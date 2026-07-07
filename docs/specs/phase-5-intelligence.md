@@ -15,6 +15,7 @@ In: trust ledger, plan-approval gate flow, definition-of-done contracts, session
 
 - Trust ledger and templates are git-tracked knowledge files (structured markdown or JSON in `knowledge/`) — readable/editable by human, written by manager turns, no database.
 - DoD contracts enforce via the EXISTING Stop-hook mechanism (mailbox veto with feedback) — no new hook types.
+- Salvaged kernel (IDEA-FORGE-REPORT §4): per-worker cumulative TOKEN ceiling checked in the Stop hook — token counts only, no $-conversion, no price table. Complements `--max-budget-usd` and works behind provider proxies where $ figures lie.
 - Plan gate uses existing modes: spawn in `plan`, result = plan text, manager approves → respawn `accept` with plan in prompt. No new kernel machinery.
 - Distillation is a manager turn on a schedule/trigger, not a daemon feature.
 
