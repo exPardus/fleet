@@ -210,6 +210,15 @@ Triggers: "fleet", "spawn workers", "manage sessions", "dispatch to <project>". 
 
 Each milestone independently usable.
 
+## 14. Portability requirements (added post-v2; full spec: `docs/specs/portability.md`)
+
+Phase 1 builds and tests on Windows, but must not bake in Windows-isms beyond one boundary:
+
+- ALL OS-specific behavior (detached spawn, kill-tree, PID+ctime liveness, attach terminal, notifications) goes through a single platform-adapter module. Nothing else may branch on `os.name`/`sys.platform`.
+- No hardcoded `C:/proga/claude-fleet` outside generated files: resolve FLEET_HOME from `fleet.py` location (overridable via `FLEET_HOME` env var). `worker-settings.json` becomes a git-tracked TEMPLATE; `fleet init` generates the machine-local instance (correct interpreter path, absolute FLEET_HOME paths, forward slashes) into a gitignored location; doctor checks instance freshness.
+- `pathlib` everywhere; `py -3.13` only inside Windows shims; code paths use `sys.executable`.
+- Target floor: Python 3.10+ (distro pythons on Linux/macOS), stdlib only.
+
 ---
 
 ## Appendix: adversarial review disposition (v1 → v2)
