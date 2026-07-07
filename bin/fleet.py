@@ -3,10 +3,10 @@
 Single-file, stdlib-only CLI for one Claude Code "manager" session to spawn,
 monitor, steer, and hand off multiple headless "worker" sessions.
 
-This module currently exposes only the pure-logic core (paths, registry,
-events, PID liveness, stream-jsonl parsing, prompt composition, permission
-mode mapping). Task 2 adds an argparse-based main() with subcommands on top
-of these functions -- keep additions below this layer, not mixed into it.
+Layering: pure-logic core (paths, registry, events, PID liveness,
+stream-jsonl parsing, prompt composition, permission mode mapping) first,
+then the argparse-based main() and its subcommands built on top of those
+functions.
 
 See docs/SPEC.md for the full design (this file implements SPEC sections
 2, 4, 5, 6, 8, 11, 14).
@@ -533,8 +533,25 @@ def _read_tail_lines(log_path) -> list:
 
 
 def _last_line_type(log_path) -> str | None:
-    """Return the "type" field of the last well-formed JSON line in log_path
-    (perf: reads only the trailing window via _read_tail_lines, see above)."""
+    """Return the "type" field of the last SUBSTANTIVE well-formed JSON line
+    in log_path (perf: reads only the trailing window via _read_tail_lines,
+    see above).
+
+    SMOKE-A (integration-smoke.md Finding A, live-proven): a completed
+    turn's own "result" event is NOT reliably the literal last line written
+    to the log -- an async hook's response (observed live: a fresh spawn's
+    "SessionStart:startup" hook, a `send`-resumed turn's
+    "SessionStart:resume" hook) can race the result line and land after it,
+    on every real launch this fleet produced in the integration smoke test.
+    Classifying by the literal last line then misreads a healthy,
+    result-bearing completed turn as "dead" instead of "idle" (recompute_
+    status's rule is keyed on "trailing result event"). Fix: scan backwards
+    past any `"type":"system"` line -- hook_started/hook_response/
+    hook_progress, and other bookkeeping lines like init/thinking_tokens
+    are all type "system" -- and past any junk/non-JSON line, returning the
+    type of the first genuinely substantive event found (result/assistant/
+    user -- i.e. something the turn's own model loop emitted, not hook or
+    system plumbing)."""
     log_path = Path(log_path)
     if not log_path.exists():
         return None
@@ -546,7 +563,12 @@ def _last_line_type(log_path) -> str | None:
             obj = json.loads(line)
         except (json.JSONDecodeError, ValueError):
             continue
-        return obj.get("type") if isinstance(obj, dict) else None
+        if not isinstance(obj, dict):
+            continue
+        etype = obj.get("type")
+        if etype == "system":
+            continue  # hook/system bookkeeping -- not substantive, keep scanning
+        return etype
     return None
 
 
@@ -575,9 +597,25 @@ def recompute_status(pid, ctime_iso, log_path, current_status: str | None = None
     record is pinned "working" forever by this guard (turn_pid stays None,
     so it never re-enters the pid_alive check below) -- rare; the operator
     resolves it with `fleet respawn`.
+
+    SMOKE-D (integration-smoke.md Finding D, live-proven): "dead" set by an
+    operator action (`fleet kill`) must be STICKY, mirroring the "attached"
+    guard above -- recompute's job is demotion (working/idle -> dead), not
+    resurrection. Without this, a killed worker whose log tail legitimately
+    ends on a trailing result event (the common "healthy, done" case) would
+    recompute straight back to "idle" on the very next status/clean call --
+    live-reproduced: `kill` marked it dead, and the immediate next `clean`
+    (and a bare `status`) flipped it back to idle, making `kill` non-
+    terminal and the worker permanently un-cleanable via the CLI. `fleet
+    respawn` is the one recovery lever out of "dead" -- it always starts a
+    brand-new record via new_worker_record (status="working"), never by
+    demoting through this function, so this guard cannot block a real
+    recovery.
     """
     if current_status == "attached":
         return "attached"
+    if current_status == "dead":
+        return "dead"
     if current_status == "working" and pid is None:
         return "working"
     if pid_alive(pid, ctime_iso, get_process_info=get_process_info):
@@ -1027,18 +1065,66 @@ def launch_turn(name: str, cwd, sid: str, prompt: str, mode: str, first: bool = 
 STALE_ATTACH_SECONDS = 3 * 3600  # doctor/status nag threshold (SPEC §9)
 
 
+def _sum_result_costs(log_path) -> float | None:
+    """Sum the cost of every "result" event in the WHOLE log file (not just
+    the trailing window), or None if the file is missing/unreadable or has
+    no result event at all (caller keeps the prior cost_usd unchanged in
+    that case).
+
+    SMOKE-B (integration-smoke.md Finding B, live-proven): cost is reported
+    PER-INVOCATION on `--resume` turns, not cumulatively by `claude` itself
+    -- observed live across a spawn + two `send`-resumed turns in the same
+    session, where the second turn's own result event reported a SMALLER
+    total_cost_usd than the first (a fresh per-turn number, not a running
+    session total). recompute_worker used to take only `results[-1]`'s
+    cost, so a multi-turn `send` sequence within one session (no respawn --
+    cost_baseline stays 0.0 there) would silently drop the display back to
+    just the latest turn's cost instead of the session's real running
+    total. Summing every result event's cost in the current log file fixes
+    this; a whole-file read is acceptable here (unlike the hot tail-read
+    path used for status/wait polling) because logs rotate to a fresh file
+    on every respawn (_rotate_worker_log) and doctor's log-size check warns
+    well before a single file could grow unreasonably large."""
+    log_path = Path(log_path)
+    if not log_path.exists():
+        return None
+    try:
+        raw = log_path.read_bytes()
+    except OSError:
+        return None
+    total = 0.0
+    found = False
+    for line in raw.decode("utf-8-sig", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(obj, dict) or obj.get("type") != "result":
+            continue
+        cost = obj.get("total_cost_usd", obj.get("cost_usd"))
+        if cost is not None:
+            total += cost
+            found = True
+    return total if found else None
+
+
 def recompute_worker(name: str, record: dict, get_process_info=None) -> dict:
     """Return an updated copy of `record` with status/cost_usd/last_activity
     refreshed from live PID + log-tail state. Never mutates other fields
     (turns, task, mode, ...); never clobbers an "attached" status
     (recompute_status's own guard, F7).
 
-    cost_usd = cost_baseline + the current log's own trailing result cost
-    (Task 5 fix wave, Finding 4): the rotated-fresh log after a respawn
-    only ever reports THIS session's own total, so without adding back
-    the prior-sessions baseline, the first post-respawn poll would
-    silently reset the worker's lifetime cost_usd down to the new
-    session's (smaller) total. cost_baseline defaults to 0.0 for records
+    cost_usd = cost_baseline + the SUM of every result event's cost in the
+    current log file (Task 5 fix wave, Finding 4 + SMOKE-B). cost_baseline
+    carries the prior-sessions total across a respawn's fresh log (Finding
+    4); summing every result event in the current file (rather than taking
+    only the last one) also carries the running total across multiple
+    `send`-resumed turns within one session, since a turn's own result
+    event reports only that turn's own per-invocation cost, not a session-
+    cumulative figure (SMOKE-B). cost_baseline defaults to 0.0 for records
     that predate this field."""
     log_path = logs_dir() / f"{name}.jsonl"
     updated = dict(record)
@@ -1046,10 +1132,9 @@ def recompute_worker(name: str, record: dict, get_process_info=None) -> dict:
         record.get("turn_pid"), record.get("turn_pid_ctime"), log_path,
         current_status=record.get("status"), get_process_info=get_process_info,
     )
-    entries = tail_events(log_path, n=50)
-    results = [e for e in entries if e.get("kind") == "result"]
-    if results and results[-1].get("cost_usd") is not None:
-        updated["cost_usd"] = record.get("cost_baseline", 0.0) + results[-1]["cost_usd"]
+    cost_sum = _sum_result_costs(log_path)
+    if cost_sum is not None:
+        updated["cost_usd"] = record.get("cost_baseline", 0.0) + cost_sum
     try:
         mtime = log_path.stat().st_mtime
         updated["last_activity"] = ctime_to_iso(datetime.fromtimestamp(mtime, tz=timezone.utc))
@@ -1784,7 +1869,17 @@ def cmd_attach(args, popen=subprocess.Popen, get_process_info=None, which=shutil
       the turn is no longer alive, so attach proceeds to the claim below;
       "kill_failed" (F3 -- the turn is still verifiably alive after the
       kill attempt) aborts loudly via FleetCliError with NO registry write
-      and NO popen.
+      and NO popen. The post-interrupt re-lock (F1, final-review.md) does
+      NOT claim unconditionally: _interrupt_worker's "killed" branch
+      commits idle and releases ITS OWN lock first, widening a real window
+      (the Get-Process/taskkill call can take hundreds of ms) in which a
+      concurrent `fleet send` can acquire the lock, observe idle, and
+      pre-claim a brand-new working/turn_pid=None launch -- the re-lock
+      checks the record's raw status is still exactly what
+      _interrupt_worker's own commit left it in (idle, or dead if a
+      concurrent `fleet kill` won the race instead) and refuses loudly
+      (no claim) otherwise, rather than stamping "attached" over that
+      concurrent claim (or a concurrent attach).
     - idle (or otherwise attachable) -> atomically pre-claim
       status="attached"/attached_since in the SAME fleet_lock that observed
       the attachable state (F1 -- status="attached" already survives
@@ -1868,13 +1963,32 @@ def cmd_attach(args, popen=subprocess.Popen, get_process_info=None, which=shutil
             )
         # "killed" or "not_running": the turn is no longer alive (or never
         # was); claim "attached" now, in a fresh lock.
+        #
+        # F1 (final-review.md): this re-lock must not claim unconditionally.
+        # _interrupt_worker's "killed" branch commits status="idle" and
+        # releases ITS lock -- widening a real window (Get-Process/taskkill
+        # takes hundreds of ms) in which a concurrent `fleet send`'s own
+        # idle-resume can acquire the lock first, observe idle, and
+        # pre-claim status="working"/turn_pid=None for a brand-new launch.
+        # Re-check the RAW status (not a fresh recompute -- recomputing
+        # here could itself demote a legitimate idle to dead on log
+        # evidence unrelated to this race and falsely refuse) is still
+        # exactly what _interrupt_worker's own commit left it in (idle, or
+        # dead if a concurrent `fleet kill` won instead) before writing
+        # "attached" over it -- refuse instead of clobbering a concurrent
+        # claim (or a concurrent "attached") with our own.
         with fleet_lock():
             data = load_registry()
             r = data["workers"].get(args.name)
             if r is None:
                 raise FleetCliError(f"unknown worker: {args.name!r}")
+            if r.get("status") not in ("idle", "dead"):
+                raise FleetCliError(
+                    f"{args.name}: worker was claimed concurrently during --force takeover; retry"
+                )
             r["status"] = "attached"
             r["attached_since"] = now_iso()
+            data["workers"][args.name] = r
             save_registry(data)
             append_event("attached", args.name)
 
@@ -2128,9 +2242,29 @@ def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shuti
         # _interrupt_worker's own "killed" path already committed
         # status="idle" on the (still old_sid) record -- re-read it as the
         # accurate rollback target before overwriting with the new record.
+        #
+        # F1 (final-review.md): mirror cmd_attach's guard -- the window
+        # between _interrupt_worker's idle-commit (its lock release) and
+        # this re-lock is exactly where a concurrent `fleet send`'s
+        # idle-resume can pre-claim status="working"/turn_pid=None (or a
+        # concurrent attach can claim "attached"). Check the RAW status
+        # (not a fresh recompute -- recomputing here could itself demote a
+        # legitimate idle to dead on log evidence unrelated to this race
+        # and falsely refuse) is still exactly what _interrupt_worker's
+        # own commit left it in (idle, or dead if a concurrent `fleet
+        # kill` won instead) and refuse to overwrite anything else --
+        # otherwise the send-launched turn would run orphaned against the
+        # old sid while the registry tracks this new one.
         with fleet_lock():
             data = load_registry()
-            prior_snapshot = dict(data["workers"][args.name])
+            r = data["workers"].get(args.name)
+            if r is None:
+                raise FleetCliError(f"unknown worker: {args.name!r}")
+            if r.get("status") not in ("idle", "dead"):
+                raise FleetCliError(
+                    f"{args.name}: worker was claimed concurrently during --force takeover; retry"
+                )
+            prior_snapshot = dict(r)
             new_record = new_worker_record(new_sid, cwd, task_for_record, mode, model=model)
             new_record["cost_usd"] = cost_usd  # cumulative -- see docstring
             new_record["cost_baseline"] = cost_usd  # Finding 4 -- see docstring
@@ -2217,7 +2351,30 @@ def cmd_kill(args, get_process_info=None, kill_process_tree=None, sleep=time.sle
     mutation call when it again finds nothing alive, so this is safe to
     repeat): if the process turns out to actually be alive on the second
     pass, this re-run performs the real kill instead of silently
-    orphaning it as "dead"."""
+    orphaning it as "dead".
+
+    F2 (final-review.md): attach --force and respawn --force both refuse
+    on a launch-in-flight claim (status=="working" and turn_pid is None --
+    a spawn/send/attach/respawn pre-claim mid-launch_turn, with no real pid
+    yet to verify-kill); kill lacked this guard. Without it, kill would
+    snapshot pid=None, pid_alive(None)=False -> "not_running" on both
+    probes, and unconditionally mark the worker dead -- either silently
+    lying (the launcher's post-launch stamp re-asserts working+pid right
+    after, so kill did nothing) or, worse, opening a window for a
+    concurrent `fleet clean` to see dead+turn_pid=None (the recompute
+    launch-in-flight guard no longer protects it) and delete the logs/
+    mailbox of a live, just-launched worker out from under it. Refuse
+    loudly instead, like the other two commands."""
+    with fleet_lock():
+        data = load_registry()
+        if args.name not in data["workers"]:
+            raise FleetCliError(f"unknown worker: {args.name!r}")
+        rec = data["workers"][args.name]
+        if rec.get("status") == "working" and rec.get("turn_pid") is None:
+            raise FleetCliError(
+                f"launch in flight for {args.name}; retry in a few seconds"
+            )
+
     outcome = _interrupt_worker(args.name, get_process_info=get_process_info, kill_process_tree=kill_process_tree)
     if outcome == "not_running":
         sleep(_DEAD_CONFIRM_DELAY_SECONDS)
@@ -2710,10 +2867,10 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run, get_process_info=No
 # ---------------------------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="fleet", description="claude-fleet manager CLI (M1)")
+    parser = argparse.ArgumentParser(prog="fleet", description="claude-fleet manager CLI")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("init", help="render the machine-local worker-settings.json instance from the template (SPEC §14)")
+    sub.add_parser("init", help="render the machine-local worker-settings.json instance from the template")
 
     p_spawn = sub.add_parser("spawn", help="spawn a new worker session")
     p_spawn.add_argument("name")
