@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shutil
@@ -363,7 +364,21 @@ def load_registry() -> dict:
     if not isinstance(data, dict):
         quarantined = _quarantine_registry(path)
         raise RegistryCorruptError(f"registry was not a JSON object; quarantined to {quarantined}")
-    data.setdefault("workers", {})
+    # Fuzz-report Finding F2 (HIGH): `data.setdefault("workers", {})` alone
+    # only fills in a MISSING "workers" key -- it is a no-op when the key is
+    # present but the wrong shape (a list/string/int), which sails through
+    # as a "valid" registry and then crashes every subcommand downstream
+    # (dict.keys()/.get()/.pop()/`in`/sorted() all raise on a non-dict).
+    # Validate the shape explicitly here -- the one place this module reads
+    # the registry off disk -- so a malformed "workers" value is quarantined
+    # exactly like a decode failure, never allowed to flow downstream.
+    workers = data.get("workers", {})
+    if not isinstance(workers, dict) or not all(isinstance(v, dict) for v in workers.values()):
+        quarantined = _quarantine_registry(path)
+        raise RegistryCorruptError(
+            f"registry 'workers' was not an object of objects; quarantined to {quarantined}"
+        )
+    data["workers"] = workers
     return data
 
 
@@ -572,7 +587,37 @@ def _last_line_type(log_path) -> str | None:
     return None
 
 
-def recompute_status(pid, ctime_iso, log_path, current_status: str | None = None, get_process_info=None) -> str:
+# Post-testing wave, item 1c (stress-report Finding 1, zombie-escape hatch):
+# how long a "working"/turn_pid=None pre-claim is allowed to sit before
+# recompute_status stops treating it as a real in-flight launch and demotes
+# it to "dead" instead. Every real launcher (launch_turn, called
+# synchronously from cmd_spawn/cmd_send/cmd_respawn) stamps the real pid
+# within, at most, LAUNCH_DOA_WINDOW_SECONDS (3s) plus one Popen() call --
+# so a claim still unstamped after ten minutes did not just lose a race, it
+# lost its launcher (the `fleet` CLI process itself crashed, was killed, or
+# lost power between the pre-claim write and the post-launch commit).
+LAUNCH_CLAIM_MAX_AGE_SECONDS = 600.0
+
+
+def _launch_claim_expired(last_activity_iso) -> bool:
+    """True iff a "working"/turn_pid=None pre-claim's last_activity is older
+    than LAUNCH_CLAIM_MAX_AGE_SECONDS (or is missing/unparseable -- treated
+    as NOT expired, matching the pre-fix behavior of never demoting when
+    there's no age information to go on). Shared by recompute_status (the
+    general liveness recompute) and cmd_kill's own launch-in-flight guard
+    (which intentionally skips a full recompute_worker probe, so it needs
+    this check standalone)."""
+    if not last_activity_iso:
+        return False
+    try:
+        age = (datetime.now(timezone.utc) - _parse_iso(last_activity_iso)).total_seconds()
+    except (ValueError, TypeError):
+        return False
+    return age > LAUNCH_CLAIM_MAX_AGE_SECONDS
+
+
+def recompute_status(pid, ctime_iso, log_path, current_status: str | None = None, get_process_info=None,
+                      last_activity_iso=None) -> str:
     """working / idle / dead, per SPEC §4: stale PID + trailing result event
     -> idle; stale PID + no trailing result event -> dead. If current_status
     is "attached", that state takes priority and is returned immediately --
@@ -592,11 +637,23 @@ def recompute_status(pid, ctime_iso, log_path, current_status: str | None = None
     idle/dead. Scoped tightly to pid is None: a "working" record with a
     real (non-None) pid that turns out to be dead must still demote
     normally (see the regression test pinning this).
-    Residual (documented, not fixed): if the `fleet` CLI process itself is
-    killed between the pre-claim write and the post-launch pid-stamp, the
-    record is pinned "working" forever by this guard (turn_pid stays None,
-    so it never re-enters the pid_alive check below) -- rare; the operator
-    resolves it with `fleet respawn`.
+
+    Zombie escape hatch (post-testing wave, item 1c -- was "Residual
+    (documented, not fixed)" above): the guard above is now time-bounded via
+    `last_activity_iso` + LAUNCH_CLAIM_MAX_AGE_SECONDS. If the `fleet` CLI
+    process itself is killed between the pre-claim write and the
+    post-launch pid-stamp -- or the post-launch commit lock is lost for
+    good (see `_commit_launched_turn`'s own docstring for the bounded-retry
+    mitigation of the common case) -- the record no longer stays pinned
+    "working" forever: once `last_activity` is older than
+    LAUNCH_CLAIM_MAX_AGE_SECONDS (real launchers stamp the pid within
+    seconds), this demotes straight to "dead", making it recoverable through
+    every normal dead-worker path (`fleet kill`, `fleet attach --force`,
+    `fleet respawn --force`/`fleet respawn`, `fleet clean`) instead of
+    requiring manual registry surgery. `last_activity_iso=None` (the
+    default, and what every pre-fix caller still passes) preserves the old
+    "never demote" behavior -- callers must opt in by passing the record's
+    own `last_activity` field.
 
     SMOKE-D (integration-smoke.md Finding D, live-proven): "dead" set by an
     operator action (`fleet kill`) must be STICKY, mirroring the "attached"
@@ -617,6 +674,8 @@ def recompute_status(pid, ctime_iso, log_path, current_status: str | None = None
     if current_status == "dead":
         return "dead"
     if current_status == "working" and pid is None:
+        if _launch_claim_expired(last_activity_iso):
+            return "dead"
         return "working"
     if pid_alive(pid, ctime_iso, get_process_info=get_process_info):
         return "working"
@@ -1065,6 +1124,49 @@ def launch_turn(name: str, cwd, sid: str, prompt: str, mode: str, first: bool = 
 STALE_ATTACH_SECONDS = 3 * 3600  # doctor/status nag threshold (SPEC §9)
 
 
+def _coerce_cost(value):
+    """Best-effort coercion of a raw cost value (a `result` event's
+    total_cost_usd/cost_usd field, or a registry record's own
+    cost_baseline/cost_usd field) to a finite, non-negative float, or None
+    if it can't be trusted (fuzz-report Findings F3/F4).
+
+    A string that parses cleanly via float() is accepted (a hand-edited
+    registry, or a hostile log line, could hold a numeric string even
+    though `claude` itself always emits a JSON number) -- anything that
+    doesn't parse cleanly returns None rather than raising. bool is
+    rejected even though it's an int subclass (a JSON true/false is never a
+    sane cost). NaN/+Infinity/-Infinity -- all of which json.loads accepts
+    by default via its non-standard constant parsing -- and any negative
+    number are rejected: letting one of those into a running sum would
+    permanently poison cost_usd (until the next respawn wipes the log)
+    with no crash and no visible warning. Never raises."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        try:
+            value = float(value)
+        except ValueError:
+            return None
+    if not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    if not math.isfinite(value) or value < 0:
+        return None
+    return value
+
+
+def _registry_cost(value) -> float:
+    """`_coerce_cost` with a 0.0 fallback, for reading a registry record's
+    OWN cost_baseline/cost_usd field back off disk (as opposed to a fresh
+    value being summed from a log's result events, which must distinguish
+    "no valid cost found at all" from "found and it was legitimately
+    0.0") -- guards against a previously-poisoned (NaN/Infinity/negative)
+    value that got persisted before this hardening existed, or a
+    hand-edited registry, from propagating forward forever."""
+    coerced = _coerce_cost(value)
+    return coerced if coerced is not None else 0.0
+
+
 def _sum_result_costs(log_path) -> float | None:
     """Sum the cost of every "result" event in the WHOLE log file (not just
     the trailing window), or None if the file is missing/unreadable or has
@@ -1106,8 +1208,10 @@ def _sum_result_costs(log_path) -> float | None:
             continue
         cost = obj.get("total_cost_usd", obj.get("cost_usd"))
         if cost is not None:
-            total += cost
-            found = True
+            coerced = _coerce_cost(cost)
+            if coerced is not None:
+                total += coerced
+                found = True
     return total if found else None
 
 
@@ -1131,10 +1235,11 @@ def recompute_worker(name: str, record: dict, get_process_info=None) -> dict:
     updated["status"] = recompute_status(
         record.get("turn_pid"), record.get("turn_pid_ctime"), log_path,
         current_status=record.get("status"), get_process_info=get_process_info,
+        last_activity_iso=record.get("last_activity"),
     )
     cost_sum = _sum_result_costs(log_path)
     if cost_sum is not None:
-        updated["cost_usd"] = record.get("cost_baseline", 0.0) + cost_sum
+        updated["cost_usd"] = _registry_cost(record.get("cost_baseline", 0.0)) + cost_sum
     try:
         mtime = log_path.stat().st_mtime
         updated["last_activity"] = ctime_to_iso(datetime.fromtimestamp(mtime, tz=timezone.utc))
@@ -1323,6 +1428,80 @@ def _require_instance_settings() -> None:
         )
 
 
+# Post-testing wave, item 1b (stress-report Finding 1, CRITICAL): how many
+# times / how long cmd_spawn, cmd_send's idle-resume path, and cmd_respawn
+# retry their post-launch commit lock (the one that stamps the real
+# turn_pid into the registry) before giving up. Deliberately several times
+# the ordinary LOCK_TIMEOUT_SECONDS (5.0s): by the time this lock is
+# reached, launch_turn() has ALREADY succeeded -- a real, billable, running
+# `claude` process exists and its pid is known -- so losing this race
+# forever would strand it as a permanent zombie registry record (status=
+# "working"/turn_pid=None, which every recovery lever historically refused
+# to touch; item 1c's LAUNCH_CLAIM_MAX_AGE_SECONDS now bounds that too, but
+# retrying hard here is the first, much faster line of defense). Total
+# backoff across all attempts is ~30s (each attempt itself may also spend
+# up to LOCK_TIMEOUT_SECONDS acquiring, so worst case is noticeably more).
+LAUNCH_COMMIT_MAX_ATTEMPTS = 6
+LAUNCH_COMMIT_BACKOFF_SECONDS = (1.0, 2.0, 4.0, 8.0, 8.0, 7.0)
+
+
+def _commit_launched_turn(commit_fn, sleep=time.sleep) -> bool:
+    """Run `commit_fn()` -- a zero-argument callable that itself acquires
+    `fleet_lock()` and performs a post-launch registry commit (stamping
+    turn_pid/turn_pid_ctime/turns/last_activity, matching cmd_spawn/
+    cmd_send/cmd_respawn's own shape) -- retrying on FleetLockTimeout with
+    backoff (LAUNCH_COMMIT_BACKOFF_SECONDS) up to LAUNCH_COMMIT_MAX_ATTEMPTS
+    times.
+
+    Returns True once `commit_fn()` completes without raising
+    FleetLockTimeout. Returns False if every attempt timed out -- the
+    caller (cmd_spawn/cmd_send/cmd_respawn) MUST NOT abandon the
+    already-launched turn on a False return: it must still report the
+    launch as successful (raising here would tempt an operator into
+    retrying the same `fleet` subcommand, which would launch a SECOND live
+    turn on top of the one already running) and instead call
+    `_report_stranded_turn` for a loud, actionable warning plus a
+    best-effort event."""
+    for attempt in range(LAUNCH_COMMIT_MAX_ATTEMPTS):
+        try:
+            commit_fn()
+            return True
+        except FleetLockTimeout:
+            if attempt == LAUNCH_COMMIT_MAX_ATTEMPTS - 1:
+                return False
+            sleep(LAUNCH_COMMIT_BACKOFF_SECONDS[attempt])
+    return False
+
+
+def _report_stranded_turn(name: str, sid: str, info: dict) -> None:
+    """Post-launch commit lock exhausted every retry in
+    `_commit_launched_turn`: a real, already-running turn's pid could not
+    be stamped into the registry. Never fail silently -- print a loud,
+    actionable stderr message (status/kill/attach/wait are all blind to
+    this turn until the record is repaired) and best-effort append an
+    event for later forensics. Deliberately does not raise: the calling
+    `fleet` subcommand still completes and reports success, since the turn
+    genuinely IS running -- raising here would read as "the launch
+    failed" and could tempt an operator into retrying, launching a SECOND
+    live turn onto the same session."""
+    print(
+        f"fleet: CRITICAL: {name}: turn launched (pid={info.get('turn_pid')}, "
+        f"session {sid}) but the registry commit failed after "
+        f"{LAUNCH_COMMIT_MAX_ATTEMPTS} lock-acquisition attempts -- the "
+        "record is stuck at status=working/turn_pid=null (the F1 "
+        "launch-in-flight state). It will auto-demote to dead after "
+        f"LAUNCH_CLAIM_MAX_AGE_SECONDS ({LAUNCH_CLAIM_MAX_AGE_SECONDS:.0f}s) "
+        f"of inactivity; recover with `fleet respawn {name} --force` once "
+        "that happens, or hand-edit state/fleet.json now to set "
+        f"turn_pid={info.get('turn_pid')} directly.",
+        file=sys.stderr,
+    )
+    try:
+        append_event("turn_commit_failed", name, session_id=sid, turn_pid=info.get("turn_pid"))
+    except OSError:
+        pass
+
+
 def cmd_init(args) -> int:
     """`fleet init` (SPEC §14, §5 command surface): render the
     machine-local worker-settings.json instance from the git-tracked
@@ -1350,7 +1529,8 @@ def cmd_init(args) -> int:
     return 0
 
 
-def cmd_spawn(args, popen=subprocess.Popen, get_process_info=None, which=shutil.which) -> int:
+def cmd_spawn(args, popen=subprocess.Popen, get_process_info=None, which=shutil.which,
+              sleep=time.sleep) -> int:
     """`fleet spawn <name> --dir <path> --task <text|@file> [--mode ...]
     [--model m] [--max-budget-usd x]` (SPEC §5 spawn row).
 
@@ -1364,6 +1544,13 @@ def cmd_spawn(args, popen=subprocess.Popen, get_process_info=None, which=shutil.
     SPEC §14: refuses before any mutation if the worker-settings instance
     hasn't been rendered yet (_require_instance_settings) -- `fleet init`
     must run once per machine before the first spawn.
+
+    Post-testing wave, item 1b (stress-report Finding 1, CRITICAL): the
+    post-launch commit lock below (the one that stamps info["turn_pid"])
+    runs through `_commit_launched_turn`'s retry-with-backoff instead of a
+    single bare `with fleet_lock():` -- by this point launch_turn() has
+    ALREADY started a real, live `claude` process, so losing the ordinary
+    5s lock race here must not mean losing the ability to ever track it.
     """
     _require_instance_settings()
 
@@ -1404,23 +1591,27 @@ def cmd_spawn(args, popen=subprocess.Popen, get_process_info=None, which=shutil.
             append_event("spawn_failed", args.name, error=str(exc))
         raise
 
-    with fleet_lock():
-        data = load_registry()
-        rec = data["workers"].get(args.name)
-        if rec is not None:
-            # F-RACE: re-assert "working" here -- a concurrent fleet
-            # status/wait landing in the gap between this lock and the
-            # create-lock above could have recomputed and persisted "dead"
-            # (turn_pid was still None then). The turn has launched by
-            # definition at this point, so this authoritatively repairs
-            # that spurious transition.
-            rec["status"] = "working"
-            rec["turn_pid"] = info["turn_pid"]
-            rec["turn_pid_ctime"] = info["turn_pid_ctime"]
-            rec["turns"] = 1
-            rec["last_activity"] = now_iso()
-            save_registry(data)
-        append_event("turn_started", args.name, session_id=sid, turn_pid=info["turn_pid"])
+    def _commit():
+        with fleet_lock():
+            data = load_registry()
+            rec = data["workers"].get(args.name)
+            if rec is not None:
+                # F-RACE: re-assert "working" here -- a concurrent fleet
+                # status/wait landing in the gap between this lock and the
+                # create-lock above could have recomputed and persisted
+                # "dead" (turn_pid was still None then). The turn has
+                # launched by definition at this point, so this
+                # authoritatively repairs that spurious transition.
+                rec["status"] = "working"
+                rec["turn_pid"] = info["turn_pid"]
+                rec["turn_pid_ctime"] = info["turn_pid_ctime"]
+                rec["turns"] = 1
+                rec["last_activity"] = now_iso()
+                save_registry(data)
+            append_event("turn_started", args.name, session_id=sid, turn_pid=info["turn_pid"])
+
+    if not _commit_launched_turn(_commit, sleep=sleep):
+        _report_stranded_turn(args.name, sid, info)
 
     print(f"{args.name} {sid} {info['log_path']}")
     return 0
@@ -1429,26 +1620,70 @@ def cmd_spawn(args, popen=subprocess.Popen, get_process_info=None, which=shutil.
 def cmd_status(args, get_process_info=None) -> int:
     """`fleet status [name]` (SPEC §5 status row): recompute liveness/cost
     for the named worker (or all workers), persist any transitions, print a
-    compact table with anomaly flags."""
+    compact table with anomaly flags.
+
+    Post-testing wave, item 1a (stress-report Finding 1, CRITICAL): this
+    used to recompute (and persist) EVERY worker's liveness inside one
+    `with fleet_lock():` block. recompute_worker's probe (get_process_info,
+    which defaults to a real PowerShell `Get-Process` subprocess call per
+    currently-"working" pid) costs on the order of ~0.3s each -- measured
+    directly, a bare `fleet status` over 8 simultaneously-"working" workers
+    held the lock for ~2.4s. Several such calls queued back-to-back
+    comfortably exceed LOCK_TIMEOUT_SECONDS (5.0s) for anyone else waiting
+    on the lock, including a spawn/send/respawn sitting at its own
+    post-launch commit lock (_commit_launched_turn) after a real, live
+    `claude` turn has ALREADY been started -- which is exactly what
+    stranded those turns as permanent zombie registry records under real
+    concurrent load.
+
+    Restructured to the same snapshot -> probe (no lock held) -> re-acquire
+    -> conditional-commit shape already used by `_interrupt_worker` (F4)
+    and `cmd_clean` (review wave 5b) for the identical reason: snapshot the
+    named records under the lock, release it, run every recompute_worker
+    probe with NO lock held at all, then re-acquire once to merge verdicts
+    -- but only for records that still match their pre-probe snapshot
+    exactly (a concurrent command that mutated a record while the lock was
+    released is left alone, its own write respected, rather than being
+    clobbered by a verdict computed against now-stale data)."""
     with fleet_lock():
         data = load_registry()
         names = [args.name] if args.name else sorted(data["workers"])
         for n in names:
             if n not in data["workers"]:
                 raise FleetCliError(f"unknown worker: {n!r}")
+        before = {n: data["workers"][n] for n in names}
+
+    # Probe every named worker's liveness with NO lock held (see docstring
+    # above) -- this is the (potentially several-seconds-total) expensive
+    # part.
+    after = {n: recompute_worker(n, before[n], get_process_info=get_process_info) for n in names}
+
+    display = {}
+    with fleet_lock():
+        data = load_registry()
         changed = False
         for n in names:
-            before = data["workers"][n]
-            after = recompute_worker(n, before, get_process_info=get_process_info)
-            if after != before:
-                data["workers"][n] = after
+            current = data["workers"].get(n)
+            if current is None or current != before[n]:
+                # Removed or mutated by a concurrent command while our lock
+                # was released for probing -- spare it, don't overwrite
+                # with a verdict computed against now-stale pre-probe data
+                # (mirrors cmd_clean's respawned-meanwhile guard). Show
+                # whatever is actually there now for the printed table
+                # (falling back to the stale snapshot only if it vanished
+                # entirely).
+                display[n] = current if current is not None else before[n]
+                continue
+            if after[n] != current:
+                data["workers"][n] = after[n]
                 changed = True
-                if after["status"] != before["status"]:
-                    append_event("status_changed", n, old=before["status"], new=after["status"])
+                if after[n]["status"] != current["status"]:
+                    append_event("status_changed", n, old=current["status"], new=after[n]["status"])
+            display[n] = data["workers"][n]
         if changed:
             save_registry(data)
 
-    _print_status_table(data, names)
+    _print_status_table({"workers": display}, names)
     return 0
 
 
@@ -1567,6 +1802,7 @@ def wait_for_workers(names, mode: str = "all", timeout=None, poll_interval: floa
             status = recompute_status(
                 rec.get("turn_pid"), rec.get("turn_pid_ctime"), log_path,
                 current_status=rec.get("status"), get_process_info=get_process_info,
+                last_activity_iso=rec.get("last_activity"),
             )
             if status != "working":
                 finished[n] = status
@@ -1584,7 +1820,20 @@ def wait_for_workers(names, mode: str = "all", timeout=None, poll_interval: floa
 def cmd_wait(args, get_process_info=None, sleep=time.sleep, clock=time.monotonic) -> int:
     """`fleet wait <name...> [--any|--all] [--timeout s]` (SPEC §5 wait
     row): block until turn(s) end, persist any status transitions, print a
-    one-line result summary per finished worker. Nonzero exit on timeout."""
+    one-line result summary per finished worker. Nonzero exit on timeout.
+
+    Post-testing wave, item 4 (live-report scenario 2): `--any` returning
+    with `pending` non-empty is the NORMAL, successful outcome of that
+    mode (at least one worker finished, the rest are still going) -- it is
+    not a timeout, and live testing found the CLI mislabeling it as one
+    ("timed out (still working)", exit code 1) even when the wait loop
+    returned instantly because `--any` was satisfied, not because the
+    deadline elapsed. Distinguish the two: `mode == "any"` with at least
+    one `finished` worker is success (exit 0, remaining pending workers
+    printed as "still working"); everything else with `pending` non-empty
+    (mode=="all" left workers unfinished, or mode=="any" found nothing at
+    all before the deadline) is a genuine timeout (exit 1, "timed out
+    (still working)")."""
     with fleet_lock():
         data = load_registry()
         for n in args.names:
@@ -1617,6 +1866,13 @@ def cmd_wait(args, get_process_info=None, sleep=time.sleep, clock=time.monotonic
         print(f"{n}: {status} -- {_truncate(summary, 120)}")
 
     if pending:
+        if mode == "any" and finished:
+            # --any's own success condition was met (at least one worker
+            # finished) -- the loop simply exited before every OTHER
+            # worker did too, which is expected, not a timeout.
+            for n in pending:
+                print(f"{n}: still working")
+            return 0
         for n in pending:
             print(f"{n}: timed out (still working)")
         return 1
@@ -1628,7 +1884,8 @@ def cmd_wait(args, get_process_info=None, sleep=time.sleep, clock=time.monotonic
 # rows, §9 hybrid interaction model, §14 platform adapter)
 # ---------------------------------------------------------------------------
 
-def cmd_send(args, popen=subprocess.Popen, get_process_info=None, which=shutil.which) -> int:
+def cmd_send(args, popen=subprocess.Popen, get_process_info=None, which=shutil.which,
+             sleep=time.sleep) -> int:
     """`fleet send <name> <text|@file>` (SPEC §5 send row, §9 attach
     asymmetry), rewritten under the uniform status-claim protocol (F1+F6,
     review wave 3):
@@ -1684,6 +1941,17 @@ def cmd_send(args, popen=subprocess.Popen, get_process_info=None, which=shutil.w
             # F1 pre-claim: atomic decide+claim, same lock, before release.
             after["status"] = "working"
             after["turn_pid"] = None
+            # Post-testing wave, item 1c: stamp last_activity to NOW at the
+            # moment of the claim (mirroring new_worker_record's
+            # created=now_iso() stamp that cmd_spawn/cmd_respawn's own
+            # pre-claims get for free) -- recompute_worker's own
+            # last_activity refresh just above reflects the log's mtime
+            # from BEFORE this claim (e.g. the prior turn's completion,
+            # possibly long ago), which would otherwise make
+            # recompute_status's new LAUNCH_CLAIM_MAX_AGE_SECONDS guard
+            # see this brand-new claim as already stale and wrongly demote
+            # a genuinely in-flight launch straight to "dead".
+            after["last_activity"] = now_iso()
         data["workers"][args.name] = after
         save_registry(data)
 
@@ -1735,21 +2003,28 @@ def cmd_send(args, popen=subprocess.Popen, get_process_info=None, which=shutil.w
                 save_registry(data)
         raise
 
-    with fleet_lock():
-        data = load_registry()
-        r = data["workers"].get(args.name)
-        if r is not None:
-            # Re-assert "working" (F-RACE, matches cmd_spawn's second-lock
-            # re-assert): a concurrent status/wait could have recomputed a
-            # spurious transition in the gap between the pre-claim above
-            # and this stamp.
-            r["status"] = "working"
-            r["turn_pid"] = info["turn_pid"]
-            r["turn_pid_ctime"] = info["turn_pid_ctime"]
-            r["turns"] = r.get("turns", 0) + 1
-            r["last_activity"] = now_iso()
-            save_registry(data)
-        append_event("turn_started", args.name, session_id=sid, turn_pid=info["turn_pid"])
+    def _commit():
+        with fleet_lock():
+            data = load_registry()
+            r = data["workers"].get(args.name)
+            if r is not None:
+                # Re-assert "working" (F-RACE, matches cmd_spawn's
+                # second-lock re-assert): a concurrent status/wait could
+                # have recomputed a spurious transition in the gap between
+                # the pre-claim above and this stamp.
+                r["status"] = "working"
+                r["turn_pid"] = info["turn_pid"]
+                r["turn_pid_ctime"] = info["turn_pid_ctime"]
+                r["turns"] = r.get("turns", 0) + 1
+                r["last_activity"] = now_iso()
+                save_registry(data)
+            append_event("turn_started", args.name, session_id=sid, turn_pid=info["turn_pid"])
+
+    # Post-testing wave, item 1b (stress-report Finding 1, CRITICAL): retry
+    # with backoff instead of a single bare lock acquisition -- see
+    # cmd_spawn's identical shape and _commit_launched_turn's docstring.
+    if not _commit_launched_turn(_commit, sleep=sleep):
+        _report_stranded_turn(args.name, sid, info)
 
     print(f"{args.name}: resumed -- {info['log_path']}")
     return 0
@@ -2096,7 +2371,7 @@ def _unrotate_worker_log(name: str) -> None:
 
 
 def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shutil.which,
-                kill_process_tree=None) -> int:
+                kill_process_tree=None, sleep=time.sleep) -> int:
     """`fleet respawn <name> [--task <text>] [--force]` (SPEC §5 respawn
     row): the context-reset lever -- a fresh session_id under the same
     name/cwd/mode/model, prompted with the preamble + task (original,
@@ -2181,7 +2456,7 @@ def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shuti
         cwd = after["cwd"]
         mode = after["mode"]
         model = after.get("model")
-        cost_usd = after.get("cost_usd", 0.0)
+        cost_usd = _registry_cost(after.get("cost_usd", 0.0))
         task_for_record = task_override if task_override is not None else after.get("task", "")
 
         if after["status"] == "working":
@@ -2311,17 +2586,24 @@ def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shuti
                 )
         raise
 
-    with fleet_lock():
-        data = load_registry()
-        r = data["workers"].get(args.name)
-        if r is not None and r.get("session_id") == new_sid:
-            r["status"] = "working"
-            r["turn_pid"] = info["turn_pid"]
-            r["turn_pid_ctime"] = info["turn_pid_ctime"]
-            r["turns"] = 1
-            r["last_activity"] = now_iso()
-            save_registry(data)
-        append_event("turn_started", args.name, session_id=new_sid, turn_pid=info["turn_pid"])
+    def _commit():
+        with fleet_lock():
+            data = load_registry()
+            r = data["workers"].get(args.name)
+            if r is not None and r.get("session_id") == new_sid:
+                r["status"] = "working"
+                r["turn_pid"] = info["turn_pid"]
+                r["turn_pid_ctime"] = info["turn_pid_ctime"]
+                r["turns"] = 1
+                r["last_activity"] = now_iso()
+                save_registry(data)
+            append_event("turn_started", args.name, session_id=new_sid, turn_pid=info["turn_pid"])
+
+    # Post-testing wave, item 1b (stress-report Finding 1, CRITICAL): retry
+    # with backoff instead of a single bare lock acquisition -- see
+    # cmd_spawn's identical shape and _commit_launched_turn's docstring.
+    if not _commit_launched_turn(_commit, sleep=sleep):
+        _report_stranded_turn(args.name, new_sid, info)
 
     print(f"{args.name} {new_sid} {info['log_path']}")
     return 0
@@ -2364,13 +2646,26 @@ def cmd_kill(args, get_process_info=None, kill_process_tree=None, sleep=time.sle
     concurrent `fleet clean` to see dead+turn_pid=None (the recompute
     launch-in-flight guard no longer protects it) and delete the logs/
     mailbox of a live, just-launched worker out from under it. Refuse
-    loudly instead, like the other two commands."""
+    loudly instead, like the other two commands.
+
+    Post-testing wave, item 1c: this guard checks the RAW stored status
+    directly rather than calling recompute_worker (deliberately, to avoid a
+    probe just to decide whether to refuse) -- so it duplicates
+    recompute_status's own `_launch_claim_expired` check inline (cheap: it
+    only needs the record's own `last_activity`, no subprocess call) rather
+    than trusting a possibly-stale persisted status. Without this, an
+    EXPIRED claim (last_activity older than LAUNCH_CLAIM_MAX_AGE_SECONDS --
+    the fleet CLI died mid-launch and nothing ever re-persisted the demoted
+    status) would refuse `fleet kill` forever, since nothing else in this
+    command's path calls recompute_worker to flip the raw stored status to
+    "dead" first."""
     with fleet_lock():
         data = load_registry()
         if args.name not in data["workers"]:
             raise FleetCliError(f"unknown worker: {args.name!r}")
         rec = data["workers"][args.name]
-        if rec.get("status") == "working" and rec.get("turn_pid") is None:
+        if (rec.get("status") == "working" and rec.get("turn_pid") is None
+                and not _launch_claim_expired(rec.get("last_activity"))):
             raise FleetCliError(
                 f"launch in flight for {args.name}; retry in a few seconds"
             )

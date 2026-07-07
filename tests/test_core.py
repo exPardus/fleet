@@ -161,6 +161,56 @@ class TestRegistry:
         # (missing-file -> {"workers": {}} is already covered by
         # test_load_missing_registry_returns_empty_workers above.)
 
+    @pytest.mark.parametrize("workers_value", [[1, 2, 3], "x", 42, [], "", 0])
+    def test_workers_wrong_shape_is_quarantined_and_raises(self, isolated_home, workers_value):
+        """Fuzz-report Finding F2 (HIGH): `data.setdefault("workers", {})`
+        is a no-op when "workers" is PRESENT with the wrong type (a list,
+        string, or int) -- such a registry is valid JSON and a valid
+        top-level dict, so it used to sail through unquarantined and crash
+        every downstream subcommand (dict.keys()/.get()/.pop()/`in`/
+        sorted() all raise on a non-dict). Must be treated exactly like a
+        decode failure: quarantined + RegistryCorruptError, for both
+        obviously-wrong shapes (list/string/int) and the falsy-but-still-
+        wrong ones ([], "", 0) that a truthiness check alone would miss."""
+        state = isolated_home / "state"
+        state.mkdir(parents=True)
+        (state / "fleet.json").write_text(json.dumps({"workers": workers_value}), encoding="utf-8")
+
+        with pytest.raises(fleet.RegistryCorruptError):
+            fleet.load_registry()
+
+        assert not (state / "fleet.json").exists()
+        quarantined = [p for p in state.iterdir() if p.name.startswith("fleet.json.corrupt.")]
+        assert len(quarantined) == 1
+
+    def test_worker_record_wrong_shape_is_quarantined_and_raises(self, isolated_home):
+        """Same finding, narrower case: "workers" is itself a dict (the
+        right shape), but one of ITS values (a worker record) is not --
+        e.g. a hand-edited or corrupted registry where a single record
+        became a bare string/int/list. Every downstream consumer calls
+        dict(record)/record.get(...) on each worker record, so this must be
+        caught here too, not just at the top-level "workers" shape."""
+        state = isolated_home / "state"
+        state.mkdir(parents=True)
+        (state / "fleet.json").write_text(
+            json.dumps({"workers": {"probe-1": "not-a-record"}}), encoding="utf-8",
+        )
+
+        with pytest.raises(fleet.RegistryCorruptError):
+            fleet.load_registry()
+
+        assert not (state / "fleet.json").exists()
+
+    def test_workers_missing_key_still_defaults_to_empty_dict(self, isolated_home):
+        """Regression guard: a valid top-level object with no "workers" key
+        at all must still degrade to {"workers": {}}, not be treated as
+        malformed."""
+        state = isolated_home / "state"
+        state.mkdir(parents=True)
+        (state / "fleet.json").write_text(json.dumps({}), encoding="utf-8")
+
+        assert fleet.load_registry() == {"workers": {}}
+
     def test_crud_add_update_remove_worker(self, isolated_home):
         with fleet.fleet_lock():
             data = fleet.load_registry()
@@ -427,6 +477,34 @@ class TestPidLiveness:
         a second live turn onto the same session."""
         log = tmp_path / "missing.jsonl"
         assert fleet.recompute_status(None, None, log, current_status="working") == "working"
+
+    def test_recompute_status_launch_in_flight_expires_to_dead(self, tmp_path):
+        """Post-testing wave, item 1c (stress-report Finding 1's zombie
+        escape hatch): a "working"/turn_pid=None pre-claim whose
+        last_activity is older than LAUNCH_CLAIM_MAX_AGE_SECONDS is no
+        longer treated as a real in-flight launch -- every real launcher
+        stamps a pid within seconds, so this old means the `fleet` CLI
+        process that owned the claim died mid-launch. Must demote to
+        "dead" (recoverable through every normal dead-worker path) instead
+        of staying pinned "working" forever."""
+        log = tmp_path / "missing.jsonl"
+        stale = fleet.ctime_to_iso(
+            datetime.now(timezone.utc) - timedelta(seconds=fleet.LAUNCH_CLAIM_MAX_AGE_SECONDS + 1)
+        )
+        status = fleet.recompute_status(
+            None, None, log, current_status="working", last_activity_iso=stale,
+        )
+        assert status == "dead"
+
+    def test_recompute_status_launch_in_flight_within_age_stays_working(self, tmp_path):
+        """Regression guard: a claim well within the age window must still
+        behave exactly like before (not demoted)."""
+        log = tmp_path / "missing.jsonl"
+        fresh = fleet.ctime_to_iso(datetime.now(timezone.utc) - timedelta(seconds=5))
+        status = fleet.recompute_status(
+            None, None, log, current_status="working", last_activity_iso=fresh,
+        )
+        assert status == "working"
 
     def test_recompute_status_still_demotes_working_with_dead_real_pid(self, tmp_path):
         """F1 required test (c) -- regression guard: the launch-in-flight
