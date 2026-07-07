@@ -11,6 +11,10 @@ Resident `fleet watch` process: nothing in the fleet fails silently; context/bud
 
 In: watch loop, rule engine, typed events, notifier plugin interface (desktop + file notifiers), `fleet status --delta`, auto-respawn policy, service install per OS (via platform adapter). Out: Telegram (Phase 3), any web endpoint (Phase 4), modifying worker hooks.
 
+Salvaged kernels to include (from IDEA-FORGE-REPORT §4 — build as scoped, do not expand toward their dead parent ideas):
+- `fleet conflicts` — one-shot advisory `git merge-tree` sweep across worker branches/worktrees, gated on git ≥ 2.38, plain-text output. NOT a live detector, NOT a lock system.
+- Mute-until-T: per-rule notification mute flag with a single timer (`fleet mute <rule|worker> --for 2h`). NOT an ack/suppress escalation ladder.
+
 ## Fixed constraints
 
 - Same fleet.py/state model; watchtower is a READER of logs/registry plus the single-writer path for events.jsonl (resolve: CLI commands also write events — who owns the file? Likely: keep single-writer = fleet.py process whoever it is, lock-guarded append).

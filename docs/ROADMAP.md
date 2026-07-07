@@ -38,6 +38,10 @@ The one deliberate v1 exclusion (no daemon) gets revisited — continuous monito
 
 Done when: phone-free day — you leave, come back, nothing silently died.
 
+## Phase 2.5 — Provider profiles (proxies & alternate backends)
+
+Spec: `docs/specs/providers.md`. Named provider profiles (git-tracked config, gitignored secrets) injected as env per worker turn AND attach: API proxies (LiteLLM-style Anthropic-compatible gateways → any model behind them), alternate Anthropic accounts, Bedrock/Vertex. `fleet spawn --provider <profile>`; provenance in registry; token-based accounting where $ figures lie. Independent of watchtower — can build any time after Phase 1.5. Non-Claude worker CLIs stay Phase 6.
+
 ## Phase 3 — Telegram bridge (fleet in your pocket)
 
 Two-way. Bot (existing Telegram bot infra on this machine can be reused):
@@ -82,7 +86,12 @@ Everything here is doctrine + knowledge, mostly prose and small CLI additions �
 
 ## Sequencing & discipline
 
-Strict order 1→1.5→2→3; 4 and 5 can interleave after 3. Each phase gets its own short spec + adversarial review before build (same process that caught 3 blockers in SPEC v1). Phase never starts until previous phase survived a week of real use — features earn their way in by friction actually felt, not imagined.
+Strict order 1→1.5→2→3; 2.5 anytime after 1.5; 4 and 5 can interleave after 3. Each phase gets its own short spec + adversarial review before build (same process that caught 3 blockers in SPEC v1). Phase never starts until previous phase survived a week of real use — features earn their way in by friction actually felt, not imagined.
+
+Review disciplines (learned from idea-forge run 1, `docs/IDEA-FORGE-REPORT.md`):
+- **Flag, not subsystem:** at spec time, re-vet every proposed subsystem for a flag-sized alternative that delivers 80% of the value.
+- **Name your invariants:** every spec/idea must list which architectural invariants it touches (daemonless launch, exit-0 hooks, atomic single-file mailbox, journal-injection-at-respawn, cwd-scoped resume) and why it doesn't violate them.
+- **Check the graveyard first:** IDEA-FORGE-REPORT §5 records ten dead ideas with causes of death — don't re-propose adjacent things without answering the cause.
 
 ## Speccing workflow (multiple sessions in parallel)
 
