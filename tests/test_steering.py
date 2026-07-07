@@ -270,6 +270,35 @@ class TestCmdSend:
         assert rec["status"] == "idle"  # F1: conditional rollback of the pre-claim
         assert rec["turn_pid"] is None  # F1: rollback reverts status only, not turn_pid
 
+    def test_idle_resume_rolls_back_on_keyboard_interrupt(self, isolated_home):
+        """Task-4-verdict re-review Fix 2: the idle-resume rollback must
+        catch BaseException, not just Exception -- a Ctrl-C landing during
+        launch_turn must still restore the drained mailbox claim (so the
+        new message is not lost) and revert the pre-claim to idle, not pin
+        a permanently-guarded ghost claim (recompute_status's launch-in-
+        flight guard never demotes "working"+turn_pid is None on its own)."""
+        sid, _ = _seed_worker("probe-1", turn_pid=111, turn_pid_ctime=ALIVE_CTIME, log_result=True)
+        mbox = fleet.mailbox_dir()
+        mbox.mkdir(parents=True, exist_ok=True)
+        (mbox / f"{sid}.md").write_text("earlier queued instruction", encoding="utf-8")
+
+        def popen(*a, **kw):
+            raise KeyboardInterrupt()
+
+        args = fleet.build_parser().parse_args(["send", "probe-1", "the new message"])
+        with pytest.raises(KeyboardInterrupt):
+            fleet.cmd_send(
+                args, popen=popen, get_process_info=_dead_info, which=lambda n: "claude.cmd",
+            )
+
+        restored = (mbox / f"{sid}.md").read_text(encoding="utf-8")
+        assert "earlier queued instruction" in restored
+        assert "the new message" in restored
+        assert list(mbox.glob("*.claimed.*")) == []
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["status"] == "idle"
+        assert rec["turn_pid"] is None
+
     def test_idle_send_preclaims_working_before_launch(self, isolated_home):
         """F1 required test (a): the decide-and-claim must be atomic under
         one lock -- by the time launch_turn (and, transitively, popen) is
@@ -471,6 +500,67 @@ class TestCmdAttach:
         rec = fleet.load_registry()["workers"]["probe-1"]
         assert rec["status"] == "working"
 
+    def test_force_refuses_during_launch_in_flight_claim(self, isolated_home):
+        """Task-4-verdict re-review Fix 1: during a turn-starter's pre-claim
+        window (status=="working", turn_pid is None -- lasting the whole
+        launch_turn duration, per recompute_status's launch-in-flight
+        guard), --force must refuse loudly instead of proceeding. Before
+        the fix: _interrupt_worker would snapshot pid=None, pid_alive(None)
+        is False, return "not_running", and cmd_attach treated that as
+        clear-to-proceed -- popen-ing a second live claude while the
+        concurrent starter brings its own claude up."""
+        _seed_worker("probe-1", status="working", turn_pid=None, cwd="C:/proj")
+
+        def popen(*a, **kw):
+            raise AssertionError("must not launch a terminal during a launch-in-flight claim")
+
+        def kill_process_tree(pid):
+            raise AssertionError("must not attempt a kill when there is no real pid yet")
+
+        args = fleet.build_parser().parse_args(["attach", "probe-1", "--force"])
+        with pytest.raises(fleet.FleetCliError, match="launch in flight"):
+            fleet.cmd_attach(
+                args, popen=popen, get_process_info=_dead_info, which=lambda n: "wt.exe",
+                kill_process_tree=kill_process_tree,
+            )
+
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["status"] == "working"
+        assert rec["turn_pid"] is None
+
+    def test_force_still_proceeds_on_real_dead_pid_working_record(self, isolated_home):
+        """Regression guard for Fix 1: the new turn_pid-is-None refusal must
+        be scoped tightly to the launch-in-flight window -- a "working"
+        record with a real (already-dead) turn_pid must still proceed
+        through the normal --force interrupt-then-attach path (this is
+        exactly test_force_interrupts_then_attaches's scenario, re-asserted
+        here to pin that Fix 1 didn't broaden the refusal)."""
+        _seed_worker("probe-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME, cwd="C:/proj")
+        calls = []
+        killed = {"done": False}
+
+        def kill_process_tree(pid):
+            calls.append(("interrupt", pid))
+            killed["done"] = True
+
+        def get_process_info(pid):
+            return None if killed["done"] else _alive_info(pid)
+
+        proc = FakeProc(pid=999)
+        popen = _fake_popen(proc, calls)
+
+        args = fleet.build_parser().parse_args(["attach", "probe-1", "--force"])
+        rc = fleet.cmd_attach(
+            args, popen=popen, get_process_info=get_process_info, which=lambda n: "wt.exe",
+            kill_process_tree=kill_process_tree,
+        )
+
+        assert rc == 0
+        assert calls[0][0] == "interrupt"
+        assert calls[1][0] == "launch"
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["status"] == "attached"
+
     def test_attach_claims_attached_before_popen_called(self, isolated_home):
         """F1 required test (d): the "attached" claim must be committed
         under the decision lock BEFORE popen launches the terminal."""
@@ -498,6 +588,24 @@ class TestCmdAttach:
 
         args = fleet.build_parser().parse_args(["attach", "probe-1"])
         with pytest.raises(OSError):
+            fleet.cmd_attach(args, popen=popen, get_process_info=_dead_info, which=lambda n: "wt.exe")
+
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["status"] == "idle"
+        assert rec["attached_since"] is None
+
+    def test_attach_rolls_back_on_keyboard_interrupt_during_popen(self, isolated_home):
+        """Task-4-verdict re-review Fix 2: the popen rollback must catch
+        BaseException, not just Exception -- a Ctrl-C landing exactly
+        during the (detached) terminal launch must still revert the
+        pre-committed "attached" claim to idle, not pin it forever."""
+        _seed_worker("probe-1", status="idle", cwd="C:/proj", log_result=True)
+
+        def popen(*a, **kw):
+            raise KeyboardInterrupt()
+
+        args = fleet.build_parser().parse_args(["attach", "probe-1"])
+        with pytest.raises(KeyboardInterrupt):
             fleet.cmd_attach(args, popen=popen, get_process_info=_dead_info, which=lambda n: "wt.exe")
 
         rec = fleet.load_registry()["workers"]["probe-1"]
