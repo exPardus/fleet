@@ -164,6 +164,46 @@ class TestPostToolUseSubprocess:
         # no leftover claimed-file litter regardless of who won
         assert list((tmp_path / "mailbox").iterdir()) == []
 
+    def test_session_id_traversal_is_silent_and_leaves_target_untouched(self, tmp_path):
+        (tmp_path / "mailbox").mkdir(parents=True, exist_ok=True)
+        target = tmp_path / "evil.md"
+        target.write_text("do not touch\n", encoding="utf-8")
+        sid = "../evil"
+
+        proc = run_hook(POSTTOOLUSE, json.dumps({"session_id": sid}), tmp_path)
+
+        assert proc.returncode == 0
+        assert proc.stdout == ""
+        assert proc.stderr == ""
+        assert target.exists()
+        assert target.read_text(encoding="utf-8") == "do not touch\n"
+
+    def test_session_id_absolute_path_is_silent_and_leaves_target_untouched(self, tmp_path):
+        (tmp_path / "mailbox").mkdir(parents=True, exist_ok=True)
+        target = tmp_path / "outside_secret.md"
+        target.write_text("do not touch\n", encoding="utf-8")
+        sid = str(tmp_path / "outside_secret")
+
+        proc = run_hook(POSTTOOLUSE, json.dumps({"session_id": sid}), tmp_path)
+
+        assert proc.returncode == 0
+        assert proc.stdout == ""
+        assert proc.stderr == ""
+        assert target.exists()
+        assert target.read_text(encoding="utf-8") == "do not touch\n"
+
+    def test_whitespace_only_mailbox_is_silent_and_consumed(self, tmp_path):
+        sid = "sess-whitespace"
+        mailbox = make_mailbox(tmp_path, sid, "   \n\t  \n")
+
+        proc = run_hook(POSTTOOLUSE, json.dumps({"session_id": sid}), tmp_path)
+
+        assert proc.returncode == 0
+        assert proc.stdout == ""
+        assert proc.stderr == ""
+        assert not mailbox.exists()
+        assert list((tmp_path / "mailbox").iterdir()) == []
+
 
 # ---------------------------------------------------------------------
 # Stop hook -- subprocess-level behavior
@@ -225,6 +265,46 @@ class TestStopSubprocess:
         assert proc.returncode == 0
         out = json.loads(proc.stdout)
         assert out == {"decision": "block", "reason": "again\n"}
+
+    def test_session_id_traversal_is_silent_and_leaves_target_untouched(self, tmp_path):
+        (tmp_path / "mailbox").mkdir(parents=True, exist_ok=True)
+        target = tmp_path / "evil.md"
+        target.write_text("do not touch\n", encoding="utf-8")
+        sid = "../evil"
+
+        proc = run_hook(STOP, json.dumps({"session_id": sid}), tmp_path)
+
+        assert proc.returncode == 0
+        assert proc.stdout == ""
+        assert proc.stderr == ""
+        assert target.exists()
+        assert target.read_text(encoding="utf-8") == "do not touch\n"
+
+    def test_session_id_absolute_path_is_silent_and_leaves_target_untouched(self, tmp_path):
+        (tmp_path / "mailbox").mkdir(parents=True, exist_ok=True)
+        target = tmp_path / "outside_secret.md"
+        target.write_text("do not touch\n", encoding="utf-8")
+        sid = str(tmp_path / "outside_secret")
+
+        proc = run_hook(STOP, json.dumps({"session_id": sid}), tmp_path)
+
+        assert proc.returncode == 0
+        assert proc.stdout == ""
+        assert proc.stderr == ""
+        assert target.exists()
+        assert target.read_text(encoding="utf-8") == "do not touch\n"
+
+    def test_whitespace_only_mailbox_is_silent_and_consumed(self, tmp_path):
+        sid = "sess-whitespace"
+        mailbox = make_mailbox(tmp_path, sid, "   \n\t  \n")
+
+        proc = run_hook(STOP, json.dumps({"session_id": sid}), tmp_path)
+
+        assert proc.returncode == 0
+        assert proc.stdout == ""
+        assert proc.stderr == ""
+        assert not mailbox.exists()
+        assert list((tmp_path / "mailbox").iterdir()) == []
 
 
 # ---------------------------------------------------------------------
