@@ -1044,6 +1044,32 @@ class TestCmdClean:
         assert rc == 0
         assert "dead-1" not in fleet.load_registry()["workers"]
 
+    def test_first_pass_probe_does_not_hold_fleet_lock(self, isolated_home):
+        """Stress residual, Finding N1 (re-review of 550df0a): clean's FIRST
+        pass used to call recompute_worker's real probe for every worker
+        inside the single `with fleet_lock():` block -- the same
+        recompute-all-under-lock shape that made `fleet status` a
+        stress-critical (see test_cli.py's
+        TestCmdStatus.test_probe_does_not_hold_fleet_lock). Reuses the same
+        nested-lock probe technique as
+        test_confirm_delay_does_not_hold_fleet_lock: a fake
+        get_process_info that itself tries to acquire fleet_lock. If
+        cmd_clean's first pass still held the lock across this probe, the
+        nested acquisition would raise FleetLockTimeout."""
+        _seed_worker("probe-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME, log_result=False)
+        logs = fleet.logs_dir()
+        logs.mkdir(parents=True, exist_ok=True)
+        (logs / "probe-1.jsonl").write_text("junk, no trailing result\n", encoding="utf-8")
+
+        def probing_get_process_info(pid):
+            with fleet.fleet_lock(timeout=0.5):
+                pass  # must not raise FleetLockTimeout
+            return _alive_info(pid)  # keep it alive/non-dead -- not the point of this test
+
+        args = fleet.build_parser().parse_args(["clean"])
+        rc = fleet.cmd_clean(args, get_process_info=probing_get_process_info, sleep=lambda s: None)
+        assert rc == 0
+
     def test_respawned_meanwhile_is_spared_not_deleted(self, isolated_home):
         """A worker that looks dead on pass 1 but gets respawned (registry
         entry mutated) by a concurrent command while clean's lock is
