@@ -693,7 +693,7 @@ class TestRenderWorkerSettingsTemplate:
     _TEMPLATE = """{
   "hooks": {
     "PostToolUse": [{ "hooks": [{ "type": "command",
-      "command": "{{PYTHON}} {{FLEET_HOME}}/bin/hooks/posttooluse_mailbox.py" }] }]
+      "command": "\\"{{PYTHON}}\\" \\"{{FLEET_HOME}}/bin/hooks/posttooluse_mailbox.py\\"" }] }]
   }
 }
 """
@@ -703,10 +703,16 @@ class TestRenderWorkerSettingsTemplate:
         rendered = fleet.render_worker_settings_template(self._TEMPLATE, python_exe, tmp_path)
 
         assert "{{" not in rendered  # no unrendered placeholder markers remain
-        assert "\\" not in rendered  # no backslash leaked into the rendered command
         assert fleet.Path(python_exe).resolve().as_posix() in rendered
         assert fleet.Path(tmp_path).resolve().as_posix() in rendered
-        json.loads(rendered)  # still valid JSON after substitution
+        data = json.loads(rendered)  # still valid JSON after substitution
+
+        # Check the *parsed* command value (not the raw JSON text, which
+        # legitimately contains backslash-escaped quotes now that the
+        # command wraps each path in double quotes): no Windows-style
+        # backslash path separator should have leaked into the command.
+        command = data["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+        assert "\\" not in command
 
     def test_renders_using_sys_executable(self, tmp_path):
         import sys
@@ -721,6 +727,27 @@ class TestRenderWorkerSettingsTemplate:
     def test_no_placeholders_is_a_noop_passthrough(self, tmp_path):
         template = '{"hooks": {}}'
         assert fleet.render_worker_settings_template(template, "python.exe", tmp_path) == template
+
+    def test_command_paths_are_double_quoted_for_spaces(self, tmp_path):
+        """HIGH adversarial finding: an unquoted {{PYTHON}}/{{FLEET_HOME}}
+        substitution word-splits under Git Bash `sh -c` (exit 127) whenever
+        the python interpreter path or fleet home path contains a space --
+        silently killing the hook. Both placeholder usages in the template
+        must be wrapped in double quotes so the rendered command survives
+        `sh -c` word-splitting regardless of spaces in either path."""
+        python_exe = "C:/Program Files/Python313/python.exe"
+        spaced_home = tmp_path / "space dir"
+        spaced_home.mkdir()
+
+        rendered = fleet.render_worker_settings_template(self._TEMPLATE, python_exe, spaced_home)
+        data = json.loads(rendered)  # still valid JSON after substitution
+
+        python_path = fleet.Path(python_exe).resolve().as_posix()
+        home_path = fleet.Path(spaced_home).resolve().as_posix()
+
+        command = data["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+        assert f'"{python_path}"' in command
+        assert f'"{home_path}/bin/hooks/posttooluse_mailbox.py"' in command
 
 
 class TestInstanceFreshnessInfo:
