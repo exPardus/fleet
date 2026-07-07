@@ -32,7 +32,7 @@ C:\proga\claude-fleet\
     hooks\
       posttooluse_mailbox.py   # mid-turn mailbox injection
       stop_mailbox.py          # turn-end mailbox drain / stop-block
-  worker-settings.json    # hook wiring, passed to every worker via --settings
+  worker-settings.template.json  # hook wiring TEMPLATE (git-tracked, {{PYTHON}}/{{FLEET_HOME}} placeholders); `fleet init` renders it
   skill\SKILL.md          # manager skill; installed by copying to %USERPROFILE%\.claude\skills\fleet\ (README one-liner)
   knowledge\
     INDEX.md              # one line per entry; manager loads this at session start
@@ -42,6 +42,7 @@ C:\proga\claude-fleet\
   state\                  # gitignored
     fleet.json            # registry (single writer: fleet.py, lock file)
     events.jsonl          # append-only lifecycle events, written by fleet.py ONLY
+    worker-settings.json  # machine-local instance rendered by `fleet init` from the template above; passed to every worker via --settings (SPEC §14)
     journals\<name>.md    # worker journals (NOT in managed repos — keeps them git-clean)
   logs\                   # gitignored; <name>.jsonl (stdout) + <name>.err (stderr), per worker
   mailbox\                # gitignored; <session_id>.md pending messages
@@ -127,6 +128,8 @@ claude -p --output-format stream-json --verbose --include-hook-events
 ## 7. Mailbox + hooks (mid-turn steering)
 
 `worker-settings.json` — **forward slashes only**: on Windows hook commands run under Git Bash (`sh -c`), which eats backslashes in unquoted strings; backslash paths silently break every hook.
+
+Pre-render illustration; `fleet init` renders `{{PYTHON}}`/`{{FLEET_HOME}}` from the git-tracked `worker-settings.template.json` into the machine-local `state\worker-settings.json` instance (SPEC §14).
 
 ```json
 {
