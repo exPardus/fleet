@@ -100,11 +100,34 @@ class TestRegistry:
         assert rec["cost_usd"] == 0.0
         assert rec["last_activity"] == rec["created"]
 
-    def test_corrupt_registry_file_treated_as_empty(self, isolated_home):
+    def test_corrupt_registry_file_is_quarantined_and_raises(self, isolated_home):
         state = isolated_home / "state"
         state.mkdir(parents=True)
         (state / "fleet.json").write_text("{not json", encoding="utf-8")
-        assert fleet.load_registry() == {"workers": {}}
+
+        with pytest.raises(fleet.RegistryCorruptError):
+            fleet.load_registry()
+
+        assert not (state / "fleet.json").exists()
+        quarantined = [p for p in state.iterdir() if p.name.startswith("fleet.json.corrupt.")]
+        assert len(quarantined) == 1
+
+    def test_corrupt_registry_quarantine_appends_registry_corrupt_event(self, isolated_home):
+        state = isolated_home / "state"
+        state.mkdir(parents=True)
+        (state / "fleet.json").write_text("{not json", encoding="utf-8")
+
+        with pytest.raises(fleet.RegistryCorruptError):
+            fleet.load_registry()
+
+        lines = (state / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1
+        record = json.loads(lines[0])
+        assert record["kind"] == "registry_corrupt"
+        assert record["name"] == "fleet"
+        assert "fleet.json.corrupt." in record["path"]
+        # (missing-file -> {"workers": {}} is already covered by
+        # test_load_missing_registry_returns_empty_workers above.)
 
     def test_crud_add_update_remove_worker(self, isolated_home):
         with fleet.fleet_lock():
@@ -200,6 +223,26 @@ class TestLockContention:
             acquired.append(True)
         assert acquired == [True]
 
+    def test_normal_release_deletes_lock_file(self, isolated_home):
+        lock_path = fleet.state_dir() / "fleet.lock"
+        with fleet.fleet_lock():
+            assert lock_path.exists()
+        assert not lock_path.exists()
+
+    def test_release_is_ownership_checked_does_not_delete_successors_lock(self, isolated_home):
+        # Simulate a successor stealing the lock file (e.g. it broke a
+        # falsely-stale lock) while we still believe we hold it: overwrite
+        # the lock file's contents with a different token before our
+        # context exits. Our release must see the mismatched token and
+        # leave the file alone (F1) -- deleting it here would cascade by
+        # freeing a lock the successor believes it owns.
+        lock_path = fleet.state_dir() / "fleet.lock"
+        with fleet.fleet_lock():
+            assert lock_path.exists()
+            lock_path.write_text("someone-elses-token", encoding="utf-8")
+        assert lock_path.exists()
+        assert lock_path.read_text(encoding="utf-8") == "someone-elses-token"
+
 
 # ---------------------------------------------------------------------------
 # Events
@@ -282,10 +325,35 @@ class TestPidLiveness:
         log.write_text('{"type":"assistant","message":{"content":[]}}\n', encoding="utf-8")
         assert fleet.recompute_status(1, "2026-07-07T12:30:00Z", log, get_process_info=info) == "dead"
 
+    def test_recompute_status_idle_with_bom_prefixed_log(self, tmp_path):
+        # Same BOM concern (F6) exercised through _last_line_type via the
+        # public recompute_status surface.
+        info = lambda pid: None
+        log = tmp_path / "w.jsonl"
+        line = '{"type":"result","subtype":"success","result":"done"}\n'
+        log.write_bytes(b"\xef\xbb\xbf" + line.encode("utf-8"))
+        assert fleet.recompute_status(1, "2026-07-07T12:30:00Z", log, get_process_info=info) == "idle"
+
     def test_recompute_status_dead_when_log_missing(self, tmp_path):
         info = lambda pid: None
         log = tmp_path / "missing.jsonl"
         assert fleet.recompute_status(1, "2026-07-07T12:30:00Z", log, get_process_info=info) == "dead"
+
+    def test_recompute_status_attached_is_not_clobbered_by_dead_pid(self, tmp_path):
+        # An operator-attached worker must stay "attached" even though the
+        # pid is dead and the log ends on a result event (which would
+        # otherwise compute "idle") -- F7.
+        info = lambda pid: None
+        log = tmp_path / "w.jsonl"
+        log.write_text('{"type":"result","subtype":"success","result":"done"}\n', encoding="utf-8")
+        status = fleet.recompute_status(
+            1, "2026-07-07T12:30:00Z", log, current_status="attached", get_process_info=info
+        )
+        assert status == "attached"
+
+    def test_ctime_to_iso_round_trips_through_parse_iso(self):
+        dt = datetime(2026, 7, 7, 12, 30, 0, tzinfo=timezone.utc)
+        assert fleet._parse_iso(fleet.ctime_to_iso(dt)) == dt
 
 
 # ---------------------------------------------------------------------------
@@ -357,6 +425,16 @@ class TestTailEvents:
         assert len(entries) == 2
         assert entries[-1]["text"] == "msg4"
 
+    def test_bom_prefixed_log_parses_first_event(self, tmp_path):
+        # PowerShell `>` redirection emits a UTF-8 BOM at the start of the
+        # file; it must not swallow the first line's event (F6).
+        log = tmp_path / "w.jsonl"
+        line = json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}})
+        log.write_bytes(b"\xef\xbb\xbf" + (line + "\n").encode("utf-8"))
+        entries = fleet.tail_events(log, 20)
+        assert len(entries) == 1
+        assert entries[0]["text"] == "hi"
+
     def test_long_text_is_truncated(self, tmp_path):
         log = tmp_path / "w.jsonl"
         long_text = "x" * 2000
@@ -372,29 +450,99 @@ class TestTailEvents:
 # Prompt composition + mailbox drain
 # ---------------------------------------------------------------------------
 
-class TestDrainMailbox:
-    def test_drain_missing_mailbox_returns_empty(self, isolated_home):
-        assert fleet.drain_mailbox("sid-1") == ""
+class TestClaimMailbox:
+    def test_claim_missing_mailbox_returns_empty(self, isolated_home):
+        content, claim = fleet.claim_mailbox("sid-1")
+        assert content == ""
+        assert claim is None
 
-    def test_drain_reads_and_deletes(self, isolated_home):
+    def test_claim_renames_to_claimed_path_and_returns_content(self, isolated_home):
         mbox = fleet.mailbox_dir()
         mbox.mkdir(parents=True)
         (mbox / "sid-1.md").write_text("please stop and check X", encoding="utf-8")
-        content = fleet.drain_mailbox("sid-1")
+
+        content, claim = fleet.claim_mailbox("sid-1")
+
         assert content == "please stop and check X"
+        assert claim is not None
+        assert claim.name.startswith("sid-1.md.claimed.")
+        assert claim.exists()
         assert not (mbox / "sid-1.md").exists()
 
-    def test_drain_twice_second_call_empty(self, isolated_home):
+    def test_claim_twice_second_call_empty(self, isolated_home):
         mbox = fleet.mailbox_dir()
         mbox.mkdir(parents=True)
         (mbox / "sid-1.md").write_text("hello", encoding="utf-8")
-        fleet.drain_mailbox("sid-1")
-        assert fleet.drain_mailbox("sid-1") == ""
+        fleet.claim_mailbox("sid-1")
+        content, claim = fleet.claim_mailbox("sid-1")
+        assert content == ""
+        assert claim is None
+
+
+class TestFinalizeMailboxClaim:
+    def test_finalize_deletes_claimed_file(self, isolated_home):
+        mbox = fleet.mailbox_dir()
+        mbox.mkdir(parents=True)
+        (mbox / "sid-1.md").write_text("hello", encoding="utf-8")
+        _, claim = fleet.claim_mailbox("sid-1")
+
+        fleet.finalize_mailbox_claim(claim)
+
+        assert not claim.exists()
+
+    def test_finalize_none_is_noop(self, isolated_home):
+        fleet.finalize_mailbox_claim(None)  # must not raise
+
+
+class TestRestoreMailboxClaim:
+    def test_restore_none_is_noop(self, isolated_home):
+        fleet.restore_mailbox_claim(None)  # must not raise
+
+    def test_restore_puts_content_back_at_original_mailbox_path(self, isolated_home):
+        mbox = fleet.mailbox_dir()
+        mbox.mkdir(parents=True)
+        (mbox / "sid-1.md").write_text("please stop and check X", encoding="utf-8")
+        _, claim = fleet.claim_mailbox("sid-1")
+        assert not (mbox / "sid-1.md").exists()
+
+        fleet.restore_mailbox_claim(claim)
+
+        assert (mbox / "sid-1.md").exists()
+        assert (mbox / "sid-1.md").read_text(encoding="utf-8") == "please stop and check X"
+        assert not claim.exists()
+
+    def test_restore_merges_with_newer_mail_claimed_content_first(self, isolated_home):
+        mbox = fleet.mailbox_dir()
+        mbox.mkdir(parents=True)
+        (mbox / "sid-1.md").write_text("older message", encoding="utf-8")
+        _, claim = fleet.claim_mailbox("sid-1")
+        # Simulate newer mail arriving while our claim was in flight.
+        (mbox / "sid-1.md").write_text("newer message", encoding="utf-8")
+
+        fleet.restore_mailbox_claim(claim)
+
+        merged = (mbox / "sid-1.md").read_text(encoding="utf-8")
+        assert merged.index("older message") < merged.index("newer message")
+        assert not claim.exists()
+
+    def test_compose_prompt_mail_survives_simulated_failed_launch(self, isolated_home):
+        mbox = fleet.mailbox_dir()
+        mbox.mkdir(parents=True)
+        (mbox / "sid-1.md").write_text("also check the logs", encoding="utf-8")
+
+        prompt, claim = fleet.compose_prompt("probe-1", "C:/x", "task text", "sid-1")
+        assert "also check the logs" in prompt
+
+        fleet.restore_mailbox_claim(claim)  # simulated failed launch
+
+        prompt2, claim2 = fleet.compose_prompt("probe-1", "C:/x", "task text", "sid-1")
+        assert "also check the logs" in prompt2
 
 
 class TestComposePrompt:
     def test_preamble_mentions_name_cwd_and_rules(self, isolated_home):
-        prompt = fleet.compose_prompt("probe-1", r"C:\proga\polymarket", "do the thing", "sid-1")
+        prompt, claim = fleet.compose_prompt("probe-1", r"C:\proga\polymarket", "do the thing", "sid-1")
+        assert claim is None
         assert "probe-1" in prompt
         assert r"C:\proga\polymarket" in prompt
         assert "MANAGER MESSAGE" in prompt
@@ -402,30 +550,39 @@ class TestComposePrompt:
         assert "do the thing" in prompt
 
     def test_empty_mailbox_is_noop(self, isolated_home):
-        prompt = fleet.compose_prompt("probe-1", "C:/x", "task text", "sid-1")
+        prompt, claim = fleet.compose_prompt("probe-1", "C:/x", "task text", "sid-1")
         # The preamble explains the <MANAGER MESSAGE> convention (in backticks);
         # what must NOT appear is an actual injected mail block.
         assert "<MANAGER MESSAGE>\n" not in prompt
+        assert claim is None
 
-    def test_pending_mailbox_is_drained_into_prompt(self, isolated_home):
+    def test_pending_mailbox_is_claimed_into_prompt(self, isolated_home):
         mbox = fleet.mailbox_dir()
         mbox.mkdir(parents=True)
         (mbox / "sid-1.md").write_text("also check the logs", encoding="utf-8")
-        prompt = fleet.compose_prompt("probe-1", "C:/x", "task text", "sid-1")
+        prompt, claim = fleet.compose_prompt("probe-1", "C:/x", "task text", "sid-1")
         assert "<MANAGER MESSAGE>\n" in prompt
         assert "also check the logs" in prompt
-        assert not (mbox / "sid-1.md").exists()  # consumed
+        assert not (mbox / "sid-1.md").exists()  # claimed, not left in place
+        assert claim is not None
+        assert claim.exists()  # not destroyed -- caller decides finalize vs restore
 
     def test_journal_contents_included_when_respawning(self, isolated_home, tmp_path):
         journal = tmp_path / "probe-1.md"
         journal.write_text("## goal\ndo the thing\n## done\nstep 1", encoding="utf-8")
-        prompt = fleet.compose_prompt("probe-1", "C:/x", "task text", "sid-1", journal_path=journal)
+        prompt, claim = fleet.compose_prompt("probe-1", "C:/x", "task text", "sid-1", journal_path=journal)
         assert "do the thing" in prompt
         assert "step 1" in prompt
 
     def test_no_journal_path_means_no_journal_section(self, isolated_home):
-        prompt = fleet.compose_prompt("probe-1", "C:/x", "task text", "sid-1")
+        prompt, claim = fleet.compose_prompt("probe-1", "C:/x", "task text", "sid-1")
         assert "## Journal" not in prompt
+
+    def test_journal_with_invalid_utf8_bytes_does_not_raise(self, isolated_home, tmp_path):
+        journal = tmp_path / "probe-1.md"
+        journal.write_bytes(b"## goal\ndo the thing \xff\xfe invalid bytes\n")
+        prompt, claim = fleet.compose_prompt("probe-1", "C:/x", "task text", "sid-1", journal_path=journal)
+        assert "do the thing" in prompt
 
 
 # ---------------------------------------------------------------------------

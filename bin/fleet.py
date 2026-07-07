@@ -19,6 +19,7 @@ import re
 import subprocess
 import tempfile
 import time
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -72,6 +73,14 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def ctime_to_iso(dt: datetime) -> str:
+    """Serialize a process creation-time datetime to the registry's
+    turn_pid_ctime format (round-trips through _parse_iso). This is the
+    only serializer callers should use to store turn_pid_ctime --
+    datetime.isoformat() yields "+00:00" and breaks _parse_iso."""
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 # ---------------------------------------------------------------------------
 # Registry lock (SPEC §4): atomic-create lock file, retry, stale-break.
 # ---------------------------------------------------------------------------
@@ -96,6 +105,7 @@ def fleet_lock(timeout: float = LOCK_TIMEOUT_SECONDS):
     path.parent.mkdir(parents=True, exist_ok=True)
     deadline = time.monotonic() + timeout
     fd = None
+    token = f"{os.getpid()}:{uuid.uuid4().hex}"
     while fd is None:
         try:
             fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -114,13 +124,22 @@ def fleet_lock(timeout: float = LOCK_TIMEOUT_SECONDS):
                 raise FleetLockTimeout(f"timed out waiting for lock: {path}")
             time.sleep(LOCK_RETRY_INTERVAL_SECONDS)
     try:
+        os.write(fd, token.encode("utf-8"))
         os.close(fd)
         yield
     finally:
+        # Compare-and-delete: only unlink if the lock file still holds our
+        # token. A successor may have broken our (apparently stale) lock and
+        # now owns it -- deleting blindly here would cascade (F1).
         try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
+            current = path.read_bytes()
+        except (FileNotFoundError, OSError):
+            current = None
+        if current == token.encode("utf-8"):
+            try:
+                path.unlink()
+            except (FileNotFoundError, OSError):
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -138,18 +157,47 @@ def validate_name(name: str, existing=()) -> None:
         raise ValueError(f"worker name already exists: {name!r}")
 
 
+class RegistryCorruptError(Exception):
+    """Raised when state/fleet.json exists but cannot be trusted as-is
+    (parse failure, non-dict content, or unreadable). Never silently
+    degrade to an empty registry in this case -- that would let a later
+    save_registry() overwrite live worker records with nothing (F2)."""
+
+
+def _quarantine_registry(path: Path) -> Path:
+    """Rename a corrupt registry aside (best-effort) and emit an event
+    (best-effort). Returns the quarantine path regardless of whether the
+    rename actually succeeded."""
+    quarantined = path.with_name(f"fleet.json.corrupt.{now_iso().replace(':', '')}")
+    try:
+        path.rename(quarantined)
+    except OSError:
+        pass
+    try:
+        append_event("registry_corrupt", "fleet", path=str(quarantined))
+    except OSError:
+        pass
+    return quarantined
+
+
 def load_registry() -> dict:
-    """Load state/fleet.json. Missing or corrupt file -> {"workers": {}}."""
+    """Load state/fleet.json. Missing file -> {"workers": {}}. An existing
+    but corrupt/unreadable file is quarantined (renamed aside) and raises
+    RegistryCorruptError -- callers must abort, not catch-and-continue."""
     path = registry_path()
     if not path.exists():
         return {"workers": {}}
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-        return {"workers": {}}
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        quarantined = _quarantine_registry(path)
+        raise RegistryCorruptError(f"corrupt registry quarantined to {quarantined}")
+    except OSError:
+        raise RegistryCorruptError(f"registry unreadable: {path}")
     if not isinstance(data, dict):
-        return {"workers": {}}
+        quarantined = _quarantine_registry(path)
+        raise RegistryCorruptError(f"registry was not a JSON object; quarantined to {quarantined}")
     data.setdefault("workers", {})
     return data
 
@@ -267,7 +315,7 @@ def _last_line_type(log_path) -> str | None:
     if not log_path.exists():
         return None
     try:
-        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+        with open(log_path, "r", encoding="utf-8-sig", errors="replace") as f:
             lines = f.readlines()
     except OSError:
         return None
@@ -283,9 +331,14 @@ def _last_line_type(log_path) -> str | None:
     return None
 
 
-def recompute_status(pid, ctime_iso, log_path, get_process_info=None) -> str:
+def recompute_status(pid, ctime_iso, log_path, current_status: str | None = None, get_process_info=None) -> str:
     """working / idle / dead, per SPEC §4: stale PID + trailing result event
-    -> idle; stale PID + no trailing result event -> dead."""
+    -> idle; stale PID + no trailing result event -> dead. If current_status
+    is "attached", that state takes priority and is returned immediately --
+    liveness recomputation must never clobber an operator's manual attach
+    (F7)."""
+    if current_status == "attached":
+        return "attached"
     if pid_alive(pid, ctime_iso, get_process_info=get_process_info):
         return "working"
     return "idle" if _last_line_type(log_path) == "result" else "dead"
@@ -344,7 +397,7 @@ def tail_events(log_path, n: int = 20) -> list:
     if not log_path.exists():
         return []
     try:
-        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+        with open(log_path, "r", encoding="utf-8-sig", errors="replace") as f:
             lines = f.readlines()
     except OSError:
         return []
@@ -373,21 +426,61 @@ def tail_events(log_path, n: int = 20) -> list:
 # Mailbox drain + prompt composition (SPEC §5 drain rule, §7, §8)
 # ---------------------------------------------------------------------------
 
-def drain_mailbox(sid: str) -> str:
-    """Read and delete mailbox/<sid>.md, returning its contents ("" if absent
-    or empty). Called by every turn launch (spawn/send-resume/respawn)."""
-    path = mailbox_dir() / f"{sid}.md"
-    if not path.exists():
-        return ""
+def _claimed_path(sid: str) -> Path:
+    return mailbox_dir() / f"{sid}.md.claimed.{os.getpid()}"
+
+
+def claim_mailbox(sid: str) -> tuple[str, Path | None]:
+    """Atomically claim mailbox/<sid>.md via os.replace to
+    mailbox/<sid>.md.claimed.<pid> (matches the hook protocol, SPEC §7).
+    Returns (stripped_content, claim_path); ("", None) if no mail."""
+    src = mailbox_dir() / f"{sid}.md"
+    if not src.exists():
+        return "", None
+    claim = _claimed_path(sid)
     try:
-        content = path.read_text(encoding="utf-8")
+        os.replace(str(src), str(claim))
     except OSError:
-        return ""
+        return "", None
     try:
-        path.unlink()
+        content = claim.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        content = ""
+    return content.strip(), claim
+
+
+def finalize_mailbox_claim(claim: Path | None) -> None:
+    """Delete the claimed file after the turn process has started. No-op on None."""
+    if claim is None:
+        return
+    try:
+        claim.unlink()
     except FileNotFoundError:
         pass
-    return content.strip()
+
+
+def restore_mailbox_claim(claim: Path | None) -> None:
+    """Return an unconsumed claim to mailbox/<sid>.md after a failed launch.
+    If newer mail arrived meanwhile, prepend the (older) claimed content. No-op on None."""
+    if claim is None:
+        return
+    target = claim.parent / (claim.name.split(".md.claimed.")[0] + ".md")
+    try:
+        claimed = claim.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        claimed = ""
+    if target.exists():
+        try:
+            newer = target.read_text(encoding="utf-8", errors="replace")
+            target.write_text(claimed.rstrip() + "\n\n" + newer, encoding="utf-8")
+            claim.unlink()
+            return
+        except OSError:
+            pass
+    try:
+        os.replace(str(claim), str(target))
+    except OSError:
+        pass
 
 
 _PREAMBLE_TEMPLATE = """You are fleet worker `{name}` in `{cwd}`.
@@ -398,12 +491,20 @@ Do not leave servers or watchers running past the end of the turn without record
 """
 
 
-def compose_prompt(name: str, cwd, task: str, sid: str, journal_path=None) -> str:
-    """preamble (SPEC §8) + drained mailbox + task text (+ journal contents
-    when respawning, i.e. when journal_path is given and exists)."""
+def compose_prompt(name: str, cwd, task: str, sid: str, journal_path=None) -> tuple[str, Path | None]:
+    """preamble (SPEC §8) + claimed mailbox + task text (+ journal contents
+    when respawning, i.e. when journal_path is given and exists).
+
+    Claims (does not destroy) mailbox/<sid>.md via claim_mailbox() so the
+    universal-drain guarantee holds (every compose_prompt call claims the
+    mailbox) while leaving recovery to the caller: on a failed launch, call
+    restore_mailbox_claim(claim) to put the mail back; on a successful
+    launch, call finalize_mailbox_claim(claim) once the turn process has
+    started (see SPEC §7 / the launch-sequence contract).
+    """
     parts = [_PREAMBLE_TEMPLATE.format(name=name, cwd=cwd)]
 
-    mail = drain_mailbox(sid)
+    mail, claim = claim_mailbox(sid)
     if mail:
         parts.append(f"<MANAGER MESSAGE>\n{mail}\n")
 
@@ -413,13 +514,13 @@ def compose_prompt(name: str, cwd, task: str, sid: str, journal_path=None) -> st
         journal_path = Path(journal_path)
         if journal_path.exists():
             try:
-                journal_text = journal_path.read_text(encoding="utf-8").strip()
+                journal_text = journal_path.read_text(encoding="utf-8", errors="replace").strip()
             except OSError:
                 journal_text = ""
             if journal_text:
                 parts.append(f"## Journal from previous session\n{journal_text}\n")
 
-    return "\n".join(parts)
+    return "\n".join(parts), claim
 
 
 # ---------------------------------------------------------------------------
