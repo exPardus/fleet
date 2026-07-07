@@ -17,6 +17,7 @@ You are the manager of a fleet of Claude Code worker sessions on this machine. T
 
 | Command | Use |
 |---|---|
+| `fleet init` | Render the machine-local `state\worker-settings.json` from the git-tracked template (real interpreter path + FLEET_HOME). Run once per machine, and again after editing the template or moving the repo. `spawn`/`send` refuse with a clear error if this hasn't been run. |
 | `fleet spawn <name> --dir <path> --task <text\|@file> [--mode bypass\|accept\|dontask\|plan\|omit] [--model m] [--max-budget-usd x]` | New worker. Name `[a-z0-9-]+`. Task via @file for anything long. |
 | `fleet send <name> <text\|@file>` | Steer. Mid-turn → delivered at next tool boundary (seconds). Idle → starts new turn. |
 | `fleet status [name]` | Compact fleet table. Your main dashboard. |

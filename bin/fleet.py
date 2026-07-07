@@ -9,7 +9,13 @@ mode mapping). Task 2 adds an argparse-based main() with subcommands on top
 of these functions -- keep additions below this layer, not mixed into it.
 
 See docs/SPEC.md for the full design (this file implements SPEC sections
-2, 4, 5, 6, 8, 11).
+2, 4, 5, 6, 8, 11, 14).
+
+Requires Python 3.10+ (dev machine: py -3.13). Stdlib only -- no pip deps
+(SPEC §14 / docs/specs/portability.md fixed constraints). Windows is the
+only implemented PLATFORM backend for now (see the platform adapter block
+below); the module itself is written to the 3.10 floor so a POSIX backend
+(Phase 1.5) can run under distro pythons without a language-version bump.
 """
 from __future__ import annotations
 
@@ -37,7 +43,17 @@ from pathlib import Path
 # state/logs/mailbox directories. Every path helper below re-reads this
 # global on each call rather than caching a Path computed at import time,
 # so monkeypatching takes effect immediately.
-FLEET_HOME = Path(__file__).resolve().parent.parent
+#
+# SPEC §14 portability: the env var FLEET_HOME wins if set, else FLEET_HOME
+# is derived from this file's own location (bin/fleet.py -> parent.parent
+# is the repo root). Read once at import into this global -- exactly like
+# bin/hooks/*.py's own _fleet_home(), which every hook script duplicates
+# standalone (hooks never import fleet.py). Monkeypatching this attribute
+# directly (as tests do) always wins over both: it is a later assignment.
+FLEET_HOME = (
+    Path(os.environ["FLEET_HOME"]) if os.environ.get("FLEET_HOME")
+    else Path(__file__).resolve().parent.parent
+)
 
 
 def state_dir() -> Path:
@@ -70,6 +86,21 @@ def events_path() -> Path:
 
 def lock_path() -> Path:
     return state_dir() / "fleet.lock"
+
+
+def template_settings_path() -> Path:
+    """Git-tracked hook-wiring TEMPLATE (SPEC §14): worker-settings.template.json
+    at the fleet-home root, with {{PYTHON}}/{{FLEET_HOME}} placeholders.
+    `fleet init` renders it into instance_settings_path()."""
+    return FLEET_HOME / "worker-settings.template.json"
+
+
+def instance_settings_path() -> Path:
+    """Machine-local, gitignored settings instance (SPEC §14):
+    state/worker-settings.json, rendered by `fleet init` from
+    template_settings_path(). Every worker turn's --settings argv value
+    points here (build_turn_argv's default), never at the template."""
+    return state_dir() / "worker-settings.json"
 
 
 def now_iso() -> str:
@@ -637,7 +668,7 @@ def append_mailbox(sid: str, message: str) -> None:
 
 _PREAMBLE_TEMPLATE = """You are fleet worker `{name}` in `{cwd}`.
 Manager messages arrive mid-task marked `<MANAGER MESSAGE>`; treat them as user instructions.
-Maintain a journal at `C:/proga/claude-fleet/state/journals/{name}.md` (create it early; update it at each milestone): goal, done, in-progress, blockers, next steps. It must be enough for a fresh session to continue.
+Maintain a journal at `{journal_target}` (create it early; update it at each milestone): goal, done, in-progress, blockers, next steps. It must be enough for a fresh session to continue.
 End every turn with a compact result summary: changed, verified, blocked.
 Do not leave servers or watchers running past the end of the turn without recording their PIDs in the journal.
 """
@@ -658,8 +689,14 @@ def compose_prompt(name: str, cwd, task: str, sid: str, journal_path=None) -> tu
     triggering message through the mailbox instead, so the drained mail
     already carries it) -- an empty task emits no task section at all
     rather than a blank line.
+
+    SPEC §14: the preamble's journal target is rendered from the live
+    journals_dir() (FLEET_HOME-derived) on every call, never a literal
+    path -- so it follows FLEET_HOME/env-var overrides and test sandboxes
+    exactly like every other path helper in this module.
     """
-    parts = [_PREAMBLE_TEMPLATE.format(name=name, cwd=cwd)]
+    journal_target = (journals_dir() / f"{name}.md").as_posix()
+    parts = [_PREAMBLE_TEMPLATE.format(name=name, cwd=cwd, journal_target=journal_target)]
 
     mail, claim = claim_mailbox(sid)
     if mail:
@@ -708,15 +745,6 @@ def mode_flags(mode: str) -> list:
 # Turn launcher (SPEC §6): pure argv builder + detached Popen.
 # ---------------------------------------------------------------------------
 
-# worker-settings.json is a single real asset that always lives alongside
-# the real repo (SPEC §1: this tool's location is fixed, never relocated
-# per-project). Deliberately NOT derived from FLEET_HOME: tests monkeypatch
-# FLEET_HOME to isolate state/logs/mailbox, but the settings file argv value
-# must stay the one real path every worker turn actually uses -- the same
-# convention _PREAMBLE_TEMPLATE already uses for the journal path.
-WORKER_SETTINGS_PATH = "C:/proga/claude-fleet/worker-settings.json"
-
-
 class ClaudeNotFoundError(Exception):
     """Raised when the `claude` executable cannot be resolved on PATH."""
 
@@ -735,11 +763,21 @@ def resolve_claude_executable(which=shutil.which) -> str:
 
 def build_turn_argv(claude_exe: str, sid: str, first: bool, mode: str,
                      model: str | None = None, max_budget_usd: float | None = None,
-                     settings_path: str = WORKER_SETTINGS_PATH) -> list:
+                     settings_path: str | None = None) -> list:
     """Pure argv builder for one worker turn (SPEC §6). Raises ValueError
     (via mode_flags) for an unknown mode -- kept a pure function per the
     Task 2 brief so every mode/model/budget combo is unit-testable without
-    touching Popen at all."""
+    touching Popen at all.
+
+    settings_path defaults to str(instance_settings_path()) -- resolved
+    fresh on every call (not baked into the signature at def-time, SPEC
+    §14) so it follows FLEET_HOME/env-var overrides and test sandboxes the
+    same way every other path helper in this module does. Callers needing
+    the real machine instance must have already run `fleet init`
+    (cmd_spawn/cmd_send enforce this via _require_instance_settings before
+    ever reaching here)."""
+    if settings_path is None:
+        settings_path = str(instance_settings_path())
     argv = [claude_exe, "-p", "--output-format", "stream-json", "--verbose", "--include-hook-events"]
     argv += ["--session-id", sid] if first else ["--resume", sid]
     argv += ["--settings", settings_path]
@@ -988,6 +1026,90 @@ def hook_events_present(log_path) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Portability: worker-settings template render + instance freshness (SPEC §14)
+#
+# worker-settings.template.json (git-tracked, repo root) carries
+# {{PYTHON}}/{{FLEET_HOME}} placeholders; `fleet init` (below, in the CLI
+# section) renders it into instance_settings_path() (gitignored,
+# machine-local). Both helpers here are pure/read-only so they are testable
+# without touching cmd_init's file I/O.
+# ---------------------------------------------------------------------------
+
+_TEMPLATE_PLACEHOLDER_RE = re.compile(r"\{\{[A-Za-z0-9_]+\}\}")
+
+
+def render_worker_settings_template(template_text: str, python_exe, fleet_home) -> str:
+    """Pure render step for `fleet init` (SPEC §14): substitute
+    {{PYTHON}} -> absolute forward-slash path to python_exe and
+    {{FLEET_HOME}} -> absolute forward-slash path to fleet_home.
+
+    Forward slashes only (matches SPEC §7's hook-command rule: Git Bash's
+    `sh -c` eats backslashes in unquoted strings on Windows; POSIX shells
+    are unaffected by forward slashes either way).
+
+    Raises ValueError if any `{{NAME}}` placeholder remains unrendered
+    after both substitutions -- a typo'd or new placeholder in the template
+    must fail loudly at `fleet init` time, not silently render a broken
+    settings file (SPEC §7: print-mode `claude` invocations swallow invalid
+    --settings JSON silently, so this is the only alarm before a worker
+    turn actually runs with dead hooks).
+    """
+    python_path = Path(python_exe).resolve().as_posix()
+    fleet_home_path = Path(fleet_home).resolve().as_posix()
+    rendered = template_text.replace("{{PYTHON}}", python_path).replace("{{FLEET_HOME}}", fleet_home_path)
+    leftover = _TEMPLATE_PLACEHOLDER_RE.search(rendered)
+    if leftover:
+        raise ValueError(
+            f"unrendered placeholder {leftover.group(0)!r} in worker-settings template "
+            "-- only {{PYTHON}} and {{FLEET_HOME}} are supported"
+        )
+    return rendered
+
+
+def instance_freshness_info() -> dict:
+    """Read-only probe comparing the rendered instance
+    (instance_settings_path()) against the git-tracked template it was
+    rendered from (template_settings_path()) -- built for Task 5's `fleet
+    doctor` freshness check (not wired into any command in this task).
+
+    Returns a dict:
+      - "template_exists" / "instance_exists": bool
+      - "template_mtime" / "instance_mtime": raw st_mtime float, or None if
+        the respective file is absent
+      - "stale": True if the instance is missing (nothing to compare, and
+        nothing for a worker turn to use -- SPEC §14's "run fleet init"
+        error), or if both files exist and the template's mtime is newer
+        than the instance's (edited after the last `fleet init`).
+        A missing TEMPLATE with an existing instance is not flagged stale
+        here (there is nothing to compare against) -- doctor may still
+        want to warn about that separately; that policy lives in Task 5,
+        not here.
+    """
+    template_path = template_settings_path()
+    instance_path = instance_settings_path()
+
+    template_exists = template_path.exists()
+    instance_exists = instance_path.exists()
+    template_mtime = template_path.stat().st_mtime if template_exists else None
+    instance_mtime = instance_path.stat().st_mtime if instance_exists else None
+
+    if not instance_exists:
+        stale = True
+    elif template_exists:
+        stale = template_mtime > instance_mtime
+    else:
+        stale = False
+
+    return {
+        "template_exists": template_exists,
+        "instance_exists": instance_exists,
+        "template_mtime": template_mtime,
+        "instance_mtime": instance_mtime,
+        "stale": stale,
+    }
+
+
+# ---------------------------------------------------------------------------
 # CLI: subcommands (SPEC §5)
 # ---------------------------------------------------------------------------
 
@@ -1009,6 +1131,49 @@ def _read_task_arg(task: str) -> str:
     return task
 
 
+def _require_instance_settings() -> None:
+    """Fail fast with a clear, actionable error (SPEC §14) if the
+    machine-local worker-settings.json instance hasn't been rendered yet --
+    checked at spawn/send time, before any registry mutation or Popen call,
+    so a missing instance never leaves a half-created worker record or a
+    consumed mailbox claim behind. Without this check, a turn would still
+    launch (build_turn_argv's --settings default just points at a
+    nonexistent path) and `claude` would silently ignore the bad
+    --settings value in print mode (SPEC §7) -- fleet hooks would simply
+    never fire, with no error anywhere."""
+    if not instance_settings_path().exists():
+        raise FleetCliError(
+            f"worker settings instance missing ({instance_settings_path()}) -- run `fleet init` first"
+        )
+
+
+def cmd_init(args) -> int:
+    """`fleet init` (SPEC §14, §5 command surface): render the
+    machine-local worker-settings.json instance from the git-tracked
+    template. Idempotent -- always safe to re-run (e.g. after editing the
+    template or moving the repo); never refuses. Uses sys.executable as
+    {{PYTHON}} -- the absolute path of the interpreter running `fleet init`
+    itself, which is what every worker turn's hook subprocess must invoke
+    (hooks run outside fleet.py, spawned by `claude`, so they cannot fall
+    back to a bare `py`/`python3` on PATH)."""
+    template_path = template_settings_path()
+    if not template_path.exists():
+        raise FleetCliError(
+            f"worker-settings template not found: {template_path} -- expected it at the fleet-home root"
+        )
+    template_text = template_path.read_text(encoding="utf-8")
+    rendered = render_worker_settings_template(template_text, sys.executable, FLEET_HOME)
+
+    instance_path = instance_settings_path()
+    instance_path.parent.mkdir(parents=True, exist_ok=True)
+    instance_path.write_text(rendered, encoding="utf-8")
+
+    print(f"fleet init: wrote {instance_path}")
+    print(f"  python:      {Path(sys.executable).resolve().as_posix()}")
+    print(f"  fleet home:  {Path(FLEET_HOME).resolve().as_posix()}")
+    return 0
+
+
 def cmd_spawn(args, popen=subprocess.Popen, get_process_info=None, which=shutil.which) -> int:
     """`fleet spawn <name> --dir <path> --task <text|@file> [--mode ...]
     [--model m] [--max-budget-usd x]` (SPEC §5 spawn row).
@@ -1019,7 +1184,13 @@ def cmd_spawn(args, popen=subprocess.Popen, get_process_info=None, which=shutil.
     module appends is written while the registry lock for that same
     operation is held, so concurrent `fleet` invocations never interleave
     events with the registry state they describe.
+
+    SPEC §14: refuses before any mutation if the worker-settings instance
+    hasn't been rendered yet (_require_instance_settings) -- `fleet init`
+    must run once per machine before the first spawn.
     """
+    _require_instance_settings()
+
     cwd = Path(args.dir)
     if not cwd.is_dir():
         raise FleetCliError(f"--dir does not exist or is not a directory: {args.dir}")
@@ -1284,7 +1455,16 @@ def cmd_send(args, popen=subprocess.Popen, get_process_info=None, which=shutil.w
       --settings, so hooks don't fire and the mail queues untouched until
       the next headless turn.
     - dead -> a clear error suggesting `fleet respawn`, never a silent no-op.
+
+    SPEC §14: refuses up front (_require_instance_settings) if the
+    worker-settings instance is missing -- checked unconditionally even
+    though only the idle-resume branch below actually launches a turn,
+    because `fleet spawn` (the only way a worker could exist at all) already
+    requires the instance, so a real fleet never reaches this check with it
+    absent; simplicity wins over branch-specific placement here.
     """
+    _require_instance_settings()
+
     message = _read_task_arg(args.message)
 
     with fleet_lock():
@@ -1590,6 +1770,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="fleet", description="claude-fleet manager CLI (M1)")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    sub.add_parser("init", help="render the machine-local worker-settings.json instance from the template (SPEC §14)")
+
     p_spawn = sub.add_parser("spawn", help="spawn a new worker session")
     p_spawn.add_argument("name")
     p_spawn.add_argument("--dir", required=True)
@@ -1639,6 +1821,8 @@ def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "init":
+            return cmd_init(args)
         if args.command == "spawn":
             return cmd_spawn(args)
         if args.command == "status":

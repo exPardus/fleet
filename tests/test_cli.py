@@ -20,6 +20,15 @@ import fleet
 @pytest.fixture(autouse=True)
 def isolated_home(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet, "FLEET_HOME", tmp_path)
+    # SPEC §14: cmd_spawn/cmd_send now refuse to launch a turn unless the
+    # worker-settings.json instance has been rendered (`fleet init`).
+    # Pre-provision a stub instance here so existing spawn/send tests don't
+    # need to know about that precondition; tests exercising the
+    # missing-instance error path delete this file first (see
+    # TestCmdSpawnRequiresInstanceSettings / TestCmdInit).
+    settings = tmp_path / "state" / "worker-settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text("{}", encoding="utf-8")
     return tmp_path
 
 
@@ -104,9 +113,19 @@ class TestBuildTurnArgv:
             assert flag in argv
 
     def test_settings_path_included(self):
+        # SPEC §14: WORKER_SETTINGS_PATH (a fixed module constant) was
+        # replaced by instance_settings_path(), resolved fresh per call so
+        # it follows FLEET_HOME (env-var override / test sandboxes) like
+        # every other path helper in this module.
         argv = fleet.build_turn_argv("claude.cmd", "sid-1", first=True, mode="omit")
         assert "--settings" in argv
-        assert argv[argv.index("--settings") + 1] == fleet.WORKER_SETTINGS_PATH
+        assert argv[argv.index("--settings") + 1] == str(fleet.instance_settings_path())
+
+    def test_settings_path_explicit_override_wins(self):
+        argv = fleet.build_turn_argv(
+            "claude.cmd", "sid-1", first=True, mode="omit", settings_path="C:/custom/settings.json",
+        )
+        assert argv[argv.index("--settings") + 1] == "C:/custom/settings.json"
 
     @pytest.mark.parametrize("mode,expected", [
         ("bypass", ["--dangerously-skip-permissions"]),
@@ -143,6 +162,60 @@ class TestBuildTurnArgv:
     def test_invalid_mode_raises(self):
         with pytest.raises(ValueError):
             fleet.build_turn_argv("claude.cmd", "sid-1", first=True, mode="yolo")
+
+
+# ---------------------------------------------------------------------------
+# fleet init (SPEC §14): template -> machine-local instance
+# ---------------------------------------------------------------------------
+
+_TEMPLATE_JSON = """{
+  "hooks": {
+    "PostToolUse": [{ "hooks": [{ "type": "command",
+      "command": "{{PYTHON}} {{FLEET_HOME}}/bin/hooks/posttooluse_mailbox.py" }] }],
+    "Stop": [{ "hooks": [{ "type": "command",
+      "command": "{{PYTHON}} {{FLEET_HOME}}/bin/hooks/stop_mailbox.py" }] }]
+  }
+}
+"""
+
+
+class TestCmdInit:
+    def test_renders_instance_from_template(self, isolated_home, capsys):
+        fleet.template_settings_path().write_text(_TEMPLATE_JSON, encoding="utf-8")
+
+        rc = fleet.cmd_init(fleet.build_parser().parse_args(["init"]))
+
+        assert rc == 0
+        instance_path = fleet.instance_settings_path()
+        assert instance_path.exists()
+        rendered = instance_path.read_text(encoding="utf-8")
+        assert "{{" not in rendered
+        assert fleet.Path(fleet.sys.executable).resolve().as_posix() in rendered
+        assert fleet.Path(isolated_home).resolve().as_posix() in rendered
+        json.loads(rendered)
+        out = capsys.readouterr().out
+        assert str(instance_path) in out
+
+    def test_missing_template_raises_clear_error(self, isolated_home):
+        # isolated_home starts empty -- no worker-settings.template.json.
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_init(fleet.build_parser().parse_args(["init"]))
+
+    def test_idempotent_rerender_never_refuses(self, isolated_home):
+        fleet.template_settings_path().write_text(_TEMPLATE_JSON, encoding="utf-8")
+        args = fleet.build_parser().parse_args(["init"])
+
+        fleet.cmd_init(args)
+        rc = fleet.cmd_init(args)  # re-render must succeed again, not refuse
+
+        assert rc == 0
+        assert fleet.instance_settings_path().exists()
+
+    def test_main_dispatches_init_command(self, isolated_home):
+        fleet.template_settings_path().write_text(_TEMPLATE_JSON, encoding="utf-8")
+        rc = fleet.main(["init"])
+        assert rc == 0
+        assert fleet.instance_settings_path().exists()
 
 
 # ---------------------------------------------------------------------------
@@ -394,6 +467,22 @@ class TestCmdSpawn:
         args = _spawn_args("probe-1", missing, "do the thing")
         with pytest.raises(fleet.FleetCliError):
             fleet.cmd_spawn(args, popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd")
+
+    def test_spawn_raises_clear_error_when_instance_settings_missing(self, isolated_home, tmp_path):
+        """SPEC §14: cmd_spawn refuses before any registry mutation or Popen
+        call when `fleet init` has never been run on this machine."""
+        fleet.instance_settings_path().unlink()  # the isolated_home fixture stubs one in
+        worker_dir = tmp_path / "proj"
+        worker_dir.mkdir()
+
+        def popen(*a, **kw):
+            raise AssertionError("must not launch when the settings instance is missing")
+
+        args = _spawn_args("probe-1", worker_dir, "do the thing")
+        with pytest.raises(fleet.FleetCliError, match="fleet init"):
+            fleet.cmd_spawn(args, popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd")
+
+        assert fleet.load_registry()["workers"] == {}  # no partial record left behind
 
     def test_spawn_reads_task_from_file(self, isolated_home, tmp_path):
         worker_dir = tmp_path / "proj"
@@ -794,7 +883,9 @@ class TestWaitForWorkers:
 class TestRegistryCorruptPropagatesThroughMain:
     def test_corrupt_registry_reaches_mains_dedicated_handler(self, isolated_home, capsys):
         state = isolated_home / "state"
-        state.mkdir(parents=True)
+        # exist_ok=True: the isolated_home fixture (SPEC §14) already creates
+        # state/ to stub a worker-settings.json instance.
+        state.mkdir(parents=True, exist_ok=True)
         (state / "fleet.json").write_text("{not json", encoding="utf-8")
 
         rc = fleet.main(["status"])
@@ -805,7 +896,9 @@ class TestRegistryCorruptPropagatesThroughMain:
 
     def test_corrupt_registry_raised_not_caught_at_cmd_level(self, isolated_home):
         state = isolated_home / "state"
-        state.mkdir(parents=True)
+        # exist_ok=True: the isolated_home fixture (SPEC §14) already creates
+        # state/ to stub a worker-settings.json instance.
+        state.mkdir(parents=True, exist_ok=True)
         (state / "fleet.json").write_text("{not json", encoding="utf-8")
 
         args = fleet.build_parser().parse_args(["status"])

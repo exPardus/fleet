@@ -18,6 +18,14 @@ import fleet
 @pytest.fixture(autouse=True)
 def isolated_home(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet, "FLEET_HOME", tmp_path)
+    # SPEC §14: cmd_send's idle-resume path now refuses to launch a turn
+    # unless the worker-settings.json instance has been rendered (`fleet
+    # init`). Pre-provision a stub instance here so existing send tests
+    # don't need to know about that precondition; the dedicated
+    # missing-instance test deletes this file first.
+    settings = tmp_path / "state" / "worker-settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text("{}", encoding="utf-8")
     return tmp_path
 
 
@@ -116,6 +124,19 @@ class TestAppendMailbox:
 # ---------------------------------------------------------------------------
 
 class TestCmdSend:
+    def test_send_raises_clear_error_when_instance_settings_missing(self, isolated_home):
+        """SPEC §14: cmd_send refuses up front when `fleet init` has never
+        been run on this machine (mirrors cmd_spawn's precondition)."""
+        fleet.instance_settings_path().unlink()  # the isolated_home fixture stubs one in
+        sid, _ = _seed_worker("probe-1", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
+
+        def popen(*a, **kw):
+            raise AssertionError("must not launch when the settings instance is missing")
+
+        args = fleet.build_parser().parse_args(["send", "probe-1", "check the logs"])
+        with pytest.raises(fleet.FleetCliError, match="fleet init"):
+            fleet.cmd_send(args, popen=popen, get_process_info=_alive_info, which=lambda n: "claude.cmd")
+
     def test_working_appends_to_mailbox_and_does_not_launch(self, isolated_home):
         sid, _ = _seed_worker("probe-1", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
 
