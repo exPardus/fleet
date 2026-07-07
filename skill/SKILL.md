@@ -18,7 +18,7 @@ You are the manager of a fleet of Claude Code worker sessions on this machine. T
 | Command | Use |
 |---|---|
 | `fleet init` | Render the machine-local `state\worker-settings.json` from the git-tracked template (real interpreter path + FLEET_HOME). Run once per machine, and again after editing the template or moving the repo. `spawn`/`send` refuse with a clear error if this hasn't been run. |
-| `fleet spawn <name> --dir <path> --task <text\|@file> [--mode bypass\|accept\|dontask\|plan\|omit] [--model m] [--max-budget-usd x]` | New worker. Name `[a-z0-9-]+`. Task via @file for anything long. |
+| `fleet spawn <name> --dir <path> --task <text\|@file> [--mode bypass\|accept\|dontask\|plan\|omit] [--model m] [--max-budget-usd x] [--setting-sources <list>]` | New worker. Name `[a-z0-9-]+`. Task via @file for anything long. `--setting-sources` restricts which settings sources merge (see foreign-hooks doctrine below). |
 | `fleet send <name> <text\|@file>` | Steer. Mid-turn → delivered at next tool boundary (seconds). Idle → starts new turn. |
 | `fleet status [name]` | Compact fleet table. Your main dashboard. |
 | `fleet peek <name>` | ~20-line live digest of current/last turn. Works mid-turn. |
@@ -26,9 +26,10 @@ You are the manager of a fleet of Claude Code worker sessions on this machine. T
 | `fleet wait <name...> [--any\|--all]` | Block until done. ALWAYS run via Bash `run_in_background` — never sleep-poll. |
 | `fleet attach <name>` / `fleet release <name>` | Human takeover in real TUI / hand back. |
 | `fleet interrupt <name>` | Kill current turn (transcript survives). Follow with `send` to redirect. |
-| `fleet respawn <name>` | Fresh session, same task + journal. THE context-reset lever. |
-| `fleet kill <name>` / `fleet clean` | Retire / purge dead. |
-| `fleet doctor` | Health check. Run when anything smells wrong. |
+| `fleet respawn <name> [--task <text>] [--force]` | Fresh session_id, same name/cwd/mode/model + journal + drained mailbox. THE context-reset lever. Refuses while a turn is running unless `--force` (interrupts first). `--task` overrides the original task text. |
+| `fleet kill <name>` | Interrupt (if running) and mark dead + event. Terminal — use `respawn` to bring the worker back. |
+| `fleet clean` | Remove dead workers + their logs/mailboxes/journals; prints what was removed. |
+| `fleet doctor` | Health check (claude/version, hook wiring + smoke test, stale PIDs/attaches, orphaned mailboxes, log sizes, ...). Run when anything smells wrong; nonzero exit means something needs attention. |
 
 ## Doctrine
 

@@ -458,17 +458,54 @@ def pid_alive(pid, ctime_iso, get_process_info=None) -> bool:
     return abs((ctime - recorded).total_seconds()) <= 2.0
 
 
+# Task 5 perf item (SPEC §12): status/wait polling calls _last_line_type /
+# tail_events once per worker per poll -- on a multi-hundred-MB stream-json
+# log (verbose+stream-json is fat, SPEC §11 "log bloat") a whole-file
+# f.readlines() every poll is wasteful. Every real caller in this module
+# only ever wants the trailing well-formed line or the trailing N digest
+# events (_last_line_type, tail_events(n=...), and recompute_worker's
+# tail_events(n=50)) -- all comfortably within a 64KB trailing window for
+# any log this fleet actually produces, so reading just the tail is
+# behaviorally identical to reading the whole file for every real call
+# site, not merely "close enough".
+_TAIL_READ_BYTES = 64 * 1024
+
+
+def _read_tail_lines(log_path) -> list:
+    """Return decoded, newline-split lines from the trailing
+    _TAIL_READ_BYTES of log_path (or the whole file if it is smaller than
+    that window -- identical to the pre-optimization behavior in that
+    common case). When the window's start lands mid-line, the partial
+    leading fragment is discarded -- exactly like a truncated final line
+    was already defensively skipped by every caller's junk-line handling,
+    so parser semantics are unchanged; only the byte range considered
+    shrinks. Missing/unreadable files return []."""
+    log_path = Path(log_path)
+    try:
+        size = log_path.stat().st_size
+    except OSError:
+        return []
+    try:
+        with open(log_path, "rb") as f:
+            if size > _TAIL_READ_BYTES:
+                f.seek(size - _TAIL_READ_BYTES)
+                chunk = f.read()
+                nl = chunk.find(b"\n")
+                chunk = chunk[nl + 1:] if nl != -1 else b""
+            else:
+                chunk = f.read()
+    except OSError:
+        return []
+    return chunk.decode("utf-8-sig", errors="replace").splitlines()
+
+
 def _last_line_type(log_path) -> str | None:
-    """Return the "type" field of the last well-formed JSON line in log_path."""
+    """Return the "type" field of the last well-formed JSON line in log_path
+    (perf: reads only the trailing window via _read_tail_lines, see above)."""
     log_path = Path(log_path)
     if not log_path.exists():
         return None
-    try:
-        with open(log_path, "r", encoding="utf-8-sig", errors="replace") as f:
-            lines = f.readlines()
-    except OSError:
-        return None
-    for line in reversed(lines):
+    for line in reversed(_read_tail_lines(log_path)):
         line = line.strip()
         if not line:
             continue
@@ -563,15 +600,17 @@ def _digest_event(obj: dict):
 def tail_events(log_path, n: int = 20) -> list:
     """Defensively parse a worker's stream-json log, returning up to n
     peek/result digest entries (oldest first). Skips non-JSON/junk lines
-    and system-only events; tolerates missing or truncated files."""
+    and system-only events; tolerates missing or truncated files.
+
+    Perf (SPEC §12): reads only the trailing window via _read_tail_lines
+    rather than the whole file -- every caller here only ever wants a
+    bounded trailing slice of events, so this is behaviorally identical to
+    a whole-file read for any log this fleet actually produces (see
+    _read_tail_lines's docstring)."""
     log_path = Path(log_path)
     if not log_path.exists():
         return []
-    try:
-        with open(log_path, "r", encoding="utf-8-sig", errors="replace") as f:
-            lines = f.readlines()
-    except OSError:
-        return []
+    lines = _read_tail_lines(log_path)
 
     entries = []
     for line in lines:
@@ -763,7 +802,7 @@ def resolve_claude_executable(which=shutil.which) -> str:
 
 def build_turn_argv(claude_exe: str, sid: str, first: bool, mode: str,
                      model: str | None = None, max_budget_usd: float | None = None,
-                     settings_path: str | None = None) -> list:
+                     settings_path: str | None = None, setting_sources: str | None = None) -> list:
     """Pure argv builder for one worker turn (SPEC §6). Raises ValueError
     (via mode_flags) for an unknown mode -- kept a pure function per the
     Task 2 brief so every mode/model/budget combo is unit-testable without
@@ -775,7 +814,15 @@ def build_turn_argv(claude_exe: str, sid: str, first: bool, mode: str,
     same way every other path helper in this module does. Callers needing
     the real machine instance must have already run `fleet init`
     (cmd_spawn/cmd_send enforce this via _require_instance_settings before
-    ever reaching here)."""
+    ever reaching here).
+
+    setting_sources is a Task 5 audit-gap item (SPEC §6 L125, spec-audit
+    gap 5): a raw passthrough string (whatever `claude --setting-sources`
+    itself accepts, e.g. "user,project") appended verbatim as
+    `--setting-sources <value>` when given -- fleet does not parse or
+    validate its contents, only forwards it, so a worker repo's own
+    foreign Stop-hook (or other unwanted merged settings) can be excluded
+    per spawn without fleet inventing its own mini-grammar for it."""
     if settings_path is None:
         settings_path = str(instance_settings_path())
     argv = [claude_exe, "-p", "--output-format", "stream-json", "--verbose", "--include-hook-events"]
@@ -786,6 +833,8 @@ def build_turn_argv(claude_exe: str, sid: str, first: bool, mode: str,
         argv += ["--model", model]
     if max_budget_usd is not None:
         argv += ["--max-budget-usd", str(max_budget_usd)]
+    if setting_sources:
+        argv += ["--setting-sources", setting_sources]
     return argv
 
 
@@ -829,7 +878,7 @@ def _write_prompt_and_close_stdin(proc, prompt: str, error_box: list) -> None:
 
 
 def launch_turn(name: str, cwd, sid: str, prompt: str, mode: str, first: bool = False,
-                 model=None, max_budget_usd=None,
+                 model=None, max_budget_usd=None, setting_sources=None,
                  popen=subprocess.Popen, get_process_info=None, which=shutil.which) -> dict:
     """Start one detached worker turn (SPEC §6): resolve claude, build argv,
     open per-worker logs (stdout -> logs/<name>.jsonl, stderr -> a separate
@@ -856,7 +905,8 @@ def launch_turn(name: str, cwd, sid: str, prompt: str, mode: str, first: bool = 
     returned or raised.
     """
     claude_exe = resolve_claude_executable(which=which)
-    argv = build_turn_argv(claude_exe, sid, first, mode, model=model, max_budget_usd=max_budget_usd)
+    argv = build_turn_argv(claude_exe, sid, first, mode, model=model, max_budget_usd=max_budget_usd,
+                            setting_sources=setting_sources)
 
     logs_dir().mkdir(parents=True, exist_ok=True)
     log_path = logs_dir() / f"{name}.jsonl"
@@ -1211,6 +1261,7 @@ def cmd_spawn(args, popen=subprocess.Popen, get_process_info=None, which=shutil.
         info = launch_turn(
             args.name, cwd, sid, prompt, args.mode, first=True,
             model=args.model, max_budget_usd=args.max_budget_usd,
+            setting_sources=args.setting_sources,
             popen=popen, get_process_info=get_process_info, which=which,
         )
         finalize_mailbox_claim(claim)
@@ -1296,6 +1347,28 @@ def _print_status_table(data: dict, names) -> None:
         )
 
 
+_TOKEN_KEY_ABBREV = (
+    ("input_tokens", "in"),
+    ("output_tokens", "out"),
+    ("cache_creation_input_tokens", "cache_w"),
+    ("cache_read_input_tokens", "cache_r"),
+)
+
+
+def _format_tokens(tokens: dict) -> str:
+    """Compact "in=X out=Y cache_r=Z" rendering of a result event's usage
+    dict for `fleet peek` (spec-audit gap 5: peek shows tokens alongside
+    cost, SPEC §5 peek row -- _digest_event already captures "tokens" from
+    the raw "usage" field). Falls back to a truncated raw dump for an
+    unrecognized/empty shape rather than silently showing nothing."""
+    if not tokens:
+        return "-"
+    parts = [f"{short}={tokens[key]}" for key, short in _TOKEN_KEY_ABBREV if key in tokens]
+    if not parts:
+        return _truncate(json.dumps(tokens, default=str), 60)
+    return " ".join(parts)
+
+
 def cmd_peek(args) -> int:
     """`fleet peek <name> [-n 20]` (SPEC §5 peek row): digest of recent
     stream events plus whether fleet hooks have fired."""
@@ -1320,7 +1393,8 @@ def cmd_peek(args) -> int:
         elif kind == "result":
             cost = e.get("cost_usd")
             cost_s = f"${cost:.2f}" if isinstance(cost, (int, float)) else "?"
-            print(f"[result] {cost_s} {e['text']}")
+            tok_s = _format_tokens(e.get("tokens") or {})
+            print(f"[result] {cost_s} tokens:{tok_s} {e['text']}")
     return 0
 
 
@@ -1805,6 +1879,642 @@ def cmd_release(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# CLI: resilience commands (SPEC §5 respawn/kill/clean/doctor rows, §7,
+# §11) -- Task 5 / M4.
+# ---------------------------------------------------------------------------
+
+def _rotate_worker_log(name: str) -> None:
+    """Rename logs/<name>.jsonl -> logs/<name>.jsonl.1 (and the matching
+    .err -> .err.1), overwriting any existing .1 (SPEC §5 respawn row /
+    §11 log-bloat handling). Uses os.replace rather than Path.rename:
+    Path.rename raises FileExistsError on Windows when the destination
+    already exists (e.g. a worker respawned twice), whereas os.replace
+    atomically overwrites it. launch_turn opens logs/<name>.jsonl in
+    append-binary mode ("ab") -- without this rotation, a respawned turn's
+    stdout would tack onto the previous session's transcript instead of
+    starting a fresh log."""
+    d = logs_dir()
+    for suffix in (".jsonl", ".err"):
+        src = d / f"{name}{suffix}"
+        if src.exists():
+            os.replace(str(src), str(d / f"{name}{suffix}.1"))
+
+
+def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shutil.which,
+                kill_process_tree=None) -> int:
+    """`fleet respawn <name> [--task <text>] [--force]` (SPEC §5 respawn
+    row): the context-reset lever -- a fresh session_id under the same
+    name/cwd/mode/model, prompted with the preamble + task (original,
+    truncated per the registry schema, or --task's override) + the
+    worker's journal (state/journals/<name>.md, labeled, if it exists) +
+    the OLD session_id's drained mailbox (consumed via the same
+    claim/finalize/restore discipline as every other launch path here --
+    never orphaned). Follows the uniform status-claim protocol verbatim
+    (task-4-verdict.md "Uniform status-claim protocol", cited by name for
+    respawn): pre-claim status="working"/turn_pid=None for the NEW record
+    under one fleet_lock, launch strictly outside any lock, conditional
+    rollback to the pre-respawn snapshot on BaseException, pid-stamp +
+    re-assert "working" on success.
+
+    Refuses while a turn is actively running unless --force, in which case
+    it reuses _interrupt_worker's verified-kill contract exactly like
+    cmd_attach's --force path (F3/F4): "killed"/"not_running" both mean
+    the old turn is no longer alive, so respawn proceeds; "kill_failed"
+    aborts loudly with NO registry mutation. A launch-in-flight window
+    (status=="working", turn_pid is None -- another spawn/send/respawn/
+    attach mid-launch) also refuses loudly under --force, same as
+    cmd_attach's Fix-1 guard -- there is no real pid yet to verify-kill.
+    An "attached" worker is NOT treated as "turn running" (attach never
+    sets turn_pid) -- respawn proceeds directly; the old attached TUI (if
+    any) is simply orphaned from the registry, a documented residual (the
+    operator closes it manually; nothing in fleet can revoke a detached
+    terminal).
+
+    cost_usd is carried over from the pre-respawn snapshot, NOT reset to
+    0.0: it tracks total money spent on the NAMED worker across its whole
+    lifetime, not per-session -- a respawn is a context reset (fresh
+    session_id, fresh turns counter, fresh transcript), not a billing
+    reset. turns resets to 0 (then to 1 once the new turn actually
+    launches, mirroring cmd_spawn's own 0->1 transition for a first turn).
+
+    The log is rotated (_rotate_worker_log) once the new record is
+    committed, before compose_prompt/launch_turn -- unconditionally,
+    matching the SPEC §5 respawn row, since launch_turn's log file is
+    opened append-mode and would otherwise tack the new turn's stdout onto
+    the old session's transcript regardless of whether the new launch
+    itself succeeds.
+
+    NOTE (Task 5 spec-audit gap: cost-accumulation validation): this
+    cumulative-cost_usd behavior is asserted by unit tests here against a
+    fabricated registry/log fixture, but was NOT validated end-to-end
+    against a real 2-turn `claude` invocation (no real claude process is
+    ever spawned by this test suite, by design) -- that validation is
+    explicitly deferred to the project's manual integration smoke test
+    (SPEC §12), not implemented in this task.
+    """
+    _require_instance_settings()
+
+    task_override = _read_task_arg(args.task) if args.task else None
+    new_sid = str(uuid.uuid4())
+    needs_force_interrupt = False
+
+    with fleet_lock():
+        data = load_registry()
+        if args.name not in data["workers"]:
+            raise FleetCliError(f"unknown worker: {args.name!r}")
+        before = data["workers"][args.name]
+        after = recompute_worker(args.name, before, get_process_info=get_process_info)
+        if after["status"] != before["status"]:
+            append_event("status_changed", args.name, old=before["status"], new=after["status"])
+
+        old_sid = after["session_id"]
+        cwd = after["cwd"]
+        mode = after["mode"]
+        model = after.get("model")
+        cost_usd = after.get("cost_usd", 0.0)
+        task_for_record = task_override if task_override is not None else after.get("task", "")
+
+        if after["status"] == "working":
+            if not args.force:
+                data["workers"][args.name] = after
+                save_registry(data)
+                raise FleetCliError(
+                    f"{args.name}: turn is running -- pass --force to interrupt it first, "
+                    "or wait for it to finish"
+                )
+            if after.get("turn_pid") is None:
+                # Same launch-in-flight refusal as cmd_attach's Fix 1:
+                # nothing real to verify-kill yet.
+                data["workers"][args.name] = after
+                save_registry(data)
+                raise FleetCliError(
+                    f"launch in flight for {args.name}; retry in a few seconds"
+                )
+            data["workers"][args.name] = after
+            save_registry(data)
+            needs_force_interrupt = True
+            prior_snapshot = None  # filled in below, after the verified kill
+        else:
+            # Not actively running (idle/dead/attached) -- pre-claim the
+            # NEW record right here, atomically with the decision (F1
+            # protocol): status="working"/turn_pid=None until the launch
+            # below stamps a real pid.
+            prior_snapshot = after
+            new_record = new_worker_record(new_sid, cwd, task_for_record, mode, model=model)
+            new_record["cost_usd"] = cost_usd  # cumulative -- see docstring
+            data["workers"][args.name] = new_record
+            save_registry(data)
+            append_event("respawned", args.name, old_session_id=old_sid, new_session_id=new_sid)
+
+    if needs_force_interrupt:
+        outcome = _interrupt_worker(args.name, get_process_info=get_process_info, kill_process_tree=kill_process_tree)
+        if outcome == "kill_failed":
+            raise FleetCliError(
+                f"{args.name}: --force could not verify the running turn was killed -- "
+                "aborting respawn (it may still be running)"
+            )
+        # "killed" or "not_running": the old turn is no longer alive.
+        # _interrupt_worker's own "killed" path already committed
+        # status="idle" on the (still old_sid) record -- re-read it as the
+        # accurate rollback target before overwriting with the new record.
+        with fleet_lock():
+            data = load_registry()
+            prior_snapshot = dict(data["workers"][args.name])
+            new_record = new_worker_record(new_sid, cwd, task_for_record, mode, model=model)
+            new_record["cost_usd"] = cost_usd  # cumulative -- see docstring
+            data["workers"][args.name] = new_record
+            save_registry(data)
+            append_event("respawned", args.name, old_session_id=old_sid, new_session_id=new_sid)
+
+    # Log rotation (SPEC §5): unconditional, before launch -- see
+    # _rotate_worker_log's docstring for why this must happen before
+    # launch_turn's append-mode log open.
+    _rotate_worker_log(args.name)
+
+    journal_path = journals_dir() / f"{args.name}.md"
+    prompt, claim = compose_prompt(args.name, cwd, task_for_record, old_sid, journal_path=journal_path)
+    try:
+        info = launch_turn(
+            args.name, cwd, new_sid, prompt, mode, first=True,
+            model=model, popen=popen, get_process_info=get_process_info, which=which,
+        )
+        finalize_mailbox_claim(claim)
+    except BaseException as exc:
+        # Conditional rollback (uniform protocol): restore the exact
+        # pre-respawn snapshot, but ONLY if the record is still in the
+        # precise claim state this call wrote (a concurrent actor may have
+        # legitimately moved it on already).
+        restore_mailbox_claim(claim)
+        with fleet_lock():
+            data = load_registry()
+            r = data["workers"].get(args.name)
+            if (r is not None and r.get("session_id") == new_sid
+                    and r.get("status") == "working" and r.get("turn_pid") is None):
+                data["workers"][args.name] = prior_snapshot
+                save_registry(data)
+                append_event(
+                    "respawn_failed", args.name, error=str(exc),
+                    old_session_id=old_sid, attempted_session_id=new_sid,
+                )
+        raise
+
+    with fleet_lock():
+        data = load_registry()
+        r = data["workers"].get(args.name)
+        if r is not None and r.get("session_id") == new_sid:
+            r["status"] = "working"
+            r["turn_pid"] = info["turn_pid"]
+            r["turn_pid_ctime"] = info["turn_pid_ctime"]
+            r["turns"] = 1
+            r["last_activity"] = now_iso()
+            save_registry(data)
+        append_event("turn_started", args.name, session_id=new_sid, turn_pid=info["turn_pid"])
+
+    print(f"{args.name} {new_sid} {info['log_path']}")
+    return 0
+
+
+def cmd_kill(args, get_process_info=None, kill_process_tree=None) -> int:
+    """`fleet kill <name>` (SPEC §5): interrupt the turn if one is alive
+    (reusing _interrupt_worker's verified-kill contract), then
+    unconditionally mark the worker "dead" and append a "killed" event --
+    kill is the terminal, "retire this worker" action, distinct from
+    `fleet interrupt` (which only pauses a turn and marks idle). If the
+    kill could not be verified ("kill_failed"), the worker is still marked
+    dead (kill is meant to be final) but a loud warning is printed and the
+    exit code is nonzero so the operator investigates the process
+    manually -- unlike `fleet interrupt`, which deliberately leaves status
+    alone on kill_failed rather than lie about it, `fleet kill`'s whole
+    point is to retire the registry entry regardless."""
+    outcome = _interrupt_worker(args.name, get_process_info=get_process_info, kill_process_tree=kill_process_tree)
+
+    with fleet_lock():
+        data = load_registry()
+        rec = data["workers"].get(args.name)
+        if rec is not None:
+            rec["status"] = "dead"
+            rec["turn_pid"] = None
+            rec["turn_pid_ctime"] = None
+            save_registry(data)
+        append_event("killed", args.name, interrupt_outcome=outcome)
+
+    if outcome == "kill_failed":
+        print(
+            f"fleet: {args.name}: kill attempted but the turn still appears to be running -- "
+            "marked dead anyway (kill is a terminal action); investigate the process manually",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"{args.name}: killed")
+    return 0
+
+
+def _remove_worker_files(name: str, sid: str) -> list:
+    """Delete every on-disk artifact for a removed dead worker: current +
+    rotated logs, its mailbox file, any orphaned mailbox/*.claimed.* files
+    for that sid (T3-F2, adversarial review deferred finding: a hook
+    killed between claim and delete leaves a `.claimed.<pid>` file behind
+    -- `fleet clean` sweeps these for the sid it is removing, rather than
+    leaving them as permanent litter), and its journal. Best-effort
+    (missing files are not an error). Returns the list of paths actually
+    removed, for cmd_clean's print-what-was-removed contract."""
+    removed = []
+    candidates = [
+        logs_dir() / f"{name}.jsonl", logs_dir() / f"{name}.jsonl.1",
+        logs_dir() / f"{name}.err", logs_dir() / f"{name}.err.1",
+        mailbox_dir() / f"{sid}.md",
+        journals_dir() / f"{name}.md",
+    ]
+    candidates += list(mailbox_dir().glob(f"{sid}.md.claimed.*")) if mailbox_dir().exists() else []
+    for path in candidates:
+        try:
+            path.unlink()
+            removed.append(path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+    return removed
+
+
+def cmd_clean(args, get_process_info=None) -> int:
+    """`fleet clean` (SPEC §5): recompute every worker's status; any that
+    resolve to "dead" are removed from the registry along with their logs
+    (current + rotated), mailbox file, orphaned mailbox claim files for
+    that sid (T3-F2), and journal. Prints one line per removed worker.
+    Never touches idle/working/attached workers. A worker whose recompute
+    merely changes status (without becoming dead) is persisted like
+    `fleet status` does, not removed."""
+    removed = []  # list of (name, sid)
+    with fleet_lock():
+        data = load_registry()
+        names = sorted(data["workers"])
+        changed = False
+        for n in names:
+            before = data["workers"][n]
+            after = recompute_worker(n, before, get_process_info=get_process_info)
+            if after["status"] != before["status"]:
+                append_event("status_changed", n, old=before["status"], new=after["status"])
+                changed = True
+            if after["status"] == "dead":
+                removed.append((n, after["session_id"]))
+                data["workers"].pop(n, None)
+                changed = True
+            else:
+                data["workers"][n] = after
+        if changed:
+            save_registry(data)
+        for n, sid in removed:
+            append_event("cleaned", n, session_id=sid)
+
+    for n, sid in removed:
+        _remove_worker_files(n, sid)
+        print(f"removed {n} (session {sid})")
+
+    if not removed:
+        print("nothing to clean -- no dead workers")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# CLI: doctor (SPEC §5 doctor row, §7 silent-failure alarm, §11) -- each
+# check below returns (name, ok, message); cmd_doctor prints one [PASS]/
+# [FAIL] line per check and exits nonzero iff any check is not ok.
+#
+# ASCII [PASS]/[FAIL] rather than literal unicode checkmark/cross glyphs
+# (SPEC §5 phrases the requirement as "prints (tick)/(cross)"): some
+# Windows console codepages (cp437/cp1252) raise UnicodeEncodeError on
+# U+2713/U+2717 when stdout isn't in UTF-8 mode, which would make `fleet
+# doctor` itself crash -- exactly the kind of silent-failure-alarm tool
+# that must never fail to run. ASCII carries the same ok/not-ok signal
+# unambiguously without that risk.
+#
+# Every check that is explicitly "note-only"/"warn" per the Task 5 brief
+# (legacy settings file, stale PIDs, orphaned/pending mailboxes, stale
+# attaches, orphaned *.claimed.* files, fleet-unknown claude-agents
+# sessions, log sizes) always returns ok=True -- it can inform, never turn
+# doctor red. Only genuinely broken infrastructure (claude missing/too
+# old, a malformed/backslash-broken/stale settings instance, a hook that
+# doesn't fire end-to-end) counts as a hard failure.
+# ---------------------------------------------------------------------------
+
+_CLAUDE_MIN_VERSION = (2, 1, 202)
+_VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+
+
+def _parse_claude_version(text: str):
+    m = _VERSION_RE.search(text or "")
+    if not m:
+        return None
+    return tuple(int(x) for x in m.groups())
+
+
+def _doctor_check_claude_version(which=shutil.which, run=subprocess.run):
+    try:
+        exe = resolve_claude_executable(which=which)
+    except ClaudeNotFoundError as exc:
+        return ("claude-on-path", False, str(exc))
+    try:
+        result = run([exe, "--version"], capture_output=True, text=True, timeout=10)
+    except Exception as exc:
+        return ("claude-on-path", False, f"claude found at {exe} but --version failed: {exc}")
+    version = _parse_claude_version((result.stdout or "") + (result.stderr or ""))
+    if version is None:
+        return ("claude-on-path", True, f"claude found at {exe} (could not parse --version output)")
+    if version < _CLAUDE_MIN_VERSION:
+        return ("claude-on-path", False,
+                f"claude {'.'.join(map(str, version))} at {exe} is older than the required "
+                f"{'.'.join(map(str, _CLAUDE_MIN_VERSION))}")
+    return ("claude-on-path", True, f"claude {'.'.join(map(str, version))} at {exe}")
+
+
+_HOOK_SCRIPT_TOKEN_RE = re.compile(r"\S+\.py\b")
+
+
+def _extract_hook_commands(settings_data) -> list:
+    """Pull every hooks.*.[].hooks[].command string out of a rendered
+    worker-settings.json structure, tolerating any malformed/unexpected
+    shape (returns [] rather than raising)."""
+    commands = []
+    hooks = settings_data.get("hooks") if isinstance(settings_data, dict) else None
+    if not isinstance(hooks, dict):
+        return commands
+    for groups in hooks.values():
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            for h in group.get("hooks", []) or []:
+                if isinstance(h, dict) and isinstance(h.get("command"), str):
+                    commands.append(h["command"])
+    return commands
+
+
+def _hook_script_tokens(command: str) -> list:
+    """Extract every whitespace-delimited "*.py" token from a hook command
+    string, stripping a leading/trailing quote char from each. Rendered
+    worker-settings.json commands wrap each path segment in double quotes
+    (a prior fix for spaced install paths, e.g. "C:/Users/.../python.exe"
+    "C:/.../posttooluse_mailbox.py") -- \\S+\\.py\\b's greedy match includes
+    the leading quote (it only stops at a \\b word boundary, which falls
+    between the trailing "y" and the closing quote, not before it), so
+    without stripping, Path(token).exists() would check a string starting
+    with a literal `"` character and always report the real script file
+    missing. Live-smoke-tested against this repo's actual rendered
+    instance, which caught exactly this bug."""
+    return [tok.strip("\"'") for tok in _HOOK_SCRIPT_TOKEN_RE.findall(command)]
+
+
+def _doctor_check_instance_settings():
+    path = instance_settings_path()
+    if not path.exists():
+        return ("worker-settings-instance", False, f"{path} missing -- run `fleet init`")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return ("worker-settings-instance", False, f"{path} does not parse as JSON: {exc}")
+    commands = _extract_hook_commands(data)
+    problems = []
+    for cmd in commands:
+        if "\\" in cmd:
+            problems.append(f"backslash path in hook command: {cmd!r}")
+        for script in _hook_script_tokens(cmd):
+            if not Path(script).exists():
+                problems.append(f"hook script not found: {script}")
+    if problems:
+        return ("worker-settings-instance", False, "; ".join(problems))
+    return ("worker-settings-instance", True,
+            f"{path} parses as JSON, hook commands use forward slashes, referenced scripts exist")
+
+
+def _doctor_check_instance_freshness():
+    info = instance_freshness_info()
+    if info["stale"]:
+        if not info["instance_exists"]:
+            return ("instance-freshness", False, "worker-settings.json instance missing -- run `fleet init`")
+        return ("instance-freshness", False,
+                "worker-settings.json instance is older than the template -- run `fleet init`")
+    return ("instance-freshness", True, "instance is up to date with the template")
+
+
+def _doctor_check_legacy_settings():
+    legacy = FLEET_HOME / "worker-settings.json"
+    if legacy.exists():
+        return ("legacy-settings", True,
+                f"legacy {legacy} present -- no longer used (superseded by state/worker-settings.json); safe to delete")
+    return ("legacy-settings", True, "no legacy root worker-settings.json present")
+
+
+_HOOK_SMOKE_SID = "fleet-doctor-smoke"
+
+
+def _run_hook_smoke(script_path: Path, home: Path, run=subprocess.run):
+    mailbox = home / "mailbox"
+    mailbox.mkdir(parents=True, exist_ok=True)
+    (mailbox / f"{_HOOK_SMOKE_SID}.md").write_text("fleet doctor smoke test\n", encoding="utf-8")
+    env = dict(os.environ)
+    env["FLEET_HOME"] = str(home)
+    payload = json.dumps({"session_id": _HOOK_SMOKE_SID})
+    return run([sys.executable, str(script_path)], input=payload, capture_output=True,
+               text=True, env=env, timeout=15)
+
+
+def _doctor_check_posttooluse_hook_smoke(run=subprocess.run):
+    """End-to-end smoke test (SPEC §5/§7 silent-failure alarm): fire the
+    real PostToolUse hook script as a real subprocess with synthetic
+    stdin + a scratch temp FLEET_HOME (mirrors tests/test_hooks.py's own
+    technique), assert it emits valid hookSpecificOutput JSON."""
+    script = FLEET_HOME / "bin" / "hooks" / "posttooluse_mailbox.py"
+    if not script.exists():
+        return ("posttooluse-hook-smoke", False, f"{script} not found")
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            result = _run_hook_smoke(script, Path(tmp), run=run)
+        except Exception as exc:
+            return ("posttooluse-hook-smoke", False, f"failed to invoke hook: {exc}")
+    if result.returncode != 0:
+        return ("posttooluse-hook-smoke", False, f"exited {result.returncode}: {(result.stderr or '').strip()[:200]}")
+    try:
+        out = json.loads(result.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return ("posttooluse-hook-smoke", False, f"did not emit JSON on stdout: {result.stdout[:200]!r}")
+    if not isinstance(out, dict) or "hookSpecificOutput" not in out:
+        return ("posttooluse-hook-smoke", False, f"unexpected JSON shape: {out}")
+    return ("posttooluse-hook-smoke", True, "fired end-to-end and emitted valid hookSpecificOutput JSON")
+
+
+def _doctor_check_stop_hook_smoke(run=subprocess.run):
+    """Same as _doctor_check_posttooluse_hook_smoke but for the Stop hook
+    (SPEC §5/§7): asserts a {"decision": "block", ...} JSON response."""
+    script = FLEET_HOME / "bin" / "hooks" / "stop_mailbox.py"
+    if not script.exists():
+        return ("stop-hook-smoke", False, f"{script} not found")
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            result = _run_hook_smoke(script, Path(tmp), run=run)
+        except Exception as exc:
+            return ("stop-hook-smoke", False, f"failed to invoke hook: {exc}")
+    if result.returncode != 0:
+        return ("stop-hook-smoke", False, f"exited {result.returncode}: {(result.stderr or '').strip()[:200]}")
+    try:
+        out = json.loads(result.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return ("stop-hook-smoke", False, f"did not emit JSON on stdout: {result.stdout[:200]!r}")
+    if not isinstance(out, dict) or out.get("decision") != "block":
+        return ("stop-hook-smoke", False, f"unexpected JSON shape: {out}")
+    return ("stop-hook-smoke", True, "fired end-to-end and emitted a valid block decision")
+
+
+def _doctor_check_terminal_launcher(which=shutil.which):
+    if which("wt"):
+        return ("terminal-launcher", True, "wt (Windows Terminal) found on PATH")
+    return ("terminal-launcher", True, "wt not found -- attach falls back to a detached PowerShell window")
+
+
+def _doctor_check_stale_pids(workers: dict, get_process_info=None):
+    stale = [
+        name for name, rec in workers.items()
+        if rec.get("status") == "working" and rec.get("turn_pid") is not None
+        and not pid_alive(rec.get("turn_pid"), rec.get("turn_pid_ctime"), get_process_info=get_process_info)
+    ]
+    if stale:
+        return ("stale-pids", True,
+                f"{len(stale)} worker(s) show a stale turn_pid (run `fleet status` to refresh): {', '.join(stale)}")
+    return ("stale-pids", True, "no stale turn_pid entries")
+
+
+def _doctor_check_mailboxes(workers: dict):
+    known_sids = {rec["session_id"] for rec in workers.values()}
+    mbox_dir = mailbox_dir()
+    orphaned = [p.name for p in mbox_dir.glob("*.md") if p.stem not in known_sids] if mbox_dir.exists() else []
+    pending_idle = [
+        name for name, rec in workers.items()
+        if rec.get("status") == "idle" and _pending_mail_count(rec["session_id"]) > 0
+    ]
+    parts = []
+    if orphaned:
+        parts.append(f"{len(orphaned)} orphaned mailbox file(s) (no matching worker): {', '.join(orphaned)}")
+    if pending_idle:
+        parts.append(f"{len(pending_idle)} idle worker(s) with undelivered mail: {', '.join(pending_idle)}")
+    if not parts:
+        return ("mailboxes", True, "no orphaned files, no undelivered mail on idle workers")
+    return ("mailboxes", True, "; ".join(parts))
+
+
+def _doctor_check_stale_attaches(workers: dict):
+    stale = [name for name, rec in workers.items()
+             if (age := _attach_age_seconds(rec)) is not None and age > STALE_ATTACH_SECONDS]
+    if stale:
+        return ("stale-attaches", True, f"{len(stale)} worker(s) attached >3h: {', '.join(stale)}")
+    return ("stale-attaches", True, "no attaches older than 3h")
+
+
+def _doctor_check_orphaned_claims():
+    mbox_dir = mailbox_dir()
+    if not mbox_dir.exists():
+        return ("orphaned-claims", True, "no mailbox dir yet")
+    claims = sorted(p.name for p in mbox_dir.glob("*.claimed.*"))
+    if claims:
+        # T3-F2 (adversarial review deferred finding): report every
+        # orphaned claim, not just ones tied to a dead worker being
+        # cleaned -- a hook can die between claim and delete regardless of
+        # the worker's current status.
+        return ("orphaned-claims", True,
+                f"{len(claims)} orphaned mailbox/*.claimed.* file(s) (hook killed mid-claim; "
+                f"safe to remove manually, or run `fleet clean`): {', '.join(claims)}")
+    return ("orphaned-claims", True, "no orphaned *.claimed.* files")
+
+
+def _doctor_check_claude_agents(workers: dict, which=shutil.which, run=subprocess.run):
+    """Note-only (SPEC §2/§5): `claude agents --json` may not exist on
+    older CLI builds, or may fail for any number of environmental reasons
+    -- tolerate its absence/failure entirely rather than fail doctor."""
+    try:
+        exe = resolve_claude_executable(which=which)
+    except ClaudeNotFoundError:
+        return ("claude-agents", True, "claude not on PATH -- skipped")
+    try:
+        result = run([exe, "agents", "--json"], capture_output=True, text=True, timeout=10)
+    except Exception as exc:
+        return ("claude-agents", True, f"`claude agents --json` unavailable -- skipped ({exc})")
+    if result.returncode != 0:
+        return ("claude-agents", True, "`claude agents --json` not supported on this CLI -- skipped")
+    try:
+        agents = json.loads(result.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return ("claude-agents", True, "`claude agents --json` did not return JSON -- skipped")
+    if not isinstance(agents, list):
+        return ("claude-agents", True, "`claude agents --json` returned an unexpected shape -- skipped")
+    known_sids = {rec["session_id"] for rec in workers.values()}
+    unknown = sorted({
+        sid for a in agents if isinstance(a, dict)
+        for sid in [a.get("session_id") or a.get("id")]
+        if sid and sid not in known_sids
+    })
+    if unknown:
+        return ("claude-agents", True, f"{len(unknown)} claude agent session(s) not tracked by fleet: {', '.join(unknown)}")
+    return ("claude-agents", True, "no fleet-unknown claude agent sessions")
+
+
+_LOG_SIZE_WARN_BYTES = 50 * 1024 * 1024
+
+
+def _doctor_check_log_sizes():
+    big = []
+    d = logs_dir()
+    if d.exists():
+        for path in d.glob("*"):
+            try:
+                if path.is_file() and path.stat().st_size > _LOG_SIZE_WARN_BYTES:
+                    big.append(f"{path.name} ({path.stat().st_size // (1024 * 1024)}MB)")
+            except OSError:
+                continue
+    if big:
+        return ("log-sizes", True, f"{len(big)} log file(s) over 50MB: {', '.join(big)}")
+    return ("log-sizes", True, "no log files over 50MB")
+
+
+def cmd_doctor(args, which=shutil.which, run=subprocess.run, get_process_info=None) -> int:
+    """`fleet doctor` (SPEC §5 doctor row, §7 silent-failure alarm): runs
+    every health check below and prints one [PASS]/[FAIL] line each;
+    exits nonzero iff any check is not ok.
+
+    Snapshots the registry under one fleet_lock() (matching
+    _interrupt_worker's snapshot pattern) then runs every check OUTSIDE
+    the lock: several checks shell out (claude --version, claude agents
+    --json, two real hook-smoke subprocesses) and holding fleet_lock
+    across them would starve every concurrent `fleet` command exactly the
+    way F4 existed to prevent for _interrupt_worker."""
+    with fleet_lock():
+        data = load_registry()
+    workers = data.get("workers", {})
+
+    checks = [
+        _doctor_check_claude_version(which=which, run=run),
+        _doctor_check_instance_settings(),
+        _doctor_check_instance_freshness(),
+        _doctor_check_legacy_settings(),
+        _doctor_check_posttooluse_hook_smoke(run=run),
+        _doctor_check_stop_hook_smoke(run=run),
+        _doctor_check_terminal_launcher(which=which),
+        _doctor_check_stale_pids(workers, get_process_info=get_process_info),
+        _doctor_check_mailboxes(workers),
+        _doctor_check_stale_attaches(workers),
+        _doctor_check_orphaned_claims(),
+        _doctor_check_claude_agents(workers, which=which, run=run),
+        _doctor_check_log_sizes(),
+    ]
+
+    all_ok = True
+    for name, ok, message in checks:
+        print(f"[{'PASS' if ok else 'FAIL'}] {name}: {message}")
+        if not ok:
+            all_ok = False
+    return 0 if all_ok else 1
+
+
+# ---------------------------------------------------------------------------
 # CLI: argparse wiring + main()
 # ---------------------------------------------------------------------------
 
@@ -1824,6 +2534,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_spawn.add_argument("--mode", choices=list(MODE_FLAGS), default="dontask")
     p_spawn.add_argument("--model", default=None)
     p_spawn.add_argument("--max-budget-usd", type=float, default=None, dest="max_budget_usd")
+    # Spec-audit gap 5 (SPEC §6 L125): raw passthrough to `claude
+    # --setting-sources`, e.g. "user,project" -- restricts which foreign
+    # settings sources merge into the worker turn (see SKILL.md doctrine:
+    # use this when a repo's own Stop hook fights fleet's turn-end model).
+    p_spawn.add_argument("--setting-sources", dest="setting_sources", default=None)
 
     p_status = sub.add_parser("status", help="show worker status table")
     p_status.add_argument("name", nargs="?", default=None)
@@ -1856,6 +2571,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_release = sub.add_parser("release", help="release an attached worker back to idle")
     p_release.add_argument("name")
 
+    p_respawn = sub.add_parser("respawn", help="fresh session for a worker (context-reset lever)")
+    p_respawn.add_argument("name")
+    p_respawn.add_argument("--task", default=None)
+    p_respawn.add_argument("--force", action="store_true")
+
+    p_kill = sub.add_parser("kill", help="interrupt (if running) and mark a worker dead")
+    p_kill.add_argument("name")
+
+    sub.add_parser("clean", help="remove dead workers and their logs/mailboxes/journals")
+
+    sub.add_parser("doctor", help="run fleet health checks")
+
     return parser
 
 
@@ -1883,6 +2610,14 @@ def main(argv=None) -> int:
             return cmd_attach(args)
         if args.command == "release":
             return cmd_release(args)
+        if args.command == "respawn":
+            return cmd_respawn(args)
+        if args.command == "kill":
+            return cmd_kill(args)
+        if args.command == "clean":
+            return cmd_clean(args)
+        if args.command == "doctor":
+            return cmd_doctor(args)
         parser.error(f"unknown command {args.command!r}")
         return 2
     except RegistryCorruptError as exc:
