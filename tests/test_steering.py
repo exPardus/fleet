@@ -217,7 +217,16 @@ class TestCmdSend:
         that dies during init (BrokenPipeError + nonzero poll) must raise
         TurnLaunchError here too, and the finalize/restore keying (stays in
         the caller, keyed on return-vs-raise) must still hold: the prior
-        queued mail is restored, not lost."""
+        queued mail is restored, not lost.
+
+        Fix wave 1 (F1+F6): the idle path now pre-claims
+        status="working"/turn_pid=None atomically before launching (F1); on
+        a failed launch, only the status is conditionally rolled back to
+        "idle" -- turn_pid is intentionally left at the pre-claim's None
+        rather than restored to the prior (already-dead) pid, per the
+        verdict's rollback contract ("send: status=='working' with
+        turn_pid is None -> set status='idle'"). F6 also requires the NEW
+        message (not just the prior mail) to survive the failed launch."""
         sid, _ = _seed_worker("probe-1", turn_pid=111, turn_pid_ctime=ALIVE_CTIME, log_result=True)
         mbox = fleet.mailbox_dir()
         mbox.mkdir(parents=True, exist_ok=True)
@@ -234,11 +243,29 @@ class TestCmdSend:
 
         restored = (mbox / f"{sid}.md").read_text(encoding="utf-8")
         assert "earlier queued instruction" in restored
+        assert "the new message" in restored  # F6: the new message is not lost either
         assert list(mbox.glob("*.claimed.*")) == []
-        # the worker record itself is untouched by a failed resume (send
-        # does not create/roll back a registry record the way spawn does).
         rec = fleet.load_registry()["workers"]["probe-1"]
-        assert rec["turn_pid"] == 111
+        assert rec["status"] == "idle"  # F1: conditional rollback of the pre-claim
+        assert rec["turn_pid"] is None  # F1: rollback reverts status only, not turn_pid
+
+    def test_idle_send_preclaims_working_before_launch(self, isolated_home):
+        """F1 required test (a): the decide-and-claim must be atomic under
+        one lock -- by the time launch_turn (and, transitively, popen) is
+        reached, a fresh registry read must already observe
+        status=="working"/turn_pid is None (the pre-claim), never the
+        pre-decision "idle"."""
+        sid, _ = _seed_worker("probe-1", turn_pid=111, turn_pid_ctime=ALIVE_CTIME, log_result=True)
+
+        def popen(argv, **kwargs):
+            rec = fleet.load_registry()["workers"]["probe-1"]
+            assert rec["status"] == "working"
+            assert rec["turn_pid"] is None
+            return FakeProc(pid=555)
+
+        args = fleet.build_parser().parse_args(["send", "probe-1", "go"])
+        rc = fleet.cmd_send(args, popen=popen, get_process_info=_dead_info, which=lambda n: "claude.cmd")
+        assert rc == 0
 
 
 # ---------------------------------------------------------------------------
@@ -247,12 +274,25 @@ class TestCmdSend:
 
 class TestInterruptWorker:
     def test_kills_and_marks_idle_when_alive(self, isolated_home):
+        """F3: get_process_info must go dead once kill_process_tree actually
+        runs, so the post-kill re-verification confirms "killed" -- a
+        static "always alive" fake would (correctly, per F3) report
+        kill_failed instead."""
         _seed_worker("probe-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
         killed_pids = []
+        killed = {"done": False}
+
+        def kill_process_tree(pid):
+            killed_pids.append(pid)
+            killed["done"] = True
+
+        def get_process_info(pid):
+            return None if killed["done"] else _alive_info(pid)
+
         result = fleet._interrupt_worker(
-            "probe-1", get_process_info=_alive_info, kill_process_tree=killed_pids.append,
+            "probe-1", get_process_info=get_process_info, kill_process_tree=kill_process_tree,
         )
-        assert result is True
+        assert result == "killed"
         assert killed_pids == [111]
         rec = fleet.load_registry()["workers"]["probe-1"]
         assert rec["status"] == "idle"
@@ -266,19 +306,59 @@ class TestInterruptWorker:
         result = fleet._interrupt_worker(
             "probe-1", get_process_info=_dead_info, kill_process_tree=kill_process_tree,
         )
-        assert result is False
+        assert result == "not_running"
         assert fleet.load_registry()["workers"]["probe-1"]["status"] == "idle"
 
     def test_unknown_worker_raises(self, isolated_home):
         with pytest.raises(fleet.FleetCliError):
             fleet._interrupt_worker("nope", get_process_info=_dead_info, kill_process_tree=lambda pid: None)
 
+    def test_kill_failed_when_still_alive_after_kill_does_not_mark_idle(self, isolated_home):
+        """F3: a kill attempt whose post-kill re-verification still sees the
+        pid alive must be reported as "kill_failed" and must NOT mark the
+        worker idle -- the pre-fix defect was discarding kill_process_tree's
+        (and reality's) outcome and always claiming success."""
+        _seed_worker("probe-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
+        killed_pids = []
+        result = fleet._interrupt_worker(
+            "probe-1", get_process_info=_alive_info, kill_process_tree=killed_pids.append,
+        )
+        assert result == "kill_failed"
+        assert killed_pids == [111]  # a kill was attempted
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["status"] == "working"  # never marked idle while possibly still alive
+
+    def test_probe_and_kill_run_outside_the_lock(self, isolated_home):
+        """F4: pid_alive/kill_process_tree must not run while fleet_lock is
+        held -- otherwise every concurrent `fleet` command would fail with
+        FleetLockTimeout for the ~15s worst case (5s Get-Process + 10s
+        taskkill) this fix exists to prevent. Assert a second fleet_lock()
+        acquisition succeeds *during* the kill call."""
+        _seed_worker("probe-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
+
+        def kill_process_tree(pid):
+            with fleet.fleet_lock(timeout=0.5):
+                pass  # must not raise FleetLockTimeout -- the outer lock is released
+
+        result = fleet._interrupt_worker(
+            "probe-1", get_process_info=_alive_info, kill_process_tree=kill_process_tree,
+        )
+        assert result == "kill_failed"  # _alive_info never reports it dead in this test
+
 
 class TestCmdInterrupt:
     def test_prints_interrupted_when_killed(self, isolated_home, capsys):
         _seed_worker("probe-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
+        killed = {"done": False}
+
+        def kill_process_tree(pid):
+            killed["done"] = True
+
+        def get_process_info(pid):
+            return None if killed["done"] else _alive_info(pid)
+
         args = fleet.build_parser().parse_args(["interrupt", "probe-1"])
-        rc = fleet.cmd_interrupt(args, get_process_info=_alive_info, kill_process_tree=lambda pid: None)
+        rc = fleet.cmd_interrupt(args, get_process_info=get_process_info, kill_process_tree=kill_process_tree)
         assert rc == 0
         assert "interrupted" in capsys.readouterr().out
 
@@ -288,6 +368,18 @@ class TestCmdInterrupt:
         rc = fleet.cmd_interrupt(args, get_process_info=_dead_info)
         assert rc == 0
         assert "no turn running" in capsys.readouterr().out
+
+    def test_prints_loud_warning_and_nonzero_when_kill_failed(self, isolated_home, capsys):
+        """F3: cmd_interrupt must not lie with "interrupted"/idle when the
+        post-kill re-verification still sees the pid alive."""
+        _seed_worker("probe-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
+        args = fleet.build_parser().parse_args(["interrupt", "probe-1"])
+        rc = fleet.cmd_interrupt(args, get_process_info=_alive_info, kill_process_tree=lambda pid: None)
+        assert rc != 0
+        combined = "".join(capsys.readouterr())
+        assert "probe-1" in combined
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["status"] == "working"
 
 
 # ---------------------------------------------------------------------------
@@ -308,18 +400,27 @@ class TestCmdAttach:
         assert fleet.load_registry()["workers"]["probe-1"]["status"] == "working"
 
     def test_force_interrupts_then_attaches(self, isolated_home):
+        """F3: _interrupt_worker now re-verifies liveness after the kill, so
+        get_process_info must go dead once the kill actually happens (a
+        static "always alive" fake would make the re-verification report
+        kill_failed and abort the attach)."""
         _seed_worker("probe-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME, cwd="C:/proj")
         calls = []
+        killed = {"done": False}
 
         def kill_process_tree(pid):
             calls.append(("interrupt", pid))
+            killed["done"] = True
+
+        def get_process_info(pid):
+            return None if killed["done"] else _alive_info(pid)
 
         proc = FakeProc(pid=999)
         popen = _fake_popen(proc, calls)
 
         args = fleet.build_parser().parse_args(["attach", "probe-1", "--force"])
         rc = fleet.cmd_attach(
-            args, popen=popen, get_process_info=_alive_info, which=lambda n: "wt.exe",
+            args, popen=popen, get_process_info=get_process_info, which=lambda n: "wt.exe",
             kill_process_tree=kill_process_tree,
         )
 
@@ -329,6 +430,58 @@ class TestCmdAttach:
         rec = fleet.load_registry()["workers"]["probe-1"]
         assert rec["status"] == "attached"
         assert rec["attached_since"] is not None
+
+    def test_force_raises_when_kill_verification_fails(self, isolated_home):
+        """F3 required test: if _interrupt_worker cannot verify the kill
+        (the pid still reports alive afterward), --force must abort loudly
+        -- no popen, no attached claim, status left as-is."""
+        _seed_worker("probe-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME, cwd="C:/proj")
+
+        def popen(*a, **kw):
+            raise AssertionError("must not launch a terminal when --force kill verification fails")
+
+        args = fleet.build_parser().parse_args(["attach", "probe-1", "--force"])
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_attach(
+                args, popen=popen, get_process_info=_alive_info, which=lambda n: "wt.exe",
+                kill_process_tree=lambda pid: None,
+            )
+
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["status"] == "working"
+
+    def test_attach_claims_attached_before_popen_called(self, isolated_home):
+        """F1 required test (d): the "attached" claim must be committed
+        under the decision lock BEFORE popen launches the terminal."""
+        _seed_worker("probe-1", status="idle", cwd="C:/proj", log_result=True)
+
+        def popen(argv, **kwargs):
+            rec = fleet.load_registry()["workers"]["probe-1"]
+            assert rec["status"] == "attached"
+            assert rec["attached_since"] is not None
+            return FakeProc(pid=1)
+
+        args = fleet.build_parser().parse_args(["attach", "probe-1"])
+        rc = fleet.cmd_attach(args, popen=popen, get_process_info=_dead_info, which=lambda n: "wt.exe")
+        assert rc == 0
+
+    def test_attach_rolls_back_on_popen_failure(self, isolated_home):
+        """F1 required test (e): if the (detached) terminal fails to even
+        launch, the pre-committed "attached" claim must be rolled back to
+        idle -- conditionally, only because the record is still exactly in
+        the state this call wrote."""
+        _seed_worker("probe-1", status="idle", cwd="C:/proj", log_result=True)
+
+        def popen(*a, **kw):
+            raise OSError("boom")
+
+        args = fleet.build_parser().parse_args(["attach", "probe-1"])
+        with pytest.raises(OSError):
+            fleet.cmd_attach(args, popen=popen, get_process_info=_dead_info, which=lambda n: "wt.exe")
+
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["status"] == "idle"
+        assert rec["attached_since"] is None
 
     def test_already_attached_warns_and_does_not_relaunch(self, isolated_home, capsys):
         _seed_worker("probe-1", status="attached")
@@ -435,7 +588,12 @@ class TestPlatformAdapterBoundary:
         end = source.index("# === PLATFORM ADAPTER END") + len("# === PLATFORM ADAPTER END ===")
         assert start != -1 and end != -1
         outside = source[:start] + source[end:]
-        for needle in ("os.name", "sys.platform"):
+        # F7: broadened beyond os.name/sys.platform to also reject every
+        # other OS-branching surface an adapter method could smuggle in.
+        for needle in (
+            "os.name", "sys.platform", "platform.system",
+            "sys.getwindowsversion", "os.uname", "os.sep",
+        ):
             assert needle not in outside, f"found {needle!r} outside the platform adapter block"
 
     def test_windows_adapter_selected_on_this_machine(self):
@@ -457,6 +615,32 @@ class TestPlatformAdapterBoundary:
         assert "-Command" in argv
         assert "sid-1" in argv[-1]
         assert "C:/proj" in argv[-1]
+
+    def test_build_attach_argv_powershell_handles_space_in_cwd(self):
+        """F2 (Minor 3): a space in cwd is fine inside the PS single-quoted
+        literal -- must not be mangled or split."""
+        cwd = r"C:\some dir\proj"
+        argv = fleet.PLATFORM.build_attach_argv(cwd, "sid-1", which=lambda n: None)
+        ps_command = argv[argv.index("-Command") + 1]
+        assert f"'{cwd}'" in ps_command
+
+    def test_build_attach_argv_powershell_escapes_single_quote_in_cwd(self):
+        """F2: an unescaped `'` in cwd would terminate the PS single-quoted
+        string literal early (ParserError) while `fleet attach` still
+        reports success. The doubled `''` form must appear literally."""
+        cwd = r"C:\Users\O'Brien\proj"
+        argv = fleet.PLATFORM.build_attach_argv(cwd, "sid-1", which=lambda n: None)
+        ps_command = argv[argv.index("-Command") + 1]
+        assert "O''Brien" in ps_command
+        assert "O'Brien" not in ps_command  # the raw, unescaped form must not survive
+
+    def test_build_attach_argv_wt_keeps_quote_and_space_cwd_as_one_element(self):
+        """F2: the `wt` branch is unaffected -- list2cmdline double-quotes
+        each argv element, so a `'` or a space in cwd stays a literal part
+        of one intact list element, not something requiring escaping here."""
+        for cwd in (r"C:\some dir\proj", r"C:\Users\O'Brien\proj"):
+            argv = fleet.PLATFORM.build_attach_argv(cwd, "sid-1", which=lambda n: "C:/wt.exe")
+            assert argv[argv.index("-d") + 1] == cwd
 
     def test_kill_process_tree_invokes_taskkill(self):
         calls = {}
