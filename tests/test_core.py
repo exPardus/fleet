@@ -386,6 +386,29 @@ class TestPidLiveness:
         dt = datetime(2026, 7, 7, 12, 30, 0, tzinfo=timezone.utc)
         assert fleet._parse_iso(fleet.ctime_to_iso(dt)) == dt
 
+    def test_recompute_status_working_launch_in_flight_not_demoted(self, tmp_path):
+        """F1 required test (b): a pre-claimed record (status="working",
+        turn_pid=None -- what spawn/send-idle/respawn write atomically
+        before the turn process actually exists) must not be demoted by a
+        concurrent recompute, the same way "attached" already isn't (F7).
+        Without this guard, a racing reader would see idle/dead and launch
+        a second live turn onto the same session."""
+        log = tmp_path / "missing.jsonl"
+        assert fleet.recompute_status(None, None, log, current_status="working") == "working"
+
+    def test_recompute_status_still_demotes_working_with_dead_real_pid(self, tmp_path):
+        """F1 required test (c) -- regression guard: the launch-in-flight
+        guard must be scoped to pid is None only. A "working" record with a
+        real (non-None) pid that is actually dead must still demote
+        normally (here to "idle" thanks to the trailing result line)."""
+        info = lambda pid: None
+        log = tmp_path / "w.jsonl"
+        log.write_text('{"type":"result","subtype":"success","result":"done"}\n', encoding="utf-8")
+        status = fleet.recompute_status(
+            111, "2026-07-07T12:30:00Z", log, current_status="working", get_process_info=info
+        )
+        assert status == "idle"
+
 
 # ---------------------------------------------------------------------------
 # Stream-jsonl parsing (tail_events)
@@ -608,6 +631,19 @@ class TestComposePrompt:
     def test_no_journal_path_means_no_journal_section(self, isolated_home):
         prompt, claim = fleet.compose_prompt("probe-1", "C:/x", "task text", "sid-1")
         assert "## Journal" not in prompt
+
+    def test_empty_task_emits_no_blank_task_section(self, isolated_home):
+        """F6: cmd_send's idle-resume path now calls compose_prompt with an
+        empty task (the triggering message travels through the mailbox
+        drain instead) -- this must not leave a stray blank line/section
+        where the task text would have gone."""
+        mbox = fleet.mailbox_dir()
+        mbox.mkdir(parents=True)
+        (mbox / "sid-1.md").write_text("do the thing", encoding="utf-8")
+        prompt, claim = fleet.compose_prompt("probe-1", "C:/x", "", "sid-1")
+        assert "do the thing" in prompt  # the mail still comes through
+        assert not prompt.endswith("\n\n")  # no trailing blank task section
+        assert "\n\n\n" not in prompt
 
     def test_journal_with_invalid_utf8_bytes_does_not_raise(self, isolated_home, tmp_path):
         journal = tmp_path / "probe-1.md"

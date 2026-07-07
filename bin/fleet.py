@@ -95,7 +95,7 @@ def ctime_to_iso(dt: datetime) -> str:
 # PLATFORM singleton below instead of doing any of that itself. Windows is
 # the only implemented backend for now; the POSIX backend raises
 # UnsupportedPlatformError everywhere -- Phase 1.5 fills it in
-# (docs/specs/portability.md). A source-scan test (test_core.py) enforces
+# (docs/specs/portability.md). A source-scan test (test_steering.py) enforces
 # that no other function in this module references os.name/sys.platform.
 # ---------------------------------------------------------------------------
 
@@ -164,8 +164,19 @@ class _WindowsPlatform:
         cwd = str(cwd)
         if which("wt"):
             return ["wt", "-d", cwd, "--", "claude", "--resume", sid]
+        # F2: cwd is interpolated into a PowerShell single-quoted string
+        # literal below. An unescaped `'` in cwd (e.g. C:\Users\O'Brien\proj)
+        # would terminate that string early -> ParserError -- and this
+        # happens silently: no terminal opens, but `fleet attach` still
+        # reports success (cmd_attach never checks the detached child's exit
+        # code, by design -- see cmd_attach's docstring). Double any embedded
+        # `'` per PowerShell single-quoted-string escaping rules. The `wt`
+        # branch above is unaffected: list2cmdline double-quotes each argv
+        # element, and a `'` is a literal character inside a double-quoted
+        # Windows command-line argument.
+        ps_cwd = cwd.replace("'", "''")
         ps_command = (
-            f"Start-Process powershell -WorkingDirectory '{cwd}' "
+            f"Start-Process powershell -WorkingDirectory '{ps_cwd}' "
             f"-ArgumentList '-NoExit','-Command','claude --resume {sid}'"
         )
         return ["powershell", "-Command", ps_command]
@@ -197,7 +208,7 @@ class _PosixPlatform:
 
 # The one and only os.name branch in this module: selects which adapter
 # instance PLATFORM points at. Nothing else in fleet.py may inspect
-# os.name or sys.platform (enforced by a source-scan test, test_core.py).
+# os.name or sys.platform (enforced by a source-scan test, test_steering.py).
 PLATFORM = _WindowsPlatform() if os.name == "nt" else _PosixPlatform()
 
 # === PLATFORM ADAPTER END ===
@@ -443,9 +454,31 @@ def recompute_status(pid, ctime_iso, log_path, current_status: str | None = None
     -> idle; stale PID + no trailing result event -> dead. If current_status
     is "attached", that state takes priority and is returned immediately --
     liveness recomputation must never clobber an operator's manual attach
-    (F7)."""
+    (F7).
+
+    F1 launch-in-flight guard: a "working" record whose turn_pid is still
+    None is a pre-claim -- every turn-starting path (cmd_spawn's
+    new_worker_record, cmd_send's idle-resume, future respawn) writes
+    status="working"/turn_pid=None atomically under fleet_lock BEFORE the
+    turn process actually exists, specifically so a concurrent reader
+    (another send/attach/status) observes the claim and refuses instead of
+    racing a second live `claude` onto the same session (SPEC §6/§9
+    one-live-claude invariant). That guarantee only holds if recompute
+    refuses to demote this exact window -- so, like "attached", "working"
+    with pid is None is returned as-is here, never reinterpreted as
+    idle/dead. Scoped tightly to pid is None: a "working" record with a
+    real (non-None) pid that turns out to be dead must still demote
+    normally (see the regression test pinning this).
+    Residual (documented, not fixed): if the `fleet` CLI process itself is
+    killed between the pre-claim write and the post-launch pid-stamp, the
+    record is pinned "working" forever by this guard (turn_pid stays None,
+    so it never re-enters the pid_alive check below) -- rare; the operator
+    resolves it with `fleet respawn`.
+    """
     if current_status == "attached":
         return "attached"
+    if current_status == "working" and pid is None:
+        return "working"
     if pid_alive(pid, ctime_iso, get_process_info=get_process_info):
         return "working"
     return "idle" if _last_line_type(log_path) == "result" else "dead"
@@ -620,6 +653,11 @@ def compose_prompt(name: str, cwd, task: str, sid: str, journal_path=None) -> tu
     restore_mailbox_claim(claim) to put the mail back; on a successful
     launch, call finalize_mailbox_claim(claim) once the turn process has
     started (see SPEC §7 / the launch-sequence contract).
+
+    `task` may be empty/omitted (F6: cmd_send's idle-resume path routes the
+    triggering message through the mailbox instead, so the drained mail
+    already carries it) -- an empty task emits no task section at all
+    rather than a blank line.
     """
     parts = [_PREAMBLE_TEMPLATE.format(name=name, cwd=cwd)]
 
@@ -627,7 +665,8 @@ def compose_prompt(name: str, cwd, task: str, sid: str, journal_path=None) -> tu
     if mail:
         parts.append(f"<MANAGER MESSAGE>\n{mail}\n")
 
-    parts.append(task)
+    if task:
+        parts.append(task)
 
     if journal_path is not None:
         journal_path = Path(journal_path)
@@ -1214,37 +1253,32 @@ def cmd_wait(args, get_process_info=None, sleep=time.sleep, clock=time.monotonic
 # rows, §9 hybrid interaction model, §14 platform adapter)
 # ---------------------------------------------------------------------------
 
-def _refresh_worker_status(name: str, get_process_info=None) -> dict:
-    """Load the registry, recompute `name`'s liveness in place, persist any
-    transition, and return the refreshed record. Shared by send/attach so
-    both act on up-to-date status rather than a possibly-stale registry
-    snapshot (a turn may have finished since the last `fleet status`)."""
-    with fleet_lock():
-        data = load_registry()
-        if name not in data["workers"]:
-            raise FleetCliError(f"unknown worker: {name!r}")
-        before = data["workers"][name]
-        after = recompute_worker(name, before, get_process_info=get_process_info)
-        if after != before:
-            data["workers"][name] = after
-            if after["status"] != before["status"]:
-                append_event("status_changed", name, old=before["status"], new=after["status"])
-            save_registry(data)
-    return after
-
-
 def cmd_send(args, popen=subprocess.Popen, get_process_info=None, which=shutil.which) -> int:
     """`fleet send <name> <text|@file>` (SPEC §5 send row, §9 attach
-    asymmetry):
+    asymmetry), rewritten under the uniform status-claim protocol (F1+F6,
+    review wave 3):
 
     - working -> append the message to mailbox/<sid>.md (small
       open(...,"a") write); the running turn's hooks pick it up mid-turn or
       at Stop.
-    - idle -> launch a resume-turn whose prompt is
-      compose_prompt(..., task=message, ...): this claims (drains) any
-      pending mailbox mail AND appends the new message as the prompt's task
-      text (the universal drain rule, SPEC §5); follows the exact same
-      claim/launch/finalize-or-restore discipline as cmd_spawn.
+    - idle -> atomically pre-claim status="working"/turn_pid=None in the
+      SAME fleet_lock that recomputed and observed "idle" (F1 -- mirrors
+      new_worker_record's shape; recompute_status's launch-in-flight guard
+      then refuses to demote this window, so a concurrent
+      send/attach/status sees "working" and refuses instead of racing a
+      second live turn onto this session). Outside the lock: append the
+      new message to the mailbox, THEN compose_prompt with an empty task
+      (F6 -- the message flows through the mailbox drain uniformly with any
+      prior mail, not through compose_prompt's task argument, so it is
+      never doubled and never silently dropped), then launch_turn. On
+      success, re-acquire the lock once to stamp turn_pid/turn_pid_ctime/
+      turns/last_activity and re-assert status="working" (matches
+      cmd_spawn's second-lock re-assert, F-RACE). On failure,
+      restore_mailbox_claim() the drained mail (so the new message
+      survives) and conditionally roll the pre-claim back to "idle" (only
+      if the record is still in the exact claim state this path wrote --
+      status=="working" and turn_pid is None -- a concurrent actor may have
+      legitimately moved it on already).
     - attached -> append to the mailbox like "working", but also print the
       attach-asymmetry warning (SPEC §9): the attached TUI runs without
       --settings, so hooks don't fire and the mail queues untouched until
@@ -1252,9 +1286,24 @@ def cmd_send(args, popen=subprocess.Popen, get_process_info=None, which=shutil.w
     - dead -> a clear error suggesting `fleet respawn`, never a silent no-op.
     """
     message = _read_task_arg(args.message)
-    rec = _refresh_worker_status(args.name, get_process_info=get_process_info)
-    status = rec["status"]
-    sid = rec["session_id"]
+
+    with fleet_lock():
+        data = load_registry()
+        if args.name not in data["workers"]:
+            raise FleetCliError(f"unknown worker: {args.name!r}")
+        before = data["workers"][args.name]
+        after = recompute_worker(args.name, before, get_process_info=get_process_info)
+        status = after["status"]
+        if status != before["status"]:
+            append_event("status_changed", args.name, old=before["status"], new=after["status"])
+        if status == "idle":
+            # F1 pre-claim: atomic decide+claim, same lock, before release.
+            after["status"] = "working"
+            after["turn_pid"] = None
+        data["workers"][args.name] = after
+        save_registry(data)
+
+    sid = after["session_id"]
 
     if status == "working":
         append_mailbox(sid, message)
@@ -1273,23 +1322,36 @@ def cmd_send(args, popen=subprocess.Popen, get_process_info=None, which=shutil.w
     if status == "dead":
         raise FleetCliError(f"{args.name}: worker is dead -- run `fleet respawn {args.name}` first")
 
-    # idle -> resume-turn launch, following the compose/claim/finalize-or-
-    # restore contract exactly as cmd_spawn does.
-    prompt, claim = compose_prompt(args.name, rec["cwd"], message, sid)
+    # idle -> resume-turn launch. F6: append the new message to the mailbox
+    # FIRST, then let compose_prompt drain the mailbox uniformly (prior mail
+    # + this message, in order) -- task is intentionally empty so the
+    # message is never carried both ways.
+    append_mailbox(sid, message)
+    prompt, claim = compose_prompt(args.name, after["cwd"], "", sid)
     try:
         info = launch_turn(
-            args.name, rec["cwd"], sid, prompt, rec["mode"], first=False,
-            model=rec.get("model"), popen=popen, get_process_info=get_process_info, which=which,
+            args.name, after["cwd"], sid, prompt, after["mode"], first=False,
+            model=after.get("model"), popen=popen, get_process_info=get_process_info, which=which,
         )
         finalize_mailbox_claim(claim)
     except Exception:
         restore_mailbox_claim(claim)
+        with fleet_lock():
+            data = load_registry()
+            r = data["workers"].get(args.name)
+            if r is not None and r.get("status") == "working" and r.get("turn_pid") is None:
+                r["status"] = "idle"
+                save_registry(data)
         raise
 
     with fleet_lock():
         data = load_registry()
         r = data["workers"].get(args.name)
         if r is not None:
+            # Re-assert "working" (F-RACE, matches cmd_spawn's second-lock
+            # re-assert): a concurrent status/wait could have recomputed a
+            # spurious transition in the gap between the pre-claim above
+            # and this stamp.
             r["status"] = "working"
             r["turn_pid"] = info["turn_pid"]
             r["turn_pid_ctime"] = info["turn_pid_ctime"]
@@ -1302,19 +1364,48 @@ def cmd_send(args, popen=subprocess.Popen, get_process_info=None, which=shutil.w
     return 0
 
 
-def _interrupt_worker(name: str, get_process_info=None, kill_process_tree=None) -> bool:
+def _interrupt_worker(name: str, get_process_info=None, kill_process_tree=None) -> str:
     """Kill the running turn for `name`, if one is verifiably still alive
     (ctime-checked via pid_alive -- PID reuse must never kill an innocent
-    process, SPEC §4). Returns True if a turn was killed (and the registry
-    updated to idle), False if there was nothing to interrupt (a friendly
-    no-op, not an error -- the operator may race a turn that already
-    finished). Shared by cmd_interrupt and cmd_attach's --force path.
+    process, SPEC §4). Shared by cmd_interrupt and cmd_attach's --force
+    path.
+
+    Returns one of three outcomes (F3+F4 uniform contract):
+      - "killed": the turn was alive, kill_process_tree() was invoked, and
+        a post-kill pid_alive() re-check confirms it is now gone -- the
+        registry is committed to status="idle" and an "interrupted" event
+        is appended.
+      - "not_running": nothing was alive to kill (a friendly no-op, not an
+        error -- the operator may race a turn that already finished); no
+        mutation.
+      - "kill_failed": the turn was alive, a kill was attempted, but the
+        pid is STILL alive afterward. The registry is left untouched --
+        marking idle here (the pre-fix defect) would let a caller launch a
+        second live `claude` onto a session whose turn is still running.
+        Callers must treat this as a hard failure, not a silent demotion.
+
+    F4: the subprocess-shaped work (pid_alive's PowerShell Get-Process,
+    kill_process_tree's taskkill) runs OUTSIDE fleet_lock -- both can take
+    several seconds and LOCK_TIMEOUT_SECONDS is only 5.0, so holding the
+    lock across them would make every concurrent `fleet` command fail with
+    FleetLockTimeout. Shape: snapshot turn_pid/ctime under lock -> release
+    -> probe/kill/re-verify outside the lock -> re-acquire only to commit
+    "killed" (status write + its event stay under the same lock, preserving
+    that ordering).
+
+    F5 residual (documented, not fixed): Windows can reuse `pid` between
+    the pre-kill pid_alive check and the taskkill call (TOCTOU) -- in the
+    accepted, vanishingly unlikely worst case taskkill could hit an
+    unrelated process that reused the pid within that window. The
+    immediate pre-kill and post-kill pid_alive re-checks bound this to one
+    subprocess-spawn latency; they do not close it.
 
     kill_process_tree defaults to PLATFORM.kill_process_tree (the platform
     adapter, SPEC §14) but is injectable so tests exercise the state
     machine without shelling out to a real taskkill.
     """
     kill_process_tree = kill_process_tree or PLATFORM.kill_process_tree
+
     with fleet_lock():
         data = load_registry()
         if name not in data["workers"]:
@@ -1322,64 +1413,150 @@ def _interrupt_worker(name: str, get_process_info=None, kill_process_tree=None) 
         rec = data["workers"][name]
         pid = rec.get("turn_pid")
         ctime_iso = rec.get("turn_pid_ctime")
-        if not pid_alive(pid, ctime_iso, get_process_info=get_process_info):
-            return False
-        kill_process_tree(pid)
-        rec["status"] = "idle"
-        data["workers"][name] = rec
-        save_registry(data)
+
+    if not pid_alive(pid, ctime_iso, get_process_info=get_process_info):
+        return "not_running"
+
+    kill_process_tree(pid)
+
+    if pid_alive(pid, ctime_iso, get_process_info=get_process_info):
+        return "kill_failed"
+
+    with fleet_lock():
+        data = load_registry()
+        rec = data["workers"].get(name)
+        if rec is not None:
+            rec["status"] = "idle"
+            data["workers"][name] = rec
+            save_registry(data)
         append_event("interrupted", name, turn_pid=pid)
-    return True
+    return "killed"
 
 
 def cmd_interrupt(args, get_process_info=None, kill_process_tree=None) -> int:
     """`fleet interrupt <name>` (SPEC §5 interrupt row): ctime-verify the
     registered turn_pid, kill its whole process tree via the platform
-    adapter, mark idle, append an event. Not-running is a friendly no-op."""
-    killed = _interrupt_worker(args.name, get_process_info=get_process_info, kill_process_tree=kill_process_tree)
-    if killed:
+    adapter, re-verify the kill (F3), mark idle, append an event.
+    Not-running is a friendly no-op. A verified-failed kill is a loud
+    warning and a nonzero exit -- the registry is deliberately left as-is
+    (never marked idle while the turn may still be alive)."""
+    outcome = _interrupt_worker(args.name, get_process_info=get_process_info, kill_process_tree=kill_process_tree)
+    if outcome == "killed":
         print(f"{args.name}: interrupted")
-    else:
+        return 0
+    if outcome == "not_running":
         print(f"{args.name}: no turn running -- nothing to interrupt")
-    return 0
+        return 0
+    print(
+        f"fleet: {args.name}: kill attempted but the turn still appears to be running -- "
+        "not marked idle; retry or investigate before attaching/sending",
+        file=sys.stderr,
+    )
+    return 1
 
 
 def cmd_attach(args, popen=subprocess.Popen, get_process_info=None, which=shutil.which,
                kill_process_tree=None) -> int:
     """`fleet attach <name> [--force]` (SPEC §5 attach row, §9 hybrid
-    model): refuse while a turn is running (`--force` interrupts it first
-    via _interrupt_worker -- same ctime-verified kill as `fleet interrupt`);
-    warn (no-op) if already attached; otherwise mark attached and launch a
-    terminal via PLATFORM.build_attach_argv (wt, else a detached PowerShell
-    fallback), resumed in the worker's cwd (the --resume cwd-scope
-    invariant, SPEC §2)."""
-    rec = _refresh_worker_status(args.name, get_process_info=get_process_info)
+    model), rewritten under the uniform status-claim protocol (F1) plus the
+    verified-kill contract (F3/F4, review wave 3):
 
-    if rec["status"] == "attached":
-        print(f"{args.name}: already attached")
-        return 0
-
-    if rec["status"] == "working":
-        if not args.force:
-            raise FleetCliError(
-                f"{args.name}: turn is running -- pass --force to interrupt it first, "
-                "or wait for it to finish"
-            )
-        _interrupt_worker(args.name, get_process_info=get_process_info, kill_process_tree=kill_process_tree)
-
-    cwd = rec["cwd"]
-    sid = rec["session_id"]
-    argv = PLATFORM.build_attach_argv(cwd, sid, which=which)
-    popen(argv, cwd=str(cwd), **PLATFORM.detached_popen_kwargs())
+    - already attached -> print a no-op warning.
+    - working, no --force -> refuse (FleetCliError).
+    - working, --force -> interrupt via _interrupt_worker OUTSIDE any lock
+      held by this function (F4 -- taskkill/Get-Process must never run
+      under fleet_lock). "killed" or "not_running" both mean the turn is no
+      longer alive, so attach proceeds to the claim below; "kill_failed"
+      (F3 -- the turn is still verifiably alive after the kill attempt)
+      aborts loudly via FleetCliError with NO registry write and NO popen.
+    - idle (or otherwise attachable) -> atomically pre-claim
+      status="attached"/attached_since in the SAME fleet_lock that observed
+      the attachable state (F1 -- status="attached" already survives
+      recompute via the existing F7 guard, so this needs no new guard,
+      only the ordering flip: claim before popen, never after). The
+      terminal is then launched via PLATFORM.build_attach_argv (wt, else a
+      detached PowerShell fallback -- F2 escapes any `'` in cwd for the PS
+      fallback) OUTSIDE the lock, resumed in the worker's cwd (the
+      --resume cwd-scope invariant, SPEC §2). If popen() itself raises, the
+      claim is rolled back to idle (conditionally -- only if the record is
+      still exactly "attached" that this call wrote). The attach terminal
+      is intentionally detached, so its exit code is deliberately never
+      probed (see build_attach_argv's docstring) -- correctness here comes
+      from the claim ordering and the escaping fix, not from watching a
+      detached child.
+    """
+    needs_force_interrupt = False
 
     with fleet_lock():
         data = load_registry()
-        r = data["workers"].get(args.name)
-        if r is not None:
+        if args.name not in data["workers"]:
+            raise FleetCliError(f"unknown worker: {args.name!r}")
+        before = data["workers"][args.name]
+        after = recompute_worker(args.name, before, get_process_info=get_process_info)
+        if after["status"] != before["status"]:
+            append_event("status_changed", args.name, old=before["status"], new=after["status"])
+
+        if after["status"] == "attached":
+            data["workers"][args.name] = after
+            save_registry(data)
+            print(f"{args.name}: already attached")
+            return 0
+
+        if after["status"] == "working":
+            if not args.force:
+                data["workers"][args.name] = after
+                save_registry(data)
+                raise FleetCliError(
+                    f"{args.name}: turn is running -- pass --force to interrupt it first, "
+                    "or wait for it to finish"
+                )
+            # --force: persist the recompute and release -- the kill itself
+            # (F4) must happen outside this lock.
+            data["workers"][args.name] = after
+            save_registry(data)
+            needs_force_interrupt = True
+        else:
+            # Attachable (idle): claim atomically in this same lock (F1).
+            after["status"] = "attached"
+            after["attached_since"] = now_iso()
+            data["workers"][args.name] = after
+            save_registry(data)
+            append_event("attached", args.name)
+
+    cwd = after["cwd"]
+    sid = after["session_id"]
+
+    if needs_force_interrupt:
+        outcome = _interrupt_worker(args.name, get_process_info=get_process_info, kill_process_tree=kill_process_tree)
+        if outcome == "kill_failed":
+            raise FleetCliError(
+                f"{args.name}: --force could not verify the running turn was killed -- "
+                "aborting attach (it may still be running)"
+            )
+        # "killed" or "not_running": the turn is no longer alive (or never
+        # was); claim "attached" now, in a fresh lock.
+        with fleet_lock():
+            data = load_registry()
+            r = data["workers"].get(args.name)
+            if r is None:
+                raise FleetCliError(f"unknown worker: {args.name!r}")
             r["status"] = "attached"
             r["attached_since"] = now_iso()
             save_registry(data)
-        append_event("attached", args.name)
+            append_event("attached", args.name)
+
+    argv = PLATFORM.build_attach_argv(cwd, sid, which=which)
+    try:
+        popen(argv, cwd=str(cwd), **PLATFORM.detached_popen_kwargs())
+    except Exception:
+        with fleet_lock():
+            data = load_registry()
+            r = data["workers"].get(args.name)
+            if r is not None and r.get("status") == "attached":
+                r["status"] = "idle"
+                r["attached_since"] = None
+                save_registry(data)
+        raise
 
     print(f"{args.name}: attached -- {argv[0]}")
     return 0
