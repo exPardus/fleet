@@ -113,7 +113,7 @@ class TestRegistry:
         assert set(rec.keys()) == {
             "session_id", "cwd", "task", "mode", "model", "created",
             "status", "turn_pid", "turn_pid_ctime", "attached_since",
-            "turns", "cost_usd", "last_activity",
+            "turns", "cost_usd", "cost_baseline", "last_activity",
         }
         assert rec["session_id"] == "sid-1"
         assert rec["cwd"] == r"C:\proga\x"
@@ -126,6 +126,10 @@ class TestRegistry:
         assert rec["attached_since"] is None
         assert rec["turns"] == 0
         assert rec["cost_usd"] == 0.0
+        # Task 5 fix wave, Finding 4: cost_baseline defaults to 0.0 for a
+        # brand-new worker -- recompute_worker adds it to the log's own
+        # trailing result cost, so a fresh spawn behaves exactly as before.
+        assert rec["cost_baseline"] == 0.0
         assert rec["last_activity"] == rec["created"]
 
     def test_corrupt_registry_file_is_quarantined_and_raises(self, isolated_home):
