@@ -8,6 +8,7 @@ as test_core.py.
 """
 import io
 import json
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -27,11 +28,21 @@ def _parse(ctime_iso):
 
 
 class FakeStdin:
-    def __init__(self):
+    def __init__(self, raise_on_write=None, block_event=None):
         self.written = b""
         self.closed = False
+        # F-DOA: if set, write() raises this instead of appending bytes
+        # (simulates the child's read end having closed -- BrokenPipeError).
+        self._raise_on_write = raise_on_write
+        # F-BLOCK: if set, write() blocks on this threading.Event before
+        # doing anything else (simulates a slow/wedged reader).
+        self._block_event = block_event
 
     def write(self, data):
+        if self._block_event is not None:
+            self._block_event.wait()
+        if self._raise_on_write is not None:
+            raise self._raise_on_write
         self.written += data
 
     def close(self):
@@ -39,9 +50,16 @@ class FakeStdin:
 
 
 class FakeProc:
-    def __init__(self, pid):
+    def __init__(self, pid, stdin=None, poll_returns=None):
         self.pid = pid
-        self.stdin = FakeStdin()
+        self.stdin = stdin if stdin is not None else FakeStdin()
+        # F-DOA/F-BLOCK: poll_returns is either None (process never exits --
+        # the default, matching a normal healthy launch) or a fixed int
+        # returncode that poll() reports from the very first call onward.
+        self._poll_returns = poll_returns
+
+    def poll(self):
+        return self._poll_returns
 
 
 def _fake_popen(proc, calls=None):
@@ -211,6 +229,96 @@ class TestLaunchTurn:
         )
         assert info["turn_pid_ctime"] is None
 
+    # -----------------------------------------------------------------
+    # F-DOA: a child that dies during init before consuming its prompt
+    # must be reported as a launch failure, not a running turn.
+    # -----------------------------------------------------------------
+
+    def test_broken_pipe_write_with_nonzero_poll_raises_turn_launch_error(self, isolated_home):
+        """The exact testDOA.py scenario: the child closed its read end
+        before the prompt was consumed (BrokenPipeError) and poll() confirms
+        it already exited nonzero -- this must raise, not report success."""
+        stdin = FakeStdin(raise_on_write=BrokenPipeError())
+        proc = FakeProc(pid=4321, stdin=stdin, poll_returns=1)
+        popen = _fake_popen(proc)
+        with pytest.raises(fleet.TurnLaunchError):
+            fleet.launch_turn(
+                "probe-1", isolated_home, "sid-1", "hello prompt", "omit", first=True,
+                popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd",
+            )
+
+    def test_buffered_write_succeeds_but_nonzero_poll_raises(self, isolated_home):
+        """Small-prompt case: the write is buffered and returns cleanly, but
+        the child has already exited nonzero within the window -- BrokenPipe
+        alone would miss this, so poll() must be checked too."""
+        proc = FakeProc(pid=4321, poll_returns=7)
+        popen = _fake_popen(proc)
+        with pytest.raises(fleet.TurnLaunchError):
+            fleet.launch_turn(
+                "probe-1", isolated_home, "sid-1", "hello prompt", "omit", first=True,
+                popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd",
+            )
+
+    def test_zero_poll_within_window_is_success_not_failure(self, isolated_home):
+        """An ultra-fast legitimately-completed turn (rc == 0) must not be
+        misreported as a launch failure."""
+        proc = FakeProc(pid=4321, poll_returns=0)
+        popen = _fake_popen(proc)
+        info = fleet.launch_turn(
+            "probe-1", isolated_home, "sid-1", "hello prompt", "omit", first=True,
+            popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd",
+        )
+        assert info["turn_pid"] == 4321
+
+    # -----------------------------------------------------------------
+    # F-BLOCK: the prompt write must not block the manager thread.
+    # -----------------------------------------------------------------
+
+    def test_blocked_writer_with_process_alive_returns_within_bounded_window(self, isolated_home, monkeypatch):
+        """A wedged/slow-booting child that never reads stdin (poll() stays
+        None) must not hang launch_turn forever -- it returns within the
+        bounded DOA window and is treated as success (F-DOA residual)."""
+        monkeypatch.setattr(fleet, "LAUNCH_DOA_WINDOW_SECONDS", 0.2)
+        block_event = threading.Event()
+        stdin = FakeStdin(block_event=block_event)
+        proc = FakeProc(pid=4321, stdin=stdin, poll_returns=None)
+        popen = _fake_popen(proc)
+
+        start = fleet.time.monotonic()
+        info = fleet.launch_turn(
+            "probe-1", isolated_home, "sid-1", "hello prompt", "omit", first=True,
+            popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd",
+        )
+        elapsed = fleet.time.monotonic() - start
+
+        assert elapsed < 2.0  # bounded, not hung
+        assert info["turn_pid"] == 4321
+
+        # release the wedged write so the daemon thread can finish cleanly;
+        # no exception should escape (it has nowhere to go but the holder).
+        block_event.set()
+
+    def test_blocked_writer_turn_pid_recorded_by_cmd_spawn(self, isolated_home, monkeypatch, tmp_path):
+        """The orphan-pid regression: even while the writer thread is still
+        blocked, cmd_spawn's post-launch lock must run and record turn_pid
+        (never leaving the detached worker unkillable)."""
+        monkeypatch.setattr(fleet, "LAUNCH_DOA_WINDOW_SECONDS", 0.2)
+        worker_dir = tmp_path / "proj"
+        worker_dir.mkdir()
+        block_event = threading.Event()
+        stdin = FakeStdin(block_event=block_event)
+        proc = FakeProc(pid=4321, stdin=stdin, poll_returns=None)
+        args = _spawn_args("probe-1", worker_dir, "do the thing")
+
+        rc = fleet.cmd_spawn(
+            args, popen=_fake_popen(proc), get_process_info=lambda pid: None, which=lambda n: "claude.cmd",
+        )
+        block_event.set()
+
+        assert rc == 0
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["turn_pid"] == 4321
+
 
 # ---------------------------------------------------------------------------
 # cmd_spawn
@@ -326,28 +434,97 @@ class TestCmdSpawn:
         data = fleet.load_registry()
         assert "probe-1" not in data["workers"]
 
-    def test_spawn_launch_failure_restores_mail_for_next_launch(self, isolated_home, tmp_path):
+    def test_spawn_launch_failure_restores_mail_for_next_launch(self, isolated_home, tmp_path, monkeypatch):
+        """F-TEST-MAIL (strengthened): pin the sid cmd_spawn will generate
+        (monkeypatch the uuid4 it calls), pre-seed mailbox/<sid>.md with
+        known content, force a launch failure, and assert that exact content
+        is back at mailbox/<sid>.md afterward -- a genuine restore, not just
+        "no dangling claim" (which is trivially true for a fresh sid)."""
         worker_dir = tmp_path / "proj"
         worker_dir.mkdir()
 
-        # Seed the registry with a worker whose session's mailbox has a
-        # pending message, then simulate spawn failing via a mailbox-bearing
-        # sid collision is not realistic for spawn (fresh uuid4 sid each
-        # time) -- so instead we verify the restore path directly against
-        # compose_prompt/claim semantics that cmd_spawn must invoke: this is
-        # covered at the unit level in TestRestoreMailboxClaim (test_core.py);
-        # here we just assert cmd_spawn's failure path does not leave a
-        # dangling .claimed.* file when there was never any mail to claim.
-        args = _spawn_args("probe-1", worker_dir, "do the thing")
+        fixed_sid = uuid.uuid4()
+        monkeypatch.setattr(fleet.uuid, "uuid4", lambda: fixed_sid)
+
+        mbox = fleet.mailbox_dir()
+        mbox.mkdir(parents=True, exist_ok=True)
+        (mbox / f"{fixed_sid}.md").write_text("pre-existing queued instruction", encoding="utf-8")
 
         def popen(*a, **kw):
             raise OSError("boom")
 
+        args = _spawn_args("probe-1", worker_dir, "do the thing")
         with pytest.raises(fleet.TurnLaunchError):
             fleet.cmd_spawn(args, popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd")
 
-        leftover = list(fleet.mailbox_dir().glob("*.claimed.*")) if fleet.mailbox_dir().exists() else []
-        assert leftover == []
+        restored = (mbox / f"{fixed_sid}.md").read_text(encoding="utf-8")
+        assert "pre-existing queued instruction" in restored
+        assert list(mbox.glob("*.claimed.*")) == []
+
+    def test_spawn_over_doa_proc_rolls_back_and_restores_mail(self, isolated_home, tmp_path, monkeypatch):
+        """F-DOA end-to-end through cmd_spawn: a child that dies during init
+        (BrokenPipeError on the prompt write + nonzero poll()) must be
+        treated exactly like the Popen()-raises case -- registry record
+        removed, no dangling .claimed.* file, pending mail restored, a
+        spawn_failed event appended, and the command raises (main() turns
+        that into a nonzero exit)."""
+        worker_dir = tmp_path / "proj"
+        worker_dir.mkdir()
+
+        fixed_sid = uuid.uuid4()
+        monkeypatch.setattr(fleet.uuid, "uuid4", lambda: fixed_sid)
+
+        mbox = fleet.mailbox_dir()
+        mbox.mkdir(parents=True, exist_ok=True)
+        (mbox / f"{fixed_sid}.md").write_text("queued before the doa spawn", encoding="utf-8")
+
+        stdin = FakeStdin(raise_on_write=BrokenPipeError())
+        proc = FakeProc(pid=4321, stdin=stdin, poll_returns=1)
+        args = _spawn_args("probe-1", worker_dir, "do the thing")
+
+        with pytest.raises(fleet.TurnLaunchError):
+            fleet.cmd_spawn(
+                args, popen=_fake_popen(proc), get_process_info=lambda pid: None, which=lambda n: "claude.cmd",
+            )
+
+        data = fleet.load_registry()
+        assert "probe-1" not in data["workers"]
+        assert list(mbox.glob("*.claimed.*")) == []
+        assert "queued before the doa spawn" in (mbox / f"{fixed_sid}.md").read_text(encoding="utf-8")
+
+        events = [
+            json.loads(line) for line in fleet.events_path().read_text(encoding="utf-8").splitlines()
+        ]
+        assert any(e["kind"] == "spawn_failed" for e in events)
+
+    def test_spawn_reasserts_working_after_concurrent_recompute_race(self, isolated_home, tmp_path):
+        """F-RACE: between cmd_spawn's create-lock (record written with
+        turn_pid=None) and its post-launch lock, a concurrent `fleet status`
+        can recompute_status(None, ...) -> "dead" and persist it. The
+        post-launch lock must re-assert status="working" so the live worker
+        is not left permanently `dead` (testRace.py in the adversarial
+        review)."""
+        worker_dir = tmp_path / "proj"
+        worker_dir.mkdir()
+
+        def popen(argv, **kwargs):
+            # Simulate the racing `fleet status` landing in the inter-lock
+            # gap: sees the first lock's record (working, turn_pid=None) and
+            # persists a spurious "dead".
+            data = fleet.load_registry()
+            rec = data["workers"]["probe-1"]
+            assert rec["status"] == "working"
+            assert rec["turn_pid"] is None
+            rec["status"] = "dead"
+            fleet.save_registry(data)
+            return FakeProc(pid=555)
+
+        args = _spawn_args("probe-1", worker_dir, "do the thing")
+        rc = fleet.cmd_spawn(args, popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd")
+
+        assert rc == 0
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["status"] == "working"
 
 
 def _seed_record(worker_dir):
@@ -598,6 +775,34 @@ class TestWaitForWorkers:
         )
         assert pending == set()
         assert finished == {"probe-1": "idle", "probe-2": "idle"}
+
+
+# ---------------------------------------------------------------------------
+# F-TEST-CORRUPT: RegistryCorruptError must propagate through the CLI layer
+# to main()'s dedicated handler -- never swallowed, never degraded to an
+# empty registry (spec review Minor 2).
+# ---------------------------------------------------------------------------
+
+class TestRegistryCorruptPropagatesThroughMain:
+    def test_corrupt_registry_reaches_mains_dedicated_handler(self, isolated_home, capsys):
+        state = isolated_home / "state"
+        state.mkdir(parents=True)
+        (state / "fleet.json").write_text("{not json", encoding="utf-8")
+
+        rc = fleet.main(["status"])
+
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "registry error" in err.lower()
+
+    def test_corrupt_registry_raised_not_caught_at_cmd_level(self, isolated_home):
+        state = isolated_home / "state"
+        state.mkdir(parents=True)
+        (state / "fleet.json").write_text("{not json", encoding="utf-8")
+
+        args = fleet.build_parser().parse_args(["status"])
+        with pytest.raises(fleet.RegistryCorruptError):
+            fleet.cmd_status(args)
 
     def test_any_mode_returns_as_soon_as_one_finishes(self, isolated_home):
         sid1, sid2 = str(uuid.uuid4()), str(uuid.uuid4())

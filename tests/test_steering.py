@@ -37,11 +37,15 @@ def _dead_info(pid):
 
 
 class FakeStdin:
-    def __init__(self):
+    def __init__(self, raise_on_write=None):
         self.written = b""
         self.closed = False
+        # F-DOA: if set, write() raises this instead of appending bytes.
+        self._raise_on_write = raise_on_write
 
     def write(self, data):
+        if self._raise_on_write is not None:
+            raise self._raise_on_write
         self.written += data
 
     def close(self):
@@ -49,9 +53,16 @@ class FakeStdin:
 
 
 class FakeProc:
-    def __init__(self, pid):
+    def __init__(self, pid, stdin=None, poll_returns=None):
         self.pid = pid
-        self.stdin = FakeStdin()
+        self.stdin = stdin if stdin is not None else FakeStdin()
+        # F-DOA: poll_returns defaults to None (process never exits --
+        # matches a normal healthy launch); the writer-thread + bounded-
+        # window launcher polls this the same way cmd_spawn does.
+        self._poll_returns = poll_returns
+
+    def poll(self):
+        return self._poll_returns
 
 
 def _fake_popen(proc, calls=None):
@@ -199,6 +210,35 @@ class TestCmdSend:
         fleet.cmd_send(args, get_process_info=_alive_info, which=lambda n: "claude.cmd")
         mailbox_text = (fleet.mailbox_dir() / f"{sid}.md").read_text(encoding="utf-8")
         assert "careful multi-line instruction" in mailbox_text
+
+    def test_idle_resume_over_doa_proc_raises_and_restores_prior_mail(self, isolated_home):
+        """F-DOA/F-BLOCK inheritance: `fleet send` on an idle worker launches
+        a resume turn through the same launch_turn() as cmd_spawn -- a child
+        that dies during init (BrokenPipeError + nonzero poll) must raise
+        TurnLaunchError here too, and the finalize/restore keying (stays in
+        the caller, keyed on return-vs-raise) must still hold: the prior
+        queued mail is restored, not lost."""
+        sid, _ = _seed_worker("probe-1", turn_pid=111, turn_pid_ctime=ALIVE_CTIME, log_result=True)
+        mbox = fleet.mailbox_dir()
+        mbox.mkdir(parents=True, exist_ok=True)
+        (mbox / f"{sid}.md").write_text("earlier queued instruction", encoding="utf-8")
+
+        stdin = FakeStdin(raise_on_write=BrokenPipeError())
+        proc = FakeProc(pid=4321, stdin=stdin, poll_returns=1)
+        args = fleet.build_parser().parse_args(["send", "probe-1", "the new message"])
+
+        with pytest.raises(fleet.TurnLaunchError):
+            fleet.cmd_send(
+                args, popen=_fake_popen(proc), get_process_info=_dead_info, which=lambda n: "claude.cmd",
+            )
+
+        restored = (mbox / f"{sid}.md").read_text(encoding="utf-8")
+        assert "earlier queued instruction" in restored
+        assert list(mbox.glob("*.claimed.*")) == []
+        # the worker record itself is untouched by a failed resume (send
+        # does not create/roll back a registry record the way spawn does).
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["turn_pid"] == 111
 
 
 # ---------------------------------------------------------------------------

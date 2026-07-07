@@ -302,6 +302,37 @@ class TestPidLiveness:
         info = lambda pid: ("notepad.exe", _parse(ctime_iso))
         assert fleet.pid_alive(12345, ctime_iso, get_process_info=info) is False
 
+    # -----------------------------------------------------------------
+    # F-CMD: the npm/claude.cmd shim launches via cmd.exe (whose child is
+    # node), so the recorded pid's image name is "cmd" or "node", not
+    # "claude" -- the accepted image-name set must be broadened to catch
+    # these, while the ctime guard still rejects unrelated processes.
+    # -----------------------------------------------------------------
+
+    def test_cmd_image_name_is_alive(self):
+        ctime_iso = "2026-07-07T12:30:00Z"
+        info = lambda pid: ("cmd", _parse(ctime_iso))
+        assert fleet.pid_alive(12345, ctime_iso, get_process_info=info) is True
+
+    def test_node_image_name_is_alive(self):
+        ctime_iso = "2026-07-07T12:30:00Z"
+        info = lambda pid: ("node", _parse(ctime_iso))
+        assert fleet.pid_alive(12345, ctime_iso, get_process_info=info) is True
+
+    def test_unrelated_image_name_still_not_alive(self):
+        ctime_iso = "2026-07-07T12:30:00Z"
+        info = lambda pid: ("explorer", _parse(ctime_iso))
+        assert fleet.pid_alive(12345, ctime_iso, get_process_info=info) is False
+
+    def test_broadened_name_with_ctime_mismatch_still_not_alive(self):
+        """The ctime +/-2s guard is what actually prevents false positives
+        from the broadened name set (not the substring test) -- it must
+        stay intact for cmd/node too."""
+        ctime_iso = "2026-07-07T12:30:00Z"
+        different = _parse(ctime_iso) + timedelta(seconds=10)
+        info = lambda pid: ("cmd", different)
+        assert fleet.pid_alive(12345, ctime_iso, get_process_info=info) is False
+
     def test_recompute_status_working_when_alive(self, isolated_home, tmp_path):
         ctime_iso = "2026-07-07T12:30:00Z"
         info = lambda pid: ("claude.exe", _parse(ctime_iso))

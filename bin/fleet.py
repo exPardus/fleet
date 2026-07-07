@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -384,10 +385,20 @@ def _parse_iso(ctime_iso: str) -> datetime:
     return datetime.strptime(ctime_iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 
 
+# F-CMD: an npm/claude.cmd install resolves to claude.cmd, which Popen runs
+# via cmd.exe -- the pid Python gets back is cmd.exe's (later re-parented to
+# node), so the recorded image name is "cmd" or "node", never "claude". The
+# recorded-pid + ctime (+/-2s) match below is what actually guards against
+# false positives, not this name test, so broadening it is safe (a reused
+# pid landing on an unrelated cmd/node/claude process within 2s of the
+# recorded ctime is the accepted, vanishingly unlikely residual).
+_ALIVE_IMAGE_NAMES = {"claude", "node", "cmd"}
+
+
 def pid_alive(pid, ctime_iso, get_process_info=None) -> bool:
-    """True iff pid exists, is a claude process, and its creation time matches
-    ctime_iso within +/-2s (PID reuse otherwise misclassifies a dead worker
-    as working -- SPEC §4)."""
+    """True iff pid exists, is a claude/node/cmd process (F-CMD), and its
+    creation time matches ctime_iso within +/-2s (PID reuse otherwise
+    misclassifies a dead worker as working -- SPEC §4)."""
     if pid is None or ctime_iso is None:
         return False
     get_process_info = get_process_info or PLATFORM.get_process_info
@@ -395,7 +406,8 @@ def pid_alive(pid, ctime_iso, get_process_info=None) -> bool:
     if info is None:
         return False
     name, ctime = info
-    if "claude" not in (name or "").lower():
+    name_l = (name or "").lower()
+    if not any(candidate in name_l for candidate in _ALIVE_IMAGE_NAMES):
         return False
     try:
         recorded = _parse_iso(ctime_iso)
@@ -701,9 +713,42 @@ def build_turn_argv(claude_exe: str, sid: str, first: bool, mode: str,
 
 
 class TurnLaunchError(Exception):
-    """Raised when Popen() itself fails to start a turn process. Callers
+    """Raised when Popen() itself fails to start a turn process, OR (F-DOA)
+    when the child dies during init before consuming its prompt. Callers
     (cmd_spawn et al) must restore_mailbox_claim() the pending claim on this
     exception -- the mailbox was never consumed by a live turn."""
+
+
+# F-DOA/F-BLOCK: bounded window, after Popen() returns, during which
+# launch_turn watches for a child that dies before consuming its prompt.
+# Long enough to catch a fast init crash (bad --settings, MCP startup
+# failure, auth/license error, invalid --resume sid); short enough to never
+# meaningfully delay the manager for a healthy launch (the writer thread
+# below typically finishes -- and this window is exited -- almost
+# immediately for any launch that isn't actually wedged).
+LAUNCH_DOA_WINDOW_SECONDS = 3.0
+_DOA_POLL_INTERVAL_SECONDS = 0.05
+
+
+def _write_prompt_and_close_stdin(proc, prompt: str, error_box: list) -> None:
+    """Daemon-thread target (F-BLOCK): write the prompt to proc.stdin and
+    close it, off the calling thread. The Windows anonymous-pipe buffer is
+    ~4 KB and claude only reads the prompt after booting, so a synchronous
+    write on the caller's thread would block fleet spawn/send for the
+    child's entire boot (or indefinitely if it wedges pre-read). A
+    BrokenPipeError here means the child's read end already closed -- i.e.
+    it died before consuming the prompt (F-DOA) -- and is captured into
+    error_box for launch_turn to inspect; any other OSError is best-effort
+    (matches the pre-fix behavior for a hiccup on an already-started
+    process) and is swallowed."""
+    try:
+        if proc.stdin is not None:
+            proc.stdin.write(prompt.encode("utf-8"))
+            proc.stdin.close()
+    except BrokenPipeError as exc:
+        error_box.append(exc)
+    except OSError:
+        pass
 
 
 def launch_turn(name: str, cwd, sid: str, prompt: str, mode: str, first: bool = False,
@@ -713,22 +758,25 @@ def launch_turn(name: str, cwd, sid: str, prompt: str, mode: str, first: bool = 
     open per-worker logs (stdout -> logs/<name>.jsonl, stderr -> a separate
     logs/<name>.err so stderr noise never breaks jsonl parsing), Popen
     PLATFORM.detached_popen_kwargs() (the platform adapter, SPEC §14) with
-    the worker's cwd (the --resume cwd-scope invariant, SPEC §2), write the
-    prompt on stdin and close it (never leave stdin open -- SPEC §6), then
-    query the new process's creation time via get_process_info (defaults to
-    PLATFORM.get_process_info) so the registry can store an unambiguous
-    turn_pid_ctime via ctime_to_iso -- the only serializer callers may use
-    (F5 bridge).
+    the worker's cwd (the --resume cwd-scope invariant, SPEC §2), hand the
+    prompt write-and-close to a daemon thread (F-BLOCK -- never block the
+    calling thread on the child's stdin) and watch for a DOA child within a
+    bounded window (F-DOA), then query the new process's creation time via
+    get_process_info (defaults to PLATFORM.get_process_info) so the registry
+    can store an unambiguous turn_pid_ctime via ctime_to_iso -- the only
+    serializer callers may use (F5 bridge).
 
     Returns {"turn_pid", "turn_pid_ctime", "log_path", "err_log_path"}.
 
-    Raises ClaudeNotFoundError / TurnLaunchError only for failures BEFORE or
-    DURING the Popen() call itself -- callers must restore_mailbox_claim()
-    the pending claim in that case (the launch-sequence contract). Once
-    Popen() has returned a process, everything else here (stdin write,
-    process-info query) is best-effort: the turn is already running, so a
-    hiccup here must never be reported as a launch failure that would cause
-    the caller to re-deliver the same mail into a duplicate turn.
+    Raises ClaudeNotFoundError / TurnLaunchError for failures BEFORE or
+    DURING the Popen() call itself, OR (F-DOA) when the child is detected to
+    have died during init before consuming its prompt -- callers must
+    restore_mailbox_claim() the pending claim in either case (the
+    launch-sequence contract). Once launch_turn returns rather than raises,
+    the turn is considered launched and the caller finalizes the claim and
+    records turn_pid. This finalize-vs-restore decision stays entirely in
+    the caller (cmd_spawn et al), keyed only on whether this function
+    returned or raised.
     """
     claude_exe = resolve_claude_executable(which=which)
     argv = build_turn_argv(claude_exe, sid, first, mode, model=model, max_budget_usd=max_budget_usd)
@@ -755,13 +803,45 @@ def launch_turn(name: str, cwd, sid: str, prompt: str, mode: str, first: bool = 
         out_f.close()
         err_f.close()
 
-    # The process has started -- from here nothing is a launch failure.
-    try:
-        if proc.stdin is not None:
-            proc.stdin.write(prompt.encode("utf-8"))
-            proc.stdin.close()
-    except OSError:
-        pass
+    # Popen() succeeded -- hand the prompt write off to a daemon thread
+    # (F-BLOCK) so a slow/wedged reader can never block this thread, then
+    # watch for a DOA child within a bounded window (F-DOA): either the
+    # writer sees the read end already closed (BrokenPipeError) or poll()
+    # reports a nonzero exit before the window elapses. Both are launch
+    # failures; the caller's except path restores the mailbox claim and
+    # rolls back the registry. A poll() of 0 is a legitimate ultra-fast
+    # completed turn, not a failure. If the writer is still blocked when the
+    # window elapses (a wedged pre-read child that never dies), this is
+    # accepted as success -- irreducible without an unbounded wait, and it
+    # self-surfaces later as a no-progress `working` worker.
+    writer_error: list = []
+    writer = threading.Thread(
+        target=_write_prompt_and_close_stdin, args=(proc, prompt, writer_error), daemon=True,
+    )
+    writer.start()
+
+    deadline = time.monotonic() + LAUNCH_DOA_WINDOW_SECONDS
+    while True:
+        writer.join(_DOA_POLL_INTERVAL_SECONDS)
+        if writer_error:
+            raise TurnLaunchError(
+                f"claude turn for {name!r} closed its stdin before consuming the prompt "
+                f"(child exited during init): {writer_error[0]}"
+            )
+        rc = proc.poll()
+        if rc is not None:
+            if rc != 0:
+                raise TurnLaunchError(
+                    f"claude turn for {name!r} exited with code {rc} during its launch "
+                    "window, before consuming its prompt"
+                )
+            break  # rc == 0: legitimate ultra-fast completed turn -- success
+        if not writer.is_alive():
+            break  # writer finished (wrote+closed, or a best-effort OSError)
+                   # and the process has not exited -- healthy launch
+        if time.monotonic() >= deadline:
+            break  # bounded window elapsed with the writer still blocked --
+                   # accepted as success (see docstring residual above)
 
     get_process_info = get_process_info or PLATFORM.get_process_info
     ctime_iso = None
@@ -937,6 +1017,13 @@ def cmd_spawn(args, popen=subprocess.Popen, get_process_info=None, which=shutil.
         data = load_registry()
         rec = data["workers"].get(args.name)
         if rec is not None:
+            # F-RACE: re-assert "working" here -- a concurrent fleet
+            # status/wait landing in the gap between this lock and the
+            # create-lock above could have recomputed and persisted "dead"
+            # (turn_pid was still None then). The turn has launched by
+            # definition at this point, so this authoritatively repairs
+            # that spurious transition.
+            rec["status"] = "working"
             rec["turn_pid"] = info["turn_pid"]
             rec["turn_pid_ctime"] = info["turn_pid_ctime"]
             rec["turns"] = 1
