@@ -10,6 +10,7 @@ import io
 import json
 import threading
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -636,6 +637,168 @@ class TestCmdSpawn:
         assert rec["status"] == "working"
 
 
+# ---------------------------------------------------------------------------
+# _commit_launched_turn / _report_stranded_turn (post-testing wave, item 1b:
+# stress-report Finding 1, CRITICAL -- the post-launch commit lock in
+# cmd_spawn/cmd_send/cmd_respawn must not strand an already-launched, live
+# turn just because that ONE lock acquisition timed out.)
+# ---------------------------------------------------------------------------
+
+class TestCommitLaunchedTurn:
+    def test_succeeds_immediately_no_retry(self):
+        calls = {"n": 0}
+
+        def commit():
+            calls["n"] += 1
+
+        slept = []
+        assert fleet._commit_launched_turn(commit, sleep=slept.append) is True
+        assert calls["n"] == 1
+        assert slept == []
+
+    def test_retries_with_backoff_then_succeeds(self):
+        calls = {"n": 0}
+
+        def commit():
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise fleet.FleetLockTimeout("simulated")
+
+        slept = []
+        assert fleet._commit_launched_turn(commit, sleep=slept.append) is True
+        assert calls["n"] == 3
+        assert slept == list(fleet.LAUNCH_COMMIT_BACKOFF_SECONDS[:2])
+
+    def test_exhausts_every_attempt_and_returns_false(self):
+        calls = {"n": 0}
+
+        def commit():
+            calls["n"] += 1
+            raise fleet.FleetLockTimeout("simulated")
+
+        slept = []
+        assert fleet._commit_launched_turn(commit, sleep=slept.append) is False
+        assert calls["n"] == fleet.LAUNCH_COMMIT_MAX_ATTEMPTS
+        assert len(slept) == fleet.LAUNCH_COMMIT_MAX_ATTEMPTS - 1
+
+    def test_non_timeout_exception_propagates_without_retry(self):
+        def commit():
+            raise ValueError("some other bug")
+
+        with pytest.raises(ValueError):
+            fleet._commit_launched_turn(commit, sleep=lambda s: None)
+
+
+class TestReportStrandedTurn:
+    def test_prints_loud_message_and_appends_event(self, isolated_home, capsys):
+        info = {"turn_pid": 4242, "turn_pid_ctime": "2026-07-07T12:00:00Z", "log_path": "x.jsonl"}
+        fleet._report_stranded_turn("probe-1", "sid-123", info)
+
+        err = capsys.readouterr().err
+        assert "CRITICAL" in err
+        assert "probe-1" in err
+        assert "4242" in err
+
+        events = [json.loads(line) for line in fleet.events_path().read_text(encoding="utf-8").splitlines()]
+        assert any(e["kind"] == "turn_commit_failed" and e["name"] == "probe-1" for e in events)
+
+    def test_never_raises_even_if_append_event_fails(self, isolated_home, monkeypatch, capsys):
+        def broken_append_event(*a, **kw):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(fleet, "append_event", broken_append_event)
+        info = {"turn_pid": 1, "turn_pid_ctime": None, "log_path": "x.jsonl"}
+        fleet._report_stranded_turn("probe-1", "sid-123", info)  # must not raise
+        assert "CRITICAL" in capsys.readouterr().err
+
+
+class TestCmdSpawnCommitLockRetry:
+    """Integration coverage (through the real cmd_spawn call, not just the
+    helper in isolation) that the post-launch commit lock actually uses
+    _commit_launched_turn/_report_stranded_turn as wired -- a monkeypatched
+    `fleet.fleet_lock` fails the commit-lock acquisitions specifically (the
+    pre-claim lock, called first, is left alone) so this exercises the real
+    call sites, not a fabricated stand-in."""
+
+    def _flaky_fleet_lock(self, fail_calls):
+        """Return a fleet_lock replacement that raises FleetLockTimeout on
+        the 1-indexed call numbers in `fail_calls`, delegating to the real
+        fleet_lock (so registry mutations still actually happen) every
+        other time."""
+        real_fleet_lock = fleet.fleet_lock
+        calls = {"n": 0}
+
+        @contextmanager
+        def flaky(timeout=fleet.LOCK_TIMEOUT_SECONDS):
+            calls["n"] += 1
+            if calls["n"] in fail_calls:
+                raise fleet.FleetLockTimeout("simulated")
+            with real_fleet_lock(timeout=timeout):
+                yield
+
+        return flaky
+
+    def test_retries_past_a_flaky_commit_lock_then_succeeds(self, isolated_home, tmp_path, monkeypatch):
+        worker_dir = tmp_path / "proj"
+        worker_dir.mkdir()
+        proc = FakeProc(pid=42)
+
+        # Call 1 = cmd_spawn's pre-claim/create lock (must succeed). Calls
+        # 2 and 3 = the post-launch commit lock's first two attempts (fail);
+        # call 4 = the third attempt (succeeds).
+        monkeypatch.setattr(fleet, "fleet_lock", self._flaky_fleet_lock({2, 3}))
+
+        slept = []
+        args = _spawn_args("probe-1", worker_dir, "do it")
+        rc = fleet.cmd_spawn(
+            args, popen=_fake_popen(proc), get_process_info=lambda pid: None,
+            which=lambda n: "claude.cmd", sleep=slept.append,
+        )
+
+        assert rc == 0
+        assert slept == list(fleet.LAUNCH_COMMIT_BACKOFF_SECONDS[:2])
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["status"] == "working"
+        assert rec["turn_pid"] == 42
+
+    def test_gives_up_loudly_without_abandoning_the_launched_turn(
+        self, isolated_home, tmp_path, monkeypatch, capsys,
+    ):
+        """If every commit attempt times out, cmd_spawn must NOT raise
+        (the turn genuinely launched -- raising would tempt a retry that
+        launches a SECOND live turn) and must NOT silently succeed either:
+        a loud stderr warning plus a best-effort event, and the registry is
+        left exactly where the pre-claim lock put it (working/turn_pid
+        still None) rather than corrupted."""
+        worker_dir = tmp_path / "proj"
+        worker_dir.mkdir()
+        proc = FakeProc(pid=42)
+
+        # Call 1 = the pre-claim lock (succeeds); every call from #2 onward
+        # (every commit attempt) fails.
+        monkeypatch.setattr(fleet, "fleet_lock", self._flaky_fleet_lock(set(range(2, 30))))
+
+        slept = []
+        args = _spawn_args("probe-1", worker_dir, "do it")
+        rc = fleet.cmd_spawn(
+            args, popen=_fake_popen(proc), get_process_info=lambda pid: None,
+            which=lambda n: "claude.cmd", sleep=slept.append,
+        )
+
+        assert rc == 0  # the turn genuinely launched -- must not raise/report failure
+        assert len(slept) == fleet.LAUNCH_COMMIT_MAX_ATTEMPTS - 1
+        err = capsys.readouterr().err
+        assert "CRITICAL" in err
+        assert "probe-1" in err
+
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["status"] == "working"
+        assert rec["turn_pid"] is None  # never got stamped -- exactly the F1 pre-claim state
+
+        events = [json.loads(line) for line in fleet.events_path().read_text(encoding="utf-8").splitlines()]
+        assert any(e["kind"] == "turn_commit_failed" for e in events)
+
+
 def _seed_record(worker_dir):
     rec = fleet.new_worker_record(str(uuid.uuid4()), worker_dir, "existing task", "dontask")
     return rec
@@ -692,6 +855,21 @@ class TestRecomputeWorker:
         log.write_text('{"type":"result","result":"done"}\n', encoding="utf-8")
         updated = fleet.recompute_worker("probe-1", rec, get_process_info=lambda pid: None)
         assert updated["status"] == "attached"
+
+    def test_expired_launch_claim_demotes_to_dead(self, isolated_home):
+        """Post-testing wave, item 1c: recompute_worker must plumb the
+        record's own last_activity through to recompute_status so an
+        expired "working"/turn_pid=None claim (the fleet CLI died mid-
+        launch, per the zombie-escape-hatch fix) actually demotes here,
+        not just when recompute_status is called directly."""
+        sid = str(uuid.uuid4())
+        rec = fleet.new_worker_record(sid, "C:/x", "task", "dontask")
+        rec["turn_pid"] = None
+        rec["last_activity"] = fleet.ctime_to_iso(
+            datetime.now(timezone.utc) - timedelta(seconds=fleet.LAUNCH_CLAIM_MAX_AGE_SECONDS + 1)
+        )
+        updated = fleet.recompute_worker("probe-1", rec, get_process_info=lambda pid: None)
+        assert updated["status"] == "dead"
 
 
 class TestCmdStatus:
@@ -750,6 +928,57 @@ class TestCmdStatus:
         fleet.cmd_status(args, get_process_info=lambda pid: None)
 
         assert fleet.load_registry()["workers"]["probe-1"]["status"] == "idle"
+
+    def test_probe_does_not_hold_fleet_lock(self, isolated_home):
+        """Post-testing wave, item 1a (stress-report Finding 1, CRITICAL):
+        cmd_status used to recompute (and probe) every worker inside one
+        `with fleet_lock():` block -- get_process_info can cost hundreds of
+        ms per real subprocess call, and several workers'-worth of that
+        while holding the lock starved concurrent commands (including a
+        spawn/send/respawn's own post-launch commit lock, after a real
+        turn had already been launched). Reuses the lock-probe technique
+        from test_resilience.py's test_confirm_delay_does_not_hold_fleet_lock
+        / test_snapshots_registry_without_holding_lock_across_checks: a
+        fake get_process_info that itself tries to acquire fleet_lock. If
+        cmd_status still held the lock across the probe, this nested
+        acquisition would raise FleetLockTimeout."""
+        sid1, sid2 = str(uuid.uuid4()), str(uuid.uuid4())
+        rec1 = fleet.new_worker_record(sid1, "C:/x", "t1", "dontask")
+        rec1["turn_pid"], rec1["turn_pid_ctime"] = 111, "2026-07-07T12:00:00Z"
+        rec2 = fleet.new_worker_record(sid2, "C:/y", "t2", "dontask")
+        rec2["turn_pid"], rec2["turn_pid_ctime"] = 222, "2026-07-07T12:00:00Z"
+        fleet.save_registry({"workers": {"probe-1": rec1, "probe-2": rec2}})
+
+        def probing_get_process_info(pid):
+            with fleet.fleet_lock(timeout=0.5):
+                pass  # must not raise FleetLockTimeout
+            return None  # both workers recompute to dead/idle-ish; not the point of this test
+
+        args = fleet.build_parser().parse_args(["status"])
+        rc = fleet.cmd_status(args, get_process_info=probing_get_process_info)
+        assert rc == 0
+
+    def test_concurrent_mutation_during_probe_is_not_clobbered(self, isolated_home):
+        """A worker mutated by a concurrent command while cmd_status's lock
+        is released for probing must be spared -- cmd_status must not
+        overwrite that concurrent write with a verdict computed against
+        now-stale pre-probe data (mirrors cmd_clean's respawned-meanwhile
+        guard)."""
+        sid = str(uuid.uuid4())
+        rec = fleet.new_worker_record(sid, "C:/x", "t1", "dontask")
+        rec["turn_pid"], rec["turn_pid_ctime"] = 111, "2026-07-07T12:00:00Z"
+        fleet.save_registry({"workers": {"probe-1": rec}})
+
+        def mutating_get_process_info(pid):
+            data = fleet.load_registry()
+            data["workers"]["probe-1"]["turns"] = 999
+            fleet.save_registry(data)
+            return None
+
+        args = fleet.build_parser().parse_args(["status"])
+        rc = fleet.cmd_status(args, get_process_info=mutating_get_process_info)
+        assert rc == 0
+        assert fleet.load_registry()["workers"]["probe-1"]["turns"] == 999
 
 
 # ---------------------------------------------------------------------------
@@ -1006,6 +1235,33 @@ class TestCmdWait:
         )
         assert rc != 0
         assert "timed out" in capsys.readouterr().out
+
+    def test_wait_any_success_with_pending_returns_zero_and_says_still_working(self, isolated_home, capsys):
+        """Post-testing wave, item 4 (live-report scenario 2): `wait --any`
+        returning as soon as ONE worker finishes, with others still
+        pending, is success -- not a timeout. Must exit 0 and must not
+        call the still-running worker "timed out"."""
+        sid_fast = str(uuid.uuid4())
+        rec_fast = fleet.new_worker_record(sid_fast, "C:/x", "t1", "dontask")
+        rec_fast["turn_pid"], rec_fast["turn_pid_ctime"] = 111, "2026-07-07T12:00:00Z"
+        sid_slow = str(uuid.uuid4())
+        rec_slow = fleet.new_worker_record(sid_slow, "C:/y", "t2", "dontask")
+        rec_slow["turn_pid"], rec_slow["turn_pid_ctime"] = 222, "2026-07-07T12:00:00Z"
+        fleet.save_registry({"workers": {"probe-fast": rec_fast, "probe-slow": rec_slow}})
+        log = fleet.logs_dir() / "probe-fast.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text('{"type":"result","result":"done fast"}\n', encoding="utf-8")
+
+        def info(pid):
+            return None if pid == 111 else ("claude.exe", _parse("2026-07-07T12:00:00Z"))
+
+        args = fleet.build_parser().parse_args(["wait", "probe-fast", "probe-slow", "--any"])
+        rc = fleet.cmd_wait(args, get_process_info=info, sleep=lambda s: None, clock=lambda: 0.0)
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "probe-slow: still working" in out
+        assert "timed out" not in out
 
 
 # ---------------------------------------------------------------------------
