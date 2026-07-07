@@ -8,8 +8,26 @@ transcript.
 """
 import json
 import os
+import re
 import sys
 import time
+
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def _valid_session_id(session_id):
+    """Reject anything that isn't a plain, filename-safe token. Guards
+    against path traversal via session_id (e.g. "../secret" or an
+    absolute path) reaching _mailbox_path unvalidated."""
+    if not session_id:
+        return False
+    if ".." in session_id:
+        return False
+    if os.path.basename(session_id) != session_id:
+        return False
+    if not _SESSION_ID_RE.fullmatch(session_id):
+        return False
+    return True
 
 
 def _fleet_home():
@@ -66,7 +84,7 @@ def _read_and_discard(claimed_file):
 def main():
     data = json.load(sys.stdin)
     session_id = data.get("session_id")
-    if not session_id:
+    if not _valid_session_id(session_id):
         return
 
     mailbox_file = _mailbox_path(session_id)
@@ -75,7 +93,7 @@ def main():
         return
 
     contents = _read_and_discard(claimed_file)
-    if not contents:
+    if not contents.strip():
         return
 
     output = {
