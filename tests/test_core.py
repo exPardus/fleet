@@ -441,6 +441,81 @@ class TestPidLiveness:
         )
         assert status == "idle"
 
+    def test_last_line_type_skips_async_hook_response_after_result(self, tmp_path):
+        """SMOKE-A (integration-smoke.md Finding A, live-proven): a real
+        `fleet spawn`/`send` launch's async SessionStart hook response can
+        land AFTER the turn's own result line in the log -- reproduced
+        live on every fresh spawn (SessionStart:startup) and on a
+        send-resumed turn (SessionStart:resume). This fixture mirrors that
+        exact shape (result line, then a hook_response system line)."""
+        info = lambda pid: None
+        log = tmp_path / "w.jsonl"
+        log.write_text(
+            '{"type":"result","subtype":"success","result":"SMOKE_OK_1","total_cost_usd":0.02}\n'
+            '{"type":"system","subtype":"hook_response","hook_name":"SessionStart:startup",'
+            '"output":"","exit_code":0}\n',
+            encoding="utf-8",
+        )
+        assert fleet._last_line_type(log) == "result"
+        assert fleet.recompute_status(1, "2026-07-07T12:30:00Z", log, get_process_info=info) == "idle"
+
+    def test_last_line_type_skips_multiple_trailing_hook_events(self, tmp_path):
+        """Same as above but with several hook_started/hook_response lines
+        trailing the result (the real smoke-steer.jsonl shape had multiple
+        Stop-hook started/response pairs after the result event)."""
+        info = lambda pid: None
+        log = tmp_path / "w.jsonl"
+        log.write_text(
+            '{"type":"result","subtype":"success","result":"DELIVERED_MIDTURN","total_cost_usd":0.02}\n'
+            '{"type":"system","subtype":"hook_started","hook_name":"Stop"}\n'
+            '{"type":"system","subtype":"hook_started","hook_name":"Stop"}\n'
+            '{"type":"system","subtype":"hook_response","hook_name":"Stop","output":"","exit_code":0}\n'
+            '{"type":"system","subtype":"hook_response","hook_name":"Stop","output":"","exit_code":0}\n',
+            encoding="utf-8",
+        )
+        assert fleet._last_line_type(log) == "result"
+        assert fleet.recompute_status(1, "2026-07-07T12:30:00Z", log, get_process_info=info) == "idle"
+
+    def test_last_line_type_still_dead_when_only_system_lines_trail_non_result(self, tmp_path):
+        """Regression guard: skipping system lines must not manufacture an
+        "idle" out of thin air -- if the last substantive event genuinely
+        isn't a result (e.g. the turn crashed mid-tool-call), trailing hook
+        noise must not change that verdict."""
+        info = lambda pid: None
+        log = tmp_path / "w.jsonl"
+        log.write_text(
+            '{"type":"assistant","message":{"content":[{"type":"text","text":"working on it"}]}}\n'
+            '{"type":"system","subtype":"hook_started","hook_name":"PostToolUse:Bash"}\n'
+            '{"type":"system","subtype":"hook_response","hook_name":"PostToolUse:Bash",'
+            '"output":"","exit_code":0}\n',
+            encoding="utf-8",
+        )
+        assert fleet._last_line_type(log) == "assistant"
+        assert fleet.recompute_status(1, "2026-07-07T12:30:00Z", log, get_process_info=info) == "dead"
+
+    def test_recompute_status_dead_is_sticky_even_with_trailing_result(self, tmp_path):
+        """SMOKE-D (integration-smoke.md Finding D, live-proven): a "dead"
+        status set by `fleet kill` must not be resurrected to "idle" by a
+        subsequent recompute just because the log tail legitimately ends
+        on a result event -- live-reproduced via kill immediately followed
+        by clean/status flipping a killed worker straight back to idle,
+        making kill non-terminal for any worker whose last turn finished
+        cleanly (the common case)."""
+        info = lambda pid: None
+        log = tmp_path / "w.jsonl"
+        log.write_text('{"type":"result","subtype":"success","result":"done"}\n', encoding="utf-8")
+        status = fleet.recompute_status(
+            None, None, log, current_status="dead", get_process_info=info
+        )
+        assert status == "dead"
+
+    def test_recompute_status_dead_is_sticky_with_no_pid_argument(self, tmp_path):
+        """Same guard, but exercised with a dead-worker-shaped call (no pid
+        at all, as cmd_kill leaves turn_pid=None) to pin the sticky check
+        runs before any pid_alive probing."""
+        log = tmp_path / "missing.jsonl"
+        assert fleet.recompute_status(None, None, log, current_status="dead") == "dead"
+
 
 # ---------------------------------------------------------------------------
 # Stream-jsonl parsing (tail_events)

@@ -561,6 +561,40 @@ class TestCmdAttach:
         rec = fleet.load_registry()["workers"]["probe-1"]
         assert rec["status"] == "attached"
 
+    def test_force_refuses_when_reclaimed_between_interrupt_and_relock(self, isolated_home, monkeypatch):
+        """F1 (final-review.md): _interrupt_worker's "killed" branch commits
+        idle and releases ITS OWN lock before cmd_attach re-locks to claim
+        "attached" -- in real production that gap is wide enough (Get-
+        Process/taskkill take hundreds of ms) for a concurrent `fleet send`
+        to observe idle and pre-claim status="working"/turn_pid=None for a
+        brand-new launch first. Simulate the race by having the (faked)
+        interrupt path leave that concurrent pre-claim in the registry
+        instead of idle before reporting "killed" back to cmd_attach: the
+        re-lock must refuse loudly instead of stamping "attached" over it
+        (which would leave two live claudes on one session)."""
+        _seed_worker("probe-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME, cwd="C:/proj")
+
+        def fake_interrupt_worker(name, get_process_info=None, kill_process_tree=None):
+            data = fleet.load_registry()
+            rec = data["workers"][name]
+            rec["status"] = "working"
+            rec["turn_pid"] = None  # the concurrent send's own launch-in-flight claim
+            fleet.save_registry(data)
+            return "killed"
+
+        monkeypatch.setattr(fleet, "_interrupt_worker", fake_interrupt_worker)
+
+        def popen(*a, **kw):
+            raise AssertionError("must not launch a terminal over a concurrently reclaimed worker")
+
+        args = fleet.build_parser().parse_args(["attach", "probe-1", "--force"])
+        with pytest.raises(fleet.FleetCliError, match="claimed concurrently"):
+            fleet.cmd_attach(args, popen=popen, get_process_info=_alive_info, which=lambda n: "wt.exe")
+
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["status"] == "working"
+        assert rec["turn_pid"] is None
+
     def test_attach_claims_attached_before_popen_called(self, isolated_home):
         """F1 required test (d): the "attached" claim must be committed
         under the decision lock BEFORE popen launches the terminal."""
