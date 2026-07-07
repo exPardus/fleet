@@ -4,6 +4,7 @@ No real claude process, no real state/ dirs are touched: every test
 monkeypatches the module-global fleet.FLEET_HOME to a pytest tmp_path.
 """
 import json
+import os
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -41,6 +42,33 @@ class TestPaths:
     def test_default_fleet_home_is_repo_root(self, monkeypatch):
         # Without monkeypatching, FLEET_HOME must be derived from __file__:
         # parent.parent of bin/fleet.py == repo root.
+        monkeypatch.delenv("FLEET_HOME", raising=False)
+        import importlib
+        importlib.reload(fleet)
+        assert fleet.FLEET_HOME == fleet.Path(fleet.__file__).resolve().parent.parent
+
+    def test_template_and_instance_settings_paths_derive_from_fleet_home(self, isolated_home):
+        assert fleet.template_settings_path() == isolated_home / "worker-settings.template.json"
+        assert fleet.instance_settings_path() == isolated_home / "state" / "worker-settings.json"
+
+
+class TestFleetHomeEnvOverride:
+    """SPEC §14: env var FLEET_HOME wins over the __file__-derived default,
+    read once at import into the module-global (same discipline as
+    bin/hooks/*.py's own _fleet_home()). Reloads the module to exercise the
+    import-time read; the next test's isolated_home autouse fixture
+    monkeypatches FLEET_HOME again regardless, so no explicit restore is
+    needed here (matches the existing test_default_fleet_home_is_repo_root
+    pattern above)."""
+
+    def test_env_var_wins_when_set(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("FLEET_HOME", str(tmp_path))
+        import importlib
+        importlib.reload(fleet)
+        assert fleet.FLEET_HOME == tmp_path
+
+    def test_env_var_absent_falls_back_to_file_derived_default(self, monkeypatch):
+        monkeypatch.delenv("FLEET_HOME", raising=False)
         import importlib
         importlib.reload(fleet)
         assert fleet.FLEET_HOME == fleet.Path(fleet.__file__).resolve().parent.parent
@@ -650,6 +678,98 @@ class TestComposePrompt:
         journal.write_bytes(b"## goal\ndo the thing \xff\xfe invalid bytes\n")
         prompt, claim = fleet.compose_prompt("probe-1", "C:/x", "task text", "sid-1", journal_path=journal)
         assert "do the thing" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Portability: worker-settings template render + instance freshness (SPEC §14)
+# ---------------------------------------------------------------------------
+
+class TestRenderWorkerSettingsTemplate:
+    """Golden tests for the pure `fleet init` render step: {{PYTHON}} and
+    {{FLEET_HOME}} substituted with absolute, forward-slash paths; any
+    leftover {{...}} placeholder is a loud ValueError, never a silently
+    broken settings file."""
+
+    _TEMPLATE = """{
+  "hooks": {
+    "PostToolUse": [{ "hooks": [{ "type": "command",
+      "command": "{{PYTHON}} {{FLEET_HOME}}/bin/hooks/posttooluse_mailbox.py" }] }]
+  }
+}
+"""
+
+    def test_renders_python_and_fleet_home_with_forward_slashes(self, tmp_path):
+        python_exe = r"C:\Python313\python.exe"
+        rendered = fleet.render_worker_settings_template(self._TEMPLATE, python_exe, tmp_path)
+
+        assert "{{" not in rendered  # no unrendered placeholder markers remain
+        assert "\\" not in rendered  # no backslash leaked into the rendered command
+        assert fleet.Path(python_exe).resolve().as_posix() in rendered
+        assert fleet.Path(tmp_path).resolve().as_posix() in rendered
+        json.loads(rendered)  # still valid JSON after substitution
+
+    def test_renders_using_sys_executable(self, tmp_path):
+        import sys
+        rendered = fleet.render_worker_settings_template(self._TEMPLATE, sys.executable, tmp_path)
+        assert fleet.Path(sys.executable).resolve().as_posix() in rendered
+
+    def test_raises_on_leftover_placeholder(self, tmp_path):
+        template = '{"x": "{{PYTHON}} {{NOT_A_REAL_PLACEHOLDER}}"}'
+        with pytest.raises(ValueError):
+            fleet.render_worker_settings_template(template, "python.exe", tmp_path)
+
+    def test_no_placeholders_is_a_noop_passthrough(self, tmp_path):
+        template = '{"hooks": {}}'
+        assert fleet.render_worker_settings_template(template, "python.exe", tmp_path) == template
+
+
+class TestInstanceFreshnessInfo:
+    """Pure read-only probe for Task 5's `fleet doctor` freshness check
+    (not wired into any command in this task) -- template mtime vs
+    instance mtime + a missing flag."""
+
+    def test_missing_instance_is_stale(self, isolated_home):
+        info = fleet.instance_freshness_info()
+        assert info["instance_exists"] is False
+        assert info["stale"] is True
+
+    def test_missing_template_with_instance_present_is_not_stale(self, isolated_home):
+        instance = fleet.instance_settings_path()
+        instance.parent.mkdir(parents=True, exist_ok=True)
+        instance.write_text("{}", encoding="utf-8")
+
+        info = fleet.instance_freshness_info()
+        assert info["template_exists"] is False
+        assert info["instance_exists"] is True
+        assert info["stale"] is False
+
+    def test_instance_newer_than_template_is_fresh(self, isolated_home):
+        template = fleet.template_settings_path()
+        template.parent.mkdir(parents=True, exist_ok=True)
+        template.write_text("{}", encoding="utf-8")
+        instance = fleet.instance_settings_path()
+        instance.parent.mkdir(parents=True, exist_ok=True)
+        instance.write_text("{}", encoding="utf-8")
+        # Explicit mtimes (not a real-clock sleep) -- deterministic, immune
+        # to filesystem timestamp-resolution flakiness.
+        os.utime(template, (1_000_000, 1_000_000))
+        os.utime(instance, (2_000_000, 2_000_000))
+
+        info = fleet.instance_freshness_info()
+        assert info["stale"] is False
+
+    def test_template_newer_than_instance_is_stale(self, isolated_home):
+        template = fleet.template_settings_path()
+        template.parent.mkdir(parents=True, exist_ok=True)
+        template.write_text("{}", encoding="utf-8")
+        instance = fleet.instance_settings_path()
+        instance.parent.mkdir(parents=True, exist_ok=True)
+        instance.write_text("{}", encoding="utf-8")
+        os.utime(instance, (1_000_000, 1_000_000))
+        os.utime(template, (2_000_000, 2_000_000))
+
+        info = fleet.instance_freshness_info()
+        assert info["stale"] is True
 
 
 # ---------------------------------------------------------------------------
