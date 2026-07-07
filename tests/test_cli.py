@@ -604,8 +604,16 @@ class TestCmdStatus:
         assert "probe-2" in out
 
     def test_status_flags_idle_with_pending_mail(self, isolated_home, capsys):
+        """Fix wave 1 (F1): a "working" record with turn_pid=None is now the
+        pre-claim launch-in-flight window and recompute_status refuses to
+        demote it (a raw new_worker_record() with turn_pid never stamped
+        would otherwise be indistinguishable from a real in-flight launch).
+        Use a real, dead turn_pid here so the ordinary (non-guarded)
+        liveness path demotes it to idle."""
         sid = str(uuid.uuid4())
         rec = fleet.new_worker_record(sid, "C:/x", "task", "dontask")
+        rec["turn_pid"] = 111
+        rec["turn_pid_ctime"] = "2026-07-07T12:00:00Z"
         log = fleet.logs_dir() / "probe-1.jsonl"
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text('{"type":"result","result":"done"}\n', encoding="utf-8")
