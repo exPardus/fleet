@@ -523,6 +523,26 @@ class TestCmdSpawn:
         data = fleet.load_registry()
         assert "probe-1" not in data["workers"]
 
+    def test_spawn_rolls_back_on_keyboard_interrupt(self, isolated_home, tmp_path):
+        """Task-4-verdict re-review Fix 2: cmd_spawn's rollback has the same
+        shape as cmd_send/cmd_attach's, so it must also catch BaseException
+        -- a Ctrl-C landing during launch must still pop the just-created
+        registry record and restore the drained mailbox claim, not leave a
+        ghost "working"+turn_pid is None record pinned forever by
+        recompute_status's launch-in-flight guard."""
+        worker_dir = tmp_path / "proj"
+        worker_dir.mkdir()
+
+        def popen(*a, **kw):
+            raise KeyboardInterrupt()
+
+        args = _spawn_args("probe-1", worker_dir, "do the thing")
+        with pytest.raises(KeyboardInterrupt):
+            fleet.cmd_spawn(args, popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd")
+
+        data = fleet.load_registry()
+        assert "probe-1" not in data["workers"]
+
     def test_spawn_launch_failure_restores_mail_for_next_launch(self, isolated_home, tmp_path, monkeypatch):
         """F-TEST-MAIL (strengthened): pin the sid cmd_spawn will generate
         (monkeypatch the uuid4 it calls), pre-seed mailbox/<sid>.md with
