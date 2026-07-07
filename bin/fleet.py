@@ -2757,23 +2757,52 @@ def cmd_clean(args, get_process_info=None, sleep=time.sleep) -> int:
     re-checked against its pre-sleep snapshot -- if a concurrent command
     respawned (or otherwise mutated) it while the lock was released, that
     candidate is spared untouched rather than deleted or overwritten with
-    a verdict computed against now-stale data."""
+    a verdict computed against now-stale data.
+
+    Stress residual, Finding N1 (re-review of 550df0a): review wave 5b
+    above only moved the CONFIRM DELAY's re-probe outside the lock -- the
+    FIRST pass still called recompute_worker's real probe (get_process_info,
+    ~0.3s each against a "working" pid) for every worker inside the single
+    `with fleet_lock()` block, the same recompute-all-under-lock shape that
+    made `fleet status` a stress-critical (see cmd_status's docstring
+    above): a concurrent `clean` over a large registry could hold the lock
+    for seconds and strand an in-flight spawn/send/respawn commit. Fixed by
+    applying the identical snapshot -> probe (no lock held) -> re-acquire
+    -> conditional-commit shape cmd_status uses: snapshot every named
+    record under the lock, release it, run every first-pass
+    recompute_worker probe with no lock held at all, then re-acquire once
+    to merge verdicts -- but only for records that still match their
+    pre-probe snapshot exactly (full-dict equality), sparing anything a
+    concurrent command mutated while the lock was released rather than
+    clobbering it with a verdict computed against now-stale data."""
     removed = []  # list of (name, sid)
     pending_confirm = []  # (name, before) -- looked dead on pass 1, lock held
-    changed = False
     with fleet_lock():
         data = load_registry()
         names = sorted(data["workers"])
+        before = {n: data["workers"][n] for n in names}
+
+    # Probe every worker's liveness with NO lock held (see docstring above)
+    # -- this is the (potentially several-seconds-total) expensive part.
+    after = {n: recompute_worker(n, before[n], get_process_info=get_process_info) for n in names}
+
+    changed = False
+    with fleet_lock():
+        data = load_registry()
         for n in names:
-            before = data["workers"][n]
-            after = recompute_worker(n, before, get_process_info=get_process_info)
-            if after["status"] == "dead":
-                pending_confirm.append((n, before))
+            current = data["workers"].get(n)
+            if current is None or current != before[n]:
+                # Removed or mutated by a concurrent command while our lock
+                # was released for probing -- spare it, don't act on a
+                # verdict computed against now-stale pre-probe data.
+                continue
+            if after[n]["status"] == "dead":
+                pending_confirm.append((n, before[n]))
             else:
-                if after["status"] != before["status"]:
-                    append_event("status_changed", n, old=before["status"], new=after["status"])
+                if after[n]["status"] != current["status"]:
+                    append_event("status_changed", n, old=current["status"], new=after[n]["status"])
                     changed = True
-                data["workers"][n] = after
+                data["workers"][n] = after[n]
         if changed:
             save_registry(data)
 
