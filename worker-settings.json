@@ -1,0 +1,8 @@
+{
+  "hooks": {
+    "PostToolUse": [{ "hooks": [{ "type": "command",
+      "command": "py -3.13 C:/proga/claude-fleet/bin/hooks/posttooluse_mailbox.py" }] }],
+    "Stop": [{ "hooks": [{ "type": "command",
+      "command": "py -3.13 C:/proga/claude-fleet/bin/hooks/stop_mailbox.py" }] }]
+  }
+}
