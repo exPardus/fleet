@@ -221,6 +221,40 @@ class TestCmdRespawn:
         assert rec["turns"] == 1
         assert rec["cost_usd"] == 2.5  # cumulative, carried over
 
+    def test_force_refuses_when_reclaimed_between_interrupt_and_relock(self, isolated_home, monkeypatch):
+        """F1 (final-review.md): mirrors cmd_attach's own regression test --
+        the window between _interrupt_worker's idle-commit (releasing its
+        own lock) and respawn's re-lock is exactly where a concurrent
+        `fleet send` can pre-claim status="working"/turn_pid=None for a
+        brand-new launch. Simulate it by having the (faked) interrupt path
+        leave that concurrent pre-claim instead of idle before reporting
+        "killed": respawn's re-lock must refuse instead of overwriting the
+        record with a new-sid record (which would orphan the send-launched
+        turn against the old sid while the registry tracks the new one)."""
+        old_sid, _ = _seed_worker("probe-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
+
+        def fake_interrupt_worker(name, get_process_info=None, kill_process_tree=None):
+            data = fleet.load_registry()
+            rec = data["workers"][name]
+            rec["status"] = "working"
+            rec["turn_pid"] = None  # the concurrent send's own launch-in-flight claim
+            fleet.save_registry(data)
+            return "killed"
+
+        monkeypatch.setattr(fleet, "_interrupt_worker", fake_interrupt_worker)
+
+        def popen(*a, **kw):
+            raise AssertionError("must not launch over a concurrently reclaimed worker")
+
+        args = fleet.build_parser().parse_args(["respawn", "probe-1", "--force"])
+        with pytest.raises(fleet.FleetCliError, match="claimed concurrently"):
+            fleet.cmd_respawn(args, popen=popen, get_process_info=_alive_info, which=lambda n: "claude.cmd")
+
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["status"] == "working"
+        assert rec["turn_pid"] is None
+        assert rec["session_id"] == old_sid  # never replaced
+
     def test_attached_worker_refuses_respawn_without_force(self, isolated_home):
         """Finding 5 (task-5 adversarial review / task-5-review.md
         Important #2): a live human TUI owns an attached worker's name --
@@ -556,6 +590,49 @@ class TestCostBaseline:
         updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info)
         assert updated["cost_usd"] == pytest.approx(0.7)
 
+    def test_sums_multiple_result_events_in_one_session(self, isolated_home):
+        """SMOKE-B (integration-smoke.md Finding B, live-proven): `claude`
+        reports cost PER-INVOCATION on `--resume` turns, not cumulatively --
+        observed live where a second send-resumed turn's own result event
+        reported a SMALLER total_cost_usd than the first. recompute_worker
+        used to take only the LAST result event's cost, so a multi-turn
+        `send` sequence within one session (cost_baseline stays 0.0 there,
+        it's only set on respawn) would drop the displayed total down to
+        just the latest turn instead of the session's real running total.
+        Two result events (0.03 + 0.01) in the current log must sum to
+        0.04."""
+        _seed_worker("probe-1", status="idle", log_result=False, cost_usd=0.0)
+        log = fleet.logs_dir() / "probe-1.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(
+            '{"type":"result","result":"turn one","total_cost_usd":0.03}\n'
+            '{"type":"system","subtype":"hook_response","hook_name":"SessionStart:resume"}\n'
+            '{"type":"result","result":"turn two","total_cost_usd":0.01}\n',
+            encoding="utf-8",
+        )
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info)
+        assert updated["cost_usd"] == pytest.approx(0.04)
+
+    def test_sums_multiple_result_events_plus_baseline(self, isolated_home):
+        """Same as above, but with a nonzero cost_baseline carried from a
+        prior respawn -- the sum must still add on top of the baseline,
+        not replace it."""
+        _seed_worker("probe-1", status="idle", log_result=False, cost_usd=2.5)
+        data = fleet.load_registry()
+        data["workers"]["probe-1"]["cost_baseline"] = 2.5
+        fleet.save_registry(data)
+        log = fleet.logs_dir() / "probe-1.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(
+            '{"type":"result","result":"turn one","total_cost_usd":0.03}\n'
+            '{"type":"result","result":"turn two","total_cost_usd":0.01}\n',
+            encoding="utf-8",
+        )
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info)
+        assert updated["cost_usd"] == pytest.approx(2.54)
+
 
 # ---------------------------------------------------------------------------
 # fleet kill
@@ -566,6 +643,29 @@ class TestCmdKill:
         args = fleet.build_parser().parse_args(["kill", "nope"])
         with pytest.raises(fleet.FleetCliError):
             fleet.cmd_kill(args, get_process_info=_dead_info)
+
+    def test_refuses_during_launch_in_flight(self, isolated_home):
+        """F2 (final-review.md): attach --force and respawn --force both
+        refuse on a launch-in-flight claim (status=="working", turn_pid is
+        None -- a spawn/send/attach/respawn pre-claim mid-launch, no real
+        pid yet to verify-kill); kill lacked this guard. Before the fix,
+        kill would snapshot pid=None, pid_alive(None)=False -> "not_running"
+        on both probes, and unconditionally mark the worker dead -- opening
+        a window for a concurrent `fleet clean` to delete the logs/mailbox
+        of a live, just-launched worker (the recompute launch-in-flight
+        guard no longer protects a dead+turn_pid=None record)."""
+        _seed_worker("probe-1", status="working", turn_pid=None)
+
+        def kill_process_tree(pid):
+            raise AssertionError("must not attempt a kill with no real pid yet")
+
+        args = fleet.build_parser().parse_args(["kill", "probe-1"])
+        with pytest.raises(fleet.FleetCliError, match="launch in flight"):
+            fleet.cmd_kill(args, get_process_info=_dead_info, kill_process_tree=kill_process_tree)
+
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["status"] == "working"
+        assert rec["turn_pid"] is None
 
     def test_kills_running_turn_and_marks_dead(self, isolated_home, capsys):
         _seed_worker("probe-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
