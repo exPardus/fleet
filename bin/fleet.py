@@ -401,6 +401,16 @@ def new_worker_record(session_id, cwd, task, mode, model=None, created=None) -> 
         "attached_since": None,
         "turns": 0,
         "cost_usd": 0.0,
+        # Task 5 fix wave, Finding 4 (task-5 adversarial review): the
+        # amount spent in sessions PRIOR to this one -- recompute_worker
+        # adds this to the current (rotated-fresh) log's own trailing
+        # result cost so cost_usd stays cumulative across a respawn's
+        # fresh session_id/log instead of being overwritten by it. 0.0
+        # for a brand-new worker (spawn); cmd_respawn sets it to the
+        # carried-forward cost_usd for a respawned one. Missing on old
+        # registry records (pre-this-field) is tolerated -- .get(...,
+        # 0.0) everywhere it's read.
+        "cost_baseline": 0.0,
         "last_activity": created,
     }
 
@@ -491,7 +501,30 @@ def _read_tail_lines(log_path) -> list:
                 f.seek(size - _TAIL_READ_BYTES)
                 chunk = f.read()
                 nl = chunk.find(b"\n")
-                chunk = chunk[nl + 1:] if nl != -1 else b""
+                if nl == -1:
+                    # Task 5 fix wave, Finding 2 (task-5 adversarial
+                    # review): no newline anywhere in the trailing
+                    # window -- an oversized final line with no
+                    # terminator yet (still being written), or one line
+                    # alone spans the whole window. Discarding it as a
+                    # "partial leading fragment" would silently drop
+                    # real content; fall back to the whole file.
+                    f.seek(0)
+                    chunk = f.read()
+                else:
+                    chunk = chunk[nl + 1:]
+                    if chunk == b"":
+                        # The only newline in the window was the
+                        # oversized trailing line's OWN terminator, so
+                        # "discard up to and including the first
+                        # newline" would drop that entire line -- a real
+                        # single stream-json event (e.g. a big result
+                        # payload) can exceed 64KB. Fall back to the
+                        # whole file so it is never silently lost;
+                        # parser semantics are unchanged for every other
+                        # shape, only this one edge case is corrected.
+                        f.seek(0)
+                        chunk = f.read()
             else:
                 chunk = f.read()
     except OSError:
@@ -998,7 +1031,15 @@ def recompute_worker(name: str, record: dict, get_process_info=None) -> dict:
     """Return an updated copy of `record` with status/cost_usd/last_activity
     refreshed from live PID + log-tail state. Never mutates other fields
     (turns, task, mode, ...); never clobbers an "attached" status
-    (recompute_status's own guard, F7)."""
+    (recompute_status's own guard, F7).
+
+    cost_usd = cost_baseline + the current log's own trailing result cost
+    (Task 5 fix wave, Finding 4): the rotated-fresh log after a respawn
+    only ever reports THIS session's own total, so without adding back
+    the prior-sessions baseline, the first post-respawn poll would
+    silently reset the worker's lifetime cost_usd down to the new
+    session's (smaller) total. cost_baseline defaults to 0.0 for records
+    that predate this field."""
     log_path = logs_dir() / f"{name}.jsonl"
     updated = dict(record)
     updated["status"] = recompute_status(
@@ -1008,7 +1049,7 @@ def recompute_worker(name: str, record: dict, get_process_info=None) -> dict:
     entries = tail_events(log_path, n=50)
     results = [e for e in entries if e.get("kind") == "result"]
     if results and results[-1].get("cost_usd") is not None:
-        updated["cost_usd"] = results[-1]["cost_usd"]
+        updated["cost_usd"] = record.get("cost_baseline", 0.0) + results[-1]["cost_usd"]
     try:
         mtime = log_path.stat().st_mtime
         updated["last_activity"] = ctime_to_iso(datetime.fromtimestamp(mtime, tz=timezone.utc))
@@ -1883,6 +1924,18 @@ def cmd_release(args) -> int:
 # §11) -- Task 5 / M4.
 # ---------------------------------------------------------------------------
 
+# Task 5 fix wave, Finding 3 (task-5 adversarial review): a single
+# get_process_info probe returning "not alive" can be a transient failure
+# (get_process_info returns None on ANY exception, including a slow
+# PowerShell timeout under serial multi-worker probing) rather than a
+# genuinely dead process. `fleet kill`'s not-running verdict and `fleet
+# clean`'s dead-worker deletion are both hard-to-reverse (kill permanently
+# retires the registry entry; clean deletes the logs/mailbox/journal
+# outright), so both re-check after this delay and only finalize when
+# BOTH probes agree.
+_DEAD_CONFIRM_DELAY_SECONDS = 0.5
+
+
 def _rotate_worker_log(name: str) -> None:
     """Rename logs/<name>.jsonl -> logs/<name>.jsonl.1 (and the matching
     .err -> .err.1), overwriting any existing .1 (SPEC §5 respawn row /
@@ -1898,6 +1951,34 @@ def _rotate_worker_log(name: str) -> None:
         src = d / f"{name}{suffix}"
         if src.exists():
             os.replace(str(src), str(d / f"{name}{suffix}.1"))
+
+
+def _unrotate_worker_log(name: str) -> None:
+    """Undo _rotate_worker_log: move logs/<name>.jsonl.1 back over
+    logs/<name>.jsonl (and the matching .err pair), overwriting whatever
+    is currently there. Missing .1 files are tolerated (nothing was
+    rotated, or a previous un-rotate already ran) -- a silent no-op, not
+    an error.
+
+    Task 5 fix wave, Finding 1 (task-5 adversarial review): cmd_respawn's
+    launch-failure rollback restores the registry to the pre-respawn
+    snapshot but, without this, never restores the LOG file --
+    _rotate_worker_log already ran unconditionally before the failed
+    launch, and launch_turn's append-mode open((re-)creates an empty
+    logs/<name>.jsonl before the Popen that then raised. Every log-reading
+    command (`peek`/`result`/`status` recompute) is keyed by name, so a
+    rolled-back-but-not-un-rotated worker would look "dead" (empty log,
+    no trailing result) despite the registry correctly reporting its old
+    idle/dead state, and a SECOND failed or successful respawn would then
+    rotate that empty file over the only surviving copy of the real
+    transcript in .1, destroying it. os.replace atomically overwrites the
+    empty stub launch_turn created, so the restored worker's log path
+    points at its real history again."""
+    d = logs_dir()
+    for suffix in (".jsonl", ".err"):
+        rotated = d / f"{name}{suffix}.1"
+        if rotated.exists():
+            os.replace(str(rotated), str(d / f"{name}{suffix}"))
 
 
 def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shutil.which,
@@ -1925,10 +2006,19 @@ def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shuti
     attach mid-launch) also refuses loudly under --force, same as
     cmd_attach's Fix-1 guard -- there is no real pid yet to verify-kill.
     An "attached" worker is NOT treated as "turn running" (attach never
-    sets turn_pid) -- respawn proceeds directly; the old attached TUI (if
-    any) is simply orphaned from the registry, a documented residual (the
-    operator closes it manually; nothing in fleet can revoke a detached
-    terminal).
+    sets turn_pid) -- but it IS a live human TUI holding the name, so (Task
+    5 fix wave, Finding 5 / task-5-review.md Important #2) respawn mirrors
+    cmd_attach's own working-state guard for it: without --force it refuses
+    loudly (FleetCliError, no mutation beyond the recompute persist) rather
+    than silently reassigning the name out from under the operator's
+    `claude --resume` terminal and rerouting their queued mail into a fresh
+    session they never see. With --force it proceeds directly (no kill
+    needed -- there is no turn_pid to interrupt), and the takeover releases
+    the attach as a side effect: new_worker_record always starts
+    attached_since=None, so the old attached TUI is simply orphaned from
+    the registry once the new record replaces it -- a documented residual
+    (the operator closes the stale terminal manually; nothing in fleet can
+    revoke a detached terminal).
 
     cost_usd is carried over from the pre-respawn snapshot, NOT reset to
     0.0: it tracks total money spent on the NAMED worker across its whole
@@ -1936,6 +2026,12 @@ def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shuti
     session_id, fresh turns counter, fresh transcript), not a billing
     reset. turns resets to 0 (then to 1 once the new turn actually
     launches, mirroring cmd_spawn's own 0->1 transition for a first turn).
+    The carried cost_usd is also stamped onto the new record's
+    cost_baseline (Task 5 fix wave, Finding 4) -- recompute_worker adds
+    this baseline to the rotated-fresh log's own trailing result cost,
+    so the very next status/wait/send poll after the new session's first
+    turn does not clobber the carried total down to just that turn's own
+    cost.
 
     The log is rotated (_rotate_worker_log) once the new record is
     committed, before compose_prompt/launch_turn -- unconditionally,
@@ -1994,14 +2090,29 @@ def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shuti
             save_registry(data)
             needs_force_interrupt = True
             prior_snapshot = None  # filled in below, after the verified kill
+        elif after["status"] == "attached" and not args.force:
+            # Finding 5 (task-5 adversarial review / task-5-review.md
+            # Important #2): mirror cmd_attach's own working-state guard
+            # -- a live human TUI owns this name, refuse instead of
+            # silently stealing it and rerouting the drained mailbox into
+            # a session the operator never sees.
+            data["workers"][args.name] = after
+            save_registry(data)
+            raise FleetCliError(
+                f"{args.name}: worker is attached -- release it first "
+                f"(`fleet release {args.name}`) or pass --force to take it over"
+            )
         else:
-            # Not actively running (idle/dead/attached) -- pre-claim the
-            # NEW record right here, atomically with the decision (F1
-            # protocol): status="working"/turn_pid=None until the launch
-            # below stamps a real pid.
+            # Not actively running (idle/dead), or attached with --force
+            # (the takeover releases the attach as a side effect --
+            # new_worker_record always starts attached_since=None) --
+            # pre-claim the NEW record right here, atomically with the
+            # decision (F1 protocol): status="working"/turn_pid=None
+            # until the launch below stamps a real pid.
             prior_snapshot = after
             new_record = new_worker_record(new_sid, cwd, task_for_record, mode, model=model)
             new_record["cost_usd"] = cost_usd  # cumulative -- see docstring
+            new_record["cost_baseline"] = cost_usd  # Finding 4 -- see docstring
             data["workers"][args.name] = new_record
             save_registry(data)
             append_event("respawned", args.name, old_session_id=old_sid, new_session_id=new_sid)
@@ -2022,6 +2133,7 @@ def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shuti
             prior_snapshot = dict(data["workers"][args.name])
             new_record = new_worker_record(new_sid, cwd, task_for_record, mode, model=model)
             new_record["cost_usd"] = cost_usd  # cumulative -- see docstring
+            new_record["cost_baseline"] = cost_usd  # Finding 4 -- see docstring
             data["workers"][args.name] = new_record
             save_registry(data)
             append_event("respawned", args.name, old_session_id=old_sid, new_session_id=new_sid)
@@ -2050,6 +2162,13 @@ def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shuti
             r = data["workers"].get(args.name)
             if (r is not None and r.get("session_id") == new_sid
                     and r.get("status") == "working" and r.get("turn_pid") is None):
+                # Finding 1 (task-5 adversarial review): un-rotate the log
+                # BEFORE restoring the registry snapshot -- the restored
+                # record points at old_sid's history, which the
+                # unconditional pre-launch rotation moved to
+                # logs/<name>.jsonl.1 and launch_turn's failed-launch
+                # append-open then stubbed out with an empty file.
+                _unrotate_worker_log(args.name)
                 data["workers"][args.name] = prior_snapshot
                 save_registry(data)
                 append_event(
@@ -2074,7 +2193,7 @@ def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shuti
     return 0
 
 
-def cmd_kill(args, get_process_info=None, kill_process_tree=None) -> int:
+def cmd_kill(args, get_process_info=None, kill_process_tree=None, sleep=time.sleep) -> int:
     """`fleet kill <name>` (SPEC §5): interrupt the turn if one is alive
     (reusing _interrupt_worker's verified-kill contract), then
     unconditionally mark the worker "dead" and append a "killed" event --
@@ -2085,8 +2204,24 @@ def cmd_kill(args, get_process_info=None, kill_process_tree=None) -> int:
     exit code is nonzero so the operator investigates the process
     manually -- unlike `fleet interrupt`, which deliberately leaves status
     alone on kill_failed rather than lie about it, `fleet kill`'s whole
-    point is to retire the registry entry regardless."""
+    point is to retire the registry entry regardless.
+
+    Finding 3 (task-5 adversarial review): a single "not_running" verdict
+    from _interrupt_worker rests on one pid_alive() probe, and
+    get_process_info returns None on ANY exception (a transient
+    PowerShell hiccup, not just a genuinely dead process) -- worst case
+    that misclassifies a live turn as not-running and permanently marks
+    it "dead" while the real process keeps going, untracked. Before
+    trusting a "not_running" verdict, wait _DEAD_CONFIRM_DELAY_SECONDS
+    and re-run the whole _interrupt_worker check (itself a no-op/no-
+    mutation call when it again finds nothing alive, so this is safe to
+    repeat): if the process turns out to actually be alive on the second
+    pass, this re-run performs the real kill instead of silently
+    orphaning it as "dead"."""
     outcome = _interrupt_worker(args.name, get_process_info=get_process_info, kill_process_tree=kill_process_tree)
+    if outcome == "not_running":
+        sleep(_DEAD_CONFIRM_DELAY_SECONDS)
+        outcome = _interrupt_worker(args.name, get_process_info=get_process_info, kill_process_tree=kill_process_tree)
 
     with fleet_lock():
         data = load_registry()
@@ -2137,31 +2272,59 @@ def _remove_worker_files(name: str, sid: str) -> list:
     return removed
 
 
-def cmd_clean(args, get_process_info=None) -> int:
+def cmd_clean(args, get_process_info=None, sleep=time.sleep) -> int:
     """`fleet clean` (SPEC §5): recompute every worker's status; any that
     resolve to "dead" are removed from the registry along with their logs
     (current + rotated), mailbox file, orphaned mailbox claim files for
     that sid (T3-F2), and journal. Prints one line per removed worker.
     Never touches idle/working/attached workers. A worker whose recompute
     merely changes status (without becoming dead) is persisted like
-    `fleet status` does, not removed."""
+    `fleet status` does, not removed.
+
+    Finding 3 (task-5 adversarial review): deletion here is irreversible,
+    but "dead" rests on a single pid_alive() probe that can misfire on a
+    transient get_process_info failure (any exception -> None, not just a
+    genuinely dead process). A worker that recomputes to "dead" on the
+    first pass is NOT removed on the strength of that alone -- it is
+    re-recomputed (from the same pre-clean snapshot) after
+    _DEAD_CONFIRM_DELAY_SECONDS, and only removed if the SECOND pass also
+    says "dead". If the second pass disagrees, the worker is persisted
+    with that (non-dead) status instead, exactly like a normal recompute
+    -- the flaky first probe never gets to destroy anything. The delay is
+    paid once per `clean` invocation (batched across every dead candidate),
+    not once per worker."""
     removed = []  # list of (name, sid)
     with fleet_lock():
         data = load_registry()
         names = sorted(data["workers"])
         changed = False
+        pending_confirm = []  # (name, before) -- looked dead on pass 1
         for n in names:
             before = data["workers"][n]
             after = recompute_worker(n, before, get_process_info=get_process_info)
-            if after["status"] != before["status"]:
-                append_event("status_changed", n, old=before["status"], new=after["status"])
-                changed = True
             if after["status"] == "dead":
-                removed.append((n, after["session_id"]))
+                pending_confirm.append((n, before))
+            else:
+                if after["status"] != before["status"]:
+                    append_event("status_changed", n, old=before["status"], new=after["status"])
+                    changed = True
+                data["workers"][n] = after
+
+        if pending_confirm:
+            sleep(_DEAD_CONFIRM_DELAY_SECONDS)
+
+        for n, before in pending_confirm:
+            confirmed = recompute_worker(n, before, get_process_info=get_process_info)
+            if confirmed["status"] != before["status"]:
+                append_event("status_changed", n, old=before["status"], new=confirmed["status"])
+                changed = True
+            if confirmed["status"] == "dead":
+                removed.append((n, confirmed["session_id"]))
                 data["workers"].pop(n, None)
                 changed = True
             else:
-                data["workers"][n] = after
+                data["workers"][n] = confirmed
+
         if changed:
             save_registry(data)
         for n, sid in removed:
