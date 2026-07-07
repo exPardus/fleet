@@ -6,7 +6,9 @@ real taskkill/PowerShell/wt is ever invoked -- every test injects a fake
 popen / get_process_info / which / kill_process_tree. Every test
 monkeypatches fleet.FLEET_HOME to a pytest tmp_path.
 """
+import json
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -316,6 +318,51 @@ class TestCmdSend:
         args = fleet.build_parser().parse_args(["send", "probe-1", "go"])
         rc = fleet.cmd_send(args, popen=popen, get_process_info=_dead_info, which=lambda n: "claude.cmd")
         assert rc == 0
+
+    def test_commit_lock_exhaustion_does_not_abandon_the_launched_turn(
+        self, isolated_home, monkeypatch, capsys,
+    ):
+        """Post-testing wave, item 1b (stress-report Finding 1, CRITICAL --
+        "Same defect shape elsewhere": cmd_send's idle-resume path ends
+        with an unwrapped `with fleet_lock(): ... rec["turn_pid"] = ...`
+        commit, identical in shape to cmd_spawn's. If every retry of that
+        commit lock times out, cmd_send must not raise (a real turn is
+        already running) -- it must report success loudly-with-a-warning,
+        same contract as cmd_spawn's own exhaustion path."""
+        sid, _ = _seed_worker("probe-1", turn_pid=111, turn_pid_ctime=ALIVE_CTIME, log_result=True)
+        proc = FakeProc(pid=42)
+
+        real_fleet_lock = fleet.fleet_lock
+        calls = {"n": 0}
+
+        @contextmanager
+        def flaky(timeout=fleet.LOCK_TIMEOUT_SECONDS):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # cmd_send's own pre-claim lock -- must succeed.
+                with real_fleet_lock(timeout=timeout):
+                    yield
+            else:
+                # Every post-launch commit attempt fails.
+                raise fleet.FleetLockTimeout("simulated")
+
+        monkeypatch.setattr(fleet, "fleet_lock", flaky)
+
+        args = fleet.build_parser().parse_args(["send", "probe-1", "go"])
+        rc = fleet.cmd_send(
+            args, popen=_fake_popen(proc), get_process_info=_dead_info,
+            which=lambda n: "claude.cmd", sleep=lambda s: None,
+        )
+
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "CRITICAL" in err
+        assert "probe-1" in err
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["status"] == "working"
+        assert rec["turn_pid"] is None  # never got stamped
+        events = [json.loads(line) for line in fleet.events_path().read_text(encoding="utf-8").splitlines()]
+        assert any(e["kind"] == "turn_commit_failed" for e in events)
 
 
 # ---------------------------------------------------------------------------

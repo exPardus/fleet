@@ -13,7 +13,8 @@ temp FLEET_HOME, mirroring tests/test_hooks.py's own technique.
 import json
 import os
 import uuid
-from datetime import datetime, timezone
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -311,6 +312,50 @@ class TestCmdRespawn:
         args = fleet.build_parser().parse_args(["respawn", "probe-1"])
         fleet.cmd_respawn(args, popen=_fake_popen(proc), get_process_info=_dead_info, which=lambda n: "claude.cmd")
         assert fleet.load_registry()["workers"]["probe-1"]["turns"] == 1
+
+    def test_commit_lock_exhaustion_does_not_abandon_the_launched_turn(
+        self, isolated_home, monkeypatch, capsys,
+    ):
+        """Post-testing wave, item 1b (stress-report Finding 1, CRITICAL --
+        "Same defect shape elsewhere"): cmd_respawn's final post-launch
+        commit lock is the same unwrapped shape as cmd_spawn's. If every
+        retry times out, cmd_respawn must not raise (a real turn is
+        already running under new_sid) -- it reports success loudly-with-
+        a-warning, same contract as cmd_spawn/cmd_send."""
+        _seed_worker("probe-1", status="idle", log_result=True)
+        proc = FakeProc(pid=42)
+
+        real_fleet_lock = fleet.fleet_lock
+        calls = {"n": 0}
+
+        @contextmanager
+        def flaky(timeout=fleet.LOCK_TIMEOUT_SECONDS):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # cmd_respawn's own pre-claim lock -- must succeed.
+                with real_fleet_lock(timeout=timeout):
+                    yield
+            else:
+                # Every post-launch commit attempt fails.
+                raise fleet.FleetLockTimeout("simulated")
+
+        monkeypatch.setattr(fleet, "fleet_lock", flaky)
+
+        args = fleet.build_parser().parse_args(["respawn", "probe-1"])
+        rc = fleet.cmd_respawn(
+            args, popen=_fake_popen(proc), get_process_info=_dead_info,
+            which=lambda n: "claude.cmd", sleep=lambda s: None,
+        )
+
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "CRITICAL" in err
+        assert "probe-1" in err
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["status"] == "working"
+        assert rec["turn_pid"] is None  # never got stamped
+        events = [json.loads(line) for line in fleet.events_path().read_text(encoding="utf-8").splitlines()]
+        assert any(e["kind"] == "turn_commit_failed" for e in events)
 
     def test_old_sid_recorded_to_events(self, isolated_home):
         old_sid, _ = _seed_worker("probe-1", status="idle", log_result=True)
@@ -635,6 +680,80 @@ class TestCostBaseline:
 
 
 # ---------------------------------------------------------------------------
+# _sum_result_costs / _coerce_cost hardening (fuzz-report Findings F3+F4)
+# ---------------------------------------------------------------------------
+
+class TestCostHardening:
+    def test_string_cost_is_coerced_when_cleanly_numeric(self, isolated_home):
+        """Finding F3 (HIGH): a `total_cost_usd` that arrives as a JSON
+        string (e.g. "5.00") used to raise TypeError ('float' + 'str') --
+        never raises now, and a cleanly-numeric string is still summed."""
+        log = fleet.logs_dir() / "probe-1.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text('{"type":"result","total_cost_usd":"5.00","result":"x"}\n', encoding="utf-8")
+        assert fleet._sum_result_costs(log) == pytest.approx(5.0)
+
+    def test_non_numeric_string_cost_is_skipped_not_raised(self, isolated_home):
+        log = fleet.logs_dir() / "probe-1.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text('{"type":"result","total_cost_usd":"garbage","result":"x"}\n', encoding="utf-8")
+        # No other result event with a valid cost -> None (nothing to sum).
+        assert fleet._sum_result_costs(log) is None
+
+    @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+    def test_non_finite_cost_is_skipped(self, isolated_home, literal):
+        """Finding F4 (MEDIUM): json.loads accepts NaN/Infinity/-Infinity
+        by default -- summing one straight in permanently poisons cost_usd
+        with no crash and no visible warning. Must be skipped instead."""
+        log = fleet.logs_dir() / "probe-1.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(f'{{"type":"result","total_cost_usd":{literal},"result":"x"}}\n', encoding="utf-8")
+        assert fleet._sum_result_costs(log) is None
+
+    def test_negative_cost_is_skipped(self, isolated_home):
+        log = fleet.logs_dir() / "probe-1.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text('{"type":"result","total_cost_usd":-1.5,"result":"x"}\n', encoding="utf-8")
+        assert fleet._sum_result_costs(log) is None
+
+    def test_bad_cost_line_among_good_ones_only_drops_the_bad_one(self, isolated_home):
+        log = fleet.logs_dir() / "probe-1.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(
+            '{"type":"result","total_cost_usd":0.03,"result":"one"}\n'
+            '{"type":"result","total_cost_usd":NaN,"result":"two"}\n'
+            '{"type":"result","total_cost_usd":0.01,"result":"three"}\n',
+            encoding="utf-8",
+        )
+        assert fleet._sum_result_costs(log) == pytest.approx(0.04)
+
+    def test_recompute_worker_tolerates_poisoned_cost_baseline(self, isolated_home):
+        """A registry record whose cost_baseline was already poisoned
+        (NaN/Infinity/negative -- e.g. persisted before this hardening
+        existed, or hand-edited) must not propagate forward forever:
+        _registry_cost falls back to 0.0 instead of contaminating the
+        freshly-summed total."""
+        _seed_worker("probe-1", status="idle", log_result=False, cost_usd=0.0)
+        data = fleet.load_registry()
+        data["workers"]["probe-1"]["cost_baseline"] = float("nan")
+        fleet.save_registry(data)
+
+        log = fleet.logs_dir() / "probe-1.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text('{"type":"result","result":"done","total_cost_usd":0.5}\n', encoding="utf-8")
+
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info)
+        assert updated["cost_usd"] == pytest.approx(0.5)
+
+    def test_coerce_cost_rejects_bool(self):
+        """A JSON true/false is never a sane cost, even though bool is an
+        int subclass in Python."""
+        assert fleet._coerce_cost(True) is None
+        assert fleet._coerce_cost(False) is None
+
+
+# ---------------------------------------------------------------------------
 # fleet kill
 # ---------------------------------------------------------------------------
 
@@ -666,6 +785,28 @@ class TestCmdKill:
         rec = fleet.load_registry()["workers"]["probe-1"]
         assert rec["status"] == "working"
         assert rec["turn_pid"] is None
+
+    def test_expired_launch_claim_is_not_refused(self, isolated_home):
+        """Post-testing wave, item 1c (zombie escape hatch): a
+        "working"/turn_pid=None claim whose last_activity is older than
+        LAUNCH_CLAIM_MAX_AGE_SECONDS is no longer a real in-flight launch
+        (the launcher stamps a pid within seconds; this old means the
+        `fleet` CLI process that owned the launch died mid-claim) -- kill
+        must proceed instead of refusing forever."""
+        sid, _ = _seed_worker("probe-1", status="working", turn_pid=None)
+        data = fleet.load_registry()
+        stale = fleet.ctime_to_iso(datetime.now(timezone.utc) - timedelta(seconds=fleet.LAUNCH_CLAIM_MAX_AGE_SECONDS + 1))
+        data["workers"]["probe-1"]["last_activity"] = stale
+        fleet.save_registry(data)
+
+        args = fleet.build_parser().parse_args(["kill", "probe-1"])
+        rc = fleet.cmd_kill(
+            args, get_process_info=_dead_info, kill_process_tree=lambda pid: None, sleep=lambda s: None,
+        )
+
+        assert rc == 0
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["status"] == "dead"
 
     def test_kills_running_turn_and_marks_dead(self, isolated_home, capsys):
         _seed_worker("probe-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
