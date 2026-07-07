@@ -85,6 +85,125 @@ def ctime_to_iso(dt: datetime) -> str:
 
 
 # ---------------------------------------------------------------------------
+# === PLATFORM ADAPTER START (SPEC §14 portability mandate) ===
+#
+# This is the ONLY section of fleet.py permitted to branch on os.name /
+# sys.platform, read subprocess creation flags, or shell out to an
+# OS-specific tool (PowerShell Get-Process, taskkill, wt.exe,
+# Start-Process). Every other function in this module calls through the
+# PLATFORM singleton below instead of doing any of that itself. Windows is
+# the only implemented backend for now; the POSIX backend raises
+# UnsupportedPlatformError everywhere -- Phase 1.5 fills it in
+# (docs/specs/portability.md). A source-scan test (test_core.py) enforces
+# that no other function in this module references os.name/sys.platform.
+# ---------------------------------------------------------------------------
+
+class UnsupportedPlatformError(NotImplementedError):
+    """Raised by every _PosixPlatform method: there is no POSIX backend yet
+    (Phase 1.5, SPEC §14) -- this build only supports Windows."""
+
+
+class _WindowsPlatform:
+    """Windows implementation of every OS-specific fleet operation."""
+
+    def detached_popen_kwargs(self) -> dict:
+        """Popen kwargs for a fully detached child (SPEC §6): survives the
+        parent CLI invocation exiting and isn't torn down with the parent's
+        process group (e.g. a Ctrl-C in the manager's shell)."""
+        return {"creationflags": subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP}
+
+    def get_process_info(self, pid):
+        """Return (image_name, creation_time_utc) for a live pid, else None.
+
+        stdlib subprocess route (no third-party deps): asks PowerShell's
+        Get-Process for the process name and UTC start time. Kept as a
+        single small method so pid_alive()/recompute_status()/launch_turn()
+        can accept an injected replacement in tests instead of touching
+        real processes.
+        """
+        try:
+            script = (
+                f"$p = Get-Process -Id {int(pid)} -ErrorAction SilentlyContinue; "
+                "if ($p) { \"$($p.ProcessName)|$($p.StartTime.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss'))\" }"
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                capture_output=True, text=True, timeout=5,
+            )
+            line = (result.stdout or "").strip()
+            if not line or "|" not in line:
+                return None
+            name, ctime_str = line.rsplit("|", 1)
+            ctime = datetime.strptime(ctime_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+            return name, ctime
+        except Exception:
+            return None
+
+    def kill_process_tree(self, pid, run=subprocess.run) -> bool:
+        """`taskkill /PID <pid> /T /F` (SPEC §5 interrupt row): best-effort
+        kill of the whole process tree rooted at pid. Returns True iff
+        taskkill itself reported success (exit code 0); callers treat
+        interrupt as best-effort regardless (the caller still marks the
+        worker idle -- a turn that ignored the kill is still not something
+        `fleet` can wait on)."""
+        try:
+            result = run(
+                ["taskkill", "/PID", str(int(pid)), "/T", "/F"],
+                capture_output=True, text=True, timeout=10,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def build_attach_argv(self, cwd, sid: str, which=shutil.which) -> list:
+        """Argv for `fleet attach` (SPEC §5 attach row, §9): Windows
+        Terminal (`wt`) if present on PATH, else a detached PowerShell
+        fallback via Start-Process. Both resume with the worker's cwd (the
+        --resume cwd-scope invariant, SPEC §2)."""
+        cwd = str(cwd)
+        if which("wt"):
+            return ["wt", "-d", cwd, "--", "claude", "--resume", sid]
+        ps_command = (
+            f"Start-Process powershell -WorkingDirectory '{cwd}' "
+            f"-ArgumentList '-NoExit','-Command','claude --resume {sid}'"
+        )
+        return ["powershell", "-Command", ps_command]
+
+
+class _PosixPlatform:
+    """Stub POSIX backend: every method raises UnsupportedPlatformError.
+    Phase 1.5 fills these in (docs/specs/portability.md); Phase 1 targets
+    Windows only (SPEC §14)."""
+
+    def _unsupported(self, what: str):
+        raise UnsupportedPlatformError(
+            f"{what} has no POSIX implementation yet (Phase 1.5, SPEC §14); "
+            "this build only supports Windows"
+        )
+
+    def detached_popen_kwargs(self) -> dict:
+        self._unsupported("detached_popen_kwargs")
+
+    def get_process_info(self, pid):
+        self._unsupported("get_process_info")
+
+    def kill_process_tree(self, pid, run=None) -> bool:
+        self._unsupported("kill_process_tree")
+
+    def build_attach_argv(self, cwd, sid: str, which=None) -> list:
+        self._unsupported("build_attach_argv")
+
+
+# The one and only os.name branch in this module: selects which adapter
+# instance PLATFORM points at. Nothing else in fleet.py may inspect
+# os.name or sys.platform (enforced by a source-scan test, test_core.py).
+PLATFORM = _WindowsPlatform() if os.name == "nt" else _PosixPlatform()
+
+# === PLATFORM ADAPTER END ===
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
 # Registry lock (SPEC §4): atomic-create lock file, retry, stale-break.
 # ---------------------------------------------------------------------------
 
@@ -261,33 +380,6 @@ def append_event(kind: str, name: str, **fields) -> None:
 # PID liveness (SPEC §4)
 # ---------------------------------------------------------------------------
 
-def _default_get_process_info(pid):
-    """Return (image_name, creation_time_utc) for a live pid, else None.
-
-    Windows-only, stdlib subprocess route (no third-party deps): asks
-    PowerShell's Get-Process for the process name and UTC start time. Kept
-    as a single small function so pid_alive()/recompute_status() can accept
-    an injected replacement in tests instead of touching real processes.
-    """
-    try:
-        script = (
-            f"$p = Get-Process -Id {int(pid)} -ErrorAction SilentlyContinue; "
-            "if ($p) { \"$($p.ProcessName)|$($p.StartTime.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss'))\" }"
-        )
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-            capture_output=True, text=True, timeout=5,
-        )
-        line = (result.stdout or "").strip()
-        if not line or "|" not in line:
-            return None
-        name, ctime_str = line.rsplit("|", 1)
-        ctime = datetime.strptime(ctime_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
-        return name, ctime
-    except Exception:
-        return None
-
-
 def _parse_iso(ctime_iso: str) -> datetime:
     return datetime.strptime(ctime_iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 
@@ -298,7 +390,7 @@ def pid_alive(pid, ctime_iso, get_process_info=None) -> bool:
     as working -- SPEC §4)."""
     if pid is None or ctime_iso is None:
         return False
-    get_process_info = get_process_info or _default_get_process_info
+    get_process_info = get_process_info or PLATFORM.get_process_info
     info = get_process_info(pid)
     if info is None:
         return False
@@ -486,6 +578,18 @@ def restore_mailbox_claim(claim: Path | None) -> None:
         pass
 
 
+def append_mailbox(sid: str, message: str) -> None:
+    """Append `message` to mailbox/<sid>.md (SPEC §7): a small
+    open(..., "a") write, matching the hooks' own append discipline exactly
+    -- multiple sends accumulate in one file and the next claim drains all
+    of them (`fleet send` while working/attached, SPEC §5 send row)."""
+    d = mailbox_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"{sid}.md"
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(message.rstrip("\n") + "\n\n")
+
+
 _PREAMBLE_TEMPLATE = """You are fleet worker `{name}` in `{cwd}`.
 Manager messages arrive mid-task marked `<MANAGER MESSAGE>`; treat them as user instructions.
 Maintain a journal at `C:/proga/claude-fleet/state/journals/{name}.md` (create it early; update it at each milestone): goal, done, in-progress, blockers, next steps. It must be enough for a fresh session to continue.
@@ -608,11 +712,11 @@ def launch_turn(name: str, cwd, sid: str, prompt: str, mode: str, first: bool = 
     """Start one detached worker turn (SPEC §6): resolve claude, build argv,
     open per-worker logs (stdout -> logs/<name>.jsonl, stderr -> a separate
     logs/<name>.err so stderr noise never breaks jsonl parsing), Popen
-    DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP with the worker's cwd (the
-    --resume cwd-scope invariant, SPEC §2), write the prompt on stdin and
-    close it (never leave stdin open -- SPEC §6), then query the new
-    process's creation time via get_process_info (defaults to
-    _default_get_process_info) so the registry can store an unambiguous
+    PLATFORM.detached_popen_kwargs() (the platform adapter, SPEC §14) with
+    the worker's cwd (the --resume cwd-scope invariant, SPEC §2), write the
+    prompt on stdin and close it (never leave stdin open -- SPEC §6), then
+    query the new process's creation time via get_process_info (defaults to
+    PLATFORM.get_process_info) so the registry can store an unambiguous
     turn_pid_ctime via ctime_to_iso -- the only serializer callers may use
     (F5 bridge).
 
@@ -643,7 +747,7 @@ def launch_turn(name: str, cwd, sid: str, prompt: str, mode: str, first: bool = 
                 stdin=subprocess.PIPE,
                 stdout=out_f,
                 stderr=err_f,
-                creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+                **PLATFORM.detached_popen_kwargs(),
             )
         except OSError as exc:
             raise TurnLaunchError(f"failed to launch claude turn for {name!r}: {exc}") from exc
@@ -659,7 +763,7 @@ def launch_turn(name: str, cwd, sid: str, prompt: str, mode: str, first: bool = 
     except OSError:
         pass
 
-    get_process_info = get_process_info or _default_get_process_info
+    get_process_info = get_process_info or PLATFORM.get_process_info
     ctime_iso = None
     try:
         info = get_process_info(proc.pid)
@@ -1019,6 +1123,202 @@ def cmd_wait(args, get_process_info=None, sleep=time.sleep, clock=time.monotonic
 
 
 # ---------------------------------------------------------------------------
+# CLI: steering + hybrid commands (SPEC §5 send/interrupt/attach/release
+# rows, §9 hybrid interaction model, §14 platform adapter)
+# ---------------------------------------------------------------------------
+
+def _refresh_worker_status(name: str, get_process_info=None) -> dict:
+    """Load the registry, recompute `name`'s liveness in place, persist any
+    transition, and return the refreshed record. Shared by send/attach so
+    both act on up-to-date status rather than a possibly-stale registry
+    snapshot (a turn may have finished since the last `fleet status`)."""
+    with fleet_lock():
+        data = load_registry()
+        if name not in data["workers"]:
+            raise FleetCliError(f"unknown worker: {name!r}")
+        before = data["workers"][name]
+        after = recompute_worker(name, before, get_process_info=get_process_info)
+        if after != before:
+            data["workers"][name] = after
+            if after["status"] != before["status"]:
+                append_event("status_changed", name, old=before["status"], new=after["status"])
+            save_registry(data)
+    return after
+
+
+def cmd_send(args, popen=subprocess.Popen, get_process_info=None, which=shutil.which) -> int:
+    """`fleet send <name> <text|@file>` (SPEC §5 send row, §9 attach
+    asymmetry):
+
+    - working -> append the message to mailbox/<sid>.md (small
+      open(...,"a") write); the running turn's hooks pick it up mid-turn or
+      at Stop.
+    - idle -> launch a resume-turn whose prompt is
+      compose_prompt(..., task=message, ...): this claims (drains) any
+      pending mailbox mail AND appends the new message as the prompt's task
+      text (the universal drain rule, SPEC §5); follows the exact same
+      claim/launch/finalize-or-restore discipline as cmd_spawn.
+    - attached -> append to the mailbox like "working", but also print the
+      attach-asymmetry warning (SPEC §9): the attached TUI runs without
+      --settings, so hooks don't fire and the mail queues untouched until
+      the next headless turn.
+    - dead -> a clear error suggesting `fleet respawn`, never a silent no-op.
+    """
+    message = _read_task_arg(args.message)
+    rec = _refresh_worker_status(args.name, get_process_info=get_process_info)
+    status = rec["status"]
+    sid = rec["session_id"]
+
+    if status == "working":
+        append_mailbox(sid, message)
+        print(f"{args.name}: turn running -- message queued to mailbox")
+        return 0
+
+    if status == "attached":
+        append_mailbox(sid, message)
+        print(
+            f"{args.name}: attached -- message queued to mailbox, but the attached "
+            "terminal runs without --settings so fleet hooks don't fire there; it "
+            "will not be delivered until the next headless turn (SPEC §9)"
+        )
+        return 0
+
+    if status == "dead":
+        raise FleetCliError(f"{args.name}: worker is dead -- run `fleet respawn {args.name}` first")
+
+    # idle -> resume-turn launch, following the compose/claim/finalize-or-
+    # restore contract exactly as cmd_spawn does.
+    prompt, claim = compose_prompt(args.name, rec["cwd"], message, sid)
+    try:
+        info = launch_turn(
+            args.name, rec["cwd"], sid, prompt, rec["mode"], first=False,
+            model=rec.get("model"), popen=popen, get_process_info=get_process_info, which=which,
+        )
+        finalize_mailbox_claim(claim)
+    except Exception:
+        restore_mailbox_claim(claim)
+        raise
+
+    with fleet_lock():
+        data = load_registry()
+        r = data["workers"].get(args.name)
+        if r is not None:
+            r["status"] = "working"
+            r["turn_pid"] = info["turn_pid"]
+            r["turn_pid_ctime"] = info["turn_pid_ctime"]
+            r["turns"] = r.get("turns", 0) + 1
+            r["last_activity"] = now_iso()
+            save_registry(data)
+        append_event("turn_started", args.name, session_id=sid, turn_pid=info["turn_pid"])
+
+    print(f"{args.name}: resumed -- {info['log_path']}")
+    return 0
+
+
+def _interrupt_worker(name: str, get_process_info=None, kill_process_tree=None) -> bool:
+    """Kill the running turn for `name`, if one is verifiably still alive
+    (ctime-checked via pid_alive -- PID reuse must never kill an innocent
+    process, SPEC §4). Returns True if a turn was killed (and the registry
+    updated to idle), False if there was nothing to interrupt (a friendly
+    no-op, not an error -- the operator may race a turn that already
+    finished). Shared by cmd_interrupt and cmd_attach's --force path.
+
+    kill_process_tree defaults to PLATFORM.kill_process_tree (the platform
+    adapter, SPEC §14) but is injectable so tests exercise the state
+    machine without shelling out to a real taskkill.
+    """
+    kill_process_tree = kill_process_tree or PLATFORM.kill_process_tree
+    with fleet_lock():
+        data = load_registry()
+        if name not in data["workers"]:
+            raise FleetCliError(f"unknown worker: {name!r}")
+        rec = data["workers"][name]
+        pid = rec.get("turn_pid")
+        ctime_iso = rec.get("turn_pid_ctime")
+        if not pid_alive(pid, ctime_iso, get_process_info=get_process_info):
+            return False
+        kill_process_tree(pid)
+        rec["status"] = "idle"
+        data["workers"][name] = rec
+        save_registry(data)
+        append_event("interrupted", name, turn_pid=pid)
+    return True
+
+
+def cmd_interrupt(args, get_process_info=None, kill_process_tree=None) -> int:
+    """`fleet interrupt <name>` (SPEC §5 interrupt row): ctime-verify the
+    registered turn_pid, kill its whole process tree via the platform
+    adapter, mark idle, append an event. Not-running is a friendly no-op."""
+    killed = _interrupt_worker(args.name, get_process_info=get_process_info, kill_process_tree=kill_process_tree)
+    if killed:
+        print(f"{args.name}: interrupted")
+    else:
+        print(f"{args.name}: no turn running -- nothing to interrupt")
+    return 0
+
+
+def cmd_attach(args, popen=subprocess.Popen, get_process_info=None, which=shutil.which,
+               kill_process_tree=None) -> int:
+    """`fleet attach <name> [--force]` (SPEC §5 attach row, §9 hybrid
+    model): refuse while a turn is running (`--force` interrupts it first
+    via _interrupt_worker -- same ctime-verified kill as `fleet interrupt`);
+    warn (no-op) if already attached; otherwise mark attached and launch a
+    terminal via PLATFORM.build_attach_argv (wt, else a detached PowerShell
+    fallback), resumed in the worker's cwd (the --resume cwd-scope
+    invariant, SPEC §2)."""
+    rec = _refresh_worker_status(args.name, get_process_info=get_process_info)
+
+    if rec["status"] == "attached":
+        print(f"{args.name}: already attached")
+        return 0
+
+    if rec["status"] == "working":
+        if not args.force:
+            raise FleetCliError(
+                f"{args.name}: turn is running -- pass --force to interrupt it first, "
+                "or wait for it to finish"
+            )
+        _interrupt_worker(args.name, get_process_info=get_process_info, kill_process_tree=kill_process_tree)
+
+    cwd = rec["cwd"]
+    sid = rec["session_id"]
+    argv = PLATFORM.build_attach_argv(cwd, sid, which=which)
+    popen(argv, cwd=str(cwd), **PLATFORM.detached_popen_kwargs())
+
+    with fleet_lock():
+        data = load_registry()
+        r = data["workers"].get(args.name)
+        if r is not None:
+            r["status"] = "attached"
+            r["attached_since"] = now_iso()
+            save_registry(data)
+        append_event("attached", args.name)
+
+    print(f"{args.name}: attached -- {argv[0]}")
+    return 0
+
+
+def cmd_release(args) -> int:
+    """`fleet release <name>` (SPEC §5 release row): attached -> idle,
+    clearing attached_since; a friendly no-op warning if not attached."""
+    with fleet_lock():
+        data = load_registry()
+        if args.name not in data["workers"]:
+            raise FleetCliError(f"unknown worker: {args.name!r}")
+        rec = data["workers"][args.name]
+        if rec["status"] != "attached":
+            print(f"{args.name}: not attached -- nothing to release")
+            return 0
+        rec["status"] = "idle"
+        rec["attached_since"] = None
+        data["workers"][args.name] = rec
+        save_registry(data)
+        append_event("released", args.name)
+    print(f"{args.name}: released")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # CLI: argparse wiring + main()
 # ---------------------------------------------------------------------------
 
@@ -1054,6 +1354,20 @@ def build_parser() -> argparse.ArgumentParser:
     wait_mode.add_argument("--all", action="store_true")
     p_wait.add_argument("--timeout", type=float, default=None)
 
+    p_send = sub.add_parser("send", help="send a message to a worker (mailbox or resume)")
+    p_send.add_argument("name")
+    p_send.add_argument("message")
+
+    p_interrupt = sub.add_parser("interrupt", help="kill a worker's running turn")
+    p_interrupt.add_argument("name")
+
+    p_attach = sub.add_parser("attach", help="attach an interactive terminal to a worker")
+    p_attach.add_argument("name")
+    p_attach.add_argument("--force", action="store_true")
+
+    p_release = sub.add_parser("release", help="release an attached worker back to idle")
+    p_release.add_argument("name")
+
     return parser
 
 
@@ -1071,12 +1385,21 @@ def main(argv=None) -> int:
             return cmd_result(args)
         if args.command == "wait":
             return cmd_wait(args)
+        if args.command == "send":
+            return cmd_send(args)
+        if args.command == "interrupt":
+            return cmd_interrupt(args)
+        if args.command == "attach":
+            return cmd_attach(args)
+        if args.command == "release":
+            return cmd_release(args)
         parser.error(f"unknown command {args.command!r}")
         return 2
     except RegistryCorruptError as exc:
         print(f"fleet: registry error: {exc}", file=sys.stderr)
         return 1
-    except (FleetCliError, ClaudeNotFoundError, TurnLaunchError, ValueError, FleetLockTimeout) as exc:
+    except (FleetCliError, ClaudeNotFoundError, TurnLaunchError, ValueError, FleetLockTimeout,
+            UnsupportedPlatformError) as exc:
         print(f"fleet: {exc}", file=sys.stderr)
         return 1
 
