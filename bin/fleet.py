@@ -1214,7 +1214,11 @@ def cmd_spawn(args, popen=subprocess.Popen, get_process_info=None, which=shutil.
             popen=popen, get_process_info=get_process_info, which=which,
         )
         finalize_mailbox_claim(claim)
-    except Exception as exc:
+    except BaseException as exc:
+        # Task-4-verdict re-review, Fix 2: same shape as cmd_send/cmd_attach
+        # -- a Ctrl-C during launch must still pop the just-created record
+        # and restore the drained mailbox claim, not leave a permanently
+        # ghost-claimed "working"+turn_pid is None record behind.
         restore_mailbox_claim(claim)
         with fleet_lock():
             data = load_registry()
@@ -1514,7 +1518,14 @@ def cmd_send(args, popen=subprocess.Popen, get_process_info=None, which=shutil.w
             model=after.get("model"), popen=popen, get_process_info=get_process_info, which=which,
         )
         finalize_mailbox_claim(claim)
-    except Exception:
+    except BaseException:
+        # Task-4-verdict re-review, Fix 2: BaseException (not Exception) --
+        # a Ctrl-C landing mid-launch must still run this rollback. An
+        # except Exception here would let KeyboardInterrupt skip straight
+        # past it, pinning the pre-claim ("working"+turn_pid is None) as a
+        # permanently-guarded ghost claim (recompute_status's launch-in-
+        # flight guard never demotes it) and leaking the drained
+        # mailbox's ".claimed" file forever.
         restore_mailbox_claim(claim)
         with fleet_lock():
             data = load_registry()
@@ -1643,12 +1654,22 @@ def cmd_attach(args, popen=subprocess.Popen, get_process_info=None, which=shutil
 
     - already attached -> print a no-op warning.
     - working, no --force -> refuse (FleetCliError).
-    - working, --force -> interrupt via _interrupt_worker OUTSIDE any lock
-      held by this function (F4 -- taskkill/Get-Process must never run
-      under fleet_lock). "killed" or "not_running" both mean the turn is no
-      longer alive, so attach proceeds to the claim below; "kill_failed"
-      (F3 -- the turn is still verifiably alive after the kill attempt)
-      aborts loudly via FleetCliError with NO registry write and NO popen.
+    - working, --force, turn_pid is None -> refuse loudly (FleetCliError,
+      task-4-verdict re-review Fix 1). This is a turn-starter's own
+      pre-claim window (spawn/send's launch-in-flight write, still lasting
+      the whole launch_turn duration) -- there is no real pid yet, so
+      _interrupt_worker would see pid=None, pid_alive(None)=False, and
+      report "not_running", which used to read as clear-to-proceed and
+      would race a second live claude onto the session against the
+      concurrent starter. No registry write beyond the recompute persist,
+      no popen.
+    - working, --force, turn_pid set -> interrupt via _interrupt_worker
+      OUTSIDE any lock held by this function (F4 -- taskkill/Get-Process
+      must never run under fleet_lock). "killed" or "not_running" both mean
+      the turn is no longer alive, so attach proceeds to the claim below;
+      "kill_failed" (F3 -- the turn is still verifiably alive after the
+      kill attempt) aborts loudly via FleetCliError with NO registry write
+      and NO popen.
     - idle (or otherwise attachable) -> atomically pre-claim
       status="attached"/attached_since in the SAME fleet_lock that observed
       the attachable state (F1 -- status="attached" already survives
@@ -1690,6 +1711,23 @@ def cmd_attach(args, popen=subprocess.Popen, get_process_info=None, which=shutil
                     f"{args.name}: turn is running -- pass --force to interrupt it first, "
                     "or wait for it to finish"
                 )
+            if after.get("turn_pid") is None:
+                # Task-4-verdict re-review, Fix 1: this is a turn-starter's
+                # pre-claim window (status=="working", turn_pid is None --
+                # see recompute_status's launch-in-flight guard above),
+                # lasting the whole launch_turn duration. There is no real
+                # pid yet to verify-kill: _interrupt_worker would snapshot
+                # pid=None, pid_alive(None)=False, and return "not_running"
+                # -- which cmd_attach would otherwise treat as clear-to-
+                # proceed, popen-ing a second live claude while the
+                # concurrent starter brings its own up. Refuse loudly
+                # instead of racing it. Non-force already refuses on
+                # "working" above; this only closes the --force hole.
+                data["workers"][args.name] = after
+                save_registry(data)
+                raise FleetCliError(
+                    f"launch in flight for {args.name}; retry in a few seconds"
+                )
             # --force: persist the recompute and release -- the kill itself
             # (F4) must happen outside this lock.
             data["workers"][args.name] = after
@@ -1728,7 +1766,11 @@ def cmd_attach(args, popen=subprocess.Popen, get_process_info=None, which=shutil
     argv = PLATFORM.build_attach_argv(cwd, sid, which=which)
     try:
         popen(argv, cwd=str(cwd), **PLATFORM.detached_popen_kwargs())
-    except Exception:
+    except BaseException:
+        # Task-4-verdict re-review, Fix 2: BaseException so a Ctrl-C during
+        # the popen call still rolls the "attached" pre-claim back to
+        # idle -- except Exception would let KeyboardInterrupt through and
+        # leave the worker permanently (and falsely) marked "attached".
         with fleet_lock():
             data = load_registry()
             r = data["workers"].get(args.name)
