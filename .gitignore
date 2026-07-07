@@ -1,0 +1,5 @@
+state/
+logs/
+mailbox/
+__pycache__/
+*.pyc
