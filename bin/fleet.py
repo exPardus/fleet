@@ -2292,13 +2292,26 @@ def cmd_clean(args, get_process_info=None, sleep=time.sleep) -> int:
     with that (non-dead) status instead, exactly like a normal recompute
     -- the flaky first probe never gets to destroy anything. The delay is
     paid once per `clean` invocation (batched across every dead candidate),
-    not once per worker."""
+    not once per worker.
+
+    Review wave 5b (re-review of eef1c88): the confirm delay used to run
+    INSIDE the single `with fleet_lock()` block, blocking every other
+    concurrent fleet command for _DEAD_CONFIRM_DELAY_SECONDS -- `fleet
+    kill` already got this right (its sleep sits outside its lock; see
+    cmd_kill above). Restructured to mirror that shape: snapshot the dead
+    candidates and release the lock, sleep + re-probe with no lock held at
+    all, then re-acquire the lock only to merge the second-pass verdicts.
+    On that second acquisition, each candidate's registry entry is
+    re-checked against its pre-sleep snapshot -- if a concurrent command
+    respawned (or otherwise mutated) it while the lock was released, that
+    candidate is spared untouched rather than deleted or overwritten with
+    a verdict computed against now-stale data."""
     removed = []  # list of (name, sid)
+    pending_confirm = []  # (name, before) -- looked dead on pass 1, lock held
+    changed = False
     with fleet_lock():
         data = load_registry()
         names = sorted(data["workers"])
-        changed = False
-        pending_confirm = []  # (name, before) -- looked dead on pass 1
         for n in names:
             before = data["workers"][n]
             after = recompute_worker(n, before, get_process_info=get_process_info)
@@ -2309,12 +2322,27 @@ def cmd_clean(args, get_process_info=None, sleep=time.sleep) -> int:
                     append_event("status_changed", n, old=before["status"], new=after["status"])
                     changed = True
                 data["workers"][n] = after
+        if changed:
+            save_registry(data)
 
-        if pending_confirm:
-            sleep(_DEAD_CONFIRM_DELAY_SECONDS)
+    if pending_confirm:
+        sleep(_DEAD_CONFIRM_DELAY_SECONDS)
 
-        for n, before in pending_confirm:
-            confirmed = recompute_worker(n, before, get_process_info=get_process_info)
+    # Second probe: no lock held, mirroring cmd_kill's re-check shape.
+    confirmations = [
+        (n, before, recompute_worker(n, before, get_process_info=get_process_info))
+        for n, before in pending_confirm
+    ]
+
+    changed = False
+    with fleet_lock():
+        data = load_registry()
+        for n, before, confirmed in confirmations:
+            current = data["workers"].get(n)
+            if current != before:
+                # Respawned/mutated by someone else while our lock was
+                # released -- spare it, don't act on a stale verdict.
+                continue
             if confirmed["status"] != before["status"]:
                 append_event("status_changed", n, old=before["status"], new=confirmed["status"])
                 changed = True

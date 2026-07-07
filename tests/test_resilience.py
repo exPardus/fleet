@@ -779,6 +779,56 @@ class TestCmdClean:
         assert rc == 0
         assert "nothing to clean" in capsys.readouterr().out
 
+    def test_confirm_delay_does_not_hold_fleet_lock(self, isolated_home):
+        """Review wave 5b: the dead-confirm sleep must not run inside
+        `with fleet_lock()` -- it used to, blocking every concurrent fleet
+        command for _DEAD_CONFIRM_DELAY_SECONDS. Reuses the reentrancy/
+        lock-probe technique from
+        test_snapshots_registry_without_holding_lock_across_checks: a fake
+        `sleep` that tries to acquire fleet_lock itself. If cmd_clean
+        still held the lock across the sleep, this nested acquisition
+        would raise FleetLockTimeout."""
+        _seed_worker("dead-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME, log_result=False)
+        logs = fleet.logs_dir()
+        logs.mkdir(parents=True, exist_ok=True)
+        (logs / "dead-1.jsonl").write_text("junk, no trailing result\n", encoding="utf-8")
+
+        def probing_sleep(seconds):
+            with fleet.fleet_lock(timeout=0.5):
+                pass  # must not raise FleetLockTimeout
+
+        args = fleet.build_parser().parse_args(["clean"])
+        rc = fleet.cmd_clean(args, get_process_info=_dead_info, sleep=probing_sleep)
+
+        assert rc == 0
+        assert "dead-1" not in fleet.load_registry()["workers"]
+
+    def test_respawned_meanwhile_is_spared_not_deleted(self, isolated_home):
+        """A worker that looks dead on pass 1 but gets respawned (registry
+        entry mutated) by a concurrent command while clean's lock is
+        released for the confirm sleep must be spared -- clean must not
+        delete or overwrite it on the strength of a verdict computed
+        against now-stale pre-sleep data."""
+        sid, _ = _seed_worker("respawn-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME, log_result=False)
+        logs = fleet.logs_dir()
+        logs.mkdir(parents=True, exist_ok=True)
+        (logs / "respawn-1.jsonl").write_text("junk, no trailing result\n", encoding="utf-8")
+
+        def respawn_meanwhile(seconds):
+            data = fleet.load_registry()
+            data["workers"]["respawn-1"]["turn_pid"] = 999
+            data["workers"]["respawn-1"]["turn_pid_ctime"] = ALIVE_CTIME
+            data["workers"]["respawn-1"]["status"] = "working"
+            fleet.save_registry(data)
+
+        args = fleet.build_parser().parse_args(["clean"])
+        rc = fleet.cmd_clean(args, get_process_info=_dead_info, sleep=respawn_meanwhile)
+
+        assert rc == 0
+        workers = fleet.load_registry()["workers"]
+        assert "respawn-1" in workers
+        assert workers["respawn-1"]["turn_pid"] == 999
+
 
 # ---------------------------------------------------------------------------
 # fleet doctor -- individual checks
