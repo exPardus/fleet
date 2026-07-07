@@ -23,3 +23,9 @@ The fleet CLI was built by a multi-agent pipeline (implementer → spec reviewer
 - The Stop-block race is real: a `send` landing in the last seconds of a turn queues to the mailbox instead of same-turn delivery — this is by design (universal drain rule); check `idle+mail` in status, don't assume same-turn.
 - `dead` is sticky (operator kill survives recompute); `respawn` is the only recovery lever. Pre-fix records persisted as idle may need a re-kill.
 - Cost per worker = cost_baseline (respawn carry) + sum of result events in the current log.
+
+**Rigorous-testing addendum (same campaign)**
+- Multi-process stress found what thread-based unit tests could not: the spawn commit-lock timeout zombie only appears under real OS-process contention with real PowerShell probe latency. Any future concurrency change to fleet.py should re-run the stress harness (kept at the session scratchpad's `stress/`; the fake-claude stub must be a compiled .exe — a .cmd stub hangs under launch_turn's pipe shape).
+- Fuzzing paid off at the parser layer, not the hooks: hooks survived 1000 hostile inputs untouched; the registry/cost parsers crashed on shape mismatches. Fuzz the parsers of any new event/registry field.
+- `--max-budget-usd` overshoots ~3x on tiny caps — circuit breaker, not a ceiling.
+- Stop-block mid-turn continuation PROVEN live: time a send after the last tool call, before Stop fires.
