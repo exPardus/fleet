@@ -16,8 +16,9 @@ The mutable cursor against the immutable contract `docs/PLAN.md`. A resuming man
 | C1 | 1A-4 `spec-amend-4-usagelimit` (UL1 — new feature) | done | 9cbdf45 (F31=UL1; detection DEFERRED-TO-KERNEL-PROBE; truth-gate PASS) | 2026-07-08 |
 | C1 | 1B stub-inject ×7 (watchtower/telegram/providers/portability/phase5/kernels-webui/roadmap) | done | fd85798/c38813f/dbea73a/d2ade0a/fe54334/a8ad2b9/f11e083 (anchor+witness gate PASS; all Invariants-touched present) | 2026-07-08 |
 | C1 | 1C review split (`c1-review-spec-core` ∥ `c1-review-spec-stubs`) | done | e2e5ca5 (3 major, UL1 clean) / 93fe929 (3 MED/3 LOW) | 2026-07-08 |
-| C1 | 1A-5 `spec-amend-5-subagents` (UL2 — new feature) | pending | intent note authored; runs after 1D SPEC.md fix | — |
-| C1 | 1D fixes (FIX-1..7, original builders via send) + `c1-review-spec-2` re-review ≤3 | dispatched | C1-FIX-LIST-2026-07-08.md; code claims CM1/CM2 verified | 2026-07-08 |
+| C1 | 1A-5 `spec-amend-5-subagents` (UL2 — new feature) | done | 8ff424a (F32; default-on, doc-only, no C2 code owed; truth-gate PASS) | 2026-07-08 |
+| C1 | 1D fixes (FIX-1..7) | done | 06dedb7/117d1d3/6a75f5b/a73a114/5860b92 (all 7 landed + truth-gate PASS) | 2026-07-08 |
+| C1 | 1D re-review `c1-review-spec-2` (loop ≤3) | dispatched | covers FIX-1..7 + UL2 | 2026-07-08 |
 | C1 | 1E verify checkpoint + `c1-knowledge` ∥ `c1-playbook` | pending | — | — |
 | C2 | 2A `harness-live` ∥ `harden-hooks` | pending | — | — |
 | C2 | 2A-close gate (FLEET_LIVE=1 hook-source=worktree) | pending | — | — |
