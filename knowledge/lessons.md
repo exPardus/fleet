@@ -111,3 +111,72 @@ UL1 (usage-limit park+resume) and UL2 (worker subagents).
   check never false-positives them — C1 documentation-only, no C2 code owed.
 
 - **UL1 + UL2 RATIFIED** by Altai at the C1 checkpoint (2026-07-08) — both approved as specced; C2 greenlit. UL1 kernel builds in C2 (item 11); UL2 was documentation-only (no C2 code owed).
+
+## 2026-07-09 — Campaign 2: harness + hardening kernels (11 kernels, UL1, 506 tests)
+
+<!-- anchor: 2026-07-09-c2 -->
+First **code** campaign that modifies the fleet itself. Built in worktree `c2-hardening`,
+merged to `fleet-impl`. Deliverable: live-integration harness (tier-3, real haiku worker)
++ 11 hardening kernels including UL1 (usage-limit park+resume) and the token-ceiling /
+rotation machinery. Waves: 2A (`harness-live` tier-3 harness ∥ `harden-hooks` hook
+kernels) → 2A-close gate (FLEET_LIVE hook-source=worktree) → 2B fleet.py same-file chain
+a(kernels 1/2/4/5)→b(budget persistence)→c(F9 send-lock/mail-events + F15 three-way probe)
+→d(token-ceiling + rotation + live demo)→e(UL1 usage-limit) → 2C reviews (code ∥
+adversarial) → 2D fix wave (2 real breaks: **resume-limited double-launch HIGH**, **UL1
+false-park MED**) → 2E merge gate. **506 unit/hook tests + a live tier.** ~$70 worker spend
++ ~$2 haiku. **The checkpoint claim "the fleet can safely modify itself" is EARNED — the
+full revert path was exercised end-to-end (see below).**
+
+**What worked**
+- The merge-gate **revert-on-red rule fired for real and worked**: merge → post-merge gate
+  RED → `git revert -m 1 <merge>` restored the known-good live install with zero downtime
+  → fixed in the worktree → re-merged green. First live proof the revert lever is not
+  theoretical. The known-good install stayed usable the entire time.
+- Splitting 2B into a **5-link same-file chain with the per-link truth gate** (§4) kept the
+  ~3000-line fleet.py rewrite from becoming one un-reviewable diff; each link ran pytest
+  green in the worktree before the next dispatched.
+- Dual-lens review (2C) again earned its keep: the adversarial lens found BOTH 2D breaks
+  (double-launch, false-park) that the conformance lens passed.
+
+**What stalled**
+- **A one-line test-scoping bug forced a full revert+refix+re-merge.** `test_live_ceiling_demo.py`
+  hard-asserted `HOOK_SOURCE == "worktree"` — correct for its pre-merge purpose, but it
+  FAILED (not skipped) under the merge gate's default `FLEET_HOOK_SOURCE=main`, turning the
+  post-merge gate RED. → process change #1.
+- **The live harness is non-idempotent on the tracked fixture corpus.** Every `FLEET_LIVE`
+  run re-captured `tests/fixtures/streams/*.jsonl`, dirtying the tree, so every git-state
+  gate check needed `git checkout -- tests/fixtures/streams/` first. → process change #2.
+- **Two fix turns died to Anthropic API 529 (Overloaded) mid-turn.** Worker went idle, cost
+  stayed FROZEN, no commit, journal unchanged — and `fleet result` itself 529'd. "Is it
+  done?" is answerable ONLY by `git log` in the worktree. → process change #3.
+- **Re-merging after a reverted merge is not a plain re-merge** (git thinks the branch is
+  already merged → no-op). Needs `git revert <the-revert>` then `git merge <branch>`. → #4.
+
+**Process changes — amend `knowledge/playbooks/campaign-template.md` (realized as v1.2 amendments)**
+
+1. **Worktree-only live demo tests MUST `pytest.skip` (not hard-assert) under the merge-gate
+   default `FLEET_HOOK_SOURCE=main`** — verify collect-and-skip in the pre-merge default run.
+   Added to the merge-gate checklist (§5) AND the task-file convention for any hook-source-
+   specific live demo (§2). This one-line scoping miss cost a full revert cycle.
+2. **Restore the committed fixture corpus (`git checkout -- tests/fixtures/streams/`) before
+   every pre/post-merge git-state check** — the live harness is non-idempotent on the corpus.
+   Added to §5. **Backlog (Phase-6/quality):** harness should write captured streams to a
+   temp dir unless `FLEET_CAPTURE_CORPUS=1` is set, so verification runs stop mutating the
+   tracked corpus.
+3. **A worker turn is "done" only if `git log` in its worktree shows the expected commit** —
+   `fleet result`/`cost_usd` are unreliable when the turn errored (529/API). Re-sending a
+   git-committed fix task is safe; revert any partial uncommitted artifacts (e.g. dirtied
+   fixtures) before re-send. Added to the §3(g) verification checkpoint.
+4. **Re-merge after a reverted merge = `git revert <the-revert>` then `git merge <branch>`**
+   (revert-the-revert restores the reverted code; the plain merge then picks up the new fix
+   commit; a bare re-merge is a no-op). Documented as a merge-gate revert-path sequence in §5.
+
+**Operational facts (reusable)**
+- The **`fleet result`/`peek` cp1252 unicode crash (from C1) is STILL live** — C2 did not fix
+  it (out of scope). Keep the `PYTHONIOENCODING=utf-8` workaround (see projects/claude-fleet.md).
+- **New standing post-merge live checks:** FLEET_LIVE integration tier (default=main hooks),
+  `fleet init` re-render when the template changes (PostCompact hook was added), `fleet doctor`
+  gained hook-registration / unreadable-starttime / limited-parks / ceiling-file-sweep /
+  hook-errors checks, and live hook-smoke.
+- **New CLI surface:** `fleet resume-limited`; `--token-ceiling` on spawn/respawn;
+  `over_budget` / `over_ceiling` / `limited` statuses; spawn-time model echo.
