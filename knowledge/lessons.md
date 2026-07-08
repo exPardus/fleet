@@ -180,3 +180,50 @@ full revert path was exercised end-to-end (see below).**
   hook-errors checks, and live hook-smoke.
 - **New CLI surface:** `fleet resume-limited`; `--token-ceiling` on spawn/respawn;
   `over_budget` / `over_ceiling` / `limited` statuses; spawn-time model echo.
+
+## 2026-07-09 — External dogfood #1: `stupidbox` (first non-fleet campaign, soak fuel)
+
+<!-- anchor: 2026-07-09-dogfood-stupidbox -->
+First real external campaign: built a throwaway useless CLI (`C:\proga\stupidbox`) from
+scratch with the fleet. Altai's steer mid-session: not the polymarket repo — "make
+something simple and stupid." 5 workers + 2 respawns, all haiku/`bypass`, ~$0.5 total.
+Wave 1: 4 module workers in parallel on disjoint files (`cow`/`fortune`/`roll`/`hodor`).
+Wave 2: 1 README worker, respawned twice. Full lifecycle exercised: batch spawn,
+mid-turn steer, respawn, background waits, manager verification, doctor-clean close.
+See `knowledge/projects/stupidbox.md`.
+
+**What worked**
+- **Dispatcher-first scaffold = clean N-wide parallelism.** Manager writes
+  `__main__.py` referencing all command names upfront (lazy import + "not built yet"
+  fallback); each worker owns exactly one module file. Zero shared-file contention;
+  4 concurrent commits, zero `index.lock`. Reusable pattern for "build N independent
+  things in parallel in a fresh repo."
+- **Mid-turn steer landed and was obeyed again** (`cow` got a `--think` thought-bubble
+  flag added mid-turn; worker also bumped its own self-test count to 3/3). Steering
+  prompt pattern "Steering update from manager: <one concrete verifiable change>" holds.
+- **Haiku on tiny tasks is ~free** ($0.09–0.13/worker); `bypass` correct for a throwaway
+  repo with no network/secrets/processes.
+
+**What stalled / friction found (the process change)**
+- **`fleet respawn <name>` IGNORES edits to `state/tasks/<name>.md`.** Verified against
+  `cmd_respawn` (bin/fleet.py:3029): respawn re-prompts with the **original task snapshot
+  stored in the registry (TRUNCATED per schema), or a `--task` override** — it does NOT
+  re-read the task file. I edited the readme task file (added banner + Philosophy section)
+  and a plain `respawn` silently regenerated the OLD scope. Passing
+  `fleet respawn sb-readme --task @state/tasks/sb-readme.md --force` picked up the edit
+  correctly (and confirms respawn `--task` DOES accept `@file` expansion).
+  → **process change (campaign-template §3f + respawn note): to change a worker's scope on
+  respawn, always re-pass `--task @file`; never edit the task file expecting respawn to see
+  it. For any long `@file` task, re-pass `--task @file` on respawn anyway — the registry
+  stores the task TRUNCATED, so a bare respawn can lose task detail.**
+
+**Operational facts (reusable)**
+- **The single system-wide fleet install means a concurrent foreign campaign shows up in
+  your `status`/`doctor`.** Mid-close, two workers I did not spawn (`plan3-t2-rtds`,
+  `plan3-t3-resolver`) appeared — a separate live pmbot Rust-TDD campaign in isolated
+  worktrees (`C:\proga\pmbot-wt-*`). Not a bug; doctor stayed 17/17. **A manager must
+  distinguish own-workers from foreign ones by name-prefix/dir before any bulk
+  `kill`/`clean`** — never blanket-retire the registry. Retire only names you spawned.
+- **Soak Gate 1 usage — Day 1 (2026-07-09):** 5 spawns + 2 respawns = **7 launches** on a
+  non-fleet project (`stupidbox`), doctor 17/17 clean, 0 incidents. Need ≥15 spawns across
+  ≥3 distinct days; this is day 1. (Sign-off stays Altai's — this only accrues the floor.)
