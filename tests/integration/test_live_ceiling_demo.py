@@ -78,10 +78,12 @@ def sandbox():
 
 
 def test_token_ceiling_both_halves(sandbox: Sandbox, capsys):
-    assert HOOK_SOURCE == "worktree", (
-        "run this demo with FLEET_HOOK_SOURCE=worktree so the chain's OWN Stop "
-        f"hook executes (got {HOOK_SOURCE!r})"
-    )
+    # Worktree-only PRE-MERGE demo: the whole point is to exercise the chain's
+    # OWN Stop hook (FLEET_HOOK_SOURCE=worktree). Under the merge gate's default
+    # (main hooks) this must SKIP, not FAIL -- otherwise it reds a post-merge
+    # run where the worktree no longer exists. Skip BEFORE any haiku spend.
+    if HOOK_SOURCE != "worktree":
+        pytest.skip("ceiling demo requires FLEET_HOOK_SOURCE=worktree", allow_module_level=False)
     name = "ceil-demo"
     # A ceiling of 1 token guarantees any real turn is provably over it -- the
     # cheapest possible way to exercise both enforcement paths.
