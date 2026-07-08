@@ -46,27 +46,6 @@ def _mailbox_path(session_id, fleet_home=None):
     return os.path.join(home, "mailbox", f"{session_id}.md")
 
 
-def _log_hook_error(session_id, exc, fleet_home=None):
-    """Kernel 1: append ONE diagnostic line to state/hook-errors.log so a
-    swallowed hook exception is not invisible. Best-effort, no lock, single
-    line (`timestamp session_id exception-repr`). Wrapped in its own
-    try/except so a logging failure NEVER changes the caller's exit code --
-    the exit-0-on-any-error invariant is absolute."""
-    try:
-        home = fleet_home if fleet_home is not None else _fleet_home()
-        ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        sid = session_id if session_id else "?"
-        # flatten to a single physical line: no field may contain a newline.
-        sid = str(sid).replace("\r", " ").replace("\n", " ")
-        rep = repr(exc).replace("\r", " ").replace("\n", " ")
-        path = os.path.join(home, "state", "hook-errors.log")
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(f"{ts} {sid} {rep}\n")
-    except Exception:
-        pass
-
-
 def _claim(mailbox_file):
     """Atomically claim mailbox_file by renaming it to a pid-suffixed
     sibling so concurrent hook invocations never deliver the same message
@@ -102,11 +81,9 @@ def _read_and_discard(claimed_file):
     return contents
 
 
-def main(state=None):
+def main():
     data = json.load(sys.stdin)
     session_id = data.get("session_id")
-    if state is not None:
-        state["sid"] = session_id
     if not _valid_session_id(session_id):
         return
 
@@ -129,9 +106,8 @@ def main(state=None):
 
 
 if __name__ == "__main__":
-    _state = {"sid": None}
     try:
-        main(_state)
-    except Exception as _exc:
-        _log_hook_error(_state["sid"], _exc)
+        main()
+    except Exception:
+        pass
     sys.exit(0)
