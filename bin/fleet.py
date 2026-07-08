@@ -1390,8 +1390,13 @@ def _sum_result_tokens(log_path) -> int | None:
 
     Fleet-side half of kernel 10 (F12=M24): the cumulative session token
     count used to HARD-enforce a worker's token_ceiling before a resume
-    launch. Basis matches the Stop hook's _current_tokens (input+output) so
-    the two halves agree on what "over ceiling" means. A whole-file read is
+    launch. Reads the SAME token keys as the Stop hook's _current_tokens
+    (input_tokens+output_tokens), best-effort -- but the two halves have
+    DIFFERENT enforcement roles, not an identical computation: the Stop hook
+    only ever ALLOWS a stop (never blocks -- invariant 2), while fleet hard-
+    ENFORCES the refusal here (over_ceiling + a refused resume). FIX-3 aligns
+    only the >= boundary so they agree on when tokens == ceiling counts as
+    over. A whole-file read is
     acceptable for the same reason _sum_result_costs's is: logs rotate to a
     fresh file on every respawn. Bogus values (bool, negative, non-int) are
     skipped, mirroring _coerce_cost's defensive stance."""
@@ -1441,9 +1446,18 @@ def _sum_result_tokens(log_path) -> int | None:
 # must never be swallowed as a park.
 # ---------------------------------------------------------------------------
 
+# FIX-2 (F-A2): tightened to recognize a CLAUDE PLAN usage-limit wall, never an
+# ordinary infra crash. Require a plan/usage-limit NOUN adjacent to "limit"
+# (usage|weekly|session|plan|5-hour limit), OR the explicit "limit ... resets
+# at <time>" wall shape. Deliberately DROPS the bare `quota` / bare `rate limit`
+# / bare `try again later` alternatives that collided with real failures --
+# disk-quota (EDQUOT), an upstream MCP `429 rate limit`, a `try again later`
+# assertion -- which must stay the crash-dead path (surfaced + journal note),
+# not a silent null-horizon park. When unsure, prefer crash-dead.
 _LIMIT_STDERR_RE = re.compile(
-    r"usage limit|rate limit|plan limit|resets?\s+at|try again (?:later|in)|quota",
-    re.IGNORECASE,
+    r"(?:usage|weekly|session|plan|5-?\s?hour)\s+limit"
+    r"|limit\b.{0,40}?\bresets?\s+at",
+    re.IGNORECASE | re.DOTALL,
 )
 # A machine-readable reset instant, IF the (as-yet-unconfirmed) signal carries
 # one in ISO-8601 UTC form. Best-effort only; absence -> null horizon.
@@ -2361,13 +2375,18 @@ def cmd_send(args, popen=subprocess.Popen, get_process_info=None, which=shutil.w
             tc = after.get("token_ceiling")
             if tc is not None:
                 used = _sum_result_tokens(logs_dir() / f"{args.name}.jsonl") or 0
-                if used > tc:
+                # FIX-3 (F-2): >= not > -- the Stop hook (stop_mailbox.py) allows
+                # stop at tokens >= ceiling; the fleet-side refusal must use the
+                # SAME boundary so tokens == ceiling is treated as over by both
+                # halves (at ==, > would let fleet launch a turn the hook would
+                # already allow-stop on -- a cross-half disagreement).
+                if used >= tc:
                     after["status"] = "over_ceiling"
                     data["workers"][args.name] = after
                     save_registry(data)
                     append_event("ceiling_exceeded", args.name, tokens=used, token_ceiling=tc)
                     raise FleetCliError(
-                        f"{args.name}: cumulative tokens {used} exceed token_ceiling "
+                        f"{args.name}: cumulative tokens {used} reached token_ceiling "
                         f"{tc} -- refusing resume (worker flagged over_ceiling); respawn "
                         "with a higher --token-ceiling or retire it"
                     )
@@ -2482,21 +2501,41 @@ def cmd_send(args, popen=subprocess.Popen, get_process_info=None, which=shutil.w
     return 0
 
 
-def _resume_one_limited(name: str, popen, get_process_info, which, sleep) -> None:
+def _resume_one_limited(name: str, popen, get_process_info, which, sleep) -> bool:
     """Relaunch a single `limited` worker through the ordinary
     fleet_lock-guarded launch path -- the SAME pre-claim / one-live-claude /
-    universal-drain shape cmd_send's idle-resume uses (invariants 6, 7). Under
-    the lock: pre-claim status="working"/turn_pid=None (recompute's launch-in-
-    flight guard then refuses to demote this window). Outside the lock: drain
-    mailbox + journal (compose_prompt with journal_path -- F31's "mailbox +
-    journal" resume), launch_turn re-passing the spawn-recorded
-    max_budget_usd/setting_sources (else the cap and foreign-hook remedy vanish
-    on the resumed turn), then commit the turn_pid. On failure, restore the
-    mailbox claim and roll the pre-claim back to `limited` (the park), never
-    leaving a ghost claim."""
+    universal-drain shape cmd_send's idle-resume uses (invariants 6, 7).
+
+    Returns True iff a resume turn was actually launched, False if the worker
+    was skipped because it was no longer `limited` when the claiming lock was
+    taken (a concurrent resume sweep / respawn --force / send already moved it).
+
+    Under the lock: RE-READ the record and re-validate it is STILL `limited`
+    BEFORE pre-claiming (FIX-1/F-A1 -- mirrors cmd_send's idle re-check: the
+    caller's eligibility decision was made against a lock-released snapshot, so
+    two racing sweeps both snapshot `limited`; without this re-check the second
+    clobbers the first's live pre-claim and starts a second `claude --resume`
+    on one sid, orphaning the first turn_pid). A vanished worker raises a clean
+    FleetCliError, never a raw KeyError. Then pre-claim status="working"/
+    turn_pid=None (recompute's launch-in-flight guard then refuses to demote
+    this window). Outside the lock: drain mailbox + journal (compose_prompt with
+    journal_path -- F31's "mailbox + journal" resume), launch_turn re-passing
+    the spawn-recorded max_budget_usd/setting_sources (else the cap and
+    foreign-hook remedy vanish on the resumed turn), then commit the turn_pid.
+    On failure, restore the mailbox claim and roll the pre-claim back to
+    `limited` (the park), never leaving a ghost claim."""
     with fleet_lock():
         data = load_registry()
-        rec = data["workers"][name]
+        rec = data["workers"].get(name)
+        if rec is None:
+            raise FleetCliError(f"unknown worker: {name!r}")
+        # FIX-1 (F-A1, HIGH): re-validate under the claiming lock. The caller
+        # decided eligibility against a snapshot taken under a DIFFERENT lock
+        # acquisition; a concurrent actor may have already flipped this worker
+        # out of `limited` (another sweep resumed it, a respawn --force reset
+        # it, ...). Skip rather than pre-claim a second live turn onto the sid.
+        if rec.get("status") != "limited":
+            return False
         rec["status"] = "working"
         rec["turn_pid"] = None
         # Stamp a fresh last_activity so recompute_status's stale-pre-claim
@@ -2549,6 +2588,7 @@ def _resume_one_limited(name: str, popen, get_process_info, which, sleep) -> Non
 
     if not _commit_launched_turn(_commit, sleep=sleep):
         _report_stranded_turn(name, sid, info)
+    return True
 
 
 def cmd_resume_limited(args, popen=subprocess.Popen, get_process_info=None, which=shutil.which,
@@ -2595,8 +2635,13 @@ def cmd_resume_limited(args, popen=subprocess.Popen, get_process_info=None, whic
             if not _limit_reset_passed(rec):
                 skipped.append((name, f"still before reset horizon (resets {reset})"))
                 continue
-        _resume_one_limited(name, popen, get_process_info, which, sleep)
-        resumed.append(name)
+        # FIX-1: _resume_one_limited re-validates `limited` under its own lock
+        # and returns False if a concurrent actor already moved the worker --
+        # report that as a skip, never as a (non-existent) resume.
+        if _resume_one_limited(name, popen, get_process_info, which, sleep):
+            resumed.append(name)
+        else:
+            skipped.append((name, "no longer limited (concurrent change)"))
 
     for name in resumed:
         print(f"{name}: resumed (limited -> working)")
@@ -3373,6 +3418,10 @@ def _remove_worker_files(name: str, sid: str) -> list:
         logs_dir() / f"{name}.err", logs_dir() / f"{name}.err.1",
         mailbox_dir() / f"{sid}.md",
         journals_dir() / f"{name}.md",
+        # FIX-5 (F-4): the sid-keyed token-ceiling file (kernel 10) was never
+        # cleaned -> a growing pile of orphaned state/ceilings/<sid> files.
+        # Sweep it alongside the other per-worker artifacts.
+        ceiling_file_path(sid),
     ]
     candidates += list(mailbox_dir().glob(f"{sid}.md.claimed.*")) if mailbox_dir().exists() else []
     for path in candidates:
@@ -3807,30 +3856,43 @@ def _doctor_check_orphaned_claims(workers=None):
     (mailbox/*.claimed.* files a hook left behind mid-claim) rather than
     duplicating it -- both are stranded mailbox artifacts doctor should
     surface. The orphaned-mailbox disposition prints the sid + its first line.
-    `workers` defaults to None (skip the orphaned-mailbox scan) so callers that
-    only care about claim litter can still call it argument-free."""
-    mbox_dir = mailbox_dir()
-    if not mbox_dir.exists():
-        return ("orphaned-claims", True, "no mailbox dir yet")
+    `workers` defaults to None (skip the sid-matched orphan scans) so callers
+    that only care about claim litter can still call it argument-free.
+
+    FIX-5 (F-4): also NOTEs orphaned state/ceilings/<sid> files (a token-ceiling
+    file whose sid matches no registered worker) -- EXTENDING this orphaned-sid
+    surface rather than duplicating it. `fleet clean` sweeps them for a removed
+    worker; this catches any left behind (e.g. a registry edited out-of-band)."""
     parts = []
-    # T3-F2 (adversarial review deferred finding): report every orphaned
-    # claim, not just ones tied to a dead worker being cleaned -- a hook can
-    # die between claim and delete regardless of the worker's current status.
-    claims = sorted(p.name for p in mbox_dir.glob("*.claimed.*"))
-    if claims:
-        parts.append(
-            f"{len(claims)} orphaned mailbox/*.claimed.* file(s) (hook killed mid-claim; "
-            f"safe to remove manually, or run `fleet clean`): {', '.join(claims)}")
-    if workers is not None:
-        known_sids = {rec["session_id"] for rec in workers.values()}
-        orphans = sorted(p for p in mbox_dir.glob("*.md") if p.stem not in known_sids)
-        if orphans:
-            disp = "; ".join(f"{p.stem}: {_mailbox_first_line(p)!r}" for p in orphans)
+    mbox_dir = mailbox_dir()
+    if mbox_dir.exists():
+        # T3-F2 (adversarial review deferred finding): report every orphaned
+        # claim, not just ones tied to a dead worker being cleaned -- a hook can
+        # die between claim and delete regardless of the worker's current status.
+        claims = sorted(p.name for p in mbox_dir.glob("*.claimed.*"))
+        if claims:
             parts.append(
-                f"{len(orphans)} orphaned mailbox file(s) (sid matches no registered worker): {disp}")
+                f"{len(claims)} orphaned mailbox/*.claimed.* file(s) (hook killed mid-claim; "
+                f"safe to remove manually, or run `fleet clean`): {', '.join(claims)}")
+        if workers is not None:
+            known_sids = {rec["session_id"] for rec in workers.values()}
+            orphans = sorted(p for p in mbox_dir.glob("*.md") if p.stem not in known_sids)
+            if orphans:
+                disp = "; ".join(f"{p.stem}: {_mailbox_first_line(p)!r}" for p in orphans)
+                parts.append(
+                    f"{len(orphans)} orphaned mailbox file(s) (sid matches no registered worker): {disp}")
+    ceil_dir = ceilings_dir()
+    if workers is not None and ceil_dir.exists():
+        known_sids = {rec["session_id"] for rec in workers.values()}
+        orphan_ceils = sorted(p.name for p in ceil_dir.iterdir()
+                              if p.is_file() and not p.name.endswith(".tmp") and p.name not in known_sids)
+        if orphan_ceils:
+            parts.append(
+                f"{len(orphan_ceils)} orphaned ceiling file(s) (state/ceilings/<sid> matching no "
+                f"registered worker; run `fleet clean` or remove manually): {', '.join(orphan_ceils)}")
     if parts:
         return ("orphaned-claims", True, " | ".join(parts))
-    return ("orphaned-claims", True, "no orphaned *.claimed.* or mailbox files")
+    return ("orphaned-claims", True, "no orphaned *.claimed.*, mailbox, or ceiling files")
 
 
 def _doctor_check_claude_agents(workers: dict, which=shutil.which, run=subprocess.run):
