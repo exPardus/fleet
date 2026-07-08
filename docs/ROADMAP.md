@@ -32,9 +32,11 @@ Ship before Phase 2 (watchtower multiplies OS surface). Spec: `docs/specs/portab
 The one deliberate v1 exclusion (no daemon) gets revisited — continuous monitoring needs a resident process. `fleet watch` (same fleet.py, subcommand; auto-start via platform adapter: Scheduled Task / systemd user unit / launchd agent):
 
 - Tails `logs/*.jsonl` + registry; evaluates **rules**: worker idle > N min with mail pending, turn crashed, context burn high (token counts from stream events), budget threshold crossed, needs-input detected, journal not updated in > N turns.
-- Emits typed events to `state/events.jsonl` (single writer stays fleet.py) and fans out to pluggable **notifiers** (Phase 2: desktop notification via platform adapter + file; Phase 3: Telegram).
-- **Context management goes automatic here** (steal: agent-farm context thresholds): watchtower flags "worker at ~70% context" → notifies manager/human; `--auto-respawn` opt-in policy respawns from journal at threshold. Journal-quality gate: respawn refuses if journal stale, pings worker to update first.
+- Emits typed events to `state/events.jsonl` (single writer stays fleet.py) and fans out to **notifier functions** (Phase 2: desktop notification via platform adapter + file sink; Phase 3: Telegram) — a static `notify(event)` dispatch over a fixed sink list, **not a plugin framework**.
+- <!-- phase2-mirror --> **Context management surfaces here** (steal: agent-farm context thresholds): watchtower flags "worker at ~70% context" → notifies manager/human. **Auto-respawn is cut from Phase-2 v1 (notify-only); it is re-vetted post-Phase-3** once remote manual respawn exists — v1 detects and notifies context-threshold / dead / idle-with-mail and never autonomously mutates state. (M10/F20: an unattended respawn loop on a context-burning task has no hard per-worker cap and no fleet-wide cost rule in v1; the "auto-respawn demonstrated lossless" done-criterion is deleted, not deferred.)
 - `fleet status --delta` (steal: sitrep) ships here — watchtower keeps last-seen cursor per consumer.
+
+<!-- phase2-mirror --> **v1 scope notes (mirrored from `docs/specs/phase-2-watchtower.md` — must read identically):** **auto-respawn cut from Phase-2 v1 (notify-only); notifier functions not a plugin framework; service install → docs snippets** (logon-triggered interactive schtasks / systemd user unit / launchd shown as documented commands through the platform adapter, not a fleet-run installer). The **needs-input / journal-staleness rule disposition is a placeholder pending the C5 watchtower spec decision** — journal-staleness is trivially detectable (journal mtime / turn-count delta) and expected to ship v1; needs-input ships as a heuristic OR is deferred to a Phase-3 re-vet. Not resolved here: see `docs/specs/phase-2-watchtower.md` OQ1 and the C5 spec task.
 
 Done when: phone-free day — you leave, come back, nothing silently died.
 
@@ -81,17 +83,21 @@ Everything here is doctrine + knowledge, mostly prose and small CLI additions �
 
 - Adopt/wrap native Agent View once out of research preview (re-evaluate; PRIOR-ART decision point).
 - GitHub-Issues-as-queue adapter (steal: code-conductor) for issue-shaped work.
-- Multi-machine: registry/state sync via git or Tailscale-mounted state; workers on the exPardus dev server.
+- <!-- F26 --><!-- M25 --> Multi-machine: **per-machine registries with a read-only federation view — never a shared writable fleet.json or git-synced state/; liveness and interrupt stay machine-local.** (`turn_pid`/ctime probes and taskkill are meaningful only on the owning host — a shared writable registry would let machine B recompute machine A's live worker as `dead` and `interrupt` could taskkill an unrelated local PID; `state/` is gitignored by the SPEC layout and atomic-rename locking has no cross-network guarantee, so single-writer breaks over a network FS.) Workers on the exPardus dev server surface through the federation view; each host owns and writes only its own registry.
 - Other agent CLIs as workers (Codex etc.) behind the same registry — the mailbox/hook layer is Claude-specific, launcher+registry aren't.
 
 ## Sequencing & discipline
 
 Strict order 1→1.5→2→3; 2.5 anytime after 1.5; 4 and 5 can interleave after 3. Each phase gets its own short spec + adversarial review before build (same process that caught 3 blockers in SPEC v1). Phase never starts until previous phase survived a week of real use — features earn their way in by friction actually felt, not imagined.
 
+<!-- soak-defs --> **Soak gates (usage-denominated, not calendar weeks).** "Survived a week of real use" above is shorthand; the binding gates are **usage-denominated — a slow week extends the gate, never passes on elapsed time alone** (PLAN soak-gate defs: Soak 1 = ≥15 spawns across ≥3 distinct days; Soak 1.5 = ≥5 green-matrix pushes across ≥3 days; Soak 2 = ≥5 workdays real load on ≥3 of them; etc.). **Spec drafting (docs-only) may proceed during the prior phase's soak while build may not** — a later demand "yes" must find a ready-for-build spec already waiting. Enforcement is mechanical, not manager memory: **each next-phase task file greps for the dated `SOAK GATE <n> SIGNED` line and blocks if absent** (PLAN §0.2.1) — the line being Altai's signature in `knowledge/lessons.md` against a defined audit artifact. **Demand-check valves (PLAN §0.4) gate the BUILD only — specs always run**, so unfelt features are never built on schedule-momentum.
+
 Review disciplines (learned from idea-forge run 1, `docs/IDEA-FORGE-REPORT.md`):
 - **Flag, not subsystem:** at spec time, re-vet every proposed subsystem for a flag-sized alternative that delivers 80% of the value.
-- **Name your invariants:** every spec/idea must list which architectural invariants it touches (daemonless launch, exit-0 hooks, atomic single-file mailbox, journal-injection-at-respawn, cwd-scoped resume) and why it doesn't violate them.
+<!-- F26 --><!-- M25 --> 
+- **Name your invariants:** every spec/idea must list which architectural invariants it touches and why it doesn't violate them, by citing number against **SPEC's numbered nine-invariant section** ("Architectural invariants (numbered)") — all nine, not the five once listed here. The four this list previously omitted are exactly the ones Phases 2–4 stress hardest: **(6) single-writer registry, (7) one-live-claude-per-session, (8) platform-adapter-only OS branching, (9) one-state-many-views**. Every phase stub carries a mandatory `## Invariants touched` section naming the cited numbers and why each is preserved.
 - **Check the graveyard first:** IDEA-FORGE-REPORT §5 records ten dead ideas with causes of death — don't re-propose adjacent things without answering the cause.
+- <!-- F27 --><!-- M7 --> **Re-run the live tier at every gate:** the tier-3 scripted live-integration suite (SPEC §12; haiku worker, temp `FLEET_HOME` + throwaway repo, asserted budget ceiling) — **the live-integration tier is re-run at every phase gate**, and required before merging any change to `launch_turn`, hooks, or stream parsers. Campaign-0 proved 338 green unit tests coexisted with real bugs only a live worker exposed; each run also archives sanitized stream logs into `tests/fixtures/streams/` (the watchtower's rule-corpus source).
 
 ## Speccing workflow (multiple sessions in parallel)
 
