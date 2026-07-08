@@ -1514,10 +1514,13 @@ class TestDoctorRegistryChecks:
         assert ok is True
         assert "no orphaned" in msg
 
-    def test_no_mailbox_dir_yet(self, isolated_home):
+    def test_no_dirs_yet_reports_no_orphans(self, isolated_home):
+        # FIX-5: the check no longer early-returns on a missing mailbox dir
+        # (it also scans state/ceilings); with nothing on disk it reports the
+        # clean "no orphaned ..." message, still ok=True.
         name, ok, msg = fleet._doctor_check_orphaned_claims()
         assert ok is True
-        assert "no mailbox dir" in msg
+        assert "no orphaned" in msg
 
     def test_log_sizes_over_threshold_reported(self, isolated_home, monkeypatch):
         logs = fleet.logs_dir()
@@ -2485,3 +2488,112 @@ class TestLimitedSurfacing:
         name, ok, msg = fleet._doctor_check_limited_parks(workers)
         assert "weekly-one" in msg
         assert "null-one" in msg
+
+
+# ---------------------------------------------------------------------------
+# C2 Wave-2D adjudicated fixes (docs/reviews/C2-FIX-LIST-2026-07-08.md)
+# ---------------------------------------------------------------------------
+
+class TestFix1ResumeUnderLockRevalidation:
+    def test_second_resume_skips_when_no_longer_limited(self, isolated_home):
+        # F-A1/F-1 (HIGH): a resume that snapshotted `limited` must re-check
+        # the record IS STILL `limited` under its own claiming lock before
+        # pre-claiming -- else two racing sweeps both launch a second
+        # `claude --resume` on one sid (one-live-claude break). After the first
+        # resume flips it to working, the second must skip, not double-launch.
+        _seed_worker("probe-1", status="limited")
+        _set_field("probe-1", limit_reset_at=_past(), limit_kind="session_5h")
+        calls = []
+        popen = _fake_popen(FakeProc(pid=7), calls)
+        launched1 = fleet._resume_one_limited("probe-1", popen, _dead_info,
+                                              lambda n: "claude.cmd", _NO_SLEEP)
+        launched2 = fleet._resume_one_limited("probe-1", popen, _dead_info,
+                                              lambda n: "claude.cmd", _NO_SLEEP)
+        assert launched1 is True
+        assert launched2 is False
+        assert len(calls) == 1  # exactly one launch, no double-launch
+
+    def test_vanished_worker_raises_clean_error_not_keyerror(self, isolated_home):
+        with pytest.raises(fleet.FleetCliError):
+            fleet._resume_one_limited("ghost", _fake_popen(FakeProc(pid=7)), _dead_info,
+                                      lambda n: "claude.cmd", _NO_SLEEP)
+
+
+class TestFix2TighterLimitRegex:
+    @pytest.mark.parametrize("stderr", [
+        "OSError: [Errno 122] EDQUOT: Disk quota exceeded writing transcript",
+        "MCP server proxy: upstream returned 429 rate limit exceeded",
+        "ConnectionResetError: connection reset by peer, try again later",
+    ])
+    def test_infra_crash_stderr_stays_crash_dead(self, isolated_home, stderr):
+        # F-A2 (MEDIUM): these are genuine infra crashes, NOT a Claude plan
+        # wall. They must classify crash-dead (with the abnormal-turn note),
+        # never a silent null-horizon park.
+        _seed_worker("probe-1", status="working", turn_pid=999, turn_pid_ctime=ALIVE_CTIME)
+        _write_no_result_log("probe-1")
+        _write_err("probe-1", stderr)
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info, sleep=_NO_SLEEP)
+        assert updated["status"] == "dead"
+        journal = fleet.journals_dir() / "probe-1.md"
+        assert "turn ended abnormally" in journal.read_text(encoding="utf-8")
+
+    def test_real_plan_wall_noun_shape_still_parks(self, isolated_home):
+        _seed_worker("probe-1", status="working", turn_pid=999, turn_pid_ctime=ALIVE_CTIME)
+        _write_no_result_log("probe-1")
+        _write_err("probe-1", "Claude usage limit reached for this session.")
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info, sleep=_NO_SLEEP)
+        assert updated["status"] == "limited"
+
+    def test_real_plan_wall_limit_resets_at_shape_still_parks(self, isolated_home):
+        _seed_worker("probe-1", status="working", turn_pid=999, turn_pid_ctime=ALIVE_CTIME)
+        _write_no_result_log("probe-1")
+        _write_err("probe-1", "You've reached your limit. It resets at 2026-07-08T18:00:00Z.")
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info, sleep=_NO_SLEEP)
+        assert updated["status"] == "limited"
+        assert updated["limit_reset_at"] == "2026-07-08T18:00:00Z"
+
+
+class TestFix3TokenCeilingBoundary:
+    def test_idle_resume_refuses_at_exactly_ceiling(self, isolated_home):
+        # F-2 (LOW): the Stop hook allows stop at tokens >= ceiling; the
+        # fleet-side refusal must also use >= so tokens == ceiling is treated
+        # as over by BOTH halves (no disagreement at the boundary).
+        _seed_worker("probe-1", status="idle", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
+        log = fleet.logs_dir() / "probe-1.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(
+            '{"type":"result","usage":{"input_tokens":600,"output_tokens":400}}\n', encoding="utf-8")
+        _set_field("probe-1", token_ceiling=1000)  # 600+400 == 1000 exactly
+
+        def popen(*a, **kw):
+            raise AssertionError("must not launch at tokens == ceiling")
+
+        args = fleet.build_parser().parse_args(["send", "probe-1", "keep going"])
+        with pytest.raises(fleet.FleetCliError, match="ceiling"):
+            fleet.cmd_send(args, popen=popen, get_process_info=_dead_info, which=lambda n: "claude.cmd")
+        assert fleet.load_registry()["workers"]["probe-1"]["status"] == "over_ceiling"
+
+
+class TestFix5OrphanedCeilingFiles:
+    def test_clean_removes_dead_worker_ceiling_file(self, isolated_home):
+        # F-4 (LOW): state/ceilings/<sid> is never cleaned -> resource leak.
+        # cmd_clean must sweep it alongside logs/mailbox/journal.
+        sid, _ = _seed_worker("probe-1", status="dead")
+        ceiling = fleet.ceiling_file_path(sid)
+        ceiling.parent.mkdir(parents=True, exist_ok=True)
+        ceiling.write_text("500", encoding="utf-8")
+        args = fleet.build_parser().parse_args(["clean"])
+        fleet.cmd_clean(args, get_process_info=_dead_info, sleep=_NO_SLEEP)
+        assert not ceiling.exists()
+
+    def test_doctor_notes_orphaned_ceiling_file(self, isolated_home):
+        ceilings = fleet.ceilings_dir()
+        ceilings.mkdir(parents=True, exist_ok=True)
+        (ceilings / "orphan-sid-xyz").write_text("500", encoding="utf-8")
+        name, ok, msg = fleet._doctor_check_orphaned_claims(workers={})
+        assert ok
+        assert "ceiling" in msg.lower()
+        assert "orphan-sid-xyz" in msg
