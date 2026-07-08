@@ -351,6 +351,21 @@ class TestCmdInit:
         assert rc == 0
         assert fleet.instance_settings_path().exists()
 
+    def test_main_dispatches_resume_limited_command(self, isolated_home, monkeypatch):
+        # UL1 (item 11 / F31): main() routes `resume-limited` to
+        # cmd_resume_limited with the parsed name/--force-now.
+        seen = {}
+
+        def fake(args, **kwargs):
+            seen["name"] = args.name
+            seen["force_now"] = args.force_now
+            return 0
+
+        monkeypatch.setattr(fleet, "cmd_resume_limited", fake)
+        rc = fleet.main(["resume-limited", "w1", "--force-now"])
+        assert rc == 0
+        assert seen == {"name": "w1", "force_now": True}
+
 
 # ---------------------------------------------------------------------------
 # resolve_claude_executable
