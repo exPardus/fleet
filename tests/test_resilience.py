@@ -80,8 +80,14 @@ def _fake_popen(proc, calls=None):
 
 
 def _seed_worker(name, status=None, turn_pid=None, turn_pid_ctime=None,
-                  cwd="C:/proj", mode="dontask", model=None, sid=None,
+                  cwd=None, mode="dontask", model=None, sid=None,
                   task="original task text", log_result=False, cost_usd=0.0):
+    # Kernel 4 cwd preflight: launch_turn now refuses to launch into a
+    # vanished cwd, so the default seeded cwd must be a real directory
+    # (FLEET_HOME, created by the isolated_home fixture). Tests that need a
+    # specific cwd pass it explicitly and create it themselves.
+    if cwd is None:
+        cwd = str(fleet.FLEET_HOME)
     sid = sid or str(uuid.uuid4())
     rec = fleet.new_worker_record(sid, cwd, task, mode, model=model)
     if status is not None:
@@ -292,8 +298,10 @@ class TestCmdRespawn:
         assert rec["attached_since"] is None
         assert rec["session_id"] != old_sid
 
-    def test_new_uuid_same_name_cwd_mode_model(self, isolated_home):
-        old_sid, _ = _seed_worker("probe-1", status="idle", cwd="C:/some/proj", mode="bypass",
+    def test_new_uuid_same_name_cwd_mode_model(self, isolated_home, tmp_path):
+        proj = tmp_path / "some" / "proj"
+        proj.mkdir(parents=True)  # kernel 4 preflight: cwd must really exist
+        old_sid, _ = _seed_worker("probe-1", status="idle", cwd=proj.as_posix(), mode="bypass",
                                    model="opus", log_result=True)
         proc = FakeProc(pid=7)
         args = fleet.build_parser().parse_args(["respawn", "probe-1"])
@@ -302,7 +310,7 @@ class TestCmdRespawn:
         rec = fleet.load_registry()["workers"]["probe-1"]
         assert uuid.UUID(rec["session_id"])
         assert rec["session_id"] != old_sid
-        assert rec["cwd"] == "C:/some/proj"
+        assert rec["cwd"] == proj.as_posix()
         assert rec["mode"] == "bypass"
         assert rec["model"] == "opus"
 
@@ -1624,3 +1632,150 @@ class TestTailReadPerf:
 
         lines = fleet._read_tail_lines(log)
         assert any(line.startswith('{"type":"result"') for line in lines)
+
+
+# ---------------------------------------------------------------------------
+# Kernel 1 (fleet-side) -- doctor hook-error tail surfacing
+# ---------------------------------------------------------------------------
+
+class TestDoctorHookErrors:
+    def test_no_log_passes(self, isolated_home):
+        name, ok, msg = fleet._doctor_check_hook_errors()
+        assert name == "hook-errors"
+        assert ok is True
+        assert "no swallowed hook errors" in msg
+
+    def test_empty_log_passes(self, isolated_home):
+        fleet.hook_errors_path().write_text("\n  \n", encoding="utf-8")
+        name, ok, msg = fleet._doctor_check_hook_errors()
+        assert ok is True
+        assert "no swallowed hook errors" in msg
+
+    def test_nonempty_log_surfaces_tail(self, isolated_home):
+        lines = [f"2026-07-08T00:0{i}:00Z sid-{i} KeyError('boom{i}')" for i in range(6)]
+        fleet.hook_errors_path().write_text("\n".join(lines) + "\n", encoding="utf-8")
+        name, ok, msg = fleet._doctor_check_hook_errors()
+        # A logged hook error is surfaced, not a hard doctor failure
+        # (hooks keep the exit-0 invariant; this only makes them visible).
+        assert ok is True
+        assert "6" in msg
+        # the newest line must appear; the oldest (line 0) is off the tail
+        assert "boom5" in msg
+        assert "boom0" not in msg
+
+
+# ---------------------------------------------------------------------------
+# Kernel 2 -- static hook-registration lint (learns PostCompact, F11)
+# ---------------------------------------------------------------------------
+
+class TestDoctorHookRegistration:
+    def _write_settings(self, hooks):
+        fleet.instance_settings_path().write_text(
+            json.dumps({"hooks": hooks}), encoding="utf-8"
+        )
+
+    def _existing_script(self, isolated_home):
+        script = isolated_home / "state" / "hook.py"
+        script.write_text("# stub", encoding="utf-8")
+        return script.as_posix()
+
+    def test_missing_instance_fails(self, isolated_home):
+        fleet.instance_settings_path().unlink()
+        name, ok, msg = fleet._doctor_check_hook_registration()
+        assert name == "hook-registration"
+        assert ok is False
+
+    def test_invalid_json_fails(self, isolated_home):
+        fleet.instance_settings_path().write_text("{not json", encoding="utf-8")
+        name, ok, msg = fleet._doctor_check_hook_registration()
+        assert ok is False
+
+    def test_no_hooks_object_is_tolerated(self, isolated_home):
+        # The stub `{}` instance (what the fixture writes) must not turn
+        # doctor red -- the instance-settings check owns "is there anything
+        # here"; this lint only validates whatever IS registered.
+        name, ok, msg = fleet._doctor_check_hook_registration()
+        assert ok is True
+
+    def test_known_events_with_existing_paths_pass(self, isolated_home):
+        script = self._existing_script(isolated_home)
+        self._write_settings({
+            "PostToolUse": [{"hooks": [{"type": "command", "command": f'py "{script}"'}]}],
+            "Stop": [{"hooks": [{"type": "command", "command": f'py "{script}"'}]}],
+            "PostCompact": [{"hooks": [{"type": "command", "command": f'py "{script}"'}]}],
+        })
+        name, ok, msg = fleet._doctor_check_hook_registration()
+        assert ok is True, msg
+        # F11: PostCompact is a KNOWN event now -- a lint that hadn't
+        # learned it would flag it as unknown and fail here.
+        assert "PostCompact" in msg
+
+    def test_unknown_event_name_fails(self, isolated_home):
+        script = self._existing_script(isolated_home)
+        self._write_settings({
+            "PostToolUsee": [{"hooks": [{"type": "command", "command": f'py "{script}"'}]}],
+        })
+        name, ok, msg = fleet._doctor_check_hook_registration()
+        assert ok is False
+        assert "PostToolUsee" in msg
+
+    def test_missing_command_path_fails(self, isolated_home):
+        self._write_settings({
+            "Stop": [{"hooks": [{"type": "command", "command": 'py "/nope/gone.py"'}]}],
+        })
+        name, ok, msg = fleet._doctor_check_hook_registration()
+        assert ok is False
+        assert "gone.py" in msg
+
+
+# ---------------------------------------------------------------------------
+# Kernel 4 -- abnormal-turn-end journal note + cwd preflight
+# ---------------------------------------------------------------------------
+
+class TestAbnormalTurnEndNote:
+    def _crash_log(self, name):
+        log = fleet.logs_dir() / f"{name}.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text('{"type":"assistant","message":{"content":[]}}\n', encoding="utf-8")
+
+    def test_crash_classification_appends_note(self, isolated_home):
+        sid, rec = _seed_worker("probe-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
+        self._crash_log("probe-1")
+        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info)
+        assert updated["status"] == "dead"
+        journal = fleet.journals_dir() / "probe-1.md"
+        assert journal.exists()
+        assert "turn ended abnormally" in journal.read_text(encoding="utf-8")
+
+    def test_note_written_once_per_crash(self, isolated_home):
+        sid, rec = _seed_worker("probe-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
+        self._crash_log("probe-1")
+        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info)
+        # feeding the now-"dead" record back must not append a second note
+        fleet.recompute_worker("probe-1", updated, get_process_info=_dead_info)
+        journal = fleet.journals_dir() / "probe-1.md"
+        assert journal.read_text(encoding="utf-8").count("turn ended abnormally") == 1
+
+    def test_clean_finish_writes_no_note(self, isolated_home):
+        # working -> idle (trailing result) is a NORMAL finish, not a crash
+        sid, rec = _seed_worker(
+            "probe-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME, log_result=True,
+        )
+        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info)
+        assert updated["status"] == "idle"
+        journal = fleet.journals_dir() / "probe-1.md"
+        assert not journal.exists() or "turn ended abnormally" not in journal.read_text(encoding="utf-8")
+
+
+class TestCwdPreflight:
+    def test_launch_turn_refuses_vanished_cwd(self, isolated_home, tmp_path):
+        gone = tmp_path / "vanished"  # never created
+
+        def popen(*a, **kw):
+            raise AssertionError("must not launch a turn into a vanished cwd")
+
+        with pytest.raises(fleet.TurnLaunchError, match="cwd"):
+            fleet.launch_turn(
+                "probe-1", gone, "sid-1", "prompt", "dontask",
+                popen=popen, which=lambda n: "claude.cmd",
+            )

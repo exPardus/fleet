@@ -85,6 +85,14 @@ def events_path() -> Path:
     return state_dir() / "events.jsonl"
 
 
+def hook_errors_path() -> Path:
+    """Append-only log of swallowed hook exceptions (phase1 kernel 1): hooks
+    keep the exit-0-on-any-error invariant (SPEC invariant 2) but record one
+    line per swallowed exception here. fleet.py only ever READS it -- `fleet
+    status` surfaces a total count, `fleet doctor` shows the tail."""
+    return state_dir() / "hook-errors.log"
+
+
 def lock_path() -> Path:
     return state_dir() / "fleet.lock"
 
@@ -1034,6 +1042,14 @@ def launch_turn(name: str, cwd, sid: str, prompt: str, mode: str, first: bool = 
     the caller (cmd_spawn et al), keyed only on whether this function
     returned or raised.
     """
+    # Phase1 kernel 4 (cwd preflight): never launch/resume a turn into a
+    # vanished directory. Every launch path (spawn, send-resume, respawn)
+    # funnels through here, so one guard covers them all -- and raising
+    # BEFORE the Popen keeps the launch-sequence contract intact (the caller
+    # restores the mailbox claim on any raise, same as a resolve/argv error).
+    if not os.path.isdir(cwd):
+        raise TurnLaunchError(f"registered cwd no longer exists, refusing to launch {name!r}: {cwd}")
+
     claude_exe = resolve_claude_executable(which=which)
     argv = build_turn_argv(claude_exe, sid, first, mode, model=model, max_budget_usd=max_budget_usd,
                             setting_sources=setting_sources)
@@ -1215,6 +1231,19 @@ def _sum_result_costs(log_path) -> float | None:
     return total if found else None
 
 
+def _append_abnormal_turn_note(name: str) -> None:
+    """Append a one-line abnormal-turn-end landmark to the worker's journal
+    (phase1 kernel 4). Best-effort: a journal we cannot write must never break
+    a status recompute, so any OSError is swallowed."""
+    try:
+        journals_dir().mkdir(parents=True, exist_ok=True)
+        journal = journals_dir() / f"{name}.md"
+        with open(journal, "a", encoding="utf-8") as f:
+            f.write(f"\nturn ended abnormally at {now_iso()}\n")
+    except OSError:
+        pass
+
+
 def recompute_worker(name: str, record: dict, get_process_info=None) -> dict:
     """Return an updated copy of `record` with status/cost_usd/last_activity
     refreshed from live PID + log-tail state. Never mutates other fields
@@ -1237,6 +1266,16 @@ def recompute_worker(name: str, record: dict, get_process_info=None) -> dict:
         current_status=record.get("status"), get_process_info=get_process_info,
         last_activity_iso=record.get("last_activity"),
     )
+    # Phase1 kernel 4: a turn that WAS "working" with a real (non-None)
+    # turn_pid and just classified "dead" is a crashed turn (stale/gone PID +
+    # no trailing result). Drop an abnormal-turn-end landmark in the worker's
+    # journal so a respawn's carried-forward context knows the last turn did
+    # not finish cleanly. Guarded on the working(real pid)->dead transition,
+    # so it fires ONCE per crash: once persisted "dead" (which is sticky),
+    # the input status is no longer "working" and this is skipped.
+    if (record.get("status") == "working" and record.get("turn_pid") is not None
+            and updated["status"] == "dead"):
+        _append_abnormal_turn_note(name)
     cost_sum = _sum_result_costs(log_path)
     if cost_sum is not None:
         updated["cost_usd"] = _registry_cost(record.get("cost_baseline", 0.0)) + cost_sum
@@ -1613,8 +1652,37 @@ def cmd_spawn(args, popen=subprocess.Popen, get_process_info=None, which=shutil.
     if not _commit_launched_turn(_commit, sleep=sleep):
         _report_stranded_turn(args.name, sid, info)
 
+    # Phase1 kernel 5: echo the effective model/config at launch so a costly
+    # model (or an inherited CLAUDE_CODE_SUBAGENT_MODEL) is visible up front,
+    # not discovered on the bill.
+    model_line = f"model: {args.model or '(claude default)'}"
+    subagent_model = os.environ.get("CLAUDE_CODE_SUBAGENT_MODEL")
+    if subagent_model:
+        model_line += f"; CLAUDE_CODE_SUBAGENT_MODEL={subagent_model}"
+    print(model_line)
+
     print(f"{args.name} {sid} {info['log_path']}")
     return 0
+
+
+_HOOK_ERROR_TAIL = 5  # doctor/status: how many trailing hook-error lines to show
+
+
+def _hook_error_lines() -> list:
+    """Non-blank lines currently in state/hook-errors.log (phase1 kernel 1),
+    or [] if the log is absent/unreadable. Read-only -- fleet.py never writes
+    this file (the hooks do)."""
+    path = hook_errors_path()
+    try:
+        if not path.exists():
+            return []
+        return [ln for ln in path.read_text(encoding="utf-8", errors="replace").splitlines() if ln.strip()]
+    except OSError:
+        return []
+
+
+def _hook_error_count() -> int:
+    return len(_hook_error_lines())
 
 
 def cmd_status(args, get_process_info=None) -> int:
@@ -1684,6 +1752,12 @@ def cmd_status(args, get_process_info=None) -> int:
             save_registry(data)
 
     _print_status_table({"workers": display}, names)
+    # Phase1 kernel 1: surface a TOTAL count of swallowed hook errors when
+    # nonzero so a silently-failing hook is visible at a glance (`fleet
+    # doctor` shows the tail).
+    n_hook_errors = _hook_error_count()
+    if n_hook_errors:
+        print(f"hook-errors: {n_hook_errors} swallowed hook error(s) logged (run `fleet doctor` for the tail)")
     return 0
 
 
@@ -3147,6 +3221,73 @@ def _doctor_check_log_sizes():
     return ("log-sizes", True, "no log files over 50MB")
 
 
+def _doctor_check_hook_errors():
+    """Phase1 kernel 1: surface the TAIL of state/hook-errors.log when it is
+    nonempty (the swallowed-hook-exception log). Never a hard failure -- a
+    logged error means a hook hit an exception but still exited 0 (SPEC
+    invariant 2); doctor's job here is to make that visible, not to fail."""
+    lines = _hook_error_lines()
+    if not lines:
+        return ("hook-errors", True, "no swallowed hook errors logged")
+    tail = lines[-_HOOK_ERROR_TAIL:]
+    return ("hook-errors", True,
+            f"{len(lines)} swallowed hook error(s) logged; last {len(tail)}: " + " | ".join(tail))
+
+
+_KNOWN_HOOK_EVENTS = frozenset({"PostToolUse", "Stop", "PostCompact"})
+
+
+def _doctor_check_hook_registration():
+    """Phase1 kernel 2 (F11): static lint of the rendered worker-settings.json
+    hook wiring. Parse the instance, assert every REGISTERED event name is a
+    known one (`PostToolUse`/`Stop`/`PostCompact` -- PostCompact is the new
+    harden-hooks event this lint has learned), each command's script path
+    exists on disk, and the JSON shape is well-formed. Catches the typo'd
+    event name / moved script the synthetic hook-smoke check false-greens on.
+
+    Tolerant of a hooks-less instance (returns PASS): the
+    `worker-settings-instance` check owns "is anything rendered at all"; this
+    lint only validates what IS registered, so a stub `{}` never turns doctor
+    red here."""
+    path = instance_settings_path()
+    if not path.exists():
+        return ("hook-registration", False, f"{path} missing -- run `fleet init`")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return ("hook-registration", False, f"{path} does not parse as JSON: {exc}")
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    if hooks is None:
+        return ("hook-registration", True, "no hooks registered (nothing to lint)")
+    if not isinstance(hooks, dict):
+        return ("hook-registration", False, f"{path} 'hooks' is not a JSON object")
+    problems = []
+    for event, groups in hooks.items():
+        if event not in _KNOWN_HOOK_EVENTS:
+            problems.append(
+                f"unknown hook event name {event!r} (known: {', '.join(sorted(_KNOWN_HOOK_EVENTS))})")
+        if not isinstance(groups, list):
+            problems.append(f"hooks.{event} is not a list")
+            continue
+        for group in groups:
+            if not isinstance(group, dict):
+                problems.append(f"hooks.{event} contains a non-object entry")
+                continue
+            for h in group.get("hooks", []) or []:
+                cmd = h.get("command") if isinstance(h, dict) else None
+                if not isinstance(cmd, str):
+                    problems.append(f"hooks.{event} has a hook with no command string")
+                    continue
+                for script in _hook_script_tokens(cmd):
+                    if not Path(script).exists():
+                        problems.append(f"hooks.{event} command path not found: {script}")
+    if problems:
+        return ("hook-registration", False, "; ".join(problems))
+    registered = ", ".join(sorted(hooks)) or "none"
+    return ("hook-registration", True,
+            f"all registered hook events known and command paths exist ({registered})")
+
+
 def cmd_doctor(args, which=shutil.which, run=subprocess.run, get_process_info=None) -> int:
     """`fleet doctor` (SPEC §5 doctor row, §7 silent-failure alarm): runs
     every health check below and prints one [PASS]/[FAIL] line each;
@@ -3166,6 +3307,7 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run, get_process_info=No
         _doctor_check_claude_version(which=which, run=run),
         _doctor_check_instance_settings(),
         _doctor_check_instance_freshness(),
+        _doctor_check_hook_registration(),
         _doctor_check_legacy_settings(),
         _doctor_check_posttooluse_hook_smoke(run=run),
         _doctor_check_stop_hook_smoke(run=run),
@@ -3176,6 +3318,7 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run, get_process_info=No
         _doctor_check_orphaned_claims(),
         _doctor_check_claude_agents(workers, which=which, run=run),
         _doctor_check_log_sizes(),
+        _doctor_check_hook_errors(),
     ]
 
     all_ok = True

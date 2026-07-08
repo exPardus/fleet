@@ -1288,3 +1288,63 @@ class TestArgparseWiring:
     def test_status_name_optional(self):
         args = fleet.build_parser().parse_args(["status"])
         assert args.name is None
+
+
+# ---------------------------------------------------------------------------
+# Kernel 1 (fleet-side) -- hook-error count surfaced in `fleet status`
+# ---------------------------------------------------------------------------
+
+class TestStatusHookErrorCount:
+    def _seed_idle(self, name="probe-1"):
+        sid = str(uuid.uuid4())
+        rec = fleet.new_worker_record(sid, "C:/x", "task", "dontask")
+        rec["turn_pid"] = 111
+        rec["turn_pid_ctime"] = "2026-07-07T12:00:00Z"
+        log = fleet.logs_dir() / f"{name}.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text('{"type":"result","result":"done"}\n', encoding="utf-8")
+        fleet.save_registry({"workers": {name: rec}})
+
+    def test_no_hook_errors_no_footer(self, isolated_home, capsys):
+        self._seed_idle()
+        fleet.cmd_status(fleet.build_parser().parse_args(["status"]), get_process_info=lambda pid: None)
+        out = capsys.readouterr().out
+        assert "hook-error" not in out
+
+    def test_hook_error_count_shown_when_nonzero(self, isolated_home, capsys):
+        self._seed_idle()
+        fleet.hook_errors_path().write_text(
+            "2026-07-08T00:00:00Z s1 err\n2026-07-08T00:01:00Z s2 err\n2026-07-08T00:02:00Z s3 err\n",
+            encoding="utf-8",
+        )
+        fleet.cmd_status(fleet.build_parser().parse_args(["status"]), get_process_info=lambda pid: None)
+        out = capsys.readouterr().out
+        assert "hook-error" in out
+        assert "3" in out
+
+
+# ---------------------------------------------------------------------------
+# Kernel 5 -- spawn-time model echo
+# ---------------------------------------------------------------------------
+
+class TestSpawnModelEcho:
+    def test_echoes_resolved_model(self, isolated_home, tmp_path, capsys):
+        worker_dir = tmp_path / "proj"
+        worker_dir.mkdir()
+        proc = FakeProc(pid=1)
+        args = _spawn_args("probe-1", worker_dir, "do the thing", model="opus")
+        fleet.cmd_spawn(args, popen=_fake_popen(proc), get_process_info=lambda pid: None, which=lambda n: "claude.cmd")
+        out = capsys.readouterr().out
+        assert "model" in out
+        assert "opus" in out
+
+    def test_echoes_subagent_model_env_when_set(self, isolated_home, tmp_path, capsys, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CODE_SUBAGENT_MODEL", "haiku")
+        worker_dir = tmp_path / "proj"
+        worker_dir.mkdir()
+        proc = FakeProc(pid=1)
+        args = _spawn_args("probe-1", worker_dir, "do the thing", model="opus")
+        fleet.cmd_spawn(args, popen=_fake_popen(proc), get_process_info=lambda pid: None, which=lambda n: "claude.cmd")
+        out = capsys.readouterr().out
+        assert "CLAUDE_CODE_SUBAGENT_MODEL" in out
+        assert "haiku" in out

@@ -84,10 +84,17 @@ def _fake_popen(proc, calls=None):
 
 
 def _seed_worker(name, status=None, turn_pid=None, turn_pid_ctime=None,
-                  cwd="C:/proj", mode="dontask", model=None, sid=None, log_result=False):
+                  cwd=None, mode="dontask", model=None, sid=None, log_result=False):
     """Save a single worker registry record with logs_dir()/<name>.jsonl
     optionally ending with a result event (so recompute_status resolves to
-    idle rather than dead when the pid is not alive)."""
+    idle rather than dead when the pid is not alive).
+
+    Kernel 4 cwd preflight: launch_turn refuses to launch/resume into a
+    vanished cwd, so the default seeded cwd is a real directory (FLEET_HOME,
+    created by isolated_home). Tests asserting on a specific cwd string still
+    pass one explicitly (those paths do not reach an actual launch)."""
+    if cwd is None:
+        cwd = str(fleet.FLEET_HOME)
     sid = sid or str(uuid.uuid4())
     rec = fleet.new_worker_record(sid, cwd, "some task", mode, model=model)
     if status is not None:
