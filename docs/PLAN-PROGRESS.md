@@ -12,10 +12,10 @@ The mutable cursor against the immutable contract `docs/PLAN.md`. A resuming man
 |---|---|---|---|---|
 | C1 | 1A-1 `spec-amend-1-state` (B1/M2/M3/M4) | done | c458641 (F17–F20; truth-gate PASS) | 2026-07-08 |
 | C1 | 1A-2 `spec-amend-2-schema` (M1/M5/M6/M18/B2 + additive rule) | done | 8b01179 (F21–F25; truth-gate PASS) | 2026-07-08 |
-| C1 | 1A-3 `spec-amend-3-testing` (M7/M8/M25 + 12 drift items) | dispatched | — | 2026-07-08 |
-| C1 | 1A-4 `spec-amend-4-usagelimit` (UL1 — new feature) | pending | task file ready | — |
-| C1 | 1B stub-inject ×7 (watchtower/telegram/providers/portability/phase5/kernels-webui/roadmap) | pending | — | — |
-| C1 | 1C review split (`c1-review-spec-core` ∥ `c1-review-spec-stubs`) | pending | — | — |
+| C1 | 1A-3 `spec-amend-3-testing` (M7/M8/M25 + 12 drift items) | done | ac59100 (F26–F30 + numbered invariants; truth-gate PASS) | 2026-07-08 |
+| C1 | 1A-4 `spec-amend-4-usagelimit` (UL1 — new feature) | done | 9cbdf45 (F31=UL1; detection DEFERRED-TO-KERNEL-PROBE; truth-gate PASS) | 2026-07-08 |
+| C1 | 1B stub-inject ×7 (watchtower/telegram/providers/portability/phase5/kernels-webui/roadmap) | done | fd85798/c38813f/dbea73a/d2ade0a/fe54334/a8ad2b9/f11e083 (anchor+witness gate PASS; all Invariants-touched present) | 2026-07-08 |
+| C1 | 1C review split (`c1-review-spec-core` ∥ `c1-review-spec-stubs`) | dispatched | — | 2026-07-08 |
 | C1 | 1D fixes (original builders via send) + `c1-review-spec-2` re-review ≤3 | pending | — | — |
 | C1 | 1E verify checkpoint + `c1-knowledge` ∥ `c1-playbook` | pending | — | — |
 | C2 | 2A `harness-live` ∥ `harden-hooks` | pending | — | — |
