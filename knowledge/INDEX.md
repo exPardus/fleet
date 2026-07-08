@@ -2,6 +2,9 @@
 
 One line per entry. The manager reads this file at every session start; keep entries short and pointer-like.
 
+- `projects/pmbot.md` — polymarket_experimenting (Rust latency-arb + Python): per-crate cargo (workspace clippy fails on PyO3), frozen kernel/parity, never-read-collector.db rule, git-worktree recipe for parallel collision-prone tasks, cold-build cost ~$1.7/worker.
+- `lessons.md#2026-07-09-c3` — Campaign 3 (pmbot Plan-3 parallel Rust TDD via worktrees): worktree-per-task → spawn --dir → wait --all → merge → cleanup; workers' own subagents confirm Python→Rust port fidelity; bypass mode + $6 budget fit; worker correctly overrides "don't touch X" for exhaustive-match compile necessity; concurrent managers coexist via name-prefix retirement discipline.
+
 - `playbooks/spawn-etiquette.md` — doctrine for spawning and running workers (one task per worker, respawn over marathons, wait-in-background, permission modes, budget caps, batch spawns).
 - `lessons.md#2026-07-07` — Campaign 0 (building fleet): dual-lens review doctrine, live-smoke-beats-unit-tests, Stop-block race is by-design (check idle+mail), sticky dead + respawn recovery, cost model.
 - `lessons.md#2026-07-08` — Campaign 1 (haiku demo): full lifecycle green; fleet.cmd needs full path (not on PATH); mid-turn steering proven; respawn re-executes done tasks (not idempotent); "Final message = X" output contract works.

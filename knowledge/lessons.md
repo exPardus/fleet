@@ -227,3 +227,26 @@ See `knowledge/projects/stupidbox.md`.
 - **Soak Gate 1 usage — Day 1 (2026-07-09):** 5 spawns + 2 respawns = **7 launches** on a
   non-fleet project (`stupidbox`), doctor 17/17 clean, 0 incidents. Need ≥15 spawns across
   ≥3 distinct days; this is day 1. (Sign-off stays Altai's — this only accrues the floor.)
+
+## 2026-07-09-c3 — Campaign 3 (pmbot Plan-3, foreign manager: parallel Rust TDD via worktrees)
+
+A separate manager session (the pmbot dev) used the shared fleet to run 2 Plan-3 Rust TDD
+tasks in PARALLEL, each in its own **git worktree** of `polymarket_experimenting`, then merged
+back. This is the reusable pattern for parallelizing collision-prone tasks (shared `main.rs`
+etc.): `git worktree add -b <br> ../wt HEAD` per task → `fleet spawn --dir <wt> --mode bypass`
+→ `fleet wait --all` (background) → review → merge → `git worktree remove` + `branch -d` + `kill`.
+
+- **What worked:** both workers green first turn (6 + 5 tests), ~$1.7 each (cold Rust build
+  dominates, not tokens). Both used their OWN subagents to read the Python source and confirm a
+  byte-for-byte port; an independent reviewer agent agreed (0 findings). Merge: one ff + one clean
+  3-way auto-merge on `main.rs`. Merged-trunk re-verify: 86 tests, clippy clean.
+- **`bypass` mode fit:** trusted known repo + TDD + cargo/git only → zero permission friction,
+  correct choice. Budget $6/worker was right for cold builds.
+- **Worker judgment win:** the "don't touch main.rs" instruction was correctly overridden by the
+  worker when adding an enum variant forced a no-op `match` arm (compile necessity). Task files
+  should anticipate this rather than forbid it.
+- **New project file:** `knowledge/projects/pmbot.md` (per-crate cargo, frozen kernel, collector.db
+  rule, worktree recipe, cold-build cost).
+- **Shared-fleet etiquette confirmed from the other side:** two managers ran concurrently on one
+  install with zero interference because each retired only its own name-prefixed workers
+  (`plan3-*` vs `sb-*`). The name-prefix discipline is load-bearing — hold it.
