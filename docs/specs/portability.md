@@ -1,6 +1,6 @@
 # Spec: Portability (Phase 1.5) — Win/Linux/macOS
 
-**Status:** stub — unclaimed
+**Status:** stub — findings injected (C1 Wave 1B); NOT ready-for-build (OQ resolution is C4 `spec-portability`)
 **Inherits:** SPEC.md architecture, ROADMAP.md principles (esp. #5: one platform-adapter module).
 
 ## Goal
@@ -10,6 +10,9 @@
 ## Scope
 
 In: platform adapter module (`bin/platform_adapter.py` or section of fleet.py), `fleet init`, FLEET_HOME resolution, shims per OS, CI matrix, doc updates. Out: watchtower service install (Phase 2 uses the adapter but ships its own spec), any new user-facing features.
+
+<!-- B3 -->
+**Scope addition — port the test suite (blocker B3).** The original scope omitted test-suite work, but the tests are Windows-pinned (`tests/test_hooks.py` `PY_CMD = ["py","-3.13"]` errors on POSIX; `tests/test_steering.py` + `tests/test_cli.py` assert Win32-only `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` — `AttributeError` on POSIX; `tests/test_steering.py::test_posix_platform_raises_unsupported` pins the exact behavior this build must invert), so the done criterion "tests green on all 3 OSes" is unachievable as originally scoped. Now in scope: **port the test suite — hook tests invoke via sys.executable; platform-launch assertions go through the adapter interface with per-OS expected-kwargs parametrization**; invert/replace the POSIX-unsupported test with POSIX behavior tests (`start_new_session`, `killpg`); the `TestPlatformAdapterBoundary` lint suite must stay green unmodified (it is the enforcement of invariant 8). A resolved OQ on pytest tier markers is added below (OQ9).
 
 ## Fixed constraints
 
@@ -22,13 +25,29 @@ In: platform adapter module (`bin/platform_adapter.py` or section of fleet.py), 
 
 1. Detached spawn on POSIX: `start_new_session=True` enough, or double-fork needed for daemon-grade detachment of worker turns? (Worker turns are short-lived — probably enough. Verify SIGHUP behavior when parent terminal closes.)
 2. PID+ctime liveness without psutil: Windows (PowerShell `Get-Process`? wmic deprecated), Linux (`/proc/<pid>/stat` field 22), macOS (`ps -o lstart= -p`). Precision differs — what tolerance?
+   <!-- F15 -->
+   **Carry (F15/M4):** this OQ must cover not just per-OS probe precision but query-FAILURE semantics — **per-OS probe failure modes carried into OQ2 (alive-unknown tier, query-failure direction)**. Per SPEC §4 (as amended by F20), a query that returns "exists but unreadable" (e.g. higher-integrity process, `.StartTime` throws `Win32Exception`; `/proc/<pid>` EPERM; `ps` access-denied) resolves to the alive-unknown tier — never demoted to `dead`, never respawn/kill-eligible without `--force`; missing/corrupt stored ctime or any transient query failure is not-live but retries once before any `working`→`dead` transition. OQ2 names the per-OS discriminator for each of the three states and the accepted residual per OS.
 3. Attach terminal launch matrix: Windows wt→PowerShell fallback (done); Linux — $TERMINAL, x-terminal-emulator, gnome-terminal, konsole, tmux-new-window-if-inside-tmux (priority order?); macOS — osascript Terminal.app vs iTerm detection. What's the fallback when headless (SSH, no display)? (Probably: print the command, let user run it in their own terminal.)
+   <!-- F10 -->
+   **Env-delivery verification rows (F10/M17).** For each terminal path in this matrix, OQ3 gains a row verifying that the provider/secret env actually reaches the launched shell (NOT the terminal-monarch/tmux-server/launchd env it would inherit by default), delivered via the platform-adapter per-attach generated env script (0600-equiv, under gitignored `state/`, sourced then deleted on release — see providers.md F10). Plus: **a doctor/test assertion that the attach command line contains no secrets value** (names may appear in argv; VALUES never — no `$env:ANTHROPIC_API_KEY='sk-...'; claude --resume` workaround that leaks into `Win32_Process.CommandLine`, script-block logging, or `ps auxww`). Per-path rows: wt (pre-existing WindowsTerminal monarch), PowerShell fallback, Linux `$TERMINAL`/gnome-terminal/tmux, macOS osascript, headless print-fallback.
+   <!-- OQ3-scope -->
+   **DECISION — attach-launcher scope + deferral (recorded, not open).**
+   - **Linux attach = $TERMINAL/gnome-terminal/tmux fallback chain + headless print-the-command fallback** — built in C4 `port-adapter-b`. The named POSIX exercise box (dev server `192.168.1.202`, real Linux, SSH-reachable — Altai's pick; WSL was the fallback) is a headless SSH box, so the **print-the-command fallback is the path actually exercised** there.
+   - **macOS osascript attach and POSIX notifications = explicit demand-gated DEFERRAL (operator is Windows-only today)** — this covers `notify-send`/osascript notifiers and macOS Terminal.app/iTerm attach; no macOS box exists; re-vet on demand. Not cut, not silently dropped: recorded as a demand-gated deferral so the matrix rows above stay honest about what is built vs deferred.
 4. Kill-tree: `taskkill /T /F` vs `os.killpg` — POSIX needs the turn spawned with its own process group (start_new_session gives this). Confirm no orphan grandchildren (claude spawns its own children).
 5. `py -3.13` vs `python3` vs `sys.executable`: hooks run OUTSIDE fleet.py (spawned by claude) — the generated worker-settings.json must embed the right interpreter path. Absolute python path or launcher command?
 6. Line endings / .gitattributes policy (repo currently warns LF→CRLF on every commit).
 7. Minimum Python version floor (3.10+? 3.13 only on this machine, but other OSes will have distro pythons).
 8. CI: which unit/hook tests can run without a claude binary; is there a cheap way to smoke-test hook JSON contracts in CI?
+9. **RESOLVED (B3) — pytest tier markers:** unit + hooks run in the CI matrix (no claude binary, parametrized per OS via the adapter interface); live-integration is local-only, env-gated (`FLEET_LIVE=1`, per SPEC §12 tier-3). Kept as a resolved row so the B3 test-port scope and OQ8's CI question do not diverge.
+
+## Invariants touched
+
+Cites the SPEC.md numbered "Architectural invariants" section.
+
+- **Invariant 8 — platform-adapter-only OS branching.** The whole point of this phase: all OS-specific launch/liveness/kill/attach/notify behavior sits behind the adapter, no scattered `if platform` in core. Preserved by routing platform-launch test assertions through the adapter interface (B3) and by keeping `TestPlatformAdapterBoundary` green unmodified as the lint that enforces it; the env-delivery contract (F10) and attach fallback chain (OQ3-scope) are adapter contracts, not core branches.
+- **Invariant 5 — cwd-scoped resume.** A worker resumes only in its recorded, immutable `cwd`, and resume must work per-OS. Preserved because the alive-unknown liveness tier (F15/OQ2) never demotes a live per-OS turn to `dead` (which would strand its cwd-scoped resume or, worse, respawn a second live claude in the same cwd), and the per-OS probe carries the query-failure direction so resume decisions stay correct on every platform.
 
 ## Done criteria
 
-Unit + hook tests green on all 3 OSes in CI; `fleet init && fleet doctor` clean on a fresh Linux box; spawn/status/send/attach exercised manually on at least Windows + one POSIX OS.
+Unit + hook tests green on all 3 OSes in CI (now achievable — test suite is in scope, B3); `fleet init && fleet doctor` clean on a fresh Linux box; spawn/status/send/attach exercised manually on at least Windows + one POSIX OS — the named POSIX exercise box is the exPardus dev server `192.168.1.202` (real Linux, SSH-reachable; WSL fallback). Because that box is headless, `attach` there exercises the print-the-command fallback (per OQ3-scope decision).
