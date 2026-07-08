@@ -6,7 +6,7 @@
 
 # Fleet Self-Build Implementation Plan — Remaining Roadmap, Risk-First (Consolidated)
 
-**Contract version:** 1.2 (round-1 plan review applied) — 2026-07-08 · branch `fleet-impl` @ 792583c · executed by a fleet manager session per `skill/SKILL.md` doctrine.
+**Contract version:** 1.3 (round-1 plan review + completeness-critic pass applied) — 2026-07-08 · branch `fleet-impl` @ 792583c · executed by a fleet manager session per `skill/SKILL.md` doctrine. v1.3 adds §0.6 progress ledger (`docs/PLAN-PROGRESS.md`) + runbook steps 2/11 for cross-session continuity — the one gap the completeness critic surfaced.
 
 **Angle (committed):** RISK-FIRST. The biggest blowup modes are (1) building against a stale spec, (2) the fleet mutating `bin/fleet.py`/hooks while workers run on them, (3) 338 green unit tests coexisting with live bugs, (4) Windows-pinned assumptions leaking into every later phase. So the order is: **spec amendments → self-build safety protocol + scripted live-integration harness → hardening kernels → only then feature phases.** We accept slower visible progress; nothing feature-shaped ships until the fleet has proven it can safely rebuild itself. New in v1.1: demand-gating pressure valves (providers, web-UI build, intelligence build) so a one-human part-time operator is never building unfelt features; read-only Web UI v1 and flag-sized Phase 5 cut the back half's cost roughly in half without touching the roadmap's done-criteria. New in v1.2 (round-1 review): harness hook-source override so hook changes get pre-merge live verification; headless permission mechanisms replacing unusable bare `accept`; the finding corpus (`docs/reviews/SPEC-REVIEW-2026-07-08.md`) committed and made the mandatory quoted input; merge gate reordered with an explicit revert path; per-link pytest truth checks; timed cost-watch polls with honest residual-risk statement; recomputed budget envelopes; witness-sentence verification + split C1 review; defined, non-circular soak audits with fault injection and usage-denominated gates.
 
@@ -67,7 +67,7 @@ Every `--task` is written to `state/tasks/<name>.md` (runtime dir, gitignored) w
 Day-one script — execute in order, evidence in the campaign log:
 
 1. `fleet status` — confirm zero live workers, note baseline; `fleet doctor` — must be clean before anything spawns.
-2. Read `knowledge/INDEX.md`, then `knowledge/lessons.md` (Campaign-0 postmortem) — doctrine load.
+2. **(Resume check first)** Read `docs/PLAN-PROGRESS.md` if it exists (§0.6) — it is the wave cursor; a non-empty ledger means this is a *resuming* manager, so jump to the first non-`done` row instead of starting C1 fresh. Then read `knowledge/INDEX.md` and `knowledge/lessons.md` (Campaign-0 postmortem) — doctrine load.
 3. **Pre-flight the dirty tree + commit the finding corpus:** `git status` shows modified `workflows/idea-forge.workflow.js` AND `docs/reviews/SPEC-REVIEW-2026-07-08.md` is currently **untracked** — it is the authoritative input for all of Campaign 1 and MUST be committed (`git add docs/reviews/SPEC-REVIEW-2026-07-08.md` + commit) before any C1 task file is written, or fresh workers cannot access it. Ask Altai: commit or stash the workflow file (one message). Do not start C1 on a dirty tree.
 4. Confirm the campaign budget envelope with Altai (one message; recomputed numbers in §Human touchpoints — sum-of-caps ceilings, not wishes).
 5. **Pre-Campaign decision touchpoint:** name the POSIX exercise box for C4 now — the exPardus dev server `192.168.1.202` (real Linux, already reachable) vs WSL (zero-dependency fallback). Record Altai's pick in lessons.md; WSL is the default if no answer.
@@ -76,6 +76,18 @@ Day-one script — execute in order, evidence in the campaign log:
 8. While 1A-1 runs, pre-write the task files for 1A-2, 1A-3, and the seven Wave-1B stub injections — each with its finding-quote block and witness-sentence list (Wave 1B).
 9. **Check-in loop (revised):** `fleet wait <names...> --all --timeout 300` in a background Bash loop (names are positional-required). On each wake — timeout or turn-end: `fleet status` + cost-watch + peek proxies (§0.1.8), `fleet result` for finished tasks, verify RESULT lines, per-link pytest where §0.1.9 applies.
 10. No worktree yet — C1 is doc-only in the main repo. Create `C:\proga\claude-fleet-wt\c2` only at C2 start.
+11. **Seed the progress ledger (final action of turn one):** write `docs/PLAN-PROGRESS.md` with the full wave skeleton (every campaign C1–C8 + Phase 6, every wave, status `pending`) per §0.6, mark the C1 Wave-1A rows `dispatched`, and commit it before returning to the check-in loop.
+
+### 0.6 Progress ledger (cross-session continuity)
+
+The manager session is disposable (SPEC §11: "Manager session dies → new manager runs `fleet status`, continues"). This plan is a multi-week contract executed across many manager sessions, so **wave-level progress must live on disk, not in a single session's context.** The tracking artifacts, in precedence order:
+
+1. **`docs/PLAN-PROGRESS.md` (git-tracked — the wave ledger).** One row per wave/task of every campaign: `<campaign> | <wave/task> | <status: pending|dispatched|done|blocked|deferred> | <commit or evidence ref> | <date>`. Updated by the manager at each task close and each gate, and **committed as part of every campaign's knowledge-loop step (§0.3 h)**. A resuming manager reads this file **first** (inserted into the runbook: it becomes step 2a, before doctrine load) to learn exactly which wave is live. This is the single "where are we now" source; the plan file (`PLAN.md`) is the immutable contract, the progress file is the mutable cursor against it.
+2. **`knowledge/lessons.md` soak signatures** — authoritative for soak-gate state (`SOAK GATE <n> SIGNED`), machine-checked by next-phase task preconditions (§0.2.1). The ledger row references them; the signature line is the truth.
+3. **`git log --oneline` on `fleet-impl`** + per-campaign commit prefixes — the immutable record of what merged.
+4. **Worker journals (`state/journals/<name>.md`) + `fleet status`** — live in-flight worker state, for a session resuming mid-wave.
+
+"Campaign log" referenced elsewhere in this plan = the evidence trail the manager pastes into `docs/PLAN-PROGRESS.md` rows and the campaign's commit messages/lessons entry. The manager seeds `docs/PLAN-PROGRESS.md` with the full wave skeleton (all campaigns, all waves, status `pending`) as the **final action of turn one**, committed before the first C1 task dispatches.
 
 ---
 
