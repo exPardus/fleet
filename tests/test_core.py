@@ -116,6 +116,8 @@ class TestRegistry:
             "turns", "cost_usd", "cost_baseline", "last_activity",
             # Phase1 kernel item 7 (F13/M5): budget/setting-sources persistence.
             "max_budget_usd", "setting_sources",
+            # Kernel 10 (F12=M24): fleet-side token ceiling.
+            "token_ceiling",
         }
         assert rec["session_id"] == "sid-1"
         assert rec["cwd"] == r"C:\proga\x"

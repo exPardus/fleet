@@ -138,6 +138,113 @@ class TestRotateWorkerLog:
     def test_missing_logs_is_a_noop(self, isolated_home):
         fleet._rotate_worker_log("nope")  # must not raise
 
+    def test_retries_on_permission_error_then_succeeds(self, isolated_home, monkeypatch):
+        # B2: a follower / just-killed claude may still hold the log handle
+        # for a short window (Windows sharing violation -> PermissionError on
+        # os.replace). Retry briefly, then succeed once the handle clears.
+        logs = fleet.logs_dir()
+        logs.mkdir(parents=True, exist_ok=True)
+        (logs / "probe-1.jsonl").write_text("old", encoding="utf-8")
+
+        real_replace = os.replace
+        state = {"fails": 2}
+
+        def flaky(src, dst, *a, **k):
+            if str(src).endswith(".jsonl") and state["fails"] > 0:
+                state["fails"] -= 1
+                raise PermissionError(13, "sharing violation")
+            return real_replace(src, dst, *a, **k)
+
+        monkeypatch.setattr(fleet.os, "replace", flaky)
+        slept = []
+        fleet._rotate_worker_log("probe-1", sleep=lambda s: slept.append(s))
+
+        assert state["fails"] == 0          # both retries consumed
+        assert slept                        # it actually backed off
+        assert (logs / "probe-1.jsonl.1").read_text(encoding="utf-8") == "old"
+
+    def test_raises_log_rotation_error_after_exhausting_retries(self, isolated_home, monkeypatch):
+        logs = fleet.logs_dir()
+        logs.mkdir(parents=True, exist_ok=True)
+        (logs / "probe-1.jsonl").write_text("old", encoding="utf-8")
+
+        def always_locked(src, dst, *a, **k):
+            if str(src).endswith(".jsonl"):
+                raise PermissionError(13, "sharing violation")
+            return os.replace(src, dst)  # never reached for .jsonl
+
+        monkeypatch.setattr(fleet.os, "replace", always_locked)
+        with pytest.raises(fleet.LogRotationError, match="probe-1"):
+            fleet._rotate_worker_log("probe-1", sleep=lambda s: None)
+
+
+class TestRespawnLogRotationCleanFail:
+    def test_respawn_clean_fails_when_log_locked(self, isolated_home, monkeypatch):
+        # B2: if rotation cannot complete (log still held), respawn must
+        # clean-fail -- NO new turn, NO sid-swap (invariant 7) -- with the
+        # registry restored to the pre-respawn snapshot and the log un-rotated.
+        old_sid, _ = _seed_worker("probe-1", status="idle", log_result=True, cost_usd=1.0)
+        logs = fleet.logs_dir()
+        (logs / "probe-1.jsonl").write_text(
+            '{"type":"result","result":"done","total_cost_usd":1.0}\n', encoding="utf-8")
+
+        real_replace = os.replace
+
+        def locked(src, dst, *a, **k):
+            if str(src).endswith(".jsonl") and not str(src).endswith(".jsonl.1"):
+                raise PermissionError(13, "sharing violation")
+            return real_replace(src, dst, *a, **k)
+
+        monkeypatch.setattr(fleet.os, "replace", locked)
+
+        def popen(*a, **kw):
+            raise AssertionError("must not launch a turn when rotation clean-failed")
+
+        args = fleet.build_parser().parse_args(["respawn", "probe-1"])
+        with pytest.raises(fleet.FleetCliError, match="probe-1"):
+            fleet.cmd_respawn(
+                args, popen=popen, get_process_info=_dead_info, which=lambda n: "claude.cmd",
+                sleep=lambda s: None,
+            )
+
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["session_id"] == old_sid   # NO sid-swap
+        assert rec["status"] == "idle"         # snapshot restored
+        assert rec["turn_pid"] is None
+        # log is un-rotated back onto the live path
+        assert (logs / "probe-1.jsonl").exists()
+        assert not (logs / "probe-1.jsonl.1").exists()
+
+    def test_respawn_succeeds_while_follower_mid_poll(self, isolated_home, monkeypatch):
+        # "respawn succeeds while a follower is mid-poll": the log handle is
+        # held only briefly (one retry), then clears -- rotation retries and
+        # the respawn completes normally with a fresh sid.
+        old_sid, _ = _seed_worker("probe-1", status="idle", log_result=True)
+        logs = fleet.logs_dir()
+        (logs / "probe-1.jsonl").write_text(
+            '{"type":"result","result":"done","total_cost_usd":0.0}\n', encoding="utf-8")
+
+        real_replace = os.replace
+        state = {"fails": 1}
+
+        def flaky(src, dst, *a, **k):
+            if str(src).endswith(".jsonl") and not str(src).endswith(".jsonl.1") and state["fails"] > 0:
+                state["fails"] -= 1
+                raise PermissionError(13, "follower still polling the log")
+            return real_replace(src, dst, *a, **k)
+
+        monkeypatch.setattr(fleet.os, "replace", flaky)
+        proc = FakeProc(pid=7)
+        args = fleet.build_parser().parse_args(["respawn", "probe-1"])
+        rc = fleet.cmd_respawn(
+            args, popen=_fake_popen(proc), get_process_info=_dead_info, which=lambda n: "claude.cmd",
+            sleep=lambda s: None,
+        )
+        assert rc == 0
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["session_id"] != old_sid   # sid-swap happened
+        assert rec["turn_pid"] == 7
+
 
 # ---------------------------------------------------------------------------
 # fleet respawn
@@ -2025,3 +2132,83 @@ class TestProbeThreeWay:
         name, ok, msg = fleet._doctor_check_unreadable_starttime({"w": rec}, get_process_info=_alive_info)
         assert ok is True
         assert "no" in msg.lower()
+
+
+# ---------------------------------------------------------------------------
+# Kernel 10 fleet half (F12=M24): token-ceiling ENFORCEMENT (fleet-side)
+# ---------------------------------------------------------------------------
+
+def _set_field(name, **fields):
+    data = fleet.load_registry()
+    data["workers"][name].update(fields)
+    fleet.save_registry(data)
+
+
+class TestTokenCeilingEnforcement:
+    def test_idle_resume_refuses_and_flags_when_cumulative_over_ceiling(self, isolated_home):
+        # Hard enforcement fleet-side: before a RESUME turn, compare the
+        # cumulative session tokens (summed from the log's result events)
+        # against the persisted token_ceiling; if exceeded, REFUSE the launch
+        # and FLAG the worker over_ceiling. The Stop hook only ALLOWS a stop --
+        # it never blocks -- so the hard cap lives here (invariant 2).
+        sid, _ = _seed_worker("probe-1", status="idle", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
+        log = fleet.logs_dir() / "probe-1.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(
+            '{"type":"result","usage":{"input_tokens":900,"output_tokens":200}}\n', encoding="utf-8")
+        _set_field("probe-1", token_ceiling=1000)
+
+        def popen(*a, **kw):
+            raise AssertionError("must not launch a resume turn once over the token ceiling")
+
+        args = fleet.build_parser().parse_args(["send", "probe-1", "keep going"])
+        with pytest.raises(fleet.FleetCliError, match="ceiling"):
+            fleet.cmd_send(args, popen=popen, get_process_info=_dead_info, which=lambda n: "claude.cmd")
+
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["status"] == "over_ceiling"
+
+    def test_idle_resume_launches_when_under_ceiling(self, isolated_home):
+        sid, _ = _seed_worker("probe-1", status="idle", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
+        log = fleet.logs_dir() / "probe-1.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(
+            '{"type":"result","usage":{"input_tokens":100,"output_tokens":20}}\n', encoding="utf-8")
+        _set_field("probe-1", token_ceiling=100000)
+
+        proc = FakeProc(pid=222)
+        args = fleet.build_parser().parse_args(["send", "probe-1", "go"])
+        rc = fleet.cmd_send(args, popen=_fake_popen(proc), get_process_info=_dead_info, which=lambda n: "claude.cmd")
+        assert rc == 0
+        assert fleet.load_registry()["workers"]["probe-1"]["status"] == "working"
+
+    def test_over_ceiling_status_is_sticky_across_recompute(self, isolated_home):
+        _seed_worker("probe-1", status="over_ceiling", log_result=True)
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info)
+        assert updated["status"] == "over_ceiling"
+
+    def test_status_flags_over_ceiling(self, isolated_home, capsys):
+        _seed_worker("probe-1", status="over_ceiling")
+        args = fleet.build_parser().parse_args(["status"])
+        fleet.cmd_status(args, get_process_info=_dead_info)
+        out = capsys.readouterr().out
+        assert "over" in out.lower() and "ceiling" in out.lower()
+
+    def test_respawn_writes_ceiling_file_for_new_sid_when_carried(self, isolated_home):
+        # respawn is a fresh session (new sid) -- the carried token_ceiling
+        # must land in a ceiling file keyed to the NEW sid, or the hook half
+        # would silently lose its allow-stop signal on a respawned worker.
+        old_sid, _ = _seed_worker("probe-1", status="idle", log_result=True)
+        _set_field("probe-1", token_ceiling=777)
+
+        proc = FakeProc(pid=7)
+        args = fleet.build_parser().parse_args(["respawn", "probe-1"])
+        fleet.cmd_respawn(args, popen=_fake_popen(proc), get_process_info=_dead_info, which=lambda n: "claude.cmd")
+
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        new_sid = rec["session_id"]
+        assert new_sid != old_sid
+        assert rec["token_ceiling"] == 777
+        ceiling_file = fleet.state_dir() / "ceilings" / new_sid
+        assert ceiling_file.read_text(encoding="utf-8").strip() == "777"

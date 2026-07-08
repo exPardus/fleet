@@ -217,6 +217,88 @@ class TestWorkerRecordBudgetPersistence:
 
 
 # ---------------------------------------------------------------------------
+# Kernel 10 fleet half (F12=M24): token ceiling
+# ---------------------------------------------------------------------------
+
+class TestTokenCeilingRecordAndSum:
+    def test_new_record_defaults_token_ceiling_to_none(self):
+        rec = fleet.new_worker_record("sid-1", "C:/proj", "task", "dontask")
+        assert rec["token_ceiling"] is None
+
+    def test_new_record_persists_token_ceiling(self):
+        rec = fleet.new_worker_record("sid-1", "C:/proj", "task", "dontask", token_ceiling=50000)
+        assert rec["token_ceiling"] == 50000
+
+    def test_reader_defaults_missing_token_ceiling_to_none(self, isolated_home):
+        rec = fleet.new_worker_record("sid-1", str(isolated_home), "task", "dontask")
+        del rec["token_ceiling"]
+        fleet.save_registry({"workers": {"probe-1": rec}})
+        loaded = fleet.load_registry()["workers"]["probe-1"]
+        assert loaded.get("token_ceiling") is None
+
+    def test_sum_result_tokens_sums_input_plus_output_across_results(self, isolated_home):
+        log = fleet.logs_dir() / "probe-1.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(
+            '{"type":"assistant","message":{"usage":{"input_tokens":9999}}}\n'
+            '{"type":"result","usage":{"input_tokens":100,"output_tokens":20}}\n'
+            '{"type":"result","usage":{"input_tokens":30,"output_tokens":5}}\n',
+            encoding="utf-8",
+        )
+        # only "result" events counted (assistant usage ignored): 100+20+30+5
+        assert fleet._sum_result_tokens(log) == 155
+
+    def test_sum_result_tokens_none_when_no_result(self, isolated_home):
+        log = fleet.logs_dir() / "probe-1.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text('{"type":"assistant","message":{"usage":{"input_tokens":10}}}\n', encoding="utf-8")
+        assert fleet._sum_result_tokens(log) is None
+
+    def test_sum_result_tokens_none_when_missing(self, isolated_home):
+        assert fleet._sum_result_tokens(fleet.logs_dir() / "nope.jsonl") is None
+
+    def test_sum_result_tokens_ignores_bogus_usage_values(self, isolated_home):
+        log = fleet.logs_dir() / "probe-1.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(
+            '{"type":"result","usage":{"input_tokens":true,"output_tokens":-5}}\n'
+            '{"type":"result","usage":{"input_tokens":40,"output_tokens":2}}\n',
+            encoding="utf-8",
+        )
+        assert fleet._sum_result_tokens(log) == 42
+
+
+class TestSpawnWritesCeilingFile:
+    def test_spawn_writes_sid_keyed_ceiling_file_when_configured(self, isolated_home, tmp_path):
+        # Kernel 10 fleet half: cmd_spawn persists the token ceiling at
+        # state/ceilings/<sid> -- the exact path stop_mailbox.py reads to
+        # decide whether to ALLOW a stop despite pending mail.
+        worker_dir = tmp_path / "proj"
+        worker_dir.mkdir()
+        proc = FakeProc(pid=999)
+        args = fleet.build_parser().parse_args([
+            "spawn", "probe-1", "--dir", str(worker_dir), "--task", "go", "--token-ceiling", "12345",
+        ])
+        fleet.cmd_spawn(args, popen=_fake_popen(proc), get_process_info=lambda pid: None, which=lambda n: "claude.cmd")
+
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["token_ceiling"] == 12345
+        ceiling_file = fleet.state_dir() / "ceilings" / rec["session_id"]
+        assert ceiling_file.read_text(encoding="utf-8").strip() == "12345"
+
+    def test_spawn_writes_no_ceiling_file_when_not_configured(self, isolated_home, tmp_path):
+        worker_dir = tmp_path / "proj"
+        worker_dir.mkdir()
+        proc = FakeProc(pid=999)
+        args = _spawn_args("probe-1", worker_dir, "go")
+        fleet.cmd_spawn(args, popen=_fake_popen(proc), get_process_info=lambda pid: None, which=lambda n: "claude.cmd")
+
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["token_ceiling"] is None
+        assert not (fleet.state_dir() / "ceilings" / rec["session_id"]).exists()
+
+
+# ---------------------------------------------------------------------------
 # fleet init (SPEC §14): template -> machine-local instance
 # ---------------------------------------------------------------------------
 

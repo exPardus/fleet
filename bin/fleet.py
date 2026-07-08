@@ -73,6 +73,35 @@ def journals_dir() -> Path:
     return state_dir() / "journals"
 
 
+def ceilings_dir() -> Path:
+    """Kernel 10 (fleet half, F12=M24): dir holding sid-keyed token-ceiling
+    files. Path MUST match bin/hooks/stop_mailbox.py's _ceiling_path
+    (state/ceilings/<session_id>) -- fleet.py WRITES these on launch; the
+    Stop hook only READS them to decide whether to allow a stop despite
+    pending mail."""
+    return state_dir() / "ceilings"
+
+
+def ceiling_file_path(sid: str) -> Path:
+    return ceilings_dir() / sid
+
+
+def _write_ceiling_file(sid: str, ceiling) -> None:
+    """Kernel 10 (fleet half): persist the sid-keyed token ceiling that the
+    Stop hook (stop_mailbox.py:_read_ceiling) reads. No-op when ceiling is
+    None (no ceiling in force -> the hook keeps its default block-on-mail
+    behavior). Atomic (temp + os.replace) so a concurrent hook read never
+    sees a half-written file. Best-effort: a ceiling we cannot persist just
+    means the hook has no allow-stop signal -- it never breaks a launch."""
+    if ceiling is None:
+        return
+    d = ceilings_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    tmp = d / f"{sid}.tmp"
+    tmp.write_text(str(int(ceiling)), encoding="utf-8")
+    os.replace(str(tmp), str(ceiling_file_path(sid)))
+
+
 def knowledge_dir() -> Path:
     return FLEET_HOME / "knowledge"
 
@@ -435,7 +464,7 @@ def save_registry(data: dict) -> None:
 
 
 def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
-                       max_budget_usd=None, setting_sources=None) -> dict:
+                       max_budget_usd=None, setting_sources=None, token_ceiling=None) -> dict:
     """Build a fresh registry record matching the SPEC §4 schema exactly.
 
     Phase1 kernel item 7 (F13/M5): max_budget_usd and setting_sources are
@@ -456,6 +485,12 @@ def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
         "model": model,
         "max_budget_usd": max_budget_usd,
         "setting_sources": setting_sources,
+        # Kernel 10 (F12=M24): a TOKEN count (int), immutable like
+        # max_budget_usd -- the fleet-side hard cap enforced before a resume
+        # launch, and the value cmd_spawn/cmd_respawn persist to the sid-keyed
+        # ceiling file the Stop hook reads. Additive-schema: defaults None,
+        # readers use .get(..., None).
+        "token_ceiling": token_ceiling,
         "created": created,
         "status": "working",
         "turn_pid": None,
@@ -748,6 +783,13 @@ def recompute_status(pid, ctime_iso, log_path, current_status: str | None = None
     # operator raises the cap (a fresh respawn record) or retires the worker.
     if current_status == "over_budget":
         return "over_budget"
+    # Kernel 10 (F12=M24): "over_ceiling" is the token analog of over_budget
+    # -- set by cmd_send's cumulative-token check when a worker's session
+    # tokens exceed its persisted token_ceiling. Sticky for the same reason:
+    # a liveness recompute must not silently revert it (respawn with a higher
+    # ceiling, or retire the worker).
+    if current_status == "over_ceiling":
+        return "over_ceiling"
     if current_status == "working" and pid is None:
         if _launch_claim_expired(last_activity_iso):
             return "dead"
@@ -1322,6 +1364,50 @@ def _sum_result_costs(log_path) -> float | None:
     return total if found else None
 
 
+def _sum_result_tokens(log_path) -> int | None:
+    """Sum input_tokens+output_tokens across every "result" event's usage in
+    the WHOLE log file, or None if the file is missing/unreadable or carries
+    no result event with usage at all (caller treats None as "nothing proven
+    over ceiling").
+
+    Fleet-side half of kernel 10 (F12=M24): the cumulative session token
+    count used to HARD-enforce a worker's token_ceiling before a resume
+    launch. Basis matches the Stop hook's _current_tokens (input+output) so
+    the two halves agree on what "over ceiling" means. A whole-file read is
+    acceptable for the same reason _sum_result_costs's is: logs rotate to a
+    fresh file on every respawn. Bogus values (bool, negative, non-int) are
+    skipped, mirroring _coerce_cost's defensive stance."""
+    log_path = Path(log_path)
+    if not log_path.exists():
+        return None
+    try:
+        raw = log_path.read_bytes()
+    except OSError:
+        return None
+    total = 0
+    found = False
+    for line in raw.decode("utf-8-sig", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(obj, dict) or obj.get("type") != "result":
+            continue
+        usage = obj.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        for key in ("input_tokens", "output_tokens"):
+            val = usage.get(key)
+            if isinstance(val, bool) or not isinstance(val, int) or val < 0:
+                continue
+            total += val
+            found = True
+    return total if found else None
+
+
 def _append_abnormal_turn_note(name: str) -> None:
     """Append a one-line abnormal-turn-end landmark to the worker's journal
     (phase1 kernel 4). Best-effort: a journal we cannot write must never break
@@ -1409,6 +1495,10 @@ def _worker_flags(record: dict) -> list:
             flags.append("stale-attach")
     if record["status"] == "dead":
         flags.append("dead")
+    # Kernel 10 (F12=M24): surface the fleet-side token-ceiling refusal in
+    # `fleet status`, mirroring how over_budget shows up as its own status.
+    if record["status"] == "over_ceiling":
+        flags.append("over-ceiling")
     return flags
 
 
@@ -1528,6 +1618,16 @@ class FleetCliError(Exception):
     """User-facing CLI error (bad args, unknown worker, missing dir/file,
     ...) -- caught in main() and reported as a clean one-line message, never
     a raw traceback."""
+
+
+class LogRotationError(FleetCliError):
+    """B2 (rotation retry): _rotate_worker_log exhausted its PermissionError
+    retries -- a follower or just-killed claude still holds the log handle
+    (Windows sharing violation). cmd_respawn catches this to CLEAN-FAIL the
+    respawn: _unrotate any partial rename, restore the pre-respawn registry
+    snapshot, and raise -- NO new turn, NO sid-swap (invariant 7). A
+    FleetCliError subclass so an unexpected escape still surfaces as a clean
+    one-line CLI error, not a traceback."""
 
 
 def _read_task_arg(task: str) -> str:
@@ -1696,10 +1796,15 @@ def cmd_spawn(args, popen=subprocess.Popen, get_process_info=None, which=shutil.
         sid = str(uuid.uuid4())
         record = new_worker_record(
             sid, cwd, task, args.mode, model=args.model,
-            max_budget_usd=args.max_budget_usd, setting_sources=args.setting_sources)
+            max_budget_usd=args.max_budget_usd, setting_sources=args.setting_sources,
+            token_ceiling=args.token_ceiling)
         data["workers"][args.name] = record
         save_registry(data)
         append_event("spawned", args.name, session_id=sid, cwd=str(cwd), mode=args.mode)
+
+    # Kernel 10 (fleet half): write the sid-keyed ceiling file BEFORE the
+    # launch so the Stop hook sees it from turn 1 (no-op when unconfigured).
+    _write_ceiling_file(sid, record.get("token_ceiling"))
 
     prompt, claim = compose_prompt(args.name, cwd, task, sid)
     try:
@@ -2128,6 +2233,26 @@ def cmd_send(args, popen=subprocess.Popen, get_process_info=None, which=shutil.w
                     f"${mb} -- refusing resume (worker flagged over_budget); respawn with a "
                     "higher --max-budget-usd or retire it"
                 )
+            # Kernel 10 (F12=M24) cumulative-TOKEN check: the token_ceiling is
+            # the hard cap the Stop hook only ever ALLOWS against (invariant
+            # 2 -- the hook never blocks). Enforcement lives HERE: before a
+            # RESUME launch, sum the session's tokens from the log's result
+            # events and refuse if already over, flagging the worker
+            # over_ceiling (sticky, see recompute_status). Mirrors the
+            # over_budget refusal directly above.
+            tc = after.get("token_ceiling")
+            if tc is not None:
+                used = _sum_result_tokens(logs_dir() / f"{args.name}.jsonl") or 0
+                if used > tc:
+                    after["status"] = "over_ceiling"
+                    data["workers"][args.name] = after
+                    save_registry(data)
+                    append_event("ceiling_exceeded", args.name, tokens=used, token_ceiling=tc)
+                    raise FleetCliError(
+                        f"{args.name}: cumulative tokens {used} exceed token_ceiling "
+                        f"{tc} -- refusing resume (worker flagged over_ceiling); respawn "
+                        "with a higher --token-ceiling or retire it"
+                    )
             # F1 pre-claim: atomic decide+claim, same lock, before release.
             after["status"] = "working"
             after["turn_pid"] = None
@@ -2534,7 +2659,11 @@ def cmd_release(args) -> int:
 _DEAD_CONFIRM_DELAY_SECONDS = 0.5
 
 
-def _rotate_worker_log(name: str) -> None:
+_ROTATE_RETRY_ATTEMPTS = 5
+_ROTATE_RETRY_DELAY_SECONDS = 0.1
+
+
+def _rotate_worker_log(name: str, sleep=time.sleep) -> None:
     """Rename logs/<name>.jsonl -> logs/<name>.jsonl.1 (and the matching
     .err -> .err.1), overwriting any existing .1 (SPEC §5 respawn row /
     §11 log-bloat handling). Uses os.replace rather than Path.rename:
@@ -2543,12 +2672,40 @@ def _rotate_worker_log(name: str) -> None:
     atomically overwrites it. launch_turn opens logs/<name>.jsonl in
     append-binary mode ("ab") -- without this rotation, a respawned turn's
     stdout would tack onto the previous session's transcript instead of
-    starting a fresh log."""
+    starting a fresh log.
+
+    B2 (rotation PermissionError retry): a just-killed claude turn, or a
+    concurrent follower (`fleet peek`/`result`/`status` reading the tail, or
+    the OS still closing the killed child's stdout handle), can hold an open
+    handle on logs/<name>.jsonl for a brief window -- on Windows os.replace
+    then raises PermissionError (sharing violation). Retry briefly
+    (_ROTATE_RETRY_ATTEMPTS with _ROTATE_RETRY_DELAY_SECONDS backoff); on
+    continued failure raise LogRotationError naming the likely holder, so
+    cmd_respawn can clean-fail the respawn (un-rotate + snapshot restore, no
+    new turn, no sid-swap) rather than half-swapping the record. `sleep` is
+    injectable so tests exercise the retry without a real delay."""
     d = logs_dir()
     for suffix in (".jsonl", ".err"):
         src = d / f"{name}{suffix}"
-        if src.exists():
-            os.replace(str(src), str(d / f"{name}{suffix}.1"))
+        if not src.exists():
+            continue
+        dst = d / f"{name}{suffix}.1"
+        last_exc = None
+        for attempt in range(_ROTATE_RETRY_ATTEMPTS):
+            try:
+                os.replace(str(src), str(dst))
+                last_exc = None
+                break
+            except PermissionError as exc:
+                last_exc = exc
+                if attempt < _ROTATE_RETRY_ATTEMPTS - 1:
+                    sleep(_ROTATE_RETRY_DELAY_SECONDS)
+        if last_exc is not None:
+            raise LogRotationError(
+                f"could not rotate {src.name} for {name!r}: still locked after "
+                f"{_ROTATE_RETRY_ATTEMPTS} attempts -- a follower or just-killed "
+                f"claude turn likely still holds the log handle"
+            ) from last_exc
 
 
 def _unrotate_worker_log(name: str) -> None:
@@ -2673,6 +2830,12 @@ def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shuti
                           else after.get("max_budget_usd"))
         setting_sources = (args.setting_sources if getattr(args, "setting_sources", None) is not None
                            else after.get("setting_sources"))
+        # Kernel 10 (F12=M24): respawn is a launch path -- carry the persisted
+        # token_ceiling forward onto the new record UNLESS an explicit
+        # --token-ceiling override is passed (default None -> carry forward),
+        # exactly like max_budget_usd above.
+        token_ceiling = (args.token_ceiling if getattr(args, "token_ceiling", None) is not None
+                         else after.get("token_ceiling"))
         cost_usd = _registry_cost(after.get("cost_usd", 0.0))
         task_for_record = task_override if task_override is not None else after.get("task", "")
 
@@ -2718,7 +2881,8 @@ def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shuti
             prior_snapshot = after
             new_record = new_worker_record(
                 new_sid, cwd, task_for_record, mode, model=model,
-                max_budget_usd=max_budget_usd, setting_sources=setting_sources)
+                max_budget_usd=max_budget_usd, setting_sources=setting_sources,
+                token_ceiling=token_ceiling)
             new_record["cost_usd"] = cost_usd  # cumulative -- see docstring
             new_record["cost_baseline"] = cost_usd  # Finding 4 -- see docstring
             data["workers"][args.name] = new_record
@@ -2761,7 +2925,8 @@ def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shuti
             prior_snapshot = dict(r)
             new_record = new_worker_record(
                 new_sid, cwd, task_for_record, mode, model=model,
-                max_budget_usd=max_budget_usd, setting_sources=setting_sources)
+                max_budget_usd=max_budget_usd, setting_sources=setting_sources,
+                token_ceiling=token_ceiling)
             new_record["cost_usd"] = cost_usd  # cumulative -- see docstring
             new_record["cost_baseline"] = cost_usd  # Finding 4 -- see docstring
             data["workers"][args.name] = new_record
@@ -2771,7 +2936,37 @@ def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shuti
     # Log rotation (SPEC §5): unconditional, before launch -- see
     # _rotate_worker_log's docstring for why this must happen before
     # launch_turn's append-mode log open.
-    _rotate_worker_log(args.name)
+    #
+    # B2 (rotation clean-fail): if the log is still held (a follower or
+    # just-killed claude), _rotate_worker_log raises LogRotationError after
+    # its retries. At this point the NEW pre-claimed record is already
+    # persisted but NO turn has launched and NO mailbox claim exists yet
+    # (compose_prompt runs below), so clean-fail here: un-rotate any partial
+    # rename, restore the exact pre-respawn snapshot (guarded on the still-
+    # unlaunched claim), and raise -- never a half-swapped record (invariant
+    # 7). sleep is threaded through so the retry backoff is test-injectable.
+    try:
+        _rotate_worker_log(args.name, sleep=sleep)
+    except LogRotationError as exc:
+        _unrotate_worker_log(args.name)
+        with fleet_lock():
+            data = load_registry()
+            r = data["workers"].get(args.name)
+            if (r is not None and r.get("session_id") == new_sid
+                    and r.get("status") == "working" and r.get("turn_pid") is None):
+                data["workers"][args.name] = prior_snapshot
+                save_registry(data)
+                append_event(
+                    "respawn_failed", args.name, error=str(exc),
+                    old_session_id=old_sid, attempted_session_id=new_sid,
+                )
+        raise
+
+    # Kernel 10 (fleet half): the new session gets its own sid-keyed ceiling
+    # file (the old sid's is now stale/harmless) so the Stop hook keeps its
+    # allow-stop signal across the respawn. Written after the successful
+    # rotation, before launch.
+    _write_ceiling_file(new_sid, token_ceiling)
 
     journal_path = journals_dir() / f"{args.name}.md"
     prompt, claim = compose_prompt(args.name, cwd, task_for_record, old_sid, journal_path=journal_path)
@@ -3552,6 +3747,11 @@ def build_parser() -> argparse.ArgumentParser:
     # settings sources merge into the worker turn (see SKILL.md doctrine:
     # use this when a repo's own Stop hook fights fleet's turn-end model).
     p_spawn.add_argument("--setting-sources", dest="setting_sources", default=None)
+    # Kernel 10 (F12=M24): a cumulative TOKEN ceiling (int) enforced
+    # fleet-side before each resume launch, and written to the sid-keyed
+    # ceiling file the Stop hook reads to allow-stop despite pending mail. NOT
+    # a per-invocation dollar cap (that is --max-budget-usd).
+    p_spawn.add_argument("--token-ceiling", type=int, default=None, dest="token_ceiling")
 
     p_status = sub.add_parser("status", help="show worker status table")
     p_status.add_argument("name", nargs="?", default=None)
@@ -3593,6 +3793,8 @@ def build_parser() -> argparse.ArgumentParser:
     # -> carry forward, mirroring the immutable-at-spawn rule for a reset).
     p_respawn.add_argument("--max-budget-usd", type=float, default=None, dest="max_budget_usd")
     p_respawn.add_argument("--setting-sources", dest="setting_sources", default=None)
+    # Kernel 10 (F12=M24): carry-forward-or-override, like the two above.
+    p_respawn.add_argument("--token-ceiling", type=int, default=None, dest="token_ceiling")
 
     p_kill = sub.add_parser("kill", help="interrupt (if running) and mark a worker dead")
     p_kill.add_argument("name")
