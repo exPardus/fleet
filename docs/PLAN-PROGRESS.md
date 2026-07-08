@@ -18,8 +18,9 @@ The mutable cursor against the immutable contract `docs/PLAN.md`. A resuming man
 | C1 | 1C review split (`c1-review-spec-core` ∥ `c1-review-spec-stubs`) | done | e2e5ca5 (3 major, UL1 clean) / 93fe929 (3 MED/3 LOW) | 2026-07-08 |
 | C1 | 1A-5 `spec-amend-5-subagents` (UL2 — new feature) | done | 8ff424a (F32; default-on, doc-only, no C2 code owed; truth-gate PASS) | 2026-07-08 |
 | C1 | 1D fixes (FIX-1..7) | done | 06dedb7/117d1d3/6a75f5b/a73a114/5860b92 (all 7 landed + truth-gate PASS) | 2026-07-08 |
-| C1 | 1D re-review `c1-review-spec-2` (loop ≤3) | dispatched | covers FIX-1..7 + UL2 | 2026-07-08 |
-| C1 | 1E verify checkpoint + `c1-knowledge` ∥ `c1-playbook` | pending | — | — |
+| C1 | 1D re-review `c1-review-spec-2` (loop 1 of ≤3) | done | fc5666e (C1 ready-to-close; 3 LOW → fixed 5708e59/198cfe3/85e1c41) | 2026-07-08 |
+| C1 | 1E verify checkpoint + `c1-knowledge` ∥ `c1-playbook` | done | 782f306 (postmortem, anti-ritual PASS) / 0d8699b (campaign-template + project file) | 2026-07-08 |
+| C1 | **✅ CAMPAIGN 1 CLOSED** — SPEC v2.1 (F17–F32, numbered invariants, UL1+UL2); all 30 findings homed; ~$62 spend | done | doc-only, no merge gate; awaiting UL1/UL2 ratification | 2026-07-08 |
 | C2 | 2A `harness-live` ∥ `harden-hooks` | pending | — | — |
 | C2 | 2A-close gate (FLEET_LIVE=1 hook-source=worktree) | pending | — | — |
 | C2 | 2B chain `harden-fleet-a` → `-b` → `-c` → `-d` (+ UL1 kernel) | pending | — | — |
