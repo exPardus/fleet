@@ -114,6 +114,8 @@ class TestRegistry:
             "session_id", "cwd", "task", "mode", "model", "created",
             "status", "turn_pid", "turn_pid_ctime", "attached_since",
             "turns", "cost_usd", "cost_baseline", "last_activity",
+            # Phase1 kernel item 7 (F13/M5): budget/setting-sources persistence.
+            "max_budget_usd", "setting_sources",
         }
         assert rec["session_id"] == "sid-1"
         assert rec["cwd"] == r"C:\proga\x"
@@ -130,6 +132,9 @@ class TestRegistry:
         # brand-new worker -- recompute_worker adds it to the log's own
         # trailing result cost, so a fresh spawn behaves exactly as before.
         assert rec["cost_baseline"] == 0.0
+        # F13/M5: budget/setting-sources default to None (recorded at spawn).
+        assert rec["max_budget_usd"] is None
+        assert rec["setting_sources"] is None
         assert rec["last_activity"] == rec["created"]
 
     def test_corrupt_registry_file_is_quarantined_and_raises(self, isolated_home):

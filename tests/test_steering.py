@@ -201,6 +201,62 @@ class TestCmdSend:
         assert sid in argv
         assert "--session-id" not in argv
 
+    def test_idle_resume_repasses_persisted_budget_and_setting_sources(self, isolated_home):
+        # F13 (item 7, M5): the RESUME launch (turn 2..N) must re-emit
+        # --max-budget-usd/--setting-sources from the PERSISTED registry
+        # record, not just turn 1 -- a missing re-pass is the exact bug this
+        # closes (turns 2..N ran uncapped, foreign-hook remedy evaporated).
+        sid, _ = _seed_worker("probe-1", turn_pid=111, turn_pid_ctime=ALIVE_CTIME, log_result=True)
+        data = fleet.load_registry()
+        data["workers"]["probe-1"]["max_budget_usd"] = 4.0
+        data["workers"]["probe-1"]["setting_sources"] = "user,project"
+        fleet.save_registry(data)
+
+        calls = []
+        proc = FakeProc(pid=222)
+        args = fleet.build_parser().parse_args(["send", "probe-1", "go"])
+        fleet.cmd_send(
+            args, popen=_fake_popen(proc, calls), get_process_info=_dead_info, which=lambda n: "claude.cmd",
+        )
+        argv = calls[0][1]
+        assert "--resume" in argv
+        assert argv[argv.index("--max-budget-usd") + 1] == "4.0"
+        assert argv[argv.index("--setting-sources") + 1] == "user,project"
+
+    def test_idle_resume_refuses_and_flags_when_cumulative_over_budget(self, isolated_home):
+        # F13 cumulative check: before a RESUME turn, compare registry
+        # cost_usd against max_budget_usd; if already exceeded, REFUSE the
+        # launch (clear error) and FLAG it in status. The CLI --max-budget-usd
+        # is per-turn; this is the worker-lifetime enforcement (SPEC §11).
+        sid, _ = _seed_worker("probe-1", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
+        # cost_usd is recomputed from the log each call, so encode the
+        # over-cap lifetime spend in a trailing result event (also lands the
+        # dead-pid worker on "idle" for the resume path).
+        log = fleet.logs_dir() / "probe-1.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text('{"type":"result","result":"done","total_cost_usd":2.5}\n', encoding="utf-8")
+        data = fleet.load_registry()
+        data["workers"]["probe-1"]["max_budget_usd"] = 1.0
+        fleet.save_registry(data)
+
+        def popen(*a, **kw):
+            raise AssertionError("must not launch a resume turn once over the cumulative cap")
+
+        args = fleet.build_parser().parse_args(["send", "probe-1", "keep going"])
+        with pytest.raises(fleet.FleetCliError, match="budget"):
+            fleet.cmd_send(args, popen=popen, get_process_info=_dead_info, which=lambda n: "claude.cmd")
+
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["status"] == "over_budget"
+
+    def test_over_budget_status_is_sticky_across_recompute(self, isolated_home):
+        # The over_budget flag must survive a later status recompute (like
+        # attached/dead), else the flag silently reverts to idle.
+        sid, _ = _seed_worker("probe-1", status="over_budget", log_result=True)
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info)
+        assert updated["status"] == "over_budget"
+
     def test_attached_appends_to_mailbox_and_warns(self, isolated_home, capsys):
         sid, _ = _seed_worker("probe-1", status="attached")
 

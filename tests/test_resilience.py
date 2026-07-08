@@ -422,6 +422,50 @@ class TestCmdRespawn:
         new_sid = fleet.load_registry()["workers"]["probe-1"]["session_id"]
         assert argv[argv.index("--session-id") + 1] == new_sid
 
+    def test_respawn_carries_forward_budget_and_setting_sources(self, isolated_home):
+        # F13 (item 7, M5): respawn is a context reset, not a config reset --
+        # the persisted max_budget_usd/setting_sources carry forward onto the
+        # new record AND onto the fresh-session launch argv (respawn is a
+        # launch path too).
+        _seed_worker("probe-1", status="idle", log_result=True)
+        data = fleet.load_registry()
+        data["workers"]["probe-1"]["max_budget_usd"] = 4.0
+        data["workers"]["probe-1"]["setting_sources"] = "user,project"
+        fleet.save_registry(data)
+
+        calls = []
+        proc = FakeProc(pid=7)
+        args = fleet.build_parser().parse_args(["respawn", "probe-1"])
+        fleet.cmd_respawn(args, popen=_fake_popen(proc, calls), get_process_info=_dead_info, which=lambda n: "claude.cmd")
+
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["max_budget_usd"] == 4.0
+        assert rec["setting_sources"] == "user,project"
+
+        argv = calls[0][1]
+        assert argv[argv.index("--max-budget-usd") + 1] == "4.0"
+        assert argv[argv.index("--setting-sources") + 1] == "user,project"
+
+    def test_respawn_override_replaces_persisted_budget_and_setting_sources(self, isolated_home):
+        # "carries them forward unless explicitly overridden" -- an explicit
+        # --max-budget-usd/--setting-sources on respawn replaces the carried
+        # value.
+        _seed_worker("probe-1", status="idle", log_result=True)
+        data = fleet.load_registry()
+        data["workers"]["probe-1"]["max_budget_usd"] = 4.0
+        data["workers"]["probe-1"]["setting_sources"] = "user,project"
+        fleet.save_registry(data)
+
+        proc = FakeProc(pid=7)
+        args = fleet.build_parser().parse_args([
+            "respawn", "probe-1", "--max-budget-usd", "9.0", "--setting-sources", "user",
+        ])
+        fleet.cmd_respawn(args, popen=_fake_popen(proc), get_process_info=_dead_info, which=lambda n: "claude.cmd")
+
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["max_budget_usd"] == 9.0
+        assert rec["setting_sources"] == "user"
+
     def test_log_rotation_happens_before_launch(self, isolated_home):
         logs = fleet.logs_dir()
         logs.mkdir(parents=True, exist_ok=True)
