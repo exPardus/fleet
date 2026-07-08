@@ -118,6 +118,8 @@ class TestRegistry:
             "max_budget_usd", "setting_sources",
             # Kernel 10 (F12=M24): fleet-side token ceiling.
             "token_ceiling",
+            # UL1 (item 11 / F31): usage-limit park horizon fields.
+            "limit_reset_at", "limit_kind",
         }
         assert rec["session_id"] == "sid-1"
         assert rec["cwd"] == r"C:\proga\x"
