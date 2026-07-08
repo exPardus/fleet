@@ -39,7 +39,7 @@ In: local HTTP server (`fleet web`), fleet board, worker detail (peek stream, jo
 
 ## Done criteria
 
-A week where fleet interaction happens primarily through the board during campaigns; peek/send/attach round-trip demonstrably faster than terminal equivalents; CSRF protection verified. (v1 read-only: "send/attach round-trip" = the copy-command path + CLI/telegram; write-form round-trip is deferred until friction earns it.)
+A week where fleet interaction happens primarily through the board during campaigns; peek/send/attach round-trip demonstrably faster than terminal equivalents; Host-header/same-origin rejection + mutating-POST→405 verified; CSRF-token machinery specced (not built until write forms are earned). (v1 read-only: "send/attach round-trip" = the copy-command path + CLI/telegram; write-form round-trip is deferred until friction earns it.)
 
 ## Invariants touched
 
