@@ -11,11 +11,17 @@ The manager gets measurably better over time. Mostly doctrine + knowledge struct
 
 In: trust ledger, plan-approval gate flow, definition-of-done contracts, session seeding (`spawn --from`), campaign templates, broadcast/named addressing, knowledge distillation routine. Out: any ML/scoring service, autonomous manager loops without human kickoff (that stays Telegram manager-on-call), cross-CLI workers (Phase 6).
 
+<!-- flag-sizing -->
+**Flag-sized scope (code vs doctrine).** Phase 5 is deliberately code-light: the entire v1 code surface = `fleet done --outcome`, `spawn --from` (journal-only), `send --all --except`, 2-metric `fleet stats`. Everything else — campaign templates, definition-of-done contracts, the distillation routine — is DOCTRINE (git-tracked markdown files the manager reads and follows), not code. The compounding asset is the knowledge base; new CLI is kept to those four flags to avoid framework-building.
+
 ## Fixed constraints
 
 - Trust ledger and templates are git-tracked knowledge files (structured markdown or JSON in `knowledge/`) — readable/editable by human, written by manager turns, no database.
 - DoD contracts enforce via the EXISTING Stop-hook mechanism (mailbox veto with feedback) — no new hook types.
-- Salvaged kernel (IDEA-FORGE-REPORT §4): per-worker cumulative TOKEN ceiling checked in the Stop hook — token counts only, no $-conversion, no price table. Complements `--max-budget-usd` and works behind provider proxies where $ figures lie.
+<!-- F12 -->
+- Salvaged kernel (IDEA-FORGE-REPORT §4): per-worker cumulative TOKEN ceiling — token counts only, no $-conversion, no price table. Complements `--max-budget-usd` and works behind provider proxies where $ figures lie. **The token-ceiling kernel ships early: it is delivered in the C2 hardening chain (`harden-hooks` + `harden-fleet-d`), not first in Phase 5** — Phase 5 consumes the shipped kernel as doctrine, it is not built here.
+  - **Enforcement lever (F12 — inverted-enforcement fix).** The Stop hook's only active lever is `{"decision":"block"}`, and **block means the turn CONTINUES (spends MORE tokens) — so blocking on over-ceiling is enforcement inverted.** The lever is therefore split so that over ceiling, the Stop hook ALLOWS stop even with mail pending (mail stays visible via idle+mail), never block; hard enforcement lives in fleet.py launch paths (send-when-idle / respawn refuse or warn when cumulative tokens > ceiling), where registry access is legitimate.
+  - **Where the counts live.** The Stop hook computes THIS turn's tokens from `transcript_path` in its stdin JSON (the field verified against the current hook contract at kernel-build time), or spawn writes a sid-keyed ceiling file next to the mailbox. Cumulative-across-respawn counts live in the registry keyed by NAME, written only by fleet.py — the hook has only `session_id`, so it never writes the registry or events.
 - Plan gate uses existing modes: spawn in `plan`, result = plan text, manager approves → respawn `accept` with plan in prompt. No new kernel machinery.
 - Distillation is a manager turn on a schedule/trigger, not a daemon feature.
 
@@ -32,3 +38,10 @@ In: trust ledger, plan-approval gate flow, definition-of-done contracts, session
 ## Done criteria
 
 Trust ledger populated across ≥3 campaigns and demonstrably consulted (manager cites it in decisions); one premature-completion bounce caught by DoD contract in real use; distillation run keeps INDEX under control; `fleet stats` shows the chosen metrics trending.
+
+## Invariants touched
+
+Cites the SPEC.md numbered "Architectural invariants" section.
+
+- **2 — exit-0 hooks.** The token-ceiling lever (F12) runs the ceiling check inside the Stop hook, and the hook ALLOWS stop over ceiling (never `block`, never errors) — it always exits 0 and surfaces nothing into the worker transcript. Preserved because the hook is a passive signal only; the block-continues-the-turn inversion is avoided by keeping all refuse/warn behavior out of the hook.
+- **6 — single-writer registry.** Cumulative-across-respawn token counts live in `fleet.json` keyed by NAME and are written ONLY by fleet.py under `fleet.lock`; the Stop hook has only `session_id` and reads its own turn's tokens from `transcript_path` (or a sid-keyed ceiling file), never writing the registry or events. Preserved because hard enforcement was moved to fleet.py launch paths (send-when-idle / respawn), where registry access is legitimate, instead of the hook.
