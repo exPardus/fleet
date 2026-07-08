@@ -52,6 +52,78 @@ def _mailbox_path(session_id, fleet_home=None):
     return os.path.join(home, "mailbox", f"{session_id}.md")
 
 
+def _log_hook_error(session_id, exc, fleet_home=None):
+    """Kernel 1: append ONE diagnostic line to state/hook-errors.log so a
+    swallowed hook exception is not invisible. Best-effort, no lock, single
+    line (`timestamp session_id exception-repr`). Wrapped in its own
+    try/except so a logging failure NEVER changes the caller's exit code --
+    the exit-0-on-any-error invariant is absolute."""
+    try:
+        home = fleet_home if fleet_home is not None else _fleet_home()
+        ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        sid = session_id if session_id else "?"
+        sid = str(sid).replace("\r", " ").replace("\n", " ")
+        rep = repr(exc).replace("\r", " ").replace("\n", " ")
+        path = os.path.join(home, "state", "hook-errors.log")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{ts} {sid} {rep}\n")
+    except Exception:
+        pass
+
+
+def _ceiling_path(session_id, fleet_home=None):
+    home = fleet_home if fleet_home is not None else _fleet_home()
+    return os.path.join(home, "state", "ceilings", session_id)
+
+
+def _read_ceiling(session_id, fleet_home=None):
+    """Kernel 10: read the sid-keyed token ceiling (an integer) written by
+    fleet.py's launch path. READ-ONLY. Returns the ceiling int, or None on
+    any failure (missing file / unreadable / non-numeric) -- a None ceiling
+    means 'no ceiling in force', so the hook keeps its existing behavior."""
+    try:
+        with open(_ceiling_path(session_id, fleet_home), "r", encoding="utf-8") as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _current_tokens(transcript_path):
+    """Kernel 10: best-effort current token count from the JSONL transcript
+    (sum of input+output tokens across usage records). Returns an int, or
+    None if the transcript is absent/unreadable -- None means 'can't prove
+    over-ceiling', so the hook falls through to its conservative existing
+    behavior (it never wrongly ALLOWS a stop it can't justify)."""
+    if not transcript_path:
+        return None
+    try:
+        total = 0
+        with open(transcript_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                usage = None
+                msg = rec.get("message")
+                if isinstance(msg, dict):
+                    usage = msg.get("usage")
+                if not isinstance(usage, dict):
+                    usage = rec.get("usage")
+                if isinstance(usage, dict):
+                    for key in ("input_tokens", "output_tokens"):
+                        val = usage.get(key)
+                        if isinstance(val, int):
+                            total += val
+        return total
+    except OSError:
+        return None
+
+
 def _claim(mailbox_file):
     """Atomically claim mailbox_file by renaming it to a pid-suffixed
     sibling so concurrent hook invocations never deliver the same message
@@ -87,13 +159,28 @@ def _read_and_discard(claimed_file):
     return contents
 
 
-def main():
+def main(state=None):
     data = json.load(sys.stdin)
     session_id = data.get("session_id")
+    if state is not None:
+        state["sid"] = session_id
     if not _valid_session_id(session_id):
         return
     # data.get("stop_hook_active") intentionally unused -- see module
     # docstring: no custom loop counter, native force-allow handles it.
+
+    # Kernel 10 (hook-side): if a token ceiling is in force AND the worker is
+    # provably over it, ALLOW stop even with mail pending. We return BEFORE
+    # touching the mailbox so pending mail is NOT claimed/drained -- it stays
+    # visible via idle+mail for the next launch. The hook can only ever ALLOW
+    # here; it never gains blocking power from the ceiling. Any doubt (no
+    # ceiling / unreadable ceiling / no transcript) falls through to the
+    # existing block-on-mail behavior below.
+    ceiling = _read_ceiling(session_id)
+    if ceiling is not None:
+        current = _current_tokens(data.get("transcript_path"))
+        if current is not None and current >= ceiling:
+            return
 
     mailbox_file = _mailbox_path(session_id)
     claimed_file = _claim(mailbox_file)
@@ -108,8 +195,9 @@ def main():
 
 
 if __name__ == "__main__":
+    _state = {"sid": None}
     try:
-        main()
-    except Exception:
-        pass
+        main(_state)
+    except Exception as _exc:
+        _log_hook_error(_state["sid"], _exc)
     sys.exit(0)
