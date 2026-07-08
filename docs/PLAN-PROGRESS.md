@@ -26,7 +26,8 @@ The mutable cursor against the immutable contract `docs/PLAN.md`. A resuming man
 | C2 | 2B chain `harden-fleet-a`→`-b`→`-c`→`-d`→`-e` (UL1 item 11 = new 5th link) | done | -a 6a44c53(426) · -b f8c9513(438) · -c c3b42f7(453) · -d ca495f0(471, demo both halves) · -e 784a73f(496); all truth-gate PASS | 2026-07-08 |
 | C2 | 2C reviews (`c2-review-code` ∥ `c2-review-adversarial`) | done | 37fff85 (11/11 conformant, 1 MED) / 066d618 (2 breaks: HIGH double-launch, MED false-park) | 2026-07-08 |
 | C2 | 2D fix wave 1 (`harden-fleet-e`, all 5 fixes) | done | 614ec3a (506 pytest; FIX-1/FIX-2 regression-pinned; 2 empty turns from transient API 529) | 2026-07-08 |
-| C2 | 2E merge gate (pre-merge pytest → merge → live tier → doctor → hook-smoke; revert-on-red) + `c2-knowledge` | in-progress | pre-merge checks running | 2026-07-08 |
+| C2 | 2E merge gate (pre-merge pytest → merge → live tier → doctor → hook-smoke; revert-on-red) | done | MERGED 9e4ec9c; post-merge: FLEET_LIVE 11✓/doctor all-PASS/init+PostCompact/hook-smoke live✓. REVERT PATH EXERCISED (48a50e0 red on demo hook-source → reverted 7c99c08 → fixed bbd4f6f → re-merged) | 2026-07-09 |
+| C2 | `c2-knowledge` (anti-ritual: campaign-template amendment) | dispatched | — | 2026-07-09 |
 | C2 | **>>> STOP: hand to Altai for SOAK GATE 1 <<<** | pending | — | — |
 | C3 | Phase-1 close (`p1-docs-sync` + external campaign + workload queue + SOAK GATE 1) | pending | GATED: readiness boundary | — |
 | C4 | Phase 1.5 portability (spec→build→ci→posix-smoke→SOAK 1.5) | pending | GATED | — |
