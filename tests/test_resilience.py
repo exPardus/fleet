@@ -2212,3 +2212,276 @@ class TestTokenCeilingEnforcement:
         assert rec["token_ceiling"] == 777
         ceiling_file = fleet.state_dir() / "ceilings" / new_sid
         assert ceiling_file.read_text(encoding="utf-8").strip() == "777"
+
+
+# ---------------------------------------------------------------------------
+# UL1 usage-limit resilience kernel (item 11 / SPEC F31)
+# ---------------------------------------------------------------------------
+
+_NO_SLEEP = lambda *a, **k: None
+
+
+def _write_err(name, text):
+    err = fleet.logs_dir() / f"{name}.err"
+    err.parent.mkdir(parents=True, exist_ok=True)
+    err.write_text(text, encoding="utf-8")
+
+
+def _write_no_result_log(name):
+    # A turn that ENDED with no trailing `result` stream event -- the errored
+    # shape the classifier reads as crash-dead unless the limit signal fires.
+    log = fleet.logs_dir() / f"{name}.jsonl"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text('{"type":"system","subtype":"init"}\n', encoding="utf-8")
+
+
+class TestUsageLimitSchema:
+    def test_new_worker_record_has_additive_limit_fields_defaulting_none(self, isolated_home):
+        rec = fleet.new_worker_record("sid-1", str(fleet.FLEET_HOME), "task", "dontask")
+        assert rec["limit_reset_at"] is None
+        assert rec["limit_kind"] is None
+
+    def test_limit_fields_round_trip_through_registry(self, isolated_home):
+        _seed_worker("probe-1", status="limited")
+        _set_field("probe-1", limit_reset_at="2026-07-08T18:00:00Z", limit_kind="session_5h")
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["limit_reset_at"] == "2026-07-08T18:00:00Z"
+        assert rec["limit_kind"] == "session_5h"
+
+    def test_recompute_tolerates_record_missing_limit_fields(self, isolated_home):
+        # An OLD record predating the additive fields must recompute cleanly
+        # (readers default the missing field to None -- M1 additive rule).
+        _seed_worker("probe-1", status="idle", log_result=True, cost_usd=0.1)
+        data = fleet.load_registry()
+        rec = data["workers"]["probe-1"]
+        rec.pop("limit_reset_at", None)
+        rec.pop("limit_kind", None)
+        fleet.save_registry(data)
+        updated = fleet.recompute_worker("probe-1", fleet.load_registry()["workers"]["probe-1"],
+                                         get_process_info=_dead_info, sleep=_NO_SLEEP)
+        assert updated["status"] == "idle"
+
+
+class TestUsageLimitDetection:
+    def test_errored_no_result_with_limit_stderr_parks_limited(self, isolated_home):
+        _seed_worker("probe-1", status="working", turn_pid=999, turn_pid_ctime=ALIVE_CTIME)
+        _write_no_result_log("probe-1")
+        _write_err("probe-1", "Claude usage limit reached. resets at 2026-07-08T18:00:00Z")
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info, sleep=_NO_SLEEP)
+        assert updated["status"] == "limited"
+        assert updated["limit_reset_at"] == "2026-07-08T18:00:00Z"
+
+    def test_weekly_limit_stderr_sets_weekly_kind(self, isolated_home):
+        _seed_worker("probe-1", status="working", turn_pid=999, turn_pid_ctime=ALIVE_CTIME)
+        _write_no_result_log("probe-1")
+        _write_err("probe-1", "You have hit your weekly usage limit. Try again later.")
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info, sleep=_NO_SLEEP)
+        assert updated["status"] == "limited"
+        assert updated["limit_kind"] == "weekly"
+
+    def test_limit_stderr_without_parseable_reset_parks_with_null_horizon(self, isolated_home):
+        _seed_worker("probe-1", status="working", turn_pid=999, turn_pid_ctime=ALIVE_CTIME)
+        _write_no_result_log("probe-1")
+        _write_err("probe-1", "usage limit reached")
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info, sleep=_NO_SLEEP)
+        assert updated["status"] == "limited"
+        assert updated["limit_reset_at"] is None
+
+    def test_errored_no_result_non_limit_stderr_stays_crash_dead(self, isolated_home):
+        _seed_worker("probe-1", status="working", turn_pid=999, turn_pid_ctime=ALIVE_CTIME)
+        _write_no_result_log("probe-1")
+        _write_err("probe-1", "Traceback (most recent call last):\n  KeyError: 'foo'")
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info, sleep=_NO_SLEEP)
+        assert updated["status"] == "dead"
+        # crash-dead path drops the abnormal-turn-end journal landmark
+        journal = fleet.journals_dir() / "probe-1.md"
+        assert "turn ended abnormally" in journal.read_text(encoding="utf-8")
+
+    def test_park_does_not_write_abnormal_turn_note(self, isolated_home):
+        _seed_worker("probe-1", status="working", turn_pid=999, turn_pid_ctime=ALIVE_CTIME)
+        _write_no_result_log("probe-1")
+        _write_err("probe-1", "usage limit reached. resets at 2026-07-08T18:00:00Z")
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info, sleep=_NO_SLEEP)
+        journal = fleet.journals_dir() / "probe-1.md"
+        assert not (journal.exists() and "turn ended abnormally" in journal.read_text(encoding="utf-8"))
+
+
+class TestUsageLimitStickyExemption:
+    def test_limited_never_demoted_to_dead_on_gone_probe(self, isolated_home):
+        # A parked `limited` worker legitimately holds NO live claude (turn
+        # ended at the plan wall, not a crash). recompute must NEVER demote it.
+        _seed_worker("probe-1", status="limited", turn_pid=999, turn_pid_ctime=ALIVE_CTIME)
+        _write_no_result_log("probe-1")
+        _set_field("probe-1", limit_reset_at="2026-07-08T18:00:00Z", limit_kind="session_5h")
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info, sleep=_NO_SLEEP)
+        assert updated["status"] == "limited"
+
+    def test_recompute_status_returns_limited_sticky(self, isolated_home):
+        assert fleet.recompute_status(None, None, "nonexistent.jsonl",
+                                      current_status="limited") == "limited"
+
+
+def _past():
+    return fleet.ctime_to_iso(datetime.now(timezone.utc) - timedelta(hours=1))
+
+
+def _future():
+    return fleet.ctime_to_iso(datetime.now(timezone.utc) + timedelta(hours=1))
+
+
+class TestCmdResumeLimited:
+    def test_past_horizon_worker_relaunched_and_flipped_working(self, isolated_home):
+        _seed_worker("probe-1", status="limited")
+        _set_field("probe-1", limit_reset_at=_past(), limit_kind="session_5h")
+        calls = []
+        proc = FakeProc(pid=7)
+        args = fleet.build_parser().parse_args(["resume-limited"])
+        rc = fleet.cmd_resume_limited(args, popen=_fake_popen(proc, calls),
+                                      get_process_info=_dead_info, which=lambda n: "claude.cmd",
+                                      sleep=_NO_SLEEP)
+        assert rc == 0
+        assert len(calls) == 1  # a real launch happened
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["status"] == "working"
+        assert rec["turn_pid"] == 7
+
+    def test_before_horizon_worker_skipped(self, isolated_home):
+        _seed_worker("probe-1", status="limited")
+        _set_field("probe-1", limit_reset_at=_future(), limit_kind="session_5h")
+        calls = []
+        proc = FakeProc(pid=7)
+        args = fleet.build_parser().parse_args(["resume-limited"])
+        fleet.cmd_resume_limited(args, popen=_fake_popen(proc, calls),
+                                 get_process_info=_dead_info, which=lambda n: "claude.cmd",
+                                 sleep=_NO_SLEEP)
+        assert calls == []  # no launch
+        assert fleet.load_registry()["workers"]["probe-1"]["status"] == "limited"
+
+    def test_null_horizon_worker_skipped_without_force(self, isolated_home):
+        _seed_worker("probe-1", status="limited")
+        _set_field("probe-1", limit_reset_at=None, limit_kind=None)
+        calls = []
+        proc = FakeProc(pid=7)
+        args = fleet.build_parser().parse_args(["resume-limited"])
+        fleet.cmd_resume_limited(args, popen=_fake_popen(proc, calls),
+                                 get_process_info=_dead_info, which=lambda n: "claude.cmd",
+                                 sleep=_NO_SLEEP)
+        assert calls == []
+        assert fleet.load_registry()["workers"]["probe-1"]["status"] == "limited"
+
+    def test_null_horizon_worker_relaunched_with_force_now(self, isolated_home):
+        _seed_worker("probe-1", status="limited")
+        _set_field("probe-1", limit_reset_at=None, limit_kind=None)
+        calls = []
+        proc = FakeProc(pid=7)
+        args = fleet.build_parser().parse_args(["resume-limited", "probe-1", "--force-now"])
+        fleet.cmd_resume_limited(args, popen=_fake_popen(proc, calls),
+                                 get_process_info=_dead_info, which=lambda n: "claude.cmd",
+                                 sleep=_NO_SLEEP)
+        assert len(calls) == 1
+        assert fleet.load_registry()["workers"]["probe-1"]["status"] == "working"
+
+    def test_before_horizon_relaunched_with_force_now(self, isolated_home):
+        _seed_worker("probe-1", status="limited")
+        _set_field("probe-1", limit_reset_at=_future(), limit_kind="weekly")
+        calls = []
+        proc = FakeProc(pid=7)
+        args = fleet.build_parser().parse_args(["resume-limited", "probe-1", "--force-now"])
+        fleet.cmd_resume_limited(args, popen=_fake_popen(proc, calls),
+                                 get_process_info=_dead_info, which=lambda n: "claude.cmd",
+                                 sleep=_NO_SLEEP)
+        assert len(calls) == 1
+
+    def test_resume_repasses_budget_and_setting_sources(self, isolated_home):
+        _seed_worker("probe-1", status="limited")
+        _set_field("probe-1", limit_reset_at=_past(), limit_kind="session_5h",
+                   max_budget_usd=4.0, setting_sources="user,project")
+        calls = []
+        proc = FakeProc(pid=7)
+        args = fleet.build_parser().parse_args(["resume-limited"])
+        fleet.cmd_resume_limited(args, popen=_fake_popen(proc, calls),
+                                 get_process_info=_dead_info, which=lambda n: "claude.cmd",
+                                 sleep=_NO_SLEEP)
+        argv = calls[0][1]
+        assert argv[argv.index("--max-budget-usd") + 1] == "4.0"
+        assert argv[argv.index("--setting-sources") + 1] == "user,project"
+
+    def test_non_limited_worker_left_untouched(self, isolated_home):
+        _seed_worker("probe-1", status="idle", log_result=True)
+        calls = []
+        proc = FakeProc(pid=7)
+        args = fleet.build_parser().parse_args(["resume-limited"])
+        fleet.cmd_resume_limited(args, popen=_fake_popen(proc, calls),
+                                 get_process_info=_dead_info, which=lambda n: "claude.cmd",
+                                 sleep=_NO_SLEEP)
+        assert calls == []
+        assert fleet.load_registry()["workers"]["probe-1"]["status"] == "idle"
+
+    def test_named_unknown_worker_raises(self, isolated_home):
+        with pytest.raises(fleet.FleetCliError):
+            args = fleet.build_parser().parse_args(["resume-limited", "nope"])
+            fleet.cmd_resume_limited(args, popen=_fake_popen(FakeProc(pid=7)),
+                                     get_process_info=_dead_info, which=lambda n: "claude.cmd",
+                                     sleep=_NO_SLEEP)
+
+    def test_launch_failure_rolls_back_to_limited(self, isolated_home):
+        _seed_worker("probe-1", status="limited")
+        _set_field("probe-1", limit_reset_at=_past(), limit_kind="session_5h")
+
+        def boom(argv, **kwargs):
+            raise fleet.TurnLaunchError("dead-on-arrival")
+
+        args = fleet.build_parser().parse_args(["resume-limited"])
+        with pytest.raises(fleet.TurnLaunchError):
+            fleet.cmd_resume_limited(args, popen=boom, get_process_info=_dead_info,
+                                     which=lambda n: "claude.cmd", sleep=_NO_SLEEP)
+        # pre-claim must roll back to the park, not strand as a ghost claim
+        assert fleet.load_registry()["workers"]["probe-1"]["status"] == "limited"
+
+
+class TestLimitedSurfacing:
+    def test_status_flags_resets_and_resume_eligible_when_past(self, isolated_home):
+        _seed_worker("probe-1", status="limited")
+        _set_field("probe-1", limit_reset_at=_past(), limit_kind="session_5h")
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        flags = fleet._worker_flags(rec)
+        assert any("resets" in f for f in flags)
+        assert "resume-eligible" in flags
+
+    def test_status_flags_reset_unknown_when_null(self, isolated_home):
+        _seed_worker("probe-1", status="limited")
+        _set_field("probe-1", limit_reset_at=None, limit_kind=None)
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        flags = fleet._worker_flags(rec)
+        assert any("reset unknown" in f for f in flags)
+        assert "resume-eligible" not in flags
+
+    def test_status_flags_no_resume_eligible_before_horizon(self, isolated_home):
+        _seed_worker("probe-1", status="limited")
+        _set_field("probe-1", limit_reset_at=_future(), limit_kind="session_5h")
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert "resume-eligible" not in fleet._worker_flags(rec)
+
+    def test_doctor_notes_past_reset_park(self, isolated_home):
+        _seed_worker("probe-1", status="limited")
+        _set_field("probe-1", limit_reset_at=_past(), limit_kind="session_5h")
+        workers = fleet.load_registry()["workers"]
+        name, ok, msg = fleet._doctor_check_limited_parks(workers)
+        assert ok
+        assert "resume-limited" in msg
+
+    def test_doctor_notes_weekly_and_null_horizon(self, isolated_home):
+        _seed_worker("weekly-one", status="limited")
+        _set_field("weekly-one", limit_reset_at=_future(), limit_kind="weekly")
+        _seed_worker("null-one", status="limited")
+        _set_field("null-one", limit_reset_at=None, limit_kind=None)
+        workers = fleet.load_registry()["workers"]
+        name, ok, msg = fleet._doctor_check_limited_parks(workers)
+        assert "weekly-one" in msg
+        assert "null-one" in msg

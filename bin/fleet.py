@@ -496,6 +496,15 @@ def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
         "turn_pid": None,
         "turn_pid_ctime": None,
         "attached_since": None,
+        # UL1 (item 11 / F31): usage-limit park horizon. limit_reset_at is the
+        # ISO-8601 UTC instant the Claude plan window resets (or None when the
+        # signal carried no parseable reset time -> parked with an unknown
+        # horizon, surfaced for an operator-set reset, never auto-resumed
+        # blind); limit_kind is session_5h | weekly | None. Additive-schema
+        # (M1): both default None, readers use .get(..., None), save_registry
+        # preserves them on round-trip. Only meaningful while status=="limited".
+        "limit_reset_at": None,
+        "limit_kind": None,
         "turns": 0,
         "cost_usd": 0.0,
         # Task 5 fix wave, Finding 4 (task-5 adversarial review): the
@@ -790,6 +799,15 @@ def recompute_status(pid, ctime_iso, log_path, current_status: str | None = None
     # ceiling, or retire the worker).
     if current_status == "over_ceiling":
         return "over_ceiling"
+    # UL1 (item 11 / F31): "limited" is a plan-usage-limit park, sticky-until-
+    # reset exactly as dead/attached are sticky. A liveness recompute must
+    # NEVER demote it to dead: a parked worker legitimately holds no live
+    # claude (its turn ended at the plan wall, not in a crash), so "no live PID
+    # + no result" is the EXPECTED shape here, not a crash signal. The sole
+    # exits are a `fleet resume-limited` launch (limited -> working, once
+    # now >= limit_reset_at) or `respawn --force` (a fresh new_worker_record).
+    if current_status == "limited":
+        return "limited"
     if current_status == "working" and pid is None:
         if _launch_claim_expired(last_activity_iso):
             return "dead"
@@ -1408,6 +1426,81 @@ def _sum_result_tokens(log_path) -> int | None:
     return total if found else None
 
 
+# ---------------------------------------------------------------------------
+# UL1 usage-limit detection (item 11 / F31) -- CONSERVATIVE FALLBACK.
+#
+# The exact live turn-end signal a Claude PLAN usage-limit wall emits is
+# DEFERRED-TO-KERNEL-PROBE: the real wall cannot be forced on demand (it would
+# burn the operator's actual plan usage), and `claude --help` (2.1.204) exposes
+# no usage/reset surface. So this is NOT a verified signal -- it is the
+# intent-§3-clause-2 fallback the SPEC (F31 detection contract) mandates until
+# a real wall confirms the precise pattern: an errored turn (no `result` stream
+# event) whose stderr is LIMIT-SHAPED is parked `limited` (surfaced for operator
+# confirmation), while a non-limit-shaped errored turn stays the ordinary
+# crash-dead path. The regex is deliberately conservative -- a genuine crash
+# must never be swallowed as a park.
+# ---------------------------------------------------------------------------
+
+_LIMIT_STDERR_RE = re.compile(
+    r"usage limit|rate limit|plan limit|resets?\s+at|try again (?:later|in)|quota",
+    re.IGNORECASE,
+)
+# A machine-readable reset instant, IF the (as-yet-unconfirmed) signal carries
+# one in ISO-8601 UTC form. Best-effort only; absence -> null horizon.
+_LIMIT_RESET_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+
+
+def _stderr_is_limit_shaped(text: str) -> bool:
+    """True iff a turn's stderr tail matches the conservative usage-limit
+    pattern (fallback detection -- DEFERRED-TO-KERNEL-PROBE). Empty/None -> not
+    limit-shaped (a silent crash is NOT a park)."""
+    return bool(text) and bool(_LIMIT_STDERR_RE.search(text))
+
+
+def _parse_limit_signal(text: str):
+    """Best-effort (reset_at, kind) from a limit-shaped stderr tail. reset_at is
+    an ISO-8601 UTC string if one is present, else None (park with an unknown
+    horizon -- never auto-resumed blind); kind is 'weekly' | 'session_5h' | None
+    by keyword. Parser is pinned to the observed signal by the kernel probe
+    later; today it stays conservative and returns None where uncertain."""
+    reset_at = None
+    m = _LIMIT_RESET_RE.search(text or "")
+    if m:
+        reset_at = m.group(0)
+    kind = None
+    low = (text or "").lower()
+    if "week" in low:
+        kind = "weekly"
+    elif "5-hour" in low or "5 hour" in low or "session" in low:
+        kind = "session_5h"
+    return reset_at, kind
+
+
+def _read_stderr_tail(name: str, limit: int = 4000) -> str:
+    """Read the tail of a worker's stderr log (logs/<name>.err) best-effort --
+    the classifier's only window onto a limit-shaped turn end. Missing/unreadable
+    -> empty string (treated as not limit-shaped)."""
+    err = logs_dir() / f"{name}.err"
+    try:
+        data = err.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    return data[-limit:]
+
+
+def _limit_reset_passed(record: dict) -> bool:
+    """True iff a `limited` record's limit_reset_at is set AND now >= it. A null
+    horizon returns False (never auto-eligible -- needs an operator-set reset or
+    --force-now)."""
+    reset = record.get("limit_reset_at")
+    if not reset:
+        return False
+    try:
+        return datetime.now(timezone.utc) >= _parse_iso(reset)
+    except (ValueError, TypeError):
+        return False
+
+
 def _append_abnormal_turn_note(name: str) -> None:
     """Append a one-line abnormal-turn-end landmark to the worker's journal
     (phase1 kernel 4). Best-effort: a journal we cannot write must never break
@@ -1452,7 +1545,23 @@ def recompute_worker(name: str, record: dict, get_process_info=None, sleep=time.
     # the input status is no longer "working" and this is skipped.
     if (record.get("status") == "working" and record.get("turn_pid") is not None
             and updated["status"] == "dead"):
-        _append_abnormal_turn_note(name)
+        # UL1 (item 11 / F31): a no-`result` crash-dead turn is NOT
+        # unconditionally a crash -- it may be a Claude PLAN usage-limit wall.
+        # Test the (conservative, DEFERRED-TO-KERNEL-PROBE) stderr signal FIRST:
+        # limit-shaped -> park `limited` (recording the reset horizon if
+        # parseable, surfacing for operator confirmation), NOT crash-dead, and
+        # DON'T drop the abnormal-turn note (a park is not a crash). A
+        # non-limit-shaped errored turn falls through to the ordinary crash-dead
+        # landmark -- the fallback never swallows a genuine crash as a park.
+        stderr_tail = _read_stderr_tail(name)
+        if _stderr_is_limit_shaped(stderr_tail):
+            reset_at, kind = _parse_limit_signal(stderr_tail)
+            updated["status"] = "limited"
+            updated["limit_reset_at"] = reset_at
+            updated["limit_kind"] = kind
+            append_event("limited_suspected", name, limit_reset_at=reset_at, limit_kind=kind)
+        else:
+            _append_abnormal_turn_note(name)
     cost_sum = _sum_result_costs(log_path)
     if cost_sum is not None:
         updated["cost_usd"] = _registry_cost(record.get("cost_baseline", 0.0)) + cost_sum
@@ -1499,6 +1608,15 @@ def _worker_flags(record: dict) -> list:
     # `fleet status`, mirroring how over_budget shows up as its own status.
     if record["status"] == "over_ceiling":
         flags.append("over-ceiling")
+    # UL1 (item 11 / F31): surface a parked worker's reset horizon and, once
+    # the horizon has passed, its resume-eligibility -- a read-only FLAG only,
+    # never an auto-launch (invariant 1 daemonless: status derives views, it
+    # does not start turns; the operator runs `fleet resume-limited`).
+    if record["status"] == "limited":
+        reset = record.get("limit_reset_at")
+        flags.append(f"limited (resets {reset})" if reset else "limited (reset unknown)")
+        if _limit_reset_passed(record):
+            flags.append("resume-eligible")
     return flags
 
 
@@ -2361,6 +2479,131 @@ def cmd_send(args, popen=subprocess.Popen, get_process_info=None, which=shutil.w
         _report_stranded_turn(args.name, sid, info)
 
     print(f"{args.name}: resumed -- {info['log_path']}")
+    return 0
+
+
+def _resume_one_limited(name: str, popen, get_process_info, which, sleep) -> None:
+    """Relaunch a single `limited` worker through the ordinary
+    fleet_lock-guarded launch path -- the SAME pre-claim / one-live-claude /
+    universal-drain shape cmd_send's idle-resume uses (invariants 6, 7). Under
+    the lock: pre-claim status="working"/turn_pid=None (recompute's launch-in-
+    flight guard then refuses to demote this window). Outside the lock: drain
+    mailbox + journal (compose_prompt with journal_path -- F31's "mailbox +
+    journal" resume), launch_turn re-passing the spawn-recorded
+    max_budget_usd/setting_sources (else the cap and foreign-hook remedy vanish
+    on the resumed turn), then commit the turn_pid. On failure, restore the
+    mailbox claim and roll the pre-claim back to `limited` (the park), never
+    leaving a ghost claim."""
+    with fleet_lock():
+        data = load_registry()
+        rec = data["workers"][name]
+        rec["status"] = "working"
+        rec["turn_pid"] = None
+        # Stamp a fresh last_activity so recompute_status's stale-pre-claim
+        # guard (LAUNCH_CLAIM_MAX_AGE_SECONDS) doesn't reap this in-flight
+        # launch against the log's old mtime (mirrors cmd_send's idle-resume).
+        rec["last_activity"] = now_iso()
+        data["workers"][name] = rec
+        save_registry(data)
+        sid = rec["session_id"]
+        cwd = rec["cwd"]
+        mode = rec["mode"]
+        model = rec.get("model")
+        max_budget_usd = rec.get("max_budget_usd")
+        setting_sources = rec.get("setting_sources")
+
+    journal_path = journals_dir() / f"{name}.md"
+    prompt, claim = compose_prompt(name, cwd, "", sid, journal_path=journal_path)
+    try:
+        info = launch_turn(
+            name, cwd, sid, prompt, mode, first=False,
+            model=model, max_budget_usd=max_budget_usd, setting_sources=setting_sources,
+            popen=popen, get_process_info=get_process_info, which=which,
+        )
+        finalize_mailbox_claim(claim)
+    except BaseException:
+        # BaseException (not Exception): a Ctrl-C mid-launch must still roll the
+        # pre-claim back to `limited`, or the record stays a permanently-guarded
+        # ghost claim (working+turn_pid=None) and leaks the drained claim file.
+        restore_mailbox_claim(claim)
+        with fleet_lock():
+            data = load_registry()
+            r = data["workers"].get(name)
+            if r is not None and r.get("status") == "working" and r.get("turn_pid") is None:
+                r["status"] = "limited"
+                save_registry(data)
+        raise
+
+    def _commit():
+        with fleet_lock():
+            data = load_registry()
+            r = data["workers"].get(name)
+            if r is not None:
+                r["status"] = "working"
+                r["turn_pid"] = info["turn_pid"]
+                r["turn_pid_ctime"] = info["turn_pid_ctime"]
+                r["turns"] = r.get("turns", 0) + 1
+                r["last_activity"] = now_iso()
+                save_registry(data)
+            append_event("limit_resumed", name, session_id=sid, turn_pid=info["turn_pid"])
+
+    if not _commit_launched_turn(_commit, sleep=sleep):
+        _report_stranded_turn(name, sid, info)
+
+
+def cmd_resume_limited(args, popen=subprocess.Popen, get_process_info=None, which=shutil.which,
+                       sleep=time.sleep) -> int:
+    """`fleet resume-limited [name] [--force-now]` (SPEC §5 resume-limited row,
+    UL1 / F31): the RECOMMENDED explicit resume sweep (UL-OQ3) -- NOT an
+    automatic status/launch-time side-effect (invariant 1 daemonless forbids a
+    read-view from launching turns; no resident process auto-wakes).
+
+    For each `limited` worker whose limit_reset_at has PASSED, relaunch the
+    pending work via _resume_one_limited (the fleet_lock-guarded launch path)
+    and flip it limited -> working. SKIPS (leaves `limited`, reports why) any
+    worker still before its reset horizon, and any with limit_reset_at = null
+    (unknown horizon -- needs operator confirmation) UNLESS --force-now
+    overrides for that named worker. Named worker -> that worker only; no name
+    -> sweep every eligible worker. status/doctor only FLAG resume-eligibility;
+    this command is the one lever that actually relaunches."""
+    _require_instance_settings()
+    force_now = bool(getattr(args, "force_now", False))
+
+    with fleet_lock():
+        data = load_registry()
+        if args.name:
+            if args.name not in data["workers"]:
+                raise FleetCliError(f"unknown worker: {args.name!r}")
+            names = [args.name]
+        else:
+            names = sorted(data["workers"])
+        # Snapshot the eligibility inputs under the lock; the actual per-worker
+        # launch re-reads the record under its own lock (each _resume_one_limited).
+        snapshot = {n: dict(data["workers"][n]) for n in names}
+
+    resumed, skipped = [], []
+    for name in names:
+        rec = snapshot[name]
+        if rec.get("status") != "limited":
+            skipped.append((name, "not limited"))
+            continue
+        reset = rec.get("limit_reset_at")
+        if not force_now:
+            if reset is None:
+                skipped.append((name, "reset horizon unknown -- needs --force-now"))
+                continue
+            if not _limit_reset_passed(rec):
+                skipped.append((name, f"still before reset horizon (resets {reset})"))
+                continue
+        _resume_one_limited(name, popen, get_process_info, which, sleep)
+        resumed.append(name)
+
+    for name in resumed:
+        print(f"{name}: resumed (limited -> working)")
+    for name, why in skipped:
+        print(f"{name}: skipped -- {why}")
+    if not resumed and not skipped:
+        print("no limited workers")
     return 0
 
 
@@ -3517,6 +3760,32 @@ def _doctor_check_stale_attaches(workers: dict):
     return ("stale-attaches", True, "no attaches older than 3h")
 
 
+def _doctor_check_limited_parks(workers: dict):
+    """UL1 (item 11 / F31): NOTE-only surfacing of usage-limit parks. Three
+    dispositions (always PASS -- a park is expected state, not a health
+    failure): (a) parked PAST its reset horizon without resuming (resume-
+    eligible but not yet swept -> prompt to run `fleet resume-limited`); (b)
+    a `weekly`-kind park (multi-day horizon, so the operator knows the wait is
+    expected, not a stall); (c) a null-horizon park (undetermined reset -- needs
+    an operator-set reset before it can resume)."""
+    limited = {n: r for n, r in workers.items() if r.get("status") == "limited"}
+    if not limited:
+        return ("limited-parks", True, "no usage-limit parks")
+    past = sorted(n for n, r in limited.items() if _limit_reset_passed(r))
+    weekly = sorted(n for n, r in limited.items() if r.get("limit_kind") == "weekly")
+    null_h = sorted(n for n, r in limited.items() if r.get("limit_reset_at") is None)
+    parts = []
+    if past:
+        parts.append(f"{len(past)} park(s) past reset -- run `fleet resume-limited`: {', '.join(past)}")
+    if weekly:
+        parts.append(f"{len(weekly)} weekly park(s) (multi-day horizon, expected): {', '.join(weekly)}")
+    if null_h:
+        parts.append(f"{len(null_h)} park(s) with unknown horizon (needs operator-set reset): {', '.join(null_h)}")
+    if not parts:
+        parts.append(f"{len(limited)} usage-limit park(s), none past reset")
+    return ("limited-parks", True, " | ".join(parts))
+
+
 def _mailbox_first_line(path: Path) -> str:
     """The first non-empty line of a mailbox file (best-effort), for the
     orphaned-mailbox disposition -- enough to identify what mail was stranded
@@ -3708,6 +3977,7 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run, get_process_info=No
         _doctor_check_unreadable_starttime(workers, get_process_info=get_process_info),
         _doctor_check_mailboxes(workers),
         _doctor_check_stale_attaches(workers),
+        _doctor_check_limited_parks(workers),
         _doctor_check_orphaned_claims(workers=workers),
         _doctor_check_claude_agents(workers, which=which, run=run),
         _doctor_check_log_sizes(),
@@ -3796,6 +4066,13 @@ def build_parser() -> argparse.ArgumentParser:
     # Kernel 10 (F12=M24): carry-forward-or-override, like the two above.
     p_respawn.add_argument("--token-ceiling", type=int, default=None, dest="token_ceiling")
 
+    # UL1 (item 11 / F31): explicit usage-limit resume sweep.
+    p_resume = sub.add_parser("resume-limited",
+                              help="relaunch limited workers whose reset horizon has passed")
+    p_resume.add_argument("name", nargs="?", default=None)
+    p_resume.add_argument("--force-now", action="store_true", dest="force_now",
+                          help="resume a named worker even before its horizon / with an unknown horizon")
+
     p_kill = sub.add_parser("kill", help="interrupt (if running) and mark a worker dead")
     p_kill.add_argument("name")
 
@@ -3832,6 +4109,8 @@ def main(argv=None) -> int:
             return cmd_release(args)
         if args.command == "respawn":
             return cmd_respawn(args)
+        if args.command == "resume-limited":
+            return cmd_resume_limited(args)
         if args.command == "kill":
             return cmd_kill(args)
         if args.command == "clean":
