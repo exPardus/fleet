@@ -30,7 +30,11 @@ Witness: *"the worker needs input → you get the question out-flow depends on t
 <!-- B5 -->
 - **Privilege bounds + confirm round-trip (confirmed constraint, review B5 — NOT an open question).** This is the highest-privilege inbound path, so its security is FIXED, not left to C6: (1) manager-on-call turns NEVER run --dangerously-skip-permissions; (2) transitive-privilege rule — any inbound path that would create a bypass-mode worker requires an explicit owner confirmation round-trip (bot replies with exact command + nonce, owner replies confirm); (3) /kill and /respawn require the same confirm; (4) the drafting session must enumerate the exact command set allowed without confirmation.
   Witness: *"manager-on-call turns NEVER run --dangerously-skip-permissions"*.
-  - **Concrete starting command-set proposal (for Altai's C6 security sign-off to review a concrete proposal, not a blank):** no-confirm = `/status /peek /result /mute`; confirm-with-nonce = `/send /respawn /kill /spawn`.
+  - **Full v1 command inventory + confirm split (the fixed baseline — stated ONCE here; OQ1 references this list, never re-lists it).** Nine v1 commands: `/status /peek /result /mute /send /spawn /respawn /kill /manager`.
+    - **no-confirm** (read-only or safe): `/status /peek /result /mute /manager`.
+    - **confirm-with-nonce** (destructive or privilege-minting): `/send /spawn /respawn /kill`.
+    - **`/manager` disposition (highest-privilege command, per FIX-7 SL2):** starts **no-confirm** — an inbound `/manager <request>` is not itself destructive — BUT any action that manager turn takes which would MINT a bypass-mode worker hits the transitive-privilege confirm (rule 2 above): the confirm fires on the spawn the manager attempts, not on the inbound message. So `/manager` sits in no-confirm at the door yet cannot escalate privilege without a round-trip.
+    - Original review proposal (verbatim anchor, pre-FIX-7 amendment): no-confirm = `/status /peek /result /mute`; confirm-with-nonce = `/send /respawn /kill /spawn`.
     Witness (command-set): *"no-confirm = `/status /peek /result /mute`; confirm-with-nonce = `/send /respawn /kill /spawn`"*.
 
 <!-- F17 -->
@@ -43,7 +47,7 @@ Witness: *"the worker needs input → you get the question out-flow depends on t
 
 ## Open questions (answer all — OQ resolution owned by C6 `spec-telegram`, NOT this stub)
 
-1. Command grammar v1: `/status [--delta]`, `/peek <name>`, `/send <name> <msg>` (or reply-to a worker's last message = implicit send), `/spawn <name> <dir> <task...>`, `/kill`, `/manager <request>` — right set? What's dangerous enough to require confirmation round-trip (kill? spawn with bypass)? (See the B5 command-set proposal above for the concrete starting split.)
+1. Command grammar refinement within the B5-fixed confirm baseline (kill/respawn/transitive-bypass already confirm-fixed; open: where `/send`, `/spawn`, `/mute` land). The full v1 command inventory and its confirm split are fixed ONCE in B5 above — this OQ does NOT re-list or re-open the baseline. It refines only: (a) the flag/arg surface (e.g. `/status [--delta]`, `/peek <name>`, `/send <name> <msg>` vs reply-to-a-worker = implicit `/send`, `/spawn <name> <dir> <task...>`); and (b) the still-open confirm *placement* for the non-fixed commands `/send`, `/spawn`, `/mute` relative to the B5 baseline.
 2. Reply-to threading: Telegram reply → map message id → worker name. Store outbound message-id → worker mapping where? TTL?
 <!-- F18 -->
    - **Confirmed disposition to fold (review F18 = review-doc M21) — reply-target validation.** dead: offer inline /respawn confirmation, or queue to the old sid's mailbox so the respawn drain delivers it (compatible with journal-injection-at-respawn); cleaned: error reply with last-known result path. Must NOT auto-respawn.
