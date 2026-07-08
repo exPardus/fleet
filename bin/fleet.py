@@ -408,8 +408,19 @@ def save_registry(data: dict) -> None:
         raise
 
 
-def new_worker_record(session_id, cwd, task, mode, model=None, created=None) -> dict:
-    """Build a fresh registry record matching the SPEC §4 schema exactly."""
+def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
+                       max_budget_usd=None, setting_sources=None) -> dict:
+    """Build a fresh registry record matching the SPEC §4 schema exactly.
+
+    Phase1 kernel item 7 (F13/M5): max_budget_usd and setting_sources are
+    persisted here and recorded at spawn, IMMUTABLE like `mode` -- every
+    launch path (spawn, send-when-idle resume, respawn) re-emits them from
+    THIS persisted value so a worker steered with N sends stays capped and
+    keeps its foreign-hook --setting-sources remedy on turns 2..N, not just
+    turn 1. Additive-schema (M1): both default to None, readers everywhere
+    use .get(..., None) so a record written before these fields existed
+    loads cleanly, and save_registry preserves any unknown fields verbatim
+    on write."""
     created = created or now_iso()
     return {
         "session_id": session_id,
@@ -417,6 +428,8 @@ def new_worker_record(session_id, cwd, task, mode, model=None, created=None) -> 
         "task": task[:200],
         "mode": mode,
         "model": model,
+        "max_budget_usd": max_budget_usd,
+        "setting_sources": setting_sources,
         "created": created,
         "status": "working",
         "turn_pid": None,
@@ -681,6 +694,13 @@ def recompute_status(pid, ctime_iso, log_path, current_status: str | None = None
         return "attached"
     if current_status == "dead":
         return "dead"
+    # Phase1 kernel item 7 (F13/M5): "over_budget" is a sticky terminal flag
+    # set by cmd_send's cumulative-cost check when a worker's lifetime
+    # cost_usd exceeds its persisted max_budget_usd. Like "attached"/"dead",
+    # a liveness recompute must never silently revert it to idle/dead -- the
+    # operator raises the cap (a fresh respawn record) or retires the worker.
+    if current_status == "over_budget":
+        return "over_budget"
     if current_status == "working" and pid is None:
         if _launch_claim_expired(last_activity_iso):
             return "dead"
@@ -1603,7 +1623,9 @@ def cmd_spawn(args, popen=subprocess.Popen, get_process_info=None, which=shutil.
         data = load_registry()
         validate_name(args.name, existing=data["workers"].keys())
         sid = str(uuid.uuid4())
-        record = new_worker_record(sid, cwd, task, args.mode, model=args.model)
+        record = new_worker_record(
+            sid, cwd, task, args.mode, model=args.model,
+            max_budget_usd=args.max_budget_usd, setting_sources=args.setting_sources)
         data["workers"][args.name] = record
         save_registry(data)
         append_event("spawned", args.name, session_id=sid, cwd=str(cwd), mode=args.mode)
@@ -1612,8 +1634,10 @@ def cmd_spawn(args, popen=subprocess.Popen, get_process_info=None, which=shutil.
     try:
         info = launch_turn(
             args.name, cwd, sid, prompt, args.mode, first=True,
-            model=args.model, max_budget_usd=args.max_budget_usd,
-            setting_sources=args.setting_sources,
+            # F13/M5: source the launch flags from the PERSISTED record, not
+            # args, so spawn and every later launch path share one origin.
+            model=record.get("model"), max_budget_usd=record.get("max_budget_usd"),
+            setting_sources=record.get("setting_sources"),
             popen=popen, get_process_info=get_process_info, which=which,
         )
         finalize_mailbox_claim(claim)
@@ -2012,6 +2036,27 @@ def cmd_send(args, popen=subprocess.Popen, get_process_info=None, which=shutil.w
         if status != before["status"]:
             append_event("status_changed", args.name, old=before["status"], new=after["status"])
         if status == "idle":
+            # F13/M5 cumulative-cost check: the CLI --max-budget-usd is a
+            # PER-TURN cap, so a worker steered with N sends could run turns
+            # 2..N and blow past its lifetime budget one turn at a time. This
+            # is the worker-lifetime enforcement SPEC §11 documents: before
+            # claiming a RESUME launch, compare the persisted cumulative
+            # cost_usd against the persisted (immutable) max_budget_usd; if
+            # already exceeded, REFUSE the resume and FLAG the worker
+            # "over_budget" (a sticky status, see recompute_status) instead
+            # of launching an over-cap turn.
+            mb = after.get("max_budget_usd")
+            spent = _registry_cost(after.get("cost_usd", 0.0))
+            if mb is not None and spent > mb:
+                after["status"] = "over_budget"
+                data["workers"][args.name] = after
+                save_registry(data)
+                append_event("budget_exceeded", args.name, cost_usd=spent, max_budget_usd=mb)
+                raise FleetCliError(
+                    f"{args.name}: cumulative cost ${spent:.4f} exceeds max_budget_usd "
+                    f"${mb} -- refusing resume (worker flagged over_budget); respawn with a "
+                    "higher --max-budget-usd or retire it"
+                )
             # F1 pre-claim: atomic decide+claim, same lock, before release.
             after["status"] = "working"
             after["turn_pid"] = None
@@ -2057,7 +2102,12 @@ def cmd_send(args, popen=subprocess.Popen, get_process_info=None, which=shutil.w
     try:
         info = launch_turn(
             args.name, after["cwd"], sid, prompt, after["mode"], first=False,
-            model=after.get("model"), popen=popen, get_process_info=get_process_info, which=which,
+            # F13/M5: re-emit the persisted cap + setting-sources on the
+            # RESUME launch -- a missing re-pass is the exact failure this
+            # closes (turns 2..N ran uncapped, foreign-hook remedy gone).
+            model=after.get("model"), max_budget_usd=after.get("max_budget_usd"),
+            setting_sources=after.get("setting_sources"),
+            popen=popen, get_process_info=get_process_info, which=which,
         )
         finalize_mailbox_claim(claim)
     except BaseException:
@@ -2530,6 +2580,14 @@ def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shuti
         cwd = after["cwd"]
         mode = after["mode"]
         model = after.get("model")
+        # F13/M5: respawn is a launch path too -- carry the persisted cap +
+        # setting-sources forward onto the new record (and its launch argv)
+        # UNLESS an explicit --max-budget-usd/--setting-sources override is
+        # passed (default None -> carry forward).
+        max_budget_usd = (args.max_budget_usd if getattr(args, "max_budget_usd", None) is not None
+                          else after.get("max_budget_usd"))
+        setting_sources = (args.setting_sources if getattr(args, "setting_sources", None) is not None
+                           else after.get("setting_sources"))
         cost_usd = _registry_cost(after.get("cost_usd", 0.0))
         task_for_record = task_override if task_override is not None else after.get("task", "")
 
@@ -2573,7 +2631,9 @@ def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shuti
             # decision (F1 protocol): status="working"/turn_pid=None
             # until the launch below stamps a real pid.
             prior_snapshot = after
-            new_record = new_worker_record(new_sid, cwd, task_for_record, mode, model=model)
+            new_record = new_worker_record(
+                new_sid, cwd, task_for_record, mode, model=model,
+                max_budget_usd=max_budget_usd, setting_sources=setting_sources)
             new_record["cost_usd"] = cost_usd  # cumulative -- see docstring
             new_record["cost_baseline"] = cost_usd  # Finding 4 -- see docstring
             data["workers"][args.name] = new_record
@@ -2614,7 +2674,9 @@ def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shuti
                     f"{args.name}: worker was claimed concurrently during --force takeover; retry"
                 )
             prior_snapshot = dict(r)
-            new_record = new_worker_record(new_sid, cwd, task_for_record, mode, model=model)
+            new_record = new_worker_record(
+                new_sid, cwd, task_for_record, mode, model=model,
+                max_budget_usd=max_budget_usd, setting_sources=setting_sources)
             new_record["cost_usd"] = cost_usd  # cumulative -- see docstring
             new_record["cost_baseline"] = cost_usd  # Finding 4 -- see docstring
             data["workers"][args.name] = new_record
@@ -2631,7 +2693,10 @@ def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shuti
     try:
         info = launch_turn(
             args.name, cwd, new_sid, prompt, mode, first=True,
-            model=model, popen=popen, get_process_info=get_process_info, which=which,
+            # F13/M5: carry the persisted (or overridden) cap + setting-sources
+            # onto the fresh-session launch argv.
+            model=model, max_budget_usd=max_budget_usd, setting_sources=setting_sources,
+            popen=popen, get_process_info=get_process_info, which=which,
         )
         finalize_mailbox_claim(claim)
     except BaseException as exc:
@@ -3390,6 +3455,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_respawn.add_argument("name")
     p_respawn.add_argument("--task", default=None)
     p_respawn.add_argument("--force", action="store_true")
+    # F13/M5: respawn carries the persisted max_budget_usd/setting_sources
+    # forward by default; these optional overrides replace them (default None
+    # -> carry forward, mirroring the immutable-at-spawn rule for a reset).
+    p_respawn.add_argument("--max-budget-usd", type=float, default=None, dest="max_budget_usd")
+    p_respawn.add_argument("--setting-sources", dest="setting_sources", default=None)
 
     p_kill = sub.add_parser("kill", help="interrupt (if running) and mark a worker dead")
     p_kill.add_argument("name")

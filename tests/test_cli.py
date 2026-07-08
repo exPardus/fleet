@@ -160,9 +160,60 @@ class TestBuildTurnArgv:
         argv = fleet.build_turn_argv("claude.cmd", "sid-1", first=True, mode="omit", max_budget_usd=None)
         assert "--max-budget-usd" not in argv
 
+    def test_setting_sources_flag_included_when_given(self):
+        argv = fleet.build_turn_argv(
+            "claude.cmd", "sid-1", first=True, mode="omit", setting_sources="user,project")
+        assert argv[argv.index("--setting-sources") + 1] == "user,project"
+
+    def test_setting_sources_flag_omitted_when_none(self):
+        argv = fleet.build_turn_argv("claude.cmd", "sid-1", first=True, mode="omit", setting_sources=None)
+        assert "--setting-sources" not in argv
+
     def test_invalid_mode_raises(self):
         with pytest.raises(ValueError):
             fleet.build_turn_argv("claude.cmd", "sid-1", first=True, mode="yolo")
+
+
+# ---------------------------------------------------------------------------
+# new_worker_record: F13 budget/setting-sources persistence (item 7, M5)
+# under the M1 additive-schema rule (readers default missing -> None;
+# writers preserve unknown fields).
+# ---------------------------------------------------------------------------
+
+class TestWorkerRecordBudgetPersistence:
+    def test_new_record_defaults_budget_fields_to_none(self):
+        rec = fleet.new_worker_record("sid-1", "C:/proj", "task", "dontask")
+        assert rec["max_budget_usd"] is None
+        assert rec["setting_sources"] is None
+
+    def test_new_record_persists_given_budget_fields(self):
+        rec = fleet.new_worker_record(
+            "sid-1", "C:/proj", "task", "dontask",
+            max_budget_usd=3.5, setting_sources="user,project")
+        assert rec["max_budget_usd"] == 3.5
+        assert rec["setting_sources"] == "user,project"
+
+    def test_reader_defaults_missing_fields_to_none(self, isolated_home):
+        # A record written before these fields existed must load and read
+        # back as None (additive-schema: readers default missing -> None).
+        rec = fleet.new_worker_record("sid-1", str(isolated_home), "task", "dontask")
+        del rec["max_budget_usd"]
+        del rec["setting_sources"]
+        fleet.save_registry({"workers": {"probe-1": rec}})
+
+        loaded = fleet.load_registry()["workers"]["probe-1"]
+        assert loaded.get("max_budget_usd") is None
+        assert loaded.get("setting_sources") is None
+
+    def test_unknown_fields_survive_write_round_trip(self, isolated_home):
+        # Additive-schema: writers preserve unknown fields (a field a newer
+        # fleet.py added must not be dropped by this one's save).
+        rec = fleet.new_worker_record("sid-1", str(isolated_home), "task", "dontask")
+        rec["some_future_field"] = "keep-me"
+        fleet.save_registry({"workers": {"probe-1": rec}})
+
+        loaded = fleet.load_registry()["workers"]["probe-1"]
+        assert loaded["some_future_field"] == "keep-me"
 
 
 # ---------------------------------------------------------------------------
@@ -421,6 +472,32 @@ class TestCmdSpawn:
         assert rec["turn_pid"] == 999
         assert rec["turn_pid_ctime"] == fleet.ctime_to_iso(ctime)
         assert rec["turns"] == 1
+
+    def test_spawn_persists_budget_and_setting_sources_and_repasses_on_launch(self, isolated_home, tmp_path):
+        # F13 (item 7, M5): --max-budget-usd/--setting-sources are recorded
+        # in the registry at spawn AND emitted on the launch argv, sourced
+        # from the persisted record.
+        worker_dir = tmp_path / "proj"
+        worker_dir.mkdir()
+        proc = FakeProc(pid=999)
+        calls = {}
+        args = fleet.build_parser().parse_args([
+            "spawn", "probe-1", "--dir", str(worker_dir), "--task", "do the thing",
+            "--max-budget-usd", "4.0", "--setting-sources", "user,project",
+        ])
+
+        fleet.cmd_spawn(
+            args, popen=_fake_popen(proc, calls), get_process_info=lambda pid: None,
+            which=lambda n: "claude.cmd",
+        )
+
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["max_budget_usd"] == 4.0
+        assert rec["setting_sources"] == "user,project"
+
+        argv = calls["argv"]
+        assert argv[argv.index("--max-budget-usd") + 1] == "4.0"
+        assert argv[argv.index("--setting-sources") + 1] == "user,project"
 
     def test_spawn_prints_name_session_id_log_path(self, isolated_home, tmp_path, capsys):
         worker_dir = tmp_path / "proj"
