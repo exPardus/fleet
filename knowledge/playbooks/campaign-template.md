@@ -1,5 +1,7 @@
 # Campaign template — the reusable fleet-campaign instrument
 
+**Version 1.2 (2026-07-09)** — Campaign-2 amendments (first code campaign): merge-gate demo-skip + fixture-restore + revert-the-revert sequence (§5), git-log-is-truth verification checkpoint (§3 g), hook-source demo-test task convention (§2). See `lessons.md#2026-07-09-c2`.
+**Version 1.1 (2026-07-08)** — Campaign-1 amendments (descriptive/prescriptive tagging §2; doc-campaign truth gate §4).
 **Version 1.0 (2026-07-08)** — first cut, distilled from `docs/PLAN.md` §0 + Campaign-0/Campaign-1 lessons.
 
 **This is a LIVING instrument.** Every campaign runs against it and **amends it in that campaign's knowledge wave** (§8 below): bump the version, date the change, record the friction that forced it. Do not treat it as frozen doctrine — treat it as the accumulated scar tissue of every campaign before yours. The immutable contract is `docs/PLAN.md`; the mutable cursor is `docs/PLAN-PROGRESS.md`; this file is the *how-to* that sits between them.
@@ -43,6 +45,9 @@ Every `--task` is a file at `state/tasks/<name>.md` (gitignored runtime dir). Fi
 - [ ] Tag each folded finding `[UNBUILT — owned by <kernel>]` when its fix is **not yet in shipped code** (prescriptive spec text describing behavior a later code kernel must build). This distinguishes descriptive amendments (true of the code today) from prescriptive ones (a promise the kernel owns).
 - [ ] Split the task's "required regressions" into two lists: **"passes today"** (assertions true against current `bin/fleet.py`) vs **"pins unbuilt fixes"** (assertions that will only pass once the owning kernel ships). This prevents the descriptive/prescriptive fix wave C1 hit — a reviewer must not demand green tests for behavior no one has built yet.
 
+**C2 amendment — hook-source-specific live demo tests (added Campaign 2):**
+- [ ] Any task that writes a `FLEET_HOOK_SOURCE=worktree` demonstration test MUST instruct the worker to **`pytest.skip` under the default `main` hook-source, never hard-assert** the source. A `assert HOOK_SOURCE == "worktree"` is correct only for a pre-merge worktree run; it turns the post-merge merge gate (which defaults to `FLEET_HOOK_SOURCE=main`) RED and cost C2 a full revert+refix+re-merge for a one-line scoping bug. Require the RESULT line to show the test **collects-and-skips** in the default `main` run.
+
 ---
 
 ## 3. The (a)–(h) quality-gate pipeline checklist (PLAN §0.3)
@@ -56,6 +61,7 @@ Instantiate per phase; every gate is a distinct wave:
 - [ ] **(e) Adversarial break review** — separate worker actively tries to break the increment: lock races, kill-mid-launch, spaced/CRLF paths, handle-in-use on Windows, hook crash paths. BOTH lenses.
 - [ ] **(f) Adjudication + fix waves** — manager merges (d)+(e) into **ONE binding fix list anchored to function roles, not line numbers**. Fixes go to the **ORIGINAL builder via `fleet send`** (respawn first if past ~30 turns; a fresh fixer only if the session is dead/cleaned) — preserves context, avoids re-interpretation. **Re-review after EVERY wave** (each wave introduces ~1 new issue). Max 3 waves, then escalate to the human.
 - [ ] **(g) Verification checkpoint — W-V discipline:** the manager **personally re-runs** `pytest`, `fleet doctor`, and each done-criterion, evidence pasted into the campaign log. A phase never closes on worker say-so.
+  - [ ] **C2 amendment — `git log` is the only truth for "did the turn land":** a worker's turn is "done" ONLY if `git log` in its worktree shows the expected commit. `fleet result` / `cost_usd` are **unreliable when the turn errored** (transient Anthropic **529 Overloaded** mid-turn leaves the worker idle, cost FROZEN, no commit, journal unchanged — and `fleet result` itself may 529). Re-sending a git-committed fix task is safe (idempotent-ish); **revert any partial uncommitted artifacts** (e.g. dirtied fixtures) before re-send.
 - [ ] **(h) Knowledge loop** — the `*-knowledge` task appends to `lessons.md` + updates INDEX + `knowledge/projects/` + commits. **Anti-ritual check:** the lessons entry MUST name ≥1 concrete process change ("what to do differently" — normally an amendment to THIS template). A lessons entry with no process change is rejected.
 
 ---
@@ -80,12 +86,15 @@ For any same-file (`bin/fleet.py`) chain, between every link:
 At the campaign boundary. Pre-merge FIRST, explicit red-path AFTER:
 
 - [ ] **Pre-merge, on the worktree branch:** `fleet status` shows **zero turns in flight**.
+- [ ] **C2 amendment — restore the committed fixture corpus before EVERY git-state check:** `git checkout -- tests/fixtures/streams/`. The `FLEET_LIVE` harness is **non-idempotent on the corpus** — it re-captures `tests/fixtures/streams/*.jsonl` on every run, dirtying the tree and poisoning any pre/post-merge git-state gate. (Phase-6/quality backlog: make the harness write captured streams to a temp dir unless `FLEET_CAPTURE_CORPUS=1` is set.)
 - [ ] Full `py -3.13 -m pytest tests/` (unit + hooks) green **in the worktree**.
+- [ ] **C2 amendment — hook-source demo tests collect-and-skip under default `main`:** in the pre-merge default run (`FLEET_HOOK_SOURCE=main`), confirm every `FLEET_HOOK_SOURCE=worktree` demonstration test **SKIPS**, does not FAIL. A hard-asserted worktree source turns the post-merge gate RED (C2 paid a full revert cycle for this). If any such test fails under `main`, fix the test scoping in the worktree **before** merging.
 - [ ] **Additive-schema diff check** — registry/`state/fleet.json` changes are additive (readers default missing fields, writers preserve unknown); no migration that breaks the live `state/fleet.json` mid-campaign.
 - [ ] **Spec-vs-code drift check** — manager diffs the campaign's code changes against SPEC/stub sections; confirms every task's RESULT `spec=` field is consistent with the diff. Any red = no merge; fix task in the worktree.
 - [ ] **Merge** worktree branch → `fleet-impl`. Then, **with no fleet command other than the gate checks between merge and green**, run in order: `FLEET_LIVE=1` integration tier → `fleet doctor` → `fleet init` re-run iff `worker-settings.template.json` changed → post-merge hook-smoke.
 - [ ] **Post-merge hook-smoke** (standing rule) if hooks/template touched: spawn one throwaway haiku worker in a temp dir (budget ≤$0.50); confirm via its journal/mailbox that **both** hook events fired on the new hooks **before dispatching any real worker**.
-- [ ] **Revert-on-red (explicit):** any post-merge red → the manager's **next action is `git revert` of the merge commit** on `fleet-impl` (restoring the known-good live install), then a fix task in the worktree. **Never fix-forward on the live branch; never dispatch any worker between a red gate check and the revert.**
+- [ ] **Revert-on-red (explicit):** any post-merge red → the manager's **next action is `git revert -m 1 <merge>` of the merge commit** on `fleet-impl` (restoring the known-good live install), then a fix task in the worktree. **Never fix-forward on the live branch; never dispatch any worker between a red gate check and the revert.** *(C2 exercised this end-to-end and it worked — the known-good install stayed live the whole time; the revert lever is proven, not theoretical.)*
+- [ ] **C2 amendment — revert-path re-merge sequence:** after a `git revert -m 1 <merge>` you **cannot plain-re-merge** the fixed branch — git sees it as already merged and no-ops. The exact sequence: **(1) `git revert <the-revert>`** (restores the reverted code) **then (2) `git merge <branch>`** (picks up the new fix commit). Follow this so the next revert→refix→re-merge does not stall.
 
 ---
 
