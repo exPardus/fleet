@@ -23,8 +23,8 @@ The mutable cursor against the immutable contract `docs/PLAN.md`. A resuming man
 | C1 | **✅ CAMPAIGN 1 CLOSED** — SPEC v2.1 (F17–F32, numbered invariants, UL1+UL2); all 30 findings homed; ~$62 spend | done | doc-only, no merge gate; awaiting UL1/UL2 ratification | 2026-07-08 |
 | C2 | 2A `harness-live` ∥ `harden-hooks` | done | dfa6050 (hooks, 50 pytest, PostCompact verified real) ∥ bff99cb (harness, 11 tests, 6-log corpus, 409 suite) | 2026-07-08 |
 | C2 | 2A-close gate (FLEET_LIVE=1 hook-source=worktree) | done | PASS 11/11 manager-run (111s live haiku); changed hooks' first live exec pre-merge | 2026-07-08 |
-| C2 | 2B chain `harden-fleet-a`→`-b`→`-c`→`-d`→`-e` (UL1 item 11 = new 5th link) | dispatched | -a live; per-link pytest truth gate | 2026-07-08 |
-| C2 | 2C reviews (`c2-review-code` ∥ `c2-review-adversarial`) | pending | — | — |
+| C2 | 2B chain `harden-fleet-a`→`-b`→`-c`→`-d`→`-e` (UL1 item 11 = new 5th link) | done | -a 6a44c53(426) · -b f8c9513(438) · -c c3b42f7(453) · -d ca495f0(471, demo both halves) · -e 784a73f(496); all truth-gate PASS | 2026-07-08 |
+| C2 | 2C reviews (`c2-review-code` ∥ `c2-review-adversarial`) | dispatched | full C2 diff review | 2026-07-08 |
 | C2 | 2D fix waves ≤3 (original builders) | pending | — | — |
 | C2 | 2E merge gate (pre-merge pytest → merge → live tier → doctor → hook-smoke; revert-on-red) + `c2-knowledge` | pending | — | — |
 | C2 | **>>> STOP: hand to the operator for SOAK GATE 1 <<<** | pending | — | — |
