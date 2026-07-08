@@ -1360,12 +1360,16 @@ class TestDoctorRegistryChecks:
         assert "no stale" in msg
 
     def test_orphaned_mailbox_reported(self, isolated_home):
+        # F9: orphaned-mailbox detection now lives in the orphaned-claims check
+        # (with sid + first-line disposition), not _doctor_check_mailboxes --
+        # extended, not duplicated.
         mbox = fleet.mailbox_dir()
         mbox.mkdir(parents=True, exist_ok=True)
         (mbox / "unknown-sid.md").write_text("x", encoding="utf-8")
-        name, ok, msg = fleet._doctor_check_mailboxes({})
+        name, ok, msg = fleet._doctor_check_orphaned_claims(workers={})
         assert ok is True
         assert "orphaned" in msg
+        assert "unknown-sid" in msg
 
     def test_pending_mail_on_idle_worker_reported(self, isolated_home):
         sid, rec = _seed_worker("probe-1", status="idle", log_result=True)
@@ -1823,3 +1827,201 @@ class TestCwdPreflight:
                 "probe-1", gone, "sid-1", "prompt", "dontask",
                 popen=popen, which=lambda n: "claude.cmd",
             )
+
+
+# ---------------------------------------------------------------------------
+# Item 8 (F9): send-lock serialization + mail events + orphaned-mailbox doctor
+# ---------------------------------------------------------------------------
+
+def _read_events():
+    p = fleet.events_path()
+    if not p.exists():
+        return []
+    return [json.loads(line) for line in p.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+class TestSendLockSerialization:
+    """F9 (item 8, review M3): cmd_send's mailbox append for a working/attached
+    worker must happen UNDER fleet_lock so a concurrent respawn drain+sid-swap
+    is atomic w.r.t. send -- no message lands in the pre-swap mailbox after the
+    swap (SPEC invariants 3 atomic-single-file-mailbox, 7 one-live-claude)."""
+
+    def test_send_append_atomic_with_respawn_swap(self, isolated_home, monkeypatch):
+        """Deterministic interleaving (required): inject a respawn-style
+        swap+drain (which runs UNDER fleet_lock) at the moment cmd_send
+        appends. If the append is (correctly) inside the lock, the injected
+        swap's own lock acquire times out and cannot sneak in mid-append; if
+        the append is outside the lock (the bug), the swap orphans the message
+        in the pre-swap mailbox. RED before the lock fix, GREEN after."""
+        old_sid, _ = _seed_worker("w", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
+        new_sid = "swapped-" + old_sid
+        orig_append = fleet.append_mailbox
+        state = {"n": 0}
+
+        def racing_append(sid, message):
+            state["n"] += 1
+            if state["n"] == 1:
+                try:
+                    with fleet.fleet_lock(timeout=0.15):
+                        data = fleet.load_registry()
+                        data["workers"]["w"]["session_id"] = new_sid
+                        fleet.save_registry(data)
+                        oldmb = fleet.mailbox_dir() / f"{old_sid}.md"
+                        if oldmb.exists():
+                            oldmb.rename(oldmb.with_name(f"{old_sid}.md.claimed.test"))
+                except fleet.FleetLockTimeout:
+                    pass
+            return orig_append(sid, message)
+
+        monkeypatch.setattr(fleet, "append_mailbox", racing_append)
+        args = fleet.build_parser().parse_args(["send", "w", "critical instruction"])
+        rc = fleet.cmd_send(args, get_process_info=_alive_info, which=lambda n: "claude.cmd")
+        assert rc == 0
+
+        current_sid = fleet.load_registry()["workers"]["w"]["session_id"]
+        mb = fleet.mailbox_dir() / f"{current_sid}.md"
+        assert mb.exists(), f"tracked mailbox {current_sid}.md missing -- message orphaned by swap"
+        assert "critical instruction" in mb.read_text(encoding="utf-8")
+
+
+class TestMailEvents:
+    """F9: fleet.py (sole writer) emits mail_sent (cmd_send) and mail_drained
+    (compose-time drain) audit events -- not a DLQ, no redelivery machinery."""
+
+    def test_send_to_working_emits_mail_sent(self, isolated_home):
+        sid, _ = _seed_worker("w", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
+        args = fleet.build_parser().parse_args(["send", "w", "ping"])
+        fleet.cmd_send(args, get_process_info=_alive_info, which=lambda n: "claude.cmd")
+        sent = [e for e in _read_events() if e["kind"] == "mail_sent"]
+        assert sent, "no mail_sent event emitted"
+        assert sent[-1]["name"] == "w"
+        assert sent[-1]["sid"] == sid
+
+    def test_compose_prompt_drain_emits_mail_drained(self, isolated_home):
+        sid = "sid-drain"
+        fleet.append_mailbox(sid, "queued work")
+        # append_mailbox itself is a low-level helper -- it must NOT emit an event.
+        assert not any(e["kind"] == "mail_drained" for e in _read_events())
+        prompt, claim = fleet.compose_prompt("w", str(fleet.FLEET_HOME), "", sid)
+        assert "queued work" in prompt
+        drained = [e for e in _read_events() if e["kind"] == "mail_drained"]
+        assert drained, "no mail_drained event emitted at compose-time drain"
+        assert drained[-1]["name"] == "w"
+        assert drained[-1]["sid"] == sid
+
+    def test_compose_prompt_no_mail_emits_no_drain(self, isolated_home):
+        prompt, claim = fleet.compose_prompt("w", str(fleet.FLEET_HOME), "do the thing", "empty-sid")
+        assert not any(e["kind"] == "mail_drained" for e in _read_events())
+
+
+class TestOrphanedMailboxDoctor:
+    """F9: doctor's orphaned-mailbox check EXTENDS _doctor_check_orphaned_claims
+    -- a mailbox/<sid>.md whose sid matches no registered worker, disposed with
+    sid + first line."""
+
+    def test_orphaned_mailbox_reports_sid_and_first_line(self, isolated_home):
+        mbox = fleet.mailbox_dir()
+        mbox.mkdir(parents=True, exist_ok=True)
+        (mbox / "ghost-sid.md").write_text("resume the migration\nsecond line", encoding="utf-8")
+        name, ok, msg = fleet._doctor_check_orphaned_claims(workers={})
+        assert name == "orphaned-claims"
+        assert ok is True
+        assert "ghost-sid" in msg
+        assert "resume the migration" in msg
+
+    def test_registered_mailbox_not_flagged_orphaned(self, isolated_home):
+        sid, rec = _seed_worker("w", status="idle", log_result=True)
+        mbox = fleet.mailbox_dir()
+        mbox.mkdir(parents=True, exist_ok=True)
+        (mbox / f"{sid}.md").write_text("pending", encoding="utf-8")
+        name, ok, msg = fleet._doctor_check_orphaned_claims(workers={"w": rec})
+        assert ok is True
+        assert sid not in msg
+
+    def test_orphaned_claims_still_reported_alongside(self, isolated_home):
+        mbox = fleet.mailbox_dir()
+        mbox.mkdir(parents=True, exist_ok=True)
+        (mbox / "sid-1.md.claimed.123").write_text("x", encoding="utf-8")
+        name, ok, msg = fleet._doctor_check_orphaned_claims(workers={})
+        assert ok is True
+        assert "claimed" in msg
+
+
+# ---------------------------------------------------------------------------
+# Item 9 (F15): PID-probe three-way + retry-once-before-dead + doctor check
+# ---------------------------------------------------------------------------
+
+class TestProbeThreeWay:
+    """F15 (item 9, review M4): the probe distinguishes alive / gone /
+    exists-but-unreadable (= alive-unknown). alive-unknown is NEVER demoted to
+    dead; a working->dead transition retries the probe once before demoting."""
+
+    def test_probe_liveness_alive(self, isolated_home):
+        gpi = lambda pid: ("claude.exe", _parse(ALIVE_CTIME))
+        assert fleet.probe_liveness(111, ALIVE_CTIME, get_process_info=gpi) == "alive"
+
+    def test_probe_liveness_gone(self, isolated_home):
+        assert fleet.probe_liveness(111, ALIVE_CTIME, get_process_info=lambda pid: None) == "gone"
+
+    def test_probe_liveness_unknown_on_unreadable_starttime(self, isolated_home):
+        gpi = lambda pid: ("claude.exe", None)  # process exists, StartTime unreadable
+        assert fleet.probe_liveness(111, ALIVE_CTIME, get_process_info=gpi) == "unknown"
+
+    def test_alive_unknown_never_demoted_to_dead(self, isolated_home):
+        log = fleet.logs_dir() / "w.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text('{"type":"assistant","message":{"content":"mid-turn"}}\n', encoding="utf-8")
+        gpi = lambda pid: ("claude.exe", None)  # unreadable -> alive-unknown
+        status = fleet.recompute_status(
+            111, ALIVE_CTIME, log, current_status="working", get_process_info=gpi,
+            sleep=lambda *_: None,
+        )
+        assert status == "working"
+
+    def test_working_to_dead_retries_probe_once_before_demoting(self, isolated_home):
+        log = fleet.logs_dir() / "w.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text('{"type":"assistant","message":{"content":"mid-turn"}}\n', encoding="utf-8")
+        calls = {"n": 0}
+
+        def gpi(pid):
+            calls["n"] += 1
+            return None  # gone on both probes
+
+        status = fleet.recompute_status(
+            111, ALIVE_CTIME, log, current_status="working", get_process_info=gpi,
+            sleep=lambda *_: None,
+        )
+        assert status == "dead"
+        assert calls["n"] == 2, "probe must be retried once before demoting to dead"
+
+    def test_retry_absorbs_transient_probe_miss(self, isolated_home):
+        log = fleet.logs_dir() / "w.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text('{"type":"assistant","message":{"content":"mid-turn"}}\n', encoding="utf-8")
+        calls = {"n": 0}
+
+        def gpi(pid):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return None  # transient hiccup
+            return ("claude.exe", _parse(ALIVE_CTIME))  # actually alive
+
+        status = fleet.recompute_status(
+            111, ALIVE_CTIME, log, current_status="working", get_process_info=gpi,
+            sleep=lambda *_: None,
+        )
+        assert status == "working", "a live worker must not be reaped on a probe hiccup"
+
+    def test_doctor_flags_unreadable_starttime(self, isolated_home):
+        _, rec = _seed_worker("w", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
+        gpi = lambda pid: ("claude.exe", None)  # alive-unknown
+        name, ok, msg = fleet._doctor_check_unreadable_starttime({"w": rec}, get_process_info=gpi)
+        assert ok is True
+        assert "w" in msg
+
+    def test_doctor_no_unreadable_starttime(self, isolated_home):
+        _, rec = _seed_worker("w", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
+        name, ok, msg = fleet._doctor_check_unreadable_starttime({"w": rec}, get_process_info=_alive_info)
+        assert ok is True
+        assert "no" in msg.lower()

@@ -154,18 +154,41 @@ class _WindowsPlatform:
         return {"creationflags": subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP}
 
     def get_process_info(self, pid):
-        """Return (image_name, creation_time_utc) for a live pid, else None.
+        """Three-way probe (F15/M4). Returns:
+          * None                 -- the pid does not exist (definitely gone)
+          * (image_name, ctime)  -- process exists and its UTC start time was
+                                    readable (alive-and-readable)
+          * (image_name, None)   -- process exists but its StartTime is
+                                    unreadable (Access Denied on an elevated/
+                                    system process, or CIM also fails) -- the
+                                    "exists-but-unreadable = alive-unknown"
+                                    case, which callers must NEVER classify as
+                                    dead (never reap a live worker on a probe
+                                    hiccup, SPEC §4/F20 three-way probe).
 
         stdlib subprocess route (no third-party deps): asks PowerShell's
-        Get-Process for the process name and UTC start time. Kept as a
-        single small method so pid_alive()/recompute_status()/launch_turn()
-        can accept an injected replacement in tests instead of touching
-        real processes.
+        Get-Process for the process name and UTC start time; the try/catch in
+        the script emits a `NAME|ACCESS_DENIED` marker when StartTime throws,
+        after one Get-CimInstance (Win32_Process CreationDate) fallback
+        attempt. Kept as a single small method so pid_alive()/probe_liveness()/
+        recompute_status()/launch_turn() can accept an injected replacement in
+        tests instead of touching real processes.
         """
         try:
             script = (
                 f"$p = Get-Process -Id {int(pid)} -ErrorAction SilentlyContinue; "
-                "if ($p) { \"$($p.ProcessName)|$($p.StartTime.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss'))\" }"
+                "if ($p) { "
+                "  try { "
+                "    \"$($p.ProcessName)|$($p.StartTime.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss'))\" "
+                "  } catch { "
+                "    try { "
+                f"      $c = Get-CimInstance Win32_Process -Filter \"ProcessId={int(pid)}\" -ErrorAction Stop; "
+                "      \"$($p.ProcessName)|$($c.CreationDate.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss'))\" "
+                "    } catch { "
+                "      \"$($p.ProcessName)|ACCESS_DENIED\" "
+                "    } "
+                "  } "
+                "}"
             )
             result = subprocess.run(
                 ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
@@ -175,6 +198,9 @@ class _WindowsPlatform:
             if not line or "|" not in line:
                 return None
             name, ctime_str = line.rsplit("|", 1)
+            if ctime_str == "ACCESS_DENIED":
+                # Process exists, StartTime unreadable -> alive-unknown.
+                return name, None
             ctime = datetime.strptime(ctime_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
             return name, ctime
         except Exception:
@@ -483,25 +509,46 @@ def _parse_iso(ctime_iso: str) -> datetime:
 _ALIVE_IMAGE_NAMES = {"claude", "node", "cmd"}
 
 
-def pid_alive(pid, ctime_iso, get_process_info=None) -> bool:
-    """True iff pid exists, is a claude/node/cmd process (F-CMD), and its
-    creation time matches ctime_iso within +/-2s (PID reuse otherwise
-    misclassifies a dead worker as working -- SPEC §4)."""
+def probe_liveness(pid, ctime_iso, get_process_info=None) -> str:
+    """Three-way liveness probe (F15/M4). Returns one of:
+      * "alive"   -- pid exists, is a claude/node/cmd process (F-CMD), and its
+                     creation time matches ctime_iso within +/-2s
+      * "unknown" -- pid exists and matches the image name, but its start time
+                     is unreadable (get_process_info returned (name, None) --
+                     the exists-but-unreadable = ALIVE-UNKNOWN case). Callers
+                     must NEVER demote this to "dead" (never reap a live worker
+                     on a probe hiccup, SPEC §4/F20 three-way probe).
+      * "gone"    -- pid is absent, is an unrelated (reused) process, or the
+                     recorded ctime is unparseable/does not match (PID reuse
+                     otherwise misclassifies a dead worker as alive, SPEC §4).
+    """
     if pid is None or ctime_iso is None:
-        return False
+        return "gone"
     get_process_info = get_process_info or PLATFORM.get_process_info
     info = get_process_info(pid)
     if info is None:
-        return False
+        return "gone"
     name, ctime = info
     name_l = (name or "").lower()
     if not any(candidate in name_l for candidate in _ALIVE_IMAGE_NAMES):
-        return False
+        return "gone"
+    if ctime is None:
+        # Process exists + image name matches, but StartTime unreadable.
+        return "unknown"
     try:
         recorded = _parse_iso(ctime_iso)
     except (ValueError, TypeError):
-        return False
-    return abs((ctime - recorded).total_seconds()) <= 2.0
+        return "gone"
+    return "alive" if abs((ctime - recorded).total_seconds()) <= 2.0 else "gone"
+
+
+def pid_alive(pid, ctime_iso, get_process_info=None) -> bool:
+    """True iff the three-way probe reports "alive" -- i.e. pid exists, is a
+    claude/node/cmd process (F-CMD), and its creation time matches ctime_iso
+    within +/-2s (PID reuse otherwise misclassifies a dead worker as working
+    -- SPEC §4). "unknown"/"gone" both return False here; callers needing the
+    alive-unknown distinction (recompute_status) use probe_liveness directly."""
+    return probe_liveness(pid, ctime_iso, get_process_info=get_process_info) == "alive"
 
 
 # Task 5 perf item (SPEC §12): status/wait polling calls _last_line_type /
@@ -638,7 +685,7 @@ def _launch_claim_expired(last_activity_iso) -> bool:
 
 
 def recompute_status(pid, ctime_iso, log_path, current_status: str | None = None, get_process_info=None,
-                      last_activity_iso=None) -> str:
+                     last_activity_iso=None, sleep=time.sleep) -> str:
     """working / idle / dead, per SPEC §4: stale PID + trailing result event
     -> idle; stale PID + no trailing result event -> dead. If current_status
     is "attached", that state takes priority and is returned immediately --
@@ -705,9 +752,27 @@ def recompute_status(pid, ctime_iso, log_path, current_status: str | None = None
         if _launch_claim_expired(last_activity_iso):
             return "dead"
         return "working"
-    if pid_alive(pid, ctime_iso, get_process_info=get_process_info):
+    # F15/M4 three-way probe: "alive" and "unknown" (exists-but-unreadable
+    # StartTime) BOTH stay working -- alive-unknown is never demoted to dead,
+    # so a live worker whose StartTime is momentarily unreadable is never
+    # reaped (SPEC §4/F20). Only a "gone" verdict is a demotion candidate.
+    verdict = probe_liveness(pid, ctime_iso, get_process_info=get_process_info)
+    if verdict in ("alive", "unknown"):
         return "working"
-    return "idle" if _last_line_type(log_path) == "result" else "dead"
+    if _last_line_type(log_path) == "result":
+        return "idle"
+    # verdict == "gone" AND no trailing result -> would demote to "dead". For a
+    # working record with a real pid, retry the probe ONCE after a short delay
+    # (mirroring _DEAD_CONFIRM_DELAY_SECONDS) before committing to dead, so a
+    # single transient probe miss cannot reap a live turn.
+    if current_status == "working" and pid is not None:
+        sleep(_DEAD_CONFIRM_DELAY_SECONDS)
+        verdict = probe_liveness(pid, ctime_iso, get_process_info=get_process_info)
+        if verdict in ("alive", "unknown"):
+            return "working"
+        if _last_line_type(log_path) == "result":
+            return "idle"
+    return "dead"
 
 
 # ---------------------------------------------------------------------------
@@ -898,6 +963,12 @@ def compose_prompt(name: str, cwd, task: str, sid: str, journal_path=None) -> tu
     mail, claim = claim_mailbox(sid)
     if mail:
         parts.append(f"<MANAGER MESSAGE>\n{mail}\n")
+        # F9 (item 8): emit a mail_drained audit event at compose-time drain.
+        # fleet.py is the SOLE writer of events.jsonl -- this is a Soak-1 audit
+        # record, NOT a DLQ (no retry/redelivery machinery). compose_prompt is
+        # only ever called by fleet.py launch paths, so the single-writer
+        # registry invariant (6) is preserved.
+        append_event("mail_drained", name, sid=sid)
 
     if task:
         parts.append(task)
@@ -1264,7 +1335,7 @@ def _append_abnormal_turn_note(name: str) -> None:
         pass
 
 
-def recompute_worker(name: str, record: dict, get_process_info=None) -> dict:
+def recompute_worker(name: str, record: dict, get_process_info=None, sleep=time.sleep) -> dict:
     """Return an updated copy of `record` with status/cost_usd/last_activity
     refreshed from live PID + log-tail state. Never mutates other fields
     (turns, task, mode, ...); never clobbers an "attached" status
@@ -1284,7 +1355,7 @@ def recompute_worker(name: str, record: dict, get_process_info=None) -> dict:
     updated["status"] = recompute_status(
         record.get("turn_pid"), record.get("turn_pid_ctime"), log_path,
         current_status=record.get("status"), get_process_info=get_process_info,
-        last_activity_iso=record.get("last_activity"),
+        last_activity_iso=record.get("last_activity"), sleep=sleep,
     )
     # Phase1 kernel 4: a turn that WAS "working" with a real (non-None)
     # turn_pid and just classified "dead" is a crashed turn (stale/gone PID +
@@ -1709,7 +1780,7 @@ def _hook_error_count() -> int:
     return len(_hook_error_lines())
 
 
-def cmd_status(args, get_process_info=None) -> int:
+def cmd_status(args, get_process_info=None, sleep=time.sleep) -> int:
     """`fleet status [name]` (SPEC §5 status row): recompute liveness/cost
     for the named worker (or all workers), persist any transitions, print a
     compact table with anomaly flags.
@@ -1748,7 +1819,7 @@ def cmd_status(args, get_process_info=None) -> int:
     # Probe every named worker's liveness with NO lock held (see docstring
     # above) -- this is the (potentially several-seconds-total) expensive
     # part.
-    after = {n: recompute_worker(n, before[n], get_process_info=get_process_info) for n in names}
+    after = {n: recompute_worker(n, before[n], get_process_info=get_process_info, sleep=sleep) for n in names}
 
     display = {}
     with fleet_lock():
@@ -1900,7 +1971,7 @@ def wait_for_workers(names, mode: str = "all", timeout=None, poll_interval: floa
             status = recompute_status(
                 rec.get("turn_pid"), rec.get("turn_pid_ctime"), log_path,
                 current_status=rec.get("status"), get_process_info=get_process_info,
-                last_activity_iso=rec.get("last_activity"),
+                last_activity_iso=rec.get("last_activity"), sleep=sleep,
             )
             if status != "working":
                 finished[n] = status
@@ -1951,7 +2022,7 @@ def cmd_wait(args, get_process_info=None, sleep=time.sleep, clock=time.monotonic
                 rec = data["workers"].get(n)
                 if rec is None:
                     continue
-                updated = recompute_worker(n, rec, get_process_info=get_process_info)
+                updated = recompute_worker(n, rec, get_process_info=get_process_info, sleep=sleep)
                 data["workers"][n] = updated
                 if updated["status"] != rec["status"]:
                     append_event("status_changed", n, old=rec["status"], new=updated["status"])
@@ -2031,7 +2102,7 @@ def cmd_send(args, popen=subprocess.Popen, get_process_info=None, which=shutil.w
         if args.name not in data["workers"]:
             raise FleetCliError(f"unknown worker: {args.name!r}")
         before = data["workers"][args.name]
-        after = recompute_worker(args.name, before, get_process_info=get_process_info)
+        after = recompute_worker(args.name, before, get_process_info=get_process_info, sleep=sleep)
         status = after["status"]
         if status != before["status"]:
             append_event("status_changed", args.name, old=before["status"], new=after["status"])
@@ -2073,16 +2144,25 @@ def cmd_send(args, popen=subprocess.Popen, get_process_info=None, which=shutil.w
             after["last_activity"] = now_iso()
         data["workers"][args.name] = after
         save_registry(data)
-
-    sid = after["session_id"]
+        sid = after["session_id"]
+        # F9 (item 8, review M3): for a working/attached worker the mailbox
+        # append MUST happen UNDER this same fleet_lock -- not after release.
+        # sid was read under the lock, so appending here (still holding it)
+        # makes send atomic w.r.t. respawn's drain+sid-swap: a concurrent
+        # respawn cannot swap the sid out and drain the old mailbox in the
+        # window between reading sid and appending, so no message ever lands
+        # in a pre-swap mailbox after the swap (SPEC invariants 3, 7). The
+        # mail_sent event is a single-writer audit record (invariant 6), not a
+        # DLQ.
+        if status in ("working", "attached"):
+            append_mailbox(sid, message)
+            append_event("mail_sent", args.name, sid=sid, status=status)
 
     if status == "working":
-        append_mailbox(sid, message)
         print(f"{args.name}: turn running -- message queued to mailbox")
         return 0
 
     if status == "attached":
-        append_mailbox(sid, message)
         print(
             f"{args.name}: attached -- message queued to mailbox, but the attached "
             "terminal runs without --settings so fleet hooks don't fire there; it "
@@ -2096,8 +2176,13 @@ def cmd_send(args, popen=subprocess.Popen, get_process_info=None, which=shutil.w
     # idle -> resume-turn launch. F6: append the new message to the mailbox
     # FIRST, then let compose_prompt drain the mailbox uniformly (prior mail
     # + this message, in order) -- task is intentionally empty so the
-    # message is never carried both ways.
+    # message is never carried both ways. The append is outside the lock here
+    # (unlike working/attached above), but that is safe: this branch already
+    # pre-claimed status="working"/turn_pid=None under the lock, and a
+    # concurrent respawn refuses on a launch-in-flight claim -- so the sid
+    # cannot be swapped out from under this append.
     append_mailbox(sid, message)
+    append_event("mail_sent", args.name, sid=sid, status="idle")
     prompt, claim = compose_prompt(args.name, after["cwd"], "", sid)
     try:
         info = launch_turn(
@@ -2246,7 +2331,7 @@ def cmd_interrupt(args, get_process_info=None, kill_process_tree=None) -> int:
 
 
 def cmd_attach(args, popen=subprocess.Popen, get_process_info=None, which=shutil.which,
-               kill_process_tree=None) -> int:
+               kill_process_tree=None, sleep=time.sleep) -> int:
     """`fleet attach <name> [--force]` (SPEC §5 attach row, §9 hybrid
     model), rewritten under the uniform status-claim protocol (F1) plus the
     verified-kill contract (F3/F4, review wave 3):
@@ -2302,7 +2387,7 @@ def cmd_attach(args, popen=subprocess.Popen, get_process_info=None, which=shutil
         if args.name not in data["workers"]:
             raise FleetCliError(f"unknown worker: {args.name!r}")
         before = data["workers"][args.name]
-        after = recompute_worker(args.name, before, get_process_info=get_process_info)
+        after = recompute_worker(args.name, before, get_process_info=get_process_info, sleep=sleep)
         if after["status"] != before["status"]:
             append_event("status_changed", args.name, old=before["status"], new=after["status"])
 
@@ -2572,7 +2657,7 @@ def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shuti
         if args.name not in data["workers"]:
             raise FleetCliError(f"unknown worker: {args.name!r}")
         before = data["workers"][args.name]
-        after = recompute_worker(args.name, before, get_process_info=get_process_info)
+        after = recompute_worker(args.name, before, get_process_info=get_process_info, sleep=sleep)
         if after["status"] != before["status"]:
             append_event("status_changed", args.name, old=before["status"], new=after["status"])
 
@@ -2923,7 +3008,7 @@ def cmd_clean(args, get_process_info=None, sleep=time.sleep) -> int:
 
     # Probe every worker's liveness with NO lock held (see docstring above)
     # -- this is the (potentially several-seconds-total) expensive part.
-    after = {n: recompute_worker(n, before[n], get_process_info=get_process_info) for n in names}
+    after = {n: recompute_worker(n, before[n], get_process_info=get_process_info, sleep=sleep) for n in names}
 
     changed = False
     with fleet_lock():
@@ -2950,7 +3035,7 @@ def cmd_clean(args, get_process_info=None, sleep=time.sleep) -> int:
 
     # Second probe: no lock held, mirroring cmd_kill's re-check shape.
     confirmations = [
-        (n, before, recompute_worker(n, before, get_process_info=get_process_info))
+        (n, before, recompute_worker(n, before, get_process_info=get_process_info, sleep=sleep))
         for n, before in pending_confirm
     ]
 
@@ -3195,22 +3280,38 @@ def _doctor_check_stale_pids(workers: dict, get_process_info=None):
     return ("stale-pids", True, "no stale turn_pid entries")
 
 
+def _doctor_check_unreadable_starttime(workers: dict, get_process_info=None):
+    """F15 (item 9): surface working workers whose turn process EXISTS but
+    whose StartTime is unreadable (probe_liveness -> "unknown", the
+    alive-unknown case). These are deliberately never demoted to dead by
+    recompute_status, so doctor is where an operator learns the probe could
+    not fully confirm them -- note-only (always PASS), never a hard failure."""
+    unknown = [
+        name for name, rec in workers.items()
+        if rec.get("status") == "working" and rec.get("turn_pid") is not None
+        and probe_liveness(rec.get("turn_pid"), rec.get("turn_pid_ctime"),
+                           get_process_info=get_process_info) == "unknown"
+    ]
+    if unknown:
+        return ("unreadable-starttime", True,
+                f"{len(unknown)} working worker(s) with an unreadable process StartTime "
+                f"(alive-unknown -- never reaped, verify manually): {', '.join(unknown)}")
+    return ("unreadable-starttime", True, "no workers with an unreadable StartTime")
+
+
 def _doctor_check_mailboxes(workers: dict):
-    known_sids = {rec["session_id"] for rec in workers.values()}
-    mbox_dir = mailbox_dir()
-    orphaned = [p.name for p in mbox_dir.glob("*.md") if p.stem not in known_sids] if mbox_dir.exists() else []
+    # F9 (item 8): orphaned mailbox files (sid matches no worker) are now
+    # reported by _doctor_check_orphaned_claims (with sid + first-line
+    # disposition) -- not duplicated here. This check owns only the
+    # undelivered-mail-on-idle-worker signal.
     pending_idle = [
         name for name, rec in workers.items()
         if rec.get("status") == "idle" and _pending_mail_count(rec["session_id"]) > 0
     ]
-    parts = []
-    if orphaned:
-        parts.append(f"{len(orphaned)} orphaned mailbox file(s) (no matching worker): {', '.join(orphaned)}")
     if pending_idle:
-        parts.append(f"{len(pending_idle)} idle worker(s) with undelivered mail: {', '.join(pending_idle)}")
-    if not parts:
-        return ("mailboxes", True, "no orphaned files, no undelivered mail on idle workers")
-    return ("mailboxes", True, "; ".join(parts))
+        return ("mailboxes", True,
+                f"{len(pending_idle)} idle worker(s) with undelivered mail: {', '.join(pending_idle)}")
+    return ("mailboxes", True, "no undelivered mail on idle workers")
 
 
 def _doctor_check_stale_attaches(workers: dict):
@@ -3221,20 +3322,51 @@ def _doctor_check_stale_attaches(workers: dict):
     return ("stale-attaches", True, "no attaches older than 3h")
 
 
-def _doctor_check_orphaned_claims():
+def _mailbox_first_line(path: Path) -> str:
+    """The first non-empty line of a mailbox file (best-effort), for the
+    orphaned-mailbox disposition -- enough to identify what mail was stranded
+    without dumping the whole file."""
+    try:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.strip():
+                return line.strip()
+    except OSError:
+        pass
+    return "(empty/unreadable)"
+
+
+def _doctor_check_orphaned_claims(workers=None):
+    """`fleet doctor` orphaned-mailbox + orphaned-claim check.
+
+    F9 (item 8): "orphaned mailbox" = a mailbox/<sid>.md whose sid matches NO
+    registered worker. This EXTENDS the pre-existing orphaned-claim check
+    (mailbox/*.claimed.* files a hook left behind mid-claim) rather than
+    duplicating it -- both are stranded mailbox artifacts doctor should
+    surface. The orphaned-mailbox disposition prints the sid + its first line.
+    `workers` defaults to None (skip the orphaned-mailbox scan) so callers that
+    only care about claim litter can still call it argument-free."""
     mbox_dir = mailbox_dir()
     if not mbox_dir.exists():
         return ("orphaned-claims", True, "no mailbox dir yet")
+    parts = []
+    # T3-F2 (adversarial review deferred finding): report every orphaned
+    # claim, not just ones tied to a dead worker being cleaned -- a hook can
+    # die between claim and delete regardless of the worker's current status.
     claims = sorted(p.name for p in mbox_dir.glob("*.claimed.*"))
     if claims:
-        # T3-F2 (adversarial review deferred finding): report every
-        # orphaned claim, not just ones tied to a dead worker being
-        # cleaned -- a hook can die between claim and delete regardless of
-        # the worker's current status.
-        return ("orphaned-claims", True,
-                f"{len(claims)} orphaned mailbox/*.claimed.* file(s) (hook killed mid-claim; "
-                f"safe to remove manually, or run `fleet clean`): {', '.join(claims)}")
-    return ("orphaned-claims", True, "no orphaned *.claimed.* files")
+        parts.append(
+            f"{len(claims)} orphaned mailbox/*.claimed.* file(s) (hook killed mid-claim; "
+            f"safe to remove manually, or run `fleet clean`): {', '.join(claims)}")
+    if workers is not None:
+        known_sids = {rec["session_id"] for rec in workers.values()}
+        orphans = sorted(p for p in mbox_dir.glob("*.md") if p.stem not in known_sids)
+        if orphans:
+            disp = "; ".join(f"{p.stem}: {_mailbox_first_line(p)!r}" for p in orphans)
+            parts.append(
+                f"{len(orphans)} orphaned mailbox file(s) (sid matches no registered worker): {disp}")
+    if parts:
+        return ("orphaned-claims", True, " | ".join(parts))
+    return ("orphaned-claims", True, "no orphaned *.claimed.* or mailbox files")
 
 
 def _doctor_check_claude_agents(workers: dict, which=shutil.which, run=subprocess.run):
@@ -3378,9 +3510,10 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run, get_process_info=No
         _doctor_check_stop_hook_smoke(run=run),
         _doctor_check_terminal_launcher(which=which),
         _doctor_check_stale_pids(workers, get_process_info=get_process_info),
+        _doctor_check_unreadable_starttime(workers, get_process_info=get_process_info),
         _doctor_check_mailboxes(workers),
         _doctor_check_stale_attaches(workers),
-        _doctor_check_orphaned_claims(),
+        _doctor_check_orphaned_claims(workers=workers),
         _doctor_check_claude_agents(workers, which=which, run=run),
         _doctor_check_log_sizes(),
         _doctor_check_hook_errors(),
