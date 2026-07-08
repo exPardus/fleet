@@ -8,7 +8,8 @@ Facts learned live while the fleet builds itself. Amended in each campaign's kno
 - The `fleet` CLI is **NOT on PATH** in the manager's PowerShell. Call it by full path — `C:\proga\claude-fleet\bin\fleet.cmd` — or `py -3.13 bin/fleet.py`.
 
 ## Known live bugs
-- **`fleet result` crashes on the Windows console (cp1252)** when output contains unicode (e.g. the `→` arrow): a stdout-encoding bug in `bin/fleet.py`. Workaround: set `PYTHONIOENCODING=utf-8`. Real fix candidate for a **C2 worktree** task (fleet.py stdout should force utf-8, not inherit the console codepage).
+- **`fleet result` / `peek` crashes on the Windows console (cp1252)** when output contains unicode (e.g. the `→` arrow): a stdout-encoding bug in `bin/fleet.py`. Workaround: set `PYTHONIOENCODING=utf-8`. **STILL LIVE after C2** — C2 did NOT fix it (out of scope). Keep the workaround; still a fix candidate for a future worktree task (fleet.py stdout should force utf-8, not inherit the console codepage).
+- **Transient Anthropic API 529 (Overloaded) leaves an empty turn:** a worker can die mid-turn to a 529 → goes idle, `cost_usd` stays FROZEN, no commit, journal unchanged, and `fleet result` may itself 529. **`git log` in the worktree is the ONLY reliable "did the turn land" signal** — not `fleet result`/cost. Re-sending a git-committed fix task is safe; revert partial uncommitted artifacts (e.g. dirtied fixtures) before re-send. (C2, 2×.)
 
 ## Bootstrap hazard (the reason for worktrees)
 - The manager and all workers execute via the **live** install at `C:\proga\claude-fleet` (registry + hooks resolved through `state/worker-settings.json`).
@@ -32,3 +33,14 @@ Facts learned live while the fleet builds itself. Amended in each campaign's kno
 - Cost per worker = `cost_baseline` (respawn carry) + sum of the current log's result events. `cost_usd` reflects only *completed* turns — a runaway resume turn shows $0 until it ends.
 - `--max-budget-usd` **overshoots ~3×** on tiny caps — circuit breaker, not a precise ceiling.
 - **Stop-block race is real:** a `send` in a turn's last seconds queues to the mailbox (idle+mail) instead of same-turn delivery — by design (universal drain rule). Check `idle+mail` in status; don't assume same-turn.
+
+## C2 facts (self-modification proven — 2026-07-09)
+- **The revert path WORKS and was exercised end-to-end:** merge → post-merge gate RED → `git revert -m 1 <merge>` (known-good install restored, stayed live) → worktree fix → re-merge → green. The C2 checkpoint claim **"the fleet can safely modify itself" is EARNED**, not theoretical.
+- **Re-merge after a reverted merge:** a plain re-merge is a **no-op** (git sees the branch as already merged). Sequence: `git revert <the-revert>` (restores the reverted code) then `git merge <branch>` (picks up the new fix commit).
+- **The `FLEET_LIVE` harness is non-idempotent on the tracked fixture corpus:** it re-captures `tests/fixtures/streams/*.jsonl` every run. Restore with `git checkout -- tests/fixtures/streams/` before any git-state check. (Backlog: gate corpus capture behind `FLEET_CAPTURE_CORPUS=1`, else write to temp.)
+- **Hook-source-specific live demo tests must `pytest.skip` (not hard-assert) under the merge-gate default `FLEET_HOOK_SOURCE=main`** — a `assert HOOK_SOURCE == "worktree"` turns the post-merge gate RED (cost C2 a full revert cycle for a one-line scoping bug).
+
+## New CLI surface (C2)
+- `fleet resume-limited` — restart workers parked by a usage limit (UL1).
+- `--token-ceiling` on `spawn`/`respawn`; new statuses `over_budget` / `over_ceiling` / `limited`; spawn echoes the resolved model.
+- **New standing post-merge live checks:** FLEET_LIVE integration tier (default = main hooks); `fleet init` re-render when `worker-settings.template.json` changes (PostCompact hook added in C2); `fleet doctor` now also checks hook-registration, unreadable-starttime, limited-parks, ceiling-file-sweep, hook-errors; live hook-smoke.
