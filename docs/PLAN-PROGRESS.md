@@ -21,9 +21,9 @@ The mutable cursor against the immutable contract `docs/PLAN.md`. A resuming man
 | C1 | 1D re-review `c1-review-spec-2` (loop 1 of ≤3) | done | fc5666e (C1 ready-to-close; 3 LOW → fixed 5708e59/198cfe3/85e1c41) | 2026-07-08 |
 | C1 | 1E verify checkpoint + `c1-knowledge` ∥ `c1-playbook` | done | 782f306 (postmortem, anti-ritual PASS) / 0d8699b (campaign-template + project file) | 2026-07-08 |
 | C1 | **✅ CAMPAIGN 1 CLOSED** — SPEC v2.1 (F17–F32, numbered invariants, UL1+UL2); all 30 findings homed; ~$62 spend | done | doc-only, no merge gate; awaiting UL1/UL2 ratification | 2026-07-08 |
-| C2 | 2A `harness-live` ∥ `harden-hooks` | dispatched | worktree C:\proga\claude-fleet-wt\c2 @ c2-hardening (5c950ea); UL1+UL2 ratified | 2026-07-08 |
-| C2 | 2A-close gate (FLEET_LIVE=1 hook-source=worktree) | pending | — | — |
-| C2 | 2B chain `harden-fleet-a`→`-b`→`-c`→`-d`→`-e` (UL1 item 11 = new 5th link) | pending | — | — |
+| C2 | 2A `harness-live` ∥ `harden-hooks` | done | dfa6050 (hooks, 50 pytest, PostCompact verified real) ∥ bff99cb (harness, 11 tests, 6-log corpus, 409 suite) | 2026-07-08 |
+| C2 | 2A-close gate (FLEET_LIVE=1 hook-source=worktree) | done | PASS 11/11 manager-run (111s live haiku); changed hooks' first live exec pre-merge | 2026-07-08 |
+| C2 | 2B chain `harden-fleet-a`→`-b`→`-c`→`-d`→`-e` (UL1 item 11 = new 5th link) | dispatched | -a live; per-link pytest truth gate | 2026-07-08 |
 | C2 | 2C reviews (`c2-review-code` ∥ `c2-review-adversarial`) | pending | — | — |
 | C2 | 2D fix waves ≤3 (original builders) | pending | — | — |
 | C2 | 2E merge gate (pre-merge pytest → merge → live tier → doctor → hook-smoke; revert-on-red) + `c2-knowledge` | pending | — | — |
