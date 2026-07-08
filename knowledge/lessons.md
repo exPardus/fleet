@@ -53,3 +53,59 @@ First real end-to-end run on the finished CLI. Spawn → status → peek → mid
 - `fleet` is NOT on PATH in the manager's PowerShell — call `C:\proga\claude-fleet\bin\fleet.cmd` by full path (or add bin to PATH).
 - Respawn on an already-DONE task re-executes it rather than no-op'ing: respawned poet read its journal but rewrote poems.txt from scratch, losing the steered revision. Journal carries context, not idempotence — don't respawn a completed worker expecting state preservation; respawn is for stuck/long-context workers only.
 - Haiku workers at these task sizes finish in under a minute — `status` right after arming `wait` often already shows idle; results can be harvested before the wait notification lands.
+
+## 2026-07-08 — Campaign 1: SPEC v2.1 amendment pass (~15 workers, ~$60)
+
+<!-- anchor: 2026-07-08-c1 -->
+Folded every confirmed blocker/major from `docs/reviews/SPEC-REVIEW-2026-07-08.md` into
+`docs/SPEC.md`, `ROADMAP.md`, and 7 stubs. Doc-only, main repo, no merge gate. Waves:
+1A (4-link sequential SPEC.md chain: state→schema→testing→usagelimit) →
+1B (7 parallel stub-injectors) → 1C (split adversarial review: core ∥ stubs) →
+1D (7 fixes to original builders via `fleet send` + re-review + 3 LOW polish) →
+1E (manager verification). Two features folded mid-campaign at Altai's request:
+UL1 (usage-limit park+resume) and UL2 (worker subagents).
+
+**Process changes — amend `knowledge/playbooks/campaign-template.md` (do these next campaign)**
+
+1. **Descriptive-vs-prescriptive labeling in spec-amendment task files (the #1 C1 lesson).**
+   Wave-1C's 3 majors all reduced to ONE root cause: the amendment folded BOTH
+   already-shipped-behavior findings (DESCRIPTIVE — "bring spec to code") AND
+   not-yet-built fixes (PRESCRIPTIVE — the fix is a future kernel) under a header
+   claiming "no code change proposed / correct code passes." A build/verify session
+   then can't tell which invariants are enforced-today vs TODO.
+   **Amendment:** every spec-amendment task file must instruct the worker to tag each
+   folded finding `[UNBUILT — owned by <kernel/campaign>]` when the fix is not yet in
+   shipped code, and to split any "required regressions" list into "passes today" vs
+   "pins unbuilt fixes." Instructing this UPFRONT would have prevented the entire 1D
+   fix wave. This is the amendment to the task-file convention.
+
+2. **Doc-adapted chain-link truth gate.** PLAN §0.1.9's truth gate assumes `pytest`;
+   C1 was doc-only. Working substitute:
+   (a) **anchor+witness grep per finding** — presence of the `<!-- F## -->` anchor AND
+       the designated witness sentence (anchor presence alone is content-blind); and
+   (b) **manager spot-checks any spec-vs-code CLAIM against `bin/fleet.py`** by grepping
+       the named function anchor BEFORE ordering a fix. In C1 this confirmed CM1/CM2 were
+       real before dispatch, and caught that a "code bug" complaint was actually
+       correct-but-C2-deferred.
+   Add this as the doc-campaign variant of the truth gate in campaign-template.md.
+
+**Operational facts (reusable)**
+
+- **Mid-campaign feature folding pattern:** a feature request with NO review-doc finding →
+  manager authors a single binding intent note (`docs/reviews/*-INTENT-*.md`, mirroring
+  §0.2.4's one-binding-input rule) and routes it through the same spec→review→fix gate as
+  a real finding. Used for UL1 + UL2; both passed review clean/sound. Reusable.
+- **`fleet result` crashes on Windows console (cp1252) when output contains unicode**
+  (→ arrows): `'charmap' codec can't encode`. Workaround: `PYTHONIOENCODING=utf-8`.
+  Real `bin/fleet.py` bug (stdout encoding), C2-worktree fix candidate — logged in
+  `knowledge/projects/claude-fleet.md` (c1-playbook owns that file; cross-ref).
+- **7-wide parallel disjoint-file commits: zero index.lock casualties** — confirms the
+  Campaign-0 disjoint-file-parallelism lesson holds at 7 concurrent workers with
+  exact-path staging + retry.
+- **Cost-watch cadence worked:** `fleet wait --timeout 300` poll loop + `fleet peek`
+  proxies caught no runaways; a timeout wake landing on an "essentially done, committing"
+  worker just needs a short re-arm to catch completion. Note: resume turns are
+  budget-UNCAPPED until `harden-fleet-b` (M5) — small doc fixes were low-risk here.
+- **UL2 outcome:** worker subagents are default-on (native Task/Agent tool, no launch
+  flag); ephemeral subagents don't register in `claude agents --json`, so the doctor
+  check never false-positives them — C1 documentation-only, no C2 code owed.
