@@ -109,3 +109,5 @@ UL1 (usage-limit park+resume) and UL2 (worker subagents).
 - **UL2 outcome:** worker subagents are default-on (native Task/Agent tool, no launch
   flag); ephemeral subagents don't register in `claude agents --json`, so the doctor
   check never false-positives them — C1 documentation-only, no C2 code owed.
+
+- **UL1 + UL2 RATIFIED** by Altai at the C1 checkpoint (2026-07-08) — both approved as specced; C2 greenlit. UL1 kernel builds in C2 (item 11); UL2 was documentation-only (no C2 code owed).
