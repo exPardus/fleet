@@ -160,142 +160,9 @@ class TestBuildTurnArgv:
         argv = fleet.build_turn_argv("claude.cmd", "sid-1", first=True, mode="omit", max_budget_usd=None)
         assert "--max-budget-usd" not in argv
 
-    def test_setting_sources_flag_included_when_given(self):
-        argv = fleet.build_turn_argv(
-            "claude.cmd", "sid-1", first=True, mode="omit", setting_sources="user,project")
-        assert argv[argv.index("--setting-sources") + 1] == "user,project"
-
-    def test_setting_sources_flag_omitted_when_none(self):
-        argv = fleet.build_turn_argv("claude.cmd", "sid-1", first=True, mode="omit", setting_sources=None)
-        assert "--setting-sources" not in argv
-
     def test_invalid_mode_raises(self):
         with pytest.raises(ValueError):
             fleet.build_turn_argv("claude.cmd", "sid-1", first=True, mode="yolo")
-
-
-# ---------------------------------------------------------------------------
-# new_worker_record: F13 budget/setting-sources persistence (item 7, M5)
-# under the M1 additive-schema rule (readers default missing -> None;
-# writers preserve unknown fields).
-# ---------------------------------------------------------------------------
-
-class TestWorkerRecordBudgetPersistence:
-    def test_new_record_defaults_budget_fields_to_none(self):
-        rec = fleet.new_worker_record("sid-1", "C:/proj", "task", "dontask")
-        assert rec["max_budget_usd"] is None
-        assert rec["setting_sources"] is None
-
-    def test_new_record_persists_given_budget_fields(self):
-        rec = fleet.new_worker_record(
-            "sid-1", "C:/proj", "task", "dontask",
-            max_budget_usd=3.5, setting_sources="user,project")
-        assert rec["max_budget_usd"] == 3.5
-        assert rec["setting_sources"] == "user,project"
-
-    def test_reader_defaults_missing_fields_to_none(self, isolated_home):
-        # A record written before these fields existed must load and read
-        # back as None (additive-schema: readers default missing -> None).
-        rec = fleet.new_worker_record("sid-1", str(isolated_home), "task", "dontask")
-        del rec["max_budget_usd"]
-        del rec["setting_sources"]
-        fleet.save_registry({"workers": {"probe-1": rec}})
-
-        loaded = fleet.load_registry()["workers"]["probe-1"]
-        assert loaded.get("max_budget_usd") is None
-        assert loaded.get("setting_sources") is None
-
-    def test_unknown_fields_survive_write_round_trip(self, isolated_home):
-        # Additive-schema: writers preserve unknown fields (a field a newer
-        # fleet.py added must not be dropped by this one's save).
-        rec = fleet.new_worker_record("sid-1", str(isolated_home), "task", "dontask")
-        rec["some_future_field"] = "keep-me"
-        fleet.save_registry({"workers": {"probe-1": rec}})
-
-        loaded = fleet.load_registry()["workers"]["probe-1"]
-        assert loaded["some_future_field"] == "keep-me"
-
-
-# ---------------------------------------------------------------------------
-# Kernel 10 fleet half (F12=M24): token ceiling
-# ---------------------------------------------------------------------------
-
-class TestTokenCeilingRecordAndSum:
-    def test_new_record_defaults_token_ceiling_to_none(self):
-        rec = fleet.new_worker_record("sid-1", "C:/proj", "task", "dontask")
-        assert rec["token_ceiling"] is None
-
-    def test_new_record_persists_token_ceiling(self):
-        rec = fleet.new_worker_record("sid-1", "C:/proj", "task", "dontask", token_ceiling=50000)
-        assert rec["token_ceiling"] == 50000
-
-    def test_reader_defaults_missing_token_ceiling_to_none(self, isolated_home):
-        rec = fleet.new_worker_record("sid-1", str(isolated_home), "task", "dontask")
-        del rec["token_ceiling"]
-        fleet.save_registry({"workers": {"probe-1": rec}})
-        loaded = fleet.load_registry()["workers"]["probe-1"]
-        assert loaded.get("token_ceiling") is None
-
-    def test_sum_result_tokens_sums_input_plus_output_across_results(self, isolated_home):
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text(
-            '{"type":"assistant","message":{"usage":{"input_tokens":9999}}}\n'
-            '{"type":"result","usage":{"input_tokens":100,"output_tokens":20}}\n'
-            '{"type":"result","usage":{"input_tokens":30,"output_tokens":5}}\n',
-            encoding="utf-8",
-        )
-        # only "result" events counted (assistant usage ignored): 100+20+30+5
-        assert fleet._sum_result_tokens(log) == 155
-
-    def test_sum_result_tokens_none_when_no_result(self, isolated_home):
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text('{"type":"assistant","message":{"usage":{"input_tokens":10}}}\n', encoding="utf-8")
-        assert fleet._sum_result_tokens(log) is None
-
-    def test_sum_result_tokens_none_when_missing(self, isolated_home):
-        assert fleet._sum_result_tokens(fleet.logs_dir() / "nope.jsonl") is None
-
-    def test_sum_result_tokens_ignores_bogus_usage_values(self, isolated_home):
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text(
-            '{"type":"result","usage":{"input_tokens":true,"output_tokens":-5}}\n'
-            '{"type":"result","usage":{"input_tokens":40,"output_tokens":2}}\n',
-            encoding="utf-8",
-        )
-        assert fleet._sum_result_tokens(log) == 42
-
-
-class TestSpawnWritesCeilingFile:
-    def test_spawn_writes_sid_keyed_ceiling_file_when_configured(self, isolated_home, tmp_path):
-        # Kernel 10 fleet half: cmd_spawn persists the token ceiling at
-        # state/ceilings/<sid> -- the exact path stop_mailbox.py reads to
-        # decide whether to ALLOW a stop despite pending mail.
-        worker_dir = tmp_path / "proj"
-        worker_dir.mkdir()
-        proc = FakeProc(pid=999)
-        args = fleet.build_parser().parse_args([
-            "spawn", "probe-1", "--dir", str(worker_dir), "--task", "go", "--token-ceiling", "12345",
-        ])
-        fleet.cmd_spawn(args, popen=_fake_popen(proc), get_process_info=lambda pid: None, which=lambda n: "claude.cmd")
-
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        assert rec["token_ceiling"] == 12345
-        ceiling_file = fleet.state_dir() / "ceilings" / rec["session_id"]
-        assert ceiling_file.read_text(encoding="utf-8").strip() == "12345"
-
-    def test_spawn_writes_no_ceiling_file_when_not_configured(self, isolated_home, tmp_path):
-        worker_dir = tmp_path / "proj"
-        worker_dir.mkdir()
-        proc = FakeProc(pid=999)
-        args = _spawn_args("probe-1", worker_dir, "go")
-        fleet.cmd_spawn(args, popen=_fake_popen(proc), get_process_info=lambda pid: None, which=lambda n: "claude.cmd")
-
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        assert rec["token_ceiling"] is None
-        assert not (fleet.state_dir() / "ceilings" / rec["session_id"]).exists()
 
 
 # ---------------------------------------------------------------------------
@@ -350,21 +217,6 @@ class TestCmdInit:
         rc = fleet.main(["init"])
         assert rc == 0
         assert fleet.instance_settings_path().exists()
-
-    def test_main_dispatches_resume_limited_command(self, isolated_home, monkeypatch):
-        # UL1 (item 11 / F31): main() routes `resume-limited` to
-        # cmd_resume_limited with the parsed name/--force-now.
-        seen = {}
-
-        def fake(args, **kwargs):
-            seen["name"] = args.name
-            seen["force_now"] = args.force_now
-            return 0
-
-        monkeypatch.setattr(fleet, "cmd_resume_limited", fake)
-        rc = fleet.main(["resume-limited", "w1", "--force-now"])
-        assert rc == 0
-        assert seen == {"name": "w1", "force_now": True}
 
 
 # ---------------------------------------------------------------------------
@@ -569,32 +421,6 @@ class TestCmdSpawn:
         assert rec["turn_pid"] == 999
         assert rec["turn_pid_ctime"] == fleet.ctime_to_iso(ctime)
         assert rec["turns"] == 1
-
-    def test_spawn_persists_budget_and_setting_sources_and_repasses_on_launch(self, isolated_home, tmp_path):
-        # F13 (item 7, M5): --max-budget-usd/--setting-sources are recorded
-        # in the registry at spawn AND emitted on the launch argv, sourced
-        # from the persisted record.
-        worker_dir = tmp_path / "proj"
-        worker_dir.mkdir()
-        proc = FakeProc(pid=999)
-        calls = {}
-        args = fleet.build_parser().parse_args([
-            "spawn", "probe-1", "--dir", str(worker_dir), "--task", "do the thing",
-            "--max-budget-usd", "4.0", "--setting-sources", "user,project",
-        ])
-
-        fleet.cmd_spawn(
-            args, popen=_fake_popen(proc, calls), get_process_info=lambda pid: None,
-            which=lambda n: "claude.cmd",
-        )
-
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        assert rec["max_budget_usd"] == 4.0
-        assert rec["setting_sources"] == "user,project"
-
-        argv = calls["argv"]
-        assert argv[argv.index("--max-budget-usd") + 1] == "4.0"
-        assert argv[argv.index("--setting-sources") + 1] == "user,project"
 
     def test_spawn_prints_name_session_id_log_path(self, isolated_home, tmp_path, capsys):
         worker_dir = tmp_path / "proj"
@@ -1462,63 +1288,3 @@ class TestArgparseWiring:
     def test_status_name_optional(self):
         args = fleet.build_parser().parse_args(["status"])
         assert args.name is None
-
-
-# ---------------------------------------------------------------------------
-# Kernel 1 (fleet-side) -- hook-error count surfaced in `fleet status`
-# ---------------------------------------------------------------------------
-
-class TestStatusHookErrorCount:
-    def _seed_idle(self, name="probe-1"):
-        sid = str(uuid.uuid4())
-        rec = fleet.new_worker_record(sid, "C:/x", "task", "dontask")
-        rec["turn_pid"] = 111
-        rec["turn_pid_ctime"] = "2026-07-07T12:00:00Z"
-        log = fleet.logs_dir() / f"{name}.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text('{"type":"result","result":"done"}\n', encoding="utf-8")
-        fleet.save_registry({"workers": {name: rec}})
-
-    def test_no_hook_errors_no_footer(self, isolated_home, capsys):
-        self._seed_idle()
-        fleet.cmd_status(fleet.build_parser().parse_args(["status"]), get_process_info=lambda pid: None)
-        out = capsys.readouterr().out
-        assert "hook-error" not in out
-
-    def test_hook_error_count_shown_when_nonzero(self, isolated_home, capsys):
-        self._seed_idle()
-        fleet.hook_errors_path().write_text(
-            "2026-07-08T00:00:00Z s1 err\n2026-07-08T00:01:00Z s2 err\n2026-07-08T00:02:00Z s3 err\n",
-            encoding="utf-8",
-        )
-        fleet.cmd_status(fleet.build_parser().parse_args(["status"]), get_process_info=lambda pid: None)
-        out = capsys.readouterr().out
-        assert "hook-error" in out
-        assert "3" in out
-
-
-# ---------------------------------------------------------------------------
-# Kernel 5 -- spawn-time model echo
-# ---------------------------------------------------------------------------
-
-class TestSpawnModelEcho:
-    def test_echoes_resolved_model(self, isolated_home, tmp_path, capsys):
-        worker_dir = tmp_path / "proj"
-        worker_dir.mkdir()
-        proc = FakeProc(pid=1)
-        args = _spawn_args("probe-1", worker_dir, "do the thing", model="opus")
-        fleet.cmd_spawn(args, popen=_fake_popen(proc), get_process_info=lambda pid: None, which=lambda n: "claude.cmd")
-        out = capsys.readouterr().out
-        assert "model" in out
-        assert "opus" in out
-
-    def test_echoes_subagent_model_env_when_set(self, isolated_home, tmp_path, capsys, monkeypatch):
-        monkeypatch.setenv("CLAUDE_CODE_SUBAGENT_MODEL", "haiku")
-        worker_dir = tmp_path / "proj"
-        worker_dir.mkdir()
-        proc = FakeProc(pid=1)
-        args = _spawn_args("probe-1", worker_dir, "do the thing", model="opus")
-        fleet.cmd_spawn(args, popen=_fake_popen(proc), get_process_info=lambda pid: None, which=lambda n: "claude.cmd")
-        out = capsys.readouterr().out
-        assert "CLAUDE_CODE_SUBAGENT_MODEL" in out
-        assert "haiku" in out

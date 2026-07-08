@@ -3,8 +3,6 @@
     "PostToolUse": [{ "hooks": [{ "type": "command",
       "command": "\"{{PYTHON}}\" \"{{FLEET_HOME}}/bin/hooks/posttooluse_mailbox.py\"" }] }],
     "Stop": [{ "hooks": [{ "type": "command",
-      "command": "\"{{PYTHON}}\" \"{{FLEET_HOME}}/bin/hooks/stop_mailbox.py\"" }] }],
-    "PostCompact": [{ "hooks": [{ "type": "command",
-      "command": "\"{{PYTHON}}\" \"{{FLEET_HOME}}/bin/hooks/postcompact_journal.py\"" }] }]
+      "command": "\"{{PYTHON}}\" \"{{FLEET_HOME}}/bin/hooks/stop_mailbox.py\"" }] }]
   }
 }
