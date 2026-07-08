@@ -17,6 +17,14 @@ In: local HTTP server (`fleet web`), fleet board, worker detail (peek stream, jo
 - Server is a reader of state/logs + an invoker of fleet.py functions for actions (send/spawn/kill call the same code paths as CLI — no parallel logic).
 - Live updates: SSE (works with stdlib) over websockets unless justified.
 - Binds 127.0.0.1 only by default. Remote access = Tailscale, never port-forward; document.
+- <!-- B2-webui --> **SSE / reader handle-discipline (B2 reader half).** The SSE follow mode and the peek pane must open-read-seek-close per poll tick: **all log/state readers open-read-seek-close within each poll cycle; no handle outlives a poll tick**, and a reader tolerates log rotation between polls (shrink / file-ID reset → re-open from the top, never a stale fd holding a rotated inode).
+- **ThreadingHTTPServer** (concurrent SSE streams + board polls must not head-of-line block each other), **127.0.0.1 bind** as above, and a **Host-header rebinding check** on every request (reject requests whose `Host` is not `127.0.0.1`/`localhost[:port]`, so a DNS-rebinding attack from a browser can't reach the server through a hostile hostname). (Lower-confidence constraints, retained for the Phase-4 spec task.)
+
+## Decisions
+
+- <!-- webui-readonly --> **v1 = READ-ONLY.** **v1 has zero write endpoints; attach = copy-command; send/spawn = use the CLI or telegram; all mutating POST → 405.** The board, worker detail, peek stream, events timeline, spend telemetry, and knowledge browser are all derived read views. "Attach from browser" (OQ5) becomes a displayed copy-command for the operator; send/spawn (OQ8's execution surface) are not offered in the UI — the operator uses the CLI or the Telegram channel. Any mutating POST that reaches the server returns `405 Method Not Allowed`. This resolves OQ7 (knowledge editing) as read-only for v1.
+- <!-- webui-csrf --> **CSRF / same-origin is a hard precondition** for the future write-forms backlog item — whenever write forms are earned by demonstrated friction (the operator hitting real, repeated pain that read-only can't solve), the machinery must already be specced: a **CSRF token per session, checked on every mutating POST**, plus the same-origin/Host-header check above. It is spec'd as the gate now and built only when friction earns the write forms — never bolted on after the first write endpoint ships. This is the standing answer to OQ8.
+  **Witness:** "CSRF/same-origin is a hard precondition for the future write-forms backlog item"
 
 ## Open questions (answer all)
 
@@ -31,4 +39,12 @@ In: local HTTP server (`fleet web`), fleet board, worker detail (peek stream, jo
 
 ## Done criteria
 
-A week where fleet interaction happens primarily through the board during campaigns; peek/send/attach round-trip demonstrably faster than terminal equivalents; CSRF protection verified.
+A week where fleet interaction happens primarily through the board during campaigns; peek/send/attach round-trip demonstrably faster than terminal equivalents; CSRF protection verified. (v1 read-only: "send/attach round-trip" = the copy-command path + CLI/telegram; write-form round-trip is deferred until friction earns it.)
+
+## Invariants touched
+
+Cites the numbered "Architectural invariants (numbered)" section of `docs/SPEC.md`.
+
+- **one-state-many-views (9)** — the web UI is another read-only view over the registry + logs; it derives everything and holds no independent state. The read-only v1 decision is this invariant made literal for Phase 4.
+- **daemonless launch (1)** — `fleet web` is additive/optional; the CLI works fully with the web server stopped, and the server is a short-lived reader, not a required resident process.
+- **single-writer registry (6)** — the server is read-only and never writes `fleet.json`; with zero write endpoints in v1 there is no second writer, and the CSRF/same-origin gate exists precisely so that any future write path still routes through `fleet.py`'s lock-guarded code paths rather than the server mutating state directly.
