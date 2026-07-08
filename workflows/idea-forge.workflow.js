@@ -14,7 +14,7 @@ export const meta = {
 }
 
 // ---- knobs ----
-const ROUNDS = 3
+const ROUNDS = 2
 const TOP_N = 5            // mini-specs per round that reach attack+judging
 const PASS_SCORE = 6.5     // avg judge score to survive
 const FLEET = 'C:/proga/claude-fleet'
