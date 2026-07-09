@@ -2206,3 +2206,283 @@ deliberately."* The `so` was a non-sequitur. It is gone from the appendix, not s
 the reviewer's fix and it is in; the hoist is mine and it is the load-bearing half. If `boot_identity()` is
 read anywhere below `bin/fleet.py:1288`, an adapter bug raising a non-`OSError` still orphans a live,
 billable `claude`, and `except OSError` will not see it. Grep for the `Popen`, not just for the handler.
+
+---
+
+## Re-verify — F33 fix wave
+
+**Reviewer:** `spec-boot-identity-review`. **Under review:** `2f56bb3` (fix wave 4), against my
+`## Review — spec-boot-identity (F33)` above.
+**Verdict: `needs-fixes`.** CRITICAL=0 **HIGH=1** MED=1 LOW=1. `portability.md` **stays `drafting`**;
+SPEC.md F33 **not ratified**. `FABRICATION: none` — all seven new receipts re-run and exact.
+
+**Write set obeyed.** `git diff --stat 9b5954d..HEAD -- bin/ tests/` → empty. Docs only, both commits.
+
+**F33-R1 — the HIGH I raised — is genuinely FIXED, and fixed better than I asked.** The new HIGH is not
+in it. It is in the fix for `F33-R2`, the LOW. And the false premise `F33-R2`'s fix encodes is **mine**:
+I wrote it into my own review, the author implemented it without grepping it, and it is now a false
+statement about shipped code sitting in §4. Both of us skipped the one command that would have caught it.
+That is the finding.
+
+---
+
+### F33-R1 — **FIXED. ORPHAN-IMPOSSIBLE: yes.**
+
+Row 6 now reads (`docs/SPEC.md`):
+
+> give the read its own guard and hoist it **above the `Popen` at `:1288`**: `try: boot_id = PLATFORM.boot_identity()` /
+> `except OSError: boot_id = None`. **Not** inside the `try` at `:1345` …
+
+Traced, not taken on trust. `Popen` is at `bin/fleet.py:1288`:
+
+```
+$ sed -n '1284,1290p' bin/fleet.py
+1284      out_f = open(log_path, "ab")
+1285      err_f = open(err_path, "ab")
+1286      try:
+1287          try:
+1288              proc = popen(
+```
+
+The hoist target the row names (`:1276`, beside the `argv` build) sits above every one of those lines.
+**If `boot_identity()` raises anywhere in `:1276-1287`, no child process exists yet** — `popen` has not been
+called. The caller's `except BaseException` then pops a record that never had a live process behind it, and
+`restore_mailbox_claim` runs. The orphan is impossible **by construction, for every exception class**, not
+just for `OSError`. The author is right that this is stronger than the wrapper I asked for, and right about
+why: the wrapper alone would have left `TypeError`/`AttributeError` from an adapter bug escaping *past* a
+live `Popen`.
+
+It is also right that this is not a new contract. `launch_turn` already states it, and the receipt is exact:
+
+```
+$ sed -n '1270,1274p' bin/fleet.py
+    # funnels through here, so one guard covers them all -- and raising
+    # BEFORE the Popen keeps the launch-sequence contract intact (the caller
+    # restores the mailbox claim on any raise, same as a resolve/argv error).
+    if not os.path.isdir(cwd):
+        raise TurnLaunchError(f"registered cwd no longer exists, refusing to launch {name!r}: {cwd}")
+```
+
+**Is there any other path between the hoisted read and the record-commit that can raise and strand a live
+child?** Three sites raise after `:1288`: `TurnLaunchError` at `:1298` (the `Popen` call's own `except OSError`),
+`:1309` (writer saw the read end closed — *child exited during init*), and `:1317` (`poll()` returned nonzero —
+*child already exited*). Each fires only when the child is dead or never started. `ctime_to_iso` failures are
+swallowed at `:1349`. So `launch_turn`'s post-`Popen` region raises only on a dead child, which is the existing
+launch-sequence contract, and F33 does not add a raise to it. **No stranding path exists.**
+
+**The `except OSError` width — what escapes, named.** `PermissionError`, `FileNotFoundError`, `IsADirectoryError`
+are `OSError` subclasses and are caught. `UnicodeDecodeError` on a corrupt `boot_id` is not — but it is a
+`ValueError` subclass (`py -3.13 -c "print([c.__name__ for c in UnicodeDecodeError.__mro__])"` →
+`['UnicodeDecodeError', 'UnicodeError', 'ValueError', 'Exception', 'BaseException', 'object']`), and `main()`'s
+except tuple **does** list `ValueError`. So at launch it escapes the wrapper, raises above the `Popen` (no
+orphan), and `main()` turns it into `fleet: <msg>` / exit 1. Loud, clean, no traceback. At probe time it escapes
+`probe_liveness`'s `except OSError` and lands in the same `ValueError` arm. **See LOW F33-R6** — this is a
+correct outcome that the spec never states, and the class that *would* traceback (`TypeError`, `AttributeError`
+— absent from `main()`'s tuple) is exactly the class the spec deliberately wants loud. Say so.
+
+### VIEWS-CANNOT-CRASH: **yes.** The author answered, and the answer is real.
+
+The structural half, re-run:
+
+```
+$ grep -rn "probe_liveness(\|pid_alive(" bin/fleet.py bin/fleet_statusline.py bin/hooks/ --include=*.py
+  16 matches in bin/fleet.py
+  (bin/fleet_statusline.py: no matches. bin/hooks/: no matches.)
+```
+
+The statusline and the SessionStart hook never reach a probe; they read `status_snapshot` (`:1742`) through
+`_read_registry_readonly` (`:1722` — *"Never writes, never quarantines, never raises"*). An `OSError` inside
+`probe_liveness` is unreachable from them.
+
+The author then found the surface I had waved past: **`/fleet:doctor` is a read-only inline view *and* it probes.**
+Verified — `docs/specs/terminal-surface.md:54` lists it under *"Inline `` !` `` (read-only)"*, and `:148` maps it
+to `` !`fleet doctor` ``. Its containment claim is verified exact:
+
+- `cmd_doctor` (`bin/fleet.py:4493`) builds `checks = [...]` **eagerly, with no `try`** (`:4508-4526`), and
+  `_doctor_check_stale_pids` (`:4210`) / `_doctor_check_unreadable_starttime` (`:4227`) are entries in that list.
+- `main()` catches exactly `RegistryCorruptError` and
+  `(FleetCliError, ClaudeNotFoundError, TurnLaunchError, ValueError, FleetLockTimeout, UnsupportedPlatformError)`.
+  **`OSError` is not in the tuple.** I read every `except` in `main()`; there are two.
+
+So `probe_liveness`'s `except OSError` really is the **sole** containment for every probing surface, and deleting
+it as "unreachable" really would traceback out of a read-only view. The spec now says this, in the doc that owns
+the decision, with a `# Do not delete` marker in the pseudocode. That is the right place and the right words.
+
+### PIN-CATCHES-THE-BUG: **yes** — but it does not pin the hoist. **MED F33-R5.**
+
+The new §12 clause makes three assertions, and against an injected `OSError`-raising `boot_identity` each one
+fails on a distinct wrong build:
+
+- (a) `launch_turn` does not raise → **fails on the unguarded read** (the original F33-R1 orphan). The pin *can*
+  fail on the bug it exists to catch. This was the manager's question, and the answer is yes.
+- (b) the dict still carries `turn_pid` **and non-null** `turn_pid_ctime` → fails on a read nested in the `:1345`
+  `try`, whose `except Exception` would null the ctime and let `:620` return `"gone"` (FW2-R1 rebuilt).
+- (c) the verdict is `"unknown"` for both a recovered and a still-failing fresh read → exercises
+  `probe_liveness`'s own `except OSError`.
+
+**The gap:** a builder who writes the wrapper but skips the hoist passes all three. Under an `OSError` injection
+the wrapper alone is sufficient — nothing raises, so nothing orphans. The hoist only matters for the classes
+`except OSError` does *not* catch, and no assertion injects one. The appendix says, correctly, *"The hoist, not
+the width of the catch, is what makes an orphan impossible"* — and then pins the catch, not the hoist. The one
+property the prose calls load-bearing is the one property untested.
+
+**Fix (MED, cheap):** a fourth assertion — inject a `boot_identity` raising a **non-`OSError`** (e.g. `RuntimeError`),
+assert `launch_turn` raises **and** that the injected `popen` was never called. `popen` is already an injected
+parameter on all four launch paths, so "no child was created" is directly observable; "does not raise" is not the
+same assertion and the manager was right to press on it.
+
+---
+
+### HIGH — F33-R4 (NEW REGRESSION, introduced by `2f56bb3`): §4's new pointer line declares two **shipped** registry fields `[UNBUILT]`.
+
+`docs/SPEC.md:102`, added by this commit as the fix for my LOW `F33-R2`:
+
+> **Three fields in the block above are PRESCRIPTIVE, not shipped** (F33-R2): `turn_pid_boot_id` (v2.2, F33,
+> `[UNBUILT — owned by C4 port-adapter-a]`) and `limit_reset_at` / `limit_kind` (v2.1, UL1/F31, `[UNBUILT]`).
+> … the `[UNBUILT]` tags live with each field's owning paragraph (`:121` for F33, appendix F31 for UL1).
+
+Both clauses are false for UL1. **`limit_reset_at` and `limit_kind` are shipped, and tested.**
+
+```
+$ grep -n "limit_reset_at\|limit_kind" bin/fleet.py
+557:        "limit_reset_at": None,          # new_worker_record default -- WRITTEN TODAY
+558:        "limit_kind": None,
+1582:    reset = record.get("limit_reset_at")          # _limit_reset_passed
+1646:            updated["status"] = "limited"         # classifier sets the park
+1647:            updated["limit_reset_at"] = reset_at
+1648:            updated["limit_kind"] = kind
+1782:            "limit_reset_at": rec.get("limit_reset_at"),   # status_snapshot forwards
+1783:            "limit_kind": rec.get("limit_kind"),
+3040:        reset = rec.get("limit_reset_at")         # cmd_resume_limited
+4272:        weekly = ... r.get("limit_kind") == "weekly"       # doctor check
+4273:        null_h = ... r.get("limit_reset_at") is None
+(13 hits; :550-556, :859, :1579, :1701-1703, :3011-3014, :4264 are comments/docstrings)
+
+$ grep -n "resume-limited" bin/fleet.py
+4630:    p_resume = sub.add_parser("resume-limited",     # real subcommand
+4680:        if args.command == "resume-limited":        # real dispatch
+
+$ grep -n '"limited"' bin/fleet.py
+860:    if current_status == "limited":     # sticky-until-reset, shipped
+861:        return "limited"
+
+$ py -3.13 -m pytest tests/ -k "limited or limit_reset" -q
+29 passed, 691 deselected in 1.05s
+```
+
+And the cross-reference points at a tag that does not exist:
+
+```
+$ sed -n '416,424p' docs/SPEC.md | grep -c "UNBUILT"      # appendix F31
+0
+$ sed -n '130,141p' docs/SPEC.md | grep -c "UNBUILT"      # §4's UL1 park paragraph
+0
+```
+
+There is no `[UNBUILT]` tag in appendix F31 or in UL1's owning §4 paragraph — **because there is nothing to tag.**
+UL1 shipped. The line invents a tag, attributes it to a paragraph that has none, and tells a builder that
+`new_worker_record:557-558` is unbuilt.
+
+**Why HIGH.** This is the **F20 drift**, freshly minted, in §4 — the schema section a builder reads first. F20 was
+a shipped kernel left tagged `[UNBUILT]`, and the campaign's own record is that it *"nearly made a builder rewrite
+working code."* A C2 builder taking up *"hardening kernel item 11"* now reads §4:102, concludes `limit_reset_at` is
+unbuilt, and re-implements a field that `new_worker_record` already writes and 29 tests already cover. The
+convention exists to prevent exactly this, and the line written to honor the convention violates it. It is docs-only
+and cannot corrupt runtime — that is why it is HIGH and not CRITICAL — but it misdescribes shipped code in the one
+place that must not.
+
+**This is my error before it is the author's.** My `F33-R2` said *"a builder scanning the schema block sees three
+unbuilt fields presented as current"* and recommended *"one line under the JSON naming the prescriptive fields."*
+There were never three. I asserted it from the JSON block's shape without grepping `bin/fleet.py`, in a review whose
+own thesis is that inspection lists are wrong and grep lists are right. The author then implemented my premise
+faithfully, pasted seven receipts for everything it already believed, and ran no receipt against the one claim that
+was new. `grep -n limit_reset_at bin/fleet.py` — thirteen hits — refutes it in one command. **The receipt discipline
+was applied to the argument and not to the assertion.** That is the lesson to carry, and it is worth more than the
+finding.
+
+**Fix.** Rewrite `:102` to name **one** prescriptive field, and answer the manager's actual question — *why* do
+UL1's fields keep the untagged form? Because they are **shipped**, and a shipped field takes no tag. Suggested:
+
+> **One field in the block above is PRESCRIPTIVE, not shipped** (F33-R2): `turn_pid_boot_id` (v2.2, F33,
+> `[UNBUILT — owned by C4 port-adapter-a]`; the tag lives with its owning paragraph at `:121`). Every other field
+> here, including `limit_reset_at` / `limit_kind` (v2.1, UL1/F31), is **written by `bin/fleet.py` today** and
+> correctly carries no tag. This line exists because a builder scanning only the JSON cannot see the one tag that
+> is there — the F20 mirror-image drift the convention prevents.
+
+**Adjacent, PRE-EXISTING, and not introduced by `2f56bb3` — the manager should open it separately.** The same stale
+premise is already in two older places, which is where the author picked it up: the Status header (`:3`,
+*"UL1 park+resume (F31) are prescriptive"*) and §12's two UL1 pins (`:338`, `:341`, tagged
+`[UNBUILT — C2 hardening kernel item 11]`). `limited_sticky_exempt_from_dead` is shipped at `:860-861`;
+`resume_limited_gated_on_reset` is shipped at `:3040`/`:4630`. **That is a live F20 drift of real size**, larger
+than this finding, and outside both this commit's diff and my scope. I am not touching it. It wants its own task
+with `grep -n` receipts against `bin/fleet.py`, the way F20's own correction was done on 2026-07-09.
+
+---
+
+### LOW — F33-R6: the `except OSError` width is a decision; state it and its escape
+
+The appendix says the narrow catch is deliberate — *"a bug in the adapter must go loud, not become a silent `null`"*
+— which I agree with. It does not say what "loud" means, and the answer is not uniform:
+
+- `UnicodeDecodeError` (a corrupt `boot_id`) escapes the catch but **is** a `ValueError`, which `main()`'s tuple
+  lists → `fleet: <msg>`, exit 1, no traceback. `/fleet:doctor` degrades cleanly.
+- `TypeError` / `AttributeError` (an adapter bug) are in neither `except OSError` nor `main()`'s tuple → a traceback
+  out of `/fleet:doctor`. That *is* the intended loudness, but it is the one place the spec's own
+  "views never crash" paragraph and its "adapter bugs go loud" paragraph pull against each other.
+
+Neither is a defect. **Recommend** one sentence in *"The launch-path read"* naming both, and one in
+`portability.md`'s adapter body pinning the read to a shape that cannot produce `UnicodeDecodeError`
+(read bytes, `.decode("ascii", "strict")` inside the adapter's own guard, or `.strip()` on a byte read). Not blocking.
+
+### F33-R2: **bad** — see HIGH F33-R4 above. F33-R3: **ok.**
+
+R3 is properly bounded now, and bounded the way a spec should be — by the formula, not by one box's constant:
+
+> reuse inside the window requires a **sustained fork rate ≥ `pid_max` / 2 s** … At the measured value that is
+> **2,097,152 forks/s** `[VERIFIED — WSL Ubuntu, cat /proc/sys/kernel/pid_max → 4194304; uname -r → 6.18.33.2-microsoft-standard-WSL2]`.
+> At the conservative `32768` floor … it is **16,384 forks/s** … the reason this spec quotes the formula rather than
+> one box's constant.
+
+Arithmetic checks (`4194304/2 = 2,097,152`; `32768/2 = 16,384`). Both WSL claims re-run by me this session:
+`cat /proc/sys/kernel/pid_max` → `4194304`; `uname -r` → `6.18.33.2-microsoft-standard-WSL2`. **Exact.** The `32768`
+floor is correctly marked `[UNVERIFIED — verify in port-posix-smoke]` rather than asserted, and the spec now requires
+`port-posix-smoke` to record the box's `pid_max` alongside its `boot_id` — which is precisely what F33-R3 asked for.
+The structural argument (ticks increase monotonically within a boot, so a pid recurs only after a full wrap) is
+stated separately from the quantitative one, so the residual no longer rests on a number that varies per machine.
+
+---
+
+### Receipts — **all seven re-run at their stated commits. FABRICATION: none.**
+
+| # | Receipt | Verdict |
+|---|---|---|
+| 1 | `sed -n '1270,1274p' bin/fleet.py` (the launch-sequence contract comment) | **EXACT**, to the line |
+| 2 | `grep -n "launch_turn(" bin/fleet.py` → `1241, 2311, 2860, 2967, 3692`; prose `236, 1959, 2280` | **EXACT**, including the prose classification |
+| 3 | `sed -n '1284,1298p'` (the `Popen` at `:1288` and its own `except OSError`) | **EXACT** |
+| 4 | `grep -rn "probe_liveness(\|pid_alive(" bin/fleet.py bin/fleet_statusline.py bin/hooks/` → statusline & hooks: no matches | **EXACT** |
+| 5 | `cmd_doctor:4493` has no `try`; `main()`'s except tuple omits `OSError` | **EXACT** — I read both |
+| 6 | `git diff --stat 9b5954d..efa64be -- bin/ tests/` → empty | **EXACT** |
+| 7 | WSL: `pid_max` → `4194304`; `uname -r` → `6.18.33.2-microsoft-standard-WSL2` | **EXACT**, re-run by me |
+
+Five spec artifacts, zero fabrications. The record holds. **F33-R4 is not a fabrication** and must not be read as
+one: no receipt was falsified, abridged, or transcribed from memory. A claim was made *without* a receipt, in a
+document whose rule is that claims come with receipts. That is a different failure, and a smaller one — but it is
+the failure that produced the only HIGH in this pass, and it produced it in the one paragraph nobody thought needed
+a grep.
+
+---
+
+### Disposition
+
+- `docs/specs/portability.md` — **`drafting`.** Not promoted. Withheld solely on F33-R4. **Nothing in
+  `portability.md` is defective**; `2f56bb3` did not touch it, and its Status line is untouched by me.
+- `docs/SPEC.md` — **F33 not ratified.** F33-R1 is fixed and the fix is correct and well-argued; the blocking
+  defect is `:102`, F33's own disposition of F33-R2. One rewritten line and one added §12 assertion clear both the
+  HIGH and the MED, and F33 ratifies.
+- **The C4 build waves remain gated on Altai's `SOAK GATE 1 SIGNED` line in `knowledge/lessons.md`, which does not
+  exist.** Nothing in this review, and nothing a promotion would have done, changes that.
+
+**For fix wave 5 — the one-line brief:** F33-R1 was fixed properly, and then the LOW's fix asserted, without a grep,
+that two shipped fields were unbuilt — because *my* review asserted it first. The rule this campaign keeps
+rediscovering is not "grep the call sites." It is **grep the claim.** Every claim. Including the ones that arrive
+already believed, and especially the ones a reviewer hands you.
