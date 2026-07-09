@@ -264,3 +264,46 @@ etc.): `git worktree add -b <br> ../wt HEAD` per task → `fleet spawn --dir <wt
 - **Shared-fleet etiquette confirmed from the other side:** two managers ran concurrently on one
   install with zero interference because each retired only its own name-prefixed workers
   (`plan3-*` vs `sb-*`). The name-prefix discipline is load-bearing — hold it.
+
+## 2026-07-09-c4 — Campaign 4 (pmbot Plan 3 complete: 5 workers, ~$22, safety-critical Rust)
+
+Finished a 12-task safety-critical plan (live-order kill-switch for a real-money trading bot) using
+worktree-per-task fleet workers + adversarial in-session reviewers. All merged; 121 + 35 tests green.
+
+**The headline lesson: builders build, adversaries find. Separate the roles.**
+Five real bugs shipped past green tests AND past a prior code review. Every single one was caught by an
+*adversarial reviewer with repro authority* or by a worker whose task forced it down a new code path —
+never by the builder, never by the suite:
+- `LiveClob::submit` hardcoded `side=Buy`, ignoring the order's side. Survived 75 tests + a whole-branch
+  opus review because nothing in the codebase ever *sold*. Found only when a new worker needed a sell.
+- The dead-man switch self-tripped at boot and latched dead (a permanent no-op) — its own unit tests all
+  called `on_beat` before polling, so none could see it.
+- An affordability guard the plan called "the only bound" ignored cost committed in other open windows.
+- Fixing (2) then introduced a *false-negative* twin. Knife-edge fixes create knife-edge bugs.
+
+**Fault-inject your tests or they are theater.** The strongest evidence produced all campaign: a reviewer
+BROKE production four ways and confirmed each break turned the relevant test red. Add this to every
+review brief for safety-critical code: *"break the production behavior N ways; report any test that stays
+green."* A test that stays green when you break what it tests is a CRITICAL finding. This converted "the
+drill passes" into "the drill is evidence."
+
+**Prompt patterns that worked (reuse verbatim):**
+- Reviewer brief opens with the project's own base rate: *"every prior fix wave introduced ~1 new issue;
+  assume this one did; find it."* A generic "review this" reviewer returned a bare "No issues" on a diff
+  that provably contained a bug. Hostile framing + repro authority + "no bare 'No issues', say so
+  per-item" produced 4 real findings.
+- Worker briefs that name the TRAP explicitly ("caps are frozen at construction while bankroll shrinks —
+  do NOT rebuild the governor mid-flight, it discards open-window exposure") got it right first try.
+- Worker briefs must say *"the plan's snippets are indicative, not authoritative — read the real type
+  definitions"* whenever the plan touches an external SDK. Both SDK-facing workers found the plan wrong.
+- Tell workers to dispatch their OWN subagents to read the source-of-truth file before porting/writing.
+  Cheap, and it made ports byte-accurate on the first attempt.
+
+**Worker judgment is real.** A worker told "do not touch main.rs" correctly overrode that when adding an
+enum variant forced a new `match` arm. Another rejected the plan's own field semantics after checking a
+live API. Write briefs with intent + invariants, not just prohibitions.
+
+**Ops:** `fleet result` still truncates long outputs even with `PYTHONIOENCODING=utf-8` — for anything
+substantive, read the worker's commits (`git log`/`git show` in its worktree) instead of `result`. And an
+API-529 death mid-turn AFTER commits is invisible from `result`; `git log` is the only truth a turn landed
+(Campaign 0 said this; it happened again, exactly as predicted).
