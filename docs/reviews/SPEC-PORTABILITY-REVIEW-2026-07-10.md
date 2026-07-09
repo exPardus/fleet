@@ -2957,3 +2957,177 @@ survives**, and separately that no *untagged* prose in SPEC.md still calls F22/F
 `docs/specs/portability.md` was not touched: its `Status:` line belongs to `spec-final-verify`, and this
 worker's edits do not by themselves lift the promotion gate — that ruling is §4 above and remains the
 final-verifier's to make. Build waves stay gated on `SOAK GATE 1 SIGNED` regardless.
+
+---
+
+## Final verification (round 2)
+
+Worker `spec-final-verify`, 2026-07-10, re-auditing `spec-unbuilt-audit`'s `f99e05f`. Round 1 withheld
+promotion on one HIGH: seven false `[UNBUILT]` tags survived the manager's correction. This round
+re-audits by grep, re-runs the auditor's seven receipts, and rules.
+
+**Verdict: ready-for-build. No CRITICAL, no HIGH. `docs/specs/portability.md` is promoted; SPEC.md F33
+is ratified.** One MEDIUM and one observation are recorded below; neither blocks. **The C4 build waves
+remain gated on Altai's `SOAK GATE 1 SIGNED` line in `knowledge/lessons.md`, which does not exist**
+(`grep -rn "SOAK GATE 1" knowledge/lessons.md` → no matches). Promotion does not unblock them, and
+nothing in this review should be read as doing so.
+
+### 1. Tag re-audit — 24 occurrences, zero false
+
+`grep -on 'UNBUILT' docs/SPEC.md | cut -d: -f1 | uniq -c` → **24 occurrences on 17 lines** (up from 23;
+the retirement added history references, which is the correct direction). Every occurrence is bracketed
+(`grep -o '\[UNBUILT' | wc -l` → 24), so no bare-word usage escaped the tag grep. Each classified against
+`bin/fleet.py` with my own grep:
+
+**Live claims — three, exactly as the manager predicted, all TRUE:**
+
+| Claim | Lines | Receipt |
+|---|---|---|
+| **F33** boot identity `[UNBUILT — owned by C4 port-adapter-a]` | 3, 102, 139, 361, 377, 458 | `grep -rn "boot_id" bin/ tests/ --include=*.py` → **no matches** |
+| **Doctor elevation-mismatch** `[UNBUILT — C2 hardening kernel item 9]` | 3, 132, 180 | `grep -rni "elevation\|IsInRole\|Administrator\|integrity level" bin/fleet.py` → **no matches**; `grep -rni "elevation" tests/*.py` → **no matches** |
+| **Provider-side half of item 10** `[UNBUILT — C2 providers kernel / item 10, provider-side half]` | 418 | `grep -in "provider" bin/fleet.py` → **no matches** |
+
+**Non-claims — twelve, all correct:** the convention token at `:3`; the back-reference at `:102`; the
+recorded history of the F33-R2 error at `:104`; the F20 narration and the grep rule at `:116` (×2); the
+round-1 audit record at `:118`; the two-part rule at `:120` (×2); F20's history at `:404` and `:412`; F22's
+retired-tag history at `:416` (×2); F24's retired-tag history at `:420`.
+
+**FALSE TAGS REMAINING: 0.** All seven from round 1 are retired.
+
+### 2. Prose re-audit — the hole the auditor named in its own NOTE
+
+Round 1's finding was that `docs/SPEC.md:3` carried the same false claim *in prose*, invisible to a
+`[UNBUILT` grep. Swept five patterns:
+
+```
+PRESCRIPTIVE     7 occurrences / 6 lines      not shipped   1 / 1
+not-yet-built    3 occurrences / 3 lines      prescriptive  3 / 3
+unbuilt (lc)    13 occurrences / 11 lines
+```
+
+**27 prose occurrences audited. 0 false.** The `:3` Status header now reads: *"the v2.1 findings this
+sentence once called prescriptive are **all SHIPPED** — budget/`setting_sources` persistence (F22,
+`f8c9513`), the rotation-retry wrapper (F24, `0a6de4b`), UL1 park+resume (F31, `784a73f`), and the
+three-way PID probe (F20…). What is **still genuinely unbuilt** is exactly three things"* — and it then
+names the same three the tag grep found, independently. The two enumerations agree, which is the first
+time in this campaign that two independently-built enumerations of this file have agreed.
+`:339`/`:359`/`:404` use "prescriptive"/"not-yet-built" only to describe the bucket *convention*, not to
+assert any specific finding's status.
+
+### 3. The seven receipts reproduce
+
+`git show --stat f99e05f` touches `docs/SPEC.md` and the review file only. `git diff --stat 7ffc6a7..HEAD
+-- bin/ tests/` → **empty**, so every anchor the auditor pinned at `7ffc6a7` is byte-identical at HEAD and
+was checked there directly, by `sed -n '<line>p'`, not by reading prose:
+
+- `bin/fleet.py:844-845` → `if current_status == "over_budget":` / `return "over_budget"` ✓
+- `:860-861` → `if current_status == "limited":` / `return "limited"` ✓
+- `:1578` → `def _limit_reset_passed(record: dict) -> bool:` ✓
+- `:1540` → `def _stderr_is_limit_shaped(text: str) -> bool:` ✓
+- `:1916` → `class LogRotationError(FleetCliError):` ✓
+- `:2298`, `:2315`, `:2865`, `:2969` → four distinct `max_budget_usd=…` re-pass sites ✓
+- `:3045` → `if not _limit_reset_passed(rec):` ✓
+- `:3392` / `:3397` / `:3402` → retry loop / `except PermissionError as exc:` / `raise LogRotationError(` ✓
+- `:89` → `def _write_ceiling_file(sid, ceiling)` ✓; `:846-852` → sticky `over_ceiling` ✓
+- `tests/test_resilience.py:141`, `:166`, `:182`, `:218`, `:677` → the five rotation tests, by name ✓
+- `tests/test_steering.py:204`, `:226`, `:252` → re-pass / over-budget refusal / sticky ✓
+- `tests/test_resilience.py:2326`, `:2336`, `:2352`, `:2367`, `:2379`, `:2403`, `:2426`, `:2444`, `:2506`;
+  `tests/test_cli.py:354` → the UL1 pins ✓
+
+**RECEIPTS-REPRODUCE: yes.** Seven workers, zero fabrications. `py -3.13 -m pytest tests/ -q` →
+**708 passed, 12 skipped** (the 12 are `FLEET_LIVE=1`-gated, via `tests/conftest.py:60` — the only
+`pytest.mark.skip` in the tree; still zero `xfail`).
+
+### 4. The §12 rows were moved, not deleted
+
+Bucket (a) — *"Pins already-shipped behavior — correct code passes today"* — begins at `:341`. Bucket (b)
+— *"Pins unbuilt fixes"* — begins at `:359`. All five rows now sit at `:353`–`:357`, i.e. **inside bucket
+(a)**, each carrying an explicit `**MOVED from bucket (b) 2026-07-10: shipped, <sha>**` and its own code +
+test anchors. Bucket (b) retains exactly `probe_three_way` (itself annotated MOVED-to-(a)) and the F33 pin.
+Nothing vanished: a pin that disappears stops protecting the fix it pinned, and none did.
+**§12-PINS-MOVED-NOT-DELETED: yes.**
+
+### 5. F23's disposition names the halves precisely
+
+`:418` no longer flattens the distinction. It states **Fleet-side: SHIPPED** in `0a6de4b` (`token_ceiling`
+field `:538`, `_write_ceiling_file` `:89`→`:2307`, resume refusal + sticky `over_ceiling` `:2785-2802`,
+the Stop-hook allow-boundary; pinned across three test files) and **Provider-side: `[UNBUILT]`** —
+untrusted-cost marking under a non-default profile, *"which is the half F23's caveat actually depends
+on"* — with the receipt `grep -in "provider" bin/fleet.py` → no matches, which I re-ran and confirm. Round
+1's LOW is properly closed, not papered over.
+
+### 6. F33 undisturbed
+
+`git diff 2f56bb3..HEAD -- docs/SPEC.md`, filtered to F33-bearing lines, shows exactly two removals — the
+`:3` Status header (rewritten in place, F33's sentence preserved verbatim: *"PRESCRIPTIVE and `[UNBUILT —
+owned by C4 port-adapter-a]` in full"*) and the manager's already-certified `:102` correction. **No F33
+text, no §12 pin, and no F33-R1 fix text was deleted or edited.** The pin survives
+(`boot_identity_gates_tick_compare`, 3 occurrences), and so does the hoist heading, now at `:533`: *"The
+launch-path read: guarded, and hoisted above the `Popen` (F33-R1)."* The round-1 certifications stand
+unchanged. **F33-UNDISTURBED: yes.**
+
+### 7. MEDIUM — the moved F22 row asserts `>=` against code that uses `>`
+
+`docs/SPEC.md:353`, now in the bucket whose header says *"correct code passes today"*, claims: *"a resume
+is refused + flagged sticky `over_budget` once registry `cost_usd >= max_budget_usd`."*
+
+`bin/fleet.py:2768` is `if mb is not None and spent > mb:` — **strictly greater**. At
+`cost_usd == max_budget_usd` the code launches the turn; the spec says it refuses. The `>=` wording is
+inherited verbatim from the old bucket-(b) text, where "fails until the kernel lands" made a wrong
+assertion harmless. The move changed its meaning without anyone re-checking the operator. `grep` for the
+boundary confirms `>=` appears nowhere in §11's runaway row — only in this §12 row — and
+`tests/test_steering.py:226` pins the strictly-over case ($2.50 spend, $1.00 cap), so the equality edge is
+**unpinned in either direction**.
+
+Why MEDIUM and not HIGH: the row's *built/unbuilt status* — the thing this audit exists to certify — is
+correct; F22 ships. The defect is one character of behavioral detail. A builder writing the pin as
+specified gets a failure at equality and will reach for `bin/fleet.py`, which is the wrong direction of
+repair, but it costs one test, not a rebuilt kernel. It also does not decide itself: the token-ceiling
+half deliberately uses `>=` (`:2789-2791`, *"FIX-3 (F-2): >= not > — the Stop hook allows stop at tokens
+>= ceiling; the fleet-side refusal must use the SAME boundary"*), and dollars have no Stop-hook analog to
+force the same choice. So `>` may well be correct and the spec wrong — but *nobody has decided*, and the
+spec currently asserts a boundary the code does not implement. **Resolve the boundary explicitly** (a
+one-line spec edit if `>` is intended, a one-line code fix plus an equality pin if `>=` is), and pin the
+`==` case either way. Out of this worker's write set; no code was touched.
+
+*Observation, not a finding.* `:353` cites spawn at `:2298`,`:2315`; `:2315` is in fact the
+send-when-idle record read. The four re-pass sites are all real and all present, so the claim holds; the
+label on one is imprecise.
+
+### 8. Ruling
+
+No CRITICAL. No HIGH. The promotion gate is met.
+
+- **`docs/specs/portability.md` → `ready-for-build`.** The `**Status:**` line is set by this review, not
+  by its author — consistent with `87a85de`, where an author's self-promotion was reverted.
+- **SPEC.md F33 is ratified.** Its content was certified in round 1 (all six tags true, `boot_id` receipt
+  reproducing, F33-R1's hoist-above-`Popen` fix correctly specified at six sites, the §12 pin
+  fault-injecting against both wrong builds). The seven inherited tags that blocked ratification are
+  retired with receipts, and the retirement left F33 untouched.
+
+**The C4 build waves remain gated on the `SOAK GATE 1 SIGNED` signature in `knowledge/lessons.md`.** It
+does not exist. Neither this promotion nor this ratification changes that, and no downstream reader should
+infer otherwise.
+
+### The weakest check I ran
+
+Not the tag grep — that one is now cross-checked by two independent enumerations that agree.
+
+It is **§4, the receipt verification, and specifically that I verified the auditor's line anchors point at
+the *right lines* without verifying that every line *says what the row claims about it*.** I confirmed
+`:2768` semantically only because round 1 had already made me suspicious of that comparison; that is how
+the MEDIUM in §7 surfaced. I did not do the same semantic read for all twenty-odd anchors — I confirmed
+`sed -n '<line>p'` returned a plausible `def`, `if`, or `raise`, which is a *stronger* check than the
+campaign's earlier failures (which cited nothing) but a *weaker* one than "this line implements the claim."
+An anchor can point at a real `except PermissionError` whose retry count, backoff, or raise condition
+differs from what the row asserts, and my check would pass it. The `>=`/`>` defect is one instance of that
+class; I found it by luck of prior suspicion, not by method. **If a further pass is wanted, the highest-value
+one is not another grep — it is reading the five moved §12 rows against their code line by line, asserting
+the behavior, not the address.** I did that for one row of five.
+
+Second-weakest: `grep -in "provider" bin/fleet.py` → no matches proves no *identifier* named `provider`
+exists. It does not prove untrusted-cost marking is absent under some other name. The claim is almost
+certainly true (the feature is a spec stub owned by `stub-inject-providers`), but the receipt is
+name-shaped, not behavior-shaped.
+
+**For the record:** seven workers, zero fabrications. All seven receipts reproduced.
