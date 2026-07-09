@@ -2186,6 +2186,44 @@ def cmd_home(args) -> int:
     return 0
 
 
+def _write_text_tolerating_console_encoding(text: str) -> None:
+    """Write text to stdout without dying on a cp1252 console.
+
+    A Windows console defaults to cp1252 and cannot encode the arrows, dashes
+    and box glyphs the knowledge base is full of; `print()` then raises
+    UnicodeEncodeError mid-stream. Prefer real UTF-8, and degrade to
+    backslash-escapes rather than failing -- the operator gets slightly ugly
+    text instead of a truncated file and a traceback."""
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except (AttributeError, OSError, ValueError):
+        pass
+    try:
+        sys.stdout.write(text)
+        return
+    except UnicodeEncodeError:
+        pass
+    encoding = getattr(sys.stdout, "encoding", None) or "ascii"
+    sys.stdout.write(text.encode(encoding, errors="backslashreplace").decode(encoding))
+
+
+def cmd_knowledge(args) -> int:
+    """`fleet knowledge`: print knowledge/INDEX.md.
+
+    Exists so no surface has to compose a FLEET_HOME path in shell. A slash
+    command's inline `!`cmd`` may run under PowerShell, where bash parameter
+    expansion (`${FLEET_HOME:-$(cat ...)}`) is meaningless -- the /fleet
+    command shipped exactly that and printed garbage."""
+    path = knowledge_dir() / "INDEX.md"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        print(f"(no knowledge index at {path} -- run `fleet init`)")
+        return 0
+    _write_text_tolerating_console_encoding(text)
+    return 0
+
+
 def cmd_init(args) -> int:
     """`fleet init` (SPEC §14, §5 command surface): render the
     machine-local worker-settings.json instance from the git-tracked
@@ -4354,6 +4392,37 @@ def _doctor_check_log_sizes():
     return ("log-sizes", True, "no log files over 50MB")
 
 
+def _doctor_check_fleet_home_marker():
+    """The `~/.claude/fleet-home` marker must exist and point at THIS fleet.
+
+    `_write_fleet_home_marker` is best-effort and swallows OSError, so a failed
+    write leaves no trace. A plugin installed from a marketplace cache then
+    resolves FLEET_HOME to its own cache copy -- whose `state/` is gitignored
+    and empty -- and the SessionStart briefing silently reports a fleet of ZERO
+    workers while the real one is running. This check makes that visible."""
+    marker = fleet_home_marker_path()
+    expected = Path(FLEET_HOME).resolve()
+    if not marker.exists():
+        return ("fleet-home marker", False,
+                f"{marker} is missing -- run `fleet init` (the plugin's SessionStart "
+                f"hook cannot find this fleet without it)")
+    try:
+        recorded = marker.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        return ("fleet-home marker", False, f"{marker} unreadable: {exc}")
+    if not recorded:
+        return ("fleet-home marker", False, f"{marker} is empty -- run `fleet init`")
+    recorded_path = Path(recorded)
+    if not recorded_path.is_dir():
+        return ("fleet-home marker", False,
+                f"{marker} points at {recorded}, which does not exist -- run `fleet init`")
+    if recorded_path.resolve() != expected:
+        return ("fleet-home marker", False,
+                f"{marker} points at {recorded_path.resolve().as_posix()}, but this fleet is "
+                f"{expected.as_posix()} -- run `fleet init` here to claim it")
+    return ("fleet-home marker", True, f"{marker} -> {expected.as_posix()}")
+
+
 def _doctor_check_hook_errors():
     """Phase1 kernel 1: surface the TAIL of state/hook-errors.log when it is
     nonempty (the swallowed-hook-exception log). Never a hard failure -- a
@@ -4453,6 +4522,7 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run, get_process_info=No
         _doctor_check_orphaned_claims(workers=workers),
         _doctor_check_claude_agents(workers, which=which, run=run),
         _doctor_check_log_sizes(),
+        _doctor_check_fleet_home_marker(),
         _doctor_check_hook_errors(),
     ]
 
@@ -4473,6 +4543,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("home", help="print the resolved FLEET_HOME path")
+
+    sub.add_parser("knowledge", help="print knowledge/INDEX.md")
 
     p_init = sub.add_parser("init", help="render the machine-local worker-settings.json instance from the template")
     p_init.add_argument("--statusline", action="store_true",
@@ -4581,6 +4653,8 @@ def main(argv=None) -> int:
     try:
         if args.command == "home":
             return cmd_home(args)
+        if args.command == "knowledge":
+            return cmd_knowledge(args)
         if args.command == "init":
             return cmd_init(args)
         if args.command == "spawn":
