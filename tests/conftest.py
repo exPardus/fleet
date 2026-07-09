@@ -19,6 +19,28 @@ if str(BIN_DIR) not in sys.path:
 
 
 @pytest.fixture(autouse=True)
+def _never_touch_the_real_home(tmp_path_factory, monkeypatch):
+    """Redirect every path fleet resolves from `Path.home()` into a tmp dir.
+
+    `cmd_init` stamps `~/.claude/fleet-home` (the marker the SessionStart hook
+    reads to find the real FLEET_HOME) and `fleet init --statusline` writes
+    `~/.claude/settings.json`. Tests that exercise those paths monkeypatched
+    the settings path but not the marker -- so running the SUITE overwrote the
+    developer's real marker with a pytest tmp dir, silently repointing their
+    fleet hook at a directory that no longer exists. Caught 2026-07-09.
+
+    Tests that assert on these paths override them again with their own value;
+    this fixture only guarantees the default is never the real home."""
+    import fleet
+    sandbox = tmp_path_factory.mktemp("fake-home")
+    (sandbox / ".claude").mkdir()
+    monkeypatch.setattr(fleet, "fleet_home_marker_path",
+                        lambda: sandbox / ".claude" / "fleet-home")
+    monkeypatch.setattr(fleet, "user_settings_path",
+                        lambda: sandbox / ".claude" / "settings.json")
+
+
+@pytest.fixture(autouse=True)
 def _no_inherited_claude_session(monkeypatch):
     """Run every test as a HUMAN SHELL, not as whichever Claude session invoked
     pytest.
