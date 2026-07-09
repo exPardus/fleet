@@ -488,3 +488,60 @@ class TestSessionStartHook:
         sshook.main()
         assert sorted(p.name for p in (home / "state").iterdir()) == before
         assert not (home / "state" / "hook-errors.log").exists()
+
+
+COMMANDS_DIR = Path(__file__).resolve().parent.parent / "commands"
+
+READ_ONLY_COMMANDS = {"fleet", "status", "peek", "result", "doctor"}
+MUTATING_COMMANDS = {"spawn", "send", "interrupt", "respawn", "kill", "clean",
+                     "attach", "release", "resume-limited"}
+
+
+def _frontmatter(path: Path) -> dict:
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith("---\n"), f"{path.name}: missing frontmatter"
+    _, fm, _body = text.split("---\n", 2)
+    out = {}
+    for line in fm.splitlines():
+        if ":" in line:
+            k, v = line.split(":", 1)
+            out[k.strip()] = v.strip()
+    return out
+
+
+def _body(path: Path) -> str:
+    return path.read_text(encoding="utf-8").split("---\n", 2)[2]
+
+
+class TestCommandFiles:
+    def test_every_expected_command_exists(self):
+        found = {p.stem for p in COMMANDS_DIR.glob("*.md")}
+        assert found == READ_ONLY_COMMANDS | MUTATING_COMMANDS
+
+    @pytest.mark.parametrize("name", sorted(READ_ONLY_COMMANDS | MUTATING_COMMANDS))
+    def test_every_command_has_a_description(self, name):
+        assert _frontmatter(COMMANDS_DIR / f"{name}.md").get("description")
+
+    @pytest.mark.parametrize("name", sorted(READ_ONLY_COMMANDS))
+    def test_read_only_commands_inline_exec_and_declare_allowed_tools(self, name):
+        path = COMMANDS_DIR / f"{name}.md"
+        assert "!`" in _body(path), f"{name}: read-only command should inline its CLI output"
+        assert "Bash" in _frontmatter(path).get("allowed-tools", "")
+
+    @pytest.mark.parametrize("name", sorted(MUTATING_COMMANDS))
+    def test_mutating_commands_never_inline_exec(self, name):
+        # D3: !`cmd` runs at prompt-expansion time with no permission prompt
+        # and no undo. `fleet kill` is terminal; `fleet clean` deletes journals.
+        assert "!`" not in _body(COMMANDS_DIR / f"{name}.md"), (
+            f"{name} is a mutating command and must not use inline !`` exec"
+        )
+
+    @pytest.mark.parametrize("name", sorted(MUTATING_COMMANDS))
+    def test_mutating_commands_declare_no_allowed_tools(self, name):
+        # Belt and braces: an allowed-tools grant on a mutating command is the
+        # first step toward someone adding inline exec to it.
+        assert "allowed-tools" not in _frontmatter(COMMANDS_DIR / f"{name}.md")
+
+    @pytest.mark.parametrize("name", sorted(MUTATING_COMMANDS - {"clean"}))
+    def test_mutating_commands_declare_an_argument_hint(self, name):
+        assert _frontmatter(COMMANDS_DIR / f"{name}.md").get("argument-hint")
