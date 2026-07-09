@@ -31,9 +31,17 @@ The mutable cursor against the immutable contract `docs/PLAN.md`. A resuming man
 | C2 | **✅ CAMPAIGN 2 CLOSED** — 11 kernels + harness merged (9e4ec9c); self-modify safety PROVEN (revert path exercised); doctor 17 checks; ~$72 spend | done | live install verified | 2026-07-09 |
 | C2 | **>>> READINESS BOUNDARY REACHED — STOP: hand to Altai for SOAK GATE 1 <<<** | **AWAITING ALTAI** | manager mandate ends here; C3+ gated behind soak sign-off | 2026-07-09 |
 | — | **External dogfood #1 — `stupidbox`** (non-fleet project built from scratch: 8-command CLI). 11 spawns + 2 respawns, doctor 17/17 at every close, 0 incidents. **VERDICT: fleet works in the wild.** Friction → campaign-template v1.3 | done | 544906e / d17e27f; `knowledge/projects/stupidbox.md`; repo `C:\proga\stupidbox` | 2026-07-09 |
+| — | **Campaign 3 (foreign manager)** — pmbot Plan-3 parallel Rust TDD via git worktrees; 2 workers green first turn, clean merge | done | ac1c545; `lessons.md#2026-07-09-c3` | 2026-07-09 |
+| — | **Campaign 4 (foreign manager)** — pmbot Plan 3 complete, safety-critical Rust, 5 workers ~$22; adversarial reviewers found 5 bugs past green tests | done | c64104d; `lessons.md#2026-07-09-c4` | 2026-07-09 |
 | — | Soak Gate 1 usage accrual — **day 1 of ≥3** (12 launches; floor is ≥15 spawns across ≥3 *distinct* days) | in progress | `lessons.md#2026-07-09-dogfood-stupidbox` | 2026-07-09 |
+| **1.6** | **Phase 1.6 terminal surface — 9 TDD tasks** (`status_snapshot()` → `status --json --stale-ok` → `fleet_statusline.py` → `FLEET_WORKER` stamp → SessionStart hook → `/fleet:*` commands → plugin package → `init --statusline` → docs) | done | fb613d6·5b17097·860077b·5f38add·5cfaec0·863f2fa·2e91b92·b2c67ba·aaa7a6a; plan `docs/superpowers/plans/2026-07-09-terminal-surface.md` | 2026-07-09 |
+| **1.6** | Post-build hardening: plugin manifest shape + honest install docs; installable-for-others; `init --statusline --chain` | done | 228167b · 0d09c25 · 6e8f526 | 2026-07-09 |
+| **1.6** | **Security fixes** — read-only slash commands could run `fleet kill`/`fleet clean` (`Bash(fleet:*)` grants the whole CLI); provenance guard on kill/clean/respawn | done | 0d0c05d · 67f62ee; 689 pytest pass, doctor all-PASS | 2026-07-09 |
+| **1.6** | ⚠ Done-criteria NOT yet verified live: D5 (a real spawned worker receives no SessionStart briefing) and statusline-survives-corrupt-registry | pending | spec `docs/specs/terminal-surface.md` §Done criteria | — |
 | C3 | Phase-1 close (`p1-docs-sync` + external campaign + workload queue + SOAK GATE 1) | pending | GATED: readiness boundary. External-campaign leg has begun (see dogfood #1); gate still needs the day-floor + Altai's signature | — |
-| C4 | Phase 1.5 portability (spec→build→ci→posix-smoke→SOAK 1.5) | pending | GATED | — |
+| C4 | `spec-portability` (spec wave — PLAN.md:182 permits overlap with Soak 1; docs-only) | dispatched | main repo, bypass, $10 | 2026-07-10 |
+| C4 | `spec-portability-review` (adversarial; blocks on spec; → `Status: ready-for-build`) | pending | strongest model, $10 | — |
+| C4 | Phase 1.5 portability BUILD waves (adapter→test-suite→ci→posix-smoke→SOAK 1.5) | pending | GATED on SOAK GATE 1 signature + ready-for-build | — |
 | C5 | Phase 2 watchtower (spec→chain→accept-tests→SOAK 2) | pending | GATED | — |
 | C5b | Phase 2.5 providers (spec always; build demand-gated) | pending | GATED | — |
 | C6 | Phase 3 telegram (spec→2 reviews→chain→tg-live→SOAK 3) | pending | GATED | — |
