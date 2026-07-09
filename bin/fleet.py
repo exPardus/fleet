@@ -2001,14 +2001,36 @@ def _report_stranded_turn(name: str, sid: str, info: dict) -> None:
         pass
 
 
-def _install_statusline(force: bool = False) -> None:
+def statusline_chain_path() -> Path:
+    """state/statusline-chain.json -- delegate statusline commands fleet runs
+    above its own row. Machine-local (gitignored), like every other state file."""
+    return state_dir() / "statusline-chain.json"
+
+
+def _capture_statusline_delegate(command: str) -> None:
+    """Record a foreign statusline command so fleet's statusline runs it and
+    prints its rows above fleet's own (Phase 1.6, --chain).
+
+    Claude Code allows exactly ONE statusLine command, so composing is the only
+    way an operator keeps their existing statusline AND gains fleet's."""
+    path = statusline_chain_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"delegates": [{"command": command, "captured_at": now_iso()}]}
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _install_statusline(force: bool = False, chain: bool = False) -> None:
     """Merge fleet's statusLine into ~/.claude/settings.json (Phase 1.6 D6).
 
     A Claude Code plugin cannot ship a statusLine -- plugin settings.json
     accepts only `agent` and `subagentStatusLine` -- so this explicit, opt-in
     step is the only way to install one. It backs up first, merges ONLY the
     statusLine key, and refuses a foreign statusline (an operator running
-    ccusage or similar must not lose it silently)."""
+    ccusage or caveman must not lose it silently).
+
+    `chain=True` COMPOSES instead of refusing: the incumbent command is
+    captured into state/statusline-chain.json and fleet's statusline runs it,
+    printing its rows above fleet's own. `force=True` overwrites outright."""
     path = user_settings_path()
     settings = {}
     if path.exists():
@@ -2023,11 +2045,20 @@ def _install_statusline(force: bool = False) -> None:
 
     script = statusline_script_path().resolve().as_posix()
     existing = settings.get("statusLine")
-    if isinstance(existing, dict) and "fleet_statusline.py" not in str(existing.get("command", "")):
-        if not force:
+    incumbent = str(existing.get("command", "")) if isinstance(existing, dict) else ""
+    # A fleet-owned incumbent is a re-install, never a delegate: chaining it
+    # would make fleet's statusline invoke itself, once per refresh, forever.
+    foreign = bool(incumbent) and "fleet_statusline.py" not in incumbent
+
+    if foreign:
+        if chain:
+            _capture_statusline_delegate(incumbent)
+            print(f"  chained:     {incumbent}")
+        elif not force:
             raise FleetCliError(
                 f"statusLine already set to {existing.get('command')!r} in {path} -- "
-                "re-run with --force to overwrite"
+                "re-run with --chain to keep it and show fleet's row beneath it, "
+                "or --force to overwrite it"
             )
 
     if path.exists():
@@ -2076,7 +2107,8 @@ def cmd_init(args) -> int:
     print(f"  marker:      {fleet_home_marker_path()}")
 
     if getattr(args, "statusline", False):
-        _install_statusline(force=getattr(args, "force", False))
+        _install_statusline(force=getattr(args, "force", False),
+                            chain=getattr(args, "chain", False))
     return 0
 
 
@@ -4296,6 +4328,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_init = sub.add_parser("init", help="render the machine-local worker-settings.json instance from the template")
     p_init.add_argument("--statusline", action="store_true",
                         help="also install fleet's statusline into ~/.claude/settings.json")
+    p_init.add_argument("--chain", action="store_true",
+                        help="with --statusline: keep an existing foreign statusline and print "
+                             "fleet's row beneath it")
     p_init.add_argument("--force", action="store_true",
                         help="with --statusline: overwrite an existing foreign statusline")
 

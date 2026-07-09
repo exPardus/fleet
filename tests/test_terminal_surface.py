@@ -311,7 +311,9 @@ class TestStatuslineMain:
         assert statusline.main() == 0
         assert "⚑" in capsys.readouterr().out
 
-    def test_main_swallows_every_exception_and_prints_nothing(self, statusline, capsys, monkeypatch):
+    def test_main_swallows_every_exception_and_prints_nothing(self, home, statusline, capsys, monkeypatch):
+        # `home` is load-bearing: without it this read the developer's REAL
+        # state/statusline-chain.json and printed a chained delegate's row.
         def boom():
             raise RuntimeError("registry exploded")
         monkeypatch.setattr(statusline.fleet, "status_snapshot", boom)
