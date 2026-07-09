@@ -27,6 +27,19 @@ Ship before Phase 2 (watchtower multiplies OS surface). Spec: `docs/specs/portab
 - Python invocation via `sys.executable` / `python3`, never `py -3.13` outside Windows shims.
 - CI: GitHub Actions matrix (windows/ubuntu/macos) running unit tests + hook smoke tests.
 
+## Phase 1.6 — Terminal surface (fleet inside the Claude Code TUI)
+
+Spec: `docs/specs/terminal-surface.md`. Independent of watchtower; buildable any time after Phase 1.
+
+Pure UX and packaging — no new capability, no new state, no daemon. One read-only derivation (`fleet.status_snapshot()`: reads `fleet.json` + `mailbox/`, takes no lock, spawns no probe, writes nothing) feeds four views:
+
+- **statusline** — always-on one-line fleet readout under the input box. Dims stale rows rather than asserting liveness it never probed for.
+- **`/fleet:*` slash commands** — read-only commands inline their CLI output; mutating ones route through the model so the permission prompt applies (`fleet kill` is terminal, `fleet clean` deletes journals).
+- **SessionStart briefing** — the SPEC §10 startup ritual, automated. Suppresses itself inside workers via a `FLEET_WORKER` env stamp.
+- **plugin package** — commands + skill + hook. Cannot ship the statusline (Claude Code forbids it); `fleet init --statusline` installs that separately, refusing to clobber a foreign one.
+
+Done when: fleet state is visible without typing a command, and `/fleet` answers "where am I" in one screen.
+
 ## Phase 2 — Watchtower (continuous monitoring)
 
 The one deliberate v1 exclusion (no daemon) gets revisited — continuous monitoring needs a resident process. `fleet watch` (same fleet.py, subcommand; auto-start via platform adapter: Scheduled Task / systemd user unit / launchd agent):

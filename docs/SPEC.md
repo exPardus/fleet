@@ -42,12 +42,17 @@ The nine load-bearing invariants of the system. Later specs and every phase stub
 C:\proga\claude-fleet\
   bin\
     fleet.py              # single-file CLI, py -3.13, stdlib only
+    fleet_statusline.py   # Phase 1.6 statusline renderer (imports fleet.py; read-only)
     fleet.cmd             # shim: @py -3.13 C:\proga\claude-fleet\bin\fleet.py %*  (dir added to PATH)
     hooks\
       posttooluse_mailbox.py   # mid-turn mailbox injection
       stop_mailbox.py          # turn-end mailbox drain / stop-block
+      sessionstart_fleet.py    # Phase 1.6 manager-session briefing (suppressed in workers)
   worker-settings.template.json  # hook wiring TEMPLATE (git-tracked, {{PYTHON}}/{{FLEET_HOME}} placeholders); `fleet init` renders it
-  skill\SKILL.md          # manager skill; installed by copying to %USERPROFILE%\.claude\skills\fleet\ (README one-liner)
+  .claude-plugin\plugin.json  # Phase 1.6 plugin manifest (ships NO statusline -- not permitted)
+  commands\               # Phase 1.6 /fleet:* slash commands
+  hooks\hooks.json        # Phase 1.6 plugin SessionStart registration
+  skills\fleet\SKILL.md   # manager skill (plugin-standard path; was skill\SKILL.md)
   knowledge\
     INDEX.md              # one line per entry; manager loads this at session start
     playbooks\            # e.g. review-pipeline.md, spawn-etiquette.md
@@ -326,6 +331,20 @@ Phase 1 builds and tests on Windows, but must not bake in Windows-isms beyond on
 - No hardcoded `C:/proga/claude-fleet` outside generated files: resolve FLEET_HOME from `fleet.py` location (overridable via `FLEET_HOME` env var). `worker-settings.json` becomes a git-tracked TEMPLATE; `fleet init` generates the machine-local instance (correct interpreter path, absolute FLEET_HOME paths, forward slashes) into a gitignored location; doctor checks instance freshness.
 - `pathlib` everywhere; `py -3.13` only inside Windows shims; code paths use `sys.executable`.
 - Target floor: Python 3.10+ (distro pythons on Linux/macOS), stdlib only.
+
+## 15. Terminal surface (Phase 1.6)
+
+Full spec: `docs/specs/terminal-surface.md`. A statusline, `/fleet:*` slash commands, a SessionStart briefing, and a plugin package — four DERIVED views over one read-only derivation, `fleet.status_snapshot()`.
+
+The three rules the rest of this spec implies but never had to state, now that a view refreshes on a hot path:
+
+- **A view never takes `fleet.lock`, never probes a PID, and never writes.** `status_snapshot()` reads `fleet.json` + `mailbox/` and stops. `fleet status` (no flag) keeps its authoritative recompute; `fleet status --stale-ok` is the view path (invariants 6, 9).
+- **A view reports registry corruption; it does not quarantine.** §11's quarantine (`fleet.json.corrupt.<ts>` + `registry_corrupt` event + exit 1) is a WRITE and belongs to the single writer. A statusline refreshing every 10 s would loop on it, destroying operator evidence. Views print "registry unreadable" and exit 0.
+- **A view flags, it never launches.** A `limited` worker past its reset horizon renders `resume-eligible`; the resume itself stays the explicit `fleet resume-limited` sweep (invariant 1).
+
+One launch-path consequence: `launch_turn` stamps `FLEET_WORKER=<name>` into the worker's child environment so the SessionStart hook — which a globally-enabled plugin fires in EVERY session on the machine — suppresses itself inside workers.
+
+Nothing in §1–§14 changes. Every surface is optional: the CLI works fully with the statusline uninstalled, the plugin absent, and the hook unregistered.
 
 ---
 
