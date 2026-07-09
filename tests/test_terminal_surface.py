@@ -545,3 +545,34 @@ class TestCommandFiles:
     @pytest.mark.parametrize("name", sorted(MUTATING_COMMANDS - {"clean"}))
     def test_mutating_commands_declare_an_argument_hint(self, name):
         assert _frontmatter(COMMANDS_DIR / f"{name}.md").get("argument-hint")
+
+
+REPO = Path(__file__).resolve().parent.parent
+
+
+class TestPluginPackaging:
+    def test_manifest_exists_and_names_the_plugin(self):
+        manifest = json.loads((REPO / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        assert manifest["name"] == "claude-fleet"
+        assert manifest["description"]
+
+    def test_manifest_does_not_ship_a_statusline(self):
+        # A plugin CANNOT ship a statusLine; plugin settings.json accepts only
+        # `agent` and `subagentStatusLine`. fleet init --statusline installs it.
+        raw = (REPO / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
+        assert "statusLine" not in raw
+
+    def test_skill_lives_at_the_plugin_standard_path(self):
+        assert (REPO / "skills" / "fleet" / "SKILL.md").exists()
+        assert not (REPO / "skill").exists()
+
+    def test_hooks_json_registers_sessionstart(self):
+        hooks = json.loads((REPO / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+        entries = hooks["hooks"]["SessionStart"]
+        commands = [h["command"] for e in entries for h in e["hooks"]]
+        assert any("sessionstart_fleet.py" in c for c in commands)
+
+    def test_hook_commands_use_forward_slashes(self):
+        # Git Bash sh -c eats backslashes in unquoted strings.
+        raw = (REPO / "hooks" / "hooks.json").read_text(encoding="utf-8")
+        assert "\\\\" not in raw
