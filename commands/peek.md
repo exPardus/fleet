@@ -1,7 +1,7 @@
 ---
 description: '~20-line digest of a worker''s current or last turn. Works mid-turn.'
 argument-hint: '<worker-name> [-n 20]'
-allowed-tools: 'Bash(fleet:*)'
+allowed-tools: 'Bash(fleet peek:*)'
 ---
 
 !`fleet peek $ARGUMENTS`

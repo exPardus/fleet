@@ -541,6 +541,28 @@ class TestCommandFiles:
         assert "!`" in _body(path), f"{name}: read-only command should inline its CLI output"
         assert "Bash" in _frontmatter(path).get("allowed-tools", "")
 
+    # A read-only command once carried `Bash(fleet:*)`, which matches
+    # `fleet kill` and `fleet clean`. A haiku session invoked /fleet:status,
+    # decided the dead workers were untidy, and -- fully within permissions --
+    # killed a working worker and cleaned five journals. 2026-07-09, real
+    # data loss. The grant must name the subcommand, never the whole CLI.
+    DESTRUCTIVE_VERBS = ("kill", "clean", "respawn", "interrupt", "spawn",
+                         "send", "attach", "release", "resume-limited")
+
+    @pytest.mark.parametrize("name", sorted(READ_ONLY_COMMANDS))
+    def test_read_only_grants_never_cover_the_whole_fleet_cli(self, name):
+        grant = _frontmatter(COMMANDS_DIR / f"{name}.md").get("allowed-tools", "")
+        assert "Bash(fleet:*)" not in grant, (
+            f"{name}: `Bash(fleet:*)` grants `fleet kill` and `fleet clean` too"
+        )
+        assert "Bash(fleet)" not in grant
+
+    @pytest.mark.parametrize("name", sorted(READ_ONLY_COMMANDS))
+    def test_read_only_grants_reach_no_destructive_subcommand(self, name):
+        grant = _frontmatter(COMMANDS_DIR / f"{name}.md").get("allowed-tools", "")
+        for verb in self.DESTRUCTIVE_VERBS:
+            assert f"fleet {verb}" not in grant, f"{name} may invoke `fleet {verb}`"
+
     @pytest.mark.parametrize("name", sorted(MUTATING_COMMANDS))
     def test_mutating_commands_never_inline_exec(self, name):
         # D3: !`cmd` runs at prompt-expansion time with no permission prompt
@@ -815,3 +837,133 @@ class TestInitStatusline:
     def test_parser_accepts_statusline_and_force(self):
         args = fleet.build_parser().parse_args(["init", "--statusline", "--force"])
         assert args.statusline is True and args.force is True
+
+    def test_parser_accepts_chain(self):
+        args = fleet.build_parser().parse_args(["init", "--statusline", "--chain"])
+        assert args.chain is True
+
+    def test_refusal_message_offers_both_chain_and_force(self, home, settings):
+        (home / "worker-settings.template.json").write_text('{"hooks":{}}', encoding="utf-8")
+        settings.parent.mkdir(parents=True)
+        settings.write_text(json.dumps(
+            {"statusLine": {"type": "command", "command": "ccusage statusline"}}), encoding="utf-8")
+        with pytest.raises(fleet.FleetCliError) as exc:
+            fleet.cmd_init(self._args(statusline=True))
+        assert "--chain" in str(exc.value) and "--force" in str(exc.value)
+
+
+class TestStatuslineChainInstall:
+    """Claude Code allows exactly ONE statusLine command. --chain composes
+    rather than forcing the operator to choose between fleet and ccusage/caveman."""
+
+    @pytest.fixture
+    def settings(self, tmp_path, monkeypatch):
+        path = tmp_path / "dot-claude" / "settings.json"
+        monkeypatch.setattr(fleet, "user_settings_path", lambda: path)
+        return path
+
+    def _args(self, **over):
+        base = {"statusline": True, "force": False, "chain": False}
+        base.update(over)
+        return argparse.Namespace(**base)
+
+    def _with_foreign(self, home, settings, command="caveman-statusline.ps1"):
+        (home / "worker-settings.template.json").write_text('{"hooks":{}}', encoding="utf-8")
+        settings.parent.mkdir(parents=True)
+        settings.write_text(json.dumps(
+            {"statusLine": {"type": "command", "command": command}}), encoding="utf-8")
+
+    def test_chain_captures_the_incumbent_and_installs_fleet(self, home, settings, capsys):
+        self._with_foreign(home, settings)
+        assert fleet.cmd_init(self._args(chain=True)) == 0
+
+        chain = json.loads(fleet.statusline_chain_path().read_text(encoding="utf-8"))
+        assert chain["delegates"][0]["command"] == "caveman-statusline.ps1"
+        assert chain["delegates"][0]["captured_at"]
+        assert "fleet_statusline.py" in json.loads(
+            settings.read_text(encoding="utf-8"))["statusLine"]["command"]
+
+    def test_chain_never_captures_fleets_own_statusline(self, home, settings):
+        # Re-running --chain against a fleet-owned statusline must not make
+        # fleet's statusline invoke itself once per refresh, forever.
+        (home / "worker-settings.template.json").write_text('{"hooks":{}}', encoding="utf-8")
+        fleet.cmd_init(self._args())                      # install fleet's
+        assert fleet.cmd_init(self._args(chain=True)) == 0  # re-run with --chain
+        assert not fleet.statusline_chain_path().exists()
+
+    def test_force_overwrites_without_chaining(self, home, settings):
+        self._with_foreign(home, settings)
+        assert fleet.cmd_init(self._args(force=True)) == 0
+        assert not fleet.statusline_chain_path().exists()
+
+
+class TestStatuslineChainRender:
+    def _chain(self, home, command):
+        (home / "state" / "statusline-chain.json").write_text(
+            json.dumps({"delegates": [{"command": command}]}), encoding="utf-8")
+
+    def test_delegate_rows_print_above_fleets_row(self, home, statusline, capsys, monkeypatch):
+        _write_registry(home, {"pmbot": _rec()})
+        self._chain(home, f'{sys.executable} -c "print(\'CAVEMAN ROW\')"')
+        monkeypatch.setattr(statusline.sys, "stdin", io.StringIO("{}"))
+        monkeypatch.setenv("NO_COLOR", "1")
+
+        statusline.main()
+
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        assert lines[0] == "CAVEMAN ROW"
+        assert "working" in lines[1]
+
+    def test_delegate_receives_the_session_json_on_stdin(self, home, statusline, capsys, monkeypatch):
+        _write_registry(home, {})
+        self._chain(home, f'{sys.executable} -c "import sys; sys.stdout.write(sys.stdin.read())"')
+        monkeypatch.setattr(statusline.sys, "stdin", io.StringIO('{"model":"opus"}'))
+        monkeypatch.setenv("NO_COLOR", "1")
+
+        statusline.main()
+        assert '{"model":"opus"}' in capsys.readouterr().out
+
+    def test_a_failing_delegate_never_costs_fleets_row(self, home, statusline, capsys, monkeypatch):
+        _write_registry(home, {"pmbot": _rec()})
+        self._chain(home, f'{sys.executable} -c "import sys; sys.exit(3)"')
+        monkeypatch.setattr(statusline.sys, "stdin", io.StringIO("{}"))
+        monkeypatch.setenv("NO_COLOR", "1")
+
+        assert statusline.main() == 0
+        out = capsys.readouterr().out
+        assert "working" in out
+
+    def test_a_hanging_delegate_is_dropped_on_timeout(self, home, statusline, capsys, monkeypatch):
+        _write_registry(home, {"pmbot": _rec()})
+        self._chain(home, "sleep 30")
+        monkeypatch.setattr(statusline, "DELEGATE_TIMEOUT_SECONDS", 1)
+        monkeypatch.setattr(statusline.sys, "stdin", io.StringIO("{}"))
+        monkeypatch.setenv("NO_COLOR", "1")
+
+        assert statusline.main() == 0
+        assert "working" in capsys.readouterr().out
+
+    def test_no_chain_file_means_a_single_row(self, home, statusline, capsys, monkeypatch):
+        _write_registry(home, {"pmbot": _rec()})
+        monkeypatch.setattr(statusline.sys, "stdin", io.StringIO("{}"))
+        monkeypatch.setenv("NO_COLOR", "1")
+        statusline.main()
+        assert len([ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]) == 1
+
+    def test_corrupt_chain_file_is_ignored(self, home, statusline, capsys, monkeypatch):
+        _write_registry(home, {"pmbot": _rec()})
+        (home / "state" / "statusline-chain.json").write_text("{bad", encoding="utf-8")
+        monkeypatch.setattr(statusline.sys, "stdin", io.StringIO("{}"))
+        monkeypatch.setenv("NO_COLOR", "1")
+        assert statusline.main() == 0
+        assert "working" in capsys.readouterr().out
+
+    def test_chain_spawns_no_subprocess_when_unconfigured(self, home, statusline, monkeypatch):
+        # D1 still holds for fleet's own row: zero subprocesses unless the
+        # operator explicitly chained a delegate.
+        _write_registry(home, {"pmbot": _rec()})
+        def boom(*a, **k):
+            raise AssertionError("no delegate configured: nothing should be spawned")
+        monkeypatch.setattr(statusline.subprocess, "run", boom)
+        monkeypatch.setattr(statusline.sys, "stdin", io.StringIO("{}"))
+        assert statusline.main() == 0

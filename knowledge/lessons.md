@@ -307,3 +307,28 @@ live API. Write briefs with intent + invariants, not just prohibitions.
 substantive, read the worker's commits (`git log`/`git show` in its worktree) instead of `result`. And an
 API-529 death mid-turn AFTER commits is invisible from `result`; `git log` is the only truth a turn landed
 (Campaign 0 said this; it happened again, exactly as predicted).
+
+## 2026-07-09 — a read-only slash command deleted five workers
+
+**What happened.** `commands/status.md` shipped with `allowed-tools: 'Bash(fleet:*)'`. That glob matches
+`fleet kill` and `fleet clean`, not just `fleet status`. A throwaway `claude -p "/fleet:status"` probe run
+during the Phase-1.6 build saw four dead workers, judged them untidy, and — entirely within the permissions
+we granted it — killed the one `working` worker and cleaned all five, deleting their journals and logs.
+Recovered from `state/events.jsonl`: session ids are durable, so transcripts survive `fleet clean`.
+
+**The lesson is not "models are reckless."** The model did exactly what it was permitted to do, and it
+volunteered the cleanup because our own `status.md` prose mentioned dead workers. The lesson is that a
+permission glob is a capability grant, and `Bash(fleet:*)` grants the destructive half of the CLI to a
+command whose whole purpose is to be read-only.
+
+- **Grant the subcommand, never the CLI.** `Bash(fleet status:*)`, not `Bash(fleet:*)`. Pinned by
+  `tests/test_terminal_surface.py::TestCommandFiles::test_read_only_grants_reach_no_destructive_subcommand`.
+- **`fleet clean` is irreversible and journals are the only record of what a worker learned.** The registry
+  entry, logs and journal go; only the claude session survives, resumable by sid from `events.jsonl`.
+- **Two guards are not one guard.** We had already ruled that mutating commands must not use inline `` !`cmd` ``
+  exec (spec D3). That guard was intact. The allowlist on the *read-only* commands let the same destructive
+  capability in through the back door. When you write a rule about one mechanism, check whether the other
+  mechanism reaching the same capability is still open.
+- **`events.jsonl` is the recovery path.** It is append-only and `fleet clean` does not touch it. Every
+  `spawned`/`respawned` event carries `session_id` + `cwd`, which is enough to `claude --resume` a swept
+  worker. Do not let anything trim it.
