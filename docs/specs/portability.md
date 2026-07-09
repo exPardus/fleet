@@ -1,6 +1,6 @@
 # Spec: Portability (Phase 1.5) — Win/Linux/macOS
 
-**Status:** stub — findings injected (C1 Wave 1B); NOT ready-for-build (OQ resolution is C4 `spec-portability`)
+**Status:** drafting (C4 `spec-portability`, 2026-07-10) — supersedes the C1 Wave-1B stub
 **Inherits:** SPEC.md architecture, ROADMAP.md principles (esp. #5: one platform-adapter module).
 
 ## Goal
