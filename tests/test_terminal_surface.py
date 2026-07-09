@@ -690,6 +690,25 @@ class TestCollaboratorInstall:
         assert out.returncode == 0
         assert "fleet" in out.stdout
 
+    @pytest.mark.parametrize("rel", [
+        "commands", "skills", ".claude-plugin", "bin/fleet",
+        "bin/hooks/run_py.sh", "bin/fleet_statusline.py",
+        "bin/hooks/sessionstart_fleet.py",
+    ])
+    def test_shipped_surfaces_hardcode_no_absolute_fleet_home(self, rel):
+        # SPEC §14: FLEET_HOME is resolved (env -> ~/.claude/fleet-home marker
+        # -> script location), never baked in. `commands/fleet.md` shipped with
+        # a literal C:/proga/claude-fleet fallback, which reads one developer's
+        # machine on every collaborator's.
+        target = REPO / rel
+        files = sorted(target.rglob("*")) if target.is_dir() else [target]
+        for path in files:
+            if not path.is_file():
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            for needle in ("C:/proga/claude-fleet", "C:\\proga\\claude-fleet"):
+                assert needle not in text, f"{path.relative_to(REPO)} hardcodes {needle}"
+
     def test_shell_scripts_are_pinned_to_lf(self):
         # A CRLF shim dies on Linux with `\r: command not found`, and a hook's
         # exit-0 rule would make that silent.
@@ -732,6 +751,23 @@ class TestFleetHomeMarker:
         # Best-effort: init still succeeds.
         with pytest.raises(OSError):
             fleet.cmd_init(argparse.Namespace(statusline=False, force=False))
+
+    def test_init_never_writes_to_the_real_home(self, home, monkeypatch, tmp_path):
+        # Running the suite once overwrote the developer's real
+        # ~/.claude/fleet-home with a pytest tmp dir, silently repointing their
+        # SessionStart hook at a directory that no longer existed. The autouse
+        # conftest fixture sandboxes it; this test proves nothing reaches
+        # Path.home() directly.
+        real_home = tmp_path / "pretend-real-home"
+        real_home.mkdir()
+        monkeypatch.setattr(fleet.Path, "home", staticmethod(lambda: real_home))
+        (home / "worker-settings.template.json").write_text('{"hooks":{}}', encoding="utf-8")
+
+        fleet.cmd_init(argparse.Namespace(statusline=False, force=False, chain=False))
+
+        assert not (real_home / ".claude").exists(), (
+            "fleet init wrote into the real home despite the conftest sandbox"
+        )
 
     def test_hook_resolution_order_env_then_marker_then_own_location(self, sshook, tmp_path, monkeypatch):
         real = tmp_path / "real-fleet"
