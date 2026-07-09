@@ -719,3 +719,359 @@ reusing the reviewer's own transcript.
 **Not disputed:** none of F1–F19. Every finding's suggested disposition was independently verified against the cited code (`bin/fleet.py:604,620-637,875-885,182-187,218-269,3280-3314`, `.gitattributes`, `git log`/`git ls-files --eol`) and, where the review's own repro authority (WSL) applied, re-confirmed independently rather than taken on faith alone (see the WSL commands run this fix-wave, above the table).
 
 **Newly verified via WSL this fix-wave (independent of the reviewer's own transcript):** `getconf CLK_TCK` → `100`; `python3 -c "import os; print(os.sysconf('SC_CLK_TCK'))"` → `100`; `python3 --version` → `3.12.3`; `/proc/stat` contains `btime 1783626278`. Four independent confirmations, feeding D2's evidence cell.
+
+---
+
+## Re-review — fix wave 1 (spec-portability-review-2, 2026-07-10)
+**Verdict:** needs-fixes
+
+Scope: verify commit `adfacab` against the 19 findings above; hunt regressions only in the sections it
+touched (D2, D3, D4, D6, D8, the probe matrix, and — because the fix wave rewrote them — the
+`## Platform adapter interface` block and `## Test port plan (B3)`). Everything else in the spec is out
+of scope and was not re-reviewed.
+
+Repro authority used: `py -3.13` with `sys.path.insert(0,"bin"); import fleet` (read-only, against the
+real `ctime_to_iso`/`_parse_iso`/`probe_liveness`); `git show adfacab`; `git log`/`git ls-files --eol`;
+grep; `py -3.13 -m pytest tests/test_steering.py -k Boundary -q` (13 passed).
+**WSL Ubuntu was used** and is cited explicitly at each Linux claim below: `man 5 proc_pid_stat`,
+`os.sysconf('SC_CLK_TCK')`, a live scan of every `/proc/<pid>/stat` `starttime`, and a `time.mktime`
+TZ/DST experiment.
+
+The author disputed nothing. **I found no spurious fix** — every one of the 19 findings was really
+broken (F16's man-page absence and F11's direct `_PosixPlatform()` construction were both independently
+re-derived from primary sources this session, not taken from the review's transcript). The problem is the
+opposite: two of the fixes are themselves defective, and one HIGH was only half-applied.
+
+| Finding | Verdict | Evidence |
+|---|---|---|
+| F1 | **REGRESSED** | The named CRITICAL is genuinely dead: D2's formula reads neither `time.time()` nor `/proc/uptime`, so an NTP step of any size cannot move it, and an independent consumer audit confirms `turn_pid_ctime` is *only* ever differenced (`bin/fleet.py:637`) — the synthetic epoch's core premise holds. **But the fix introduces a new HIGH defect (R1): boot-relative ticks have no cross-boot identity, making a post-reboot false-`alive` reachable, which then fires `killpg` on a live unrelated process group.** |
+| F2 | **NOT-FIXED** | Only 1 of the 3 demands landed. The interface now *asserts* `image_name` must satisfy `_ALIVE_IMAGE_NAMES` and notes the 15-char/full-path forms. It still does **not** require `port-adapter-a` to record the real `comm` of a live POSIX `claude` turn, does **not** pre-authorize the cross-boundary edit to core's `_ALIVE_IMAGE_NAMES` (`bin/fleet.py:604`) that a mismatch would force, and does **not** drop or justify `"cmd"`. Surviving failure below the table. |
+| F3 | FIXED | D4 + interface: "the adapter returns the sentinel `("claude", None)` … so core's name check (`fleet.py:628`) passes BEFORE it ever reaches the ctime-is-None branch (`fleet.py:630`)." Traced against real code: `"claude" in "claude"` → passes `:628`; `ctime is None` → `"unknown"` at `:630-632`. The branch is now reachable from its own trigger. |
+| F4 | FIXED | Interface: `def kill_process_tree(self, pid, killpg=None)` with `killpg = killpg or os.killpg` resolved in the body, plus a module-top `import signal  # F4: never bind a POSIX-only stdlib name in a default argument or class body`. The general rule is stated, as F4 demanded. |
+| F5 | FIXED | Interface: "`ctime` MUST be tz-aware UTC on every branch (F5)." Linux satisfies it by construction. The macOS *mechanism* chosen to satisfy it is itself defective — filed as R2, not as an F5 failure. |
+| F6 | FIXED | D4: "**(F6 correction) the STORED `turn_pid`/`turn_pid_ctime` itself is null or fails to parse** — `probe_liveness` returns `"gone"` … on every OS today (`bin/fleet.py:620-621,635-636`), not alive-unknown." Matches shipped code exactly (re-read). All three probe-matrix rows updated. SPEC.md:382's drift filed as a pointer only, with the "must not be silently fixed by a builder editing core" clause. |
+| F7 | FIXED | D8: "`.gitattributes` **already exists**, committed in `0d09c25`". Re-verified: real content is `*.sh text eol=lf` + `bin/fleet text eol=lf` + the invariant-2 comment; `git ls-files --eol \| grep -c 'i/crlf'` → `0`. Blanket `* text=auto eol=lf` dropped; done-criterion 7 (renormalize) removed; criterion 2 now says "review". |
+| F8 | FIXED | Consumer-side note: "the `None`-check sits after the pre-claim and before the `popen` call; on `None`, `cmd_attach` prints … and returns WITHOUT calling `popen` and WITHOUT rolling the status back — the worker stays `attached`." The `fleet release`-required instruction is mandated in the printed output; done-criterion 6 checks both. |
+| F9 | FIXED | New "POSIX attach argv, pinned" subsection gives literal argv for all four branches and answers the shell-mediation question ("`sh` is a visible, explicit child argv element, never `Popen(..., shell=True)`"). One loose end recorded as R4. |
+| F10 | FIXED | "13 tests, not 11 … 2 pure source-scans … 9 Windows-hardcoded … 2 unsupported-behavior". Range corrected to `857-962`. Re-ran `pytest -k Boundary -q` → `13 passed`. `## Findings against PLAN.md` #2 corrected to match. |
+| F11 | FIXED | "**Fix: DELETE `test_posix_platform_raises_unsupported` outright, on all OSes**". Confirmed at `tests/test_steering.py:950-951` that it does `posix = fleet._PosixPlatform()` directly, so the reviewer's "fails on every OS" claim is right. The neighbouring test is now "stays untouched, forever"; the L97/L127 contradiction is gone. |
+| F12 | FIXED | D3: "compare `state[0]` only … Per-OS alphabet: **Linux `{Z, X, x}`** … **Darwin `{Z}` only**". D4 and both probe-matrix rows agree. The Darwin zombie string keeps its `[UNSETTLED — needs port-posix-smoke]` tag. The discriminator needed to *pick* the alphabet is unnamed — R5. |
+| F13 | FIXED | D4: "`hidepid=1` … **EACCES/`PermissionError`** → alive-unknown … `hidepid=2` … **ENOENT/`FileNotFoundError`** → **definitely-gone**". The load-bearing clause is now explicit: "**fleet only ever probes its own same-user worker PIDs**". |
+| F14 | FIXED | D5: "Delivering env in Phase 2.5 WILL require either changing the returned shape … or adding a new adapter method — this is a real, expected Phase-2.5 interface change, not a settled contract." The lifecycle half is deferred **with a named owner** (Phase 2.5 `providers`), which is what makes the residual acceptable rather than hand-waving. |
+| F15 | FIXED | D10: "**`macos-latest` CI DOES exercise D3's probe**"; D3's residual narrowed to "unverified against a *real operator workflow*"; the D3 cell and the macOS probe-matrix row both cross-reference the reconciliation, so `port-ci` and `port-test-suite` cannot read them as contradictory. |
+| F16 | FIXED | **Independently re-settled on WSL**, because a spurious fix here would bake a reviewer error into the contract. `man 5 proc_pid_stat \| col -b` gives, for field 2, only: *"The filename of the executable, in parentheses. Strings longer than TASK_COMM_LEN (16) characters … are silently truncated."* The sentence the first draft quoted is **not on that page**. The reviewer was right; D2 now attributes the last-`)` rule to reasoning. (Serendipity: WSL `/proc/324/stat` reads `324 ((sd-pam)) S …` — a real `comm` containing parentheses. The reasoning is not merely sound, it is observed.) `etimes` downgraded to `[UNVERIFIED — no macOS box]`; the Leopard mirror flagged era-specific. |
+| F17 | FIXED | D9 now names the load-bearing fact: PEP 604 unions "do not force a 3.10 floor **only because** `bin/fleet.py:20` is `from __future__ import annotations` … **must not be removed**." Confirmed `bin/fleet.py:20` is exactly that import. Grep list extended. |
+| F18 | FIXED | Probe-matrix Windows row: "C2 is merged and closed (`48a50e0`) … Re-tagged: **unowned Windows-only residual, out of portability scope**." Scope §: "**review of the existing per-OS shims**". Confirmed all three (`bin/fleet`, `bin/fleet.cmd`, `bin/hooks/run_py.sh`) are tracked. D8's "future" wording dropped. |
+| F19 | FIXED | D7's Owner cell is now `port-adapter-b`; the residual reads `DEFERRED (demand-gated — F19 disposition)` with an explicit re-vet trigger; `## Done criteria` gained a "**Not a done criterion (F19 — explicit, not silently dropped)**" line. |
+
+**Spurious fixes: none.** F16 and F11 — the two findings most likely to have been reviewer errors, and
+the two whose "fixes" would have been most costly to bake in — were each re-derived from primary sources
+this session. Both hold.
+
+### F2's surviving failure
+
+The interface block now asserts a contract without giving the builder any way to satisfy or falsify it:
+
+> `image_name` MUST satisfy core's `_ALIVE_IMAGE_NAMES` substring test (fleet.py:604,628) or
+> `probe_liveness` returns "gone" regardless of ctime (F2) — Linux returns `/proc/<pid>/stat`'s `comm`
+> (TASK_COMM_LEN-truncated to 15 chars — "claude"/"node" fit with room to spare)
+
+"Fit with room to spare" answers the *truncation-length* question. It presumes the answer to the
+question F2 actually asked: **is a live POSIX `claude --print` turn's direct `Popen` child named
+`claude` or `node` at all?** Core's own comment (`bin/fleet.py:597-603`) explains that `"cmd"`/`"node"`
+are there because a *Windows* `claude.cmd` npm install re-parents through `cmd.exe`. Nothing in that
+reasoning transfers. If the POSIX child is a `sh` wrapper, a venv shim, or a renamed launcher, every
+probe of every worker returns `"gone"` on the first `fleet status`, deterministically → mass false-dead
+→ `respawn` double-launch. Done criterion 7 records `python3 --version` and `SC_CLK_TCK`; it does not
+record `comm`. So `port-adapter-a` still cannot discover this before `port-posix-smoke`, which runs after
+the adapter merges — F2's stated failure, verbatim, unchanged.
+
+Worse, the F3 sentinel makes the wrong workaround look sanctioned: a builder told both "`image_name` MUST
+satisfy `_ALIVE_IMAGE_NAMES`" and "on a probe-read failure return the literal `"claude"`" will reasonably
+hardcode `"claude"` whenever the real `comm` misses — silently disabling the PID-reuse image guard on
+POSIX. The spec must forbid that in the same breath as it mandates the sentinel.
+
+**Required:** (1) `port-adapter-a` MUST record the observed `comm` of a live POSIX `claude` turn as
+evidence; (2) the spec MUST pre-authorize extending core's `_ALIVE_IMAGE_NAMES` in that same change,
+since the set is core and the adapter cannot reach it; (3) `"cmd"` MUST be dropped from the POSIX
+reasoning or justified; (4) the sentinel MUST be stated as legal *only* on the alive-unknown probe-read
+path, never as a fallback for a real-but-unmatched `comm`.
+
+### Regressions introduced by the fix wave
+
+#### R1 — HIGH — The synthetic epoch trades an NTP-step false-`gone` for a cross-reboot false-`alive`, and `_interrupt_worker` then `killpg`s a live unrelated process group
+
+**Claim under review:** D2 — "(b) **Reboot** — … a `turn_pid_ctime` stored pre-reboot differs from any
+freshly-probed post-reboot process's ticks by (order of magnitude = pre-reboot uptime-at-launch) seconds,
+far outside ±2 s … (c) **PID reuse after reboot** — … the one narrow accepted residual is a coincidental
+post-reboot tick-value collision … the same *class* of vanishingly-unlikely accepted residual this
+codebase already documents."
+
+**Why it is wrong:** Both sentences are load-bearing and both fail in the deployment the ROADMAP already
+plans for.
+
+1. **"Order of magnitude = pre-reboot uptime-at-launch" is only large if the worker launched long after
+   boot.** ROADMAP Phase 2's service-install starts the fleet manager from a logon-triggered task. A
+   manager that starts at logon spawns its workers *inside the boot burst*, so uptime-at-launch is
+   single-digit seconds and the stored synthetic ctime is `1970-01-01T00:00:3xZ`. A process launched at a
+   similar boot offset on the *next* boot matches it within ±2 s.
+
+2. **"Same class of vanishingly-unlikely residual" is a false equivalence.** The existing residual
+   (`bin/fleet.py:597-603`) is *"a reused pid landing on an unrelated cmd/node/claude process within 2 s
+   of the recorded ctime"* — where ctime is an **absolute wall-clock instant**. To collide, an unrelated
+   process must have started inside a 4-second window of real time that lies in the past and can never
+   recur. Under the synthetic epoch the collision condition becomes *"started within 2 s of the same
+   **boot offset**"* — a condition that **recurs on every boot**, and that boot itself makes dense. One is
+   a measure-zero coincidence; the other is a structural property of the representation.
+
+3. **The two required coincidences are positively correlated, not independent.** Linux allocates PIDs
+   sequentially from a counter that also resets at boot, advanced by the same deterministic boot+logon
+   sequence that sets the tick offset. The "vanishingly unlikely" estimate silently multiplies two
+   probabilities that are not independent.
+
+4. **The ±2 s window was retained even though D2's own text says it now bounds only sub-second
+   serialization truncation.** Measured against the real functions: the `ctime_to_iso`→`_parse_iso`
+   round-trip has a supremum error of `0.999999 s` (truncated-stored vs untruncated-probed), so `±1 s` —
+   or, per F1's original disposition, an exact-tick compare — would suffice. Keeping `±2 s` leaves a
+   400-tick-wide window at `SC_CLK_TCK=100` where ~1 tick would do.
+
+**WSL evidence (run this session, real `/proc`):** `SC_CLK_TCK=100`, so the compare window is `±200
+ticks`, `400 ticks` (4 s) wide. Scanning every live `/proc/<pid>/stat` `starttime`:
+
+```
+    3343     33.43s  pid=1       systemd
+    3347     33.47s  pid=2       init-systemd(Ub
+    3376     33.76s  pid=40      systemd-journal
+    ...
+    3486     34.86s  pid=346     bash
+densest +/-2s tick window contains 19 of 26 live processes
+```
+
+The entire userspace boot — PID 1 through the login shell — spans **1.43 s**, i.e. it fits inside a
+*single* ±2 s window with room left over. Boot is precisely where the tick axis has no resolving power.
+
+**Concrete failure:**
+1. Manager auto-starts at logon (ROADMAP Phase 2). Worker `beta` is `working`; `turn_pid = P`;
+   `turn_pid_ctime = 1970-01-01T00:00:37Z` (37 s of ticks).
+2. Power loss / reboot. `state/registry.json` persists `beta` as `working` with `turn_pid = P`. Nothing
+   invalidates `turn_pid` on boot — the spec explicitly declined a boot-id field.
+3. Boot #2, same logon path, same deterministic sequence. The manager spawns worker `alpha`; its
+   `claude`/`node` child gets PID `P` (sequential allocator, reset at boot) at ~36.2 s of ticks.
+4. `fleet status`/`send`/`kill` on `beta` → `probe_liveness`: PID exists; `comm` is `node` → passes
+   `_ALIVE_IMAGE_NAMES`; `|3620 − 3700| ticks = 0.8 s ≤ 2 s` → **`"alive"`**. `beta` is pinned `working`
+   forever with no live process of its own (SPEC §11's reboot row says it should read gone).
+5. The operator runs `fleet kill beta`. `_interrupt_worker` gates the kill on the ctime probe —
+   `if not pid_alive(pid, ctime_iso, ...): return "not_running"` (`bin/fleet.py:3116`) — the gate
+   **passes**, and `kill_process_tree(pid)` (`:3118`) fires: `killpg(P, SIGKILL)`.
+   **Fleet SIGKILLs worker `alpha`'s process group while trying to kill `beta`.**
+
+This falsifies the original review's own Pass-3 item (d) — *"`killpg` never fires on a reused pgid — every
+kill path gates on the ctime probe first"* — which was true of the wall-clock representation and is not
+true of this one. The failure *direction* is `alive`, not `gone`: it does **not** double-launch (invariants
+5 and 7 hold), which is why this is HIGH and not CRITICAL. It wedges the state machine and it kills a live
+process. Pre-fix D2 could not produce this: a recomputed wall-clock ctime for a post-reboot process is
+always "now", never within 2 s of a pre-reboot launch instant. The defect is strictly new.
+
+Fairness note: the review's own suggested disposition ("compare for exact equality, ±1 tick") has the same
+hole, one 400th as wide. The author chose the wider of the two and then reasoned the residual away by
+citing a comment about a structurally different residual.
+
+**Suggested disposition:** D2 must stop calling this "the same class" of residual, must quantify it for the
+boot-started-manager case, and must then pick one of these explicitly — this is exactly the cross-cutting
+decision F1's disposition said the spec must make rather than leave to `port-adapter-a`:
+- **(a) cheapest, no schema change:** on every `fleet` invocation compare `/proc/sys/kernel/random/boot_id`
+  against a value cached in `state/`; on mismatch, null out every record's `turn_pid`/`turn_pid_ctime`
+  before any probe runs. A null stored ctime is already `definitely-gone` (F6/D4) — the correct post-reboot
+  verdict — and this needs no per-probe change.
+- **(b) closes it completely:** add a `turn_pid_boot_id` companion field. That *is* a schema change; say so,
+  rather than declaring one unnecessary.
+- **(c) narrows it ~400×, does not close it:** tighten the Linux compare to exact tick equality. The ±2 s
+  constant is **core** (`bin/fleet.py:637`), so this is a cross-boundary edit the spec must pre-authorize.
+
+Whichever is chosen, D2 must state that `starttime` ticks carry **no cross-boot identity**, so `±2 s` on
+this axis is not the same guarantee it is on the Windows/macOS wall-clock axis.
+
+---
+
+#### R2 — MED — D3's new `time.mktime` local→UTC conversion re-introduces F1's failure class on macOS: it makes a differenced-only quantity depend on the process's timezone environment
+
+**Claim under review:** D3 (the F5 fix) — "`epoch = time.mktime(naive.timetuple()); ctime =
+datetime.fromtimestamp(epoch, tz=timezone.utc)` … `[UNSETTLED — needs port-posix-smoke]` whether this
+local→UTC round-trip is exact across a DST boundary on real Darwin."
+
+**Why it is wrong:** The `[UNSETTLED]` tag guards the harmless half of the hazard, and the spec never names
+the harmful half.
+
+*The harmless half.* `naive.timetuple()` yields `tm_isdst = -1`, so `mktime` must guess on the repeated
+local hour. That guess is **deterministic for a given input and timezone** — WSL, this session:
+
+```
+repeated mktime on ambiguous   2026-11-01 01:30 -> [1793511000.0, 1793511000.0, 1793511000.0]  deterministic: True
+repeated mktime on nonexistent 2026-03-08 02:30 -> [1772955000.0, 1772955000.0, 1772955000.0]  deterministic: True
+```
+
+Store and probe both run the same function on the same immutable `lstart` string, so a wrong-but-consistent
+guess **cancels in the difference**. DST ambiguity alone cannot break the ±2 s compare.
+
+*The harmful half.* `time.mktime` reads the process's effective local timezone. Same naive input, same
+session, three environments:
+
+```
+UTC                  epoch=1783606981  utc=2026-07-09T14:23:01+00:00
+America/New_York     epoch=1783621381  utc=2026-07-09T18:23:01+00:00
+Asia/Tokyo           epoch=1783574581  utc=2026-07-09T05:23:01+00:00
+```
+
+A 4-hour and a 9-hour shift. The stored value is written by whichever process ran `fleet spawn`/`send`
+(`launch_turn` → `ctime_to_iso`, `bin/fleet.py:1348`); the probed value by whichever process ran
+`fleet status`/`kill` (`recompute_status` → `probe_liveness`). If the effective timezone differs between
+those two processes — an explicit `TZ=` in a launchd/cron/CI environment, or an operator changing the system
+timezone mid-turn — the compare sees hours of difference, returns `"gone"`, takes `working→dead`, and
+`fleet respawn` starts a second live `claude` in the same cwd. **That is F1's failure class, on macOS,
+introduced by F1's sibling fix.**
+
+The conversion buys nothing. An audit of every `turn_pid_ctime` consumer at HEAD (`bin/fleet.py`,
+`bin/fleet_statusline.py`, `bin/hooks/*`, `commands/*`, `status_snapshot()`, `append_event`, every `--json`
+path, `doctor`) confirms the field is never rendered, sorted, aged, or wall-clock-compared — the only
+arithmetic on it anywhere is `abs((ctime - recorded).total_seconds()) <= 2.0` at `bin/fleet.py:637`. D2
+relies on exactly that property to justify its synthetic epoch. D3 then pays a real correctness cost for an
+absolute meaning nothing consumes.
+
+**Concrete failure:** `fleet spawn` from an interactive shell (`TZ` unset → `/etc/localtime`). A
+launchd-managed watchtower (Phase 2) later runs `fleet status` with `TZ=UTC` in its plist. Every macOS
+worker probes `gone` → `dead` → the documented recovery lever `fleet respawn` double-launches. Invariants
+5 and 7.
+
+**Suggested disposition:** Apply D2's own trick, for which D3 already has every precondition: `lstart` is a
+once-captured, immutable string for the life of the PID, so label it without converting —
+`ctime = naive.replace(tzinfo=timezone.utc)`. This satisfies F5's tz-aware-UTC contract, is exact, is
+timezone-environment-independent, needs no `time` import, and is consistent with the difference-only
+contract D2 already depends on. Then delete the `[UNSETTLED — DST]` tag: with no conversion there is no DST
+question. If the author instead keeps `mktime`, D3 must state that `turn_pid_ctime` on macOS is valid only
+within a fixed-`TZ` process family, and name who guarantees that.
+
+---
+
+#### R3 — MED — The pinned `get_process_info` signature has no injection point, but the `TestPosixPlatformBehavior` class the same fix wave mandates requires one. This is F9's deadlock, relocated
+
+**Claim under review:** Interface — `def get_process_info(self, pid):` (no further parameters). Test port
+plan (F11's replacement class) — "returns the `("claude", None)` alive-unknown sentinel shape (F3) when a
+fake `/proc` read is monkeypatched to raise `PermissionError` (Linux) — **via an injectable read-function
+parameter** mirroring `get_process_info=None`'s injection pattern elsewhere in this file."
+
+**Why it is wrong:** The `get_process_info=None` pattern the test plan points at is **core's**
+(`probe_liveness(pid, ctime_iso, get_process_info=None)`, `bin/fleet.py:607`), not the adapter's. Neither
+`_WindowsPlatform.get_process_info(self, pid)` (`:218`) nor the pinned `_PosixPlatform` signature has any
+injection parameter. `kill_process_tree` got one (`killpg=None`, F4) and `build_attach_argv` has `which=`;
+`get_process_info` has none — and the fix wave's own new test class demands one.
+
+**Concrete failure:** identical in kind to F9, the finding this fix wave was supposed to close.
+`port-adapter-a` implements the pinned two-argument signature. `port-test-suite` cannot write the mandated
+sentinel test without either changing the adapter signature (a different task, a different wave) or
+monkeypatching `builtins.open` — which the test plan did not ask for and which does not reach the macOS `ps`
+branch at all. The two tasks deadlock, or the test author invents the contract.
+
+**Suggested disposition:** Pin it. Add `read=None` (Linux: the `/proc/<pid>/stat` reader) and `run=None`
+(macOS: the `ps` runner) to `get_process_info`'s specified signature, resolved inside the body per the F4
+rule, and say in the interface block that they exist solely as test injection points and that no core call
+site passes them. Then state which of the two the macOS branch of the sentinel test uses.
+
+---
+
+#### R4 — LOW — The pinned `$TERMINAL` argv calls `shlex.quote`, and the interface block's own import note lists only `signal`
+
+**Claim under review:** "POSIX attach argv, pinned" — `[$TERMINAL, "-e", "sh", "-c", f"cd
+{shlex.quote(cwd)} && claude --resume {shlex.quote(sid)}"]`; interface block — `import signal  # module
+top-level -- F4: never bind a POSIX-only stdlib name in a default argument or class body`.
+
+**Why it is wrong:** `bin/fleet.py` imports neither `shlex` nor `signal` today (`grep -n "^import
+\(time\|shlex\|signal\)" bin/fleet.py` → only `32:import time`). F4's fix correctly added the `signal` note;
+F9's new argv introduced a second missing import in the same commit and did not add one. Cosmetic —
+`import shlex` is unconditional and portable — but the interface block is the copy-me artifact, and it is
+one import short of running.
+
+**Suggested disposition:** `import shlex` alongside `import signal` in the interface block's header.
+
+---
+
+#### R5 — LOW — F12's per-OS state alphabet needs a Linux-vs-Darwin discriminator the spec never names, and invariant 8's lint constrains where it may live
+
+**Claim under review:** D3 — "Per-OS alphabet: **Linux `{Z, X, x}`** … **Darwin `{Z}` only**".
+
+**Why it is wrong:** A single `_PosixPlatform` serves both OSes. D2 (`/proc`) vs D3 (`ps`) already implies an
+internal discriminator, and F12 adds a third site that needs one, but the spec never says what it is
+(`sys.platform == "darwin"`? `platform.system()`?) or where it may appear, given that
+`TestPlatformAdapterBoundary.test_no_os_branches_outside_adapter_block` is the mechanical enforcement of
+invariant 8. The fix wave sharpened the need without answering it.
+
+**Suggested disposition:** One sentence in the interface block: name the discriminator, state that it lives
+inside the adapter block, and confirm the source-scan lint's block boundaries cover it.
+
+### CRITICAL-fix attack log
+
+What I threw at the synthetic epoch, and what happened.
+
+1. **"Is the difference-only claim true?"** — *survived.* Grepped `turn_pid_ctime` across the whole repo,
+   not just `bin/fleet.py`: `bin/fleet_statusline.py`, `bin/hooks/*`, `commands/*`, `status_snapshot()`,
+   every `append_event` call, both `--json` branches of `cmd_status`, `cmd_peek`, `cmd_result`, and all four
+   `_doctor_check_*`. The field is stored (`:1348,1354,2346,2898,2993,3733`), cleared (`:3829`), or passed
+   straight through to `pid_alive`/`probe_liveness` (`:1622,2619,3113,4210,4227`). It is decoded to a
+   `datetime` in exactly one place — `probe_liveness` — and the only arithmetic is
+   `abs((ctime - recorded).total_seconds()) <= 2.0`. It is **not** in `status_snapshot()`'s returned dict
+   (so no view can render it), **never** printed by any CLI command, **never** written to `events.jsonl`,
+   and **no** doctor check computes `now - turn_pid_ctime` (all staleness math uses `last_activity`,
+   `attached_since`, or `limit_reset_at`). No statusline will print a 1970 date. The author's central
+   premise holds, and the manager's grep is independently confirmed.
+
+2. **`_parse_iso` round-trip** — *survived.* Driven against the real functions via
+   `sys.path.insert(0,"bin"); import fleet`. `ctime_to_iso` truncates (`strftime("%Y-%m-%dT%H:%M:%SZ")`, no
+   `%f`), so `probe_liveness` compares a truncated stored value against an untruncated probed one; the error
+   is exactly the discarded fractional part, supremum `0.999999 s`, never reaching `1.0`. Well inside ±2 s
+   for every `SC_CLK_TCK ∈ {100, 250, 1000}` and every uptime from 1 tick to 10 years. No overflow: at
+   `SC_CLK_TCK=1000` a 100-year uptime lands at `2069-12-07`, and `datetime.max` would need ~8000 years of
+   uptime. No year-<1000 zero-padding case exists (the base is 1970).
+
+3. **The tz-aware/naive knife-edge** — *survived, but the margin is thinner than the spec admits.* On this
+   UTC+5 box, `naive(1970,1,1,0,0,0).astimezone(timezone.utc)` raises `OSError(22, 'Invalid argument')` — a
+   pre-epoch UTC instant the Windows CRT rejects. `ctime_to_iso` calls exactly that method
+   (`bin/fleet.py:187`). D2's `datetime(1970,1,1,tzinfo=timezone.utc)` is aware, so `astimezone` is a no-op
+   relabel and the path is safe **only because** the spec spells out `tzinfo=timezone.utc`. The near-epoch
+   synthetic value puts the F5 tz-awareness contract on the critical path for a *crash*, not merely a wrong
+   offset. No change required; worth one clause in D2 so that no builder "simplifies" it to
+   `datetime(1970,1,1)`.
+
+4. **Cross-OS registry mixing** — *not reachable, and here is precisely why.* A record's ctime is real-epoch
+   (Windows/macOS) or boot-relative (Linux), and both are compared by the same core ±2 s constant, so a mixed
+   registry would compare incommensurable quantities. But `probe_liveness` calls `PLATFORM.get_process_info`,
+   and `PLATFORM` is selected from the **running** OS (`bin/fleet.py:340`). A Linux fleet reading a
+   Windows-written record therefore probes a Linux PID and compares a boot-relative probe against a
+   real-epoch stored value — off by decades → `"gone"`. Since a null or stale stored ctime is *also* `"gone"`
+   (F6/D4), the mixed-registry outcome is the same fail-safe verdict a moved registry already produces; there
+   is no path to a false `alive`. Note this is **not** guaranteed by any invariant: a worker's `cwd` is
+   immutable (invariant 5) but `FLEET_HOME`/`state/` is not pinned to an OS by any invariant or doctor check,
+   so a synced or shared `state/` is *possible*. It is safe by consequence, not by construction. **Not a
+   fix-wave defect and I raise no finding** — but D2 asserts the fix is safe "with zero core changes" without
+   naming this reasoning, and should state it in one sentence rather than leave a reader to reconstruct it.
+
+5. **The reboot argument, attacked in the direction the author did not test** — *broke it.* The author tested
+   stale-pre-reboot-ctime vs fresh-post-reboot-process (large tick delta → `gone`, the safe direction). The
+   other direction — a worker launched `T` seconds after boot #1 vs an unrelated process launched `T ± 2`
+   seconds after boot #2 — is admitted by the ±2 s window, and it is *dense* rather than rare: boot compresses
+   the whole userspace startup into a sub-2-second tick band (WSL: 19 of 26 live processes inside one ±2 s
+   window; PID 1 → login shell spans 1.43 s), and PID allocation resets at boot and advances through the same
+   deterministic sequence, making the PID coincidence and the tick coincidence **correlated**, not
+   independent. ROADMAP Phase 2's logon-triggered manager puts fleet's own workers squarely in that band. The
+   consequence is a false `"alive"` — no double-launch, but a record pinned `working` forever, and
+   `_interrupt_worker`'s ctime gate (`bin/fleet.py:3116`) passes, firing `killpg` on a live unrelated process
+   group at `:3118`. Filed as **R1**.
+
+**Verdict on the CRITICAL fix:** the NTP-step failure is genuinely and correctly eliminated, and the
+difference-only premise it rests on is true for this codebase at HEAD — attacks 1 through 4 all failed to
+break it. But the representation the fix chose carries **no cross-boot identity**, and the spec reasons that
+gap away by equating it with an unrelated residual. The CRITICAL does not survive as a CRITICAL. It survives
+as a HIGH pointing the other way.
+
+**Gate.** One HIGH `NOT-FIXED` (F2) and one HIGH `REGRESSED` (R1). `docs/specs/portability.md`'s
+`**Status:**` line therefore stays `drafting`. Nothing in this re-review bears on the C4 **build** waves in
+any case — they remain gated on Altai's `SOAK GATE 1 SIGNED` line in `knowledge/lessons.md`, which still does
+not exist.
