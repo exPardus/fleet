@@ -1,0 +1,10 @@
+#!/bin/sh
+# POSIX entry point for the fleet CLI.
+#
+# `bin/fleet.cmd` only resolves from cmd.exe/PowerShell: bash does not honor
+# PATHEXT, so `fleet status` from Git Bash -- or from a slash command's
+# inline !`fleet status`, which runs under a shell -- finds nothing and fails
+# silently. This extensionless shim is what makes `fleet` work from bash on
+# every OS.
+here=$(dirname "$0")
+exec sh "$here/hooks/run_py.sh" "$here/fleet.py" "$@"

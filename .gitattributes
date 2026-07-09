@@ -1,0 +1,8 @@
+# Shell scripts must keep LF endings. A CRLF `run_py.sh` checked out on Linux
+# or macOS dies with `\r: command not found`, and because a hook must exit 0
+# on every failure (invariant 2) it would die SILENTLY -- a collaborator would
+# just never see the fleet briefing.
+*.sh text eol=lf
+
+# The extensionless POSIX CLI shim has the same constraint.
+bin/fleet text eol=lf

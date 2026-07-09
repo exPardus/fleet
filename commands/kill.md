@@ -1,6 +1,6 @@
 ---
-description: Interrupt a worker if running, then mark it dead. Terminal — only respawn brings it back.
-argument-hint: <worker-name>
+description: 'Interrupt a worker if running, then mark it dead. Terminal — only respawn brings it back.'
+argument-hint: '<worker-name>'
 ---
 
 Kill fleet worker `$1`.
