@@ -1,0 +1,14 @@
+{
+  "name": "claude-fleet",
+  "description": "claude-fleet: one Claude Code manager session that spawns, steers and monitors worker sessions across projects.",
+  "owner": {
+    "name": "Altai"
+  },
+  "plugins": [
+    {
+      "name": "fleet",
+      "source": "./",
+      "description": "Spawn, steer, monitor and hand off multiple Claude Code worker sessions across projects from one manager session."
+    }
+  ]
+}

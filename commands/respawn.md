@@ -1,6 +1,6 @@
 ---
-description: Fresh session for a worker — same name, cwd, mode; journal and drained mailbox carried over. The context-reset lever.
-argument-hint: <worker-name> [--task <text>] [--force]
+description: 'Fresh session for a worker — same name, cwd, mode; journal and drained mailbox carried over. The context-reset lever.'
+argument-hint: '<worker-name> [--task <text>] [--force]'
 ---
 
 Respawn fleet worker: `$ARGUMENTS`

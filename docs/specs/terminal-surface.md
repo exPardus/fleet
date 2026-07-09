@@ -156,8 +156,18 @@ Bundles `commands/` and `skills/fleet/SKILL.md` (moved from `skill/SKILL.md`) by
 **Plugin name is `fleet`, not `claude-fleet`** — the slash-command namespace derives from the plugin name, so `claude-fleet` would yield `/claude-fleet:status`.
 
 **Build findings (verified live 2026-07-09, claude 2.1.204), corrections to the original design:**
-- Declaring `"commands": "./commands"` / `"skills": "./skills"` / `"hooks": "./hooks/hooks.json"` path keys did not work; the reference plugin that does work on this machine (caveman) declares none of them and inlines its hooks object. The manifest now matches that shape. Do not re-add the path keys without evidence.
-- `claude --plugin-dir <path>` loads the plugin for a session but **does not register its SessionStart hook** — the briefing never fires. The hook script itself is correct: registered by hand in a project's `.claude/settings.json` it fires and injects real worker names (proved end-to-end from a neutral cwd, so the model could not have read the registry off disk). Testing plugin hooks therefore requires a real install (marketplace / `enabledPlugins`), not `--plugin-dir`.
+- Declaring `"commands": "./commands"` / `"skills": "./skills"` / `"hooks": "./hooks/hooks.json"` path keys did not work; the reference plugin that does work on this machine (caveman) declares none of them and inlines its hooks object. The manifest now matches that shape. Do not re-add the path keys without evidence. `claude plugin validate .` is the check; it also rejects a string `author` (must be an object) and unquoted YAML frontmatter beginning with `[`.
+- `claude --plugin-dir <path>` loads the plugin for a session but **does not register its SessionStart hook** — the briefing never fires. Testing plugin hooks requires a real install (`claude plugin marketplace add` + `claude plugin install`), not `--plugin-dir`.
+
+### 4.5.1 Making it installable for someone else
+
+Three defects surfaced only when the plugin was actually installed and driven. Each was silent.
+
+- **`FLEET_HOME` cannot be resolved from the script's own location.** A marketplace-installed plugin runs from a **cache copy** of this repo, whose `state/` is gitignored and empty. The hook would report a fleet of zero workers while the operator's real fleet is running. Fix: `fleet init` stamps `~/.claude/fleet-home` with the absolute home; the hook resolves `$FLEET_HOME` → marker → own location, and ignores a marker pointing at a missing directory. Verified against a real clone with an empty `state/`.
+- **`py -3.13` is Windows-only.** A plugin hook command is one string run through a shell and cannot branch on OS. Fix: `bin/hooks/run_py.sh` resolves an interpreter (`$FLEET_PYTHON` → `py -3.13` → `python3.x` → `python`, requiring ≥ 3.10) and exits 0 when none exists, preserving invariant 2.
+- **`fleet` did not resolve from bash.** `bin/fleet.cmd` only works from cmd.exe/PowerShell; bash ignores `PATHEXT`. Every read-only slash command inlines `` !`fleet status` ``, which runs under a shell — so `/fleet:status` produced **silent empty output**. Fix: `bin/fleet`, an extensionless POSIX shim, committed mode 755.
+
+Both shell scripts are pinned to LF in `.gitattributes`: a CRLF checkout on Linux fails with `\r: command not found`, and the exit-0 rule would swallow it.
 
 The SPEC §3 repo-layout block gains the new paths.
 

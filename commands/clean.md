@@ -1,5 +1,5 @@
 ---
-description: Remove dead workers and their logs, mailboxes, and journals. Destructive and irreversible.
+description: 'Remove dead workers and their logs, mailboxes, and journals. Destructive and irreversible.'
 ---
 
 Clean dead fleet workers.

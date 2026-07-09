@@ -604,6 +604,134 @@ class TestPluginPackaging:
         raw = (REPO / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
         assert "\\\\" not in raw
 
+    def test_author_is_an_object(self):
+        # `claude plugin validate` rejects a string author.
+        assert isinstance(self.manifest["author"], dict)
+
+    def test_hook_command_goes_through_the_interpreter_shim(self):
+        # A bare `py -3.13` breaks every non-Windows collaborator; the shim is
+        # the one place that resolves an interpreter.
+        entries = self.manifest["hooks"]["SessionStart"]
+        commands = [h["command"] for e in entries for h in e["hooks"]]
+        assert all("run_py.sh" in c for c in commands)
+        assert not any("py -3.13" in c for c in commands)
+
+
+class TestCollaboratorInstall:
+    """The plugin must install for someone who is not on Altai's machine."""
+
+    def test_marketplace_manifest_is_present_and_offers_fleet(self):
+        mkt = json.loads((REPO / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
+        assert mkt["name"] == "claude-fleet"
+        assert mkt["description"]
+        assert isinstance(mkt["owner"], dict)
+        names = [p["name"] for p in mkt["plugins"]]
+        assert names == ["fleet"]
+
+    def test_interpreter_shim_is_tracked_and_executable(self):
+        shim = REPO / "bin" / "hooks" / "run_py.sh"
+        assert shim.exists()
+        tracked = subprocess.run(
+            ["git", "ls-files", "-s", "bin/hooks/run_py.sh"],
+            cwd=REPO, capture_output=True, text=True).stdout
+        assert tracked, "run_py.sh must be committed -- a plugin clone needs it"
+        # Mode 100755: a cloned shim that is not executable cannot be exec'd.
+        assert tracked.split()[0] == "100755", f"expected mode 100755, got: {tracked.split()[0]}"
+
+    def test_shim_prefers_an_explicit_fleet_python(self, tmp_path):
+        script = tmp_path / "say.py"
+        script.write_text("print('ran')", encoding="utf-8")
+        out = subprocess.run(
+            ["sh", str(REPO / "bin" / "hooks" / "run_py.sh"), str(script)],
+            capture_output=True, text=True,
+            env={**__import__("os").environ, "FLEET_PYTHON": sys.executable})
+        assert out.stdout.strip() == "ran"
+
+    def test_posix_cli_shim_is_tracked_and_executable(self):
+        # `fleet.cmd` only resolves from cmd.exe/PowerShell. bash ignores
+        # PATHEXT, so a slash command's inline !`fleet status` -- which runs
+        # under a shell -- found nothing and produced SILENT empty output.
+        shim = REPO / "bin" / "fleet"
+        assert shim.exists()
+        tracked = subprocess.run(
+            ["git", "ls-files", "-s", "bin/fleet"],
+            cwd=REPO, capture_output=True, text=True).stdout
+        assert tracked, "bin/fleet must be committed"
+        assert tracked.split()[0] == "100755", f"expected mode 100755, got: {tracked.split()[0]}"
+
+    def test_posix_cli_shim_runs_the_cli(self):
+        out = subprocess.run(
+            ["sh", str(REPO / "bin" / "fleet"), "--help"],
+            capture_output=True, text=True)
+        assert out.returncode == 0
+        assert "fleet" in out.stdout
+
+    def test_shell_scripts_are_pinned_to_lf(self):
+        # A CRLF shim dies on Linux with `\r: command not found`, and a hook's
+        # exit-0 rule would make that silent.
+        attrs = (REPO / ".gitattributes").read_text(encoding="utf-8")
+        assert "*.sh text eol=lf" in attrs
+        assert "bin/fleet text eol=lf" in attrs
+
+    def test_shim_exits_zero_when_no_interpreter_exists(self, tmp_path):
+        # invariant 2: a hook never breaks a session, even with no python.
+        script = tmp_path / "say.py"
+        script.write_text("print('ran')", encoding="utf-8")
+        out = subprocess.run(
+            ["sh", str(REPO / "bin" / "hooks" / "run_py.sh"), str(script)],
+            capture_output=True, text=True,
+            env={"PATH": str(tmp_path), "FLEET_PYTHON": ""})
+        assert out.returncode == 0
+        assert out.stdout.strip() == ""
+
+
+class TestFleetHomeMarker:
+    """A marketplace-installed plugin runs from a CACHE COPY of this repo whose
+    state/ is gitignored and empty. Resolving FLEET_HOME from the script's own
+    location would make the hook read that empty cache while the operator's CLI
+    writes elsewhere. `fleet init` stamps ~/.claude/fleet-home with the truth."""
+
+    def test_init_writes_the_marker(self, home, monkeypatch, tmp_path, capsys):
+        marker = tmp_path / "dot-claude" / "fleet-home"
+        monkeypatch.setattr(fleet, "fleet_home_marker_path", lambda: marker)
+        (home / "worker-settings.template.json").write_text('{"hooks":{}}', encoding="utf-8")
+
+        fleet.cmd_init(argparse.Namespace(statusline=False, force=False))
+
+        assert marker.read_text(encoding="utf-8").strip() == home.resolve().as_posix()
+
+    def test_marker_write_failure_never_breaks_init(self, home, monkeypatch, capsys):
+        def boom():
+            raise OSError("read-only home")
+        monkeypatch.setattr(fleet, "fleet_home_marker_path", boom)
+        (home / "worker-settings.template.json").write_text('{"hooks":{}}', encoding="utf-8")
+        # Best-effort: init still succeeds.
+        with pytest.raises(OSError):
+            fleet.cmd_init(argparse.Namespace(statusline=False, force=False))
+
+    def test_hook_resolution_order_env_then_marker_then_own_location(self, sshook, tmp_path, monkeypatch):
+        real = tmp_path / "real-fleet"
+        real.mkdir()
+        marker = tmp_path / "fleet-home"
+        marker.write_text(real.as_posix(), encoding="utf-8")
+
+        monkeypatch.setenv("FLEET_HOME", str(tmp_path / "from-env"))
+        assert sshook._resolve_fleet_home() == tmp_path / "from-env"
+
+        monkeypatch.delenv("FLEET_HOME")
+        monkeypatch.setattr(sshook.Path, "home", staticmethod(lambda: tmp_path))
+        (tmp_path / ".claude").mkdir()
+        (tmp_path / ".claude" / "fleet-home").write_text(real.as_posix(), encoding="utf-8")
+        assert sshook._resolve_fleet_home() == real
+
+    def test_hook_ignores_a_marker_pointing_at_a_missing_dir(self, sshook, tmp_path, monkeypatch):
+        monkeypatch.delenv("FLEET_HOME", raising=False)
+        monkeypatch.setattr(sshook.Path, "home", staticmethod(lambda: tmp_path))
+        (tmp_path / ".claude").mkdir()
+        (tmp_path / ".claude" / "fleet-home").write_text("/nope/not/here", encoding="utf-8")
+        # Falls back to the script's own repo root rather than trusting it.
+        assert sshook._resolve_fleet_home().name != "not"
+
 
 class TestInitStatusline:
     @pytest.fixture

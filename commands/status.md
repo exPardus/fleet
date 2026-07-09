@@ -1,6 +1,6 @@
 ---
-description: Compact fleet status table — every worker's status, turns, cost, idle time, pending mail.
-allowed-tools: Bash(fleet:*)
+description: 'Compact fleet status table — every worker''s status, turns, cost, idle time, pending mail.'
+allowed-tools: 'Bash(fleet:*)'
 ---
 
 !`fleet status`

@@ -2,7 +2,9 @@
   "name": "fleet",
   "description": "Spawn, steer, monitor and hand off multiple Claude Code worker sessions across projects from one manager session.",
   "version": "0.1.0",
-  "author": "Altai",
+  "author": {
+    "name": "Altai"
+  },
   "keywords": ["fleet", "orchestration", "sessions", "workers"],
   "hooks": {
     "SessionStart": [
@@ -10,7 +12,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "py -3.13 \"${CLAUDE_PLUGIN_ROOT}/bin/hooks/sessionstart_fleet.py\"",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/hooks/run_py.sh\" \"${CLAUDE_PLUGIN_ROOT}/bin/hooks/sessionstart_fleet.py\"",
             "timeout": 10,
             "statusMessage": "Loading fleet status..."
           }

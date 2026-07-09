@@ -1,6 +1,6 @@
 ---
-description: Fleet health check — claude version, hook wiring, stale PIDs and attaches, orphaned mailboxes, log sizes.
-allowed-tools: Bash(fleet:*)
+description: 'Fleet health check — claude version, hook wiring, stale PIDs and attaches, orphaned mailboxes, log sizes.'
+allowed-tools: 'Bash(fleet:*)'
 ---
 
 !`fleet doctor`

@@ -153,6 +153,27 @@ def statusline_script_path() -> Path:
     return FLEET_HOME / "bin" / "fleet_statusline.py"
 
 
+def fleet_home_marker_path() -> Path:
+    """~/.claude/fleet-home -- one line: the absolute FLEET_HOME.
+
+    Written by `fleet init`. Exists because the plugin's SessionStart hook may
+    run from a MARKETPLACE CACHE COPY of this repo, whose own location is not
+    the operator's real fleet home; resolving FLEET_HOME from the script's
+    location would make the hook read an empty registry inside the cache while
+    the operator's `fleet` CLI writes somewhere else entirely."""
+    return Path.home() / ".claude" / "fleet-home"
+
+
+def _write_fleet_home_marker() -> None:
+    """Best-effort: a missing marker degrades the hook, never breaks fleet."""
+    path = fleet_home_marker_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(Path(FLEET_HOME).resolve().as_posix() + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
 def now_iso() -> str:
     """Current UTC time, second precision, matching the registry schema."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -2047,9 +2068,12 @@ def cmd_init(args) -> int:
     instance_path.parent.mkdir(parents=True, exist_ok=True)
     instance_path.write_text(rendered, encoding="utf-8")
 
+    _write_fleet_home_marker()
+
     print(f"fleet init: wrote {instance_path}")
     print(f"  python:      {Path(sys.executable).resolve().as_posix()}")
     print(f"  fleet home:  {Path(FLEET_HOME).resolve().as_posix()}")
+    print(f"  marker:      {fleet_home_marker_path()}")
 
     if getattr(args, "statusline", False):
         _install_statusline(force=getattr(args, "force", False))

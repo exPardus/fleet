@@ -1,6 +1,6 @@
 ---
-description: Spawn a new fleet worker on a task in a project directory.
-argument-hint: <name> --dir <path> --task <text|@file> [--mode bypass|accept|dontask|plan|omit] [--max-budget-usd x]
+description: 'Spawn a new fleet worker on a task in a project directory.'
+argument-hint: '<name> --dir <path> --task <text|@file> [--mode bypass|accept|dontask|plan|omit] [--max-budget-usd x]'
 ---
 
 Spawn a fleet worker with these arguments: `$ARGUMENTS`

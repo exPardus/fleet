@@ -1,6 +1,6 @@
 ---
-description: Open an interactive terminal on a worker's session — full TUI, whole history.
-argument-hint: <worker-name> [--force]
+description: 'Open an interactive terminal on a worker''s session — full TUI, whole history.'
+argument-hint: '<worker-name> [--force]'
 ---
 
 Attach an interactive terminal to fleet worker: `$ARGUMENTS`

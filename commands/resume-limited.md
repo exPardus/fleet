@@ -1,6 +1,6 @@
 ---
-description: Resume workers parked on a Claude plan usage limit whose reset horizon has passed.
-argument-hint: [worker-name] [--force-now]
+description: 'Resume workers parked on a Claude plan usage limit whose reset horizon has passed.'
+argument-hint: '[worker-name] [--force-now]'
 ---
 
 Resume usage-limit-parked fleet workers: `$ARGUMENTS`

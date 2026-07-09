@@ -25,10 +25,28 @@ from pathlib import Path
 
 MAX_CONTEXT_CHARS = 10_000
 
-_FLEET_HOME = (
-    Path(os.environ["FLEET_HOME"]) if os.environ.get("FLEET_HOME")
-    else Path(__file__).resolve().parent.parent.parent
-)
+
+def _resolve_fleet_home() -> Path:
+    """$FLEET_HOME -> ~/.claude/fleet-home marker -> this script's repo root.
+
+    The marker is load-bearing for a PLUGIN install: the plugin may be a
+    marketplace cache copy of this repo, so `parent.parent.parent` points at
+    the cache, not at the fleet the operator's CLI actually writes. `fleet
+    init` stamps the marker with the real home."""
+    env = os.environ.get("FLEET_HOME")
+    if env:
+        return Path(env)
+    try:
+        marker = Path.home() / ".claude" / "fleet-home"
+        recorded = marker.read_text(encoding="utf-8").strip()
+        if recorded and Path(recorded).is_dir():
+            return Path(recorded)
+    except (OSError, ValueError):
+        pass
+    return Path(__file__).resolve().parent.parent.parent
+
+
+_FLEET_HOME = _resolve_fleet_home()
 sys.path.insert(0, str(_FLEET_HOME / "bin"))
 
 try:
