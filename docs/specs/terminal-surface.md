@@ -181,7 +181,7 @@ The SPEC §3 repo-layout block gains the new paths.
 
 **Required `fleet.py` change:** `launch_turn` adds `FLEET_WORKER=<name>` to the child env passed to `Popen`. Nothing else in the launch-sequence contract (SPEC §6) moves — the env stamp happens where the child env is already constructed, before the pre-claim is released.
 
-### 4.7 `fleet init --statusline`
+### 4.7 `fleet init --statusline [--chain | --force]`
 
 1. Locate `~/.claude/settings.json` (create if absent).
 2. If a `statusLine` key exists and does not point at `fleet_statusline.py` → **refuse, exit 1**, naming the incumbent. `--force` overrides.
@@ -192,6 +192,14 @@ The SPEC §3 repo-layout block gains the new paths.
 Idempotent: re-running against a fleet-owned statusline rewrites it in place without a second backup churn (backup still taken; harmless).
 
 Plain `fleet init` (existing behaviour: render `state/worker-settings.json`) never touches user settings.
+
+**`--chain` — composing with an existing statusline.** Claude Code allows exactly ONE `statusLine` command, so an operator already running `ccusage` or `caveman` would otherwise have to choose. `--chain` captures the incumbent command into `state/statusline-chain.json` and installs fleet's; at render time fleet runs each delegate, prints its rows, then prints fleet's row beneath.
+
+This is the **one** place fleet's statusline spawns a subprocess, and a deliberate, opt-in exception to D1: the delegate is a command the operator was already paying for on every refresh, and fleet's own row still costs zero subprocesses. Guards:
+- A delegate that exits nonzero, hangs past `DELEGATE_TIMEOUT_SECONDS` (4 s), or emits unencodable bytes is **dropped** — fleet's row always prints.
+- A fleet-owned incumbent is never captured as a delegate: chaining fleet's statusline into itself would make it invoke itself once per refresh, forever.
+- `--force` overwrites the incumbent outright and chains nothing.
+- The delegate command is executed through a shell. It comes from the operator's own `settings.json`, which is already an arbitrary-command surface; chaining moves no trust boundary.
 
 ## Error handling
 
