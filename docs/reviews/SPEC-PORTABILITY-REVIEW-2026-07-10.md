@@ -1594,3 +1594,395 @@ spec, and does not promote the spec it amended (`87a85de`; PROCESS CHANGE #1,
 **What the reviewer should attack first:** the eleven-row core-edit table in F33. Rows 8 and 9 exist because
 a `grep` contradicted a list that two reviews and one ratified PLAN bullet had agreed on. Run the greps
 again. If a twelfth site exists, this wave failed exactly the way its two predecessors did.
+
+---
+
+## Review — spec-boot-identity (F33)
+
+**Reviewer:** `spec-boot-identity-review` (adversarial, third spec artifact of the C4 spec wave).
+**Under review:** `28d5d81` (`docs/SPEC.md` → v2.2, appendix F33; `docs/specs/portability.md` D2 → citation).
+**Verdict: `needs-fixes`.** CRITICAL=0 **HIGH=1** MED=0 LOW=2. `portability.md` **stays `drafting`.**
+Nothing in this review unblocks the C4 build waves — they remain gated on Altai's `SOAK GATE 1 SIGNED`
+line in `knowledge/lessons.md`, which does not exist.
+
+**Write set obeyed.** `git diff --stat 9b5954d..HEAD -- bin/ tests/` → empty. No code or test was touched.
+
+The design is right. The F33 null-discrimination idea survives every attack in the brief: it kills FW2-R1,
+it kills FW2-R5, it keeps `OSError` out of every read-only view, its intra-boot residual claim is correct
+**on the evidence** (not by analogy), and its receipts are honest — I re-ran all of them. The single HIGH is
+not in the mechanism. It is in the one place the mechanism is invoked *outside* `probe_liveness`, and it
+exists **because** of the FW2-R1 fix. That is the fourth consecutive occurrence of this campaign's signature
+failure mode, and it is the reason this artifact cannot be promoted as written.
+
+### The signature failure mode, stated once
+
+Fix wave 1 closed F1 and broke the cross-boot case. Fix wave 2 closed R1 and broke `launch_turn`. F33 closes
+FW2-R1 by **routing `launch_turn` around `probe_liveness`** — and `probe_liveness` is where F33 puts the only
+`except OSError` in the entire design. So the fix that removed `launch_turn` from the danger path also removed
+`launch_turn`'s only exception handler, and then F33's prose asserts a safety property that the specified code
+cannot have. Each wave's fix is correct; each wave's fix relocates the defect one call site outward.
+
+---
+
+### HIGH — F33-R1: `launch_turn`'s boot-id read is specified unwrapped, but its stated behavior needs a wrapper. Built to the letter, an `OSError` orphans a live, billable `claude`.
+
+F33's core-edit table, row 6:
+
+> | 6 | `launch_turn`, `:1343-1357` | read `PLATFORM.boot_identity()` **before** the `:1345` `try`; add `"turn_pid_boot_id"` to the returned dict |
+
+F33's prose, two paragraphs earlier:
+
+> The boot-id read at launch is a separate, pid-free call whose exception is **not** swallowed by the bare
+> `except Exception` at `:1349` — it sits before the `try` at `:1345`, so an `OSError` stamps `null`
+> deliberately (a Linux worker with an unreadable boot_id probes alive-unknown, never `"gone"`).
+
+The `so` is a non-sequitur. Placing an unguarded call *before* a `try` does not make its exception become a
+`null`; it makes the exception propagate. The actual code (`bin/fleet.py:1343-1357`, read this session):
+
+```
+1343      get_process_info = get_process_info or PLATFORM.get_process_info
+1344      ctime_iso = None
+1345      try:
+1346          info = get_process_info(proc.pid)
+1347          if info is not None:
+1348              ctime_iso = ctime_to_iso(info[1])
+1349      except Exception:
+1350          ctime_iso = None
+1351
+1352      return {
+1353          "turn_pid": proc.pid,
+1354          "turn_pid_ctime": ctime_iso,
+```
+
+The `try` at `:1345` is the only guard in the region. F33 correctly wants the boot-id read *outside* it (so
+`except Exception` cannot swallow an `OSError` into a corrupt `turn_pid_ctime`) — but it never gives the read
+a guard of its own, and then claims the behavior a guard would produce.
+
+**Consequence, traced.** By `:1343` `Popen` has already run: the healthy-launch deadline loop at `:1339` has
+elapsed and `proc.pid` is consumed at `:1346`. An `OSError` raised at `:1344` therefore escapes `launch_turn`
+*after* a real `claude` is live. Every one of the four callers wraps `launch_turn` in `except BaseException`
+and **pops the record**:
+
+```
+$ grep -n "launch_turn(" bin/fleet.py
+1241:def launch_turn(name: str, cwd, sid: str, prompt: str, mode: str, first: bool = False,
+2311:        info = launch_turn(          # cmd_spawn
+2860:        info = launch_turn(          # cmd_send
+2967:        info = launch_turn(          # _resume_one_limited
+3692:        info = launch_turn(          # cmd_respawn
+```
+
+`cmd_spawn`, `bin/fleet.py:2310-2329`:
+
+```
+2310      try:
+2311          info = launch_turn(
+   ...
+2320          finalize_mailbox_claim(claim)
+2321      except BaseException as exc:
+   ...
+2325          restore_mailbox_claim(claim)
+2326          with fleet_lock():
+2327              data = load_registry()
+2328              data["workers"].pop(args.name, None)
+2329              save_registry(data)
+```
+
+So the outcome is not a ghost pre-claim. It is **worse**: a live `claude` process with *no registry record at
+all* — no `turn_pid`, so `interrupt` and `kill` cannot reach it; no name, so `doctor` cannot see it; billing
+until it exits on its own. `bin/fleet.py:1959` names this exact hazard in a comment: *"launch_turn() has
+ALREADY succeeded -- a real, billable, running"* claude. Fires on all four launch paths (spawn, send, respawn,
+resume-limited).
+
+**§12 does not catch it.** The `boot_identity_gates_tick_compare` pin's launch companion reads:
+
+> a launch commits a **non-null** `turn_pid_boot_id` on a platform whose `boot_identity()` is non-null, and its
+> first `probe_liveness` returns `"alive"` — no worker is born `"gone"` (FW2-R1)
+
+That pins the happy path only. No pin exercises `boot_identity()` *raising* at launch. The one behavior F33's
+prose promises for that path is the one behavior nothing tests.
+
+**Why HIGH and not CRITICAL.** The trigger is an `OSError` on `/proc/sys/kernel/random/boot_id`, and F33's own
+evidence — which I reproduced (below) — shows that file is `0444`, world-readable, and outside `hidepid`'s
+reach. It never mis-decides liveness. Unlike FW2-R1 it does not fire on every Linux worker. It requires a
+`/proc`-less or hardened environment. **Why not LOW:** it is a stated-mechanism contradiction in a
+**PRESCRIPTIVE** spec, on the sole code path where `boot_identity()` is called outside `probe_liveness`, with
+no test pinning it, in a campaign whose thesis is that the call site one step from the fix is where the defect
+lands.
+
+**Fix — one sentence and one pin.**
+
+1. Row 6 → *"give the read its own guard: `try: boot_id = PLATFORM.boot_identity()` / `except OSError: boot_id = None`,
+   placed before the `:1345` `try` (so the bare `except Exception` at `:1349` cannot swallow it into a corrupt
+   `turn_pid_ctime`, and an unreadable boot_id stamps `null` rather than raising past a live `Popen`)."*
+   Delete the false causal clause from the prose paragraph.
+2. §12 companion pin: *`boot_identity()` raising `OSError` at launch commits `turn_pid_boot_id = null` and the
+   record still receives `turn_pid` — `launch_turn` does not propagate.*
+
+With that, case (v) carries it the rest of the way: stored `null` + fresh non-`None` → `"unknown"` → alive-unknown,
+never demoted, never `killpg`'d, self-healing on next launch. The design was already right; only the placement
+text is wrong.
+
+---
+
+### LOW — F33-R2: the §4 example-record JSON carries `turn_pid_boot_id` with no `[UNBUILT]` marker
+
+`docs/SPEC.md:89` shows `"turn_pid_boot_id": null,` inside §4's example record. The `[UNBUILT — owned by C4
+port-adapter-a]` tag is 30 lines below, at `:119`. This matches the existing convention — `limit_reset_at` and
+`limit_kind` (UL1, also prescriptive, also unbuilt) sit untagged in the same JSON — so it is not *new* drift,
+and I do not hold the author to a standard the file does not already set. But the F20 mirror-image (an unbuilt
+thing read as shipped) is precisely what the tag convention exists to prevent, and a builder scanning the schema
+block sees three unbuilt fields presented as current. **Recommend** one line under the JSON naming the
+prescriptive fields. Not blocking.
+
+### LOW — F33-R3: `pid_max` is a sysctl, and the wraparound argument is quantitatively sensitive to it
+
+F33 residual (2) argues the intra-boot residual is negligible because a pid-space wrap "consumes far more than
+2 s" of ticks, citing `/proc/sys/kernel/pid_max` → `4194304 on WSL`. I confirm `4194304` on WSL Ubuntu
+(below). But `pid_max` is a tunable whose *stock kernel* default is `32768`; `systemd` is what raises it. At
+`32768` the wrap costs ≥16k forks/s to fit inside the ±2 s window — absurd for fleet, but not the ~128×-safer
+number the spec quotes. The **class** claim is unaffected (see below). **Recommend** `port-posix-smoke` record
+`pid_max` alongside `boot_id`. Not blocking.
+
+---
+
+## The dispute: **UPHELD. `docs/PLAN.md` is wrong and needs a second amendment.**
+
+`docs/PLAN.md:185` ratified, verbatim:
+
+> (b) adopt the reviewer's `boot_identity()` restructuring — the compare moves into `probe_liveness`,
+> `get_process_info` grows **no** production parameter, cutting the core-edit list from "five call sites, two
+> adapter classes, and every test double" to **"one new adapter method, one stamp in `launch_turn`, one compare
+> in `probe_liveness`"**
+
+That is three edits. The truth is eleven rows. The same PLAN bullet, four sentences later, mandates *"Every
+call-site enumeration must be produced by `grep` and pasted as evidence."* The author obeyed the mandate and
+thereby falsified the list the same bullet ratified. **PLAN.md contradicts itself, and the author is on the
+right side of the contradiction.** I do not edit PLAN.md; the manager should amend `:185` (b) to cite F33's
+eleven-row table rather than the three-edit reduction.
+
+**All six of the author's anchors confirmed from primary source.** `launch_turn` does **not** write the
+registry — it returns a dict at `:1352-1357`, whose keys four commit sites copy under `fleet.lock`
+(`:2346`, `:2898`, `:2993`, `:3733`), and `cmd_wait` (`:2618-2622`) reads the fields straight off the record.
+
+## CALL-SITE-LIST-COMPLETE: **yes.** The corrected list is not short.
+
+The brief asked the question neither the manager nor the author had answered: *is the corrected list complete,
+or is it short too?* I enumerated independently, by grep, and then checked every hit against F33's table.
+
+```
+$ grep -n "turn_pid" bin/fleet.py        # superset; the ctime footprint is the structural twin
+547:        "turn_pid": None,
+548:        "turn_pid_ctime": None,
+1353:        "turn_pid": proc.pid,
+1354:        "turn_pid_ctime": ctime_iso,
+1622:        record.get("turn_pid"), record.get("turn_pid_ctime"), log_path,
+2345:                rec["turn_pid"] = info["turn_pid"]
+2346:                rec["turn_pid_ctime"] = info["turn_pid_ctime"]
+2619:                rec.get("turn_pid"), rec.get("turn_pid_ctime"), log_path,
+2805:            after["turn_pid"] = None
+2897:                r["turn_pid"] = info["turn_pid"]
+2898:                r["turn_pid_ctime"] = info["turn_pid_ctime"]
+2950:        rec["turn_pid"] = None
+2992:                r["turn_pid"] = info["turn_pid"]
+2993:                r["turn_pid_ctime"] = info["turn_pid_ctime"]
+3112:        pid = rec.get("turn_pid")
+3113:        ctime_iso = rec.get("turn_pid_ctime")
+3732:                r["turn_pid"] = info["turn_pid"]
+3733:                r["turn_pid_ctime"] = info["turn_pid_ctime"]
+3828:            rec["turn_pid"] = None
+3829:            rec["turn_pid_ctime"] = None
+4209:        if rec.get("status") == "working" and rec.get("turn_pid") is not None
+4210:        and not pid_alive(rec.get("turn_pid"), rec.get("turn_pid_ctime"), get_process_info=get_process_info)
+4226:        if rec.get("status") == "working" and rec.get("turn_pid") is not None
+4227:        and probe_liveness(rec.get("turn_pid"), rec.get("turn_pid_ctime"),
+(prose/docstring lines 184,185,754,766,790,793,1253,1256,1264,1957,1962,1974,2011,2014,2019,2023,2278,2324,
+ 2350,2712,2722,2728,2853,2874,2882,2902,2928,2930,2934,2976,2981,2997,3089,3130,3136,3164,3173,3184,3231,
+ 3233,3279,3448,3458,3462,3469,3558,3587,3620,3674,3710,3737,3776,3783,3804,4214,4215 elided — pre-claim
+ `turn_pid is None` guards, `append_event` kwargs, and comments; none carries or forwards the field.)
+```
+
+Every mutating/reading site maps to an F33 row:
+
+| line | F33 row | line | F33 row |
+|---|---|---|---|
+| `:548` | 2 (`new_worker_record`) | `:2993` | 9 (commit site) |
+| `:1354` | 6 (`launch_turn`) | `:3113` | 10 (`_interrupt_worker`) |
+| `:1622` | 7 (`recompute_worker`) | `:3733` | 9 (commit site) |
+| `:2346` | 9 (commit site) | `:4210` | 11 (doctor stale-pids) |
+| `:2619` | 8 (`cmd_wait`) | `:4227` | 11 (doctor unreadable-starttime) |
+| `:2898` | 9 (commit site) | `:607/:640/:782` | 3, 4, 5 (signatures) |
+
+The three residual `turn_pid = None` clears (`:2805`, `:2950`, `:3828`) are **named and dispositioned** in F33,
+not omitted: *"the three sites that clear `turn_pid` on a rollback or a kill … leave a stale `turn_pid_boot_id`
+behind, and `:620`'s `pid is None` short-circuit means the gate never sees it. Those sites therefore need **no**
+boot-id edit."* I verified `:3828` sets `turn_pid = None` on the line above `:3829`, so the short-circuit does
+hold, and `cmd_kill:3829`'s optional hygiene null is correctly labelled a decision rather than an omission.
+
+**Signature blast radius, verified.** Required kw-only `stored_boot_id` on `probe_liveness`/`pid_alive`/
+`recompute_status` makes every existing caller a `TypeError`. Production callers: `:646` (row 4), `:870`,`:881`
+(row 5), `:1621` (row 7), `:2618` (row 8), `:3115`,`:3120` (row 10), `:4210`,`:4227` (row 11) — **all nine are
+in the table.** Test callers: 13, enumerated by the author's own grep and assigned to `port-test-suite`; I
+re-ran it and got 10 `pid_alive` + 3 `probe_liveness` = 13. **The list is complete.**
+
+One subagent leg reported the list "still short by six" (`:548`, `:1622`, `:3113`, `:3829`, `:4210`, `:4227`).
+That leg compared against the **commit message's six anchors** rather than against F33's eleven-row table. All
+six are in the table (rows 2, 7, 10, dispositioned, 11, 11). Re-aimed at primary source, the finding evaporates.
+Recording it because a future reviewer will make the same mistake: the commit message is not the spec.
+
+## Attacks on the null-discrimination design
+
+**FW2-R1 — DEAD.** `launch_turn` cannot reach the gate. `get_process_info` grows no production parameter, so the
+`(name, None)` sentinel never carries boot-id meaning; and `launch_turn` never calls `probe_liveness`:
+
+```
+$ grep -n "probe_liveness(\|pid_alive(" bin/fleet.py   # code lines only
+607:def probe_liveness(...)   640:def pid_alive(...)   646:  return probe_liveness(...)
+870, 881: recompute_status   3115, 3120: _interrupt_worker   4210, 4227: doctor
+```
+
+`launch_turn` spans `:1241-1357` and appears nowhere. The FW2-R1 chain `get_process_info → (name, None) →
+ctime_to_iso(None) → AttributeError → swallowed → turn_pid_ctime=null → "gone"` is structurally unreachable.
+The §12 pin does pin it: a launch on a boot-identity platform commits non-null `turn_pid_boot_id`, and its first
+`probe_liveness` sees fresh non-`None` + stored non-`null` + **equal** → falls through to the tick compare →
+`"alive"`. No worker born `"gone"`.
+
+**FW2-R5 — DEAD.** The two-meanings default is gone by *removal*, not by sentinel. Omission is a `TypeError` at
+the call site. It is expressible: all nine production callers are enumerated above and every one is an edit row,
+so the breaking change is a change the spec already schedules. The 13 test callers are named with a pasted grep
+and assigned to `port-test-suite` with a concrete mechanism (autouse `fleet.PLATFORM.boot_identity` stub, on the
+`get_process_info` monkeypatch precedent at `tests/test_terminal_surface.py:149,175,404`). §12 pins the omission
+directly (`raises TypeError rather than silently degrading`), and any production site that forgets the kwarg goes
+red through the existing suite, which already exercises `cmd_wait`, `doctor`, and `_interrupt_worker`.
+
+**`OSError` into read-only views — NOT a finding.** I traced it and the spec is **not silent**; the answer is
+correct on both counts. (1) The views never probe. `status_snapshot` (`bin/fleet.py:1742`) reads
+`rec.get("status")` and routes through `_read_registry_readonly` (`:1722`, *"Never writes, never quarantines,
+never raises"*); it calls neither `probe_liveness` nor `pid_alive`. The statusline
+(`bin/fleet_statusline.py:236`), the SessionStart hook (`bin/hooks/sessionstart_fleet.py:101`), and
+`cmd_status --stale-ok` (`:2419-2425`) all stop there. An `OSError` inside `probe_liveness` is structurally
+unreachable from every surface `CLAUDE.md` names as a view. (2) For the commands that *do* probe — `cmd_status`
+default (which takes `fleet_lock` and writes, so it is not a view), `cmd_doctor`, `wait`/`send`/`attach`/
+`respawn`/`clean`/`interrupt`/`kill` — F33 catches it explicitly: `SPEC.md:467` *"`probe_liveness` catches that
+`OSError` and returns `"unknown"` — the fail-safe verdict"*, with matching pseudocode, and `portability.md:269`
+*"core catches it and returns `"unknown"`."* Correct, and correctly placed. **This is exactly why F33-R1 is a
+finding: `probe_liveness` is the only place that catch exists, and `launch_turn` was deliberately routed around
+it.**
+
+**The equal-boot_id fall-through — the "same class" claim is CORRECT here, on the evidence.** Fix wave 1 made
+this claim about the cross-boot case and was wrong, so I checked the structure rather than the analogy. Cross-boot
+was wrong because a reboot **recreates every offset**: collision probability approaches 1, and is *densest at
+boot* where fleet spawns. Intra-boot is structurally different: within one boot `starttime` increases
+monotonically and is never revisited, so two processes sharing a pid must be separated by a **full pid-space
+wrap**. A false `alive` needs that wrap to complete inside ±2 s (≤200 ticks at `CLK_TCK=100`). That is the same
+guard shape as the accepted Windows/macOS residual at `bin/fleet.py:597-603` — *"a reused pid landing on an
+unrelated cmd/node/claude process within 2s of the recorded ctime"*. Both reduce to "reuse must occur within 2 s
+of the original's start." **Same class, and for a structural reason, not by analogy.** (Magnitude caveat: LOW
+F33-R3.)
+
+**Container / namespace — half settled here, half correctly left `[UNSETTLED]`.** I confirmed on WSL Ubuntu that
+`boot_id` is kernel-global (a container therefore reads the *host's*, and a container restart without a host
+reboot leaves it unchanged), and I settled the half the author deferred: **field 22 remains host-boot-relative
+inside a PID namespace**, so a fresh container process's ticks are host-uptime-scale, not near-zero, and cannot
+collide with a stale record's. Evidence (my run, this session):
+
+```
+$ wsl -d Ubuntu -- bash -c 'cut -d" " -f1 /proc/uptime;
+    unshare -r --fork --pid --mount-proc bash -c "cut -d\" \" -f1 /proc/self/stat; cut -d\" \" -f22 /proc/self/stat"'
+4.33                 # host uptime, seconds
+2                    # namespace-local pid
+434                  # field 22 = 434 ticks = 4.34 s  -> HOST boot, not namespace start
+```
+
+So the PID-namespace shape does **not** reintroduce the collision. What remains genuinely unsettled, and what
+`port-posix-smoke` must check: (a) whether fleet ever runs under a container runtime at all (none available in
+WSL to test); (b) `CLONE_NEWTIME` / `unshare --time`, which offsets `boottime` and *would* defeat the
+host-relative property — the author names this defeater correctly; (c) the box's `pid_max` (LOW F33-R3).
+The author's `[UNSETTLED]` tag is conservative and its named checks are the right ones.
+
+## RECEIPTS-HONEST: **yes. FABRICATION: none.** Re-ran all seven at the stated commit (`9b5954d`).
+
+| # | Receipt | Re-run verdict |
+|---|---|---|
+| R1 | `grep -rn "boot_id" bin/ tests/ --include=*.py` → `(no matches)` | **EXACT** |
+| R2 | WSL: field 22 `16469` / `CLK_TCK 100` = `164.69` vs uptime `164.70` | **PREMISE INDEPENDENTLY REPRODUCED** — see below |
+| R3 | `grep -n "get_process_info("` → `623`,`1346`; `grep -n "probe_liveness(\|pid_alive("` → 9 code lines | **EXACT**; the "comment/docstring lines elided" annotation names `:235,3073,3168,3237,3763,3779,3886` — correct to the digit |
+| R4 | `grep -n "turn_pid_ctime"` (18 lines) + `grep -n "recompute_status("` (4 lines) | **EXACT** |
+| R5 | `grep -c "def _doctor_check_"` → `18`; `awk -F: '$1>=4043'` → 6 lines | **EXACT**; `4043` really is the first `_doctor_check_` def |
+| R6 | `grep -rn "probe_liveness(\|pid_alive(" tests/` → 10 + 3 = 13 | **ABRIDGED, self-declared, accurate** — reformatted to comma-lists; every line number and every code-vs-prose call correct |
+| R7 | `git log --oneline -1 -- .gitattributes` → `0d09c25`; `git ls-files --eol \| grep -c 'i/crlf'` → `0` | **EXACT** |
+
+Plus the runtime receipt `py -3.13 -m pytest tests/test_steering.py -k Boundary -q` → claimed `13 passed, 42
+deselected`; I ran it: `13 passed, 42 deselected`. **EXACT.**
+
+**On R2, which is the load-bearing premise of the entire finding.** It is the one receipt not reproducible from
+the repo, so I re-derived it from scratch on WSL Ubuntu, twice, two seconds apart:
+
+```
+$ wsl -d Ubuntu -- bash -c 'cat /proc/uptime; cut -d" " -f22 /proc/self/stat;
+                            sleep 2; cat /proc/uptime; cut -d" " -f22 /proc/self/stat'
+54.30 839.09         5430        # 5430 ticks / 100 = 54.30 s  == uptime
+56.30 871.18         5630        # 5630 ticks / 100 = 56.30 s  == uptime
+```
+
+Field 22 is boot-relative. **Confirmed.** No absolute instant is encoded, and F33's premise stands. (A first
+attempt using the author's `awk '{print $22}'` form returned `2` — an argv-mangling artifact of the
+Windows→`wsl`→`bash -c` quoting path, not a discrepancy in the author's number. Recording it so the next
+reviewer does not raise the false alarm I briefly did: use `cut -d" " -f22` when crossing that boundary.)
+
+Also independently confirmed on WSL Ubuntu: `ls -l /proc/sys/kernel/random/boot_id` → `-r--r--r-- 1 root root`
+(`0444`, unprivileged-readable, and under `/proc/sys/` where `hidepid` does not reach); `getconf CLK_TCK` → `100`;
+`pid_max` → `4194304`; and `unshare -r --fork --pid --mount-proc cat /proc/sys/kernel/random/boot_id` returns the
+**same UUID** as the host — `boot_id` is kernel-global, not namespaced, exactly as claimed.
+
+**Five workers, zero fabrications. The record holds.**
+
+## `[UNBUILT]` tag coverage
+
+Present on **4 of the 5** brief-named surfaces, and effectively on the fifth:
+
+| surface | line | tag |
+|---|---|---|
+| Status header (v2.2 line) | `SPEC.md:3` | **yes** — and it adds the F20-mirror instruction: *"do not leave the tag on after `port-adapter-a` lands it"* |
+| §4 PID-liveness paragraph | `SPEC.md:119` | **yes** — *"PRESCRIPTIVE, no part of this paragraph ships today"* |
+| §4 schema row / field bullet | `SPEC.md:89`, `:121` | **inside** the `:119` paragraph, whose tag says "no part of this paragraph"; the JSON at `:89` is bare → LOW F33-R2 |
+| §12 pin | `SPEC.md:340` | **yes** |
+| appendix F33 | `SPEC.md:438` | **yes** |
+
+Bonus: §14's adapter-surface line (`SPEC.md:357`) is tagged too. `portability.md` carries no inline tag on D2 /
+`## Boot identity` / the adapter row, but all three explicitly defer (*"SPECIFIED ELSEWHERE, DO NOT RE-SPECIFY
+HERE … decided in `docs/SPEC.md` appendix F33 + §4"*), which is the correct disposition for a doc that no longer
+owns the decision. **No F20-style drift.**
+
+## Scope: did shrinking D2 lose anything? **No.**
+
+D2 went 16,922 → 4,809 chars. Everything load-bearing survived, in D2 or in its owning section:
+
+- **Kept in D2:** the `comm` last-`)` parse and field indices; **F1 CRITICAL** — *"never recompute wall-clock via
+  `time.time() − /proc/uptime`"*; the synthetic-epoch representation; `±2 s` unchanged; `sysconf` never
+  hardcoded; NTP-step immunity; the intra-boot residual and its `:597-603` class; **`sysctl kern.boottime`
+  explicitly declined** so macOS does not grow a boot id for false symmetry.
+- **Moved, not lost:** the `tolerance_seconds` optional hardening finding. D2's prose referenced it; it *lives*
+  in `## Findings against SPEC.md` #2, and it is intact there (`portability.md:389-392`) — default `2.0`, Linux
+  requesting `1.0`, owner `port-adapter-a` if ever promoted, the measured `0.999999 s` round-trip supremum, and
+  the "not required by any done criterion" gating all still present.
+- **Heading diff `9b5954d`→`HEAD`:** every section preserved; exactly one added (`## Boot identity (SPEC §4 F33)`).
+
+**Out of scope, and not drifted into:** every section `28d5d81` did not touch (D1, D3–D8, the per-OS probe
+matrix rows other than Linux, the done criteria, `## Findings against PLAN.md`).
+
+## Disposition
+
+- `docs/SPEC.md` — v2.2 Status header left exactly as the author wrote it (an amendment, not a gate). **F33 is
+  not yet ratified**: it is correct in mechanism and one sentence short in `launch_turn`. Fix F33-R1 (row 6 +
+  one §12 companion pin) and it ratifies.
+- `docs/specs/portability.md` — **`drafting`.** Not promoted. The `ready-for-build` line the reviewer was
+  authorized to write is withheld solely on F33-R1; nothing in the portability spec itself is defective.
+- `docs/PLAN.md:185` (b) — **wrong, needs a second amendment.** Manager's edit, not the reviewer's.
+
+**Neither promotion would have unblocked anything.** The C4 build waves are gated on Altai's `SOAK GATE 1 SIGNED`
+line in `knowledge/lessons.md`, which does not exist.
+
+**For the next fix wave — the one-line brief:** F33-R1 is not a design flaw. It is the fix's own shadow. When you
+route a call site *around* the function that owns the exception handler, you have moved that call site out of the
+handler's scope. Grep for the handler, not just for the field.
