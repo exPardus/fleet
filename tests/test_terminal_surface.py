@@ -564,10 +564,15 @@ REPO = Path(__file__).resolve().parent.parent
 
 
 class TestPluginPackaging:
-    def test_manifest_exists_and_names_the_plugin(self):
-        manifest = json.loads((REPO / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
-        assert manifest["name"] == "claude-fleet"
-        assert manifest["description"]
+    @property
+    def manifest(self) -> dict:
+        return json.loads((REPO / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+
+    def test_plugin_is_named_fleet_so_commands_namespace_as_fleet(self):
+        # The slash-command namespace derives from the plugin NAME: a plugin
+        # named "claude-fleet" would give /claude-fleet:status, not /fleet:status.
+        assert self.manifest["name"] == "fleet"
+        assert self.manifest["description"]
 
     def test_manifest_does_not_ship_a_statusline(self):
         # A plugin CANNOT ship a statusLine; plugin settings.json accepts only
@@ -579,15 +584,24 @@ class TestPluginPackaging:
         assert (REPO / "skills" / "fleet" / "SKILL.md").exists()
         assert not (REPO / "skill").exists()
 
-    def test_hooks_json_registers_sessionstart(self):
-        hooks = json.loads((REPO / "hooks" / "hooks.json").read_text(encoding="utf-8"))
-        entries = hooks["hooks"]["SessionStart"]
+    def test_commands_and_skills_are_convention_discovered(self):
+        # A working reference plugin (caveman) declares no `commands`/`skills`
+        # path keys and relies on convention. Declaring them appeared to make
+        # the manifest unusable here; do not add them back without evidence.
+        assert "commands" not in self.manifest
+        assert "skills" not in self.manifest
+
+    def test_manifest_registers_the_sessionstart_hook_inline(self):
+        # Hooks are inlined in plugin.json (caveman's working shape), not
+        # referenced as a separate hooks/hooks.json path.
+        entries = self.manifest["hooks"]["SessionStart"]
         commands = [h["command"] for e in entries for h in e["hooks"]]
         assert any("sessionstart_fleet.py" in c for c in commands)
+        assert not (REPO / "hooks" / "hooks.json").exists()
 
-    def test_hook_commands_use_forward_slashes(self):
+    def test_hook_command_uses_forward_slashes(self):
         # Git Bash sh -c eats backslashes in unquoted strings.
-        raw = (REPO / "hooks" / "hooks.json").read_text(encoding="utf-8")
+        raw = (REPO / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
         assert "\\\\" not in raw
 
 

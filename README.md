@@ -32,11 +32,15 @@ The nine load-bearing architectural invariants are enumerated in [`docs/SPEC.md`
 
 1. Add `bin\` to your `PATH` (contains `fleet.cmd`, the CLI shim).
 2. Run `fleet init` once — renders the machine-local `state\worker-settings.json` (hook wiring: real interpreter path + `FLEET_HOME`, forward slashes) from the git-tracked `worker-settings.template.json`. Re-run after editing the template or moving the repo; idempotent.
-3. Load the plugin for the manager skill, the `/fleet:*` slash commands, and the SessionStart briefing:
+3. Install the plugin — it carries the manager skill, the `/fleet:*` slash commands, and the SessionStart briefing. Add this repo as a plugin marketplace and enable `fleet`, or add it to `enabledPlugins` in `~/.claude/settings.json`.
 
-   ```
-   claude --plugin-dir C:/proga/claude-fleet
-   ```
+   > `claude --plugin-dir C:/proga/claude-fleet` loads the plugin for one session, but **verified 2026-07-09: it does not register the plugin's SessionStart hook** (the briefing never fires). Use it to try the commands, not to test hooks. Registering the hook by hand in a project's `.claude/settings.json` works and is the fallback:
+   >
+   > ```json
+   > { "hooks": { "SessionStart": [ { "hooks": [
+   >     { "type": "command", "command": "py -3.13 C:/proga/claude-fleet/bin/hooks/sessionstart_fleet.py" }
+   > ] } ] } }
+   > ```
 
 4. Optional — install the fleet statusline into `~/.claude/settings.json`:
 
