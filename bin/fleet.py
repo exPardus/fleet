@@ -2133,6 +2133,17 @@ def cmd_status(args, get_process_info=None, sleep=time.sleep) -> int:
     exactly (a concurrent command that mutated a record while the lock was
     released is left alone, its own write respected, rather than being
     clobbered by a verdict computed against now-stale data)."""
+    # Phase 1.6 (D1/D2): --stale-ok is the probe-free, lock-free, write-free
+    # read path every view uses. Returns last-COMMITTED status plus
+    # stale_seconds; it never asserts liveness it did not probe for.
+    if getattr(args, "stale_ok", False):
+        snap = status_snapshot()
+        if getattr(args, "json", False):
+            print(json.dumps(snap, indent=2))
+        else:
+            _print_snapshot_table(snap, args.name)
+        return 0
+
     with fleet_lock():
         data = load_registry()
         names = [args.name] if args.name else sorted(data["workers"])
@@ -2171,7 +2182,12 @@ def cmd_status(args, get_process_info=None, sleep=time.sleep) -> int:
         if changed:
             save_registry(data)
 
-    _print_status_table({"workers": display}, names)
+    if getattr(args, "json", False):
+        # The authoritative path has already persisted its verdicts above, so
+        # re-deriving the snapshot from disk yields exactly the recomputed state.
+        print(json.dumps(status_snapshot(), indent=2))
+    else:
+        _print_status_table({"workers": display}, names)
     # Phase1 kernel 1: surface a TOTAL count of swallowed hook errors when
     # nonzero so a silently-failing hook is visible at a glance (`fleet
     # doctor` shows the tail).
@@ -2179,6 +2195,31 @@ def cmd_status(args, get_process_info=None, sleep=time.sleep) -> int:
     if n_hook_errors:
         print(f"hook-errors: {n_hook_errors} swallowed hook error(s) logged (run `fleet doctor` for the tail)")
     return 0
+
+
+def _print_snapshot_table(snap: dict, name=None) -> None:
+    """Human table for `fleet status --stale-ok` (D2): last-committed status
+    with an age column, never a probed one."""
+    if not snap["ok"]:
+        print("fleet: not initialized" if snap["reason"] == "not_initialized"
+              else "fleet: registry unreadable")
+        return
+    rows = [w for w in snap["workers"] if name is None or w["name"] == name]
+    if name is not None and not rows:
+        raise FleetCliError(f"unknown worker: {name!r}")
+    print(f"{'NAME':<20}{'STATUS':<12}{'TURNS':>6}{'COST':>9}{'AGE':>9}{'MAIL':>6}  FLAGS")
+    for w in rows:
+        age = "?" if w["stale_seconds"] is None else f"{w['stale_seconds'] / 60:.0f}m"
+        flags = []
+        if w["status"] == "idle" and w["mail"]:
+            flags.append("idle+mail")
+        if w["resume_eligible"]:
+            flags.append("resume-eligible")
+        print(
+            f"{w['name']:<20}{w['status']:<12}{w['turns']:>6}{w['cost_usd']:>9.2f}"
+            f"{age:>9}{w['mail']:>6}  {','.join(flags) or '-'}"
+        )
+    print("(stale-ok: last-committed state, not probed)")
 
 
 def _print_status_table(data: dict, names) -> None:
@@ -4175,6 +4216,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_status = sub.add_parser("status", help="show worker status table")
     p_status.add_argument("name", nargs="?", default=None)
+    p_status.add_argument("--json", action="store_true",
+                          help="print the status snapshot as JSON")
+    p_status.add_argument("--stale-ok", dest="stale_ok", action="store_true",
+                          help="read-only fast path: no PID probe, no lock, no write "
+                               "(last-committed state; used by the statusline)")
 
     p_peek = sub.add_parser("peek", help="digest of recent stream events")
     p_peek.add_argument("name")

@@ -1,4 +1,5 @@
 """Phase 1.6 terminal surface (docs/specs/terminal-surface.md)."""
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -158,3 +159,45 @@ class TestStatusSnapshotIsPure:
         before = (path.read_bytes(), path.stat().st_mtime_ns)
         fleet.status_snapshot()
         assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+
+
+class TestStatusJsonFlags:
+    def _args(self, **over):
+        base = {"name": None, "json": False, "stale_ok": False}
+        base.update(over)
+        return argparse.Namespace(**base)
+
+    def test_stale_ok_json_prints_snapshot_and_never_probes(self, home, capsys, monkeypatch):
+        def boom(*a, **k):
+            raise AssertionError("--stale-ok must never probe")
+        monkeypatch.setattr(fleet.PLATFORM, "get_process_info", boom)
+        _write_registry(home, {"pmbot": _rec()})
+
+        rc = fleet.cmd_status(self._args(json=True, stale_ok=True))
+
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is True
+        assert payload["workers"][0]["name"] == "pmbot"
+        assert not (home / "state" / "fleet.lock").exists()
+
+    def test_stale_ok_on_corrupt_registry_exits_zero_and_reports(self, home, capsys):
+        (home / "state" / "fleet.json").write_text("{bad", encoding="utf-8")
+        rc = fleet.cmd_status(self._args(json=True, stale_ok=True))
+        assert rc == 0
+        assert json.loads(capsys.readouterr().out)["reason"] == "unreadable"
+        assert list((home / "state").glob("fleet.json.corrupt.*")) == []
+
+    def test_stale_ok_without_json_prints_the_table(self, home, capsys):
+        _write_registry(home, {"pmbot": _rec()})
+        rc = fleet.cmd_status(self._args(stale_ok=True))
+        assert rc == 0
+        assert "pmbot" in capsys.readouterr().out
+
+    def test_parser_accepts_the_flags(self):
+        args = fleet.build_parser().parse_args(["status", "--json", "--stale-ok"])
+        assert args.json is True and args.stale_ok is True
+
+    def test_parser_defaults_both_flags_off(self):
+        args = fleet.build_parser().parse_args(["status"])
+        assert args.json is False and args.stale_ok is False
