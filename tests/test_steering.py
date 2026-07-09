@@ -869,6 +869,18 @@ class TestPlatformAdapterBoundary:
         ):
             assert needle not in outside, f"found {needle!r} outside the platform adapter block"
 
+    def test_new_surface_scripts_have_no_os_branches(self):
+        # Phase 1.6: invariant 8 stays lint-enforced as the file set grows.
+        root = Path(fleet.__file__).resolve().parent.parent
+        for rel in ("bin/fleet_statusline.py", "bin/hooks/sessionstart_fleet.py"):
+            path = root / rel
+            if not path.exists():
+                continue  # added by a later task in the terminal-surface plan
+            source = path.read_text(encoding="utf-8")
+            for needle in ("os.name", "sys.platform", "platform.system",
+                           "sys.getwindowsversion", "os.uname", "os.sep"):
+                assert needle not in source, f"found {needle!r} in {rel}"
+
     def test_windows_adapter_selected_on_this_machine(self):
         assert isinstance(fleet.PLATFORM, fleet._WindowsPlatform)
 
