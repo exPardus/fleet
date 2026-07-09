@@ -1472,3 +1472,125 @@ short SPEC.md-owned decision rather than a residual clause inside a portability 
 
 Nothing in this re-review bears on the C4 **build** waves. They remain gated on Altai's
 `SOAK GATE 1 SIGNED` line in `knowledge/lessons.md`, which does not exist.
+
+---
+
+## Fix-wave 3 disposition (`spec-boot-identity`, 2026-07-10) — escalation resolved
+
+Author: `spec-boot-identity`, acting on Altai's ratified re-scope (`docs/PLAN.md` Campaign 4, added
+2026-07-10). **Docs only**; `bin/fleet.py`, `bin/hooks/*`, `tests/*` untouched. Repro authority used:
+`git log/show`, `grep`, read-only `py -3.13` import, read-only `pytest`, WSL Ubuntu.
+
+**The rule this wave was given, and obeyed:** both prior waves specified a correct mechanism against a
+call-site list built by **inspection**. Every enumeration below was produced by `grep`, and the grep is
+pasted with it — in `docs/SPEC.md` appendix F33 (core), and in `docs/specs/portability.md`
+`## Test port plan (B3)` (tests). Commit/date stamped: `9b5954d`, 2026-07-10.
+
+**Structural fix.** The boot-identity mechanism no longer lives in `docs/specs/portability.md` D2. It is
+`docs/SPEC.md` appendix **F33** + a §4 schema row + a §12 regression (`boot_identity_gates_tick_compare`),
+tagged `[UNBUILT — owned by C4 port-adapter-a]`. D2 shrank from **16,922 characters to 4,809** and now
+cites F33. `portability.md` keeps only what a portability spec owns: the adapter method. Its `**Status:**`
+stays `drafting` — `spec-boot-identity-review` owns the promotion call for both specs.
+
+| Finding | Verdict | Where / why |
+|---|---|---|
+| **FW2-R1** (CRITICAL) | **FIXED** (SPEC.md F33; portability.md D2, D4, probe matrix, interface) | The compare moved into `probe_liveness` (core), before `get_process_info` is called. `get_process_info` grows **no** boot-id parameter, so the `(name, None)` → `ctime_to_iso(None)` → swallowed `AttributeError` → `turn_pid_ctime=null` → `"gone"` chain is **structurally unreachable**: `launch_turn` never calls `probe_liveness`, and the receipt is pasted in F33 (`grep -n "probe_liveness(\|pid_alive(" bin/fleet.py` — `launch_turn:1241-1357` appears nowhere in the output). The deeper defect — an overloaded wire shape — is named in F33 and not repeated: `boot_identity()`'s `None` means *only* "this OS defines no boot identity"; a Linux read failure raises `OSError`, and is never encoded as `None`. |
+| **FW2-R2** (HIGH) | **FIXED, and EXTENDED — see DISPUTED below** | `boot_identity(self) -> str \| None` is pinned in `## Platform adapter interface` on **both** adapter classes, with signature, return contract, the `None`-on-Windows/macOS rule *and why* each returns `None`, and its lint-safety verified rather than assumed. Interface line 53 and done criterion 1 now say **five** methods. `## Test port plan (B3)` gains `test_boot_identity_*`. Confirmed: the return channel FW2-R2 said was missing is exactly what a fifth method supplies; a fifth method is mandatory. |
+| **FW2-R3** (HIGH) | **FIXED BY REMOVAL** | `_WindowsPlatform.get_process_info` (`bin/fleet.py:218`) is untouched, because core no longer forwards anything to it. The injected one-argument `get_process_info=lambda pid: ...` doubles across four test files keep working unchanged. There is no arity change to widen and no `windows-latest` breakage to fix. |
+| **FW2-R4** (MED) | **CONFIRMED, FIXED, and EXTENDED** | The count is right. Re-derived mechanically, not by reading: `grep -c "def _doctor_check_" bin/fleet.py` → `18`; `grep -n "turn_pid" bin/fleet.py \| awk -F: '$1>=4043'` → hits only at `:4209,4210,4214,4215,4226,4227`, i.e. exactly **two** functions, `_doctor_check_stale_pids` (`:4206`) and `_doctor_check_unreadable_starttime` (`:4218`). Both are row 11 of F33's core-edit list. The finding's closing instruction — *"re-derive the list mechanically rather than by inspection"* — is the whole method of this wave, and executing it found two more sites the finding itself did not name. |
+| **FW2-R5** (MED) | **FIXED BY REMOVAL** | The `_UNSET` sentinel is unnecessary because the parameter it was meant to protect no longer exists on the adapter. On core, `stored_boot_id` is a **required keyword-only parameter** on `probe_liveness` / `pid_alive` / `recompute_status` — omission is a `TypeError` at the call site, not a value. `None` therefore means exactly one thing (the record's field is null), and what *that* implies is decided by the fresh `boot_identity()` read, not by the null. No third overload is added; §12 pins the `TypeError`. |
+
+**FW2-R1..R5: 5/5 disposed. 0 accepted as residual.**
+
+### DISPUTED — 1
+
+**The re-review's own suggested disposition, ratified verbatim into `docs/PLAN.md`, is short by three call
+sites. "One stamp in `launch_turn`" is not sufficient, and would have reproduced FW2-R2's exact
+"no writer" failure.** This is not a preference; it is a grep.
+
+`launch_turn` does not write the registry. It **returns a dict** (`bin/fleet.py:1352-1357`), and four
+separate commit sites copy the keys out of it under `fleet.lock`:
+
+```
+$ grep -n "turn_pid_ctime" bin/fleet.py          # (prose lines elided)
+1354:        "turn_pid_ctime": ctime_iso,                                 <- launch_turn's RETURN dict
+2346:                rec["turn_pid_ctime"] = info["turn_pid_ctime"]       <- cmd_spawn
+2898:                r["turn_pid_ctime"] = info["turn_pid_ctime"]         <- cmd_send
+2993:                r["turn_pid_ctime"] = info["turn_pid_ctime"]         <- _resume_one_limited
+3733:                r["turn_pid_ctime"] = info["turn_pid_ctime"]         <- cmd_respawn
+2619:                rec.get("turn_pid"), rec.get("turn_pid_ctime"), log_path,   <- cmd_wait
+1622:        record.get("turn_pid"), record.get("turn_pid_ctime"), log_path,     <- recompute_worker
+```
+
+Consequences, all named in F33's eleven-row core-edit table:
+
+1. **The four commit sites (`:2346`, `:2898`, `:2993`, `:3733`) must each copy `info["turn_pid_boot_id"]`.**
+   Without them the field is never persisted, every Linux record reads `null` forever, every probe returns
+   alive-unknown, and the gate is inert — precisely the concrete failure FW2-R2 described for the
+   *un*-fixed spec, arriving through the fix that was supposed to close it.
+2. **`cmd_wait` (`:2618-2622`) reads `turn_pid`/`turn_pid_ctime` straight off the record and calls
+   `recompute_status`.** It is named by neither fix wave 2's list nor FW2-R4's correction of it. Left
+   un-threaded, `fleet wait` takes the `stored_boot_id`-omitted path. (Under this wave's required-keyword-only
+   design that is a loud `TypeError`, not a silent alive-unknown — which is the point of the design, and is
+   why FW2-R5's disease had to be cured by construction rather than by a longer list.)
+3. `recompute_worker` (`:1621-1624`) is the other record-reader behind `recompute_status`. The prior list
+   named the forwarding function (`:870,881`) but neither of the two sites that actually read the record.
+
+The reviewer was right about the mechanism and right to escalate. The *suggested disposition* was written
+the same way the two fix waves it criticized were written. **The invariant is not "trust the reviewer's
+list"; it is "re-derive the list with `grep` before every core change, and paste the grep."** F33 says so
+in those words.
+
+### Newly verified this wave (WSL Ubuntu; `wsl --list --quiet` → `Ubuntu`)
+
+Attack 3 left three things unsettled. Two are now settled by command; one is not.
+
+- **`boot_id` is kernel-global, not namespaced.** `[VERIFIED — WSL Ubuntu, unshare -r --fork --pid --mount-proc cat /proc/sys/kernel/random/boot_id → the same UUID, exit 0]`. Stronger than the reviewer's inference from `/proc/sys` not being PID-namespaced.
+- **The boot-relative premise, which the whole design rests on and which no prior wave measured directly.** `[VERIFIED — WSL Ubuntu, awk '{print $22}' /proc/self/stat → 16469; getconf CLK_TCK → 100; cat /proc/uptime → 164.70 2582.76]` — field 22 ÷ CLK_TCK = 164.69 s ≈ uptime, so field 22 encodes ticks-since-boot and **no absolute instant**. A freshly spawned `sleep` read `16470` ticks.
+- **Permissions and `hidepid`.** `[VERIFIED — WSL Ubuntu, ls -l → -r--r--r-- 1 root root; cat as uid 1000 → 53b5856e-50a5-4cdf-b283-944c2f619d7d; wc -c → 37; three reads across separate invocations, byte-identical]`. `[VERIFIED — cat /proc/mounts | grep ' /proc ' → rw,nosuid,nodev,noexec,noatime]`, no `hidepid`, and the path is under `/proc/sys/`, not `/proc/<pid>/`.
+- **Containers remain `[UNSETTLED]`.** `which docker` → exit 1; no runtime in WSL. The host-boot_id-sharing claim follows from the namespace result above but was not demonstrated end-to-end. `port-posix-smoke` records it (F33 residual 1).
+- **New, incidental:** `ps -o lstart=` on **Linux** is `btime + starttime/CLK_TCK`, and `btime` (`/proc/stat`; own read: `btime 1783631745`) is `wall_now − uptime` — so Linux `ps lstart` is NTP-step sensitive. This does **not** touch D3, where macOS renders a once-captured `p_starttime`. Recorded because a builder reaching for `ps` on Linux would silently inherit the step.
+- `[UNVERIFIED — no macOS host]` macOS' `p_starttime`-captured-once premise. `[UNVERIFIED — would require `wsl --shutdown`]` that `boot_id` changes across a real reboot. `[UNVERIFIED — sudo -n true → "a password is required"]` a `hidepid=2` remount. All three carried and tagged; none asserted.
+
+Lint re-verified read-only, not assumed: `py -3.13 -m pytest tests/test_steering.py -k Boundary -q` →
+`13 passed, 42 deselected`. The scan is positional (`source[:start] + source[end:]` around the two marker
+comments, `tests/test_steering.py:858-870`), so a `sys.platform == "darwin"` inside a `_PosixPlatform`
+method is excised and never seen. R5's fix-wave-2 reasoning holds; `boot_identity()` inherits it.
+
+### Carried forward, NOT silently fixed
+
+D4 flags a genuine **SPEC.md drift**: `SPEC.md:115` and F20 (`:382`) both describe "the stored
+`turn_pid`/`turn_pid_ctime` is null/corrupt" as **alive-unknown**, while shipped code returns `"gone"`
+(`bin/fleet.py:620-621`, `:635-636`). D4 declined to fix it because SPEC.md was outside its write set.
+SPEC.md **is** inside this wave's write set — and it is still not fixed here, deliberately: it is a separate
+descriptive-drift finding, not an edit F33 requires, and "a builder silently fixing core to match a spec
+sentence" is the exact hazard D4 raised. **F33's text does not depend on it** — F33 places its gate *after*
+the `:620` branch, and says so, precisely so the two questions stay independent. Owner: a follow-up doc
+task, or `spec-boot-identity-review`'s call.
+
+### Two new residuals introduced by this wave, named rather than left to be discovered
+
+1. **The `ubuntu-latest` unit-test trap.** On Linux `PLATFORM.boot_identity()` returns a real UUID, so the
+   thirteen existing direct callers of `probe_liveness`/`pid_alive` change behavior: with `stored_boot_id=None`
+   the gate fires and returns `"unknown"` where they assert `"alive"`. Green on Windows, red on Ubuntu — the
+   mirror of FW2-R3, arriving from the test side. Receipt: `grep -rn "probe_liveness(\|pid_alive(" tests/ --include=*.py`
+   → `test_core.py:371,377,383,387,391,396,408,413,418,427` and `test_resilience.py:2079,2082,2086`
+   (the four other hits are test names / prose). Spec'd in `## Test port plan (B3)` with a recommended
+   autouse `fleet.PLATFORM.boot_identity` stub. Owner: `port-test-suite`.
+2. **`boot_identity` is deliberately not threaded** through `recompute_status` or the doctor checks; it is
+   resolved once inside `probe_liveness`, with a test-only injection point there and on `pid_alive`.
+   Rationale: `get_process_info`'s keyword fan-out across a dozen entrypoints is the disease this finding
+   cures, and reproducing it for `boot_identity` would re-import it. The cost, stated: tests that reach
+   `probe_liveness` indirectly must monkeypatch `fleet.PLATFORM.boot_identity` (precedent:
+   `tests/test_terminal_surface.py:149,175,404`). A decision, with its price named.
+
+### Gate
+
+`docs/specs/portability.md` `**Status:**` remains **`drafting`**. This wave's author does not promote its own
+spec, and does not promote the spec it amended (`87a85de`; PROCESS CHANGE #1,
+`knowledge/lessons.md#2026-07-10-c4-spec-portability`). `spec-boot-identity-review` owns the
+`ready-for-build` call for **both** `docs/specs/portability.md` and the F33 amendment to `docs/SPEC.md`.
+
+**What the reviewer should attack first:** the eleven-row core-edit table in F33. Rows 8 and 9 exist because
+a `grep` contradicted a list that two reviews and one ratified PLAN bullet had agreed on. Run the greps
+again. If a twelfth site exists, this wave failed exactly the way its two predecessors did.
