@@ -99,7 +99,21 @@ C:\proga\claude-fleet\
 }
 ```
 
-**Three fields in the block above are PRESCRIPTIVE, not shipped** (F33-R2): `turn_pid_boot_id` (v2.2, F33, `[UNBUILT — owned by C4 port-adapter-a]`) and `limit_reset_at` / `limit_kind` (v2.1, UL1/F31, `[UNBUILT]`). The example record shows the schema fleet is being built to, not the one `bin/fleet.py` writes today; the `[UNBUILT]` tags live with each field's owning paragraph (`:121` for F33, appendix F31 for UL1). This line exists because a builder scanning only the JSON cannot see those tags — the F20 mirror-image drift the tag convention exists to prevent. Naming all three, rather than tagging one, is the point: the convention was already inconsistent, and fixing only the new field would have entrenched it.
+**ONE field in the block above is PRESCRIPTIVE, not shipped** (F33-R2, **corrected 2026-07-10 by the manager**): `turn_pid_boot_id` (v2.2, F33, `[UNBUILT — owned by C4 port-adapter-a]`). Its `[UNBUILT]` tag lives with its owning paragraph (`:121`). This line exists because a builder scanning only the JSON cannot see that tag — the F20 mirror-image drift the tag convention exists to prevent.
+
+**Correction, and the reason it is recorded here rather than silently amended.** An earlier revision of this line also declared `limit_reset_at` / `limit_kind` (UL1/F31) `[UNBUILT]`. **They ship.** UL1 landed as C2 hardening kernel item 11; the fields are written, read, and regression-pinned today:
+
+```
+$ grep -c "limit_reset_at\|limit_kind" bin/fleet.py        # at 2f56bb3
+18
+$ grep -rc "limit_reset_at\|limit_kind" tests/ | grep -v ":0"
+tests/test_core.py:1
+tests/test_destructive_guard.py:1
+tests/test_resilience.py:26
+tests/test_terminal_surface.py:13
+```
+
+The false claim entered as a review finding written without a grep, and was implemented without one. It is **the exact drift this convention exists to prevent** (F20: a shipped kernel left tagged `[UNBUILT]` long after it landed, which would have had a builder rewrite working code) — reintroduced by the paragraph asserting that F20 must never recur. Recorded, not buried: a spec that quietly fixes its own drift teaches nobody. Any claim in this file that a field is `[UNBUILT]` must be verifiable by `grep` against `bin/fleet.py` at a stated commit.
 
 Names are human-chosen, unique, `[a-z0-9-]+`. Single-writer discipline: only `fleet.py` writes `fleet.json`, guarded by `state\fleet.lock` (atomic-rename lock with retry).
 
