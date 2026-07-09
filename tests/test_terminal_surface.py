@@ -412,3 +412,79 @@ class TestLaunchTurnEnvStamp:
 
         assert captured["env"]["FLEET_TEST_SENTINEL"] == "kept"
         assert "PATH" in captured["env"]
+
+
+@pytest.fixture
+def sshook():
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin" / "hooks"))
+    import sessionstart_fleet
+    return sessionstart_fleet
+
+
+class TestSessionStartHook:
+    def test_suppressed_inside_a_worker(self, home, sshook, capsys, monkeypatch):
+        _write_registry(home, {"pmbot": _rec()})
+        monkeypatch.setenv("FLEET_WORKER", "pmbot")
+        monkeypatch.setattr(sshook.sys, "stdin", io.StringIO('{"source":"startup"}'))
+        assert sshook.main() == 0
+        assert capsys.readouterr().out.strip() == "{}"
+
+    def test_emits_briefing_in_a_manager_session(self, home, sshook, capsys, monkeypatch):
+        _write_registry(home, {"pmbot": _rec()})
+        monkeypatch.delenv("FLEET_WORKER", raising=False)
+        monkeypatch.setattr(sshook.sys, "stdin", io.StringIO('{"source":"startup"}'))
+        assert sshook.main() == 0
+        payload = json.loads(capsys.readouterr().out)
+        ctx = payload["hookSpecificOutput"]["additionalContext"]
+        assert payload["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+        assert "pmbot" in ctx and "working" in ctx
+
+    def test_includes_knowledge_index_lines(self, home, sshook, capsys, monkeypatch):
+        _write_registry(home, {})
+        (home / "knowledge").mkdir()
+        (home / "knowledge" / "INDEX.md").write_text("- pmbot.md — quirks\n", encoding="utf-8")
+        monkeypatch.delenv("FLEET_WORKER", raising=False)
+        monkeypatch.setattr(sshook.sys, "stdin", io.StringIO("{}"))
+        sshook.main()
+        assert "pmbot.md" in capsys.readouterr().out
+
+    def test_flags_idle_plus_mail(self, home, sshook, capsys, monkeypatch):
+        _write_registry(home, {"expardus": _rec(status="idle", session_id="s-e")})
+        (home / "mailbox" / "s-e.md").write_text("do the thing", encoding="utf-8")
+        monkeypatch.delenv("FLEET_WORKER", raising=False)
+        monkeypatch.setattr(sshook.sys, "stdin", io.StringIO("{}"))
+        sshook.main()
+        assert "idle+mail" in capsys.readouterr().out
+
+    def test_missing_registry_emits_empty_object_and_exits_zero(self, home, sshook, capsys, monkeypatch):
+        monkeypatch.delenv("FLEET_WORKER", raising=False)
+        monkeypatch.setattr(sshook.sys, "stdin", io.StringIO("{}"))
+        assert sshook.main() == 0
+        assert capsys.readouterr().out.strip() == "{}"
+
+    def test_any_exception_exits_zero_with_empty_object(self, home, sshook, capsys, monkeypatch):
+        def boom():
+            raise RuntimeError("kaboom")
+        monkeypatch.setattr(sshook.fleet, "status_snapshot", boom)
+        monkeypatch.delenv("FLEET_WORKER", raising=False)
+        monkeypatch.setattr(sshook.sys, "stdin", io.StringIO("{}"))
+        assert sshook.main() == 0
+        assert capsys.readouterr().out.strip() == "{}"
+
+    def test_context_truncated_to_ten_thousand_chars(self, home, sshook, capsys, monkeypatch):
+        _write_registry(home, {
+            f"worker-{i:03d}": _rec(session_id=f"s-{i}") for i in range(400)})
+        monkeypatch.delenv("FLEET_WORKER", raising=False)
+        monkeypatch.setattr(sshook.sys, "stdin", io.StringIO("{}"))
+        sshook.main()
+        ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+        assert len(ctx) <= 10_000
+
+    def test_writes_nothing_at_all(self, home, sshook, capsys, monkeypatch):
+        _write_registry(home, {"pmbot": _rec()})
+        monkeypatch.delenv("FLEET_WORKER", raising=False)
+        monkeypatch.setattr(sshook.sys, "stdin", io.StringIO("{}"))
+        before = sorted(p.name for p in (home / "state").iterdir())
+        sshook.main()
+        assert sorted(p.name for p in (home / "state").iterdir()) == before
+        assert not (home / "state" / "hook-errors.log").exists()
