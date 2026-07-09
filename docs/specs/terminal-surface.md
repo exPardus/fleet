@@ -51,7 +51,7 @@ This is **not** a PowerShell-cost workaround. On Linux the probe is a `/proc/<pi
 <!-- ts-mutating-commands -->
 **D3 — read-only commands inline; mutating commands go through the model.** `` !`cmd` `` executes at prompt-expansion time with no permission prompt and no undo. `fleet kill` is terminal (only `respawn` exits `dead`) and `fleet clean` deletes logs, journals and mailboxes. A typo in an inline-exec `/fleet:kill` is unrecoverable.
 
-- **Inline `` !` `` (read-only):** `/fleet`, `/fleet:status`, `/fleet:peek`, `/fleet:result`, `/fleet:doctor`.
+- **Inline `` !` `` (read-only):** `/fleet:overview`, `/fleet:status`, `/fleet:peek`, `/fleet:result`, `/fleet:doctor`.
 - **Prompt templates the model executes via Bash (mutating):** `/fleet:spawn`, `/fleet:send`, `/fleet:interrupt`, `/fleet:respawn`, `/fleet:kill`, `/fleet:clean`, `/fleet:attach`, `/fleet:release`, `/fleet:resume-limited`.
 
 Direct control is preserved — `/fleet:kill pmbot` still kills `pmbot` — it merely passes the ordinary permission prompt on the way. Both classes call the same `fleet.py` code paths; there is no parallel logic. This mirrors the Phase-4 `<!-- webui-readonly -->` decision: derived views do not mutate, and the mutating surface stays the lock-guarded CLI.
@@ -141,7 +141,7 @@ Read-only (inline `` !` ``, `allowed-tools: Bash(fleet:*)`):
 
 | Command | Body |
 |---|---|
-| `/fleet` | overview: status table + doctor warnings + `knowledge/INDEX.md` lines |
+| `/fleet:overview` | status table + doctor warnings + `knowledge/INDEX.md` lines (via `fleet knowledge`) |
 | `/fleet:status` | `` !`fleet status` `` |
 | `/fleet:peek <name>` | `` !`fleet peek $1` `` |
 | `/fleet:result <name>` | `` !`fleet result $1` `` |
@@ -241,7 +241,7 @@ Cites the numbered "Architectural invariants" section of `docs/SPEC.md`. All fou
 ## Done criteria
 
 - A manager session shows live fleet state under the input box without any command being typed, and the statusline survives a missing, empty, and corrupt registry without ever printing a traceback.
-- `/fleet` answers "where am I" in one screen; `/fleet:kill` still requires a permission prompt.
+- `/fleet:overview` answers "where am I" in one screen; `/fleet:kill` still requires a permission prompt.
 - A worker session, spawned while the plugin is globally enabled, receives **no** fleet SessionStart briefing (D5 verified against a real spawn).
 - `fleet init --statusline` refuses to clobber a pre-existing foreign statusline.
 - Unit tier green on all three OSes in CI; `TestPlatformAdapterBoundary` green unmodified in spirit (extended file list only).

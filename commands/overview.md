@@ -1,6 +1,6 @@
 ---
 description: 'Fleet overview — status table, health warnings, and the knowledge index in one screen.'
-allowed-tools: 'Bash(fleet status:*), Bash(fleet doctor:*), Bash(cat:*)'
+allowed-tools: 'Bash(fleet status:*), Bash(fleet doctor:*), Bash(fleet knowledge:*)'
 ---
 
 # Fleet overview
@@ -15,7 +15,7 @@ allowed-tools: 'Bash(fleet status:*), Bash(fleet doctor:*), Bash(cat:*)'
 
 ## Knowledge
 
-!`cat "${FLEET_HOME:-$(cat ~/.claude/fleet-home 2>/dev/null)}/knowledge/INDEX.md" 2>/dev/null || echo "(no knowledge index -- run 'fleet init')"`
+!`fleet knowledge`
 
 ---
 

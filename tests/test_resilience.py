@@ -1582,6 +1582,10 @@ class TestCmdDoctorOrchestration:
         monkeypatch.setattr(fleet, "_doctor_check_legacy_settings", lambda: ("d", True, "ok"))
         monkeypatch.setattr(fleet, "_doctor_check_posttooluse_hook_smoke", lambda **kw: ("e", True, "ok"))
         monkeypatch.setattr(fleet, "_doctor_check_stop_hook_smoke", lambda **kw: ("f", True, "ok"))
+        # The isolated home has no ~/.claude/fleet-home marker (conftest sandboxes it
+        # away from the developer's real one), so the real check correctly fails
+        # there. These tests are about orchestration, not that check.
+        monkeypatch.setattr(fleet, "_doctor_check_fleet_home_marker", lambda: ("g", True, "ok"))
 
         args = fleet.build_parser().parse_args(["doctor"])
         rc = fleet.cmd_doctor(args, which=lambda n: "wt.exe", run=lambda *a, **k: _FakeResult())
@@ -1597,6 +1601,10 @@ class TestCmdDoctorOrchestration:
         monkeypatch.setattr(fleet, "_doctor_check_legacy_settings", lambda: ("d", True, "ok"))
         monkeypatch.setattr(fleet, "_doctor_check_posttooluse_hook_smoke", lambda **kw: ("e", True, "ok"))
         monkeypatch.setattr(fleet, "_doctor_check_stop_hook_smoke", lambda **kw: ("f", True, "ok"))
+        # The isolated home has no ~/.claude/fleet-home marker (conftest sandboxes it
+        # away from the developer's real one), so the real check correctly fails
+        # there. These tests are about orchestration, not that check.
+        monkeypatch.setattr(fleet, "_doctor_check_fleet_home_marker", lambda: ("g", True, "ok"))
 
         args = fleet.build_parser().parse_args(["doctor"])
         rc = fleet.cmd_doctor(args, which=lambda n: "wt.exe", run=lambda *a, **k: _FakeResult())

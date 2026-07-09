@@ -507,7 +507,7 @@ class TestSessionStartHook:
 
 COMMANDS_DIR = Path(__file__).resolve().parent.parent / "commands"
 
-READ_ONLY_COMMANDS = {"fleet", "status", "peek", "result", "doctor"}
+READ_ONLY_COMMANDS = {"overview", "status", "peek", "result", "doctor"}
 MUTATING_COMMANDS = {"spawn", "send", "interrupt", "respawn", "kill", "clean",
                      "attach", "release", "resume-limited"}
 
@@ -582,6 +582,14 @@ class TestCommandFiles:
     @pytest.mark.parametrize("name", sorted(MUTATING_COMMANDS - {"clean"}))
     def test_mutating_commands_declare_an_argument_hint(self, name):
         assert _frontmatter(COMMANDS_DIR / f"{name}.md").get("argument-hint")
+
+    def test_no_command_collides_with_the_skill_name(self):
+        # A plugin named `fleet` ships skills/fleet/SKILL.md. A command file
+        # named fleet.md would be invoked as `/fleet` -- the same token -- and
+        # the SKILL wins, leaving the command permanently unreachable.
+        assert not (COMMANDS_DIR / "fleet.md").exists()
+        assert (REPO / "skills" / "fleet" / "SKILL.md").exists()
+
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -783,6 +791,89 @@ class TestFleetHomeMarker:
         (tmp_path / ".claude").mkdir()
         (tmp_path / ".claude" / "fleet-home").write_text(real.as_posix(), encoding="utf-8")
         assert sshook._resolve_fleet_home() == real
+
+    def test_doctor_passes_when_the_marker_points_here(self, home, monkeypatch, tmp_path):
+        marker = tmp_path / "fleet-home"
+        marker.write_text(home.resolve().as_posix(), encoding="utf-8")
+        monkeypatch.setattr(fleet, "fleet_home_marker_path", lambda: marker)
+        name, ok, _msg = fleet._doctor_check_fleet_home_marker()
+        assert (name, ok) == ("fleet-home marker", True)
+
+    def test_doctor_flags_a_missing_marker(self, home, monkeypatch, tmp_path):
+        monkeypatch.setattr(fleet, "fleet_home_marker_path", lambda: tmp_path / "absent")
+        _name, ok, msg = fleet._doctor_check_fleet_home_marker()
+        assert ok is False and "fleet init" in msg
+
+    def test_doctor_flags_a_marker_pointing_at_a_missing_dir(self, home, monkeypatch, tmp_path):
+        marker = tmp_path / "fleet-home"
+        marker.write_text(str(tmp_path / "gone"), encoding="utf-8")
+        monkeypatch.setattr(fleet, "fleet_home_marker_path", lambda: marker)
+        _name, ok, msg = fleet._doctor_check_fleet_home_marker()
+        assert ok is False and "does not exist" in msg
+
+    def test_doctor_flags_a_marker_claimed_by_another_fleet(self, home, monkeypatch, tmp_path):
+        # The marketplace-cache failure: the marker points at some OTHER fleet,
+        # so the hook briefs from a registry this CLI never writes.
+        other = tmp_path / "other-fleet"
+        other.mkdir()
+        marker = tmp_path / "fleet-home"
+        marker.write_text(other.as_posix(), encoding="utf-8")
+        monkeypatch.setattr(fleet, "fleet_home_marker_path", lambda: marker)
+        _name, ok, msg = fleet._doctor_check_fleet_home_marker()
+        assert ok is False and "claim it" in msg
+
+    def test_doctor_flags_an_empty_marker(self, home, monkeypatch, tmp_path):
+        marker = tmp_path / "fleet-home"
+        marker.write_text("   \n", encoding="utf-8")
+        monkeypatch.setattr(fleet, "fleet_home_marker_path", lambda: marker)
+        _name, ok, _msg = fleet._doctor_check_fleet_home_marker()
+        assert ok is False
+
+
+class TestKnowledgeCommand:
+    """`/fleet` inlines `!`fleet knowledge``. It used to inline bash parameter
+    expansion, which a PowerShell-backed inline exec printed as garbage."""
+
+    def test_prints_the_index(self, home, capsys):
+        (home / "knowledge").mkdir()
+        (home / "knowledge" / "INDEX.md").write_text("- pmbot.md — quirks\n", encoding="utf-8")
+        assert fleet.cmd_knowledge(argparse.Namespace()) == 0
+        assert "pmbot.md" in capsys.readouterr().out
+
+    def test_missing_index_is_reported_not_raised(self, home, capsys):
+        assert fleet.cmd_knowledge(argparse.Namespace()) == 0
+        assert "fleet init" in capsys.readouterr().out
+
+    def test_survives_a_console_that_cannot_encode_the_text(self, home, monkeypatch, capsys):
+        # A cp1252 console cannot encode the arrows and em-dashes the knowledge
+        # base is full of; print() would raise mid-stream.
+        (home / "knowledge").mkdir()
+        (home / "knowledge" / "INDEX.md").write_text("a → b — c\n", encoding="utf-8")
+
+        class _Cp1252Stdout:
+            encoding = "cp1252"
+            def __init__(self):
+                self.buf = []
+            def write(self, s):
+                s.encode("cp1252")  # raises on the arrow, like the real console
+                self.buf.append(s)
+            def reconfigure(self, **k):
+                raise OSError("cannot reconfigure")
+
+        fake = _Cp1252Stdout()
+        monkeypatch.setattr(fleet.sys, "stdout", fake)
+        assert fleet.cmd_knowledge(argparse.Namespace()) == 0
+        assert "".join(fake.buf).strip()  # something was written, not a traceback
+
+    def test_parser_exposes_home_and_knowledge(self):
+        assert fleet.build_parser().parse_args(["home"]).command == "home"
+        assert fleet.build_parser().parse_args(["knowledge"]).command == "knowledge"
+
+    def test_overview_command_uses_the_cli_not_shell_expansion(self):
+        body = _body(COMMANDS_DIR / "overview.md")
+        assert "!`fleet knowledge`" in body
+        assert "${FLEET_HOME" not in body, "shell parameter expansion is not portable across inline shells"
+        assert "cat " not in body
 
     def test_hook_ignores_a_marker_pointing_at_a_missing_dir(self, sshook, tmp_path, monkeypatch):
         monkeypatch.delenv("FLEET_HOME", raising=False)
