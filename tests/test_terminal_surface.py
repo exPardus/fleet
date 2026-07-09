@@ -576,3 +576,87 @@ class TestPluginPackaging:
         # Git Bash sh -c eats backslashes in unquoted strings.
         raw = (REPO / "hooks" / "hooks.json").read_text(encoding="utf-8")
         assert "\\\\" not in raw
+
+
+class TestInitStatusline:
+    @pytest.fixture
+    def settings(self, tmp_path, monkeypatch):
+        path = tmp_path / "dot-claude" / "settings.json"
+        monkeypatch.setattr(fleet, "user_settings_path", lambda: path)
+        return path
+
+    def _args(self, **over):
+        base = {"statusline": False, "force": False}
+        base.update(over)
+        return argparse.Namespace(**base)
+
+    def test_plain_init_never_touches_user_settings(self, home, settings, capsys):
+        (home / "worker-settings.template.json").write_text('{"hooks":{}}', encoding="utf-8")
+        fleet.cmd_init(self._args())
+        assert not settings.exists()
+
+    def test_statusline_creates_settings_when_absent(self, home, settings, capsys):
+        (home / "worker-settings.template.json").write_text('{"hooks":{}}', encoding="utf-8")
+        assert fleet.cmd_init(self._args(statusline=True)) == 0
+        payload = json.loads(settings.read_text(encoding="utf-8"))
+        assert "fleet_statusline.py" in payload["statusLine"]["command"]
+        assert payload["statusLine"]["type"] == "command"
+
+    def test_statusline_command_uses_forward_slashes(self, home, settings):
+        (home / "worker-settings.template.json").write_text('{"hooks":{}}', encoding="utf-8")
+        fleet.cmd_init(self._args(statusline=True))
+        cmd = json.loads(settings.read_text(encoding="utf-8"))["statusLine"]["command"]
+        assert "\\" not in cmd
+
+    def test_statusline_backs_up_and_preserves_siblings(self, home, settings):
+        (home / "worker-settings.template.json").write_text('{"hooks":{}}', encoding="utf-8")
+        settings.parent.mkdir(parents=True)
+        settings.write_text(json.dumps({"model": "opus", "env": {"A": "1"}}), encoding="utf-8")
+
+        fleet.cmd_init(self._args(statusline=True))
+
+        payload = json.loads(settings.read_text(encoding="utf-8"))
+        assert payload["model"] == "opus"
+        assert payload["env"] == {"A": "1"}
+        assert payload["statusLine"]["type"] == "command"
+        assert list(settings.parent.glob("settings.json.bak.*"))
+
+    def test_statusline_refuses_a_foreign_statusline(self, home, settings):
+        (home / "worker-settings.template.json").write_text('{"hooks":{}}', encoding="utf-8")
+        settings.parent.mkdir(parents=True)
+        settings.write_text(json.dumps(
+            {"statusLine": {"type": "command", "command": "ccusage statusline"}}), encoding="utf-8")
+
+        with pytest.raises(fleet.FleetCliError) as exc:
+            fleet.cmd_init(self._args(statusline=True))
+        assert "ccusage" in str(exc.value)
+        # Untouched.
+        assert "ccusage" in settings.read_text(encoding="utf-8")
+
+    def test_force_overwrites_a_foreign_statusline(self, home, settings):
+        (home / "worker-settings.template.json").write_text('{"hooks":{}}', encoding="utf-8")
+        settings.parent.mkdir(parents=True)
+        settings.write_text(json.dumps(
+            {"statusLine": {"type": "command", "command": "ccusage statusline"}}), encoding="utf-8")
+
+        assert fleet.cmd_init(self._args(statusline=True, force=True)) == 0
+        assert "fleet_statusline.py" in settings.read_text(encoding="utf-8")
+
+    def test_reinstall_over_fleets_own_statusline_is_idempotent(self, home, settings):
+        (home / "worker-settings.template.json").write_text('{"hooks":{}}', encoding="utf-8")
+        fleet.cmd_init(self._args(statusline=True))
+        first = json.loads(settings.read_text(encoding="utf-8"))
+        assert fleet.cmd_init(self._args(statusline=True)) == 0
+        assert json.loads(settings.read_text(encoding="utf-8")) == first
+
+    def test_corrupt_user_settings_refuses_rather_than_clobbering(self, home, settings):
+        (home / "worker-settings.template.json").write_text('{"hooks":{}}', encoding="utf-8")
+        settings.parent.mkdir(parents=True)
+        settings.write_text("{not json", encoding="utf-8")
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_init(self._args(statusline=True))
+        assert settings.read_text(encoding="utf-8") == "{not json"
+
+    def test_parser_accepts_statusline_and_force(self):
+        args = fleet.build_parser().parse_args(["init", "--statusline", "--force"])
+        assert args.statusline is True and args.force is True

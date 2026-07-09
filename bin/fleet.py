@@ -141,6 +141,18 @@ def instance_settings_path() -> Path:
     return state_dir() / "worker-settings.json"
 
 
+def user_settings_path() -> Path:
+    """~/.claude/settings.json -- the ONLY file outside FLEET_HOME that fleet
+    ever writes, and only via `fleet init --statusline` (Phase 1.6 D6).
+    Separate helper so tests can redirect it without touching a developer's
+    real settings."""
+    return Path.home() / ".claude" / "settings.json"
+
+
+def statusline_script_path() -> Path:
+    return FLEET_HOME / "bin" / "fleet_statusline.py"
+
+
 def now_iso() -> str:
     """Current UTC time, second precision, matching the registry schema."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1968,6 +1980,52 @@ def _report_stranded_turn(name: str, sid: str, info: dict) -> None:
         pass
 
 
+def _install_statusline(force: bool = False) -> None:
+    """Merge fleet's statusLine into ~/.claude/settings.json (Phase 1.6 D6).
+
+    A Claude Code plugin cannot ship a statusLine -- plugin settings.json
+    accepts only `agent` and `subagentStatusLine` -- so this explicit, opt-in
+    step is the only way to install one. It backs up first, merges ONLY the
+    statusLine key, and refuses a foreign statusline (an operator running
+    ccusage or similar must not lose it silently)."""
+    path = user_settings_path()
+    settings = {}
+    if path.exists():
+        try:
+            settings = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
+            raise FleetCliError(
+                f"refusing to touch an unreadable {path}: {exc} -- fix or move it, then re-run"
+            ) from exc
+        if not isinstance(settings, dict):
+            raise FleetCliError(f"refusing to touch {path}: not a JSON object")
+
+    script = statusline_script_path().resolve().as_posix()
+    existing = settings.get("statusLine")
+    if isinstance(existing, dict) and "fleet_statusline.py" not in str(existing.get("command", "")):
+        if not force:
+            raise FleetCliError(
+                f"statusLine already set to {existing.get('command')!r} in {path} -- "
+                "re-run with --force to overwrite"
+            )
+
+    if path.exists():
+        backup = path.with_name(f"settings.json.bak.{now_iso().replace(':', '').replace('-', '')}")
+        shutil.copy2(path, backup)
+        print(f"  backup:      {backup}")
+
+    settings["statusLine"] = {
+        "type": "command",
+        # Forward slashes: this command string is executed through a shell.
+        "command": f"{Path(sys.executable).resolve().as_posix()} {script}",
+        "refreshInterval": 10,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    print(f"fleet init: installed statusLine into {path}")
+    print("  restart Claude Code to see it")
+
+
 def cmd_init(args) -> int:
     """`fleet init` (SPEC §14, §5 command surface): render the
     machine-local worker-settings.json instance from the git-tracked
@@ -1992,6 +2050,9 @@ def cmd_init(args) -> int:
     print(f"fleet init: wrote {instance_path}")
     print(f"  python:      {Path(sys.executable).resolve().as_posix()}")
     print(f"  fleet home:  {Path(FLEET_HOME).resolve().as_posix()}")
+
+    if getattr(args, "statusline", False):
+        _install_statusline(force=getattr(args, "force", False))
     return 0
 
 
@@ -4207,7 +4268,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="fleet", description="claude-fleet manager CLI")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("init", help="render the machine-local worker-settings.json instance from the template")
+    p_init = sub.add_parser("init", help="render the machine-local worker-settings.json instance from the template")
+    p_init.add_argument("--statusline", action="store_true",
+                        help="also install fleet's statusline into ~/.claude/settings.json")
+    p_init.add_argument("--force", action="store_true",
+                        help="with --statusline: overwrite an existing foreign statusline")
 
     p_spawn = sub.add_parser("spawn", help="spawn a new worker session")
     p_spawn.add_argument("name")
