@@ -1634,6 +1634,94 @@ def _worker_flags(record: dict) -> list:
     return flags
 
 
+# ---------------------------------------------------------------------------
+# Phase 1.6 terminal surface (docs/specs/terminal-surface.md): the single
+# read-only derivation every view consumes -- statusline, `status --json
+# --stale-ok`, the SessionStart hook, and (later) watchtower / web UI.
+#
+# D1: no fleet_lock, no PLATFORM.get_process_info, no write. This runs on a
+# statusline hot path that refires after every assistant message.
+# D4: it must NOT call load_registry() -- that quarantines a corrupt registry
+# (a write, and a 10s-refresh loop would shred operator evidence). Views
+# report corruption; the next real fleet command quarantines it.
+# ---------------------------------------------------------------------------
+
+def _read_registry_readonly() -> tuple:
+    """(ok, reason, data). Never writes, never quarantines, never raises.
+
+    reason is None when ok, else "not_initialized" | "unreadable"."""
+    path = registry_path()
+    if not path.exists():
+        return (False, "not_initialized", {"workers": {}})
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+        return (False, "unreadable", {"workers": {}})
+    if not isinstance(data, dict):
+        return (False, "unreadable", {"workers": {}})
+    workers = data.get("workers", {})
+    if not isinstance(workers, dict) or not all(isinstance(v, dict) for v in workers.values()):
+        return (False, "unreadable", {"workers": {}})
+    return (True, None, {"workers": workers})
+
+
+def status_snapshot(now=None) -> dict:
+    """Read-only fleet snapshot. See the module comment above for why this
+    exists alongside cmd_status rather than reusing it."""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    ok, reason, data = _read_registry_readonly()
+    snap = {
+        "ok": ok,
+        "reason": reason,
+        "generated_at": now_iso(),
+        "totals": {"workers": 0, "mail": 0, "cost_usd": 0.0, "by_status": {}},
+        "workers": [],
+    }
+    if not ok:
+        return snap
+
+    rows = []
+    by_status: dict = {}
+    total_mail = 0
+    total_cost = 0.0
+    for name in sorted(data["workers"]):
+        rec = data["workers"][name]
+        sid = rec.get("session_id") or ""
+        mail = _pending_mail_count(sid) if sid else 0
+        cost = _registry_cost(rec.get("cost_usd"))
+        try:
+            stale = (now - _parse_iso(rec["last_activity"])).total_seconds()
+        except (ValueError, TypeError, KeyError):
+            stale = None
+        status = rec.get("status", "?")
+        by_status[status] = by_status.get(status, 0) + 1
+        total_mail += mail
+        total_cost += cost
+        rows.append({
+            "name": name,
+            "status": status,
+            "turns": rec.get("turns", 0),
+            "cost_usd": cost,
+            "mail": mail,
+            "stale_seconds": stale,
+            "limit_reset_at": rec.get("limit_reset_at"),
+            "limit_kind": rec.get("limit_kind"),
+            "resume_eligible": status == "limited" and _limit_reset_passed(rec),
+            "attached_since": rec.get("attached_since"),
+        })
+
+    snap["workers"] = rows
+    snap["totals"] = {
+        "workers": len(rows),
+        "mail": total_mail,
+        "cost_usd": round(total_cost, 6),
+        "by_status": by_status,
+    }
+    return snap
+
+
 def hook_events_present(log_path) -> bool:
     """Whether any hook event (PostToolUse/Stop additionalContext, requires
     --include-hook-events at spawn) appears anywhere in the raw log -- the
