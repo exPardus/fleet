@@ -2715,3 +2715,245 @@ grep -rn "SOAK GATE 1" knowledge/lessons.md                    # -> no matches (
 ```
 
 **For the record:** the manager's receipt reproduced. Six workers, zero fabrications.
+
+---
+
+## Disposition of the seven false `[UNBUILT]` tags
+
+Worker `spec-unbuilt-audit`, 2026-07-10. Scope: retire the seven false tags §2 above found, scope the
+one misleading tag, and re-verify — independently, by grep — every tag §2 called TRUE. Docs only; no
+`bin/`, no `tests/`. All receipts below were run at **`7ffc6a7`** (`git rev-parse --short HEAD`) against a
+clean tree (`git status --porcelain` → empty). Every command is pasted with its actual output.
+
+**Result: 7/7 retired, 7 receipts pasted, 1 tag scoped (F23), 8 TRUE tags re-verified, no disagreement
+with the auditor.** The three kernels are in HEAD's ancestry (`git merge-base --is-ancestor 710e3d3 HEAD`
+→ exit 0):
+
+```
+$ git log -1 --format="%h %s" f8c9513
+f8c9513 harden: fleet.py budget/setting-sources persistence (C2 Wave 2B link 2/5)
+$ git log -1 --format="%h %s" 0a6de4b
+0a6de4b harden: fleet.py token-ceiling fleet-side + B2 rotation retry (C2 Wave 2B link 4/5)
+$ git log -1 --format="%h %s" 784a73f
+784a73f harden: fleet.py UL1 usage-limit resilience kernel (C2 Wave 2B link 5/5)
+```
+
+The auditor's `harden-fleet-b` / `-d` / `-e` kernel names map to `f8c9513` / `0a6de4b` / `784a73f`. Note
+`0a6de4b` carries **two** kernels: item 10's fleet-side token ceiling *and* B2's rotation retry. That is
+why F23 and F24 share a commit.
+
+### Tags 11 and 20 — F22, budget/`setting_sources` persistence — RETIRED, shipped in `f8c9513`
+
+```
+$ grep -n "max_budget_usd=" bin/fleet.py | sed -n "4,11p"
+2298:            max_budget_usd=args.max_budget_usd, setting_sources=args.setting_sources,
+2315:            model=record.get("model"), max_budget_usd=record.get("max_budget_usd"),
+2772:                append_event("budget_exceeded", args.name, cost_usd=spent, max_budget_usd=mb)
+2865:            model=after.get("model"), max_budget_usd=after.get("max_budget_usd"),
+2969:            model=model, max_budget_usd=max_budget_usd, setting_sources=setting_sources,
+3592:                max_budget_usd=max_budget_usd, setting_sources=setting_sources,
+3641:                max_budget_usd=max_budget_usd, setting_sources=setting_sources,
+3696:            model=model, max_budget_usd=max_budget_usd, setting_sources=setting_sources,
+
+$ grep -n "budget_exceeded\|= \"over_budget\"" bin/fleet.py
+844:    if current_status == "over_budget":
+2769:                after["status"] = "over_budget"
+2772:                append_event("budget_exceeded", args.name, cost_usd=spent, max_budget_usd=mb)
+
+$ grep -rc "max_budget_usd" tests/*.py | grep -v ":0"
+tests/test_cli.py:11
+tests/test_core.py:2
+tests/test_destructive_guard.py:1
+tests/test_resilience.py:6
+tests/test_steering.py:3
+tests/test_terminal_surface.py:1
+```
+
+`:2298`/`:2315` are inside `cmd_spawn` (`def cmd_spawn` @`:2261`); `:2865` inside `cmd_send` (@`:2703`) —
+the send-when-idle resume; `:2969` inside `_resume_one_limited` (@`:2914`), the per-worker helper
+`cmd_resume_limited` (@`:3004`) calls; `:3592`/`:3641`/`:3696` inside `cmd_respawn` (@`:3437`). All four
+launch paths re-pass. The worker-level ceiling refuses + flags sticky
+`over_budget` at `:2766-2777`. Named pins, green: `tests/test_steering.py:204`
+(`test_idle_resume_repasses_persisted_budget_and_setting_sources`), `:226`
+(`test_idle_resume_refuses_and_flags_when_cumulative_over_budget`), `:252`
+(`test_over_budget_status_is_sticky_across_recompute`); `tests/test_resilience.py:532`, `:556`, `:2412`.
+
+**Disposition.** SPEC.md §12 row moved from bucket (b) to bucket (a) with these anchors. Appendix F22
+gains **`STATUS CORRECTED 2026-07-10: SHIPPED`**, naming `f8c9513`, keeping the finding's history.
+
+### Tags 12 and 22 — F24, rotation retry + `_unrotate` rollback — RETIRED, shipped in `0a6de4b`
+
+The old tag conceded `_unrotate` existed and asserted *"the rotation-retry-on-`PermissionError` wrapper is
+what is unbuilt."* It is built:
+
+```
+$ grep -n "except PermissionError\|_ROTATE_RETRY_ATTEMPTS = \|raise LogRotationError\|def _unrotate_worker_log\|_unrotate_worker_log(args.name)" bin/fleet.py
+3360:_ROTATE_RETRY_ATTEMPTS = 5
+3381:    continued failure raise LogRotationError naming the likely holder, so
+3397:            except PermissionError as exc:
+3402:            raise LogRotationError(
+3409:def _unrotate_worker_log(name: str) -> None:
+3669:        _unrotate_worker_log(args.name)
+3717:                _unrotate_worker_log(args.name)
+
+$ grep -rc "_rotate_worker_log\|LogRotationError" tests/*.py | grep -v ":0"
+tests/test_resilience.py:8
+```
+
+`LogRotationError` is declared at `:1916`. `:3669` is respawn's rotation-failure clean-fail path (no new
+turn, no sid-swap); `:3717` is the launch-failure rollback. Named pins, green:
+`tests/test_resilience.py:141` (`test_retries_on_permission_error_then_succeeds`, injected `sleep`),
+`:166` (`test_raises_log_rotation_error_after_exhausting_retries`), `:182`
+(`test_respawn_clean_fails_when_log_locked`), `:218` (`test_respawn_succeeds_while_follower_mid_poll`),
+`:677` (`test_launch_failure_rollback_unrotates_log_and_preserves_transcript`).
+
+**Disposition.** §12 row → bucket (a). Appendix F24 gains **`STATUS CORRECTED 2026-07-10: SHIPPED — BOTH
+halves`**, naming `0a6de4b`.
+
+### Tag 13 — UL1 `limited_sticky_exempt_from_dead` — RETIRED, shipped in `784a73f`
+
+```
+$ grep -n "current_status == \"limited\"" bin/fleet.py
+860:    if current_status == "limited":
+```
+
+`bin/fleet.py:853-861` is the recompute exemption (comment: *"A liveness recompute must NEVER demote it to
+dead … The sole exits are a `fleet resume-limited` launch … or `respawn --force`"*), placed alongside the
+`dead`/`attached`/`over_budget`/`over_ceiling` sticky guards. Named pins, green:
+`tests/test_resilience.py:2326` (`test_limited_never_demoted_to_dead_on_gone_probe`), `:2336`
+(`test_recompute_status_returns_limited_sticky`).
+
+### Tag 14 — UL1 `resume_limited_gated_on_reset` — RETIRED, shipped in `784a73f`
+
+```
+$ grep -n "def cmd_resume_limited\|def _limit_reset_passed\|if not _limit_reset_passed\|force_now = \|if not force_now" bin/fleet.py
+1578:def _limit_reset_passed(record: dict) -> bool:
+3004:def cmd_resume_limited(args, popen=subprocess.Popen, get_process_info=None, which=shutil.which,
+3020:    force_now = bool(getattr(args, "force_now", False))
+3041:        if not force_now:
+3045:            if not _limit_reset_passed(rec):
+```
+
+`:3041` skips the null-horizon parks unless `--force-now`; `:3045` skips those still before the reset. The
+relaunch re-passes `max_budget_usd`/`setting_sources` at `:2969` (invariants 6, 7). CLI flag at `:4633`,
+dispatch at `:4680-4681`. Named pins, green: `tests/test_resilience.py:2352` (past reset), `:2367`
+(future), `:2379` (null horizon), `:2403` (weekly), `:2426` (`test_non_limited_worker_left_untouched`),
+`:2444` (`test_launch_failure_rolls_back_to_limited`), `:2506`; `tests/test_cli.py:354`
+(`test_main_dispatches_resume_limited_command`).
+
+### Tag 16 — UL1 `limited_distinct_from_budget_trip` — RETIRED, shipped in `784a73f`
+
+```
+$ grep -n "def _stderr_is_limit_shaped\|if _stderr_is_limit_shaped\|updated[\"status\"] = \"limited\"" bin/fleet.py
+1540:def _stderr_is_limit_shaped(text: str) -> bool:
+1644:        if _stderr_is_limit_shaped(stderr_tail):
+1646:            updated["status"] = "limited"
+```
+
+The classifier at `:1640-1651` parks on a limit-shaped stderr tail and *falls through* to the ordinary
+crash-dead landmark otherwise (in-code: *"the fallback never swallows a genuine crash as a park"*). The
+budget trip is a separate, sticky `over_budget` (`:2769`), never a park. Named pins, green:
+`tests/test_resilience.py:2277` (`test_errored_no_result_with_limit_stderr_parks_limited`) against
+`tests/test_steering.py:226` (the budget trip).
+
+Shared UL1 test-surface receipt for tags 13/14/16:
+
+```
+$ grep -rc "limit_reset_at\|limit_kind\|resume_limited" tests/*.py | grep -v ":0"
+tests/test_cli.py:3
+tests/test_core.py:1
+tests/test_destructive_guard.py:1
+tests/test_resilience.py:35
+tests/test_terminal_surface.py:13
+```
+
+**Disposition (13/14/16).** All three §12 rows moved to bucket (a) with these anchors and `784a73f`.
+
+### Tag 21 — F23's token ceiling — SCOPED, not retired. The fleet-side half ships; the provider-side half does not.
+
+The auditor called this MISLEADING, and the distinction is real, so it is preserved rather than flattened.
+Item 10 has two halves. **Fleet-side, SHIPPED in `0a6de4b`:**
+
+```
+$ grep -c "token_ceiling" bin/fleet.py
+18
+$ grep -n "= \"over_ceiling\"\|def _write_ceiling_file" bin/fleet.py
+89:def _write_ceiling_file(sid: str, ceiling) -> None:
+851:    if current_status == "over_ceiling":
+1696:    if record["status"] == "over_ceiling":
+2794:                after["status"] = "over_ceiling"
+```
+
+**Provider-side, genuinely UNBUILT** — untrusted-cost marking under a non-default provider profile, which
+is the half F23's `--max-budget-usd` caveat actually depends on:
+
+```
+$ grep -in "provider" bin/fleet.py ; echo "exit=$?"
+exit=1
+```
+
+Zero matches, case-insensitive, in the whole file. **Disposition.** F23's tag is rewritten to
+`[UNBUILT — owned by C2 providers kernel / item 10, provider-side half]`, with the fleet-side half
+recorded as shipped in `0a6de4b` and its anchors named. The caveat text itself is unchanged: it is
+descriptive-of-a-gap and the gap is still open.
+
+### The TRUE tags — re-verified independently. No disagreement with the auditor.
+
+The auditor could be wrong too, so each was re-grepped rather than trusted.
+
+```
+$ grep -rn "boot_id" bin/ tests/ --include=*.py ; echo "exit=$?"
+exit=1
+```
+
+**F33 (tags 2, 3, 9, 15, 17, 23): TRUE.** No match anywhere in `bin/` or `tests/`. Every F33 tag stands,
+including §12's `boot_identity_gates_tick_compare`, which is now the ONLY row in bucket (b).
+
+```
+$ grep -rin "elevation\|elevated\|integrity level\|IsInRole\|Administrator" bin/fleet.py tests/*.py
+bin/fleet.py:224:                                    unreadable (Access Denied on an elevated/
+$ grep -n "def _doctor_check_unreadable_starttime" bin/fleet.py
+4218:def _doctor_check_unreadable_starttime(workers: dict, get_process_info=None):
+```
+
+**Doctor elevation-mismatch (tags 8, 10): TRUE.** The single match is a *comment* describing the
+Access-Denied case; zero matches in `tests/`. The neighbouring `_doctor_check_unreadable_starttime` — the
+part `:412` says shipped — does exist. Both tags accurate as written.
+
+Tags 1, 4, 5, 6, 7, 18, 19 are the convention statement, a back-reference, and recorded history. Nothing
+to verify against code; left untouched.
+
+Independent confirmation that the five moved rows are green and not gated:
+
+```
+$ grep -rn "xfail\|@pytest.mark.skip" tests/*.py ; echo "exit=$?"
+exit=1
+```
+
+Bucket (b) described a state of the test suite that does not exist. It now contains one row, and that
+row's absence from the code is proved by the `boot_id` receipt above.
+
+### The collateral the auditor named, and the one it implies
+
+`docs/SPEC.md:3` — the `**Status:**` line — carried the same false claim with **no `[UNBUILT` token**, so
+no grep for the tag would have found it. It is corrected: F22, F24, F31 and F20 are recorded SHIPPED with
+their commits, and the line now names the three things still genuinely unbuilt (F33; doctor's
+elevation-mismatch check; F23's provider-side half) and nothing else.
+
+The auditor's mechanism — *the tag is not the claim; the claim is the claim, and it also appears
+untagged* — is now written into SPEC.md's tag-convention note (§4, after the F33-R2 correction), together
+with the fact that these seven tags survived Campaign 2, two adversarial reviews and a manager sweep
+because every one of those passes enumerated by inspection. Two rules follow, and both are recorded there:
+any `[UNBUILT]` claim must carry a pasted `grep` receipt against `bin/fleet.py` at a stated commit, and
+retiring a tag means **moving the §12 row to the bucket that says it passes** — a row stranded under
+"FAILS until the kernel lands" is still an instruction to gate a passing test, tag or no tag.
+
+### What the verifier must re-check
+
+Re-run every command in this section at the commit that lands it; they are the whole basis for the eight
+edits. Then re-run the auditor's own sweep — `grep -on ".\{0,80\}\[UNBUILT[^]]*\]" docs/SPEC.md` — and
+confirm that **no `[UNBUILT` occurrence outside quoted history and the three genuinely-unbuilt items
+survives**, and separately that no *untagged* prose in SPEC.md still calls F22/F24/F31 prescriptive.
+`docs/specs/portability.md` was not touched: its `Status:` line belongs to `spec-final-verify`, and this
+worker's edits do not by themselves lift the promotion gate — that ruling is §4 above and remains the
+final-verifier's to make. Build waves stay gated on `SOAK GATE 1 SIGNED` regardless.
