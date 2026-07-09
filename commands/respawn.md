@@ -12,6 +12,9 @@ drained mailbox — lossless if the journal is current. It refuses while a turn 
 running unless `--force` (which interrupts first), and refuses a launch-in-flight
 claim even with `--force`.
 
+Respawning a worker spawned by another session is refused unless `--yes`; surface
+that refusal rather than overriding it unasked.
+
 It also rotates the log. If rotation fails because a follower holds the log handle,
 the respawn fails cleanly with no session swap — report that verbatim rather than
 retrying blindly.

@@ -37,6 +37,10 @@ You are the manager of a fleet of Claude Code worker sessions on this machine. T
 - **Never read raw `logs\*.jsonl`.** `status`/`peek`/`result` exist to protect your context. Trust the compression.
 - **Never sleep-loop.** `fleet wait` in background Bash notifies you.
 - **Prefer respawn over marathon sessions.** Worker past ~30–40 turns or acting confused → `fleet respawn`. Journal makes it lossless.
+- **You may only retire your own workers.** `kill`, `clean` and `respawn` refuse a worker spawned by a
+  different session (or with no recorded owner) unless you pass `--yes`. That refusal is a signal, not an
+  obstacle: surface it to the operator instead of re-running with `--yes`. `fleet clean` deletes journals
+  irreversibly; only the claude session survives, resumable by sid from `state/events.jsonl`.
 - **Permission modes:** trusted grind in known repo → `bypass`. Unfamiliar/destructive → `accept` or `plan`. Middle → `dontask`. Put `--max-budget-usd` on unbounded tasks. Record choice per task.
 - **Foreign hooks:** worker inherits target repo's own hooks + global plugins. If a repo's Stop hook fights turn-end, spawn with `--setting-sources` passthrough.
 - **Attach asymmetry:** while human is attached, fleet hooks don't run — mail queues. Nag stale attaches.
