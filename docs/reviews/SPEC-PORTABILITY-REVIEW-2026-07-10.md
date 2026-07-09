@@ -2486,3 +2486,232 @@ a grep.
 that two shipped fields were unbuilt — because *my* review asserted it first. The rule this campaign keeps
 rediscovering is not "grep the call sites." It is **grep the claim.** Every claim. Including the ones that arrive
 already believed, and especially the ones a reviewer hands you.
+
+---
+
+## Final verification
+
+Worker `spec-final-verify`, 2026-07-10. Scope: (1) certify the manager's correction `92e8a44` — the
+manager authored it, so the manager cannot certify it; (2) confirm the F33-R1 fix at `2f56bb3` still
+stands; (3) rule on promoting `docs/specs/portability.md`. Nothing here re-reviews settled findings.
+
+**Verdict: needs-fixes. One HIGH. `docs/specs/portability.md` stays `drafting`; SPEC.md F33 is NOT
+ratified.** Nothing in this document unblocks the C4 build waves — they are gated on Altai's
+`SOAK GATE 1 SIGNED` line in `knowledge/lessons.md`, which does not exist (`grep -rn "SOAK GATE 1"
+knowledge/lessons.md` → no matches), and no finding, fix, or promotion here changes that.
+
+### 1. The manager's receipt is honest, and the claim is true
+
+The two greps pasted inline in `92e8a44` were re-run at `2f56bb3` (via `git show`) and at HEAD. They
+reproduce **exactly**:
+
+```
+$ git show 2f56bb3:bin/fleet.py | grep -c "limit_reset_at\|limit_kind"
+18
+$ for f in $(git ls-tree --name-only 2f56bb3 tests/); do ... done
+tests/test_core.py:1
+tests/test_destructive_guard.py:1
+tests/test_resilience.py:26
+tests/test_terminal_surface.py:13          # 1+1+26+13 = 41, as the commit message states
+```
+
+Identical at HEAD (the only delta is four `tests/__pycache__/*.pyc` byte-matches, which are build
+artifacts, not source; the manager's paste correctly excluded them). **No fabrication.** The record
+stands at six workers, zero fabrications.
+
+The claim is true, and stronger than "the fields exist" — they are written, read, and regression-pinned:
+
+- **Written:** `new_worker_record` seeds both (`bin/fleet.py:557-558`); the turn-end classifier stamps
+  them and emits `limited_suspected` (`bin/fleet.py:1647-1649`).
+- **Read:** `_limit_reset_passed` (`bin/fleet.py:1579-1587`), `cmd_resume_limited`'s sweep
+  (`:3040`), the status snapshot (`:1782-1783`), doctor's park summary (`:4272-4273`).
+- **Pinned:** `tests/test_resilience.py:2252-2564` (26 refs — park, sticky, reset-gating, `--force-now`,
+  weekly vs `session_5h`, launch-failure rollback), `tests/test_terminal_surface.py:118-137, 275-284`
+  (13 refs — snapshot never raises, `resume_eligible` flag, statusline rendering),
+  `tests/test_core.py:122` (schema), `tests/test_destructive_guard.py:43`.
+
+UL1 landed as **C2 Wave 2B link 5/5**, commit `784a73f` (`harden: fleet.py UL1 usage-limit resilience
+kernel`), re-landed at HEAD via `710e3d3` (`git merge-base --is-ancestor 710e3d3 HEAD` → yes).
+
+**`turn_pid_boot_id` is genuinely `[UNBUILT]`.** `grep -rn "boot_id" bin/ tests/ --include=*.py` → **no
+matches**, at HEAD. No mirror defect. `92e8a44` is correct as written.
+
+### 2. HIGH — the correction fixed one line and left seven false `[UNBUILT]` tags standing
+
+`92e8a44` corrected `docs/SPEC.md:102`. It did not sweep the file. Enumeration built **by grep**, not by
+inspection — `grep -on ".\{0,80\}\[UNBUILT[^]]*\]" docs/SPEC.md`, **23 occurrences**, every one checked
+against `bin/fleet.py` and `tests/`:
+
+| # | Line | Tag / claim | Verdict |
+|---|------|-------------|---------|
+| 1 | 3 | `[UNBUILT — owned by <kernel>]` (naming the convention) | n/a — convention, not a claim |
+| 2 | 3 | F33 `[UNBUILT — owned by C4 port-adapter-a]` | **TRUE** — `boot_id` grep: no matches |
+| 3 | 102 | `turn_pid_boot_id` `[UNBUILT — owned by C4 port-adapter-a]` | **TRUE** |
+| 4 | 102 | "Its `[UNBUILT]` tag lives at `:121`" | **TRUE** — back-reference |
+| 5 | 104 | "an earlier revision also declared … `[UNBUILT]`" | **TRUE** — recorded history |
+| 6 | 116 | "F20: a shipped kernel left tagged `[UNBUILT]`" | **TRUE** — history |
+| 7 | 116 | "any claim … that a field is `[UNBUILT]` must be verifiable by grep" | **TRUE** — the rule |
+| 8 | 128 | doctor elevation-mismatch `[UNBUILT — C2 hardening kernel item 9]` | **TRUE** — no impl (below) |
+| 9 | 135 | F33 boot-identity paragraph `[UNBUILT — C4 port-adapter-a]` | **TRUE** |
+| 10 | 176 | doctor elevation check `[UNBUILT — C2 item 9]` | **TRUE** |
+| 11 | 352 | `budget_persistence_repassed_every_launch` `[UNBUILT — item 7]` | **FALSE — SHIPPED** |
+| 12 | 353 | `rotation_retry_unrotate_rollback` `[UNBUILT — B2 half]` | **FALSE — SHIPPED** |
+| 13 | 354 | (UL1) `limited_sticky_exempt_from_dead` `[UNBUILT — item 11]` | **FALSE — SHIPPED** |
+| 14 | 355 | (UL1) `resume_limited_gated_on_reset` `[UNBUILT — item 11]` | **FALSE — SHIPPED** |
+| 15 | 356 | (F33) `boot_identity_gates_tick_compare` `[UNBUILT — C4]` | **TRUE** |
+| 16 | 357 | (UL1) `limited_distinct_from_budget_trip` `[UNBUILT — item 11]` | **FALSE — SHIPPED** |
+| 17 | 373 | port-adapter `boot_identity` `[UNBUILT — C4 port-adapter-a]` | **TRUE** |
+| 18 | 400 | "F20's three-way probe is PRESCRIPTIVE/`[UNBUILT]`" | **TRUE** — history, self-corrected |
+| 19 | 408 | "the spec carried `[UNBUILT]` long after the kernel landed" | **TRUE** — history |
+| 20 | 412 | F22 `[UNBUILT — C2 harden-fleet-b / item 7]` | **FALSE — SHIPPED** |
+| 21 | 414 | F23 provider-side token ceiling `[UNBUILT — item 10]` | **MISLEADING** (LOW, below) |
+| 22 | 416 | F24 `[UNBUILT — C2 harden-fleet-d / B2 half]` | **FALSE — SHIPPED** |
+| 23 | 454 | F33 appendix `[UNBUILT — C4 port-adapter-a]` | **TRUE** |
+
+**23 audited. 7 false. 1 misleading. 15 correct.**
+
+**Receipts for each false tag.** All three kernels landed in **C2 Wave 2B** and are in HEAD's ancestry
+via `710e3d3` (`Revert "Revert "merge: Campaign 2 … (11 kernels, UL1, 506 tests)""`):
+
+- **Item 7 / F22** (`:352`, `:412`) — landed `f8c9513` (`harden: fleet.py budget/setting-sources
+  persistence (C2 Wave 2B link 2/5)`). `max_budget_usd`/`setting_sources` are re-passed on **every**
+  launch path: spawn `:2298`, send-when-idle `:2315-2316`, respawn `:3539-3541`/`:3592`/`:3641`/`:3696`,
+  resume-limited `:2961-2969`. The worker-level ceiling refuses + flags `over_budget` at `:2766-2777`
+  (`append_event("budget_exceeded", …)`). Pinned: `tests/test_steering.py:226`
+  (`test_idle_resume_refuses_and_flags_when_cumulative_over_budget`), `:252` (sticky across recompute),
+  `tests/test_resilience.py:532`, `:556`, `:2412` (`test_resume_repasses_budget_and_setting_sources`).
+  `bin/fleet.py:515` names it in-code: *"Phase1 kernel item 7 (F13/M5)"*.
+- **B2 half / F24** (`:353`, `:416`) — landed `0a6de4b`. The spec's parenthetical asserts *"the
+  rotation-retry-on-`PermissionError` wrapper is what is unbuilt."* It is at `bin/fleet.py:3397`
+  (`except PermissionError as exc:` inside the `_ROTATE_RETRY_ATTEMPTS` loop), raising `LogRotationError`
+  on exhaustion (`:3403`), with `_unrotate_worker_log` (`:3409`) called from respawn's clean-fail paths
+  (`:3669`, `:3717`). Pinned: `tests/test_resilience.py:143-160` (retry succeeds, injected `sleep`),
+  `:173-178` (exhaustion raises), `:185-233` (clean-fail → registry snapshot restored + log un-rotated),
+  `:677` (`test_launch_failure_rollback_unrotates_log_and_preserves_transcript`).
+- **Item 11 / UL1** (`:354`, `:355`, `:357`) — landed `784a73f`. Sticky exemption:
+  `bin/fleet.py:853-858`, pinned `tests/test_resilience.py:2326`
+  (`test_limited_never_demoted_to_dead_on_gone_probe`) and `:2336`
+  (`test_recompute_status_returns_limited_sticky`). Reset-gated resume: `cmd_resume_limited`
+  (`:3004-3043`), `_limit_reset_passed` (`:1579`), `--force-now` (`:4633`), CLI dispatch (`:4680`);
+  pinned `tests/test_resilience.py:2352` (past), `:2367` (future), `:2379` (null horizon), `:2403`
+  (weekly), `:2444` (launch-failure rollback → `limited`), `:2506`, and `tests/test_cli.py:354`.
+  Limited-vs-budget-trip: classifier at `:1644-1649` parks on a limit-shaped stderr signal and
+  *falls through* to crash-dead otherwise; pinned `tests/test_resilience.py:2277`
+  (`test_errored_no_result_with_limit_stderr_parks_limited`), with the budget trip pinned separately
+  as `over_budget` (`tests/test_steering.py:226`).
+
+**Why this is HIGH, not LOW.** All five false §12 entries sit under the bucket header at
+`docs/SPEC.md:351`: ***"(b) Pins unbuilt fixes — FAILS until the named C2 kernel lands. … a builder
+writes them as `xfail`/gated until the kernel ships, then flips them green."*** A builder who follows
+that instruction takes five behaviors that **pass today** and marks them `xfail` — and, reading the F22
+and F24 appendix tags at `:412`/`:416`, rebuilds three kernels that already exist. That is precisely the
+harm the tag convention exists to prevent, and precisely the harm `92e8a44`'s own commit message names:
+*"a shipped feature tagged `[UNBUILT]`, which would have a builder rewrite working code."*
+
+Independent confirmation that these pins are green, not gated: `py -3.13 -m pytest tests/ -q` →
+**708 passed, 12 skipped** (the 12 are the `FLEET_LIVE=1` tier-3 haiku harness), and
+`grep -rn "xfail\|@pytest.mark.skip" tests/*.py` → **zero matches**. Bucket (b) describes a state of the
+test suite that does not exist.
+
+**Collateral, same class, no `[UNBUILT` token — so a grep for the tag alone will miss it.** `docs/SPEC.md:3`
+(the `**Status:**` line) still reads: *"budget/`setting_sources` persistence (F22), the rotation-retry
+wrapper (F24), and UL1 park+resume (F31) are prescriptive."* All three ship. Any fix wave must correct
+`:3` as well; a sweep driven only by `grep "\[UNBUILT"` will leave it standing. This is the fifth
+enumeration in this campaign to be built by inspection, and the mechanism is now visible: **the tag is
+not the claim. The claim is the claim, and it also appears untagged.**
+
+**LOW (`:414`, F23 token ceiling — imprecise, not false).** The tag reads
+`[UNBUILT — owned by C2 providers token-ceiling kernel / item 10]`. Item 10's **fleet-side** half shipped
+in `0a6de4b` (*"token-ceiling fleet-side"*): the `token_ceiling` field (`:538`), resume refusal +
+sticky `over_ceiling` (`:2785-2802`), `_write_ceiling_file` (`:2307`), the Stop-hook allow-boundary
+(`>=`, `:2789-2791`); pinned `tests/test_resilience.py:2159`, `:2196`, `tests/test_hooks.py:616`, `:693`,
+`tests/test_cli.py:224-237`. What remains genuinely unbuilt is the **provider-side** half — untrusted-cost
+marking under a non-default profile, owned by `stub-inject-providers` — which is what F23's caveat
+actually needs. The sentence is defensible as written but reads as "item 10 is unbuilt," which is half
+wrong. Fix wave should scope the tag to the provider-side half. Not a promotion blocker on its own.
+
+**Not a finding — verified correct.** `:128`/`:176` claim only the doctor **elevation-mismatch** check
+remains unbuilt from item 9. Confirmed: a case-insensitive grep for `elevation|elevated|integrity level|
+IsInRole|Administrator` over `bin/fleet.py` returns a single match — a *comment* at `:224` describing the
+Access-Denied case — and zero matches in `tests/`. `_doctor_check_unreadable_starttime` exists (`:4218`,
+wired at `:4518`), which is the part `:408` says shipped. Both tags are accurate.
+
+### 3. F33-R1 stands, and the §12 pin can fail on the defect it exists to catch
+
+**The fix stands.** Spot-checked in the spec text at `2f56bb3` and HEAD, not re-derived:
+
+- `docs/SPEC.md:529` — heading: *"The launch-path read: guarded, and hoisted above the `Popen` (F33-R1)."*
+- `:531` — the earlier draft's non-sequitur (that a call placed before the `:1345` `try` would "stamp
+  `null`") is **explicitly retracted**: *"An unguarded call before a `try` propagates."*
+- `:545` — *"The specified read is therefore both wrapped and hoisted."*
+- `:564` — *"It is the read's **own** `try/except OSError` — explicitly **not** the existing block at
+  `:1345`,"* whose `except Exception` at `:1349` exists solely to null `ctime_iso`.
+- `:650` (the call-site table) — `except OSError: boot_id = None`, **"Not** inside the `try` at `:1345`",
+  marked *"placement corrected by F33-R1."*
+- `:137` (§4 field) — *"guarded and hoisted above the `Popen`… a launch may never fail, and may never
+  orphan a live `claude`, because a boot id was unreadable."*
+
+The anchor is real: `bin/fleet.py:1288` is `proc = popen(` — so a read hoisted above it runs when no
+child exists yet, and no exception class can orphan one. Consistent across all six sites.
+
+**The pin catches the bug.** `docs/SPEC.md:356` specifies three assertions for the F33-R1 launch-path
+row, and assertion **(a)** is *"`launch_turn` does not raise"* — not merely "a committed record has
+`turn_pid_boot_id = null`." Fault-injected against every wrong build:
+
+- read left **unguarded below the `Popen`** (the real defect) → `OSError` escapes → callers'
+  `except BaseException` pops the record, child orphaned → `launch_turn` **raises** → **(a) fails.**
+- read **nested inside the `:1345` `try`** → `except Exception` at `:1349` nulls `turn_pid_ctime` too,
+  and `:620`'s `ctime_iso is None` short-circuit returns `"gone"` → **(b) fails** (it requires a non-null
+  `turn_pid_ctime` alongside `turn_pid`).
+- read guarded but placed **below** the `Popen` → no raise, no orphan, `boot_id = null` → all three pass,
+  and correctly so: nothing is orphaned. (No orphaning build passes.)
+
+A pin asserting only `turn_pid_boot_id = null` would pass on the first case and be theater. This one does
+not. **PIN-CATCHES-THE-BUG: yes.**
+
+*Observation (not a finding, no fix required).* Assertion (a) establishes orphan-freedom **by inference** —
+"`launch_turn` returned normally, therefore nothing was left running" — while the prose at `:137` and
+`:356` promises "never an orphaned child" directly. The inference is sound here (the only orphan path is
+an escaping exception), so the pin cannot pass on the defect. A builder who wants the prose asserted
+literally can have the injected `popen` record its spawns and assert none survive an
+`OSError`-raising `boot_identity()`. Strengthening, not correcting.
+
+### 4. Ruling on promotion
+
+A HIGH survives §1. Per the promotion gate, **`docs/specs/portability.md` remains `drafting`** — the
+`**Status:**` line is untouched by this review — and **SPEC.md F33 is not ratified.**
+
+To be precise about what is and is not wrong, because the next fix wave should not overshoot: **F33's own
+content is clean.** Every F33 tag (`:3`, `:102`, `:135`, `:356`, `:373`, `:454`) is true, its `boot_id`
+grep receipt reproduces, F33-R1's fix is correctly specified at six sites, and its §12 pin fault-injects
+against the real defect. **The manager's correction `92e8a44` is also clean** — honest receipt, true
+claim, correctly scoped to the line it fixed.
+
+What blocks ratification is the seven stale tags F33 inherited and the campaign never swept: five §12
+entries that would have a builder `xfail` passing tests, two appendix tags that would have him rebuild
+`f8c9513` and `0a6de4b`, and the untagged sentence at `:3` that repeats the claim where no grep for
+`[UNBUILT` will find it. **Ratifying F33 while `docs/SPEC.md:351-357` instructs a builder to gate five
+green tests is ratifying the F20 drift a third time.**
+
+**To unblock:** correct `:3`, `:352`, `:353`, `:354`, `:355`, `:357`, `:412`, `:416` — moving the five §12
+entries from bucket (b) to bucket (a) with commit anchors (`f8c9513`, `0a6de4b`, `784a73f`) — scope
+`:414` to the provider-side half, then re-verify with the same grep. Estimated: one fix wave, eight edits,
+no code change.
+
+**Build waves remain gated on the `SOAK GATE 1 SIGNED` signature in `knowledge/lessons.md` regardless of
+this verdict.** Promotion of `portability.md`, whenever it is earned, would not have unblocked them either.
+
+### Receipts index
+
+Every claim above is reproducible read-only from this commit:
+
+```
+grep -rn "boot_id" bin/ tests/ --include=*.py                  # -> no matches (turn_pid_boot_id UNBUILT)
+grep -on ".\{0,80\}\[UNBUILT[^]]*\]" docs/SPEC.md              # -> 23 occurrences (the table above)
+grep -rn "xfail\|@pytest.mark.skip" tests/*.py                 # -> no matches (bucket (b) is fiction)
+py -3.13 -m pytest tests/ -q                                   # -> 708 passed, 12 skipped
+git merge-base --is-ancestor 710e3d3 HEAD                      # -> yes (Campaign 2 kernels are in HEAD)
+grep -rn "SOAK GATE 1" knowledge/lessons.md                    # -> no matches (build waves gated)
+```
+
+**For the record:** the manager's receipt reproduced. Six workers, zero fabrications.
