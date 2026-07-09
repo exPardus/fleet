@@ -379,3 +379,95 @@ A sweep for "things shaped like the `Bash(fleet:*)` incident" found four. Every 
 **Meta-lesson.** Every one of these was found by *running the thing*, never by reading it or by a green test
 suite. The statusline was blank, `/fleet` answered nonsense, the marker pointed at a deleted directory — all
 while 700 tests passed. Drive the surface you just built, from a clean directory, as the user.
+
+## 2026-07-10 — C4 spec wave (portability): the adversarial loop earned its keep, then hit a wall
+
+<!-- anchor: 2026-07-10-c4-spec-portability -->
+
+Docs-only campaign, 4 workers, ~$36, 6 commits. `docs/specs/portability.md` stub → drafting →
+2 adversarial reviews → 2 fix waves → **ESCALATED, still `drafting`.** Not a failure: the loop
+did exactly what it exists to do, and stopped where doctrine says stop.
+
+**The headline: every single review found real, blocking defects in work that looked finished.**
+- Author declared its own spec `ready-for-build`. Review 1: **1 CRITICAL, 7 HIGH, 7 MED, 4 LOW.**
+- Fix wave 1 claimed CRITICAL+7/7 HIGH fixed, disputed nothing. Re-review: **17/19 fixed, F2
+  NOT-FIXED, F1 REGRESSED, 5 new regressions.**
+- Fix wave 2 claimed R1 fixed + 4/4. Re-review 2: **R1 NOT-FIXED, new CRITICAL + 2 HIGH.** Escalate.
+
+**PROCESS CHANGE #1 — an author may not promote its own spec.** `spec-portability` set
+`Status: ready-for-build` on the spec it had just written; the manager reverted it (87a85de) before
+the reviewer saw it. A spec cannot ratify itself. Put the promotion authority in the REVIEWER's task
+file, put "leave Status at drafting" in the author's, and check the Status line after every author
+turn. It tried once and never again once the constraint was explicit.
+
+**PROCESS CHANGE #2 — the failure mode of a fix wave is a NEW defect one call site away.** Both
+waves fixed their target and broke something adjacent, identically: a correct mechanism specified
+against a call-site list built by *inspection* instead of by `grep`. The escalation trigger is not
+"the fix is wrong" but "the fix is right and the enumeration is short, twice." Fix-wave briefs must
+demand: *enumerate every consumer by grep, paste the grep, then specify.*
+
+**PROCESS CHANGE #3 — `DISPUTED: none` across 19 findings is a smell, not a virtue.** The fix brief
+explicitly invited evidence-backed dispute; the author disputed nothing. So the re-review was told to
+hunt `SPURIOUS-FIX` (a "fix" to something never broken — it bakes the reviewer's error into the
+contract). Verdict: none found, every finding was real. Worth the check anyway; add `SPURIOUS-FIX`
+to every re-review's required verdict vocabulary.
+
+**The technical lesson (reusable, and expensive to learn): a probe's ctime representation is a
+correctness surface, and every candidate fails differently.**
+1. `time.time() - /proc/uptime + starttime/CLK_TCK` → mixes CLOCK_REALTIME (NTP-steppable) with a
+   monotonic quantity. An NTP step of S shifts every later probe by S while the kernel's `starttime`
+   never moves → false `gone` → `respawn` **double-launches** in the worker's cwd.
+2. Synthetic 1970-epoch from raw boot-relative ticks → immune to NTP by construction, and the
+   difference-only premise genuinely holds (`turn_pid_ctime` is consumed ONLY by
+   `pid_alive`/`probe_liveness`, never rendered, never wall-clock-compared — grepped twice,
+   independently). But boot-relative ticks carry **no boot identity**: the collision condition
+   becomes "started within 2s of the same *boot offset*", which **every reboot recreates**.
+   Measured on WSL (manager + reviewer, separately): the entire userspace boot spans 1.4-2.3s at
+   `CLK_TCK=100`, i.e. inside ONE ±2s window. And ROADMAP Phase 2's logon-triggered manager spawns
+   workers *inside that boot burst*. Failure direction inverted to false **`alive`**, which is worse:
+   `_interrupt_worker` trusts "alive" and `killpg`s a live, unrelated process group fleet doesn't own.
+3. `/proc/stat`'s `btime` → also REALTIME-derived; moves under a step. Correctly rejected.
+4. boot_id gate (`/proc/sys/kernel/random/boot_id`) before the tick compare → the right mechanism,
+   but the spec's "stored boot_id is null → alive-unknown" rule fires **at launch**, where by
+   definition no stored boot_id exists: `launch_turn` (`:1343-1350`) → sentinel `("claude", None)`
+   → `ctime_to_iso(None)` → `AttributeError` → swallowed by a bare `except` → `turn_pid_ctime=null`
+   → `probe_liveness`'s first branch (`:620`) returns `"gone"`. **Every Linux worker born dead.**
+
+**"Vanishingly unlikely" is a claim requiring evidence, not a rhetorical move.** Fix wave 1 called
+the cross-reboot collision "the same class" as the existing accepted PID-reuse residual. It is not:
+the existing one needs a coincidence in a 4s window of real time that lies in the irrecoverable past
+(measure-zero, never recurs); the new one recurs *every boot*, and boot is where tick density peaks.
+The estimate also multiplied two probabilities that are **positively correlated** — Linux resets the
+PID counter and the tick origin at the same boot, driven by the same deterministic sequence.
+
+**Ops facts**
+- A worker over its `max_budget_usd` ceiling refuses `send` (worker-level, cumulative). Use
+  `respawn --task @file --max-budget-usd <higher>` — the documented context-reset lever, journal
+  survives. Re-passing `--task @file` remains mandatory (registry stores it TRUNCATED).
+- WSL Ubuntu exists on this box and is real repro authority for Linux claims. Both reviewers used it;
+  the manager independently reproduced the boot-density scan rather than trust the transcript.
+  **Grant it explicitly in the task file** — the spec author didn't know it had WSL in wave 1 and
+  correctly tagged claims `[UNVERIFIED]` instead of inventing results. Zero fabricated experiments
+  across 4 workers, verified by a dedicated fabrication-audit pass.
+- Manager spot-checks paid for themselves every single time: `.gitattributes` already existed (the
+  spec called it a new file and would have deleted the `*.sh text eol=lf` rule that keeps CRLF from
+  silently killing POSIX hooks); `os.killpg` is absent on Windows (import-time `AttributeError`);
+  `TestPlatformAdapterBoundary` has 13 tests, not 11. Never merge a spec claim about code you have
+  not grepped.
+
+**Open, for Altai (nothing below is the manager's to decide):**
+1. **`PLAN.md` is wrong in two places.** Its `port-test-suite` bullet demands
+   `TestPlatformAdapterBoundary` stay "untouched and green", but 9 of its 13 tests hardcode
+   `DETACHED_PROCESS`/`taskkill`/`wt` and cannot pass on POSIX; only the 2 source-scan lint tests are
+   OS-independent. And its "interpreter path decision" task already shipped (`cmd_init` renders
+   `{{PYTHON}}` from `sys.executable`, `:2242`). The contract needs amending or an override.
+2. **`turn_pid_boot_id`** — an additive registry field, proposed, not applied. Owner listed as
+   `port-adapter-a`, but it edits `recompute_status`, `_interrupt_worker` (×2), `pid_alive`,
+   `probe_liveness`, and TWO doctor checks — that is **core**, not the adapter, and may violate the
+   invariant-8 boundary this phase exists to enforce.
+3. **The reviewer's structural recommendation:** adopt FW2-R1's `boot_identity()` restructuring
+   (compare inside `probe_liveness`; no production parameter on `get_process_info`), which cuts the
+   core-edit list from "five call sites, two adapter classes, every test double" to "one adapter
+   method, one stamp in `launch_turn`, one compare in `probe_liveness`" — and re-scope boot identity
+   into a short **SPEC.md-owned decision** rather than a residual clause inside a portability row.
+   A portability spec should not be specifying core plumbing.

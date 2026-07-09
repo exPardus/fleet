@@ -39,8 +39,13 @@ The mutable cursor against the immutable contract `docs/PLAN.md`. A resuming man
 | **1.6** | **Security fixes** — read-only slash commands could run `fleet kill`/`fleet clean` (`Bash(fleet:*)` grants the whole CLI); provenance guard on kill/clean/respawn | done | 0d0c05d · 67f62ee; 689 pytest pass, doctor all-PASS | 2026-07-09 |
 | **1.6** | ⚠ Done-criteria NOT yet verified live: D5 (a real spawned worker receives no SessionStart briefing) and statusline-survives-corrupt-registry | pending | spec `docs/specs/terminal-surface.md` §Done criteria | — |
 | C3 | Phase-1 close (`p1-docs-sync` + external campaign + workload queue + SOAK GATE 1) | pending | GATED: readiness boundary. External-campaign leg has begun (see dogfood #1); gate still needs the day-floor + Altai's signature | — |
-| C4 | `spec-portability` (spec wave — PLAN.md:182 permits overlap with Soak 1; docs-only) | done | 27a9878 (claim) + spec commit below; 0 OQs open, 2 findings against PLAN.md (OQ5 stale-assumption; TestPlatformAdapterBoundary "unmodified" scoped to 2/11 tests) | 2026-07-10 |
-| C4 | `spec-portability-review` (adversarial; blocks on spec; → `Status: ready-for-build`) | pending | strongest model, $10 | — |
+| C4 | `spec-portability` (spec wave — PLAN.md:182 permits overlap with Soak 1; docs-only) | done | 27a9878 (claim) · cd63dcf (draft, 9/9 OQs) · **87a85de (manager reverted the author's self-promotion to ready-for-build)** | 2026-07-10 |
+| C4 | `spec-portability-review` (adversarial, 5 hostile passes, WSL repro) | done | 71af3c0 — **needs-fixes: 1 CRITICAL, 7 HIGH, 7 MED, 4 LOW**; 0 fabricated claims; all code anchors exact | 2026-07-10 |
+| C4 | fix wave 1 (`spec-portability`, via `send`) | done | adfacab — claimed CRITICAL + 7/7 HIGH, `DISPUTED: none` | 2026-07-10 |
+| C4 | `spec-portability-review-2` (re-review, loop 1) | done | de06485 — **needs-fixes: 17/19 fixed, F2 NOT-FIXED, F1 REGRESSED, R1–R5 new**; `SPURIOUS-FIX: none` | 2026-07-10 |
+| C4 | fix wave 2 (`spec-portability`, via `respawn --task @file`, ceiling→$22) | done | 45851da — boot-identity gate; retracted its own "zero core changes" claim; proposes additive `turn_pid_boot_id` | 2026-07-10 |
+| C4 | re-review loop 2 | done | 6158baf — **needs-fixes: R1 NOT-FIXED; new CRITICAL FW2-R1 + 2 HIGH. `ESCALATE: yes`** | 2026-07-10 |
+| C4 | **>>> SPEC WAVE ESCALATED TO ALTAI — spec stays `drafting`; loop 2 of ≤3 red; doctrine = escalate, not grind <<<** | **AWAITING ALTAI** | 3 decisions: (1) 2 defects in immutable PLAN.md; (2) `turn_pid_boot_id` schema + its owner (adapter task edits 5+ core call sites → invariant-8 risk); (3) reviewer's `boot_identity()` restructuring + re-scope boot identity to a SPEC.md decision | 2026-07-10 |
 | C4 | Phase 1.5 portability BUILD waves (adapter→test-suite→ci→posix-smoke→SOAK 1.5) | pending | GATED on SOAK GATE 1 signature + ready-for-build | — |
 | C5 | Phase 2 watchtower (spec→chain→accept-tests→SOAK 2) | pending | GATED | — |
 | C5b | Phase 2.5 providers (spec always; build demand-gated) | pending | GATED | — |
