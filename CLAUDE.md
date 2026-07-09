@@ -10,3 +10,6 @@ Rules:
 - Never launch background processes via Git-Bash `&` — detached Popen flags or Start-Process only.
 - Runtime dirs `state/`, `logs/`, `mailbox/` are gitignored; `knowledge/` is git-tracked.
 - Tests: pytest for unit/hook tests (SPEC §12); integration tests use a haiku worker in a temp dir.
+- Views (statusline, `/fleet:*`, SessionStart hook) never take `fleet.lock`, never probe a PID, never write, and never quarantine a corrupt registry — they read `fleet.status_snapshot()` and exit 0. See `docs/specs/terminal-surface.md`.
+- Mutating slash commands are prompt templates, never inline `` !`cmd` `` — inline exec skips the permission prompt, and `fleet kill`/`fleet clean` are irreversible. A lint in `tests/test_terminal_surface.py` enforces this.
+- A plugin cannot ship a `statusLine`; `fleet init --statusline` installs it, refusing to clobber a foreign one.

@@ -196,6 +196,19 @@ class TestStatusJsonFlags:
         assert rc == 0
         assert "pmbot" in capsys.readouterr().out
 
+    def test_a_long_name_does_not_swallow_the_status_column(self, home, capsys):
+        # "plan3-t12-lowfunding" is exactly 20 chars; a <20 field left no
+        # separator and printed "plan3-t12-lowfundingdead".
+        _write_registry(home, {"plan3-t12-lowfunding": _rec(status="dead")})
+        fleet.cmd_status(self._args(stale_ok=True))
+        out = capsys.readouterr().out
+        assert "plan3-t12-lowfunding dead" in out
+
+    def test_unknown_worker_name_raises(self, home):
+        _write_registry(home, {"pmbot": _rec()})
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_status(self._args(name="nope", stale_ok=True))
+
     def test_parser_accepts_the_flags(self):
         args = fleet.build_parser().parse_args(["status", "--json", "--stale-ok"])
         assert args.json is True and args.stale_ok is True

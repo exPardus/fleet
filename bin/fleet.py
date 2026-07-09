@@ -2284,7 +2284,7 @@ def _print_snapshot_table(snap: dict, name=None) -> None:
     rows = [w for w in snap["workers"] if name is None or w["name"] == name]
     if name is not None and not rows:
         raise FleetCliError(f"unknown worker: {name!r}")
-    print(f"{'NAME':<20}{'STATUS':<12}{'TURNS':>6}{'COST':>9}{'AGE':>9}{'MAIL':>6}  FLAGS")
+    print(f"{'NAME':<20} {'STATUS':<12}{'TURNS':>6}{'COST':>9}{'AGE':>9}{'MAIL':>6}  FLAGS")
     for w in rows:
         age = "?" if w["stale_seconds"] is None else f"{w['stale_seconds'] / 60:.0f}m"
         flags = []
@@ -2292,8 +2292,9 @@ def _print_snapshot_table(snap: dict, name=None) -> None:
             flags.append("idle+mail")
         if w["resume_eligible"]:
             flags.append("resume-eligible")
+        # A name at or past the column width must never swallow the separator.
         print(
-            f"{w['name']:<20}{w['status']:<12}{w['turns']:>6}{w['cost_usd']:>9.2f}"
+            f"{w['name']:<20} {w['status']:<12}{w['turns']:>6}{w['cost_usd']:>9.2f}"
             f"{age:>9}{w['mail']:>6}  {','.join(flags) or '-'}"
         )
     print("(stale-ok: last-committed state, not probed)")
