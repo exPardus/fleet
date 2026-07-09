@@ -332,3 +332,26 @@ command whose whole purpose is to be read-only.
 - **`events.jsonl` is the recovery path.** It is append-only and `fleet clean` does not touch it. Every
   `spawned`/`respawned` event carries `session_id` + `cwd`, which is enough to `claude --resume` a swept
   worker. Do not let anything trim it.
+
+### Follow-up: the CLI-level guard (same day)
+
+Narrowing `allowed-tools` fixed the one command. It did not fix the class. Two more holes were open:
+
+- **`.claude/settings.local.json` in this repo sets `"defaultMode": "bypassPermissions"`.** Every Claude
+  session working in `C:\proga\claude-fleet` — which is exactly where a fleet manager runs — skips all
+  permission prompts. A narrowed allowlist protects nothing there. The permission layer is not a safety
+  layer for the tool that lives inside the bypassed directory.
+- **`fleet.py` had no confirmation anywhere.** No `--yes`, no ownership, no record of who spawned what.
+
+Fixed by provenance: `spawned_by` records the spawning `CLAUDE_CODE_SESSION_ID`; `kill`/`clean`/`respawn`
+refuse a foreign worker without `--yes`; an unknown owner counts as foreign (fail toward asking); and
+respawn carries ownership forward so `respawn --force` + `kill` cannot launder it. Worker turns strip the
+inherited `CLAUDE_CODE_SESSION_ID`, or a worker would look exactly like its manager. Verified against a
+real `bypassPermissions` haiku session ordered to run `fleet clean`: refused, worker survived.
+
+**Two Windows traps found while building it.**
+- `sys.stdin.isatty()` is **not** an interactivity test under Git Bash: `/dev/null` maps to `NUL`, a
+  character device, so `fleet kill x < /dev/null` reports a tty, `input()` then hits EOF, and the operator
+  gets a traceback instead of a refusal. The guard now never prompts — agents pass `--yes`.
+- pytest inherits `CLAUDE_CODE_SESSION_ID` from whichever Claude session ran it, so guard-sensitive tests
+  passed or failed depending on **who ran the tests**. An autouse fixture in `conftest.py` deletes it.

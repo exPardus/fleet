@@ -18,6 +18,19 @@ if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 
 
+@pytest.fixture(autouse=True)
+def _no_inherited_claude_session(monkeypatch):
+    """Run every test as a HUMAN SHELL, not as whichever Claude session invoked
+    pytest.
+
+    The destructive-command guard (SPEC §5.1) keys off CLAUDE_CODE_SESSION_ID.
+    When pytest itself is launched from a Claude Code session, that variable is
+    inherited, every fixture worker looks foreign, and `fleet kill`/`clean`
+    tests get refused -- a test outcome that depends on who ran the tests.
+    Tests that exercise the guard set the variable explicitly."""
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+
+
 def pytest_collection_modifyitems(config, items):
     """Tag every collected test with its tier (SPEC §12) and skip the live
     tier unless FLEET_LIVE=1 is set in the environment."""

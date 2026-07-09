@@ -13,3 +13,7 @@ First run `fleet status` via Bash and show the operator exactly which workers ar
 
 A journal is the only record of what a worker learned. If any dead worker's journal
 looks worth keeping, say so before sweeping it.
+
+If any dead worker was spawned by a different session, fleet refuses the whole sweep
+and names it. Do not reflexively re-run with `--yes` — show the operator which
+workers are not yours and let them decide.

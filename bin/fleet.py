@@ -496,8 +496,20 @@ def save_registry(data: dict) -> None:
         raise
 
 
+def current_caller_session() -> str | None:
+    """The Claude Code session id of whoever is running this CLI, or None when
+    fleet is run by a human from a plain shell.
+
+    Provenance for the destructive-command guard (§5.1): a session may retire
+    the workers it spawned without ceremony, but must explicitly acknowledge
+    (`--yes`) before killing or sweeping someone else's."""
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    return sid or None
+
+
 def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
-                       max_budget_usd=None, setting_sources=None, token_ceiling=None) -> dict:
+                       max_budget_usd=None, setting_sources=None, token_ceiling=None,
+                       spawned_by=None) -> dict:
     """Build a fresh registry record matching the SPEC §4 schema exactly.
 
     Phase1 kernel item 7 (F13/M5): max_budget_usd and setting_sources are
@@ -524,6 +536,12 @@ def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
         # ceiling file the Stop hook reads. Additive-schema: defaults None,
         # readers use .get(..., None).
         "token_ceiling": token_ceiling,
+        # Provenance (§5.1 destructive-command guard): the CLAUDE_CODE_SESSION_ID
+        # of the session that spawned this worker, or None when spawned by a
+        # human shell. Immutable, carried across respawn. Additive-schema (M1):
+        # readers default it to None -- and an UNKNOWN owner is treated as
+        # FOREIGN, never as "mine", so pre-existing records are protected too.
+        "spawned_by": spawned_by,
         "created": created,
         "status": "working",
         "turn_pid": None,
@@ -1208,8 +1226,14 @@ def _worker_env(name: str) -> dict:
     the manager's fleet briefing injected into its context.
 
     os.environ is copied explicitly -- passing env= at all replaces the whole
-    inherited environment, and a child without PATH cannot launch."""
+    inherited environment, and a child without PATH cannot launch.
+
+    CLAUDE_CODE_SESSION_ID is STRIPPED (§5.1 provenance): the child `claude`
+    stamps its own, and an inherited one would make a worker running
+    `fleet kill` look exactly like the manager that spawned it -- so a worker
+    could quietly retire its siblings with no confirmation."""
     env = dict(os.environ)
+    env.pop("CLAUDE_CODE_SESSION_ID", None)
     env["FLEET_WORKER"] = name
     return env
 
@@ -2019,6 +2043,81 @@ def _capture_statusline_delegate(command: str) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
+# ---------------------------------------------------------------------------
+# Destructive-command guard (§5.1).
+#
+# On 2026-07-09 a `claude -p "/fleet:status"` probe run -- granted `Bash(fleet:*)`
+# by a read-only slash command -- decided four dead workers were untidy, killed
+# a fifth that was WORKING, and swept all five journals. It was inside its
+# permissions the whole time. Narrowing the grant fixed that command; this
+# guard fixes the CLI, so the next over-helpful agent (or a bypassPermissions
+# session, which sees no prompt at all) cannot destroy a worker it never owned
+# without saying so out loud.
+#
+# Rules:
+#   * A worker you spawned is yours: retire it freely.
+#   * A worker spawned by ANOTHER session, or whose owner is unknown, is
+#     FOREIGN. Destroying it needs --yes, or an interactive human typing "y".
+#   * Non-interactive + foreign + no --yes = refuse, exit 1. Agents run
+#     non-interactive, so this is the branch that actually bites.
+#   * `interrupt` is exempt: it kills a turn, not a worker, and the transcript
+#     survives. Only kill / clean / respawn destroy or rotate state.
+# ---------------------------------------------------------------------------
+
+class DestructiveActionRefused(FleetCliError):
+    """A destructive action against a foreign worker was not acknowledged."""
+
+
+def _worker_is_foreign(record: dict, caller: str | None) -> bool:
+    """True when this session did not spawn the worker.
+
+    An UNKNOWN owner (`spawned_by` absent -- every record written before this
+    field existed) counts as foreign: the guard fails toward asking."""
+    owner = record.get("spawned_by")
+    if not owner:
+        return True
+    return owner != caller
+
+
+def _describe_owner(record: dict) -> str:
+    owner = record.get("spawned_by")
+    if not owner:
+        return "unknown owner (spawned before provenance was recorded, or by a human shell)"
+    return f"session {owner[:8]}"
+
+
+def _confirm_destructive(action: str, names: list, records: dict, assume_yes: bool) -> None:
+    """Raise DestructiveActionRefused unless a foreign-worker action is
+    acknowledged with --yes. Silent no-op when every named worker belongs to
+    this caller.
+
+    The guard applies to CLAUDE SESSIONS only. A human at a plain shell has no
+    CLAUDE_CODE_SESSION_ID; fleet has always been a human-driven CLI and
+    interposing prompts there would break every existing script for no safety
+    gain -- a human typing `fleet clean` meant to type it. The threat model is
+    an over-helpful agent, especially one under `bypassPermissions` where no
+    permission prompt is ever shown.
+
+    There is deliberately NO interactive prompt. An agent's Bash tool has no
+    stdin to answer one with (it gets an EOFError), and `isatty()` cannot tell
+    the two apart on Windows anyway: Git Bash's `/dev/null` is `NUL`, a
+    CHARACTER DEVICE, so `sys.stdin.isatty()` returns True under
+    `fleet kill x < /dev/null`. An agent must pass --yes; there is nothing to
+    prompt."""
+    caller = current_caller_session()
+    if caller is None:
+        return
+    foreign = [n for n in names if _worker_is_foreign(records.get(n, {}), caller)]
+    if not foreign or assume_yes:
+        return
+
+    detail = ", ".join(f"{n} ({_describe_owner(records.get(n, {}))})" for n in foreign)
+    raise DestructiveActionRefused(
+        f"refusing to {action} {len(foreign)} worker(s) this session did not spawn: {detail}. "
+        f"Re-run with --yes to confirm. (A worker you spawned needs no confirmation.)"
+    )
+
+
 def _install_statusline(force: bool = False, chain: bool = False) -> None:
     """Merge fleet's statusLine into ~/.claude/settings.json (Phase 1.6 D6).
 
@@ -2150,7 +2249,8 @@ def cmd_spawn(args, popen=subprocess.Popen, get_process_info=None, which=shutil.
         record = new_worker_record(
             sid, cwd, task, args.mode, model=args.model,
             max_budget_usd=args.max_budget_usd, setting_sources=args.setting_sources,
-            token_ceiling=args.token_ceiling)
+            token_ceiling=args.token_ceiling,
+            spawned_by=current_caller_session())
         data["workers"][args.name] = record
         save_registry(data)
         append_event("spawned", args.name, session_id=sid, cwd=str(cwd), mode=args.mode)
@@ -3360,6 +3460,16 @@ def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shuti
     new_sid = str(uuid.uuid4())
     needs_force_interrupt = False
 
+    # §5.1: respawn retires the old session id and rotates its log. Ask before
+    # doing that to a worker this session did not spawn. Reads the registry
+    # WITHOUT the lock (a lock-free read, like `status --stale-ok`) and prompts
+    # outside it: a prompt must never block the fleet, and the guard must not
+    # perturb the lock-acquisition sequence the launch path depends on.
+    _ok, _reason, _snap = _read_registry_readonly()
+    if _ok and args.name in _snap["workers"]:
+        _confirm_destructive("respawn (retire the session of)", [args.name], _snap["workers"],
+                             assume_yes=getattr(args, "yes", False))
+
     with fleet_lock():
         data = load_registry()
         if args.name not in data["workers"]:
@@ -3436,6 +3546,11 @@ def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shuti
                 token_ceiling=token_ceiling)
             new_record["cost_usd"] = cost_usd  # cumulative -- see docstring
             new_record["cost_baseline"] = cost_usd  # Finding 4 -- see docstring
+            # Provenance is IMMUTABLE across respawn (§5.1): respawning someone
+            # else's worker must not silently transfer ownership to the
+            # respawner, or a single forced respawn launders a foreign worker
+            # into a freely-killable one.
+            new_record["spawned_by"] = prior_snapshot.get("spawned_by")
             data["workers"][args.name] = new_record
             save_registry(data)
             append_event("respawned", args.name, old_session_id=old_sid, new_session_id=new_sid)
@@ -3480,6 +3595,11 @@ def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shuti
                 token_ceiling=token_ceiling)
             new_record["cost_usd"] = cost_usd  # cumulative -- see docstring
             new_record["cost_baseline"] = cost_usd  # Finding 4 -- see docstring
+            # Provenance is IMMUTABLE across respawn (§5.1): respawning someone
+            # else's worker must not silently transfer ownership to the
+            # respawner, or a single forced respawn launders a foreign worker
+            # into a freely-killable one.
+            new_record["spawned_by"] = prior_snapshot.get("spawned_by")
             data["workers"][args.name] = new_record
             save_registry(data)
             append_event("respawned", args.name, old_session_id=old_sid, new_session_id=new_sid)
@@ -3639,6 +3759,14 @@ def cmd_kill(args, get_process_info=None, kill_process_tree=None, sleep=time.sle
             raise FleetCliError(
                 f"launch in flight for {args.name}; retry in a few seconds"
             )
+        workers_snapshot = {args.name: dict(rec)}
+
+    # §5.1: acknowledge before retiring a worker this session did not spawn.
+    # Runs BEFORE _interrupt_worker (refusing after the turn is already dead
+    # would help nobody) and OUTSIDE fleet_lock (an interactive prompt must
+    # never block every other fleet command on a human's keystroke).
+    _confirm_destructive("kill", [args.name], workers_snapshot,
+                         assume_yes=getattr(args, "yes", False))
 
     outcome = _interrupt_worker(args.name, get_process_info=get_process_info, kill_process_tree=kill_process_tree)
     if outcome == "not_running":
@@ -3788,6 +3916,16 @@ def cmd_clean(args, get_process_info=None, sleep=time.sleep) -> int:
         (n, before, recompute_worker(n, before, get_process_info=get_process_info, sleep=sleep))
         for n, before in pending_confirm
     ]
+
+    # §5.1: this is the moment `clean` knows exactly which workers it will
+    # DELETE (registry entry, logs, mailbox and journal -- irreversible; only
+    # the claude session survives, resumable by sid from events.jsonl). Ask
+    # before sweeping any worker this session did not spawn. Outside the lock:
+    # a prompt must never block the fleet.
+    doomed = {n: before for n, before, confirmed in confirmations if confirmed["status"] == "dead"}
+    if doomed:
+        _confirm_destructive("clean (delete logs + journal of)", sorted(doomed), doomed,
+                             assume_yes=getattr(args, "yes", False))
 
     changed = False
     with fleet_lock():
@@ -4395,6 +4533,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_respawn.add_argument("name")
     p_respawn.add_argument("--task", default=None)
     p_respawn.add_argument("--force", action="store_true")
+    p_respawn.add_argument("--yes", action="store_true",
+                           help="confirm respawning a worker this session did not spawn")
     # F13/M5: respawn carries the persisted max_budget_usd/setting_sources
     # forward by default; these optional overrides replace them (default None
     # -> carry forward, mirroring the immutable-at-spawn rule for a reset).
@@ -4411,9 +4551,13 @@ def build_parser() -> argparse.ArgumentParser:
                           help="resume a named worker even before its horizon / with an unknown horizon")
 
     p_kill = sub.add_parser("kill", help="interrupt (if running) and mark a worker dead")
+    p_kill.add_argument("--yes", action="store_true",
+                        help="confirm killing a worker this session did not spawn")
     p_kill.add_argument("name")
 
-    sub.add_parser("clean", help="remove dead workers and their logs/mailboxes/journals")
+    p_clean = sub.add_parser("clean", help="remove dead workers and their logs/mailboxes/journals")
+    p_clean.add_argument("--yes", action="store_true",
+                         help="confirm deleting workers this session did not spawn")
 
     sub.add_parser("doctor", help="run fleet health checks")
 
