@@ -151,7 +151,13 @@ Mutating (prompt template → model runs the CLI via Bash → permission prompt 
 
 ### 4.5 `.claude-plugin/plugin.json`
 
-Bundles `commands/`, `skills/fleet/SKILL.md` (moved from `skill/SKILL.md`), and `hooks/` (the SessionStart registration only — worker hooks stay in `state/worker-settings.json`, unrelated wiring). Ships **no** statusline. Installable locally via `--plugin-dir C:/proga/claude-fleet` for testing; a marketplace entry may point at the repo later.
+Bundles `commands/` and `skills/fleet/SKILL.md` (moved from `skill/SKILL.md`) by convention discovery, and inlines the SessionStart hook registration. Worker hooks stay in `state/worker-settings.json` — unrelated wiring. Ships **no** statusline.
+
+**Plugin name is `fleet`, not `claude-fleet`** — the slash-command namespace derives from the plugin name, so `claude-fleet` would yield `/claude-fleet:status`.
+
+**Build findings (verified live 2026-07-09, claude 2.1.204), corrections to the original design:**
+- Declaring `"commands": "./commands"` / `"skills": "./skills"` / `"hooks": "./hooks/hooks.json"` path keys did not work; the reference plugin that does work on this machine (caveman) declares none of them and inlines its hooks object. The manifest now matches that shape. Do not re-add the path keys without evidence.
+- `claude --plugin-dir <path>` loads the plugin for a session but **does not register its SessionStart hook** — the briefing never fires. The hook script itself is correct: registered by hand in a project's `.claude/settings.json` it fires and injects real worker names (proved end-to-end from a neutral cwd, so the model could not have read the registry off disk). Testing plugin hooks therefore requires a real install (marketplace / `enabledPlugins`), not `--plugin-dir`.
 
 The SPEC §3 repo-layout block gains the new paths.
 

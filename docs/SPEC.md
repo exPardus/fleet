@@ -49,9 +49,8 @@ C:\proga\claude-fleet\
       stop_mailbox.py          # turn-end mailbox drain / stop-block
       sessionstart_fleet.py    # Phase 1.6 manager-session briefing (suppressed in workers)
   worker-settings.template.json  # hook wiring TEMPLATE (git-tracked, {{PYTHON}}/{{FLEET_HOME}} placeholders); `fleet init` renders it
-  .claude-plugin\plugin.json  # Phase 1.6 plugin manifest (ships NO statusline -- not permitted)
+  .claude-plugin\plugin.json  # Phase 1.6 plugin manifest (name `fleet`; inlines SessionStart hook; ships NO statusline -- not permitted)
   commands\               # Phase 1.6 /fleet:* slash commands
-  hooks\hooks.json        # Phase 1.6 plugin SessionStart registration
   skills\fleet\SKILL.md   # manager skill (plugin-standard path; was skill\SKILL.md)
   knowledge\
     INDEX.md              # one line per entry; manager loads this at session start
