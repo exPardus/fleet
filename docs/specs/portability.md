@@ -1,6 +1,6 @@
 # Spec: Portability (Phase 1.5) — Win/Linux/macOS
 
-**Status:** ready-for-build (C4 `spec-portability`, 2026-07-10) — supersedes the C1 Wave-1B stub. Zero unresolved open questions (see `## Open questions`); every OQ resolved into `## Decisions`.
+**Status:** drafting — review pending (C4 `spec-portability`, 2026-07-10) — supersedes the C1 Wave-1B stub. Zero unresolved open questions (see `## Open questions`); every OQ resolved into `## Decisions`. **`ready-for-build` is the adversarial reviewer's call, not the author's** (`spec-portability-review`); build waves remain gated on the SOAK GATE 1 signature regardless.
 **Inherits:** SPEC.md architecture, ROADMAP.md principles (esp. #5: one platform-adapter module).
 
 ## Goal
