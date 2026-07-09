@@ -1986,3 +1986,223 @@ line in `knowledge/lessons.md`, which does not exist.
 **For the next fix wave — the one-line brief:** F33-R1 is not a design flaw. It is the fix's own shadow. When you
 route a call site *around* the function that owns the exception handler, you have moved that call site out of the
 handler's scope. Grep for the handler, not just for the field.
+
+---
+
+## Fix-wave 4 disposition â€” `spec-boot-identity` (F33-R1..R3)
+
+**Author:** `spec-boot-identity` (respawned; context reset, journal intact). **Append-only.**
+**Under fix:** `2f1021a`'s `## Review â€” spec-boot-identity (F33)`. Write set: `docs/SPEC.md` (F33 only) +
+this file (append only). **No code, no tests, no `docs/PLAN.md`, no `docs/specs/portability.md`.**
+Receipts below are at `efa64be`; `git diff --stat 9b5954d..efa64be -- bin/ tests/` â†’ **empty**, so every
+line number the reviewer and I both cite holds unchanged at either commit.
+
+**No dispute. F33-R1 is correct, and the reviewer's trace is correct.** I built the fix one step past the
+recommendation, for a reason given below.
+
+---
+
+### F33-R1 (HIGH) â€” **FIXED**, and with a second property the recommendation did not require.
+
+The reviewer's minimum was *"give the read its own guard, placed before the `:1345` `try`."* That is
+necessary and I adopted it. It is **not sufficient**, and the gap is the same one this campaign keeps
+finding: it closes the exception class you named and leaves the ones you did not.
+
+`except OSError` around the read makes an unreadable `/proc/sys/kernel/random/boot_id` stamp `null`. It
+does nothing about an adapter bug â€” a `TypeError`, an `AttributeError`, a `ValueError` out of a UUID
+parse. Placed at `:1344`, any of those still escapes `launch_turn` **after** `Popen` (`:1288`), and all
+four callers `except BaseException` â†’ `data["workers"].pop(name, None)`. The orphan survives the fix at
+one exception class' remove. Widening to `except Exception` would close it, but at the cost the narrow
+catch exists to avoid: an adapter bug becomes a silent `null` and a permanently alive-unknown worker.
+
+**So the specified read is guarded *and* hoisted above the `Popen`.** `boot_identity()` is pid-free and
+side-effect-free; nothing forces it below `:1288`. Above it, *every* exception class raises before a child
+exists, and the caller's `except BaseException` restores the mailbox claim and pops a record that never
+had a live process behind it. The wrapper supplies the promised semantics; the hoist supplies the
+impossibility. Neither alone does both.
+
+This is not a new contract. It is `launch_turn`'s own, stated in its own comment:
+
+```
+$ sed -n '1270,1274p' bin/fleet.py            # at efa64be
+    # funnels through here, so one guard covers them all -- and raising
+    # BEFORE the Popen keeps the launch-sequence contract intact (the caller
+    # restores the mailbox claim on any raise, same as a resolve/argv error).
+    if not os.path.isdir(cwd):
+        raise TurnLaunchError(f"registered cwd no longer exists, refusing to launch {name!r}: {cwd}")
+```
+
+```
+$ grep -n "launch_turn(" bin/fleet.py         # at efa64be
+1241:def launch_turn(...)   2311:cmd_spawn   2860:cmd_send   2967:_resume_one_limited   3692:cmd_respawn
+(:236, :1959, :2280 prose/comments)
+
+$ sed -n '1284,1298p' bin/fleet.py            # the Popen and its own OSError guard
+1284:    out_f = open(log_path, "ab")
+1288:            proc = popen(
+1297:        except OSError as exc:
+1298:            raise TurnLaunchError(f"failed to launch claude turn for {name!r}: {exc}") from exc
+```
+
+**Why not inside the `:1345` `try`** (the brief asked me to pick and justify): that block's
+`except Exception` at `:1349` has exactly one purpose, `ctime_iso = None`. A boot-id read nested inside it
+is swallowed by that handler and nulls `turn_pid_ctime` as collateral. `probe_liveness:620`
+(`pid is None or ctime_iso is None â†’ "gone"`) then returns `"gone"` on the worker's **first** poll. That is
+FW2-R1's exact failure, rebuilt out of FW2-R1's own fix. **Conflating the two handlers is how FW2-R1
+happened.** They stay separate because their purposes are, and Â§12's new pin asserts the returned dict
+still carries a non-null `turn_pid_ctime` so a builder cannot make that mistake silently.
+
+**What the `null` means at probe time â€” walked through Â§4's table, not asserted.** The reviewer wrote
+*"case (v) carries it the rest of the way"*. Case (v) as written covered only the branch where the file
+became readable again. Both branches now exist and both are `"unknown"`:
+
+- `boot_identity()` raising at all implies **Linux**: `_WindowsPlatform` and the macOS branch return `None`
+  as a static property of the OS and have no failure mode. A Linux `boot_identity()` returns `str` or
+  raises, never `None`. The two probe-time outcomes are therefore exhaustive.
+- The record carries `turn_pid` and (because the handlers stayed separate) a non-null `turn_pid_ctime`, so
+  `:620` does not short-circuit and the fresh read runs.
+- **Still unreadable** â†’ fresh read raises â†’ `probe_liveness`'s `except OSError` â†’ **`"unknown"`**. This is
+  **new case (vi)** in Â§4's table; the old five-case table had no row for a probe-time raise.
+- **Readable again** â†’ fresh non-`None` + stored `null` â†’ **case (v)** â†’ **`"unknown"`**.
+
+Never `"gone"`, on either. Case (v)'s consequence column then applies unchanged: never demoted to `dead`
+(no `respawn` double-launch), `pid_alive` `False` (`_interrupt_worker` â†’ `"not_running"`, no `killpg`),
+self-heals on the next launch. **Confirmed by walking it, and the walk found the missing row.**
+
+**The Â§12 pin.** Added as a third companion to `boot_identity_gates_tick_compare`, with three assertions
+rather than one, because each catches a different way to build row 6 wrong:
+
+> a `boot_identity()` that raises `OSError` during launch yields a committed record with `turn_pid` set and
+> `turn_pid_boot_id = null`; `launch_turn` returns normally and propagates nothing, and that worker's first
+> `probe_liveness` returns `"unknown"` â€” never `"gone"`, and never an orphaned child.
+
+(a) `launch_turn` does not raise â†’ catches the unguarded read (orphan). (b) the returned dict carries
+`turn_pid` **and** non-null `turn_pid_ctime` â†’ catches the read nested in the `:1345` `try` (FW2-R1
+rebuilt). (c) the verdict is `"unknown"` for **both** a recovered and a still-failing fresh read â†’ exercises
+`probe_liveness`'s own `except OSError`, whose deletion is the next foreseeable regression.
+
+### The same class of defect, everywhere else `boot_identity()` is called â€” **there is nowhere else.**
+
+Two call sites, both now guarded. Row 1 defines the method; row 3 calls it in `probe_liveness` under
+`except OSError`; row 6 calls it in `launch_turn` under `except OSError`, above the `Popen`. Nothing else
+calls it, and that is a design property, not an accident: F33 deliberately does not thread `boot_identity`
+through `recompute_status` or the doctor checks (*Test obligations*), which is what holds the count at two.
+
+### Read-only views â€” **answered here, not left to `port-adapter-a`.**
+
+```
+$ grep -rn "probe_liveness(\|pid_alive(" bin/fleet.py bin/fleet_statusline.py bin/hooks/ --include=*.py
+bin/fleet.py:607,640,646,870,881,3115,3120,4210,4227      # code
+bin/fleet.py:3073,3168,3237,3763,3779,3886                # prose
+bin/fleet_statusline.py: (no matches)
+bin/hooks/: (no matches)
+```
+
+The reviewer is right that the statusline, the SessionStart hook, and `status_snapshot` never probe â€” so an
+`OSError` is structurally unreachable from them. **But the reviewer's conclusion ("NOT a finding") rests on
+`probe_liveness` catching it, and nothing states what happens if a builder decides that catch is
+redundant.** It is not redundant; it is the only thing there is:
+
+- `/fleet:doctor` is an inline read-only surface (`docs/specs/terminal-surface.md:54,148`) and `fleet doctor`
+  **does** probe (`:4210`, `:4227`).
+- `cmd_doctor` (`bin/fleet.py:4493`) builds `checks = [...]` **eagerly, with no `try`** â€” every check runs
+  during list construction and any exception propagates out of `cmd_doctor`.
+- `main()` catches `RegistryCorruptError`, then
+  `(FleetCliError, ClaudeNotFoundError, TurnLaunchError, ValueError, FleetLockTimeout, UnsupportedPlatformError)`.
+  **`OSError` is not in that tuple.** An escaping `OSError` is an unhandled traceback out of a read-only view.
+
+So: `probe_liveness`'s `except OSError` is the **sole** containment for every probing surface. F33 now says
+that, in the appendix, in the pseudocode comment, and in case (vi)'s consequence column, with the
+instruction that `port-adapter-a` must not remove it in favour of a caller-side guard that does not exist.
+
+---
+
+### F33-R2 (LOW) â€” **FIXED**, and the fix names UL1's fields too.
+
+The reviewer's own recommendation was *"one line under the JSON naming the prescriptive fields"* (plural).
+Tagging `turn_pid_boot_id` alone would have fixed my field and left `limit_reset_at` / `limit_kind` in the
+inconsistent state that made the convention ambiguous in the first place â€” the outcome the brief names as
+the one indefensible option. The added line at `docs/SPEC.md:102` names **all three**, points at each
+field's owning `[UNBUILT]` paragraph, and states why the JSON block cannot carry the tags itself. UL1's
+semantics are untouched; this is an annotation, not an amendment, and it stays inside my write set.
+
+### F33-R3 (LOW) â€” **BOUNDED**, and partly verified.
+
+`[VERIFIED â€” WSL Ubuntu, cat /proc/sys/kernel/pid_max â†’ 4194304; uname -r â†’ 6.18.33.2-microsoft-standard-WSL2]`
+â€” the reviewer's `4194304` reproduces. That settles the value on this box and settles nothing about any
+other, which is the reviewer's point.
+
+The old text ("a wraparound consumes far more than 2 s of ticks") is not a fact about ticks; it is a fact
+about `pid_max`, smuggled in as one. Replaced with the bound it actually is. Every one of `pid_max`
+allocations must occur between the original's start and the reused pid's, and a false `alive` requires that
+interval to be â‰¤ 2 s, so reuse inside the window requires a **sustained fork rate â‰¥ `pid_max` / 2 s**:
+
+| `pid_max` | required sustained fork rate | provenance |
+|---|---|---|
+| `4194304` | 2,097,152 /s | `[VERIFIED â€” WSL Ubuntu]` |
+| `32768` | 16,384 /s | conservative floor `[UNVERIFIED â€” kernel default; verify in port-posix-smoke]` |
+
+128Ã— apart. The **class** claim is unaffected â€” the reused pid must additionally pass the
+`_ALIVE_IMAGE_NAMES` filter, and the residual is the same shape as `bin/fleet.py:597-603`'s accepted one â€”
+but the spec now quotes the formula rather than one box's constant, and `port-posix-smoke` records `pid_max`
+alongside `boot_id`. I did not assert a probability, because I cannot measure the fork-rate ceiling of a
+machine I have not seen.
+
+---
+
+### Changes to `docs/SPEC.md`
+
+| # | Surface | Change |
+|---|---|---|
+| 1 | `:102` (under Â§4's example JSON) | **new line** naming the three PRESCRIPTIVE-unbuilt fields (F33-R2) |
+| 2 | Â§4 `turn_pid_boot_id` field bullet | **Writer** clause now says the read is guarded and hoisted above the `Popen` |
+| 3 | Â§12 `boot_identity_gates_tick_compare` | two companion pins â†’ **three**; the launch-path failure pin, with its three assertions (F33-R1) |
+| 4 | F33 appendix header | cites `F33-R1..R3`; states `bin/` is unchanged `9b5954d..efa64be` |
+| 5 | F33 pseudocode | `except OSError` annotated **SOLE containment â€” do not delete** |
+| 6 | F33, new *"The launch-path read"* section | replaces the retracted non-sequitur; wrapper + hoist, both justified; the two-call-site audit; the read-only-views paragraph |
+| 7 | F33 case table | **five cases â†’ six**; (v) broadened to cover an `OSError`-stamped `null`; **(vi)** added for a probe-time raise |
+| 8 | F33 core-edit table, **row 6** | rewritten: own `try/except OSError`, hoisted above `:1288`, explicitly not inside the `:1345` `try`, with the FW2-R1-rebuilt consequence spelled out |
+| 9 | F33 *Accepted residuals* (2) | tick-consumption assertion â†’ the `pid_max`/2 s fork-rate bound (F33-R3) |
+
+**Retracted, in writing:** *"it sits before the `try` at `:1345`, so an `OSError` stamps `null`
+deliberately."* The `so` was a non-sequitur. It is gone from the appendix, not softened.
+
+### New receipts: 7 (all at `efa64be`; `bin/`+`tests/` byte-identical to `9b5954d`)
+
+1. `git diff --stat 9b5954d..efa64be -- bin/ tests/` â†’ empty
+2. `grep -n "launch_turn(" bin/fleet.py` â†’ def `:1241`, callers `:2311,:2860,:2967,:3692`
+3. `sed -n '1284,1298p' bin/fleet.py` â†’ `out_f = open` `:1284`, `proc = popen(` **`:1288`**, `except OSError` â†’ `TurnLaunchError` `:1297-1298`
+4. `sed -n '1270,1274p' bin/fleet.py` â†’ the pre-`Popen` launch-sequence contract comment
+5. `grep -rn "probe_liveness(\|pid_alive(" bin/fleet.py bin/fleet_statusline.py bin/hooks/ --include=*.py` â†’ **0 hits in `fleet_statusline.py` and `bin/hooks/`**
+6. `cmd_doctor` `:4493` builds `checks = [...]` with no `try`; `main()`'s except tuple = `RegistryCorruptError` | `(FleetCliError, ClaudeNotFoundError, TurnLaunchError, ValueError, FleetLockTimeout, UnsupportedPlatformError)` â€” **no `OSError`**
+7. `wsl -d Ubuntu -- bash -c 'cat /proc/sys/kernel/pid_max; uname -r'` â†’ `4194304` / `6.18.33.2-microsoft-standard-WSL2`
+
+**Nothing fabricated.** Every command above was run this session, on this box, at `efa64be`.
+
+### Residuals I am leaving, named
+
+1. **`SPEC.md:115` and F20 (`:382`) still call a null/corrupt *stored* ctime alive-unknown; shipped code
+   returns `"gone"` (`bin/fleet.py:620-621,635-636`).** Carried forward from fix wave 3, unchanged. F33 does
+   not depend on it (the gate sits after `:620`), and folding it silently is the hazard D4 raised. Owner:
+   a follow-up doc task, or `spec-boot-identity-review`'s call.
+2. **`32768` as the stock `pid_max` default is `[UNVERIFIED]`.** I have one Linux box and it reports
+   `4194304`. The bound is stated as a formula so the claim does not depend on which is right.
+3. The `ubuntu-latest` unit-test trap and the `boot_identity` non-threading cost, both from fix wave 3,
+   stand as spec'd. Owner `port-test-suite`.
+
+### Disposition
+
+- **F33-R1 â€” FIXED.** Row 6 respecified (guard + hoist above `:1288`), the false causal clause retracted,
+  the launch-path failure pin added to Â§12 with three assertions, case (vi) added, the read-only-views
+  containment stated where the decision lives.
+- **F33-R2 â€” FIXED** (one line, all three prescriptive fields).
+- **F33-R3 â€” BOUNDED** (fork-rate formula; `pid_max` verified on WSL; `port-posix-smoke` records it).
+- **Disputed: none.** The reviewer's trace was right, its recommendation was one exception-class short, and
+  I said so above rather than quietly building past it.
+- **Promotion: not mine.** `docs/specs/portability.md` untouched, `Status: drafting`. `spec-boot-identity-review`
+  owns the `ready-for-build` call for both specs.
+
+**For the reviewer â€” the one-line brief:** re-check **row 6's hoist** before anything else. The wrapper is
+the reviewer's fix and it is in; the hoist is mine and it is the load-bearing half. If `boot_identity()` is
+read anywhere below `bin/fleet.py:1288`, an adapter bug raising a non-`OSError` still orphans a live,
+billable `claude`, and `except OSError` will not see it. Grep for the `Popen`, not just for the handler.
