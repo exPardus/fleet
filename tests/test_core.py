@@ -120,6 +120,8 @@ class TestRegistry:
             "token_ceiling",
             # UL1 (item 11 / F31): usage-limit park horizon fields.
             "limit_reset_at", "limit_kind",
+            # §5.1: provenance for the destructive-command guard.
+            "spawned_by",
         }
         assert rec["session_id"] == "sid-1"
         assert rec["cwd"] == r"C:\proga\x"
