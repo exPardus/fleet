@@ -1,6 +1,8 @@
 """Phase 1.6 terminal surface (docs/specs/terminal-surface.md)."""
 import argparse
+import io
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -201,3 +203,166 @@ class TestStatusJsonFlags:
     def test_parser_defaults_both_flags_off(self):
         args = fleet.build_parser().parse_args(["status"])
         assert args.json is False and args.stale_ok is False
+
+
+@pytest.fixture
+def statusline(monkeypatch):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin"))
+    import fleet_statusline
+    return fleet_statusline
+
+
+class TestStatuslineRender:
+    def test_not_initialized(self, statusline):
+        line = statusline.render_statusline(
+            {"ok": False, "reason": "not_initialized", "workers": [], "totals": {}}, color=False)
+        assert line == "⚑ fleet: not initialized"
+
+    def test_unreadable_registry(self, statusline):
+        line = statusline.render_statusline(
+            {"ok": False, "reason": "unreadable", "workers": [], "totals": {}}, color=False)
+        assert line == "⚑ fleet: registry unreadable"
+
+    def test_no_workers(self, statusline):
+        snap = {"ok": True, "reason": None, "workers": [],
+                "totals": {"workers": 0, "mail": 0, "cost_usd": 0.0, "by_status": {}}}
+        assert statusline.render_statusline(snap, color=False) == "⚑ fleet: no workers"
+
+    def _snap(self, workers):
+        by_status = {}
+        for w in workers:
+            by_status[w["status"]] = by_status.get(w["status"], 0) + 1
+        return {"ok": True, "reason": None, "workers": workers,
+                "totals": {"workers": len(workers),
+                           "mail": sum(w["mail"] for w in workers),
+                           "cost_usd": sum(w["cost_usd"] for w in workers),
+                           "by_status": by_status}}
+
+    def _w(self, **over):
+        base = {"name": "w", "status": "working", "turns": 1, "cost_usd": 1.0,
+                "mail": 0, "stale_seconds": 5.0, "limit_reset_at": None,
+                "limit_kind": None, "resume_eligible": False, "attached_since": None}
+        base.update(over)
+        return base
+
+    def test_counts_and_cost(self, statusline):
+        snap = self._snap([
+            self._w(name="a", status="working", cost_usd=1.02),
+            self._w(name="b", status="idle", cost_usd=0.41),
+            self._w(name="c", status="dead", cost_usd=0.71),
+        ])
+        line = statusline.render_statusline(snap, color=False)
+        assert "1 working" in line.replace("●", " ").replace("○", " ").replace("✗", " ")
+        assert "$2.14" in line
+
+    def test_idle_with_mail_renders_as_idle_plus_mail(self, statusline):
+        snap = self._snap([self._w(name="b", status="idle", mail=1)])
+        assert "idle+mail" in statusline.render_statusline(snap, color=False)
+
+    def test_limited_shows_reset_time(self, statusline):
+        snap = self._snap([self._w(status="limited", limit_reset_at="2026-07-09T14:20:00Z")])
+        assert "resets 14:20" in statusline.render_statusline(snap, color=False)
+
+    def test_limited_without_reset_shows_unknown(self, statusline):
+        snap = self._snap([self._w(status="limited", limit_reset_at=None)])
+        assert "reset?" in statusline.render_statusline(snap, color=False)
+
+    def test_limited_past_reset_flags_resume_eligible_only(self, statusline):
+        snap = self._snap([self._w(status="limited", limit_reset_at="2020-01-01T00:00:00Z",
+                                   resume_eligible=True)])
+        line = statusline.render_statusline(snap, color=False)
+        assert "resume-eligible" in line
+
+    def test_stale_worker_gets_age_suffix(self, statusline):
+        snap = self._snap([self._w(status="working", stale_seconds=2400.0)])
+        assert "~40m" in statusline.render_statusline(snap, color=False)
+
+    def test_fresh_worker_has_no_age_suffix(self, statusline):
+        snap = self._snap([self._w(status="working", stale_seconds=299.0)])
+        assert "~" not in statusline.render_statusline(snap, color=False)
+
+    def test_color_false_emits_no_escapes(self, statusline):
+        snap = self._snap([self._w(status="working", stale_seconds=2400.0)])
+        assert "\x1b" not in statusline.render_statusline(snap, color=False)
+
+    def test_color_true_emits_escapes(self, statusline):
+        snap = self._snap([self._w(status="working")])
+        assert "\x1b" in statusline.render_statusline(snap, color=True)
+
+
+class TestStatuslineMain:
+    def test_main_exits_zero_and_prints_a_line(self, home, statusline, capsys, monkeypatch):
+        _write_registry(home, {"pmbot": _rec()})
+        monkeypatch.setattr(statusline.sys, "stdin", io.StringIO('{"model":{}}'))
+        monkeypatch.setenv("NO_COLOR", "1")
+        assert statusline.main() == 0
+        assert "⚑" in capsys.readouterr().out
+
+    def test_main_swallows_every_exception_and_prints_nothing(self, statusline, capsys, monkeypatch):
+        def boom():
+            raise RuntimeError("registry exploded")
+        monkeypatch.setattr(statusline.fleet, "status_snapshot", boom)
+        monkeypatch.setattr(statusline.sys, "stdin", io.StringIO(""))
+        assert statusline.main() == 0
+        assert capsys.readouterr().out == ""
+
+    def test_main_tolerates_garbage_stdin(self, home, statusline, capsys, monkeypatch):
+        _write_registry(home, {})
+        monkeypatch.setattr(statusline.sys, "stdin", io.StringIO("not json at all"))
+        monkeypatch.setenv("NO_COLOR", "1")
+        assert statusline.main() == 0
+
+    def test_main_spawns_no_subprocess(self, home, statusline, monkeypatch):
+        def boom(*a, **k):
+            raise AssertionError("the statusline must spawn no subprocess")
+        monkeypatch.setattr(subprocess, "Popen", boom)
+        monkeypatch.setattr(subprocess, "run", boom)
+        monkeypatch.setattr(statusline.sys, "stdin", io.StringIO("{}"))
+        _write_registry(home, {"pmbot": _rec()})
+        assert statusline.main() == 0
+
+
+class TestStatuslineAsciiFallback:
+    """A Windows console is cp1252 and cannot encode the fleet glyphs. Printing
+    them raises UnicodeEncodeError, the exit-0 guard swallows it, and the
+    operator sees a permanently BLANK statusline. Caught live during Task 3."""
+
+    def test_ascii_only_render_is_pure_ascii(self, statusline):
+        snap = {"ok": True, "reason": None,
+                "workers": [{"name": "a", "status": "working", "turns": 1, "cost_usd": 1.0,
+                             "mail": 0, "stale_seconds": 5.0, "limit_reset_at": None,
+                             "limit_kind": None, "resume_eligible": False,
+                             "attached_since": None}],
+                "totals": {"workers": 1, "mail": 0, "cost_usd": 1.0,
+                           "by_status": {"working": 1}}}
+        line = statusline.render_statusline(snap, color=False, ascii_only=True)
+        line.encode("ascii")  # raises if any glyph slipped through
+        assert "working" in line
+
+    def test_ascii_only_degrades_the_error_lines_too(self, statusline):
+        line = statusline.render_statusline(
+            {"ok": False, "reason": "unreadable", "workers": [], "totals": {}},
+            color=False, ascii_only=True)
+        line.encode("ascii")
+        assert "registry unreadable" in line
+
+    def test_main_prints_ascii_when_stdout_cannot_encode_glyphs(
+            self, home, statusline, monkeypatch, capsys):
+        _write_registry(home, {"pmbot": _rec()})
+        monkeypatch.setattr(statusline.sys, "stdin", io.StringIO("{}"))
+        monkeypatch.setenv("NO_COLOR", "1")
+        # Simulate a cp1252 console: no reconfigure(), encoding that rejects glyphs.
+        monkeypatch.setattr(statusline, "_stdout_can_encode", lambda text: False)
+
+        assert statusline.main() == 0
+        out = capsys.readouterr().out
+        assert out.strip()  # the bug was: silently empty
+        out.encode("ascii")
+        assert "working" in out
+
+    def test_stdout_can_encode_rejects_cp1252(self, statusline, monkeypatch):
+        class _Cp1252:
+            encoding = "cp1252"
+        monkeypatch.setattr(statusline.sys, "stdout", _Cp1252())
+        assert statusline._stdout_can_encode("⚑ fleet") is False
+        assert statusline._stdout_can_encode("# fleet") is True
