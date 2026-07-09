@@ -18,6 +18,7 @@ Contract, all four points load-bearing:
 """
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -136,6 +137,64 @@ def _want_color() -> bool:
     return True
 
 
+# --- statusline chaining ---------------------------------------------------
+#
+# Claude Code allows exactly ONE `statusLine` command. An operator who already
+# runs another statusline (ccusage, caveman, ...) would otherwise have to
+# choose. `fleet init --statusline --chain` captures the incumbent command
+# into state/statusline-chain.json; this script runs it, prints its rows, then
+# prints fleet's row beneath.
+#
+# This is the ONE place fleet's statusline spawns a subprocess, and it is a
+# deliberate, opt-in exception to the D1 no-subprocess-on-the-hot-path rule:
+# the delegate is a command the operator was already paying for on every
+# refresh. Fleet's own row still costs zero subprocesses. A delegate that
+# fails, hangs, or writes garbage is DROPPED -- fleet's row always prints.
+
+DELEGATE_TIMEOUT_SECONDS = 4
+
+
+def _chain_path() -> Path:
+    return Path(fleet.state_dir()) / "statusline-chain.json"
+
+
+def _load_delegates() -> list:
+    try:
+        data = json.loads(_chain_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return []
+    delegates = data.get("delegates") if isinstance(data, dict) else None
+    if not isinstance(delegates, list):
+        return []
+    return [d["command"] for d in delegates
+            if isinstance(d, dict) and isinstance(d.get("command"), str) and d["command"].strip()]
+
+
+def _run_delegate(command: str, payload: str) -> list:
+    """Run one delegate statusline, return its output rows. Never raises."""
+    try:
+        proc = subprocess.run(
+            command,
+            shell=True,  # the command is a shell string straight out of settings.json
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=DELEGATE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return []
+    if proc.returncode != 0:
+        return []
+    return [line for line in proc.stdout.splitlines() if line.strip()]
+
+
+def _delegate_rows(payload: str) -> list:
+    rows = []
+    for command in _load_delegates():
+        rows.extend(_run_delegate(command, payload))
+    return rows
+
+
 def _stdout_can_encode(text: str) -> bool:
     """Whether sys.stdout's encoding can carry `text`. A cp1252 console cannot
     encode the fleet glyphs; printing them there raises UnicodeEncodeError,
@@ -151,17 +210,27 @@ def _stdout_can_encode(text: str) -> bool:
 def main() -> int:
     try:
         # Claude Code passes a session JSON blob on stdin. Fleet needs none of
-        # it today; read and discard so the writer never blocks on a full pipe.
+        # it, but a chained delegate might, so it is captured and forwarded
+        # verbatim. Read it in full so the writer never blocks on a full pipe.
         try:
-            sys.stdin.read()
+            payload = sys.stdin.read()
         except (OSError, ValueError):
-            pass
+            payload = ""
 
         # Prefer real UTF-8 output; fall back to ASCII glyphs when the console
         # cannot carry them rather than dying silently.
         try:
             sys.stdout.reconfigure(encoding="utf-8")
         except (AttributeError, OSError, ValueError):
+            pass
+
+        # Delegates print above fleet's row. A delegate that fails, hangs, or
+        # emits unprintable bytes is dropped -- it must never cost fleet's row.
+        try:
+            for row in _delegate_rows(payload):
+                if _stdout_can_encode(row):
+                    print(row)
+        except BaseException:  # noqa: BLE001
             pass
 
         snap = fleet.status_snapshot()

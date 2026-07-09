@@ -49,7 +49,15 @@ The nine load-bearing architectural invariants are enumerated in [`docs/SPEC.md`
    fleet init --statusline
    ```
 
-   It is a separate step because a Claude Code plugin cannot ship a `statusLine`. The command backs up your settings first and refuses to overwrite a statusline it does not own (pass `--force` if you mean it).
+   It is a separate step because a Claude Code plugin cannot ship a `statusLine`. The command backs up your settings first and refuses to overwrite a statusline it does not own.
+
+   Already running another statusline (`ccusage`, `caveman`, …)? Claude Code allows only one, so compose them:
+
+   ```powershell
+   fleet init --statusline --chain
+   ```
+
+   Your existing statusline keeps its row; fleet's prints beneath it. A delegate that fails or hangs is dropped — fleet's row always renders. Use `--force` instead to replace the incumbent outright.
 
 ## Installing for collaborators
 
