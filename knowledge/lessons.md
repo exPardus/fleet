@@ -224,9 +224,13 @@ See `knowledge/projects/stupidbox.md`.
   worktrees (`C:\proga\pmbot-wt-*`). Not a bug; doctor stayed 17/17. **A manager must
   distinguish own-workers from foreign ones by name-prefix/dir before any bulk
   `kill`/`clean`** — never blanket-retire the registry. Retire only names you spawned.
-- **Soak Gate 1 usage — Day 1 (2026-07-09):** 5 spawns + 2 respawns = **7 launches** on a
-  non-fleet project (`stupidbox`), doctor 17/17 clean, 0 incidents. Need ≥15 spawns across
-  ≥3 distinct days; this is day 1. (Sign-off stays Altai's — this only accrues the floor.)
+- **Soak Gate 1 usage — Day 1 (2026-07-09):** two waves on `stupidbox` (built an 8-command
+  useless CLI): **12 launches total** (11 spawns + 2 respawns; sb-cow/fortune/roll/hodor +
+  sb-readme×3 launches, then sb2-8ball/yoda/slap/mock + sb2-readme). Doctor 17/17 clean at
+  every close, 0 incidents. Also coexisted cleanly with a concurrent foreign campaign
+  (pmbot Campaign 3) that ran and retired in the shared install during the session. Need
+  ≥15 spawns across **≥3 distinct days**; this is day 1 of 3. (Sign-off stays Altai's — this
+  only accrues the floor; a single busy day cannot satisfy the ≥3-distinct-days requirement.)
 
 ## 2026-07-09-c3 — Campaign 3 (pmbot Plan-3, foreign manager: parallel Rust TDD via worktrees)
 
