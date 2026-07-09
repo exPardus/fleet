@@ -38,7 +38,7 @@ Pure UX and packaging — no new capability, no new state, no daemon. One read-o
 - **SessionStart briefing** — the SPEC §10 startup ritual, automated. Suppresses itself inside workers via a `FLEET_WORKER` env stamp.
 - **plugin package** — commands + skill + hook. Cannot ship the statusline (Claude Code forbids it); `fleet init --statusline` installs that separately, refusing to clobber a foreign one.
 
-Done when: fleet state is visible without typing a command, and `/fleet` answers "where am I" in one screen.
+Done when: fleet state is visible without typing a command, and `/fleet:overview` answers "where am I" in one screen.
 
 ## Phase 2 — Watchtower (continuous monitoring)
 
