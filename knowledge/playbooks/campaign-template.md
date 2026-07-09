@@ -1,5 +1,6 @@
 # Campaign template — the reusable fleet-campaign instrument
 
+**Version 1.4 (2026-07-10)** — C4 spec-wave amendments, all one lesson: **an enumeration produced by inspection is wrong.** New §2 GREP-RECEIPT GATE (mandatory for any task specifying a change to code it does not own); authors may never promote their own spec (§3); re-reviews must carry a `SPURIOUS-FIX` verdict (§3); `[UNBUILT]` claims must be grep-verifiable at a stated commit, and prose claims *about* tags must be audited too (§2). See `lessons.md#2026-07-10-c4-spec-portability`.
 **Version 1.3 (2026-07-09)** — External dogfood #1 (`stupidbox`) amendments: `fleet respawn` ignores task-file edits — re-pass `--task @file` to change scope (§3 f); own-vs-foreign worker discipline on a shared fleet install before any bulk kill/clean (§1). See `lessons.md#2026-07-09-dogfood-stupidbox`.
 **Version 1.2 (2026-07-09)** — Campaign-2 amendments (first code campaign): merge-gate demo-skip + fixture-restore + revert-the-revert sequence (§5), git-log-is-truth verification checkpoint (§3 g), hook-source demo-test task convention (§2). See `lessons.md#2026-07-09-c2`.
 **Version 1.1 (2026-07-08)** — Campaign-1 amendments (descriptive/prescriptive tagging §2; doc-campaign truth gate §4).
@@ -45,6 +46,61 @@ Every `--task` is a file at `state/tasks/<name>.md` (gitignored runtime dir). Fi
 **C1 amendment — spec-amendment task files (added Campaign 1):**
 - [ ] Tag each folded finding `[UNBUILT — owned by <kernel>]` when its fix is **not yet in shipped code** (prescriptive spec text describing behavior a later code kernel must build). This distinguishes descriptive amendments (true of the code today) from prescriptive ones (a promise the kernel owns).
 - [ ] Split the task's "required regressions" into two lists: **"passes today"** (assertions true against current `bin/fleet.py`) vs **"pins unbuilt fixes"** (assertions that will only pass once the owning kernel ships). This prevents the descriptive/prescriptive fix wave C1 hit — a reviewer must not demand green tests for behavior no one has built yet.
+
+**C4 amendment — THE GREP-RECEIPT GATE (added Campaign 4; the most expensive lesson yet):**
+
+Any task whose output **specifies a change to code the task does not own** (a spec, a review, a plan
+amendment, a schema proposal) MUST enumerate the affected call sites **by `grep`**, and:
+- [ ] **paste the grep command AND its output** into the artifact, in a fenced block;
+- [ ] **pin it to a stated commit** (`# at <sha>`);
+- [ ] specify against that pasted list, never against a list built by reading.
+
+A call-site list without its receipt is a defect, and the reviewer must fail the task for it.
+
+*Why this is a hard gate.* In C4 an enumeration built by inspection was wrong **five times**: fix
+wave 1 (broke F1 → double-launch), fix wave 2 (broke FW2-R1 → every Linux worker born dead), the
+`PLAN.md` contract itself (a 3-edit list that was really 11 — written by a reviewer, ratified by the
+human, believed by the manager), a LOW too small to seem worth a grep (which reintroduced the exact
+F20 drift the paragraph it edited was warning about), and the manager's own correction sweep (fixed
+1 line, left 7 false `[UNBUILT]` tags standing). Every one was invisible to two adversarial
+reviewers reading carefully, and every one took a single `grep` to find. **Reading a document does
+not verify a claim about code.**
+
+Corollaries, each earned:
+- [ ] **`[UNBUILT]` claims are grep-verifiable or they are false.** Any spec text tagging a fix
+      `[UNBUILT — owned by <kernel>]` must reproduce as no-matches against `bin/fleet.py` at a stated
+      commit. Seven false tags survived in `SPEC.md` from 2026-07-08 (C2 shipped the kernels; nobody
+      re-tagged) — a `port-adapter-a` builder reading §12 would have rebuilt four working features.
+      This is F20's failure, seven more times.
+- [ ] **Audit the prose, not just the tags.** A `grep "[UNBUILT"` misses a *sentence* asserting a
+      field is prescriptive. Also grep `PRESCRIPTIVE`, `not shipped`, lowercase `unbuilt`. A false
+      sentence about a tag misleads a builder exactly as well as a false tag.
+- [ ] **Retire a stale pin by MOVING it**, not deleting it. A §12 regression moved from "pins unbuilt
+      fixes" to "passes today" keeps protecting its fix; a deleted pin is a silent regression wearing
+      a cleanup's clothes.
+- [ ] **A fix wave's failure mode is a new defect one call site away.** Both C4 fix waves closed
+      their target finding and broke an adjacent thing, in the same direction, for the same reason.
+      Budget a re-review for every fix wave; never merge a fix wave on the author's own report.
+
+**C4 amendment — spec review authority + verdict vocabulary:**
+- [ ] **An author may NEVER promote its own spec.** Put "leave `Status:` at `drafting`" in the
+      author's task file and the promotion authority in the reviewer's. Check the `Status:` line after
+      every author turn — one author set its own spec `ready-for-build` and the manager reverted it
+      (`87a85de`). A spec cannot ratify itself. The same rule bound the manager: having authored a
+      correction, the manager spawned a fresh verifier rather than certify it.
+- [ ] **Every re-review must carry a `SPURIOUS-FIX` verdict** alongside `FIXED`/`NOT-FIXED`/
+      `REGRESSED`. `DISPUTED: none` across N findings is a smell, not a virtue: an author who accepts
+      everything may "fix" something never broken, baking the reviewer's error into the contract. (C4
+      checked; found none; all 19 findings were real. Worth the check anyway.)
+- [ ] **Grant WSL/repro authority explicitly in the task file.** A worker that doesn't know it has a
+      POSIX box correctly tags claims `[UNVERIFIED]` instead of inventing results — which is right, but
+      leaves evidence on the table. Seven C4 workers, zero fabricated experiments, verified by
+      re-running every pasted receipt at its stated commit. Keep that record: state that fabricating a
+      result is unforgivable, and then actually re-run the receipts.
+- [ ] **`ESCALATE` beats a third fix wave.** The ≤3-loop rule is real. When two consecutive fix waves
+      each close their target and break a neighbour, the defect is structural (in C4: a portability
+      spec was specifying *core* plumbing, and the plumbing kept growing). Escalate to the human with
+      a named restructuring, not a third list of findings.
 
 **C2 amendment — hook-source-specific live demo tests (added Campaign 2):**
 - [ ] Any task that writes a `FLEET_HOOK_SOURCE=worktree` demonstration test MUST instruct the worker to **`pytest.skip` under the default `main` hook-source, never hard-assert** the source. A `assert HOOK_SOURCE == "worktree"` is correct only for a pre-merge worktree run; it turns the post-merge merge gate (which defaults to `FLEET_HOOK_SOURCE=main`) RED and cost C2 a full revert+refix+re-merge for a one-line scoping bug. Require the RESULT line to show the test **collects-and-skips** in the default `main` run.

@@ -471,3 +471,79 @@ PID counter and the tick origin at the same boot, driven by the same determinist
    method, one stamp in `launch_turn`, one compare in `probe_liveness`" — and re-scope boot identity
    into a short **SPEC.md-owned decision** rather than a residual clause inside a portability row.
    A portability spec should not be specifying core plumbing.
+
+### 2026-07-10 — C4 spec wave, CLOSED (supersedes the escalation entry above)
+
+The escalation resolved. Altai ratified two decisions: amend `PLAN.md`; re-scope boot identity out
+of the portability spec into a SPEC.md decision. Both executed. **Final state: `SPEC.md` v2.2 + F33
+ratified; `docs/specs/portability.md` = `ready-for-build`; zero code touched; 708 tests green.**
+7 workers, ~$80, 12 commits.
+
+**THE LESSON, and it cost the whole campaign to learn: an enumeration produced by inspection is
+wrong. Five times, in five different artifacts, by five different actors.**
+
+1. **Fix wave 1** — call-site list by inspection → F1 REGRESSED (false-`gone` → double-launch).
+2. **Fix wave 2** — again → FW2-R1 CRITICAL: the null-boot_id rule fires at `launch_turn`, where no
+   stored boot_id can exist by definition → `ctime_to_iso(None)` → swallowed `AttributeError` →
+   `turn_pid_ctime=null` → `probe_liveness:620` returns `"gone"`. **Every Linux worker born dead.**
+3. **`PLAN.md` itself** — the ratified "one adapter method, one stamp in `launch_turn`, one compare"
+   was short by 3 sites. `launch_turn` doesn't write the registry; it RETURNS a dict that four commit
+   sites copy (`:2346,:2898,:2993,:3733`). Written by a reviewer, ratified by Altai, believed by the
+   manager. **The true list is 11 rows.** Caught only because that same bullet mandated grep receipts.
+4. **A LOW too small to grep** — a review finding asserted 3 fields were `[UNBUILT]`; the author
+   implemented it without checking. `limit_reset_at`/`limit_kind` SHIP (18 refs in `fleet.py`, 41 in
+   tests). SPEC.md briefly declared shipped code unbuilt — **F20's exact drift, reintroduced by the
+   paragraph asserting F20 must never recur.** The reviewer found it and owned it: *"That false
+   premise was mine — I wrote 'three unbuilt fields' without grepping."*
+5. **The manager's own correction sweep** — fixed the 1 named line, left **7 false `[UNBUILT]` tags**
+   standing elsewhere. They had been in `SPEC.md` since 2026-07-08: C2 built `harden-fleet-b/-d/-e`
+   (budget persistence, rotation retry, UL1) and nobody re-tagged. A `port-adapter-a` builder reading
+   §12 would have rebuilt four working features.
+
+Every one was invisible to careful reading — by two adversarial reviewers, and by me. Every one took
+a single `grep` to find. → **campaign-template v1.4: the GREP-RECEIPT GATE.**
+
+**Corollaries now in the template**
+- `[UNBUILT]` claims must reproduce as grep-no-matches at a stated commit, or they are false.
+- **Audit the prose, not just the tags.** `grep "[UNBUILT"` misses a *sentence* claiming a field is
+  prescriptive — which is how the `:3` Status header carried the false claim invisibly. Grep
+  `PRESCRIPTIVE`, `not shipped`, lowercase `unbuilt` too.
+- Retire a stale pin by **moving** it (§12 "pins unbuilt" → "passes today"), never deleting it. A
+  deleted pin is a silent regression wearing a cleanup's clothes.
+- A fix wave's failure mode is a new defect **one call site away**. Never merge a fix wave on the
+  author's own report; budget a re-review for each.
+- **ESCALATE beats a third fix wave.** Two waves each closing their target and breaking a neighbour
+  = the defect is structural. Here: a *portability* spec was specifying *core* plumbing, and the
+  plumbing kept growing. The fix was a re-scope, not a third finding list.
+
+**Authority discipline (new, and it held under pressure)**
+- **No author promotes its own spec.** One tried (`cd63dcf`); manager reverted (`87a85de`). The rule
+  then bound the manager: having authored the `92e8a44` correction, the manager spawned a fresh
+  verifier rather than self-certify — and that verifier **refused to promote**, catching the 7 tags.
+  The rule is only real when it binds the person holding it.
+- **`SPURIOUS-FIX` is now a required re-review verdict.** `DISPUTED: none` across 19 findings is a
+  smell. (Checked: none found; all 19 real. Still worth checking.)
+- **Dispute-with-evidence is the behavior to select for.** `spec-boot-identity` overturned the
+  ratified contract with pasted greps. That is worth more than a compliant worker.
+
+**Technical residue (the probe ctime is a correctness surface)**
+- `time.time() - /proc/uptime + ticks` mixes CLOCK_REALTIME with monotonic → NTP step → false-`gone`
+  → **double-launch**.
+- Raw boot-relative ticks → immune to NTP, but carry **no boot identity**; the collision recurs every
+  boot and boot is where tick density peaks (WSL: whole userspace boot spans 1.4–2.3s at CLK_TCK=100,
+  inside ONE ±2s window; ROADMAP Phase-2's logon manager spawns *inside* that burst). Direction
+  inverts to false-`alive` → `_interrupt_worker` **`killpg`s a live, unrelated process group**. Worse.
+- `/proc/stat` `btime` is REALTIME-derived too. Rejected.
+- Answer: `/proc/sys/kernel/random/boot_id`, compared **before** the tick compare; mismatch = positive
+  proof of reboot → reuse the existing `None` wire shape (`probe_liveness` already maps it to `gone`).
+  The discriminator is a **fresh read at probe time**, never the stored value — a stored `null` is
+  *normal* on Windows/macOS and *legacy* on Linux, and conflating those is what killed fix wave 2.
+- `launch_turn`: hoist the boot-id read **above** the `Popen` at `:1288` and wrap it. The hoist (not
+  the wrapper) is what makes an orphaned live billable `claude` impossible — no child exists yet.
+
+**Ops**
+- A worker over its cumulative `max_budget_usd` refuses `send`; use `respawn --task @file
+  --max-budget-usd <higher>` (journal survives; the registry stores the task TRUNCATED, so re-pass it).
+- A transient **403** killed a turn mid-flight exactly like the C4 **529** did: `fleet result`
+  returned the auth error as the worker's "answer," `cost_usd` froze, **zero commits landed**.
+  `git log` remains the only truth a turn landed. The lesson generalizes past overload errors.
