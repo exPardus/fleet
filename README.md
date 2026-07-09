@@ -32,7 +32,19 @@ The nine load-bearing architectural invariants are enumerated in [`docs/SPEC.md`
 
 1. Add `bin\` to your `PATH` (contains `fleet.cmd`, the CLI shim).
 2. Run `fleet init` once — renders the machine-local `state\worker-settings.json` (hook wiring: real interpreter path + `FLEET_HOME`, forward slashes) from the git-tracked `worker-settings.template.json`. Re-run after editing the template or moving the repo; idempotent.
-3. Copy `skill\SKILL.md` to `%USERPROFILE%\.claude\skills\fleet\SKILL.md`.
+3. Load the plugin for the manager skill, the `/fleet:*` slash commands, and the SessionStart briefing:
+
+   ```
+   claude --plugin-dir C:/proga/claude-fleet
+   ```
+
+4. Optional — install the fleet statusline into `~/.claude/settings.json`:
+
+   ```powershell
+   fleet init --statusline
+   ```
+
+   It is a separate step because a Claude Code plugin cannot ship a `statusLine`. The command backs up your settings first and refuses to overwrite a statusline it does not own (pass `--force` if you mean it).
 
 ## CLI
 
