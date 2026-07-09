@@ -1,0 +1,11 @@
+{
+  "name": "claude-fleet",
+  "displayName": "claude-fleet",
+  "description": "Spawn, steer, monitor and hand off multiple Claude Code worker sessions across projects from one manager session.",
+  "version": "0.1.0",
+  "author": "Altai",
+  "keywords": ["fleet", "orchestration", "sessions", "workers"],
+  "commands": "./commands",
+  "skills": "./skills",
+  "hooks": "./hooks/hooks.json"
+}
