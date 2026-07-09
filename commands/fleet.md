@@ -15,7 +15,7 @@ allowed-tools: 'Bash(fleet status:*), Bash(fleet doctor:*), Bash(cat:*)'
 
 ## Knowledge
 
-!`cat "$FLEET_HOME/knowledge/INDEX.md" 2>/dev/null || cat C:/proga/claude-fleet/knowledge/INDEX.md`
+!`cat "${FLEET_HOME:-$(cat ~/.claude/fleet-home 2>/dev/null)}/knowledge/INDEX.md" 2>/dev/null || echo "(no knowledge index -- run 'fleet init')"`
 
 ---
 

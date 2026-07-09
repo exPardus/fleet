@@ -2177,6 +2177,15 @@ def _install_statusline(force: bool = False, chain: bool = False) -> None:
     print("  restart Claude Code to see it")
 
 
+def cmd_home(args) -> int:
+    """`fleet home`: print the resolved FLEET_HOME.
+
+    The skill, the slash commands and any collaborator script need the fleet
+    root without hardcoding one developer's absolute path (SPEC §14)."""
+    print(Path(FLEET_HOME).resolve().as_posix())
+    return 0
+
+
 def cmd_init(args) -> int:
     """`fleet init` (SPEC §14, §5 command surface): render the
     machine-local worker-settings.json instance from the git-tracked
@@ -4463,6 +4472,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="fleet", description="claude-fleet manager CLI")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    sub.add_parser("home", help="print the resolved FLEET_HOME path")
+
     p_init = sub.add_parser("init", help="render the machine-local worker-settings.json instance from the template")
     p_init.add_argument("--statusline", action="store_true",
                         help="also install fleet's statusline into ~/.claude/settings.json")
@@ -4568,6 +4579,8 @@ def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "home":
+            return cmd_home(args)
         if args.command == "init":
             return cmd_init(args)
         if args.command == "spawn":
