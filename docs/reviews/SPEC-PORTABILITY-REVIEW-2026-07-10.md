@@ -1104,3 +1104,371 @@ to ground every line citation and the R5 lint-scan claim in current code, not th
 **Not applied, named instead (per the write-set restriction: no `bin/fleet.py`, no `docs/SPEC.md` edits from this task):** two entries under the new `## Findings against SPEC.md` section — (1) the `turn_pid_boot_id` additive registry field and its core-side read/write/thread plumbing (R1's mechanism), owner `port-adapter-a`; (2) an optional, explicitly-deferred `tolerance_seconds` parameter on `probe_liveness`/`get_process_info` that would let the Linux branch use a ~1 s bound instead of the shared ±2 s constant, owner `port-adapter-a` if ever promoted, not required by any done criterion.
 
 **Status left at `drafting`**, per instruction — this fix-wave does not self-promote.
+
+---
+
+## Re-review — fix wave 2 (loop 2)
+**Verdict:** needs-fixes — **escalate rather than run a third fix wave**
+
+Scope: commit `45851da` against R1/F2/R2/R3/R4/R5, plus regressions in the sections it touched
+(D2, D3, D4, the probe matrix, `## Platform adapter interface`, `## Test port plan (B3)`, and the
+new `## Findings against SPEC.md`). Everything else is out of scope and was not re-reviewed.
+
+Repro authority: `git show 45851da`; grep and direct reads of `bin/fleet.py` / `tests/`;
+`py -3.13` read-only. **WSL Ubuntu** used and cited per claim below.
+
+**Headline.** The boot-identity *design* is right — I attacked it five ways and the design survived
+all five, including the two the author was most exposed on (the `None`-means-gone reuse, and the
+un-narrowed tolerance, which is now a **correct** argument where fix wave 1's version of it was
+false). What does not survive is the *specification* of it. R1's read half is specified; **R1's write
+half is not specified at all**, and the one production call site the author did not re-check —
+`launch_turn` — turns the new case-3 rule into a CRITICAL: as written, every Linux worker stores a
+null `turn_pid_ctime` at launch and reads `"gone"` on its first poll.
+
+| Item | Verdict | Evidence |
+|---|---|---|
+| R1 | **NOT-FIXED** | The gate's read path is fully specified and correct. Its **write** path is one prose clause — "reading it from a new Linux-only adapter accessor at the same moment `get_process_info` is first called" — and the word `accessor` appears **exactly once in the entire spec** (`grep -c "accessor"` → `1`). No name, no signature, no return contract, no Windows/macOS counterpart, no test. Meanwhile `## Platform adapter interface` still specifies exactly **4** methods, line 53 still declares the duck-typed contract to be "same 4 method names, same call sites in core," and done criterion 1 still reads "**all 4 methods** per `## Platform adapter interface`". `port-adapter-a` cannot build the writer. With no writer, `turn_pid_boot_id` is `null` on every record forever, so **every** Linux probe takes case 3 (alive-unknown) — the gate never engages. This is F9's class (a mandated mechanism with no pinned contract), and it is why R1 is NOT-FIXED rather than merely regressed. See FW2-R2. |
+| F2 | **FIXED** | All four demands landed, in the interface block's `F2 REQUIRED` numbered list plus done criterion 7. (1) "port-posix-smoke (NOT port-adapter-a …) MUST record the observed `comm` … with a build-stopping gate: if the observed name does not substring-match `_ALIVE_IMAGE_NAMES`, the build stops rather than shipping silently-broken liveness." (2) "extending `_ALIVE_IMAGE_NAMES` (fleet.py:604, core, outside the adapter block) … is **PRE-AUTHORIZED** as part of port-posix-smoke's own fix-forward scope." (3) `"cmd"` is justified, not dropped: "it exists solely for Windows' claude.cmd → cmd.exe re-parenting quirk … a POSIX install execs a shebang script or a real binary directly." (4) the trap I flagged is closed: "The sentinel … MUST NOT become the fallback whenever a real-but-unmatched `comm` is read. A builder who hardcodes "claude" to silence a requirement-1 gate failure … that is a defect, not a valid implementation." Done criterion 7 carries the gate. Nothing left to ask for. |
+| R2 | **FIXED** | D3 and the interface both replace the conversion with a label: "macOS labels `ps -o lstart=` as UTC via `.replace(tzinfo=timezone.utc)`, never converted through `time.mktime` (D3, R2 — mktime reads the calling process's TZ and was itself a fix-wave-1 regression)"; D3 adds "it is a **label, not a conversion** (no timezone database consulted, no `time` module call)". Every remaining `mktime` mention in the spec is a negation. TZ-environment dependence is gone. |
+| R3 | **FIXED** | `def get_process_info(self, pid, stored_boot_id=None, read=None, run=None)`, with `read`/`run` documented as "TEST-ONLY injection points … `read` stands in for the Linux `/proc/<pid>/stat` file read; `run` stands in for the macOS `ps` subprocess call. No core call site passes either one." The `TestPosixPlatformBehavior` sentinel test is now writable. (The *other* new parameter, `stored_boot_id`, is a production parameter and is where the damage is — FW2-R3.) |
+| R4 | **FIXED** | `import shlex    # R4 fix-wave-2 -- the pinned $TERMINAL argv below calls shlex.quote(); neither this nor `signal` is imported by bin/fleet.py today`. Re-verified: `grep -n "^import \(time\|shlex\|signal\)" bin/fleet.py` → only `32:import time`. |
+| R5 | **FIXED** | The discriminator is named and its lint-safety is *verified*, not assumed: "`sys.platform == "darwin"` … inside a `_PosixPlatform` method body is therefore lint-clean," justified by reading the lint's actual scan. I re-read it: `tests/test_steering.py:858-870` does `outside = source[:start] + source[end:]` and asserts the needles (`os.name`, `sys.platform`, `platform.system`, …) are absent from `outside` only. `_PosixPlatform` (`bin/fleet.py:313`) sits between the markers. Correct. |
+
+**R2..R5: 4/4.** **F2: closed.** **R1: not closed.**
+
+### Regressions introduced by fix wave 2
+
+#### FW2-R1 — CRITICAL — D2's case 3 fires at launch time, so every Linux worker stores a null `turn_pid_ctime` and reads `"gone"` on its first poll
+
+**Claim under review:** D2 — "3. **Stored boot_id is `null`** (a legacy record written before this field
+existed, or the launch-time read failed) → **cannot verify either direction**, so the adapter returns the
+F3 alive-unknown sentinel `(name, None)` rather than trusting the tick compare." Restated in the interface
+block and in the Linux probe-matrix row. The rule is stated **unconditionally on the adapter method**, and
+the parameter that carries it defaults to `None`.
+
+**Why it is wrong:** `launch_turn` — core, unchanged by this spec, and the *only* place `turn_pid_ctime`
+is ever produced — calls the adapter with no `stored_boot_id`:
+
+```
+bin/fleet.py:1343   get_process_info = get_process_info or PLATFORM.get_process_info
+bin/fleet.py:1344   ctime_iso = None
+bin/fleet.py:1345   try:
+bin/fleet.py:1346       info = get_process_info(proc.pid)
+bin/fleet.py:1347       if info is not None:
+bin/fleet.py:1348           ctime_iso = ctime_to_iso(info[1])
+bin/fleet.py:1349   except Exception:
+bin/fleet.py:1350       ctime_iso = None
+```
+
+At stamp time there is no stored boot_id — by definition, the record is being created. So
+`stored_boot_id` is `None`, case 3 applies verbatim, and the Linux adapter returns the sentinel
+`("claude", None)`. Then: `info is not None` → `ctime_to_iso(None)` → `AttributeError` inside
+`ctime_to_iso`'s `dt.astimezone(...)` → swallowed by the bare `except Exception` at `:1349` →
+**`ctime_iso = None`**. The record is committed with `turn_pid` set and `turn_pid_ctime = null`.
+
+`probe_liveness` maps a null **stored** ctime to `"gone"` unconditionally, at its very first branch —
+this is F6's own finding, which this same spec correctly documents:
+
+```
+bin/fleet.py:620   if pid is None or ctime_iso is None:
+bin/fleet.py:621       return "gone"
+```
+
+**Concrete failure:** `fleet spawn` on Linux → turn launches, `claude` is alive → registry records
+`turn_pid_ctime: null`. The very next `fleet status` → `recompute_status` → `probe_liveness` → `"gone"`
+→ retry-once (`:881`) → `"gone"` → **`working` → `dead`**, while the `claude` process is running. This is
+mass false-dead on **every worker, on the first poll, deterministically** — and `fleet respawn`, the
+documented dead-recovery lever, then calls `launch_turn` in the same immutable cwd: **two live `claude`
+processes in one cwd.** Invariants 5 and 7. It is F2's original concrete failure and F1's original
+concrete failure, arriving together through a third door.
+
+Note the mechanism is silent: the `except Exception` at `:1349` is exactly the broad swallow that
+`cmd_kill`/`cmd_respawn`/`cmd_clean`'s own comments already lean on ("`get_process_info` returns `None`
+on ANY exception," `bin/fleet.py:3350,3764,3887`). Nothing logs, nothing raises, nothing lints.
+
+**Suggested disposition:** The boot compare does not belong inside `get_process_info` at all. It is a
+string equality on a field the adapter merely *supplies*; putting it inside the probe method is what
+forced (a) an unspecified writer, (b) a production parameter on a method whose entire existing contract
+is "answer a question about this pid", and (c) this launch-time collision. Instead:
+
+- Add a **fifth adapter method on both adapters**: `boot_identity(self) -> str | None`. Linux reads
+  `/proc/sys/kernel/random/boot_id`; Windows and macOS `return None`. It is a pure accessor with no pid
+  argument — trivially testable, symmetric, and it satisfies the duck-typed 4-→5-method contract openly
+  instead of smuggling a "Linux-only accessor" past it.
+- `launch_turn` stamps `turn_pid_boot_id = PLATFORM.boot_identity()` next to `turn_pid_ctime`. No OS
+  branch enters core; the value is opaque.
+- `probe_liveness` gains `stored_boot_id=None` and does the compare **in core, before it calls
+  `get_process_info` at all**: `current = PLATFORM.boot_identity()`; if `stored` and `current` are both
+  non-null and differ → `"gone"`; if `stored` is null **and** `current` is non-null → `"unknown"`
+  (the case-3 safe middle ground, now unreachable from `launch_turn` because `launch_turn` never calls
+  `probe_liveness`); otherwise fall through to today's logic unchanged.
+
+This keeps `get_process_info(pid, read=None, run=None)` at its R3 shape, leaves every existing test
+double working, needs no change to `_WindowsPlatform`, and makes case 3 mean what the author wants it
+to mean without it firing at stamp time. If the author prefers to keep the compare in the adapter, D2
+must state explicitly that **`launch_turn`'s call passes a distinguishable `_UNSET` sentinel, not
+`None`**, and that case 3 is skipped for it — see FW2-R5.
+
+---
+
+#### FW2-R2 — HIGH — The boot_id *writer* is one unspecified prose clause, and it contradicts the spec's own 4-method contract and done criterion 1
+
+**Claim under review:** `## Findings against SPEC.md` #1 — "**Write path:** `launch_turn` stamps
+`turn_pid_boot_id` alongside `turn_pid`/`turn_pid_ctime` at every launch (spawn, resume, respawn),
+reading it from **a new Linux-only adapter accessor** at the same moment `get_process_info` is first
+called on the freshly-`Popen`'d pid."
+
+**Why it is wrong:** That clause is the entire specification of the writer. `grep -c "accessor"` over
+`docs/specs/portability.md` → `1`. The interface block — the copy-me artifact — specifies four methods
+and `get_process_info`'s return shape is explicitly *unchanged*: `None` / `(image_name, ctime)` /
+`(image_name, None)`. **There is no return channel through which `launch_turn` could learn the current
+boot_id.** So a fifth method is mandatory, and it is:
+
+- unnamed, unsigned, un-return-typed, untested, and absent from `## Test port plan (B3)`;
+- described as "Linux-only", which means `_WindowsPlatform` would not have it — so `launch_turn`
+  (core) calling `PLATFORM.<accessor>()` raises `AttributeError` on Windows, and the only way to avoid
+  that is a `hasattr`/`getattr` capability sniff, which is an OS branch in core in all but name (it
+  passes the `test_no_os_branches_outside_adapter_block` needle list precisely the way F4's `os.killpg`
+  did — green lint, dead Windows);
+- in direct contradiction with `## Platform adapter interface` line 53 ("the contract is *same 4 method
+  names, same call sites in core*") and with done criterion 1 ("`_PosixPlatform` fully implemented …
+  **all 4 methods** per `## Platform adapter interface`"), neither of which fix wave 2 updated.
+
+**Concrete failure:** `port-adapter-a` implements the four specified methods and stops, because done
+criterion 1 says four. `turn_pid_boot_id` is never written. Every Linux record has it `null`, so every
+probe takes case 3 → alive-unknown → every worker is pinned `working` forever, `pid_alive` is always
+`False` so `_interrupt_worker` returns `"not_running"` and `fleet kill`/`interrupt` cannot reach the
+turn, and the "self-healing per worker: the next successful launch/respawn populates
+`turn_pid_boot_id`" clause never fires, because nothing ever populates it. R1's gate is inert and the
+cross-reboot collision it was written to close is still open.
+
+**Suggested disposition:** Pin the accessor in the interface block, on **both** adapter classes, with a
+name, signature, return contract, and the `None`-on-Windows/macOS rule (see FW2-R1's `boot_identity()`
+proposal). Update line 53 and done criterion 1 from "4 methods" to "5". Add its four branches to
+`## Test port plan (B3)`.
+
+---
+
+#### FW2-R3 — HIGH — `_WindowsPlatform.get_process_info` never grows the parameter core is told to forward, and every existing test double is a one-argument lambda
+
+**Claim under review:** `## Findings against SPEC.md` #1 — "`probe_liveness` (`:607`) and `pid_alive`
+(`:640`) both gain a `stored_boot_id=None` parameter whose only job is forwarding to
+`get_process_info`." Interface block — "Windows/macOS ignore it (always `None` on those OSes)."
+
+**Why it is wrong:** macOS is fine — it runs `_PosixPlatform`, the class this spec is rewriting.
+**Windows runs `_WindowsPlatform`**, and its signature is `def get_process_info(self, pid):`
+(`bin/fleet.py:218`). This spec's write set is `_PosixPlatform`; the interface section is titled "Exact
+method signatures `_PosixPlatform` … must implement"; done criterion 1 names only `_PosixPlatform`.
+Nothing in fix wave 2 tells anyone to widen the Windows adapter. Once `probe_liveness` forwards
+`stored_boot_id`, `PLATFORM.get_process_info(pid, stored_boot_id=...)` raises **`TypeError` on every
+Windows probe** — every `fleet status`, `send`, `kill`, `clean`, `doctor`.
+
+Second blast radius, equally concrete: core resolves `get_process_info = get_process_info or
+PLATFORM.get_process_info` (`:622`, `:1343`), i.e. the forwarded parameter also reaches every **injected
+test double**. Those are one-argument lambdas throughout — `get_process_info=lambda pid: None`
+(`tests/test_cli.py:282,294,407,418,432,442,450`), `lambda pid: ("claude.exe", ctime)` (`:394`), and the
+same shape across `test_core.py`, `test_steering.py`, `test_resilience.py`. Every one raises `TypeError`
+the moment core forwards a second argument. `## Test port plan (B3)` does not mention them.
+
+**Concrete failure:** `port-adapter-a` lands the core plumbing exactly as `## Findings against SPEC.md`
+specifies. The `windows-latest` job of done criterion 4 goes red before the first assertion — this is
+F4's failure mode ("green lint, dead Windows") reproduced by the very fix wave that closed F4.
+
+**Suggested disposition:** Adopt FW2-R1's core-side compare, which removes the parameter from
+`get_process_info` entirely and makes this finding moot. If the adapter-side compare is kept: state
+explicitly that `_WindowsPlatform.get_process_info` gains `stored_boot_id=None` (ignored), name it in
+done criterion 1, and add a `## Test port plan (B3)` item covering the arity change to every injected
+`get_process_info` double across the four test files.
+
+---
+
+#### FW2-R4 — MED — The thread-through call-site list omits `_doctor_check_unreadable_starttime`, so `fleet doctor` flags every live Linux worker
+
+**Claim under review:** `## Findings against SPEC.md` #1 — "every current call site that already pulls
+`turn_pid_ctime` out of a record to call `probe_liveness`/`pid_alive` must also pull `turn_pid_boot_id`
+and pass it through: `recompute_status` (`bin/fleet.py:870,881`), `_interrupt_worker`'s pre- and
+post-kill checks (`:3115,3120`), **the doctor check at `:4210`**."
+
+**Why it is wrong:** There are **two** doctor checks that pull those fields out of a record, not one.
+`_doctor_check_stale_pids` (`:4206-4210`) is the one named. `_doctor_check_unreadable_starttime`
+(`:4218-4228`) is not:
+
+```
+bin/fleet.py:4227   and probe_liveness(rec.get("turn_pid"), rec.get("turn_pid_ctime"),
+bin/fleet.py:4228                      get_process_info=get_process_info) == "unknown"
+```
+
+It reads `turn_pid` and `turn_pid_ctime` straight off the record, exactly like the check one function
+above it. Left un-threaded, it calls `probe_liveness` with `stored_boot_id` defaulting to `None` → D2
+case 3 → alive-unknown sentinel → verdict `"unknown"` → **true for every live Linux worker**.
+
+**Concrete failure:** `fleet doctor` on the exercise box prints "*N* working worker(s) with an unreadable
+process StartTime" for **all** of them. The check is note-only (always PASS), so done criterion 5
+(`fleet init && fleet doctor` clean) technically survives — which is what keeps this MED and not HIGH —
+but the operator's one signal that the probe could not confirm a worker becomes noise on day one.
+
+**Suggested disposition:** Add `_doctor_check_unreadable_starttime` (`bin/fleet.py:4218-4228`) to the
+thread-through list. Then re-derive the list mechanically (`grep -n 'turn_pid_ctime' bin/fleet.py`)
+rather than by inspection — the omission of a call site four lines below one that *was* listed is the
+signature of a hand-built list.
+
+---
+
+#### FW2-R5 — MED — `stored_boot_id=None` uses one value for "the caller omitted it" and "this record's field is null", so every missed call site silently degrades to alive-unknown instead of failing loudly
+
+**Claim under review:** D2 case 3 and the pinned signature
+`get_process_info(self, pid, stored_boot_id=None, read=None, run=None)`.
+
+**Why it is wrong:** The parameter's default and its legacy-record value are the same object. The adapter
+therefore cannot distinguish *"core did not thread this through"* from *"core threaded through a genuine
+`null`"*, and the spec assigns the second meaning to both. Every omission — `launch_turn` (FW2-R1),
+`_doctor_check_unreadable_starttime` (FW2-R4), any future call site, any un-updated test — lands in the
+alive-unknown branch, which by design is never demoted and never raises. The two most damaging findings
+in this re-review are both instances of this one root cause, which is why it is filed separately rather
+than folded into either.
+
+Alive-unknown is the correct *verdict* for a genuinely-null stored field. It is the worst possible
+*failure mode* for a plumbing bug, because it is indistinguishable from correct operation until a worker
+wedges.
+
+**Suggested disposition:** Preferred — FW2-R1's core-side compare, where the field is read from the
+record at the one place that already reads `turn_pid_ctime`, so there is no parameter to forget. If the
+parameter is kept, use a module-level `_UNSET = object()` default and specify that the adapter raises on
+`_UNSET` rather than degrading, so a missed call site fails at the first test instead of the first
+reboot.
+
+### Boot-identity gate attack log
+
+Five attacks. The **design** survived all five. The **specification** did not survive attacks 1 and 5's
+follow-through, which is FW2-R1/R2/R3 above.
+
+1. **The `None`-means-gone reuse.** *Survived.* `get_process_info(pid) is None` is mapped to `"gone"` at
+   exactly one place — `bin/fleet.py:624-625` — and every consumer reaches it through
+   `probe_liveness`/`pid_alive`: `recompute_status` (`:870,881`), `_interrupt_worker`'s pre- and post-kill
+   gates (`:3115,3120`), `_doctor_check_stale_pids` (`:4210`), `_doctor_check_unreadable_starttime`
+   (`:4227`), and `recompute_worker` (`:1623`) via `recompute_status`. **No caller calls
+   `PLATFORM.get_process_info` directly and branches on `None` itself** except `launch_turn` (`:1346`),
+   which only asks "is there a tuple to read a ctime out of." So the wire shape carries no second meaning
+   any consumer can observe. Two further points in the author's favour, both of which I expected to break
+   and did not: (a) `None` is *already* overloaded in shipped code — `_WindowsPlatform.get_process_info`
+   ends `except Exception: return None` (`:268-269`), and `cmd_kill`/`cmd_respawn`/`cmd_clean`'s own
+   comments say so ("`get_process_info` returns `None` on ANY exception," `:3350,3764,3887`) — so adding a
+   third producer of `None` adds no ambiguity that was not already tolerated; (b) unlike those transient
+   producers, a boot-id mismatch is *deterministic*, so the retry-once at `:881` cannot flap on it. The
+   author's "positive proof beats absent evidence" framing (mismatch → gone; unresolvable → unknown) is
+   the right way round, and it is the only place in this spec where a `"gone"` verdict is justified by
+   proof rather than by absence.
+
+2. **The launch-time race.** *Survived on the axis asked about; broke on an axis nobody was looking at.*
+   A reboot between `Popen` and the stamp is not a hazard — a reboot kills the pid, so the record is born
+   pointing at a dead process and the ordinary probe returns `"gone"`. The two-lock stamping sequence
+   (`cmd_send`'s "re-acquire the lock once to stamp `turn_pid`/`turn_pid_ctime`", `bin/fleet.py:2722`) is
+   also safe: `launch_turn` builds the whole dict — `turn_pid`, `turn_pid_ctime`, and (per the proposal)
+   `turn_pid_boot_id` — *before* the lock is re-acquired, and all three are committed in one write
+   (`:2346`, `:2898`, `:2993`, `:3733`, all four launch paths funnel through `launch_turn`'s return dict).
+   So no record can exist with a ctime and a null boot_id **by way of the lock sequence**. It can exist
+   for a different reason entirely: case 3 fires *inside* `launch_turn`'s own probe. That is FW2-R1, and
+   it produces the opposite record — boot_id null *and ctime null* — which reads `"gone"`, not
+   alive-unknown. The author's "legacy, self-healing" characterisation of a null boot_id is therefore
+   correct for the case they considered and irrelevant to the case that actually occurs, since with no
+   writer specified (FW2-R2) *every* record is a null-boot_id record and nothing ever heals.
+
+3. **WSL-vs-real-Linux.** *Partially settled.* **WSL Ubuntu, this session:**
+   `stat -c "%a %U" /proc/sys/kernel/random/boot_id` → `444 root`; `cat` → a stable UUID. It is
+   world-readable and, being under `/proc/sys/` rather than `/proc/<pid>/`, **`hidepid` cannot affect it** —
+   `hidepid` protects per-process directories only (`man 5 proc`). That much is settled, and it retires
+   the spec's case-4 ("current boot_id read fails") as anything but paranoia on a stock kernel.
+   **Not settled, and the spec should say so:** (a) whether a stock non-WSL systemd kernel guarantees the
+   file (it is `CONFIG_PROC_SYSCTL` + the random driver; universally present in practice, but this is a
+   documentation claim, not an experiment I ran); (b) **containers.** `/proc/sys` is not PID-namespaced,
+   so a containerised fleet reads the **host's** boot_id — a container restart without a host reboot
+   leaves the boot_id unchanged while the container's PID namespace resets to 1. The gate would not fire.
+   Fleet is *probably* saved by a second accident — `/proc/<pid>/stat`'s `starttime` remains host-boot
+   relative in a plain PID namespace, so post-restart processes carry large tick values that cannot
+   collide with a stale record's — but a `CLONE_NEWTIME` time namespace virtualises `CLOCK_BOOTTIME` and
+   would defeat that too. Tag `[UNSETTLED — needs port-posix-smoke]` and have the smoke test record:
+   `cat /proc/sys/kernel/random/boot_id` on the exercise box; whether the box runs fleet in a container;
+   and if so, whether `/proc/<pid>/stat` field 22 for a fresh process is host-uptime-scale or near-zero.
+   Fleet does not currently claim container support, so this gates nothing — but the spec asserts the
+   gate closes the reboot class outright, and a container restart is a reboot from the registry's point
+   of view.
+
+4. **The declined macOS analogue.** *Survived, with one honest gap the author already labelled.* The
+   author's core claim — `kp_proc.p_starttime` is captured once at fork and not re-derived on read — is
+   the same claim F1 rested on, and it is load-bearing again here. I cannot settle it without a Mac, and
+   neither could the author; it stays `[UNSETTLED — needs port-posix-smoke]`, correctly tagged. But the
+   argument does not actually depend on it: `probe_liveness` compares the **stored** `lstart` against a
+   **re-read** `lstart` of the same pid, so even if the kernel re-derived the value, both sides would move
+   together and the difference would still be zero. An NTP correction after the worker launched changes
+   neither side of a self-consistent comparison. The only way a macOS record could false-`alive` across a
+   reboot is if a *new* process's `lstart` landed within ±2 s of a *pre-reboot* stored `lstart` — which
+   requires the box to boot to a wall clock within two seconds of the earlier launch instant, i.e. a
+   machine with no working RTC. That is not a Mac. **`kern.boottime` is correctly declined.**
+
+5. **The un-narrowed tolerance.** *Survived — and this is the finding I most expected to sustain and
+   could not.* Fix wave 1 claimed the cross-boot collision was "the same class" as the existing accepted
+   PID-reuse residual; that was false, and R1 proved it with boot-burst density. The author now makes the
+   same-class claim about the **intra-boot** residual, and there it is **correct**. Once case 2 returns
+   `None` before the tick compare, the surviving collision needs one boot to contain: a pid allocated to
+   the worker, that pid *freed*, the allocator *wrapping the whole pid space* (WSL:
+   `/proc/sys/kernel/pid_max` → `4194304`; `32768` on many distros), and the reused pid's `starttime`
+   landing within ±2 s of the original's. But the tick value grows monotonically with the boot, and a
+   wraparound takes far longer than 2 s of ticks to consume — so the reused pid's ticks are necessarily
+   *far* from the original's. Boot-burst density does not bite here, because boot-burst pids are never
+   the *reused* ones. The residual is genuinely the same class as `bin/fleet.py:597-603`'s. **The
+   `tolerance_seconds` deferral is correct, its `## Findings against SPEC.md` #2 framing is honest, and
+   the decision not to narrow ±2 s is right.** No finding.
+
+**Verdict on the gate:** the mechanism is the right mechanism, chosen for the right reason, and the
+author's two contested judgement calls (mismatch→gone before the tick compare; don't narrow the
+tolerance) both hold up under attack. The gate fails only on plumbing — but it fails on plumbing in three
+places, one of which is a CRITICAL that bricks Linux on the first `fleet status` and one of which reddens
+`windows-latest`.
+
+### Schema proposal
+
+**Judged against SPEC.md:107's additive rule** ("`fleet.json` grows by ADDING fields, never
+renaming/removing. Readers default any missing field …; writers preserve unknown fields"):
+
+- **Additive rule: respected.** `turn_pid_boot_id` adds a field, renames nothing, removes nothing. The
+  proposal states nullability ("string, nullable"), the legacy-record behavior ("readers default the
+  missing field to `null`; writers preserve it on round-trip"), and cites the right precedents
+  (`spawned_by`, SPEC.md:157; `limit_reset_at`/`limit_kind`, SPEC.md:126-129) — all three genuinely are
+  additive-nullable fields under the same rule. No migration step, no format-version gate. Correct.
+- **Invariant 8: not violated.** The core edits thread an *opaque string* through; no `os.name` /
+  `sys.platform` / `platform.system` needle enters core, so
+  `test_no_os_branches_outside_adapter_block` still passes for the right reason, not by accident. The
+  OS-specific act (reading `/proc/sys/kernel/random/boot_id`) stays inside the adapter. The manager's
+  worry that a schema change owned by the adapter task would breach the invariant-8 boundary is
+  **unfounded** — invariant 8 governs where OS branches live, not which task edits which line, and the
+  spec explicitly pre-authorizes the core edits, which is precisely what F1's disposition demanded.
+- **Owner: defensible.** `port-adapter-a` owning five core call sites is fine *because it is written
+  down*. The problem is not who owns the edits; it is that the edit list is wrong.
+- **Enumeration: incomplete, in three places, and that is the finding.** The list omits `launch_turn`'s
+  own `get_process_info` call (`:1346` — FW2-R1, CRITICAL), `_WindowsPlatform.get_process_info`'s
+  signature (`:218` — FW2-R3, reddens `windows-latest`), `_doctor_check_unreadable_starttime`
+  (`:4218-4228` — FW2-R4), and every injected `get_process_info` test double across four test files. It
+  also relies on a fifth adapter method it never specifies (FW2-R2).
+
+**SCHEMA-PROPOSAL-SOUND: no** — the additive rule and invariant 8 are both respected, but the core-edit
+enumeration is incomplete in three places, one of which bricks Linux and one of which bricks Windows.
+
+### Gate
+
+`R1` is `NOT-FIXED`; five new regressions, one CRITICAL and two HIGH. `docs/specs/portability.md`'s
+`**Status:**` line stays `drafting`. (Had the only defects been LOW-severity dispositions, promotion
+would have been allowed under the manager's rule; that is not the case here.)
+
+**Escalate.** Fix waves 1 and 2 each closed the finding they were aimed at and each introduced a new
+defect in the same neighbourhood, in the same direction: a correct mechanism, specified with an
+incomplete call-site enumeration, verified by inspection rather than by grep. A third wave against a
+list I hand it would very likely produce a fourth. The structural problem is that D2 now specifies a
+core plumbing change from inside an adapter spec, and the plumbing keeps growing. My recommendation to
+the human: adopt FW2-R1's `boot_identity()` restructuring — it moves the compare into `probe_liveness`,
+removes the production parameter from `get_process_info`, and reduces the core-edit list from "five call
+sites, two adapter classes, and every test double" to "one new adapter method, one stamp in
+`launch_turn`, one compare in `probe_liveness`" — and re-scope the whole boot-identity mechanism into a
+short SPEC.md-owned decision rather than a residual clause inside a portability row.
+
+Nothing in this re-review bears on the C4 **build** waves. They remain gated on Altai's
+`SOAK GATE 1 SIGNED` line in `knowledge/lessons.md`, which does not exist.
