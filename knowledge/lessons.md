@@ -355,3 +355,27 @@ real `bypassPermissions` haiku session ordered to run `fleet clean`: refused, wo
   gets a traceback instead of a refusal. The guard now never prompts — agents pass `--yes`.
 - pytest inherits `CLAUDE_CODE_SESSION_ID` from whichever Claude session ran it, so guard-sensitive tests
   passed or failed depending on **who ran the tests**. An autouse fixture in `conftest.py` deletes it.
+
+### The same silent-failure class, four more times (2026-07-09, later)
+
+A sweep for "things shaped like the `Bash(fleet:*)` incident" found four. Every one produced *no error*:
+
+- **The test suite overwrote the operator's real `~/.claude/fleet-home`.** `cmd_init` stamps the marker via
+  `Path.home()`; the statusline tests monkeypatched `user_settings_path` but not the marker. Running the
+  suite repointed the SessionStart hook at a pytest tmp dir. The briefing would have reported an empty
+  fleet forever. Fixed with an autouse conftest fixture that sandboxes every home-derived path, plus a test
+  asserting `fleet init` never reaches the real home. **Rule: a test that writes to `Path.home()` is a bug,
+  even when the assertion passes.**
+- **`/fleet` never ran.** The plugin is named `fleet` and ships `skills/fleet/SKILL.md`, so `/fleet` invoked
+  the SKILL and `commands/fleet.md` was permanently unreachable. Renamed `/fleet:overview`. A command file
+  may not collide with the skill name; lint added.
+- **A slash command's inline `` !`cmd` `` is not guaranteed to be bash.** `/fleet` inlined
+  `${FLEET_HOME:-$(cat ~/.claude/fleet-home)}` and printed garbage. Shell logic belongs in the CLI:
+  `fleet home` and `fleet knowledge` now exist, are testable, and are shell-agnostic.
+- **cp1252, for the third time.** `fleet knowledge` printed a knowledge base full of arrows and em-dashes to
+  a Windows console and `print()` raised mid-stream. There is now one helper,
+  `_write_text_tolerating_console_encoding`. **Any new stdout path on Windows needs it.**
+
+**Meta-lesson.** Every one of these was found by *running the thing*, never by reading it or by a green test
+suite. The statusline was blank, `/fleet` answered nonsense, the marker pointed at a deleted directory — all
+while 700 tests passed. Drive the surface you just built, from a clean directory, as the user.
