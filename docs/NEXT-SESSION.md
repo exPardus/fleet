@@ -38,7 +38,53 @@ Campaign 3+ (feature phases) are **gated behind Soak Gate 1**, which only Altai 
 
 ---
 
-## Your first job next session — dogfood fleet on a small sample project (documentation)
+## ✅ DONE (2026-07-09) — external dogfood #1: `stupidbox`
+
+The "first job" below is **complete**. Altai redirected it away from a documentation pass on
+an existing repo: *"make something simple and stupid."* The fleet built
+**`C:\proga\stupidbox`** from scratch — an 8-command useless CLI (`cow` `fortune` `roll`
+`hodor` `8ball` `yoda` `slap` `mock`) — across two waves.
+
+**VERDICT: fleet works in the wild.** First campaign on a repo the fleet never built.
+11 spawns + 2 respawns, every worker committed its own disjoint file, zero `index.lock`
+collisions, zero lost turns, **0 incidents**, `fleet doctor` 17/17 at every close, ~$1 total
+(haiku/`bypass`). Full lifecycle exercised: batch spawn, mid-turn steer (obeyed), respawn
+(plain + `--task @file`), background waits, manager verification, doctor-clean close.
+Evidence: `knowledge/projects/stupidbox.md`, `lessons.md#2026-07-09-dogfood-stupidbox`,
+commits `d17e27f` / `544906e`.
+
+**Friction found → campaign-template v1.3:**
+1. **`fleet respawn` ignores edits to `state/tasks/<name>.md`** — it re-prompts with the
+   *original, TRUNCATED* task snapshot from the registry. To change scope on respawn you
+   must re-pass `--task @state/tasks/<name>.md` (respawn's `--task` does accept `@file`).
+   Re-pass it for any long task regardless, or the truncation silently drops detail.
+2. **The fleet install is system-wide/shared** — a concurrent *foreign* campaign (pmbot
+   Campaign 3) appeared in `status`/`doctor` mid-session. Not a bug. **Retire only names you
+   spawned**; never blanket-`kill` the registry.
+
+## Your job next session — Soak Gate 1, day 2 of ≥3
+
+The gate is **usage-denominated, not calendar-denominated.** Current accrual:
+
+| | |
+|---|---|
+| **Day 1 (2026-07-09)** | 12 launches (11 spawns + 2 respawns) on `stupidbox`, doctor 17/17, 0 incidents |
+| **Floor** | ≥15 spawns across **≥3 distinct days**, on ≥1 non-fleet project, doctor clean at gate-close, 0 incidents |
+| **Remaining** | ≥2 more distinct days. One busy day cannot satisfy the day-count. |
+
+Run another cheap real campaign on a **non-fleet** project (extend `stupidbox`, or whatever
+Altai points at). Same recipe: haiku, `bypass`, small caps, disjoint files, background waits,
+doctor clean at close, knowledge entry after. Then, when the floor is met, dispatch the
+gate-close **audit task** per `campaign-template.md` §7 (doctor clean, mail-ledger
+reconciliation, phantom-live audit, dated incident-log section) and hand the audit to Altai.
+
+**Still true: you do NOT sign.** Altai writes `SOAK GATE 1 SIGNED: <date> — Altai` in
+`knowledge/lessons.md`. You generate usage + the audit; the signature is his. C3+ build waves
+stay GATED until it exists.
+
+---
+
+## (Original brief, kept for reference) — dogfood fleet on a small sample project
 
 Altai's request: **test fleet in the wild on a small sample project — a documentation campaign.** This is a genuine external campaign that ALSO feeds Soak Gate 1's usage floor (≥15 spawns / ≥3 days). Run it from the `campaign-template.md` checklist — its first real external instantiation.
 
@@ -60,4 +106,4 @@ Altai's request: **test fleet in the wild on a small sample project — a docume
 >
 > The self-build is at its readiness boundary: Campaigns 1–2 are merged and verified; Campaign 3+ is GATED behind Soak Gate 1, which only Altai signs — do NOT start any C3+ build wave or self-issue the sign-off.
 >
-> Your job this session: **dogfood fleet on a small sample project by running a real documentation campaign** (per docs/NEXT-SESSION.md "Your first job"). Ask Altai which project to document (propose one if none given). Run it from the campaign-template checklist: ≥3 workers on disjoint files, at least one respawn and one mid-turn steer, background waits, doctor clean at close. This is a genuine external campaign that also feeds Soak Gate 1's usage floor (≥15 spawns / ≥3 days). Keep it cheap (haiku, small caps, doc-only). Write up friction found in knowledge/. Honor all hard constraints in docs/NEXT-SESSION.md. The soak sign-off stays Altai's — you generate the usage and report, you do not sign.
+> External dogfood #1 (`stupidbox`) is DONE and the verdict is recorded: **fleet works in the wild.** Your job this session: **accrue Soak Gate 1 usage — day 2 of ≥3.** Run another cheap real campaign on a **non-fleet** project (extend `C:\proga\stupidbox`, or whatever Altai points at), per `campaign-template.md` (v1.3): haiku, `bypass`, small caps, ≥3 workers on disjoint files, background waits, doctor clean at close, knowledge entry after. Remember: `fleet respawn` ignores task-file edits — re-pass `--task @file`. Retire only the worker names you spawned; a foreign campaign may share the install. When the floor is met (≥15 spawns across ≥3 distinct days), dispatch the gate-close audit task per §7 and hand it to Altai. **You do NOT sign the soak gate, and you do NOT start any C3+ build wave.**

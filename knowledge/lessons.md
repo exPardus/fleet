@@ -192,6 +192,16 @@ Wave 2: 1 README worker, respawned twice. Full lifecycle exercised: batch spawn,
 mid-turn steer, respawn, background waits, manager verification, doctor-clean close.
 See `knowledge/projects/stupidbox.md`.
 
+**VERDICT — fleet works in the wild (2026-07-09).** This was the first campaign on a
+project the fleet did not build and whose repo it had never seen. It ran end-to-end with
+no manual intervention: 11 spawns + 2 respawns, 8 shipped commands, every worker committed
+its own disjoint file, zero `index.lock` collisions, zero lost turns, zero incidents,
+`fleet doctor` 17/17 at every close. **The tool is usable for real day-to-day work, not
+just self-build.** What remains before Soak Gate 1 is *not* capability — it is the
+usage floor (≥15 spawns across ≥3 distinct days) and Altai's signature. Nothing observed
+in this campaign argues against the gate; the only defects found were ergonomic (respawn
+task-snapshot staleness) and both had documented workarounds.
+
 **What worked**
 - **Dispatcher-first scaffold = clean N-wide parallelism.** Manager writes
   `__main__.py` referencing all command names upfront (lazy import + "not built yet"

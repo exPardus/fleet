@@ -30,7 +30,9 @@ The mutable cursor against the immutable contract `docs/PLAN.md`. A resuming man
 | C2 | `c2-knowledge` (anti-ritual: campaign-template amendment) | done | c57b7ee (template→v1.2, 4 process changes; anti-ritual PASS) | 2026-07-09 |
 | C2 | **✅ CAMPAIGN 2 CLOSED** — 11 kernels + harness merged (9e4ec9c); self-modify safety PROVEN (revert path exercised); doctor 17 checks; ~$72 spend | done | live install verified | 2026-07-09 |
 | C2 | **>>> READINESS BOUNDARY REACHED — STOP: hand to Altai for SOAK GATE 1 <<<** | **AWAITING ALTAI** | manager mandate ends here; C3+ gated behind soak sign-off | 2026-07-09 |
-| C3 | Phase-1 close (`p1-docs-sync` + external campaign + workload queue + SOAK GATE 1) | pending | GATED: readiness boundary | — |
+| — | **External dogfood #1 — `stupidbox`** (non-fleet project built from scratch: 8-command CLI). 11 spawns + 2 respawns, doctor 17/17 at every close, 0 incidents. **VERDICT: fleet works in the wild.** Friction → campaign-template v1.3 | done | 544906e / d17e27f; `knowledge/projects/stupidbox.md`; repo `C:\proga\stupidbox` | 2026-07-09 |
+| — | Soak Gate 1 usage accrual — **day 1 of ≥3** (12 launches; floor is ≥15 spawns across ≥3 *distinct* days) | in progress | `lessons.md#2026-07-09-dogfood-stupidbox` | 2026-07-09 |
+| C3 | Phase-1 close (`p1-docs-sync` + external campaign + workload queue + SOAK GATE 1) | pending | GATED: readiness boundary. External-campaign leg has begun (see dogfood #1); gate still needs the day-floor + Altai's signature | — |
 | C4 | Phase 1.5 portability (spec→build→ci→posix-smoke→SOAK 1.5) | pending | GATED | — |
 | C5 | Phase 2 watchtower (spec→chain→accept-tests→SOAK 2) | pending | GATED | — |
 | C5b | Phase 2.5 providers (spec always; build demand-gated) | pending | GATED | — |
