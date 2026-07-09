@@ -1166,6 +1166,21 @@ def _write_prompt_and_close_stdin(proc, prompt: str, error_box: list) -> None:
         pass
 
 
+def _worker_env(name: str) -> dict:
+    """Child environment for a worker turn: the parent's, plus FLEET_WORKER.
+
+    Phase 1.6 D5: a globally-enabled fleet plugin fires its SessionStart hook
+    in EVERY Claude Code session on this machine, including every worker turn.
+    The hook reads FLEET_WORKER and suppresses itself, so a worker never gets
+    the manager's fleet briefing injected into its context.
+
+    os.environ is copied explicitly -- passing env= at all replaces the whole
+    inherited environment, and a child without PATH cannot launch."""
+    env = dict(os.environ)
+    env["FLEET_WORKER"] = name
+    return env
+
+
 def launch_turn(name: str, cwd, sid: str, prompt: str, mode: str, first: bool = False,
                  model=None, max_budget_usd=None, setting_sources=None,
                  popen=subprocess.Popen, get_process_info=None, which=shutil.which) -> dict:
@@ -1219,6 +1234,7 @@ def launch_turn(name: str, cwd, sid: str, prompt: str, mode: str, first: bool = 
                 stdin=subprocess.PIPE,
                 stdout=out_f,
                 stderr=err_f,
+                env=_worker_env(name),
                 **PLATFORM.detached_popen_kwargs(),
             )
         except OSError as exc:
