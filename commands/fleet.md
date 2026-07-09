@@ -1,6 +1,6 @@
 ---
-description: Fleet overview — status table, health warnings, and the knowledge index in one screen.
-allowed-tools: Bash(fleet:*)
+description: 'Fleet overview — status table, health warnings, and the knowledge index in one screen.'
+allowed-tools: 'Bash(fleet:*)'
 ---
 
 # Fleet overview

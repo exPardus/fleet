@@ -1,6 +1,6 @@
 ---
-description: Hand an attached worker back to the fleet — attached → idle.
-argument-hint: <worker-name>
+description: 'Hand an attached worker back to the fleet — attached → idle.'
+argument-hint: '<worker-name>'
 ---
 
 Release fleet worker `$1` back to idle.

@@ -1,6 +1,6 @@
 ---
-name: fleet
-description: Use when managing multiple Claude Code sessions — "fleet", "spawn workers", "manage sessions", "dispatch task to <project>", "check on workers", parallel work across projects, long-running babysat jobs, or review pipelines. Makes this session the fleet manager: spawns/steers/monitors headless worker sessions via the fleet CLI, with a persistent knowledge loop at C:\proga\claude-fleet.
+name: 'fleet'
+description: 'Use when managing multiple Claude Code sessions — "fleet", "spawn workers", "manage sessions", "dispatch task to <project>", "check on workers", parallel work across projects, long-running babysat jobs, or review pipelines. Makes this session the fleet manager: spawns/steers/monitors headless worker sessions via the fleet CLI, with a persistent knowledge loop at C:\proga\claude-fleet.'
 ---
 
 # Fleet manager

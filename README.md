@@ -32,15 +32,16 @@ The nine load-bearing architectural invariants are enumerated in [`docs/SPEC.md`
 
 1. Add `bin\` to your `PATH` (contains `fleet.cmd`, the CLI shim).
 2. Run `fleet init` once — renders the machine-local `state\worker-settings.json` (hook wiring: real interpreter path + `FLEET_HOME`, forward slashes) from the git-tracked `worker-settings.template.json`. Re-run after editing the template or moving the repo; idempotent.
-3. Install the plugin — it carries the manager skill, the `/fleet:*` slash commands, and the SessionStart briefing. Add this repo as a plugin marketplace and enable `fleet`, or add it to `enabledPlugins` in `~/.claude/settings.json`.
+3. Install the plugin — it carries the manager skill, the `/fleet:*` slash commands, and the SessionStart briefing:
 
-   > `claude --plugin-dir C:/proga/claude-fleet` loads the plugin for one session, but **verified 2026-07-09: it does not register the plugin's SessionStart hook** (the briefing never fires). Use it to try the commands, not to test hooks. Registering the hook by hand in a project's `.claude/settings.json` works and is the fallback:
-   >
-   > ```json
-   > { "hooks": { "SessionStart": [ { "hooks": [
-   >     { "type": "command", "command": "py -3.13 C:/proga/claude-fleet/bin/hooks/sessionstart_fleet.py" }
-   > ] } ] } }
-   > ```
+   ```bash
+   claude plugin marketplace add <path-or-github-repo-of-this-clone>
+   claude plugin install fleet@claude-fleet
+   ```
+
+   Then restart Claude Code. Verify with `claude plugin details fleet`.
+
+   > `claude --plugin-dir <path>` loads the commands for one session but **does not register the plugin's SessionStart hook** (verified 2026-07-09, claude 2.1.204) — the briefing never fires. Use a real install, not `--plugin-dir`, when you care about the hook.
 
 4. Optional — install the fleet statusline into `~/.claude/settings.json`:
 
@@ -49,6 +50,20 @@ The nine load-bearing architectural invariants are enumerated in [`docs/SPEC.md`
    ```
 
    It is a separate step because a Claude Code plugin cannot ship a `statusLine`. The command backs up your settings first and refuses to overwrite a statusline it does not own (pass `--force` if you mean it).
+
+## Installing for collaborators
+
+`fleet` is a *system-wide tool with machine-local state*, so installing the plugin is not the whole install. Each person needs:
+
+1. **A clone of this repo**, with `bin/` on `PATH` (Windows uses `bin\fleet.cmd`).
+2. **`fleet init` run once** — this renders `state/worker-settings.json` *and* stamps `~/.claude/fleet-home` with the absolute path of their fleet.
+3. **The plugin installed** (step 3 above).
+
+Step 2 is load-bearing and easy to miss. A marketplace-installed plugin runs from a **cache copy** of this repo, whose `state/` is gitignored and therefore empty. Without the `~/.claude/fleet-home` marker, the SessionStart hook would read that empty cache and cheerfully report a fleet of zero workers while the real one is running. The marker is how the hook finds the fleet the `fleet` CLI actually writes. `$FLEET_HOME` overrides it.
+
+Requirements: Python ≥ 3.10 on `PATH` (the hook finds it via `bin/hooks/run_py.sh`, which tries `py -3.13`, then `python3.x`, then `python`; set `$FLEET_PYTHON` to force one), Claude Code ≥ 2.1.202, and `git`.
+
+Not yet portable: worker launch, kill, attach and PID liveness are Windows-only until Phase 1.5 (`docs/specs/portability.md`). The plugin surface itself — commands, statusline, briefing — is not.
 
 ## CLI
 
@@ -74,7 +89,9 @@ The nine load-bearing architectural invariants are enumerated in [`docs/SPEC.md`
 ```
 bin/                           # single-file CLI (fleet.py), shim, hooks
 worker-settings.template.json  # hook-wiring template; `fleet init` renders it
-skill/SKILL.md                 # manager skill, installed into ~/.claude/skills/fleet/
+skills/fleet/SKILL.md          # manager skill (shipped by the plugin)
+commands/                      # /fleet:* slash commands (shipped by the plugin)
+.claude-plugin/                # plugin + marketplace manifests
 knowledge/                     # git-tracked: playbooks, per-project notes, lessons
 docs/                          # SPEC, plan, roadmap, phase specs, reviews
 tests/                         # pytest unit/hook tests

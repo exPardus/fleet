@@ -1,6 +1,6 @@
 ---
-description: Kill a worker's currently running turn. The transcript survives; the worker does not die.
-argument-hint: <worker-name>
+description: 'Kill a worker''s currently running turn. The transcript survives; the worker does not die.'
+argument-hint: '<worker-name>'
 ---
 
 Interrupt the running turn of fleet worker `$1`.
