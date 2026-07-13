@@ -326,3 +326,69 @@ Error: Session 80380638-3141-4768-8742-a79257914ffa is currently running as a ba
 **Net G2 verdict: CONFIRMED-with-caveat — outcome (b) applies.** Of the two live channels enumerated in Step 1: `--bg --resume` **works** but forks (new sid, full transcript carried over, original session's roster entry and events untouched) — CONFIRMED-with-caveat per the brief's outcome (b) wording. `-p --resume` (without `--fork-session`) is flatly **REFUTED** — the CLI refuses it while the daemon owns the session. This is **not** outcome (c) (all channels rejected) — a working steering path exists — but it is also **not** outcome (a) (true same-session turn delivery), so per the brief's own framing this is **HALT-grade: flag for operator ratification at Task 12.** The concrete design implication for the fleet overlay: "steering an idle worker" must be implemented as **fork-and-restamp**, not same-session prompt injection — every `--bg --resume` steer mints a new sid that the overlay must adopt as the worker's new canonical identity (mailbox/journal keyed by name, re-pointed at the new sid; the old sid's transcript remains valid history but stops receiving events). The roster-name instability anomaly above (auto-retitle can silently change `name` after a fork) compounds this: name-based re-identification after a steer is not guaranteed stable either, so the overlay likely needs to capture the **new sid from `--bg --resume`'s own stdout** (it prints the new short id, exactly as `--bg`'s initial dispatch does) rather than re-polling the roster by name after the fact.
 
 Cleanup: `claude stop 80380638` → `stopped 80380638`; `claude stop 2e94bbc6` → `stopped 2e94bbc6` (both roster entries retained `state: "done"` post-stop, not `"stopped"` — consistent with the same already-terminal-state pattern noted for the three failed `m0-g2`/`m0-g2b`/`m0-g2c` dispatches above and for `m0-core` in Task 2). No other session (including `m0-reap`, untouched throughout) was affected.
+
+### G3: Where do result text and cost live for `--bg` sessions? — result text **CONFIRMED** (Stop payload `last_assistant_message` + transcript `message.content[].text`); token usage **CONFIRMED** (transcript `message.usage` only); USD cost **REFUTED-for-contract** (no sanctioned source carries it)
+
+**Method.** Pure inspection, no new sessions dispatched (controller adaptation: brief's `m0-core` is long-stopped; the existing spread of DONE/stopped/blocked/failed `m0-*` sessions is the sample). Sources: (1) full `claude agents --json --all` roster (piped to temp file, parsed `utf-8-sig` per the known PS-pipe BOM hazard) — 17 entries, 9 of them `m0-*`; (2) the six existing transcripts named by `events.jsonl` Stop-event `transcript_path` values (m0-core `0ac6e5d0`, m0-stopblock `55c82a69`, m0-reap `0fba0df4`, m0-g8-file `0438096a`, m0-g2d `80380638`, plus the G2 fork `2e94bbc6`), last ~10 lines each; (3) research-only listings of `~/.claude/jobs/<short-id>/` for three m0 sessions and the `~/.claude/daemon/roster.json` schema (keys only). m0-reap's watcher and all foreign sessions untouched.
+
+**Step 1 — roster: no result, no cost, no tokens, no turn metadata.**
+
+Full key inventory across all 17 current roster entries — every entry's key set is a subset of:
+`pid, id, cwd, kind, startedAt, sessionId, name, status, state`
+No key resembling result text, cost, tokens, USD, turn count, or duration appears on any entry, in any state. Representative m0 entry (current snapshot, 2026-07-14):
+```json
+{"id": "0ac6e5d0", "cwd": "C:\\proga\\claude-fleet\\spike\\m0\\proj", "kind": "background", "startedAt": 1783975710002, "sessionId": "0ac6e5d0-f96f-499a-bac7-d33979e3acc5", "name": "m0-core", "state": "done"}
+```
+**Roster as result/cost source: REFUTED.**
+
+**Per-state field-presence table (spec §2 requirement).** Sources: current `--all` snapshot (2026-07-14) for done/stopped/failed/interactive rows; live-state rows cite the raw snapshots already quoted verbatim earlier in this file (G6, G1-sharp, G2, G8), values redacted for foreign entries. Y = present, - = absent.
+
+| state literal (context) | pid | name | status | state | sessionId | id | cwd | startedAt | kind |
+|---|---|---|---|---|---|---|---|---|---|
+| `done` — dead/reaped, current snapshot, 7 entries | - | 6/7¹ | - | Y | Y | Y | Y | Y | `background` |
+| `done` — process still live (G6 snapshot of `0ac6e5d0`, 2026-07-13) | Y | Y | Y (`idle`) | Y | Y | Y | Y | Y | `background` |
+| `stopped` — current snapshot, 3 entries | - | Y | - | Y | Y | Y | Y | Y | `background` |
+| `failed` — current snapshot, 3 entries | - | Y | - | Y | Y | Y | Y | Y | `background` |
+| `working` — live (G2 snapshot of `80380638`) | Y | Y | Y (`busy`) | Y | Y | Y | Y | Y | `background` |
+| `working` — wedged, never started a turn (G8-stdin snapshot of `f3f760c2`) | - | Y | - | Y | Y | Y | Y | Y | `background` |
+| `blocked` — live (G1-sharp snapshot of `55c82a69`) | Y | Y | Y (`idle`) | Y | Y | Y | Y | Y | (not in quote) |
+| *(no `state` key at all)* — interactive sessions, 4 foreign entries, values redacted | Y | Y | Y (`busy`×3, `idle`×1) | - | Y | - | Y | Y | `interactive` |
+
+¹ one foreign `done` background entry (short-id `f80a808c`, this repo's cwd, started 4 days ago) has **no `name` key at all** — `name` is not guaranteed even on background entries.
+
+Two structural findings, each on ≥2 snapshots:
+- **`pid`/`status` are liveness fields, not state fields.** Same session `0ac6e5d0` observed twice: 2026-07-13 (G6, quoted above in this file) with `"pid": 38072, "status": "idle", "state": "done"`; 2026-07-14 (this task) with **no `pid`, no `status`**, same `state: "done"` (and `startedAt` drifted `1783975713627` → `1783975710002` across the daemon reap — even `startedAt` is not immutable). A consumer must treat `pid`/`status` as present-only-while-the-backing-process-lives, and absence of `status` as "dead, read `state`". The G8-stdin wedge row shows the converse hazard: `state:"working"` with **no** `pid`/`status` means "working" cannot be trusted as "alive" either.
+- **`state` vs `status` are disjoint axes with different presence rules**: interactive entries carry `status` only (never `state`, never `id`); dead background entries carry `state` only (never `status`, never `pid`); only live background entries carry both.
+
+**Step 2 — hook payload + transcript: the sanctioned result-text path; tokens yes, USD no.**
+
+Every one of the 6 Stop events in `events.jsonl` (5 sessions; m0-stopblock fired twice) has the identical `payload_keys` set, including both keys that matter here:
+```
+['background_tasks', 'cwd', 'hook_event_name', 'last_assistant_message', 'permission_mode', 'prompt_id', 'session_crons', 'session_id', 'stop_hook_active', 'transcript_path']
+```
+- `last_assistant_message` is present in **6/6** Stop payloads. **Caveat — value UNOBSERVED:** `hook_probe.py` logs `payload_keys` only, so its value/shape (string vs object) was never captured in this spike; key presence is confirmed, content is not.
+- `transcript_path` is present in 6/6 and every path existed on disk (all six transcripts found, 28–43 lines each).
+
+Transcript tail inspection (last ~10 lines of each of the 6 transcripts). The tail is **not** the assistant message — the final records are `attachment` (hook results), `system/stop_hook_summary`, `system/turn_duration`, and a `last-prompt` index record; a naive "read last line" fails. The final assistant text lives in the **last record with `"type": "assistant"`**, at:
+- result text: `message.content[]` where `content[].type == "text"`, key `text` — verified verbatim for all six: `DONE-M0`, `BLOCKED-ACK`, `REAP-BAIT`, `NEEDLE-9317`, `DONE-G2`, `PONG-G2`;
+- model: `message.model` — `"claude-haiku-4-5-20251001"` in all six;
+- usage: `message.usage`, identical key set in all six:
+```
+cache_creation, cache_creation_input_tokens, cache_read_input_tokens, inference_geo,
+input_tokens, iterations, output_tokens, server_tool_use, service_tier, speed
+```
+Example (m0-g8-file final assistant record, quoted from the transcript): `"usage": {"input_tokens": 8, "cache_creation_input_tokens": 18935, "cache_read_input_tokens": 39322, "output_tokens": 65, ...}`.
+- **USD cost: absent.** Case-insensitive scan for any `*cost*` key over two full transcripts (m0-core, m0-g8-file): **zero hits**. No dollar figure exists in roster, Stop payload key list, or transcript.
+- Turn metadata: the `system/turn_duration` record near the tail carries `durationMs` and `messageCount` (e.g. `"durationMs": 6755, "messageCount": 18` for m0-g8-file) — the only turn-level timing found in any sanctioned source.
+
+**Stability caveat (pin-tested, not guaranteed):** all six transcripts are CLI `version: "2.1.207"`. The transcript JSONL format is an unversioned internal contract — key names (`message.content[].text`, `message.usage.input_tokens`, `type: "assistant"`, `subtype: "turn_duration"`) are pin-tested observations at 2.1.207, and the Stop-hook outcome-record implementation must treat them as such (tolerant parsing, feature-detect, fail soft), not as a stable API.
+
+**Step 3 — research-only: `~/.claude/jobs/<short-id>/` and daemon roster schema (no verdict depends on this).**
+
+`~/.claude/jobs/` contains one dir per short-id (13 dirs incl. all m0 sessions, plus `pins.json`). For `0438096a`, `0ac6e5d0`, `80380638`, each dir holds: `state.json` (~1.0–1.2 KB), `timeline.jsonl` (~115–120 B), empty `tmp/`. `state.json` keys (values not relied on): `backend, children, cliVersion, createdAt, cwd, daemonShort, detail, firstTerminalAt, [inFlight,] intent, linkScanOffset, linkScanPath, name, nameSource, output, providerEnv, respawnFlags, resumeSessionId, sessionId, state, template, tempo, tokens, updatedAt`. Notably it has a `tokens` field (a bare number, e.g. `203` — far below the transcript's real token totals, unit/meaning unknown) and an `output` field (observed `null`). `timeline.jsonl` **does** carry the final assistant text in a `text` key (e.g. `{"at": ..., "state": "done", "detail": "...", "text": "DONE-M0"}`) — i.e. a result artifact exists here, but it is an undocumented internal file and per the pre-registered rule **no verdict depends on it**; corroboration only. `~/.claude/daemon/roster.json` schema: top-level keys `proto` (=1), `supervisorPid`, `updatedAt`, `workers` — `workers` was an **empty dict** at observation despite 17 sessions in `agents --json`, so this file is not the roster backing store one might assume; another reason it is unusable as a contract source.
+
+**Sub-verdicts.**
+- **(a) Result text — CONFIRMED.** Sanctioned source: **Stop hook payload + transcript**. The Stop payload carries `last_assistant_message` (key present 6/6; value shape UNOBSERVED) and `transcript_path` (6/6, always valid); the transcript's last `type:"assistant"` record carries the final text verbatim at `message.content[].text` (6/6 verified). The roster carries nothing. Design implication for the Stop-hook outcome record: prefer `last_assistant_message` from the payload if its shape checks out at build time, with transcript-tail parse as the verified fallback; never poll the roster for results.
+- **(b) Cost — token usage CONFIRMED / USD REFUTED-for-contract.** Token counts (`input_tokens`, `output_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`) live **only** in the transcript's assistant records (`message.usage`), per-API-call; no sanctioned source (roster, Stop payload key set, transcript) carries a USD figure anywhere. USD must be **computed** by the overlay from summed usage × model pricing (`message.model` is in the same record). The only other numeric candidate (`jobs/<id>/state.json` `tokens`) is an unsanctioned internal file and is excluded by the pre-registered rule.
+
+**UNOBSERVED, named:** (1) value/shape of `last_assistant_message` (probe logged keys only); (2) usage aggregation semantics across a multi-assistant-record turn (whether summing per-record `usage` double-counts given the nested `iterations` key — not decomposed here); (3) any state literal other than `done/stopped/failed/working/blocked` (no `killed`/`error` literal seen); (4) `state` field on a live interactive session — never observed, but only 4 foreign samples exist; (5) whether transcript key names survive a CLI version bump (single version 2.1.207 observed). **No HALT** — result text has a working sanctioned path; USD-cost absence is a compute-it-yourself gap, not a blocker, and matches the spec's Stop-hook outcome-record assumption that the hook, not the roster, is the outcome source.
