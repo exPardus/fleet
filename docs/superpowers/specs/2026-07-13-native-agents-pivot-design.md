@@ -1,7 +1,7 @@
 # Native Agents Pivot — Design
 
 **Date:** 2026-07-13
-**Status:** v2.1 — v2 amended per adversarial review (`docs/reviews/NATIVE-PIVOT-REVIEW-2026-07-13.md`); v2.1 fixes re-review findings N1–N11; promotion review pending
+**Status:** v2.2 — v2 per adversarial review (`docs/reviews/NATIVE-PIVOT-REVIEW-2026-07-13.md`); v2.1 fixed re-review N1–N11; v2.2 fixed promotion-review F1–F4; re-promotion pending
 **Approach:** B — native substrate, fleet sidecar (chosen over pure-native replacement and agent-teams bet)
 
 ## 1. Problem and decision
