@@ -79,3 +79,49 @@ All four fired exactly once, in order, ~4-8s apart, ending with roster `state: d
 Note: no `PostToolUse`/`PreToolUse` payload carries `env_fleet_worker`/`env_claude_session` — those two fields are hook-probe-computed (`os.environ.get(...)`), not part of the Claude Code hook payload itself; they are listed separately in each record, outside `payload_keys`.
 
 Session cleanup: `claude stop 0ac6e5d0` → `stopped 0ac6e5d0`.
+
+### G1-sharp: Stop-block semantics under the daemon — **CONFIRMED**
+
+Dispatch (BLOCK_ONCE armed, PowerShell, from `spike/m0/proj`, `FLEET_WORKER` intentionally **not** set — see G4 addendum below):
+```
+New-Item C:\proga\claude-fleet\spike\m0\out\BLOCK_ONCE -ItemType File -Force
+claude --bg -n m0-stopblock --settings ..\worker-settings.json --permission-mode acceptEdits --model haiku "Reply with exactly: FIRST-ANSWER"
+```
+Dispatch stdout:
+```
+backgrounded · 55c82a69 · m0-stopblock
+```
+Roster immediately after dispatch (`claude agents --json --all`, filtered to `m0-*`):
+```json
+{"pid": 20848, "id": "55c82a69", "cwd": "C:\\proga\\claude-fleet\\spike\\m0\\proj", "startedAt": 1783976268850, "sessionId": "55c82a69-f318-42a7-8b5d-9853dc53b1c5", "name": "m0-stopblock", "status": "busy", "state": "working"}
+```
+
+`spike/m0/out/events.jsonl` for this session (all 3 lines — no tool call in this prompt, so no Pre/PostToolUse):
+```json
+{"t": 1783976269.0834448, "event": "SessionStart", "env_fleet_worker": null, "env_claude_session": "55c82a69-f318-42a7-8b5d-9853dc53b1c5", "session_id": "55c82a69-f318-42a7-8b5d-9853dc53b1c5", ...}
+{"t": 1783976275.2222342, "event": "Stop", "env_fleet_worker": null, "env_claude_session": "55c82a69-f318-42a7-8b5d-9853dc53b1c5", "session_id": "55c82a69-f318-42a7-8b5d-9853dc53b1c5", ...}
+{"t": 1783976278.2544858, "event": "Stop", "env_fleet_worker": null, "env_claude_session": "55c82a69-f318-42a7-8b5d-9853dc53b1c5", "session_id": "55c82a69-f318-42a7-8b5d-9853dc53b1c5", ...}
+```
+`BLOCK_ONCE` existed at dispatch time and was gone by the first poll after the first `Stop` (`Test-Path C:\proga\claude-fleet\spike\m0\out\BLOCK_ONCE` → `False`), confirming `hook_probe.py`'s consume-on-first-Stop logic fired exactly once.
+
+Transcript (`55c82a69-f318-42a7-8b5d-9853dc53b1c5.jsonl`) shows the block reason fed back into the conversation as a synthetic user turn and the model complying with it before the second `Stop`:
+```
+line 12 (user):      Reply with exactly: FIRST-ANSWER
+line 24 (assistant):  FIRST-ANSWER
+line 25 (user):      Stop hook feedback:
+                     M0 stop-block probe: reply BLOCKED-ACK then stop.
+line 30 (assistant):  BLOCKED-ACK
+```
+This is the exact reason string `hook_probe.py` emits on the consumed `Stop` (`"M0 stop-block probe: reply BLOCKED-ACK then stop."`), proving the daemon delivered the hook's `{"decision":"block","reason":...}` back to the model as a new turn rather than dropping it.
+
+Roster polled twice more (15 s apart) after the second `Stop`, both identical:
+```json
+{"pid": 20848, "id": "55c82a69", "cwd": "C:\\proga\\claude-fleet\\spike\\m0\\proj", "startedAt": 1783976268850, "sessionId": "55c82a69-f318-42a7-8b5d-9853dc53b1c5", "name": "m0-stopblock", "status": "idle", "state": "blocked"}
+```
+Note: the terminal `state` the daemon reports for this session is the literal string `"blocked"`, not `"done"` (contrast `m0-core`'s `"state": "done"` above) — even though `status` correctly reads `"idle"` and no further Stop/hook activity occurred (event count held at 7 total across both sessions for 35+ s, `claude logs 55c82a69` showed the session sitting at an idle prompt, not looping). This is a **naming quirk, not a wedge**: the session is genuinely finished, but a status surface that branches on `state == "done"` to mean "turn complete" would misclassify a session that passed through a Stop-block as still stuck. M1's status/idle-detection logic (SPEC §5 UL1/UL2) must key off `status` (`idle`/`busy`), not assume `state` is only ever `working`/`done`.
+
+Session cleanup: `claude stop 55c82a69` → `stopped 55c82a69`; final roster entry: `{"id": "55c82a69", ..., "name": "m0-stopblock", "state": "stopped"}`.
+
+Two `Stop` events, session survived the first (continued, acknowledged the block reason, replied `BLOCKED-ACK`), second `Stop` passed (BLOCK_ONCE already consumed, no further block decision emitted) — matches the brief's CONFIRMED criteria exactly. No wedge, no HALT. D-series stop-block handling (SPEC's Stop-hook feedback loop) is buildable as designed; flag the `state:"blocked"` terminal-state naming for the status-surface implementation (§5, `docs/specs/terminal-surface.md`).
+
+**G4 addendum (negative control):** Per controller amendment, this dispatch deliberately omitted `$env:FLEET_WORKER = "1"` (confirmed unset in the dispatching shell beforehand — `$env:FLEET_WORKER` printed empty). Every event record for `m0-stopblock` carries `"env_fleet_worker": null` (see the three `events.jsonl` lines quoted above — all three, `SessionStart` and both `Stop`s, show `null`, never `"1"` and never a stale value from the earlier `m0-core` run). This is the expected negative-control result for G4: the daemon does not stamp or inherit `FLEET_WORKER` on its own — it only appears when the dispatching shell sets it, confirming G4's CONFIRMED verdict is not a false positive from ambient environment leakage.
