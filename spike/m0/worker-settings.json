@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {"hooks": [{"type": "command", "command": "py -3.13 C:/proga/claude-fleet/spike/m0/hook_probe.py SessionStart"}]}
+    ],
+    "PreToolUse": [
+      {"matcher": "", "hooks": [{"type": "command", "command": "py -3.13 C:/proga/claude-fleet/spike/m0/hook_probe.py PreToolUse"}]}
+    ],
+    "PostToolUse": [
+      {"matcher": "", "hooks": [{"type": "command", "command": "py -3.13 C:/proga/claude-fleet/spike/m0/hook_probe.py PostToolUse"}]}
+    ],
+    "Stop": [
+      {"hooks": [{"type": "command", "command": "py -3.13 C:/proga/claude-fleet/spike/m0/hook_probe.py Stop"}]}
+    ]
+  }
+}
