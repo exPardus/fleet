@@ -125,3 +125,71 @@ Session cleanup: `claude stop 55c82a69` → `stopped 55c82a69`; final roster ent
 Two `Stop` events, session survived the first (continued, acknowledged the block reason, replied `BLOCKED-ACK`), second `Stop` passed (BLOCK_ONCE already consumed, no further block decision emitted). **Caveat — one sub-criterion UNOBSERVED:** the brief asked for roster state *during* the block window, but the window was ~3.03 s (first Stop `t=1783976275.222` → second Stop `t=1783976278.254`) against a ~15 s poll cadence — no roster poll landed inside it, and hitting a 3 s window on a 15 s cadence is practically infeasible. The `busy/working` snapshot quoted above is post-dispatch/pre-block, not in-window; the `idle/blocked` snapshots are post-second-Stop. In-window behavior is evidenced only indirectly by the transcript: the model received the block reason as a synthetic user turn and replied `BLOCKED-ACK` *before* the second Stop, which requires the session to have been alive and running through the window. The CONFIRMED verdict therefore rests on the two-Stop-events + continuation evidence; the during-block roster sub-criterion is explicitly UNOBSERVED. No wedge, no HALT. D-series stop-block handling (SPEC's Stop-hook feedback loop) is buildable as designed; flag the `state:"blocked"` terminal-state naming for the status-surface implementation (§5, `docs/specs/terminal-surface.md`).
 
 **G4 addendum (negative control):** Per controller amendment, this dispatch deliberately omitted `$env:FLEET_WORKER = "1"` (confirmed unset in the dispatching shell beforehand — `$env:FLEET_WORKER` printed empty). Every event record for `m0-stopblock` carries `"env_fleet_worker": null` (see the three `events.jsonl` lines quoted above — all three, `SessionStart` and both `Stop`s, show `null`, never `"1"` and never a stale value from the earlier `m0-core` run). This is the expected negative-control result for G4: the daemon does not stamp or inherit `FLEET_WORKER` on its own — it only appears when the dispatching shell sets it, confirming G4's CONFIRMED verdict is not a false positive from ambient environment leakage.
+
+### G8: Prompt delivery of a >32,767-char prompt — argv **REFUTED** / stdin **REFUTED-stdin** / task-file bootstrap **CONFIRMED**
+
+Generator (`spike/m0/gen_bigprompt.py`, committed): builds `("FILLER " * 6000) + "\nIf you can read this, reply with exactly: NEEDLE-9317"`, needle placed at the *end* so truncation is detectable. `py -3.13 C:\proga\claude-fleet\spike\m0\gen_bigprompt.py` printed `42054` (Python `len()`, no trailing newline). PowerShell's own `Get-Content -Raw` measured the same file at `42055` chars (one more — CRLF/EOF-newline counting difference between the writer and the reader, not a content change); both figures are >32,767, satisfying the size gate either way.
+
+**Channel 1 — argv: REFUTED (CreateProcess-level, not PowerShell-level).**
+
+Dispatch attempted (PowerShell, from `spike/m0/proj`):
+```
+$big = Get-Content ..\out\bigprompt.txt -Raw   # $big.Length = 42055
+claude --bg -n m0-g8-argv --settings ..\worker-settings.json --permission-mode acceptEdits --model haiku $big
+```
+Exact exception surfaced (verbatim):
+```
+System.Management.Automation.ApplicationFailedException: Program 'claude.exe' failed to run: The filename or extension is too long
+ ---> System.ComponentModel.Win32Exception: The filename or extension is too long
+    at System.Diagnostics.Process.StartWithShellExecuteEx(ProcessStartInfo startInfo)
+    at System.Management.Automation.NativeCommandProcessor.Complete()
+```
+This is the **Win32 CreateProcess** failure (`ERROR_FILENAME_EXCED_RANGE`, surfaced through .NET's `Process.Start`/`StartWithShellExecuteEx`), not a PowerShell-side argument-parsing error — the distinction the controller flagged as load-bearing for the contract doc. It fires below PowerShell's own layer, meaning no shell-level workaround (quoting, escaping) changes the outcome; the OS command-line buffer for `CreateProcess` (~32K char practical limit on Windows) is the hard ceiling, independent of which shell invokes `claude.exe`.
+
+Confirmed no zombie/partial dispatch: `claude agents --json --all` immediately after showed no `m0-g8-argv` entry at all — the exception was thrown before any child process existed, so no cleanup was required for this channel.
+
+**Channel 2 — stdin: REFUTED-stdin (session created but wedges; never fires SessionStart).**
+
+Dispatch attempted (PowerShell, run inside a background `Start-Job` with a 30s `Wait-Job` guard per the brief's hang rule):
+```
+Get-Content ..\out\bigprompt.txt -Raw | claude --bg -n m0-g8-stdin --settings ..\worker-settings.json --permission-mode acceptEdits --model haiku
+```
+The **dispatch command itself did not hang** — it returned inside the 30s window with normal-looking output:
+```
+backgrounded · f3f760c2 · m0-g8-stdin
+  claude agents             list sessions
+  claude attach f3f760c2    open in this terminal
+  claude logs f3f760c2      show recent output
+  claude stop f3f760c2      stop this session
+```
+But the **spawned session itself never made progress**: no prompt string was given on argv (piped stdin was the only prompt source attempted), and polling `claude agents --json --all` repeatedly over the next ~171 seconds showed it permanently stuck:
+```json
+{"id": "f3f760c2", "cwd": "C:\\proga\\claude-fleet\\spike\\m0\\proj", "kind": "background", "startedAt": 1783977197785, "sessionId": "f3f760c2-1b7a-4bd6-9b0a-a9f889f45880", "name": "m0-g8-stdin", "state": "working"}
+```
+`state: working` held identically across polls at +5s, +20s, +40s, and a final check at **171 s** post-dispatch (`(now_ms - startedAt)/1000 = 170.961`) — never transitioned to `busy`/`idle`/`done`. Across that entire window, `spike/m0/out/events.jsonl` recorded **zero** events for session `f3f760c2` — not even `SessionStart`, which in every other G-series dispatch (G1, G4, G6, G8-file below) fired within 1-5 s. No transcript file `f3f760c2-*.jsonl` was ever created under `C:\Users\Techn\.claude\projects\C--proga-claude-fleet-spike-m0-proj\`. This matches the brief's prediction (`--bg` is a PTY TUI dispatch, likely does not read stdin as the prompt) — but the failure mode is a **silent permanent wedge at the session level**, not the fast, clean hang the brief's "Ctrl-C within 30s" language anticipated at the *dispatch-command* level. Distinguishing carefully: dispatch-command hang → did not occur (REFUTED as literally worded); session-level liveness → refuted (the session never starts a turn). Recorded verdict: **REFUTED-stdin**, with the caveat that the observed failure is "wedged, zero hook activity, ever" rather than "dispatch call blocks the terminal." Cleaned up via `claude stop f3f760c2` → `stopped f3f760c2`.
+
+**Channel 3 — task-file bootstrap fallback: CONFIRMED (must-pass gate; passed).**
+
+Dispatch (PowerShell, from `spike/m0/proj`):
+```
+Copy-Item ..\out\bigprompt.txt .\bigtask.md -Force     # 42055 bytes
+claude --bg -n m0-g8-file --settings ..\worker-settings.json --permission-mode acceptEdits --model haiku "Use the Read tool to read bigtask.md in this directory and follow the instruction at its end."
+```
+Dispatch stdout: `backgrounded · 0438096a · m0-g8-file`.
+
+`events.jsonl` shows the full expected sequence, fast and complete (~9 s total):
+```json
+{"t": 1783977379.7519724, "event": "SessionStart", "session_id": "0438096a-00aa-47d5-9698-5d03422e1894", ...}
+{"t": 1783977384.1102705, "event": "PreToolUse",  "session_id": "0438096a-00aa-47d5-9698-5d03422e1894", ...}
+{"t": 1783977384.5574362, "event": "PostToolUse", "session_id": "0438096a-00aa-47d5-9698-5d03422e1894", ...}
+{"t": 1783977388.1883636, "event": "Stop",         "session_id": "0438096a-00aa-47d5-9698-5d03422e1894", ...}
+```
+(`hook_probe.py` logs `payload_keys` only, not the `last_assistant_message` value itself, so the needle is verified directly from the transcript per the controller's Task-6-substitute instruction, not from the events log.)
+
+Transcript `C:\Users\Techn\.claude\projects\C--proga-claude-fleet-spike-m0-proj\0438096a-00aa-47d5-9698-5d03422e1894.jsonl`, final assistant turn (line 33, `stop_reason: "end_turn"`), quoted verbatim:
+```json
+{"parentUuid":"50e2e597-b669-4f0c-abd0-46a36df36d50", ..., "message":{"model":"claude-haiku-4-5-20251001","role":"assistant","content":[{"type":"text","text":"NEEDLE-9317"}],"stop_reason":"end_turn", ...},"sessionId":"0438096a-00aa-47d5-9698-5d03422e1894"}
+```
+The model's reply is the exact literal string `NEEDLE-9317` and nothing else — the needle that sits at the very end of the 42,054/42,055-char file, past 6000 repetitions of `FILLER `. Since the needle is only reachable by reading the file to its end, this is proof the `Read` tool delivered the **entire** oversized file content to the model with no truncation. This is the spec's mandatory G8 fallback and it passed cleanly, so G8 is **not** REFUTED outright — the task-file bootstrap channel is the buildable path for prompts >32,767 chars. Cleaned up via `claude stop 0438096a` → `stopped 0438096a`.
+
+**Net G8 verdict:** argv REFUTED (hard CreateProcess ceiling, ~32K chars, confirmed via exact Win32 error text, no partial/zombie dispatch); stdin REFUTED-stdin (session-level wedge — created, never starts, zero hook activity, confirmed over a 171 s observation window, well past the brief's 30 s hang threshold); task-file bootstrap CONFIRMED (full 42,054-char payload round-tripped intact, needle recovered verbatim from the transcript). **No HALT** — G8 is not a HALT-grade gate per the spec's pre-registered fallback (task-file bootstrap was always the intended production path for large prompts; this run empirically validates it and additionally documents *why* argv/stdin are closed, which the spec's contract doc should cite verbatim). **UNOBSERVED caveat:** the exact byte-for-byte argv ceiling (e.g., is it 32,767, 8,191, or some other OS-reported constant) was not bisected — only that 42,055 chars fails and no smaller value was tested in this task, so the precise threshold is inferred from the well-known Windows `CreateProcess` command-line limit, not measured here.
