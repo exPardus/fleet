@@ -197,3 +197,132 @@ Transcript `C:\Users\Techn\.claude\projects\C--proga-claude-fleet-spike-m0-proj\
 The model's reply is the exact literal string `NEEDLE-9317` and nothing else — the needle that sits at the very end of the 42,054/42,055-char file, past 6000 repetitions of `FILLER `. Since the needle is only reachable by reading the file to its end, this is proof the `Read` tool delivered the **entire** oversized file content to the model with no truncation. This is the spec's mandatory G8 fallback and it passed cleanly, so G8 is **not** REFUTED outright — the task-file bootstrap channel is the buildable path for prompts >32,767 chars. Cleaned up via `claude stop 0438096a` → `stopped 0438096a`.
 
 **Net G8 verdict:** argv REFUTED (hard CreateProcess ceiling, ~32K chars, confirmed via exact Win32 error text, no partial/zombie dispatch); stdin REFUTED-stdin (session-level wedge — created, never starts, zero hook activity, confirmed over a 171 s observation window, well past the brief's 30 s hang threshold); task-file bootstrap CONFIRMED (full 42,054-char payload round-tripped intact, needle recovered verbatim from the transcript). **No HALT** — G8 is not a HALT-grade gate per the spec's pre-registered fallback (task-file bootstrap was always the intended production path for large prompts; this run empirically validates it and additionally documents *why* argv/stdin are closed, which the spec's contract doc should cite verbatim). **UNOBSERVED caveat:** the exact byte-for-byte argv ceiling (e.g., is it 32,767, 8,191, or some other OS-reported constant) was not bisected — only that 42,055 chars fails and no smaller value was tested in this task, so the precise threshold is inferred from the well-known Windows `CreateProcess` command-line limit, not measured here.
+
+### G2: Can a second prompt be delivered to an idle `--bg` session? — **CONFIRMED-with-caveat** (outcome (b): fork-with-transcript; steer = fork, overlay must restamp sid) — **HALT-grade: flag for operator ratification at Task 12**
+
+**Deviation from brief (per controller instruction):** the brief's `<m0-core-sid>` (`0ac6e5d0-...` from Task 2) is `state: done`/`stopped` and long-idle; the controller directed dispatching a **fresh** probe session instead (`-n m0-g2`, task "reply DONE-G2") and using its sid. Done below (after two false starts caused by this task's own tooling, recorded honestly as an anomaly, not a G2 hazard).
+
+**Step 1 — candidate-channel enumeration.**
+
+```
+claude --help 2>&1 | Select-String -Pattern "resume|send|prompt" -Context 0,2
+claude agents --help 2>&1 | Select-String -Pattern "resume|send|dispatch" -Context 0,2
+claude attach --help
+claude stop --help
+claude logs --help
+```
+(Run via the Bash tool's `grep -n -i -E` against captured help text rather than literal PowerShell `Select-String`, since only PowerShell has a live prompt tree here; content-equivalent, plain-text match on the same three patterns.)
+
+Relevant `claude --help` lines (verbatim, from `claude --help 2>&1`):
+```
+  --fork-session                        When resuming, create a new session ID
+                                        instead of reusing the original (use
+                                        with --resume or --continue)
+  -p, --print                           Print response and exit (useful for
+                                        pipes)... only works with --print elsewhere for --resume interactions
+  -r, --resume [value]                  Resume a conversation by session ID, or
+                                        open interactive picker with optional
+                                        search term
+  --bg, --background                    Start the session as a background agent
+                                        and return immediately (manage with
+                                        `claude agents`)
+```
+`claude agents --help` has **no** `resume`/`send` flag at all — every `resume|send|dispatch` hit in that help text is just the word "dispatched" inside unrelated option descriptions (`--add-dir`, `--agent`, `--model`, etc., all "for sessions dispatched from agent view"). `claude attach --help`, `claude stop --help`, `claude logs --help` are each a single one-line command with no resume/steer-related flags (`attach <id>` opens the session in-terminal; `stop <id>` stops it; `logs <id>` prints recent output — none accept a new prompt argument).
+
+**Candidate channels identified:** (1) `--bg --resume <sid> "<prompt>"` — background-resume composition; (2) `-p --resume <sid> "<prompt>"` — print-mode resume, with `--fork-session` as an available modifier; no hidden "send"/"push-prompt" subcommand exists anywhere in the enumerated help text.
+
+**Fresh probe dispatch — two false starts (tooling anomaly, recorded per hazard-recording instructions, not a G2 finding):**
+
+First attempt, run via the **Bash tool** (Git Bash) per the brief's literal channel-2 example syntax habit:
+```
+claude --bg -n m0-g2 --settings ..\worker-settings.json --permission-mode acceptEdits --model haiku "Use the Read tool to read task.md in this directory, then reply with exactly: DONE-G2"
+```
+Dispatch stdout looked normal (`backgrounded · b53f232e · m0-g2`), but the roster immediately showed a **new `state` literal not seen in prior tasks**: `state: "failed"`. Roster entry:
+```json
+{"id": "b53f232e", "cwd": "C:\\proga\\claude-fleet\\spike\\m0\\proj", "kind": "background", "startedAt": 1783978256217, "sessionId": "b53f232e-f819-4264-b126-9807f5cfb416", "name": "m0-g2", "state": "failed"}
+```
+`claude logs b53f232e` → `Couldn't read logs for b53f232e — job not found — it may have already exited`. `events.jsonl` session_id-filtered count: `grep -c "b53f232e" spike/m0/out/events.jsonl` = **0** (of 13 lines at that point, all belonging to earlier sessions `0ac6e5d0`/`55c82a69`/`0fba0df4`/`f3f760c2`/`0438096a`). A second attempt with a different name (`m0-g2b`, same Bash-tool invocation pattern) failed identically: roster `state: "failed"`, `claude logs 163f11f2` → `Couldn't read logs for 163f11f2 — connect ENOENT \\.\pipe\cc-daemon-*-control`, 0 matching `events.jsonl` lines. A third attempt (`m0-g2c`) reproduced the same `state: "failed"` outcome, but this time `claude attach 76386689` surfaced the real underlying error (not visible from `claude logs` or the roster):
+```
+Session 76386689 can't start — exit 1 before init — Error: Settings file not found: ..worker-settings.json
+```
+Root cause: all three of these dispatches were issued through this session's **Bash tool**, which runs Git Bash `sh -c` — exactly the hazard CLAUDE.md documents ("Hook commands in worker-settings.json use FORWARD slashes (Git Bash `sh -c` eats backslashes)") — except here it ate the backslash in the **CLI argument** `..\worker-settings.json` itself (not inside a hook command), turning it into the literal string `..worker-settings.json`, which the daemon correctly reported as "not found." This is a **self-inflicted dispatch-tooling artifact**, not a G2-relevant daemon behavior — confirmed by the fact that switching to the **PowerShell tool** for the identical command immediately succeeded (see below). All three failed sessions were cleaned up: `claude stop b53f232e` → `stopped b53f232e`; `claude stop 163f11f2` → `stopped 163f11f2`; `claude stop 76386689` → `stopped 76386689` (roster `state` remained the literal `"failed"` after stop, not `"stopped"` — consistent with the pattern noted elsewhere in this file that `stop` on a session that never reached a live/working state does not rewrite `state`).
+
+**Fresh probe dispatch — successful (PowerShell tool, forward-slash-safe):**
+```powershell
+Set-Location C:\proga\claude-fleet\spike\m0\proj
+claude --bg -n m0-g2d --settings ..\worker-settings.json --permission-mode acceptEdits --model haiku "Use the Read tool to read task.md in this directory, then reply with exactly: DONE-G2"
+```
+Stdout: `backgrounded · 80380638 · m0-g2d`. Roster immediately after (busy):
+```json
+{"pid": 44480, "id": "80380638", "cwd": "C:\\proga\\claude-fleet\\spike\\m0\\proj", "kind": "background", "startedAt": 1783978443413, "sessionId": "80380638-3141-4768-8742-a79257914ffa", "name": "m0-g2d", "status": "busy", "state": "working"}
+```
+Roster ~8 s later (done):
+```json
+{"pid": 44480, "id": "80380638", "cwd": "C:\\proga\\claude-fleet\\spike\\m0\\proj", "kind": "background", "startedAt": 1783978443413, "sessionId": "80380638-3141-4768-8742-a79257914ffa", "name": "m0-g2d", "status": "idle", "state": "done"}
+```
+`events.jsonl` for this sid (4 lines, `session_id` filtered):
+```json
+{"t": 1783978443.6513352, "event": "SessionStart", "session_id": "80380638-3141-4768-8742-a79257914ffa", ...}
+{"t": 1783978450.550122, "event": "PreToolUse", "session_id": "80380638-3141-4768-8742-a79257914ffa", ...}
+{"t": 1783978450.7241342, "event": "PostToolUse", "session_id": "80380638-3141-4768-8742-a79257914ffa", ...}
+{"t": 1783978456.6789217, "event": "Stop", "session_id": "80380638-3141-4768-8742-a79257914ffa", ...}
+```
+This is the idle probe session used for Steps 2–3 below. Sid: `80380638-3141-4768-8742-a79257914ffa`.
+
+**Step 2 — `--bg --resume` composition on the idle session.**
+
+```powershell
+Set-Location C:\proga\claude-fleet\spike\m0\proj
+claude --bg --resume 80380638-3141-4768-8742-a79257914ffa "Reply with exactly: PONG-G2"
+```
+Stdout (verbatim): `backgrounded · 2e94bbc6` (no `-n` name printed since none was passed this call). Roster **immediately after** (both entries side by side):
+```json
+{"pid": 44480, "id": "80380638", "cwd": "C:\\proga\\claude-fleet\\spike\\m0\\proj", "kind": "background", "startedAt": 1783978443413, "sessionId": "80380638-3141-4768-8742-a79257914ffa", "name": "m0-g2d", "status": "idle", "state": "done"}
+{"pid": 25276, "id": "2e94bbc6", "cwd": "C:\\proga\\claude-fleet\\spike\\m0\\proj", "kind": "background", "startedAt": 1783978497871, "sessionId": "2e94bbc6-5c19-4266-9a16-e4a29a6f267e", "name": "m0-g2d", "status": "busy", "state": "working"}
+```
+This is the discriminator moment: **a brand-new roster entry appeared** (`sessionId` `2e94bbc6-5c19-4266-9a16-e4a29a6f267e`, new pid `25276`), while the **original entry `80380638-...` was untouched** (`status: idle`, `state: done`, unchanged). This is outcome **(b)**, not (a): a new session id spawned rather than the same session going busy.
+
+Roster ~6 s later, both entries done (name of the new one had already auto-changed — see anomaly note below):
+```json
+{"pid": 44480, "id": "80380638", "cwd": "C:\\proga\\claude-fleet\\spike\\m0\\proj", "kind": "background", "startedAt": 1783978443413, "sessionId": "80380638-3141-4768-8742-a79257914ffa", "name": "m0-g2d", "status": "idle", "state": "done"}
+{"pid": 25276, "id": "2e94bbc6", "cwd": "C:\\proga\\claude-fleet\\spike\\m0\\proj", "kind": "background", "startedAt": 1783978497871, "sessionId": "2e94bbc6-5c19-4266-9a16-e4a29a6f267e", "name": "i need more information about the job t�", "status": "idle", "state": "done"}
+```
+`events.jsonl` session_id-filtered count for the **original** sid `80380638`: `grep -c "80380638" spike/m0/out/events.jsonl` = **4** (unchanged from before Step 2 — no new turn landed on it). Count for the **new** sid `2e94bbc6`: **0** — expected and not a wedge signal: this dispatch's `--bg --resume` invocation did not repeat `--settings ..\worker-settings.json` (the brief's Step 2 command has no `--settings` flag), so `hook_probe.py` was never wired into the forked session; the absence of events here reflects a config omission, not a liveness failure.
+
+Transcript continuity check — the forked session's transcript file `C:\Users\Techn\.claude\projects\C--proga-claude-fleet-spike-m0-proj\2e94bbc6-5c19-4266-9a16-e4a29a6f267e.jsonl` (42 lines) contains the **entire prior conversation** from `80380638`, verbatim, followed by the new turn:
+```
+user:      Use the Read tool to read task.md in this directory, then reply with exactly: DONE-G2
+assistant: (tool_use Read task.md)
+user:      (tool_result: task.md contents)
+assistant: DONE-G2
+user:      Reply with exactly: PONG-G2
+assistant: PONG-G2
+```
+This proves the fork carried the **full transcript** forward (task.md read + `DONE-G2` reply are present, not just a fresh context), and the new turn's reply is the exact literal `PONG-G2` requested. **Step 2 verdict: CONFIRMED-with-caveat — outcome (b).** `--bg --resume` does not deliver a second prompt to the *same* session; it silently forks a new session id that inherits the full transcript. Any overlay/mailbox design that assumes same-sid continuity across a steer must restamp the sid after every `--bg --resume` call and re-key its own bookkeeping (roster join by `-n`/name survives across the fork here — both entries show `name: "m0-g2d"` immediately after the fork — but see the anomaly below: the name did not stay stable).
+
+**Anomaly (recorded, not scored):** the forked session's `name`/`agent-name` field **changed itself** between the immediately-after-dispatch poll (`"m0-g2d"`) and the done poll (`"i need more information about the job t�"` — a mojibake-truncated auto-generated title). Transcript inspection of the `custom-title`/`agent-name`/`ai-title` records confirms the mechanism: two `custom-title`/`agent-name` entries carry `"m0-g2d"` (inherited from `-n`), then a later `ai-title` entry auto-generates `"i need more information about the job t�"` and overwrites `agent-name` with it. This means **roster join-by-name is not stable across a resumed/forked turn** — the daemon's own auto-titling can silently rename an entry after the fact. Flagging this for M1's roster-join design (join-by-name at dispatch time is fine; joining by name *later*, after an auto-retitle, is not reliable) — **UNOBSERVED:** whether this auto-retitle also happens to non-forked `--bg` sessions given enough turns (only observed here, on a forked session, after its second turn).
+
+**Step 3 — print-mode resume against the daemon-registered session (two-live-claudes hazard).**
+
+```powershell
+Set-Location C:\proga\claude-fleet\spike\m0\proj
+claude -p --resume 80380638-3141-4768-8742-a79257914ffa "Reply with exactly: PONG-G2P"
+```
+Exact result (PowerShell wrapped a cosmetic stdin-timing warning as a `NativeCommandError` — same harmless artifact noted in Task 2's report re: `2>&1` capture — the load-bearing line is the `Error:` on the last line):
+```
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect
+stdin explicitly: < /dev/null to skip, or wait longer.
+Error: Session 80380638-3141-4768-8742-a79257914ffa is currently running as a background agent (bg). Use
+`claude agents` to find and attach to it, or add --fork-session to branch off a copy.
+```
+**Does it succeed?** No — rejected outright by the CLI before any turn is attempted; the daemon refuses to let `-p --resume` touch a session it still owns (even though that session's roster `status` is `idle`/`state` is `done`, not actively running a turn). The two-live-claudes hazard therefore never materialized — the CLI's own guard prevented it, rather than the daemon needing to detect and reject a live collision after the fact.
+
+**Does the roster reflect the turn?** No turn occurred, so no change expected; confirmed — roster for `80380638` immediately after this command, byte-for-byte identical to the pre-Step-3 snapshot:
+```json
+{"pid": 44480, "id": "80380638", "cwd": "C:\\proga\\claude-fleet\\spike\\m0\\proj", "kind": "background", "startedAt": 1783978443413, "sessionId": "80380638-3141-4768-8742-a79257914ffa", "name": "m0-g2d", "status": "idle", "state": "done"}
+```
+**Does the roster entry corrupt?** No — `grep -c "80380638" spike/m0/out/events.jsonl` = **4**, unchanged from the pre-Step-3 count; no fifth event line, no partial/malformed roster JSON on the next poll. **Step 3 verdict: REFUTED** — `-p --resume` against a daemon-owned session is rejected outright (not silently forked, not corrupted); the CLI's own suggested escape hatch (`--fork-session`) was not additionally exercised in this task (out of the brief's literal scope for Step 3; **UNOBSERVED**: whether `-p --resume --fork-session` behaves identically to `--bg --resume`'s silent fork, or differently, was not tested here).
+
+**Net G2 verdict: CONFIRMED-with-caveat — outcome (b) applies.** Of the two live channels enumerated in Step 1: `--bg --resume` **works** but forks (new sid, full transcript carried over, original session's roster entry and events untouched) — CONFIRMED-with-caveat per the brief's outcome (b) wording. `-p --resume` (without `--fork-session`) is flatly **REFUTED** — the CLI refuses it while the daemon owns the session. This is **not** outcome (c) (all channels rejected) — a working steering path exists — but it is also **not** outcome (a) (true same-session turn delivery), so per the brief's own framing this is **HALT-grade: flag for operator ratification at Task 12.** The concrete design implication for the fleet overlay: "steering an idle worker" must be implemented as **fork-and-restamp**, not same-session prompt injection — every `--bg --resume` steer mints a new sid that the overlay must adopt as the worker's new canonical identity (mailbox/journal keyed by name, re-pointed at the new sid; the old sid's transcript remains valid history but stops receiving events). The roster-name instability anomaly above (auto-retitle can silently change `name` after a fork) compounds this: name-based re-identification after a steer is not guaranteed stable either, so the overlay likely needs to capture the **new sid from `--bg --resume`'s own stdout** (it prints the new short id, exactly as `--bg`'s initial dispatch does) rather than re-polling the roster by name after the fact.
+
+Cleanup: `claude stop 80380638` → `stopped 80380638`; `claude stop 2e94bbc6` → `stopped 2e94bbc6` (both roster entries retained `state: "done"` post-stop, not `"stopped"` — consistent with the same already-terminal-state pattern noted for the three failed `m0-g2`/`m0-g2b`/`m0-g2c` dispatches above and for `m0-core` in Task 2). No other session (including `m0-reap`, untouched throughout) was affected.
