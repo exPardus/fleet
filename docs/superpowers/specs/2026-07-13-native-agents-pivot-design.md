@@ -1,7 +1,7 @@
 # Native Agents Pivot — Design
 
 **Date:** 2026-07-13
-**Status:** v2 — amended per adversarial review (`docs/reviews/NATIVE-PIVOT-REVIEW-2026-07-13.md`); re-review pending
+**Status:** v2.1 — v2 amended per adversarial review (`docs/reviews/NATIVE-PIVOT-REVIEW-2026-07-13.md`); v2.1 fixes re-review findings N1–N11; promotion review pending
 **Approach:** B — native substrate, fleet sidecar (chosen over pure-native replacement and agent-teams bet)
 
 ## 1. Problem and decision
@@ -34,17 +34,19 @@ Rejected alternatives:
 | # | Question | Halt-grade? | Fallback if refuted |
 |---|----------|-------------|---------------------|
 | G1 | Do fleet hooks (`--settings worker-settings.json`) fire inside a `--bg` session — PreToolUse, PostToolUse, **and Stop**? Sharper Stop experiment: stop-block honored? roster state during block? does the reap timer treat a stop-blocked session as active? | **HALT** | none — pivot dies at M-A |
-| G2 | Second-prompt delivery to an idle bg session (steer-idle). Any of: `claude --bg` composing with `--resume`, a send CLI, dispatch-into-existing-session? | **HALT-grade** | respawn-to-steer: `send` to idle worker = respawn with mailbox drained into the prompt — semantics + cost change, spec §5 states it |
+| G2 | Second-prompt delivery to an idle bg session (steer-idle). Any of: `claude --bg` composing with `--resume`, a send CLI, dispatch-into-existing-session? | **HALT-grade** | respawn-to-steer: `claude stop` the idle session first, verify roster transition, then dispatch replacement with drained mailbox; sid swap atomic under `fleet.lock`. Never two live sessions under one name. Semantics + cost change — §5 states it |
 | G3 | Result/cost source under `--bg`: does any structured artifact expose per-turn result text and cost (roster field? result file? hook payload)? | HALT-grade | result capture moves fully into fleet's Stop hook (writes result + transcript-derived cost to fleet journal); if hooks can't see cost, cost column declared dead and budget = token-ceiling hook only |
 | G4 | Env propagation: do `--settings`, env vars (`FLEET_WORKER` stamp), and the `CLAUDE_CODE_SESSION_ID` strip reach the daemon-spawned child? | **HALT** | none — D5 + SPEC §5.1 provenance guard are non-negotiable |
 | G5 | Scriptable pin/unpin, or any reap exemption? What is the actual reap window? | no | heartbeat-respawn becomes primary: supervisor beat period < reap window; supervisor self-preservation via G7 |
-| G6 | `--session-id` composes with `--bg` (fleet mints sids → pre-claim launch contract preserved)? | no | short-id capture from `--bg` stdout + `agents --json` join; concurrent-spawn attribution via `-n` |
+| G6 | `--session-id` composes with `--bg` (fleet mints sids → pre-claim launch contract preserved)? | no | short-id capture from `--bg` stdout + `agents --json` join; concurrent-spawn attribution via `-n`. **Crash-safety degrades on this path**: sid unknown between dispatch and stamp — recovery = roster join on `-n`; no roster match within the verify window ⇒ claimed entry marked DOA |
 | G7 | In-session scheduling primitive for heartbeats (name the real one — /loop or equivalent; "ScheduleWakeup" unverified). Cost per beat? | HALT-grade for watchtower duties | event-driven only: supervisor acts when user opens it or hooks poke it; watchtower scoped out until primitive exists |
-| G8 | Prompt delivery size: can a large composed prompt (preamble + mailbox + task + carried journal, > 32,767 chars) reach a `--bg` session — stdin, prompt file, or argv only? | no | prompt-file indirection: argv carries only a pointer, SessionStart/first-turn hook injects the body |
+| G8 | Prompt delivery size: can a large composed prompt (preamble + mailbox + task + carried journal, > 32,767 chars) reach a `--bg` session — stdin, prompt file, or argv only? | no | task-file bootstrap: argv carries a tiny fixed prompt ("read `<task-file>` and execute it"); the composed body lives in a fleet-written file the worker Reads as its first action. No size cap. (SessionStart `additionalContext` is NOT a viable channel — hard-capped at 10,000 chars, 3× smaller than the problem) |
 | G9 | Daemon restart (incl. `claude update`) with workers live: do sessions survive? Does roster persist or reset? Do pins survive? | no | roster-epoch sanity check (§5) is mandatory regardless |
 | G10 | Daemon reaction to external `claude stop` / process kill: roster marking, zombie risk? | no | informs kill/interrupt design (§5) |
 
-M-0 output = `docs/specs/native-substrate.md`: the contract doc pinning exact flags, JSON fields per state, and behaviors fleet depends on, plus the G-table verdicts.
+**Halt vocabulary:** `HALT` = refuted ⇒ pivot stops at M-A and the design is revisited; no fallback exists. `HALT-grade` = refuted ⇒ the named fallback becomes the design, but only after the operator ratifies it in the M-0 verdict doc — a builder may not silently proceed on a fallback. `no` = refuted ⇒ fallback applies without ratification.
+
+M-0 output = `docs/specs/native-substrate.md`: the contract doc pinning exact flags, JSON fields per state, and behaviors fleet depends on, plus the G-table verdicts and any fallback ratifications.
 
 ## 3. Architecture
 
@@ -62,7 +64,7 @@ supervisor = pinned/heartbeat session      ← persistent identity in files, dis
 
 The registry stays **keyed by worker name** (as today); `session_id` is a mutable field stamped per incarnation (respawn mints a new one — a key must survive respawn, so sessionId cannot be the key). Liveness truth = `claude agents --json` roster joined on session_id, **filtered through the outcome discriminator (§5)** — never PID probing.
 
-**Launch contract preserved** (SPEC §6 analog on the new substrate): pre-claim registry entry under `fleet.lock` → mint sid (`--session-id`, G6) → dispatch `--bg` → stamp/verify → rollback on DOA. A crash between dispatch and stamp leaves a claimed entry pointing at a mintable sid, not an untracked live session.
+**Launch contract preserved** (SPEC §6 analog on the new substrate): pre-claim registry entry under `fleet.lock` → mint sid (`--session-id`, G6) → dispatch `--bg` → stamp/verify → rollback on DOA. A crash between dispatch and stamp leaves a claimed entry pointing at a mintable sid, not an untracked live session (fallback-path degradation: see G6). **DOA verdict consults the outcome record first**: roster-absent + outcome record present ⇒ completed (a fast worker can finish before verify runs — the haiku pin test will); roster-absent + no record + no roster appearance within the verify window ⇒ DOA rollback.
 
 ### Superseded prior-spec surface
 
@@ -72,19 +74,25 @@ Banner treatment (`[SUPERSEDED — native-substrate pivot 2026-07-13]`, MOVE nev
 - `docs/SPEC.md` v2.2 — §6 "Worker turn launch (Windows detail)" detached-spawn plumbing; PID-based liveness verdicts. The **unbuilt** F33 `turn_pid_boot_id` work is cancelled (it was never shipped — do not list it as a deletion).
 - `docs/specs/phase-2-watchtower.md` — PID-liveness polling premise; watchtower duties fold into the supervisor's beat.
 - `docs/specs/terminal-surface.md` — **rules remain binding** (views read-only, no locks, exit 0, D4 quarantine, D5 worker-suppression), but its probe-premised text (D2 "probing" recompute, builder notes citing `probe_liveness`) gets banners pointing here.
+- `docs/SPEC.md` §4 hook write boundary — **explicitly amended, not silently contradicted** (the F25 precedent): the sanctioned hook-write list (mailbox, `hook-errors.log`, own journal via PostCompact) gains one entry — *the Stop hook may write the worker's terminal-outcome record (result text, cost if visible, `result_captured` marker) to the worker's fleet journal*. This is the data source for §5's outcome discriminator.
 - Unaffected: mailbox protocol, budget-hook design, knowledge loop, campaign-template doctrine, corrupt-registry quarantine (stays — it guards JSON corruption, not PID truth).
 
 ## 4. Supervisor — persistent identity, disposable body
 
 **Soul** = git-tracked files: `supervisor/GOALS.md` (single target + standing goals, user-editable), `supervisor/JOURNAL.md` (append-only checkpoint log), `knowledge/` (unchanged).
 
-**Single-supervisor invariant** (invariant-7 analog): never two live supervisors over one GOALS.md. Mechanism: `supervisor/INCARNATION` claim file written under `fleet.lock` — holds incarnation id + session_id. Boot ritual refuses to act (read-only report, then exit) if the claim names a session the roster shows live, or if a fresher incarnation's checkpoint exists in the journal.
+**Single-supervisor invariant** (invariant-7 analog): never two live supervisors over one GOALS.md. Mechanism: `supervisor/INCARNATION` claim file, written only under `fleet.lock` — holds incarnation id, session_id, and a **heartbeat timestamp the holder refreshes at every checkpoint/beat**. Journal is append-only, single-writer, claim-holder only — no exceptions (handshake uses a separate file, below).
 
-**Handoff protocol** (context exhaustion): old writes handoff checkpoint → dispatches successor (`--bg`, `-n`, claim-pending) → **waits until the successor's first journal checkpoint appears** (timeout T) → releases claim and exits. Dispatch failure or timeout ⇒ old resumes duty and raises a doctor-visible flag. Journal is append-only single-writer by claim-holder; the not-yet-claimed successor's boot ritual takes no respawn/spawn actions until claim transfer completes — kills the both-alive double-spawn window.
+**Claim rules at boot** (run **after** the roster-epoch sanity check — a suspiciously empty roster freezes the claim decision too, or a daemon restart would let a fresh boot seize a claim whose holder is actually alive):
+- Claim's session live in roster, or a fresher incarnation's checkpoint in the journal ⇒ refuse: read-only report, exit.
+- Claim's session roster-gone AND heartbeat stale (older than threshold S > beat period + margin) ⇒ **seize**: rewrite `INCARNATION` under `fleet.lock`, journal a `SEIZED` checkpoint naming the dead incarnation.
+- Claim's session roster-gone but heartbeat fresh (ambiguous — daemon restart, G9) ⇒ freeze + page operator. Never seize on ambiguity.
 
-**Boot ritual** (one code path for morning / post-reboot / post-handoff): claim check → read GOALS + JOURNAL tail + knowledge/INDEX + `agents --json` + fleet status → reconcile per §5's outcome discriminator → continue.
+**Handoff protocol** (context exhaustion): old writes handoff checkpoint → dispatches successor (`--bg`, `-n`, claim-pending) → successor boots and writes `supervisor/HANDSHAKE` (its incarnation id — **not** a journal write; it holds no claim yet) → old observes HANDSHAKE, transfers claim to successor under `fleet.lock`, deletes HANDSHAKE, exits. Dispatch failure or timeout T ⇒ old resumes duty, **`claude stop`s the limbo successor** (old knows its sid — it dispatched it), removes any HANDSHAKE, raises a doctor-visible flag. The claim-pending successor takes no spawn/respawn actions before claim transfer — kills the both-alive double-spawn window from both sides.
 
-**Resurrection scope (stated limitation):** nothing auto-restarts the supervisor after reboot or crash in this build. Human-restarted; `fleet doctor` + the manager SessionStart hook nag when GOALS.md is active but no live incarnation holds the claim. Logon-task auto-start = ROADMAP Phase-2, out of scope here.
+**Boot ritual** (one code path for morning / post-reboot / post-handoff): roster-epoch sanity check → claim rules (above) → read GOALS + JOURNAL tail + knowledge/INDEX + `agents --json` + fleet status → reconcile workers (M-B onward: §5's outcome discriminator; M-A interim: today's registry verdicts via `fleet status` — the discriminator's inputs don't exist until M-B) → continue.
+
+**Resurrection scope (stated limitation):** nothing auto-restarts the supervisor after reboot or crash in this build. Human-restarted; `fleet doctor` + the manager SessionStart hook nag. **Nag predicate is file-only** (views/hooks never probe, never spawn subprocesses — terminal-surface rules): GOALS.md active AND (no claim file OR claim heartbeat older than S). No roster read needed — the heartbeat timestamp carries liveness. Logon-task auto-start = ROADMAP Phase-2, out of scope here.
 
 **Heartbeats:** mechanism = G7's verified primitive; beat period < reap window when G5 refutes scriptable pin. **Supervisor gets its own per-incarnation budget cap and a beat-rate bound** — it is not exempt from the budget discipline it enforces. If G7 refutes, watchtower duties are scoped out and the supervisor is event-driven only.
 
@@ -98,9 +106,9 @@ Banner treatment (`[SUPERSEDED — native-substrate pivot 2026-07-13]`, MOVE nev
 
 **Result/peek/cost:** the stream-json stdout pipeline is dead under `--bg` (refuted, §2). Result capture moves into the Stop hook (G3); `fleet peek` reads hook-journaled events; cost source per G3 verdict — if none, the cost column is declared dead and budget enforcement = token-ceiling hook + fleet-side cumulative checks only. `--max-budget-usd` does not exist under `--bg`; the spec makes no claim it does.
 
-**Steering:** mid-turn = mailbox + PreToolUse/PostToolUse hooks, unchanged (G1). **Idle = G2's verdict**; fallback is respawn-to-steer with drained mailbox — dearer and non-idempotent-risk-free only for not-yet-started tasks, so `send` must say which path it took.
+**Steering:** mid-turn = mailbox + PreToolUse/PostToolUse hooks, unchanged (G1). **Idle = G2's verdict**; fallback is respawn-to-steer per the G2 row — stop old session first, verify, dispatch replacement, atomic sid swap; never two live sessions under one name. Dearer, and non-idempotent-risk-free only for not-yet-started tasks — `send` must say which path it took.
 
-**Kill/interrupt:** kill = `claude stop <id>` (verified) + overlay mark dead; never raw pid signals, never daemon files. `fleet interrupt`'s old contract ("transcript survives; worker does not die") is **unsatisfiable** under daemon-owned sessions unless G2/G10 reveal a native interrupt: default plan = interrupt is redefined as `stop` + respawn-with-journal, and the `/fleet:interrupt` surface says so.
+**Kill/interrupt:** kill = `claude stop <id>` (verified) + overlay mark dead; never raw pid signals, never daemon files. `fleet interrupt`'s old contract ("transcript survives; worker does not die") is **unsatisfiable** under daemon-owned sessions unless G2/G10 reveal a native interrupt. Default plan: interrupt = `claude stop` + overlay mark `interrupted` — **respawn is a separate, explicit operator decision, never bundled** (an interrupted task is definitionally started; auto-respawn would re-run side effects). The `/fleet:interrupt` surface says so.
 
 **Coexistence (M-B window):** legacy name-keyed PID-probed records become **read-only legacy** — status renders them flagged, mutating commands refuse ("pre-pivot worker — finish or kill via legacy path"), doctor's unknown-sessions check learns the overlay so fleet-native workers aren't false positives. M-B deploy requires an empty fleet or explicitly acknowledges the mix.
 
@@ -122,13 +130,13 @@ THE risk: coupling to an undocumented `--bg`/daemon surface that drifts under `c
 ## 8. Milestones
 
 - **M-0 — spike + contract.** Execute the G-table, write native-substrate.md. Kills or confirms everything downstream.
-- **M-A — supervisor identity.** Soul files, claim/invariant, boot ritual, handoff protocol, checkpoint discipline — against today's backend. Value even if M-B stalls.
+- **M-A — supervisor identity.** Soul files, claim/invariant (incl. seizure rules + heartbeat), boot ritual, handoff protocol, checkpoint discipline — against today's backend, with the M-A interim reconciliation (today's registry verdicts). Value even if M-B stalls.
 - **M-B — native dispatch.** Launch contract on `--bg`, outcome discriminator, Stop-hook result capture, steering per G2, kill via `claude stop`, coexistence rules, pin tests, doctor checks.
 - **M-C — deletion + SPEC v3.** Retire per §6, banner superseded sections (§3 list), soak campaign before done.
 
 ## 9. Testing
 
-- pytest: overlay merge, roster-JSON parsing per-state fixtures (incl. missing `pid`, contradictory status/state), boot ritual, claim/handoff state machine, outcome-discriminator verdicts.
+- pytest: overlay merge, roster-JSON parsing per-state fixtures (incl. missing `pid`, contradictory status/state), boot ritual, claim/handoff/seizure state machine (stale-claim takeover, ambiguous-freeze, handshake timeout stopping the limbo successor), outcome-discriminator verdicts incl. the fast-completion DOA case.
 - Integration: haiku `--bg` worker full lifecycle (spawn → mid-turn steer → result → respawn) + handoff drill (old supervisor → successor with forced dispatch failure).
 - Pin tests: §7.2, version-gated skip when `claude agents` unavailable.
 - Removals delete their tests in the same commit.
