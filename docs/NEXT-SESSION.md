@@ -1,27 +1,40 @@
-# Next session — author the M-A implementation plan
+# Next session — build M-B (native dispatch), starting with usage-limit continuity
 
-Updated 2026-07-14, after the M-0 spike closed. Previous handoff (C4 soak day 2, 2026-07-10) is superseded; the native-agents pivot overtook it.
+Updated 2026-07-14, after M-A (supervisor identity) shipped. Previous handoff ("author the M-A implementation plan", also 2026-07-14) is superseded — that plan was written and fully executed.
 
 ## State
 
 - **M-0 native-substrate spike: COMPLETE and ratified.** Contract = `docs/specs/native-substrate.md` (all 13 G-rows verdicted, 4 gate ratifications recorded at the end — fork-steer, v2.3, G9 deferred, M-A go). Evidence = `spike/m0/VERDICTS.md`. Everything pushed to `origin/main`.
-- **Spec of record**: `docs/superpowers/specs/2026-07-13-native-agents-pivot-design.md` v2.3, ratified through the M-0 gate. §4 = supervisor design (M-A's scope). §5.1 = operator features (M-B, usage-limit continuity FIRST).
-- **Supervisor soul seed exists**: `supervisor/GOALS.md` (operator-authored target + cost frugality). JOURNAL.md, INCARNATION, HANDSHAKE do not exist yet — M-A builds them.
-- **Execution ledger** (this campaign): `.superpowers/sdd/progress.md` — full task/commit/review record of the spike.
+- **M-A supervisor milestone: COMPLETE.** `bin/fleet.py` now ships the full supervisor layer — soul files (`supervisor/GOALS.md`, append-only `supervisor/JOURNAL.md`), claim mechanics (`supervisor/INCARNATION`, epoch check before claim decision, refuse/seize/freeze rules), boot ritual, checkpoint/heartbeat discipline, and the handoff protocol. CLI surface added:
+  - `fleet sup-boot [--handoff-inc <id>]` — boot ritual: epoch check → claim/seize/refuse/freeze + boot bundle. Exit 0=hold, 2=refuse, 3=freeze.
+  - `fleet sup-checkpoint <text|@file> [--kind CHECKPOINT|PROPOSAL]` — journal checkpoint (claim holder only) + heartbeat refresh.
+  - `fleet sup-heartbeat` — heartbeat refresh without a journal write.
+  - `fleet sup-status [--json]` — read-only claim/handshake/nag view.
+  - `fleet sup-handoff-begin` / `sup-handoff-complete` / `sup-handoff-abort` — context-exhaustion succession protocol (trigger band: begin ~300k tokens, hard-latest 500k).
+  - `doctor` gained `supervisor-claim` (advisory) and `supervisor-handoff` (PASS/FAIL) checks; SessionStart gained a nag line.
+  - Operator doc: `skills/fleet/supervisor.md` (boot ritual, checkpoint discipline, handoff protocol, binding rules). `skills/fleet/SKILL.md` startup ritual gained step 4 (run the supervisor boot ritual when GOALS.md is active). 761+ tests green (53 supervisor tests added in M-A).
+- **Spec of record**: `docs/superpowers/specs/2026-07-13-native-agents-pivot-design.md` v2.3, ratified through the M-0 gate. §4 = supervisor design (M-A, now built). §5.1 = operator features (M-B, next).
+- **Execution ledger** (M-0 + M-A campaigns): `.superpowers/sdd/progress.md`.
 - **G9 probe**: deferred; operator instructions at the end of native-substrate.md. Do not block on it.
 - **Repo is public-facing now**: README overhauled, docs/README.md audience index, CONTRIBUTING.md. Keep them true as things ship.
 
 ## The job
 
-Author the **M-A plan** (`superpowers:writing-plans` → `docs/superpowers/plans/2026-07-1X-native-pivot-mA-supervisor.md`), then execute via subagent-driven-development on operator go.
+Author the **M-B plan** (`superpowers:writing-plans` → `docs/superpowers/plans/2026-07-1X-native-pivot-mB-dispatch.md`), then execute via subagent-driven-development on operator go.
 
-M-A scope (spec §4, against TODAY's backend — no --bg dispatch changes):
-1. `supervisor/JOURNAL.md` conventions + checkpoint write helper.
-2. Claim mechanics: `supervisor/INCARNATION` under `fleet.lock` — schema (incarnation id, session_id, heartbeat ts), claim rules (refuse / seize-on-stale / freeze-on-ambiguous), epoch check BEFORE claim decision.
-3. Boot ritual (skill step + SessionStart extension): GOALS + JOURNAL tail + knowledge INDEX + `claude agents --json` + fleet status → M-A interim reconciliation = today's registry verdicts, NOT the outcome discriminator (its inputs are M-B).
-4. Handoff protocol: checkpoint → dispatch successor → HANDSHAKE file (id-verified) → claim transfer → old exits; timeout ⇒ old resumes + `claude stop`s limbo successor. Trigger band: 300k begin / 500k hard (spec §4).
-5. Nag predicate (file-only): GOALS active AND (no claim OR heartbeat stale) → doctor check + SessionStart hook line.
-6. Tests: claim/seizure/handshake state machine, boot-ritual assembly, stale-HANDSHAKE hygiene (seize deletes, refuse is read-only), handoff-timeout drill.
+M-B scope (spec §5, native `--bg` dispatch + operator-directed features from §5.1):
+
+**Build order — §5.1.1 usage-limit resilience continuity is the FIRST M-B feature after the launch contract itself (operator ASAP directive).** Today's UL1 park (`limited` status + `limit_reset_at`, `bin/fleet.py:1508-1649`) detects the wall by parsing the turn process's stderr tail — a channel that does not exist under `--bg` (daemon owns stderr). Rehomed design (per G11, spec §5.1.1): a limit wall kills the turn silently — no Stop hook fires, roster unchanged — so detection rides the dead-suspected investigation path instead: worker idle/roster-alive with no fresh outcome record ⇒ supervisor's watchtower beat scans the transcript tail with the existing `_parse_limit_signal` regexes ⇒ limit-shaped ⇒ park `limited` with the parsed reset horizon. `limited` stays a sticky park (never `dead-suspected`, never auto-respawned before the horizon); `resume-limited` = fork-steer per G2(b) (or respawn) once `now >= limit_reset_at`. The boot ritual and watchtower beat must treat `limited` workers as parked; the roster-epoch freeze rule must not demote them.
+
+Rest of M-B scope, after usage-limit continuity lands:
+1. Launch contract on `--bg` (dispatch pattern, `-n` conventions, fork-steer semantics per G2(b)).
+2. Outcome discriminator + Stop-hook result capture (supersedes M-A's interim "today's registry verdicts" reconciliation).
+3. Kill via `claude stop` (`fleet interrupt` contract change: transcript survives, worker does not die — is unsatisfiable under daemon-owned sessions; interrupt becomes `claude stop` + overlay mark `interrupted`, respawn stays a separate explicit operator decision).
+4. §5.1.2 auto-archival of stale agents (watchtower beat, `claude rm`, never auto-delete).
+5. §5.1.3 fleet categories in the agents menu (`-n "<cat>|<name>|<hint>"` dispatch-time encoding).
+6. Coexistence rules for the M-B deploy window: legacy name-keyed PID-probed workers become read-only legacy.
+7. Pin tests (FLEET_LIVE analog): dispatch haiku bg worker, assert JSON contract per state, hook firing incl. Stop, `claude stop` behavior — run before campaigns.
+8. Doctor checks: `claude --version` drift since last pin-test pass, legacy-worker mix flag.
 
 Plan-authoring facts from the contract (do not re-derive): dispatch pattern + `-n` conventions, fork-steer semantics, `claude stop` fires no Stop hook, startedAt unstable, state literals incl. "waiting for permission prompt", ScheduleWakeup exists but scheduler dies with stop.
 
