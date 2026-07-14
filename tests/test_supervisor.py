@@ -19,12 +19,6 @@ def sup_home(tmp_path, monkeypatch):
     (tmp_path / "knowledge").mkdir()
     (tmp_path / "knowledge" / "INDEX.md").write_text("# Knowledge Index\n- entry one\n", encoding="utf-8")
     (tmp_path / "state").mkdir()
-    # TestSessionStartLine drives fleet.status_snapshot() (via the hook's
-    # _build_context), which short-circuits to "" when the registry is
-    # absent ("not_initialized") -- seed an empty-but-valid one so that path
-    # doesn't shadow the supervisor-line assertion under test.
-    (tmp_path / "state" / "fleet.json").write_text(
-        json.dumps({"workers": {}}), encoding="utf-8")
     return tmp_path
 
 
@@ -516,6 +510,12 @@ class TestSupervisorDoctorChecks:
 class TestSessionStartLine:
     def test_build_context_includes_supervisor_nag(self, sup_home, monkeypatch):
         import importlib.util
+        # _build_context() short-circuits to "" when status_snapshot() reports
+        # a missing registry ("not_initialized") -- seed an empty-but-valid one
+        # HERE, not in sup_home: the shared fixture must keep the registry
+        # absent so TestSupBoot still covers the registry-unreadable branch.
+        (sup_home / "state" / "fleet.json").write_text(
+            json.dumps({"workers": {}}), encoding="utf-8")
         hook_path = (fleet.Path(fleet.__file__).resolve().parent / "hooks"
                      / "sessionstart_fleet.py")
         spec = importlib.util.spec_from_file_location("sessionstart_fleet", hook_path)
