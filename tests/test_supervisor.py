@@ -267,7 +267,7 @@ class TestCheckpointHeartbeat:
         latest = fleet.supervisor_journal_latest()
         assert latest["kind"] == "CHECKPOINT" and latest["body"] == "did a thing"
         assert latest["inc"] == "inc-me"
-        assert fleet.read_incarnation()["heartbeat_at"] >= old_beat
+        assert fleet.read_incarnation()["heartbeat_at"] > old_beat
 
     def test_non_holder_refused_journal_untouched(self, sup_home):
         self._hold(sid="sid-holder")
