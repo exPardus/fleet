@@ -150,3 +150,18 @@ Per design spec §7 ("Risk and its gate"):
 1. **Pin-test tier is required before any campaign.** A pin-test suite (haiku `--bg` worker: dispatch, assert the JSON contract per state above, confirm hook firing including Stop, confirm `claude stop` behavior) must pass before fleet dispatches real work on this substrate. This spike's own harness (`spike/m0/hook_probe.py`, `spike/m0/worker-settings.json`) is the seed for that tier.
 2. **`fleet doctor` must warn on a `claude --version` change since the last pin-test pass.** Every contract fact in this document — the roster's closed 8-9-key schema, the transcript's `message.usage`/`message.content[].text` key names, the `--session-id`/`--bg` composition failure, the `--bg --resume` fork behavior — was observed at exactly `claude --version` 2.1.207 and is explicitly **not** guaranteed to survive an update; the transcript format in particular is stated by Anthropic to be an unversioned internal contract (§ Result/cost contract above).
 3. **No daemon/jobs file access in production.** `~/.claude/daemon/` and `~/.claude/jobs/` were inspected read-only for research in this spike only (e.g. `state.json`'s `tokens`/`output` fields, `timeline.jsonl`'s undocumented `text` key, `roster.json`'s empty `workers` dict despite 17 live sessions) — none of that research backs any verdict above, and fleet's production code must use the CLI + `--json` only, per the pre-registered spike rule.
+
+## Ratifications (Task 12 gate review, 2026-07-14)
+
+- RATIFIED 2026-07-14: G2 fallback — steering an idle worker = fork-with-transcript via `--bg --resume`; overlay restamps the sid; fresh `-n` renders category on every steer.
+- RATIFIED 2026-07-14: spec v2.3 delta (§5.1.1 usage-limit continuity as first M-B feature, §5.1.2 auto-archival, §5.1.3 agents-menu categories; gates G11–G13).
+- RATIFIED 2026-07-14: G9 DEFERRED — operator runs the standalone probe below at a quiet moment; the roster-epoch freeze rule (spec §5) is binding regardless of outcome.
+- RATIFIED 2026-07-14: M-A plan authoring green-lit.
+
+### G9 standalone probe (operator, ~5 min — kills every background session on the machine)
+
+1. `claude agents --json` — confirm nothing live that you care about.
+2. `claude --bg -n g9-probe --model haiku "Use the Bash tool to run: sleep 300. Then reply DONE."`
+3. Probe `claude daemon --help` for a native stop/restart; else find and stop the daemon supervisor process.
+4. After restart: `claude agents --json --all` — record whether g9-probe survived, whether the roster reset, whether pinned entries persisted.
+5. Paste outputs into a fleet session; the G9 row gets its verdict then.
