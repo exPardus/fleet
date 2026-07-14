@@ -161,3 +161,89 @@ class TestRosterLiveSids:
             {"no_sid": True, "status": "idle"},               # malformed: skipped
         ]
         assert fleet._roster_live_sids(entries) == {"a", "c"}
+
+
+def _fake_run_roster(entries):
+    """Injectable subprocess.run double returning a roster JSON payload."""
+    def run(argv, **kw):
+        assert "--json" in argv and "--all" in argv
+        return SimpleNamespace(returncode=0, stdout=json.dumps(entries), stderr="")
+    return run
+
+
+def _fake_which(name):
+    return "C:/fake/claude.cmd"
+
+
+class TestSupBoot:
+    def _boot(self, sup_home, entries, sid="sid-me", handoff=None):
+        args = SimpleNamespace(sid=sid, handoff_inc=handoff)
+        return fleet.cmd_sup_boot(args, which=_fake_which, run=_fake_run_roster(entries))
+
+    def test_fresh_claim_writes_incarnation_and_boot_checkpoint(self, sup_home, capsys):
+        rc = self._boot(sup_home, [{"sessionId": "sid-me", "status": "busy"}])
+        assert rc == 0
+        claim = fleet.read_incarnation()
+        assert claim["session_id"] == "sid-me" and claim["claimed_via"] == "fresh"
+        entries = fleet.supervisor_journal_entries()
+        assert entries[-1]["kind"] == "BOOT"
+        out = capsys.readouterr().out
+        assert "VERDICT: claim" in out and "GOALS" in out and "entry one" in out
+
+    def test_refuse_is_strictly_read_only(self, sup_home, capsys):
+        live_holder = _claim(sid="sid-holder")
+        fleet.write_incarnation(live_holder)
+        before_journal = fleet.supervisor_journal_entries()
+        fleet.write_handshake("inc-inflight", "sid-x")  # in-flight handoff artifact
+        rc = self._boot(sup_home, [{"sessionId": "sid-holder", "status": "idle"},
+                                   {"sessionId": "sid-me", "status": "busy"}])
+        assert rc == 2
+        assert fleet.read_incarnation() == live_holder          # untouched
+        assert fleet.read_handshake() is not None               # bystander never deletes (spec §4)
+        assert fleet.supervisor_journal_entries() == before_journal
+        assert "VERDICT: refuse" in capsys.readouterr().out
+
+    def test_seize_rewrites_claim_deletes_handshake_journals_seized(self, sup_home, capsys):
+        stale = _claim(inc="inc-dead", sid="sid-dead",
+                       beat=datetime.now(timezone.utc) - timedelta(hours=3))
+        fleet.write_incarnation(stale)
+        fleet.write_handshake("inc-orphan", "sid-orphan")  # crash-mid-handoff orphan
+        rc = self._boot(sup_home, [{"sessionId": "sid-me", "status": "busy"}])
+        assert rc == 0
+        claim = fleet.read_incarnation()
+        assert claim["session_id"] == "sid-me" and claim["claimed_via"] == "seize"
+        assert fleet.read_handshake() is None                   # stale-HANDSHAKE hygiene
+        latest = fleet.supervisor_journal_latest()
+        assert latest["kind"] == "SEIZED" and "inc-dead" in latest["body"]
+
+    def test_freeze_on_fresh_heartbeat_roster_gone(self, sup_home, capsys):
+        fresh = _claim(sid="sid-gone", beat=datetime.now(timezone.utc) - timedelta(seconds=30))
+        fleet.write_incarnation(fresh)
+        rc = self._boot(sup_home, [{"sessionId": "sid-me", "status": "busy"}])
+        assert rc == 3
+        assert fleet.read_incarnation() == fresh
+        assert "VERDICT: freeze" in capsys.readouterr().out
+
+    def test_freeze_on_empty_roster_even_with_no_claim(self, sup_home, capsys):
+        rc = self._boot(sup_home, [])
+        assert rc == 3
+        assert fleet.read_incarnation() is None  # epoch freeze blocks even a fresh claim
+
+    def test_handoff_mode_writes_handshake_touches_nothing_else(self, sup_home, capsys):
+        holder = _claim(sid="sid-old")
+        fleet.write_incarnation(holder)
+        before_journal = fleet.supervisor_journal_entries()
+        rc = self._boot(sup_home, [{"sessionId": "sid-old", "status": "idle"},
+                                   {"sessionId": "sid-me", "status": "busy"}],
+                        handoff="inc-successor")
+        assert rc == 0
+        hs = fleet.read_handshake()
+        assert hs["incarnation_id"] == "inc-successor" and hs["session_id"] == "sid-me"
+        assert fleet.read_incarnation() == holder
+        assert fleet.supervisor_journal_entries() == before_journal
+        assert "handshake-written" in capsys.readouterr().out
+
+    def test_no_sid_available_is_cli_error(self, sup_home):
+        args = SimpleNamespace(sid=None, handoff_inc=None)
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_sup_boot(args, which=_fake_which, run=_fake_run_roster([]))
