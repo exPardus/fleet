@@ -83,3 +83,81 @@ class TestJournal:
     def test_empty_journal(self, sup_home):
         assert fleet.supervisor_journal_entries() == []
         assert fleet.supervisor_journal_latest() is None
+
+
+def _claim(inc="inc-old", sid="sid-old", beat=None):
+    beat = beat or NOW - timedelta(seconds=60)
+    return {"incarnation_id": inc, "session_id": sid,
+            "claimed_at": _iso(NOW - timedelta(hours=2)),
+            "heartbeat_at": _iso(beat), "claimed_via": "fresh"}
+
+
+class TestClaimDecision:
+    def test_no_claim_file_claims(self):
+        v, _ = fleet.supervisor_claim_decision(None, set(), None, now=NOW)
+        assert v == "claim"
+
+    def test_live_in_roster_refuses(self):
+        v, _ = fleet.supervisor_claim_decision(_claim(), {"sid-old"}, None, now=NOW)
+        assert v == "refuse"
+
+    def test_roster_gone_stale_heartbeat_seizes(self):
+        c = _claim(beat=NOW - timedelta(seconds=3601))
+        v, _ = fleet.supervisor_claim_decision(c, set(), None, now=NOW)
+        assert v == "seize"
+
+    def test_roster_gone_fresh_heartbeat_freezes(self):
+        c = _claim(beat=NOW - timedelta(seconds=120))
+        v, reason = fleet.supervisor_claim_decision(c, set(), None, now=NOW)
+        assert v == "freeze"
+        assert "G9" in reason or "daemon" in reason.lower()
+
+    def test_fresher_foreign_checkpoint_refuses(self):
+        # journal's latest entry is a DIFFERENT incarnation, newer than the
+        # claim's heartbeat -> mid-transition, bystander must refuse (spec §4)
+        c = _claim(beat=NOW - timedelta(seconds=7200))
+        latest = {"ts": _iso(NOW - timedelta(seconds=30)), "kind": "CHECKPOINT",
+                  "inc": "inc-newer", "sid": "sid-newer", "body": ""}
+        v, _ = fleet.supervisor_claim_decision(c, set(), latest, now=NOW)
+        assert v == "refuse"
+
+    def test_own_incarnation_checkpoint_does_not_block_seize(self):
+        c = _claim(inc="inc-old", beat=NOW - timedelta(seconds=7200))
+        latest = {"ts": _iso(NOW - timedelta(seconds=7100)), "kind": "CHECKPOINT",
+                  "inc": "inc-old", "sid": "sid-old", "body": ""}
+        v, _ = fleet.supervisor_claim_decision(c, set(), latest, now=NOW)
+        assert v == "seize"
+
+    def test_unparseable_heartbeat_freezes_never_seizes(self):
+        c = _claim()
+        c["heartbeat_at"] = "garbage"
+        v, _ = fleet.supervisor_claim_decision(c, set(), None, now=NOW)
+        assert v == "freeze"
+
+
+class TestEpochCheck:
+    def test_roster_fetch_failure_freezes(self):
+        ok, reason = fleet.supervisor_epoch_check(False, "claude not on PATH")
+        assert ok is False and "claude not on PATH" in reason
+
+    def test_empty_roster_is_suspicious(self):
+        # the booting session itself is a claude session -- an --all roster
+        # with ZERO entries means the daemon lost its memory (G9 shape)
+        ok, reason = fleet.supervisor_epoch_check(True, [])
+        assert ok is False
+
+    def test_populated_roster_passes(self):
+        ok, _ = fleet.supervisor_epoch_check(True, [{"sessionId": "s1", "status": "idle"}])
+        assert ok is True
+
+
+class TestRosterLiveSids:
+    def test_status_or_pid_means_live(self):
+        entries = [
+            {"sessionId": "a", "status": "busy", "pid": 1, "state": "working"},
+            {"sessionId": "b", "state": "done"},              # dead: no status/pid
+            {"sessionId": "c", "status": "idle"},             # interactive: live
+            {"sessionId": "d", "state": "working"},           # wedged, no pid/status: NOT live
+            {"no_sid": True, "status": "idle"},               # malformed: skipped
+        ]
+        assert fleet._roster_live_sids(entries) == {"a", "c"}

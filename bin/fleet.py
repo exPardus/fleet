@@ -4691,6 +4691,61 @@ def supervisor_journal_append(kind: str, inc: str, sid: str, body: str) -> None:
         f.write(entry)
 
 
+def _roster_live_sids(entries: list) -> set:
+    """Sids whose backing process is LIVE. Contract rule
+    (docs/specs/native-substrate.md, roster contract): `status`/`pid` keys
+    exist only while the process lives; a lingering `state:"done"` entry
+    (observed surviving >=3h21m) must NOT count as live, or a finished
+    predecessor would block every successor claim for hours."""
+    return {
+        e.get("sessionId") for e in entries
+        if isinstance(e, dict) and e.get("sessionId") and ("status" in e or "pid" in e)
+    }
+
+
+def supervisor_epoch_check(roster_ok: bool, payload):
+    """Roster-epoch sanity check, run BEFORE any claim decision (spec §4).
+    A failed or empty roster freezes the decision -- a daemon restart (G9)
+    must never let a fresh boot seize a claim whose holder is alive."""
+    if not roster_ok:
+        return (False, f"roster unavailable ({payload}) -- freeze, never decide blind")
+    if not payload:
+        return (False, "roster is EMPTY -- not even this session is listed; "
+                       "daemon restart suspected (G9). Freeze + page operator.")
+    return (True, f"roster holds {len(payload)} entr{'y' if len(payload) == 1 else 'ies'}")
+
+
+def supervisor_claim_decision(claim, live_sids: set, latest_entry, now=None,
+                              stale_seconds: float = SUPERVISOR_CLAIM_STALE_SECONDS):
+    """Claim rules at boot (spec §4, verbatim order). Returns (verdict, reason);
+    verdict in {"claim","refuse","seize","freeze"}. Pure function -- no IO."""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if claim is None:
+        return ("claim", "no existing claim -- fresh claim")
+    holder_sid = claim.get("session_id")
+    if holder_sid in live_sids:
+        return ("refuse", f"claim holder {claim.get('incarnation_id', '?')} "
+                          f"(sid {holder_sid}) is live in the roster")
+    try:
+        beat = _parse_iso(claim["heartbeat_at"])
+    except (KeyError, TypeError, ValueError):
+        return ("freeze", "claim heartbeat unreadable -- ambiguous; never seize on ambiguity")
+    if latest_entry is not None and latest_entry.get("inc") != claim.get("incarnation_id"):
+        try:
+            entry_ts = _parse_iso(latest_entry["ts"])
+        except (KeyError, TypeError, ValueError):
+            entry_ts = None
+        if entry_ts is not None and entry_ts > beat:
+            return ("refuse", f"journal's latest checkpoint is a fresher incarnation "
+                              f"({latest_entry.get('inc')}) -- transition in flight")
+    age = (now - beat).total_seconds()
+    if age > stale_seconds:
+        return ("seize", f"holder roster-gone, heartbeat stale ({age:.0f}s > {stale_seconds:.0f}s)")
+    return ("freeze", f"holder roster-gone but heartbeat fresh ({age:.0f}s <= "
+                      f"{stale_seconds:.0f}s) -- daemon restart? (G9). Never seize on ambiguity.")
+
+
 # ---------------------------------------------------------------------------
 # CLI: argparse wiring + main()
 # ---------------------------------------------------------------------------
