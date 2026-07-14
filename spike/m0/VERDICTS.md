@@ -524,3 +524,78 @@ Both data points — the 12-poll log and this live check — directly contradict
 **Consequence for the spec's heartbeat-period-vs-reap-window fallback.** The spec's fallback (heartbeat period must stay under the reap window, or pin must be used) is **moot for done sessions** — a finished `--bg` session's roster entry does not get reaped inside any window observed here (≥3 h 21 min and counting), so there's no race to guard against for sessions that reach `done` before the next heartbeat. It remains **UNKNOWN for live idle sessions** — if the daemon does reap the *process* of a long-idle-but-not-done session around some window (1 h or otherwise), and pin is genuinely required to prevent that, then the fact that pin has **no scriptable surface** (sub-verdict a) means fleet's supervisor cannot arm it programmatically. This is a live open question, not resolved here: **flagging for Task 12** (same HALT-grade escalation pattern as G2's resume-trigger gap) — before the overlay assumes heartbeats alone are sufficient to keep a long-running interactive-style worker alive, someone needs to either (i) run the live-idle-process reap experiment this spike did not, or (ii) find/confirm an operator-driven pin path is acceptable for the design.
 
 **Evidence discipline.** All quoted material above is copied verbatim from Phase A's report (`.superpowers/sdd/task-7-report.md`), this phase's own `reap_watch.log` read + live roster pull, and a direct fetch of the primary docs page (`https://code.claude.com/docs/en/agent-view.md`, 2026-07-14) — no second-hand doc claims remain; methods are shown (watcher script content already on record in Phase A, live-check recipe named); the one substantive UNOBSERVED (live-idle-session process reap) is named rather than glossed into either verdict.
+
+### G10: `claude stop` mid-turn Stop-hook semantics — **REFUTED** (no Stop hook fires on an external mid-turn stop); raw `taskkill` blast radius — **CONFIRMED zombie hazard** (daemon supervisor auto-respawns the killed process under a new pid, same session id, full new hook cycle)
+
+**Method, Step 1.** Three `--bg` dispatches (PowerShell, from `spike/m0/proj`, `--settings ..\worker-settings.json --permission-mode acceptEdits --model haiku`), each `claude stop`-ped at a different, verified point in its turn, session_id-filtered against `spike/m0/out/events.jsonl` before and after. A fourth, confounded sample is disclosed separately and excluded from the verdict.
+
+**Sample 1 — `m0-g10-stop` (`a3ec4f14`), killed before the assistant produced any turn at all.** Dispatch prompt: `"Use the Bash tool to run: sleep 120. Then reply DONE."` Roster ~15 s post-dispatch (busy/working, i.e. daemon reports it "running"):
+```json
+{"pid": 33152, "id": "a3ec4f14", ..., "sessionId": "a3ec4f14-53ce-4bbb-bd76-4cac7a58a6e6", "name": "m0-g10-stop", "status": "busy", "state": "working"}
+```
+`claude stop a3ec4f14` → `stopped a3ec4f14`. Roster immediately after: `{"id": "a3ec4f14", ..., "name": "m0-g10-stop", "state": "stopped"}` (pid/status dropped, per the established dead-entry pattern). `events.jsonl`, session_id-filtered, **1 of 1 lines**, re-checked 20 s later still 1 of 1 — only `SessionStart` ever fired:
+```json
+{"event": "SessionStart", "session_id": "a3ec4f14-53ce-4bbb-bd76-4cac7a58a6e6", ...}
+```
+Transcript inspection (`a3ec4f14-...jsonl`, 22 records) confirms why: **zero `"type":"assistant"` records exist** — the model had not yet produced a single turn (no tool_use, no text) when the kill landed; only the dispatched user prompt is on record. **No Stop hook. No PreToolUse/PostToolUse.**
+
+**Sample 2 — `m0-g10-stop3` (`9f18a106`), killed while genuinely mid-turn, blocked on a pending permission prompt.** Same dispatch prompt pattern, substituting a non-guarded long-running command: `"Use the Bash tool to run: ping -n 40 127.0.0.1. Then reply DONE."` Polled `events.jsonl` every 3 s until `PreToolUse` appeared (confirming the tool call had actually started) before stopping — it appeared on the first 3 s poll. Roster at that instant, captured immediately before issuing `stop`:
+```json
+{"pid": 35620, "id": "9f18a106", ..., "sessionId": "9f18a106-de7d-4353-bcf3-65b314e8cb16", "name": "m0-g10-stop3", "status": "waiting", "waitingFor": "permission prompt", "state": "blocked"}
+```
+This surfaces a **new roster field not seen in any prior G-task**: `status: "waiting"` / `waitingFor: "permission prompt"` — `--permission-mode acceptEdits` auto-approves file edits but not this Bash command, so the tool call sat pending an approval no headless `--bg` operator can supply; `state: "blocked"` here means "stuck on a permission gate," a second, unrelated meaning for the same `"blocked"` literal G1-sharp used for "passed through a consumed Stop-block" — **the `state` value alone cannot distinguish these two very different situations.** `claude stop 9f18a106` → `stopped 9f18a106`. Roster after: `{"id": "9f18a106", ..., "state": "stopped"}`. `events.jsonl`, session_id-filtered, re-checked 10 s after the stop: **2 of 2 lines**, `SessionStart` + `PreToolUse` only — **no `PostToolUse` (the Bash call never actually ran) and no `Stop`.**
+
+**Sample 3 (confounded, disclosed not scored) — `m0-g10-stop2` (`ca9462d3`).** Same `sleep 120` prompt as Sample 1. This project's own Bash-tool guard intercepted the standalone `sleep 120` call with `"<tool_use_error>Blocked: standalone sleep 120. ... use run_in_background: true.</tool_use_error>"`; the model retried with `run_in_background: true`, which succeeded near-instantly, then replied `"Sleep started (120s). Waiting for completion."` with `stop_reason: "end_turn"` — a **natural** turn completion, not a forced one. `events.jsonl` for this sid does show all four events including `Stop`, but converting the Stop event's epoch (`t=1783990196.056` → local `05:49:56.056`, Asia/Qyzylorda) against the `claude stop` PowerShell call (`$before` captured at local `05:49:55`, command itself taking some further sub-second-to-low-single-digit-second round trip) shows the two are separated by roughly a second either way — **too close to attribute the Stop hook to the kill rather than to the turn's own natural end.** Recorded honestly as **UNOBSERVED/confounded**, not counted toward the verdict either way.
+
+**Step 1 net verdict: REFUTED — an externally issued `claude stop` against a session that has not yet naturally ended its turn does not fire a Stop hook**, confirmed on two independent, unconfounded samples (pre-turn-start kill; mid-turn permission-pending kill), both showing the process transition straight to roster `state: "stopped"` with zero corresponding `Stop` event in `events.jsonl`, even after a 10-20 s settle-and-recheck window. This is the exact design-critical result the brief flagged: **the outcome discriminator cannot rely on the Stop hook to record an outcome for an operator-stopped worker — a stopped session with no Stop-hook record is a real, reproducible case, not a hypothetical, so spec §5's stop-then-mark flow must write its own tombstone rather than assume the Stop hook will have already done so.**
+
+**Step 2 — raw `taskkill`, the blast radius.** Dispatch `m0-g10-kill` (`b2079061`), same `ping -n 40 127.0.0.1` prompt, polled to confirm `PreToolUse` fired (mid-turn, same permission-pending shape as Sample 2 above). Roster pre-kill:
+```json
+{"pid": 25080, "id": "b2079061", ..., "name": "m0-g10-kill", "status": "waiting", "waitingFor": "permission prompt", "state": "blocked"}
+```
+`taskkill /PID 25080 /F` → `SUCCESS: The process with PID 25080 has been terminated.` Roster snapshot 1 (~6 s later): `pid`/`status` dropped, `state: "blocked"` retained (stale — not yet reconciled to reflect the dead process):
+```json
+{"id": "b2079061", ..., "name": "m0-g10-kill", "state": "blocked"}
+```
+Roster snapshot 2 (~36 s after the kill, ~30 s after snapshot 1 — the second required ≥2-snapshots-≥30s-apart poll): **a new `pid` and a new `startedAt` appear on the identical `id`/`sessionId`/`name`**:
+```json
+{"pid": 45592, "id": "b2079061", "startedAt": 1783990434737, "sessionId": "b2079061-58c9-4453-8eed-72c96e967a0f", "name": "m0-g10-kill", "status": "waiting", "waitingFor": "permission prompt", "state": "blocked"}
+```
+(original snapshot's `startedAt` was `1783990401412` — different value, confirming this is not a stale re-read.) `tasklist /FI "PID eq 25080"` → `INFO: No tasks are running which match the specified criteria.` (old pid genuinely dead); `tasklist /FI "PID eq 45592"` → a live `claude.exe`, 408 MB resident (new pid genuinely alive). `events.jsonl`, session_id-filtered for `b2079061`: **4 of 4 lines** — the original `SessionStart`/`PreToolUse` pair, **then a second `SessionStart` at `t=1783990435.826` and a second `PreToolUse` at `t=1783990442.233`, both carrying the exact same `session_id`**:
+```json
+{"event": "SessionStart", "session_id": "b2079061-58c9-4453-8eed-72c96e967a0f", "payload_keys": ["cwd", "hook_event_name", "session_id", "session_title", "source", "transcript_path"], ...}
+{"event": "PreToolUse", "session_id": "b2079061-58c9-4453-8eed-72c96e967a0f", ...}
+```
+(Note: this second `SessionStart`'s `payload_keys` is missing `model` — present on every first-dispatch `SessionStart` recorded elsewhere in this file — a small but real payload-shape difference on a daemon-driven respawn vs. a fresh CLI dispatch, worth a feature-detect/tolerant-parse note alongside G3's stability caveat.)
+
+**Does the roster mark it failed/done?** No — `state` stayed `"blocked"` throughout (stale snapshot 1, then live-and-current at snapshot 2); the literal `"failed"` was never observed for this session. **Does the daemon respawn it?** **Yes — confirmed**, new pid, new `startedAt`, new `SessionStart`+`PreToolUse` hook pair, same session id, same short id, same name; `tasklist` independently corroborates old-pid-dead/new-pid-alive. **Does the roster corrupt?** No — every poll across the whole sequence (pre-kill, +6 s, +36 s, post-cleanup) returned a single well-formed JSON object for `b2079061`, in every case a strict subset of the known key set; no malformed/partial/duplicate entries.
+
+**This is the zombie hazard named in the brief, empirically confirmed, not hypothetical:** a raw `taskkill` against a fleet-managed session's pid does **not** durably stop it — the daemon supervisor detects the dead child and silently restarts the identical session (same sid), which then re-fires `SessionStart`/`PreToolUse` and resumes sitting on the same pending permission prompt. An operator (or a buggy overlay) that raw-kills a worker believing it is now dead is wrong within the observed ~30 s window; any process-liveness check keyed on the old pid would report "gone" while the session is, from the daemon's perspective, still alive and about to be re-driven. **This is the concrete, machine-verified reason CLAUDE.md's rule ("fleet must never do this") is a hard rule and not just caution** — the failure mode is not "the session dies cleanly," it's "the session comes back under your feet with a new pid, silently." The resurrected session was cleanly `claude stop`-ped afterward (`stopped b2079061`) rather than left running or re-killed raw.
+
+**UNOBSERVED, named:** (1) how many times the daemon will keep respawning a raw-killed session if left unattended past the ~30 s window observed here — only one respawn cycle was captured before this task intervened with a clean `stop`; (2) whether the respawn behavior differs for a session that was actively executing a tool (not just pending on a permission prompt) at kill time; (3) exact reconciliation latency between the kill and the roster reflecting the new pid — bounded here only to "somewhere between +6 s (still showing dead-stale `state`, no `pid`) and +36 s (new pid live)," not measured more precisely.
+
+Cleanup: `a3ec4f14`, `ca9462d3`, `9f18a106`, `b2079061` all confirmed `state: "stopped"` in a final roster pass. No foreign session or other `m0-*` husk touched.
+
+### G12: live-verify `claude rm` as the archival primitive (spec §5.1.2) — **CONFIRMED** (roster entry removed, `~/.claude/jobs/<short-id>/` directory removed, no errors, no collateral changes)
+
+**Target.** `b53f232e` (`m0-g2`), the disposable `state: "failed"` husk from Task 5/G2's documented false starts (see the G2 section above — one of three dispatches that hit the Git-Bash backslash-eating hazard).
+
+**Pre-state.** Roster (`--json --all`, 24 total entries), filtered to `id == "b53f232e"`:
+```json
+{"id": "b53f232e", "cwd": "C:\\proga\\claude-fleet\\spike\\m0\\proj", "kind": "background", "startedAt": 1783978256217, "sessionId": "b53f232e-f819-4264-b126-9807f5cfb416", "name": "m0-g2", "state": "failed"}
+```
+`~/.claude/jobs/b53f232e/` (research-only, per G3's pre-registered rule) exists and contains `tmp/` (empty dir), `recap.trigger` (0 bytes), `state.json` (904 bytes) — note **no `timeline.jsonl`** here, unlike the three `jobs/<id>/` dirs sampled in G3 (`0438096a`, `0ac6e5d0`, `80380638`, all of which had one); this failed-at-dispatch session apparently never got far enough to produce a timeline, and has a `recap.trigger` file not seen in any of G3's samples.
+
+**Command and exact output.** `claude rm --help`:
+```
+Usage: claude rm <id>
+
+  Delete a background session and its worktree. Unlike `stop`, works on already-exited sessions.
+```
+`claude rm b53f232e` → exact stdout: `removed b53f232e`. No error, no prompt, no warning.
+
+**Post-state.** Roster (`--json --all`, 23 total entries — exactly one fewer than pre-state), filtered to `id == "b53f232e"`: **zero matches.** Set-difference of pre/post roster ids confirms **exactly one** id removed (`{'b53f232e'}`) and **zero** ids added — no collateral roster change. `Test-Path ~/.claude/jobs/b53f232e` → `False` — the job directory (and everything under it: `tmp/`, `recap.trigger`, `state.json`) is gone.
+
+**Verdict: CONFIRMED.** `claude rm <id>` is a clean, working archival primitive for spec §5.1.2: it removes exactly the targeted roster entry (no partial/corrupted state on the 23 remaining entries) and deletes the backing `~/.claude/jobs/<short-id>/` directory (research-only observation, consistent with the "delete a background session and its worktree" help text), with no error output on a `failed`-state, long-dead target. **UNOBSERVED, named:** (1) `claude rm` against a *live* (still-running) session — not tested, `--help` text doesn't say whether it force-stops first or refuses; (2) `claude rm` against a session that doesn't exist / already removed — idempotency/error-message shape untested; (3) whether `rm` also clears the session's transcript under `~/.claude/projects/<cwd-slug>/<sid>.jsonl` (out of scope for this check — not probed).
+
+Cleanup: none required — `b53f232e` was already terminal (`failed`) before removal; no other session touched by this step.
