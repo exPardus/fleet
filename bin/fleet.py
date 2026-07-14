@@ -4524,6 +4524,8 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run, get_process_info=No
         _doctor_check_log_sizes(),
         _doctor_check_fleet_home_marker(),
         _doctor_check_hook_errors(),
+        _doctor_check_supervisor_claim(),
+        _doctor_check_supervisor_handoff(),
     ]
 
     all_ok = True
@@ -4939,6 +4941,7 @@ def cmd_sup_status(args) -> int:
         "heartbeat_age_seconds": beat_age,
         "handshake": hs,
         "abort_flag": handoff_abort_flag_path().exists(),
+        "nag": supervisor_status_line(),
     }
     if getattr(args, "json", False):
         print(json.dumps(info, indent=2))
@@ -5120,6 +5123,72 @@ def supervisor_goals_active() -> bool:
     except OSError:
         return False
     return "SUPERVISOR-DORMANT" not in text
+
+
+def supervisor_status_line(now=None):
+    """One-line supervisor status/nag for VIEWS (SessionStart hook, doctor,
+    sup-status). File-only by mandate (spec §4 nag predicate + terminal-
+    surface doctrine): no lock, no roster read, no subprocess -- the
+    heartbeat timestamp alone carries liveness, so this may false-fire on a
+    live idle supervisor (accepted: the nag is advisory; seizure stays
+    gated on roster-gone in sup-boot). Never raises; None = GOALS absent
+    or dormant."""
+    try:
+        if not supervisor_goals_active():
+            return None
+        if now is None:
+            now = datetime.now(timezone.utc)
+        claim = read_incarnation()
+        if claim is None:
+            return ("SUPERVISOR: GOALS active, no claim -- boot one "
+                    "(`fleet sup-boot`; see skills/fleet/supervisor.md).")
+        inc = claim.get("incarnation_id", "?")
+        try:
+            age = (now - _parse_iso(claim["heartbeat_at"])).total_seconds()
+        except (KeyError, TypeError, ValueError):
+            return f"SUPERVISOR: claim {inc} heartbeat unreadable -- inspect supervisor/INCARNATION."
+        if age > SUPERVISOR_CLAIM_STALE_SECONDS:
+            return (f"SUPERVISOR: claim {inc} heartbeat stale (~{age / 60:.0f}m > "
+                    f"{SUPERVISOR_CLAIM_STALE_SECONDS / 60:.0f}m) -- boot a new incarnation.")
+        return f"SUPERVISOR: {inc} live, heartbeat {age / 60:.0f}m ago."
+    except Exception:  # noqa: BLE001 -- view: never raises
+        return None
+
+
+def _doctor_check_supervisor_claim():
+    """Spec §4 nag, doctor surface. ALWAYS ok=True -- the nag is advisory
+    (an absent supervisor is a prompt, not a health failure)."""
+    line = supervisor_status_line()
+    if line is None:
+        return ("supervisor-claim", True, "GOALS absent or dormant -- no supervisor expected")
+    return ("supervisor-claim", True, line)
+
+
+def _doctor_check_supervisor_handoff():
+    """FAIL on handoff residue needing an operator: the aborted-handoff flag
+    (sup-handoff-abort wrote it) or a HANDSHAKE older than the handoff
+    timeout (orphan from a crash mid-handoff -- the seize path will delete
+    it, but doctor should not wait for a seize to notice)."""
+    parts = []
+    ok = True
+    if handoff_abort_flag_path().exists():
+        ok = False
+        parts.append(f"aborted-handoff flag present ({handoff_abort_flag_path().name}) -- "
+                     f"review supervisor/JOURNAL.md, delete the flag once resolved")
+    if handshake_path().exists():
+        try:
+            age = time.time() - handshake_path().stat().st_mtime
+        except OSError:
+            age = None
+        if age is None or age > SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS:
+            ok = False
+            parts.append("stale supervisor/HANDSHAKE (older than the handoff timeout) -- "
+                         "orphan from a crashed handoff; safe to delete manually")
+        else:
+            parts.append("HANDSHAKE present (handoff in flight)")
+    if not parts:
+        parts.append("no handoff in flight, no aborted-handoff flag")
+    return ("supervisor-handoff", ok, " | ".join(parts))
 
 
 # ---------------------------------------------------------------------------
