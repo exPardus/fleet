@@ -4878,6 +4878,95 @@ def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
     return rc
 
 
+def _require_claim_holder(sid_override=None):
+    """(claim, caller_sid) iff the caller holds the claim; FleetCliError
+    otherwise. Enforces spec §4's journal single-writer rule at the only
+    write chokepoint. Caller MUST already hold fleet_lock."""
+    claim = read_incarnation()
+    if claim is None:
+        raise FleetCliError("no supervisor claim exists -- run `fleet sup-boot` first")
+    caller = sid_override or current_caller_session()
+    if not caller:
+        raise FleetCliError("caller session unknown -- pass --sid or run from a Claude session")
+    if caller != claim.get("session_id"):
+        raise FleetCliError(
+            f"caller sid {caller} does not hold the claim (holder: "
+            f"{claim.get('incarnation_id', '?')} sid {claim.get('session_id')}) -- "
+            f"the journal is single-writer, claim-holder-only (spec §4)")
+    return claim, caller
+
+
+def cmd_sup_checkpoint(args) -> int:
+    """`fleet sup-checkpoint <body|@file> [--kind CHECKPOINT|PROPOSAL] [--sid S]`.
+    Every checkpoint refreshes the heartbeat (spec §4: 'the holder refreshes
+    at every checkpoint/beat')."""
+    body = _read_task_arg(args.body)
+    with fleet_lock():
+        claim, caller = _require_claim_holder(getattr(args, "sid", None))
+        supervisor_journal_append(args.kind, claim["incarnation_id"], caller, body)
+        claim["heartbeat_at"] = now_iso()
+        write_incarnation(claim)
+    print(f"checkpointed ({args.kind}) as {claim['incarnation_id']}; heartbeat refreshed")
+    return 0
+
+
+def cmd_sup_heartbeat(args) -> int:
+    """`fleet sup-heartbeat [--sid S]` -- beat without journal spam (GOALS
+    frugality: a beat is not an event worth a checkpoint)."""
+    with fleet_lock():
+        claim, _ = _require_claim_holder(getattr(args, "sid", None))
+        claim["heartbeat_at"] = now_iso()
+        write_incarnation(claim)
+    print(f"heartbeat refreshed for {claim['incarnation_id']}")
+    return 0
+
+
+def cmd_sup_status(args) -> int:
+    """`fleet sup-status [--json]` -- READ-ONLY VIEW (terminal-surface
+    doctrine: no lock, no probe, no write). Safe lock-free reads: all
+    supervisor state files are written atomically."""
+    claim = read_incarnation()
+    hs = read_handshake()
+    beat_age = None
+    if claim is not None:
+        try:
+            beat_age = (datetime.now(timezone.utc) - _parse_iso(claim["heartbeat_at"])).total_seconds()
+        except (KeyError, TypeError, ValueError):
+            beat_age = None
+    info = {
+        "goals_active": supervisor_goals_active(),
+        "incarnation": claim,
+        "heartbeat_age_seconds": beat_age,
+        "handshake": hs,
+        "abort_flag": handoff_abort_flag_path().exists(),
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(info, indent=2))
+        return 0
+    if claim is None:
+        print("supervisor: no claim" + (" (GOALS active -- start one: `fleet sup-boot`)"
+                                        if info["goals_active"] else ""))
+    else:
+        age = f"{beat_age:.0f}s ago" if beat_age is not None else "unreadable"
+        print(f"supervisor: {claim.get('incarnation_id', '?')} sid={claim.get('session_id')} "
+              f"via {claim.get('claimed_via', '?')}, heartbeat {age}")
+    if hs is not None:
+        print(f"handshake: {hs.get('incarnation_id')} sid={hs.get('session_id')} (handoff in flight)")
+    if info["abort_flag"]:
+        print(f"WARNING: aborted-handoff flag present ({handoff_abort_flag_path()})")
+    return 0
+
+
+def supervisor_goals_active() -> bool:
+    """GOALS.md exists and is not parked. Operator parks the nag by adding
+    the literal token SUPERVISOR-DORMANT anywhere in GOALS.md."""
+    try:
+        text = goals_path().read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return "SUPERVISOR-DORMANT" not in text
+
+
 # ---------------------------------------------------------------------------
 # CLI: argparse wiring + main()
 # ---------------------------------------------------------------------------
@@ -4993,6 +5082,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_supboot.add_argument("--handoff-inc", dest="handoff_inc",
                            help="handoff-successor mode: write HANDSHAKE with this incarnation id; no claim action")
 
+    p_supckpt = sub.add_parser("sup-checkpoint", help="append a supervisor journal checkpoint (claim holder only) + refresh heartbeat")
+    p_supckpt.add_argument("body", help="checkpoint text, or @file")
+    p_supckpt.add_argument("--kind", choices=["CHECKPOINT", "PROPOSAL"], default="CHECKPOINT")
+    p_supckpt.add_argument("--sid", help="override caller session id")
+
+    p_supbeat = sub.add_parser("sup-heartbeat", help="refresh the supervisor claim heartbeat (no journal write)")
+    p_supbeat.add_argument("--sid", help="override caller session id")
+
+    p_supstat = sub.add_parser("sup-status", help="read-only supervisor claim/handshake status")
+    p_supstat.add_argument("--json", action="store_true")
+
     return parser
 
 
@@ -5036,6 +5136,12 @@ def main(argv=None) -> int:
             return cmd_doctor(args)
         if args.command == "sup-boot":
             return cmd_sup_boot(args)
+        if args.command == "sup-checkpoint":
+            return cmd_sup_checkpoint(args)
+        if args.command == "sup-heartbeat":
+            return cmd_sup_heartbeat(args)
+        if args.command == "sup-status":
+            return cmd_sup_status(args)
         parser.error(f"unknown command {args.command!r}")
         return 2
     except RegistryCorruptError as exc:
