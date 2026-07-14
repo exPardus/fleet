@@ -99,7 +99,7 @@ No daemon in the core loop: every `fleet` command is a short-lived CLI invocatio
 
 ## Quickstart
 
-**Requirements today:** Windows 10+, PowerShell, Git Bash, Python via `py -3.13`, Claude Code CLI ≥ 2.1.202. Portability to Linux/macOS is speccced and `ready-for-build` ([`docs/specs/portability.md`](docs/specs/portability.md)) — not yet shipped.
+**Requirements today:** Windows 10+, PowerShell, Git Bash, Python via `py -3.13`, Claude Code CLI ≥ 2.1.202. Portability to Linux/macOS is specced and `ready-for-build` ([`docs/specs/portability.md`](docs/specs/portability.md)) — not yet shipped.
 
 ```powershell
 # 1. Clone, add bin\ to PATH
