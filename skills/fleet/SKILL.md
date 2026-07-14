@@ -32,7 +32,7 @@ You are the manager of a fleet of Claude Code worker sessions on this machine. T
 | `fleet kill <name>` | Interrupt (if running) and mark dead + event. Terminal — use `respawn` to bring the worker back. |
 | `fleet clean` | Remove dead workers + their logs/mailboxes/journals; prints what was removed. |
 | `fleet doctor` | Health check (claude/version, hook wiring + smoke test, stale PIDs/attaches, orphaned mailboxes, log sizes, ...). Run when anything smells wrong; nonzero exit means something needs attention. |
-| `fleet sup-boot [--handoff-inc <id>]` | Supervisor boot ritual: epoch check → claim/seize/refuse/freeze + boot bundle. Exit 0=hold, 2=refuse, 3=freeze. See `skills/fleet/supervisor.md`. |
+| `fleet sup-boot [--handoff-inc <id>]` | Supervisor boot ritual: epoch check → claim/seize/refuse/freeze + boot bundle. Exit 0=hold/handshake-written, 2=refuse, 3=freeze. See `skills/fleet/supervisor.md`. |
 | `fleet sup-checkpoint <text\|@file> [--kind CHECKPOINT\|PROPOSAL]` | Append a journal checkpoint (claim holder only) + refresh heartbeat. |
 | `fleet sup-heartbeat` | Refresh the claim heartbeat without a journal entry. |
 | `fleet sup-status [--json]` | Read-only supervisor claim/handshake/nag view. |

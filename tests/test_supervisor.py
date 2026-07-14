@@ -84,6 +84,19 @@ class TestJournal:
         assert fleet.supervisor_journal_entries() == []
         assert fleet.supervisor_journal_latest() is None
 
+    def test_header_injection_in_body_is_escaped(self, sup_home):
+        fleet.supervisor_journal_append("BOOT", "inc-a", "sid-1", "ok")
+        evil_line = "## 2099-01-01T00:00:00Z CHECKPOINT inc=inc-evil sid=sid-evil"
+        fleet.supervisor_journal_append("CHECKPOINT", "inc-a", "sid-1",
+                                        f"legit body\n{evil_line}\nmore legit body")
+        entries = fleet.supervisor_journal_entries()
+        assert [e["kind"] for e in entries] == ["BOOT", "CHECKPOINT"]
+        assert entries[1]["inc"] == "inc-a" and entries[1]["sid"] == "sid-1"
+        assert evil_line in entries[1]["body"]
+        latest = fleet.supervisor_journal_latest()
+        assert latest["inc"] != "inc-evil"
+        assert latest["inc"] == "inc-a"
+
 
 def _claim(inc="inc-old", sid="sid-old", beat=None):
     beat = beat or NOW - timedelta(seconds=60)
@@ -133,6 +146,24 @@ class TestClaimDecision:
         c["heartbeat_at"] = "garbage"
         v, _ = fleet.supervisor_claim_decision(c, set(), None, now=NOW)
         assert v == "freeze"
+
+    def test_foreign_but_not_fresher_checkpoint_falls_through_to_seize(self):
+        # journal's latest entry is a DIFFERENT incarnation but OLDER than
+        # the claim's heartbeat -- the normal dead-post-handoff-successor
+        # recovery path. A "refuse on any foreign inc" refactor must fail
+        # this test.
+        c = _claim(inc="inc-old", beat=NOW - timedelta(seconds=7200))
+        latest = {"ts": _iso(NOW - timedelta(seconds=8000)), "kind": "CHECKPOINT",
+                  "inc": "inc-other", "sid": "sid-other", "body": ""}
+        v, _ = fleet.supervisor_claim_decision(c, set(), latest, now=NOW)
+        assert v == "seize"
+
+    def test_foreign_checkpoint_unparseable_ts_falls_through(self):
+        c = _claim(inc="inc-old", beat=NOW - timedelta(seconds=7200))
+        latest = {"ts": "garbage", "kind": "CHECKPOINT",
+                  "inc": "inc-other", "sid": "sid-other", "body": ""}
+        v, _ = fleet.supervisor_claim_decision(c, set(), latest, now=NOW)
+        assert v == "seize"
 
 
 class TestEpochCheck:

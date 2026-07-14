@@ -4688,7 +4688,15 @@ def supervisor_journal_append(kind: str, inc: str, sid: str, body: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         path.write_text(_SUPERVISOR_JOURNAL_SEED, encoding="utf-8")
-    entry = f"\n## {now_iso()} {kind} inc={inc} sid={sid}\n\n{body.rstrip()}\n"
+    # Header-injection escape: a body line that itself looks like an entry
+    # header (e.g. a quoted/pasted journal excerpt) must never be able to
+    # parse back out as a real entry -- prefix it with a space so
+    # _SUPERVISOR_ENTRY_RE no longer matches (line no longer starts with "##").
+    safe_body = "\n".join(
+        f" {line}" if _SUPERVISOR_ENTRY_RE.match(line) else line
+        for line in body.rstrip().splitlines()
+    )
+    entry = f"\n## {now_iso()} {kind} inc={inc} sid={sid}\n\n{safe_body}\n"
     with open(path, "a", encoding="utf-8") as f:
         f.write(entry)
 
@@ -5012,8 +5020,12 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     if getattr(args, "permission_mode", None):
         argv += ["--permission-mode", args.permission_mode]
     argv.append(f"Read {task_path.as_posix()} and follow it exactly.")
-    proc = run(argv, capture_output=True, text=True, encoding="utf-8",
-               errors="replace", timeout=120)
+    try:
+        proc = run(argv, capture_output=True, text=True, encoding="utf-8",
+                   errors="replace", timeout=120)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise FleetCliError(f"successor dispatch failed: {exc} -- no successor to stop; "
+                            f"claim unchanged, duty continues")
     if proc.returncode != 0:
         raise FleetCliError(f"successor dispatch failed (exit {proc.returncode}): "
                             f"{(proc.stderr or '').strip()[:300]} -- no successor to stop; "
@@ -5102,8 +5114,14 @@ def cmd_sup_handoff_abort(args, which=shutil.which, run=subprocess.run) -> int:
         claim["heartbeat_at"] = now_iso()   # old resumes duty
         write_incarnation(claim)
     exe = resolve_claude_executable(which=which)
-    proc = run([exe, "stop", args.successor_sid], capture_output=True, text=True,
-               encoding="utf-8", errors="replace", timeout=60)
+    try:
+        proc = run([exe, "stop", args.successor_sid], capture_output=True, text=True,
+                   encoding="utf-8", errors="replace", timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"WARNING: `claude stop {args.successor_sid}` stop failed "
+              f"({exc}) -- successor may still be live; stop it manually via the "
+              f"agents menu. Abort flag is set either way.")
+        return 0
     if proc.returncode != 0:
         print(f"WARNING: `claude stop {args.successor_sid}` stop failed "
               f"(exit {proc.returncode}: {(proc.stderr or '').strip()[:200]}) -- "
