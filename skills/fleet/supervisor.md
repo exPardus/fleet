@@ -11,6 +11,9 @@ Soul = `supervisor/GOALS.md` (operator-owned) + `supervisor/JOURNAL.md`
    tail, knowledge index, roster, fleet status).
 2. Act on the VERDICT line:
    - `claim` / `seize` (exit 0): you hold the claim. Continue the duty.
+     (A claim-pending successor booted via `--handoff-inc` also exits 0
+     without holding a claim yet — it has only written HANDSHAKE; see the
+     "Successor" note below.)
    - `refuse` (exit 2): another supervisor is live. Report read-only and STOP.
    - `freeze` (exit 3): ambiguity (daemon restart? G9). PAGE THE OPERATOR.
      Never seize, never mass-respawn.
