@@ -306,3 +306,144 @@ class TestSupStatus:
         args = SimpleNamespace(json=False)
         assert fleet.cmd_sup_status(args) == 0
         assert "no claim" in capsys.readouterr().out.lower()
+
+
+class TestHandoff:
+    def _hold(self, sid="sid-old", inc="inc-old"):
+        fleet.write_incarnation({"incarnation_id": inc, "session_id": sid,
+                                 "claimed_at": _iso(NOW), "heartbeat_at": _iso(NOW),
+                                 "claimed_via": "fresh"})
+
+    def _begin(self, run, sid="sid-old"):
+        args = SimpleNamespace(sid=sid, model=None, permission_mode=None)
+        return fleet.cmd_sup_handoff_begin(args, which=_fake_which, run=run,
+                                           sleep=lambda s: None)
+
+    @staticmethod
+    def _dispatch_then_roster(successor_sid="sid-new"):
+        """run double. Call order in cmd_sup_handoff_begin is: pre-dispatch
+        roster fetch, --bg dispatch, then roster polls -- so the fake is
+        STATEFUL: the successor appears in the roster only after the
+        dispatch call has been observed."""
+        state = {"name": None}
+        calls = []
+        def run(argv, **kw):
+            calls.append(argv)
+            if "--bg" in argv:
+                state["name"] = next(a for a in argv if a.startswith("sup|"))
+                return SimpleNamespace(returncode=0, stdout="backgrounded · abc123 · sup\n", stderr="")
+            entries = [{"sessionId": "sid-old", "status": "busy"}]
+            if state["name"]:
+                entries.append({"sessionId": successor_sid, "status": "busy",
+                                "name": state["name"]})
+            return SimpleNamespace(returncode=0, stdout=json.dumps(entries), stderr="")
+        run.calls = calls
+        return run
+
+    def test_begin_journals_writes_taskfile_joins_sid(self, sup_home, capsys):
+        self._hold()
+        run = self._dispatch_then_roster()
+        rc = self._begin(run)
+        assert rc == 0
+        latest_kinds = [e["kind"] for e in fleet.supervisor_journal_entries()]
+        assert "HANDOFF-BEGIN" in latest_kinds
+        out = capsys.readouterr().out
+        assert "SUCCESSOR-SID: sid-new" in out and "SUCCESSOR-INC: inc-" in out
+        taskfiles = list((sup_home / "state").glob("supervisor-handoff-*.md"))
+        assert len(taskfiles) == 1
+        body = taskfiles[0].read_text(encoding="utf-8")
+        assert "sup-boot --handoff-inc" in body and "NO spawn" in body
+        dispatch = next(c for c in run.calls if "--bg" in c)
+        assert any(a.startswith("sup|inc-") for a in dispatch)
+
+    def test_begin_doa_when_successor_never_appears(self, sup_home, capsys, monkeypatch):
+        # shrink the verify window: with a no-op sleep the real 60s window
+        # would busy-spin for a full minute of wall clock
+        monkeypatch.setattr(fleet, "SUPERVISOR_ROSTER_VERIFY_SECONDS", 0.05)
+        self._hold()
+        def run(argv, **kw):
+            if "--bg" in argv:
+                return SimpleNamespace(returncode=0, stdout="backgrounded · abc · sup\n", stderr="")
+            return SimpleNamespace(returncode=0, stdout=json.dumps(
+                [{"sessionId": "sid-old", "status": "busy"}]), stderr="")
+        rc = self._begin(run)
+        assert rc == 1
+        assert "DOA" in capsys.readouterr().out
+
+    def test_begin_refused_for_non_holder(self, sup_home):
+        self._hold(sid="sid-holder")
+        with pytest.raises(fleet.FleetCliError):
+            self._begin(self._dispatch_then_roster(), sid="sid-imposter")
+
+    def test_complete_transfers_on_dual_match(self, sup_home):
+        self._hold()
+        fleet.write_handshake("inc-succ", "sid-new")
+        args = SimpleNamespace(sid="sid-old", expect_inc="inc-succ", expect_sid="sid-new")
+        assert fleet.cmd_sup_handoff_complete(args) == 0
+        claim = fleet.read_incarnation()
+        assert claim["incarnation_id"] == "inc-succ" and claim["session_id"] == "sid-new"
+        assert claim["claimed_via"] == "handoff"
+        assert fleet.read_handshake() is None
+        latest = fleet.supervisor_journal_latest()
+        assert latest["kind"] == "HANDOFF-COMPLETE" and latest["inc"] == "inc-old"
+
+    def test_complete_refuses_on_inc_mismatch(self, sup_home):
+        self._hold()
+        fleet.write_handshake("inc-WRONG", "sid-new")
+        args = SimpleNamespace(sid="sid-old", expect_inc="inc-succ", expect_sid="sid-new")
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_sup_handoff_complete(args)
+        assert fleet.read_incarnation()["incarnation_id"] == "inc-old"
+        assert fleet.read_handshake() is not None
+
+    def test_complete_refuses_when_no_handshake(self, sup_home):
+        self._hold()
+        args = SimpleNamespace(sid="sid-old", expect_inc="inc-succ", expect_sid="sid-new")
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_sup_handoff_complete(args)
+
+    def test_abort_stops_successor_flags_and_resumes(self, sup_home, capsys):
+        self._hold()
+        fleet.write_handshake("inc-succ", "sid-new")
+        stopped = []
+        def run(argv, **kw):
+            stopped.append(argv)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        args = SimpleNamespace(sid="sid-old", successor_sid="sid-new")
+        assert fleet.cmd_sup_handoff_abort(args, which=_fake_which, run=run) == 0
+        assert stopped and stopped[0][-2:] == ["stop", "sid-new"]
+        assert fleet.read_handshake() is None
+        assert fleet.handoff_abort_flag_path().exists()
+        assert fleet.supervisor_journal_latest()["kind"] == "HANDOFF-ABORT"
+        assert fleet.read_incarnation()["incarnation_id"] == "inc-old"  # old resumes duty
+
+    def test_abort_reports_failed_stop_but_still_flags(self, sup_home, capsys):
+        self._hold()
+        def run(argv, **kw):
+            return SimpleNamespace(returncode=1, stdout="", stderr="no such session")
+        args = SimpleNamespace(sid="sid-old", successor_sid="sid-gone")
+        assert fleet.cmd_sup_handoff_abort(args, which=_fake_which, run=run) == 0
+        assert fleet.handoff_abort_flag_path().exists()
+        assert "stop failed" in capsys.readouterr().out.lower()
+
+    def test_begin_clears_previous_abort_flag(self, sup_home):
+        self._hold()
+        fleet._write_json_atomic(fleet.handoff_abort_flag_path(), {"stale": True})
+        self._begin(self._dispatch_then_roster())
+        assert not fleet.handoff_abort_flag_path().exists()
+
+    def test_handoff_timeout_drill_end_to_end(self, sup_home):
+        """Spec §4 failure branch: begin -> successor never handshakes ->
+        complete refuses -> abort stops the limbo successor and old resumes."""
+        self._hold()
+        rc = self._begin(self._dispatch_then_roster())
+        assert rc == 0
+        args = SimpleNamespace(sid="sid-old",
+                               expect_inc="inc-whatever", expect_sid="sid-new")
+        with pytest.raises(fleet.FleetCliError):   # no HANDSHAKE was written
+            fleet.cmd_sup_handoff_complete(args)
+        def stop_run(argv, **kw):
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        abort = SimpleNamespace(sid="sid-old", successor_sid="sid-new")
+        assert fleet.cmd_sup_handoff_abort(abort, which=_fake_which, run=stop_run) == 0
+        assert fleet.read_incarnation()["session_id"] == "sid-old"
