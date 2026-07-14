@@ -392,3 +392,86 @@ Example (m0-g8-file final assistant record, quoted from the transcript): `"usage
 - **(b) Cost — token usage CONFIRMED / USD REFUTED-for-contract.** Token counts (`input_tokens`, `output_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`) live **only** in the transcript's assistant records (`message.usage`), per-API-call; no sanctioned source (roster, Stop payload key set, transcript) carries a USD figure anywhere. USD must be **computed** by the overlay from summed usage × model pricing (`message.model` is in the same record). The only other numeric candidate (`jobs/<id>/state.json` `tokens`) is an unsanctioned internal file and is excluded by the pre-registered rule.
 
 **UNOBSERVED, named:** (1) value/shape of `last_assistant_message` (probe logged keys only); (2) usage aggregation semantics across a multi-assistant-record turn (whether summing per-record `usage` double-counts given the nested `iterations` key — not decomposed here); (3) any state literal other than `done/stopped/failed/working/blocked` (no `killed`/`error` literal seen); (4) `state` field on a live interactive session — never observed, but only 4 foreign samples exist; (5) whether transcript key names survive a CLI version bump (single version 2.1.207 observed). **No HALT** — result text has a working sanctioned path; USD-cost absence is a compute-it-yourself gap, not a blocker, and matches the spec's Stop-hook outcome-record assumption that the hook, not the roster, is the outcome source.
+
+### G7: Does a `--bg` session survive as a self-driven heartbeat, and what happens to the scheduler when `claude stop` kills it? — heartbeat primitive **CONFIRMED**; same-sid restart anomaly **CONFIRMED as daemon-owned rate-limit auto-retry** (trigger process itself UNOBSERVED beyond the daemon's own job record); post-`stop` scheduler death **CONFIRMED**
+
+**Task/dispatch (by the now-dead originating agent, not reconstructed here).** `spike/m0/proj/heartbeat-task.md`:
+```
+# Heartbeat probe
+1. Append one line containing the current time to `beats.log` in this directory
+   (use the Bash tool: `date >> beats.log`).
+2. If you have ANY capability to schedule yourself to wake up again in ~2
+   minutes (a ScheduleWakeup tool, a /loop skill, a self-reminder), invoke it
+   now to repeat step 1. If you have no such capability, reply with exactly:
+   NO-SCHEDULER and stop.
+```
+Dispatched as `-n m0-beat`, sid `8beb709a-bacf-4575-97d3-fdf13176358a`, model haiku, `--settings ..\worker-settings.json --permission-mode acceptEdits`, cwd `spike/m0/proj`.
+
+**Method.** Read-only inspection of three sources for the same sid: (1) `spike/m0/out/events.jsonl` (84 hook events for `8beb709a`, SessionStart/PreToolUse/PostToolUse/Stop cycles), (2) the session's own transcript (307 records, path from any Stop event's `transcript_path`: `C:\Users\Techn\.claude\projects\C--proga-claude-fleet-spike-m0-proj\8beb709a-bacf-4575-97d3-fdf13176358a.jsonl`), (3) the daemon's internal job record `~/.claude/jobs/8beb709a/{timeline.jsonl,state.json}` (unsanctioned per G3's pre-registered rule — corroboration only, no verdict rests solely on it). Then one live action: `claude stop 8beb709a`, followed by a 5-minute poll of `beats.log`'s line count.
+
+**Heartbeat mechanism — CONFIRMED, tool call quoted verbatim.** Every steady-state beat is two assistant turns of one API call each: a `Bash` call (`date >> beats.log`) immediately followed by a `ScheduleWakeup` tool call. Exact tool_use input, unchanged across 15+ beats:
+```json
+{"delaySeconds":120,"prompt":"Read heartbeat-task.md in this directory and follow it.","reason":"Repeating heartbeat probe every ~2 minutes"}
+```
+Its tool_result, exact text (timestamps vary):
+```
+Next wakeup scheduled for 03:06:00 (in 166s). Nothing more to do this turn — the harness re-invokes you when the wakeup fires or a task-notification arrives.
+```
+At the scheduled instant the harness delivers a fresh **user** turn with `isMeta:true`, `promptSource:"system"`, `queuePriority:"later"`, literal content `"Read heartbeat-task.md in this directory and follow it."` — e.g. transcript record 40, `timestamp:"2026-07-13T22:06:00.614Z"`, immediately preceded by two `queue-operation` records at the identical timestamp. This confirms the loop is entirely self-driven: the session's own `ScheduleWakeup` tool call is both necessary and sufficient — no external cron, no fleet-side poller, re-arms the next beat.
+
+**Evidence of ≥15 beats spanning session state.** `spike/m0/proj/beats.log` (16 lines at first read, growing) cross-checked line-for-line against `events.jsonl`'s 16 Stop events for `8beb709a` (03:03:18 → 05:02:11, then continuing) — every `beats.log` timestamp has a matching `PreToolUse(Bash)/PostToolUse/PreToolUse(ScheduleWakeup)/PostToolUse/Stop` quintet in `events.jsonl`, e.g. beat 1: `beats.log` line `"Tue, Jul 14, 2026 03:03:13 AM"` ↔ `events.jsonl` `PostToolUse` at `03:03:13`, `Stop` at `03:03:18`. Cadence measured from `events.jsonl` Stop timestamps in run 1: `03:03:18, 03:06:11, 03:09:11, 03:12:09, 03:15:11, 03:18:10, 03:21:10, 03:24:10, 03:27:11, 03:29:19` — mean interval 172s (range 165–182s), i.e. `delaySeconds:120` plus harness delivery latency of ~50s, consistently in the ~3-min band per the brief.
+
+**Session-state-between-beats: CONFIRMED context-preserving, not a fresh process per beat.** Each beat's `cache_read_input_tokens` monotonically increases across the whole run (steady-state beats, transcript `message.usage`): `39870 → 40414 → 41692 → 41858 → 42219 → 42338 → …→ 49090 → 49306` — the growing cache-read count is only possible if the same underlying conversation/session context is reused turn over turn; a fresh process per beat would reset it. Steady-state per-beat cost (2 API calls per beat, haiku): call 1 (do the work) `in≈10, out≈200, cache_creation≈120, cache_read≈(running total)`; call 2 (wrap-up text) `in≈8, out≈40, cache_creation≈330, cache_read≈(running total + call-1's cache_creation)`. Example, beat at `23:51` (steady state, post-restart): call 1 `{"input_tokens":10,"output_tokens":203,"cache_creation_input_tokens":119,"cache_read_input_tokens":46751}`; call 2 `{"input_tokens":8,"output_tokens":40,"cache_creation_input_tokens":329,"cache_read_input_tokens":46870}`. **USD cost: same REFUTED-for-contract finding as G3** — no dollar figure in any sanctioned source; only token counts, confirmed here as a second independent sample.
+
+**The same-sid restart anomaly (03:32 → 04:48, 76 min) — root cause CONFIRMED as a rate-limit block + daemon-driven auto-retry; the process that finally delivered the resume is UNOBSERVED beyond the daemon's own bookkeeping.**
+
+At the 10th beat's next-scheduled wakeup (`03:32:00`), the harness re-invoked the session normally (transcript record 198, `isMeta` user turn, identical shape to every prior beat), but the API call itself failed. Exact assistant record (transcript record 201, verbatim):
+```json
+{"model":"<synthetic>","role":"assistant","stop_details":null,"stop_reason":"stop_sequence",
+ "content":[{"type":"text","text":"You've hit your session limit — resets 4:40am (Asia/Qyzylorda)"}]},
+"error":"rate_limit","isApiErrorMessage":true,"apiErrorStatus":429
+```
+`usage` on this record is all-zero — no real model call was made. **Critically, this error turn contains no tool_use at all**, so no `ScheduleWakeup` was re-armed: the self-driven loop terminated here, not by the scheduler's own choice but because the 429 pre-empted the turn before the assistant could reach its `ScheduleWakeup` call. This is corroborated independently by `~/.claude/jobs/8beb709a/timeline.jsonl`, whose state transitions from `working` straight to `blocked` at the identical instant (`"at":"2026-07-13T22:32:01.933Z","state":"blocked","detail":"You've hit your session limit · resets 4:40am (Asia/Qyzylorda)"`) — and `state.json`'s `"selfWake": true` / `"inFlight":{"kinds":["session_cron"]}` fields confirm the daemon itself models this session as a self-waking cron-kind job, distinct from `--bg --resume` steering (G2).
+
+`beats.log` and `events.jsonl` both go silent for exactly this window (last run-1 Stop `03:29:19`; no SessionStart until `04:48:10` — a 79-minute gap from the 03:29 Stop, 76 minutes from the 03:32 block). The stated reset (`4:40am`) came and went with **no** automatic resume at 4:40 — the actual resume landed 8 minutes later, at `04:48:10`/`23:48:10Z`.
+
+Transcript records 205–207 (verbatim, same `promptId:"2a993c97-fd27-4571-bb96-7caec20f083c"` on both):
+```json
+{"type":"user","message":{"content":[{"type":"text","text":"Continue from where you left off."}]},
+ "isMeta":true,"timestamp":"2026-07-13T23:48:10.741Z"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"No response requested."}]},
+ "isApiErrorMessage":false,"timestamp":"2026-07-13T23:48:10.741Z"}   // synthetic, all-zero usage
+{"type":"user","message":{"content":"continue"},
+ "origin":{"kind":"human"},"promptSource":"typed","timestamp":"2026-07-13T23:48:14.901Z"}
+```
+The second, `"continue"` (promptSource `"typed"`, `origin.kind:"human"`), is the one that actually resumes the loop: the very next assistant record (23:48:18.735Z) is a real haiku call (46,405 cache-creation tokens — a full context re-prime after the idle gap) that re-issues the `Bash`/`ScheduleWakeup` pair and the beat cadence resumes normally from there (16 further beats observed through `05:05:07`, identical cadence/shape to run 1).
+
+`~/.claude/jobs/8beb709a/timeline.jsonl` independently records this exact moment as `{"at":"2026-07-13T23:48:15.758Z","state":"blocked","detail":"continue"}` — the daemon's own job tracker logs the resume trigger's text as literally `"continue"`, matching the transcript's second, "typed" record.
+
+**Interpretation (honest, evidence-bounded):** the daemon models this session as a `session_cron`/`selfWake:true` job (per `state.json`), and its own job-timeline records the resume as an internal `"continue"` event at `23:48:15.758Z` — i.e., the daemon's bookkeeping, not just the transcript, shows the resume originating from its own retry path rather than from a `--bg --resume` fork (no new sid was minted — same `8beb709a-bacf-4575-97d3-fdf13176358a` throughout, confirmed by both `events.jsonl`'s second `SessionStart` for the identical `session_id` and `state.json`'s `resumeSessionId == sessionId`). This rules out G2's fork mechanism as the explanation. **What is not observed:** no daemon log file exists on this machine (`~/.claude/daemon/` holds only `control.key`, `pipe.key`, `roster.json`, `dispatch/`, `pty-pids/` — no `.log`), so the process/trigger that actually issued the `"continue"` delivery at `23:48:14.901Z` (8 minutes past the stated `4:40am` reset) cannot be traced further than "the daemon's own selfWake/session_cron machinery, evidenced by its job-timeline entry" — whether that is a fixed retry-poll interval, an on-next-daemon-tick check, or something else is **UNOBSERVED**. Checked and ruled out as the trigger: the concurrent `explore-ui-cli-report.md` (Task 7/9's UI probe) — its own transcript shows it only ever touched `m0-ui-*` disposable sessions and read `m0-beat`'s roster row read-only; it never issued `--resume`/`attach`/`stop` against `8beb709a`. No human operator action is recorded anywhere in this spike's controller logs for that window. **Named UNOBSERVED, not glossed over:** the identity of the specific mechanism (daemon background thread vs. next-`claude`-invocation side-effect vs. something else) that materializes the `"continue"` prompt against a rate-limited self-wake session, and why it fired at +8min past the stated reset rather than exactly at reset.
+
+**Post-`stop` scheduler behavior — CONFIRMED: `claude stop` kills the self-wake loop; it does not survive the process.**
+
+Method: two roster snapshots + a 5-minute `beats.log` poll.
+
+Snapshot 1 (immediately before stop, `2026-07-14 05:05:27 AM`), session mid-loop with a wakeup already queued for `05:08:00` (per the transcript's last tool_result: `"Next wakeup scheduled for 05:08:00 (in 172s)."`, last beat logged `05:05:07`):
+```json
+{"pid": 47284, "id": "8beb709a", "cwd": "C:\\proga\\claude-fleet\\spike\\m0\\proj", "kind": "background",
+ "startedAt": 1783986489446, "sessionId": "8beb709a-bacf-4575-97d3-fdf13176358a", "name": "m0-beat",
+ "status": "idle", "state": "working"}
+```
+`claude stop 8beb709a` → exact stdout: `stopped 8beb709a` (run `2026-07-14 05:05:34 AM`).
+
+Snapshot 2 (immediately after stop, same poll):
+```json
+{"id": "8beb709a", "cwd": "C:\\proga\\claude-fleet\\spike\\m0\\proj", "kind": "background",
+ "startedAt": 1783980172298, "sessionId": "8beb709a-bacf-4575-97d3-fdf13176358a", "name": "m0-beat",
+ "state": "stopped"}
+```
+Terminal roster state is `"state": "stopped"` — `pid`/`status` both dropped (consistent with G3's dead-entry field-presence table). Note `startedAt` changed value across the stop (`1783986489446` → `1783980172298`), a second independent sample of the drift G3 first flagged.
+
+`beats.log` line count at stop time: 17 lines, last line `"Tue, Jul 14, 2026 05:05:07 AM"`. Polled every 15s for 300s (5 min ≥ one full 172s beat period plus margin) starting `05:05:34`, spanning the already-queued `05:08:00` wakeup: line count and tail unchanged throughout — **no new line appeared**, confirming the queued `05:08:00` wakeup never fired once the backing process was killed. **Verdict: the `ScheduleWakeup` mechanism is entirely within-process — it does not survive `claude stop`, even when a wakeup was already committed/scheduled at stop time.** This directly answers the design-relevant question: fleet's overlay cannot rely on a stopped/killed worker's self-wake continuing in the background; `stop` is a true kill, not a pause.
+
+**Net G7 verdict.** Heartbeat primitive: **CONFIRMED** — `ScheduleWakeup(delaySeconds, prompt, reason)` is a real, working, in-session self-rearming tool; 26+ beats observed across two runs at ~172s mean cadence, session context (cache-read tokens) provably continuous across beats. Same-sid restart anomaly: **CONFIRMED mechanism (rate-limit block killed the loop mid-turn before `ScheduleWakeup` could re-arm) + CONFIRMED same-sid resume path (daemon-owned `session_cron`/`selfWake` job, not a G2-style fork)**; the specific external trigger for the +8min-late resume is **UNOBSERVED**, named explicitly above, with the UI-probe agent and any human operator affirmatively ruled out as candidates. Post-stop behavior: **CONFIRMED** — `claude stop` terminates the self-wake loop permanently; a previously-scheduled wakeup does not fire after the process is killed (5-minute poll, zero new `beats.log` lines, spanning a wakeup that was already queued at stop time).
+
+Cleanup: only `8beb709a` was targeted by `claude stop`. `m0-reap`, `m0-ui-*`, and all foreign sessions untouched throughout this task.
