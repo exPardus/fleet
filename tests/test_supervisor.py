@@ -251,8 +251,12 @@ class TestSupBoot:
 
 class TestCheckpointHeartbeat:
     def _hold(self, sid="sid-me", inc="inc-me"):
+        # Seed the heartbeat strictly in the past: now_iso() truncates to
+        # whole seconds, so a same-second seed would let `>=` pass on
+        # equality even if the refresh silently stopped happening.
+        beat = (datetime.now(timezone.utc) - timedelta(seconds=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
         fleet.write_incarnation({"incarnation_id": inc, "session_id": sid,
-                                 "claimed_at": _iso(NOW), "heartbeat_at": fleet.now_iso(),
+                                 "claimed_at": beat, "heartbeat_at": beat,
                                  "claimed_via": "fresh"})
 
     def test_checkpoint_appends_and_refreshes_heartbeat(self, sup_home):
