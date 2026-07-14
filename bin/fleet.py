@@ -5116,11 +5116,13 @@ def cmd_sup_handoff_abort(args, which=shutil.which, run=subprocess.run) -> int:
 
 
 def supervisor_goals_active() -> bool:
-    """GOALS.md exists and is not parked. Operator parks the nag by adding
-    the literal token SUPERVISOR-DORMANT anywhere in GOALS.md."""
+    """GOALS.md exists, decodes, and is not parked. Operator parks the nag by
+    adding the literal token SUPERVISOR-DORMANT anywhere in GOALS.md.
+    ValueError covers UnicodeDecodeError: an undecodable GOALS.md must not
+    crash the unguarded read-only callers (cmd_sup_status, views)."""
     try:
         text = goals_path().read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, ValueError):
         return False
     return "SUPERVISOR-DORMANT" not in text
 
