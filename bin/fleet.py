@@ -4535,6 +4535,163 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run, get_process_info=No
 
 
 # ---------------------------------------------------------------------------
+# Supervisor identity (native-pivot spec §4, milestone M-A)
+#
+# Soul = git-tracked files (supervisor/GOALS.md operator-owned,
+# supervisor/JOURNAL.md append-only). Body claim = supervisor/INCARNATION
+# (machine-local, gitignored), written ONLY under fleet_lock, read lock-free
+# (atomic os.replace writes make torn reads impossible). HANDSHAKE is a
+# separate gitignored file so a claimless handoff successor never touches
+# the journal (single-writer, claim-holder-only -- spec §4, no exceptions).
+# ---------------------------------------------------------------------------
+
+SUPERVISOR_CLAIM_STALE_SECONDS = 3600.0   # S: seizure/nag threshold, > beat period + margin (spec §4)
+SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS = 300.0   # T: handoff wait before abort (spec §4)
+SUPERVISOR_ROSTER_VERIFY_SECONDS = 60.0   # dispatch -> roster-join window (contract G6 fallback)
+
+SUPERVISOR_JOURNAL_KINDS = (
+    "BOOT", "CHECKPOINT", "PROPOSAL", "SEIZED",
+    "HANDOFF-BEGIN", "HANDOFF-COMPLETE", "HANDOFF-ABORT",
+)
+
+_SUPERVISOR_JOURNAL_SEED = """# Supervisor Journal
+
+Append-only checkpoint log (spec §4). Single writer: the current claim
+holder, via `fleet sup-*` commands only. Never edit or delete entries.
+Entry header format: `## <utc-iso> <KIND> inc=<incarnation-id> sid=<session-id>`
+Kinds: BOOT, CHECKPOINT, PROPOSAL, SEIZED, HANDOFF-BEGIN, HANDOFF-COMPLETE, HANDOFF-ABORT.
+
+<!-- entries below -->
+"""
+
+
+def supervisor_dir() -> Path:
+    return FLEET_HOME / "supervisor"
+
+
+def goals_path() -> Path:
+    return supervisor_dir() / "GOALS.md"
+
+
+def incarnation_path() -> Path:
+    return supervisor_dir() / "INCARNATION"
+
+
+def handshake_path() -> Path:
+    return supervisor_dir() / "HANDSHAKE"
+
+
+def supervisor_journal_path() -> Path:
+    return supervisor_dir() / "JOURNAL.md"
+
+
+def handoff_abort_flag_path() -> Path:
+    """Doctor-visible flag written by sup-handoff-abort (spec §4 timeout
+    branch). Lives in state/ (gitignored runtime), cleared by the next
+    sup-handoff-begin or manually by the operator."""
+    return state_dir() / "supervisor-handoff-aborted.json"
+
+
+def _write_json_atomic(path: Path, obj: dict) -> None:
+    """Atomic JSON write (temp + os.replace) so lock-free readers (views,
+    SessionStart hook) can never see a half-written file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(obj, indent=2), encoding="utf-8")
+    os.replace(str(tmp), str(path))
+
+
+def read_incarnation() -> dict | None:
+    """The current claim, or None when absent/unreadable. Lock-free-safe
+    (writes are atomic); mutating callers still re-read under fleet_lock."""
+    try:
+        data = json.loads(incarnation_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_incarnation(claim: dict) -> None:
+    """Caller MUST hold fleet_lock (single-supervisor invariant, spec §4)."""
+    _write_json_atomic(incarnation_path(), claim)
+
+
+def read_handshake() -> dict | None:
+    try:
+        data = json.loads(handshake_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_handshake(incarnation_id: str, session_id: str) -> None:
+    _write_json_atomic(handshake_path(), {
+        "incarnation_id": incarnation_id,
+        "session_id": session_id,
+        "written_at": now_iso(),
+    })
+
+
+def mint_incarnation_id() -> str:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"inc-{stamp}-{uuid.uuid4().hex[:4]}"
+
+
+_SUPERVISOR_ENTRY_RE = re.compile(
+    r"^## (?P<ts>\S+) (?P<kind>[A-Z][A-Z-]*) inc=(?P<inc>\S+) sid=(?P<sid>\S+)\s*$")
+
+
+def parse_supervisor_journal(text: str) -> list:
+    """Parse JOURNAL.md into entry dicts {ts, kind, inc, sid, body}. Prose
+    outside entry headers is tolerated: lines before the first header are
+    the seed doc; lines after a header up to the next header are that
+    entry's body (stray human notes ride along in the preceding body)."""
+    entries = []
+    current = None
+    for line in text.splitlines():
+        m = _SUPERVISOR_ENTRY_RE.match(line)
+        if m:
+            if current is not None:
+                current["body"] = "\n".join(current["body"]).strip("\n")
+                entries.append(current)
+            current = {**m.groupdict(), "body": []}
+        elif current is not None:
+            current["body"].append(line)
+    if current is not None:
+        current["body"] = "\n".join(current["body"]).strip("\n")
+        entries.append(current)
+    return entries
+
+
+def supervisor_journal_entries() -> list:
+    try:
+        text = supervisor_journal_path().read_text(encoding="utf-8")
+    except OSError:
+        return []
+    return parse_supervisor_journal(text)
+
+
+def supervisor_journal_latest():
+    entries = supervisor_journal_entries()
+    return entries[-1] if entries else None
+
+
+def supervisor_journal_append(kind: str, inc: str, sid: str, body: str) -> None:
+    """Append one checkpoint entry. Caller MUST hold fleet_lock and MUST be
+    the verified claim holder (enforced by the cmd layer via
+    _require_claim_holder) -- spec §4: append-only, single-writer."""
+    if kind not in SUPERVISOR_JOURNAL_KINDS:
+        raise ValueError(f"unknown journal kind {kind!r}; allowed: {', '.join(SUPERVISOR_JOURNAL_KINDS)}")
+    path = supervisor_journal_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        path.write_text(_SUPERVISOR_JOURNAL_SEED, encoding="utf-8")
+    entry = f"\n## {now_iso()} {kind} inc={inc} sid={sid}\n\n{body.rstrip()}\n"
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(entry)
+
+
+# ---------------------------------------------------------------------------
 # CLI: argparse wiring + main()
 # ---------------------------------------------------------------------------
 
