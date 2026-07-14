@@ -1,77 +1,124 @@
 # claude-fleet
 
-One Claude Code **manager** session that spawns, monitors, steers, and hands off multiple **worker** Claude Code sessions across arbitrary projects on a single machine.
+![tests](https://img.shields.io/badge/tests-720%20passing-brightgreen) ![python](https://img.shields.io/badge/python-3.13%20stdlib--only-blue) ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 
-The manager is "another you": parallel fan-out, long-running babysitting, cross-project routing, and review pipelines — driven from a single stdlib-only Python CLI, with a persistent, git-tracked knowledge base that grows over time.
-
-> **Status:** design-complete (SPEC v2.1, post adversarial review) and implementing milestone by milestone. See [`docs/SPEC.md`](docs/SPEC.md).
+One Claude Code session — the **manager** — that spawns, monitors, steers, and hands off many headless Claude Code **worker** sessions across different projects on one machine. Workers are durable sessions on disk, not fire-and-forget processes: they survive crashes, reboots, and the manager's own death, and you can drop into any of them for an interactive hand-off at any time. It's a stdlib-only Python CLI plus a handful of hooks, built so a solo operator can run days-long, multi-project campaigns without babysitting a terminal.
 
 ## Why
 
-CLI-native background agents cover spawn + list + monitor, but not a named registry with per-task permission modes, mid-turn mailbox steering, journals + respawn continuity, attach/headless conflict guards, or a shared knowledge loop. `claude-fleet` adds exactly that layer.
+Claude Code's own background agents (`claude --bg`, `claude agents`) cover spawn, list, and monitor. They do not cover a named registry with per-task permission modes, mid-turn mailbox steering, journals with respawn continuity, attach/headless conflict guards, budget and token ceilings, or a knowledge base that gets smarter across sessions. `claude-fleet` is exactly that layer — currently sitting on top of its own detached-launch machinery, and mid-pivot onto the native substrate (see [Status](#status) below).
 
-## Core design
+## See it in action
 
-- **Sessions, not processes.** A worker is a durable Claude Code *session* on disk (`--session-id` / `--resume`); each turn is a short-lived `claude -p` process. Crash-safe by construction.
-- **Daemonless.** No resident supervisor. Every action is a short-lived CLI invocation.
-- **Single-writer registry.** Only `fleet.py` writes `state/fleet.json`, guarded by a lock file.
-- **One live claude per session.** Attach/headless guards prevent two live processes on one session.
-- **cwd-scoped resume.** A worker resumes only in its recorded, immutable working directory.
-- **Steering via mailbox.** Append-only `mailbox/<sid>.md`, claimed atomically via `os.replace`, injected at tool boundaries.
-- **Knowledge loop.** `knowledge/` is git-tracked — playbooks, per-project quirks, and append-only lessons that improve the fleet across sessions.
+```
+$ fleet spawn migrate-users --dir C:\proga\billing-service --mode bypass \
+    --task "Port the users table migration from Knex to raw SQL, see MIGRATION.md" \
+    --max-budget-usd 5
+migrate-users a1b2c3d4-...  logs\migrate-users.jsonl
 
-The nine load-bearing architectural invariants are enumerated in [`docs/SPEC.md`](docs/SPEC.md).
+$ fleet status
+NAME                STATUS       TURNS     COST      AGE  MAIL  FLAGS
+migrate-users        working         1      0.41       2m     0  -
 
-## Requirements
+$ fleet send migrate-users "also add a down-migration, I forgot to ask"
+migrate-users: turn running -- message queued to mailbox
 
-- Windows 10 + PowerShell + Git Bash
-- Python 3.13 via `py -3.13` (the CLI is single-file, stdlib-only)
-- Claude Code CLI ≥ 2.1.202
+$ fleet peek migrate-users
+[tool] Read MIGRATION.md
+[tool] Write migrations/0042_users.sql
+[mail] delivered: "also add a down-migration, I forgot to ask"
+[tool] Write migrations/0042_users.down.sql
+[assistant] Added the down-migration and re-ran the local suite; both pass.
 
-## Install
+$ fleet wait migrate-users
+migrate-users: idle (turn ended)
 
-1. Add `bin\` to your `PATH` (contains `fleet.cmd`, the CLI shim).
-2. Run `fleet init` once — renders the machine-local `state\worker-settings.json` (hook wiring: real interpreter path + `FLEET_HOME`, forward slashes) from the git-tracked `worker-settings.template.json`. Re-run after editing the template or moving the repo; idempotent.
-3. Install the plugin — it carries the manager skill, the `/fleet:*` slash commands, and the SessionStart briefing:
+$ fleet result migrate-users
+Migrated 0042_users to raw SQL with a matching down-migration. Ran
+`npm test -- migrations` locally: 14 passed. Diff is 2 files, no schema drift.
+```
 
-   ```bash
-   claude plugin marketplace add <path-or-github-repo-of-this-clone>
-   claude plugin install fleet@claude-fleet
-   ```
+One task, one worker, one budget cap, mid-turn steering delivered without ever attaching a terminal. `fleet doctor` (18 health checks), `fleet attach`/`fleet release` for a full interactive hand-off, and `fleet respawn` to reset a worker's context while carrying its journal forward round out the loop — see the [CLI reference](#cli) below.
 
-   Then restart Claude Code. Verify with `claude plugin details fleet`.
+## Architecture
 
-   > `claude --plugin-dir <path>` loads the commands for one session but **does not register the plugin's SessionStart hook** (verified 2026-07-09, claude 2.1.204) — the briefing never fires. Use a real install, not `--plugin-dir`, when you care about the hook.
+```
+                    ┌──────────────────────────┐
+                    │   manager session         │
+                    │   (you, or another        │  reads/writes
+                    │   Claude Code session)     │◄──────────────┐
+                    └────────────┬──────────────┘                │
+                                 │ fleet CLI                      │
+                                 ▼                                │
+                    ┌──────────────────────────┐                 │
+                    │  state/fleet.json          │  single writer:
+                    │  registry (single-writer,  │  bin/fleet.py only
+                    │  lock-guarded)              │                 │
+                    └────────────┬──────────────┘                 │
+                 ┌───────────────┼───────────────┐                │
+                 ▼               ▼               ▼                │
+           ┌──────────┐   ┌──────────┐    ┌──────────┐            │
+           │ worker A │   │ worker B │    │ worker C │  each a    │
+           │ claude -p│   │ claude -p│    │ claude -p│  durable   │
+           │ session  │   │ session  │    │ session  │  session,  │
+           └────┬─────┘   └────┬─────┘    └────┬─────┘  short-lived
+                │              │               │        turns
+        PostToolUse/Stop hooks (mailbox drain, journal write, budget check)
+                │              │               │
+                ▼              ▼               ▼
+        mailbox/*.md    logs/*.jsonl    state/journals/*.md
+                │                               │
+                └───────────────┬───────────────┘
+                                 ▼
+                    ┌──────────────────────────┐
+                    │  knowledge/ (git-tracked)  │  playbooks, per-project
+                    │  INDEX · lessons · projects │  quirks, append-only
+                    └──────────────────────────┘  lessons — read by every
+                                                    manager session at start
+```
 
-4. Optional — install the fleet statusline into `~/.claude/settings.json`:
+No daemon in the core loop: every `fleet` command is a short-lived CLI invocation, and the registry is the single source of truth every view (`status`, `peek`, the statusline, `/fleet:*` slash commands) derives from — never independent state.
 
-   ```powershell
-   fleet init --statusline
-   ```
+## Features (shipped, not aspirational)
 
-   It is a separate step because a Claude Code plugin cannot ship a `statusLine`. The command backs up your settings first and refuses to overwrite a statusline it does not own.
+- **Mid-turn steering.** `fleet send` delivers a message into a running worker's mailbox; it's injected at the next tool boundary, no attach required.
+- **Budget and token caps.** `--max-budget-usd` and `--token-ceiling` are enforced fleet-side before every resume turn — a worker that would blow its cap refuses to continue.
+- **Respawn with journal continuity.** `fleet respawn` gives a worker a fresh session (new context, same name/cwd/mode) while carrying its journal and any drained mailbox forward — the context-reset lever for long campaigns.
+- **Usage-limit park/resume.** A worker that hits a Claude plan usage limit parks itself (`limited` status, recorded reset horizon) instead of dying silently; `fleet resume-limited` relaunches it once the window passes.
+- **Knowledge loop.** `knowledge/` is git-tracked: an index, playbooks, per-project quirks, and append-only lessons that every manager session reads at startup and writes back to after every campaign.
+- **`fleet doctor`.** 18 health checks in one command — hook wiring, stale PIDs, orphaned mailboxes, stale attaches, log sizes, elevation mismatches, and more.
+- **Statusline + `/fleet:*` slash commands + SessionStart briefing.** Fleet state is visible without typing a command, shipped as a normal Claude Code plugin (see [Install](#install)).
+- **Attach/release for real interactive hand-off.** `fleet attach` opens a worker's actual session in its own terminal; `fleet release` hands it back to headless operation.
+- **cwd-scoped, crash-safe sessions.** A worker is a durable Claude Code session addressed by `--session-id`/`--resume`, not a process fleet has to keep alive.
 
-   Already running another statusline (`ccusage`, `caveman`, …)? Claude Code allows only one, so compose them:
+## Status
 
-   ```powershell
-   fleet init --statusline --chain
-   ```
+**Working v2.1 today.** Two self-hosted campaigns have shipped hardening kernels into fleet's own codebase — including a real revert-on-red drill — plus external dogfooding on non-fleet repos. 720 pytest tests, `fleet doctor` clean. The architecture, its nine load-bearing invariants, and the full command surface are specified in [`docs/SPEC.md`](docs/SPEC.md).
 
-   Your existing statusline keeps its row; fleet's prints beneath it. A delegate that fails or hangs is dropped — fleet's row always renders. Use `--force` instead to replace the incumbent outright.
+**In flight: a pivot onto Claude Code's native background-agent substrate** (`claude --bg`, the agents daemon) — fleet keeps the semantic layer (mailbox steering, budgets, journals, the knowledge loop) but hands process hosting to the native daemon, and adds a persistent **supervisor**: a manager identity that survives context exhaustion and reboots by handing off between incarnations. This unlocks fleet workers showing up natively in the Claude Code agents menu, and a fleet that keeps running when you're not watching it. Design: [`docs/superpowers/specs/2026-07-13-native-agents-pivot-design.md`](docs/superpowers/specs/2026-07-13-native-agents-pivot-design.md). The M-0 spike (13 go/no-go experiments against the real daemon) is nearly complete — receipts in [`spike/m0/VERDICTS.md`](spike/m0/VERDICTS.md).
 
-## Installing for collaborators
+## Quickstart
 
-`fleet` is a *system-wide tool with machine-local state*, so installing the plugin is not the whole install. Each person needs:
+**Requirements today:** Windows 10+, PowerShell, Git Bash, Python via `py -3.13`, Claude Code CLI ≥ 2.1.202. Portability to Linux/macOS is speccced and `ready-for-build` ([`docs/specs/portability.md`](docs/specs/portability.md)) — not yet shipped.
 
-1. **A clone of this repo**, with `bin/` on `PATH` (Windows uses `bin\fleet.cmd`).
-2. **`fleet init` run once** — this renders `state/worker-settings.json` *and* stamps `~/.claude/fleet-home` with the absolute path of their fleet.
-3. **The plugin installed** (step 3 above).
+```powershell
+# 1. Clone, add bin\ to PATH
+git clone https://github.com/exPardus/fleet.git
+# add <repo>\bin to PATH (contains fleet.cmd)
 
-Step 2 is load-bearing and easy to miss. A marketplace-installed plugin runs from a **cache copy** of this repo, whose `state/` is gitignored and therefore empty. Without the `~/.claude/fleet-home` marker, the SessionStart hook would read that empty cache and cheerfully report a fleet of zero workers while the real one is running. The marker is how the hook finds the fleet the `fleet` CLI actually writes. `$FLEET_HOME` overrides it.
+# 2. Render machine-local hook wiring
+fleet init
 
-Requirements: Python ≥ 3.10 on `PATH` (the hook finds it via `bin/hooks/run_py.sh`, which tries `py -3.13`, then `python3.x`, then `python`; set `$FLEET_PYTHON` to force one), Claude Code ≥ 2.1.202, and `git`.
+# 3. Install the plugin (manager skill, /fleet:* commands, SessionStart briefing)
+claude plugin marketplace add <path-or-github-repo-of-this-clone>
+claude plugin install fleet@claude-fleet
+# restart Claude Code, verify with: claude plugin details fleet
 
-Not yet portable: worker launch, kill, attach and PID liveness are Windows-only until Phase 1.5 (`docs/specs/portability.md`). The plugin surface itself — commands, statusline, briefing — is not.
+# 4. Optional: the always-on statusline (can't ship inside a plugin)
+fleet init --statusline
+```
+
+Full install detail, including the collaborator/multi-machine setup and the `--statusline --chain` composition flag, lives in the [CLI reference](#cli) section below and in [`docs/SPEC.md`](docs/SPEC.md).
 
 ## CLI
 
@@ -88,23 +135,22 @@ Not yet portable: worker launch, kill, attach and PID liveness are Windows-only 
 | `fleet attach` | Attach an interactive terminal to a worker |
 | `fleet release` | Release an attached worker back to idle |
 | `fleet respawn` | Fresh session for a worker (context-reset lever) |
+| `fleet resume-limited` | Relaunch workers parked on a usage limit past their reset horizon |
 | `fleet kill` | Interrupt (if running) and mark a worker dead |
 | `fleet clean` | Remove dead workers and their logs/mailboxes/journals |
 | `fleet doctor` | Run fleet health checks |
 
-## Repo layout
+## Roadmap
 
-```
-bin/                           # single-file CLI (fleet.py), shim, hooks
-worker-settings.template.json  # hook-wiring template; `fleet init` renders it
-skills/fleet/SKILL.md          # manager skill (shipped by the plugin)
-commands/                      # /fleet:* slash commands (shipped by the plugin)
-.claude-plugin/                # plugin + marketplace manifests
-knowledge/                     # git-tracked: playbooks, per-project notes, lessons
-docs/                          # SPEC, plan, roadmap, phase specs, reviews
-tests/                         # pytest unit/hook tests
-state/  logs/  mailbox/        # runtime, gitignored
-```
+Shipped: core lifecycle (spawn/steer/attach/respawn/knowledge), the terminal surface (statusline, slash commands, plugin package). Specced and ready-for-build: cross-platform portability. Ahead: watchtower (continuous monitoring, no daemon required until then), a Telegram bridge, a local web UI, and a "trust ledger" intelligence layer — plus the native-substrate pivot described in [Status](#status) above. Full detail, sequencing, and the soak-gate discipline that gates each phase: [`docs/ROADMAP.md`](docs/ROADMAP.md).
+
+## Docs
+
+[`docs/README.md`](docs/README.md) indexes every doc in this repo with an audience tag — what's for using the tool, what's for contributing to it, and what's fleet's own internal working record (design reviews, campaign plans, accumulated knowledge). Start there if you're not sure where to look.
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## License
 
