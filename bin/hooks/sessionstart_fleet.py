@@ -122,6 +122,13 @@ def _build_context() -> str:
     else:
         out.append("FLEET: no workers registered.")
 
+    try:
+        sup_line = fleet.supervisor_status_line()
+    except Exception:  # noqa: BLE001 -- invariant 2: the briefing must never break
+        sup_line = None
+    if sup_line:
+        out.append(sup_line)
+
     index = _index_lines()
     if index:
         out.append("")

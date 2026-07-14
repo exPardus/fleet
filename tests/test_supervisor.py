@@ -19,6 +19,12 @@ def sup_home(tmp_path, monkeypatch):
     (tmp_path / "knowledge").mkdir()
     (tmp_path / "knowledge" / "INDEX.md").write_text("# Knowledge Index\n- entry one\n", encoding="utf-8")
     (tmp_path / "state").mkdir()
+    # TestSessionStartLine drives fleet.status_snapshot() (via the hook's
+    # _build_context), which short-circuits to "" when the registry is
+    # absent ("not_initialized") -- seed an empty-but-valid one so that path
+    # doesn't shadow the supervisor-line assertion under test.
+    (tmp_path / "state" / "fleet.json").write_text(
+        json.dumps({"workers": {}}), encoding="utf-8")
     return tmp_path
 
 
@@ -447,3 +453,74 @@ class TestHandoff:
         abort = SimpleNamespace(sid="sid-old", successor_sid="sid-new")
         assert fleet.cmd_sup_handoff_abort(abort, which=_fake_which, run=stop_run) == 0
         assert fleet.read_incarnation()["session_id"] == "sid-old"
+
+
+class TestNag:
+    def test_none_when_goals_absent(self, sup_home):
+        fleet.goals_path().unlink()
+        assert fleet.supervisor_status_line() is None
+
+    def test_none_when_dormant_token(self, sup_home):
+        fleet.goals_path().write_text("# Goals\nSUPERVISOR-DORMANT\n", encoding="utf-8")
+        assert fleet.supervisor_status_line() is None
+
+    def test_nags_when_no_claim(self, sup_home):
+        line = fleet.supervisor_status_line()
+        assert line is not None and "no claim" in line
+
+    def test_nags_when_heartbeat_stale(self, sup_home):
+        stale = datetime.now(timezone.utc) - timedelta(hours=2)
+        fleet.write_incarnation({"incarnation_id": "inc-x", "session_id": "s",
+                                 "claimed_at": _iso(stale), "heartbeat_at": _iso(stale),
+                                 "claimed_via": "fresh"})
+        line = fleet.supervisor_status_line()
+        assert "stale" in line
+
+    def test_informational_when_fresh(self, sup_home):
+        fleet.write_incarnation({"incarnation_id": "inc-x", "session_id": "s",
+                                 "claimed_at": fleet.now_iso(), "heartbeat_at": fleet.now_iso(),
+                                 "claimed_via": "fresh"})
+        line = fleet.supervisor_status_line()
+        assert "inc-x" in line and "stale" not in line and "no claim" not in line
+
+
+class TestSupervisorDoctorChecks:
+    def test_claim_check_is_always_advisory_pass(self, sup_home):
+        name, ok, msg = fleet._doctor_check_supervisor_claim()
+        assert name == "supervisor-claim" and ok is True
+        assert "no claim" in msg
+
+    def test_handoff_check_fails_on_abort_flag(self, sup_home):
+        fleet._write_json_atomic(fleet.handoff_abort_flag_path(), {"aborted_at": "x"})
+        name, ok, msg = fleet._doctor_check_supervisor_handoff()
+        assert ok is False and "abort" in msg.lower()
+
+    def test_handoff_check_fails_on_stale_handshake(self, sup_home):
+        fleet.write_handshake("inc-x", "sid-x")
+        import os as _os, time as _time
+        old = _time.time() - fleet.SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS - 60
+        _os.utime(fleet.handshake_path(), (old, old))
+        name, ok, msg = fleet._doctor_check_supervisor_handoff()
+        assert ok is False and "stale" in msg.lower()
+
+    def test_handoff_check_passes_on_fresh_handshake(self, sup_home):
+        fleet.write_handshake("inc-x", "sid-x")
+        name, ok, msg = fleet._doctor_check_supervisor_handoff()
+        assert ok is True and "in flight" in msg
+
+    def test_handoff_check_passes_clean(self, sup_home):
+        name, ok, msg = fleet._doctor_check_supervisor_handoff()
+        assert ok is True
+
+
+class TestSessionStartLine:
+    def test_build_context_includes_supervisor_nag(self, sup_home, monkeypatch):
+        import importlib.util
+        hook_path = (fleet.Path(fleet.__file__).resolve().parent / "hooks"
+                     / "sessionstart_fleet.py")
+        spec = importlib.util.spec_from_file_location("sessionstart_fleet", hook_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        monkeypatch.setattr(mod, "fleet", fleet)   # hook resolves its own fleet import
+        ctx = mod._build_context()
+        assert "SUPERVISOR:" in ctx
