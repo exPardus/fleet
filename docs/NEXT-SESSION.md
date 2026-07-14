@@ -6,7 +6,7 @@ Updated 2026-07-14, after M-A (supervisor identity) shipped. Previous handoff ("
 
 - **M-0 native-substrate spike: COMPLETE and ratified.** Contract = `docs/specs/native-substrate.md` (all 13 G-rows verdicted, 4 gate ratifications recorded at the end — fork-steer, v2.3, G9 deferred, M-A go). Evidence = `spike/m0/VERDICTS.md`. Everything pushed to `origin/main`.
 - **M-A supervisor milestone: COMPLETE.** `bin/fleet.py` now ships the full supervisor layer — soul files (`supervisor/GOALS.md`, append-only `supervisor/JOURNAL.md`), claim mechanics (`supervisor/INCARNATION`, epoch check before claim decision, refuse/seize/freeze rules), boot ritual, checkpoint/heartbeat discipline, and the handoff protocol. CLI surface added:
-  - `fleet sup-boot [--handoff-inc <id>]` — boot ritual: epoch check → claim/seize/refuse/freeze + boot bundle. Exit 0=hold, 2=refuse, 3=freeze.
+  - `fleet sup-boot [--handoff-inc <id>]` — boot ritual: epoch check → claim/seize/refuse/freeze + boot bundle. Exit 0=hold/handshake-written, 2=refuse, 3=freeze.
   - `fleet sup-checkpoint <text|@file> [--kind CHECKPOINT|PROPOSAL]` — journal checkpoint (claim holder only) + heartbeat refresh.
   - `fleet sup-heartbeat` — heartbeat refresh without a journal write.
   - `fleet sup-status [--json]` — read-only claim/handshake/nag view.
@@ -35,6 +35,12 @@ Rest of M-B scope, after usage-limit continuity lands:
 6. Coexistence rules for the M-B deploy window: legacy name-keyed PID-probed workers become read-only legacy.
 7. Pin tests (FLEET_LIVE analog): dispatch haiku bg worker, assert JSON contract per state, hook firing incl. Stop, `claude stop` behavior — run before campaigns.
 8. Doctor checks: `claude --version` drift since last pin-test pass, legacy-worker mix flag.
+
+**M-A final-review fast-follows (deferred with reviewer agreement — hardening on narrow crash/operator-error windows, none can break the single-supervisor invariant; fold into M-B tasks):**
+- `sup-handoff-begin` dispatch-failure and DOA paths set no doctor-visible flag (spec §4 asks for one) — write the abort flag on both, or teach `_doctor_check_supervisor_handoff` to flag a journal ending in HANDOFF-BEGIN older than T + verify window.
+- `sup-handoff-abort` stops whatever `--successor-sid` it is given — cross-check against HANDSHAKE sid when present, refuse on mismatch (typo stops an innocent session).
+- Successor dispatch inherits the caller's incidental cwd — pass `cwd=FLEET_HOME` for roster legibility.
+- Successor sid join discards `--bg`'s printed short id (name-join only, G6 fallback) — capture the short id and cross-check roster `id` to fully close the ai-title rename hazard; belongs in M-B's shared launch contract anyway.
 
 Plan-authoring facts from the contract (do not re-derive): dispatch pattern + `-n` conventions, fork-steer semantics, `claude stop` fires no Stop hook, startedAt unstable, state literals incl. "waiting for permission prompt", ScheduleWakeup exists but scheduler dies with stop.
 
