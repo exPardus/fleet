@@ -4746,6 +4746,138 @@ def supervisor_claim_decision(claim, live_sids: set, latest_entry, now=None,
                       f"{stale_seconds:.0f}s) -- daemon restart? (G9). Never seize on ambiguity.")
 
 
+def _fetch_agents_roster(which=shutil.which, run=subprocess.run):
+    """(ok, entries|reason). Sanctioned surface only: `claude agents --json
+    --all` (contract: roster contract). utf-8/replace decoding -- roster
+    names may carry emoji/`·` that cp1252 consoles mangle."""
+    try:
+        exe = resolve_claude_executable(which=which)
+    except ClaudeNotFoundError:
+        return (False, "claude executable not found on PATH")
+    try:
+        proc = run([exe, "agents", "--json", "--all"], capture_output=True,
+                   text=True, encoding="utf-8", errors="replace", timeout=30)
+    except Exception as exc:  # noqa: BLE001 -- any spawn failure is one verdict
+        return (False, f"`claude agents --json --all` failed: {exc}")
+    if proc.returncode != 0:
+        return (False, f"`claude agents --json --all` exit {proc.returncode}: "
+                       f"{(proc.stderr or '').strip()[:200]}")
+    try:
+        entries = json.loads(proc.stdout)
+    except (json.JSONDecodeError, ValueError) as exc:
+        return (False, f"roster JSON unparseable: {exc}")
+    if not isinstance(entries, list):
+        return (False, f"roster has unexpected shape: {type(entries).__name__}")
+    return (True, entries)
+
+
+def _render_boot_bundle(roster_entries: list, snap: dict, journal_entries: list) -> str:
+    """The boot ritual's read set, one string (spec §4: GOALS + JOURNAL tail
+    + knowledge INDEX + roster + fleet status). M-A interim reconciliation =
+    today's registry verdicts via status_snapshot -- the outcome
+    discriminator's inputs don't exist until M-B."""
+    out = ["=== SUPERVISOR BOOT BUNDLE ==="]
+    try:
+        goals = goals_path().read_text(encoding="utf-8").rstrip()
+    except OSError:
+        goals = "(supervisor/GOALS.md missing)"
+    out += ["", "--- supervisor/GOALS.md ---", goals]
+    out += ["", "--- supervisor/JOURNAL.md tail (last 5) ---"]
+    tail = journal_entries[-5:]
+    if tail:
+        for e in tail:
+            out.append(f"## {e['ts']} {e['kind']} inc={e['inc']} sid={e['sid']}")
+            if e["body"].strip():
+                out.append(e["body"].rstrip())
+    else:
+        out.append("(no checkpoints yet)")
+    out += ["", "--- knowledge/INDEX.md (first 20 non-blank lines) ---"]
+    try:
+        idx = [ln for ln in (knowledge_dir() / "INDEX.md")
+               .read_text(encoding="utf-8").splitlines() if ln.strip()][:20]
+    except OSError:
+        idx = ["(missing)"]
+    out += idx
+    live = _roster_live_sids(roster_entries)
+    out += ["", f"--- native roster: {len(roster_entries)} entries, {len(live)} live ---"]
+    out += ["", "--- fleet status (M-A interim reconciliation: registry verdicts) ---"]
+    if snap.get("ok"):
+        t = snap["totals"]
+        out.append(f"{t['workers']} worker(s), ${t['cost_usd']:.2f} lifetime, {t['mail']} pending mail")
+        for w in snap["workers"]:
+            mail = f", {w['mail']} mail" if w["mail"] else ""
+            out.append(f"  {w['name']}: {w['status']}, {w['turns']} turns, ${w['cost_usd']:.2f}{mail}")
+    else:
+        out.append(f"(registry unreadable: {snap.get('reason')})")
+    return "\n".join(out)
+
+
+def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
+    """`fleet sup-boot [--sid SID] [--handoff-inc INC]` -- the ONE boot code
+    path (morning / post-reboot / post-handoff, spec §4). Epoch check runs
+    BEFORE the claim decision; the roster subprocess runs OUTSIDE fleet_lock
+    (F4 doctrine: never hold the lock across a subprocess)."""
+    caller_sid = getattr(args, "sid", None) or current_caller_session()
+    if not caller_sid:
+        raise FleetCliError("sup-boot: caller session unknown -- run from a Claude "
+                            "session or pass --sid")
+    roster_ok, payload = _fetch_agents_roster(which=which, run=run)
+    epoch_ok, epoch_reason = supervisor_epoch_check(roster_ok, payload)
+    entries = payload if roster_ok else []
+    live_sids = _roster_live_sids(entries)
+
+    inc_line = None
+    if getattr(args, "handoff_inc", None):
+        # Successor mode: claim-pending, holds NO claim, takes no actions
+        # (spec §4). Writes HANDSHAKE only -- never the journal.
+        with fleet_lock():
+            write_handshake(args.handoff_inc, caller_sid)
+        verdict = "handshake-written"
+        reason = (f"successor {args.handoff_inc} awaiting claim transfer; "
+                  f"take NO fleet actions until sup-status shows your incarnation")
+        rc = 0
+    else:
+        with fleet_lock():
+            claim = read_incarnation()
+            latest = supervisor_journal_latest()
+            if not epoch_ok:
+                verdict, reason = "freeze", f"epoch check failed: {epoch_reason}"
+            else:
+                verdict, reason = supervisor_claim_decision(claim, live_sids, latest)
+            if verdict == "claim":
+                inc = mint_incarnation_id()
+                write_incarnation({"incarnation_id": inc, "session_id": caller_sid,
+                                   "claimed_at": now_iso(), "heartbeat_at": now_iso(),
+                                   "claimed_via": "fresh"})
+                supervisor_journal_append("BOOT", inc, caller_sid, f"fresh claim: {reason}")
+                inc_line = inc
+            elif verdict == "seize":
+                inc = mint_incarnation_id()
+                dead = claim.get("incarnation_id", "?")
+                try:
+                    # Stale-HANDSHAKE hygiene (spec §4): an orphan from a crash
+                    # mid-handoff must never receive a claim transfer.
+                    handshake_path().unlink()
+                except FileNotFoundError:
+                    pass
+                write_incarnation({"incarnation_id": inc, "session_id": caller_sid,
+                                   "claimed_at": now_iso(), "heartbeat_at": now_iso(),
+                                   "claimed_via": "seize"})
+                supervisor_journal_append("SEIZED", inc, caller_sid,
+                                          f"seized from {dead}: {reason}")
+                inc_line = inc
+            # refuse / freeze: strictly read-only.
+        rc = {"claim": 0, "seize": 0, "refuse": 2, "freeze": 3}[verdict]
+
+    bundle = _render_boot_bundle(entries, status_snapshot(), supervisor_journal_entries())
+    lines = [bundle, "", f"EPOCH: {'ok' if epoch_ok else 'FAIL'} -- {epoch_reason}"]
+    if inc_line:
+        lines.append(f"INCARNATION: {inc_line}")
+    lines.append(f"VERDICT: {verdict} -- {reason}")
+    _write_text_tolerating_console_encoding("\n".join(lines) + "\n")
+    return rc
+
+
 # ---------------------------------------------------------------------------
 # CLI: argparse wiring + main()
 # ---------------------------------------------------------------------------
@@ -4856,6 +4988,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("doctor", help="run fleet health checks")
 
+    p_supboot = sub.add_parser("sup-boot", help="supervisor boot ritual: epoch check, claim decision, boot bundle (spec §4)")
+    p_supboot.add_argument("--sid", help="override caller session id (default: CLAUDE_CODE_SESSION_ID)")
+    p_supboot.add_argument("--handoff-inc", dest="handoff_inc",
+                           help="handoff-successor mode: write HANDSHAKE with this incarnation id; no claim action")
+
     return parser
 
 
@@ -4897,6 +5034,8 @@ def main(argv=None) -> int:
             return cmd_clean(args)
         if args.command == "doctor":
             return cmd_doctor(args)
+        if args.command == "sup-boot":
+            return cmd_sup_boot(args)
         parser.error(f"unknown command {args.command!r}")
         return 2
     except RegistryCorruptError as exc:
