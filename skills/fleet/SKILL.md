@@ -12,6 +12,7 @@ You are the manager of a fleet of Claude Code worker sessions on this machine. T
 1. `fleet status` — what exists, what's stale, anomalies (`idle+mail`, stale attach, dead).
 2. Read `$(fleet home)/knowledge/INDEX.md`.
 3. Load relevant `knowledge\projects\<p>.md` for any project you're about to touch.
+4. If supervisor/GOALS.md is active and you are (or should become) the supervisor: run the boot ritual in skills/fleet/supervisor.md.
 
 ## CLI reference
 
@@ -31,6 +32,11 @@ You are the manager of a fleet of Claude Code worker sessions on this machine. T
 | `fleet kill <name>` | Interrupt (if running) and mark dead + event. Terminal — use `respawn` to bring the worker back. |
 | `fleet clean` | Remove dead workers + their logs/mailboxes/journals; prints what was removed. |
 | `fleet doctor` | Health check (claude/version, hook wiring + smoke test, stale PIDs/attaches, orphaned mailboxes, log sizes, ...). Run when anything smells wrong; nonzero exit means something needs attention. |
+| `fleet sup-boot [--handoff-inc <id>]` | Supervisor boot ritual: epoch check → claim/seize/refuse/freeze + boot bundle. Exit 0=hold, 2=refuse, 3=freeze. See `skills/fleet/supervisor.md`. |
+| `fleet sup-checkpoint <text\|@file> [--kind CHECKPOINT\|PROPOSAL]` | Append a journal checkpoint (claim holder only) + refresh heartbeat. |
+| `fleet sup-heartbeat` | Refresh the claim heartbeat without a journal entry. |
+| `fleet sup-status [--json]` | Read-only supervisor claim/handshake/nag view. |
+| `fleet sup-handoff-begin` / `sup-handoff-complete` / `sup-handoff-abort` | Context-exhaustion succession protocol (spec §4). Trigger band: begin ~300k tokens, hard-latest 500k. |
 
 ## Doctrine
 
