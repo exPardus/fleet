@@ -4957,6 +4957,161 @@ def cmd_sup_status(args) -> int:
     return 0
 
 
+def _render_successor_task(successor_inc: str, old_inc: str) -> str:
+    """Successor bootstrap body (task-file bootstrap, contract G8 -- never
+    argv for size-unbounded content). Paths rendered .as_posix()."""
+    fleet_py = (FLEET_HOME / "bin" / "fleet.py").as_posix()
+    return f"""You are the claude-fleet supervisor SUCCESSOR, incarnation {successor_inc}.
+Your predecessor ({old_inc}) dispatched you mid-handoff (spec docs/superpowers/specs/2026-07-13-native-agents-pivot-design.md §4).
+
+Do exactly this, in order:
+1. Run: py -3.13 {fleet_py} sup-boot --handoff-inc {successor_inc}
+   This prints your boot bundle and writes supervisor/HANDSHAKE. You hold NO claim yet.
+2. Take NO spawn/respawn/send/kill/clean actions before claim transfer -- spec §4's double-spawn guard.
+3. Poll every ~30s (up to 10 minutes): py -3.13 {fleet_py} sup-status --json
+   - When incarnation.incarnation_id == "{successor_inc}": the claim is yours. Run:
+     py -3.13 {fleet_py} sup-checkpoint "claim received via handoff from {old_inc}"
+     then read your boot bundle output and continue the supervisor duty per skills/fleet/supervisor.md.
+   - If 10 minutes pass without transfer: the handoff was aborted. STOP -- take no actions,
+     end your turn with the final message: HANDOFF-ORPHAN {successor_inc}
+"""
+
+
+def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
+                          sleep=time.sleep) -> int:
+    """`fleet sup-handoff-begin [--model M] [--permission-mode P] [--sid S]`.
+    Checkpoint-then-act: HANDOFF-BEGIN is journaled BEFORE dispatch so a
+    crash mid-dispatch leaves evidence. Dispatch + roster polling run
+    OUTSIDE fleet_lock (F4 doctrine)."""
+    with fleet_lock():
+        claim, caller = _require_claim_holder(getattr(args, "sid", None))
+        successor_inc = mint_incarnation_id()
+        task_path = state_dir() / f"supervisor-handoff-{successor_inc}.md"
+        task_path.parent.mkdir(parents=True, exist_ok=True)
+        task_path.write_text(_render_successor_task(successor_inc, claim["incarnation_id"]),
+                             encoding="utf-8")
+        supervisor_journal_append("HANDOFF-BEGIN", claim["incarnation_id"], caller,
+                                  f"successor={successor_inc} task={task_path.as_posix()}")
+        try:
+            # A new attempt supersedes any previous aborted handoff.
+            handoff_abort_flag_path().unlink()
+        except FileNotFoundError:
+            pass
+
+    exe = resolve_claude_executable(which=which)
+    pre_ok, pre_payload = _fetch_agents_roster(which=which, run=run)
+    pre_sids = {e.get("sessionId") for e in (pre_payload if pre_ok else [])
+                if isinstance(e, dict)}
+    name = f"sup|{successor_inc}|successor"
+    argv = [exe, "--bg", "-n", name]
+    if getattr(args, "model", None):
+        argv += ["--model", args.model]
+    if getattr(args, "permission_mode", None):
+        argv += ["--permission-mode", args.permission_mode]
+    argv.append(f"Read {task_path.as_posix()} and follow it exactly.")
+    proc = run(argv, capture_output=True, text=True, encoding="utf-8",
+               errors="replace", timeout=120)
+    if proc.returncode != 0:
+        raise FleetCliError(f"successor dispatch failed (exit {proc.returncode}): "
+                            f"{(proc.stderr or '').strip()[:300]} -- no successor to stop; "
+                            f"claim unchanged, duty continues")
+
+    # G6 fallback: join by fresh `-n` match within the verify window.
+    successor_sid = None
+    deadline = time.monotonic() + SUPERVISOR_ROSTER_VERIFY_SECONDS
+    while time.monotonic() < deadline:
+        ok, payload = _fetch_agents_roster(which=which, run=run)
+        if ok:
+            fresh = [e for e in payload if isinstance(e, dict)
+                     and e.get("name") == name and e.get("sessionId")
+                     and e.get("sessionId") not in pre_sids]
+            if fresh:
+                successor_sid = fresh[0]["sessionId"]
+                break
+        sleep(3)
+    if successor_sid is None:
+        print(f"successor DOA: no roster entry named {name!r} appeared within "
+              f"{SUPERVISOR_ROSTER_VERIFY_SECONDS:.0f}s (contract G6 fallback). "
+              f"Claim unchanged -- duty continues; re-run sup-handoff-begin to retry.")
+        return 1
+
+    print(f"SUCCESSOR-INC: {successor_inc}")
+    print(f"SUCCESSOR-SID: {successor_sid}")
+    print(f"Next: wait for supervisor/HANDSHAKE (timeout "
+          f"{SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS:.0f}s), then run:\n"
+          f"  fleet sup-handoff-complete --expect-inc {successor_inc} --expect-sid {successor_sid}\n"
+          f"On timeout/failure instead run:\n"
+          f"  fleet sup-handoff-abort --successor-sid {successor_sid}")
+    return 0
+
+
+def cmd_sup_handoff_complete(args) -> int:
+    """`fleet sup-handoff-complete --expect-inc I --expect-sid S [--sid ...]`.
+    Dual verification (spec §4): the HANDSHAKE must carry EXACTLY the
+    incarnation id the old side minted AND the sid it dispatched. Journal
+    HANDOFF-COMPLETE first (old is still holder), then transfer."""
+    with fleet_lock():
+        claim, caller = _require_claim_holder(getattr(args, "sid", None))
+        hs = read_handshake()
+        if hs is None:
+            raise FleetCliError("no supervisor/HANDSHAKE -- successor not ready; wait, "
+                                "or sup-handoff-abort past the timeout")
+        if (hs.get("incarnation_id") != args.expect_inc
+                or hs.get("session_id") != args.expect_sid):
+            raise FleetCliError(
+                f"HANDSHAKE mismatch: found inc={hs.get('incarnation_id')} "
+                f"sid={hs.get('session_id')}, expected inc={args.expect_inc} "
+                f"sid={args.expect_sid} -- NOT transferring (spec §4 id verification)")
+        supervisor_journal_append("HANDOFF-COMPLETE", claim["incarnation_id"], caller,
+                                  f"claim -> {args.expect_inc} sid={args.expect_sid}")
+        write_incarnation({"incarnation_id": args.expect_inc,
+                           "session_id": args.expect_sid,
+                           "claimed_at": now_iso(), "heartbeat_at": now_iso(),
+                           "claimed_via": "handoff"})
+        try:
+            handshake_path().unlink()
+        except FileNotFoundError:
+            pass
+    print(f"claim transferred to {args.expect_inc}. This (old) incarnation must now "
+          f"EXIT: end the session, take no further fleet actions.")
+    return 0
+
+
+def cmd_sup_handoff_abort(args, which=shutil.which, run=subprocess.run) -> int:
+    """`fleet sup-handoff-abort --successor-sid S [--sid ...]` -- spec §4
+    timeout branch: old resumes duty, stops the limbo successor (`claude
+    stop`, NEVER raw kill -- G10 zombie hazard), removes HANDSHAKE, raises
+    the doctor-visible flag. Note contract G10: `claude stop` fires NO Stop
+    hook -- nothing will have journaled on the successor's behalf."""
+    with fleet_lock():
+        claim, caller = _require_claim_holder(getattr(args, "sid", None))
+        try:
+            handshake_path().unlink()
+        except FileNotFoundError:
+            pass
+        supervisor_journal_append("HANDOFF-ABORT", claim["incarnation_id"], caller,
+                                  f"stopping limbo successor sid={args.successor_sid}")
+        _write_json_atomic(handoff_abort_flag_path(), {
+            "aborted_at": now_iso(),
+            "successor_sid": args.successor_sid,
+            "holder": claim["incarnation_id"],
+        })
+        claim["heartbeat_at"] = now_iso()   # old resumes duty
+        write_incarnation(claim)
+    exe = resolve_claude_executable(which=which)
+    proc = run([exe, "stop", args.successor_sid], capture_output=True, text=True,
+               encoding="utf-8", errors="replace", timeout=60)
+    if proc.returncode != 0:
+        print(f"WARNING: `claude stop {args.successor_sid}` stop failed "
+              f"(exit {proc.returncode}: {(proc.stderr or '').strip()[:200]}) -- "
+              f"successor may still be live; stop it manually via the agents menu. "
+              f"Abort flag is set either way.")
+    else:
+        print(f"limbo successor {args.successor_sid} stopped; duty resumed by "
+              f"{claim['incarnation_id']}. Doctor will flag until the abort flag is cleared.")
+    return 0
+
+
 def supervisor_goals_active() -> bool:
     """GOALS.md exists and is not parked. Operator parks the nag by adding
     the literal token SUPERVISOR-DORMANT anywhere in GOALS.md."""
@@ -5093,6 +5248,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_supstat = sub.add_parser("sup-status", help="read-only supervisor claim/handshake status")
     p_supstat.add_argument("--json", action="store_true")
 
+    p_suphb = sub.add_parser("sup-handoff-begin", help="dispatch a handoff successor (claim holder only)")
+    p_suphb.add_argument("--model", help="model for the successor session")
+    p_suphb.add_argument("--permission-mode", dest="permission_mode", help="permission mode for the successor session")
+    p_suphb.add_argument("--sid", help="override caller session id")
+
+    p_suphc = sub.add_parser("sup-handoff-complete", help="verify HANDSHAKE and transfer the claim")
+    p_suphc.add_argument("--expect-inc", dest="expect_inc", required=True)
+    p_suphc.add_argument("--expect-sid", dest="expect_sid", required=True)
+    p_suphc.add_argument("--sid", help="override caller session id")
+
+    p_supha = sub.add_parser("sup-handoff-abort", help="abort a handoff: stop the limbo successor, resume duty")
+    p_supha.add_argument("--successor-sid", dest="successor_sid", required=True)
+    p_supha.add_argument("--sid", help="override caller session id")
+
     return parser
 
 
@@ -5142,6 +5311,12 @@ def main(argv=None) -> int:
             return cmd_sup_heartbeat(args)
         if args.command == "sup-status":
             return cmd_sup_status(args)
+        if args.command == "sup-handoff-begin":
+            return cmd_sup_handoff_begin(args)
+        if args.command == "sup-handoff-complete":
+            return cmd_sup_handoff_complete(args)
+        if args.command == "sup-handoff-abort":
+            return cmd_sup_handoff_abort(args)
         parser.error(f"unknown command {args.command!r}")
         return 2
     except RegistryCorruptError as exc:
