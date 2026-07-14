@@ -547,3 +547,21 @@ a single `grep` to find. → **campaign-template v1.4: the GREP-RECEIPT GATE.**
 - A transient **403** killed a turn mid-flight exactly like the C4 **529** did: `fleet result`
   returned the auth error as the worker's "answer," `cost_usd` froze, **zero commits landed**.
   `git log` remains the only truth a turn landed. The lesson generalizes past overload errors.
+
+## 2026-07-14 — M-0 native-substrate spike (12 SDD tasks, 13 gates, ~$? in subagents, zero fleet workers)
+
+Substrate verdicts (contract: `docs/specs/native-substrate.md` — the law for M-A/M-B):
+- **Hooks fire inside `claude --bg` sessions** (G1) — the pivot lives. Env propagates, provenance strip survives (G4).
+- **Steering an idle bg session = fork-with-transcript** (`--bg --resume` mints a NEW sid carrying the whole conversation; `-p --resume` rejected). RATIFIED: every steer is a re-dispatch + overlay restamp + fresh `-n`.
+- **Print-only flags die under `--bg`**: no stream-json logs, no `--max-budget-usd`. Result = Stop payload `last_assistant_message` (value-shape feature-detect) + transcript tokens; USD is fleet-computed.
+- **Usage-limit walls are SILENT** (G11, pinned by a live 429 mid-spike): no Stop hook, roster looks healthy-idle, no native auto-resume (the observed "recovery" was the operator peek+replying). Detection must ride the idle-no-outcome-record investigation path scanning transcript tails.
+- **`claude stop` fires NO Stop hook** → fleet writes its own tombstone on kill/interrupt. **Raw taskkill → daemon silently respawns same sid ~30 s** — never-raw-kill is now machine-verified. `claude rm` = clean archival primitive.
+- **~1 h reap = process stop, not roster eviction** (primary doc quote); done sessions sit in the roster for hours. Live-idle process-reap UNOBSERVED. No pin CLI (TUI Ctrl+T only).
+- **Big prompts**: argv dies at CreateProcess (>32k), stdin dispatch WEDGES the session silently — task-file bootstrap is the only channel. `-n` carries emoji/pipes/120 chars intact; ai-title clobbers names only on the fork path. `startedAt` jitters across liveness transitions — key nothing on it.
+- **ScheduleWakeup heartbeats work** in bg sessions (~3 min cadence proven); scheduler dies with `claude stop`, no zombie wakeups.
+
+Process lessons:
+- **Evidence-discipline reviews caught overclaims in 5 of 8 experiment tasks** ("permanent" wedge from a 171 s window; "matches criteria exactly" over an unobserved sub-criterion; "daemon did it" when the record said human-typed; beat-count arithmetic 26 vs 17; an unsourced doc quote). Hostile per-task review of EVIDENCE (not just code) pays exactly like C4's grep-receipt gate.
+- **Controller-side research must land in repo files before anything cites it** — an explore-agent's finding cited as "the docs-lane" was untraceable to any artifact and burned a fix wave. Save reports to disk first.
+- **Natural occurrences are data**: a live 429 answered G11 for free; the operator's agents-menu poke was an uncontrolled variable that first masqueraded as a daemon capability. In daemon experiments, log or ask about operator actions before attributing causes.
+- **A subagent's transcript can vanish** (T8 original lost to an API error); the ledger + committed artifacts were sufficient to hand the task to a finisher. Checkpoint discipline works.
