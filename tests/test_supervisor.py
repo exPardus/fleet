@@ -247,3 +247,58 @@ class TestSupBoot:
         args = SimpleNamespace(sid=None, handoff_inc=None)
         with pytest.raises(fleet.FleetCliError):
             fleet.cmd_sup_boot(args, which=_fake_which, run=_fake_run_roster([]))
+
+
+class TestCheckpointHeartbeat:
+    def _hold(self, sid="sid-me", inc="inc-me"):
+        fleet.write_incarnation({"incarnation_id": inc, "session_id": sid,
+                                 "claimed_at": _iso(NOW), "heartbeat_at": fleet.now_iso(),
+                                 "claimed_via": "fresh"})
+
+    def test_checkpoint_appends_and_refreshes_heartbeat(self, sup_home):
+        self._hold()
+        old_beat = fleet.read_incarnation()["heartbeat_at"]
+        args = SimpleNamespace(body="did a thing", kind="CHECKPOINT", sid="sid-me")
+        assert fleet.cmd_sup_checkpoint(args) == 0
+        latest = fleet.supervisor_journal_latest()
+        assert latest["kind"] == "CHECKPOINT" and latest["body"] == "did a thing"
+        assert latest["inc"] == "inc-me"
+        assert fleet.read_incarnation()["heartbeat_at"] >= old_beat
+
+    def test_non_holder_refused_journal_untouched(self, sup_home):
+        self._hold(sid="sid-holder")
+        args = SimpleNamespace(body="intruder", kind="CHECKPOINT", sid="sid-intruder")
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_sup_checkpoint(args)
+        assert fleet.supervisor_journal_entries() == []
+
+    def test_checkpoint_without_any_claim_refused(self, sup_home):
+        args = SimpleNamespace(body="x", kind="CHECKPOINT", sid="sid-me")
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_sup_checkpoint(args)
+
+    def test_heartbeat_refreshes_without_journal_growth(self, sup_home):
+        self._hold()
+        args = SimpleNamespace(sid="sid-me")
+        assert fleet.cmd_sup_heartbeat(args) == 0
+        assert fleet.supervisor_journal_entries() == []
+        assert fleet.read_incarnation()["heartbeat_at"] is not None
+
+
+class TestSupStatus:
+    def test_json_shape(self, sup_home, capsys):
+        fleet.write_incarnation({"incarnation_id": "inc-me", "session_id": "sid-me",
+                                 "claimed_at": _iso(NOW), "heartbeat_at": fleet.now_iso(),
+                                 "claimed_via": "fresh"})
+        args = SimpleNamespace(json=True)
+        assert fleet.cmd_sup_status(args) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["goals_active"] is True
+        assert data["incarnation"]["incarnation_id"] == "inc-me"
+        assert data["heartbeat_age_seconds"] < 60
+        assert data["handshake"] is None and data["abort_flag"] is False
+
+    def test_no_claim_human_output(self, sup_home, capsys):
+        args = SimpleNamespace(json=False)
+        assert fleet.cmd_sup_status(args) == 0
+        assert "no claim" in capsys.readouterr().out.lower()
