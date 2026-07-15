@@ -24,6 +24,7 @@ HOOKS_DIR = REPO_ROOT / "bin" / "hooks"
 POSTTOOLUSE = HOOKS_DIR / "posttooluse_mailbox.py"
 STOP = HOOKS_DIR / "stop_mailbox.py"
 POSTCOMPACT = HOOKS_DIR / "postcompact_journal.py"
+STOP_OUTCOME = HOOKS_DIR / "stop_outcome.py"
 TEMPLATE = REPO_ROOT / "worker-settings.template.json"
 
 PY_CMD = ["py", "-3.13"]
@@ -60,18 +61,30 @@ def make_registry(fleet_home, workers):
     return path
 
 
-def make_transcript(fleet_home, name, usages):
-    """Write a JSONL transcript; `usages` is a list of (input, output) token
-    pairs, one assistant record per pair. Returns the transcript path."""
+def make_transcript(fleet_home, name_or_records, usages=None):
+    """Write a JSONL transcript.
+
+    Two call shapes:
+    - make_transcript(fleet_home, name, usages) -- `usages` is a list of
+      (input, output) token pairs, one assistant record per pair.
+    - make_transcript(fleet_home, records) -- `records` is a list of raw
+      JSONL-record dicts written verbatim, one per line (auto-named).
+
+    Returns the transcript path.
+    """
     tdir = Path(fleet_home) / "transcripts"
     tdir.mkdir(parents=True, exist_ok=True)
-    path = tdir / f"{name}.jsonl"
-    lines = []
-    for inp, out in usages:
-        lines.append(json.dumps({
+    if usages is None:
+        records = name_or_records
+        path = tdir / "t.jsonl"
+        lines = [json.dumps(rec) for rec in records]
+    else:
+        name = name_or_records
+        path = tdir / f"{name}.jsonl"
+        lines = [json.dumps({
             "type": "assistant",
             "message": {"usage": {"input_tokens": inp, "output_tokens": out}},
-        }))
+        }) for inp, out in usages]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
 
@@ -85,11 +98,25 @@ def make_ceiling(fleet_home, session_id, value):
     return path
 
 
+class _HookErrorLines(list):
+    """A list of log lines whose `in` also matches as a substring of any
+    line (on top of normal exact-element membership), so callers can do
+    either `"X" in lines[0]` (existing per-line checks) or `"X" in lines`
+    (does any line mention X) without losing len()/indexing."""
+
+    def __contains__(self, item):
+        if list.__contains__(self, item):
+            return True
+        return any(item in line for line in self)
+
+
 def read_hook_errors(fleet_home):
     path = Path(fleet_home) / "state" / "hook-errors.log"
     if not path.exists():
-        return []
-    return [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        return _HookErrorLines()
+    return _HookErrorLines(
+        ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()
+    )
 
 
 def journal_path(fleet_home, key):
@@ -707,6 +734,80 @@ class TestKernel10TokenCeiling:
 
 
 # ---------------------------------------------------------------------
+# Stop-hook outcome writer (M-B T2)
+# ---------------------------------------------------------------------
+
+class TestStopOutcome:
+    def _payload(self, home, sid="sid-1", last_msg="All done.", transcript=None):
+        p = {"session_id": sid, "hook_event_name": "Stop"}
+        if transcript is not None:
+            p["transcript_path"] = str(transcript)
+        if last_msg is not None:
+            p["last_assistant_message"] = last_msg
+        return json.dumps(p)
+
+    def test_writes_result_record_named_by_registry(self, tmp_path):
+        make_registry(tmp_path, {"w1": {"session_id": "sid-1"}})
+        t = make_transcript(tmp_path, [
+            {"type": "assistant",
+             "message": {"model": "claude-haiku-4-5-20251001",
+                         "usage": {"input_tokens": 11, "output_tokens": 7},
+                         "content": [{"type": "text", "text": "All done."}]}},
+            {"type": "system", "subtype": "bookkeeping"},
+        ])
+        run_hook(STOP_OUTCOME, self._payload(tmp_path, transcript=t), tmp_path)
+        rec = json.loads((tmp_path / "state" / "outcomes" / "w1.jsonl")
+                         .read_text(encoding="utf-8").strip())
+        assert rec["kind"] == "result"
+        assert rec["session_id"] == "sid-1"
+        assert rec["result_text"] == "All done."
+        assert rec["output_tokens"] == 7 and rec["input_tokens"] == 11
+        assert rec["model"] == "claude-haiku-4-5-20251001"
+
+    def test_missing_last_assistant_message_falls_back_to_transcript(self, tmp_path):
+        make_registry(tmp_path, {"w1": {"session_id": "sid-1"}})
+        t = make_transcript(tmp_path, [
+            {"type": "assistant",
+             "message": {"content": [{"type": "text", "text": "from transcript"}]}},
+            {"type": "attachment"},
+        ])
+        run_hook(STOP_OUTCOME, self._payload(tmp_path, last_msg=None, transcript=t), tmp_path)
+        rec = json.loads((tmp_path / "state" / "outcomes" / "w1.jsonl")
+                         .read_text(encoding="utf-8").strip())
+        assert rec["result_text"] == "from transcript"
+
+    def test_unresolvable_name_falls_back_to_sid_key(self, tmp_path):
+        (tmp_path / "state").mkdir(parents=True, exist_ok=True)  # no registry
+        run_hook(STOP_OUTCOME, self._payload(tmp_path, transcript=None), tmp_path)
+        assert (tmp_path / "state" / "outcomes" / "sid-1.jsonl").exists()
+
+    def test_truncates_huge_result_text(self, tmp_path):
+        make_registry(tmp_path, {"w1": {"session_id": "sid-1"}})
+        run_hook(STOP_OUTCOME, self._payload(tmp_path, last_msg="x" * 50000), tmp_path)
+        rec = json.loads((tmp_path / "state" / "outcomes" / "w1.jsonl")
+                         .read_text(encoding="utf-8").strip())
+        assert len(rec["result_text"]) == 20000
+
+    def test_garbage_stdin_logs_error_and_exits_zero(self, tmp_path):
+        (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+        proc = run_hook(STOP_OUTCOME, "{not json", tmp_path)
+        assert proc.returncode == 0
+        assert "stop_outcome" in read_hook_errors(tmp_path)
+
+    def test_atomic_append_helper_matches_fleet_pattern(self):
+        """Structural pin: the hook must use the same Win32
+        FILE_APPEND_DATA-only atomic-append approach as bin/fleet.py's
+        _atomic_append_bytes (T1 fix-wave lesson), not plain open(..., "a")
+        buffered writes, which lose records under concurrent Stop-hook
+        invocations on Windows."""
+        source = STOP_OUTCOME.read_text(encoding="utf-8")
+        assert "_atomic_append_bytes" in source
+        assert "FILE_APPEND_DATA" in source
+        assert "CreateFileW" in source
+        assert "WriteFile" in source
+
+
+# ---------------------------------------------------------------------
 # Template -- parses, forward slashes, PostCompact registered (F11a)
 # ---------------------------------------------------------------------
 
@@ -728,12 +829,21 @@ class TestTemplate:
         cmd = parsed["hooks"]["PostCompact"][0]["hooks"][0]["command"]
         assert "postcompact_journal.py" in cmd
 
+    def test_stop_array_order_outcome_then_mailbox(self):
+        parsed = json.loads(self._render())
+        stop_hooks = parsed["hooks"]["Stop"][0]["hooks"]
+        assert len(stop_hooks) == 2
+        assert "stop_outcome.py" in stop_hooks[0]["command"]
+        assert "stop_mailbox.py" in stop_hooks[1]["command"]
+
     def test_all_hook_commands_use_forward_slashes(self):
         parsed = json.loads(self._render())
-        for event in ("PostToolUse", "Stop", "PostCompact"):
+        for event in ("PostToolUse", "PostCompact"):
             cmd = parsed["hooks"][event][0]["hooks"][0]["command"]
             # path portion must not contain backslashes (Git-Bash sh -c eats them)
             assert "\\" not in cmd, f"{event} command has a backslash: {cmd}"
+        for cmd in (h["command"] for h in parsed["hooks"]["Stop"][0]["hooks"]):
+            assert "\\" not in cmd, f"Stop command has a backslash: {cmd}"
 
     def test_raw_template_is_valid_json_with_placeholders(self):
         # placeholders live inside string values, so the raw file still parses
