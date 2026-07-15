@@ -1643,14 +1643,15 @@ class TestSettingSourcesPassthrough:
         argv = fleet.build_turn_argv("claude.cmd", "sid-1", first=True, mode="omit")
         assert "--setting-sources" not in argv
 
-    def test_spawn_persists_setting_sources(self, isolated_home, tmp_path, monkeypatch):
-        # M-B T4: cmd_spawn now dispatches natively via dispatch_bg, whose
-        # frozen T3 interface has no setting_sources param -- it is
-        # persisted in the registry at spawn but NOT yet forwarded onto the
-        # native --bg argv (see tests/test_cli.py::TestCmdSpawn's matching
-        # note and task-4-report.md concerns).
+    def test_spawn_persists_and_forwards_setting_sources(self, isolated_home, tmp_path, monkeypatch):
+        # T4 fix wave (Important I1): --setting-sources is persisted in the
+        # registry at spawn AND forwarded onto the native --bg argv via
+        # dispatch_bg's setting_sources param (previously persistence-only
+        # -- dispatch_bg's frozen T3 signature had no such param; see
+        # tests/test_cli.py::TestCmdSpawn's matching note).
         import types
         state = {"n": 0}
+        calls = []
 
         def roster_fetch(**_):
             # Call-count-aware: the 1st call is dispatch_bg's pre-dispatch
@@ -1674,6 +1675,7 @@ class TestSettingSourcesPassthrough:
         )
 
         def fake_run(argv, **kwargs):
+            calls.append(argv)
             return types.SimpleNamespace(returncode=0,
                 stdout="backgrounded · aaaabbbb · fleet|probe-1|t\n", stderr="")
 
@@ -1681,6 +1683,41 @@ class TestSettingSourcesPassthrough:
 
         rec = fleet.load_registry()["workers"]["probe-1"]
         assert rec["setting_sources"] == "project"
+
+        argv = calls[0]
+        assert argv[argv.index("--setting-sources") + 1] == "project"
+        # Positioned after --settings, per the T4 fix wave contract.
+        assert argv.index("--setting-sources") > argv.index("--settings")
+
+    def test_spawn_omits_setting_sources_flag_when_not_given(self, isolated_home, tmp_path, monkeypatch):
+        import types
+        state = {"n": 0}
+        calls = []
+
+        def roster_fetch(**_):
+            state["n"] += 1
+            if state["n"] == 1:
+                return True, []
+            return True, [{"id": "aaaabbbb", "sessionId":
+                "aaaabbbb-1111-2222-3333-444455556666", "name": "fleet|probe-1|t",
+                "cwd": str(tmp_path), "startedAt": 1, "kind": "background",
+                "state": "working", "status": "busy", "pid": 1}]
+
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", roster_fetch)
+        worker_dir = tmp_path / "proj"
+        worker_dir.mkdir()
+        args = fleet.build_parser().parse_args(
+            ["spawn", "probe-1", "--dir", str(worker_dir), "--task", "do it"]
+        )
+
+        def fake_run(argv, **kwargs):
+            calls.append(argv)
+            return types.SimpleNamespace(returncode=0,
+                stdout="backgrounded · aaaabbbb · fleet|probe-1|t\n", stderr="")
+
+        fleet.cmd_spawn(args, run=fake_run, which=lambda n: "claude.cmd", sleep=lambda s: None)
+
+        assert "--setting-sources" not in calls[0]
 
 
 # ---------------------------------------------------------------------------
