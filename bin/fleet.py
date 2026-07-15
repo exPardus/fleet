@@ -4712,6 +4712,104 @@ def write_tombstone_outcome(name: str, sid: str, kind: str) -> None:
                           "result_text": None})
 
 
+# --------------------------------------------------------------------------
+# Native dispatch (M-B, spec §5): single choke point for every --bg launch.
+# Task-file bootstrap (G8), short-id capture + sid-prefix roster join (G6
+# fallback), fresh -n render per dispatch (G13 / spec §5.1.3).
+# --------------------------------------------------------------------------
+
+NATIVE_JOIN_VERIFY_SECONDS = 60.0
+NATIVE_JOIN_POLL_SECONDS = 3.0
+NATIVE_DISPATCH_TIMEOUT_SECONDS = 120.0
+DEFAULT_CATEGORY = "fleet"
+NATIVE_NAME_HINT_MAX = 40
+
+_BG_SHORT_ID_RE = re.compile(r"backgrounded\s*[··]\s*(\S+)\s*[··]")
+
+
+class NativeDispatchError(Exception):
+    pass
+
+
+def render_native_name(category, name: str, hint: str) -> str:
+    cat = category or DEFAULT_CATEGORY
+    clean = " ".join((hint or "").split())[:NATIVE_NAME_HINT_MAX]
+    return f"{cat}|{name}|{clean}"
+
+
+def _parse_bg_short_id(stdout_text: str):
+    m = _BG_SHORT_ID_RE.search(stdout_text or "")
+    return m.group(1) if m else None
+
+
+def _roster_entry_for(entries, sid):
+    for e in entries:
+        if isinstance(e, dict) and e.get("sessionId") == sid:
+            return e
+    return None
+
+
+def _join_roster_by_short_id(short_id, roster_fetch, sleep,
+                             verify_seconds=NATIVE_JOIN_VERIFY_SECONDS):
+    """Full sid whose prefix is the dispatch-printed short id. Matches done
+    entries too -- a fast worker finishes before verify (spec §3)."""
+    deadline = time.monotonic() + verify_seconds
+    while True:
+        ok, payload = roster_fetch()
+        if ok:
+            for e in payload:
+                sid = e.get("sessionId") if isinstance(e, dict) else None
+                if isinstance(sid, str) and sid.startswith(short_id):
+                    return sid
+        if time.monotonic() >= deadline:
+            return None
+        sleep(NATIVE_JOIN_POLL_SECONDS)
+
+
+def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
+                hint="", resume_sid=None, settings_path=None,
+                run=subprocess.run, which=shutil.which, sleep=time.sleep,
+                roster_fetch=None):
+    if roster_fetch is None:
+        roster_fetch = lambda: _fetch_agents_roster(which=which, run=run)  # noqa: E731
+    exe = resolve_claude_executable(which)
+    settings = Path(settings_path) if settings_path else instance_settings_path()
+    tasks_dir().mkdir(parents=True, exist_ok=True)
+    task_path = task_file_path(name)
+    task_path.write_text(prompt_body, encoding="utf-8")
+    rendered = render_native_name(category, name, hint)
+    tiny_prompt = f"Read {task_path.as_posix()} and follow it exactly."
+    argv = [exe, "--bg"]
+    if resume_sid:
+        argv += ["--resume", resume_sid]
+    argv += ["-n", rendered, "--settings", settings.as_posix()]
+    argv += mode_flags(mode)
+    if model:
+        argv += ["--model", model]
+    argv.append(tiny_prompt)
+    try:
+        proc = run(argv, cwd=str(cwd), env=_worker_env(name),
+                   capture_output=True, text=True, encoding="utf-8",
+                   errors="replace", timeout=NATIVE_DISPATCH_TIMEOUT_SECONDS)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise NativeDispatchError(f"--bg dispatch failed: {exc}") from exc
+    if proc.returncode != 0:
+        raise NativeDispatchError(
+            f"--bg dispatch exited {proc.returncode}: "
+            f"{(proc.stderr or proc.stdout or '').strip()[:400]}")
+    short_id = _parse_bg_short_id(proc.stdout or "")
+    if not short_id:
+        raise NativeDispatchError(
+            f"could not parse short id from --bg stdout: {(proc.stdout or '').strip()[:400]}")
+    sid = _join_roster_by_short_id(short_id, roster_fetch, sleep)
+    if sid is None:
+        raise NativeDispatchError(
+            f"dispatched (short id {short_id}) but no roster entry joined "
+            f"within {NATIVE_JOIN_VERIFY_SECONDS:.0f}s -- possible DOA; "
+            f"recover manually via claude agents")
+    return {"session_id": sid, "short_id": short_id, "rendered_name": rendered}
+
+
 # ---------------------------------------------------------------------------
 # Supervisor identity (native-pivot spec §4, milestone M-A)
 #
