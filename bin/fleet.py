@@ -1715,6 +1715,125 @@ def recompute_worker(name: str, record: dict, get_process_info=None, sleep=time.
     return updated
 
 
+# ---------------------------------------------------------------------------
+# Native outcome discriminator (M-B T5): recompute_worker_native replaces
+# PID probing for dispatch_kind:"bg" records -- there is no OS pid to probe,
+# liveness comes from the roster (joined by sid) plus the Stop-hook outcome
+# store. `_limit_scan_hook` is a module-level seam (None here; T6 installs
+# the real transcript_limit_scan) so the no-fresh-outcome branch can resolve
+# to `limited` instead of always falling to `dead-suspected`.
+# ---------------------------------------------------------------------------
+
+_limit_scan_hook = None  # T6 installs transcript_limit_scan here
+
+NATIVE_TERMINAL_STATUSES = {"idle", "dead", "dead-suspected", "limited",
+                            "over_ceiling", "interrupted"}
+# dead-suspected is deliberately NOT sticky -- it is a verdict, not a state,
+# re-evaluated every recompute so a late-arriving outcome record can flip it
+# back to idle (task-5-brief.md, "Fix the sticky-guard logic").
+_NATIVE_STICKY = ("dead", "over_budget", "over_ceiling", "limited",
+                  "interrupted", "attached")
+
+
+def _investigate_no_outcome(name: str, record: dict, updated: dict) -> dict:
+    """No fresh outcome record for the current sid: limit wall (silent,
+    G11) or genuinely dead. Scans the transcript tail via `_limit_scan_hook`
+    (None until T6 installs transcript_limit_scan, in which case this
+    always resolves to dead-suspected); limit-shaped -> park `limited`
+    (never auto-respawned before the horizon), else -> `dead-suspected`
+    (surfaced, never auto-respawned, re-evaluated every recompute)."""
+    scan = _limit_scan_hook
+    if scan is not None:
+        is_limit, reset_at, kind = scan(record.get("session_id"))
+        if is_limit:
+            updated["status"] = "limited"
+            updated["limit_reset_at"] = reset_at
+            updated["limit_kind"] = kind
+            return updated
+    updated["status"] = "dead-suspected"
+    return updated
+
+
+def recompute_worker_native(name: str, record: dict, roster_entries: list) -> dict:
+    """Verdict engine for dispatch_kind:"bg" records (task-5-brief.md,
+    binding verdict order):
+
+    1. Sticky statuses (`_NATIVE_STICKY`) pass through unchanged.
+    2. `session_id is None` (dispatch in flight): stay `working` while the
+       pre-claim hasn't aged past `_launch_claim_expired`, else `dead`.
+    3. Roster entry present and live (carries `status` or `pid` -- `state`
+       alone is never live, contract field-presence table): `busy`/
+       `waiting` -> `working` (`waiting` also flags `waiting_for_permission`
+       for `_worker_flags`); `idle` -> fresh-outcome check against
+       `last_dispatch_at` (falls back to `created`) -- fresh -> `idle`,
+       else -> investigate.
+    4. Roster entry present but dead (`state`-only), or roster-gone
+       entirely: same fresh-outcome check as the idle branch above (covers
+       `stopped`/`failed`/`done`-reaped).
+
+    Anchoring the fresh-outcome check on `last_dispatch_at` (never on the
+    outcome record's mere presence) is what stops a dead predecessor's
+    outcome record -- or this session's OWN prior turn's outcome record --
+    from vouching for the current turn (`has_fresh_outcome` filters by sid
+    AND timestamp)."""
+    updated = dict(record)
+    updated.pop("waiting_for_permission", None)
+
+    status = record.get("status")
+    if status in _NATIVE_STICKY:
+        updated["status"] = status
+        return updated
+
+    sid = record.get("session_id")
+    if sid is None:
+        if not _launch_claim_expired(record.get("last_activity")):
+            updated["status"] = "working"
+        else:
+            updated["status"] = "dead"
+        return updated
+
+    since = record.get("last_dispatch_at") or record.get("created")
+    entry = _roster_entry_for(roster_entries, sid)
+    live = entry is not None and ("status" in entry or "pid" in entry)
+    if live:
+        rstatus = entry.get("status")
+        if rstatus in ("busy", "waiting"):
+            updated["status"] = "working"
+            if rstatus == "waiting":
+                updated["waiting_for_permission"] = True
+            return updated
+        # idle: the turn ended -- did the Stop hook record an outcome for
+        # THIS sid at or after this dispatch began?
+        if has_fresh_outcome(name, sid, since):
+            updated["status"] = "idle"
+            return updated
+        return _investigate_no_outcome(name, record, updated)
+
+    # Roster entry is dead (state-only) or the sid is gone from the roster
+    # entirely -- same fresh-outcome test as the idle branch.
+    if has_fresh_outcome(name, sid, since):
+        updated["status"] = "idle"
+        return updated
+    return _investigate_no_outcome(name, record, updated)
+
+
+def native_epoch_suspicious(roster_ok: bool, entries: list, workers: dict) -> bool:
+    """G9 epoch-freeze predicate (mirrors supervisor_epoch_check): the
+    roster fetch failed, OR it came back empty while some native worker's
+    own last-committed record still says `working` with a real sid -- a
+    fresh daemon boot (or a transient CLI failure shaped like an empty
+    list) must never be read as "everything died". Callers freeze: no
+    native record is recomputed or written while this is true."""
+    if not roster_ok:
+        return True
+    if entries:
+        return False
+    return any(
+        is_native(rec) and rec.get("status") == "working" and rec.get("session_id")
+        for rec in workers.values() if isinstance(rec, dict)
+    )
+
+
 def _pending_mail_count(sid: str) -> int:
     """0 or 1: whether mailbox/<sid>.md exists and is nonempty (SPEC §5
     status row: "pending-mail count (mailbox file exists+nonempty)" -- a
@@ -1746,6 +1865,15 @@ def _worker_flags(record: dict) -> list:
             flags.append("stale-attach")
     if record["status"] == "dead":
         flags.append("dead")
+    # M-B T5: dead-suspected is a native-only, non-sticky verdict -- surface
+    # it as an operator prompt to look, never an auto-respawn trigger.
+    if record["status"] == "dead-suspected":
+        flags.append("investigate: no outcome record")
+    # M-B T5: recompute_worker_native sets this transient field (never part
+    # of new_worker_record's base schema) when the roster reports the native
+    # session paused on a permission prompt.
+    if record.get("waiting_for_permission"):
+        flags.append("waiting-permission")
     # Kernel 10 (F12=M24): surface the fleet-side token-ceiling refusal in
     # `fleet status`, mirroring how over_budget shows up as its own status.
     if record["status"] == "over_ceiling":
@@ -2628,11 +2756,38 @@ def cmd_status(args, get_process_info=None, sleep=time.sleep) -> int:
             if n not in data["workers"]:
                 raise FleetCliError(f"unknown worker: {n!r}")
         before = {n: data["workers"][n] for n in names}
+        all_workers = data["workers"]  # snapshot for the epoch check (G9)
+
+    # M-B T5: native (dispatch_kind:"bg") records have no OS pid to probe --
+    # they go through recompute_worker_native (roster + outcome store)
+    # instead of recompute_worker's PID/log-tail probe. Legacy records keep
+    # today's path untouched.
+    native_names = [n for n in names if is_native(before[n])]
+    legacy_names = [n for n in names if n not in native_names]
+
+    # ONE roster fetch per invocation, outside the lock (F4 doctrine), only
+    # when a native worker is actually being asked about.
+    roster_entries = []
+    epoch_frozen = False
+    if native_names:
+        roster_ok, payload = _fetch_agents_roster()
+        roster_entries = payload if roster_ok else []
+        epoch_frozen = native_epoch_suspicious(roster_ok, roster_entries, all_workers)
 
     # Probe every named worker's liveness with NO lock held (see docstring
     # above) -- this is the (potentially several-seconds-total) expensive
     # part.
-    after = {n: recompute_worker(n, before[n], get_process_info=get_process_info, sleep=sleep) for n in names}
+    after = {n: recompute_worker(n, before[n], get_process_info=get_process_info, sleep=sleep)
+             for n in legacy_names}
+    if native_names:
+        if epoch_frozen:
+            # G9: roster suspicious -- no native record is recomputed or
+            # written this invocation; display whatever is last-committed.
+            for n in native_names:
+                after[n] = before[n]
+        else:
+            for n in native_names:
+                after[n] = recompute_worker_native(n, before[n], roster_entries)
 
     display = {}
     with fleet_lock():
@@ -2655,9 +2810,25 @@ def cmd_status(args, get_process_info=None, sleep=time.sleep) -> int:
                 changed = True
                 if after[n]["status"] != current["status"]:
                     append_event("status_changed", n, old=current["status"], new=after[n]["status"])
+                    # M-B T5: a native verdict landing on limited/dead-
+                    # suspected also gets its own named event, mirroring
+                    # recompute_worker's own limited_suspected append for
+                    # the legacy crash-dead branch -- guarded on the same
+                    # old!=new transition above, so a dead-suspected record
+                    # that stays dead-suspected across reruns never re-fires.
+                    if n in native_names:
+                        if after[n]["status"] == "limited":
+                            append_event("limited_suspected", n,
+                                        limit_reset_at=after[n].get("limit_reset_at"),
+                                        limit_kind=after[n].get("limit_kind"))
+                        elif after[n]["status"] == "dead-suspected":
+                            append_event("dead_suspected", n)
             display[n] = data["workers"][n]
         if changed:
             save_registry(data)
+
+    if epoch_frozen:
+        print("EPOCH: roster suspicious -- native verdicts frozen (G9); legacy rows only")
 
     if getattr(args, "json", False):
         # The authoritative path has already persisted its verdicts above, so
@@ -2700,6 +2871,25 @@ def _print_snapshot_table(snap: dict, name=None) -> None:
     print("(stale-ok: last-committed state, not probed)")
 
 
+def _native_token_summary(name: str, rec: dict) -> str:
+    """"tokens:in=X out=Y" from the latest outcome record for this native
+    worker's current sid, or "" if there is none yet / it carries no token
+    fields (G3: USD cost is refused for native dispatch, so this is the
+    status table's only per-worker usage signal)."""
+    sid = rec.get("session_id")
+    if not sid:
+        return ""
+    outcome = latest_outcome(name, sid)
+    if not outcome:
+        return ""
+    parts = []
+    if outcome.get("input_tokens") is not None:
+        parts.append(f"in={outcome['input_tokens']}")
+    if outcome.get("output_tokens") is not None:
+        parts.append(f"out={outcome['output_tokens']}")
+    return "tokens:" + " ".join(parts) if parts else ""
+
+
 def _print_status_table(data: dict, names) -> None:
     header = f"{'NAME':<20}{'STATUS':<10}{'TURNS':>6}{'COST':>9}{'MIN-AGO':>9}{'MAIL':>6}{'ATTACH':>9}  FLAGS"
     print(header)
@@ -2714,9 +2904,19 @@ def _print_status_table(data: dict, names) -> None:
         mail = _pending_mail_count(rec["session_id"])
         attach_age = _attach_age_seconds(rec)
         attach_s = f"{attach_age / 3600:.1f}h" if attach_age is not None else "-"
-        flags = ",".join(_worker_flags(rec)) or "-"
+        flag_list = _worker_flags(rec)
+        if is_native(rec):
+            # G3: USD cost is REFUTED-for-contract under native dispatch --
+            # render "-", never a stale/zero dollar figure.
+            cost_s = f"{'-':>9}"
+            tok = _native_token_summary(n, rec)
+            if tok:
+                flag_list = flag_list + [tok]
+        else:
+            cost_s = f"{rec['cost_usd']:>9.2f}"
+        flags = ",".join(flag_list) or "-"
         print(
-            f"{n:<20}{rec['status']:<10}{rec['turns']:>6}{rec['cost_usd']:>9.2f}"
+            f"{n:<20}{rec['status']:<10}{rec['turns']:>6}{cost_s}"
             f"{mins_s:>9}{mail:>6}{attach_s:>9}  {flags}"
         )
 
@@ -2805,11 +3005,33 @@ def wait_for_workers(names, mode: str = "all", timeout=None, poll_interval: floa
     pending = set(names)
     while True:
         data = load_registry()
+        workers = data["workers"]
+
+        # M-B T5: one roster fetch per poll shared by every native name
+        # still pending (not per-name) -- and the same epoch-freeze
+        # discipline as cmd_status: a suspicious roster this poll means no
+        # native verdict is trusted this poll (they simply stay pending).
+        native_pending = [n for n in pending if n in workers and is_native(workers[n])]
+        roster_entries = []
+        epoch_frozen = False
+        if native_pending:
+            roster_ok, payload = _fetch_agents_roster()
+            roster_entries = payload if roster_ok else []
+            epoch_frozen = native_epoch_suspicious(roster_ok, roster_entries, workers)
+
         for n in list(pending):
-            rec = data["workers"].get(n)
+            rec = workers.get(n)
             if rec is None:
                 finished[n] = "dead"
                 pending.discard(n)
+                continue
+            if is_native(rec):
+                if epoch_frozen:
+                    continue
+                status = recompute_worker_native(n, rec, roster_entries)["status"]
+                if status in NATIVE_TERMINAL_STATUSES:
+                    finished[n] = status
+                    pending.discard(n)
                 continue
             log_path = logs_dir() / f"{n}.jsonl"
             status = recompute_status(
@@ -2860,16 +3082,46 @@ def cmd_wait(args, get_process_info=None, sleep=time.sleep, clock=time.monotonic
     )
 
     if finished:
+        # M-B T5: wait_for_workers already picked the terminal verdict for
+        # any native name in `finished` via recompute_worker_native (never
+        # recompute_worker's PID probe -- native records have no turn_pid).
+        # Re-derive the same way here for the persist step, one more roster
+        # fetch outside the lock (F4), so a worker that flips into
+        # `limited`/`dead-suspected` gets its horizon fields and its named
+        # event, exactly like cmd_status.
+        snap_workers = load_registry()["workers"]
+        native_finished = [n for n in finished if n in snap_workers and is_native(snap_workers[n])]
+        roster_entries = []
+        epoch_frozen = False
+        if native_finished:
+            roster_ok, payload = _fetch_agents_roster()
+            roster_entries = payload if roster_ok else []
+            epoch_frozen = native_epoch_suspicious(roster_ok, roster_entries, snap_workers)
+
         with fleet_lock():
             data = load_registry()
             for n in finished:
                 rec = data["workers"].get(n)
                 if rec is None:
                     continue
-                updated = recompute_worker(n, rec, get_process_info=get_process_info, sleep=sleep)
+                if is_native(rec):
+                    if epoch_frozen:
+                        # G9: roster suspicious -- leave this native record
+                        # untouched (unwritten), same freeze as cmd_status.
+                        continue
+                    updated = recompute_worker_native(n, rec, roster_entries)
+                else:
+                    updated = recompute_worker(n, rec, get_process_info=get_process_info, sleep=sleep)
                 data["workers"][n] = updated
                 if updated["status"] != rec["status"]:
                     append_event("status_changed", n, old=rec["status"], new=updated["status"])
+                    if is_native(rec):
+                        if updated["status"] == "limited":
+                            append_event("limited_suspected", n,
+                                        limit_reset_at=updated.get("limit_reset_at"),
+                                        limit_kind=updated.get("limit_kind"))
+                        elif updated["status"] == "dead-suspected":
+                            append_event("dead_suspected", n)
             save_registry(data)
 
     for n, status in finished.items():
