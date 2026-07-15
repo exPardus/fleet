@@ -2478,6 +2478,76 @@ class TestCmdKillNative:
         stopped = {c[0][2] for c in calls if c[0][:2] == ["claude", "stop"]}
         assert stopped == {SID, "retired-1", "retired-2"}
 
+    # T8 fix wave (adv I1, Important) -- retired-sid sweep wall-time bound.
+
+    def test_retired_sid_stops_use_short_timeout_primary_keeps_full_budget(self, native_home):
+        rec = seed_native_worker(native_home, sid=SID, status="working")
+        rec["retired_sids"] = ["retired-1", "retired-2"]
+        fleet.save_registry({"workers": {"w1": rec}})
+        calls = []
+        fleet.cmd_kill(_kill_args(), run=_fake_run_factory(rc=0, calls=calls), which=lambda _: "claude")
+        stop_calls = {c[0][2]: c[1] for c in calls if c[0][:2] == ["claude", "stop"]}
+        assert stop_calls[SID]["timeout"] == 30
+        assert stop_calls["retired-1"]["timeout"] == fleet._RETIRED_SID_SWEEP_TIMEOUT_SECONDS
+        assert stop_calls["retired-2"]["timeout"] == fleet._RETIRED_SID_SWEEP_TIMEOUT_SECONDS
+        assert fleet._RETIRED_SID_SWEEP_TIMEOUT_SECONDS == 5
+
+    def test_retired_sid_sweep_capped_at_20_most_recent(self, native_home):
+        rec = seed_native_worker(native_home, sid=SID, status="working")
+        rec["retired_sids"] = [f"retired-{i}" for i in range(50)]
+        fleet.save_registry({"workers": {"w1": rec}})
+        calls = []
+        fleet.cmd_kill(_kill_args(), run=_fake_run_factory(rc=0, calls=calls), which=lambda _: "claude")
+        stopped_retired = [c[0][2] for c in calls if c[0][:2] == ["claude", "stop"] and c[0][2] != SID]
+        assert len(stopped_retired) == 20
+        # the 20 MOST RECENT (last 20 of the list), not the first 20.
+        assert set(stopped_retired) == {f"retired-{i}" for i in range(30, 50)}
+
+    def test_retired_sid_sweep_prints_one_progress_line_per_sid(self, native_home, capsys):
+        rec = seed_native_worker(native_home, sid=SID, status="working")
+        rec["retired_sids"] = ["retired1sid", "retired2sid"]
+        fleet.save_registry({"workers": {"w1": rec}})
+        fleet.cmd_kill(_kill_args(), run=_fake_run_factory(rc=0), which=lambda _: "claude")
+        err = capsys.readouterr().err
+        assert "stopping retired session retired1... ok" in err
+        assert "stopping retired session retired2... ok" in err
+
+    def test_retired_sid_sweep_reports_timeout_on_stop_failure(self, native_home, capsys):
+        rec = seed_native_worker(native_home, sid=SID, status="working")
+        rec["retired_sids"] = ["retired1sid"]
+        fleet.save_registry({"workers": {"w1": rec}})
+        fleet.cmd_kill(_kill_args(), run=_fake_run_factory(rc=1), which=lambda _: "claude")
+        err = capsys.readouterr().err
+        assert "stopping retired session retired1... timeout" in err
+
+    # T8 fix wave (adv M1, Minor) -- cross-worker ownership check on a
+    # corrupted/hand-edited registry.
+
+    def test_retired_sid_matching_another_workers_current_sid_is_skipped(self, native_home, capsys):
+        victim_sid = "victim-live-sid"
+        attacker = fleet.new_worker_record(SID, "C:/proj", "t", "accept", dispatch_kind="bg")
+        attacker["status"] = "working"
+        attacker["native_short_id"] = SID[:8]
+        attacker["last_dispatch_at"] = _iso(NOW - timedelta(minutes=5))
+        attacker["retired_sids"] = [victim_sid]
+        victim = fleet.new_worker_record(victim_sid, "C:/proj", "t", "accept", dispatch_kind="bg")
+        victim["status"] = "working"
+        victim["native_short_id"] = victim_sid[:8]
+        victim["last_dispatch_at"] = _iso(NOW - timedelta(minutes=1))
+        fleet.save_registry({"workers": {"attacker": attacker, "victim": victim}})
+
+        calls = []
+        rc = fleet.cmd_kill(_kill_args(name="attacker"),
+                            run=_fake_run_factory(rc=0, calls=calls), which=lambda _: "claude")
+        assert rc == 0
+        stopped = {c[0][2] for c in calls if c[0][:2] == ["claude", "stop"]}
+        assert victim_sid not in stopped
+        assert stopped == {SID}
+        err = capsys.readouterr().err
+        assert "skipping" in err
+        # victim's own registry record is untouched.
+        assert fleet.load_registry()["workers"]["victim"] == victim
+
     def test_stop_failure_still_marks_dead_but_warns_and_nonzero(self, native_home, capsys):
         seed_native_worker(native_home, sid=SID, status="working")
         rc = fleet.cmd_kill(_kill_args(), run=_fake_run_factory(rc=1), which=lambda _: "claude")
@@ -2537,7 +2607,11 @@ class TestCmdInterruptNative:
         assert rc == 0
         assert fleet.load_registry()["workers"]["w1"]["status"] == "interrupted"
 
-    def test_launch_in_flight_is_a_noop(self, native_home):
+    def test_launch_in_flight_refuses(self, native_home):
+        # T8 fix wave (adv C1): a dispatch pre-claim (no real sid yet) now
+        # refuses loudly (exit 1) rather than a silent friendly no-op --
+        # a dispatch may still land any moment and the operator should
+        # know interrupt did nothing, not assume it succeeded.
         rec = fleet.new_worker_record(None, "C:/proj", "t", "accept", dispatch_kind="bg")
         fleet.save_registry({"workers": {"w1": rec}})
 
@@ -2545,8 +2619,95 @@ class TestCmdInterruptNative:
             raise AssertionError("must not attempt a stop with no real sid yet")
 
         rc = fleet.cmd_interrupt(_interrupt_args(), run=boom_run, which=lambda _: "claude")
-        assert rc == 0
+        assert rc == 1
         assert fleet.load_registry()["workers"]["w1"]["status"] == "working"
+
+    # T8 fix wave (adv C1, CRITICAL) -- status guard: interrupt only ever
+    # fires `claude stop` + tombstone + status flip on a `working` verdict.
+    # Every other status either friendly-no-ops or refuses loudly, and
+    # NEVER touches the registry or fires a stop call.
+
+    def test_dead_is_a_noop_never_un_terminals(self, native_home):
+        # Trap: pre-fix, this silently overwrote a sticky `dead` status to
+        # `interrupted` with rc==0 and fired a live `claude stop` against a
+        # sid fleet's own registry already called gone.
+        seed_native_worker(native_home, sid=SID, status="dead")
+
+        def boom_run(*a, **kw):
+            raise AssertionError("must not claude-stop a sid already marked dead")
+
+        rc = fleet.cmd_interrupt(_interrupt_args(), run=boom_run, which=lambda _: "claude")
+        assert rc == 0
+        assert fleet.load_registry()["workers"]["w1"]["status"] == "dead"
+
+    def test_already_interrupted_is_a_noop(self, native_home):
+        seed_native_worker(native_home, sid=SID, status="interrupted")
+
+        def boom_run(*a, **kw):
+            raise AssertionError("must not claude-stop an already-interrupted sid")
+
+        rc = fleet.cmd_interrupt(_interrupt_args(), run=boom_run, which=lambda _: "claude")
+        assert rc == 0
+        assert fleet.load_registry()["workers"]["w1"]["status"] == "interrupted"
+
+    def test_idle_is_a_noop(self, native_home):
+        seed_native_worker(native_home, sid=SID, status="idle")
+
+        def boom_run(*a, **kw):
+            raise AssertionError("must not claude-stop a finished (idle) sid")
+
+        rc = fleet.cmd_interrupt(_interrupt_args(), run=boom_run, which=lambda _: "claude")
+        assert rc == 0
+        assert fleet.load_registry()["workers"]["w1"]["status"] == "idle"
+
+    def test_limited_refuses_and_is_preserved_for_resume_limited(self, native_home, capsys):
+        # Adversarial doc's own named repro: interrupting a `limited`
+        # worker used to silently drop it out of `resume-limited`'s
+        # `status == "limited"` filter forever, permanently breaking
+        # usage-limit auto-continuity (spec Sec5.1.1) with rc==0 and no
+        # signal. Must now refuse loudly and leave status untouched.
+        rec = seed_native_worker(native_home, sid=SID, status="limited")
+        rec["limit_reset_at"] = _iso(NOW + timedelta(hours=1))
+        rec["limit_kind"] = "plan_usage"
+        fleet.save_registry({"workers": {"w1": rec}})
+
+        def boom_run(*a, **kw):
+            raise AssertionError("must not claude-stop a parked (limited) sid")
+
+        rc = fleet.cmd_interrupt(_interrupt_args(), run=boom_run, which=lambda _: "claude")
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "limited" in err and "resume-limited" in err
+        workers = fleet.load_registry()["workers"]
+        assert workers["w1"]["status"] == "limited"
+        assert {n for n, r in workers.items() if r["status"] == "limited"} == {"w1"}
+
+    def test_dead_suspected_refuses_with_investigate_hint(self, native_home, capsys):
+        seed_native_worker(native_home, sid=SID, status="dead-suspected")
+
+        def boom_run(*a, **kw):
+            raise AssertionError("must not claude-stop a dead-suspected sid")
+
+        rc = fleet.cmd_interrupt(_interrupt_args(), run=boom_run, which=lambda _: "claude")
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "dead-suspected" in err
+        assert "peek" in err or "result" in err
+        assert fleet.load_registry()["workers"]["w1"]["status"] == "dead-suspected"
+
+    def test_other_sticky_status_refuses_generically(self, native_home, capsys):
+        # attached/over_ceiling/over_budget: not explicitly named by the
+        # contract, but none of them is a plain live turn either -- the
+        # generic default branch must still refuse rather than silently
+        # overwrite.
+        seed_native_worker(native_home, sid=SID, status="attached")
+
+        def boom_run(*a, **kw):
+            raise AssertionError("must not claude-stop an attached sid")
+
+        rc = fleet.cmd_interrupt(_interrupt_args(), run=boom_run, which=lambda _: "claude")
+        assert rc == 1
+        assert fleet.load_registry()["workers"]["w1"]["status"] == "attached"
 
     def test_tombstone_prevents_dead_suspected_on_next_recompute(self, native_home):
         rec = seed_native_worker(native_home, sid=SID, status="working")
@@ -2754,18 +2915,19 @@ class TestCmdAttachNative:
 
 
 class TestCmdCleanNative:
-    def test_deletes_dead_idle_interrupted_and_sweeps_files(self, native_home, monkeypatch):
-        # seed_native_worker overwrites the whole registry per call -- build
-        # the multi-worker registry directly so all three coexist.
+    def test_deletes_dead_and_sweeps_files(self, native_home, monkeypatch):
+        # T8 fix wave (review CRITICAL): native clean is dead-ONLY, exact
+        # legacy parity -- idle and interrupted are proven NOT deleted by
+        # the dedicated regression tests below.
         data = {"workers": {}}
-        for name, status in (("dead-w", "dead"), ("idle-w", "idle"), ("int-w", "interrupted")):
+        for name, status in (("dead-w1", "dead"), ("dead-w2", "dead")):
             rec = fleet.new_worker_record(f"{name}-sid", "C:/proj", "do it", "accept", dispatch_kind="bg")
             rec["status"] = status
             rec["native_short_id"] = f"{name}-sid"[:8]
             rec["last_dispatch_at"] = _iso(NOW - timedelta(minutes=5))
             data["workers"][name] = rec
         fleet.save_registry(data)
-        for name, _status in (("dead-w", "dead"), ("idle-w", "idle"), ("int-w", "interrupted")):
+        for name, _status in (("dead-w1", "dead"), ("dead-w2", "dead")):
             fleet.append_outcome(name, {"ts": _iso(NOW), "session_id": f"{name}-sid",
                                         "kind": "result", "result_text": "done"})
             task_file = fleet.task_file_path(name)
@@ -2777,10 +2939,33 @@ class TestCmdCleanNative:
         assert rc == 0
         workers = fleet.load_registry()["workers"]
         assert workers == {}
-        for name in ("dead-w", "idle-w", "int-w"):
+        for name in ("dead-w1", "dead-w2"):
             assert not fleet.outcome_path(name).exists()
             assert not fleet.outcome_path(f"{name}-sid").exists()
             assert not fleet.task_file_path(name).exists()
+
+    def test_never_deletes_idle(self, native_home, monkeypatch):
+        # T8 fix wave (review CRITICAL): an earlier revision swept `idle`
+        # native workers on a false "matches today's legacy semantics"
+        # premise -- legacy is dead-only (confirmed against 8e79dbe).
+        # `idle` means finished-and-still-steerable; a native worker's own
+        # `claude --resume` survives regardless, but fleet's OWN
+        # bookkeeping (registry entry, outcomes, task file) must not
+        # vanish out from under an operator who can still `fleet send` it.
+        seed_native_worker(native_home, sid=SID, status="idle")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
+        fleet.cmd_clean(_clean_args())
+        assert "w1" in fleet.load_registry()["workers"]
+
+    def test_never_deletes_interrupted(self, native_home, monkeypatch):
+        # T8 fix wave (binding contract): `interrupted` is respawn-eligible
+        # by design -- an operator who wants to abandon it kills it first
+        # (which recomputes to `dead`, then IS swept). `clean` sweeping
+        # `interrupted` directly would remove that explicit choice.
+        seed_native_worker(native_home, sid=SID, status="interrupted")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
+        fleet.cmd_clean(_clean_args())
+        assert "w1" in fleet.load_registry()["workers"]
 
     def test_sweeps_retired_sid_outcome_and_ceiling_files(self, native_home, monkeypatch):
         rec = seed_native_worker(native_home, name="w1", sid=SID, status="dead",

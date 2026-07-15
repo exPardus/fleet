@@ -16,3 +16,8 @@ Native (daemon-hosted) workers: this runs `claude stop` and marks the worker
 resuming it is never automatic). Respawn is a separate, explicit decision:
 `fleet respawn $1`. Confirm what the worker was doing (via `fleet peek $1`) before
 interrupting it.
+
+Interrupt only ever fires on a worker whose last known status is actually a live
+running turn. A `dead`/`interrupted`/`idle` worker is a friendly no-op (nothing to
+stop); a `limited`/`dead-suspected`/parked worker refuses loudly instead of
+silently overwriting its status -- `fleet status $1` first if unsure.
