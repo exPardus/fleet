@@ -91,6 +91,49 @@ def _spawn_args(name, dir_, task, mode="dontask", model=None, max_budget_usd=Non
 
 
 # ---------------------------------------------------------------------------
+# M-B T4: cmd_spawn fakes for the native `--bg` dispatch path (mirrors
+# tests/test_native.py's own copies -- pytest path rules block importing
+# fixtures across test files, per the M-B plan doc's shared-scaffolding note).
+# ---------------------------------------------------------------------------
+
+NATIVE_SID = "aaaabbbb-1111-2222-3333-444455556666"
+
+
+def _make_native_roster_entry(sid, *, name="fleet|w1|task", state="working",
+                              status="busy", pid=1234, kind="background"):
+    entry = {"id": sid[:8], "sessionId": sid, "name": name, "cwd": "C:/proj",
+             "startedAt": 1783986489446, "kind": kind, "state": state}
+    if status is not None:
+        entry["status"] = status
+    if pid is not None:
+        entry["pid"] = pid
+    return entry
+
+
+def _fake_run_factory(stdout="backgrounded · aaaabbbb · fleet|w1|t\n", rc=0, calls=None):
+    def fake_run(argv, **kwargs):
+        if calls is not None:
+            calls.append((argv, kwargs))
+        import types
+        return types.SimpleNamespace(returncode=rc, stdout=stdout, stderr="")
+    return fake_run
+
+
+def _native_roster_with(sid=NATIVE_SID, **kw):
+    """Call-count-aware: 1st call (dispatch_bg's pre-dispatch snapshot)
+    reports the session doesn't exist yet; 2nd+ call (the join poll) reports
+    it present -- matches how the real daemon mints the session after --bg
+    returns."""
+    state = {"n": 0}
+    def fetch(**_):
+        state["n"] += 1
+        if state["n"] == 1:
+            return True, []
+        return True, [_make_native_roster_entry(sid, **kw)]
+    return fetch
+
+
+# ---------------------------------------------------------------------------
 # build_turn_argv (pure argv builder, SPEC §6)
 # ---------------------------------------------------------------------------
 
@@ -269,29 +312,31 @@ class TestTokenCeilingRecordAndSum:
 
 
 class TestSpawnWritesCeilingFile:
-    def test_spawn_writes_sid_keyed_ceiling_file_when_configured(self, isolated_home, tmp_path):
+    def test_spawn_writes_sid_keyed_ceiling_file_when_configured(self, isolated_home, tmp_path, monkeypatch):
         # Kernel 10 fleet half: cmd_spawn persists the token ceiling at
         # state/ceilings/<sid> -- the exact path stop_mailbox.py reads to
-        # decide whether to ALLOW a stop despite pending mail.
+        # decide whether to ALLOW a stop despite pending mail. M-B T4: sid
+        # is only known post-join, so the ceiling file is written AFTER the
+        # native dispatch stamps the record (G6 -- see cmd_spawn docstring).
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _native_roster_with())
         worker_dir = tmp_path / "proj"
         worker_dir.mkdir()
-        proc = FakeProc(pid=999)
         args = fleet.build_parser().parse_args([
             "spawn", "probe-1", "--dir", str(worker_dir), "--task", "go", "--token-ceiling", "12345",
         ])
-        fleet.cmd_spawn(args, popen=_fake_popen(proc), get_process_info=lambda pid: None, which=lambda n: "claude.cmd")
+        fleet.cmd_spawn(args, run=_fake_run_factory(), which=lambda n: "claude.cmd", sleep=lambda s: None)
 
         rec = fleet.load_registry()["workers"]["probe-1"]
         assert rec["token_ceiling"] == 12345
         ceiling_file = fleet.state_dir() / "ceilings" / rec["session_id"]
         assert ceiling_file.read_text(encoding="utf-8").strip() == "12345"
 
-    def test_spawn_writes_no_ceiling_file_when_not_configured(self, isolated_home, tmp_path):
+    def test_spawn_writes_no_ceiling_file_when_not_configured(self, isolated_home, tmp_path, monkeypatch):
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _native_roster_with())
         worker_dir = tmp_path / "proj"
         worker_dir.mkdir()
-        proc = FakeProc(pid=999)
         args = _spawn_args("probe-1", worker_dir, "go")
-        fleet.cmd_spawn(args, popen=_fake_popen(proc), get_process_info=lambda pid: None, which=lambda n: "claude.cmd")
+        fleet.cmd_spawn(args, run=_fake_run_factory(), which=lambda n: "claude.cmd", sleep=lambda s: None)
 
         rec = fleet.load_registry()["workers"]["probe-1"]
         assert rec["token_ceiling"] is None
@@ -520,95 +565,80 @@ class TestLaunchTurn:
         # no exception should escape (it has nowhere to go but the holder).
         block_event.set()
 
-    def test_blocked_writer_turn_pid_recorded_by_cmd_spawn(self, isolated_home, monkeypatch, tmp_path):
-        """The orphan-pid regression: even while the writer thread is still
-        blocked, cmd_spawn's post-launch lock must run and record turn_pid
-        (never leaving the detached worker unkillable)."""
-        monkeypatch.setattr(fleet, "LAUNCH_DOA_WINDOW_SECONDS", 0.2)
-        worker_dir = tmp_path / "proj"
-        worker_dir.mkdir()
-        block_event = threading.Event()
-        stdin = FakeStdin(block_event=block_event)
-        proc = FakeProc(pid=4321, stdin=stdin, poll_returns=None)
-        args = _spawn_args("probe-1", worker_dir, "do the thing")
-
-        rc = fleet.cmd_spawn(
-            args, popen=_fake_popen(proc), get_process_info=lambda pid: None, which=lambda n: "claude.cmd",
-        )
-        block_event.set()
-
-        assert rc == 0
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        assert rec["turn_pid"] == 4321
+    # M-B T4: test_blocked_writer_turn_pid_recorded_by_cmd_spawn (the
+    # orphan-pid regression via cmd_spawn's post-launch lock) is DELETED --
+    # cmd_spawn no longer calls launch_turn/Popen at all (native `--bg`
+    # dispatch via dispatch_bg, see TestCmdSpawn below); the blocked-writer
+    # DOA-window mechanism it exercised only exists for launch_turn callers
+    # that still use it (cmd_send/cmd_respawn), already covered by
+    # test_blocked_writer_with_process_alive_returns_within_bounded_window
+    # above.
 
 
 # ---------------------------------------------------------------------------
-# cmd_spawn
+# cmd_spawn (M-B T4: native `--bg` dispatch via dispatch_bg -- see
+# tests/test_native.py::TestCmdSpawnNative for the launch-contract-specific
+# cases: USD-budget refusal, dispatch-failure rollback, join-expiry
+# fast-completion idle commit, join-expiry DOA rollback. This class covers
+# the surrounding CLI-layer concerns: registry shape, name/dir/task-file
+# validation, model echo, F-RACE re-assertion.)
 # ---------------------------------------------------------------------------
 
 class TestCmdSpawn:
-    def test_spawn_creates_registry_entry_and_launches(self, isolated_home, tmp_path):
+    def test_spawn_creates_registry_entry_and_launches(self, isolated_home, tmp_path, monkeypatch):
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _native_roster_with())
         worker_dir = tmp_path / "proj"
         worker_dir.mkdir()
-        proc = FakeProc(pid=999)
-        ctime = datetime(2026, 7, 7, 12, 0, 0, tzinfo=timezone.utc)
         args = _spawn_args("probe-1", worker_dir, "do the thing", mode="dontask", model="haiku")
 
-        rc = fleet.cmd_spawn(
-            args, popen=_fake_popen(proc), get_process_info=lambda pid: ("claude.exe", ctime),
-            which=lambda n: "claude.cmd",
-        )
+        rc = fleet.cmd_spawn(args, run=_fake_run_factory(), which=lambda n: "claude.cmd",
+                             sleep=lambda s: None)
 
         assert rc == 0
         data = fleet.load_registry()
         rec = data["workers"]["probe-1"]
-        assert uuid.UUID(rec["session_id"])
+        assert rec["dispatch_kind"] == "bg"
+        assert rec["session_id"] == NATIVE_SID
+        assert rec["native_short_id"] == "aaaabbbb"
         assert rec["cwd"] == str(worker_dir)
         assert rec["mode"] == "dontask"
         assert rec["model"] == "haiku"
-        assert rec["turn_pid"] == 999
-        assert rec["turn_pid_ctime"] == fleet.ctime_to_iso(ctime)
+        assert rec["turn_pid"] is None  # native flow never populates the legacy Popen field
         assert rec["turns"] == 1
 
-    def test_spawn_persists_budget_and_setting_sources_and_repasses_on_launch(self, isolated_home, tmp_path):
-        # F13 (item 7, M5): --max-budget-usd/--setting-sources are recorded
-        # in the registry at spawn AND emitted on the launch argv, sourced
-        # from the persisted record.
+    def test_spawn_persists_setting_sources(self, isolated_home, tmp_path, monkeypatch):
+        # F13 (item 7, M5): --setting-sources is still recorded in the
+        # registry at spawn. NOTE (T4 concern, see task-4-report.md): unlike
+        # the legacy Popen path, dispatch_bg's frozen T3 interface has no
+        # setting_sources parameter, so it is NOT yet forwarded onto the
+        # native --bg argv -- persistence only, until a later task plumbs it
+        # through dispatch_bg.
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _native_roster_with())
         worker_dir = tmp_path / "proj"
         worker_dir.mkdir()
-        proc = FakeProc(pid=999)
-        calls = {}
         args = fleet.build_parser().parse_args([
             "spawn", "probe-1", "--dir", str(worker_dir), "--task", "do the thing",
-            "--max-budget-usd", "4.0", "--setting-sources", "user,project",
+            "--setting-sources", "user,project",
         ])
 
-        fleet.cmd_spawn(
-            args, popen=_fake_popen(proc, calls), get_process_info=lambda pid: None,
-            which=lambda n: "claude.cmd",
-        )
+        fleet.cmd_spawn(args, run=_fake_run_factory(), which=lambda n: "claude.cmd", sleep=lambda s: None)
 
         rec = fleet.load_registry()["workers"]["probe-1"]
-        assert rec["max_budget_usd"] == 4.0
         assert rec["setting_sources"] == "user,project"
 
-        argv = calls["argv"]
-        assert argv[argv.index("--max-budget-usd") + 1] == "4.0"
-        assert argv[argv.index("--setting-sources") + 1] == "user,project"
-
-    def test_spawn_prints_name_session_id_log_path(self, isolated_home, tmp_path, capsys):
+    def test_spawn_prints_name_and_session_id(self, isolated_home, tmp_path, capsys, monkeypatch):
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _native_roster_with())
         worker_dir = tmp_path / "proj"
         worker_dir.mkdir()
-        proc = FakeProc(pid=1)
         args = _spawn_args("probe-1", worker_dir, "do the thing")
 
-        fleet.cmd_spawn(args, popen=_fake_popen(proc), get_process_info=lambda pid: None, which=lambda n: "claude.cmd")
+        fleet.cmd_spawn(args, run=_fake_run_factory(), which=lambda n: "claude.cmd", sleep=lambda s: None)
 
         out = capsys.readouterr().out
         assert "probe-1" in out
         data = fleet.load_registry()
         assert data["workers"]["probe-1"]["session_id"] in out
-        assert "probe-1.jsonl" in out
+        assert "short id aaaabbbb" in out
 
     def test_spawn_refuses_duplicate_name(self, isolated_home, tmp_path):
         worker_dir = tmp_path / "proj"
@@ -616,60 +646,61 @@ class TestCmdSpawn:
         fleet.save_registry({"workers": {"probe-1": _seed_record(worker_dir)}})
         args = _spawn_args("probe-1", worker_dir, "do the thing")
 
-        def popen(*a, **kw):
-            raise AssertionError("must not launch when name is a duplicate")
+        def run(*a, **kw):
+            raise AssertionError("must not dispatch when name is a duplicate")
 
         with pytest.raises(ValueError):
-            fleet.cmd_spawn(args, popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd")
+            fleet.cmd_spawn(args, run=run, which=lambda n: "claude.cmd", sleep=lambda s: None)
 
     def test_spawn_refuses_bad_name(self, isolated_home, tmp_path):
         worker_dir = tmp_path / "proj"
         worker_dir.mkdir()
 
-        def popen(*a, **kw):
-            raise AssertionError("must not launch when name is invalid")
+        def run(*a, **kw):
+            raise AssertionError("must not dispatch when name is invalid")
 
         args = _spawn_args("Bad Name!", worker_dir, "do the thing")
         with pytest.raises(ValueError):
-            fleet.cmd_spawn(args, popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd")
+            fleet.cmd_spawn(args, run=run, which=lambda n: "claude.cmd", sleep=lambda s: None)
 
     def test_spawn_refuses_missing_dir(self, isolated_home, tmp_path):
         missing = tmp_path / "nope"
 
-        def popen(*a, **kw):
-            raise AssertionError("must not launch when --dir is missing")
+        def run(*a, **kw):
+            raise AssertionError("must not dispatch when --dir is missing")
 
         args = _spawn_args("probe-1", missing, "do the thing")
         with pytest.raises(fleet.FleetCliError):
-            fleet.cmd_spawn(args, popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd")
+            fleet.cmd_spawn(args, run=run, which=lambda n: "claude.cmd", sleep=lambda s: None)
 
     def test_spawn_raises_clear_error_when_instance_settings_missing(self, isolated_home, tmp_path):
-        """SPEC §14: cmd_spawn refuses before any registry mutation or Popen
-        call when `fleet init` has never been run on this machine."""
+        """SPEC §14: cmd_spawn refuses before any registry mutation or
+        dispatch when `fleet init` has never been run on this machine."""
         fleet.instance_settings_path().unlink()  # the isolated_home fixture stubs one in
         worker_dir = tmp_path / "proj"
         worker_dir.mkdir()
 
-        def popen(*a, **kw):
-            raise AssertionError("must not launch when the settings instance is missing")
+        def run(*a, **kw):
+            raise AssertionError("must not dispatch when the settings instance is missing")
 
         args = _spawn_args("probe-1", worker_dir, "do the thing")
         with pytest.raises(fleet.FleetCliError, match="fleet init"):
-            fleet.cmd_spawn(args, popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd")
+            fleet.cmd_spawn(args, run=run, which=lambda n: "claude.cmd", sleep=lambda s: None)
 
         assert fleet.load_registry()["workers"] == {}  # no partial record left behind
 
-    def test_spawn_reads_task_from_file(self, isolated_home, tmp_path):
+    def test_spawn_reads_task_from_file(self, isolated_home, tmp_path, monkeypatch):
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _native_roster_with())
         worker_dir = tmp_path / "proj"
         worker_dir.mkdir()
         task_file = tmp_path / "task.md"
         task_file.write_text("do the elaborate multi-line thing\nwith detail", encoding="utf-8")
-        proc = FakeProc(pid=1)
         args = _spawn_args("probe-1", worker_dir, f"@{task_file}")
 
-        fleet.cmd_spawn(args, popen=_fake_popen(proc), get_process_info=lambda pid: None, which=lambda n: "claude.cmd")
+        fleet.cmd_spawn(args, run=_fake_run_factory(), which=lambda n: "claude.cmd", sleep=lambda s: None)
 
-        assert "do the elaborate multi-line thing" in proc.stdin.written.decode("utf-8")
+        written = fleet.task_file_path("probe-1").read_text(encoding="utf-8")
+        assert "do the elaborate multi-line thing" in written
         data = fleet.load_registry()
         assert data["workers"]["probe-1"]["task"].startswith("do the elaborate multi-line thing")
 
@@ -678,133 +709,69 @@ class TestCmdSpawn:
         worker_dir.mkdir()
         args = _spawn_args("probe-1", worker_dir, "@" + str(tmp_path / "nope.md"))
 
-        def popen(*a, **kw):
-            raise AssertionError("must not launch when task file is missing")
+        def run(*a, **kw):
+            raise AssertionError("must not dispatch when task file is missing")
 
         with pytest.raises(fleet.FleetCliError):
-            fleet.cmd_spawn(args, popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd")
+            fleet.cmd_spawn(args, run=run, which=lambda n: "claude.cmd", sleep=lambda s: None)
 
-    def test_spawn_launch_failure_rolls_back_registry_and_restores_mailbox(self, isolated_home, tmp_path):
+    def test_spawn_dispatch_failure_rolls_back_registry(self, isolated_home, tmp_path):
         worker_dir = tmp_path / "proj"
         worker_dir.mkdir()
 
-        def popen(*a, **kw):
-            raise OSError("boom")
-
         args = _spawn_args("probe-1", worker_dir, "do the thing")
-        with pytest.raises(fleet.TurnLaunchError):
-            fleet.cmd_spawn(args, popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd")
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_spawn(args, run=_fake_run_factory(rc=1), which=lambda n: "claude.cmd",
+                            sleep=lambda s: None)
 
         data = fleet.load_registry()
         assert "probe-1" not in data["workers"]
 
     def test_spawn_rolls_back_on_keyboard_interrupt(self, isolated_home, tmp_path):
-        """Task-4-verdict re-review Fix 2: cmd_spawn's rollback has the same
-        shape as cmd_send/cmd_attach's, so it must also catch BaseException
-        -- a Ctrl-C landing during launch must still pop the just-created
-        registry record and restore the drained mailbox claim, not leave a
-        ghost "working"+turn_pid is None record pinned forever by
-        recompute_status's launch-in-flight guard."""
+        """Task-4-verdict re-review Fix 2 precedent, carried into the native
+        flow: cmd_spawn's rollback must also catch BaseException -- a Ctrl-C
+        landing during dispatch must still pop the just-created registry
+        record, not leave a ghost "working"+session_id=None record pinned
+        forever by recompute_status's launch-in-flight guard."""
         worker_dir = tmp_path / "proj"
         worker_dir.mkdir()
 
-        def popen(*a, **kw):
+        def run(*a, **kw):
             raise KeyboardInterrupt()
 
         args = _spawn_args("probe-1", worker_dir, "do the thing")
         with pytest.raises(KeyboardInterrupt):
-            fleet.cmd_spawn(args, popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd")
+            fleet.cmd_spawn(args, run=run, which=lambda n: "claude.cmd", sleep=lambda s: None)
 
         data = fleet.load_registry()
         assert "probe-1" not in data["workers"]
 
-    def test_spawn_launch_failure_restores_mail_for_next_launch(self, isolated_home, tmp_path, monkeypatch):
-        """F-TEST-MAIL (strengthened): pin the sid cmd_spawn will generate
-        (monkeypatch the uuid4 it calls), pre-seed mailbox/<sid>.md with
-        known content, force a launch failure, and assert that exact content
-        is back at mailbox/<sid>.md afterward -- a genuine restore, not just
-        "no dangling claim" (which is trivially true for a fresh sid)."""
-        worker_dir = tmp_path / "proj"
-        worker_dir.mkdir()
-
-        fixed_sid = uuid.uuid4()
-        monkeypatch.setattr(fleet.uuid, "uuid4", lambda: fixed_sid)
-
-        mbox = fleet.mailbox_dir()
-        mbox.mkdir(parents=True, exist_ok=True)
-        (mbox / f"{fixed_sid}.md").write_text("pre-existing queued instruction", encoding="utf-8")
-
-        def popen(*a, **kw):
-            raise OSError("boom")
-
-        args = _spawn_args("probe-1", worker_dir, "do the thing")
-        with pytest.raises(fleet.TurnLaunchError):
-            fleet.cmd_spawn(args, popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd")
-
-        restored = (mbox / f"{fixed_sid}.md").read_text(encoding="utf-8")
-        assert "pre-existing queued instruction" in restored
-        assert list(mbox.glob("*.claimed.*")) == []
-
-    def test_spawn_over_doa_proc_rolls_back_and_restores_mail(self, isolated_home, tmp_path, monkeypatch):
-        """F-DOA end-to-end through cmd_spawn: a child that dies during init
-        (BrokenPipeError on the prompt write + nonzero poll()) must be
-        treated exactly like the Popen()-raises case -- registry record
-        removed, no dangling .claimed.* file, pending mail restored, a
-        spawn_failed event appended, and the command raises (main() turns
-        that into a nonzero exit)."""
-        worker_dir = tmp_path / "proj"
-        worker_dir.mkdir()
-
-        fixed_sid = uuid.uuid4()
-        monkeypatch.setattr(fleet.uuid, "uuid4", lambda: fixed_sid)
-
-        mbox = fleet.mailbox_dir()
-        mbox.mkdir(parents=True, exist_ok=True)
-        (mbox / f"{fixed_sid}.md").write_text("queued before the doa spawn", encoding="utf-8")
-
-        stdin = FakeStdin(raise_on_write=BrokenPipeError())
-        proc = FakeProc(pid=4321, stdin=stdin, poll_returns=1)
-        args = _spawn_args("probe-1", worker_dir, "do the thing")
-
-        with pytest.raises(fleet.TurnLaunchError):
-            fleet.cmd_spawn(
-                args, popen=_fake_popen(proc), get_process_info=lambda pid: None, which=lambda n: "claude.cmd",
-            )
-
-        data = fleet.load_registry()
-        assert "probe-1" not in data["workers"]
-        assert list(mbox.glob("*.claimed.*")) == []
-        assert "queued before the doa spawn" in (mbox / f"{fixed_sid}.md").read_text(encoding="utf-8")
-
-        events = [
-            json.loads(line) for line in fleet.events_path().read_text(encoding="utf-8").splitlines()
-        ]
-        assert any(e["kind"] == "spawn_failed" for e in events)
-
-    def test_spawn_reasserts_working_after_concurrent_recompute_race(self, isolated_home, tmp_path):
+    def test_spawn_reasserts_working_after_concurrent_recompute_race(self, isolated_home, tmp_path, monkeypatch):
         """F-RACE: between cmd_spawn's create-lock (record written with
-        turn_pid=None) and its post-launch lock, a concurrent `fleet status`
-        can recompute_status(None, ...) -> "dead" and persist it. The
-        post-launch lock must re-assert status="working" so the live worker
+        session_id=None) and its post-dispatch stamp lock, a concurrent
+        `fleet status` can recompute_status(...) -> "dead" and persist it.
+        The stamp lock must re-assert status="working" so the live worker
         is not left permanently `dead` (testRace.py in the adversarial
-        review)."""
+        review; same contract under native dispatch)."""
         worker_dir = tmp_path / "proj"
         worker_dir.mkdir()
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _native_roster_with())
 
-        def popen(argv, **kwargs):
+        def run(argv, **kwargs):
             # Simulate the racing `fleet status` landing in the inter-lock
-            # gap: sees the first lock's record (working, turn_pid=None) and
+            # gap: sees the pre-claim record (working, session_id=None) and
             # persists a spurious "dead".
             data = fleet.load_registry()
             rec = data["workers"]["probe-1"]
             assert rec["status"] == "working"
-            assert rec["turn_pid"] is None
+            assert rec["session_id"] is None
             rec["status"] = "dead"
             fleet.save_registry(data)
-            return FakeProc(pid=555)
+            import types
+            return types.SimpleNamespace(returncode=0, stdout="backgrounded · aaaabbbb · fleet|w1|t\n", stderr="")
 
         args = _spawn_args("probe-1", worker_dir, "do the thing")
-        rc = fleet.cmd_spawn(args, popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd")
+        rc = fleet.cmd_spawn(args, run=run, which=lambda n: "claude.cmd", sleep=lambda s: None)
 
         assert rc == 0
         rec = fleet.load_registry()["workers"]["probe-1"]
@@ -886,91 +853,20 @@ class TestReportStrandedTurn:
         assert "CRITICAL" in capsys.readouterr().err
 
 
-class TestCmdSpawnCommitLockRetry:
-    """Integration coverage (through the real cmd_spawn call, not just the
-    helper in isolation) that the post-launch commit lock actually uses
-    _commit_launched_turn/_report_stranded_turn as wired -- a monkeypatched
-    `fleet.fleet_lock` fails the commit-lock acquisitions specifically (the
-    pre-claim lock, called first, is left alone) so this exercises the real
-    call sites, not a fabricated stand-in."""
-
-    def _flaky_fleet_lock(self, fail_calls):
-        """Return a fleet_lock replacement that raises FleetLockTimeout on
-        the 1-indexed call numbers in `fail_calls`, delegating to the real
-        fleet_lock (so registry mutations still actually happen) every
-        other time."""
-        real_fleet_lock = fleet.fleet_lock
-        calls = {"n": 0}
-
-        @contextmanager
-        def flaky(timeout=fleet.LOCK_TIMEOUT_SECONDS):
-            calls["n"] += 1
-            if calls["n"] in fail_calls:
-                raise fleet.FleetLockTimeout("simulated")
-            with real_fleet_lock(timeout=timeout):
-                yield
-
-        return flaky
-
-    def test_retries_past_a_flaky_commit_lock_then_succeeds(self, isolated_home, tmp_path, monkeypatch):
-        worker_dir = tmp_path / "proj"
-        worker_dir.mkdir()
-        proc = FakeProc(pid=42)
-
-        # Call 1 = cmd_spawn's pre-claim/create lock (must succeed). Calls
-        # 2 and 3 = the post-launch commit lock's first two attempts (fail);
-        # call 4 = the third attempt (succeeds).
-        monkeypatch.setattr(fleet, "fleet_lock", self._flaky_fleet_lock({2, 3}))
-
-        slept = []
-        args = _spawn_args("probe-1", worker_dir, "do it")
-        rc = fleet.cmd_spawn(
-            args, popen=_fake_popen(proc), get_process_info=lambda pid: None,
-            which=lambda n: "claude.cmd", sleep=slept.append,
-        )
-
-        assert rc == 0
-        assert slept == list(fleet.LAUNCH_COMMIT_BACKOFF_SECONDS[:2])
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        assert rec["status"] == "working"
-        assert rec["turn_pid"] == 42
-
-    def test_gives_up_loudly_without_abandoning_the_launched_turn(
-        self, isolated_home, tmp_path, monkeypatch, capsys,
-    ):
-        """If every commit attempt times out, cmd_spawn must NOT raise
-        (the turn genuinely launched -- raising would tempt a retry that
-        launches a SECOND live turn) and must NOT silently succeed either:
-        a loud stderr warning plus a best-effort event, and the registry is
-        left exactly where the pre-claim lock put it (working/turn_pid
-        still None) rather than corrupted."""
-        worker_dir = tmp_path / "proj"
-        worker_dir.mkdir()
-        proc = FakeProc(pid=42)
-
-        # Call 1 = the pre-claim lock (succeeds); every call from #2 onward
-        # (every commit attempt) fails.
-        monkeypatch.setattr(fleet, "fleet_lock", self._flaky_fleet_lock(set(range(2, 30))))
-
-        slept = []
-        args = _spawn_args("probe-1", worker_dir, "do it")
-        rc = fleet.cmd_spawn(
-            args, popen=_fake_popen(proc), get_process_info=lambda pid: None,
-            which=lambda n: "claude.cmd", sleep=slept.append,
-        )
-
-        assert rc == 0  # the turn genuinely launched -- must not raise/report failure
-        assert len(slept) == fleet.LAUNCH_COMMIT_MAX_ATTEMPTS - 1
-        err = capsys.readouterr().err
-        assert "CRITICAL" in err
-        assert "probe-1" in err
-
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        assert rec["status"] == "working"
-        assert rec["turn_pid"] is None  # never got stamped -- exactly the F1 pre-claim state
-
-        events = [json.loads(line) for line in fleet.events_path().read_text(encoding="utf-8").splitlines()]
-        assert any(e["kind"] == "turn_commit_failed" for e in events)
+\
+# M-B T4: TestCmdSpawnCommitLockRetry deleted -- it verified that cmd_spawn's
+# post-launch stamp lock retried through _commit_launched_turn/
+# _report_stranded_turn with backoff. The native flow's post-dispatch stamp
+# lock (cmd_spawn's second `with fleet_lock():`, after dispatch_bg's roster
+# join already succeeded) is a single bare acquisition, not wrapped in that
+# retry helper -- see task-4-report.md concerns: the exact same "a live
+# session already exists, don't strand it on one lock-timeout" risk this
+# class exercised still applies to a real live `--bg` session, and porting
+# _commit_launched_turn/_report_stranded_turn (or an equivalent) onto the
+# native stamp lock is flagged there as follow-up work, not done in T4.
+# _commit_launched_turn/_report_stranded_turn themselves stay covered by
+# TestCommitLaunchedTurn/TestReportStrandedTurn above (called directly, not
+# through cmd_spawn).
 
 
 def _seed_record(worker_dir):
@@ -1502,23 +1398,23 @@ class TestStatusHookErrorCount:
 # ---------------------------------------------------------------------------
 
 class TestSpawnModelEcho:
-    def test_echoes_resolved_model(self, isolated_home, tmp_path, capsys):
+    def test_echoes_resolved_model(self, isolated_home, tmp_path, capsys, monkeypatch):
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _native_roster_with())
         worker_dir = tmp_path / "proj"
         worker_dir.mkdir()
-        proc = FakeProc(pid=1)
         args = _spawn_args("probe-1", worker_dir, "do the thing", model="opus")
-        fleet.cmd_spawn(args, popen=_fake_popen(proc), get_process_info=lambda pid: None, which=lambda n: "claude.cmd")
+        fleet.cmd_spawn(args, run=_fake_run_factory(), which=lambda n: "claude.cmd", sleep=lambda s: None)
         out = capsys.readouterr().out
         assert "model" in out
         assert "opus" in out
 
     def test_echoes_subagent_model_env_when_set(self, isolated_home, tmp_path, capsys, monkeypatch):
         monkeypatch.setenv("CLAUDE_CODE_SUBAGENT_MODEL", "haiku")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _native_roster_with())
         worker_dir = tmp_path / "proj"
         worker_dir.mkdir()
-        proc = FakeProc(pid=1)
         args = _spawn_args("probe-1", worker_dir, "do the thing", model="opus")
-        fleet.cmd_spawn(args, popen=_fake_popen(proc), get_process_info=lambda pid: None, which=lambda n: "claude.cmd")
+        fleet.cmd_spawn(args, run=_fake_run_factory(), which=lambda n: "claude.cmd", sleep=lambda s: None)
         out = capsys.readouterr().out
         assert "CLAUDE_CODE_SUBAGENT_MODEL" in out
         assert "haiku" in out
