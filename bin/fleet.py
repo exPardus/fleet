@@ -1094,7 +1094,7 @@ Do not leave servers or watchers running past the end of the turn without record
 """
 
 
-def compose_prompt(name: str, cwd, task: str, sid: str, journal_path=None) -> tuple[str, Path | None]:
+def compose_prompt(name: str, cwd, task: str, sid: str | None, journal_path=None) -> tuple[str, Path | None]:
     """preamble (SPEC §8) + claimed mailbox + task text (+ journal contents
     when respawning, i.e. when journal_path is given and exists).
 
@@ -1114,19 +1114,27 @@ def compose_prompt(name: str, cwd, task: str, sid: str, journal_path=None) -> tu
     journals_dir() (FLEET_HOME-derived) on every call, never a literal
     path -- so it follows FLEET_HOME/env-var overrides and test sandboxes
     exactly like every other path helper in this module.
+
+    M-B T4: sid=None (a fresh native spawn has no sid until join -- the
+    pre-claim record's session_id is still None at compose time) skips the
+    mailbox claim entirely -- there is no <sid>.md to claim yet, only
+    <name>.md could exist and that channel is not wired for pre-claim
+    spawns -- and returns (prompt, None), matching the no-mail shape.
     """
     journal_target = (journals_dir() / f"{name}.md").as_posix()
     parts = [_PREAMBLE_TEMPLATE.format(name=name, cwd=cwd, journal_target=journal_target)]
 
-    mail, claim = claim_mailbox(sid)
-    if mail:
-        parts.append(f"<MANAGER MESSAGE>\n{mail}\n")
-        # F9 (item 8): emit a mail_drained audit event at compose-time drain.
-        # fleet.py is the SOLE writer of events.jsonl -- this is a Soak-1 audit
-        # record, NOT a DLQ (no retry/redelivery machinery). compose_prompt is
-        # only ever called by fleet.py launch paths, so the single-writer
-        # registry invariant (6) is preserved.
-        append_event("mail_drained", name, sid=sid)
+    claim = None
+    if sid is not None:
+        mail, claim = claim_mailbox(sid)
+        if mail:
+            parts.append(f"<MANAGER MESSAGE>\n{mail}\n")
+            # F9 (item 8): emit a mail_drained audit event at compose-time drain.
+            # fleet.py is the SOLE writer of events.jsonl -- this is a Soak-1 audit
+            # record, NOT a DLQ (no retry/redelivery machinery). compose_prompt is
+            # only ever called by fleet.py launch paths, so the single-writer
+            # registry invariant (6) is preserved.
+            append_event("mail_drained", name, sid=sid)
 
     if task:
         parts.append(task)
@@ -2305,28 +2313,47 @@ def cmd_init(args) -> int:
     return 0
 
 
-def cmd_spawn(args, popen=subprocess.Popen, get_process_info=None, which=shutil.which,
-              sleep=time.sleep) -> int:
+def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
+              clock=time.monotonic) -> int:
     """`fleet spawn <name> --dir <path> --task <text|@file> [--mode ...]
-    [--model m] [--max-budget-usd x]` (SPEC §5 spawn row).
+    [--model m] [--category c] [--token-ceiling n]` (SPEC §5 spawn row,
+    M-B T4: native `--bg` dispatch replaces detached Popen).
+
+    Launch contract (M-B spec §3): pre-claim a registry record under
+    fleet_lock with session_id=None (the analog of the legacy turn_pid=None
+    pre-claim -- _launch_claim_expired bounds it via last_activity), dispatch
+    outside the lock via dispatch_bg, then re-lock to stamp the real sid/
+    short id, OR roll back -- EXCEPT when a fast worker already finished
+    (an outcome record for this name newer than the pre-claim) even though
+    the roster join itself expired: that commits as "idle" with the
+    outcome's sid instead of rolling back a completed task (never lose a
+    finished turn to a slow/missed roster join).
 
     Registry mutation (create the record) and event-append happen together
-    inside one fleet_lock() -- the append_event/lock-discipline decision for
-    Task 2 (see module docstring note below cmd_wait): every event this
-    module appends is written while the registry lock for that same
-    operation is held, so concurrent `fleet` invocations never interleave
-    events with the registry state they describe.
+    inside one fleet_lock() (F4): every event this module appends is
+    written while the registry lock for that same operation is held, so
+    concurrent `fleet` invocations never interleave events with the
+    registry state they describe.
 
     SPEC §14: refuses before any mutation if the worker-settings instance
     hasn't been rendered yet (_require_instance_settings) -- `fleet init`
     must run once per machine before the first spawn.
 
-    Post-testing wave, item 1b (stress-report Finding 1, CRITICAL): the
-    post-launch commit lock below (the one that stamps info["turn_pid"])
-    runs through `_commit_launched_turn`'s retry-with-backoff instead of a
-    single bare `with fleet_lock():` -- by this point launch_turn() has
-    ALREADY started a real, live `claude` process, so losing the ordinary
-    5s lock race here must not mean losing the ability to ever track it.
+    G3: USD budgets are refused outright for native dispatch (`--bg` does
+    not carry cost information) -- `--token-ceiling` is the only fleet-side
+    cap available; `--max-budget-usd` stays in the parser only because
+    respawn/legacy paths still reference the attr.
+
+    G6: the sid-keyed ceiling file is written AFTER the sid is known (the
+    real sid does not exist before roster join), a seconds-wide gap versus
+    the legacy pre-launch write -- accepted; the Stop hook has no ceiling
+    signal for that narrow window and falls back to its default
+    block-on-mail behavior, never a launch failure.
+
+    `clock` is injectable (forwarded to dispatch_bg, T4 addition beyond the
+    brief's stated signature) so join-expiry tests never pay the real
+    NATIVE_JOIN_VERIFY_SECONDS wall-clock wait -- see task-4-report.md
+    deviations.
     """
     _require_instance_settings()
 
@@ -2334,70 +2361,102 @@ def cmd_spawn(args, popen=subprocess.Popen, get_process_info=None, which=shutil.
     if not cwd.is_dir():
         raise FleetCliError(f"--dir does not exist or is not a directory: {args.dir}")
 
+    if getattr(args, "max_budget_usd", None) is not None:
+        raise FleetCliError(
+            "no USD budget under native dispatch (contract G3) -- use --token-ceiling"
+        )
+
     task = _read_task_arg(args.task)
 
     with fleet_lock():
         data = load_registry()
         validate_name(args.name, existing=data["workers"].keys())
-        sid = str(uuid.uuid4())
         record = new_worker_record(
-            sid, cwd, task, args.mode, model=args.model,
-            max_budget_usd=args.max_budget_usd, setting_sources=args.setting_sources,
-            token_ceiling=args.token_ceiling,
-            spawned_by=current_caller_session())
+            None, cwd, task, args.mode, model=args.model,
+            setting_sources=args.setting_sources, token_ceiling=args.token_ceiling,
+            spawned_by=current_caller_session(),
+            dispatch_kind="bg", category=args.category)
+        record["last_dispatch_at"] = now_iso()
         data["workers"][args.name] = record
         save_registry(data)
-        append_event("spawned", args.name, session_id=sid, cwd=str(cwd), mode=args.mode)
+        append_event("spawned", args.name, cwd=str(cwd), mode=args.mode)
 
-    # Kernel 10 (fleet half): write the sid-keyed ceiling file BEFORE the
-    # launch so the Stop hook sees it from turn 1 (no-op when unconfigured).
-    _write_ceiling_file(sid, record.get("token_ceiling"))
+    pre_claim_at = record["last_dispatch_at"]
 
-    prompt, claim = compose_prompt(args.name, cwd, task, sid)
+    # sid=None (pre-claim, no real sid exists yet) -- compose_prompt skips
+    # the mailbox claim entirely and always returns a None claim here.
+    prompt, _claim = compose_prompt(args.name, cwd, task, None)
+
     try:
-        info = launch_turn(
-            args.name, cwd, sid, prompt, args.mode, first=True,
-            # F13/M5: source the launch flags from the PERSISTED record, not
-            # args, so spawn and every later launch path share one origin.
-            model=record.get("model"), max_budget_usd=record.get("max_budget_usd"),
-            setting_sources=record.get("setting_sources"),
-            popen=popen, get_process_info=get_process_info, which=which,
+        result = dispatch_bg(
+            args.name, cwd, prompt, args.mode, model=args.model,
+            category=args.category, hint=task,
+            run=run, which=which, sleep=sleep, clock=clock,
         )
-        finalize_mailbox_claim(claim)
-    except BaseException as exc:
-        # Task-4-verdict re-review, Fix 2: same shape as cmd_send/cmd_attach
-        # -- a Ctrl-C during launch must still pop the just-created record
-        # and restore the drained mailbox claim, not leave a permanently
-        # ghost-claimed "working"+turn_pid is None record behind.
-        restore_mailbox_claim(claim)
-        with fleet_lock():
-            data = load_registry()
-            data["workers"].pop(args.name, None)
-            save_registry(data)
-            append_event("spawn_failed", args.name, error=str(exc))
-        raise
+    except NativeDispatchError as exc:
+        fast_sid = _fast_completion_sid(args.name, pre_claim_at)
+        if fast_sid is not None:
+            with fleet_lock():
+                data = load_registry()
+                rec = data["workers"].get(args.name)
+                if rec is not None and rec.get("session_id") is None:
+                    rec["session_id"] = fast_sid
+                    rec["native_short_id"] = fast_sid.partition("-")[0] or fast_sid[:8]
+                    rec["status"] = "idle"
+                    rec["turns"] = 1
+                    rec["last_activity"] = now_iso()
+                    save_registry(data)
+                    append_event("turn_started", args.name, session_id=fast_sid)
+            _write_ceiling_file(fast_sid, record.get("token_ceiling"))
+            print(f"{args.name} {fast_sid} (native bg, fast completion before join)")
+            return 0
 
-    def _commit():
+        # DOA rollback: re-lock, pop the pre-claim ONLY if still unclaimed
+        # (session_id is None) -- a concurrent mutation (e.g. a fast_sid
+        # commit that raced in from elsewhere) must never be clobbered.
         with fleet_lock():
             data = load_registry()
             rec = data["workers"].get(args.name)
-            if rec is not None:
-                # F-RACE: re-assert "working" here -- a concurrent fleet
-                # status/wait landing in the gap between this lock and the
-                # create-lock above could have recomputed and persisted
-                # "dead" (turn_pid was still None then). The turn has
-                # launched by definition at this point, so this
-                # authoritatively repairs that spurious transition.
-                rec["status"] = "working"
-                rec["turn_pid"] = info["turn_pid"]
-                rec["turn_pid_ctime"] = info["turn_pid_ctime"]
-                rec["turns"] = 1
-                rec["last_activity"] = now_iso()
+            if rec is not None and rec.get("session_id") is None:
+                data["workers"].pop(args.name, None)
                 save_registry(data)
-            append_event("turn_started", args.name, session_id=sid, turn_pid=info["turn_pid"])
+            append_event("spawn_failed", args.name, error=str(exc))
+        raise FleetCliError(f"{args.name}: native spawn failed -- {exc}") from exc
+    except BaseException as exc:
+        # T4 deviation, carrying forward a documented precedent (legacy
+        # Task-4-verdict re-review Fix 2): a Ctrl-C or any other unexpected
+        # exception escaping dispatch_bg must not leave a ghost
+        # "working"+session_id=None pre-claim behind, pinned forever by
+        # recompute_status's launch-in-flight guard. Same guarded-pop shape
+        # as the NativeDispatchError branch above; re-raised verbatim
+        # (not wrapped in FleetCliError) so e.g. KeyboardInterrupt still
+        # propagates as itself.
+        with fleet_lock():
+            data = load_registry()
+            rec = data["workers"].get(args.name)
+            if rec is not None and rec.get("session_id") is None:
+                data["workers"].pop(args.name, None)
+                save_registry(data)
+            append_event("spawn_failed", args.name, error=str(exc))
+        raise
 
-    if not _commit_launched_turn(_commit, sleep=sleep):
-        _report_stranded_turn(args.name, sid, info)
+    sid = result["session_id"]
+    short_id = result["short_id"]
+    with fleet_lock():
+        data = load_registry()
+        rec = data["workers"].get(args.name)
+        if rec is not None:
+            rec["session_id"] = sid
+            rec["native_short_id"] = short_id
+            rec["status"] = "working"
+            rec["turns"] = 1
+            rec["last_activity"] = now_iso()
+            save_registry(data)
+        append_event("turn_started", args.name, session_id=sid)
+
+    # G6: sid-keyed ceiling file written post-join by necessity (the sid
+    # does not exist before now) -- see docstring.
+    _write_ceiling_file(sid, record.get("token_ceiling"))
 
     # Phase1 kernel 5: echo the effective model/config at launch so a costly
     # model (or an inherited CLAUDE_CODE_SUBAGENT_MODEL) is visible up front,
@@ -2408,7 +2467,7 @@ def cmd_spawn(args, popen=subprocess.Popen, get_process_info=None, which=shutil.
         model_line += f"; CLAUDE_CODE_SUBAGENT_MODEL={subagent_model}"
     print(model_line)
 
-    print(f"{args.name} {sid} {info['log_path']}")
+    print(f"{args.name} {sid} (native bg, short id {short_id})")
     return 0
 
 
@@ -4712,6 +4771,30 @@ def write_tombstone_outcome(name: str, sid: str, kind: str) -> None:
                           "result_text": None})
 
 
+def _fast_completion_sid(name: str, since_iso: str):
+    """T4 deviation (see task-4 report): cmd_spawn's fast-completion check
+    on a NativeDispatchError, keeping dispatch_bg opaque (no short-id
+    parsing of its exception message) per the brief's own suggested
+    alternative. Scans outcomes/<name>.jsonl (name-keyed only, no sid
+    fallback file -- the real sid isn't known yet) for the newest record
+    with ts >= since_iso - OUTCOME_FRESH_SLACK_SECONDS, and returns its
+    session_id, or None if no such record exists."""
+    try:
+        since = _parse_iso(since_iso)
+    except (ValueError, TypeError):
+        return None
+    threshold = since - timedelta(seconds=OUTCOME_FRESH_SLACK_SECONDS)
+    best_sid, best_ts = None, None
+    for rec in read_outcomes(name):
+        try:
+            ts = _parse_iso(str(rec.get("ts", "")))
+        except (ValueError, TypeError):
+            continue
+        if ts >= threshold and rec.get("session_id") and (best_ts is None or ts > best_ts):
+            best_sid, best_ts = rec.get("session_id"), ts
+    return best_sid
+
+
 # --------------------------------------------------------------------------
 # Native dispatch (M-B, spec §5): single choke point for every --bg launch.
 # Task-file bootstrap (G8), short-id capture + sid-prefix roster join (G6
@@ -5562,6 +5645,10 @@ def build_parser() -> argparse.ArgumentParser:
     # ceiling file the Stop hook reads to allow-stop despite pending mail. NOT
     # a per-invocation dollar cap (that is --max-budget-usd).
     p_spawn.add_argument("--token-ceiling", type=int, default=None, dest="token_ceiling")
+    # M-B T4 (spec §5.1.3 agents-menu categories): passed through verbatim
+    # to render_native_name; defaults to DEFAULT_CATEGORY ("fleet") when
+    # unset at dispatch time.
+    p_spawn.add_argument("--category", default=None)
 
     p_status = sub.add_parser("status", help="show worker status table")
     p_status.add_argument("name", nargs="?", default=None)
