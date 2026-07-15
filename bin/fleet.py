@@ -7240,11 +7240,14 @@ Do exactly this, in order:
 
 
 def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
-                          sleep=time.sleep) -> int:
+                          sleep=time.sleep, clock=time.monotonic) -> int:
     """`fleet sup-handoff-begin [--model M] [--permission-mode P] [--sid S]`.
     Checkpoint-then-act: HANDOFF-BEGIN is journaled BEFORE dispatch so a
     crash mid-dispatch leaves evidence. Dispatch + roster polling run
-    OUTSIDE fleet_lock (F4 doctrine)."""
+    OUTSIDE fleet_lock (F4 doctrine). Both failure paths (dispatch failure,
+    successor DOA) raise the doctor-visible abort flag before returning
+    (M-B T10 fix 1) -- a crash here must not leave the old side believing
+    a successor is in flight when none exists."""
     with fleet_lock():
         claim, caller = _require_claim_holder(getattr(args, "sid", None))
         successor_inc = mint_incarnation_id()
@@ -7260,8 +7263,20 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
         except FileNotFoundError:
             pass
 
+    holder_inc = claim["incarnation_id"]
+
+    def _abort_flag(reason, successor_sid=None, successor_short_id=None):
+        _write_json_atomic(handoff_abort_flag_path(), {
+            "aborted_at": now_iso(),
+            "reason": reason,
+            "successor_sid": successor_sid,
+            "successor_short_id": successor_short_id,
+            "holder": holder_inc,
+        })
+
+    roster_fetch = lambda: _fetch_agents_roster(which=which, run=run)  # noqa: E731
     exe = resolve_claude_executable(which=which)
-    pre_ok, pre_payload = _fetch_agents_roster(which=which, run=run)
+    pre_ok, pre_payload = roster_fetch()
     pre_sids = {e.get("sessionId") for e in (pre_payload if pre_ok else [])
                 if isinstance(e, dict)}
     name = f"sup|{successor_inc}|successor"
@@ -7272,30 +7287,45 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
         argv += ["--permission-mode", args.permission_mode]
     argv.append(f"Read {task_path.as_posix()} and follow it exactly.")
     try:
-        proc = run(argv, capture_output=True, text=True, encoding="utf-8",
-                   errors="replace", timeout=120)
+        proc = run(argv, cwd=str(FLEET_HOME), capture_output=True, text=True,
+                   encoding="utf-8", errors="replace", timeout=120)
     except (OSError, subprocess.SubprocessError) as exc:
+        _abort_flag("dispatch-failed")
         raise FleetCliError(f"successor dispatch failed: {exc} -- no successor to stop; "
                             f"claim unchanged, duty continues")
     if proc.returncode != 0:
+        _abort_flag("dispatch-failed")
         raise FleetCliError(f"successor dispatch failed (exit {proc.returncode}): "
                             f"{(proc.stderr or '').strip()[:300]} -- no successor to stop; "
                             f"claim unchanged, duty continues")
 
-    # G6 fallback: join by fresh `-n` match within the verify window.
+    # Sid capture per contract G6: short id from --bg stdout, joined to the
+    # full sid by prefix match (T3 helper) -- never re-derive by polling the
+    # roster for a name match (ai-title collision hazard). Fall back to the
+    # old name-join loop ONLY when stdout was unparseable (G6 fallback of the
+    # fallback, M-B T10 fix 4).
+    short_id = _parse_bg_short_id(proc.stdout or "")
     successor_sid = None
-    deadline = time.monotonic() + SUPERVISOR_ROSTER_VERIFY_SECONDS
-    while time.monotonic() < deadline:
-        ok, payload = _fetch_agents_roster(which=which, run=run)
-        if ok:
-            fresh = [e for e in payload if isinstance(e, dict)
-                     and e.get("name") == name and e.get("sessionId")
-                     and e.get("sessionId") not in pre_sids]
-            if fresh:
-                successor_sid = fresh[0]["sessionId"]
-                break
-        sleep(3)
+    if short_id:
+        successor_sid = _join_roster_by_short_id(
+            short_id, roster_fetch, sleep,
+            verify_seconds=SUPERVISOR_ROSTER_VERIFY_SECONDS,
+            exclude_sids=pre_sids, clock=clock)
+    else:
+        print("short-id parse failed -- falling back to name join (G6 fallback)")
+        deadline = clock() + SUPERVISOR_ROSTER_VERIFY_SECONDS
+        while clock() < deadline:
+            ok, payload = roster_fetch()
+            if ok:
+                fresh = [e for e in payload if isinstance(e, dict)
+                         and e.get("name") == name and e.get("sessionId")
+                         and e.get("sessionId") not in pre_sids]
+                if fresh:
+                    successor_sid = fresh[0]["sessionId"]
+                    break
+            sleep(3)
     if successor_sid is None:
+        _abort_flag("successor-doa", successor_short_id=short_id)
         print(f"successor DOA: no roster entry named {name!r} appeared within "
               f"{SUPERVISOR_ROSTER_VERIFY_SECONDS:.0f}s (contract G6 fallback). "
               f"Claim unchanged -- duty continues; re-run sup-handoff-begin to retry.")
@@ -7348,9 +7378,18 @@ def cmd_sup_handoff_abort(args, which=shutil.which, run=subprocess.run) -> int:
     timeout branch: old resumes duty, stops the limbo successor (`claude
     stop`, NEVER raw kill -- G10 zombie hazard), removes HANDSHAKE, raises
     the doctor-visible flag. Note contract G10: `claude stop` fires NO Stop
-    hook -- nothing will have journaled on the successor's behalf."""
+    hook -- nothing will have journaled on the successor's behalf.
+
+    Sid cross-check (M-B T10 fix 2): a live HANDSHAKE naming a different sid
+    than --successor-sid means the caller is pointed at the wrong session --
+    refuse before touching anything (nothing stopped, no flag written)."""
     with fleet_lock():
         claim, caller = _require_claim_holder(getattr(args, "sid", None))
+        hs = read_handshake()
+        if hs is not None and hs.get("session_id") != args.successor_sid:
+            raise FleetCliError(
+                f"--successor-sid does not match HANDSHAKE sid {hs.get('session_id')} -- "
+                f"refusing to stop an unrelated session")
         try:
             handshake_path().unlink()
         except FileNotFoundError:
