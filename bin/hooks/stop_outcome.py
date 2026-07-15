@@ -20,11 +20,14 @@ too, not just in fleet.py.
 import ctypes
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
 
 RESULT_TEXT_MAX = 20000
+
+_SAFE_TOKEN_RE = re.compile(r"[A-Za-z0-9._-]+")
 
 _FILE_APPEND_DATA = 0x0004
 _FILE_SHARE_READ = 0x00000001
@@ -82,13 +85,47 @@ def _log_hook_error(home: Path, message: str) -> None:
         pass
 
 
+def _valid_token(value):
+    """Reject anything that isn't a plain, filename-safe token. Ported
+    verbatim from postcompact_journal.py::_valid_token (fix wave, T2 review
+    "Important" finding: this hook builds out_dir / f"{key}.jsonl" from
+    exactly the same two untrusted sources -- a registry-resolved name or a
+    raw session_id -- so it needs the same traversal guard, e.g. against
+    "../secret" or an absolute path.)"""
+    if not value:
+        return False
+    if ".." in value:
+        return False
+    if os.path.basename(value) != value:
+        return False
+    if not _SAFE_TOKEN_RE.fullmatch(value):
+        return False
+    return True
+
+
 def _resolve_name(home: Path, sid: str):
-    """READ-ONLY registry lookup (invariant 6: hooks never write fleet.json)."""
+    """READ-ONLY registry lookup (invariant 6: hooks never write fleet.json).
+
+    Defensive isinstance guards against a syntactically-valid but
+    wrong-shaped fleet.json (top-level document not a dict, "workers" not a
+    dict, an individual worker record not a dict) -- adversarial review
+    trap 6: without these guards an AttributeError from e.g. `[1,2].items()`
+    used to escape this function entirely, unwind into main()'s outer
+    handler, and skip the record write altogether for that turn (silent
+    outcome loss, worse than a wrong record). Also validates the resolved
+    name as a safe path token (see _valid_token) before returning it, same
+    as postcompact_journal.py::_resolve_name, so a malformed registry name
+    never reaches the outcome path -- callers fall back to sid instead."""
     try:
         data = json.loads((home / "state" / "fleet.json").read_text(encoding="utf-8"))
-        for name, rec in data.get("workers", {}).items():
+        if not isinstance(data, dict):
+            return None
+        workers = data.get("workers")
+        if not isinstance(workers, dict):
+            return None
+        for name, rec in workers.items():
             if isinstance(rec, dict) and rec.get("session_id") == sid:
-                return name
+                return name if _valid_token(name) else None
     except (OSError, ValueError):
         pass
     return None
@@ -135,6 +172,10 @@ def main() -> int:
         sid = payload.get("session_id")
         if not sid:
             return 0
+        # Coerce BEFORE validation/matching so a non-str session_id (e.g. a
+        # JSON int) both matches str-typed registry session_ids and lands in
+        # the written record as a str (fix wave, adversarial Minor finding).
+        sid = str(sid)
         transcript_path = payload.get("transcript_path")
         text = payload.get("last_assistant_message")
         if not isinstance(text, str):
@@ -146,7 +187,15 @@ def main() -> int:
                 text = t_text
         if isinstance(text, str) and len(text) > RESULT_TEXT_MAX:
             text = text[:RESULT_TEXT_MAX]
+        # Path-safety parity with postcompact_journal.py: validate BOTH the
+        # resolved registry name (done inside _resolve_name) and the raw
+        # session_id fallback before using either as a path component. An
+        # unsafe sid (e.g. "..\\evil", an absolute path, embedded path
+        # separators) must not reach out_dir / f"{key}.jsonl" at all.
         key = _resolve_name(home, sid) or sid
+        if not _valid_token(key):
+            _log_hook_error(home, f"unsafe outcome path token: {key!r}")
+            return 0
         out_dir = home / "state" / "outcomes"
         out_dir.mkdir(parents=True, exist_ok=True)
         record = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
