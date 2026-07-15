@@ -4373,13 +4373,72 @@ def _cmd_interrupt_native(name: str, rec: dict, run=subprocess.run, which=shutil
     --force`'s own "write the stopped tombstone regardless of the stop's
     exit code" rule.
 
+    T8 fix wave (adv C1, CRITICAL): the pre-fix version checked ONLY
+    `session_id is None` before firing `claude stop` + the tombstone +
+    the status flip -- every OTHER status (dead, dead-suspected, limited,
+    over_budget/over_ceiling/attached, idle) fell straight through and got
+    unconditionally overwritten to `interrupted`, which is destructive for
+    anything that was never actually a live turn:
+      - `dead` -> `interrupted` un-terminals a sticky status via a raw
+        write that bypasses `recompute_worker_native`'s stickiness
+        entirely, with rc==0 and no warning that nothing was running.
+      - `limited` -> `interrupted` silently drops the worker out of
+        `resume-limited`'s `status == "limited"` filter, permanently
+        breaking usage-limit auto-continuity (spec §5.1.1) -- rc==0, no
+        operator-visible signal.
+      - a live `claude stop <sid>` subprocess call fired against a sid
+        fleet's OWN registry already called dead/gone.
+    Guard: only `rec["status"] == "working"` is actually interruptible.
+    `recompute_worker_native`'s own definition of "working" IS "roster-
+    live busy/waiting", and every write to a native record's status
+    already routes through that recompute (send/status/clean/respawn) --
+    trusting the last-persisted verdict here needs no extra roster fetch.
+    Every other status gets either a friendly no-op (nothing was running:
+    dead/interrupted/idle) or a loud refusal (limited/dead-suspected/
+    anything else sticky-but-not-working -- parked or otherwise not a
+    plain live turn) pointing at the right escape hatch, rather than a
+    silent overwrite.
+
     sid is None only for a launch-in-flight pre-claim (no real session to
-    stop yet) -- a friendly no-op, mirroring `_interrupt_worker`'s own
-    "not_running" no-mutation branch for the legacy launch-in-flight case."""
+    stop yet) -- refuses loudly (unlike the friendly no-op statuses above)
+    since a dispatch may still land any moment and silently no-op'ing
+    would hide that from the operator."""
     sid = rec.get("session_id")
     if sid is None:
+        print(
+            f"fleet: {name}: dispatch in flight -- no live session yet to "
+            "interrupt; retry in a few seconds",
+            file=sys.stderr,
+        )
+        return 1
+
+    status = rec.get("status")
+    if status in ("dead", "interrupted", "idle"):
         print(f"{name}: no turn running -- nothing to interrupt")
         return 0
+    if status == "limited":
+        print(
+            f"fleet: {name}: limited park -- interrupting would orphan the "
+            "resume path; use resume-limited or kill",
+            file=sys.stderr,
+        )
+        return 1
+    if status == "dead-suspected":
+        print(
+            f"fleet: {name}: dead-suspected -- inspect first (fleet peek/"
+            f"result {name}); nothing confirms a turn is actually running "
+            "to stop",
+            file=sys.stderr,
+        )
+        return 1
+    if status != "working":
+        print(
+            f"fleet: {name}: status is {status!r}, not a live running turn "
+            "-- refusing to interrupt",
+            file=sys.stderr,
+        )
+        return 1
+
     stopped_ok = _stop_native_session(sid, run=run, which=which)
     write_tombstone_outcome(name, sid, "interrupted")
     with fleet_lock():
@@ -4406,7 +4465,10 @@ def cmd_interrupt(args, get_process_info=None, kill_process_tree=None,
 
     M-B T8: native (`dispatch_kind:"bg"`) records route to
     `_cmd_interrupt_native` instead -- `claude stop` + tombstone + a status
-    of `interrupted` (never `idle`, unlike the legacy branch below)."""
+    of `interrupted` (never `idle`, unlike the legacy branch below), guarded
+    to only actually fire on a `working` verdict (T8 fix wave, adv C1) --
+    every other status refuses or friendly-no-ops rather than un-terminaling
+    a sticky status via a silent overwrite."""
     with fleet_lock():
         data = load_registry()
         if args.name not in data["workers"]:
@@ -5276,6 +5338,10 @@ def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shuti
     return 0
 
 
+_RETIRED_SID_SWEEP_TIMEOUT_SECONDS = 5
+_RETIRED_SID_SWEEP_CAP = 20
+
+
 def _cmd_kill_native(name: str, rec: dict, run=subprocess.run, which=shutil.which) -> int:
     """Native (`dispatch_kind:"bg"`) counterpart of `cmd_kill`'s legacy body
     (M-B T8): `claude stop` the current sid (G10: never raw-kill) plus every
@@ -5291,11 +5357,52 @@ def _cmd_kill_native(name: str, rec: dict, run=subprocess.run, which=shutil.whic
     `rec` is the caller's already-locked snapshot (post-launch-in-flight-
     guard, post-`_confirm_destructive`); the commit below re-reads the
     registry fresh under its own lock rather than trusting `rec`, since
-    kill is meant to succeed even if the record changed shape meanwhile."""
+    kill is meant to succeed even if the record changed shape meanwhile.
+
+    T8 fix wave (adv I1): `retired_sids` has no cap anywhere else in the
+    codebase -- it accumulates one entry per fork-steer/respawn for a
+    worker's ENTIRE lifetime, so a long-lived, much-steered worker can
+    carry dozens of retired sids. Sweeping all of them sequentially at the
+    primary sid's 30s timeout each could block a single `fleet kill` for
+    tens of minutes with zero progress feedback. Fix: each retired stop
+    gets its own short `_RETIRED_SID_SWEEP_TIMEOUT_SECONDS` (5s) budget --
+    best-effort only, the primary sid above still gets the full 30s -- and
+    the sweep is capped to the `_RETIRED_SID_SWEEP_CAP` (20) MOST RECENT
+    retired sids (older ones are long-reaped in practice; this is a
+    wall-time bound, not a correctness guarantee -- a still-live retired
+    sid past the cap simply isn't swept by this invocation). One stderr
+    progress line per retired sid so a long sweep never looks hung.
+
+    T8 fix wave (adv M1): before stopping a retired sid, skip it (with a
+    stderr note) if it equals ANY OTHER worker's CURRENT session_id in the
+    registry. A genuine sid collision through normal operation is not a
+    real-world concern (~0 probability), so this only guards a corrupted/
+    hand-edited registry -- but cheaply, with one extra registry read
+    (under the lock, released immediately, no probe/roster fetch) before
+    the sweep starts."""
+    with fleet_lock():
+        other_current_sids = {
+            other_rec.get("session_id")
+            for other_name, other_rec in load_registry()["workers"].items()
+            if other_name != name and other_rec.get("session_id") is not None
+        }
+
     sid = rec.get("session_id")
     stopped_ok = _stop_native_session(sid, run=run, which=which) if sid else True
-    for retired in rec.get("retired_sids", []) or []:
-        _stop_native_session(retired, run=run, which=which)
+    retired_sids = list(rec.get("retired_sids", []) or [])[-_RETIRED_SID_SWEEP_CAP:]
+    for retired in retired_sids:
+        if retired in other_current_sids:
+            print(
+                f"fleet: {name}: retired session {retired[:8]} matches another "
+                "worker's current session_id -- skipping (registry looks "
+                "corrupted; not stopping someone else's live session)",
+                file=sys.stderr,
+            )
+            continue
+        ok = _stop_native_session(retired, run=run, which=which,
+                                  timeout=_RETIRED_SID_SWEEP_TIMEOUT_SECONDS)
+        print(f"fleet: {name}: stopping retired session {retired[:8]}... "
+              f"{'ok' if ok else 'timeout'}", file=sys.stderr)
     if sid:
         write_tombstone_outcome(name, sid, "killed")
 
@@ -5539,25 +5646,29 @@ def cmd_clean(args, get_process_info=None, sleep=time.sleep,
     candidates need no second-pass confirm-delay re-check -- only legacy's
     PID-probe path does.
 
-    Deletable native statuses: `dead`, `idle`, `interrupted`. Wider than
-    legacy's dead-only on purpose: a native worker's true identity lives in
-    the daemon roster (`claude agents`), not in fleet's own registry+logs
-    the way a legacy pid-tracked worker's does, so sweeping fleet's OWN
-    bookkeeping (registry entry, outcome-store files, task file, ceiling
-    file) for a finished (`idle`) or operator-stopped (`interrupted`)
-    native worker never destroys resumability -- `claude --resume <sid>` /
-    `claude attach <sid>` still finds the session regardless. NEVER
-    `dead-suspected` (a surfaced, still-undecided verdict, not a finished
-    state), `limited` (parked, not finished), or `working`. `claude rm`-ing
-    the roster entry itself is T9's territory -- this command never touches
-    the roster, only fleet's own files.
+    Deletable native statuses: `dead` ONLY -- exact legacy parity (T8 fix
+    wave, review CRITICAL). An earlier revision of this docstring/set also
+    swept `idle` and `interrupted`, on the premise that those matched
+    "today's legacy semantics"; that premise was false (legacy's own
+    `cmd_clean` docstring and body are dead-only, confirmed against
+    `8e79dbe`) and the wider sweep was a real hazard: `idle` means
+    finished-and-still-steerable (an operator can still `fleet send` it;
+    T9's idle-with-TTL archival is the milestone that will own retiring
+    idle workers deliberately, on a timer -- not this command, unannounced),
+    and `interrupted` is respawn-eligible by design (an operator who wants
+    to abandon an interrupted worker kills it first; `clean` sweeping it
+    out from under them removes that choice). NEVER `dead-suspected` (a
+    surfaced, still-undecided verdict, not a finished state), `limited`
+    (parked, not finished), `idle`, `interrupted`, or `working`. `claude
+    rm`-ing the roster entry itself is T9's territory -- this command never
+    touches the roster, only fleet's own files.
 
     G9 epoch-freeze: a suspicious roster fetch (failure, or an empty roster
     while some native worker's own last-committed record still claims a
     live turn) means clean REFUSES to touch ANY native record this
     invocation -- no recompute, no delete, prints the freeze line. Legacy
     cleaning proceeds unaffected."""
-    _NATIVE_CLEAN_DELETABLE = {"dead", "idle", "interrupted"}
+    _NATIVE_CLEAN_DELETABLE = {"dead"}
 
     removed = []  # list of (name, sid, retired_sids)
     pending_confirm = []  # (name, before) -- looked dead on pass 1, lock held
@@ -6366,7 +6477,8 @@ def write_tombstone_outcome(name: str, sid: str, kind: str) -> None:
                           "result_text": None})
 
 
-def _stop_native_session(sid: str, run=subprocess.run, which=shutil.which) -> bool:
+def _stop_native_session(sid: str, run=subprocess.run, which=shutil.which,
+                         timeout: int = 30) -> bool:
     """`claude stop <sid>` (contract G10): the only sanctioned way to end a
     --bg-managed session -- a raw pid kill triggers a silent daemon respawn
     under the same sid (G10, never raw-kill). True iff the stop's own exit
@@ -6374,14 +6486,20 @@ def _stop_native_session(sid: str, run=subprocess.run, which=shutil.which) -> bo
     OSError/SubprocessError (including TimeoutExpired) from the subprocess
     call, both resolve to False -- the caller (cmd_respawn --force) treats
     False as "could not verify the stop" and re-checks the roster before
-    ever proceeding (never claim two live sessions under one name)."""
+    ever proceeding (never claim two live sessions under one name).
+
+    T8 fix wave (adv I1): `timeout` defaults to 30s (the primary/current
+    sid's budget) but `_cmd_kill_native`'s retired-sid sweep passes 5s --
+    those stops are best-effort only and unbounded wall-time across a
+    long-lived worker's whole retired_sids history is the actual defect
+    being fixed, not the primary sid's own stop."""
     try:
         exe = resolve_claude_executable(which)
     except ClaudeNotFoundError:
         return False
     try:
         proc = run([exe, "stop", sid], capture_output=True, text=True,
-                  encoding="utf-8", errors="replace", timeout=30)
+                  encoding="utf-8", errors="replace", timeout=timeout)
     except (OSError, subprocess.SubprocessError):
         return False
     return proc.returncode == 0
