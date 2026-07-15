@@ -3873,3 +3873,228 @@ class TestMainUtf8Reconfigure:
         assert "✓ 完了 émoji" in stdout_text
         stderr_text = proc.stderr.decode("utf-8", errors="replace")
         assert "UnicodeEncodeError" not in stderr_text
+
+
+# ---------------------------------------------------------------------------
+# M-B T11: doctor pin-version gate, legacy-mix + dead-suspected advisories,
+# native-skip retrofits (docs/specs/native-substrate.md, Re-verification)
+# ---------------------------------------------------------------------------
+
+class _FakeVersionResult:
+    def __init__(self, stdout="", stderr="", returncode=0):
+        self.stdout, self.stderr, self.returncode = stdout, stderr, returncode
+
+
+class TestPinPassStore:
+    def test_record_then_read_roundtrip(self, native_home):
+        fleet.record_pin_pass("2.1.207")
+        pin = fleet.read_pin_pass()
+        assert pin["claude_version"] == "2.1.207"
+        assert "passed_at" in pin
+
+    def test_read_missing_file_returns_none(self, native_home):
+        assert fleet.read_pin_pass() is None
+
+    def test_read_corrupt_file_returns_none(self, native_home):
+        fleet.pin_pass_path().parent.mkdir(parents=True, exist_ok=True)
+        fleet.pin_pass_path().write_text("not json{", encoding="utf-8")
+        assert fleet.read_pin_pass() is None
+
+    def test_read_tolerates_unknown_extra_fields(self, native_home):
+        fleet._write_json_atomic(fleet.pin_pass_path(),
+                                 {"claude_version": "2.1.207", "passed_at": _iso(NOW),
+                                  "future_field": "whatever"})
+        pin = fleet.read_pin_pass()
+        assert pin["claude_version"] == "2.1.207"
+        assert pin["future_field"] == "whatever"
+
+
+class TestDoctorCheckPinVersion:
+    def test_no_pin_file_passes_with_hint(self, native_home):
+        name, ok, msg = fleet._doctor_check_pin_version(which=lambda n: "claude.cmd",
+                                                         run=lambda *a, **k: _FakeVersionResult())
+        assert ok is True
+        assert "no pin-test pass recorded" in msg
+        assert "tests/integration/test_native_pin.py" in msg
+
+    def test_matching_version_passes(self, native_home):
+        fleet.record_pin_pass("2.1.207")
+        run = lambda *a, **k: _FakeVersionResult(stdout="2.1.207")
+        name, ok, msg = fleet._doctor_check_pin_version(which=lambda n: "claude.cmd", run=run)
+        assert ok is True
+        assert "pin-test pass current" in msg
+        assert "2.1.207" in msg
+
+    def test_mismatched_version_fails(self, native_home):
+        fleet.record_pin_pass("2.1.207")
+        run = lambda *a, **k: _FakeVersionResult(stdout="2.2.0")
+        name, ok, msg = fleet._doctor_check_pin_version(which=lambda n: "claude.cmd", run=run)
+        assert ok is False
+        assert "2.2.0 != 2.1.207" in msg
+        assert "native-substrate.md" in msg
+
+    def test_claude_not_on_path_passes_with_note(self, native_home):
+        fleet.record_pin_pass("2.1.207")
+        name, ok, msg = fleet._doctor_check_pin_version(which=lambda n: None,
+                                                         run=lambda *a, **k: _FakeVersionResult())
+        assert ok is True
+        assert "not resolvable" in msg
+
+    def test_version_subprocess_failure_passes_with_note(self, native_home):
+        fleet.record_pin_pass("2.1.207")
+        def boom(*a, **k):
+            raise OSError("nope")
+        name, ok, msg = fleet._doctor_check_pin_version(which=lambda n: "claude.cmd", run=boom)
+        assert ok is True
+        assert "not resolvable" in msg
+
+
+class TestDoctorCheckLegacyMix:
+    def test_no_workers_passes_silent(self, native_home):
+        name, ok, msg = fleet._doctor_check_legacy_mix({})
+        assert ok is True
+        assert "no pre-pivot" in msg
+
+    def test_all_native_workers_passes_silent(self, native_home):
+        rec = seed_native_worker(native_home, name="w1", status="idle")
+        name, ok, msg = fleet._doctor_check_legacy_mix({"w1": rec})
+        assert ok is True
+        assert "no pre-pivot" in msg
+
+    def test_legacy_worker_named_advisory(self, native_home):
+        legacy = fleet.new_worker_record(SID, "C:/proj", "t", "accept")
+        name, ok, msg = fleet._doctor_check_legacy_mix({"old-worker": legacy})
+        assert ok is True
+        assert "1 pre-pivot worker(s)" in msg
+        assert "old-worker" in msg
+        assert "spec 5.1 coexistence" in msg
+
+    def test_archived_native_worker_not_counted_as_legacy(self, native_home):
+        rec = seed_native_worker(native_home, name="w1", status="idle", archived_at=_iso(NOW))
+        name, ok, msg = fleet._doctor_check_legacy_mix({"w1": rec})
+        assert ok is True
+        assert "no pre-pivot" in msg
+
+
+class TestDoctorCheckDeadSuspected:
+    def test_none_passes_silent(self, native_home):
+        rec = seed_native_worker(native_home, name="w1", status="idle")
+        name, ok, msg = fleet._doctor_check_dead_suspected({"w1": rec})
+        assert ok is True
+        assert "no dead-suspected" in msg
+
+    def test_dead_suspected_worker_named_advisory(self, native_home):
+        rec = seed_native_worker(native_home, name="w1", status="dead-suspected")
+        name, ok, msg = fleet._doctor_check_dead_suspected({"w1": rec})
+        assert ok is True
+        assert "1 dead-suspected worker(s)" in msg
+        assert "w1" in msg
+        assert "fleet peek/result" in msg
+
+    def test_does_not_recompute_uses_raw_snapshot_status(self, native_home):
+        # A record whose live process would actually resolve differently
+        # today still gets named -- this check never touches the roster or
+        # any liveness probe, only the snapshot's own `status` field.
+        rec = seed_native_worker(native_home, name="w1", status="dead-suspected",
+                                 turn_pid=999999)
+        name, ok, msg = fleet._doctor_check_dead_suspected({"w1": rec})
+        assert "w1" in msg
+
+
+class TestDoctorNativeSkipStalePids:
+    def test_native_record_with_dead_turn_pid_not_flagged(self, native_home):
+        # Native dispatch never populates turn_pid, but a bogus/stale one
+        # (e.g. carried over from a legacy->native edit) must still not
+        # trip this legacy-only check.
+        rec = seed_native_worker(native_home, name="w1", status="working",
+                                 turn_pid=999999, turn_pid_ctime=None)
+        name, ok, msg = fleet._doctor_check_stale_pids(
+            {"w1": rec}, get_process_info=lambda pid: None)
+        assert ok is True
+        assert "no stale turn_pid" in msg
+
+    def test_legacy_record_with_dead_turn_pid_still_flagged(self, native_home):
+        legacy = fleet.new_worker_record(SID, "C:/proj", "t", "accept")
+        legacy["status"] = "working"
+        legacy["turn_pid"] = 999999
+        name, ok, msg = fleet._doctor_check_stale_pids(
+            {"w1": legacy}, get_process_info=lambda pid: None)
+        assert ok is True
+        assert "w1" in msg
+
+
+class TestDoctorNativeSkipUnreadableStarttime:
+    def test_native_record_with_unknown_liveness_not_flagged(self, native_home, monkeypatch):
+        rec = seed_native_worker(native_home, name="w1", status="working",
+                                 turn_pid=999999, turn_pid_ctime=None)
+        monkeypatch.setattr(fleet, "probe_liveness", lambda *a, **k: "unknown")
+        name, ok, msg = fleet._doctor_check_unreadable_starttime({"w1": rec})
+        assert ok is True
+        assert "no workers with an unreadable" in msg
+
+    def test_legacy_record_with_unknown_liveness_still_flagged(self, native_home, monkeypatch):
+        legacy = fleet.new_worker_record(SID, "C:/proj", "t", "accept")
+        legacy["status"] = "working"
+        legacy["turn_pid"] = 999999
+        monkeypatch.setattr(fleet, "probe_liveness", lambda *a, **k: "unknown")
+        name, ok, msg = fleet._doctor_check_unreadable_starttime({"w1": legacy})
+        assert ok is True
+        assert "w1" in msg
+
+
+class TestDoctorClaudeAgentsRetiredSids:
+    def test_retired_sid_counted_as_known(self, native_home):
+        old_sid = "aaaaaaaa-0000-0000-0000-000000000000"
+        rec = seed_native_worker(native_home, name="w1", sid=SID, status="idle",
+                                 retired_sids=[old_sid])
+
+        def run(argv, **kw):
+            return _FakeVersionResult(stdout=json.dumps([{"session_id": old_sid}]))
+        name, ok, msg = fleet._doctor_check_claude_agents(
+            {"w1": rec}, which=lambda n: "claude.cmd", run=run)
+        assert ok is True
+        assert "no fleet-unknown" in msg
+
+    def test_still_reports_a_truly_unknown_session(self, native_home):
+        rec = seed_native_worker(native_home, name="w1", sid=SID, status="idle")
+
+        def run(argv, **kw):
+            return _FakeVersionResult(stdout=json.dumps([{"session_id": "totally-unknown"}]))
+        name, ok, msg = fleet._doctor_check_claude_agents(
+            {"w1": rec}, which=lambda n: "claude.cmd", run=run)
+        assert ok is True
+        assert "totally-unknown" in msg
+
+
+class TestDoctorOrphanedClaimsArchivedRegression:
+    # M-B T11: T9's mailbox-move-on-archive fix (finding M-4b) already
+    # erases this check's noise too, since an orphaned-mailbox scan can
+    # only flag a *.md file that still exists under mailbox_dir() -- no
+    # separate doctor-side exclusion is needed here either.
+    def test_archived_workers_mailbox_moved_produces_no_orphan_noise(self, native_home):
+        seed_archive_ready_worker(native_home)
+        mailbox_file = fleet.mailbox_dir() / f"{SID}.md"
+        mailbox_file.write_text("pending mail", encoding="utf-8")
+
+        rc = fleet.cmd_archive(_archive_args(), run=_archive_fake_run(rc=0), which=lambda _: "claude")
+        assert rc == 0
+
+        workers = fleet.load_registry()["workers"]
+        _name, ok, msg = fleet._doctor_check_orphaned_claims(workers=workers)
+        assert ok is True
+        assert SID not in msg
+
+
+class TestCmdDoctorRegistersNewChecks:
+    def test_new_checks_run_and_appear_in_output(self, native_home, capsys):
+        args = fleet.build_parser().parse_args(["doctor"])
+        rc = fleet.cmd_doctor(
+            args, which=lambda n: None,
+            run=lambda *a, **k: _FakeVersionResult(),
+        )
+        out = capsys.readouterr().out
+        assert "pin-version" in out
+        assert "legacy-mix" in out
+        assert "dead-suspected" in out
+        # pin-version registered right after claude-on-path, per the T11 brief.
+        assert out.index("claude-on-path") < out.index("pin-version") < out.index("worker-settings-instance")

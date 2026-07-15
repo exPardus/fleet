@@ -111,6 +111,26 @@ def pin_pass_path() -> Path:
     return state_dir() / "pin-pass.json"
 
 
+def record_pin_pass(claude_version: str) -> None:
+    """T12's pin-test suite calls this on a green run (SPEC re-verification
+    doctrine): stamps the CLI version the native contract was last verified
+    against, so `fleet doctor`'s pin-version check can flag drift."""
+    _write_json_atomic(pin_pass_path(), {"claude_version": claude_version, "passed_at": now_iso()})
+
+
+def read_pin_pass() -> dict | None:
+    """Lock-free tolerant read: missing file, unreadable file, or non-JSON
+    content all resolve to None rather than raising -- doctor is the only
+    consumer and must never crash on a corrupt/absent pin-pass record."""
+    try:
+        data = json.loads(pin_pass_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
 def is_native(record: dict) -> bool:
     if not isinstance(record, dict):
         return False
@@ -6338,6 +6358,43 @@ def _doctor_check_claude_version(which=shutil.which, run=subprocess.run):
     return ("claude-on-path", True, f"claude {'.'.join(map(str, version))} at {exe}")
 
 
+def _doctor_check_pin_version(which=shutil.which, run=subprocess.run):
+    """M-B T11 (docs/specs/native-substrate.md, Re-verification): the native
+    contract (roster schema, transcript keys, --bg/--resume behavior) was
+    observed against one specific `claude --version` and is not guaranteed
+    to survive an update. FAIL is reserved for a confirmed mismatch against
+    the last recorded pin-test pass -- everything else (no pin file yet,
+    `claude` unresolvable) is a PASS-note, since neither means the contract
+    is currently broken, only that it hasn't been (re)verified.
+
+    Deliberately double-shells `claude --version` rather than sharing
+    `_doctor_check_claude_version`'s subprocess result: that check returns
+    an already-formatted (name, ok, message) tuple, not the parsed version,
+    and threading a shared raw result through both call sites/signatures
+    would contort an otherwise-simple check for the sake of one skipped
+    subprocess call in a diagnostic (never-hot-path) command."""
+    pin = read_pin_pass()
+    if pin is None:
+        return ("pin-version", True,
+                "no pin-test pass recorded -- run FLEET_LIVE=1 py -3.13 -m pytest "
+                "tests/integration/test_native_pin.py")
+    try:
+        exe = resolve_claude_executable(which=which)
+        result = run([exe, "--version"], capture_output=True, text=True, timeout=10)
+    except Exception:
+        return ("pin-version", True, "claude not resolvable")
+    live = _parse_claude_version((result.stdout or "") + (result.stderr or ""))
+    if live is None:
+        return ("pin-version", True, "claude not resolvable")
+    live_str = ".".join(map(str, live))
+    pinned = pin.get("claude_version")
+    if live_str != pinned:
+        return ("pin-version", False,
+                f"claude {live_str} != {pinned} at last pin pass ({pin.get('passed_at')}) -- "
+                "native contract unverified (docs/specs/native-substrate.md, Re-verification)")
+    return ("pin-version", True, f"pin-test pass current ({live_str}, {pin.get('passed_at')})")
+
+
 _HOOK_SCRIPT_TOKEN_RE = re.compile(r"\S+\.py\b")
 
 
@@ -6483,9 +6540,15 @@ def _doctor_check_terminal_launcher(which=shutil.which):
 
 
 def _doctor_check_stale_pids(workers: dict, get_process_info=None):
+    """M-B T11: native records never populate `turn_pid` (dispatch is
+    `--bg`, not a fleet-forked subprocess), so the `is_native` guard is
+    belt-and-suspenders -- the turn_pid-is-not-None condition alone would
+    already exclude them. Guarding explicitly documents that this check is
+    legacy-only rather than relying on an incidental field default."""
     stale = [
         name for name, rec in workers.items()
-        if rec.get("status") == "working" and rec.get("turn_pid") is not None
+        if not is_native(rec)
+        and rec.get("status") == "working" and rec.get("turn_pid") is not None
         and not pid_alive(rec.get("turn_pid"), rec.get("turn_pid_ctime"), get_process_info=get_process_info)
     ]
     if stale:
@@ -6499,10 +6562,14 @@ def _doctor_check_unreadable_starttime(workers: dict, get_process_info=None):
     whose StartTime is unreadable (probe_liveness -> "unknown", the
     alive-unknown case). These are deliberately never demoted to dead by
     recompute_status, so doctor is where an operator learns the probe could
-    not fully confirm them -- note-only (always PASS), never a hard failure."""
+    not fully confirm them -- note-only (always PASS), never a hard failure.
+
+    M-B T11: legacy-only, same rationale as `_doctor_check_stale_pids` --
+    native records carry no `turn_pid` for this to ever probe."""
     unknown = [
         name for name, rec in workers.items()
-        if rec.get("status") == "working" and rec.get("turn_pid") is not None
+        if not is_native(rec)
+        and rec.get("status") == "working" and rec.get("turn_pid") is not None
         and probe_liveness(rec.get("turn_pid"), rec.get("turn_pid_ctime"),
                            get_process_info=get_process_info) == "unknown"
     ]
@@ -6560,6 +6627,34 @@ def _doctor_check_limited_parks(workers: dict):
     if not parts:
         parts.append(f"{len(limited)} usage-limit park(s), none past reset")
     return ("limited-parks", True, " | ".join(parts))
+
+
+def _doctor_check_legacy_mix(workers: dict):
+    """M-B T11 (spec §5.1 coexistence): advisory-only (always ok=True) --
+    a legacy (pre-pivot, `dispatch_kind` absent) record is read-only, not
+    broken; naming it just points the operator at `kill`/`clean`. Archived
+    records are excluded even though they're also non-native, since they're
+    already history and doctor's other archived-aware checks cover them."""
+    legacy = sorted(name for name, rec in workers.items()
+                    if not is_native(rec) and rec.get("archived_at") is None)
+    if legacy:
+        return ("legacy-mix", True,
+                f"{len(legacy)} pre-pivot worker(s): {', '.join(legacy)} -- read-only; "
+                "kill or clean (spec 5.1 coexistence)")
+    return ("legacy-mix", True, "no pre-pivot workers")
+
+
+def _doctor_check_dead_suspected(workers: dict):
+    """M-B T11: advisory-only (always ok=True) -- `dead-suspected` is a
+    recomputable verdict, never sticky (never auto-respawned), so doctor
+    just names current holders from the snapshot it was handed; it does not
+    recompute (a stale label here is fine -- doctor is point-in-time)."""
+    names = sorted(name for name, rec in workers.items() if rec.get("status") == "dead-suspected")
+    if names:
+        return ("dead-suspected", True,
+                f"{len(names)} dead-suspected worker(s): {', '.join(names)} -- no outcome record; "
+                "inspect via fleet peek/result, then kill or respawn")
+    return ("dead-suspected", True, "no dead-suspected workers")
 
 
 def _mailbox_first_line(path: Path) -> str:
@@ -6642,7 +6737,16 @@ def _doctor_check_claude_agents(workers: dict, which=shutil.which, run=subproces
         return ("claude-agents", True, "`claude agents --json` did not return JSON -- skipped")
     if not isinstance(agents, list):
         return ("claude-agents", True, "`claude agents --json` returned an unexpected shape -- skipped")
-    known_sids = {rec["session_id"] for rec in workers.values()}
+    # M-B T11: a fork-steer/respawn retires the old sid into `retired_sids`
+    # but never rm's it (spec §5.1); an archived worker's own rm is
+    # best-effort and can still leave a retired sid lingering in the roster.
+    # Counting only the CURRENT session_id would keep re-reporting those as
+    # "fleet-unknown" forever -- every retired sid is still fleet-tracked
+    # history, so it belongs in known_sids too.
+    known_sids = set()
+    for rec in workers.values():
+        known_sids.add(rec["session_id"])
+        known_sids.update(rec.get("retired_sids", []) or [])
     unknown = sorted({
         sid for a in agents if isinstance(a, dict)
         for sid in [a.get("session_id") or a.get("id")]
@@ -6786,6 +6890,7 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run, get_process_info=No
 
     checks = [
         _doctor_check_claude_version(which=which, run=run),
+        _doctor_check_pin_version(which=which, run=run),
         _doctor_check_instance_settings(),
         _doctor_check_instance_freshness(),
         _doctor_check_hook_registration(),
@@ -6798,6 +6903,8 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run, get_process_info=No
         _doctor_check_mailboxes(workers),
         _doctor_check_stale_attaches(workers),
         _doctor_check_limited_parks(workers),
+        _doctor_check_legacy_mix(workers),
+        _doctor_check_dead_suspected(workers),
         _doctor_check_orphaned_claims(workers=workers),
         _doctor_check_claude_agents(workers, which=which, run=run),
         _doctor_check_log_sizes(),
