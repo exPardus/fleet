@@ -152,6 +152,25 @@ class TestOutcomeStore:
         rec = fleet.read_outcomes("w1")[0]
         assert rec["result_text"] == "short"
 
+    # T5 fix wave (Critical C1): has_fresh_outcome's default `kinds`
+    # argument must exclude tombstones -- see task-5-adversarial.md's C1
+    # repro. A fresh tombstone must never be read as "the turn finished".
+    def test_has_fresh_outcome_result_kind_still_vouches(self, native_home):
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": "s1", "kind": "result"})
+        assert fleet.has_fresh_outcome("w1", "s1", _iso(NOW)) is True
+
+    @pytest.mark.parametrize("kind", fleet.TOMBSTONE_KINDS)
+    def test_has_fresh_outcome_default_ignores_every_tombstone_kind(self, native_home, kind):
+        fleet.write_tombstone_outcome("w1", "s1", kind)
+        assert fleet.has_fresh_outcome("w1", "s1", _iso(NOW)) is False
+
+    def test_has_fresh_outcome_kinds_param_can_opt_in_to_tombstones(self, native_home):
+        # The default excludes tombstones, but a caller that genuinely
+        # wants to match one can still widen the match set explicitly.
+        fleet.write_tombstone_outcome("w1", "s1", "killed")
+        assert fleet.has_fresh_outcome("w1", "s1", _iso(NOW), kinds=("killed",)) is True
+        assert fleet.has_fresh_outcome("w1", "s1", _iso(NOW)) is False
+
 
 class TestOutcomeConcurrency:
     def test_concurrent_appends_lose_no_records(self, native_home):
@@ -524,6 +543,26 @@ class TestFastCompletionSid:
         found = fleet._fast_completion_sid("w1", _iso(NOW - timedelta(seconds=1)))
         assert found is None
 
+    # T5 fix wave (Critical C1 audit): a tombstone can't mean fast
+    # completion -- only a Stop-hook-written kind=="result" record should
+    # ever be returned.
+    @pytest.mark.parametrize("kind", fleet.TOMBSTONE_KINDS)
+    def test_tombstone_kind_is_never_a_fast_completion_sid(self, native_home, kind):
+        fleet.write_tombstone_outcome(SID, SID, kind)
+        found = fleet._fast_completion_sid("w1", _iso(NOW - timedelta(seconds=1)),
+                                           short_id="aaaabbbb")
+        assert found is None
+
+    def test_result_kind_still_found_alongside_tombstone(self, native_home):
+        # A tombstone is present too, but must not shadow/confuse the
+        # genuine result-kind match.
+        fleet.write_tombstone_outcome(SID, SID, "interrupted")
+        fleet.append_outcome(SID, {"ts": _iso(NOW), "session_id": SID,
+                                   "kind": "result", "result_text": "done"})
+        found = fleet._fast_completion_sid("w1", _iso(NOW - timedelta(seconds=1)),
+                                           short_id="aaaabbbb")
+        assert found == SID
+
     def test_prefers_freshest_across_both_sources(self, native_home):
         fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": "old-name-keyed",
                                     "kind": "result"})
@@ -667,3 +706,493 @@ class TestCmdSpawnNative:
         kinds = [json.loads(ln)["kind"] for ln in
                 events_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
         assert kinds == ["spawned", "turn_started"]
+
+
+# ---------------------------------------------------------------------------
+# M-B Task 5: outcome discriminator, epoch freeze, status/wait integration
+# ---------------------------------------------------------------------------
+
+def _fixed_roster(ok=True, entries=None):
+    """Unlike _roster_with (dispatch_bg's two-phase pre/post snapshot), T5's
+    callers (cmd_status/wait_for_workers) each do exactly ONE fetch per
+    invocation -- every call gets the same fixed answer."""
+    def fetch(**_):
+        return ok, ([] if entries is None else entries)
+    return fetch
+
+
+def _status_args(name=None, **kw):
+    from types import SimpleNamespace
+    base = dict(name=name, json=False, stale_ok=False)
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def _wait_args(names, any=False, timeout=None):
+    from types import SimpleNamespace
+    return SimpleNamespace(names=names, any=any, timeout=timeout)
+
+
+def _events_kinds(home):
+    path = home / "state" / "events.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(ln)["kind"] for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+
+class TestNativeRecompute:
+    def _rec(self, native_home, status="working", **kw):
+        return seed_native_worker(native_home, status=status, **kw)
+
+    def test_roster_busy_stays_working(self, native_home):
+        rec = self._rec(native_home)
+        out = fleet.recompute_worker_native("w1", rec, [make_roster_entry(SID, status="busy")])
+        assert out["status"] == "working"
+
+    def test_roster_waiting_stays_working_and_flags_permission(self, native_home):
+        rec = self._rec(native_home)
+        out = fleet.recompute_worker_native("w1", rec, [make_roster_entry(SID, status="waiting")])
+        assert out["status"] == "working"
+        assert out["waiting_for_permission"] is True
+
+    def test_roster_idle_with_fresh_outcome_goes_idle(self, native_home):
+        rec = self._rec(native_home)
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": SID, "kind": "result"})
+        rec["last_dispatch_at"] = _iso(NOW - timedelta(minutes=1))
+        out = fleet.recompute_worker_native("w1", rec, [make_roster_entry(SID, status="idle")])
+        assert out["status"] == "idle"
+
+    def test_roster_idle_without_outcome_is_dead_suspected(self, native_home):
+        rec = self._rec(native_home)
+        out = fleet.recompute_worker_native("w1", rec, [make_roster_entry(SID, status="idle")])
+        assert out["status"] == "dead-suspected"
+
+    def test_stale_outcome_from_prior_dispatch_does_not_vouch(self, native_home):
+        rec = self._rec(native_home, last_dispatch_at=_iso(NOW))
+        fleet.append_outcome("w1", {"ts": _iso(NOW - timedelta(hours=2)),
+                                    "session_id": SID, "kind": "result"})
+        out = fleet.recompute_worker_native("w1", rec, [make_roster_entry(SID, status="idle")])
+        assert out["status"] == "dead-suspected"
+
+    def test_predecessor_sid_record_does_not_vouch(self, native_home):
+        rec = self._rec(native_home)
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": "old-dead-sid",
+                                    "kind": "result"})
+        out = fleet.recompute_worker_native("w1", rec, [])
+        assert out["status"] == "dead-suspected"
+
+    def test_roster_gone_with_fresh_outcome_is_completed(self, native_home):
+        rec = self._rec(native_home)
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": SID, "kind": "result"})
+        rec["last_dispatch_at"] = _iso(NOW - timedelta(minutes=1))
+        out = fleet.recompute_worker_native("w1", rec, [])
+        assert out["status"] == "idle"
+
+    def test_roster_dead_entry_state_only_is_not_live(self, native_home):
+        # state-only entry (no status/pid key) -- contract: not live, treated
+        # the same as roster-gone, never inspect `state` alone.
+        rec = self._rec(native_home)
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": SID, "kind": "result"})
+        rec["last_dispatch_at"] = _iso(NOW - timedelta(minutes=1))
+        entry = make_roster_entry(SID, status=None, pid=None, state="done")
+        out = fleet.recompute_worker_native("w1", rec, [entry])
+        assert out["status"] == "idle"
+
+    def test_sticky_statuses_pass_through(self, native_home):
+        for sticky in ("dead", "limited", "over_ceiling", "interrupted", "attached", "over_budget"):
+            rec = self._rec(native_home, status=sticky)
+            out = fleet.recompute_worker_native("w1", rec, [])
+            assert out["status"] == sticky
+
+    def test_dead_suspected_is_reversible(self, native_home):
+        rec = self._rec(native_home, status="dead-suspected",
+                        last_dispatch_at=_iso(NOW - timedelta(minutes=5)))
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": SID, "kind": "result"})
+        out = fleet.recompute_worker_native("w1", rec, [])
+        assert out["status"] == "idle"
+
+    def test_no_fresh_outcome_with_limit_scan_hook_parks_limited(self, native_home, monkeypatch):
+        monkeypatch.setattr(fleet, "_limit_scan_hook",
+                            lambda sid: (True, "2026-07-16T00:00:00Z", "session_5h"))
+        rec = self._rec(native_home)
+        out = fleet.recompute_worker_native("w1", rec, [make_roster_entry(SID, status="idle")])
+        assert out["status"] == "limited"
+        assert out["limit_reset_at"] == "2026-07-16T00:00:00Z"
+        assert out["limit_kind"] == "session_5h"
+
+    def test_in_flight_preclaim_stays_working_until_claim_expires(self, native_home):
+        rec = self._rec(native_home, session_id=None, last_activity=fleet.now_iso())
+        out = fleet.recompute_worker_native("w1", rec, [])
+        assert out["status"] == "working"
+
+    def test_in_flight_preclaim_expires_to_dead(self, native_home):
+        stale = _iso(NOW - timedelta(hours=1))
+        rec = self._rec(native_home, session_id=None, last_activity=stale)
+        out = fleet.recompute_worker_native("w1", rec, [])
+        assert out["status"] == "dead"
+
+    # T5 fix wave (Critical C1): task-5-adversarial.md's exact laundering
+    # repro. A fresh fleet-written tombstone for the CURRENT sid, landed
+    # (e.g. by a future T8 cmd_kill) before the registry status flip
+    # caught up, must never make the discriminator vouch "idle" -- it
+    # should fall through to _investigate_no_outcome (dead-suspected),
+    # honestly uncertain rather than falsely "done". Roster still reports
+    # idle (models the race window: the process is gone/idle on the
+    # roster, but the ONLY outcome record is the tombstone, not a result).
+    @pytest.mark.parametrize("kind", fleet.TOMBSTONE_KINDS)
+    def test_fresh_tombstone_never_launders_to_idle(self, native_home, kind):
+        rec = self._rec(native_home, status="working",
+                        last_dispatch_at=_iso(NOW - timedelta(minutes=1)))
+        fleet.write_tombstone_outcome("w1", SID, kind)
+        out = fleet.recompute_worker_native("w1", rec, [make_roster_entry(SID, status="idle")])
+        assert out["status"] != "idle"
+        assert out["status"] == "dead-suspected"
+
+    @pytest.mark.parametrize("kind", fleet.TOMBSTONE_KINDS)
+    def test_fresh_tombstone_never_launders_to_idle_roster_gone(self, native_home, kind):
+        # Same trap via the roster-gone branch (recompute_worker_native's
+        # OTHER has_fresh_outcome call site).
+        rec = self._rec(native_home, status="working",
+                        last_dispatch_at=_iso(NOW - timedelta(minutes=1)))
+        fleet.write_tombstone_outcome("w1", SID, kind)
+        out = fleet.recompute_worker_native("w1", rec, [])
+        assert out["status"] != "idle"
+        assert out["status"] == "dead-suspected"
+
+
+class TestEpochFreeze:
+    def test_fetch_failure_is_suspicious(self):
+        assert fleet.native_epoch_suspicious(False, "no claude", {}) is True
+
+    def test_empty_roster_with_live_native_worker_is_suspicious(self, native_home):
+        rec = seed_native_worker(native_home)
+        assert fleet.native_epoch_suspicious(True, [], {"w1": rec}) is True
+
+    def test_empty_roster_with_no_native_workers_is_fine(self):
+        assert fleet.native_epoch_suspicious(True, [], {}) is False
+
+    def test_nonempty_roster_is_never_suspicious(self, native_home):
+        rec = seed_native_worker(native_home)
+        assert fleet.native_epoch_suspicious(True, [make_roster_entry("other-sid")], {"w1": rec}) is False
+
+    def test_limited_worker_is_native_but_never_the_suspicion_signal(self, native_home):
+        # limited is sticky (never demoted by the freeze) -- it must not be
+        # what trips the "any native worker still working" check either.
+        rec = seed_native_worker(native_home, status="limited")
+        assert fleet.native_epoch_suspicious(True, [], {"w1": rec}) is False
+
+
+class TestWorkerFlagsNative:
+    def test_dead_suspected_flag(self, native_home):
+        rec = seed_native_worker(native_home, status="dead-suspected")
+        assert "investigate: no outcome record" in fleet._worker_flags(rec)
+
+    def test_waiting_for_permission_flag(self, native_home):
+        rec = seed_native_worker(native_home, status="working")
+        rec["waiting_for_permission"] = True
+        assert "waiting-permission" in fleet._worker_flags(rec)
+
+    def test_no_flag_when_not_waiting(self, native_home):
+        rec = seed_native_worker(native_home, status="working")
+        assert "waiting-permission" not in fleet._worker_flags(rec)
+
+
+class TestNativeTokenSummary:
+    def test_summary_from_latest_outcome(self, native_home):
+        seed_native_worker(native_home, status="working")
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": SID, "kind": "result",
+                                    "input_tokens": 111, "output_tokens": 22})
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert fleet._native_token_summary("w1", rec) == "tokens:in=111 out=22"
+
+    def test_empty_without_outcome(self, native_home):
+        rec = seed_native_worker(native_home, status="working")
+        assert fleet._native_token_summary("w1", rec) == ""
+
+
+class TestCmdStatusNative:
+    def test_native_busy_stays_working_and_never_pid_probed(self, native_home, monkeypatch):
+        seed_native_worker(native_home, status="working")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            _fixed_roster(True, [make_roster_entry(SID, status="busy")]))
+
+        def _boom(*a, **k):
+            raise AssertionError("recompute_worker (PID probe) must not run for a native record")
+        monkeypatch.setattr(fleet, "recompute_worker", _boom)
+
+        rc = fleet.cmd_status(_status_args())
+        assert rc == 0
+        assert fleet.load_registry()["workers"]["w1"]["status"] == "working"
+
+    def test_legacy_worker_still_uses_pid_probe(self, native_home):
+        rec = fleet.new_worker_record("legacy-sid-0000", "C:/proj", "do it", "accept")
+        rec["status"] = "working"
+        rec["turn_pid"] = 4242
+        rec["turn_pid_ctime"] = fleet.now_iso()
+        data = fleet.load_registry()
+        data["workers"]["legacy1"] = rec
+        fleet.save_registry(data)
+
+        rc = fleet.cmd_status(_status_args(), get_process_info=lambda pid: None)
+        assert rc == 0
+        assert fleet.load_registry()["workers"]["legacy1"]["status"] == "dead"
+
+    def test_mixed_native_and_legacy_split_correctly(self, native_home, monkeypatch):
+        seed_native_worker(native_home, status="working")
+        legacy = fleet.new_worker_record("legacy-sid-0001", "C:/proj", "do it", "accept")
+        legacy["status"] = "working"
+        legacy["turn_pid"] = 4242
+        legacy["turn_pid_ctime"] = fleet.now_iso()
+        data = fleet.load_registry()
+        data["workers"]["legacy1"] = legacy
+        fleet.save_registry(data)
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            _fixed_roster(True, [make_roster_entry(SID, status="busy")]))
+
+        rc = fleet.cmd_status(_status_args(), get_process_info=lambda pid: None)
+        assert rc == 0
+        workers = fleet.load_registry()["workers"]
+        assert workers["w1"]["status"] == "working"
+        assert workers["legacy1"]["status"] == "dead"
+
+    def test_epoch_freeze_prints_warning_and_freezes_native_write(self, native_home, monkeypatch, capsys):
+        rec = seed_native_worker(native_home, status="working")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _fixed_roster(False, None))
+
+        rc = fleet.cmd_status(_status_args())
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "EPOCH: roster suspicious -- native verdicts frozen (G9); legacy rows only" in out
+        assert fleet.load_registry()["workers"]["w1"] == rec
+
+    def test_dead_suspected_event_fires_once_not_per_rerun(self, native_home, monkeypatch):
+        seed_native_worker(native_home, status="working")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            _fixed_roster(True, [make_roster_entry(SID, status="idle")]))
+
+        fleet.cmd_status(_status_args())
+        fleet.cmd_status(_status_args())
+
+        kinds = _events_kinds(native_home)
+        assert kinds.count("dead_suspected") == 1
+        assert fleet.load_registry()["workers"]["w1"]["status"] == "dead-suspected"
+
+    def test_dead_suspected_flips_back_to_idle_on_later_outcome(self, native_home, monkeypatch):
+        seed_native_worker(native_home, status="working")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            _fixed_roster(True, [make_roster_entry(SID, status="idle")]))
+        fleet.cmd_status(_status_args())
+        assert fleet.load_registry()["workers"]["w1"]["status"] == "dead-suspected"
+
+        fleet.append_outcome("w1", {"ts": fleet.now_iso(), "session_id": SID, "kind": "result"})
+        fleet.cmd_status(_status_args())
+        assert fleet.load_registry()["workers"]["w1"]["status"] == "idle"
+
+    def test_limited_suspected_event_and_horizon_fields(self, native_home, monkeypatch):
+        seed_native_worker(native_home, status="working")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            _fixed_roster(True, [make_roster_entry(SID, status="idle")]))
+        monkeypatch.setattr(fleet, "_limit_scan_hook",
+                            lambda sid: (True, "2026-07-16T00:00:00Z", "session_5h"))
+
+        rc = fleet.cmd_status(_status_args())
+        assert rc == 0
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["status"] == "limited"
+        assert rec["limit_reset_at"] == "2026-07-16T00:00:00Z"
+        assert rec["limit_kind"] == "session_5h"
+        assert "limited_suspected" in _events_kinds(native_home)
+
+    def test_limited_is_sticky_never_demoted_by_epoch_freeze(self, native_home, monkeypatch):
+        rec = seed_native_worker(native_home, status="limited", limit_reset_at=None, limit_kind=None)
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _fixed_roster(False, None))
+
+        rc = fleet.cmd_status(_status_args())
+        assert rc == 0
+        assert fleet.load_registry()["workers"]["w1"]["status"] == "limited"
+
+    # T5 fix wave (Important I1): waiting_for_permission is transient --
+    # recomputed fresh from the roster every call -- and must never land in
+    # the persisted registry (new_worker_record's baseline schema doesn't
+    # enumerate it, unlike every other optional field).
+    def test_waiting_for_permission_not_persisted_to_registry(self, native_home, monkeypatch):
+        seed_native_worker(native_home, status="working")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            _fixed_roster(True, [make_roster_entry(SID, status="waiting")]))
+        rc = fleet.cmd_status(_status_args())
+        assert rc == 0
+        raw = json.loads((native_home / "state" / "fleet.json").read_text(encoding="utf-8"))
+        assert "waiting_for_permission" not in raw["workers"]["w1"]
+
+    def test_waiting_for_permission_still_shown_in_printed_table(self, native_home, monkeypatch, capsys):
+        seed_native_worker(native_home, status="working")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            _fixed_roster(True, [make_roster_entry(SID, status="waiting")]))
+        rc = fleet.cmd_status(_status_args())
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "waiting-permission" in out
+
+    def test_waiting_for_permission_does_not_survive_a_second_call_either(self, native_home, monkeypatch):
+        # Two consecutive calls -- self-heal isn't the only requirement
+        # now: it must never have persisted in the first place.
+        seed_native_worker(native_home, status="working")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            _fixed_roster(True, [make_roster_entry(SID, status="waiting")]))
+        fleet.cmd_status(_status_args())
+        fleet.cmd_status(_status_args())
+        raw = json.loads((native_home / "state" / "fleet.json").read_text(encoding="utf-8"))
+        assert "waiting_for_permission" not in raw["workers"]["w1"]
+
+
+class TestWaitForWorkersNative:
+    def test_native_busy_stays_pending_until_timeout(self, native_home, monkeypatch):
+        seed_native_worker(native_home, status="working")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            _fixed_roster(True, [make_roster_entry(SID, status="busy")]))
+        clock = _FakeClock()
+        finished, pending = fleet.wait_for_workers(
+            ["w1"], timeout=1.0, poll_interval=0.5,
+            sleep=lambda s: clock.advance(s), clock=clock)
+        assert pending == {"w1"}
+        assert finished == {}
+
+    def test_native_idle_with_fresh_outcome_finishes(self, native_home, monkeypatch):
+        seed_native_worker(native_home, last_dispatch_at=_iso(NOW - timedelta(minutes=1)))
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": SID, "kind": "result"})
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            _fixed_roster(True, [make_roster_entry(SID, status="idle")]))
+        finished, pending = fleet.wait_for_workers(["w1"], timeout=1.0, poll_interval=0.1,
+                                                    sleep=lambda s: None)
+        assert pending == set()
+        assert finished == {"w1": "idle"}
+
+    def test_native_dead_suspected_is_terminal_for_wait(self, native_home, monkeypatch):
+        seed_native_worker(native_home, status="working")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            _fixed_roster(True, [make_roster_entry(SID, status="idle")]))
+        finished, pending = fleet.wait_for_workers(["w1"], timeout=1.0, poll_interval=0.1,
+                                                    sleep=lambda s: None)
+        assert pending == set()
+        assert finished == {"w1": "dead-suspected"}
+
+    def test_epoch_frozen_native_stays_pending(self, native_home, monkeypatch):
+        seed_native_worker(native_home, status="working")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _fixed_roster(False, None))
+        clock = _FakeClock()
+        finished, pending = fleet.wait_for_workers(
+            ["w1"], timeout=1.0, poll_interval=0.5,
+            sleep=lambda s: clock.advance(s), clock=clock)
+        assert pending == {"w1"}
+        assert finished == {}
+
+    def test_one_roster_fetch_per_poll_shared_across_names(self, native_home, monkeypatch):
+        seed_native_worker(native_home, name="w1", status="working")
+        seed_native_worker(native_home, name="w2", status="working",
+                           sid="bbbbcccc-1111-2222-3333-444455556666")
+        calls = []
+
+        def fetch(**_):
+            calls.append(1)
+            return True, [make_roster_entry(SID, status="busy"),
+                          make_roster_entry("bbbbcccc-1111-2222-3333-444455556666", status="busy")]
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", fetch)
+        clock = _FakeClock()
+        fleet.wait_for_workers(["w1", "w2"], timeout=0.1, poll_interval=0.1,
+                               sleep=lambda s: clock.advance(s), clock=clock)
+        # exactly one fetch per poll iteration, not one per pending name
+        assert len(calls) <= 2
+
+
+class TestCmdWaitNative:
+    def test_persists_dead_suspected_and_event(self, native_home, monkeypatch):
+        seed_native_worker(native_home, status="working")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            _fixed_roster(True, [make_roster_entry(SID, status="idle")]))
+        rc = fleet.cmd_wait(_wait_args(["w1"]), sleep=lambda s: None, clock=_FakeClock())
+        assert rc == 0
+        assert fleet.load_registry()["workers"]["w1"]["status"] == "dead-suspected"
+        assert "dead_suspected" in _events_kinds(native_home)
+
+    def test_persists_idle_with_fresh_outcome(self, native_home, monkeypatch):
+        seed_native_worker(native_home, last_dispatch_at=_iso(NOW - timedelta(minutes=1)))
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": SID, "kind": "result"})
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            _fixed_roster(True, [make_roster_entry(SID, status="idle")]))
+        rc = fleet.cmd_wait(_wait_args(["w1"]), sleep=lambda s: None, clock=_FakeClock())
+        assert rc == 0
+        assert fleet.load_registry()["workers"]["w1"]["status"] == "idle"
+
+    # T5 fix wave (Minor: print-vs-persist race, task-5-review.md M1):
+    # wait_for_workers's poll loop and cmd_wait's own persist-step fetch
+    # each do their own independent roster fetch. If they disagree (a
+    # fresh outcome record lands, or the roster changes, in the narrow
+    # window between the two), the summary line printed at the end must
+    # reflect what actually got persisted to fleet.json, never the
+    # earlier (now-stale) poll verdict.
+    def test_printed_summary_matches_persisted_status_not_stale_poll_verdict(
+            self, native_home, monkeypatch, capsys):
+        seed_native_worker(native_home, status="working",
+                           last_dispatch_at=_iso(NOW - timedelta(minutes=1)))
+        # Stub wait_for_workers directly: models its poll loop having
+        # concluded "dead-suspected" (no outcome record was visible yet at
+        # poll time).
+        monkeypatch.setattr(fleet, "wait_for_workers",
+                            lambda *a, **k: ({"w1": "dead-suspected"}, set()))
+        # Between that poll and cmd_wait's own persist-step roster fetch, a
+        # fresh outcome record lands -- the persist step's recompute now
+        # correctly resolves "idle", diverging from the stale poll verdict.
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": SID, "kind": "result"})
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            _fixed_roster(True, [make_roster_entry(SID, status="idle")]))
+
+        rc = fleet.cmd_wait(_wait_args(["w1"]), sleep=lambda s: None, clock=_FakeClock())
+        assert rc == 0
+        assert fleet.load_registry()["workers"]["w1"]["status"] == "idle"
+        out = capsys.readouterr().out
+        assert "w1: idle" in out
+        assert "dead-suspected" not in out
+
+
+class TestSnapshotTableNative:
+    """T5 fix wave (Minor: task-5-review.md M2) -- `_print_snapshot_table`/
+    `status_snapshot` (`fleet status --stale-ok`) must render native rows'
+    cost as "-" like `_print_status_table`'s G3 convention, never a stale/
+    always-zero dollar figure. Nativeness is derived from the row's own
+    `dispatch_kind` field -- no roster fetch (this view is file-only, per
+    CLAUDE.md's view-isolation rule)."""
+
+    def test_status_snapshot_row_carries_dispatch_kind(self, native_home):
+        seed_native_worker(native_home, status="idle")
+        row = fleet.status_snapshot()["workers"][0]
+        assert row["dispatch_kind"] == "bg"
+
+    def test_print_snapshot_table_native_row_renders_dash_cost(self, native_home, capsys):
+        seed_native_worker(native_home, status="idle")
+        snap = fleet.status_snapshot()
+        fleet._print_snapshot_table(snap)
+        out = capsys.readouterr().out
+        row_line = next(l for l in out.splitlines() if l.startswith("w1"))
+        assert "0.00" not in row_line
+
+    def test_print_snapshot_table_legacy_row_still_renders_cost(self, native_home, capsys):
+        rec = fleet.new_worker_record("legacy-sid-0000", "C:/proj", "do it", "accept")
+        rec["status"] = "idle"
+        rec["cost_usd"] = 1.23
+        data = fleet.load_registry()
+        data["workers"]["legacy1"] = rec
+        fleet.save_registry(data)
+
+        snap = fleet.status_snapshot()
+        fleet._print_snapshot_table(snap)
+        out = capsys.readouterr().out
+        row_line = next(l for l in out.splitlines() if l.startswith("legacy1"))
+        assert "1.23" in row_line
+
+    def test_via_cmd_status_stale_ok_native_row_renders_dash_cost(self, native_home, capsys):
+        seed_native_worker(native_home, status="idle")
+        rc = fleet.cmd_status(_status_args(stale_ok=True))
+        assert rc == 0
+        out = capsys.readouterr().out
+        row_line = next(l for l in out.splitlines() if l.startswith("w1"))
+        assert "0.00" not in row_line
