@@ -26,11 +26,12 @@ Each beat: `fleet status` (runs the outcome discriminator + the silent-limit
 transcript scan -- a rate-limit wall shows as `limited`, contract G11, never
 `dead-suspected`), then `fleet resume-limited` for any worker whose reset
 horizon has passed, then a checkpoint/heartbeat (below). `limited` is a
-sticky park: the boot reconcile and the epoch freeze never demote it, and
-nothing but `resume-limited` clears it today -- `cmd_respawn` refuses
-outright against a native (`--bg`) record until M-B Task 7 ships
-native-aware respawn; the interim recovery levers are `resume-limited`
-(for limited parks) or `claude stop` + `fleet kill`.
+sticky park: the boot reconcile and the epoch freeze never demote it --
+`fleet resume-limited` clears a parked worker via fork-steer (M-B T6);
+`fleet respawn --force` (M-B T7) resets ANY native worker's context
+(stopping a still-live old session and tombstoning it first), the
+general-purpose recovery lever for `dead-suspected` or otherwise stuck
+workers.
 
 ## Checkpoint discipline
 
