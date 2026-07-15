@@ -3387,6 +3387,14 @@ def wait_for_workers(names, mode: str = "all", timeout=None, poll_interval: floa
     Returns (finished: dict[name -> final_status], pending: set[name]) --
     pending is empty iff every requested worker (mode="all") or at least one
     (mode="any") finished before the deadline.
+
+    T9 fix wave (finding I-4a): an `archived_at`-set record is frozen
+    history -- its evidence files are gone (moved into the archive dir), so
+    `recompute_worker_native` would have nothing fresh to read and could
+    misfire into `dead-suspected`. It never reaches recompute here; its
+    last-committed (frozen) status resolves the wait immediately, exactly
+    like `cmd_status`'s own "never recompute an archived native record"
+    rule.
     """
     deadline = None if timeout is None else clock() + timeout
     finished: dict = {}
@@ -3399,7 +3407,10 @@ def wait_for_workers(names, mode: str = "all", timeout=None, poll_interval: floa
         # still pending (not per-name) -- and the same epoch-freeze
         # discipline as cmd_status: a suspicious roster this poll means no
         # native verdict is trusted this poll (they simply stay pending).
-        native_pending = [n for n in pending if n in workers and is_native(workers[n])]
+        # T9: an archived native record never consults the roster either.
+        native_pending = [n for n in pending
+                          if n in workers and is_native(workers[n])
+                          and not workers[n].get("archived_at")]
         roster_entries = []
         epoch_frozen = False
         if native_pending:
@@ -3411,6 +3422,10 @@ def wait_for_workers(names, mode: str = "all", timeout=None, poll_interval: floa
             rec = workers.get(n)
             if rec is None:
                 finished[n] = "dead"
+                pending.discard(n)
+                continue
+            if rec.get("archived_at") is not None:
+                finished[n] = rec.get("status")
                 pending.discard(n)
                 continue
             if is_native(rec):
@@ -3489,8 +3504,18 @@ def cmd_wait(args, get_process_info=None, sleep=time.sleep, clock=time.monotonic
         # fetch outside the lock (F4), so a worker that flips into
         # `limited`/`dead-suspected` gets its horizon fields and its named
         # event, exactly like cmd_status.
+        # T9 fix wave (finding I-4a): an archived record is frozen history --
+        # `wait_for_workers` already resolved it from its last-committed
+        # status alone (no recompute), and this persist step must not
+        # re-derive or overwrite it either. Without this exclusion, an
+        # unconditional recompute_worker_native here would misread the
+        # already-moved-away evidence files as "no fresh outcome" and demote
+        # the tombstone to `dead-suspected`, appending a spurious event on
+        # top of a record `cmd_status`/`cmd_clean` both treat as immutable.
         snap_workers = load_registry()["workers"]
-        native_finished = [n for n in finished if n in snap_workers and is_native(snap_workers[n])]
+        native_finished = [n for n in finished
+                           if n in snap_workers and is_native(snap_workers[n])
+                           and not snap_workers[n].get("archived_at")]
         roster_entries = []
         epoch_frozen = False
         if native_finished:
@@ -3498,12 +3523,15 @@ def cmd_wait(args, get_process_info=None, sleep=time.sleep, clock=time.monotonic
             roster_entries = payload if roster_ok else []
             epoch_frozen = native_epoch_suspicious(roster_ok, roster_entries, snap_workers)
 
+        changed = False
         with fleet_lock():
             data = load_registry()
             for n in finished:
                 rec = data["workers"].get(n)
                 if rec is None:
                     continue
+                if rec.get("archived_at") is not None:
+                    continue  # frozen tombstone -- never recompute/persist/event
                 if is_native(rec):
                     if epoch_frozen:
                         # G9: roster suspicious -- leave this native record
@@ -3522,6 +3550,7 @@ def cmd_wait(args, get_process_info=None, sleep=time.sleep, clock=time.monotonic
                 persisted.pop("waiting_for_permission", None)
                 data["workers"][n] = persisted
                 persisted_status[n] = persisted["status"]
+                changed = True
                 if persisted["status"] != rec["status"]:
                     append_event("status_changed", n, old=rec["status"], new=persisted["status"])
                     if is_native(rec):
@@ -3531,7 +3560,14 @@ def cmd_wait(args, get_process_info=None, sleep=time.sleep, clock=time.monotonic
                                         limit_kind=persisted.get("limit_kind"))
                         elif persisted["status"] == "dead-suspected":
                             append_event("dead_suspected", n)
-            save_registry(data)
+            # T9 fix wave (finding I-4a): if every finished worker this
+            # invocation was either archived (skipped above) or -- in
+            # principle -- otherwise unchanged, do not touch the registry
+            # file at all. A wait that resolves purely against archived
+            # tombstones must leave state/fleet.json byte-identical, not
+            # merely value-equal after a needless rewrite.
+            if changed:
+                save_registry(data)
 
     for n, status in finished.items():
         status = persisted_status.get(n, status)
@@ -5640,6 +5676,23 @@ def _remove_worker_files(name: str, sid: str, retired_sids: list = ()) -> list:
             removed.append(archive_dir)
         except OSError:
             pass
+    # T9 fix wave (finding M-3a): `_archive_dest_dir` collision-suffixes a
+    # base dir that was never cleaned up (`.1`, `.2`, ...) -- a crash mid-
+    # move (finding 3a) or an archive/clean/archive cycle can leave one or
+    # more of these siblings behind. Sweep every `<name>.<digits>` dir too,
+    # so `fleet clean` (the sole sanctioned deleter of archived history)
+    # actually deletes ALL of it, not just the base dir. Regex-anchored
+    # (not a loose glob) so a differently-named worker whose name happens
+    # to start with this one (e.g. "w10" vs "w1") is never swept.
+    if archive_root().exists():
+        suffix_re = re.compile(re.escape(name) + r"\.\d+$")
+        for p in sorted(archive_root().iterdir()):
+            if p.is_dir() and suffix_re.match(p.name):
+                try:
+                    shutil.rmtree(p)
+                    removed.append(p)
+                except OSError:
+                    pass
     return removed
 
 
@@ -5829,7 +5882,15 @@ def cmd_clean(args, get_process_info=None, sleep=time.sleep,
     doomed = {n: before for n, before, confirmed in confirmations if confirmed["status"] == "dead"}
     doomed.update({n: before for n, before in native_doomed_now})
     if doomed:
-        _confirm_destructive("clean (delete logs + journal of)", sorted(doomed), doomed,
+        # T9 fix wave (finding M-6): an archived target's confirm line names
+        # what is actually being destroyed -- not just "logs + journal" but
+        # the tombstoned `logs/archive/<name>/` history T9's whole design
+        # exists to preserve. Only added when at least one doomed worker is
+        # archived; the routine dead-worker wording is unchanged otherwise.
+        any_archived = any(rec.get("archived_at") is not None for rec in doomed.values())
+        action = ("clean (delete logs + journal + archived history of)" if any_archived
+                  else "clean (delete logs + journal of)")
+        _confirm_destructive(action, sorted(doomed), doomed,
                              assume_yes=getattr(args, "yes", False))
 
     changed = False
@@ -5938,7 +5999,12 @@ def _archive_dest_dir(name: str) -> Path:
     a name archived, cleaned, then archived again under the same name is
     the only way this fires -- refuse_if_archived blocks re-archiving a
     still-tombstoned record, so a collision here means an EARLIER archive
-    dir was never cleaned up)."""
+    dir was never cleaned up). NEVER called for a resume (T9 fix wave,
+    finding 3b) -- a resume reuses archive_root()/<name> directly (the
+    exact dir a crashed prior attempt already started populating), since
+    treating that as a "collision" would split the same worker's evidence
+    across two dirs (finding 3a's failure mode, re-triggered by the resume
+    path itself)."""
     base = archive_root() / name
     if not base.exists():
         return base
@@ -5946,6 +6012,77 @@ def _archive_dest_dir(name: str) -> Path:
     while (archive_root() / f"{name}.{i}").exists():
         i += 1
     return archive_root() / f"{name}.{i}"
+
+
+def _archive_file_pairs(name: str, sid: str, retired: list) -> list:
+    """(src_path, dest_filename) for every on-disk evidence file a worker's
+    archive moves -- journal, name-keyed + sid-keyed outcomes, task file,
+    and (T9 fix wave, finding M-4b) the mailbox file for the current sid and
+    every retired sid ("stranded mail is history too" -- otherwise it
+    survives forever at its original path, unreachable via `send` (refused
+    on `archived_at`) and invisible to `fleet clean` (which only sweeps
+    `mailbox/<sid>.md` for a worker's CURRENT sid, not its retired ones).
+    Single source of truth shared by the actual move phase and
+    `_archive_resume_pending`'s crash-detection check (which only needs the
+    src half), so the two can never drift apart."""
+    pairs = [
+        (journals_dir() / f"{name}.md", "journal.md"),
+        (outcome_path(name), outcome_path(name).name),
+        (task_file_path(name), "task.md"),
+    ]
+    if sid:
+        pairs.append((outcome_path(sid), outcome_path(sid).name))
+        pairs.append((mailbox_dir() / f"{sid}.md", f"{sid}.md"))
+    for s in retired:
+        pairs.append((outcome_path(s), outcome_path(s).name))
+        pairs.append((mailbox_dir() / f"{s}.md", f"{s}.md"))
+    return pairs
+
+
+def _archive_resume_pending(name: str, record: dict) -> bool:
+    """T9 fix wave (findings C2/3b): True iff this worker's `archived_at` is
+    already stamped but at least one of its evidence files still sits at
+    its PRE-MOVE location -- a crash (or any other interruption) landed
+    between the (now-reordered, commit-first) `archived_at` write and the
+    file-move phase finishing. `cmd_archive` re-run against such a record
+    RESUMES the move instead of refusing via `refuse_if_archived` -- the
+    tombstone is already correct, only the file relocation is incomplete."""
+    if record.get("archived_at") is None:
+        return False
+    sid = record.get("session_id")
+    retired = list(record.get("retired_sids", []) or [])
+    return any(src.exists() for src, _dest in _archive_file_pairs(name, sid, retired))
+
+
+def _archive_move_and_rm(n: str, sid: str, retired: list, dest_dir: Path,
+                         roster_entries: list, run, which) -> None:
+    """The (potentially slow) file-move + `claude rm` phase, shared by a
+    fresh archive and a resumed one: move every evidence file into
+    `dest_dir`, then `claude rm` the current sid and every retired sid --
+    EXCEPT any sid the roster snapshot (the SAME one `_archive_eligible`'s
+    gate 3 and this invocation's own eligibility pass used) shows live
+    (`status` or `pid` key present). T9 fix wave finding C1: gate 3 only
+    ever checked the CURRENT sid's liveness -- a retired sid abandoned by a
+    fork-steer (`_cmd_send_native`'s idle path / `_resume_one_limited_native`,
+    whose own docstring says the OLD sid's roster entry is left "untouched")
+    can still be genuinely live at archive-time, and the un-gated rm loop
+    below (pre-fix) removed it -- and its backing `~/.claude/jobs/<short>/`
+    dir -- out from under a still-running session (G12 UNOBSERVED). A live
+    sid is now SKIPPED (reported, not rm'd) rather than swept; a later
+    archive run catches it once it actually retires."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    for src, dest_name in _archive_file_pairs(n, sid, retired):
+        _archive_move(src, dest_dir / dest_name, n)
+
+    for s in ([sid] if sid else []) + retired:
+        entry = _roster_entry_for(roster_entries, s)
+        live = entry is not None and ("status" in entry or "pid" in entry)
+        if live:
+            print(f"fleet: {n}: skipping rm {s[:8]}... -- session live in roster",
+                  file=sys.stderr)
+            continue
+        ok = _rm_native_session(s, run=run, which=which)
+        print(f"fleet: {n}: rm {s[:8]}... {'ok' if ok else 'failed'}", file=sys.stderr)
 
 
 def _rm_native_session(sid: str, run=subprocess.run, which=shutil.which,
@@ -5990,25 +6127,50 @@ def cmd_archive(args, run=subprocess.run, which=shutil.which) -> int:
     auto-retire terminal-state (idle/dead/interrupted) native workers whose
     current sid is confirmed gone-or-dead from the roster, has an outcome
     record vouching for it, and has sat idle past `ttl_hours` (default
-    `ARCHIVE_TTL_HOURS_DEFAULT`). Moves the worker's journal/outcomes/task
-    file into `logs/archive/<name>/`, `claude rm`s the current sid and
-    every retired sid (best-effort, non-fatal per sid), then stamps
+    `ARCHIVE_TTL_HOURS_DEFAULT`). Moves the worker's journal/outcomes/task/
+    mailbox files into `logs/archive/<name>/`, `claude rm`s the current sid
+    and every retired sid (best-effort, non-fatal per sid, skipping any that
+    the roster shows still live -- see `_archive_move_and_rm`), then stamps
     `archived_at` under the lock -- the registry entry SURVIVES as a
     tombstone; `fleet clean` remains the only deleter.
+
+    T9 fix wave (finding C2/3b): the per-worker commit ordering is COMMIT
+    FIRST, THEN move files, THEN rm sids -- the reverse of the original cut.
+    The commit itself is a conditional write (re-read under lock, proceed
+    only if the record is byte-identical to the eligibility snapshot,
+    mirroring `cmd_status`/`cmd_clean`'s own "spare a concurrently-mutated
+    record" doctrine) -- a concurrent `fleet send` fork-steer landing in the
+    (now much narrower) window between snapshot and commit is detected and
+    the archive attempt is skipped entirely for that worker, rather than
+    stamping `archived_at` on top of a live, newly-restamped turn. Because
+    the commit happens BEFORE the (slow, crash-prone) move/rm phase, a crash
+    mid-move always leaves a fully-consistent tombstone (registry says
+    archived) with some evidence files merely still sitting at their
+    original path -- `recompute_worker`/`cmd_status` never re-derive
+    liveness for an `archived_at` record regardless of file state, so this
+    can never misfire into `dead-suspected` (finding 3b). Re-running
+    `fleet archive` against such a record RESUMES the move (see
+    `_archive_resume_pending`) instead of refusing, and reuses the exact
+    same `archive_root()/<name>` dir rather than treating it as a fresh
+    collision (finding 3a would otherwise reappear on every resume).
 
     G9 epoch-freeze: a suspicious roster fetch (failure, or an empty
     roster while some native worker's own last-committed record still
     claims a live turn) refuses the WHOLE invocation -- zero mutations,
-    exit 1 -- exactly like `cmd_status`/`cmd_clean`'s freeze line. Only
-    fetched at all when at least one named/candidate worker is native
-    (mirrors cmd_status/cmd_clean's own roster-fetch conditioning).
+    exit 1 -- exactly like `cmd_status`/`cmd_clean`'s freeze line. Fetched
+    when at least one named/candidate worker is native-and-not-yet-archived,
+    OR at least one is a pending resume (mirrors cmd_status/cmd_clean's own
+    roster-fetch conditioning, extended for the resume case since its rm
+    phase needs the same live-sid gate as a fresh archive).
 
     `--dry-run` prints each worker's eligibility verdict and mutates
     nothing (no roster-dependent verdict is computed differently, no rm,
     no file move, no registry write) -- safe to run even while frozen is
     NOT special-cased separately: freeze still refuses first, since a
     verdict computed against a suspicious roster is not trustworthy to
-    even preview."""
+    even preview. A resumable already-archived record still reports
+    "already-archived" under `--dry-run` (resume is an execution-time-only
+    concept)."""
     name = getattr(args, "name", None)
     ttl_hours = getattr(args, "ttl_hours", None)
     if ttl_hours is None:
@@ -6021,23 +6183,36 @@ def cmd_archive(args, run=subprocess.run, which=shutil.which) -> int:
             if name not in data["workers"]:
                 raise FleetCliError(f"unknown worker: {name!r}")
             if not dry_run:
-                refuse_if_archived(name, data["workers"][name], "archive")
+                rec_check = data["workers"][name]
+                # T9 fix wave (finding C2/3b): a resumable archived record
+                # (archived_at set, evidence files still pending their move)
+                # is NOT a re-archive attempt -- let it through to resume
+                # rather than raising. A fully-archived record with nothing
+                # left to move still refuses, exactly as before.
+                resumable = (rec_check.get("archived_at") is not None
+                            and _archive_resume_pending(name, rec_check))
+                if not resumable:
+                    refuse_if_archived(name, rec_check, "archive")
             names = [name]
         else:
             names = sorted(data["workers"])
         before = {n: data["workers"][n] for n in names}
         all_workers = data["workers"]  # snapshot for the epoch check (G9)
 
-    # Already-archived native records never consult the roster (gate 1 of
-    # _archive_eligible short-circuits before the live-check) -- exclude
-    # them from the roster-fetch conditioning, mirroring cmd_status/
-    # cmd_clean's own "no native work, no subprocess call" convention.
+    # Already-archived-and-fully-moved native records never consult the
+    # roster (gate 1 of _archive_eligible short-circuits before the
+    # live-check) -- exclude them from the roster-fetch conditioning,
+    # mirroring cmd_status/cmd_clean's own "no native work, no subprocess
+    # call" convention. A pending RESUME still needs the roster (its rm
+    # phase re-checks sid liveness, finding C1), so it stays included.
+    resume_names = [n for n in names
+                    if is_native(before[n]) and _archive_resume_pending(n, before[n])]
     native_names = [n for n in names
                     if is_native(before[n]) and before[n].get("archived_at") is None]
 
     roster_entries = []
     epoch_frozen = False
-    if native_names:
+    if native_names or resume_names:
         roster_ok, payload = _fetch_agents_roster(which=which, run=run)
         roster_entries = payload if roster_ok else []
         epoch_frozen = native_epoch_suspicious(roster_ok, roster_entries, all_workers)
@@ -6056,6 +6231,8 @@ def cmd_archive(args, run=subprocess.run, which=shutil.which) -> int:
             print(f"{n}: eligible" if ok else f"{n}: skipped -- {reason}")
         return 0
 
+    # verdicts[n][0] is always False for anything in resume_names (gate 1:
+    # "already-archived") -- eligible_names and resume_names are disjoint.
     eligible_names = [n for n in names if verdicts[n][0]]
 
     archived_count = 0
@@ -6064,30 +6241,45 @@ def cmd_archive(args, run=subprocess.run, which=shutil.which) -> int:
         sid = rec.get("session_id")
         retired = list(rec.get("retired_sids", []) or [])
 
-        dest_dir = _archive_dest_dir(n)
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        _archive_move(journals_dir() / f"{n}.md", dest_dir / "journal.md", n)
-        _archive_move(outcome_path(n), dest_dir / outcome_path(n).name, n)
-        _archive_move(outcome_path(sid), dest_dir / outcome_path(sid).name, n)
-        for s in retired:
-            _archive_move(outcome_path(s), dest_dir / outcome_path(s).name, n)
-        _archive_move(task_file_path(n), dest_dir / "task.md", n)
-
-        for s in [sid] + retired:
-            ok = _rm_native_session(s, run=run, which=which)
-            print(f"fleet: {n}: rm {s[:8]}... {'ok' if ok else 'failed'}", file=sys.stderr)
-
+        # T9 fix wave (finding C2): commit FIRST, under a fresh lock,
+        # conditional on the record still matching the eligibility
+        # snapshot exactly -- a concurrent mutation (e.g. a fork-steer
+        # restamping session_id/status) since `before` was captured means
+        # this worker's turn is no longer the one that was judged eligible;
+        # skip it rather than stamping archived_at over a live turn.
         with fleet_lock():
             data = load_registry()
             current = data["workers"].get(n)
             if current is None:
-                print(f"fleet: {n}: registry entry vanished concurrently -- "
-                      "files already archived; investigate", file=sys.stderr)
+                print(f"fleet: {n}: registry entry vanished concurrently -- skipped",
+                      file=sys.stderr)
                 continue
+            if current != rec:
+                print(f"fleet: {n}: changed during archive -- skipped", file=sys.stderr)
+                continue
+            current = dict(current)
             current["archived_at"] = now_iso()
+            data["workers"][n] = current
             save_registry(data)
             append_event("archived", n, session_id=sid, retired_count=len(retired))
             archived_count += 1
+
+        _archive_move_and_rm(n, sid, retired, _archive_dest_dir(n),
+                             roster_entries, run, which)
+
+    # T9 fix wave (finding C2/3b): resumed workers were ALREADY counted as
+    # archived by whichever earlier run first stamped their archived_at --
+    # this run is pure cleanup (finish the move, retry any un-rm'd sid), so
+    # it neither adds to archived_count nor appends another "archived"
+    # event; it just reports progress per worker.
+    for n in resume_names:
+        rec = before[n]
+        sid = rec.get("session_id")
+        retired = list(rec.get("retired_sids", []) or [])
+        print(f"fleet: {n}: resuming archive -- completing pending file moves",
+              file=sys.stderr)
+        _archive_move_and_rm(n, sid, retired, archive_root() / n,
+                             roster_entries, run, which)
 
     skipped_count = len(names) - archived_count
     print(f"archived {archived_count} worker(s), skipped {skipped_count}")
