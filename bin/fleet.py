@@ -4724,7 +4724,10 @@ NATIVE_DISPATCH_TIMEOUT_SECONDS = 120.0
 DEFAULT_CATEGORY = "fleet"
 NATIVE_NAME_HINT_MAX = 40
 
-_BG_SHORT_ID_RE = re.compile(r"backgrounded\s*[··]\s*(\S+)\s*[··]")
+# · = MIDDLE DOT (the daemon's literal separator glyph). Previously a
+# duplicate-codepoint char class `[··]` (same character twice) -- collapsed
+# to a single literal, behavior-identical.
+_BG_SHORT_ID_RE = re.compile(r"backgrounded\s*·\s*(\S+)\s*·")
 
 
 class NativeDispatchError(Exception):
@@ -4732,8 +4735,11 @@ class NativeDispatchError(Exception):
 
 
 def render_native_name(category, name: str, hint: str) -> str:
-    cat = category or DEFAULT_CATEGORY
-    clean = " ".join((hint or "").split())[:NATIVE_NAME_HINT_MAX]
+    # category gets the same treatment as hint: whitespace-collapsed, then
+    # `|` replaced (not stripped, to keep legibility) so a pipe in either
+    # field can never corrupt the `cat|name|hint` split("|", 2) convention.
+    cat = " ".join(str(category or DEFAULT_CATEGORY).split()).replace("|", "/")
+    clean = " ".join((hint or "").split()).replace("|", "/")[:NATIVE_NAME_HINT_MAX]
     return f"{cat}|{name}|{clean}"
 
 
@@ -4750,18 +4756,26 @@ def _roster_entry_for(entries, sid):
 
 
 def _join_roster_by_short_id(short_id, roster_fetch, sleep,
-                             verify_seconds=NATIVE_JOIN_VERIFY_SECONDS):
+                             verify_seconds=NATIVE_JOIN_VERIFY_SECONDS,
+                             exclude_sids=frozenset(), clock=time.monotonic):
     """Full sid whose prefix is the dispatch-printed short id. Matches done
-    entries too -- a fast worker finishes before verify (spec §3)."""
-    deadline = time.monotonic() + verify_seconds
+    entries too -- a fast worker finishes before verify (spec §3).
+
+    `exclude_sids` skips any prefix-matching sid already known before this
+    dispatch began (belt-and-braces against joining a foreign, pre-existing
+    session that happens to share the short-id prefix -- adversarial trap 1).
+    `clock` is injectable so tests never pay the real verify-window wall time.
+    """
+    deadline = clock() + verify_seconds
     while True:
         ok, payload = roster_fetch()
         if ok:
             for e in payload:
                 sid = e.get("sessionId") if isinstance(e, dict) else None
-                if isinstance(sid, str) and sid.startswith(short_id):
+                if (isinstance(sid, str) and sid.startswith(short_id)
+                        and sid not in exclude_sids):
                     return sid
-        if time.monotonic() >= deadline:
+        if clock() >= deadline:
             return None
         sleep(NATIVE_JOIN_POLL_SECONDS)
 
@@ -4769,14 +4783,27 @@ def _join_roster_by_short_id(short_id, roster_fetch, sleep,
 def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
                 hint="", resume_sid=None, settings_path=None,
                 run=subprocess.run, which=shutil.which, sleep=time.sleep,
-                roster_fetch=None):
+                roster_fetch=None, clock=time.monotonic):
+    # Defense in depth (adversarial trap 6): every current caller
+    # pre-validates `name`, but this is the single choke point for every
+    # --bg launch and `task_file_path(name)` is not traversal-safe on its
+    # own -- guard here too so a future direct-call path can't escape
+    # tasks_dir().
+    if not name or not NAME_RE.match(name):
+        raise NativeDispatchError(f"invalid worker name: {name!r} (must match {NAME_RE.pattern})")
     if roster_fetch is None:
         roster_fetch = lambda: _fetch_agents_roster(which=which, run=run)  # noqa: E731
-    exe = resolve_claude_executable(which)
+    try:
+        exe = resolve_claude_executable(which)
+    except ClaudeNotFoundError as exc:
+        raise NativeDispatchError(str(exc)) from exc
     settings = Path(settings_path) if settings_path else instance_settings_path()
-    tasks_dir().mkdir(parents=True, exist_ok=True)
-    task_path = task_file_path(name)
-    task_path.write_text(prompt_body, encoding="utf-8")
+    try:
+        tasks_dir().mkdir(parents=True, exist_ok=True)
+        task_path = task_file_path(name)
+        task_path.write_text(prompt_body, encoding="utf-8")
+    except OSError as exc:
+        raise NativeDispatchError(f"task-file write failed: {exc}") from exc
     rendered = render_native_name(category, name, hint)
     tiny_prompt = f"Read {task_path.as_posix()} and follow it exactly."
     argv = [exe, "--bg"]
@@ -4787,6 +4814,14 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
     if model:
         argv += ["--model", model]
     argv.append(tiny_prompt)
+    # Snapshot the roster ONCE before dispatching -- any sid already present
+    # (sharing the short-id prefix fleet is about to receive) is excluded
+    # from the join below, so a foreign concurrent session can never be
+    # mistaken for the one just launched. A snapshot fetch failure never
+    # blocks dispatch -- fall back to an empty exclusion set.
+    pre_ok, pre_entries = roster_fetch()
+    pre_sids = ({e.get("sessionId") for e in pre_entries if isinstance(e, dict)}
+                if pre_ok else frozenset())
     try:
         proc = run(argv, cwd=str(cwd), env=_worker_env(name),
                    capture_output=True, text=True, encoding="utf-8",
@@ -4801,7 +4836,8 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
     if not short_id:
         raise NativeDispatchError(
             f"could not parse short id from --bg stdout: {(proc.stdout or '').strip()[:400]}")
-    sid = _join_roster_by_short_id(short_id, roster_fetch, sleep)
+    sid = _join_roster_by_short_id(short_id, roster_fetch, sleep,
+                                   exclude_sids=pre_sids, clock=clock)
     if sid is None:
         raise NativeDispatchError(
             f"dispatched (short id {short_id}) but no roster entry joined "
