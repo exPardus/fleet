@@ -813,7 +813,7 @@ class TestNativeRecompute:
 
     def test_no_fresh_outcome_with_limit_scan_hook_parks_limited(self, native_home, monkeypatch):
         monkeypatch.setattr(fleet, "_limit_scan_hook",
-                            lambda sid: (True, "2026-07-16T00:00:00Z", "session_5h"))
+                            lambda sid, **kw: (True, "2026-07-16T00:00:00Z", "session_5h"))
         rec = self._rec(native_home)
         out = fleet.recompute_worker_native("w1", rec, [make_roster_entry(SID, status="idle")])
         assert out["status"] == "limited"
@@ -993,7 +993,7 @@ class TestCmdStatusNative:
         monkeypatch.setattr(fleet, "_fetch_agents_roster",
                             _fixed_roster(True, [make_roster_entry(SID, status="idle")]))
         monkeypatch.setattr(fleet, "_limit_scan_hook",
-                            lambda sid: (True, "2026-07-16T00:00:00Z", "session_5h"))
+                            lambda sid, **kw: (True, "2026-07-16T00:00:00Z", "session_5h"))
 
         rc = fleet.cmd_status(_status_args())
         assert rc == 0
@@ -1196,3 +1196,214 @@ class TestSnapshotTableNative:
         out = capsys.readouterr().out
         row_line = next(l for l in out.splitlines() if l.startswith("w1"))
         assert "0.00" not in row_line
+
+
+# ---------------------------------------------------------------------------
+# M-B Task 6: usage-limit continuity -- transcript-tail scan, park,
+# fork-steer resume (spec 5.1.1)
+# ---------------------------------------------------------------------------
+
+def _write_native_transcript(home, sid, records):
+    proj = home / ".claude" / "projects" / "C--proj"
+    proj.mkdir(parents=True, exist_ok=True)
+    p = proj / f"{sid}.jsonl"
+    p.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+    return p
+
+
+# Real observed G7 evidence shape (spike/m0/VERDICTS.md transcript record
+# 201) -- binding fixture per task-6-brief.md.
+LIMIT_RECORD = {
+    "type": "assistant",
+    "message": {"model": "<synthetic>", "role": "assistant",
+                "content": [{"type": "text",
+                             "text": "You've hit your session limit — resets 4:40am (Asia/Qyzylorda)"}]},
+    "error": "rate_limit", "isApiErrorMessage": True, "apiErrorStatus": 429,
+}
+
+
+class TestTranscriptLimitScan:
+    def test_synthetic_429_record_detected(self, native_home, tmp_path):
+        t = _write_native_transcript(tmp_path, SID, [{"type": "user"}, LIMIT_RECORD])
+        is_limit, reset_at, kind = fleet.transcript_limit_scan(SID, transcript_path=t)
+        assert is_limit is True
+        assert reset_at is None  # observed text is local-format, not ISO
+        assert kind == "session_5h"
+
+    def test_iso_reset_in_text_is_parsed(self, native_home, tmp_path):
+        rec = json.loads(json.dumps(LIMIT_RECORD))
+        rec["message"]["content"][0]["text"] = \
+            "Weekly limit reached. It resets at 2026-07-16T09:00:00Z."
+        t = _write_native_transcript(tmp_path, SID, [rec])
+        is_limit, reset_at, kind = fleet.transcript_limit_scan(SID, transcript_path=t)
+        assert (is_limit, reset_at, kind) == (True, "2026-07-16T09:00:00Z", "weekly")
+
+    # The load-bearing negatives (port of TestFix2): conversation text about
+    # rate limits, MCP-tool 429s, infra errors -- none carry isApiErrorMessage.
+    @pytest.mark.parametrize("rec", [
+        {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "the API returned 429 rate limit, retrying"}]}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "usage limit exceeded on disk quota EDQUOT"}]}},
+        {"type": "system", "subtype": "error", "text": "try again later"},
+    ])
+    def test_non_synthetic_shapes_do_not_park(self, native_home, tmp_path, rec):
+        t = _write_native_transcript(tmp_path, SID, [rec])
+        assert fleet.transcript_limit_scan(SID, transcript_path=t)[0] is False
+
+    def test_missing_transcript_is_not_limit(self, native_home):
+        assert fleet.transcript_limit_scan("no-such-sid")[0] is False
+
+    def test_malformed_json_line_is_skipped_not_raised(self, native_home, tmp_path):
+        proj = tmp_path / ".claude" / "projects" / "C--proj"
+        proj.mkdir(parents=True)
+        p = proj / f"{SID}.jsonl"
+        p.write_text("{not json\n" + json.dumps(LIMIT_RECORD) + "\n", encoding="utf-8")
+        is_limit, reset_at, kind = fleet.transcript_limit_scan(SID, transcript_path=p)
+        assert is_limit is True
+
+    def test_newest_first_stops_at_first_match(self, native_home, tmp_path):
+        older = json.loads(json.dumps(LIMIT_RECORD))
+        older["message"]["content"][0]["text"] = "resets at 2026-07-15T00:00:00Z"
+        newer = json.loads(json.dumps(LIMIT_RECORD))
+        newer["message"]["content"][0]["text"] = "resets at 2026-07-16T00:00:00Z"
+        t = _write_native_transcript(tmp_path, SID, [older, newer])
+        is_limit, reset_at, kind = fleet.transcript_limit_scan(SID, transcript_path=t)
+        assert reset_at == "2026-07-16T00:00:00Z"
+
+
+class TestFindTranscriptPath:
+    def test_prefers_outcome_store_transcript_path(self, native_home, tmp_path):
+        real = tmp_path / "real.jsonl"
+        real.write_text("{}\n", encoding="utf-8")
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": SID, "kind": "result",
+                                    "transcript_path": str(real)})
+        assert fleet.find_transcript_path("w1", SID) == real
+
+    def test_skips_tombstone_null_transcript_path(self, native_home, tmp_path):
+        # A tombstone carries transcript_path=None -- must never be mistaken
+        # for a path donor even though it is the newer record.
+        real = tmp_path / "real.jsonl"
+        real.write_text("{}\n", encoding="utf-8")
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": SID, "kind": "result",
+                                    "transcript_path": str(real)})
+        fleet.write_tombstone_outcome("w1", SID, "killed")
+        assert fleet.find_transcript_path("w1", SID) == real
+
+    def test_falls_back_to_glob_when_no_outcome_path(self, native_home, tmp_path, monkeypatch):
+        monkeypatch.setattr(fleet.Path, "home", staticmethod(lambda: tmp_path))
+        t = _write_native_transcript(tmp_path, SID, [{"type": "user"}])
+        assert fleet.find_transcript_path("w1", SID) == t
+
+    def test_no_name_skips_outcome_lookup_globs_instead(self, native_home, tmp_path, monkeypatch):
+        real = tmp_path / "real.jsonl"
+        real.write_text("{}\n", encoding="utf-8")
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": SID, "kind": "result",
+                                    "transcript_path": str(real)})
+        monkeypatch.setattr(fleet.Path, "home", staticmethod(lambda: tmp_path))
+        t = _write_native_transcript(tmp_path, SID, [{"type": "user"}])
+        assert fleet.find_transcript_path(None, SID) == t
+
+    def test_missing_sid_returns_none(self, native_home):
+        assert fleet.find_transcript_path("w1", None) is None
+
+    def test_nothing_found_returns_none(self, native_home, monkeypatch, tmp_path):
+        monkeypatch.setattr(fleet.Path, "home", staticmethod(lambda: tmp_path))
+        assert fleet.find_transcript_path("w1", SID) is None
+
+
+class TestLimitParkViaDiscriminator:
+    """End-to-end through the REAL installed `_limit_scan_hook`
+    (transcript_limit_scan) -- no hook monkeypatch here, unlike
+    TestNativeRecompute's synthetic-hook tests above."""
+
+    def test_idle_no_outcome_limit_transcript_parks_limited(self, native_home, tmp_path, monkeypatch):
+        monkeypatch.setattr(fleet.Path, "home", staticmethod(lambda: tmp_path))
+        rec = seed_native_worker(native_home)
+        _write_native_transcript(tmp_path, SID, [LIMIT_RECORD])
+        out = fleet.recompute_worker_native("w1", rec, [make_roster_entry(SID, status="idle")])
+        assert out["status"] == "limited"
+        assert out["limit_kind"] == "session_5h"
+        assert out["limit_reset_at"] is None
+
+    def test_limited_stays_parked_never_dead_suspected(self, native_home):
+        rec = seed_native_worker(native_home, status="limited")
+        out = fleet.recompute_worker_native("w1", rec, [])
+        assert out["status"] == "limited"
+
+    def test_no_transcript_falls_to_dead_suspected(self, native_home, tmp_path, monkeypatch):
+        monkeypatch.setattr(fleet.Path, "home", staticmethod(lambda: tmp_path))
+        rec = seed_native_worker(native_home)
+        out = fleet.recompute_worker_native("w1", rec, [make_roster_entry(SID, status="idle")])
+        assert out["status"] == "dead-suspected"
+
+
+class TestNativeResumeLimited:
+    def test_resume_fork_steers_and_restamps_sid(self, native_home, monkeypatch):
+        old_sid = SID
+        new_sid = "ccccdddd-9999-8888-7777-666655554444"
+        seed_native_worker(native_home, sid=old_sid, status="limited",
+                           limit_reset_at="2026-07-15T00:00:00Z", limit_kind="session_5h")
+        calls = []
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_with(new_sid))
+        from types import SimpleNamespace
+        args = SimpleNamespace(name="w1", force_now=False)
+        rc = fleet.cmd_resume_limited(
+            args, run=_fake_run_factory(
+                stdout="backgrounded · ccccdddd · fleet|w1|resume\n", calls=calls),
+            which=lambda _: "claude", sleep=lambda s: None)
+        assert rc == 0
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["session_id"] == new_sid
+        assert old_sid in rec["retired_sids"]
+        assert rec["status"] == "working"
+        assert rec["limit_reset_at"] is None
+        assert rec["limit_kind"] is None
+        assert rec["native_short_id"] == "ccccdddd"
+        assert rec["turns"] == 1
+        # dispatch_bg's argv carries --resume <old_sid> (fork-steer, G2(b))
+        dispatch_call = next(c for c in calls if "--resume" in c[0])
+        argv = dispatch_call[0]
+        assert argv[argv.index("--resume") + 1] == old_sid
+
+    def test_resume_failure_rolls_back_to_limited(self, native_home):
+        seed_native_worker(native_home, status="limited",
+                           limit_reset_at="2026-07-15T00:00:00Z", limit_kind="session_5h")
+        from types import SimpleNamespace
+        args = SimpleNamespace(name="w1", force_now=False)
+        # Mirrors TestFix1's legacy-path launch-failure test (test_resilience.py):
+        # dispatch_bg's failure propagates out of cmd_resume_limited uncaught
+        # (never swallowed into a false "success") -- the rollback is what
+        # matters, not a clean return.
+        with pytest.raises(fleet.NativeDispatchError):
+            fleet.cmd_resume_limited(args, run=_fake_run_factory(rc=1),
+                                     which=lambda _: "claude", sleep=lambda s: None)
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["status"] == "limited"
+        assert rec["session_id"] == SID
+        assert rec["limit_reset_at"] == "2026-07-15T00:00:00Z"
+
+    def test_resume_appends_limit_resumed_event(self, native_home, monkeypatch):
+        old_sid = SID
+        new_sid = "ccccdddd-9999-8888-7777-666655554444"
+        seed_native_worker(native_home, sid=old_sid, status="limited",
+                           limit_reset_at="2026-07-15T00:00:00Z")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_with(new_sid))
+        from types import SimpleNamespace
+        args = SimpleNamespace(name="w1", force_now=False)
+        fleet.cmd_resume_limited(
+            args, run=_fake_run_factory(stdout="backgrounded · ccccdddd · fleet|w1|resume\n"),
+            which=lambda _: "claude", sleep=lambda s: None)
+        assert "limit_resumed" in _events_kinds(native_home)
+
+    def test_horizon_gate_still_fronts_native_branch(self, native_home):
+        # Reset horizon in the future -- cmd_resume_limited's gate must skip
+        # BEFORE ever reaching _resume_one_limited_native (no dispatch call).
+        seed_native_worker(native_home, status="limited",
+                           limit_reset_at="2099-01-01T00:00:00Z")
+        from types import SimpleNamespace
+        args = SimpleNamespace(name="w1", force_now=False)
+        rc = fleet.cmd_resume_limited(args, run=_fake_run_factory(),
+                                      which=lambda _: "claude", sleep=lambda s: None)
+        assert rc == 0
+        assert fleet.load_registry()["workers"]["w1"]["status"] == "limited"
