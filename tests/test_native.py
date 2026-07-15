@@ -3193,6 +3193,23 @@ class TestArchiveEligible:
     def test_default_ttl_constant_is_24_hours(self):
         assert fleet.ARCHIVE_TTL_HOURS_DEFAULT == 24.0
 
+    # T9 fix wave (spec review Minor: gate-precedence not test-locked) --
+    # pin which reason wins when a record independently violates two gates.
+    def test_gate_precedence_already_archived_beats_bad_status(self, native_home):
+        rec = seed_native_worker(native_home, sid=SID, status="working",
+                                 last_activity=_iso(NOW - timedelta(hours=25)),
+                                 archived_at=_iso(NOW))
+        assert fleet._archive_eligible("w1", rec, [], NOW) == (False, "already-archived")
+
+    def test_gate_precedence_roster_live_beats_no_outcome_record(self, native_home):
+        # status is idle (gate 2 would pass) and NO outcome record exists
+        # (would independently fail gate 4) -- roster-live (gate 3) must
+        # still be the reported reason, since it is checked first.
+        rec = seed_native_worker(native_home, sid=SID, status="idle",
+                                 last_activity=_iso(NOW - timedelta(hours=25)))
+        entries = [make_roster_entry(SID, status="busy")]
+        assert fleet._archive_eligible("w1", rec, entries, NOW) == (False, "roster-live")
+
 
 class TestCmdArchive:
     def test_archive_dry_run_mutates_nothing(self, native_home, capsys):
@@ -3260,6 +3277,31 @@ class TestCmdArchive:
         assert rec_after["session_id"] == SID  # tombstoned overlay -- history readable
         assert "w1" in fleet.load_registry()["workers"]  # registry entry SURVIVES
         assert "archived" in _events_kinds(native_home)
+
+    # T9 fix wave (finding C1, CRITICAL): a retired sid abandoned by a
+    # fork-steer can still be genuinely live in the roster at archive-time
+    # -- gate 3 of _archive_eligible only ever checked the CURRENT sid, so
+    # the un-gated rm loop swept a live retired sid's roster entry (and its
+    # backing ~/.claude/jobs/<short>/ dir) out from under a still-running
+    # session. The rm loop must now skip any sid (current OR retired) the
+    # roster shows live, report it, and still archive everything else.
+    def test_rm_skips_a_live_retired_sid_but_rms_current_sid(self, native_home, capsys):
+        seed_archive_ready_worker(native_home, retired_sids=["retired-1"])
+        calls = []
+        roster = json.dumps([make_roster_entry("retired-1", status="busy")])
+
+        rc = fleet.cmd_archive(_archive_args(), run=_archive_fake_run(rc=0, calls=calls,
+                                                                       roster_stdout=roster),
+                               which=lambda _: "claude")
+        assert rc == 0
+
+        rm_sids = {c[0][2] for c in calls if c[0][:2] == ["claude", "rm"]}
+        assert rm_sids == {SID}  # only the (dead-per-roster) current sid was rm'd
+        err = capsys.readouterr().err
+        assert "skipping rm" in err and "session live in roster" in err
+        # the archive itself still proceeds -- the live retired sid is
+        # skipped, not a reason to block the whole worker.
+        assert fleet.load_registry()["workers"]["w1"]["archived_at"] is not None
 
     def test_archive_prints_summary_counts(self, native_home, capsys):
         busy_sid = "busybusy-1111-2222-3333-444455556666"
@@ -3555,6 +3597,224 @@ class TestCmdCleanArchived:
         workers = fleet.load_registry()["workers"]
         assert "active-w" in workers      # frozen -- untouched (native, non-archived)
         assert "archived-w" not in workers  # archived deletion proceeds despite freeze
+
+
+# T9 fix wave (finding C2, CRITICAL): a concurrent `fleet send` fork-steer
+# landing between cmd_archive's eligibility snapshot and its per-worker
+# commit must never have its live turn stomped by a stale `archived_at`
+# commit -- the commit is now conditional on the record still matching the
+# eligibility snapshot exactly (mirroring cmd_status/cmd_clean's own
+# "spare a concurrently-mutated record" doctrine).
+class TestCmdArchiveConcurrentMutation:
+    def test_concurrent_mutation_between_snapshot_and_commit_is_skipped(self, native_home,
+                                                                        monkeypatch, capsys):
+        seed_archive_ready_worker(native_home)
+        real_load = fleet.load_registry
+        call_count = {"n": 0}
+        new_sid = "newsid01-1111-2222-3333-444455556666"
+
+        def flaky_load():
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                # Simulate a concurrent fork-steer landing in the window
+                # between cmd_archive's eligibility snapshot (call #1) and
+                # its per-worker commit (this call): a real fork-steer
+                # restamps session_id to a brand-new live sid and flips
+                # status to "working".
+                data = real_load()
+                data["workers"]["w1"]["session_id"] = new_sid
+                data["workers"]["w1"]["status"] = "working"
+                fleet.save_registry(data)
+            return real_load()
+
+        monkeypatch.setattr(fleet, "load_registry", flaky_load)
+
+        rc = fleet.cmd_archive(_archive_args(), run=_archive_fake_run(rc=0), which=lambda _: "claude")
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "changed during archive -- skipped" in err
+
+        rec = fleet.load_registry()["workers"]["w1"]
+        # the concurrent mutation is respected untouched -- NOT clobbered
+        # with a stale archived_at commit on top of the live turn.
+        assert rec["archived_at"] is None
+        assert rec["status"] == "working"
+        assert rec["session_id"] == new_sid
+        assert "archived" not in _events_kinds(native_home)
+
+
+# T9 fix wave (findings C2/3b, CRITICAL+Important): a crash between the
+# (now-first) archived_at commit and the file-move phase finishing must
+# leave a fully-consistent tombstone -- never a false dead-suspected verdict
+# (3b) -- and a re-run of `fleet archive` must RESUME the move into the
+# SAME dest dir rather than creating a split-history collision sibling (3a).
+class TestCmdArchiveCrashResume:
+    def _seed_full_worker(self, native_home, retired_sids=("retired-1",)):
+        seed_archive_ready_worker(native_home, retired_sids=list(retired_sids))
+        fleet.append_outcome(SID, {"ts": _iso(NOW), "session_id": SID, "kind": "result"})
+        for s in retired_sids:
+            fleet.append_outcome(s, {"ts": _iso(NOW), "session_id": s, "kind": "result"})
+        task_file = fleet.task_file_path("w1")
+        task_file.parent.mkdir(parents=True, exist_ok=True)
+        task_file.write_text("the task", encoding="utf-8")
+        journal = fleet.journals_dir() / "w1.md"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text("journal text", encoding="utf-8")
+        mailbox_file = fleet.mailbox_dir() / f"{SID}.md"
+        mailbox_file.write_text("pending mail", encoding="utf-8")
+        return task_file, journal, mailbox_file
+
+    def test_crash_mid_move_resumes_cleanly_on_rerun(self, native_home, monkeypatch, capsys):
+        self._seed_full_worker(native_home)
+        real_move = fleet._archive_move
+        real_fetch_roster = fleet._fetch_agents_roster
+        call_count = {"n": 0}
+
+        def flaky_move(src, dest, name):
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                raise OSError("simulated hard crash mid-move")
+            return real_move(src, dest, name)
+
+        monkeypatch.setattr(fleet, "_archive_move", flaky_move)
+
+        with pytest.raises(OSError):
+            fleet.cmd_archive(_archive_args(name="w1"), run=_archive_fake_run(rc=0),
+                              which=lambda _: "claude")
+
+        # The tombstone landed BEFORE the crash (commit-first reorder) --
+        # registry is already consistent, no rm attempted yet.
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["archived_at"] is not None
+        assert rec["status"] == "idle"
+        assert _events_kinds(native_home).count("archived") == 1
+
+        # 3b: the archived tombstone must never be misread as dead-suspected
+        # regardless of which evidence files are mid-move -- cmd_status
+        # never recomputes an archived_at record, so this never even
+        # touches the roster.
+        def boom_roster(**kw):
+            raise AssertionError("an archived record must never trigger a roster fetch")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", boom_roster)
+        rc = fleet.cmd_status(_status_args(name="w1"))
+        assert rc == 0
+        assert fleet.load_registry()["workers"]["w1"]["status"] == "idle"
+
+        # Restore both patched seams before driving the resume run below --
+        # it legitimately needs a working _archive_move AND a real roster
+        # fetch (the rm phase's live-sid check, finding C1).
+        monkeypatch.setattr(fleet, "_archive_move", real_move)
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", real_fetch_roster)
+
+        # Re-run: resumes into the SAME dest dir (no ".1" collision sibling)
+        # and finishes every pending move + the never-attempted rm calls.
+        calls = []
+        rc = fleet.cmd_archive(_archive_args(name="w1"), run=_archive_fake_run(rc=0, calls=calls),
+                               which=lambda _: "claude")
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "resuming archive" in err
+
+        dest = fleet.archive_root() / "w1"
+        assert not (fleet.archive_root() / "w1.1").exists()
+        assert (dest / "journal.md").exists()
+        assert (dest / "task.md").exists()
+        assert (dest / "w1.jsonl").exists()
+        assert (dest / f"{SID}.jsonl").exists()
+        assert (dest / "retired-1.jsonl").exists()
+        assert (dest / f"{SID}.md").read_text(encoding="utf-8") == "pending mail"
+
+        rm_sids = {c[0][2] for c in calls if c[0][:2] == ["claude", "rm"]}
+        assert rm_sids == {SID, "retired-1"}
+        # exactly one "archived" event total -- the resume never appends a second.
+        assert _events_kinds(native_home).count("archived") == 1
+
+
+class TestDoctorArchivedMailbox:
+    # T9 fix wave (finding M-4b): mailbox files are now part of the archive
+    # move inventory ("stranded mail is history too") -- this erases the
+    # doctor noise at the source, with no separate doctor-side exclusion
+    # needed.
+    def test_archived_workers_mailbox_moved_produces_no_doctor_noise(self, native_home):
+        seed_archive_ready_worker(native_home)
+        mailbox_file = fleet.mailbox_dir() / f"{SID}.md"
+        mailbox_file.write_text("pending mail", encoding="utf-8")
+
+        rc = fleet.cmd_archive(_archive_args(), run=_archive_fake_run(rc=0), which=lambda _: "claude")
+        assert rc == 0
+        assert not mailbox_file.exists()
+
+        workers = fleet.load_registry()["workers"]
+        _name, ok, msg = fleet._doctor_check_mailboxes(workers)
+        assert ok is True
+        assert "w1" not in msg
+        assert (fleet.archive_root() / "w1" / f"{SID}.md").read_text(encoding="utf-8") == "pending mail"
+
+
+class TestRemoveWorkerFilesArchiveSweep:
+    # T9 fix wave (finding M-3a): collision-suffixed archive dirs (left
+    # behind by a crash mid-move, or an archive/clean/archive cycle) must
+    # not survive `fleet clean` forever.
+    def test_sweeps_collision_suffixed_dirs_but_not_unrelated_names(self, native_home):
+        (fleet.archive_root() / "w1").mkdir(parents=True)
+        (fleet.archive_root() / "w1.1").mkdir(parents=True)
+        (fleet.archive_root() / "w1.2").mkdir(parents=True)
+        (fleet.archive_root() / "w10").mkdir(parents=True)  # different worker -- must survive
+
+        fleet._remove_worker_files("w1", SID)
+
+        assert not (fleet.archive_root() / "w1").exists()
+        assert not (fleet.archive_root() / "w1.1").exists()
+        assert not (fleet.archive_root() / "w1.2").exists()
+        assert (fleet.archive_root() / "w10").exists()
+
+
+class TestCleanConfirmArchivedWording:
+    # T9 fix wave (finding M-6, Minor): the confirm-prompt line for an
+    # archived target names what is actually being destroyed.
+    def test_archived_target_confirm_message_mentions_archived_history(self, native_home, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-A")
+        rec = seed_archived_worker(native_home, status="dead")
+        rec = dict(fleet.load_registry()["workers"]["w1"])
+        rec["spawned_by"] = "sess-B"  # foreign -- forces the confirm path
+        fleet.save_registry({"workers": {"w1": rec}})
+
+        with pytest.raises(fleet.DestructiveActionRefused) as exc:
+            fleet.cmd_clean(_clean_args(yes=False))
+        assert "archived history" in str(exc.value)
+
+
+class TestWaitArchived:
+    # T9 fix wave (finding I-4a, Important): an archived native record is
+    # frozen history -- `wait_for_workers` must resolve it from its last-
+    # committed status alone (never recompute_worker_native), and cmd_wait's
+    # persist step must never write over it or append spurious events.
+    def test_wait_for_workers_resolves_archived_immediately_without_recompute(self, native_home,
+                                                                              monkeypatch):
+        seed_archived_worker(native_home, status="idle")
+
+        def boom_roster(**kw):
+            raise AssertionError("an archived worker must never trigger a roster fetch in wait")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", boom_roster)
+
+        finished, pending = fleet.wait_for_workers(["w1"], sleep=lambda s: None)
+        assert finished == {"w1": "idle"}
+        assert pending == set()
+
+    def test_cmd_wait_on_archived_worker_leaves_registry_byte_identical(self, native_home,
+                                                                        monkeypatch, capsys):
+        seed_archived_worker(native_home, status="idle")
+        before = fleet.load_registry()
+
+        def boom_roster(**kw):
+            raise AssertionError("an archived worker must never trigger a roster fetch in wait")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", boom_roster)
+
+        rc = fleet.cmd_wait(_wait_args(["w1"]), sleep=lambda s: None)
+        assert rc == 0
+        assert fleet.load_registry() == before
+        assert _events_kinds(native_home) == []
+        assert "w1: idle" in capsys.readouterr().out
 
 
 class TestMainUtf8Reconfigure:
