@@ -1903,6 +1903,95 @@ class TestCmdSendNative:
         assert new_mailbox.exists()
         assert "inner" in new_mailbox.read_text(encoding="utf-8")
 
+    # -----------------------------------------------------------------
+    # T7 fix wave 2 (NEW CRITICAL, re-review of eef84ae): the raw-status
+    # in-flight check must not treat every "on-disk working, recompute
+    # disagrees" mismatch as a live concurrent pre-claim -- that shape is
+    # ALSO the routine, non-racing case of a worker whose turn genuinely
+    # finished with nothing having persisted the demotion yet.
+    # -----------------------------------------------------------------
+    def test_send_recomputes_past_stale_working_label_when_turn_actually_finished(
+            self, native_home, monkeypatch):
+        """Genuinely-finished worker: fresh result outcome for its sid,
+        roster alive (an unrelated other worker present) but no longer
+        carries this sid (reaped -- not an empty roster, so G9 does not
+        intervene), and a stale on-disk "working" label nothing has
+        recomputed since. `send` must NOT queue mail against the dead sid
+        and freeze the stale label -- it must recompute to idle, persist
+        it, and proceed through the normal fork-steer path exactly once."""
+        old_sid = SID
+        new_sid = "ccccdddd-9999-8888-7777-666655554444"
+        other_sid = "eeeeffff-0000-1111-2222-333344445555"
+        stale_anchor = _iso(datetime.now(timezone.utc) - timedelta(minutes=5))
+        seed_native_worker(native_home, sid=old_sid, status="working",
+                           last_dispatch_at=stale_anchor)
+        # Genuinely fresh completion outcome -- the turn really did finish,
+        # AFTER the stale last_dispatch_at anchor above.
+        fleet.append_outcome("w1", {"ts": fleet.now_iso(), "session_id": old_sid,
+                                    "kind": "result"})
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_sequence(
+            (True, [make_roster_entry(other_sid, status="busy")]),  # outer verdict fetch
+            (True, [make_roster_entry(other_sid, status="busy")]),  # dispatch_bg pre-dispatch snapshot
+            (True, [make_roster_entry(other_sid, status="busy"),
+                    make_roster_entry(new_sid, status="idle")]),    # join poll
+        ))
+        calls = []
+        rc = fleet.cmd_send(
+            _send_args(message="go do X"),
+            run=_fake_run_factory(stdout="backgrounded · ccccdddd · fleet|w1|go do X\n", calls=calls),
+            which=lambda _: "claude", sleep=lambda s: None,
+        )
+        assert rc == 0
+        bg_dispatches = [c[0] for c in calls if "--bg" in c[0]]
+        assert len(bg_dispatches) == 1
+
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["session_id"] == new_sid
+        assert rec["status"] == "working"
+        assert rec["retired_sids"] == [old_sid]
+        # nothing stranded on the dead sid's mailbox -- claimed+drained,
+        # not misrouted into a queue nobody will ever read.
+        assert not (fleet.mailbox_dir() / f"{old_sid}.md").exists()
+        assert "steered" in _events_kinds(native_home)
+
+    def test_send_on_expired_crashed_claim_does_not_queue_to_dead_mailbox(
+            self, native_home, monkeypatch, tmp_path):
+        """A stale "working" label with NO fresh outcome and a pre-claim
+        that's aged past LAUNCH_CLAIM_MAX_AGE_SECONDS (a crashed steer,
+        never a live one) must not be treated as in-flight either -- it
+        falls through to the normal verdict path (dead-suspected, since
+        there's no outcome to vouch for it), never queuing mail against a
+        sid nothing will ever read again."""
+        monkeypatch.setattr(fleet.Path, "home", staticmethod(lambda: tmp_path))
+        old_sid = SID
+        other_sid = "eeeeffff-0000-1111-2222-333344445555"
+        expired_anchor = _iso(datetime.now(timezone.utc)
+                              - timedelta(seconds=fleet.LAUNCH_CLAIM_MAX_AGE_SECONDS + 60))
+        seed_native_worker(native_home, sid=old_sid, status="working",
+                           last_dispatch_at=expired_anchor)
+        # No outcome record at all for old_sid -- nothing vouches for it.
+        # Roster alive (unrelated other worker present, old_sid reaped) so
+        # G9's epoch-suspicious freeze does not intervene -- entries is
+        # non-empty, and native_epoch_suspicious only trips on either a
+        # fetch failure or an EMPTY roster.
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            lambda **_: (True, [make_roster_entry(other_sid, status="busy")]))
+
+        def run(*a, **kw):
+            raise AssertionError("must not dispatch on a dead-suspected verdict")
+
+        with pytest.raises(fleet.FleetCliError, match="dead-suspected"):
+            fleet.cmd_send(_send_args(message="ping"), run=run,
+                           which=lambda _: "claude", sleep=lambda s: None)
+
+        rec = fleet.load_registry()["workers"]["w1"]
+        # recomputed verdict WAS persisted (self-healed), not frozen.
+        assert rec["status"] == "dead-suspected"
+        # message was never queued against the dead/expired sid.
+        assert not (fleet.mailbox_dir() / f"{old_sid}.md").exists()
+        events = _events_kinds(native_home)
+        assert "mail_sent" not in events
+
     def test_fork_steer_removes_old_ceiling_file(self, native_home, monkeypatch):
         old_sid = SID
         new_sid = "ccccdddd-9999-8888-7777-666655554444"

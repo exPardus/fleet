@@ -3462,19 +3462,51 @@ def _cmd_send_native(name: str, before: dict, message: str,
         # claim -- never pre-claim twice; queue the mailbox message against
         # the raw (current) sid instead of writing `after` back over a live
         # pre-claim.
+        #
+        # T7 fix wave 2 (NEW CRITICAL, re-review of eef84ae): the raw
+        # mismatch above is NOT proof of a live concurrent pre-claim -- it
+        # is also the routine, majority-of-the-time shape of "this turn
+        # genuinely finished and nothing has persisted the demotion yet"
+        # (recomputing-and-persisting exactly that staleness is this
+        # function's own job). Both shapes produce an identical on-disk
+        # record. Narrow the raw check to only claim in-flight authority
+        # when there's no fresh completion outcome for the raw sid AND the
+        # pre-claim itself hasn't expired (a crashed steer) -- i.e. the raw
+        # label could still plausibly belong to a live, still-running
+        # dispatch. Anchors mirror recompute_worker_native's own
+        # (last_dispatch_at, falling back to created/last_activity for
+        # legacy-shaped records) so this reuses the same ground truth the
+        # recompute itself already applied, rather than inventing a second
+        # one.
         if rec.get("status") == "working" and status != "working":
             raw_sid = rec.get("session_id")
             if raw_sid is None:
                 # T7 fix wave (CRITICAL-1): a spawn/respawn launch-claim in
                 # flight has no real sid yet -- appending to mailbox/None.md
                 # would silently swallow the message. Refuse loudly instead.
+                # (Definitionally in-flight: no sid means nothing could have
+                # finished yet.)
                 raise FleetCliError(
                     f"{name}: dispatch in flight -- retry in a few seconds"
                 )
-            append_mailbox(raw_sid, message)
-            append_event("mail_sent", name, sid=raw_sid, status="working")
-            print(f"{name}: turn running -- message queued to mailbox")
-            return 0
+            outcome_anchor = rec.get("last_dispatch_at") or rec.get("created")
+            claim_anchor = rec.get("last_dispatch_at") or rec.get("last_activity")
+            in_flight = (
+                not has_fresh_outcome(name, raw_sid, outcome_anchor)
+                and not _launch_claim_expired(claim_anchor)
+            )
+            if in_flight:
+                append_mailbox(raw_sid, message)
+                append_event("mail_sent", name, sid=raw_sid, status="working")
+                print(f"{name}: turn running -- message queued to mailbox")
+                return 0
+            # Not actually in flight: the raw "working" label is stale
+            # (fresh outcome proves the turn already finished) or belongs to
+            # an expired/crashed claim. Fall through to the normal verdict
+            # path below, which persists the freshly recomputed `after` on
+            # every branch it can reach -- self-healing the stale label
+            # instead of leaving it frozen and silently misrouting mail to
+            # a dead session.
 
         if status != rec.get("status"):
             append_event("status_changed", name, old=rec.get("status"), new=status)
