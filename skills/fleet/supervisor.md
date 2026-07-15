@@ -20,6 +20,15 @@ Soul = `supervisor/GOALS.md` (operator-owned) + `supervisor/JOURNAL.md`
 3. Reconcile workers from the bundle's fleet-status section (M-A interim:
    registry verdicts; the outcome discriminator arrives in M-B).
 
+## Watchtower beat
+
+Each beat: `fleet status` (runs the outcome discriminator + the silent-limit
+transcript scan -- a rate-limit wall shows as `limited`, contract G11, never
+`dead-suspected`), then `fleet resume-limited` for any worker whose reset
+horizon has passed, then a checkpoint/heartbeat (below). `limited` is a
+sticky park: the boot reconcile and the epoch freeze never demote it, and
+nothing but `resume-limited` (or an operator `respawn --force`) clears it.
+
 ## Checkpoint discipline
 
 - `fleet sup-checkpoint "<what changed / decided / learned>"` after every
