@@ -3157,13 +3157,101 @@ def _format_tokens(tokens: dict) -> str:
     return " ".join(parts)
 
 
+def _render_native_peek_lines(rec: dict) -> list:
+    """Rendered display lines for one substantive transcript record
+    (`_is_substantive_transcript_record` already gated the caller's
+    selection): assistant records emit one `[text]` line per non-empty text
+    part (first 200 chars) and one `[tool] <name>` line per `tool_use` part;
+    user records emit one `[user]`/`[user:meta]` line (first 120 chars,
+    `isMeta` distinguishes a synthetic/hook-injected turn from a real
+    operator message). Anything else renders as no lines -- the caller's
+    substantive-record filter already excludes bookkeeping types, so this
+    is defensive, not a real path."""
+    rtype = rec.get("type")
+    content = (rec.get("message") or {}).get("content")
+    parts = content if isinstance(content, list) else []
+    lines = []
+    if rtype == "assistant":
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "text":
+                text = part.get("text")
+                if isinstance(text, str) and text.strip():
+                    lines.append(f"[text] {_truncate(text, 200)}")
+            elif part.get("type") == "tool_use":
+                lines.append(f"[tool] {part.get('name', '?')}")
+    elif rtype == "user":
+        if isinstance(content, str):
+            text = content
+        else:
+            text = "\n".join(
+                p.get("text", "") for p in parts
+                if isinstance(p, dict) and p.get("type") == "text"
+            )
+        if text.strip():
+            tag = "[user:meta]" if rec.get("isMeta") else "[user]"
+            lines.append(f"{tag} {_truncate(text, 120)}")
+    return lines
+
+
+def _cmd_peek_native(name: str, sid, n: int) -> int:
+    """Native (`dispatch_kind:"bg"`) counterpart of `cmd_peek` (M-B T8):
+    render the last `n` SUBSTANTIVE records (`_is_substantive_transcript_
+    record`) from the current sid's transcript tail (`_read_tail_lines` --
+    bounded bytes, works mid-turn since the daemon writes the transcript
+    live). Tolerant parsing: an unparseable/non-dict line is skipped, never
+    a crash (mirrors `transcript_limit_scan`'s own discipline). No sid
+    (launch-in-flight) or no resolvable transcript both exit 1 with a hint
+    rather than printing an empty digest that could be misread as "nothing
+    happened yet"."""
+    if sid is None:
+        print(f"{name}: no transcript yet -- dispatch may still be in flight", file=sys.stderr)
+        return 1
+    path = find_transcript_path(name, sid)
+    if path is None:
+        print(f"{name}: no transcript found for session {sid} -- try `fleet status {name}`",
+              file=sys.stderr)
+        return 1
+    records = []
+    for line in _read_tail_lines(path):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(rec, dict) and _is_substantive_transcript_record(rec):
+            records.append(rec)
+    records = records[-n:] if n else records
+
+    print(f"-- {name} ({sid[:8]}) --")
+    if not records:
+        print("(no substantive transcript records yet)")
+        return 0
+    for rec in records:
+        for line in _render_native_peek_lines(rec):
+            print(line)
+    return 0
+
+
 def cmd_peek(args) -> int:
     """`fleet peek <name> [-n 20]` (SPEC §5 peek row): digest of recent
-    stream events plus whether fleet hooks have fired."""
+    stream events plus whether fleet hooks have fired.
+
+    M-B T8: native (`dispatch_kind:"bg"`) records route to
+    `_cmd_peek_native` -- there is no `logs/<name>.jsonl` stream for a
+    daemon-hosted session; the digest comes from the sid's own transcript
+    tail instead."""
     with fleet_lock():
         data = load_registry()
         if args.name not in data["workers"]:
             raise FleetCliError(f"unknown worker: {args.name!r}")
+        rec = data["workers"][args.name]
+
+    if is_native(rec):
+        return _cmd_peek_native(args.name, rec.get("session_id"), args.lines)
 
     log_path = logs_dir() / f"{args.name}.jsonl"
     entries = tail_events(log_path, n=args.lines)
@@ -3186,13 +3274,58 @@ def cmd_peek(args) -> int:
     return 0
 
 
+def _cmd_result_native(name: str, sid) -> int:
+    """Native (`dispatch_kind:"bg"`) counterpart of `cmd_result` (M-B T8):
+    the latest outcome record for the CURRENT sid (`latest_outcome` is
+    already the newest-by-ts record for that sid -- no separate filter
+    step is needed, its own `kind` tells the story). `kind == "result"`
+    prints `result_text` alone on stdout (purity: scripts consume it) plus
+    one token/model info line on stderr; any other kind (a tombstone --
+    killed/interrupted/stopped) means the turn did not end with a result at
+    all, and no record means nothing has completed for this sid yet (or
+    the worker is dead-suspected) -- both exit 1 with a distinct reason.
+    `result_text is None` (a Stop hook that wrote a null payload) is
+    treated the same as "no result", never printed as an empty line with
+    exit 0 -- the trap named in the T8 contract."""
+    if sid is None:
+        print(f"{name}: no outcome record for current session -- "
+              "worker may be dead-suspected (fleet status)", file=sys.stderr)
+        return 1
+    outcome = latest_outcome(name, sid)
+    if outcome is None:
+        print(f"{name}: no outcome record for current session -- "
+              "worker may be dead-suspected (fleet status)", file=sys.stderr)
+        return 1
+    kind = outcome.get("kind")
+    text = outcome.get("result_text")
+    if kind != "result" or text is None:
+        print(f"{name}: last turn ended by {kind} -- no result", file=sys.stderr)
+        return 1
+    print(text)
+    print(
+        f"-- tokens in={outcome.get('input_tokens')} out={outcome.get('output_tokens')} "
+        f"model={outcome.get('model')}",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def cmd_result(args) -> int:
     """`fleet result <name>` (SPEC §5 result row): final result event text
-    of the last completed turn, nothing else."""
+    of the last completed turn, nothing else.
+
+    M-B T8: native (`dispatch_kind:"bg"`) records route to
+    `_cmd_result_native` -- result text lives in the Stop-hook outcome
+    store (`latest_outcome`), never in a `logs/<name>.jsonl` stream that
+    only legacy workers have."""
     with fleet_lock():
         data = load_registry()
         if args.name not in data["workers"]:
             raise FleetCliError(f"unknown worker: {args.name!r}")
+        rec = data["workers"][args.name]
+
+    if is_native(rec):
+        return _cmd_result_native(args.name, rec.get("session_id"))
 
     log_path = logs_dir() / f"{args.name}.jsonl"
     entries = tail_events(log_path, n=None)
@@ -4221,13 +4354,68 @@ def _interrupt_worker(name: str, get_process_info=None, kill_process_tree=None) 
     return "killed"
 
 
-def cmd_interrupt(args, get_process_info=None, kill_process_tree=None) -> int:
+def _cmd_interrupt_native(name: str, rec: dict, run=subprocess.run, which=shutil.which) -> int:
+    """Native (`dispatch_kind:"bg"`) counterpart of `cmd_interrupt` (M-B
+    T8): `claude stop` the current sid (G10: never raw-kill), write fleet's
+    own tombstone (G10: stop fires no Stop hook), and mark the worker
+    `interrupted` -- deliberately NOT `idle`: spec §5 forbids auto-anything,
+    and an interrupted task is definitionally started, so it must read as
+    "operator stopped this on purpose", never as "finished cleanly and
+    ready for the next `send`". `interrupted` is in `_NATIVE_STICKY`, so no
+    later recompute ever flips it back on its own -- only `fleet respawn`
+    moves the worker again, a separate explicit decision (the print below
+    says so).
+
+    `_stop_native_session`'s own success/failure is not distinguished in
+    the outcome here (unlike `cmd_kill`, interrupt is not terminal and
+    nothing further depends on proving the stop landed) -- the tombstone
+    and status flip both commit unconditionally, mirroring `cmd_respawn
+    --force`'s own "write the stopped tombstone regardless of the stop's
+    exit code" rule.
+
+    sid is None only for a launch-in-flight pre-claim (no real session to
+    stop yet) -- a friendly no-op, mirroring `_interrupt_worker`'s own
+    "not_running" no-mutation branch for the legacy launch-in-flight case."""
+    sid = rec.get("session_id")
+    if sid is None:
+        print(f"{name}: no turn running -- nothing to interrupt")
+        return 0
+    stopped_ok = _stop_native_session(sid, run=run, which=which)
+    write_tombstone_outcome(name, sid, "interrupted")
+    with fleet_lock():
+        data = load_registry()
+        r = data["workers"].get(name)
+        if r is not None:
+            r["status"] = "interrupted"
+            data["workers"][name] = r
+            save_registry(data)
+        append_event("interrupted", name, session_id=sid, stopped=stopped_ok)
+    print(f"{name}: stopped via claude stop; marked interrupted. "
+          f"Respawn is a separate decision (fleet respawn {name}).")
+    return 0
+
+
+def cmd_interrupt(args, get_process_info=None, kill_process_tree=None,
+                  run=subprocess.run, which=shutil.which) -> int:
     """`fleet interrupt <name>` (SPEC §5 interrupt row): ctime-verify the
     registered turn_pid, kill its whole process tree via the platform
     adapter, re-verify the kill (F3), mark idle, append an event.
     Not-running is a friendly no-op. A verified-failed kill is a loud
     warning and a nonzero exit -- the registry is deliberately left as-is
-    (never marked idle while the turn may still be alive)."""
+    (never marked idle while the turn may still be alive).
+
+    M-B T8: native (`dispatch_kind:"bg"`) records route to
+    `_cmd_interrupt_native` instead -- `claude stop` + tombstone + a status
+    of `interrupted` (never `idle`, unlike the legacy branch below)."""
+    with fleet_lock():
+        data = load_registry()
+        if args.name not in data["workers"]:
+            raise FleetCliError(f"unknown worker: {args.name!r}")
+        rec = dict(data["workers"][args.name])
+
+    if is_native(rec):
+        return _cmd_interrupt_native(args.name, rec, run=run, which=which)
+
     outcome = _interrupt_worker(args.name, get_process_info=get_process_info, kill_process_tree=kill_process_tree)
     if outcome == "killed":
         print(f"{args.name}: interrupted")
@@ -4300,6 +4488,16 @@ def cmd_attach(args, popen=subprocess.Popen, get_process_info=None, which=shutil
         if args.name not in data["workers"]:
             raise FleetCliError(f"unknown worker: {args.name!r}")
         before = data["workers"][args.name]
+        # M-B T8 (M-B scope fence): native (`dispatch_kind:"bg"`) sessions
+        # have no legacy pid to `--resume` into a detached terminal, and no
+        # `recompute_worker` PID/log-tail probe applies to them -- refuse
+        # before touching the registry at all (native attach integration is
+        # M-C-or-later). Legacy attach below is unchanged.
+        if is_native(before):
+            raise FleetCliError(
+                f"{args.name}: native worker -- attach via the agents menu (Ctrl+T in claude) "
+                f"or: claude attach {before.get('session_id')}"
+            )
         after = recompute_worker(args.name, before, get_process_info=get_process_info, sleep=sleep)
         if after["status"] != before["status"]:
             append_event("status_changed", args.name, old=before["status"], new=after["status"])
@@ -5078,7 +5276,52 @@ def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shuti
     return 0
 
 
-def cmd_kill(args, get_process_info=None, kill_process_tree=None, sleep=time.sleep) -> int:
+def _cmd_kill_native(name: str, rec: dict, run=subprocess.run, which=shutil.which) -> int:
+    """Native (`dispatch_kind:"bg"`) counterpart of `cmd_kill`'s legacy body
+    (M-B T8): `claude stop` the current sid (G10: never raw-kill) plus every
+    retired sid best-effort (a steered-away fork per Steering contract may
+    still be live even though this record's own current sid has moved on),
+    write fleet's own tombstone (G10: `claude stop` fires no Stop hook, so
+    nothing else records this turn ended), then unconditionally mark the
+    worker dead -- kill is terminal regardless of whether the stop could be
+    verified. A verified-failed stop still marks dead (mirrors the legacy
+    kill_failed branch) but warns loudly and exits 1 so the operator
+    investigates the session manually instead of trusting a silent success.
+
+    `rec` is the caller's already-locked snapshot (post-launch-in-flight-
+    guard, post-`_confirm_destructive`); the commit below re-reads the
+    registry fresh under its own lock rather than trusting `rec`, since
+    kill is meant to succeed even if the record changed shape meanwhile."""
+    sid = rec.get("session_id")
+    stopped_ok = _stop_native_session(sid, run=run, which=which) if sid else True
+    for retired in rec.get("retired_sids", []) or []:
+        _stop_native_session(retired, run=run, which=which)
+    if sid:
+        write_tombstone_outcome(name, sid, "killed")
+
+    with fleet_lock():
+        data = load_registry()
+        r = data["workers"].get(name)
+        if r is not None:
+            r["status"] = "dead"
+            r["turn_pid"] = None
+            r["turn_pid_ctime"] = None
+            save_registry(data)
+        append_event("killed", name, interrupt_outcome=stopped_ok)
+
+    if not stopped_ok:
+        print(
+            f"fleet: {name}: claude stop could not be verified -- marked dead anyway "
+            "(kill is a terminal action); investigate the session manually",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"{name}: killed")
+    return 0
+
+
+def cmd_kill(args, get_process_info=None, kill_process_tree=None, sleep=time.sleep,
+             run=subprocess.run, which=shutil.which) -> int:
     """`fleet kill <name>` (SPEC §5): interrupt the turn if one is alive
     (reusing _interrupt_worker's verified-kill contract), then
     unconditionally mark the worker "dead" and append a "killed" event --
@@ -5127,13 +5370,25 @@ def cmd_kill(args, get_process_info=None, kill_process_tree=None, sleep=time.sle
     the fleet CLI died mid-launch and nothing ever re-persisted the demoted
     status) would refuse `fleet kill` forever, since nothing else in this
     command's path calls recompute_worker to flip the raw stored status to
-    "dead" first."""
+    "dead" first.
+
+    M-B T8: native (`dispatch_kind:"bg"`) records route through
+    `_cmd_kill_native` after the shared unknown-worker/launch-in-flight-
+    guard/`_confirm_destructive` prelude below -- the launch-in-flight guard
+    for native mirrors the legacy one's wording but keys on `session_id is
+    None` (native never uses `turn_pid`) rather than `turn_pid is None`."""
     with fleet_lock():
         data = load_registry()
         if args.name not in data["workers"]:
             raise FleetCliError(f"unknown worker: {args.name!r}")
         rec = data["workers"][args.name]
-        if (rec.get("status") == "working" and rec.get("turn_pid") is None
+        native = is_native(rec)
+        if native:
+            if rec.get("session_id") is None and not _launch_claim_expired(rec.get("last_activity")):
+                raise FleetCliError(
+                    f"launch in flight for {args.name}; retry in a few seconds"
+                )
+        elif (rec.get("status") == "working" and rec.get("turn_pid") is None
                 and not _launch_claim_expired(rec.get("last_activity"))):
             raise FleetCliError(
                 f"launch in flight for {args.name}; retry in a few seconds"
@@ -5146,6 +5401,9 @@ def cmd_kill(args, get_process_info=None, kill_process_tree=None, sleep=time.sle
     # never block every other fleet command on a human's keystroke).
     _confirm_destructive("kill", [args.name], workers_snapshot,
                          assume_yes=getattr(args, "yes", False))
+
+    if native:
+        return _cmd_kill_native(args.name, workers_snapshot[args.name], run=run, which=which)
 
     outcome = _interrupt_worker(args.name, get_process_info=get_process_info, kill_process_tree=kill_process_tree)
     if outcome == "not_running":
@@ -5173,7 +5431,7 @@ def cmd_kill(args, get_process_info=None, kill_process_tree=None, sleep=time.sle
     return 0
 
 
-def _remove_worker_files(name: str, sid: str) -> list:
+def _remove_worker_files(name: str, sid: str, retired_sids: list = ()) -> list:
     """Delete every on-disk artifact for a removed dead worker: current +
     rotated logs, its mailbox file, any orphaned mailbox/*.claimed.* files
     for that sid (T3-F2, adversarial review deferred finding: a hook
@@ -5181,7 +5439,16 @@ def _remove_worker_files(name: str, sid: str) -> list:
     -- `fleet clean` sweeps these for the sid it is removing, rather than
     leaving them as permanent litter), and its journal. Best-effort
     (missing files are not an error). Returns the list of paths actually
-    removed, for cmd_clean's print-what-was-removed contract."""
+    removed, for cmd_clean's print-what-was-removed contract.
+
+    M-B T8: also sweeps the native outcome-store files -- the name-keyed
+    `state/outcomes/<name>.jsonl` plus this sid's own sid-keyed fallback
+    file (`read_outcomes`' dual-file merge shape), the worker's task file
+    (`state/tasks/<name>.md`), and -- for every sid in `retired_sids` (a
+    fork-steer/respawn chain's earlier sids, native-only, always empty for
+    a legacy record) -- that sid's own outcome file and ceiling file, which
+    would otherwise survive as permanent orphans once the registry entry
+    that referenced them is gone."""
     removed = []
     candidates = [
         logs_dir() / f"{name}.jsonl", logs_dir() / f"{name}.jsonl.1",
@@ -5192,7 +5459,12 @@ def _remove_worker_files(name: str, sid: str) -> list:
         # cleaned -> a growing pile of orphaned state/ceilings/<sid> files.
         # Sweep it alongside the other per-worker artifacts.
         ceiling_file_path(sid),
+        outcome_path(name),
+        outcome_path(sid),
+        task_file_path(name),
     ]
+    candidates += [outcome_path(s) for s in retired_sids]
+    candidates += [ceiling_file_path(s) for s in retired_sids]
     candidates += list(mailbox_dir().glob(f"{sid}.md.claimed.*")) if mailbox_dir().exists() else []
     for path in candidates:
         try:
@@ -5205,7 +5477,8 @@ def _remove_worker_files(name: str, sid: str) -> list:
     return removed
 
 
-def cmd_clean(args, get_process_info=None, sleep=time.sleep) -> int:
+def cmd_clean(args, get_process_info=None, sleep=time.sleep,
+              run=subprocess.run, which=shutil.which) -> int:
     """`fleet clean` (SPEC §5): recompute every worker's status; any that
     resolve to "dead" are removed from the registry along with their logs
     (current + rotated), mailbox file, orphaned mailbox claim files for
@@ -5255,18 +5528,66 @@ def cmd_clean(args, get_process_info=None, sleep=time.sleep) -> int:
     to merge verdicts -- but only for records that still match their
     pre-probe snapshot exactly (full-dict equality), sparing anything a
     concurrent command mutated while the lock was released rather than
-    clobbering it with a verdict computed against now-stale data."""
-    removed = []  # list of (name, sid)
+    clobbering it with a verdict computed against now-stale data.
+
+    M-B T8: native (`dispatch_kind:"bg"`) records route through
+    `recompute_worker_native` instead of the legacy PID-probe dance -- ONE
+    roster fetch for the whole invocation (mirrors cmd_status's split, F4
+    doctrine: never hold fleet_lock across the roster subprocess call).
+    That verdict is deterministic given one fetch (no transient-probe
+    flakiness the way a `get_process_info` hiccup can misfire), so native
+    candidates need no second-pass confirm-delay re-check -- only legacy's
+    PID-probe path does.
+
+    Deletable native statuses: `dead`, `idle`, `interrupted`. Wider than
+    legacy's dead-only on purpose: a native worker's true identity lives in
+    the daemon roster (`claude agents`), not in fleet's own registry+logs
+    the way a legacy pid-tracked worker's does, so sweeping fleet's OWN
+    bookkeeping (registry entry, outcome-store files, task file, ceiling
+    file) for a finished (`idle`) or operator-stopped (`interrupted`)
+    native worker never destroys resumability -- `claude --resume <sid>` /
+    `claude attach <sid>` still finds the session regardless. NEVER
+    `dead-suspected` (a surfaced, still-undecided verdict, not a finished
+    state), `limited` (parked, not finished), or `working`. `claude rm`-ing
+    the roster entry itself is T9's territory -- this command never touches
+    the roster, only fleet's own files.
+
+    G9 epoch-freeze: a suspicious roster fetch (failure, or an empty roster
+    while some native worker's own last-committed record still claims a
+    live turn) means clean REFUSES to touch ANY native record this
+    invocation -- no recompute, no delete, prints the freeze line. Legacy
+    cleaning proceeds unaffected."""
+    _NATIVE_CLEAN_DELETABLE = {"dead", "idle", "interrupted"}
+
+    removed = []  # list of (name, sid, retired_sids)
     pending_confirm = []  # (name, before) -- looked dead on pass 1, lock held
     with fleet_lock():
         data = load_registry()
         names = sorted(data["workers"])
         before = {n: data["workers"][n] for n in names}
 
-    # Probe every worker's liveness with NO lock held (see docstring above)
-    # -- this is the (potentially several-seconds-total) expensive part.
-    after = {n: recompute_worker(n, before[n], get_process_info=get_process_info, sleep=sleep) for n in names}
+    native_names = [n for n in names if is_native(before[n])]
+    legacy_names = [n for n in names if n not in native_names]
 
+    # ONE roster fetch per invocation, outside the lock (F4 doctrine), only
+    # when a native worker is actually in the registry.
+    roster_entries = []
+    epoch_frozen = False
+    if native_names:
+        roster_ok, payload = _fetch_agents_roster(which=which, run=run)
+        roster_entries = payload if roster_ok else []
+        epoch_frozen = native_epoch_suspicious(roster_ok, roster_entries, before)
+
+    # Probe every legacy worker's liveness with NO lock held (see docstring
+    # above) -- this is the (potentially several-seconds-total) expensive
+    # part. Native verdicts come from the single roster fetch above instead.
+    after = {n: recompute_worker(n, before[n], get_process_info=get_process_info, sleep=sleep)
+             for n in legacy_names}
+    if native_names and not epoch_frozen:
+        for n in native_names:
+            after[n] = recompute_worker_native(n, before[n], roster_entries)
+
+    native_doomed_now = []  # (name, before) -- native verdict already final, no confirm-delay needed
     changed = False
     with fleet_lock():
         data = load_registry()
@@ -5276,6 +5597,21 @@ def cmd_clean(args, get_process_info=None, sleep=time.sleep) -> int:
                 # Removed or mutated by a concurrent command while our lock
                 # was released for probing -- spare it, don't act on a
                 # verdict computed against now-stale pre-probe data.
+                continue
+            if n in native_names:
+                if epoch_frozen:
+                    continue  # G9: no native record recomputed or written this invocation
+                verdict = after[n]
+                if verdict["status"] in _NATIVE_CLEAN_DELETABLE:
+                    native_doomed_now.append((n, before[n]))
+                    continue
+                persisted = dict(verdict)
+                persisted.pop("waiting_for_permission", None)
+                if persisted != current:
+                    if persisted["status"] != current["status"]:
+                        append_event("status_changed", n, old=current["status"], new=persisted["status"])
+                        changed = True
+                    data["workers"][n] = persisted
                 continue
             if after[n]["status"] == "dead":
                 pending_confirm.append((n, before[n]))
@@ -5287,10 +5623,16 @@ def cmd_clean(args, get_process_info=None, sleep=time.sleep) -> int:
         if changed:
             save_registry(data)
 
+    if epoch_frozen:
+        print("EPOCH: roster suspicious -- native verdicts frozen (G9); legacy cleaning only")
+
     if pending_confirm:
         sleep(_DEAD_CONFIRM_DELAY_SECONDS)
 
     # Second probe: no lock held, mirroring cmd_kill's re-check shape.
+    # Legacy candidates only -- native verdicts are already final (one
+    # deterministic roster fetch, no flaky get_process_info probe to
+    # corroborate).
     confirmations = [
         (n, before, recompute_worker(n, before, get_process_info=get_process_info, sleep=sleep))
         for n, before in pending_confirm
@@ -5300,8 +5642,10 @@ def cmd_clean(args, get_process_info=None, sleep=time.sleep) -> int:
     # DELETE (registry entry, logs, mailbox and journal -- irreversible; only
     # the claude session survives, resumable by sid from events.jsonl). Ask
     # before sweeping any worker this session did not spawn. Outside the lock:
-    # a prompt must never block the fleet.
+    # a prompt must never block the fleet. One combined confirm covers both
+    # legacy and native candidates from this single invocation.
     doomed = {n: before for n, before, confirmed in confirmations if confirmed["status"] == "dead"}
+    doomed.update({n: before for n, before in native_doomed_now})
     if doomed:
         _confirm_destructive("clean (delete logs + journal of)", sorted(doomed), doomed,
                              assume_yes=getattr(args, "yes", False))
@@ -5319,19 +5663,29 @@ def cmd_clean(args, get_process_info=None, sleep=time.sleep) -> int:
                 append_event("status_changed", n, old=before["status"], new=confirmed["status"])
                 changed = True
             if confirmed["status"] == "dead":
-                removed.append((n, confirmed["session_id"]))
+                removed.append((n, confirmed["session_id"], confirmed.get("retired_sids", [])))
                 data["workers"].pop(n, None)
                 changed = True
             else:
                 data["workers"][n] = confirmed
 
+        for n, before_rec in native_doomed_now:
+            current = data["workers"].get(n)
+            if current != before_rec:
+                # Mutated concurrently since the first lock released --
+                # spare it, don't delete on a now-stale verdict.
+                continue
+            removed.append((n, current.get("session_id"), current.get("retired_sids", [])))
+            data["workers"].pop(n, None)
+            changed = True
+
         if changed:
             save_registry(data)
-        for n, sid in removed:
+        for n, sid, _retired in removed:
             append_event("cleaned", n, session_id=sid)
 
-    for n, sid in removed:
-        _remove_worker_files(n, sid)
+    for n, sid, retired in removed:
+        _remove_worker_files(n, sid, retired_sids=retired)
         print(f"removed {n} (session {sid})")
 
     if not removed:
@@ -7138,6 +7492,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    # M-B T8: the standing cp1252-crash fix (knowledge C2) -- a Windows
+    # console's default code page cannot encode most native-worker output
+    # (roster/transcript text is UTF-8: emoji, CJK, box-drawing). Force
+    # utf-8 with lossy replacement on both streams before anything else
+    # prints, so `fleet result`/`fleet peek` et al. never raise
+    # UnicodeEncodeError on a plain `cmd.exe`/legacy-codepage console.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
