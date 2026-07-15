@@ -1661,8 +1661,16 @@ def find_transcript_path(name: str, sid: str):
 
     Falls back to globbing every project dir for `<sid>.jsonl` -- the ONLY
     path available for a sid whose limit-walled turn fired no Stop hook at
-    all (G11: a limit wall is silent, no outcome record exists yet).
-    None if nothing exists either way."""
+    all (G11: a limit wall is silent, no outcome record exists yet). When
+    the same sid shows up under more than one project dir (a worktree
+    moved, or a stale duplicate left behind), the candidate with the
+    freshest `st_mtime` wins (T6 fix wave, High finding) -- NOT the
+    lexicographically-first path string, which is pure alphabetical
+    accident of the project-dir name and has no relationship to which
+    copy is actually current. A candidate whose `stat()` itself raises
+    OSError is skipped from the mtime comparison (never crashes the
+    lookup); if every candidate is unstatable (or ties), falls back to
+    `sorted()[0]` for determinism. None if nothing exists either way."""
     if not sid:
         return None
     if name:
@@ -1674,7 +1682,17 @@ def find_transcript_path(name: str, sid: str):
         candidates = sorted(Path.home().glob(f".claude/projects/*/{sid}.jsonl"))
     except OSError:
         return None
-    return candidates[0] if candidates else None
+    if not candidates:
+        return None
+    statable = []
+    for c in candidates:
+        try:
+            statable.append((c.stat().st_mtime, c))
+        except OSError:
+            continue
+    if statable:
+        return max(statable, key=lambda pair: pair[0])[1]
+    return candidates[0]
 
 
 def transcript_limit_scan(sid: str, transcript_path=None):
@@ -1706,11 +1724,36 @@ def transcript_limit_scan(sid: str, transcript_path=None):
     it in here, since this function only has a sid to work with); when
     omitted, falls back to find_transcript_path(None, sid) -- the
     sid-glob path only, since there is no name to key an outcome-store
-    lookup on from here."""
-    path = Path(transcript_path) if transcript_path else find_transcript_path(None, sid)
-    if path is None or not path.exists():
+    lookup on from here.
+
+    Newest-first scanning discipline (T6 fix wave C2): the tail is walked
+    backward looking for the FIRST record that is either API-error-shaped
+    (`isApiErrorMessage` truthy) or substantive (type assistant/user with
+    real message content) -- bookkeeping records (attachment/system/
+    summary types, or anything with neither signal) are transparently
+    skipped. Once that first qualifying record is found, it is
+    authoritative: limit-shaped -> park; anything else -> (False, ...)
+    immediately, WITHOUT walking further back. A stale older 429 sitting
+    behind a newer, non-matching error (e.g. a 529) or behind ordinary
+    newer chatter must never win -- the wall is only the reason for
+    silence if it is the LAST substantive thing that happened.
+
+    Never raises (T6 fix wave C1): the ENTIRE transcript access path --
+    path resolution, the existence check, the open + tail read -- is
+    wrapped in try/except OSError. `Path.exists()` only swallows a narrow
+    allowlist of errno/winerror values and re-raises everything else
+    (notably ERROR_SHARING_VIOLATION / winerror 32, the ordinary Windows
+    error for "another process has this file open" -- ourselves, mid
+    --bg write, easily included); a missing/unreadable/locked transcript
+    or an unparseable line all fall through to (False, None, None)."""
+    try:
+        path = Path(transcript_path) if transcript_path else find_transcript_path(None, sid)
+        if path is None or not path.exists():
+            return False, None, None
+        lines = _read_tail_lines(path)
+    except OSError:
         return False, None, None
-    for line in reversed(_read_tail_lines(path)):
+    for line in reversed(lines):
         line = line.strip()
         if not line:
             continue
@@ -1718,15 +1761,48 @@ def transcript_limit_scan(sid: str, transcript_path=None):
             rec = json.loads(line)
         except ValueError:
             continue
-        if not isinstance(rec, dict) or not rec.get("isApiErrorMessage"):
+        if not isinstance(rec, dict):
             continue
-        if rec.get("apiErrorStatus") == 429 or rec.get("error") == "rate_limit":
+        is_error = bool(rec.get("isApiErrorMessage"))
+        if not is_error and not _is_substantive_transcript_record(rec):
+            continue  # bookkeeping record -- keep walking backward
+        if is_error and (rec.get("apiErrorStatus") == 429 or rec.get("error") == "rate_limit"):
             msg = rec.get("message") or {}
             parts = [c.get("text", "") for c in (msg.get("content") or [])
                      if isinstance(c, dict) and c.get("type") == "text"]
             reset_at, kind = _parse_limit_signal("\n".join(parts))
             return True, reset_at, kind
+        # First qualifying (error-shaped or substantive) record does not
+        # match the limit shape -- it is the authoritative "last thing
+        # that happened" and the scan stops here, never mind an older
+        # stale wall further back.
+        return False, None, None
     return False, None, None
+
+
+def _is_substantive_transcript_record(rec: dict) -> bool:
+    """True iff rec is a type assistant/user transcript record carrying
+    real message content (non-empty text, or a tool_use/tool_result/image
+    part) -- as opposed to bookkeeping records (attachment/system/summary
+    types, or an assistant/user record with empty/absent content).
+    Used by transcript_limit_scan's newest-first stopping discipline
+    (T6 fix wave C2)."""
+    if rec.get("type") not in ("assistant", "user"):
+        return False
+    content = (rec.get("message") or {}).get("content")
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict):
+                text = part.get("text")
+                if isinstance(text, str) and text.strip():
+                    return True
+                if part.get("type") in ("tool_use", "tool_result", "image"):
+                    return True
+            elif isinstance(part, str) and part.strip():
+                return True
+    return False
 
 
 def _append_abnormal_turn_note(name: str) -> None:
@@ -4207,6 +4283,16 @@ def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shuti
         if args.name not in data["workers"]:
             raise FleetCliError(f"unknown worker: {args.name!r}")
         before = data["workers"][args.name]
+        # T6 fix wave, Medium finding: cmd_respawn has zero native
+        # awareness (legacy recompute/launch path below would silently
+        # strip dispatch_kind and orphan the --bg session). Refuse loudly
+        # until Task 7 lands native-aware respawn.
+        # T7 replaces this guard.
+        if is_native(before):
+            raise FleetCliError(
+                "native worker respawn lands in M-B Task 7 -- interim: "
+                "resume-limited (for limited parks) or claude stop + fleet kill"
+            )
         after = recompute_worker(args.name, before, get_process_info=get_process_info, sleep=sleep)
         if after["status"] != before["status"]:
             append_event("status_changed", args.name, old=before["status"], new=after["status"])

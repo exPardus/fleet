@@ -27,7 +27,10 @@ transcript scan -- a rate-limit wall shows as `limited`, contract G11, never
 `dead-suspected`), then `fleet resume-limited` for any worker whose reset
 horizon has passed, then a checkpoint/heartbeat (below). `limited` is a
 sticky park: the boot reconcile and the epoch freeze never demote it, and
-nothing but `resume-limited` (or an operator `respawn --force`) clears it.
+nothing but `resume-limited` clears it today -- `cmd_respawn` refuses
+outright against a native (`--bg`) record until M-B Task 7 ships
+native-aware respawn; the interim recovery levers are `resume-limited`
+(for limited parks) or `claude stop` + `fleet kill`.
 
 ## Checkpoint discipline
 
