@@ -6627,7 +6627,7 @@ def _fast_completion_sid(name: str, since_iso: str, short_id: str | None = None)
 # fallback), fresh -n render per dispatch (G13 / spec §5.1.3).
 # --------------------------------------------------------------------------
 
-NATIVE_JOIN_VERIFY_SECONDS = 60.0
+NATIVE_JOIN_VERIFY_SECONDS = 60.0   # keep in sync with SUPERVISOR_ROSTER_VERIFY_SECONDS below (same window, independently defined -- Finding 3)
 NATIVE_JOIN_POLL_SECONDS = 3.0
 NATIVE_DISPATCH_TIMEOUT_SECONDS = 120.0
 DEFAULT_CATEGORY = "fleet"
@@ -6800,7 +6800,7 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
 
 SUPERVISOR_CLAIM_STALE_SECONDS = 3600.0   # S: seizure/nag threshold, > beat period + margin (spec §4)
 SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS = 300.0   # T: handoff wait before abort (spec §4)
-SUPERVISOR_ROSTER_VERIFY_SECONDS = 60.0   # dispatch -> roster-join window (contract G6 fallback)
+SUPERVISOR_ROSTER_VERIFY_SECONDS = 60.0   # dispatch -> roster-join window (contract G6 fallback); keep in sync with NATIVE_JOIN_VERIFY_SECONDS above (same window, independently defined -- Finding 3)
 
 SUPERVISOR_JOURNAL_KINDS = (
     "BOOT", "CHECKPOINT", "PROPOSAL", "SEIZED",
@@ -6843,6 +6843,17 @@ def handoff_abort_flag_path() -> Path:
     branch). Lives in state/ (gitignored runtime), cleared by the next
     sup-handoff-begin or manually by the operator."""
     return state_dir() / "supervisor-handoff-aborted.json"
+
+
+def read_handoff_abort_flag() -> dict | None:
+    """Best-effort read of the abort flag (M-B T10 fix wave, Finding 2):
+    used by cmd_sup_handoff_abort as fallback evidence when HANDSHAKE is
+    absent. Missing/corrupt file -> None, same tolerance as read_handshake."""
+    try:
+        data = json.loads(handoff_abort_flag_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _write_json_atomic(path: Path, obj: dict) -> None:
@@ -7382,14 +7393,34 @@ def cmd_sup_handoff_abort(args, which=shutil.which, run=subprocess.run) -> int:
 
     Sid cross-check (M-B T10 fix 2): a live HANDSHAKE naming a different sid
     than --successor-sid means the caller is pointed at the wrong session --
-    refuse before touching anything (nothing stopped, no flag written)."""
+    refuse before touching anything (nothing stopped, no flag written).
+
+    BEHAVIOR CHANGE (M-B T10 fix wave, Finding 2 -- Important): absent
+    HANDSHAKE no longer means "unchecked, proceed". Verification order is:
+    (1) HANDSHAKE present -- cross-check its sid as above (mismatch refuses,
+    match proceeds); (2) HANDSHAKE absent -- fall back to the abort flag
+    (`handoff_abort_flag_path()`) written by sup-handoff-begin on a DOA/
+    dispatch-failure; if its `successor_sid` matches --successor-sid,
+    proceed (stopping the recorded limbo successor is the documented duty);
+    (3) HANDSHAKE absent and no matching recorded evidence -- refuse. There
+    is no longer a path where an arbitrary --successor-sid is stopped with
+    zero verification."""
     with fleet_lock():
         claim, caller = _require_claim_holder(getattr(args, "sid", None))
         hs = read_handshake()
-        if hs is not None and hs.get("session_id") != args.successor_sid:
-            raise FleetCliError(
-                f"--successor-sid does not match HANDSHAKE sid {hs.get('session_id')} -- "
-                f"refusing to stop an unrelated session")
+        if hs is not None:
+            if hs.get("session_id") != args.successor_sid:
+                raise FleetCliError(
+                    f"--successor-sid does not match HANDSHAKE sid {hs.get('session_id')} -- "
+                    f"refusing to stop an unrelated session")
+        else:
+            flag = read_handoff_abort_flag()
+            recorded_sid = flag.get("successor_sid") if flag is not None else None
+            if recorded_sid != args.successor_sid:
+                raise FleetCliError(
+                    f"no HANDSHAKE and --successor-sid {args.successor_sid} matches no "
+                    f"recorded limbo successor -- refusing to stop an unverified session "
+                    f"(check claude agents; stop manually if certain)")
         try:
             handshake_path().unlink()
         except FileNotFoundError:

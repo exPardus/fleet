@@ -564,6 +564,7 @@ class TestHandoff:
 
     def test_abort_reports_failed_stop_but_still_flags(self, sup_home, capsys):
         self._hold()
+        fleet.write_handshake("inc-succ", "sid-gone")
         def run(argv, **kw):
             return SimpleNamespace(returncode=1, stdout="", stderr="no such session")
         args = SimpleNamespace(sid="sid-old", successor_sid="sid-gone")
@@ -587,8 +588,7 @@ class TestHandoff:
         kinds = [e["kind"] for e in fleet.supervisor_journal_entries()]
         assert "HANDOFF-ABORT" not in kinds
 
-    def test_handoff_abort_proceeds_on_matching_or_absent_handshake(self, sup_home):
-        # matching HANDSHAKE
+    def test_handoff_abort_proceeds_on_matching_handshake(self, sup_home):
         self._hold()
         fleet.write_handshake("inc-succ", "sid-new")
         run = lambda argv, **kw: SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -597,12 +597,45 @@ class TestHandoff:
         assert fleet.handoff_abort_flag_path().exists()
         assert fleet.read_handshake() is None
 
-        # absent HANDSHAKE
-        fleet.handoff_abort_flag_path().unlink()
+    def test_handoff_abort_proceeds_on_absent_handshake_with_matching_flag(self, sup_home):
+        # Finding 2 fix: with no HANDSHAKE, the recorded limbo successor in
+        # the abort flag (written by sup-handoff-begin on DOA/dispatch-fail)
+        # is the only evidence that makes an absent-HANDSHAKE abort legit.
         self._hold()
-        args2 = SimpleNamespace(sid="sid-old", successor_sid="sid-whatever")
-        assert fleet.cmd_sup_handoff_abort(args2, which=_fake_which, run=run) == 0
+        fleet._write_json_atomic(fleet.handoff_abort_flag_path(), {
+            "aborted_at": fleet.now_iso(), "reason": "successor-doa",
+            "successor_sid": "sid-whatever", "successor_short_id": None,
+            "holder": "inc-old"})
+        run = lambda argv, **kw: SimpleNamespace(returncode=0, stdout="", stderr="")
+        args = SimpleNamespace(sid="sid-old", successor_sid="sid-whatever")
+        assert fleet.cmd_sup_handoff_abort(args, which=_fake_which, run=run) == 0
         assert fleet.handoff_abort_flag_path().exists()
+
+    def test_handoff_abort_refuses_on_absent_handshake_with_mismatched_flag(self, sup_home):
+        self._hold()
+        fleet._write_json_atomic(fleet.handoff_abort_flag_path(), {
+            "aborted_at": fleet.now_iso(), "reason": "successor-doa",
+            "successor_sid": "sid-recorded", "successor_short_id": None,
+            "holder": "inc-old"})
+        calls = []
+        def run(argv, **kw):
+            calls.append(argv)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        args = SimpleNamespace(sid="sid-old", successor_sid="sid-typo")
+        with pytest.raises(fleet.FleetCliError, match="matches no recorded limbo successor"):
+            fleet.cmd_sup_handoff_abort(args, which=_fake_which, run=run)
+        assert not calls   # nothing stopped
+
+    def test_handoff_abort_refuses_on_absent_handshake_and_no_flag(self, sup_home):
+        self._hold()
+        calls = []
+        def run(argv, **kw):
+            calls.append(argv)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        args = SimpleNamespace(sid="sid-old", successor_sid="sid-whatever")
+        with pytest.raises(fleet.FleetCliError, match="matches no recorded limbo successor"):
+            fleet.cmd_sup_handoff_abort(args, which=_fake_which, run=run)
+        assert not calls   # nothing stopped
 
     def test_begin_clears_previous_abort_flag(self, sup_home):
         self._hold()
@@ -612,7 +645,16 @@ class TestHandoff:
 
     def test_handoff_timeout_drill_end_to_end(self, sup_home):
         """Spec §4 failure branch: begin -> successor never handshakes ->
-        complete refuses -> abort stops the limbo successor and old resumes."""
+        complete refuses -> abort stops the limbo successor and old resumes.
+
+        Post-Finding-2-fix: the roster join succeeded here, so begin's DOA/
+        dispatch-failure abort-flag paths never fire and HANDSHAKE is never
+        written (that's the whole point of the drill). Under the new
+        absent-HANDSHAKE rule, abort itself now needs recorded evidence
+        before it will act -- simulate the operator recording the sid
+        printed as SUCCESSOR-SID by begin (external verification is the
+        documented alternative when no flag exists, per the abort
+        docstring)."""
         self._hold()
         rc = self._begin(self._dispatch_then_roster())
         assert rc == 0
@@ -620,6 +662,10 @@ class TestHandoff:
                                expect_inc="inc-whatever", expect_sid="sid-new")
         with pytest.raises(fleet.FleetCliError):   # no HANDSHAKE was written
             fleet.cmd_sup_handoff_complete(args)
+        fleet._write_json_atomic(fleet.handoff_abort_flag_path(), {
+            "aborted_at": fleet.now_iso(), "reason": "operator-recorded",
+            "successor_sid": "sid-new", "successor_short_id": None,
+            "holder": "inc-old"})
         def stop_run(argv, **kw):
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         abort = SimpleNamespace(sid="sid-old", successor_sid="sid-new")
