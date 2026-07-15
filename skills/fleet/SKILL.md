@@ -27,7 +27,7 @@ You are the manager of a fleet of Claude Code worker sessions on this machine. T
 | `fleet result <name>` | Final text of last completed turn only. |
 | `fleet wait <name...> [--any\|--all]` | Block until done. ALWAYS run via Bash `run_in_background` — never sleep-poll. |
 | `fleet attach <name>` / `fleet release <name>` | Human takeover in real TUI / hand back. |
-| `fleet interrupt <name>` | Kill current turn (transcript survives). Follow with `send` to redirect. |
+| `fleet interrupt <name>` | Stop current turn. Legacy: kills the pid, marks idle. Native: `claude stop` + marks `interrupted` (never idle -- respawn is a separate decision). Follow with `send`/`respawn` to redirect. |
 | `fleet respawn <name> [--task <text>] [--force]` | Fresh session_id, same name/cwd/mode/model + journal + drained mailbox. THE context-reset lever. Refuses while a turn is running unless `--force` (interrupts first). `--task` overrides the original task text. |
 | `fleet kill <name>` | Interrupt (if running) and mark dead + event. Terminal — use `respawn` to bring the worker back. |
 | `fleet clean` | Remove dead workers + their logs/mailboxes/journals; prints what was removed. |

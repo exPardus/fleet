@@ -2394,3 +2394,712 @@ class TestCmdRespawnNative:
         after = fleet.load_registry()["workers"]["legacy1"]
         assert after["dispatch_kind"] is None
         assert after["session_id"] != "legacy-sid-0000"
+
+
+# ---------------------------------------------------------------------------
+# M-B Task 8: claude-stop kill/interrupt + tombstones, peek/result rehome,
+# utf-8 stdout, native clean.
+# ---------------------------------------------------------------------------
+
+def _kill_args(name="w1", yes=True):
+    from types import SimpleNamespace
+    return SimpleNamespace(name=name, yes=yes)
+
+
+def _interrupt_args(name="w1"):
+    from types import SimpleNamespace
+    return SimpleNamespace(name=name)
+
+
+def _attach_args(name="w1", force=False):
+    from types import SimpleNamespace
+    return SimpleNamespace(name=name, force=force)
+
+
+def _peek_args(name="w1", lines=20):
+    from types import SimpleNamespace
+    return SimpleNamespace(name=name, lines=lines)
+
+
+def _result_args(name="w1"):
+    from types import SimpleNamespace
+    return SimpleNamespace(name=name)
+
+
+def _clean_args(yes=True):
+    from types import SimpleNamespace
+    return SimpleNamespace(yes=yes)
+
+
+class TestCmdKillNative:
+    def test_launch_in_flight_refuses(self, native_home):
+        rec = fleet.new_worker_record(None, "C:/proj", "t", "accept", dispatch_kind="bg")
+        fleet.save_registry({"workers": {"w1": rec}})
+
+        def boom_run(*a, **kw):
+            raise AssertionError("must not attempt a stop with no real sid yet")
+
+        with pytest.raises(fleet.FleetCliError, match="launch in flight"):
+            fleet.cmd_kill(_kill_args(), run=boom_run, which=lambda _: "claude")
+        assert fleet.load_registry()["workers"]["w1"]["status"] == "working"
+
+    def test_expired_launch_claim_is_not_refused(self, native_home):
+        rec = fleet.new_worker_record(None, "C:/proj", "t", "accept", dispatch_kind="bg")
+        rec["last_activity"] = fleet.ctime_to_iso(
+            datetime.now(timezone.utc) - timedelta(seconds=fleet.LAUNCH_CLAIM_MAX_AGE_SECONDS + 1))
+        fleet.save_registry({"workers": {"w1": rec}})
+
+        rc = fleet.cmd_kill(_kill_args(), run=_fake_run_factory(), which=lambda _: "claude")
+        assert rc == 0
+        assert fleet.load_registry()["workers"]["w1"]["status"] == "dead"
+
+    def test_stops_current_sid_writes_tombstone_marks_dead(self, native_home, capsys):
+        seed_native_worker(native_home, sid=SID, status="working")
+        calls = []
+        rc = fleet.cmd_kill(_kill_args(), run=_fake_run_factory(rc=0, calls=calls), which=lambda _: "claude")
+
+        assert rc == 0
+        assert "killed" in capsys.readouterr().out
+        stop_call = next(c for c in calls if c[0][:2] == ["claude", "stop"])
+        assert stop_call[0] == ["claude", "stop", SID]
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["status"] == "dead"
+        assert rec["turn_pid"] is None
+        outcomes = fleet.read_outcomes("w1", sid=SID)
+        assert any(o["kind"] == "killed" for o in outcomes)
+        assert "killed" in _events_kinds(native_home)
+
+    def test_stops_retired_sids_best_effort(self, native_home):
+        rec = seed_native_worker(native_home, sid=SID, status="working")
+        rec["retired_sids"] = ["retired-1", "retired-2"]
+        fleet.save_registry({"workers": {"w1": rec}})
+        calls = []
+        fleet.cmd_kill(_kill_args(), run=_fake_run_factory(rc=0, calls=calls), which=lambda _: "claude")
+        stopped = {c[0][2] for c in calls if c[0][:2] == ["claude", "stop"]}
+        assert stopped == {SID, "retired-1", "retired-2"}
+
+    # T8 fix wave (adv I1, Important) -- retired-sid sweep wall-time bound.
+
+    def test_retired_sid_stops_use_short_timeout_primary_keeps_full_budget(self, native_home):
+        rec = seed_native_worker(native_home, sid=SID, status="working")
+        rec["retired_sids"] = ["retired-1", "retired-2"]
+        fleet.save_registry({"workers": {"w1": rec}})
+        calls = []
+        fleet.cmd_kill(_kill_args(), run=_fake_run_factory(rc=0, calls=calls), which=lambda _: "claude")
+        stop_calls = {c[0][2]: c[1] for c in calls if c[0][:2] == ["claude", "stop"]}
+        assert stop_calls[SID]["timeout"] == 30
+        assert stop_calls["retired-1"]["timeout"] == fleet._RETIRED_SID_SWEEP_TIMEOUT_SECONDS
+        assert stop_calls["retired-2"]["timeout"] == fleet._RETIRED_SID_SWEEP_TIMEOUT_SECONDS
+        assert fleet._RETIRED_SID_SWEEP_TIMEOUT_SECONDS == 5
+
+    def test_retired_sid_sweep_capped_at_20_most_recent(self, native_home):
+        rec = seed_native_worker(native_home, sid=SID, status="working")
+        rec["retired_sids"] = [f"retired-{i}" for i in range(50)]
+        fleet.save_registry({"workers": {"w1": rec}})
+        calls = []
+        fleet.cmd_kill(_kill_args(), run=_fake_run_factory(rc=0, calls=calls), which=lambda _: "claude")
+        stopped_retired = [c[0][2] for c in calls if c[0][:2] == ["claude", "stop"] and c[0][2] != SID]
+        assert len(stopped_retired) == 20
+        # the 20 MOST RECENT (last 20 of the list), not the first 20.
+        assert set(stopped_retired) == {f"retired-{i}" for i in range(30, 50)}
+
+    def test_retired_sid_sweep_prints_one_progress_line_per_sid(self, native_home, capsys):
+        rec = seed_native_worker(native_home, sid=SID, status="working")
+        rec["retired_sids"] = ["retired1sid", "retired2sid"]
+        fleet.save_registry({"workers": {"w1": rec}})
+        fleet.cmd_kill(_kill_args(), run=_fake_run_factory(rc=0), which=lambda _: "claude")
+        err = capsys.readouterr().err
+        assert "stopping retired session retired1... ok" in err
+        assert "stopping retired session retired2... ok" in err
+
+    def test_retired_sid_sweep_reports_timeout_on_stop_failure(self, native_home, capsys):
+        rec = seed_native_worker(native_home, sid=SID, status="working")
+        rec["retired_sids"] = ["retired1sid"]
+        fleet.save_registry({"workers": {"w1": rec}})
+        fleet.cmd_kill(_kill_args(), run=_fake_run_factory(rc=1), which=lambda _: "claude")
+        err = capsys.readouterr().err
+        assert "stopping retired session retired1... timeout" in err
+
+    # T8 fix wave (adv M1, Minor) -- cross-worker ownership check on a
+    # corrupted/hand-edited registry.
+
+    def test_retired_sid_matching_another_workers_current_sid_is_skipped(self, native_home, capsys):
+        victim_sid = "victim-live-sid"
+        attacker = fleet.new_worker_record(SID, "C:/proj", "t", "accept", dispatch_kind="bg")
+        attacker["status"] = "working"
+        attacker["native_short_id"] = SID[:8]
+        attacker["last_dispatch_at"] = _iso(NOW - timedelta(minutes=5))
+        attacker["retired_sids"] = [victim_sid]
+        victim = fleet.new_worker_record(victim_sid, "C:/proj", "t", "accept", dispatch_kind="bg")
+        victim["status"] = "working"
+        victim["native_short_id"] = victim_sid[:8]
+        victim["last_dispatch_at"] = _iso(NOW - timedelta(minutes=1))
+        fleet.save_registry({"workers": {"attacker": attacker, "victim": victim}})
+
+        calls = []
+        rc = fleet.cmd_kill(_kill_args(name="attacker"),
+                            run=_fake_run_factory(rc=0, calls=calls), which=lambda _: "claude")
+        assert rc == 0
+        stopped = {c[0][2] for c in calls if c[0][:2] == ["claude", "stop"]}
+        assert victim_sid not in stopped
+        assert stopped == {SID}
+        err = capsys.readouterr().err
+        assert "skipping" in err
+        # victim's own registry record is untouched.
+        assert fleet.load_registry()["workers"]["victim"] == victim
+
+    def test_stop_failure_still_marks_dead_but_warns_and_nonzero(self, native_home, capsys):
+        seed_native_worker(native_home, sid=SID, status="working")
+        rc = fleet.cmd_kill(_kill_args(), run=_fake_run_factory(rc=1), which=lambda _: "claude")
+
+        assert rc != 0
+        combined = "".join(capsys.readouterr())
+        assert "w1" in combined
+        assert fleet.load_registry()["workers"]["w1"]["status"] == "dead"
+
+    def test_unknown_worker_raises(self, native_home):
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_kill(_kill_args(name="nope"), which=lambda _: "claude")
+
+    def test_legacy_kill_still_works_byte_identical(self, native_home):
+        # Guard against a regression in the is_native routing itself.
+        rec = fleet.new_worker_record("legacy-sid", "C:/proj", "t", "accept")
+        rec["status"] = "idle"
+        fleet.save_registry({"workers": {"legacy1": rec}})
+
+        rc = fleet.cmd_kill(_kill_args(name="legacy1"), get_process_info=lambda pid: None,
+                            kill_process_tree=lambda pid: None)
+        assert rc == 0
+        assert fleet.load_registry()["workers"]["legacy1"]["status"] == "dead"
+
+
+class TestCmdInterruptNative:
+    def test_marks_interrupted_not_idle(self, native_home):
+        seed_native_worker(native_home, sid=SID, status="working")
+        rc = fleet.cmd_interrupt(_interrupt_args(), run=_fake_run_factory(rc=0), which=lambda _: "claude")
+        assert rc == 0
+        assert fleet.load_registry()["workers"]["w1"]["status"] == "interrupted"
+
+    def test_stops_and_writes_tombstone(self, native_home):
+        seed_native_worker(native_home, sid=SID, status="working")
+        calls = []
+        fleet.cmd_interrupt(_interrupt_args(), run=_fake_run_factory(rc=0, calls=calls), which=lambda _: "claude")
+        stop_call = next(c for c in calls if c[0][:2] == ["claude", "stop"])
+        assert stop_call[0] == ["claude", "stop", SID]
+        outcomes = fleet.read_outcomes("w1", sid=SID)
+        assert any(o["kind"] == "interrupted" for o in outcomes)
+        assert "interrupted" in _events_kinds(native_home)
+
+    def test_prints_respawn_hint(self, native_home, capsys):
+        seed_native_worker(native_home, sid=SID, status="working")
+        fleet.cmd_interrupt(_interrupt_args(), run=_fake_run_factory(rc=0), which=lambda _: "claude")
+        out = capsys.readouterr().out
+        assert "stopped via claude stop" in out
+        assert "marked interrupted" in out
+        assert "fleet respawn w1" in out
+
+    def test_commits_even_when_stop_fails(self, native_home):
+        # G10/respawn's own precedent: the tombstone + status flip commit
+        # regardless of the stop's own exit code -- an operator-initiated
+        # stop was genuinely attempted either way.
+        seed_native_worker(native_home, sid=SID, status="working")
+        rc = fleet.cmd_interrupt(_interrupt_args(), run=_fake_run_factory(rc=1), which=lambda _: "claude")
+        assert rc == 0
+        assert fleet.load_registry()["workers"]["w1"]["status"] == "interrupted"
+
+    def test_launch_in_flight_refuses(self, native_home):
+        # T8 fix wave (adv C1): a dispatch pre-claim (no real sid yet) now
+        # refuses loudly (exit 1) rather than a silent friendly no-op --
+        # a dispatch may still land any moment and the operator should
+        # know interrupt did nothing, not assume it succeeded.
+        rec = fleet.new_worker_record(None, "C:/proj", "t", "accept", dispatch_kind="bg")
+        fleet.save_registry({"workers": {"w1": rec}})
+
+        def boom_run(*a, **kw):
+            raise AssertionError("must not attempt a stop with no real sid yet")
+
+        rc = fleet.cmd_interrupt(_interrupt_args(), run=boom_run, which=lambda _: "claude")
+        assert rc == 1
+        assert fleet.load_registry()["workers"]["w1"]["status"] == "working"
+
+    # T8 fix wave (adv C1, CRITICAL) -- status guard: interrupt only ever
+    # fires `claude stop` + tombstone + status flip on a `working` verdict.
+    # Every other status either friendly-no-ops or refuses loudly, and
+    # NEVER touches the registry or fires a stop call.
+
+    def test_dead_is_a_noop_never_un_terminals(self, native_home):
+        # Trap: pre-fix, this silently overwrote a sticky `dead` status to
+        # `interrupted` with rc==0 and fired a live `claude stop` against a
+        # sid fleet's own registry already called gone.
+        seed_native_worker(native_home, sid=SID, status="dead")
+
+        def boom_run(*a, **kw):
+            raise AssertionError("must not claude-stop a sid already marked dead")
+
+        rc = fleet.cmd_interrupt(_interrupt_args(), run=boom_run, which=lambda _: "claude")
+        assert rc == 0
+        assert fleet.load_registry()["workers"]["w1"]["status"] == "dead"
+
+    def test_already_interrupted_is_a_noop(self, native_home):
+        seed_native_worker(native_home, sid=SID, status="interrupted")
+
+        def boom_run(*a, **kw):
+            raise AssertionError("must not claude-stop an already-interrupted sid")
+
+        rc = fleet.cmd_interrupt(_interrupt_args(), run=boom_run, which=lambda _: "claude")
+        assert rc == 0
+        assert fleet.load_registry()["workers"]["w1"]["status"] == "interrupted"
+
+    def test_idle_is_a_noop(self, native_home):
+        seed_native_worker(native_home, sid=SID, status="idle")
+
+        def boom_run(*a, **kw):
+            raise AssertionError("must not claude-stop a finished (idle) sid")
+
+        rc = fleet.cmd_interrupt(_interrupt_args(), run=boom_run, which=lambda _: "claude")
+        assert rc == 0
+        assert fleet.load_registry()["workers"]["w1"]["status"] == "idle"
+
+    def test_limited_refuses_and_is_preserved_for_resume_limited(self, native_home, capsys):
+        # Adversarial doc's own named repro: interrupting a `limited`
+        # worker used to silently drop it out of `resume-limited`'s
+        # `status == "limited"` filter forever, permanently breaking
+        # usage-limit auto-continuity (spec Sec5.1.1) with rc==0 and no
+        # signal. Must now refuse loudly and leave status untouched.
+        rec = seed_native_worker(native_home, sid=SID, status="limited")
+        rec["limit_reset_at"] = _iso(NOW + timedelta(hours=1))
+        rec["limit_kind"] = "plan_usage"
+        fleet.save_registry({"workers": {"w1": rec}})
+
+        def boom_run(*a, **kw):
+            raise AssertionError("must not claude-stop a parked (limited) sid")
+
+        rc = fleet.cmd_interrupt(_interrupt_args(), run=boom_run, which=lambda _: "claude")
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "limited" in err and "resume-limited" in err
+        workers = fleet.load_registry()["workers"]
+        assert workers["w1"]["status"] == "limited"
+        assert {n for n, r in workers.items() if r["status"] == "limited"} == {"w1"}
+
+    def test_dead_suspected_refuses_with_investigate_hint(self, native_home, capsys):
+        seed_native_worker(native_home, sid=SID, status="dead-suspected")
+
+        def boom_run(*a, **kw):
+            raise AssertionError("must not claude-stop a dead-suspected sid")
+
+        rc = fleet.cmd_interrupt(_interrupt_args(), run=boom_run, which=lambda _: "claude")
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "dead-suspected" in err
+        assert "peek" in err or "result" in err
+        assert fleet.load_registry()["workers"]["w1"]["status"] == "dead-suspected"
+
+    def test_other_sticky_status_refuses_generically(self, native_home, capsys):
+        # attached/over_ceiling/over_budget: not explicitly named by the
+        # contract, but none of them is a plain live turn either -- the
+        # generic default branch must still refuse rather than silently
+        # overwrite.
+        seed_native_worker(native_home, sid=SID, status="attached")
+
+        def boom_run(*a, **kw):
+            raise AssertionError("must not claude-stop an attached sid")
+
+        rc = fleet.cmd_interrupt(_interrupt_args(), run=boom_run, which=lambda _: "claude")
+        assert rc == 1
+        assert fleet.load_registry()["workers"]["w1"]["status"] == "attached"
+
+    def test_tombstone_prevents_dead_suspected_on_next_recompute(self, native_home):
+        rec = seed_native_worker(native_home, sid=SID, status="working")
+        fleet.cmd_interrupt(_interrupt_args(), run=_fake_run_factory(rc=0), which=lambda _: "claude")
+
+        after_interrupt = fleet.load_registry()["workers"]["w1"]
+        assert after_interrupt["status"] == "interrupted"
+
+        # Roster shows the sid gone entirely (as a real `claude stop` would
+        # leave it) -- a non-sticky verdict would investigate and land on
+        # dead-suspected; `interrupted` is in _NATIVE_STICKY, so it must not.
+        verdict = fleet.recompute_worker_native("w1", after_interrupt, [])
+        assert verdict["status"] == "interrupted"
+
+    def test_legacy_interrupt_still_works_byte_identical(self, native_home):
+        ctime_iso = "2026-07-07T12:00:00Z"
+        rec = fleet.new_worker_record("legacy-sid", "C:/proj", "t", "accept")
+        rec["turn_pid"] = 111
+        rec["turn_pid_ctime"] = ctime_iso
+        fleet.save_registry({"workers": {"legacy1": rec}})
+
+        killed = {"done": False}
+
+        def kill_process_tree(pid):
+            killed["done"] = True
+
+        def get_process_info(pid):
+            if killed["done"]:
+                return None
+            return ("claude.exe", datetime.strptime(ctime_iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc))
+
+        rc = fleet.cmd_interrupt(_interrupt_args(name="legacy1"),
+                                 get_process_info=get_process_info,
+                                 kill_process_tree=kill_process_tree)
+        assert rc == 0
+        assert fleet.load_registry()["workers"]["legacy1"]["status"] == "idle"
+
+
+class TestCmdResultNative:
+    def test_prints_result_text_and_token_line(self, native_home, capsys):
+        seed_native_worker(native_home, sid=SID, status="idle")
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": SID, "kind": "result",
+                                    "result_text": "all done", "input_tokens": 10,
+                                    "output_tokens": 20, "model": "claude-haiku-4-5"})
+        rc = fleet.cmd_result(_result_args())
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert captured.out.strip() == "all done"
+        assert "in=10" in captured.err
+        assert "out=20" in captured.err
+        assert "claude-haiku-4-5" in captured.err
+
+    def test_no_record_exit_1(self, native_home, capsys):
+        seed_native_worker(native_home, sid=SID, status="working")
+        rc = fleet.cmd_result(_result_args())
+        assert rc == 1
+        assert "no outcome record" in capsys.readouterr().err
+
+    def test_tombstone_no_result_exit_1(self, native_home, capsys):
+        seed_native_worker(native_home, sid=SID, status="interrupted")
+        fleet.write_tombstone_outcome("w1", SID, "interrupted")
+        rc = fleet.cmd_result(_result_args())
+        assert rc == 1
+        assert "interrupted" in capsys.readouterr().err
+
+    def test_null_result_text_treated_as_no_result(self, native_home, capsys):
+        seed_native_worker(native_home, sid=SID, status="idle")
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": SID, "kind": "result",
+                                    "result_text": None})
+        rc = fleet.cmd_result(_result_args())
+        assert rc == 1
+        assert capsys.readouterr().out == ""
+
+    def test_only_current_sid_outcome_counts(self, native_home, capsys):
+        old_sid = "old-sid-0000"
+        seed_native_worker(native_home, sid=SID, status="idle", retired_sids=[old_sid])
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": old_sid, "kind": "result",
+                                    "result_text": "stale from a prior fork"})
+        rc = fleet.cmd_result(_result_args())
+        assert rc == 1
+        assert "stale from a prior fork" not in capsys.readouterr().out
+
+    def test_launch_in_flight_exit_1(self, native_home, capsys):
+        rec = fleet.new_worker_record(None, "C:/proj", "t", "accept", dispatch_kind="bg")
+        fleet.save_registry({"workers": {"w1": rec}})
+        rc = fleet.cmd_result(_result_args())
+        assert rc == 1
+        assert "no outcome record" in capsys.readouterr().err
+
+    def test_unknown_worker_raises(self, native_home):
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_result(_result_args(name="nope"))
+
+    def test_legacy_result_still_works_byte_identical(self, native_home):
+        rec = fleet.new_worker_record("legacy-sid", "C:/proj", "t", "accept")
+        fleet.save_registry({"workers": {"legacy1": rec}})
+        log_path = fleet.logs_dir() / "legacy1.jsonl"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(json.dumps({"type": "result", "result": "hi", "usage": {},
+                                        "total_cost_usd": 0.0}) + "\n", encoding="utf-8")
+        rc = fleet.cmd_result(_result_args(name="legacy1"))
+        assert rc == 0
+
+
+class TestCmdPeekNative:
+    def _write_transcript(self, home, sid, records):
+        path = home / "transcript.jsonl"
+        lines = []
+        for r in records:
+            lines.append(r if isinstance(r, str) else json.dumps(r))
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": sid, "kind": "result",
+                                    "transcript_path": str(path), "result_text": "ok"})
+        return path
+
+    def test_renders_assistant_tool_and_user_lines(self, native_home, capsys):
+        seed_native_worker(native_home, sid=SID, status="working")
+        self._write_transcript(native_home, SID, [
+            {"type": "system", "message": {}},
+            "not valid json {{{",
+            {"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "Hello world"},
+                {"type": "tool_use", "name": "Bash"},
+            ]}},
+            {"type": "user", "message": {"content": [{"type": "text", "text": "do the thing"}]},
+             "isMeta": False},
+            {"type": "user", "message": {"content": [{"type": "text", "text": "synthetic reminder"}]},
+             "isMeta": True},
+        ])
+        rc = fleet.cmd_peek(_peek_args())
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "[text] Hello world" in out
+        assert "[tool] Bash" in out
+        assert "[user] do the thing" in out
+        assert "[user:meta] synthetic reminder" in out
+
+    def test_no_transcript_exit_1(self, native_home, capsys):
+        seed_native_worker(native_home, sid=SID, status="working")
+        rc = fleet.cmd_peek(_peek_args())
+        assert rc == 1
+        assert capsys.readouterr().err
+
+    def test_launch_in_flight_exit_1(self, native_home, capsys):
+        rec = fleet.new_worker_record(None, "C:/proj", "t", "accept", dispatch_kind="bg")
+        fleet.save_registry({"workers": {"w1": rec}})
+        rc = fleet.cmd_peek(_peek_args())
+        assert rc == 1
+        assert capsys.readouterr().err
+
+    def test_works_mid_turn(self, native_home, capsys):
+        # Peek's whole point: no completed-turn outcome required, just a
+        # transcript to tail.
+        seed_native_worker(native_home, sid=SID, status="working")
+        path = native_home / "transcript.jsonl"
+        path.write_text(json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "still working"}]}}) + "\n", encoding="utf-8")
+        import fleet as fleet_mod
+        orig = fleet_mod.find_transcript_path
+        try:
+            fleet_mod.find_transcript_path = lambda name, sid: path
+            rc = fleet.cmd_peek(_peek_args())
+        finally:
+            fleet_mod.find_transcript_path = orig
+        assert rc == 0
+        assert "[text] still working" in capsys.readouterr().out
+
+    def test_unknown_worker_raises(self, native_home):
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_peek(_peek_args(name="nope"))
+
+    def test_legacy_peek_still_works_byte_identical(self, native_home):
+        rec = fleet.new_worker_record("legacy-sid", "C:/proj", "t", "accept")
+        fleet.save_registry({"workers": {"legacy1": rec}})
+        rc = fleet.cmd_peek(_peek_args(name="legacy1"))
+        assert rc == 0
+
+
+class TestCmdAttachNative:
+    def test_refuses_with_hint(self, native_home):
+        seed_native_worker(native_home, sid=SID, status="idle")
+        with pytest.raises(fleet.FleetCliError, match="native worker"):
+            fleet.cmd_attach(_attach_args())
+
+    def test_message_names_the_sid(self, native_home):
+        seed_native_worker(native_home, sid=SID, status="idle")
+        with pytest.raises(fleet.FleetCliError, match=SID):
+            fleet.cmd_attach(_attach_args())
+
+    def test_registry_untouched(self, native_home):
+        seed_native_worker(native_home, sid=SID, status="idle")
+        before = fleet.load_registry()["workers"]["w1"]
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_attach(_attach_args())
+        assert fleet.load_registry()["workers"]["w1"] == before
+
+    def test_refuses_even_with_force(self, native_home):
+        seed_native_worker(native_home, sid=SID, status="working")
+        with pytest.raises(fleet.FleetCliError, match="native worker"):
+            fleet.cmd_attach(_attach_args(force=True))
+
+    def test_unknown_worker_raises(self, native_home):
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_attach(_attach_args(name="nope"))
+
+
+class TestCmdCleanNative:
+    def test_deletes_dead_and_sweeps_files(self, native_home, monkeypatch):
+        # T8 fix wave (review CRITICAL): native clean is dead-ONLY, exact
+        # legacy parity -- idle and interrupted are proven NOT deleted by
+        # the dedicated regression tests below.
+        data = {"workers": {}}
+        for name, status in (("dead-w1", "dead"), ("dead-w2", "dead")):
+            rec = fleet.new_worker_record(f"{name}-sid", "C:/proj", "do it", "accept", dispatch_kind="bg")
+            rec["status"] = status
+            rec["native_short_id"] = f"{name}-sid"[:8]
+            rec["last_dispatch_at"] = _iso(NOW - timedelta(minutes=5))
+            data["workers"][name] = rec
+        fleet.save_registry(data)
+        for name, _status in (("dead-w1", "dead"), ("dead-w2", "dead")):
+            fleet.append_outcome(name, {"ts": _iso(NOW), "session_id": f"{name}-sid",
+                                        "kind": "result", "result_text": "done"})
+            task_file = fleet.task_file_path(name)
+            task_file.parent.mkdir(parents=True, exist_ok=True)
+            task_file.write_text("the task", encoding="utf-8")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
+
+        rc = fleet.cmd_clean(_clean_args())
+        assert rc == 0
+        workers = fleet.load_registry()["workers"]
+        assert workers == {}
+        for name in ("dead-w1", "dead-w2"):
+            assert not fleet.outcome_path(name).exists()
+            assert not fleet.outcome_path(f"{name}-sid").exists()
+            assert not fleet.task_file_path(name).exists()
+
+    def test_never_deletes_idle(self, native_home, monkeypatch):
+        # T8 fix wave (review CRITICAL): an earlier revision swept `idle`
+        # native workers on a false "matches today's legacy semantics"
+        # premise -- legacy is dead-only (confirmed against 8e79dbe).
+        # `idle` means finished-and-still-steerable; a native worker's own
+        # `claude --resume` survives regardless, but fleet's OWN
+        # bookkeeping (registry entry, outcomes, task file) must not
+        # vanish out from under an operator who can still `fleet send` it.
+        seed_native_worker(native_home, sid=SID, status="idle")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
+        fleet.cmd_clean(_clean_args())
+        assert "w1" in fleet.load_registry()["workers"]
+
+    def test_never_deletes_interrupted(self, native_home, monkeypatch):
+        # T8 fix wave (binding contract): `interrupted` is respawn-eligible
+        # by design -- an operator who wants to abandon it kills it first
+        # (which recomputes to `dead`, then IS swept). `clean` sweeping
+        # `interrupted` directly would remove that explicit choice.
+        seed_native_worker(native_home, sid=SID, status="interrupted")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
+        fleet.cmd_clean(_clean_args())
+        assert "w1" in fleet.load_registry()["workers"]
+
+    def test_sweeps_retired_sid_outcome_and_ceiling_files(self, native_home, monkeypatch):
+        rec = seed_native_worker(native_home, name="w1", sid=SID, status="dead",
+                                 retired_sids=["old-1", "old-2"])
+        for s in ["old-1", "old-2", SID]:
+            fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": s, "kind": "result"})
+            fleet.ceiling_file_path(s).parent.mkdir(parents=True, exist_ok=True)
+            fleet.ceiling_file_path(s).write_text("100", encoding="utf-8")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
+
+        fleet.cmd_clean(_clean_args())
+        for s in ["old-1", "old-2", SID]:
+            assert not fleet.outcome_path(s).exists()
+            assert not fleet.ceiling_file_path(s).exists()
+
+    def test_never_deletes_dead_suspected(self, native_home, monkeypatch):
+        seed_native_worker(native_home, sid=SID, status="dead-suspected")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
+        fleet.cmd_clean(_clean_args())
+        assert "w1" in fleet.load_registry()["workers"]
+
+    def test_never_deletes_limited(self, native_home, monkeypatch):
+        seed_native_worker(native_home, sid=SID, status="limited")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
+        fleet.cmd_clean(_clean_args())
+        assert "w1" in fleet.load_registry()["workers"]
+
+    def test_never_deletes_working(self, native_home, monkeypatch):
+        seed_native_worker(native_home, sid=SID, status="working")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            lambda **_: (True, [make_roster_entry(SID, status="busy")]))
+        fleet.cmd_clean(_clean_args())
+        assert "w1" in fleet.load_registry()["workers"]
+
+    def test_epoch_frozen_refuses_native_but_legacy_proceeds(self, native_home, monkeypatch, capsys):
+        seed_native_worker(native_home, name="native-w", sid=SID, status="dead")
+        legacy = fleet.new_worker_record("legacy-sid", "C:/proj", "t", "accept")
+        legacy["status"] = "working"
+        legacy["turn_pid"] = 111
+        legacy["turn_pid_ctime"] = fleet.ctime_to_iso(datetime.now(timezone.utc))
+        data = fleet.load_registry()
+        data["workers"]["legacy-w"] = legacy
+        fleet.save_registry(data)
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (False, "roster fetch failed"))
+
+        def get_process_info(pid):
+            return None  # legacy-w recomputes to dead
+
+        rc = fleet.cmd_clean(_clean_args(), get_process_info=get_process_info, sleep=lambda s: None)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "EPOCH" in out
+        workers = fleet.load_registry()["workers"]
+        assert "native-w" in workers  # frozen -- untouched
+        assert "legacy-w" not in workers  # legacy cleaning proceeds unaffected
+
+    def test_unrelated_worker_untouched_when_no_native_records(self, native_home):
+        rec = fleet.new_worker_record("legacy-sid", "C:/proj", "t", "accept")
+        rec["status"] = "idle"
+        fleet.save_registry({"workers": {"legacy1": rec}})
+        # A genuinely idle legacy record needs a trailing-result log line to
+        # recompute as "idle" rather than "dead" (no pid, no log evidence).
+        log_path = fleet.logs_dir() / "legacy1.jsonl"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(json.dumps({"type": "result", "result": "hi", "usage": {},
+                                        "total_cost_usd": 0.0}) + "\n", encoding="utf-8")
+
+        def boom_roster(**kw):
+            raise AssertionError("must not fetch the roster with no native worker in the registry")
+
+        import fleet as fleet_mod
+        monkeypatch_target = fleet_mod._fetch_agents_roster
+        fleet_mod._fetch_agents_roster = boom_roster
+        try:
+            rc = fleet.cmd_clean(_clean_args())
+        finally:
+            fleet_mod._fetch_agents_roster = monkeypatch_target
+        assert rc == 0
+        assert "legacy1" in fleet.load_registry()["workers"]
+
+
+class TestMainUtf8Reconfigure:
+    def test_main_reconfigures_stdout_and_stderr(self, native_home, monkeypatch):
+        calls = []
+
+        class FakeStream:
+            def __init__(self, real):
+                self._real = real
+            def reconfigure(self, **kw):
+                calls.append(kw)
+            def __getattr__(self, item):
+                return getattr(self._real, item)
+
+        import sys
+        fake_out, fake_err = FakeStream(sys.stdout), FakeStream(sys.stderr)
+        monkeypatch.setattr(sys, "stdout", fake_out)
+        monkeypatch.setattr(sys, "stderr", fake_err)
+
+        rc = fleet.main(["status", "--stale-ok"])
+        assert rc == 0
+        assert len(calls) == 2
+        for kw in calls:
+            assert kw == {"encoding": "utf-8", "errors": "replace"}
+
+    def test_reconfigure_failure_is_swallowed(self, native_home, monkeypatch):
+        class BoomStream:
+            def reconfigure(self, **kw):
+                raise ValueError("no can do")
+            def __getattr__(self, item):
+                import sys
+                return getattr(sys.__stdout__, item)
+
+        import sys
+        monkeypatch.setattr(sys, "stdout", BoomStream())
+        # Must not raise -- the reconfigure failure is swallowed and main()
+        # proceeds normally.
+        rc = fleet.main(["status", "--stale-ok"])
+        assert rc == 0
+
+    def test_subprocess_smoke_unicode_result_survives_default_codepage(self, native_home):
+        sid = SID
+        seed_native_worker(native_home, sid=sid, status="idle")
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": sid, "kind": "result",
+                                    "result_text": "✓ 完了 émoji",
+                                    "input_tokens": 1, "output_tokens": 1})
+        env = dict(os.environ)
+        env["FLEET_HOME"] = str(native_home)
+        env.pop("PYTHONIOENCODING", None)
+        proc = subprocess.run(
+            [*PY_CMD, str(REPO_ROOT / "bin" / "fleet.py"), "result", "w1"],
+            capture_output=True, env=env, timeout=15,
+        )
+        assert proc.returncode == 0, proc.stderr.decode("utf-8", errors="replace")
+        stdout_text = proc.stdout.decode("utf-8")
+        assert "✓ 完了 émoji" in stdout_text
+        stderr_text = proc.stderr.decode("utf-8", errors="replace")
+        assert "UnicodeEncodeError" not in stderr_text
