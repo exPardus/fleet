@@ -1422,6 +1422,52 @@ class TestNativeResumeLimited:
         assert rc == 0
         assert fleet.load_registry()["workers"]["w1"]["status"] == "limited"
 
+    def test_resume_removes_old_ceiling_file(self, native_home, monkeypatch):
+        # T7 fix wave (Minor, ceiling-file leak): mirrors send's fork-steer
+        # cleanup for resume-limited's own native branch.
+        old_sid = SID
+        new_sid = "ccccdddd-9999-8888-7777-666655554444"
+        seed_native_worker(native_home, sid=old_sid, status="limited",
+                           limit_reset_at="2026-07-15T00:00:00Z", token_ceiling=5000)
+        fleet._write_ceiling_file(old_sid, 5000)
+        assert fleet.ceiling_file_path(old_sid).exists()
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_with(new_sid))
+        from types import SimpleNamespace
+        args = SimpleNamespace(name="w1", force_now=False)
+        rc = fleet.cmd_resume_limited(
+            args, run=_fake_run_factory(stdout="backgrounded · ccccdddd · fleet|w1|resume\n"),
+            which=lambda _: "claude", sleep=lambda s: None)
+        assert rc == 0
+        assert not fleet.ceiling_file_path(old_sid).exists()
+        assert fleet.ceiling_file_path(new_sid).exists()
+
+    def test_resume_migrates_residual_old_sid_mailbox_at_commit(self, native_home, monkeypatch):
+        # T7 fix wave (CRITICAL-2 fix 2c): resume-limited's own fork-steer
+        # commit must also migrate a residual OLD-sid mailbox onto the new
+        # fork, mirroring send's own commit -- exercised directly here
+        # (rather than a full concurrent-actor race) by monkeypatching in
+        # a spy that records the call.
+        old_sid = SID
+        new_sid = "ccccdddd-9999-8888-7777-666655554444"
+        seed_native_worker(native_home, sid=old_sid, status="limited",
+                           limit_reset_at="2026-07-15T00:00:00Z")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_with(new_sid))
+        migrate_calls = []
+        real_migrate = fleet._migrate_residual_mailbox
+
+        def spy_migrate(old, new):
+            migrate_calls.append((old, new))
+            return real_migrate(old, new)
+
+        monkeypatch.setattr(fleet, "_migrate_residual_mailbox", spy_migrate)
+        from types import SimpleNamespace
+        args = SimpleNamespace(name="w1", force_now=False)
+        rc = fleet.cmd_resume_limited(
+            args, run=_fake_run_factory(stdout="backgrounded · ccccdddd · fleet|w1|resume\n"),
+            which=lambda _: "claude", sleep=lambda s: None)
+        assert rc == 0
+        assert migrate_calls == [(old_sid, new_sid)]
+
 
 # ---------------------------------------------------------------------------
 # M-B Task 6 fix wave (task-6-adversarial.md): C1 OSError-proof scan, C2
@@ -1756,6 +1802,189 @@ class TestCmdSendNative:
         mailbox = fleet.mailbox_dir() / f"{old_sid}.md"
         assert "go" in mailbox.read_text(encoding="utf-8")
 
+    # -----------------------------------------------------------------
+    # T7 fix wave (task-7-adversarial.md CRITICAL-1): send during an
+    # in-flight dispatch (session_id is None) must refuse loudly, never
+    # silently swallow the message into mailbox/None.md.
+    # -----------------------------------------------------------------
+    def test_send_during_dispatch_window_refuses_no_mailbox_none(self, native_home, monkeypatch):
+        seed_native_worker(native_home, sid=SID, status="working",
+                           session_id=None, last_activity=fleet.now_iso())
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
+
+        def run(*a, **kw):
+            raise AssertionError("must not dispatch while a launch-claim is in flight")
+
+        with pytest.raises(fleet.FleetCliError, match="dispatch in flight"):
+            fleet.cmd_send(_send_args(message="hello"), run=run,
+                           which=lambda _: "claude", sleep=lambda s: None)
+        assert not (fleet.mailbox_dir() / "None.md").exists()
+        # no other mailbox file was created either -- the message was
+        # refused outright, not queued anywhere.
+        assert list(fleet.mailbox_dir().glob("*.md")) == []
+
+    # -----------------------------------------------------------------
+    # T7 fix wave (task-7-adversarial.md CRITICAL-2): a second, fully
+    # independent `fleet send` landing while the first's fork-steer
+    # dispatch is still in flight must queue to the mailbox instead of
+    # double-forking the same idle worker.
+    # -----------------------------------------------------------------
+    def test_reentrant_second_send_during_dispatch_queues_not_double_forks(
+            self, native_home, monkeypatch):
+        old_sid = SID
+        new_sid = "ccccdddd-9999-8888-7777-666655554444"
+        seed_native_worker(native_home, sid=old_sid, status="idle")
+        # The outcome from old_sid's ACTUAL last turn -- fixed, in the past
+        # relative to real wall-clock test execution, so it looks fresh
+        # against the ORIGINAL last_dispatch_at (5 minutes before NOW) but
+        # stale against a freshly-restamped one (FIX-2a).
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": old_sid, "kind": "result"})
+
+        # old_sid stays "idle" in the roster throughout -- the NEW fork
+        # landing under a brand-new sid is invisible to old_sid's own
+        # roster entry. new_sid only appears once dispatch_bg's join poll
+        # goes looking for it (call #4+).
+        roster_answers = _roster_sequence(
+            (True, [make_roster_entry(old_sid, status="idle")]),  # 1: outer verdict fetch
+            (True, [make_roster_entry(old_sid, status="idle")]),  # 2: dispatch_bg pre-dispatch snapshot
+            (True, [make_roster_entry(old_sid, status="idle")]),  # 3: inner send's own verdict fetch
+            (True, [make_roster_entry(old_sid, status="idle"),
+                    make_roster_entry(new_sid, status="idle")]),  # 4+: outer's join poll
+        )
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", roster_answers)
+
+        real_getpid = os.getpid
+        dispatch_calls = []
+        inner_rc = {}
+
+        def inner_run(*a, **kw):
+            raise AssertionError("the reentrant (inner) send must not dispatch at all")
+
+        def run(argv, **kw):
+            dispatch_calls.append(argv)
+            if len(dispatch_calls) == 1:
+                # Simulate a second, fully independent `fleet send` OS
+                # process landing while the first's dispatch subprocess is
+                # in flight -- distinct pid so the two mailbox claims can
+                # never collide on the same claimed-filename.
+                monkeypatch.setattr(os, "getpid", lambda: real_getpid() + 1)
+                try:
+                    inner_rc["rc"] = fleet.cmd_send(
+                        _send_args(message="inner"), run=inner_run,
+                        which=lambda _: "claude", sleep=lambda s: None,
+                    )
+                finally:
+                    monkeypatch.setattr(os, "getpid", real_getpid)
+            import types
+            return types.SimpleNamespace(
+                returncode=0, stdout="backgrounded · ccccdddd · fleet|w1|outer\n", stderr="")
+
+        rc = fleet.cmd_send(_send_args(message="outer"), run=run,
+                            which=lambda _: "claude", sleep=lambda s: None)
+        assert rc == 0
+        assert inner_rc["rc"] == 0
+
+        # Exactly ONE real "claude --bg" dispatch happened.
+        bg_dispatches = [c for c in dispatch_calls if "--bg" in c]
+        assert len(bg_dispatches) == 1
+
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["session_id"] == new_sid
+        assert rec["retired_sids"] == [old_sid]
+        events = _events_kinds(native_home)
+        assert events.count("steered") == 1
+
+        # The inner message raced into old_sid's mailbox AFTER
+        # compose_prompt had already claimed/drained it for the outer
+        # dispatch -- FIX-2c must migrate it onto the new sid at commit,
+        # not strand it under a sid the registry will never reference again.
+        assert not (fleet.mailbox_dir() / f"{old_sid}.md").exists()
+        new_mailbox = fleet.mailbox_dir() / f"{new_sid}.md"
+        assert new_mailbox.exists()
+        assert "inner" in new_mailbox.read_text(encoding="utf-8")
+
+    def test_fork_steer_removes_old_ceiling_file(self, native_home, monkeypatch):
+        old_sid = SID
+        new_sid = "ccccdddd-9999-8888-7777-666655554444"
+        seed_native_worker(native_home, sid=old_sid, status="idle", token_ceiling=5000)
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": old_sid, "kind": "result"})
+        fleet._write_ceiling_file(old_sid, 5000)
+        assert fleet.ceiling_file_path(old_sid).exists()
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_sequence(
+            (True, []), (True, []), (True, [make_roster_entry(new_sid, status="idle")]),
+        ))
+        rc = fleet.cmd_send(
+            _send_args(message="go"),
+            run=_fake_run_factory(stdout="backgrounded · ccccdddd · fleet|w1|go\n"),
+            which=lambda _: "claude", sleep=lambda s: None,
+        )
+        assert rc == 0
+        assert not fleet.ceiling_file_path(old_sid).exists()
+        assert fleet.ceiling_file_path(new_sid).exists()
+
+    def test_steered_event_only_appended_when_record_still_present(self, native_home, monkeypatch):
+        # T7 fix wave (Minor, event-append symmetry): a concurrent
+        # kill/clean racing the post-dispatch commit window must not leave
+        # a "steered" event behind when no registry mutation happened.
+        old_sid = SID
+        new_sid = "ccccdddd-9999-8888-7777-666655554444"
+        seed_native_worker(native_home, sid=old_sid, status="idle")
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": old_sid, "kind": "result"})
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_sequence(
+            (True, []), (True, []), (True, [make_roster_entry(new_sid, status="idle")]),
+        ))
+
+        def run(argv, **kw):
+            if "--bg" in argv:
+                # Model a concurrent kill/clean: the worker record vanishes
+                # entirely between dispatch and the post-dispatch commit.
+                data = fleet.load_registry()
+                data["workers"].pop("w1", None)
+                fleet.save_registry(data)
+            import types
+            return types.SimpleNamespace(
+                returncode=0, stdout="backgrounded · ccccdddd · fleet|w1|go\n", stderr="")
+
+        rc = fleet.cmd_send(_send_args(message="go"), run=run,
+                            which=lambda _: "claude", sleep=lambda s: None)
+        assert rc == 0
+        assert fleet.load_registry()["workers"] == {}
+        assert "steered" not in _events_kinds(native_home)
+
+
+class TestMigrateResidualMailbox:
+    """T7 fix wave (CRITICAL-2 fix 2c): a steering message that raced into
+    the OLD sid's mailbox after compose_prompt already claimed/drained it
+    must follow the worker onto the NEW sid at the steer-restamp commit."""
+
+    def test_moves_content_and_unlinks_old(self, native_home):
+        fleet.append_mailbox("old-sid", "residual message")
+        fleet._migrate_residual_mailbox("old-sid", "new-sid")
+        assert not (fleet.mailbox_dir() / "old-sid.md").exists()
+        new_mailbox = fleet.mailbox_dir() / "new-sid.md"
+        assert "residual message" in new_mailbox.read_text(encoding="utf-8")
+
+    def test_appends_to_existing_new_mailbox(self, native_home):
+        fleet.append_mailbox("new-sid", "already queued")
+        fleet.append_mailbox("old-sid", "residual message")
+        fleet._migrate_residual_mailbox("old-sid", "new-sid")
+        content = (fleet.mailbox_dir() / "new-sid.md").read_text(encoding="utf-8")
+        assert "already queued" in content
+        assert "residual message" in content
+        assert content.index("already queued") < content.index("residual message")
+
+    def test_noop_when_old_absent(self, native_home):
+        fleet._migrate_residual_mailbox("old-sid", "new-sid")
+        assert not (fleet.mailbox_dir() / "new-sid.md").exists()
+
+    def test_unlinks_whitespace_only_old_without_creating_new(self, native_home):
+        path = fleet.mailbox_dir() / "old-sid.md"
+        fleet.mailbox_dir().mkdir(parents=True, exist_ok=True)
+        path.write_text("   \n\n  ", encoding="utf-8")
+        fleet._migrate_residual_mailbox("old-sid", "new-sid")
+        assert not path.exists()
+        assert not (fleet.mailbox_dir() / "new-sid.md").exists()
+
 
 class TestCmdRespawnNative:
     def test_fresh_dispatch_carries_journal_no_resume(self, native_home, monkeypatch, tmp_path):
@@ -1811,11 +2040,14 @@ class TestCmdRespawnNative:
     def test_force_stops_old_and_tombstones(self, native_home, monkeypatch):
         old_sid = SID
         seed_native_worker(native_home, sid=old_sid, status="working")
-        # 1st roster fetch (liveness check): old sid live. 2nd+ (dispatch_bg's
-        # pre/join snapshots): old sid gone, new sid present.
+        # 1st roster fetch (liveness check): old sid live. 2nd (T7 fix wave:
+        # post-stop re-verify, ALWAYS run now, even on a reported-successful
+        # stop): old sid gone. 3rd (dispatch_bg's pre-dispatch snapshot):
+        # still gone. 4th+ (join poll): new sid present.
         new_sid = "ccccdddd-9999-8888-7777-666655554444"
         monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_sequence(
             (True, [make_roster_entry(old_sid, status="busy")]),
+            (True, []),
             (True, []),
             (True, [make_roster_entry(new_sid, status="idle")]),
         ))
@@ -1884,6 +2116,163 @@ class TestCmdRespawnNative:
             which=lambda _: "claude", sleep=lambda s: None,
         )
         assert rotate_calls == []
+
+    # -----------------------------------------------------------------
+    # T7 fix wave (task-7-adversarial.md MAJOR): `_stop_native_session`
+    # returning True is just the stop command's own exit code, not proof
+    # the daemon actually tore the session down -- re-verify the roster
+    # after EVERY --force stop attempt, not only a reported failure.
+    # -----------------------------------------------------------------
+    def test_force_aborts_when_stop_succeeds_but_roster_still_live_after_retry(
+            self, native_home, monkeypatch):
+        old_sid = SID
+        seed_native_worker(native_home, sid=old_sid, status="working")
+        # Every roster fetch (liveness check, post-stop re-verify, and the
+        # grace-window retry re-fetch) reports the old sid still live --
+        # models a `claude stop` that acknowledges (rc=0) before the daemon
+        # has actually torn the session down.
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            lambda **_: (True, [make_roster_entry(old_sid, status="busy")]))
+        sleeps = []
+
+        def run(argv, **kw):
+            if argv[:2] == ["claude", "stop"]:
+                import types
+                return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+            raise AssertionError(
+                "must not dispatch a second session while the old one is still live")
+
+        with pytest.raises(fleet.FleetCliError, match="never two live sessions"):
+            fleet.cmd_respawn(_respawn_args(force=True), run=run, which=lambda _: "claude",
+                              sleep=lambda s: sleeps.append(s))
+        assert 2 in sleeps  # the grace-window retry actually happened
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["session_id"] == old_sid
+
+    def test_force_succeeds_once_roster_confirms_gone_on_retry(self, native_home, monkeypatch):
+        # The mirror-image happy path: a reported-successful stop that
+        # STILL shows live on the immediate re-check, but the grace-window
+        # retry re-fetch confirms it's actually gone -- respawn proceeds.
+        old_sid = SID
+        new_sid = "ccccdddd-9999-8888-7777-666655554444"
+        calls = {"n": 0}
+
+        def roster(**_):
+            calls["n"] += 1
+            n = calls["n"]
+            if n <= 2:
+                # 1: liveness check. 2: immediate post-stop re-verify --
+                # both still show the old sid live (daemon lag).
+                return True, [make_roster_entry(old_sid, status="busy")]
+            if n == 3:
+                # 3: the grace-window retry re-fetch -- now gone.
+                return True, []
+            if n == 4:
+                # 4: dispatch_bg's pre-dispatch snapshot.
+                return True, []
+            # 5+: dispatch_bg's join poll.
+            return True, [make_roster_entry(new_sid, status="idle")]
+
+        seed_native_worker(native_home, sid=old_sid, status="working")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", roster)
+        sleeps = []
+        rc = fleet.cmd_respawn(
+            _respawn_args(force=True),
+            run=_fake_run_factory(stdout="backgrounded · ccccdddd · fleet|w1|t\n"),
+            which=lambda _: "claude", sleep=lambda s: sleeps.append(s),
+        )
+        assert rc == 0
+        assert 2 in sleeps
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["session_id"] == new_sid
+        assert old_sid in rec["retired_sids"]
+
+    # -----------------------------------------------------------------
+    # T7 fix wave (task-7-review.md concern (a)): the two previously
+    # untested roster-fetch-failure refusal branches in respawn.
+    # -----------------------------------------------------------------
+    def test_roster_fetch_failure_refuses(self, native_home, monkeypatch):
+        seed_native_worker(native_home, sid=SID, status="idle")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (False, "no claude"))
+        with pytest.raises(fleet.FleetCliError, match="could not fetch the native roster"):
+            fleet.cmd_respawn(_respawn_args(), which=lambda _: "claude", sleep=lambda s: None)
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["session_id"] == SID
+
+    def test_post_stop_roster_fetch_failure_refuses(self, native_home, monkeypatch):
+        old_sid = SID
+        seed_native_worker(native_home, sid=old_sid, status="working")
+        calls = {"n": 0}
+
+        def roster(**_):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return True, [make_roster_entry(old_sid, status="busy")]
+            return False, "no claude"
+
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", roster)
+
+        def run(argv, **kw):
+            import types
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with pytest.raises(fleet.FleetCliError, match="never two live sessions"):
+            fleet.cmd_respawn(_respawn_args(force=True), run=run, which=lambda _: "claude",
+                              sleep=lambda s: None)
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["session_id"] == old_sid
+
+    # -----------------------------------------------------------------
+    # T7 fix wave (task-7-review.md concern (b)): respawn's join-expiry
+    # handler must reuse cmd_spawn's fast-completion check instead of
+    # unconditionally rolling back a legitimately-finished turn.
+    # -----------------------------------------------------------------
+    def test_join_expiry_fast_completion_sid_keyed_outcome_commits_idle(
+            self, native_home, monkeypatch):
+        old_sid = "deadbeef-0000-1111-2222-333344445555"
+        seed_native_worker(native_home, sid=old_sid, status="idle")
+        # 1st call: liveness check (old sid gone -- respawn proceeds
+        # unforced). Every call after that: empty (the daemon never
+        # registers the new session on the roster, forcing the join to run
+        # out the clock).
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
+        # Sid-keyed fallback (outcomes/<SID>.jsonl) -- the realistic shape
+        # the REAL Stop hook writes when the registry's session_id is still
+        # None at the instant it fires (see _fast_completion_sid's
+        # docstring) -- not the simpler name-keyed shape.
+        fleet.append_outcome(SID, {"ts": fleet.now_iso(), "session_id": SID,
+                                   "kind": "result", "result_text": "already done"})
+        clock = _FakeClock()
+        rc = fleet.cmd_respawn(
+            _respawn_args(),
+            run=_fake_run_factory(stdout="backgrounded · aaaabbbb · fleet|w1|t\n"),
+            which=lambda _: "claude", sleep=lambda s: clock.advance(s), clock=clock,
+        )
+        assert rc == 0
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["status"] == "idle"
+        assert rec["session_id"] == SID
+        assert old_sid in rec["retired_sids"]
+        events = _events_kinds(native_home)
+        assert "turn_started" in events
+        assert "respawn_failed" not in events
+
+    def test_join_expiry_without_fast_completion_rolls_back_to_before(
+            self, native_home, monkeypatch):
+        old_sid = "deadbeef-0000-1111-2222-333344445555"
+        seed_native_worker(native_home, sid=old_sid, status="idle")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
+        clock = _FakeClock()
+        with pytest.raises(fleet.FleetCliError, match="native respawn failed"):
+            fleet.cmd_respawn(
+                _respawn_args(),
+                run=_fake_run_factory(stdout="backgrounded · aaaabbbb · fleet|w1|t\n"),
+                which=lambda _: "claude", sleep=lambda s: clock.advance(s), clock=clock,
+            )
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["session_id"] == old_sid
+        assert rec["status"] == "idle"
+        assert "respawn_failed" in _events_kinds(native_home)
 
     def test_legacy_respawn_still_works_byte_identical(self, native_home):
         # Guard against a regression in the is_native routing itself: a
