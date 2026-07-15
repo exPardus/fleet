@@ -1,6 +1,7 @@
 """M-B native-substrate tests: registry v2 fields, outcome store, dispatch
 helper, discriminator, limit rehome, steering, stop/tombstones, archival."""
 import json
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -77,6 +78,15 @@ class TestRegistryV2:
             fleet.refuse_if_legacy("w1", legacy, "send")
         fleet.refuse_if_legacy("w1", native, "send")  # no raise
 
+    @pytest.mark.parametrize("bad", [None, "junk", [], 42])
+    def test_is_native_non_dict_returns_false(self, native_home, bad):
+        assert fleet.is_native(bad) is False
+
+    @pytest.mark.parametrize("bad", [None, "junk", [], 42])
+    def test_refuse_if_legacy_non_dict_raises_fleet_cli_error(self, native_home, bad):
+        with pytest.raises(fleet.FleetCliError, match="pre-pivot"):
+            fleet.refuse_if_legacy("w1", bad, "send")
+
 
 class TestOutcomeStore:
     def test_append_and_read_roundtrip(self, native_home):
@@ -111,3 +121,66 @@ class TestOutcomeStore:
         assert rec["kind"] == "interrupted" and rec["result_text"] is None
         with pytest.raises(ValueError):
             fleet.write_tombstone_outcome("w1", "s1", "exploded")
+
+    def test_has_fresh_outcome_malformed_since_iso_returns_false(self, native_home):
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": "s1", "kind": "result"})
+        assert fleet.has_fresh_outcome("w1", "s1", "not-a-date") is False
+
+    def test_has_fresh_outcome_skips_malformed_record_ts(self, native_home):
+        # ts is an int (not a string) -- must be skipped, not raise.
+        fleet.append_outcome("w1", {"ts": 12345, "session_id": "s1", "kind": "result"})
+        # ts is missing entirely -- must be skipped, not raise.
+        fleet.append_outcome("w1", {"session_id": "s1", "kind": "result"})
+        assert fleet.has_fresh_outcome("w1", "s1", _iso(NOW)) is False
+
+    def test_append_outcome_truncates_result_text(self, native_home):
+        long_text = "x" * (fleet.OUTCOME_RESULT_TEXT_MAX + 500)
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": "s1",
+                                    "kind": "result", "result_text": long_text})
+        rec = fleet.read_outcomes("w1")[0]
+        assert len(rec["result_text"]) == fleet.OUTCOME_RESULT_TEXT_MAX
+
+    def test_append_outcome_short_result_text_untouched(self, native_home):
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": "s1",
+                                    "kind": "result", "result_text": "short"})
+        rec = fleet.read_outcomes("w1")[0]
+        assert rec["result_text"] == "short"
+
+
+class TestOutcomeConcurrency:
+    def test_concurrent_appends_lose_no_records(self, native_home):
+        """4 threads x 250 records each -> exactly 1000 parseable records,
+        zero torn/lost lines. Regression test for the buffered text-mode
+        `open(..., 'a')` record-loss bug (adversarial CRITICAL finding #1)."""
+        n_writers = 4
+        n_per_writer = 250
+
+        def writer(tag):
+            for i in range(n_per_writer):
+                fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": tag,
+                                            "kind": "result", "seq": i,
+                                            "result_text": tag * 50})
+
+        threads = [threading.Thread(target=writer, args=(f"tag{t}",))
+                   for t in range(n_writers)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        text = fleet.outcome_path("w1").read_text(encoding="utf-8")
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        parsed = []
+        bad = 0
+        for ln in lines:
+            try:
+                parsed.append(json.loads(ln))
+            except json.JSONDecodeError:
+                bad += 1
+
+        assert bad == 0
+        assert len(parsed) == n_writers * n_per_writer
+        counts = {}
+        for rec in parsed:
+            counts[rec["session_id"]] = counts.get(rec["session_id"], 0) + 1
+        assert counts == {f"tag{t}": n_per_writer for t in range(n_writers)}
