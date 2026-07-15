@@ -1094,7 +1094,7 @@ Do not leave servers or watchers running past the end of the turn without record
 """
 
 
-def compose_prompt(name: str, cwd, task: str, sid: str, journal_path=None) -> tuple[str, Path | None]:
+def compose_prompt(name: str, cwd, task: str, sid: str | None, journal_path=None) -> tuple[str, Path | None]:
     """preamble (SPEC §8) + claimed mailbox + task text (+ journal contents
     when respawning, i.e. when journal_path is given and exists).
 
@@ -1114,19 +1114,27 @@ def compose_prompt(name: str, cwd, task: str, sid: str, journal_path=None) -> tu
     journals_dir() (FLEET_HOME-derived) on every call, never a literal
     path -- so it follows FLEET_HOME/env-var overrides and test sandboxes
     exactly like every other path helper in this module.
+
+    M-B T4: sid=None (a fresh native spawn has no sid until join -- the
+    pre-claim record's session_id is still None at compose time) skips the
+    mailbox claim entirely -- there is no <sid>.md to claim yet, only
+    <name>.md could exist and that channel is not wired for pre-claim
+    spawns -- and returns (prompt, None), matching the no-mail shape.
     """
     journal_target = (journals_dir() / f"{name}.md").as_posix()
     parts = [_PREAMBLE_TEMPLATE.format(name=name, cwd=cwd, journal_target=journal_target)]
 
-    mail, claim = claim_mailbox(sid)
-    if mail:
-        parts.append(f"<MANAGER MESSAGE>\n{mail}\n")
-        # F9 (item 8): emit a mail_drained audit event at compose-time drain.
-        # fleet.py is the SOLE writer of events.jsonl -- this is a Soak-1 audit
-        # record, NOT a DLQ (no retry/redelivery machinery). compose_prompt is
-        # only ever called by fleet.py launch paths, so the single-writer
-        # registry invariant (6) is preserved.
-        append_event("mail_drained", name, sid=sid)
+    claim = None
+    if sid is not None:
+        mail, claim = claim_mailbox(sid)
+        if mail:
+            parts.append(f"<MANAGER MESSAGE>\n{mail}\n")
+            # F9 (item 8): emit a mail_drained audit event at compose-time drain.
+            # fleet.py is the SOLE writer of events.jsonl -- this is a Soak-1 audit
+            # record, NOT a DLQ (no retry/redelivery machinery). compose_prompt is
+            # only ever called by fleet.py launch paths, so the single-writer
+            # registry invariant (6) is preserved.
+            append_event("mail_drained", name, sid=sid)
 
     if task:
         parts.append(task)
@@ -2072,6 +2080,53 @@ def _report_stranded_turn(name: str, sid: str, info: dict) -> None:
         pass
 
 
+def _report_stranded_native_turn(name: str, sid: str, short_id: str) -> None:
+    """T4 fix wave (Critical C2): native analog of `_report_stranded_turn`
+    above, for cmd_spawn's post-dispatch stamp lock -- reached only after
+    dispatch_bg already returned a real, joined sid (a live `claude --bg`
+    session genuinely exists) but every `_commit_launched_turn` retry
+    timed out acquiring fleet_lock() to stamp it into the registry.
+
+    Unlike the legacy path, there is no OS pid fallback here -- native
+    sids come entirely from `claude` itself, never fleet -- so `sid`/
+    `short_id` are the ONLY recovery handles that exist anywhere once this
+    stack frame unwinds. Never fail silently: print a loud, actionable
+    stderr message and best-effort append an event. Deliberately does not
+    raise -- the caller (cmd_spawn) reports this as a failure via its own
+    nonzero return, but must NOT let the exception escape raw (that would
+    read as an ordinary dispatch failure and could tempt a retry, which
+    would double-dispatch a second live session onto the same name)."""
+    print(
+        f"fleet: CRITICAL: {name}: native session {sid} (short id {short_id}) "
+        "was dispatched and joined but the registry stamp failed after "
+        f"{LAUNCH_COMMIT_MAX_ATTEMPTS} lock-acquisition attempts -- the "
+        "record is stuck at status=working/session_id=null (the native "
+        "pre-claim state). It will auto-demote to dead after "
+        f"LAUNCH_CLAIM_MAX_AGE_SECONDS ({LAUNCH_CLAIM_MAX_AGE_SECONDS:.0f}s) "
+        "of inactivity -- DO NOT re-run `fleet spawn` for this name before "
+        "then, that would double-dispatch a second live session. Recover "
+        f"by hand-editing state/fleet.json to set session_id={sid!r} and "
+        f"native_short_id={short_id!r} directly, or track the session via "
+        "`claude agents` in the meantime.",
+        file=sys.stderr,
+    )
+    try:
+        append_event("turn_commit_failed", name, session_id=sid, native_short_id=short_id)
+    except OSError:
+        pass
+
+
+def _short_id_from_notes(exc: BaseException):
+    """T4 fix wave (Ctrl-C short-id loss): dispatch_bg's join-phase wrapper
+    stashes `fleet_short_id=<id>` onto an escaping exception's __notes__
+    (BaseException.add_note, 3.11+) when a short id is known at that
+    point. Pulls it back out, or returns None if absent/malformed."""
+    for note in getattr(exc, "__notes__", None) or ():
+        if isinstance(note, str) and note.startswith("fleet_short_id="):
+            return note.partition("=")[2] or None
+    return None
+
+
 def statusline_chain_path() -> Path:
     """state/statusline-chain.json -- delegate statusline commands fleet runs
     above its own row. Machine-local (gitignored), like every other state file."""
@@ -2305,28 +2360,59 @@ def cmd_init(args) -> int:
     return 0
 
 
-def cmd_spawn(args, popen=subprocess.Popen, get_process_info=None, which=shutil.which,
-              sleep=time.sleep) -> int:
+def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
+              clock=time.monotonic) -> int:
     """`fleet spawn <name> --dir <path> --task <text|@file> [--mode ...]
-    [--model m] [--max-budget-usd x]` (SPEC §5 spawn row).
+    [--model m] [--category c] [--token-ceiling n]` (SPEC §5 spawn row,
+    M-B T4: native `--bg` dispatch replaces detached Popen).
+
+    Launch contract (M-B spec §3): pre-claim a registry record under
+    fleet_lock with session_id=None (the analog of the legacy turn_pid=None
+    pre-claim -- _launch_claim_expired bounds it via last_activity), dispatch
+    outside the lock via dispatch_bg, then re-lock to stamp the real sid/
+    short id, OR roll back -- EXCEPT when a fast worker already finished
+    (an outcome record for this name newer than the pre-claim) even though
+    the roster join itself expired: that commits as "idle" with the
+    outcome's sid instead of rolling back a completed task (never lose a
+    finished turn to a slow/missed roster join).
 
     Registry mutation (create the record) and event-append happen together
-    inside one fleet_lock() -- the append_event/lock-discipline decision for
-    Task 2 (see module docstring note below cmd_wait): every event this
-    module appends is written while the registry lock for that same
-    operation is held, so concurrent `fleet` invocations never interleave
-    events with the registry state they describe.
+    inside one fleet_lock() (F4): every event this module appends is
+    written while the registry lock for that same operation is held, so
+    concurrent `fleet` invocations never interleave events with the
+    registry state they describe.
 
     SPEC §14: refuses before any mutation if the worker-settings instance
     hasn't been rendered yet (_require_instance_settings) -- `fleet init`
     must run once per machine before the first spawn.
 
-    Post-testing wave, item 1b (stress-report Finding 1, CRITICAL): the
-    post-launch commit lock below (the one that stamps info["turn_pid"])
-    runs through `_commit_launched_turn`'s retry-with-backoff instead of a
-    single bare `with fleet_lock():` -- by this point launch_turn() has
-    ALREADY started a real, live `claude` process, so losing the ordinary
-    5s lock race here must not mean losing the ability to ever track it.
+    G3: USD budgets are refused outright for native dispatch (`--bg` does
+    not carry cost information) -- `--token-ceiling` is the only fleet-side
+    cap available; `--max-budget-usd` stays in the parser only because
+    respawn/legacy paths still reference the attr.
+
+    G6: the sid-keyed ceiling file is written AFTER the sid is known (the
+    real sid does not exist before roster join), a seconds-wide gap versus
+    the legacy pre-launch write -- accepted; the Stop hook has no ceiling
+    signal for that narrow window and falls back to its default
+    block-on-mail behavior, never a launch failure.
+
+    `clock` is injectable (forwarded to dispatch_bg, T4 addition beyond the
+    brief's stated signature) so join-expiry tests never pay the real
+    NATIVE_JOIN_VERIFY_SECONDS wall-clock wait -- see task-4-report.md
+    deviations.
+
+    T4 fix wave (Critical C2): the post-dispatch stamp lock (after
+    dispatch_bg already returned a real, joined sid) is wrapped in
+    `_commit_launched_turn`'s retry+backoff, same as the legacy launch
+    path -- an ordinary FleetLockTimeout there must not stand a permanent
+    chance of stranding an already-live session. On exhaustion, this
+    returns nonzero (unlike the legacy path's rc==0: native has no OS pid
+    fallback, so the operator-facing signal here has to be louder) after
+    `_report_stranded_native_turn` prints the sid/short_id needed to
+    recover by hand -- it does NOT pop the pre-claim record (a live
+    session exists; popping would orphan it beyond even the stranded-turn
+    recovery instructions) and does NOT raise raw.
     """
     _require_instance_settings()
 
@@ -2334,70 +2420,134 @@ def cmd_spawn(args, popen=subprocess.Popen, get_process_info=None, which=shutil.
     if not cwd.is_dir():
         raise FleetCliError(f"--dir does not exist or is not a directory: {args.dir}")
 
+    if getattr(args, "max_budget_usd", None) is not None:
+        raise FleetCliError(
+            "no USD budget under native dispatch (contract G3) -- use --token-ceiling"
+        )
+
     task = _read_task_arg(args.task)
 
     with fleet_lock():
         data = load_registry()
         validate_name(args.name, existing=data["workers"].keys())
-        sid = str(uuid.uuid4())
         record = new_worker_record(
-            sid, cwd, task, args.mode, model=args.model,
-            max_budget_usd=args.max_budget_usd, setting_sources=args.setting_sources,
-            token_ceiling=args.token_ceiling,
-            spawned_by=current_caller_session())
+            None, cwd, task, args.mode, model=args.model,
+            setting_sources=args.setting_sources, token_ceiling=args.token_ceiling,
+            spawned_by=current_caller_session(),
+            dispatch_kind="bg", category=args.category)
+        record["last_dispatch_at"] = now_iso()
         data["workers"][args.name] = record
         save_registry(data)
-        append_event("spawned", args.name, session_id=sid, cwd=str(cwd), mode=args.mode)
+        append_event("spawned", args.name, cwd=str(cwd), mode=args.mode)
 
-    # Kernel 10 (fleet half): write the sid-keyed ceiling file BEFORE the
-    # launch so the Stop hook sees it from turn 1 (no-op when unconfigured).
-    _write_ceiling_file(sid, record.get("token_ceiling"))
+    pre_claim_at = record["last_dispatch_at"]
 
-    prompt, claim = compose_prompt(args.name, cwd, task, sid)
+    # sid=None (pre-claim, no real sid exists yet) -- compose_prompt skips
+    # the mailbox claim entirely and always returns a None claim here.
+    prompt, _claim = compose_prompt(args.name, cwd, task, None)
+
     try:
-        info = launch_turn(
-            args.name, cwd, sid, prompt, args.mode, first=True,
-            # F13/M5: source the launch flags from the PERSISTED record, not
-            # args, so spawn and every later launch path share one origin.
-            model=record.get("model"), max_budget_usd=record.get("max_budget_usd"),
+        result = dispatch_bg(
+            args.name, cwd, prompt, args.mode, model=args.model,
+            category=args.category, hint=task,
             setting_sources=record.get("setting_sources"),
-            popen=popen, get_process_info=get_process_info, which=which,
+            run=run, which=which, sleep=sleep, clock=clock,
         )
-        finalize_mailbox_claim(claim)
-    except BaseException as exc:
-        # Task-4-verdict re-review, Fix 2: same shape as cmd_send/cmd_attach
-        # -- a Ctrl-C during launch must still pop the just-created record
-        # and restore the drained mailbox claim, not leave a permanently
-        # ghost-claimed "working"+turn_pid is None record behind.
-        restore_mailbox_claim(claim)
-        with fleet_lock():
-            data = load_registry()
-            data["workers"].pop(args.name, None)
-            save_registry(data)
-            append_event("spawn_failed", args.name, error=str(exc))
-        raise
+    except NativeDispatchError as exc:
+        # T4 fix wave (Critical C1): forward the short id the exception
+        # carries (join-expiry raises always know it) so the fast-
+        # completion scan can also find the Stop hook's sid-keyed
+        # fallback file, not just a name-keyed one that production never
+        # produces during this exact race (see _fast_completion_sid).
+        fast_sid = _fast_completion_sid(args.name, pre_claim_at,
+                                        short_id=getattr(exc, "short_id", None))
+        if fast_sid is not None:
+            with fleet_lock():
+                data = load_registry()
+                rec = data["workers"].get(args.name)
+                if rec is not None and rec.get("session_id") is None:
+                    rec["session_id"] = fast_sid
+                    rec["native_short_id"] = fast_sid.partition("-")[0] or fast_sid[:8]
+                    rec["status"] = "idle"
+                    rec["turns"] = 1
+                    rec["last_activity"] = now_iso()
+                    save_registry(data)
+                    append_event("turn_started", args.name, session_id=fast_sid)
+            _write_ceiling_file(fast_sid, record.get("token_ceiling"))
+            print(f"{args.name} {fast_sid} (native bg, fast completion before join)")
+            return 0
 
-    def _commit():
+        # DOA rollback: re-lock, pop the pre-claim ONLY if still unclaimed
+        # (session_id is None) -- a concurrent mutation (e.g. a fast_sid
+        # commit that raced in from elsewhere) must never be clobbered.
+        # T4 fix wave (Minor): the spawn_failed event is appended ONLY
+        # when the pop actually happened -- previously unconditional, so a
+        # concurrently-stamped (still-alive) worker got a misleading
+        # "spawn_failed" event in its own audit trail even though nothing
+        # failed.
         with fleet_lock():
             data = load_registry()
             rec = data["workers"].get(args.name)
+            if rec is not None and rec.get("session_id") is None:
+                data["workers"].pop(args.name, None)
+                save_registry(data)
+                append_event("spawn_failed", args.name, error=str(exc))
+        raise FleetCliError(f"{args.name}: native spawn failed -- {exc}") from exc
+    except BaseException as exc:
+        # T4 deviation, carrying forward a documented precedent (legacy
+        # Task-4-verdict re-review Fix 2): a Ctrl-C or any other unexpected
+        # exception escaping dispatch_bg must not leave a ghost
+        # "working"+session_id=None pre-claim behind, pinned forever by
+        # recompute_status's launch-in-flight guard. Same guarded-pop shape
+        # as the NativeDispatchError branch above; re-raised verbatim
+        # (not wrapped in FleetCliError) so e.g. KeyboardInterrupt still
+        # propagates as itself.
+        #
+        # T4 fix wave (Ctrl-C short-id loss): dispatch_bg's join-phase
+        # wrapper stashes the short id onto the exception's __notes__ when
+        # a live session was already dispatched before the interrupt --
+        # recover it here so the spawn_failed event (an operator's only
+        # trace of the orphaned session once this process exits) carries
+        # it, instead of an empty str(KeyboardInterrupt()).
+        with fleet_lock():
+            data = load_registry()
+            rec = data["workers"].get(args.name)
+            if rec is not None and rec.get("session_id") is None:
+                data["workers"].pop(args.name, None)
+                save_registry(data)
+                append_event("spawn_failed", args.name, error=str(exc),
+                            short_id=_short_id_from_notes(exc))
+        raise
+
+    sid = result["session_id"]
+    short_id = result["short_id"]
+
+    def _commit_native_stamp():
+        with fleet_lock():
+            data = load_registry()
+            rec = data["workers"].get(args.name)
+            # T4 fix wave (Minor M1, event-append symmetry): append_event
+            # now lives inside the same `if rec is not None:` guard as the
+            # mutation, matching the fast-completion commit block above --
+            # previously this fired unconditionally even if a concurrent
+            # kill/clean had already removed the record in the inter-lock
+            # gap.
             if rec is not None:
-                # F-RACE: re-assert "working" here -- a concurrent fleet
-                # status/wait landing in the gap between this lock and the
-                # create-lock above could have recomputed and persisted
-                # "dead" (turn_pid was still None then). The turn has
-                # launched by definition at this point, so this
-                # authoritatively repairs that spurious transition.
+                rec["session_id"] = sid
+                rec["native_short_id"] = short_id
                 rec["status"] = "working"
-                rec["turn_pid"] = info["turn_pid"]
-                rec["turn_pid_ctime"] = info["turn_pid_ctime"]
                 rec["turns"] = 1
                 rec["last_activity"] = now_iso()
                 save_registry(data)
-            append_event("turn_started", args.name, session_id=sid, turn_pid=info["turn_pid"])
+                append_event("turn_started", args.name, session_id=sid)
 
-    if not _commit_launched_turn(_commit, sleep=sleep):
-        _report_stranded_turn(args.name, sid, info)
+    if not _commit_launched_turn(_commit_native_stamp, sleep=sleep):
+        _report_stranded_native_turn(args.name, sid, short_id)
+        return 1
+
+    # G6: sid-keyed ceiling file written post-join by necessity (the sid
+    # does not exist before now) -- see docstring.
+    _write_ceiling_file(sid, record.get("token_ceiling"))
 
     # Phase1 kernel 5: echo the effective model/config at launch so a costly
     # model (or an inherited CLAUDE_CODE_SUBAGENT_MODEL) is visible up front,
@@ -2408,7 +2558,7 @@ def cmd_spawn(args, popen=subprocess.Popen, get_process_info=None, which=shutil.
         model_line += f"; CLAUDE_CODE_SUBAGENT_MODEL={subagent_model}"
     print(model_line)
 
-    print(f"{args.name} {sid} {info['log_path']}")
+    print(f"{args.name} {sid} (native bg, short id {short_id})")
     return 0
 
 
@@ -4712,6 +4862,75 @@ def write_tombstone_outcome(name: str, sid: str, kind: str) -> None:
                           "result_text": None})
 
 
+def _fast_completion_sid(name: str, since_iso: str, short_id: str | None = None):
+    """T4 fix wave (Critical C1): cmd_spawn's fast-completion check on a
+    NativeDispatchError, keeping dispatch_bg opaque (no message parsing)
+    per the brief's own suggested alternative -- but the exception now
+    carries `short_id` as a real attribute (NativeDispatchError.short_id)
+    instead of being buried in the message text, so this function can use
+    it directly.
+
+    Scans TWO sources for the newest record with ts >= since_iso -
+    OUTCOME_FRESH_SLACK_SECONDS, returning its session_id (or None if
+    nothing matches):
+
+    1. outcomes/<name>.jsonl (name-keyed) -- reachable only when the Stop
+       hook's registry scan (_resolve_name) found a record whose
+       session_id already equalled the real sid, which requires the
+       stamp to have landed first.
+    2. When `short_id` is given: every outcomes/<stem>.jsonl in
+       outcomes_dir() whose stem startswith(short_id) -- the Stop hook's
+       OWN fallback key (`_resolve_name(...) or sid`) when name
+       resolution fails, which is exactly what happens during the fast-
+       completion race this function exists to handle: cmd_spawn's
+       pre-claim record still has session_id=None when the hook fires,
+       so `_resolve_name` can never match it, and the hook writes
+       outcomes/<real-sid>.jsonl instead of outcomes/<name>.jsonl. A real
+       sid always startswith its own short id (the short id IS a prefix
+       of the sid, per _parse_bg_short_id/_join_roster_by_short_id), so
+       this glob is the only way to locate that file without already
+       knowing the sid -- which is the whole point of scanning for it."""
+    try:
+        since = _parse_iso(since_iso)
+    except (ValueError, TypeError):
+        return None
+    threshold = since - timedelta(seconds=OUTCOME_FRESH_SLACK_SECONDS)
+    best_sid, best_ts = None, None
+
+    def _consider(rec):
+        nonlocal best_sid, best_ts
+        try:
+            ts = _parse_iso(str(rec.get("ts", "")))
+        except (ValueError, TypeError):
+            return
+        if ts >= threshold and rec.get("session_id") and (best_ts is None or ts > best_ts):
+            best_sid, best_ts = rec.get("session_id"), ts
+
+    for rec in read_outcomes(name):
+        _consider(rec)
+
+    if short_id:
+        for path in sorted(outcomes_dir().glob("*.jsonl")):
+            if not path.stem.startswith(short_id):
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            for line in text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if isinstance(rec, dict):
+                    _consider(rec)
+
+    return best_sid
+
+
 # --------------------------------------------------------------------------
 # Native dispatch (M-B, spec §5): single choke point for every --bg launch.
 # Task-file bootstrap (G8), short-id capture + sid-prefix roster join (G6
@@ -4731,7 +4950,18 @@ _BG_SHORT_ID_RE = re.compile(r"backgrounded\s*·\s*(\S+)\s*·")
 
 
 class NativeDispatchError(Exception):
-    pass
+    """T4 fix wave (Critical C1): carries the short id whenever dispatch_bg
+    knows it at raise time (primarily the join-expiry raise, where a real
+    --bg dispatch happened and only the roster join itself failed to
+    verify) -- default None for the earlier failure causes (bad name,
+    missing exe, task-file write, dispatch subprocess failure) where no
+    short id was ever parsed. cmd_spawn forwards this to
+    _fast_completion_sid so it can locate the Stop hook's sid-keyed
+    fallback outcome file, which is the only file that exists in the
+    fast-completion race (see _fast_completion_sid's docstring)."""
+    def __init__(self, message, short_id=None):
+        super().__init__(message)
+        self.short_id = short_id
 
 
 def render_native_name(category, name: str, hint: str) -> str:
@@ -4782,6 +5012,7 @@ def _join_roster_by_short_id(short_id, roster_fetch, sleep,
 
 def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
                 hint="", resume_sid=None, settings_path=None,
+                setting_sources=None,
                 run=subprocess.run, which=shutil.which, sleep=time.sleep,
                 roster_fetch=None, clock=time.monotonic):
     # Defense in depth (adversarial trap 6): every current caller
@@ -4810,6 +5041,14 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
     if resume_sid:
         argv += ["--resume", resume_sid]
     argv += ["-n", rendered, "--settings", settings.as_posix()]
+    # T4 fix wave (Important I1): additive param -- forwards the persisted
+    # --setting-sources value onto the native --bg argv, which the frozen
+    # T3 dispatch_bg signature never carried. UNOBSERVED under --bg at
+    # 2.1.207 (the flag's actual runtime effect on a --bg-launched worker
+    # was never directly confirmed against a real daemon in this task);
+    # pin-tested in T12.
+    if setting_sources:
+        argv += ["--setting-sources", setting_sources]
     argv += mode_flags(mode)
     if model:
         argv += ["--model", model]
@@ -4836,13 +5075,25 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
     if not short_id:
         raise NativeDispatchError(
             f"could not parse short id from --bg stdout: {(proc.stdout or '').strip()[:400]}")
-    sid = _join_roster_by_short_id(short_id, roster_fetch, sleep,
-                                   exclude_sids=pre_sids, clock=clock)
+    try:
+        sid = _join_roster_by_short_id(short_id, roster_fetch, sleep,
+                                       exclude_sids=pre_sids, clock=clock)
+    except BaseException as exc:
+        # T4 fix wave (Important, Ctrl-C mid-join): a live --bg session was
+        # already dispatched (proc.returncode == 0, short_id parsed) by the
+        # time this loop runs -- if Ctrl-C (or any other exception) lands
+        # here, the short id is the only handle an operator has left to
+        # find it again via `claude agents`. add_note survives re-raise
+        # through cmd_spawn's except BaseException handler, which has no
+        # other way to recover it (dispatch_bg stays opaque -- no message
+        # parsing per the T4 design).
+        exc.add_note(f"fleet_short_id={short_id}")
+        raise
     if sid is None:
         raise NativeDispatchError(
             f"dispatched (short id {short_id}) but no roster entry joined "
             f"within {NATIVE_JOIN_VERIFY_SECONDS:.0f}s -- possible DOA; "
-            f"recover manually via claude agents")
+            f"recover manually via claude agents", short_id=short_id)
     return {"session_id": sid, "short_id": short_id, "rendered_name": rendered}
 
 
@@ -5562,6 +5813,10 @@ def build_parser() -> argparse.ArgumentParser:
     # ceiling file the Stop hook reads to allow-stop despite pending mail. NOT
     # a per-invocation dollar cap (that is --max-budget-usd).
     p_spawn.add_argument("--token-ceiling", type=int, default=None, dest="token_ceiling")
+    # M-B T4 (spec §5.1.3 agents-menu categories): passed through verbatim
+    # to render_native_name; defaults to DEFAULT_CATEGORY ("fleet") when
+    # unset at dispatch time.
+    p_spawn.add_argument("--category", default=None)
 
     p_status = sub.add_parser("status", help="show worker status table")
     p_status.add_argument("name", nargs="?", default=None)

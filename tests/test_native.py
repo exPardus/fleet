@@ -1,6 +1,7 @@
 """M-B native-substrate tests: registry v2 fields, outcome store, dispatch
 helper, discriminator, limit rehome, steering, stop/tombstones, archival."""
 import json
+import os
 import subprocess
 import threading
 from datetime import datetime, timedelta, timezone
@@ -12,6 +13,10 @@ import fleet
 
 
 NOW = datetime(2026, 7, 15, 12, 0, 0, tzinfo=timezone.utc)
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+STOP_OUTCOME_HOOK = REPO_ROOT / "bin" / "hooks" / "stop_outcome.py"
+PY_CMD = ["py", "-3.13"]
 
 
 def _iso(dt):
@@ -304,10 +309,62 @@ class TestDispatchBg:
         def fast_sleep(s):
             clock.advance(s)
 
-        with pytest.raises(fleet.NativeDispatchError, match="aaaabbbb"):
+        with pytest.raises(fleet.NativeDispatchError, match="aaaabbbb") as exc_info:
             fleet.dispatch_bg("w1", "C:/proj", "b", "accept",
                               run=_fake_run_factory(), which=lambda _: "claude",
                               sleep=fast_sleep, roster_fetch=empty_fetch, clock=clock)
+        # T4 fix wave (Critical C1): the join-expiry raise is the primary
+        # place dispatch_bg knows the short id -- cmd_spawn's
+        # fast-completion recovery depends on this attribute being set (see
+        # _fast_completion_sid).
+        assert exc_info.value.short_id == "aaaabbbb"
+
+    def test_other_dispatch_errors_leave_short_id_none(self, native_home):
+        # Failure causes before a short id is ever parsed (bad name, missing
+        # exe, task-file write failure, nonzero exit, unparseable stdout)
+        # must not fabricate one.
+        with pytest.raises(fleet.NativeDispatchError) as exc_info:
+            fleet.dispatch_bg("w1", "C:/proj", "b", "accept",
+                              run=_fake_run_factory(rc=1), which=lambda _: "claude",
+                              sleep=lambda s: None, roster_fetch=_roster_with())
+        assert exc_info.value.short_id is None
+
+    def test_ctrlc_mid_join_adds_short_id_note(self, native_home):
+        # T4 fix wave (Ctrl-C short-id loss): a KeyboardInterrupt (or any
+        # BaseException) escaping the join-verify wait -- AFTER the --bg
+        # dispatch itself already succeeded -- must carry the short id as
+        # an exception note so cmd_spawn's BaseException handler can still
+        # recover it (dispatch_bg stays opaque otherwise: no other channel
+        # exists once the join call itself never returns).
+        def empty_fetch(**_):
+            return True, []
+
+        def sleep(s):
+            raise KeyboardInterrupt()
+
+        with pytest.raises(KeyboardInterrupt) as exc_info:
+            fleet.dispatch_bg("w1", "C:/proj", "b", "accept",
+                              run=_fake_run_factory(), which=lambda _: "claude",
+                              sleep=sleep, roster_fetch=empty_fetch)
+        notes = getattr(exc_info.value, "__notes__", None) or []
+        assert any(n == "fleet_short_id=aaaabbbb" for n in notes)
+
+    def test_setting_sources_forwarded_after_settings_flag(self, native_home):
+        calls = []
+        fleet.dispatch_bg("w1", "C:/proj", "b", "accept", setting_sources="user,project",
+                          run=_fake_run_factory(calls=calls), which=lambda _: "claude",
+                          sleep=lambda s: None, roster_fetch=_roster_with())
+        argv = calls[0][0]
+        assert argv[argv.index("--setting-sources") + 1] == "user,project"
+        assert argv.index("--setting-sources") > argv.index("--settings")
+
+    def test_setting_sources_omitted_when_none(self, native_home):
+        calls = []
+        fleet.dispatch_bg("w1", "C:/proj", "b", "accept",
+                          run=_fake_run_factory(calls=calls), which=lambda _: "claude",
+                          sleep=lambda s: None, roster_fetch=_roster_with())
+        argv = calls[0][0]
+        assert "--setting-sources" not in argv
 
     def test_dispatch_timeout_raises(self, native_home):
         def timeout_run(argv, **kwargs):
@@ -428,3 +485,185 @@ class TestJoinRosterByShortId:
         sid = fleet._join_roster_by_short_id("aaaabbbb", fetch, sleep,
                                              exclude_sids={foreign}, clock=clock)
         assert sid is None
+
+
+class TestFastCompletionSid:
+    """T4 fix wave (Critical C1): _fast_completion_sid must locate the Stop
+    hook's sid-keyed fallback outcome file, not just a name-keyed one --
+    the fallback file is what the real hook actually writes during the
+    fast-completion race (see the end-to-end subprocess test below, which
+    reproduces the adversarial review's Trap 1)."""
+
+    def test_short_id_scan_finds_sid_keyed_file(self, native_home):
+        # No name-keyed file at all -- only the sid-keyed fallback the real
+        # hook would have written.
+        fleet.append_outcome(SID, {"ts": _iso(NOW), "session_id": SID,
+                                   "kind": "result", "result_text": "done"})
+        found = fleet._fast_completion_sid("w1", _iso(NOW - timedelta(seconds=1)),
+                                           short_id="aaaabbbb")
+        assert found == SID
+
+    def test_short_id_scan_ignores_non_matching_prefix(self, native_home):
+        other_sid = "ffffffff-1111-2222-3333-444455556666"
+        fleet.append_outcome(other_sid, {"ts": _iso(NOW), "session_id": other_sid,
+                                         "kind": "result"})
+        found = fleet._fast_completion_sid("w1", _iso(NOW - timedelta(seconds=1)),
+                                           short_id="aaaabbbb")
+        assert found is None
+
+    def test_short_id_scan_respects_freshness_window(self, native_home):
+        fleet.append_outcome(SID, {"ts": _iso(NOW - timedelta(minutes=10)),
+                                   "session_id": SID, "kind": "result"})
+        found = fleet._fast_completion_sid("w1", _iso(NOW), short_id="aaaabbbb")
+        assert found is None
+
+    def test_no_short_id_does_not_scan_outcomes_dir(self, native_home):
+        # short_id=None (the default) -- behavior-identical to the
+        # pre-fix-wave function: name-keyed only.
+        fleet.append_outcome(SID, {"ts": _iso(NOW), "session_id": SID, "kind": "result"})
+        found = fleet._fast_completion_sid("w1", _iso(NOW - timedelta(seconds=1)))
+        assert found is None
+
+    def test_prefers_freshest_across_both_sources(self, native_home):
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": "old-name-keyed",
+                                    "kind": "result"})
+        fleet.append_outcome(SID, {"ts": _iso(NOW + timedelta(seconds=5)),
+                                   "session_id": SID, "kind": "result"})
+        found = fleet._fast_completion_sid("w1", _iso(NOW - timedelta(seconds=1)),
+                                           short_id="aaaabbbb")
+        assert found == SID
+
+    def test_end_to_end_real_stop_hook_writes_sid_keyed_fallback(self, native_home, monkeypatch):
+        """Adversarial Trap 1 repro, pinned as a regression test: cmd_spawn
+        pre-claims a record (session_id=None). Mid-join-poll, the REAL
+        `bin/hooks/stop_outcome.py` fires as a subprocess against this same
+        temp FLEET_HOME with the true final sid -- at that exact instant
+        the registry still has session_id=None, so the hook's own
+        _resolve_name scan cannot match it, and the hook falls back to
+        writing outcomes/<real-sid>.jsonl (sid-keyed), never
+        outcomes/w1.jsonl (name-keyed). The join itself then expires
+        (never observes the session on the roster). cmd_spawn's
+        fast-completion recovery must still find the hook's sid-keyed
+        file via the short id and commit idle with the real sid -- NOT
+        roll back and discard the already-completed task."""
+        # Roster never reports the session -- models a daemon that never
+        # registers it on the roster despite the worker finishing, forcing
+        # the join to run out the clock.
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
+
+        def fake_run(argv, **kwargs):
+            # Fires INSIDE dispatch_bg, after cmd_spawn's real pre-claim
+            # lock has already written the registry record with
+            # session_id=None (exactly the production sequence) -- models
+            # the real Stop hook firing mid-join-poll, with the true final
+            # sid, at the exact instant the registry cannot yet resolve a
+            # name for it.
+            assert fleet.load_registry()["workers"]["w1"]["session_id"] is None
+            payload = json.dumps({"session_id": SID,
+                                  "last_assistant_message": "already done -- fast completion"})
+            env = dict(os.environ)
+            env["FLEET_HOME"] = str(native_home)
+            proc = subprocess.run([*PY_CMD, str(STOP_OUTCOME_HOOK)], input=payload,
+                                  capture_output=True, text=True, env=env, timeout=15)
+            assert proc.returncode == 0
+            import types
+            return types.SimpleNamespace(returncode=0,
+                stdout="backgrounded · aaaabbbb · fleet|w1|t\n", stderr="")
+
+        clock = _FakeClock()
+        rc = fleet.cmd_spawn(_spawn_args(d=str(native_home)), run=fake_run,
+                             which=lambda _: "claude",
+                             sleep=lambda s: clock.advance(s), clock=clock)
+        assert rc == 0
+
+        sid_keyed = native_home / "state" / "outcomes" / f"{SID}.jsonl"
+        name_keyed = native_home / "state" / "outcomes" / "w1.jsonl"
+        assert sid_keyed.exists()
+        assert not name_keyed.exists()  # confirms the hook's actual fallback shape
+
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["status"] == "idle"
+        assert rec["session_id"] == SID  # never rolled back -- the completed task is preserved
+
+
+def _spawn_args(name="w1", d="C:/proj", task="do it", **kw):
+    from types import SimpleNamespace
+    base = dict(name=name, dir=d, task=task, mode="accept", model=None,
+                max_budget_usd=None, setting_sources=None, token_ceiling=None,
+                category=None)
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+class TestCmdSpawnNative:
+    # cmd_spawn validates --dir is a real directory (unlike dispatch_bg,
+    # which never touches the filesystem for cwd) -- every call here passes
+    # d=str(native_home) so the brief's placeholder "C:/proj" (never created
+    # on a real machine) doesn't trip that check before reaching the code
+    # under test.
+    def test_spawn_native_stamps_sid_and_short_id(self, native_home, monkeypatch):
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_with())
+        rc = fleet.cmd_spawn(_spawn_args(d=str(native_home)), run=_fake_run_factory(),
+                             which=lambda _: "claude", sleep=lambda s: None)
+        assert rc == 0
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["dispatch_kind"] == "bg"
+        assert rec["session_id"] == SID and rec["native_short_id"] == "aaaabbbb"
+        assert rec["status"] == "working" and rec["turns"] == 1
+        assert rec["last_dispatch_at"] is not None
+
+    def test_spawn_stamps_category_and_writes_ceiling_file(self, native_home, monkeypatch):
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_with())
+        rc = fleet.cmd_spawn(_spawn_args(d=str(native_home), category="camp5", token_ceiling=5000),
+                             run=_fake_run_factory(), which=lambda _: "claude",
+                             sleep=lambda s: None)
+        assert rc == 0
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["category"] == "camp5"
+        assert fleet.ceiling_file_path(SID).exists()
+
+    def test_spawn_refuses_usd_budget(self, native_home):
+        with pytest.raises(fleet.FleetCliError, match="token-ceiling"):
+            fleet.cmd_spawn(_spawn_args(d=str(native_home), max_budget_usd=5.0),
+                            run=_fake_run_factory(), which=lambda _: "claude",
+                            sleep=lambda s: None)
+        assert fleet.load_registry()["workers"] == {}
+
+    def test_dispatch_failure_rolls_back_preclaim(self, native_home, monkeypatch):
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_spawn(_spawn_args(d=str(native_home)), run=_fake_run_factory(rc=1),
+                            which=lambda _: "claude", sleep=lambda s: None)
+        assert fleet.load_registry()["workers"] == {}
+
+    def test_join_expiry_with_fast_completion_outcome_commits_idle(self, native_home, monkeypatch):
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
+        fleet.append_outcome("w1", {"ts": fleet.now_iso(),
+                                    "session_id": SID, "kind": "result",
+                                    "result_text": "already done"})
+        clock = _FakeClock()
+        rc = fleet.cmd_spawn(_spawn_args(d=str(native_home)), run=_fake_run_factory(),
+                             which=lambda _: "claude",
+                             sleep=lambda s: clock.advance(s), clock=clock)
+        assert rc == 0
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["status"] == "idle" and rec["session_id"] == SID
+
+    def test_join_expiry_without_outcome_is_doa_rollback(self, native_home, monkeypatch):
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
+        clock = _FakeClock()
+        with pytest.raises(fleet.FleetCliError, match="aaaabbbb"):
+            fleet.cmd_spawn(_spawn_args(d=str(native_home)), run=_fake_run_factory(),
+                            which=lambda _: "claude",
+                            sleep=lambda s: clock.advance(s), clock=clock)
+        assert fleet.load_registry()["workers"] == {}
+
+    def test_spawn_events_written_under_same_lock_as_mutation(self, native_home, monkeypatch):
+        # F4: append_event calls happen for "spawned" (pre-claim) and
+        # "turn_started" (post-stamp) -- both present, in order.
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_with())
+        events_path = native_home / "state" / "events.jsonl"
+        fleet.cmd_spawn(_spawn_args(d=str(native_home)), run=_fake_run_factory(),
+                        which=lambda _: "claude", sleep=lambda s: None)
+        kinds = [json.loads(ln)["kind"] for ln in
+                events_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        assert kinds == ["spawned", "turn_started"]
