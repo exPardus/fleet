@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import functools
 import json
 import math
 import os
@@ -114,8 +115,20 @@ def pin_pass_path() -> Path:
 def record_pin_pass(claude_version: str) -> None:
     """T12's pin-test suite calls this on a green run (SPEC re-verification
     doctrine): stamps the CLI version the native contract was last verified
-    against, so `fleet doctor`'s pin-version check can flag drift."""
-    _write_json_atomic(pin_pass_path(), {"claude_version": claude_version, "passed_at": now_iso()})
+    against, so `fleet doctor`'s pin-version check can flag drift.
+
+    M-B T11 fix wave: normalizes through _parse_claude_version at write
+    time (defense on the write end, to complement the read-end
+    normalization in _doctor_check_pin_version) so a caller passing the
+    raw, unparsed `claude --version` stdout (e.g. "2.1.207 (Claude
+    Code)\\n") is stored in the same bare "X.Y.Z" shape doctor compares
+    against, rather than propagating formatting noise into a permanent
+    false FAIL. If the string doesn't parse as a version at all, it is
+    stored as-is -- _doctor_check_pin_version treats an unparseable
+    pinned value as an invalid pin record (PASS-note), never a crash."""
+    parsed = _parse_claude_version(claude_version)
+    normalized = ".".join(map(str, parsed)) if parsed is not None else claude_version
+    _write_json_atomic(pin_pass_path(), {"claude_version": normalized, "passed_at": now_iso()})
 
 
 def read_pin_pass() -> dict | None:
@@ -6358,14 +6371,39 @@ def _doctor_check_claude_version(which=shutil.which, run=subprocess.run):
     return ("claude-on-path", True, f"claude {'.'.join(map(str, version))} at {exe}")
 
 
+_PIN_VERSION_ECHO_LIMIT = 40
+
+
+def _clamp_version_echo(s: str, limit: int = _PIN_VERSION_ECHO_LIMIT) -> str:
+    """Bounds an untrusted, stored version-ish string before it's
+    interpolated into a doctor message -- a pin file can carry an
+    arbitrarily long digit run (still a valid _parse_claude_version match)
+    or, pre-parse, an arbitrarily long raw string; either way the message
+    stays a single sane terminal line."""
+    s = str(s)
+    return s if len(s) <= limit else s[:limit] + "..."
+
+
 def _doctor_check_pin_version(which=shutil.which, run=subprocess.run):
     """M-B T11 (docs/specs/native-substrate.md, Re-verification): the native
     contract (roster schema, transcript keys, --bg/--resume behavior) was
     observed against one specific `claude --version` and is not guaranteed
     to survive an update. FAIL is reserved for a confirmed mismatch against
     the last recorded pin-test pass -- everything else (no pin file yet,
-    `claude` unresolvable) is a PASS-note, since neither means the contract
-    is currently broken, only that it hasn't been (re)verified.
+    `claude` unresolvable, or a pin record whose claude_version doesn't
+    parse -- missing, None, non-str, or otherwise not version-shaped) is a
+    PASS-note, since none of those mean the contract is currently broken,
+    only that it hasn't been (re)verified or the record is unreadable.
+
+    M-B T11 fix wave: BOTH sides of the comparison are normalized through
+    _parse_claude_version before comparing, not just the live side --
+    otherwise a pin-pass recorded from a raw, unparsed `claude --version`
+    capture (e.g. "2.1.207 (Claude Code)\\n") permanently FAILs against
+    the identical, unchanged live version, purely on formatting. A pinned
+    value that fails to parse at all (field-corrupt pin-pass.json: absent
+    key, None, int, nested dict, ...) is treated the same as an invalid/
+    unreadable pin record -- a PASS-note, never a FAIL, since a bad record
+    is not evidence the contract itself is broken.
 
     Deliberately double-shells `claude --version` rather than sharing
     `_doctor_check_claude_version`'s subprocess result: that check returns
@@ -6387,12 +6425,18 @@ def _doctor_check_pin_version(which=shutil.which, run=subprocess.run):
     if live is None:
         return ("pin-version", True, "claude not resolvable")
     live_str = ".".join(map(str, live))
-    pinned = pin.get("claude_version")
-    if live_str != pinned:
+    pinned_raw = pin.get("claude_version")
+    pinned = _parse_claude_version(pinned_raw) if isinstance(pinned_raw, str) else None
+    if pinned is None:
+        return ("pin-version", True, "pin record unreadable -- re-run pin suite")
+    pinned_str = ".".join(map(str, pinned))
+    if live_str != pinned_str:
         return ("pin-version", False,
-                f"claude {live_str} != {pinned} at last pin pass ({pin.get('passed_at')}) -- "
-                "native contract unverified (docs/specs/native-substrate.md, Re-verification)")
-    return ("pin-version", True, f"pin-test pass current ({live_str}, {pin.get('passed_at')})")
+                f"claude {_clamp_version_echo(live_str)} != {_clamp_version_echo(pinned_str)} "
+                f"at last pin pass ({pin.get('passed_at')}) -- native contract unverified "
+                "(docs/specs/native-substrate.md, Re-verification)")
+    return ("pin-version", True,
+            f"pin-test pass current ({_clamp_version_echo(live_str)}, {pin.get('passed_at')})")
 
 
 _HOOK_SCRIPT_TOKEN_RE = re.compile(r"\S+\.py\b")
@@ -6743,10 +6787,23 @@ def _doctor_check_claude_agents(workers: dict, which=shutil.which, run=subproces
     # Counting only the CURRENT session_id would keep re-reporting those as
     # "fleet-unknown" forever -- every retired sid is still fleet-tracked
     # history, so it belongs in known_sids too.
+    # M-B T11 fix wave: registry field-shape drift (hand-repaired records,
+    # partial schema migrations) can hand this loop a non-dict record, a
+    # missing session_id, or a retired_sids value that isn't a list (e.g.
+    # a bare sid string, which would otherwise silently char-spread via
+    # set.update() on a str). Every shape is skipped/normalized rather
+    # than trusted, so a corrupt field degrades this to a no-op instead
+    # of a crash or a silently-wrong known_sids set.
     known_sids = set()
     for rec in workers.values():
-        known_sids.add(rec["session_id"])
-        known_sids.update(rec.get("retired_sids", []) or [])
+        if not isinstance(rec, dict):
+            continue
+        sid = rec.get("session_id")
+        if isinstance(sid, str):
+            known_sids.add(sid)
+        retired_sids = rec.get("retired_sids")
+        if isinstance(retired_sids, list):
+            known_sids.update(s for s in retired_sids if isinstance(s, str))
     unknown = sorted({
         sid for a in agents if isinstance(a, dict)
         for sid in [a.get("session_id") or a.get("id")]
@@ -6888,31 +6945,47 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run, get_process_info=No
         data = load_registry()
     workers = data.get("workers", {})
 
-    checks = [
-        _doctor_check_claude_version(which=which, run=run),
-        _doctor_check_pin_version(which=which, run=run),
-        _doctor_check_instance_settings(),
-        _doctor_check_instance_freshness(),
-        _doctor_check_hook_registration(),
-        _doctor_check_legacy_settings(),
-        _doctor_check_posttooluse_hook_smoke(run=run),
-        _doctor_check_stop_hook_smoke(run=run),
-        _doctor_check_terminal_launcher(which=which),
-        _doctor_check_stale_pids(workers, get_process_info=get_process_info),
-        _doctor_check_unreadable_starttime(workers, get_process_info=get_process_info),
-        _doctor_check_mailboxes(workers),
-        _doctor_check_stale_attaches(workers),
-        _doctor_check_limited_parks(workers),
-        _doctor_check_legacy_mix(workers),
-        _doctor_check_dead_suspected(workers),
-        _doctor_check_orphaned_claims(workers=workers),
-        _doctor_check_claude_agents(workers, which=which, run=run),
-        _doctor_check_log_sizes(),
-        _doctor_check_fleet_home_marker(),
-        _doctor_check_hook_errors(),
-        _doctor_check_supervisor_claim(),
-        _doctor_check_supervisor_handoff(),
+    check_calls = [
+        functools.partial(_doctor_check_claude_version, which=which, run=run),
+        functools.partial(_doctor_check_pin_version, which=which, run=run),
+        functools.partial(_doctor_check_instance_settings),
+        functools.partial(_doctor_check_instance_freshness),
+        functools.partial(_doctor_check_hook_registration),
+        functools.partial(_doctor_check_legacy_settings),
+        functools.partial(_doctor_check_posttooluse_hook_smoke, run=run),
+        functools.partial(_doctor_check_stop_hook_smoke, run=run),
+        functools.partial(_doctor_check_terminal_launcher, which=which),
+        functools.partial(_doctor_check_stale_pids, workers, get_process_info=get_process_info),
+        functools.partial(_doctor_check_unreadable_starttime, workers, get_process_info=get_process_info),
+        functools.partial(_doctor_check_mailboxes, workers),
+        functools.partial(_doctor_check_stale_attaches, workers),
+        functools.partial(_doctor_check_limited_parks, workers),
+        functools.partial(_doctor_check_legacy_mix, workers),
+        functools.partial(_doctor_check_dead_suspected, workers),
+        functools.partial(_doctor_check_orphaned_claims, workers=workers),
+        functools.partial(_doctor_check_claude_agents, workers, which=which, run=run),
+        functools.partial(_doctor_check_log_sizes),
+        functools.partial(_doctor_check_fleet_home_marker),
+        functools.partial(_doctor_check_hook_errors),
+        functools.partial(_doctor_check_supervisor_claim),
+        functools.partial(_doctor_check_supervisor_handoff),
     ]
+
+    # M-B T11 fix wave: each check runs in isolation -- a raising check
+    # (realistically reachable via registry field-shape drift, e.g. a
+    # hand-repaired or partially-migrated worker record) must not take
+    # down every OTHER check's [PASS]/[FAIL] line with it. Convert a
+    # crash into its own FAIL line, keyed by the check function's name
+    # since a raising check never got the chance to produce its own
+    # (name, ok, message) tuple.
+    checks = []
+    for check_fn in check_calls:
+        try:
+            checks.append(check_fn())
+        except Exception as exc:
+            fn_name = check_fn.func.__name__
+            exc_msg = str(exc)[:200]
+            checks.append((fn_name, False, f"check crashed: {type(exc).__name__}: {exc_msg}"))
 
     all_ok = True
     for name, ok, message in checks:
