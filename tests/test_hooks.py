@@ -794,6 +794,70 @@ class TestStopOutcome:
         assert proc.returncode == 0
         assert "stop_outcome" in read_hook_errors(tmp_path)
 
+    # -- fix wave: registry-shape guards (adversarial trap 6, CRITICAL) --
+
+    def test_registry_workers_list_falls_back_to_sid_key(self, tmp_path):
+        """A syntactically-valid but wrong-shaped fleet.json ("workers" is a
+        list, not a dict) must not blow up _resolve_name -- the record for
+        this Stop event must still be written, keyed by sid."""
+        state = tmp_path / "state"
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "fleet.json").write_text(json.dumps({"workers": [1, 2]}), encoding="utf-8")
+        proc = run_hook(STOP_OUTCOME, self._payload(tmp_path, transcript=None), tmp_path)
+        assert proc.returncode == 0
+        assert (state / "outcomes" / "sid-1.jsonl").exists()
+
+    def test_registry_top_level_list_falls_back_to_sid_key(self, tmp_path):
+        """Same as above but the whole registry document is a list, not a
+        dict at all."""
+        state = tmp_path / "state"
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "fleet.json").write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+        proc = run_hook(STOP_OUTCOME, self._payload(tmp_path, transcript=None), tmp_path)
+        assert proc.returncode == 0
+        assert (state / "outcomes" / "sid-1.jsonl").exists()
+
+    # -- fix wave: path-safety parity with postcompact_journal.py --
+
+    def test_unsafe_session_id_writes_nothing_and_logs(self, tmp_path):
+        (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+        payload = self._payload(tmp_path, sid="..\\..\\pwn", transcript=None)
+        proc = run_hook(STOP_OUTCOME, payload, tmp_path)
+        assert proc.returncode == 0
+        outcomes = tmp_path / "state" / "outcomes"
+        assert not outcomes.exists() or not any(outcomes.iterdir())
+        # no traversal outside the outcomes dir either
+        assert not (tmp_path / "pwn.jsonl").exists()
+        assert "stop_outcome" in read_hook_errors(tmp_path)
+
+    def test_registry_name_with_path_separator_falls_back_to_sid_key(self, tmp_path):
+        make_registry(tmp_path, {"w1/evil": {"session_id": "sid-1"}})
+        proc = run_hook(STOP_OUTCOME, self._payload(tmp_path, transcript=None), tmp_path)
+        assert proc.returncode == 0
+        assert (tmp_path / "state" / "outcomes" / "sid-1.jsonl").exists()
+        assert not (tmp_path / "state" / "outcomes" / "w1").exists()
+
+    # -- fix wave: session_id coerced to str before validation/matching --
+
+    def test_non_str_session_id_coerced_to_str(self, tmp_path):
+        payload = json.dumps({
+            "session_id": 12345, "hook_event_name": "Stop",
+            "last_assistant_message": "All done.",
+        })
+        proc = run_hook(STOP_OUTCOME, payload, tmp_path)
+        assert proc.returncode == 0
+        out = tmp_path / "state" / "outcomes" / "12345.jsonl"
+        assert out.exists()
+        rec = json.loads(out.read_text(encoding="utf-8").strip())
+        assert rec["session_id"] == "12345"
+        assert isinstance(rec["session_id"], str)
+
+    def test_falsy_session_id_still_silent_no_write(self, tmp_path):
+        payload = json.dumps({"session_id": "", "hook_event_name": "Stop"})
+        proc = run_hook(STOP_OUTCOME, payload, tmp_path)
+        assert proc.returncode == 0
+        assert not (tmp_path / "state" / "outcomes").exists()
+
     def test_atomic_append_helper_matches_fleet_pattern(self):
         """Structural pin: the hook must use the same Win32
         FILE_APPEND_DATA-only atomic-append approach as bin/fleet.py's
