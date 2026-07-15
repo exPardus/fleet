@@ -152,6 +152,25 @@ class TestOutcomeStore:
         rec = fleet.read_outcomes("w1")[0]
         assert rec["result_text"] == "short"
 
+    # T5 fix wave (Critical C1): has_fresh_outcome's default `kinds`
+    # argument must exclude tombstones -- see task-5-adversarial.md's C1
+    # repro. A fresh tombstone must never be read as "the turn finished".
+    def test_has_fresh_outcome_result_kind_still_vouches(self, native_home):
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": "s1", "kind": "result"})
+        assert fleet.has_fresh_outcome("w1", "s1", _iso(NOW)) is True
+
+    @pytest.mark.parametrize("kind", fleet.TOMBSTONE_KINDS)
+    def test_has_fresh_outcome_default_ignores_every_tombstone_kind(self, native_home, kind):
+        fleet.write_tombstone_outcome("w1", "s1", kind)
+        assert fleet.has_fresh_outcome("w1", "s1", _iso(NOW)) is False
+
+    def test_has_fresh_outcome_kinds_param_can_opt_in_to_tombstones(self, native_home):
+        # The default excludes tombstones, but a caller that genuinely
+        # wants to match one can still widen the match set explicitly.
+        fleet.write_tombstone_outcome("w1", "s1", "killed")
+        assert fleet.has_fresh_outcome("w1", "s1", _iso(NOW), kinds=("killed",)) is True
+        assert fleet.has_fresh_outcome("w1", "s1", _iso(NOW)) is False
+
 
 class TestOutcomeConcurrency:
     def test_concurrent_appends_lose_no_records(self, native_home):
@@ -524,6 +543,26 @@ class TestFastCompletionSid:
         found = fleet._fast_completion_sid("w1", _iso(NOW - timedelta(seconds=1)))
         assert found is None
 
+    # T5 fix wave (Critical C1 audit): a tombstone can't mean fast
+    # completion -- only a Stop-hook-written kind=="result" record should
+    # ever be returned.
+    @pytest.mark.parametrize("kind", fleet.TOMBSTONE_KINDS)
+    def test_tombstone_kind_is_never_a_fast_completion_sid(self, native_home, kind):
+        fleet.write_tombstone_outcome(SID, SID, kind)
+        found = fleet._fast_completion_sid("w1", _iso(NOW - timedelta(seconds=1)),
+                                           short_id="aaaabbbb")
+        assert found is None
+
+    def test_result_kind_still_found_alongside_tombstone(self, native_home):
+        # A tombstone is present too, but must not shadow/confuse the
+        # genuine result-kind match.
+        fleet.write_tombstone_outcome(SID, SID, "interrupted")
+        fleet.append_outcome(SID, {"ts": _iso(NOW), "session_id": SID,
+                                   "kind": "result", "result_text": "done"})
+        found = fleet._fast_completion_sid("w1", _iso(NOW - timedelta(seconds=1)),
+                                           short_id="aaaabbbb")
+        assert found == SID
+
     def test_prefers_freshest_across_both_sources(self, native_home):
         fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": "old-name-keyed",
                                     "kind": "result"})
@@ -792,6 +831,34 @@ class TestNativeRecompute:
         out = fleet.recompute_worker_native("w1", rec, [])
         assert out["status"] == "dead"
 
+    # T5 fix wave (Critical C1): task-5-adversarial.md's exact laundering
+    # repro. A fresh fleet-written tombstone for the CURRENT sid, landed
+    # (e.g. by a future T8 cmd_kill) before the registry status flip
+    # caught up, must never make the discriminator vouch "idle" -- it
+    # should fall through to _investigate_no_outcome (dead-suspected),
+    # honestly uncertain rather than falsely "done". Roster still reports
+    # idle (models the race window: the process is gone/idle on the
+    # roster, but the ONLY outcome record is the tombstone, not a result).
+    @pytest.mark.parametrize("kind", fleet.TOMBSTONE_KINDS)
+    def test_fresh_tombstone_never_launders_to_idle(self, native_home, kind):
+        rec = self._rec(native_home, status="working",
+                        last_dispatch_at=_iso(NOW - timedelta(minutes=1)))
+        fleet.write_tombstone_outcome("w1", SID, kind)
+        out = fleet.recompute_worker_native("w1", rec, [make_roster_entry(SID, status="idle")])
+        assert out["status"] != "idle"
+        assert out["status"] == "dead-suspected"
+
+    @pytest.mark.parametrize("kind", fleet.TOMBSTONE_KINDS)
+    def test_fresh_tombstone_never_launders_to_idle_roster_gone(self, native_home, kind):
+        # Same trap via the roster-gone branch (recompute_worker_native's
+        # OTHER has_fresh_outcome call site).
+        rec = self._rec(native_home, status="working",
+                        last_dispatch_at=_iso(NOW - timedelta(minutes=1)))
+        fleet.write_tombstone_outcome("w1", SID, kind)
+        out = fleet.recompute_worker_native("w1", rec, [])
+        assert out["status"] != "idle"
+        assert out["status"] == "dead-suspected"
+
 
 class TestEpochFreeze:
     def test_fetch_failure_is_suspicious(self):
@@ -944,6 +1011,39 @@ class TestCmdStatusNative:
         assert rc == 0
         assert fleet.load_registry()["workers"]["w1"]["status"] == "limited"
 
+    # T5 fix wave (Important I1): waiting_for_permission is transient --
+    # recomputed fresh from the roster every call -- and must never land in
+    # the persisted registry (new_worker_record's baseline schema doesn't
+    # enumerate it, unlike every other optional field).
+    def test_waiting_for_permission_not_persisted_to_registry(self, native_home, monkeypatch):
+        seed_native_worker(native_home, status="working")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            _fixed_roster(True, [make_roster_entry(SID, status="waiting")]))
+        rc = fleet.cmd_status(_status_args())
+        assert rc == 0
+        raw = json.loads((native_home / "state" / "fleet.json").read_text(encoding="utf-8"))
+        assert "waiting_for_permission" not in raw["workers"]["w1"]
+
+    def test_waiting_for_permission_still_shown_in_printed_table(self, native_home, monkeypatch, capsys):
+        seed_native_worker(native_home, status="working")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            _fixed_roster(True, [make_roster_entry(SID, status="waiting")]))
+        rc = fleet.cmd_status(_status_args())
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "waiting-permission" in out
+
+    def test_waiting_for_permission_does_not_survive_a_second_call_either(self, native_home, monkeypatch):
+        # Two consecutive calls -- self-heal isn't the only requirement
+        # now: it must never have persisted in the first place.
+        seed_native_worker(native_home, status="working")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            _fixed_roster(True, [make_roster_entry(SID, status="waiting")]))
+        fleet.cmd_status(_status_args())
+        fleet.cmd_status(_status_args())
+        raw = json.loads((native_home / "state" / "fleet.json").read_text(encoding="utf-8"))
+        assert "waiting_for_permission" not in raw["workers"]["w1"]
+
 
 class TestWaitForWorkersNative:
     def test_native_busy_stays_pending_until_timeout(self, native_home, monkeypatch):
@@ -1022,3 +1122,77 @@ class TestCmdWaitNative:
         rc = fleet.cmd_wait(_wait_args(["w1"]), sleep=lambda s: None, clock=_FakeClock())
         assert rc == 0
         assert fleet.load_registry()["workers"]["w1"]["status"] == "idle"
+
+    # T5 fix wave (Minor: print-vs-persist race, task-5-review.md M1):
+    # wait_for_workers's poll loop and cmd_wait's own persist-step fetch
+    # each do their own independent roster fetch. If they disagree (a
+    # fresh outcome record lands, or the roster changes, in the narrow
+    # window between the two), the summary line printed at the end must
+    # reflect what actually got persisted to fleet.json, never the
+    # earlier (now-stale) poll verdict.
+    def test_printed_summary_matches_persisted_status_not_stale_poll_verdict(
+            self, native_home, monkeypatch, capsys):
+        seed_native_worker(native_home, status="working",
+                           last_dispatch_at=_iso(NOW - timedelta(minutes=1)))
+        # Stub wait_for_workers directly: models its poll loop having
+        # concluded "dead-suspected" (no outcome record was visible yet at
+        # poll time).
+        monkeypatch.setattr(fleet, "wait_for_workers",
+                            lambda *a, **k: ({"w1": "dead-suspected"}, set()))
+        # Between that poll and cmd_wait's own persist-step roster fetch, a
+        # fresh outcome record lands -- the persist step's recompute now
+        # correctly resolves "idle", diverging from the stale poll verdict.
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": SID, "kind": "result"})
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            _fixed_roster(True, [make_roster_entry(SID, status="idle")]))
+
+        rc = fleet.cmd_wait(_wait_args(["w1"]), sleep=lambda s: None, clock=_FakeClock())
+        assert rc == 0
+        assert fleet.load_registry()["workers"]["w1"]["status"] == "idle"
+        out = capsys.readouterr().out
+        assert "w1: idle" in out
+        assert "dead-suspected" not in out
+
+
+class TestSnapshotTableNative:
+    """T5 fix wave (Minor: task-5-review.md M2) -- `_print_snapshot_table`/
+    `status_snapshot` (`fleet status --stale-ok`) must render native rows'
+    cost as "-" like `_print_status_table`'s G3 convention, never a stale/
+    always-zero dollar figure. Nativeness is derived from the row's own
+    `dispatch_kind` field -- no roster fetch (this view is file-only, per
+    CLAUDE.md's view-isolation rule)."""
+
+    def test_status_snapshot_row_carries_dispatch_kind(self, native_home):
+        seed_native_worker(native_home, status="idle")
+        row = fleet.status_snapshot()["workers"][0]
+        assert row["dispatch_kind"] == "bg"
+
+    def test_print_snapshot_table_native_row_renders_dash_cost(self, native_home, capsys):
+        seed_native_worker(native_home, status="idle")
+        snap = fleet.status_snapshot()
+        fleet._print_snapshot_table(snap)
+        out = capsys.readouterr().out
+        row_line = next(l for l in out.splitlines() if l.startswith("w1"))
+        assert "0.00" not in row_line
+
+    def test_print_snapshot_table_legacy_row_still_renders_cost(self, native_home, capsys):
+        rec = fleet.new_worker_record("legacy-sid-0000", "C:/proj", "do it", "accept")
+        rec["status"] = "idle"
+        rec["cost_usd"] = 1.23
+        data = fleet.load_registry()
+        data["workers"]["legacy1"] = rec
+        fleet.save_registry(data)
+
+        snap = fleet.status_snapshot()
+        fleet._print_snapshot_table(snap)
+        out = capsys.readouterr().out
+        row_line = next(l for l in out.splitlines() if l.startswith("legacy1"))
+        assert "1.23" in row_line
+
+    def test_via_cmd_status_stale_ok_native_row_renders_dash_cost(self, native_home, capsys):
+        seed_native_worker(native_home, status="idle")
+        rc = fleet.cmd_status(_status_args(stale_ok=True))
+        assert rc == 0
+        out = capsys.readouterr().out
+        row_line = next(l for l in out.splitlines() if l.startswith("w1"))
+        assert "0.00" not in row_line
