@@ -1643,6 +1643,92 @@ def _limit_reset_passed(record: dict) -> bool:
         return False
 
 
+def find_transcript_path(name: str, sid: str):
+    """Path to sid's transcript JSONL, or None. Reading
+    `~/.claude/projects/*/<sid>.jsonl` is sanctioned (native-substrate.md
+    "Result/cost" contract) -- read-only, never a mutation.
+
+    Prefers the `transcript_path` the Stop hook captured on an EARLIER
+    turn of this sid: scans read_outcomes(name, sid=sid) newest-first (it
+    already merges the name-keyed file with the sid-keyed fallback file --
+    see _fast_completion_sid's docstring for why that fallback file can
+    exist) for the latest record whose transcript_path is set and still
+    exists. A tombstone record carries transcript_path=None and is skipped
+    naturally by the truthiness check -- it is never mistaken for a path
+    donor. `name` may be None (a caller with only a sid on hand) -- the
+    outcome-store lookup is skipped entirely in that case, falling straight
+    to the glob below.
+
+    Falls back to globbing every project dir for `<sid>.jsonl` -- the ONLY
+    path available for a sid whose limit-walled turn fired no Stop hook at
+    all (G11: a limit wall is silent, no outcome record exists yet).
+    None if nothing exists either way."""
+    if not sid:
+        return None
+    if name:
+        for rec in reversed(read_outcomes(name, sid=sid)):
+            tp = rec.get("transcript_path")
+            if tp and Path(tp).exists():
+                return Path(tp)
+    try:
+        candidates = sorted(Path.home().glob(f".claude/projects/*/{sid}.jsonl"))
+    except OSError:
+        return None
+    return candidates[0] if candidates else None
+
+
+def transcript_limit_scan(sid: str, transcript_path=None):
+    """(is_limit, reset_at, kind) from sid's transcript tail (G11 / Known
+    hazards: a rate-limit 429 fires NO Stop hook and leaves the roster
+    looking like a healthy idle/working entry -- the only sanctioned-
+    surface evidence is a synthetic 429 assistant record inside the
+    transcript itself).
+
+    A record is limit-shaped IFF it is a parseable JSON object with
+    `isApiErrorMessage` truthy AND (`apiErrorStatus == 429` OR
+    `error == "rate_limit"`) -- the structured gate observed verbatim in
+    the G7 evidence. Structured gate ONLY: conversation TEXT about rate
+    limits, an upstream MCP 429, or a disk-quota EDQUOT must never park
+    (mirrors the legacy UL1 stderr classifier's own load-bearing
+    negatives, TestFix2, ported here for the transcript-tail path).
+
+    Scans the tail window (`_read_tail_lines` -- perf: bounded bytes, no
+    whole-file parse) newest-first, first match wins. Horizon/kind reuse
+    `_parse_limit_signal` verbatim against the record's
+    `message.content[].text` -- the observed real signal carries a
+    LOCAL-format time, not ISO, so reset_at is usually None (park with an
+    unknown horizon; `resume-limited --force-now` is the realistic
+    recovery). Never raises: a missing/unreadable transcript or an
+    unparseable line both fall through to (False, None, None).
+
+    transcript_path may be given directly (the discriminator's own call
+    site resolves it once via find_transcript_path(name, sid) and hands
+    it in here, since this function only has a sid to work with); when
+    omitted, falls back to find_transcript_path(None, sid) -- the
+    sid-glob path only, since there is no name to key an outcome-store
+    lookup on from here."""
+    path = Path(transcript_path) if transcript_path else find_transcript_path(None, sid)
+    if path is None or not path.exists():
+        return False, None, None
+    for line in reversed(_read_tail_lines(path)):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict) or not rec.get("isApiErrorMessage"):
+            continue
+        if rec.get("apiErrorStatus") == 429 or rec.get("error") == "rate_limit":
+            msg = rec.get("message") or {}
+            parts = [c.get("text", "") for c in (msg.get("content") or [])
+                     if isinstance(c, dict) and c.get("type") == "text"]
+            reset_at, kind = _parse_limit_signal("\n".join(parts))
+            return True, reset_at, kind
+    return False, None, None
+
+
 def _append_abnormal_turn_note(name: str) -> None:
     """Append a one-line abnormal-turn-end landmark to the worker's journal
     (phase1 kernel 4). Best-effort: a journal we cannot write must never break
@@ -1719,12 +1805,12 @@ def recompute_worker(name: str, record: dict, get_process_info=None, sleep=time.
 # Native outcome discriminator (M-B T5): recompute_worker_native replaces
 # PID probing for dispatch_kind:"bg" records -- there is no OS pid to probe,
 # liveness comes from the roster (joined by sid) plus the Stop-hook outcome
-# store. `_limit_scan_hook` is a module-level seam (None here; T6 installs
-# the real transcript_limit_scan) so the no-fresh-outcome branch can resolve
-# to `limited` instead of always falling to `dead-suspected`.
+# store. `_limit_scan_hook` is a module-level seam (transcript_limit_scan,
+# installed below, T6) so the no-fresh-outcome branch can resolve to
+# `limited` instead of always falling to `dead-suspected`.
 # ---------------------------------------------------------------------------
 
-_limit_scan_hook = None  # T6 installs transcript_limit_scan here
+_limit_scan_hook = transcript_limit_scan  # T6: rehomed to the transcript-tail scan
 
 NATIVE_TERMINAL_STATUSES = {"idle", "dead", "dead-suspected", "limited",
                             "over_ceiling", "interrupted"}
@@ -1738,13 +1824,21 @@ _NATIVE_STICKY = ("dead", "over_budget", "over_ceiling", "limited",
 def _investigate_no_outcome(name: str, record: dict, updated: dict) -> dict:
     """No fresh outcome record for the current sid: limit wall (silent,
     G11) or genuinely dead. Scans the transcript tail via `_limit_scan_hook`
-    (None until T6 installs transcript_limit_scan, in which case this
-    always resolves to dead-suspected); limit-shaped -> park `limited`
-    (never auto-respawned before the horizon), else -> `dead-suspected`
-    (surfaced, never auto-respawned, re-evaluated every recompute)."""
+    (module-level seam, `transcript_limit_scan` in production, swappable
+    in tests); limit-shaped -> park `limited` (never auto-respawned before
+    the horizon), else -> `dead-suspected` (surfaced, never auto-respawned,
+    re-evaluated every recompute).
+
+    Resolves the transcript path itself via find_transcript_path(name,
+    sid) -- the record may live under either the outcome store's NAME key
+    or its sid-fallback key (see find_transcript_path's docstring) -- and
+    hands sid + the resolved path to the hook, so transcript_limit_scan's
+    own signature can stay (sid, transcript_path=None) as documented."""
     scan = _limit_scan_hook
     if scan is not None:
-        is_limit, reset_at, kind = scan(record.get("session_id"))
+        sid = record.get("session_id")
+        path = find_transcript_path(name, sid)
+        is_limit, reset_at, kind = scan(sid, transcript_path=path)
         if is_limit:
             updated["status"] = "limited"
             updated["limit_reset_at"] = reset_at
@@ -3405,7 +3499,84 @@ def cmd_send(args, popen=subprocess.Popen, get_process_info=None, which=shutil.w
     return 0
 
 
-def _resume_one_limited(name: str, popen, get_process_info, which, sleep) -> bool:
+def _resume_one_limited_native(name: str, old_sid: str, cwd, mode, model, category,
+                               setting_sources, token_ceiling,
+                               run, which, sleep) -> bool:
+    """Native (`dispatch_kind:"bg"`) counterpart of the legacy resume below --
+    fork-steer per RATIFIED G2(b): `claude --bg --resume <old_sid>` MINTS A
+    NEW SID (the original session's own roster entry, sid, and event count
+    are left untouched, Steering contract) rather than waking the same live
+    session. Called with the pre-claim (status="working"/turn_pid=None)
+    already committed by `_resume_one_limited` under its own lock, exactly
+    like the legacy branch.
+
+    Outside any lock: drain the OLD sid's mailbox into a steer body via
+    compose_prompt(..., old_sid, journal_path=...) -- same "mailbox +
+    journal" resume shape as the legacy path -- prefixed with the operator-
+    facing continuation line, then dispatch_bg(..., resume_sid=old_sid,
+    hint="resume past limit"). On any failure, restore the mailbox claim and
+    roll the pre-claim back to `limited` (mirrors the legacy branch's
+    rollback exactly -- session_id was never touched pre-commit, so this
+    restores the OLD sid's park cleanly).
+
+    On success: retire old_sid into retired_sids, restamp session_id/
+    native_short_id to the NEW sid, re-point the ceiling file (the new sid
+    didn't exist before dispatch_bg returned it), clear the limit fields,
+    and commit turn_pid/turns/last_dispatch_at/last_activity via the same
+    retry-wrapped `_commit_launched_turn` stamp step cmd_spawn's native path
+    uses -- dispatch_bg is itself synchronous (it already blocks through the
+    roster join), so the only remaining race is the registry commit lock,
+    exactly like cmd_spawn's post-dispatch stamp."""
+    journal_path = journals_dir() / f"{name}.md"
+    prompt, claim = compose_prompt(name, cwd, "", old_sid, journal_path=journal_path)
+    body = ("The usage-limit reset horizon has passed. Continue the task "
+            "from where you left off.\n\n" + prompt)
+    try:
+        result = dispatch_bg(
+            name, cwd, body, mode, model=model, category=category,
+            hint="resume past limit", resume_sid=old_sid,
+            setting_sources=setting_sources, run=run, which=which, sleep=sleep,
+        )
+        finalize_mailbox_claim(claim)
+    except BaseException:
+        restore_mailbox_claim(claim)
+        with fleet_lock():
+            data = load_registry()
+            r = data["workers"].get(name)
+            if r is not None and r.get("status") == "working" and r.get("turn_pid") is None:
+                r["status"] = "limited"
+                save_registry(data)
+        raise
+
+    new_sid = result["session_id"]
+    short_id = result["short_id"]
+    _write_ceiling_file(new_sid, token_ceiling)
+
+    def _commit():
+        with fleet_lock():
+            data = load_registry()
+            r = data["workers"].get(name)
+            if r is not None:
+                r["retired_sids"] = list(r.get("retired_sids", [])) + [old_sid]
+                r["session_id"] = new_sid
+                r["native_short_id"] = short_id
+                r["status"] = "working"
+                r["turn_pid"] = None
+                r["last_dispatch_at"] = now_iso()
+                r["last_activity"] = now_iso()
+                r["turns"] = r.get("turns", 0) + 1
+                r["limit_reset_at"] = None
+                r["limit_kind"] = None
+                save_registry(data)
+            append_event("limit_resumed", name, old_session_id=old_sid, session_id=new_sid)
+
+    if not _commit_launched_turn(_commit, sleep=sleep):
+        _report_stranded_native_turn(name, new_sid, short_id)
+    return True
+
+
+def _resume_one_limited(name: str, popen, get_process_info, which, sleep,
+                        run=subprocess.run) -> bool:
     """Relaunch a single `limited` worker through the ordinary
     fleet_lock-guarded launch path -- the SAME pre-claim / one-live-claude /
     universal-drain shape cmd_send's idle-resume uses (invariants 6, 7).
@@ -3422,7 +3593,13 @@ def _resume_one_limited(name: str, popen, get_process_info, which, sleep) -> boo
     on one sid, orphaning the first turn_pid). A vanished worker raises a clean
     FleetCliError, never a raw KeyError. Then pre-claim status="working"/
     turn_pid=None (recompute's launch-in-flight guard then refuses to demote
-    this window). Outside the lock: drain mailbox + journal (compose_prompt with
+    this window).
+
+    M-B T6: a native (`dispatch_kind:"bg"`) record forks off to
+    `_resume_one_limited_native` here (RATIFIED G2(b) fork-steer) --
+    everything below this point is the legacy Popen path, untouched.
+
+    Outside the lock: drain mailbox + journal (compose_prompt with
     journal_path -- F31's "mailbox + journal" resume), launch_turn re-passing
     the spawn-recorded max_budget_usd/setting_sources (else the cap and
     foreign-hook remedy vanish on the resumed turn), then commit the turn_pid.
@@ -3440,6 +3617,7 @@ def _resume_one_limited(name: str, popen, get_process_info, which, sleep) -> boo
         # it, ...). Skip rather than pre-claim a second live turn onto the sid.
         if rec.get("status") != "limited":
             return False
+        native = is_native(rec)
         rec["status"] = "working"
         rec["turn_pid"] = None
         # Stamp a fresh last_activity so recompute_status's stale-pre-claim
@@ -3454,6 +3632,13 @@ def _resume_one_limited(name: str, popen, get_process_info, which, sleep) -> boo
         model = rec.get("model")
         max_budget_usd = rec.get("max_budget_usd")
         setting_sources = rec.get("setting_sources")
+        category = rec.get("category")
+        token_ceiling = rec.get("token_ceiling")
+
+    if native:
+        return _resume_one_limited_native(name, sid, cwd, mode, model, category,
+                                          setting_sources, token_ceiling,
+                                          run=run, which=which, sleep=sleep)
 
     journal_path = journals_dir() / f"{name}.md"
     prompt, claim = compose_prompt(name, cwd, "", sid, journal_path=journal_path)
@@ -3496,11 +3681,17 @@ def _resume_one_limited(name: str, popen, get_process_info, which, sleep) -> boo
 
 
 def cmd_resume_limited(args, popen=subprocess.Popen, get_process_info=None, which=shutil.which,
-                       sleep=time.sleep) -> int:
+                       sleep=time.sleep, run=subprocess.run) -> int:
     """`fleet resume-limited [name] [--force-now]` (SPEC §5 resume-limited row,
     UL1 / F31): the RECOMMENDED explicit resume sweep (UL-OQ3) -- NOT an
     automatic status/launch-time side-effect (invariant 1 daemonless forbids a
     read-view from launching turns; no resident process auto-wakes).
+
+    M-B T6: `run` is additive -- the native fork-steer branch's dispatch_bg
+    call needs a `subprocess.run`-shaped injectable, threaded alongside (not
+    instead of) the legacy `popen`/`get_process_info` pair, since a single
+    sweep can cover both a legacy and a native `limited` worker in the same
+    call. `_resume_one_limited` picks the branch per-worker via `is_native`.
 
     For each `limited` worker whose limit_reset_at has PASSED, relaunch the
     pending work via _resume_one_limited (the fleet_lock-guarded launch path)
@@ -3542,7 +3733,7 @@ def cmd_resume_limited(args, popen=subprocess.Popen, get_process_info=None, whic
         # FIX-1: _resume_one_limited re-validates `limited` under its own lock
         # and returns False if a concurrent actor already moved the worker --
         # report that as a skip, never as a (non-existent) resume.
-        if _resume_one_limited(name, popen, get_process_info, which, sleep):
+        if _resume_one_limited(name, popen, get_process_info, which, sleep, run=run):
             resumed.append(name)
         else:
             skipped.append((name, "no longer limited (concurrent change)"))
