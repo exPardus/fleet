@@ -1407,3 +1407,152 @@ class TestNativeResumeLimited:
                                       which=lambda _: "claude", sleep=lambda s: None)
         assert rc == 0
         assert fleet.load_registry()["workers"]["w1"]["status"] == "limited"
+
+
+# ---------------------------------------------------------------------------
+# M-B Task 6 fix wave (task-6-adversarial.md): C1 OSError-proof scan, C2
+# last-substantive-record scanning discipline, High mtime transcript pick,
+# Medium native respawn guard.
+# ---------------------------------------------------------------------------
+
+class TestFixC1LockedTranscriptFailsSoft:
+    """C1 (Critical): transcript_limit_scan must never raise on a locked/
+    unreadable transcript -- the ENTIRE access path (exists check, open,
+    read) is OSError-guarded and falls soft to (False, None, None)."""
+
+    def test_locked_exists_check_fails_soft(self, native_home, tmp_path, monkeypatch):
+        t = _write_native_transcript(tmp_path, SID, [LIMIT_RECORD])
+
+        class SharingViolation(PermissionError):
+            def __init__(self):
+                super().__init__(13, "used by another process")
+                self.winerror = 32
+
+        def boom(self):
+            raise SharingViolation()
+
+        monkeypatch.setattr(fleet.Path, "exists", boom)
+        assert fleet.transcript_limit_scan(SID, transcript_path=t) == (False, None, None)
+
+    def test_locked_read_fails_soft(self, native_home, tmp_path, monkeypatch):
+        t = _write_native_transcript(tmp_path, SID, [LIMIT_RECORD])
+
+        def boom(path):
+            raise PermissionError(13, "used by another process")
+
+        monkeypatch.setattr(fleet, "_read_tail_lines", boom)
+        assert fleet.transcript_limit_scan(SID, transcript_path=t) == (False, None, None)
+
+    def test_recompute_worker_native_no_crash_on_locked_transcript(
+            self, native_home, tmp_path, monkeypatch):
+        # Integration-shape: idle-no-outcome native worker whose transcript
+        # exists but is momentarily locked (e.g. the --bg daemon's own
+        # write) must resolve to dead-suspected, not raise, all the way
+        # through recompute_worker_native -> _investigate_no_outcome ->
+        # the REAL installed transcript_limit_scan hook.
+        monkeypatch.setattr(fleet.Path, "home", staticmethod(lambda: tmp_path))
+        rec = seed_native_worker(native_home)
+        _write_native_transcript(tmp_path, SID, [LIMIT_RECORD])
+
+        real_exists = fleet.Path.exists
+
+        def flaky_exists(self):
+            if self.name == f"{SID}.jsonl":
+                raise PermissionError(13, "used by another process")
+            return real_exists(self)
+
+        monkeypatch.setattr(fleet.Path, "exists", flaky_exists)
+        out = fleet.recompute_worker_native("w1", rec, [make_roster_entry(SID, status="idle")])
+        assert out["status"] == "dead-suspected"
+
+
+class TestFixC2LastSubstantiveRecordGate:
+    """C2 (Critical): the scan stops at the FIRST record (newest-first)
+    that is either API-error-shaped or substantive (assistant/user with
+    real content) -- a stale older 429 sitting behind a newer non-matching
+    record must never win. Bookkeeping records are transparently skipped."""
+
+    def test_newer_529_after_older_429_does_not_park(self, native_home, tmp_path):
+        older_429 = json.loads(json.dumps(LIMIT_RECORD))
+        newer_529 = {
+            "type": "assistant",
+            "message": {"model": "<synthetic>", "role": "assistant",
+                        "content": [{"type": "text", "text": "upstream overloaded"}]},
+            "isApiErrorMessage": True, "apiErrorStatus": 529,
+        }
+        t = _write_native_transcript(tmp_path, SID, [older_429, newer_529])
+        is_limit, reset_at, kind = fleet.transcript_limit_scan(SID, transcript_path=t)
+        assert (is_limit, reset_at, kind) == (False, None, None)
+
+    def test_newer_assistant_text_after_older_429_does_not_park(self, native_home, tmp_path):
+        older_429 = json.loads(json.dumps(LIMIT_RECORD))
+        newer_chat = {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "sure, let's keep going with the refactor"}]}}
+        t = _write_native_transcript(tmp_path, SID, [older_429, newer_chat])
+        is_limit, reset_at, kind = fleet.transcript_limit_scan(SID, transcript_path=t)
+        assert (is_limit, reset_at, kind) == (False, None, None)
+
+    def test_wall_as_last_substantive_record_with_trailing_bookkeeping_parks(
+            self, native_home, tmp_path):
+        # G7-evidence ordering: the limit wall IS the last substantive
+        # thing that happened; only bookkeeping (attachment/system/
+        # summary-shaped) records trail it and must be skipped over, not
+        # treated as the stopping record.
+        bookkeeping_1 = {"type": "attachment", "name": "some-file.txt"}
+        bookkeeping_2 = {"type": "summary", "summary": "session summary"}
+        t = _write_native_transcript(tmp_path, SID, [LIMIT_RECORD, bookkeeping_1, bookkeeping_2])
+        is_limit, reset_at, kind = fleet.transcript_limit_scan(SID, transcript_path=t)
+        assert is_limit is True
+        assert kind == "session_5h"
+
+
+class TestFixHTranscriptGlobPicksFreshestMtime:
+    """High: find_transcript_path's glob fallback picks the freshest
+    st_mtime among candidates, not the lexicographically-first path
+    string (which is pure alphabetical accident of the project-dir
+    name)."""
+
+    def test_older_lexicographic_dir_loses_to_fresher_mtime_dir(
+            self, native_home, tmp_path, monkeypatch):
+        monkeypatch.setattr(fleet.Path, "home", staticmethod(lambda: tmp_path))
+        old_path = _write_native_transcript_in(tmp_path, SID, [{"type": "user"}], "C--aaa-old")
+        import time
+        time.sleep(0.05)
+        new_path = _write_native_transcript_in(tmp_path, SID, [LIMIT_RECORD], "C--zzz-new")
+        chosen = fleet.find_transcript_path(None, SID)
+        assert chosen == new_path
+        assert chosen != old_path
+
+
+def _write_native_transcript_in(home, sid, records, proj_name):
+    proj = home / ".claude" / "projects" / proj_name
+    proj.mkdir(parents=True, exist_ok=True)
+    p = proj / f"{sid}.jsonl"
+    p.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+    return p
+
+
+class TestFixMediumRespawnNativeGuard:
+    """Medium: cmd_respawn must refuse against a native (dispatch_kind:
+    "bg") record until Task 7 lands native-aware respawn, instead of
+    silently stripping dispatch_kind and orphaning the --bg session."""
+
+    def test_native_record_respawn_refuses_registry_unchanged(self, native_home):
+        seed_native_worker(native_home, status="limited",
+                           limit_reset_at="2026-07-15T00:00:00Z", limit_kind="session_5h")
+        before = fleet.load_registry()["workers"]["w1"]
+        from types import SimpleNamespace
+        args = SimpleNamespace(name="w1", task=None, force=False, yes=True,
+                               max_budget_usd=None, setting_sources=None,
+                               token_ceiling=None)
+
+        def popen(*a, **kw):
+            raise AssertionError("must not launch -- native respawn is refused pre-launch")
+
+        with pytest.raises(fleet.FleetCliError, match="M-B Task 7"):
+            fleet.cmd_respawn(args, popen=popen)
+
+        after = fleet.load_registry()["workers"]["w1"]
+        assert after == before
+        assert after["dispatch_kind"] == "bg"
+        assert after["session_id"] == before["session_id"]
