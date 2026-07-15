@@ -125,6 +125,18 @@ def refuse_if_legacy(name: str, record: dict, action: str) -> None:
         )
 
 
+def refuse_if_archived(name: str, record: dict, action: str) -> None:
+    """M-B T9 (spec §5.1.2): a tombstoned (archived_at set) worker is
+    history-only -- every native mutating command refuses it up front
+    rather than silently reanimating or re-touching a retired record.
+    `fleet clean` is deliberately exempt (it is the only sanctioned
+    deleter of an archived record) and never calls this guard."""
+    if isinstance(record, dict) and record.get("archived_at") is not None:
+        raise FleetCliError(
+            f"{name}: archived -- history only (fleet clean to delete)"
+        )
+
+
 def _write_ceiling_file(sid: str, ceiling) -> None:
     """Kernel 10 (fleet half): persist the sid-keyed token ceiling that the
     Stop hook (stop_mailbox.py:_read_ceiling) reads. No-op when ceiling is
@@ -2078,6 +2090,11 @@ def _worker_flags(record: dict) -> list:
         flags.append(f"limited (resets {reset})" if reset else "limited (reset unknown)")
         if _limit_reset_passed(record):
             flags.append("resume-eligible")
+    # M-B T9 (spec §5.1.2): archived_at survives on a tombstoned record
+    # regardless of its (frozen) status -- flag it distinctly rather than
+    # letting it masquerade as a live idle/dead/interrupted row.
+    if record.get("archived_at"):
+        flags.append("archived")
     return flags
 
 
@@ -2113,9 +2130,15 @@ def _read_registry_readonly() -> tuple:
     return (True, None, {"workers": workers})
 
 
-def status_snapshot(now=None) -> dict:
+def status_snapshot(now=None, include_archived: bool = False) -> dict:
     """Read-only fleet snapshot. See the module comment above for why this
-    exists alongside cmd_status rather than reusing it."""
+    exists alongside cmd_status rather than reusing it.
+
+    M-B T9 (spec §5.1.2): rows whose `archived_at` is set are EXCLUDED by
+    default (a tombstoned worker is history, not a live-fleet row) --
+    `include_archived=True` (wired from `fleet status --all`) puts them
+    back, each carrying its own `archived_at` timestamp so the caller can
+    flag it distinctly."""
     if now is None:
         now = datetime.now(timezone.utc)
     ok, reason, data = _read_registry_readonly()
@@ -2135,6 +2158,8 @@ def status_snapshot(now=None) -> dict:
     total_cost = 0.0
     for name in sorted(data["workers"]):
         rec = data["workers"][name]
+        if rec.get("archived_at") and not include_archived:
+            continue
         sid = rec.get("session_id") or ""
         mail = _pending_mail_count(sid) if sid else 0
         cost = _registry_cost(rec.get("cost_usd"))
@@ -2164,6 +2189,7 @@ def status_snapshot(now=None) -> dict:
             # like _print_status_table's G3 convention, without needing
             # is_native's full record shape.
             "dispatch_kind": rec.get("dispatch_kind"),
+            "archived_at": rec.get("archived_at"),
         })
 
     snap["workers"] = rows
@@ -2939,8 +2965,12 @@ def cmd_status(args, get_process_info=None, sleep=time.sleep) -> int:
     # Phase 1.6 (D1/D2): --stale-ok is the probe-free, lock-free, write-free
     # read path every view uses. Returns last-COMMITTED status plus
     # stale_seconds; it never asserts liveness it did not probe for.
+    # M-B T9 (spec §5.1.2): an explicit named query always finds its worker
+    # (archived or not) -- the default-hides-archived rule only governs the
+    # unfiltered bulk listing, matched via `--all`.
+    include_archived = getattr(args, "all", False) or args.name is not None
     if getattr(args, "stale_ok", False):
-        snap = status_snapshot()
+        snap = status_snapshot(include_archived=include_archived)
         if getattr(args, "json", False):
             print(json.dumps(snap, indent=2))
         else:
@@ -2949,12 +2979,15 @@ def cmd_status(args, get_process_info=None, sleep=time.sleep) -> int:
 
     with fleet_lock():
         data = load_registry()
-        names = [args.name] if args.name else sorted(data["workers"])
-        for n in names:
+        requested = [args.name] if args.name else sorted(data["workers"])
+        for n in requested:
             if n not in data["workers"]:
                 raise FleetCliError(f"unknown worker: {n!r}")
-        before = {n: data["workers"][n] for n in names}
+        before_all = {n: data["workers"][n] for n in requested}
         all_workers = data["workers"]  # snapshot for the epoch check (G9)
+
+    names = [n for n in requested if include_archived or not before_all[n].get("archived_at")]
+    before = before_all
 
     # M-B T5: native (dispatch_kind:"bg") records have no OS pid to probe --
     # they go through recompute_worker_native (roster + outcome store)
@@ -2962,12 +2995,18 @@ def cmd_status(args, get_process_info=None, sleep=time.sleep) -> int:
     # today's path untouched.
     native_names = [n for n in names if is_native(before[n])]
     legacy_names = [n for n in names if n not in native_names]
+    # M-B T9: an archived native record is frozen history -- its evidence
+    # files (outcomes/journal/task) have already been moved to the archive
+    # dir, so recompute_worker_native would have nothing fresh to read and
+    # could misfire into dead-suspected/limited. Never recompute it; just
+    # carry its last-committed record forward unchanged.
+    native_active_names = [n for n in native_names if not before[n].get("archived_at")]
 
     # ONE roster fetch per invocation, outside the lock (F4 doctrine), only
     # when a native worker is actually being asked about.
     roster_entries = []
     epoch_frozen = False
-    if native_names:
+    if native_active_names:
         roster_ok, payload = _fetch_agents_roster()
         roster_entries = payload if roster_ok else []
         epoch_frozen = native_epoch_suspicious(roster_ok, roster_entries, all_workers)
@@ -2977,15 +3016,15 @@ def cmd_status(args, get_process_info=None, sleep=time.sleep) -> int:
     # part.
     after = {n: recompute_worker(n, before[n], get_process_info=get_process_info, sleep=sleep)
              for n in legacy_names}
-    if native_names:
-        if epoch_frozen:
+    for n in native_names:
+        if n not in native_active_names:
+            after[n] = before[n]  # archived: frozen, never recomputed
+        elif epoch_frozen:
             # G9: roster suspicious -- no native record is recomputed or
             # written this invocation; display whatever is last-committed.
-            for n in native_names:
-                after[n] = before[n]
+            after[n] = before[n]
         else:
-            for n in native_names:
-                after[n] = recompute_worker_native(n, before[n], roster_entries)
+            after[n] = recompute_worker_native(n, before[n], roster_entries)
 
     display = {}
     with fleet_lock():
@@ -3041,7 +3080,7 @@ def cmd_status(args, get_process_info=None, sleep=time.sleep) -> int:
     if getattr(args, "json", False):
         # The authoritative path has already persisted its verdicts above, so
         # re-deriving the snapshot from disk yields exactly the recomputed state.
-        print(json.dumps(status_snapshot(), indent=2))
+        print(json.dumps(status_snapshot(include_archived=include_archived), indent=2))
     else:
         _print_status_table({"workers": display}, names)
     # Phase1 kernel 1: surface a TOTAL count of swallowed hook errors when
@@ -3071,6 +3110,8 @@ def _print_snapshot_table(snap: dict, name=None) -> None:
             flags.append("idle+mail")
         if w["resume_eligible"]:
             flags.append("resume-eligible")
+        if w.get("archived_at"):
+            flags.append("archived")
         # T5 fix wave (Minor: snapshot cost render): G3 says USD cost is
         # dead for native dispatch -- render "-" here too, matching
         # _print_status_table, instead of a stale/always-zero dollar
@@ -3855,6 +3896,7 @@ def cmd_send(args, popen=subprocess.Popen, get_process_info=None, which=shutil.w
     # through to the legacy path's own (unchanged) unknown-worker check.
     _ok, _reason, _snap = _read_registry_readonly()
     if _ok and args.name in _snap["workers"] and is_native(_snap["workers"][args.name]):
+        refuse_if_archived(args.name, _snap["workers"][args.name], "send")
         return _cmd_send_native(args.name, dict(_snap["workers"][args.name]), message,
                                 run=run, which=which, sleep=sleep)
 
@@ -4247,6 +4289,7 @@ def cmd_resume_limited(args, popen=subprocess.Popen, get_process_info=None, whic
         if args.name:
             if args.name not in data["workers"]:
                 raise FleetCliError(f"unknown worker: {args.name!r}")
+            refuse_if_archived(args.name, data["workers"][args.name], "resume-limited")
             names = [args.name]
         else:
             names = sorted(data["workers"])
@@ -4476,6 +4519,7 @@ def cmd_interrupt(args, get_process_info=None, kill_process_tree=None,
         rec = dict(data["workers"][args.name])
 
     if is_native(rec):
+        refuse_if_archived(args.name, rec, "interrupt")
         return _cmd_interrupt_native(args.name, rec, run=run, which=which)
 
     outcome = _interrupt_worker(args.name, get_process_info=get_process_info, kill_process_tree=kill_process_tree)
@@ -5106,6 +5150,7 @@ def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shuti
     # falls through to the legacy path's own (unchanged) unknown-worker
     # check under its first real lock.
     if _ok and args.name in _snap["workers"] and is_native(_snap["workers"][args.name]):
+        refuse_if_archived(args.name, _snap["workers"][args.name], "respawn")
         return _cmd_respawn_native(args, dict(_snap["workers"][args.name]),
                                    run=run, which=which, sleep=sleep, clock=clock)
 
@@ -5491,6 +5536,7 @@ def cmd_kill(args, get_process_info=None, kill_process_tree=None, sleep=time.sle
         rec = data["workers"][args.name]
         native = is_native(rec)
         if native:
+            refuse_if_archived(args.name, rec, "kill")
             if rec.get("session_id") is None and not _launch_claim_expired(rec.get("last_activity")):
                 raise FleetCliError(
                     f"launch in flight for {args.name}; retry in a few seconds"
@@ -5555,7 +5601,13 @@ def _remove_worker_files(name: str, sid: str, retired_sids: list = ()) -> list:
     fork-steer/respawn chain's earlier sids, native-only, always empty for
     a legacy record) -- that sid's own outcome file and ceiling file, which
     would otherwise survive as permanent orphans once the registry entry
-    that referenced them is gone."""
+    that referenced them is gone.
+
+    M-B T9 (spec §5.1.2): also sweeps `logs/archive/<name>/` (the whole
+    tree, via shutil.rmtree) -- `fleet clean` is the only sanctioned
+    deleter of an archived worker's tombstoned files, mirroring the rest
+    of this function's best-effort/missing-is-fine contract. A no-op for
+    a worker that was never archived (the dir simply doesn't exist)."""
     removed = []
     candidates = [
         logs_dir() / f"{name}.jsonl", logs_dir() / f"{name}.jsonl.1",
@@ -5579,6 +5631,13 @@ def _remove_worker_files(name: str, sid: str, retired_sids: list = ()) -> list:
             removed.append(path)
         except FileNotFoundError:
             pass
+        except OSError:
+            pass
+    archive_dir = archive_root() / name
+    if archive_dir.exists():
+        try:
+            shutil.rmtree(archive_dir)
+            removed.append(archive_dir)
         except OSError:
             pass
     return removed
@@ -5667,7 +5726,14 @@ def cmd_clean(args, get_process_info=None, sleep=time.sleep,
     while some native worker's own last-committed record still claims a
     live turn) means clean REFUSES to touch ANY native record this
     invocation -- no recompute, no delete, prints the freeze line. Legacy
-    cleaning proceeds unaffected."""
+    cleaning proceeds unaffected.
+
+    M-B T9 (spec §5.1.2): an archived (`archived_at` set) native record is
+    ALWAYS doomed here, regardless of epoch-freeze or its (frozen) status --
+    `fleet archive` already `claude rm`'d every sid, so there is no roster
+    verdict left to compute; this is pure file deletion (registry entry +
+    the `logs/archive/<name>/` dir `_remove_worker_files` now also sweeps).
+    It never enters `recompute_worker_native`/the roster fetch at all."""
     _NATIVE_CLEAN_DELETABLE = {"dead"}
 
     removed = []  # list of (name, sid, retired_sids)
@@ -5677,11 +5743,13 @@ def cmd_clean(args, get_process_info=None, sleep=time.sleep,
         names = sorted(data["workers"])
         before = {n: data["workers"][n] for n in names}
 
-    native_names = [n for n in names if is_native(before[n])]
-    legacy_names = [n for n in names if n not in native_names]
+    native_all_names = [n for n in names if is_native(before[n])]
+    native_archived_names = [n for n in native_all_names if before[n].get("archived_at")]
+    native_names = [n for n in native_all_names if n not in native_archived_names]
+    legacy_names = [n for n in names if n not in native_all_names]
 
     # ONE roster fetch per invocation, outside the lock (F4 doctrine), only
-    # when a native worker is actually in the registry.
+    # when a non-archived native worker is actually in the registry.
     roster_entries = []
     epoch_frozen = False
     if native_names:
@@ -5699,6 +5767,7 @@ def cmd_clean(args, get_process_info=None, sleep=time.sleep,
             after[n] = recompute_worker_native(n, before[n], roster_entries)
 
     native_doomed_now = []  # (name, before) -- native verdict already final, no confirm-delay needed
+    native_doomed_now.extend((n, before[n]) for n in native_archived_names)
     changed = False
     with fleet_lock():
         data = load_registry()
@@ -5709,6 +5778,8 @@ def cmd_clean(args, get_process_info=None, sleep=time.sleep,
                 # was released for probing -- spare it, don't act on a
                 # verdict computed against now-stale pre-probe data.
                 continue
+            if n in native_archived_names:
+                continue  # already queued into native_doomed_now above
             if n in native_names:
                 if epoch_frozen:
                     continue  # G9: no native record recomputed or written this invocation
@@ -5801,6 +5872,225 @@ def cmd_clean(args, get_process_info=None, sleep=time.sleep,
 
     if not removed:
         print("nothing to clean -- no dead workers")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Auto-archival (M-B T9, spec §5.1.2): retire terminal-state native workers
+# past a TTL. `claude rm` (G12 CONFIRMED archival primitive; UNOBSERVED
+# against a live session -- hence every gate below, especially the
+# roster-live check) plus a file move into logs/archive/<name>/. The
+# registry entry SURVIVES as a tombstone (archived_at set) -- `fleet clean`
+# remains the only deleter (CLAUDE.md irreversibility doctrine).
+# ---------------------------------------------------------------------------
+
+ARCHIVE_TTL_HOURS_DEFAULT = 24.0
+
+
+def _archive_eligible(name: str, record: dict, roster_entries: list, now,
+                      ttl_hours: float = ARCHIVE_TTL_HOURS_DEFAULT) -> tuple:
+    """Every gate must hold; returns (True, "eligible") or (False, reason)
+    naming the FIRST failed gate (binding order, task-9-brief.md):
+
+    1. is_native(record); archived_at is None.
+    2. status in {"idle", "dead", "interrupted"} (the recomputed verdict
+       the caller passes in, not necessarily the raw stored one).
+    3. roster entry for the current sid is absent OR dead (no `status`/
+       `pid` keys) -- NEVER archive a live-process entry (G12 gap).
+    4. an outcome record exists for the current sid (ANY kind -- a result
+       vouches completion, a tombstone vouches an operator decision); no
+       record at all is dead-suspected territory, never auto-archived.
+    5. now - last_activity >= ttl_hours.
+
+    Gate 6 (status not limited/dead-suspected/working) is implied by gate
+    2's allowed set -- never reachable as its own branch, asserted by
+    tests instead."""
+    if not is_native(record):
+        return (False, "not-native")
+    if record.get("archived_at") is not None:
+        return (False, "already-archived")
+    status = record.get("status")
+    if status not in ("idle", "dead", "interrupted"):
+        return (False, f"status:{status}")
+    sid = record.get("session_id")
+    if not sid:
+        return (False, "no-session-id")
+    entry = _roster_entry_for(roster_entries, sid)
+    live = entry is not None and ("status" in entry or "pid" in entry)
+    if live:
+        return (False, "roster-live")
+    if not read_outcomes(name, sid=sid):
+        return (False, "no-outcome-record")
+    try:
+        last_activity = _parse_iso(record.get("last_activity", ""))
+    except (ValueError, TypeError):
+        # Traps named in advance (task-9-brief.md): a missing/malformed
+        # last_activity must fail SAFE -- never eligible, never a crash.
+        return (False, "last-activity-unparseable")
+    age_hours = (now - last_activity).total_seconds() / 3600.0
+    if age_hours < ttl_hours:
+        return (False, "ttl-not-elapsed")
+    return (True, "eligible")
+
+
+def _archive_dest_dir(name: str) -> Path:
+    """archive_root()/<name>, suffixed .1, .2, ... on collision (contract:
+    a name archived, cleaned, then archived again under the same name is
+    the only way this fires -- refuse_if_archived blocks re-archiving a
+    still-tombstoned record, so a collision here means an EARLIER archive
+    dir was never cleaned up)."""
+    base = archive_root() / name
+    if not base.exists():
+        return base
+    i = 1
+    while (archive_root() / f"{name}.{i}").exists():
+        i += 1
+    return archive_root() / f"{name}.{i}"
+
+
+def _rm_native_session(sid: str, run=subprocess.run, which=shutil.which,
+                       timeout: int = 30) -> bool:
+    """`claude rm <sid>` (G12 CONFIRMED): the archival primitive -- removes
+    the roster entry and its backing `~/.claude/jobs/<short-id>/` dir.
+    Never raises: an unresolvable `claude` executable or any subprocess
+    error both resolve to False, exactly like `_stop_native_session` --
+    the caller treats every rm as best-effort/non-fatal and reports it."""
+    try:
+        exe = resolve_claude_executable(which)
+    except ClaudeNotFoundError:
+        return False
+    try:
+        proc = run([exe, "rm", sid], capture_output=True, text=True,
+                  encoding="utf-8", errors="replace", timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
+def _archive_move(src: Path, dest: Path, name: str) -> None:
+    """Best-effort shutil.move of `src` to the exact path `dest` (whose
+    parent dir must already exist) -- missing source is silently skipped
+    (contract: "missing files skipped silently"); any other OSError is
+    reported and the sweep continues (contract: "partial failure = report
+    + continue"). `dest` is always a full path, never a bare directory:
+    journals_dir()/<name>.md and task_file_path(<name>) share the SAME
+    basename (<name>.md) in their own source dirs -- flattening both into
+    logs/archive/<name>/ by basename alone would silently clobber one with
+    the other, so callers pick distinct destination filenames."""
+    if not src.exists():
+        return
+    try:
+        shutil.move(str(src), str(dest))
+    except OSError as exc:
+        print(f"fleet: {name}: could not archive {src.name}: {exc}", file=sys.stderr)
+
+
+def cmd_archive(args, run=subprocess.run, which=shutil.which) -> int:
+    """`fleet archive [name] [--ttl-hours F] [--dry-run]` (SPEC §5.1.2):
+    auto-retire terminal-state (idle/dead/interrupted) native workers whose
+    current sid is confirmed gone-or-dead from the roster, has an outcome
+    record vouching for it, and has sat idle past `ttl_hours` (default
+    `ARCHIVE_TTL_HOURS_DEFAULT`). Moves the worker's journal/outcomes/task
+    file into `logs/archive/<name>/`, `claude rm`s the current sid and
+    every retired sid (best-effort, non-fatal per sid), then stamps
+    `archived_at` under the lock -- the registry entry SURVIVES as a
+    tombstone; `fleet clean` remains the only deleter.
+
+    G9 epoch-freeze: a suspicious roster fetch (failure, or an empty
+    roster while some native worker's own last-committed record still
+    claims a live turn) refuses the WHOLE invocation -- zero mutations,
+    exit 1 -- exactly like `cmd_status`/`cmd_clean`'s freeze line. Only
+    fetched at all when at least one named/candidate worker is native
+    (mirrors cmd_status/cmd_clean's own roster-fetch conditioning).
+
+    `--dry-run` prints each worker's eligibility verdict and mutates
+    nothing (no roster-dependent verdict is computed differently, no rm,
+    no file move, no registry write) -- safe to run even while frozen is
+    NOT special-cased separately: freeze still refuses first, since a
+    verdict computed against a suspicious roster is not trustworthy to
+    even preview."""
+    name = getattr(args, "name", None)
+    ttl_hours = getattr(args, "ttl_hours", None)
+    if ttl_hours is None:
+        ttl_hours = ARCHIVE_TTL_HOURS_DEFAULT
+    dry_run = bool(getattr(args, "dry_run", False))
+
+    with fleet_lock():
+        data = load_registry()
+        if name is not None:
+            if name not in data["workers"]:
+                raise FleetCliError(f"unknown worker: {name!r}")
+            if not dry_run:
+                refuse_if_archived(name, data["workers"][name], "archive")
+            names = [name]
+        else:
+            names = sorted(data["workers"])
+        before = {n: data["workers"][n] for n in names}
+        all_workers = data["workers"]  # snapshot for the epoch check (G9)
+
+    # Already-archived native records never consult the roster (gate 1 of
+    # _archive_eligible short-circuits before the live-check) -- exclude
+    # them from the roster-fetch conditioning, mirroring cmd_status/
+    # cmd_clean's own "no native work, no subprocess call" convention.
+    native_names = [n for n in names
+                    if is_native(before[n]) and before[n].get("archived_at") is None]
+
+    roster_entries = []
+    epoch_frozen = False
+    if native_names:
+        roster_ok, payload = _fetch_agents_roster(which=which, run=run)
+        roster_entries = payload if roster_ok else []
+        epoch_frozen = native_epoch_suspicious(roster_ok, roster_entries, all_workers)
+
+    if epoch_frozen:
+        print("EPOCH: roster suspicious -- archival refused (G9); zero mutations", file=sys.stderr)
+        return 1
+
+    now = datetime.now(timezone.utc)
+    verdicts = {n: _archive_eligible(n, before[n], roster_entries, now, ttl_hours=ttl_hours)
+               for n in names}
+
+    if dry_run:
+        for n in names:
+            ok, reason = verdicts[n]
+            print(f"{n}: eligible" if ok else f"{n}: skipped -- {reason}")
+        return 0
+
+    eligible_names = [n for n in names if verdicts[n][0]]
+
+    archived_count = 0
+    for n in eligible_names:
+        rec = before[n]
+        sid = rec.get("session_id")
+        retired = list(rec.get("retired_sids", []) or [])
+
+        dest_dir = _archive_dest_dir(n)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        _archive_move(journals_dir() / f"{n}.md", dest_dir / "journal.md", n)
+        _archive_move(outcome_path(n), dest_dir / outcome_path(n).name, n)
+        _archive_move(outcome_path(sid), dest_dir / outcome_path(sid).name, n)
+        for s in retired:
+            _archive_move(outcome_path(s), dest_dir / outcome_path(s).name, n)
+        _archive_move(task_file_path(n), dest_dir / "task.md", n)
+
+        for s in [sid] + retired:
+            ok = _rm_native_session(s, run=run, which=which)
+            print(f"fleet: {n}: rm {s[:8]}... {'ok' if ok else 'failed'}", file=sys.stderr)
+
+        with fleet_lock():
+            data = load_registry()
+            current = data["workers"].get(n)
+            if current is None:
+                print(f"fleet: {n}: registry entry vanished concurrently -- "
+                      "files already archived; investigate", file=sys.stderr)
+                continue
+            current["archived_at"] = now_iso()
+            save_registry(data)
+            append_event("archived", n, session_id=sid, retired_count=len(retired))
+            archived_count += 1
+
+    skipped_count = len(names) - archived_count
+    print(f"archived {archived_count} worker(s), skipped {skipped_count}")
     return 0
 
 
@@ -7515,6 +7805,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_status.add_argument("--stale-ok", dest="stale_ok", action="store_true",
                           help="read-only fast path: no PID probe, no lock, no write "
                                "(last-committed state; used by the statusline)")
+    p_status.add_argument("--all", action="store_true",
+                          help="include archived (tombstoned) workers, flagged 'archived'")
 
     p_peek = sub.add_parser("peek", help="digest of recent stream events")
     p_peek.add_argument("name")
@@ -7573,6 +7865,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_clean = sub.add_parser("clean", help="remove dead workers and their logs/mailboxes/journals")
     p_clean.add_argument("--yes", action="store_true",
                          help="confirm deleting workers this session did not spawn")
+
+    p_archive = sub.add_parser("archive", help="auto-archive terminal-state native workers past a TTL")
+    p_archive.add_argument("name", nargs="?", default=None)
+    p_archive.add_argument("--ttl-hours", type=float, default=None, dest="ttl_hours")
+    p_archive.add_argument("--dry-run", action="store_true", dest="dry_run")
 
     sub.add_parser("doctor", help="run fleet health checks")
 
@@ -7656,6 +7953,8 @@ def main(argv=None) -> int:
             return cmd_kill(args)
         if args.command == "clean":
             return cmd_clean(args)
+        if args.command == "archive":
+            return cmd_archive(args)
         if args.command == "doctor":
             return cmd_doctor(args)
         if args.command == "sup-boot":
