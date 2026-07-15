@@ -32,7 +32,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -84,6 +84,42 @@ def ceilings_dir() -> Path:
 
 def ceiling_file_path(sid: str) -> Path:
     return ceilings_dir() / sid
+
+
+def outcomes_dir() -> Path:
+    return state_dir() / "outcomes"
+
+
+def outcome_path(key: str) -> Path:
+    return outcomes_dir() / f"{key}.jsonl"
+
+
+def tasks_dir() -> Path:
+    return state_dir() / "tasks"
+
+
+def task_file_path(name: str) -> Path:
+    return tasks_dir() / f"{name}.md"
+
+
+def archive_root() -> Path:
+    return logs_dir() / "archive"
+
+
+def pin_pass_path() -> Path:
+    return state_dir() / "pin-pass.json"
+
+
+def is_native(record: dict) -> bool:
+    return record.get("dispatch_kind") == "bg"
+
+
+def refuse_if_legacy(name: str, record: dict, action: str) -> None:
+    if not is_native(record):
+        raise FleetCliError(
+            f"{name}: pre-pivot worker -- {action} unavailable; "
+            "kill or clean via legacy path"
+        )
 
 
 def _write_ceiling_file(sid: str, ceiling) -> None:
@@ -509,7 +545,7 @@ def current_caller_session() -> str | None:
 
 def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
                        max_budget_usd=None, setting_sources=None, token_ceiling=None,
-                       spawned_by=None) -> dict:
+                       spawned_by=None, dispatch_kind=None, category=None) -> dict:
     """Build a fresh registry record matching the SPEC §4 schema exactly.
 
     Phase1 kernel item 7 (F13/M5): max_budget_usd and setting_sources are
@@ -569,6 +605,14 @@ def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
         # 0.0) everywhere it's read.
         "cost_baseline": 0.0,
         "last_activity": created,
+        # --- M-B native-substrate fields (spec §5; None/[] on legacy records) ---
+        "dispatch_kind": dispatch_kind,      # "bg" = daemon-hosted; None = pre-pivot Popen
+        "category": category,                # agents-menu category (spec §5.1.3)
+        "native_short_id": None,             # short id from --bg stdout (G6 fallback)
+        "last_dispatch_at": None,            # stamped at every dispatch/steer/resume;
+                                             # anchor for the fresh-outcome predicate
+        "retired_sids": [],                  # prior sids retired by fork-steer/respawn
+        "archived_at": None,                 # set by auto-archival; hides from status
     }
 
 
@@ -4534,6 +4578,76 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run, get_process_info=No
         if not ok:
             all_ok = False
     return 0 if all_ok else 1
+
+
+# ---------------------------------------------------------------------------
+# Outcome store (M-B, spec §5): terminal-outcome records per worker.
+# Written by the Stop hook (kind="result") and by fleet-side tombstones
+# (kill/interrupt/stop -- G10: an operator stop fires NO Stop hook).
+# The outcome discriminator's only data source. JSONL, name-keyed, with a
+# sid-keyed fallback file for hooks that could not resolve the name.
+# ---------------------------------------------------------------------------
+
+OUTCOME_FRESH_SLACK_SECONDS = 5.0
+OUTCOME_RESULT_TEXT_MAX = 20000
+TOMBSTONE_KINDS = ("killed", "interrupted", "stopped")
+
+
+def append_outcome(key: str, record: dict) -> None:
+    outcomes_dir().mkdir(parents=True, exist_ok=True)
+    line = json.dumps(record, ensure_ascii=False)
+    with outcome_path(key).open("a", encoding="utf-8") as f:
+        f.write(line + "\n")
+
+
+def read_outcomes(name: str, sid: str | None = None) -> list:
+    records = []
+    paths = [outcome_path(name)]
+    if sid and sid != name:
+        paths.append(outcome_path(sid))
+    for p in paths:
+        try:
+            text = p.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if isinstance(rec, dict):
+                records.append(rec)
+    if sid is not None:
+        records = [r for r in records if r.get("session_id") == sid]
+    records.sort(key=lambda r: str(r.get("ts", "")))
+    return records
+
+
+def latest_outcome(name: str, sid: str):
+    recs = read_outcomes(name, sid=sid)
+    return recs[-1] if recs else None
+
+
+def has_fresh_outcome(name: str, sid: str, since_iso: str) -> bool:
+    since = _parse_iso(since_iso)
+    if since is None:
+        return False
+    threshold = since - timedelta(seconds=OUTCOME_FRESH_SLACK_SECONDS)
+    for rec in read_outcomes(name, sid=sid):
+        ts = _parse_iso(str(rec.get("ts", "")))
+        if ts is not None and ts >= threshold:
+            return True
+    return False
+
+
+def write_tombstone_outcome(name: str, sid: str, kind: str) -> None:
+    if kind not in TOMBSTONE_KINDS:
+        raise ValueError(f"unknown tombstone kind: {kind}")
+    append_outcome(name, {"ts": now_iso(), "session_id": sid, "kind": kind,
+                          "result_text": None})
 
 
 # ---------------------------------------------------------------------------
