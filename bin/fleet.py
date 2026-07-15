@@ -1559,6 +1559,27 @@ def _sum_result_tokens(log_path) -> int | None:
     return total if found else None
 
 
+def _native_cumulative_tokens(name: str) -> int:
+    """Sum input_tokens+output_tokens across every kind=="result" outcome
+    record for this native worker (all past sids/turns) -- native's
+    lifetime-cumulative analog of `_sum_result_tokens`'s legacy log-tail sum
+    (native has no logs/<name>.jsonl to read), used by cmd_send's
+    fork-steer path for the token_ceiling refusal check (Kernel 10, M-B
+    T7). Bogus values (bool, negative, non-int) are skipped, mirroring
+    _sum_result_tokens's defensive stance; missing/no records -> 0 (never
+    None -- 0 correctly compares as under any positive ceiling)."""
+    total = 0
+    for rec in read_outcomes(name):
+        if not isinstance(rec, dict) or rec.get("kind") != "result":
+            continue
+        for key in ("input_tokens", "output_tokens"):
+            val = rec.get(key)
+            if isinstance(val, bool) or not isinstance(val, int) or val < 0:
+                continue
+            total += val
+    return total
+
+
 # ---------------------------------------------------------------------------
 # UL1 usage-limit detection (item 11 / F31) -- CONSERVATIVE FALLBACK.
 #
@@ -3364,11 +3385,296 @@ def cmd_wait(args, get_process_info=None, sleep=time.sleep, clock=time.monotonic
 # rows, §9 hybrid interaction model, §14 platform adapter)
 # ---------------------------------------------------------------------------
 
+def _cmd_send_native(name: str, before: dict, message: str,
+                     run=subprocess.run, which=shutil.which, sleep=time.sleep) -> int:
+    """Native (`dispatch_kind:"bg"`) counterpart of `cmd_send`'s legacy body
+    below -- fork-steer per RATIFIED G2(b), M-B Task 7.
+
+    `before` is the caller's already-locked snapshot of the record (`cmd_send`
+    only routes here once it has confirmed `is_native`); `refuse_if_legacy`
+    below is pure defense in depth against a future misrouted call, not the
+    primary gate.
+
+    Roster fetched ONCE, outside any lock (F4 doctrine), then the verdict
+    (`recompute_worker_native`) is (re)computed under a single fresh lock --
+    the record is re-read here rather than trusting `before`, since an
+    unbounded amount of time may have passed since the caller's snapshot.
+
+    Verdict branches:
+      - working (roster busy/waiting) -> append_mailbox + mail_sent event,
+        UNCHANGED mid-turn path (hooks deliver, G1). Print states this.
+      - dead-suspected -> refuse, point at peek/result then kill/respawn.
+      - dead / interrupted -> refuse, point at respawn.
+      - limited -> refuse, point at resume-limited (never steer a parked
+        worker).
+      - idle -> FORK-STEER: token-ceiling cumulative check (mirrors legacy's
+        over_ceiling refusal; native has no logs/<name>.jsonl, so
+        `_native_cumulative_tokens` sums the outcome store instead; USD
+        check is skipped entirely -- G3), pre-claim `working` (turn_pid
+        stays None -- native never used it), then OUTSIDE the lock:
+        append_mailbox(old_sid, message) FIRST so the message rides the
+        drain (F6 pattern), compose_prompt(name, cwd, "", old_sid) (claims
+        the mailbox, no journal_path -- this is a steer, not a context
+        reset), dispatch_bg(..., resume_sid=old_sid). On success, commit via
+        `_restamp_after_steer` + a fresh ceiling file for the new sid + a
+        `steered` event. On NativeDispatchError/BaseException, restore the
+        mailbox claim and roll the pre-claim back to idle -- but ONLY if the
+        record is still in the exact claim state this call wrote (status
+        working, session_id still the OLD sid) -- a concurrent actor may
+        have already moved it on.
+      - anything else reached here (over_ceiling/over_budget/attached --
+        native sticky statuses this task's contract does not otherwise
+        enumerate) refuses generically rather than silently mis-steering."""
+    refuse_if_legacy(name, before, "send")
+
+    roster_ok, payload = _fetch_agents_roster(which=which, run=run)
+    roster_entries = payload if roster_ok else []
+
+    with fleet_lock():
+        data = load_registry()
+        rec = data["workers"].get(name)
+        if rec is None:
+            raise FleetCliError(f"unknown worker: {name!r}")
+        # G9 epoch rule: never trust a verdict computed against a suspicious
+        # roster snapshot (fetch failure, or an empty roster while this
+        # worker's own last-committed record still claims a live turn).
+        if native_epoch_suspicious(roster_ok, roster_entries, {name: rec}):
+            raise FleetCliError(
+                f"{name}: roster fetch unavailable/suspicious (G9) -- "
+                "refusing to send while native verdicts are frozen; retry shortly"
+            )
+        after = recompute_worker_native(name, rec, roster_entries)
+        status = after["status"]
+
+        # T7 fix wave (CRITICAL-2, race authority): recompute_worker_native's
+        # "working" verdict is NOT sticky for native records (dead-suspected
+        # must stay re-evaluable) -- so a concurrent send/steer's own
+        # idle-fork-steer pre-claim (raw status=="working" on disk,
+        # session_id still the OLD sid until ITS dispatch resolves) can get
+        # RE-DERIVED by roster+outcome into something else entirely (idle,
+        # pre-FIX-2a; dead-suspected/limited, post-FIX-2a's last_dispatch_at
+        # restamp) once THIS call's own recompute runs, since the roster
+        # hasn't caught up to the other actor's fork yet. Mirrors the FIX-1
+        # revalidate pattern in `_resume_one_limited`: the untouched RAW
+        # `rec` (loaded fresh under this SAME lock, never mutated by
+        # `after`) is ground truth. If it still says "working" and this
+        # call's own recompute disagrees, someone else already owns the
+        # claim -- never pre-claim twice; queue the mailbox message against
+        # the raw (current) sid instead of writing `after` back over a live
+        # pre-claim.
+        #
+        # T7 fix wave 2 (NEW CRITICAL, re-review of eef84ae): the raw
+        # mismatch above is NOT proof of a live concurrent pre-claim -- it
+        # is also the routine, majority-of-the-time shape of "this turn
+        # genuinely finished and nothing has persisted the demotion yet"
+        # (recomputing-and-persisting exactly that staleness is this
+        # function's own job). Both shapes produce an identical on-disk
+        # record. Narrow the raw check to only claim in-flight authority
+        # when there's no fresh completion outcome for the raw sid AND the
+        # pre-claim itself hasn't expired (a crashed steer) -- i.e. the raw
+        # label could still plausibly belong to a live, still-running
+        # dispatch. Anchors mirror recompute_worker_native's own
+        # (last_dispatch_at, falling back to created/last_activity for
+        # legacy-shaped records) so this reuses the same ground truth the
+        # recompute itself already applied, rather than inventing a second
+        # one.
+        if rec.get("status") == "working" and status != "working":
+            raw_sid = rec.get("session_id")
+            if raw_sid is None:
+                # T7 fix wave (CRITICAL-1): a spawn/respawn launch-claim in
+                # flight has no real sid yet -- appending to mailbox/None.md
+                # would silently swallow the message. Refuse loudly instead.
+                # (Definitionally in-flight: no sid means nothing could have
+                # finished yet.)
+                raise FleetCliError(
+                    f"{name}: dispatch in flight -- retry in a few seconds"
+                )
+            outcome_anchor = rec.get("last_dispatch_at") or rec.get("created")
+            claim_anchor = rec.get("last_dispatch_at") or rec.get("last_activity")
+            in_flight = (
+                not has_fresh_outcome(name, raw_sid, outcome_anchor)
+                and not _launch_claim_expired(claim_anchor)
+            )
+            if in_flight:
+                append_mailbox(raw_sid, message)
+                append_event("mail_sent", name, sid=raw_sid, status="working")
+                print(f"{name}: turn running -- message queued to mailbox")
+                return 0
+            # Not actually in flight: the raw "working" label is stale
+            # (fresh outcome proves the turn already finished) or belongs to
+            # an expired/crashed claim. Fall through to the normal verdict
+            # path below, which persists the freshly recomputed `after` on
+            # every branch it can reach -- self-healing the stale label
+            # instead of leaving it frozen and silently misrouting mail to
+            # a dead session.
+
+        if status != rec.get("status"):
+            append_event("status_changed", name, old=rec.get("status"), new=status)
+
+        if status == "dead-suspected":
+            data["workers"][name] = after
+            save_registry(data)
+            raise FleetCliError(
+                f"{name}: dead-suspected -- no outcome record for its last "
+                "turn; inspect (fleet peek/result), then kill or respawn"
+            )
+        if status in ("dead", "interrupted"):
+            data["workers"][name] = after
+            save_registry(data)
+            raise FleetCliError(
+                f"{name}: worker is {status} -- run `fleet respawn {name}` first"
+            )
+        if status == "limited":
+            data["workers"][name] = after
+            save_registry(data)
+            raise FleetCliError(
+                f"{name}: parked (limited) -- use `fleet resume-limited {name}` "
+                "instead (never steer a parked worker)"
+            )
+
+        if status == "working":
+            data["workers"][name] = after
+            save_registry(data)
+            sid = after["session_id"]
+            if sid is None:
+                # T7 fix wave (CRITICAL-1), defense in depth: the raw
+                # pre-check above already catches the common shape of this
+                # (raw status=="working"); guard here too in case recompute
+                # itself derived "working" from a sid-less launch-claim that
+                # wasn't already raw "working" (a corrupted/legacy-shaped
+                # record) -- never append to mailbox/None.md.
+                raise FleetCliError(
+                    f"{name}: dispatch in flight -- retry in a few seconds"
+                )
+            append_mailbox(sid, message)
+            append_event("mail_sent", name, sid=sid, status=status)
+            print(f"{name}: turn running -- message queued to mailbox")
+            return 0
+
+        if status != "idle":
+            data["workers"][name] = after
+            save_registry(data)
+            raise FleetCliError(f"{name}: flagged {status} -- refusing to send")
+
+        old_sid = after["session_id"]
+        cwd = after["cwd"]
+        mode = after["mode"]
+        model = after.get("model")
+        category = after.get("category")
+        setting_sources = after.get("setting_sources")
+        token_ceiling = after.get("token_ceiling")
+
+        # Kernel 10 native lane: mirror the legacy over_ceiling refusal
+        # (USD check skipped entirely for native -- G3).
+        if token_ceiling is not None:
+            used = _native_cumulative_tokens(name)
+            if used >= token_ceiling:
+                after["status"] = "over_ceiling"
+                data["workers"][name] = after
+                save_registry(data)
+                append_event("ceiling_exceeded", name, tokens=used, token_ceiling=token_ceiling)
+                raise FleetCliError(
+                    f"{name}: cumulative tokens {used} reached token_ceiling "
+                    f"{token_ceiling} -- refusing fork-steer (worker flagged "
+                    "over_ceiling); respawn with a higher --token-ceiling or retire it"
+                )
+
+        # F1 pre-claim: atomic decide+claim, same lock, before release.
+        # turn_pid stays None -- native records never populate it.
+        # T7 fix wave (CRITICAL-2 fix 2a): also restamp last_dispatch_at --
+        # the in-flight anchor cmd_spawn's own pre-claim stamps, mirrored
+        # here so a concurrent recompute (any caller, not just a racing
+        # send) never re-derives this in-flight window as stale-outcome
+        # "idle" again (has_fresh_outcome is anchored on last_dispatch_at,
+        # never on the outcome record's mere presence).
+        after["status"] = "working"
+        after["turn_pid"] = None
+        after["last_activity"] = now_iso()
+        after["last_dispatch_at"] = now_iso()
+        data["workers"][name] = after
+        save_registry(data)
+
+    # Outside the lock: F6 pattern -- append the message FIRST so it rides
+    # the mailbox drain uniformly with any prior mail (never doubled, never
+    # silently dropped).
+    append_mailbox(old_sid, message)
+    append_event("mail_sent", name, sid=old_sid, status="idle")
+    prompt, claim = compose_prompt(name, cwd, "", old_sid)
+    try:
+        result = dispatch_bg(
+            name, cwd, prompt, mode, model=model, category=category,
+            hint=message[:NATIVE_NAME_HINT_MAX], resume_sid=old_sid,
+            setting_sources=setting_sources, run=run, which=which, sleep=sleep,
+        )
+        finalize_mailbox_claim(claim)
+    except BaseException:
+        restore_mailbox_claim(claim)
+        with fleet_lock():
+            data = load_registry()
+            r = data["workers"].get(name)
+            if (r is not None and r.get("status") == "working"
+                    and r.get("session_id") == old_sid):
+                r["status"] = "idle"
+                save_registry(data)
+        raise
+
+    new_sid = result["session_id"]
+    short_id = result["short_id"]
+
+    def _commit():
+        with fleet_lock():
+            data = load_registry()
+            r = data["workers"].get(name)
+            if r is not None:
+                _restamp_after_steer(r, new_sid, short_id)
+                r["status"] = "working"
+                r["turn_pid"] = None
+                r["last_activity"] = now_iso()
+                save_registry(data)
+                # T7 fix wave (CRITICAL-2 fix 2c): a steering message that
+                # raced into the OLD sid's mailbox AFTER compose_prompt
+                # already claimed/drained it (e.g. a concurrent send that
+                # lost the raw-status race above) must still follow the
+                # worker -- migrate it onto the NEW sid rather than
+                # stranding it under a sid the registry will never
+                # reference again.
+                _migrate_residual_mailbox(old_sid, new_sid)
+                # T7 fix wave (Minor, event-append symmetry): keep
+                # append_event inside the same `if r is not None:` guard as
+                # the mutation -- matches cmd_spawn's own commit shape.
+                # Previously fired unconditionally, so a concurrent
+                # kill/clean racing this window got a "steered" event in
+                # its audit trail even though no registry mutation happened.
+                append_event("steered", name, old_session_id=old_sid,
+                            new_session_id=new_sid, short_id=short_id)
+
+    if not _commit_launched_turn(_commit, sleep=sleep):
+        _report_stranded_native_turn(name, new_sid, short_id)
+        return 1
+
+    _write_ceiling_file(new_sid, token_ceiling)
+    # T7 fix wave (Minor, ceiling-file leak): the OLD sid's ceiling file is
+    # now permanently unreachable (the Stop hook only ever reads the
+    # CURRENT sid's) -- respawn already cleans this up on its own dispatch;
+    # mirror it here for send's fork-steer, after the new one is written.
+    try:
+        ceiling_file_path(old_sid).unlink()
+    except OSError:
+        pass
+    print(f"{name}: fork-steered (new session {short_id}) -- fork carries full transcript (G2b)")
+    return 0
+
+
 def cmd_send(args, popen=subprocess.Popen, get_process_info=None, which=shutil.which,
-             sleep=time.sleep) -> int:
+             sleep=time.sleep, run=subprocess.run) -> int:
     """`fleet send <name> <text|@file>` (SPEC §5 send row, §9 attach
     asymmetry), rewritten under the uniform status-claim protocol (F1+F6,
     review wave 3):
+
+    M-B T7: a native (`dispatch_kind:"bg"`) record forks off to
+    `_cmd_send_native` right after the unknown-name check below --
+    everything else in this docstring/function body describes the LEGACY
+    (Popen) path only, untouched.
 
     - working -> append the message to mailbox/<sid>.md (small
       open(...,"a") write); the running turn's hooks pick it up mid-turn or
@@ -3408,6 +3714,18 @@ def cmd_send(args, popen=subprocess.Popen, get_process_info=None, which=shutil.w
 
     message = _read_task_arg(args.message)
 
+    # M-B T7: routing is decided via a LOCK-FREE peek (mirrors the
+    # respawn provenance guard's own _read_registry_readonly use) so the
+    # legacy path below keeps its EXACT pre-T7 lock-acquisition count --
+    # test_resilience.py/test_steering.py's lock-exhaustion tests assert on
+    # that count directly. An unknown/unreadable name here just falls
+    # through to the legacy path's own (unchanged) unknown-worker check.
+    _ok, _reason, _snap = _read_registry_readonly()
+    if _ok and args.name in _snap["workers"] and is_native(_snap["workers"][args.name]):
+        return _cmd_send_native(args.name, dict(_snap["workers"][args.name]), message,
+                                run=run, which=which, sleep=sleep)
+
+    # ---- legacy path below: byte-identical to the pre-T7 implementation ----
     with fleet_lock():
         data = load_registry()
         if args.name not in data["workers"]:
@@ -3627,6 +3945,13 @@ def _resume_one_limited_native(name: str, old_sid: str, cwd, mode, model, catego
     new_sid = result["session_id"]
     short_id = result["short_id"]
     _write_ceiling_file(new_sid, token_ceiling)
+    # T7 fix wave (Minor, ceiling-file leak): mirror send's fork-steer
+    # cleanup -- the OLD sid's ceiling file is now permanently unreachable
+    # (the Stop hook only ever reads the CURRENT sid's).
+    try:
+        ceiling_file_path(old_sid).unlink()
+    except OSError:
+        pass
 
     def _commit():
         with fleet_lock():
@@ -3644,6 +3969,10 @@ def _resume_one_limited_native(name: str, old_sid: str, cwd, mode, model, catego
                 r["limit_reset_at"] = None
                 r["limit_kind"] = None
                 save_registry(data)
+                # T7 fix wave (CRITICAL-2 fix 2c): migrate any residual
+                # OLD-sid mailbox onto the new fork -- see
+                # _migrate_residual_mailbox's docstring.
+                _migrate_residual_mailbox(old_sid, new_sid)
             append_event("limit_resumed", name, old_session_id=old_sid, session_id=new_sid)
 
     if not _commit_launched_turn(_commit, sleep=sleep):
@@ -4195,8 +4524,238 @@ def _unrotate_worker_log(name: str) -> None:
             os.replace(str(rotated), str(d / f"{name}{suffix}"))
 
 
+def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.which,
+                        sleep=time.sleep, clock=time.monotonic) -> int:
+    """Native (`dispatch_kind:"bg"`) counterpart of `cmd_respawn`'s legacy
+    body below (M-B Task 7, replacing T6's interim "lands in Task 7" guard).
+
+    Unlike the legacy respawn, this is a FRESH dispatch (no --resume) --
+    the context reset is the point (SPEC §5 respawn row) -- so it goes
+    through `dispatch_bg` exactly like `cmd_spawn`'s native path, just with
+    carried-forward fields instead of fresh ones, and journal + old-sid
+    mailbox carry via `compose_prompt(..., journal_path=...)`.
+
+    Liveness gate: the OLD sid is "live" iff it is present in the roster
+    with a `status`/`pid` (`_roster_live_sids`, contract field-presence
+    table) -- NOT the registry's own stored status label (that label may
+    be stale, sticky, or simply wrong for a record this task is the first
+    to ever recompute via a fresh dispatch path). A roster fetch failure
+    means liveness cannot be proven either way -- refuse outright (G9-style
+    caution: never assume a session is dead on ambiguous data) rather than
+    risking two live sessions under one name.
+
+    --force on a live old session calls `_stop_native_session` then
+    unconditionally writes a "stopped" tombstone (G10: `claude stop` fires
+    no Stop hook, so fleet must record its own outcome for that turn) --
+    regardless of whether the stop's own exit code was 0. The roster is
+    ALWAYS re-fetched and re-checked after the stop attempt, whether or not
+    `_stop_native_session` reported success (T7 fix wave, MAJOR: `claude
+    stop`'s own exit code is not proof the daemon has actually torn the
+    session down -- trusting a `True` return blindly skipped this
+    verification entirely). If the re-check still shows the old sid live
+    after a REPORTED SUCCESS, one `sleep(2)` + one more re-fetch gives a
+    plausible daemon-lag stop a brief grace window before giving up; a
+    REPORTED FAILURE aborts immediately on the first still-live re-check
+    (no grace -- the tool itself already said it didn't work). Either way,
+    still-live after the check(s) ABORTS the respawn entirely (Trap #3:
+    never two live sessions under one name -- a real invariant, not a
+    nicety).
+
+    New record: `new_worker_record(None, ...)` (native pre-claim shape,
+    session_id unknown until roster join, mirrors cmd_spawn) carrying
+    cwd/mode/model/category/setting_sources/token_ceiling forward from
+    `before` (overridable the same way legacy respawn's carry-or-override
+    works), spawned_by carried immutably (§5.1 provenance), cost_usd/
+    cost_baseline carried like legacy's Finding-4 fix, and retired_sids =
+    the OLD record's own retired_sids + the OLD sid itself (a respawn chain
+    must not lose earlier forks' history). No log rotation (native has no
+    logs/<name>.jsonl to rotate). The old sid's ceiling file is removed
+    (best-effort) and a fresh one written for the new sid once it is known.
+
+    On dispatch failure, the pre-claim (session_id still None) rolls back
+    to the exact pre-respawn snapshot (`before`) rather than popping the
+    worker -- the operator keeps a registry entry pointing at the old
+    (possibly already-stopped) session instead of losing the name outright.
+    """
+    name = args.name
+    if getattr(args, "max_budget_usd", None) is not None:
+        raise FleetCliError(
+            "no USD budget under native dispatch (contract G3) -- use --token-ceiling"
+        )
+
+    old_sid = before.get("session_id")
+    if old_sid is None:
+        # Launch-in-flight pre-claim (native analog of legacy's
+        # turn_pid-is-None guard): no real sid exists yet to stop or fork
+        # from, and no launch-in-flight window has a live process to verify.
+        raise FleetCliError(f"launch in flight for {name}; retry in a few seconds")
+
+    cwd = before["cwd"]
+    mode = before["mode"]
+    model = before.get("model")
+    category = before.get("category")
+    setting_sources = (args.setting_sources if getattr(args, "setting_sources", None) is not None
+                       else before.get("setting_sources"))
+    token_ceiling = (args.token_ceiling if getattr(args, "token_ceiling", None) is not None
+                     else before.get("token_ceiling"))
+    cost_usd = _registry_cost(before.get("cost_usd", 0.0))
+    task_override = _read_task_arg(args.task) if getattr(args, "task", None) else None
+    task_for_record = task_override if task_override is not None else before.get("task", "")
+    prior_retired = list(before.get("retired_sids", []))
+    spawned_by = before.get("spawned_by")
+
+    roster_ok, entries = _fetch_agents_roster(which=which, run=run)
+    if not roster_ok:
+        raise FleetCliError(
+            f"{name}: could not fetch the native roster -- refusing respawn "
+            "until the old session's liveness can be verified"
+        )
+    old_live = old_sid in _roster_live_sids(entries)
+
+    stopped_ok = None
+    if old_live:
+        if not getattr(args, "force", False):
+            raise FleetCliError(
+                f"{name}: turn is running -- pass --force to interrupt it first, "
+                "or wait for it to finish"
+            )
+        stopped_ok = _stop_native_session(old_sid, run=run, which=which)
+        # G10: `claude stop` fires no Stop hook -- write fleet's own
+        # tombstone regardless of the stop's verified success, since an
+        # operator-initiated stop was genuinely attempted either way.
+        write_tombstone_outcome(name, old_sid, "stopped")
+        # T7 fix wave (MAJOR): re-verify the roster after EVERY --force stop
+        # attempt, not only when `_stop_native_session` reported failure --
+        # its `True` return is just the stop command's own exit code, not
+        # proof the daemon has actually torn the session down.
+        roster_ok2, entries2 = _fetch_agents_roster(which=which, run=run)
+        still_live = (not roster_ok2) or (old_sid in _roster_live_sids(entries2))
+        if still_live and stopped_ok:
+            # A reported success that still shows live could just be
+            # daemon lag -- give it one brief grace window before aborting.
+            sleep(2)
+            roster_ok3, entries3 = _fetch_agents_roster(which=which, run=run)
+            still_live = (not roster_ok3) or (old_sid in _roster_live_sids(entries3))
+        if still_live:
+            raise FleetCliError(
+                f"{name}: --force could not verify the old session was "
+                "stopped -- aborting respawn (never two live sessions "
+                "under one name)"
+            )
+
+    with fleet_lock():
+        data = load_registry()
+        rec = data["workers"].get(name)
+        if rec is None:
+            raise FleetCliError(f"unknown worker: {name!r}")
+        if not is_native(rec):
+            raise FleetCliError(f"{name}: worker changed concurrently; retry")
+        new_record = new_worker_record(
+            None, cwd, task_for_record, mode, model=model,
+            setting_sources=setting_sources, token_ceiling=token_ceiling,
+            spawned_by=spawned_by, dispatch_kind="bg", category=category)
+        new_record["cost_usd"] = cost_usd
+        new_record["cost_baseline"] = cost_usd
+        new_record["retired_sids"] = prior_retired + [old_sid]
+        new_record["last_dispatch_at"] = now_iso()
+        data["workers"][name] = new_record
+        save_registry(data)
+        append_event("respawned", name, old_session_id=old_sid, new_session_id=None,
+                    stopped=stopped_ok)
+
+    pre_claim_at = new_record["last_dispatch_at"]
+
+    try:
+        ceiling_file_path(old_sid).unlink()
+    except OSError:
+        pass
+
+    journal_path = journals_dir() / f"{name}.md"
+    prompt, claim = compose_prompt(name, cwd, task_for_record, old_sid, journal_path=journal_path)
+    try:
+        result = dispatch_bg(
+            name, cwd, prompt, mode, model=model, category=category,
+            hint=task_for_record, setting_sources=setting_sources,
+            run=run, which=which, sleep=sleep, clock=clock,
+        )
+        finalize_mailbox_claim(claim)
+    except NativeDispatchError as exc:
+        # T7 fix wave (Important b): reuse cmd_spawn's fast-completion
+        # check -- this respawn's new-record pre-claim is session_id=None
+        # exactly like spawn's, so the SAME race (a fast-finishing session's
+        # outcome landing under a sid-keyed fallback file before
+        # dispatch_bg's join-verify loop observes it in the roster) can
+        # strand a genuinely-completed turn behind a rollback. The launch
+        # genuinely happened (a real --bg dispatch was issued and consumed
+        # the already-composed/drained prompt) whenever join expiry raised
+        # WITH a short_id, so finalize (not restore) the claim on the found
+        # branch, mirroring the try block's own success path.
+        fast_sid = _fast_completion_sid(name, pre_claim_at, short_id=getattr(exc, "short_id", None))
+        if fast_sid is not None:
+            finalize_mailbox_claim(claim)
+            with fleet_lock():
+                data = load_registry()
+                rec = data["workers"].get(name)
+                if rec is not None and rec.get("session_id") is None:
+                    rec["session_id"] = fast_sid
+                    rec["native_short_id"] = fast_sid.partition("-")[0] or fast_sid[:8]
+                    rec["status"] = "idle"
+                    rec["turns"] = 1
+                    rec["last_activity"] = now_iso()
+                    save_registry(data)
+                    append_event("turn_started", name, session_id=fast_sid)
+            _write_ceiling_file(fast_sid, token_ceiling)
+            print(f"{name} {fast_sid} (native bg, fast completion before join)")
+            return 0
+
+        restore_mailbox_claim(claim)
+        with fleet_lock():
+            data = load_registry()
+            r = data["workers"].get(name)
+            if r is not None and r.get("session_id") is None:
+                data["workers"][name] = before
+                save_registry(data)
+                append_event("respawn_failed", name, error=str(exc), old_session_id=old_sid)
+        raise FleetCliError(f"{name}: native respawn failed -- {exc}") from exc
+    except BaseException as exc:
+        restore_mailbox_claim(claim)
+        with fleet_lock():
+            data = load_registry()
+            r = data["workers"].get(name)
+            if r is not None and r.get("session_id") is None:
+                data["workers"][name] = before
+                save_registry(data)
+                append_event("respawn_failed", name, error=str(exc), old_session_id=old_sid)
+        raise
+
+    new_sid = result["session_id"]
+    short_id = result["short_id"]
+
+    def _commit():
+        with fleet_lock():
+            data = load_registry()
+            r = data["workers"].get(name)
+            if r is not None and r.get("session_id") is None:
+                r["session_id"] = new_sid
+                r["native_short_id"] = short_id
+                r["status"] = "working"
+                r["turns"] = 1
+                r["last_activity"] = now_iso()
+                save_registry(data)
+                append_event("turn_started", name, session_id=new_sid)
+
+    if not _commit_launched_turn(_commit, sleep=sleep):
+        _report_stranded_native_turn(name, new_sid, short_id)
+        return 1
+
+    _write_ceiling_file(new_sid, token_ceiling)
+    print(f"{name} {new_sid} (native bg)")
+    return 0
+
+
 def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shutil.which,
-                kill_process_tree=None, sleep=time.sleep) -> int:
+                kill_process_tree=None, sleep=time.sleep, run=subprocess.run,
+                clock=time.monotonic) -> int:
     """`fleet respawn <name> [--task <text>] [--force]` (SPEC §5 respawn
     row): the context-reset lever -- a fresh session_id under the same
     name/cwd/mode/model, prompted with the preamble + task (original,
@@ -4278,21 +4837,23 @@ def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shuti
         _confirm_destructive("respawn (retire the session of)", [args.name], _snap["workers"],
                              assume_yes=getattr(args, "yes", False))
 
+    # M-B T7: a native (`dispatch_kind:"bg"`) record forks off to
+    # _cmd_respawn_native here -- everything below is the legacy Popen path,
+    # untouched. Routing reuses the SAME lock-free snapshot fetched above
+    # for the provenance guard (never an extra fleet_lock() acquisition --
+    # test_resilience.py's lock-exhaustion tests assert on the legacy
+    # path's exact lock-call count). An unknown/unreadable name here just
+    # falls through to the legacy path's own (unchanged) unknown-worker
+    # check under its first real lock.
+    if _ok and args.name in _snap["workers"] and is_native(_snap["workers"][args.name]):
+        return _cmd_respawn_native(args, dict(_snap["workers"][args.name]),
+                                   run=run, which=which, sleep=sleep, clock=clock)
+
     with fleet_lock():
         data = load_registry()
         if args.name not in data["workers"]:
             raise FleetCliError(f"unknown worker: {args.name!r}")
         before = data["workers"][args.name]
-        # T6 fix wave, Medium finding: cmd_respawn has zero native
-        # awareness (legacy recompute/launch path below would silently
-        # strip dispatch_kind and orphan the --bg session). Refuse loudly
-        # until Task 7 lands native-aware respawn.
-        # T7 replaces this guard.
-        if is_native(before):
-            raise FleetCliError(
-                "native worker respawn lands in M-B Task 7 -- interim: "
-                "resume-limited (for limited parks) or claude stop + fleet kill"
-            )
         after = recompute_worker(args.name, before, get_process_info=get_process_info, sleep=sleep)
         if after["status"] != before["status"]:
             append_event("status_changed", args.name, old=before["status"], new=after["status"])
@@ -5449,6 +6010,68 @@ def write_tombstone_outcome(name: str, sid: str, kind: str) -> None:
         raise ValueError(f"unknown tombstone kind: {kind}")
     append_outcome(name, {"ts": now_iso(), "session_id": sid, "kind": kind,
                           "result_text": None})
+
+
+def _stop_native_session(sid: str, run=subprocess.run, which=shutil.which) -> bool:
+    """`claude stop <sid>` (contract G10): the only sanctioned way to end a
+    --bg-managed session -- a raw pid kill triggers a silent daemon respawn
+    under the same sid (G10, never raw-kill). True iff the stop's own exit
+    code was 0. Never raises: an unresolvable `claude` executable, or any
+    OSError/SubprocessError (including TimeoutExpired) from the subprocess
+    call, both resolve to False -- the caller (cmd_respawn --force) treats
+    False as "could not verify the stop" and re-checks the roster before
+    ever proceeding (never claim two live sessions under one name)."""
+    try:
+        exe = resolve_claude_executable(which)
+    except ClaudeNotFoundError:
+        return False
+    try:
+        proc = run([exe, "stop", sid], capture_output=True, text=True,
+                  encoding="utf-8", errors="replace", timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
+def _restamp_after_steer(record: dict, new_sid: str, short_id: str) -> None:
+    """Mutate `record` in place after a fork-steer (`send`'s idle path,
+    `resume-limited`'s native branch): retire the OLD sid into
+    retired_sids, restamp session_id/native_short_id to the new fork,
+    stamp last_dispatch_at (the fresh-outcome anchor for the NEXT
+    recompute), and bump turns -- mirrors _resume_one_limited_native's
+    inline commit shape, shared here so `send` and a future resume-limited
+    refactor stay in lockstep."""
+    record["retired_sids"] = list(record.get("retired_sids", [])) + [record["session_id"]]
+    record["session_id"] = new_sid
+    record["native_short_id"] = short_id
+    record["last_dispatch_at"] = now_iso()
+    record["turns"] = record.get("turns", 0) + 1
+
+
+def _migrate_residual_mailbox(old_sid: str, new_sid: str) -> None:
+    """T7 fix wave (CRITICAL-2 fix 2c): called at every steer-restamp commit
+    (`send`'s idle fork-steer, `resume-limited`'s native branch) right after
+    the registry has been restamped to `new_sid`. A steering message can
+    race into `mailbox/<old_sid>.md` AFTER `compose_prompt` already
+    claimed/drained it for this fork's dispatch (e.g. a concurrent send
+    that lost the raw-status race in `_cmd_send_native` and queued its
+    message against the OLD sid, per FIX-2b) -- that message must still
+    follow the worker, not be stranded under a sid the registry will never
+    reference again. Best-effort: any OSError here must never fail a steer
+    commit that has already succeeded, and a missing/empty old mailbox is
+    the overwhelmingly common case (no-op)."""
+    old_path = mailbox_dir() / f"{old_sid}.md"
+    try:
+        if not old_path.exists():
+            return
+        content = old_path.read_text(encoding="utf-8", errors="replace")
+        if content.strip():
+            new_path = mailbox_dir() / f"{new_sid}.md"
+            with open(new_path, "a", encoding="utf-8") as f:
+                f.write(content.rstrip("\n") + "\n\n")
+        old_path.unlink()
+    except OSError:
+        pass
 
 
 def _fast_completion_sid(name: str, since_iso: str, short_id: str | None = None):
