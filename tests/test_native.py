@@ -428,3 +428,86 @@ class TestJoinRosterByShortId:
         sid = fleet._join_roster_by_short_id("aaaabbbb", fetch, sleep,
                                              exclude_sids={foreign}, clock=clock)
         assert sid is None
+
+
+def _spawn_args(name="w1", d="C:/proj", task="do it", **kw):
+    from types import SimpleNamespace
+    base = dict(name=name, dir=d, task=task, mode="accept", model=None,
+                max_budget_usd=None, setting_sources=None, token_ceiling=None,
+                category=None)
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+class TestCmdSpawnNative:
+    # cmd_spawn validates --dir is a real directory (unlike dispatch_bg,
+    # which never touches the filesystem for cwd) -- every call here passes
+    # d=str(native_home) so the brief's placeholder "C:/proj" (never created
+    # on a real machine) doesn't trip that check before reaching the code
+    # under test.
+    def test_spawn_native_stamps_sid_and_short_id(self, native_home, monkeypatch):
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_with())
+        rc = fleet.cmd_spawn(_spawn_args(d=str(native_home)), run=_fake_run_factory(),
+                             which=lambda _: "claude", sleep=lambda s: None)
+        assert rc == 0
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["dispatch_kind"] == "bg"
+        assert rec["session_id"] == SID and rec["native_short_id"] == "aaaabbbb"
+        assert rec["status"] == "working" and rec["turns"] == 1
+        assert rec["last_dispatch_at"] is not None
+
+    def test_spawn_stamps_category_and_writes_ceiling_file(self, native_home, monkeypatch):
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_with())
+        rc = fleet.cmd_spawn(_spawn_args(d=str(native_home), category="camp5", token_ceiling=5000),
+                             run=_fake_run_factory(), which=lambda _: "claude",
+                             sleep=lambda s: None)
+        assert rc == 0
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["category"] == "camp5"
+        assert fleet.ceiling_file_path(SID).exists()
+
+    def test_spawn_refuses_usd_budget(self, native_home):
+        with pytest.raises(fleet.FleetCliError, match="token-ceiling"):
+            fleet.cmd_spawn(_spawn_args(d=str(native_home), max_budget_usd=5.0),
+                            run=_fake_run_factory(), which=lambda _: "claude",
+                            sleep=lambda s: None)
+        assert fleet.load_registry()["workers"] == {}
+
+    def test_dispatch_failure_rolls_back_preclaim(self, native_home, monkeypatch):
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_spawn(_spawn_args(d=str(native_home)), run=_fake_run_factory(rc=1),
+                            which=lambda _: "claude", sleep=lambda s: None)
+        assert fleet.load_registry()["workers"] == {}
+
+    def test_join_expiry_with_fast_completion_outcome_commits_idle(self, native_home, monkeypatch):
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
+        fleet.append_outcome("w1", {"ts": fleet.now_iso(),
+                                    "session_id": SID, "kind": "result",
+                                    "result_text": "already done"})
+        clock = _FakeClock()
+        rc = fleet.cmd_spawn(_spawn_args(d=str(native_home)), run=_fake_run_factory(),
+                             which=lambda _: "claude",
+                             sleep=lambda s: clock.advance(s), clock=clock)
+        assert rc == 0
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["status"] == "idle" and rec["session_id"] == SID
+
+    def test_join_expiry_without_outcome_is_doa_rollback(self, native_home, monkeypatch):
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
+        clock = _FakeClock()
+        with pytest.raises(fleet.FleetCliError, match="aaaabbbb"):
+            fleet.cmd_spawn(_spawn_args(d=str(native_home)), run=_fake_run_factory(),
+                            which=lambda _: "claude",
+                            sleep=lambda s: clock.advance(s), clock=clock)
+        assert fleet.load_registry()["workers"] == {}
+
+    def test_spawn_events_written_under_same_lock_as_mutation(self, native_home, monkeypatch):
+        # F4: append_event calls happen for "spawned" (pre-claim) and
+        # "turn_started" (post-stamp) -- both present, in order.
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_with())
+        events_path = native_home / "state" / "events.jsonl"
+        fleet.cmd_spawn(_spawn_args(d=str(native_home)), run=_fake_run_factory(),
+                        which=lambda _: "claude", sleep=lambda s: None)
+        kinds = [json.loads(ln)["kind"] for ln in
+                events_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        assert kinds == ["spawned", "turn_started"]
