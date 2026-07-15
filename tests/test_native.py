@@ -184,3 +184,98 @@ class TestOutcomeConcurrency:
         for rec in parsed:
             counts[rec["session_id"]] = counts.get(rec["session_id"], 0) + 1
         assert counts == {f"tag{t}": n_per_writer for t in range(n_writers)}
+
+
+class TestRenderNativeName:
+    def test_format_and_hint_clip(self):
+        n = fleet.render_native_name("camp5", "w1", "port the parser\nto rust " + "x" * 60)
+        cat, name, hint = n.split("|", 2)
+        assert (cat, name) == ("camp5", "w1")
+        assert "\n" not in hint and len(hint) <= 40
+
+    def test_defaults(self):
+        assert fleet.render_native_name(None, "w1", "") == "fleet|w1|"
+
+
+class TestParseBgShortId:
+    def test_parses_backgrounded_line(self):
+        out = "some hint\nbackgrounded · deadbeef · fleet|w1|task\nattach hint\n"
+        assert fleet._parse_bg_short_id(out) == "deadbeef"
+
+    def test_missing_line_returns_none(self):
+        assert fleet._parse_bg_short_id("error: whatever") is None
+
+
+def _fake_run_factory(stdout="backgrounded · aaaabbbb · fleet|w1|t\n", rc=0, calls=None):
+    def fake_run(argv, **kwargs):
+        if calls is not None:
+            calls.append((argv, kwargs))
+        import types
+        return types.SimpleNamespace(returncode=rc, stdout=stdout, stderr="")
+    return fake_run
+
+
+SID = "aaaabbbb-1111-2222-3333-444455556666"
+
+
+def _roster_with(sid=SID, **kw):
+    def fetch(**_):
+        return True, [make_roster_entry(sid, **kw)]
+    return fetch
+
+
+class TestDispatchBg:
+    def test_happy_path_returns_sid_and_writes_task_file(self, native_home):
+        calls = []
+        out = fleet.dispatch_bg("w1", "C:/proj", "BODY-1234", "accept",
+                                model="haiku", category="camp5", hint="port it",
+                                run=_fake_run_factory(calls=calls),
+                                which=lambda _: "claude",
+                                sleep=lambda s: None, roster_fetch=_roster_with())
+        assert out["session_id"] == SID and out["short_id"] == "aaaabbbb"
+        assert fleet.task_file_path("w1").read_text(encoding="utf-8") == "BODY-1234"
+        argv, kwargs = calls[0]
+        assert argv[:2] == ["claude", "--bg"]
+        assert "--resume" not in argv
+        assert argv[argv.index("-n") + 1].startswith("camp5|w1|")
+        assert argv[-1] == f"Read {fleet.task_file_path('w1').as_posix()} and follow it exactly."
+        assert "--model" in argv and "haiku" in argv
+        assert kwargs["env"].get("FLEET_WORKER")
+        assert "CLAUDE_CODE_SESSION_ID" not in kwargs["env"]
+        assert kwargs["cwd"] == "C:/proj"
+
+    def test_resume_sid_inserts_resume_flag(self, native_home):
+        calls = []
+        fleet.dispatch_bg("w1", "C:/proj", "steer", "accept", resume_sid="old-sid",
+                          run=_fake_run_factory(calls=calls), which=lambda _: "claude",
+                          sleep=lambda s: None, roster_fetch=_roster_with())
+        argv = calls[0][0]
+        assert argv[argv.index("--resume") + 1] == "old-sid"
+
+    def test_nonzero_exit_raises(self, native_home):
+        with pytest.raises(fleet.NativeDispatchError):
+            fleet.dispatch_bg("w1", "C:/proj", "b", "accept",
+                              run=_fake_run_factory(rc=1), which=lambda _: "claude",
+                              sleep=lambda s: None, roster_fetch=_roster_with())
+
+    def test_unparseable_stdout_raises(self, native_home):
+        with pytest.raises(fleet.NativeDispatchError):
+            fleet.dispatch_bg("w1", "C:/proj", "b", "accept",
+                              run=_fake_run_factory(stdout="garbage"),
+                              which=lambda _: "claude",
+                              sleep=lambda s: None, roster_fetch=_roster_with())
+
+    def test_join_window_expiry_raises_with_short_id(self, native_home):
+        def empty_fetch(**_):
+            return True, []
+        with pytest.raises(fleet.NativeDispatchError, match="aaaabbbb"):
+            fleet.dispatch_bg("w1", "C:/proj", "b", "accept",
+                              run=_fake_run_factory(), which=lambda _: "claude",
+                              sleep=lambda s: None, roster_fetch=empty_fetch)
+
+    def test_join_matches_done_entry_fast_completion(self, native_home):
+        out = fleet.dispatch_bg("w1", "C:/proj", "b", "accept",
+                                run=_fake_run_factory(), which=lambda _: "claude",
+                                sleep=lambda s: None,
+                                roster_fetch=_roster_with(state="done", status=None, pid=None))
+        assert out["session_id"] == SID
