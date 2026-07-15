@@ -1,6 +1,7 @@
 """M-B native-substrate tests: registry v2 fields, outcome store, dispatch
 helper, discriminator, limit rehome, steering, stop/tombstones, archival."""
 import json
+import subprocess
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -196,6 +197,13 @@ class TestRenderNativeName:
     def test_defaults(self):
         assert fleet.render_native_name(None, "w1", "") == "fleet|w1|"
 
+    def test_category_and_hint_pipes_sanitized(self):
+        # A pipe in either field must not corrupt the cat|name|hint split.
+        n = fleet.render_native_name("a|b", "w1", "x|y")
+        assert n.count("|") == 2
+        cat, name, hint = n.split("|", 2)
+        assert (cat, name, hint) == ("a/b", "w1", "x/y")
+
 
 class TestParseBgShortId:
     def test_parses_backgrounded_line(self):
@@ -219,9 +227,29 @@ SID = "aaaabbbb-1111-2222-3333-444455556666"
 
 
 def _roster_with(sid=SID, **kw):
+    """Call-count-aware: the 1st call (dispatch_bg's pre-dispatch snapshot)
+    reports the session doesn't exist yet -- realistic, since the daemon
+    hasn't minted it. The 2nd+ call (the join poll, post-dispatch) reports
+    the entry present."""
+    state = {"n": 0}
     def fetch(**_):
+        state["n"] += 1
+        if state["n"] == 1:
+            return True, []
         return True, [make_roster_entry(sid, **kw)]
     return fetch
+
+
+class _FakeClock:
+    """Injectable monotonic clock for join-loop tests -- no real sleeping."""
+    def __init__(self, start=0.0):
+        self.t = start
+
+    def __call__(self):
+        return self.t
+
+    def advance(self, dt):
+        self.t += dt
 
 
 class TestDispatchBg:
@@ -266,12 +294,29 @@ class TestDispatchBg:
                               sleep=lambda s: None, roster_fetch=_roster_with())
 
     def test_join_window_expiry_raises_with_short_id(self, native_home):
+        # Fake clock + sleep-advances-clock -- exercises the full 60s verify
+        # window with zero real wall-clock time (was ~60s of real sleep).
+        clock = _FakeClock()
+
         def empty_fetch(**_):
             return True, []
+
+        def fast_sleep(s):
+            clock.advance(s)
+
         with pytest.raises(fleet.NativeDispatchError, match="aaaabbbb"):
             fleet.dispatch_bg("w1", "C:/proj", "b", "accept",
                               run=_fake_run_factory(), which=lambda _: "claude",
-                              sleep=lambda s: None, roster_fetch=empty_fetch)
+                              sleep=fast_sleep, roster_fetch=empty_fetch, clock=clock)
+
+    def test_dispatch_timeout_raises(self, native_home):
+        def timeout_run(argv, **kwargs):
+            raise subprocess.TimeoutExpired(cmd=argv, timeout=fleet.NATIVE_DISPATCH_TIMEOUT_SECONDS)
+
+        with pytest.raises(fleet.NativeDispatchError):
+            fleet.dispatch_bg("w1", "C:/proj", "b", "accept",
+                              run=timeout_run, which=lambda _: "claude",
+                              sleep=lambda s: None, roster_fetch=_roster_with())
 
     def test_join_matches_done_entry_fast_completion(self, native_home):
         out = fleet.dispatch_bg("w1", "C:/proj", "b", "accept",
@@ -279,3 +324,107 @@ class TestDispatchBg:
                                 sleep=lambda s: None,
                                 roster_fetch=_roster_with(state="done", status=None, pid=None))
         assert out["session_id"] == SID
+
+    def test_missing_claude_exe_raises_native_dispatch_error(self, native_home):
+        # resolve_claude_executable raises ClaudeNotFoundError -- the contract
+        # requires NativeDispatchError uniformly across all four failure causes.
+        with pytest.raises(fleet.NativeDispatchError):
+            fleet.dispatch_bg("w1", "C:/proj", "b", "accept",
+                              run=_fake_run_factory(), which=lambda _: None,
+                              sleep=lambda s: None, roster_fetch=_roster_with())
+
+    def test_task_file_mkdir_failure_raises_native_dispatch_error(self, native_home):
+        # A regular FILE occupying tasks_dir()'s path makes mkdir(exist_ok=True)
+        # raise FileExistsError -- must surface as NativeDispatchError, not a
+        # raw OSError, so callers' `except NativeDispatchError` rollback fires.
+        (native_home / "state" / "tasks").write_text("blocker", encoding="utf-8")
+        with pytest.raises(fleet.NativeDispatchError, match="task-file write failed"):
+            fleet.dispatch_bg("w1", "C:/proj", "b", "accept",
+                              run=_fake_run_factory(), which=lambda _: "claude",
+                              sleep=lambda s: None, roster_fetch=_roster_with())
+
+    def test_invalid_name_raises_before_any_file_created(self, native_home):
+        with pytest.raises(fleet.NativeDispatchError):
+            fleet.dispatch_bg("..\\evil", "C:/proj", "b", "accept",
+                              run=_fake_run_factory(), which=lambda _: "claude",
+                              sleep=lambda s: None, roster_fetch=_roster_with())
+        # No task file created anywhere -- neither inside tasks_dir() nor via
+        # traversal outside it.
+        assert not (native_home / "state" / "tasks").exists()
+        assert not (native_home / "evil.md").exists()
+        assert not (native_home.parent / "evil.md").exists()
+
+    def test_pre_existing_foreign_sid_excluded_from_join(self, native_home):
+        # Roundtrip through dispatch_bg's automatic pre-dispatch snapshot: a
+        # foreign session sharing the short-id prefix is already on the
+        # roster BEFORE this dispatch -- it must never be joined, even though
+        # it's still present (and listed first) on every subsequent poll.
+        foreign = "aaaabbbb-9999-8888-7777-666655554444"
+        real = "aaaabbbb-1111-2222-3333-444455556666"
+        state = {"n": 0}
+
+        def roster_fetch(**_):
+            state["n"] += 1
+            entries = [make_roster_entry(foreign, name="someone-elses-worker")]
+            if state["n"] > 1:
+                # Only visible from the join poll onward -- the real session
+                # doesn't exist yet at pre-dispatch-snapshot time.
+                entries.append(make_roster_entry(real))
+            return True, entries
+
+        out = fleet.dispatch_bg(
+            "w1", "C:/proj", "b", "accept",
+            run=_fake_run_factory(stdout="backgrounded · aaaabbbb · fleet|w1|t\n"),
+            which=lambda _: "claude", sleep=lambda s: None,
+            roster_fetch=roster_fetch)
+        assert out["session_id"] == real
+
+
+class TestJoinRosterByShortId:
+    def test_multi_poll_miss_then_match(self):
+        """Fetch misses twice, matches on the 3rd poll -- regression test for
+        the join loop's retry structure (previously zero coverage per the
+        adversarial review's fault-injection finding)."""
+        clock = _FakeClock()
+        calls = {"fetch": 0}
+        sleeps = []
+
+        def fetch(**_):
+            calls["fetch"] += 1
+            if calls["fetch"] < 3:
+                return True, []
+            return True, [make_roster_entry(SID)]
+
+        def sleep(s):
+            sleeps.append(s)
+            clock.advance(s)
+
+        sid = fleet._join_roster_by_short_id("aaaabbbb", fetch, sleep, clock=clock)
+        assert sid == SID
+        assert calls["fetch"] == 3
+        assert sleeps == [fleet.NATIVE_JOIN_POLL_SECONDS, fleet.NATIVE_JOIN_POLL_SECONDS]
+
+    def test_exclude_sids_skips_foreign_prefix_match(self):
+        foreign = "aaaabbbb-9999-8888-7777-666655554444"
+        real = "aaaabbbb-1111-2222-3333-444455556666"
+
+        def fetch(**_):
+            return True, [make_roster_entry(foreign), make_roster_entry(real)]
+
+        sid = fleet._join_roster_by_short_id("aaaabbbb", fetch, lambda s: None,
+                                             exclude_sids={foreign})
+        assert sid == real
+
+    def test_exclude_sids_only_foreign_present_expires(self):
+        foreign = "aaaabbbb-9999-8888-7777-666655554444"
+        clock = _FakeClock()
+
+        def fetch(**_):
+            return True, [make_roster_entry(foreign)]
+
+        def sleep(s):
+            clock.advance(s)
+
+        sid = fleet._join_roster_by_short_id("aaaabbbb", fetch, sleep,
+                                             exclude_sids={foreign}, clock=clock)
+        assert sid is None
