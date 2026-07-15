@@ -13,12 +13,12 @@ Claude Code's own background agents (`claude --bg`, `claude agents`) cover spawn
 ```
 $ fleet spawn migrate-users --dir C:\proga\billing-service --mode bypass \
     --task "Port the users table migration from Knex to raw SQL, see MIGRATION.md" \
-    --max-budget-usd 5
-migrate-users a1b2c3d4-...  logs\migrate-users.jsonl
+    --token-ceiling 200000
+migrate-users a1b2c3d4-... (native bg, short id a1b2c3d4)
 
 $ fleet status
 NAME                STATUS       TURNS     COST      AGE  MAIL  FLAGS
-migrate-users        working         1      0.41       2m     0  -
+migrate-users        working         1      0.00       2m     0  -
 
 $ fleet send migrate-users "also add a down-migration, I forgot to ask"
 migrate-users: turn running -- message queued to mailbox
@@ -82,7 +82,7 @@ No daemon in the core loop: every `fleet` command is a short-lived CLI invocatio
 ## Features (shipped, not aspirational)
 
 - **Mid-turn steering.** `fleet send` delivers a message into a running worker's mailbox; it's injected at the next tool boundary, no attach required.
-- **Budget and token caps.** `--max-budget-usd` and `--token-ceiling` are enforced fleet-side before every resume turn — a worker that would blow its cap refuses to continue.
+- **Token caps.** `--token-ceiling` is enforced fleet-side before every resume turn — a worker that would blow its cap refuses to continue. (Native `--bg` dispatch carries no cost field at all — `--max-budget-usd` is refused at spawn; USD caps only ever applied to the pre-pivot legacy launch path.)
 - **Respawn with journal continuity.** `fleet respawn` gives a worker a fresh session (new context, same name/cwd/mode) while carrying its journal and any drained mailbox forward — the context-reset lever for long campaigns.
 - **Usage-limit park/resume.** A worker that hits a Claude plan usage limit parks itself (`limited` status, recorded reset horizon) instead of dying silently; `fleet resume-limited` relaunches it once the window passes.
 - **Knowledge loop.** `knowledge/` is git-tracked: an index, playbooks, per-project quirks, and append-only lessons that every manager session reads at startup and writes back to after every campaign.

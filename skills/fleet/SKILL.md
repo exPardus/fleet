@@ -20,7 +20,7 @@ You are the manager of a fleet of Claude Code worker sessions on this machine. T
 |---|---|
 | `fleet home` | Print the resolved fleet home directory. Use this instead of hardcoding a path. |
 | `fleet init` | Render the machine-local `state\worker-settings.json` from the git-tracked template (real interpreter path + FLEET_HOME). Run once per machine, and again after editing the template or moving the repo. `spawn`/`send` refuse with a clear error if this hasn't been run. |
-| `fleet spawn <name> --dir <path> --task <text\|@file> [--mode bypass\|accept\|dontask\|plan\|omit] [--model m] [--max-budget-usd x] [--setting-sources <list>]` | New worker. Name `[a-z0-9-]+`. Task via @file for anything long. `--setting-sources` restricts which settings sources merge (see foreign-hooks doctrine below). |
+| `fleet spawn <name> --dir <path> --task <text\|@file> [--mode bypass\|accept\|dontask\|plan\|omit] [--model m] [--token-ceiling n] [--category c] [--setting-sources <list>]` | New worker; native (`claude --bg`)-hosted. Name `[a-z0-9-]+`. Task via @file for anything long. `--token-ceiling` is the budget cap (native dispatch carries no cost field, so `--max-budget-usd` is refused — see doctrine below). `--category` tags the agents-menu grouping (default `fleet`). `--setting-sources` restricts which settings sources merge (see foreign-hooks doctrine below). |
 | `fleet send <name> <text\|@file>` | Steer. Mid-turn → delivered at next tool boundary (seconds). Idle → starts new turn. |
 | `fleet status [name] [--all]` | Compact fleet table. Your main dashboard. Archived (tombstoned) workers are hidden by default — `--all` includes them, flagged `archived`; an explicit `<name>` always finds its worker regardless. |
 | `fleet peek <name>` | ~20-line live digest of current/last turn. Works mid-turn. |
@@ -49,7 +49,7 @@ You are the manager of a fleet of Claude Code worker sessions on this machine. T
   different session (or with no recorded owner) unless you pass `--yes`. That refusal is a signal, not an
   obstacle: surface it to the operator instead of re-running with `--yes`. `fleet clean` deletes journals
   irreversibly; only the claude session survives, resumable by sid from `state/events.jsonl`.
-- **Permission modes:** trusted grind in known repo → `bypass`. Unfamiliar/destructive → `accept` or `plan`. Middle → `dontask`. Put `--max-budget-usd` on unbounded tasks. Record choice per task.
+- **Permission modes:** trusted grind in known repo → `bypass`. Unfamiliar/destructive → `accept` or `plan`. Middle → `dontask`. Put `--token-ceiling` on unbounded tasks (native dispatch has no dollar budget — `--max-budget-usd` is refused at spawn). Record choice per task.
 - **Foreign hooks:** worker inherits target repo's own hooks + global plugins. If a repo's Stop hook fights turn-end, spawn with `--setting-sources` passthrough.
 - **Attach asymmetry:** while human is attached, fleet hooks don't run — mail queues. Nag stale attaches.
 - Worker journals live at `$(fleet home)/state/journals/<name>.md` — read one before respawning or diagnosing.
