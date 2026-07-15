@@ -3047,6 +3047,776 @@ class TestCmdCleanNative:
         assert "legacy1" in fleet.load_registry()["workers"]
 
 
+# ---------------------------------------------------------------------------
+# M-B Task 9: auto-archival (spec §5.1.2).
+# ---------------------------------------------------------------------------
+
+def _archive_args(name=None, ttl_hours=None, dry_run=False):
+    from types import SimpleNamespace
+    return SimpleNamespace(name=name, ttl_hours=ttl_hours, dry_run=dry_run)
+
+
+def seed_archive_ready_worker(home, name="w1", sid=SID, status="idle",
+                              retired_sids=(), age_hours=25.0, **overrides):
+    """A native record that passes every `_archive_eligible` gate against an
+    empty roster: terminal status, last_activity `age_hours` in the REAL
+    past (cmd_archive's own `now` is real wall-clock, un-injectable, like
+    every other recompute path in this module), and a matching outcome
+    record for its current sid."""
+    overrides.setdefault(
+        "last_activity",
+        fleet.ctime_to_iso(datetime.now(timezone.utc) - timedelta(hours=age_hours)),
+    )
+    overrides.setdefault("retired_sids", list(retired_sids))
+    rec = seed_native_worker(home, name=name, sid=sid, status=status, **overrides)
+    fleet.append_outcome(name, {"ts": _iso(NOW), "session_id": sid, "kind": "result",
+                                "result_text": "done"})
+    return rec
+
+
+def seed_archived_worker(home, name="w1", sid=SID, status="idle", **overrides):
+    overrides.setdefault("archived_at", _iso(NOW))
+    return seed_native_worker(home, name=name, sid=sid, status=status, **overrides)
+
+
+def _archive_fake_run(rc=0, calls=None, roster_stdout="[]"):
+    """Unlike `_fake_run_factory` (one fixed stdout for every argv), a real
+    `cmd_archive` non-dry-run invocation drives TWO distinct `claude`
+    subcommands in one call: `agents --json --all` (the roster fetch,
+    which needs valid JSON or `native_epoch_suspicious` freezes the whole
+    command) and `rm <sid>` (the archival primitive, whose exit code this
+    fake controls via `rc`). Discriminates on argv[1]."""
+    import types
+
+    def fake_run(argv, **kwargs):
+        if calls is not None:
+            calls.append((argv, kwargs))
+        if len(argv) >= 2 and argv[1] == "agents":
+            return types.SimpleNamespace(returncode=0, stdout=roster_stdout, stderr="")
+        return types.SimpleNamespace(returncode=rc, stdout="", stderr="")
+    return fake_run
+
+
+class TestArchiveEligible:
+    def test_eligible_all_gates_pass(self, native_home):
+        rec = seed_native_worker(native_home, sid=SID, status="idle",
+                                 last_activity=_iso(NOW - timedelta(hours=25)))
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": SID, "kind": "result"})
+        assert fleet._archive_eligible("w1", rec, [], NOW) == (True, "eligible")
+
+    @pytest.mark.parametrize("status", ["working", "attached", "over_ceiling", "over_budget", "dead-suspected"])
+    def test_ineligible_bad_status(self, native_home, status):
+        rec = seed_native_worker(native_home, sid=SID, status=status,
+                                 last_activity=_iso(NOW - timedelta(hours=25)))
+        assert fleet._archive_eligible("w1", rec, [], NOW) == (False, f"status:{status}")
+
+    def test_ineligible_limited(self, native_home):
+        rec = seed_native_worker(native_home, sid=SID, status="limited",
+                                 last_activity=_iso(NOW - timedelta(hours=25)))
+        assert fleet._archive_eligible("w1", rec, [], NOW) == (False, "status:limited")
+
+    def test_ineligible_legacy_record(self, native_home):
+        rec = fleet.new_worker_record(SID, "C:/proj", "t", "accept")  # dispatch_kind None
+        rec["status"] = "idle"
+        assert fleet._archive_eligible("w1", rec, [], NOW) == (False, "not-native")
+
+    def test_ineligible_already_archived(self, native_home):
+        rec = seed_native_worker(native_home, sid=SID, status="idle",
+                                 last_activity=_iso(NOW - timedelta(hours=25)),
+                                 archived_at=_iso(NOW))
+        assert fleet._archive_eligible("w1", rec, [], NOW) == (False, "already-archived")
+
+    def test_ineligible_roster_live_entry(self, native_home):
+        rec = seed_native_worker(native_home, sid=SID, status="idle",
+                                 last_activity=_iso(NOW - timedelta(hours=25)))
+        entries = [make_roster_entry(SID, status="busy")]
+        assert fleet._archive_eligible("w1", rec, entries, NOW) == (False, "roster-live")
+
+    def test_roster_state_only_dead_entry_does_not_block(self, native_home):
+        # A roster entry carrying only `state` (no status/pid keys) is DEAD
+        # per contract -- must never block eligibility.
+        rec = seed_native_worker(native_home, sid=SID, status="idle",
+                                 last_activity=_iso(NOW - timedelta(hours=25)))
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": SID, "kind": "result"})
+        entries = [make_roster_entry(SID, status=None, pid=None)]
+        assert fleet._archive_eligible("w1", rec, entries, NOW) == (True, "eligible")
+
+    def test_ineligible_no_outcome_record(self, native_home):
+        rec = seed_native_worker(native_home, sid=SID, status="idle",
+                                 last_activity=_iso(NOW - timedelta(hours=25)))
+        assert fleet._archive_eligible("w1", rec, [], NOW) == (False, "no-outcome-record")
+
+    def test_ineligible_no_outcome_record_dead_suspected_never_auto_archived(self, native_home):
+        # Trap named in advance (task-9-brief.md): roster-gone with NO
+        # outcome record is dead-suspected territory, never auto-archived,
+        # even once the roster entry is confirmed gone.
+        rec = seed_native_worker(native_home, sid=SID, status="dead",
+                                 last_activity=_iso(NOW - timedelta(hours=100)))
+        ok, reason = fleet._archive_eligible("w1", rec, [], NOW)
+        assert (ok, reason) == (False, "no-outcome-record")
+
+    def test_ineligible_ttl_not_elapsed(self, native_home):
+        rec = seed_native_worker(native_home, sid=SID, status="idle",
+                                 last_activity=_iso(NOW - timedelta(hours=1)))
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": SID, "kind": "result"})
+        assert fleet._archive_eligible("w1", rec, [], NOW) == (False, "ttl-not-elapsed")
+
+    def test_ttl_boundary_exact_elapsed_is_eligible(self, native_home):
+        rec = seed_native_worker(native_home, sid=SID, status="idle",
+                                 last_activity=_iso(NOW - timedelta(hours=24)))
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": SID, "kind": "result"})
+        assert fleet._archive_eligible("w1", rec, [], NOW) == (True, "eligible")
+
+    def test_custom_ttl_hours_param(self, native_home):
+        rec = seed_native_worker(native_home, sid=SID, status="idle",
+                                 last_activity=_iso(NOW - timedelta(hours=2)))
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": SID, "kind": "result"})
+        assert fleet._archive_eligible("w1", rec, [], NOW, ttl_hours=1.0) == (True, "eligible")
+        assert fleet._archive_eligible("w1", rec, [], NOW, ttl_hours=3.0) == (False, "ttl-not-elapsed")
+
+    def test_malformed_last_activity_fails_safe(self, native_home):
+        rec = seed_native_worker(native_home, sid=SID, status="idle", last_activity="not-a-date")
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": SID, "kind": "result"})
+        assert fleet._archive_eligible("w1", rec, [], NOW) == (False, "last-activity-unparseable")
+
+    def test_missing_last_activity_fails_safe(self, native_home):
+        rec = seed_native_worker(native_home, sid=SID, status="idle")
+        del rec["last_activity"]
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": SID, "kind": "result"})
+        assert fleet._archive_eligible("w1", rec, [], NOW) == (False, "last-activity-unparseable")
+
+    def test_no_session_id_ineligible(self, native_home):
+        rec = fleet.new_worker_record(None, "C:/proj", "t", "accept", dispatch_kind="bg")
+        rec["status"] = "dead"
+        assert fleet._archive_eligible("w1", rec, [], NOW) == (False, "no-session-id")
+
+    def test_default_ttl_constant_is_24_hours(self):
+        assert fleet.ARCHIVE_TTL_HOURS_DEFAULT == 24.0
+
+    # T9 fix wave (spec review Minor: gate-precedence not test-locked) --
+    # pin which reason wins when a record independently violates two gates.
+    def test_gate_precedence_already_archived_beats_bad_status(self, native_home):
+        rec = seed_native_worker(native_home, sid=SID, status="working",
+                                 last_activity=_iso(NOW - timedelta(hours=25)),
+                                 archived_at=_iso(NOW))
+        assert fleet._archive_eligible("w1", rec, [], NOW) == (False, "already-archived")
+
+    def test_gate_precedence_roster_live_beats_no_outcome_record(self, native_home):
+        # status is idle (gate 2 would pass) and NO outcome record exists
+        # (would independently fail gate 4) -- roster-live (gate 3) must
+        # still be the reported reason, since it is checked first.
+        rec = seed_native_worker(native_home, sid=SID, status="idle",
+                                 last_activity=_iso(NOW - timedelta(hours=25)))
+        entries = [make_roster_entry(SID, status="busy")]
+        assert fleet._archive_eligible("w1", rec, entries, NOW) == (False, "roster-live")
+
+
+class TestCmdArchive:
+    def test_archive_dry_run_mutates_nothing(self, native_home, capsys):
+        seed_archive_ready_worker(native_home)
+        before = fleet.load_registry()
+        calls = []
+
+        rc = fleet.cmd_archive(_archive_args(dry_run=True), run=_archive_fake_run(calls=calls),
+                               which=lambda _: "claude")
+        assert rc == 0
+        assert fleet.load_registry() == before
+        assert "w1: eligible" in capsys.readouterr().out
+        assert fleet.outcome_path("w1").exists()
+        assert not any(c[0][1] == "rm" for c in calls)
+
+    def test_dry_run_prints_skip_reason(self, native_home, capsys):
+        seed_native_worker(native_home, sid=SID, status="working")
+        # A "working" record needs a LIVE roster entry or an empty roster
+        # trips G9 (empty roster + a record claiming "working" is exactly
+        # the epoch-suspicious shape) -- irrelevant to the gate under test
+        # (status fails before roster is ever consulted).
+        roster = json.dumps([make_roster_entry(SID, status="busy")])
+        rc = fleet.cmd_archive(_archive_args(dry_run=True),
+                               run=_archive_fake_run(roster_stdout=roster),
+                               which=lambda _: "claude")
+        assert "w1: skipped -- status:working" in capsys.readouterr().out
+
+    def test_archive_moves_files_and_rms_all_sids(self, native_home):
+        seed_archive_ready_worker(native_home, retired_sids=["retired-1", "retired-2"])
+        # sid-keyed outcome files (the Stop hook's fallback key) for the
+        # current sid AND each retired sid -- these are separate FILES
+        # (outcome_path(sid)), not the name-keyed one seed_archive_ready_worker
+        # already wrote.
+        fleet.append_outcome(SID, {"ts": _iso(NOW), "session_id": SID, "kind": "result"})
+        for s in ["retired-1", "retired-2"]:
+            fleet.append_outcome(s, {"ts": _iso(NOW), "session_id": s, "kind": "result"})
+        task_file = fleet.task_file_path("w1")
+        task_file.parent.mkdir(parents=True, exist_ok=True)
+        task_file.write_text("the task", encoding="utf-8")
+        journal = fleet.journals_dir() / "w1.md"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text("journal text", encoding="utf-8")
+        calls = []
+
+        rc = fleet.cmd_archive(_archive_args(), run=_archive_fake_run(rc=0, calls=calls),
+                               which=lambda _: "claude")
+        assert rc == 0
+
+        rm_sids = {c[0][2] for c in calls if c[0][:2] == ["claude", "rm"]}
+        assert rm_sids == {SID, "retired-1", "retired-2"}
+
+        dest = fleet.archive_root() / "w1"
+        assert (dest / "journal.md").read_text(encoding="utf-8") == "journal text"
+        assert (dest / "task.md").exists()
+        assert (dest / "w1.jsonl").exists()          # name-keyed outcome file
+        assert (dest / f"{SID}.jsonl").exists()       # current sid's outcome file
+        assert (dest / "retired-1.jsonl").exists()
+        assert (dest / "retired-2.jsonl").exists()
+        assert not task_file.exists()
+        assert not journal.exists()
+        assert not fleet.outcome_path("w1").exists()
+
+        rec_after = fleet.load_registry()["workers"]["w1"]
+        assert rec_after["archived_at"] is not None
+        assert rec_after["session_id"] == SID  # tombstoned overlay -- history readable
+        assert "w1" in fleet.load_registry()["workers"]  # registry entry SURVIVES
+        assert "archived" in _events_kinds(native_home)
+
+    # T9 fix wave (finding C1, CRITICAL): a retired sid abandoned by a
+    # fork-steer can still be genuinely live in the roster at archive-time
+    # -- gate 3 of _archive_eligible only ever checked the CURRENT sid, so
+    # the un-gated rm loop swept a live retired sid's roster entry (and its
+    # backing ~/.claude/jobs/<short>/ dir) out from under a still-running
+    # session. The rm loop must now skip any sid (current OR retired) the
+    # roster shows live, report it, and still archive everything else.
+    def test_rm_skips_a_live_retired_sid_but_rms_current_sid(self, native_home, capsys):
+        seed_archive_ready_worker(native_home, retired_sids=["retired-1"])
+        calls = []
+        roster = json.dumps([make_roster_entry("retired-1", status="busy")])
+
+        rc = fleet.cmd_archive(_archive_args(), run=_archive_fake_run(rc=0, calls=calls,
+                                                                       roster_stdout=roster),
+                               which=lambda _: "claude")
+        assert rc == 0
+
+        rm_sids = {c[0][2] for c in calls if c[0][:2] == ["claude", "rm"]}
+        assert rm_sids == {SID}  # only the (dead-per-roster) current sid was rm'd
+        err = capsys.readouterr().err
+        assert "skipping rm" in err and "session live in roster" in err
+        # the archive itself still proceeds -- the live retired sid is
+        # skipped, not a reason to block the whole worker.
+        assert fleet.load_registry()["workers"]["w1"]["archived_at"] is not None
+
+    def test_archive_prints_summary_counts(self, native_home, capsys):
+        busy_sid = "busybusy-1111-2222-3333-444455556666"
+        ready = seed_archive_ready_worker(native_home, name="ready", sid=SID)
+        busy = fleet.new_worker_record(busy_sid, "C:/proj", "t", "accept", dispatch_kind="bg")
+        busy["status"] = "working"
+        busy["native_short_id"] = "busybusy"
+        busy["last_dispatch_at"] = _iso(NOW - timedelta(minutes=5))
+        fleet.save_registry({"workers": {"ready": ready, "busy": busy}})
+        # "busy" claims status=="working" -- give it a LIVE roster entry so
+        # G9's epoch check doesn't read an empty roster as suspicious.
+        roster = json.dumps([make_roster_entry(busy_sid, status="busy")])
+
+        rc = fleet.cmd_archive(_archive_args(), run=_archive_fake_run(rc=0, roster_stdout=roster),
+                               which=lambda _: "claude")
+        assert rc == 0
+        assert "archived 1 worker(s), skipped 1" in capsys.readouterr().out
+
+    def test_named_worker_archives_alone(self, native_home):
+        seed_archive_ready_worker(native_home, name="w1", sid=SID)
+        w2_sid = "22222222-1111-2222-3333-444455556666"
+        w2 = fleet.new_worker_record(w2_sid, "C:/proj", "t", "accept", dispatch_kind="bg")
+        w2["status"] = "working"
+        w2["native_short_id"] = "22222222"
+        w2["last_dispatch_at"] = _iso(NOW - timedelta(minutes=5))
+        data = fleet.load_registry()
+        data["workers"]["w2"] = w2
+        fleet.save_registry(data)
+        # G9's epoch check reads the WHOLE registry, not just the named
+        # worker -- w2 claims "working", so it needs a live roster entry
+        # or an empty roster would (correctly) freeze this invocation.
+        roster = json.dumps([make_roster_entry(w2_sid, status="busy")])
+
+        rc = fleet.cmd_archive(_archive_args(name="w1"),
+                               run=_archive_fake_run(rc=0, roster_stdout=roster),
+                               which=lambda _: "claude")
+        assert rc == 0
+        workers = fleet.load_registry()["workers"]
+        assert workers["w1"]["archived_at"] is not None
+        assert workers["w2"]["archived_at"] is None
+
+    def test_custom_ttl_hours_flows_through(self, native_home, capsys):
+        seed_native_worker(native_home, sid=SID, status="idle",
+                           last_activity=fleet.ctime_to_iso(
+                               datetime.now(timezone.utc) - timedelta(hours=2)))
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": SID, "kind": "result"})
+        rc = fleet.cmd_archive(_archive_args(dry_run=True, ttl_hours=1.0),
+                               run=_archive_fake_run(), which=lambda _: "claude")
+        assert rc == 0
+        assert "w1: eligible" in capsys.readouterr().out
+
+    def test_unknown_worker_raises(self, native_home):
+        with pytest.raises(fleet.FleetCliError, match="unknown worker"):
+            fleet.cmd_archive(_archive_args(name="nope"))
+
+    def test_already_archived_named_worker_refuses(self, native_home):
+        seed_archived_worker(native_home)
+        with pytest.raises(fleet.FleetCliError, match="archived"):
+            fleet.cmd_archive(_archive_args(name="w1"))
+
+    def test_already_archived_is_silently_skipped_in_bulk_sweep(self, native_home, capsys):
+        seed_archived_worker(native_home)
+        rc = fleet.cmd_archive(_archive_args())
+        assert rc == 0
+        assert "archived 0 worker(s), skipped 1" in capsys.readouterr().out
+
+    def test_missing_files_skipped_silently_no_crash(self, native_home):
+        # No journal/task file ever created on disk -- move is a silent no-op.
+        seed_archive_ready_worker(native_home)
+        rc = fleet.cmd_archive(_archive_args(), run=_archive_fake_run(rc=0), which=lambda _: "claude")
+        assert rc == 0
+        assert fleet.load_registry()["workers"]["w1"]["archived_at"] is not None
+
+    def test_rm_failure_is_non_fatal_still_archives(self, native_home, capsys):
+        seed_archive_ready_worker(native_home)
+        rc = fleet.cmd_archive(_archive_args(), run=_archive_fake_run(rc=1), which=lambda _: "claude")
+        assert rc == 0
+        assert fleet.load_registry()["workers"]["w1"]["archived_at"] is not None
+        assert "rm aaaabbbb... failed" in capsys.readouterr().err
+
+    def test_collision_suffixes_existing_archive_dir(self, native_home):
+        fleet.archive_root().mkdir(parents=True, exist_ok=True)
+        (fleet.archive_root() / "w1").mkdir()
+        seed_archive_ready_worker(native_home)
+        rc = fleet.cmd_archive(_archive_args(), run=_archive_fake_run(rc=0), which=lambda _: "claude")
+        assert rc == 0
+        assert (fleet.archive_root() / "w1.1").exists()
+
+
+class TestCmdArchiveEpochFreeze:
+    def test_epoch_frozen_refuses_entirely_zero_mutations(self, native_home, monkeypatch, capsys):
+        seed_archive_ready_worker(native_home)
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (False, "roster down"))
+        before = fleet.load_registry()
+
+        rc = fleet.cmd_archive(_archive_args())
+        assert rc == 1
+        assert fleet.load_registry() == before
+        assert "EPOCH" in "".join(capsys.readouterr())
+
+    def test_epoch_frozen_blocks_dry_run_too(self, native_home, monkeypatch, capsys):
+        seed_archive_ready_worker(native_home)
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (False, "roster down"))
+        rc = fleet.cmd_archive(_archive_args(dry_run=True))
+        assert rc == 1
+        combined = "".join(capsys.readouterr())
+        assert "EPOCH" in combined
+        assert "eligible" not in combined
+
+    def test_no_native_workers_never_fetches_roster(self, native_home):
+        rec = fleet.new_worker_record("legacy-sid", "C:/proj", "t", "accept")
+        rec["status"] = "idle"
+        fleet.save_registry({"workers": {"legacy1": rec}})
+
+        def boom_roster(**kw):
+            raise AssertionError("must not fetch roster with no native worker in the registry")
+
+        import fleet as fleet_mod
+        prev = fleet_mod._fetch_agents_roster
+        fleet_mod._fetch_agents_roster = boom_roster
+        try:
+            rc = fleet.cmd_archive(_archive_args())
+        finally:
+            fleet_mod._fetch_agents_roster = prev
+        assert rc == 0
+
+
+class TestCmdArchiveForeignRosterUntouched:
+    def test_only_this_workers_own_sids_reach_rm(self, native_home, monkeypatch):
+        seed_archive_ready_worker(native_home, retired_sids=["retired-1"])
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": "retired-1", "kind": "result"})
+        calls = []
+        monkeypatch.setattr(
+            fleet, "_fetch_agents_roster",
+            lambda **_: (True, [make_roster_entry("foreign-sid-999", status="busy",
+                                                   name="someone else's session")]),
+        )
+        rc = fleet.cmd_archive(_archive_args(), run=_fake_run_factory(rc=0, calls=calls),
+                               which=lambda _: "claude")
+        assert rc == 0
+        rm_sids = {c[0][2] for c in calls if c[0][:2] == ["claude", "rm"]}
+        assert "foreign-sid-999" not in rm_sids
+        assert rm_sids == {SID, "retired-1"}
+
+
+class TestRefuseIfArchived:
+    def test_raises_when_archived(self):
+        with pytest.raises(fleet.FleetCliError, match="archived"):
+            fleet.refuse_if_archived("w1", {"archived_at": _iso(NOW)}, "send")
+
+    def test_noop_when_not_archived(self):
+        fleet.refuse_if_archived("w1", {"archived_at": None}, "send")  # no raise
+
+    def test_noop_on_non_dict(self):
+        fleet.refuse_if_archived("w1", None, "send")  # no raise
+
+
+class TestArchivedRefusesMutation:
+    def test_send_refuses(self, native_home):
+        seed_archived_worker(native_home)
+        with pytest.raises(fleet.FleetCliError, match="archived"):
+            fleet.cmd_send(_send_args())
+
+    def test_respawn_refuses(self, native_home):
+        seed_archived_worker(native_home)
+        with pytest.raises(fleet.FleetCliError, match="archived"):
+            fleet.cmd_respawn(_respawn_args())
+
+    def test_kill_refuses(self, native_home):
+        seed_archived_worker(native_home)
+        with pytest.raises(fleet.FleetCliError, match="archived"):
+            fleet.cmd_kill(_kill_args())
+
+    def test_interrupt_refuses(self, native_home):
+        seed_archived_worker(native_home, status="idle")
+        with pytest.raises(fleet.FleetCliError, match="archived"):
+            fleet.cmd_interrupt(_interrupt_args())
+
+    def test_resume_limited_named_refuses(self, native_home):
+        seed_archived_worker(native_home, status="limited")
+        from types import SimpleNamespace
+        with pytest.raises(fleet.FleetCliError, match="archived"):
+            fleet.cmd_resume_limited(SimpleNamespace(name="w1", force_now=False))
+
+    def test_archive_again_refuses(self, native_home):
+        seed_archived_worker(native_home)
+        with pytest.raises(fleet.FleetCliError, match="archived"):
+            fleet.cmd_archive(_archive_args(name="w1"))
+
+
+class TestStatusHidesArchived:
+    def test_status_hides_archived_by_default(self, native_home):
+        seed_archived_worker(native_home)
+        assert fleet.status_snapshot()["workers"] == []
+
+    def test_snapshot_all_includes_archived_flagged(self, native_home):
+        seed_archived_worker(native_home)
+        snap = fleet.status_snapshot(include_archived=True)
+        assert len(snap["workers"]) == 1
+        assert snap["workers"][0]["archived_at"] is not None
+
+    def test_cmd_status_stale_ok_hides_by_default(self, native_home, capsys):
+        seed_archived_worker(native_home)
+        rc = fleet.cmd_status(_status_args(stale_ok=True))
+        assert rc == 0
+        assert "w1" not in capsys.readouterr().out
+
+    def test_cmd_status_stale_ok_all_shows_flagged(self, native_home, capsys):
+        seed_archived_worker(native_home)
+        rc = fleet.cmd_status(_status_args(stale_ok=True, all=True))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "w1" in out and "archived" in out
+
+    def test_cmd_status_stale_ok_explicit_name_finds_archived_without_all(self, native_home, capsys):
+        seed_archived_worker(native_home)
+        rc = fleet.cmd_status(_status_args(name="w1", stale_ok=True))
+        assert rc == 0
+        assert "w1" in capsys.readouterr().out
+
+    def test_cmd_status_full_recompute_hides_and_never_touches_archived(self, native_home, capsys):
+        seed_archived_worker(native_home)
+
+        def boom_roster(**kw):
+            raise AssertionError("must not fetch roster for an archived-only bulk query")
+
+        import fleet as fleet_mod
+        prev = fleet_mod._fetch_agents_roster
+        fleet_mod._fetch_agents_roster = boom_roster
+        try:
+            rc = fleet.cmd_status(_status_args())
+        finally:
+            fleet_mod._fetch_agents_roster = prev
+        assert rc == 0
+        assert "w1" not in capsys.readouterr().out
+        assert fleet.load_registry()["workers"]["w1"]["archived_at"] is not None
+
+    def test_cmd_status_full_recompute_all_shows_frozen_flagged(self, native_home, capsys):
+        seed_archived_worker(native_home)
+        rc = fleet.cmd_status(_status_args(all=True))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "w1" in out and "archived" in out
+        # frozen -- never recomputed, no roster fetch attempted (would have
+        # raised if it tried, since no _fetch_agents_roster stub is installed
+        # and none is needed).
+        assert fleet.load_registry()["workers"]["w1"]["archived_at"] is not None
+
+    def test_cmd_status_explicit_name_full_recompute_shows_frozen(self, native_home, capsys):
+        seed_archived_worker(native_home)
+        rc = fleet.cmd_status(_status_args(name="w1"))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "w1" in out and "archived" in out
+
+
+class TestCmdCleanArchived:
+    def test_deletes_archived_and_sweeps_archive_dir(self, native_home):
+        seed_archived_worker(native_home, status="idle")
+        dest = fleet.archive_root() / "w1"
+        dest.mkdir(parents=True)
+        (dest / "journal.md").write_text("j", encoding="utf-8")
+
+        def boom_roster(**kw):
+            raise AssertionError("an archived-only registry must never trigger a roster fetch")
+
+        import fleet as fleet_mod
+        prev = fleet_mod._fetch_agents_roster
+        fleet_mod._fetch_agents_roster = boom_roster
+        try:
+            rc = fleet.cmd_clean(_clean_args())
+        finally:
+            fleet_mod._fetch_agents_roster = prev
+
+        assert rc == 0
+        assert "w1" not in fleet.load_registry()["workers"]
+        assert not dest.exists()
+
+    def test_epoch_freeze_does_not_block_archived_deletion(self, native_home, monkeypatch, capsys):
+        archived = seed_archived_worker(native_home, name="archived-w", sid=SID, status="dead")
+        active = fleet.new_worker_record("active-sid-1111-2222-3333-444455556666", "C:/proj", "t",
+                                         "accept", dispatch_kind="bg")
+        active["status"] = "working"
+        active["native_short_id"] = "active-s"
+        active["last_dispatch_at"] = _iso(NOW - timedelta(minutes=5))
+        fleet.save_registry({"workers": {"archived-w": archived, "active-w": active}})
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (False, "roster down"))
+
+        rc = fleet.cmd_clean(_clean_args())
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "EPOCH" in out
+        workers = fleet.load_registry()["workers"]
+        assert "active-w" in workers      # frozen -- untouched (native, non-archived)
+        assert "archived-w" not in workers  # archived deletion proceeds despite freeze
+
+
+# T9 fix wave (finding C2, CRITICAL): a concurrent `fleet send` fork-steer
+# landing between cmd_archive's eligibility snapshot and its per-worker
+# commit must never have its live turn stomped by a stale `archived_at`
+# commit -- the commit is now conditional on the record still matching the
+# eligibility snapshot exactly (mirroring cmd_status/cmd_clean's own
+# "spare a concurrently-mutated record" doctrine).
+class TestCmdArchiveConcurrentMutation:
+    def test_concurrent_mutation_between_snapshot_and_commit_is_skipped(self, native_home,
+                                                                        monkeypatch, capsys):
+        seed_archive_ready_worker(native_home)
+        real_load = fleet.load_registry
+        call_count = {"n": 0}
+        new_sid = "newsid01-1111-2222-3333-444455556666"
+
+        def flaky_load():
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                # Simulate a concurrent fork-steer landing in the window
+                # between cmd_archive's eligibility snapshot (call #1) and
+                # its per-worker commit (this call): a real fork-steer
+                # restamps session_id to a brand-new live sid and flips
+                # status to "working".
+                data = real_load()
+                data["workers"]["w1"]["session_id"] = new_sid
+                data["workers"]["w1"]["status"] = "working"
+                fleet.save_registry(data)
+            return real_load()
+
+        monkeypatch.setattr(fleet, "load_registry", flaky_load)
+
+        rc = fleet.cmd_archive(_archive_args(), run=_archive_fake_run(rc=0), which=lambda _: "claude")
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "changed during archive -- skipped" in err
+
+        rec = fleet.load_registry()["workers"]["w1"]
+        # the concurrent mutation is respected untouched -- NOT clobbered
+        # with a stale archived_at commit on top of the live turn.
+        assert rec["archived_at"] is None
+        assert rec["status"] == "working"
+        assert rec["session_id"] == new_sid
+        assert "archived" not in _events_kinds(native_home)
+
+
+# T9 fix wave (findings C2/3b, CRITICAL+Important): a crash between the
+# (now-first) archived_at commit and the file-move phase finishing must
+# leave a fully-consistent tombstone -- never a false dead-suspected verdict
+# (3b) -- and a re-run of `fleet archive` must RESUME the move into the
+# SAME dest dir rather than creating a split-history collision sibling (3a).
+class TestCmdArchiveCrashResume:
+    def _seed_full_worker(self, native_home, retired_sids=("retired-1",)):
+        seed_archive_ready_worker(native_home, retired_sids=list(retired_sids))
+        fleet.append_outcome(SID, {"ts": _iso(NOW), "session_id": SID, "kind": "result"})
+        for s in retired_sids:
+            fleet.append_outcome(s, {"ts": _iso(NOW), "session_id": s, "kind": "result"})
+        task_file = fleet.task_file_path("w1")
+        task_file.parent.mkdir(parents=True, exist_ok=True)
+        task_file.write_text("the task", encoding="utf-8")
+        journal = fleet.journals_dir() / "w1.md"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text("journal text", encoding="utf-8")
+        mailbox_file = fleet.mailbox_dir() / f"{SID}.md"
+        mailbox_file.write_text("pending mail", encoding="utf-8")
+        return task_file, journal, mailbox_file
+
+    def test_crash_mid_move_resumes_cleanly_on_rerun(self, native_home, monkeypatch, capsys):
+        self._seed_full_worker(native_home)
+        real_move = fleet._archive_move
+        real_fetch_roster = fleet._fetch_agents_roster
+        call_count = {"n": 0}
+
+        def flaky_move(src, dest, name):
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                raise OSError("simulated hard crash mid-move")
+            return real_move(src, dest, name)
+
+        monkeypatch.setattr(fleet, "_archive_move", flaky_move)
+
+        with pytest.raises(OSError):
+            fleet.cmd_archive(_archive_args(name="w1"), run=_archive_fake_run(rc=0),
+                              which=lambda _: "claude")
+
+        # The tombstone landed BEFORE the crash (commit-first reorder) --
+        # registry is already consistent, no rm attempted yet.
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["archived_at"] is not None
+        assert rec["status"] == "idle"
+        assert _events_kinds(native_home).count("archived") == 1
+
+        # 3b: the archived tombstone must never be misread as dead-suspected
+        # regardless of which evidence files are mid-move -- cmd_status
+        # never recomputes an archived_at record, so this never even
+        # touches the roster.
+        def boom_roster(**kw):
+            raise AssertionError("an archived record must never trigger a roster fetch")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", boom_roster)
+        rc = fleet.cmd_status(_status_args(name="w1"))
+        assert rc == 0
+        assert fleet.load_registry()["workers"]["w1"]["status"] == "idle"
+
+        # Restore both patched seams before driving the resume run below --
+        # it legitimately needs a working _archive_move AND a real roster
+        # fetch (the rm phase's live-sid check, finding C1).
+        monkeypatch.setattr(fleet, "_archive_move", real_move)
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", real_fetch_roster)
+
+        # Re-run: resumes into the SAME dest dir (no ".1" collision sibling)
+        # and finishes every pending move + the never-attempted rm calls.
+        calls = []
+        rc = fleet.cmd_archive(_archive_args(name="w1"), run=_archive_fake_run(rc=0, calls=calls),
+                               which=lambda _: "claude")
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "resuming archive" in err
+
+        dest = fleet.archive_root() / "w1"
+        assert not (fleet.archive_root() / "w1.1").exists()
+        assert (dest / "journal.md").exists()
+        assert (dest / "task.md").exists()
+        assert (dest / "w1.jsonl").exists()
+        assert (dest / f"{SID}.jsonl").exists()
+        assert (dest / "retired-1.jsonl").exists()
+        assert (dest / f"{SID}.md").read_text(encoding="utf-8") == "pending mail"
+
+        rm_sids = {c[0][2] for c in calls if c[0][:2] == ["claude", "rm"]}
+        assert rm_sids == {SID, "retired-1"}
+        # exactly one "archived" event total -- the resume never appends a second.
+        assert _events_kinds(native_home).count("archived") == 1
+
+
+class TestDoctorArchivedMailbox:
+    # T9 fix wave (finding M-4b): mailbox files are now part of the archive
+    # move inventory ("stranded mail is history too") -- this erases the
+    # doctor noise at the source, with no separate doctor-side exclusion
+    # needed.
+    def test_archived_workers_mailbox_moved_produces_no_doctor_noise(self, native_home):
+        seed_archive_ready_worker(native_home)
+        mailbox_file = fleet.mailbox_dir() / f"{SID}.md"
+        mailbox_file.write_text("pending mail", encoding="utf-8")
+
+        rc = fleet.cmd_archive(_archive_args(), run=_archive_fake_run(rc=0), which=lambda _: "claude")
+        assert rc == 0
+        assert not mailbox_file.exists()
+
+        workers = fleet.load_registry()["workers"]
+        _name, ok, msg = fleet._doctor_check_mailboxes(workers)
+        assert ok is True
+        assert "w1" not in msg
+        assert (fleet.archive_root() / "w1" / f"{SID}.md").read_text(encoding="utf-8") == "pending mail"
+
+
+class TestRemoveWorkerFilesArchiveSweep:
+    # T9 fix wave (finding M-3a): collision-suffixed archive dirs (left
+    # behind by a crash mid-move, or an archive/clean/archive cycle) must
+    # not survive `fleet clean` forever.
+    def test_sweeps_collision_suffixed_dirs_but_not_unrelated_names(self, native_home):
+        (fleet.archive_root() / "w1").mkdir(parents=True)
+        (fleet.archive_root() / "w1.1").mkdir(parents=True)
+        (fleet.archive_root() / "w1.2").mkdir(parents=True)
+        (fleet.archive_root() / "w10").mkdir(parents=True)  # different worker -- must survive
+
+        fleet._remove_worker_files("w1", SID)
+
+        assert not (fleet.archive_root() / "w1").exists()
+        assert not (fleet.archive_root() / "w1.1").exists()
+        assert not (fleet.archive_root() / "w1.2").exists()
+        assert (fleet.archive_root() / "w10").exists()
+
+
+class TestCleanConfirmArchivedWording:
+    # T9 fix wave (finding M-6, Minor): the confirm-prompt line for an
+    # archived target names what is actually being destroyed.
+    def test_archived_target_confirm_message_mentions_archived_history(self, native_home, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-A")
+        rec = seed_archived_worker(native_home, status="dead")
+        rec = dict(fleet.load_registry()["workers"]["w1"])
+        rec["spawned_by"] = "sess-B"  # foreign -- forces the confirm path
+        fleet.save_registry({"workers": {"w1": rec}})
+
+        with pytest.raises(fleet.DestructiveActionRefused) as exc:
+            fleet.cmd_clean(_clean_args(yes=False))
+        assert "archived history" in str(exc.value)
+
+
+class TestWaitArchived:
+    # T9 fix wave (finding I-4a, Important): an archived native record is
+    # frozen history -- `wait_for_workers` must resolve it from its last-
+    # committed status alone (never recompute_worker_native), and cmd_wait's
+    # persist step must never write over it or append spurious events.
+    def test_wait_for_workers_resolves_archived_immediately_without_recompute(self, native_home,
+                                                                              monkeypatch):
+        seed_archived_worker(native_home, status="idle")
+
+        def boom_roster(**kw):
+            raise AssertionError("an archived worker must never trigger a roster fetch in wait")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", boom_roster)
+
+        finished, pending = fleet.wait_for_workers(["w1"], sleep=lambda s: None)
+        assert finished == {"w1": "idle"}
+        assert pending == set()
+
+    def test_cmd_wait_on_archived_worker_leaves_registry_byte_identical(self, native_home,
+                                                                        monkeypatch, capsys):
+        seed_archived_worker(native_home, status="idle")
+        before = fleet.load_registry()
+
+        def boom_roster(**kw):
+            raise AssertionError("an archived worker must never trigger a roster fetch in wait")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", boom_roster)
+
+        rc = fleet.cmd_wait(_wait_args(["w1"]), sleep=lambda s: None)
+        assert rc == 0
+        assert fleet.load_registry() == before
+        assert _events_kinds(native_home) == []
+        assert "w1: idle" in capsys.readouterr().out
+
+
 class TestMainUtf8Reconfigure:
     def test_main_reconfigures_stdout_and_stderr(self, native_home, monkeypatch):
         calls = []

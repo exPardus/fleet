@@ -22,7 +22,7 @@ You are the manager of a fleet of Claude Code worker sessions on this machine. T
 | `fleet init` | Render the machine-local `state\worker-settings.json` from the git-tracked template (real interpreter path + FLEET_HOME). Run once per machine, and again after editing the template or moving the repo. `spawn`/`send` refuse with a clear error if this hasn't been run. |
 | `fleet spawn <name> --dir <path> --task <text\|@file> [--mode bypass\|accept\|dontask\|plan\|omit] [--model m] [--max-budget-usd x] [--setting-sources <list>]` | New worker. Name `[a-z0-9-]+`. Task via @file for anything long. `--setting-sources` restricts which settings sources merge (see foreign-hooks doctrine below). |
 | `fleet send <name> <text\|@file>` | Steer. Mid-turn → delivered at next tool boundary (seconds). Idle → starts new turn. |
-| `fleet status [name]` | Compact fleet table. Your main dashboard. |
+| `fleet status [name] [--all]` | Compact fleet table. Your main dashboard. Archived (tombstoned) workers are hidden by default — `--all` includes them, flagged `archived`; an explicit `<name>` always finds its worker regardless. |
 | `fleet peek <name>` | ~20-line live digest of current/last turn. Works mid-turn. |
 | `fleet result <name>` | Final text of last completed turn only. |
 | `fleet wait <name...> [--any\|--all]` | Block until done. ALWAYS run via Bash `run_in_background` — never sleep-poll. |
@@ -31,6 +31,7 @@ You are the manager of a fleet of Claude Code worker sessions on this machine. T
 | `fleet respawn <name> [--task <text>] [--force]` | Fresh session_id, same name/cwd/mode/model + journal + drained mailbox. THE context-reset lever. Refuses while a turn is running unless `--force` (interrupts first). `--task` overrides the original task text. |
 | `fleet kill <name>` | Interrupt (if running) and mark dead + event. Terminal — use `respawn` to bring the worker back. |
 | `fleet clean` | Remove dead workers + their logs/mailboxes/journals; prints what was removed. |
+| `fleet archive [name] [--ttl-hours F] [--dry-run]` | Auto-retire idle/dead/interrupted native workers past a TTL (default 24h): moves journal/outcomes/task file into `logs/archive/<name>/`, `claude rm`s every sid (current + retired), keeps the registry entry as a tombstone (`fleet clean` is still the only deleter). `--dry-run` prints eligibility verdicts, mutates nothing. Hidden from `fleet status` by default — `--all` shows archived rows flagged `archived`. |
 | `fleet doctor` | Health check (claude/version, hook wiring + smoke test, stale PIDs/attaches, orphaned mailboxes, log sizes, ...). Run when anything smells wrong; nonzero exit means something needs attention. |
 | `fleet sup-boot [--handoff-inc <id>]` | Supervisor boot ritual: epoch check → claim/seize/refuse/freeze + boot bundle. Exit 0=hold/handshake-written, 2=refuse, 3=freeze. See `skills/fleet/supervisor.md`. |
 | `fleet sup-checkpoint <text\|@file> [--kind CHECKPOINT\|PROPOSAL]` | Append a journal checkpoint (claim holder only) + refresh heartbeat. |

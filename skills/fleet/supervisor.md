@@ -24,8 +24,11 @@ Soul = `supervisor/GOALS.md` (operator-owned) + `supervisor/JOURNAL.md`
 
 Each beat: `fleet status` (runs the outcome discriminator + the silent-limit
 transcript scan -- a rate-limit wall shows as `limited`, contract G11, never
-`dead-suspected`), then `fleet resume-limited` for any worker whose reset
-horizon has passed, then a checkpoint/heartbeat (below). `limited` is a
+`dead-suspected`), then `fleet archive` (cautious operators: `fleet archive
+--dry-run` first to preview) to retire idle/dead/interrupted native workers
+past the TTL into tombstoned history, then `fleet resume-limited` for any
+worker whose reset horizon has passed, then a checkpoint/heartbeat (below).
+`limited` is a
 sticky park: the boot reconcile and the epoch freeze never demote it --
 `fleet resume-limited` clears a parked worker via fork-steer (M-B T6);
 `fleet respawn --force` (M-B T7) resets ANY native worker's context
