@@ -1966,6 +1966,13 @@ def status_snapshot(now=None) -> dict:
             "limit_kind": rec.get("limit_kind"),
             "resume_eligible": status == "limited" and _limit_reset_passed(rec),
             "attached_since": rec.get("attached_since"),
+            # T5 fix wave (Minor: snapshot cost render): additive field,
+            # file-only derivation (no roster fetch -- this view never
+            # probes, per CLAUDE.md's view-isolation rule) so
+            # _print_snapshot_table can render native rows' cost as "-"
+            # like _print_status_table's G3 convention, without needing
+            # is_native's full record shape.
+            "dispatch_kind": rec.get("dispatch_kind"),
         })
 
     snap["workers"] = rows
@@ -2805,11 +2812,21 @@ def cmd_status(args, get_process_info=None, sleep=time.sleep) -> int:
                 # entirely).
                 display[n] = current if current is not None else before[n]
                 continue
-            if after[n] != current:
-                data["workers"][n] = after[n]
+            # T5 fix wave (Important I1): waiting_for_permission is
+            # transient -- recomputed fresh from the roster every call,
+            # never enumerated in new_worker_record's baseline schema like
+            # every other optional field. Strip it from the dict compared
+            # against/written to the registry so it never lands in
+            # fleet.json; the printed table below still gets the full
+            # (flag-included) dict via `display[n] = after[n]` so
+            # `_worker_flags`'s "waiting-permission" flag keeps working.
+            persisted_after = dict(after[n])
+            persisted_after.pop("waiting_for_permission", None)
+            if persisted_after != current:
+                data["workers"][n] = persisted_after
                 changed = True
-                if after[n]["status"] != current["status"]:
-                    append_event("status_changed", n, old=current["status"], new=after[n]["status"])
+                if persisted_after["status"] != current["status"]:
+                    append_event("status_changed", n, old=current["status"], new=persisted_after["status"])
                     # M-B T5: a native verdict landing on limited/dead-
                     # suspected also gets its own named event, mirroring
                     # recompute_worker's own limited_suspected append for
@@ -2817,13 +2834,13 @@ def cmd_status(args, get_process_info=None, sleep=time.sleep) -> int:
                     # old!=new transition above, so a dead-suspected record
                     # that stays dead-suspected across reruns never re-fires.
                     if n in native_names:
-                        if after[n]["status"] == "limited":
+                        if persisted_after["status"] == "limited":
                             append_event("limited_suspected", n,
-                                        limit_reset_at=after[n].get("limit_reset_at"),
-                                        limit_kind=after[n].get("limit_kind"))
-                        elif after[n]["status"] == "dead-suspected":
+                                        limit_reset_at=persisted_after.get("limit_reset_at"),
+                                        limit_kind=persisted_after.get("limit_kind"))
+                        elif persisted_after["status"] == "dead-suspected":
                             append_event("dead_suspected", n)
-            display[n] = data["workers"][n]
+            display[n] = after[n]
         if changed:
             save_registry(data)
 
@@ -2863,9 +2880,15 @@ def _print_snapshot_table(snap: dict, name=None) -> None:
             flags.append("idle+mail")
         if w["resume_eligible"]:
             flags.append("resume-eligible")
+        # T5 fix wave (Minor: snapshot cost render): G3 says USD cost is
+        # dead for native dispatch -- render "-" here too, matching
+        # _print_status_table, instead of a stale/always-zero dollar
+        # figure. Nativeness comes from the row's own dispatch_kind field
+        # (no roster fetch -- this view is file-only, per CLAUDE.md).
+        cost_s = f"{'-':>9}" if w["dispatch_kind"] == "bg" else f"{w['cost_usd']:>9.2f}"
         # A name at or past the column width must never swallow the separator.
         print(
-            f"{w['name']:<20} {w['status']:<12}{w['turns']:>6}{w['cost_usd']:>9.2f}"
+            f"{w['name']:<20} {w['status']:<12}{w['turns']:>6}{cost_s}"
             f"{age:>9}{w['mail']:>6}  {','.join(flags) or '-'}"
         )
     print("(stale-ok: last-committed state, not probed)")
@@ -3081,6 +3104,18 @@ def cmd_wait(args, get_process_info=None, sleep=time.sleep, clock=time.monotonic
         get_process_info=get_process_info, sleep=sleep, clock=clock,
     )
 
+    # T5 fix wave (Minor: print-vs-persist race): the persist step below
+    # re-derives each finished native worker's verdict from ITS OWN fresh
+    # roster fetch, separate from the one wait_for_workers's poll loop used
+    # to decide `finished` in the first place. If the two disagree (a fresh
+    # outcome record lands, or the roster changes, in the narrow window
+    # between them), the summary line printed below must reflect what
+    # actually got persisted -- never the earlier, possibly-stale poll
+    # verdict. Populated only for names the persist step actually
+    # recomputed and wrote; anything else (persist skipped by an epoch
+    # freeze, or `finished` itself empty) falls back to the poll verdict,
+    # which is the only one that exists for it.
+    persisted_status: dict = {}
     if finished:
         # M-B T5: wait_for_workers already picked the terminal verdict for
         # any native name in `finished` via recompute_worker_native (never
@@ -3112,19 +3147,29 @@ def cmd_wait(args, get_process_info=None, sleep=time.sleep, clock=time.monotonic
                     updated = recompute_worker_native(n, rec, roster_entries)
                 else:
                     updated = recompute_worker(n, rec, get_process_info=get_process_info, sleep=sleep)
-                data["workers"][n] = updated
-                if updated["status"] != rec["status"]:
-                    append_event("status_changed", n, old=rec["status"], new=updated["status"])
+                # T5 fix wave (I1): strip the transient waiting_for_permission
+                # flag before it lands in the registry (see cmd_status for
+                # the identical rationale) -- native "working" statuses
+                # don't reach NATIVE_TERMINAL_STATUSES/`finished` today, but
+                # guard it here too so this persist step never depends on
+                # that staying true.
+                persisted = dict(updated)
+                persisted.pop("waiting_for_permission", None)
+                data["workers"][n] = persisted
+                persisted_status[n] = persisted["status"]
+                if persisted["status"] != rec["status"]:
+                    append_event("status_changed", n, old=rec["status"], new=persisted["status"])
                     if is_native(rec):
-                        if updated["status"] == "limited":
+                        if persisted["status"] == "limited":
                             append_event("limited_suspected", n,
-                                        limit_reset_at=updated.get("limit_reset_at"),
-                                        limit_kind=updated.get("limit_kind"))
-                        elif updated["status"] == "dead-suspected":
+                                        limit_reset_at=persisted.get("limit_reset_at"),
+                                        limit_kind=persisted.get("limit_kind"))
+                        elif persisted["status"] == "dead-suspected":
                             append_event("dead_suspected", n)
             save_registry(data)
 
     for n, status in finished.items():
+        status = persisted_status.get(n, status)
         log_path = logs_dir() / f"{n}.jsonl"
         results = [e for e in tail_events(log_path, n=None) if e["kind"] == "result"]
         summary = results[-1]["text"] if results else "(no result event)"
@@ -5091,13 +5136,28 @@ def latest_outcome(name: str, sid: str) -> dict | None:
     return recs[-1] if recs else None
 
 
-def has_fresh_outcome(name: str, sid: str, since_iso: str) -> bool:
+def has_fresh_outcome(name: str, sid: str, since_iso: str,
+                      kinds: tuple = ("result",)) -> bool:
+    """T5 fix wave (Critical C1): `kinds` defaults to `("result",)` -- ONLY
+    a Stop-hook-written completion record vouches for "idle" by default. A
+    tombstone (`TOMBSTONE_KINDS`: killed/interrupted/stopped, written by
+    fleet itself on an operator-initiated stop) is a DIFFERENT signal --
+    the session did NOT end on its own -- and must never be read as "the
+    turn finished cleanly" just because a record with a fresh ts exists.
+    Before this fix, an unfiltered match let a fresh tombstone launder an
+    operator kill into a false "idle" verdict during the window between
+    the tombstone write and the registry status flip (two separate,
+    non-transactional writes -- see task-5-adversarial.md C1). Callers
+    that genuinely need to match tombstone kinds (none yet in this task)
+    can pass `kinds=TOMBSTONE_KINDS` or a wider tuple explicitly."""
     try:
         since = _parse_iso(since_iso)
     except (ValueError, TypeError):
         return False
     threshold = since - timedelta(seconds=OUTCOME_FRESH_SLACK_SECONDS)
     for rec in read_outcomes(name, sid=sid):
+        if rec.get("kind") not in kinds:
+            continue
         try:
             ts = _parse_iso(str(rec.get("ts", "")))
         except (ValueError, TypeError):
@@ -5151,6 +5211,12 @@ def _fast_completion_sid(name: str, since_iso: str, short_id: str | None = None)
 
     def _consider(rec):
         nonlocal best_sid, best_ts
+        # T5 fix wave (Critical C1 audit): a tombstone (kind in
+        # TOMBSTONE_KINDS) means the session was operator-stopped, not that
+        # it finished on its own -- it can never mean "fast completion".
+        # Only a Stop-hook-written kind=="result" record counts.
+        if rec.get("kind") != "result":
+            return
         try:
             ts = _parse_iso(str(rec.get("ts", "")))
         except (ValueError, TypeError):
