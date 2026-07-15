@@ -122,6 +122,9 @@ class TestRegistry:
             "limit_reset_at", "limit_kind",
             # §5.1: provenance for the destructive-command guard.
             "spawned_by",
+            # M-B native-substrate fields (spec §5).
+            "dispatch_kind", "category", "native_short_id",
+            "last_dispatch_at", "retired_sids", "archived_at",
         }
         assert rec["session_id"] == "sid-1"
         assert rec["cwd"] == r"C:\proga\x"

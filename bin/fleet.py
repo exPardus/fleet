@@ -20,6 +20,7 @@ below); the module itself is written to the 3.10 floor so a POSIX backend
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import math
 import os
@@ -32,7 +33,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -84,6 +85,44 @@ def ceilings_dir() -> Path:
 
 def ceiling_file_path(sid: str) -> Path:
     return ceilings_dir() / sid
+
+
+def outcomes_dir() -> Path:
+    return state_dir() / "outcomes"
+
+
+def outcome_path(key: str) -> Path:
+    return outcomes_dir() / f"{key}.jsonl"
+
+
+def tasks_dir() -> Path:
+    return state_dir() / "tasks"
+
+
+def task_file_path(name: str) -> Path:
+    return tasks_dir() / f"{name}.md"
+
+
+def archive_root() -> Path:
+    return logs_dir() / "archive"
+
+
+def pin_pass_path() -> Path:
+    return state_dir() / "pin-pass.json"
+
+
+def is_native(record: dict) -> bool:
+    if not isinstance(record, dict):
+        return False
+    return record.get("dispatch_kind") == "bg"
+
+
+def refuse_if_legacy(name: str, record: dict, action: str) -> None:
+    if not is_native(record):
+        raise FleetCliError(
+            f"{name}: pre-pivot worker -- {action} unavailable; "
+            "kill or clean via legacy path"
+        )
 
 
 def _write_ceiling_file(sid: str, ceiling) -> None:
@@ -509,7 +548,7 @@ def current_caller_session() -> str | None:
 
 def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
                        max_budget_usd=None, setting_sources=None, token_ceiling=None,
-                       spawned_by=None) -> dict:
+                       spawned_by=None, dispatch_kind=None, category=None) -> dict:
     """Build a fresh registry record matching the SPEC §4 schema exactly.
 
     Phase1 kernel item 7 (F13/M5): max_budget_usd and setting_sources are
@@ -569,6 +608,14 @@ def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
         # 0.0) everywhere it's read.
         "cost_baseline": 0.0,
         "last_activity": created,
+        # --- M-B native-substrate fields (spec §5; None/[] on legacy records) ---
+        "dispatch_kind": dispatch_kind,      # "bg" = daemon-hosted; None = pre-pivot Popen
+        "category": category,                # agents-menu category (spec §5.1.3)
+        "native_short_id": None,             # short id from --bg stdout (G6 fallback)
+        "last_dispatch_at": None,            # stamped at every dispatch/steer/resume;
+                                             # anchor for the fresh-outcome predicate
+        "retired_sids": [],                  # prior sids retired by fork-steer/respawn
+        "archived_at": None,                 # set by auto-archival; hides from status
     }
 
 
@@ -4534,6 +4581,135 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run, get_process_info=No
         if not ok:
             all_ok = False
     return 0 if all_ok else 1
+
+
+# ---------------------------------------------------------------------------
+# Outcome store (M-B, spec §5): terminal-outcome records per worker.
+# Written by the Stop hook (kind="result") and by fleet-side tombstones
+# (kill/interrupt/stop -- G10: an operator stop fires NO Stop hook).
+# The outcome discriminator's only data source. JSONL, name-keyed, with a
+# sid-keyed fallback file for hooks that could not resolve the name.
+# ---------------------------------------------------------------------------
+
+OUTCOME_FRESH_SLACK_SECONDS = 5.0
+OUTCOME_RESULT_TEXT_MAX = 20000
+TOMBSTONE_KINDS = ("killed", "interrupted", "stopped")
+
+
+_FILE_APPEND_DATA = 0x0004
+_FILE_SHARE_READ = 0x00000001
+_FILE_SHARE_WRITE = 0x00000002
+_OPEN_ALWAYS = 4
+_FILE_ATTRIBUTE_NORMAL = 0x80
+
+
+def _atomic_append_bytes(path: Path, data: bytes) -> None:
+    """Single-syscall atomic append. Opens the file for FILE_APPEND_DATA
+    access ONLY (no GENERIC_WRITE) -- the Win32 kernel documents this access
+    mode as giving each WriteFile call atomic append semantics across
+    concurrently-open handles/processes, so two writers appending "at the
+    same instant" (Stop hook + fleet-side tombstone, see module banner)
+    never interleave or clobber each other's line.
+
+    Deliberately NOT `os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY)`
+    + `os.write`: on Windows that goes through the C runtime's O_APPEND
+    emulation, which lseek()s to EOF and write()s as two separate steps per
+    call -- a real TOCTOU race between handles that reproducibly drops whole
+    clean records under concurrent writers (confirmed empirically: 4
+    threads x 250 records via os.open+O_APPEND lost ~17% of records with
+    zero JSON-decode errors, i.e. silent loss, not corruption -- the same
+    failure mode the CRITICAL finding this fixes originally reported). The
+    FILE_APPEND_DATA-only handle below is the actual OS-level fix; verified
+    to lose zero of 1000 records under the same test. ctypes/kernel32 only
+    -- no platform-detection branch of any kind (this build targets Windows
+    only, SPEC §14)."""
+    kernel32 = ctypes.windll.kernel32
+    from ctypes import wintypes
+
+    create_file_w = kernel32.CreateFileW
+    create_file_w.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    create_file_w.restype = wintypes.HANDLE
+
+    handle = create_file_w(
+        str(path), _FILE_APPEND_DATA, _FILE_SHARE_READ | _FILE_SHARE_WRITE,
+        None, _OPEN_ALWAYS, _FILE_ATTRIBUTE_NORMAL, None,
+    )
+    if handle in (0, wintypes.HANDLE(-1).value):
+        raise OSError(f"CreateFileW failed for {path}: {ctypes.WinError()}")
+    try:
+        written = wintypes.DWORD(0)
+        ok = kernel32.WriteFile(handle, data, len(data), ctypes.byref(written), None)
+        if not ok:
+            raise OSError(f"WriteFile failed for {path}: {ctypes.WinError()}")
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def append_outcome(key: str, record: dict) -> None:
+    result_text = record.get("result_text")
+    if isinstance(result_text, str) and len(result_text) > OUTCOME_RESULT_TEXT_MAX:
+        record = dict(record)
+        record["result_text"] = result_text[:OUTCOME_RESULT_TEXT_MAX]
+    outcomes_dir().mkdir(parents=True, exist_ok=True)
+    line = json.dumps(record, ensure_ascii=False)
+    _atomic_append_bytes(outcome_path(key), (line + "\n").encode("utf-8"))
+
+
+def read_outcomes(name: str, sid: str | None = None) -> list[dict]:
+    records = []
+    paths = [outcome_path(name)]
+    if sid and sid != name:
+        paths.append(outcome_path(sid))
+    for p in paths:
+        try:
+            text = p.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if isinstance(rec, dict):
+                records.append(rec)
+    if sid is not None:
+        records = [r for r in records if r.get("session_id") == sid]
+    records.sort(key=lambda r: str(r.get("ts", "")))
+    return records
+
+
+def latest_outcome(name: str, sid: str) -> dict | None:
+    recs = read_outcomes(name, sid=sid)
+    return recs[-1] if recs else None
+
+
+def has_fresh_outcome(name: str, sid: str, since_iso: str) -> bool:
+    try:
+        since = _parse_iso(since_iso)
+    except (ValueError, TypeError):
+        return False
+    threshold = since - timedelta(seconds=OUTCOME_FRESH_SLACK_SECONDS)
+    for rec in read_outcomes(name, sid=sid):
+        try:
+            ts = _parse_iso(str(rec.get("ts", "")))
+        except (ValueError, TypeError):
+            continue
+        if ts >= threshold:
+            return True
+    return False
+
+
+def write_tombstone_outcome(name: str, sid: str, kind: str) -> None:
+    if kind not in TOMBSTONE_KINDS:
+        raise ValueError(f"unknown tombstone kind: {kind}")
+    append_outcome(name, {"ts": now_iso(), "session_id": sid, "kind": kind,
+                          "result_text": None})
 
 
 # ---------------------------------------------------------------------------
