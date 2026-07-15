@@ -3948,6 +3948,66 @@ class TestDoctorCheckPinVersion:
         assert ok is True
         assert "not resolvable" in msg
 
+    # M-B T11 fix wave (HIGH #2): pin-side normalization symmetry.
+    def test_raw_stdout_shaped_pin_matches_identical_live_version(self, native_home):
+        # The adversarial repro: a naive caller stores the raw, unparsed
+        # `claude --version` stdout capture (trailing paren text + \n).
+        # Comparing against the SAME, unchanged live version must PASS,
+        # not FAIL on formatting alone.
+        fleet.record_pin_pass("2.1.207 (Claude Code)\n")
+        run = lambda *a, **k: _FakeVersionResult(stdout="2.1.207 (Claude Code)\n")
+        name, ok, msg = fleet._doctor_check_pin_version(which=lambda n: "claude.cmd", run=run)
+        assert ok is True
+        assert "pin-test pass current" in msg
+        assert "2.1.207" in msg
+
+    def test_genuine_mismatch_still_fails_after_normalization(self, native_home):
+        fleet.record_pin_pass("2.1.207 (Claude Code)\n")
+        run = lambda *a, **k: _FakeVersionResult(stdout="2.2.0 (Claude Code)\n")
+        name, ok, msg = fleet._doctor_check_pin_version(which=lambda n: "claude.cmd", run=run)
+        assert ok is False
+        assert "2.2.0 != 2.1.207" in msg
+        assert "native-substrate.md" in msg
+
+    # M-B T11 fix wave (MEDIUM x2 + review Minor): field-corrupt pin file.
+    @pytest.mark.parametrize("bad_version", [None, 42, ["nested"], {"nested": "dict"}])
+    def test_non_str_claude_version_is_pass_note_not_fail(self, native_home, bad_version):
+        fleet._write_json_atomic(fleet.pin_pass_path(),
+                                 {"claude_version": bad_version, "passed_at": _iso(NOW)})
+        run = lambda *a, **k: _FakeVersionResult(stdout="2.1.207")
+        name, ok, msg = fleet._doctor_check_pin_version(which=lambda n: "claude.cmd", run=run)
+        assert ok is True
+        assert "pin record unreadable" in msg
+
+    def test_missing_claude_version_key_is_pass_note_not_fail(self, native_home):
+        fleet._write_json_atomic(fleet.pin_pass_path(), {"passed_at": _iso(NOW)})
+        run = lambda *a, **k: _FakeVersionResult(stdout="2.1.207")
+        name, ok, msg = fleet._doctor_check_pin_version(which=lambda n: "claude.cmd", run=run)
+        assert ok is True
+        assert "pin record unreadable" in msg
+
+    def test_non_version_shaped_string_is_pass_note_not_fail(self, native_home):
+        fleet._write_json_atomic(fleet.pin_pass_path(),
+                                 {"claude_version": "not-a-version", "passed_at": _iso(NOW)})
+        run = lambda *a, **k: _FakeVersionResult(stdout="2.1.207")
+        name, ok, msg = fleet._doctor_check_pin_version(which=lambda n: "claude.cmd", run=run)
+        assert ok is True
+        assert "pin record unreadable" in msg
+
+    def test_echoed_version_string_clamped_to_40_chars(self, native_home):
+        # A pinned claude_version with a pathologically long digit run
+        # still parses (valid \d+.\d+.\d+ match) but must not blow up the
+        # FAIL message into an unbounded single line.
+        huge = ("9" * 100) + ".1.1"
+        fleet._write_json_atomic(fleet.pin_pass_path(),
+                                 {"claude_version": huge, "passed_at": _iso(NOW)})
+        run = lambda *a, **k: _FakeVersionResult(stdout="2.1.207")
+        name, ok, msg = fleet._doctor_check_pin_version(which=lambda n: "claude.cmd", run=run)
+        assert ok is False
+        # the clamped echo (<=40 chars plus "...") appears, not the raw 104-char string
+        assert huge not in msg
+        assert len(msg) < 300
+
 
 class TestDoctorCheckLegacyMix:
     def test_no_workers_passes_silent(self, native_home):
@@ -4065,6 +4125,45 @@ class TestDoctorClaudeAgentsRetiredSids:
         assert ok is True
         assert "totally-unknown" in msg
 
+    # M-B T11 fix wave (HIGH #1): retired_sids shape tolerance.
+    @pytest.mark.parametrize("bad_retired_sids", [True, 42, "not-a-list-just-a-sid-string"])
+    def test_non_list_retired_sids_shapes_do_not_crash_or_char_spread(self, native_home, bad_retired_sids):
+        rec = seed_native_worker(native_home, name="w1", sid=SID, status="idle",
+                                 retired_sids=bad_retired_sids)
+
+        def run(argv, **kw):
+            return _FakeVersionResult(stdout=json.dumps([{"session_id": "totally-unknown"}]))
+        name, ok, msg = fleet._doctor_check_claude_agents(
+            {"w1": rec}, which=lambda n: "claude.cmd", run=run)
+        assert ok is True
+        assert "totally-unknown" in msg
+        # the malformed retired_sids value must never spread into known_sids
+        # (e.g. a string char-spreading via set.update(str))
+        assert "not-a-list" not in msg
+
+    def test_missing_session_id_does_not_raise_key_error(self, native_home):
+        rec = seed_native_worker(native_home, name="w1", sid=SID, status="idle")
+        del rec["session_id"]
+        data = {"workers": {"w1": rec}}
+        fleet.save_registry(data)
+
+        def run(argv, **kw):
+            return _FakeVersionResult(stdout=json.dumps([{"session_id": "totally-unknown"}]))
+        name, ok, msg = fleet._doctor_check_claude_agents(
+            {"w1": rec}, which=lambda n: "claude.cmd", run=run)
+        assert ok is True
+        assert "totally-unknown" in msg
+
+    def test_non_dict_record_is_skipped_not_crashed(self, native_home):
+        rec = seed_native_worker(native_home, name="w1", sid=SID, status="idle")
+
+        def run(argv, **kw):
+            return _FakeVersionResult(stdout=json.dumps([{"session_id": "totally-unknown"}]))
+        name, ok, msg = fleet._doctor_check_claude_agents(
+            {"w1": rec, "corrupt": "not-a-dict-record"}, which=lambda n: "claude.cmd", run=run)
+        assert ok is True
+        assert "totally-unknown" in msg
+
 
 class TestDoctorOrphanedClaimsArchivedRegression:
     # M-B T11: T9's mailbox-move-on-archive fix (finding M-4b) already
@@ -4098,3 +4197,60 @@ class TestCmdDoctorRegistersNewChecks:
         assert "dead-suspected" in out
         # pin-version registered right after claude-on-path, per the T11 brief.
         assert out.index("claude-on-path") < out.index("pin-version") < out.index("worker-settings-instance")
+
+
+# ---------------------------------------------------------------------------
+# M-B T11 fix wave: CRITICAL -- per-check isolation in cmd_doctor.
+# ---------------------------------------------------------------------------
+
+class TestCmdDoctorCheckIsolation:
+    def test_raising_check_yields_own_fail_line_others_still_print(self, native_home, monkeypatch, capsys):
+        def _doctor_check_claude_agents(*a, **k):
+            raise TypeError("'int' object is not iterable")
+        monkeypatch.setattr(fleet, "_doctor_check_claude_agents", _doctor_check_claude_agents)
+
+        args = fleet.build_parser().parse_args(["doctor"])
+        rc = fleet.cmd_doctor(
+            args, which=lambda n: None,
+            run=lambda *a, **k: _FakeVersionResult(),
+        )
+        out = capsys.readouterr().out
+        assert "[FAIL] _doctor_check_claude_agents: check crashed: TypeError: " \
+               "'int' object is not iterable" in out
+        # checks registered AFTER the crashing one still ran and printed.
+        assert "log-sizes" in out
+        assert "fleet-home marker" in out
+        assert "supervisor" in out
+        assert rc == 1
+
+    def test_register_order_intact_when_an_earlier_check_crashes(self, native_home, monkeypatch, capsys):
+        def _doctor_check_legacy_mix(*a, **k):
+            raise ValueError("boom")
+        monkeypatch.setattr(fleet, "_doctor_check_legacy_mix", _doctor_check_legacy_mix)
+
+        args = fleet.build_parser().parse_args(["doctor"])
+        fleet.cmd_doctor(
+            args, which=lambda n: None,
+            run=lambda *a, **k: _FakeVersionResult(),
+        )
+        out = capsys.readouterr().out
+        assert "[FAIL] _doctor_check_legacy_mix: check crashed: ValueError: boom" in out
+        # order preserved around the crashed check: claude-on-path and
+        # pin-version still precede it; dead-suspected (registered right
+        # after legacy-mix) still follows it.
+        assert (out.index("claude-on-path") < out.index("pin-version")
+                < out.index("_doctor_check_legacy_mix") < out.index("dead-suspected"))
+
+    def test_crash_message_clamped_to_200_chars(self, native_home, monkeypatch, capsys):
+        def _doctor_check_dead_suspected(*a, **k):
+            raise ValueError("x" * 500)
+        monkeypatch.setattr(fleet, "_doctor_check_dead_suspected", _doctor_check_dead_suspected)
+
+        args = fleet.build_parser().parse_args(["doctor"])
+        fleet.cmd_doctor(
+            args, which=lambda n: None,
+            run=lambda *a, **k: _FakeVersionResult(),
+        )
+        out = capsys.readouterr().out
+        assert ("x" * 500) not in out
+        assert ("x" * 200) in out
