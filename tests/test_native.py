@@ -264,6 +264,20 @@ def _roster_with(sid=SID, **kw):
     return fetch
 
 
+def _roster_sequence(*results):
+    """Returns `results[0]` on the 1st call, `results[1]` on the 2nd, ...
+    and repeats the LAST result for every call beyond `len(results)`. Used
+    where a single test drives MULTIPLE distinct `_fetch_agents_roster`
+    call sites in order (e.g. cmd_send's own verdict fetch, THEN
+    dispatch_bg's pre-dispatch snapshot, THEN its join-poll)."""
+    state = {"n": 0}
+    def fetch(**_):
+        i = min(state["n"], len(results) - 1)
+        state["n"] += 1
+        return results[i]
+    return fetch
+
+
 class _FakeClock:
     """Injectable monotonic clock for join-loop tests -- no real sleeping."""
     def __init__(self, start=0.0):
@@ -1532,27 +1546,373 @@ def _write_native_transcript_in(home, sid, records, proj_name):
     return p
 
 
-class TestFixMediumRespawnNativeGuard:
-    """Medium: cmd_respawn must refuse against a native (dispatch_kind:
-    "bg") record until Task 7 lands native-aware respawn, instead of
-    silently stripping dispatch_kind and orphaning the --bg session."""
+def _send_args(name="w1", message="go"):
+    from types import SimpleNamespace
+    return SimpleNamespace(name=name, message=message)
 
-    def test_native_record_respawn_refuses_registry_unchanged(self, native_home):
-        seed_native_worker(native_home, status="limited",
+
+def _respawn_args(name="w1", task=None, force=False, yes=True,
+                  max_budget_usd=None, setting_sources=None, token_ceiling=None):
+    from types import SimpleNamespace
+    return SimpleNamespace(name=name, task=task, force=force, yes=yes,
+                           max_budget_usd=max_budget_usd,
+                           setting_sources=setting_sources,
+                           token_ceiling=token_ceiling)
+
+
+# ---------------------------------------------------------------------------
+# M-B Task 7: send fork-steer + native respawn.
+# ---------------------------------------------------------------------------
+
+class TestStopNativeSession:
+    def test_true_on_rc_zero(self, native_home):
+        calls = []
+        assert fleet._stop_native_session(
+            "sid-1", run=_fake_run_factory(rc=0, calls=calls), which=lambda _: "claude"
+        ) is True
+        argv, kwargs = calls[0]
+        assert argv == ["claude", "stop", "sid-1"]
+        assert kwargs["capture_output"] is True
+        assert kwargs["text"] is True
+        assert kwargs["encoding"] == "utf-8"
+        assert kwargs["errors"] == "replace"
+        assert kwargs["timeout"] == 30
+
+    def test_false_on_nonzero_rc(self, native_home):
+        assert fleet._stop_native_session(
+            "sid-1", run=_fake_run_factory(rc=1), which=lambda _: "claude"
+        ) is False
+
+    def test_false_when_claude_not_found(self, native_home):
+        def boom_run(*a, **kw):
+            raise AssertionError("must not run when claude cannot be resolved")
+        assert fleet._stop_native_session("sid-1", run=boom_run, which=lambda _: None) is False
+
+    def test_false_on_oserror(self, native_home):
+        def run(argv, **kw):
+            raise OSError("boom")
+        assert fleet._stop_native_session("sid-1", run=run, which=lambda _: "claude") is False
+
+    def test_false_on_timeout(self, native_home):
+        def run(argv, **kw):
+            raise subprocess.TimeoutExpired(cmd=argv, timeout=30)
+        assert fleet._stop_native_session("sid-1", run=run, which=lambda _: "claude") is False
+
+
+class TestRestampAfterSteer:
+    def test_mutates_in_place(self, native_home):
+        rec = seed_native_worker(native_home, sid="old-sid")
+        rec["turns"] = 3
+        fleet._restamp_after_steer(rec, "new-sid", "newshort")
+        assert rec["session_id"] == "new-sid"
+        assert rec["native_short_id"] == "newshort"
+        assert rec["retired_sids"] == ["old-sid"]
+        assert rec["turns"] == 4
+        assert rec["last_dispatch_at"] is not None
+
+    def test_appends_to_existing_retired_sids(self, native_home):
+        rec = seed_native_worker(native_home, sid="s2")
+        rec["retired_sids"] = ["s0", "s1"]
+        fleet._restamp_after_steer(rec, "s3", "s3short")
+        assert rec["retired_sids"] == ["s0", "s1", "s2"]
+
+
+class TestNativeCumulativeTokens:
+    def test_sums_result_records_across_sids(self, native_home):
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": "s1", "kind": "result",
+                                    "input_tokens": 100, "output_tokens": 50})
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": "s2", "kind": "result",
+                                    "input_tokens": 10, "output_tokens": 5})
+        assert fleet._native_cumulative_tokens("w1") == 165
+
+    def test_ignores_tombstones_and_bogus_values(self, native_home):
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": "s1", "kind": "result",
+                                    "input_tokens": True, "output_tokens": -5})
+        fleet.write_tombstone_outcome("w1", "s1", "killed")
+        assert fleet._native_cumulative_tokens("w1") == 0
+
+    def test_no_records_is_zero(self, native_home):
+        assert fleet._native_cumulative_tokens("nope") == 0
+
+
+class TestCmdSendNative:
+    def test_legacy_refuses(self, native_home):
+        legacy = {"session_id": "old"}  # dispatch_kind absent entirely
+        with pytest.raises(fleet.FleetCliError, match="pre-pivot"):
+            fleet._cmd_send_native("w1", legacy, "hello")
+
+    def test_busy_native_appends_mailbox(self, native_home, monkeypatch):
+        old_sid = SID
+        seed_native_worker(native_home, sid=old_sid, status="idle")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            lambda **_: (True, [make_roster_entry(old_sid, status="busy")]))
+
+        def run(*a, **kw):
+            raise AssertionError("must not dispatch while the turn is busy")
+
+        rc = fleet.cmd_send(_send_args(message="check the logs"),
+                           run=run, which=lambda _: "claude", sleep=lambda s: None)
+        assert rc == 0
+        mailbox = fleet.mailbox_dir() / f"{old_sid}.md"
+        assert "check the logs" in mailbox.read_text(encoding="utf-8")
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["status"] == "working"
+        assert rec["session_id"] == old_sid
+
+    def test_idle_native_fork_steers_and_restamps(self, native_home, monkeypatch):
+        old_sid = SID
+        new_sid = "ccccdddd-9999-8888-7777-666655554444"
+        seed_native_worker(native_home, sid=old_sid, status="idle")
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": old_sid, "kind": "result"})
+        calls = []
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_sequence(
+            (True, []),                                          # cmd_send's own verdict fetch
+            (True, []),                                          # dispatch_bg pre-dispatch snapshot
+            (True, [make_roster_entry(new_sid, status="idle")]),  # join poll
+        ))
+        rc = fleet.cmd_send(
+            _send_args(message="go do X"),
+            run=_fake_run_factory(stdout="backgrounded · ccccdddd · fleet|w1|go do X\n", calls=calls),
+            which=lambda _: "claude", sleep=lambda s: None,
+        )
+        assert rc == 0
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["session_id"] == new_sid
+        assert old_sid in rec["retired_sids"]
+        assert rec["status"] == "working"
+        assert rec["native_short_id"] == "ccccdddd"
+        assert rec["turns"] == 1
+        dispatch_call = next(c for c in calls if "--resume" in c[0])
+        argv = dispatch_call[0]
+        assert argv[argv.index("--resume") + 1] == old_sid
+        # message rides the mailbox drain -- old sid's mailbox is claimed+finalized
+        assert not (fleet.mailbox_dir() / f"{old_sid}.md").exists()
+        assert "steered" in _events_kinds(native_home)
+
+    def test_idle_native_over_ceiling_refuses_no_dispatch(self, native_home, monkeypatch):
+        old_sid = SID
+        seed_native_worker(native_home, sid=old_sid, status="idle", token_ceiling=100)
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": old_sid, "kind": "result"})
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": old_sid, "kind": "result",
+                                    "input_tokens": 80, "output_tokens": 40})
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
+
+        def run(*a, **kw):
+            raise AssertionError("must not dispatch when over the token ceiling")
+
+        with pytest.raises(fleet.FleetCliError, match="over_ceiling"):
+            fleet.cmd_send(_send_args(), run=run, which=lambda _: "claude", sleep=lambda s: None)
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["status"] == "over_ceiling"
+        assert rec["session_id"] == old_sid
+
+    def test_dead_suspected_refuses(self, native_home, monkeypatch, tmp_path):
+        old_sid = SID
+        seed_native_worker(native_home, sid=old_sid, status="idle")
+        monkeypatch.setattr(fleet.Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
+        with pytest.raises(fleet.FleetCliError, match="dead-suspected"):
+            fleet.cmd_send(_send_args(message="ping"), which=lambda _: "claude", sleep=lambda s: None)
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["status"] == "dead-suspected"
+
+    def test_limited_refuses(self, native_home, monkeypatch):
+        old_sid = SID
+        seed_native_worker(native_home, sid=old_sid, status="limited",
                            limit_reset_at="2026-07-15T00:00:00Z", limit_kind="session_5h")
-        before = fleet.load_registry()["workers"]["w1"]
-        from types import SimpleNamespace
-        args = SimpleNamespace(name="w1", task=None, force=False, yes=True,
-                               max_budget_usd=None, setting_sources=None,
-                               token_ceiling=None)
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
+        with pytest.raises(fleet.FleetCliError, match="resume-limited"):
+            fleet.cmd_send(_send_args(), which=lambda _: "claude", sleep=lambda s: None)
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["status"] == "limited"
 
-        def popen(*a, **kw):
-            raise AssertionError("must not launch -- native respawn is refused pre-launch")
+    def test_dead_refuses_with_respawn_hint(self, native_home, monkeypatch):
+        old_sid = SID
+        seed_native_worker(native_home, sid=old_sid, status="dead")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
+        with pytest.raises(fleet.FleetCliError, match="fleet respawn"):
+            fleet.cmd_send(_send_args(), which=lambda _: "claude", sleep=lambda s: None)
 
-        with pytest.raises(fleet.FleetCliError, match="M-B Task 7"):
-            fleet.cmd_respawn(args, popen=popen)
+    def test_epoch_suspicious_roster_refuses(self, native_home, monkeypatch):
+        # G9: a roster fetch FAILURE must never be treated as "safe to act
+        # on" -- refuse rather than risk a wrong verdict against frozen data.
+        seed_native_worker(native_home, sid=SID, status="working")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (False, "no claude"))
+        with pytest.raises(fleet.FleetCliError, match="G9"):
+            fleet.cmd_send(_send_args(), which=lambda _: "claude", sleep=lambda s: None)
 
-        after = fleet.load_registry()["workers"]["w1"]
-        assert after == before
-        assert after["dispatch_kind"] == "bg"
-        assert after["session_id"] == before["session_id"]
+    def test_fork_steer_rolls_back_to_idle_on_dispatch_failure(self, native_home, monkeypatch):
+        old_sid = SID
+        seed_native_worker(native_home, sid=old_sid, status="idle")
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": old_sid, "kind": "result"})
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
+        with pytest.raises(fleet.NativeDispatchError):
+            fleet.cmd_send(_send_args(message="go"), run=_fake_run_factory(rc=1),
+                           which=lambda _: "claude", sleep=lambda s: None)
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["status"] == "idle"
+        assert rec["session_id"] == old_sid
+        # the message must survive the rollback, not be lost
+        mailbox = fleet.mailbox_dir() / f"{old_sid}.md"
+        assert "go" in mailbox.read_text(encoding="utf-8")
+
+
+class TestCmdRespawnNative:
+    def test_fresh_dispatch_carries_journal_no_resume(self, native_home, monkeypatch, tmp_path):
+        old_sid = "deadbeef-0000-1111-2222-333344445555"
+        seed_native_worker(native_home, sid=old_sid, status="idle", category="camp5")
+        journal = fleet.journals_dir() / "w1.md"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text("prior session left off here", encoding="utf-8")
+        # 1st call: respawn's own liveness check (old sid gone from roster).
+        # 2nd call: dispatch_bg's pre-dispatch snapshot (new sid not minted yet).
+        # 3rd+ call: dispatch_bg's join poll (new sid present).
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_sequence(
+            (True, []),
+            (True, []),
+            (True, [make_roster_entry(SID, status="idle")]),
+        ))
+        calls = []
+        rc = fleet.cmd_respawn(
+            _respawn_args(),
+            run=_fake_run_factory(stdout="backgrounded · aaaabbbb · fleet|w1|t\n", calls=calls),
+            which=lambda _: "claude", sleep=lambda s: None,
+        )
+        assert rc == 0
+        dispatch_call = next(c for c in calls if "--bg" in c[0])
+        argv = dispatch_call[0]
+        assert "--resume" not in argv
+        task_file = fleet.task_file_path("w1")
+        assert "prior session left off here" in task_file.read_text(encoding="utf-8")
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["session_id"] == SID
+        assert rec["session_id"] != old_sid
+        assert old_sid in rec["retired_sids"]
+        assert rec["dispatch_kind"] == "bg"
+        assert rec["category"] == "camp5"
+        assert rec["status"] == "working"
+        assert rec["turns"] == 1
+
+    def test_live_native_without_force_refuses(self, native_home, monkeypatch):
+        old_sid = SID
+        seed_native_worker(native_home, sid=old_sid, status="working")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            lambda **_: (True, [make_roster_entry(old_sid, status="busy")]))
+
+        def run(*a, **kw):
+            raise AssertionError("must not stop/dispatch without --force")
+
+        with pytest.raises(fleet.FleetCliError, match="--force"):
+            fleet.cmd_respawn(_respawn_args(force=False), run=run, which=lambda _: "claude",
+                              sleep=lambda s: None)
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["session_id"] == old_sid
+
+    def test_force_stops_old_and_tombstones(self, native_home, monkeypatch):
+        old_sid = SID
+        seed_native_worker(native_home, sid=old_sid, status="working")
+        # 1st roster fetch (liveness check): old sid live. 2nd+ (dispatch_bg's
+        # pre/join snapshots): old sid gone, new sid present.
+        new_sid = "ccccdddd-9999-8888-7777-666655554444"
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_sequence(
+            (True, [make_roster_entry(old_sid, status="busy")]),
+            (True, []),
+            (True, [make_roster_entry(new_sid, status="idle")]),
+        ))
+        stop_calls = []
+        rc = fleet.cmd_respawn(
+            _respawn_args(force=True),
+            run=_fake_run_factory(stdout="backgrounded · ccccdddd · fleet|w1|t\n", calls=stop_calls),
+            which=lambda _: "claude", sleep=lambda s: None,
+        )
+        assert rc == 0
+        stop_call = next(c for c in stop_calls if c[0][:2] == ["claude", "stop"])
+        assert stop_call[0] == ["claude", "stop", old_sid]
+        outcomes = fleet.read_outcomes("w1", sid=old_sid)
+        assert any(o["kind"] == "stopped" for o in outcomes)
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["session_id"] == new_sid
+        assert old_sid in rec["retired_sids"]
+
+    def test_force_aborts_when_stop_fails_and_still_live(self, native_home, monkeypatch):
+        # Trap #3: _stop_native_session returns False AND a re-fetch still
+        # shows the old sid live -- must ABORT, never proceed to dispatch a
+        # second live session under the same name.
+        old_sid = SID
+        seed_native_worker(native_home, sid=old_sid, status="working")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            lambda **_: (True, [make_roster_entry(old_sid, status="busy")]))
+
+        def run(argv, **kw):
+            import types
+            if argv[:2] == ["claude", "stop"]:
+                return types.SimpleNamespace(returncode=1, stdout="", stderr="failed")
+            raise AssertionError("must not dispatch after an unverified stop on a still-live sid")
+
+        with pytest.raises(fleet.FleetCliError, match="never two live sessions"):
+            fleet.cmd_respawn(_respawn_args(force=True), run=run, which=lambda _: "claude",
+                              sleep=lambda s: None)
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["session_id"] == old_sid
+
+    def test_max_budget_usd_refused(self, native_home):
+        seed_native_worker(native_home, sid=SID, status="idle")
+        with pytest.raises(fleet.FleetCliError, match="G3"):
+            fleet.cmd_respawn(_respawn_args(max_budget_usd=5.0), which=lambda _: "claude")
+
+    def test_no_log_rotation_for_native(self, native_home, monkeypatch):
+        old_sid = "deadbeef-0000-1111-2222-333344445555"
+        seed_native_worker(native_home, sid=old_sid, status="idle")
+        # 1st call: liveness check (old sid gone). 2nd: dispatch_bg pre-dispatch
+        # snapshot (new sid not minted yet). 3rd+: join poll (new sid present).
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_sequence(
+            (True, []),
+            (True, []),
+            (True, [make_roster_entry(SID, status="idle")]),
+        ))
+        # A native worker has no logs/<name>.jsonl at all -- if respawn ever
+        # tried to rotate it, this would raise (no such file / attribute).
+        rotate_calls = []
+        real_rotate = fleet._rotate_worker_log
+        def spy_rotate(*a, **kw):
+            rotate_calls.append((a, kw))
+            return real_rotate(*a, **kw)
+        monkeypatch.setattr(fleet, "_rotate_worker_log", spy_rotate)
+        fleet.cmd_respawn(
+            _respawn_args(),
+            run=_fake_run_factory(stdout="backgrounded · aaaabbbb · fleet|w1|t\n"),
+            which=lambda _: "claude", sleep=lambda s: None,
+        )
+        assert rotate_calls == []
+
+    def test_legacy_respawn_still_works_byte_identical(self, native_home):
+        # Guard against a regression in the is_native routing itself: a
+        # genuinely legacy (pre-pivot) record must still respawn via the
+        # untouched Popen path, never routed into _cmd_respawn_native.
+        rec = fleet.new_worker_record("legacy-sid-0000", str(native_home), "do it", "accept")
+        rec["status"] = "idle"
+        rec["turn_pid"] = None
+        fleet.save_registry({"workers": {"legacy1": rec}})
+
+        class FakeStdin:
+            def __init__(self):
+                self.written = b""
+            def write(self, data):
+                self.written += data
+            def close(self):
+                pass
+
+        class FakeProc:
+            def __init__(self, pid):
+                self.pid = pid
+                self.stdin = FakeStdin()
+            def poll(self):
+                return None
+
+        proc = FakeProc(pid=999)
+        rc = fleet.cmd_respawn(_respawn_args(name="legacy1"),
+                               popen=lambda *a, **kw: proc, which=lambda _: "claude.cmd")
+        assert rc == 0
+        after = fleet.load_registry()["workers"]["legacy1"]
+        assert after["dispatch_kind"] is None
+        assert after["session_id"] != "legacy-sid-0000"
