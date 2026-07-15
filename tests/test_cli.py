@@ -607,12 +607,12 @@ class TestCmdSpawn:
         assert rec["turns"] == 1
 
     def test_spawn_persists_setting_sources(self, isolated_home, tmp_path, monkeypatch):
-        # F13 (item 7, M5): --setting-sources is still recorded in the
-        # registry at spawn. NOTE (T4 concern, see task-4-report.md): unlike
-        # the legacy Popen path, dispatch_bg's frozen T3 interface has no
-        # setting_sources parameter, so it is NOT yet forwarded onto the
-        # native --bg argv -- persistence only, until a later task plumbs it
-        # through dispatch_bg.
+        # F13 (item 7, M5): --setting-sources is recorded in the registry
+        # at spawn. T4 fix wave (Important I1): it is now also forwarded
+        # onto the native --bg argv via dispatch_bg's setting_sources
+        # param -- see the argv assertion below (previously persistence
+        # only, see task-4-report.md/task-4-adversarial.md I1).
+        calls = []
         monkeypatch.setattr(fleet, "_fetch_agents_roster", _native_roster_with())
         worker_dir = tmp_path / "proj"
         worker_dir.mkdir()
@@ -621,10 +621,13 @@ class TestCmdSpawn:
             "--setting-sources", "user,project",
         ])
 
-        fleet.cmd_spawn(args, run=_fake_run_factory(), which=lambda n: "claude.cmd", sleep=lambda s: None)
+        fleet.cmd_spawn(args, run=_fake_run_factory(calls=calls), which=lambda n: "claude.cmd",
+                        sleep=lambda s: None)
 
         rec = fleet.load_registry()["workers"]["probe-1"]
         assert rec["setting_sources"] == "user,project"
+        argv = calls[0][0]
+        assert argv[argv.index("--setting-sources") + 1] == "user,project"
 
     def test_spawn_prints_name_and_session_id(self, isolated_home, tmp_path, capsys, monkeypatch):
         monkeypatch.setattr(fleet, "_fetch_agents_roster", _native_roster_with())
@@ -853,20 +856,253 @@ class TestReportStrandedTurn:
         assert "CRITICAL" in capsys.readouterr().err
 
 
-\
-# M-B T4: TestCmdSpawnCommitLockRetry deleted -- it verified that cmd_spawn's
-# post-launch stamp lock retried through _commit_launched_turn/
-# _report_stranded_turn with backoff. The native flow's post-dispatch stamp
-# lock (cmd_spawn's second `with fleet_lock():`, after dispatch_bg's roster
-# join already succeeded) is a single bare acquisition, not wrapped in that
-# retry helper -- see task-4-report.md concerns: the exact same "a live
-# session already exists, don't strand it on one lock-timeout" risk this
-# class exercised still applies to a real live `--bg` session, and porting
-# _commit_launched_turn/_report_stranded_turn (or an equivalent) onto the
-# native stamp lock is flagged there as follow-up work, not done in T4.
-# _commit_launched_turn/_report_stranded_turn themselves stay covered by
-# TestCommitLaunchedTurn/TestReportStrandedTurn above (called directly, not
-# through cmd_spawn).
+class TestCmdSpawnNativeCommitLockRetry:
+    """T4 fix wave (Critical C2): port of the legacy TestCmdSpawnCommitLockRetry
+    onto the native flow -- cmd_spawn's post-dispatch stamp lock (after
+    dispatch_bg already returned a real, joined sid) is now wrapped in
+    _commit_launched_turn's retry+backoff, same machinery as the legacy
+    launch path, via a monkeypatched `fleet.fleet_lock` that fails the
+    stamp-lock acquisitions specifically (the pre-claim lock, called
+    first, is left alone) -- exercises the real call sites, not a
+    fabricated stand-in."""
+
+    def _flaky_fleet_lock(self, fail_calls):
+        real_fleet_lock = fleet.fleet_lock
+        calls = {"n": 0}
+
+        @contextmanager
+        def flaky(timeout=fleet.LOCK_TIMEOUT_SECONDS):
+            calls["n"] += 1
+            if calls["n"] in fail_calls:
+                raise fleet.FleetLockTimeout("simulated")
+            with real_fleet_lock(timeout=timeout):
+                yield
+
+        return flaky
+
+    def test_retries_past_a_flaky_stamp_lock_then_succeeds(self, isolated_home, tmp_path, monkeypatch):
+        worker_dir = tmp_path / "proj"
+        worker_dir.mkdir()
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _native_roster_with())
+
+        # Call 1 = the pre-claim lock (must succeed). Calls 2 and 3 = the
+        # post-dispatch stamp lock's first two attempts (fail); call 4 =
+        # the third attempt (succeeds).
+        monkeypatch.setattr(fleet, "fleet_lock", self._flaky_fleet_lock({2, 3}))
+
+        slept = []
+        args = _spawn_args("probe-1", worker_dir, "do it")
+        rc = fleet.cmd_spawn(args, run=_fake_run_factory(), which=lambda n: "claude.cmd",
+                             sleep=slept.append)
+
+        assert rc == 0
+        assert slept == list(fleet.LAUNCH_COMMIT_BACKOFF_SECONDS[:2])
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["status"] == "working"
+        assert rec["session_id"] == NATIVE_SID
+
+    def test_gives_up_loudly_without_stamping_and_returns_nonzero(
+        self, isolated_home, tmp_path, monkeypatch, capsys,
+    ):
+        """If every stamp-lock attempt times out, cmd_spawn must NOT pop
+        the pre-claim record (a live session genuinely exists -- popping
+        would orphan it beyond even the stranded-turn recovery
+        instructions) and must NOT raise raw: a loud stderr warning
+        carrying the sid/short_id an operator needs to stamp by hand, plus
+        a NONZERO return (unlike legacy's rc==0 -- native has no OS pid
+        fallback, so the failure signal here has to be louder, per the T4
+        fix-wave brief)."""
+        worker_dir = tmp_path / "proj"
+        worker_dir.mkdir()
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _native_roster_with())
+
+        # Call 1 = the pre-claim lock (succeeds); every call from #2 onward
+        # (every stamp attempt) fails.
+        monkeypatch.setattr(fleet, "fleet_lock", self._flaky_fleet_lock(set(range(2, 30))))
+
+        slept = []
+        args = _spawn_args("probe-1", worker_dir, "do it")
+        rc = fleet.cmd_spawn(args, run=_fake_run_factory(), which=lambda n: "claude.cmd",
+                             sleep=slept.append)
+
+        assert rc != 0
+        assert len(slept) == fleet.LAUNCH_COMMIT_MAX_ATTEMPTS - 1
+        err = capsys.readouterr().err
+        assert "CRITICAL" in err
+        assert "probe-1" in err
+        assert NATIVE_SID in err
+        assert "aaaabbbb" in err
+
+        # The pre-claim record is left exactly where it was -- NOT popped
+        # (the session is genuinely live) and NOT stamped (the stamp lock
+        # never landed): session_id is still None, the pre-claim state --
+        # the recovery message above is the ONLY place the real sid/short
+        # id survive; the operator must hand-stamp the record using it.
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["status"] == "working"
+        assert rec["session_id"] is None
+
+        events = [json.loads(line) for line in fleet.events_path().read_text(encoding="utf-8").splitlines()]
+        assert any(e["kind"] == "turn_commit_failed" and e["session_id"] == NATIVE_SID for e in events)
+
+
+class TestCmdSpawnCtrlCMidJoin:
+    def test_ctrlc_mid_join_preserves_short_id_in_spawn_failed_event(self, isolated_home, tmp_path, monkeypatch):
+        """T4 fix wave (Ctrl-C short-id loss): a KeyboardInterrupt landing
+        during dispatch_bg's join-verify wait -- AFTER the --bg dispatch
+        itself already succeeded, so a live session genuinely exists --
+        must not lose the short id. Previously str(KeyboardInterrupt()) is
+        empty, so the spawn_failed event carried zero trace of the
+        orphaned session's identity, worse than the sibling DOA-timeout
+        branch (whose message embeds the short id in plain text)."""
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
+        worker_dir = tmp_path / "proj"
+        worker_dir.mkdir()
+
+        def sleep(s):
+            raise KeyboardInterrupt()
+
+        args = _spawn_args("probe-1", worker_dir, "do the thing")
+        with pytest.raises(KeyboardInterrupt):
+            fleet.cmd_spawn(args, run=_fake_run_factory(), which=lambda n: "claude.cmd", sleep=sleep)
+
+        assert "probe-1" not in fleet.load_registry()["workers"]
+        events = [json.loads(line) for line in fleet.events_path().read_text(encoding="utf-8").splitlines()]
+        spawn_failed = [e for e in events if e["kind"] == "spawn_failed"]
+        assert len(spawn_failed) == 1
+        assert spawn_failed[0]["short_id"] == "aaaabbbb"
+
+
+class TestCmdSpawnGuardedPopEventSymmetry:
+    """T4 fix wave (Minor): the spawn_failed event must fire ONLY when the
+    guarded pop actually pops the record -- adversarial fault injection
+    proved zero coverage for this in either exception branch (weakening
+    `rec.get("session_id") is None` down to just `rec is not None` stayed
+    green in the full suite for both). These pin both conditions in both
+    branches, so that regression would go red."""
+
+    def test_native_dispatch_error_concurrent_stamp_no_pop_no_event(self, isolated_home, tmp_path):
+        import types
+        worker_dir = tmp_path / "proj"
+        worker_dir.mkdir()
+        real_sid = "cccccccc-1111-2222-3333-444455556666"
+
+        def run(argv, **kwargs):
+            # Simulate a concurrent process (e.g. a fast-completion commit
+            # racing in from elsewhere) stamping the record with a real sid
+            # before this dispatch's own failure handler re-locks.
+            data = fleet.load_registry()
+            data["workers"]["probe-1"]["session_id"] = real_sid
+            data["workers"]["probe-1"]["status"] = "working"
+            fleet.save_registry(data)
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="boom")
+
+        args = _spawn_args("probe-1", worker_dir, "do the thing")
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_spawn(args, run=run, which=lambda n: "claude.cmd", sleep=lambda s: None)
+
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["session_id"] == real_sid  # not clobbered by the DOA rollback
+        kinds = [json.loads(line)["kind"] for line in
+                fleet.events_path().read_text(encoding="utf-8").splitlines()]
+        assert kinds == ["spawned"]  # no spawn_failed -- nothing actually failed
+
+    def test_native_dispatch_error_unstamped_pops_and_events(self, isolated_home, tmp_path):
+        worker_dir = tmp_path / "proj"
+        worker_dir.mkdir()
+        args = _spawn_args("probe-1", worker_dir, "do the thing")
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_spawn(args, run=_fake_run_factory(rc=1), which=lambda n: "claude.cmd",
+                            sleep=lambda s: None)
+
+        assert "probe-1" not in fleet.load_registry()["workers"]
+        kinds = [json.loads(line)["kind"] for line in
+                fleet.events_path().read_text(encoding="utf-8").splitlines()]
+        assert kinds == ["spawned", "spawn_failed"]
+
+    def test_base_exception_concurrent_stamp_no_pop_no_event(self, isolated_home, tmp_path):
+        worker_dir = tmp_path / "proj"
+        worker_dir.mkdir()
+        real_sid = "cccccccc-1111-2222-3333-444455556666"
+
+        def run(argv, **kwargs):
+            data = fleet.load_registry()
+            data["workers"]["probe-1"]["session_id"] = real_sid
+            data["workers"]["probe-1"]["status"] = "working"
+            fleet.save_registry(data)
+            raise KeyboardInterrupt()
+
+        args = _spawn_args("probe-1", worker_dir, "do the thing")
+        with pytest.raises(KeyboardInterrupt):
+            fleet.cmd_spawn(args, run=run, which=lambda n: "claude.cmd", sleep=lambda s: None)
+
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["session_id"] == real_sid
+        kinds = [json.loads(line)["kind"] for line in
+                fleet.events_path().read_text(encoding="utf-8").splitlines()]
+        assert kinds == ["spawned"]
+
+    def test_base_exception_unstamped_pops_and_events(self, isolated_home, tmp_path):
+        worker_dir = tmp_path / "proj"
+        worker_dir.mkdir()
+
+        def run(argv, **kwargs):
+            raise KeyboardInterrupt()
+
+        args = _spawn_args("probe-1", worker_dir, "do the thing")
+        with pytest.raises(KeyboardInterrupt):
+            fleet.cmd_spawn(args, run=run, which=lambda n: "claude.cmd", sleep=lambda s: None)
+
+        assert "probe-1" not in fleet.load_registry()["workers"]
+        kinds = [json.loads(line)["kind"] for line in
+                fleet.events_path().read_text(encoding="utf-8").splitlines()]
+        assert kinds == ["spawned", "spawn_failed"]
+
+
+class TestCmdSpawnStampEventSymmetry:
+    def test_success_stamp_skips_turn_started_event_when_record_concurrently_removed(
+        self, isolated_home, tmp_path, monkeypatch,
+    ):
+        """T4 fix wave (Minor M1, event-symmetry nit from task-4-review.md):
+        the success-stamp block's append_event("turn_started", ...) now
+        lives inside the same `if rec is not None:` guard as the mutation
+        it describes, matching the fast-completion commit block's shape --
+        previously it fired unconditionally, so a concurrent kill/clean
+        landing in the inter-lock gap produced a turn_started event for a
+        registry mutation that never happened."""
+        worker_dir = tmp_path / "proj"
+        worker_dir.mkdir()
+        state = {"n": 0}
+
+        def roster_fetch(**_):
+            # Call-count-aware like _native_roster_with: 1st call is
+            # dispatch_bg's pre-dispatch snapshot (must stay empty, or the
+            # real sid would be excluded from its own join as a "foreign
+            # pre-existing session"). From the 2nd call (the join poll)
+            # onward, report the session AND simulate a concurrent `fleet
+            # clean`/`kill` removing the record entirely right as the join
+            # completes (the inter-lock gap this fix targets).
+            state["n"] += 1
+            if state["n"] == 1:
+                return True, []
+            data = fleet.load_registry()
+            data["workers"].pop("probe-1", None)
+            fleet.save_registry(data)
+            return True, [{"id": "aaaabbbb", "sessionId": NATIVE_SID,
+                          "name": "fleet|probe-1|t", "cwd": str(worker_dir),
+                          "startedAt": 1, "kind": "background", "state": "working",
+                          "status": "busy", "pid": 1}]
+
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", roster_fetch)
+        args = _spawn_args("probe-1", worker_dir, "do the thing")
+        rc = fleet.cmd_spawn(args, run=_fake_run_factory(), which=lambda n: "claude.cmd",
+                             sleep=lambda s: None)
+
+        assert rc == 0  # the launch itself still succeeds/reports normally
+        assert "probe-1" not in fleet.load_registry()["workers"]  # stays removed
+        kinds = [json.loads(line)["kind"] for line in
+                fleet.events_path().read_text(encoding="utf-8").splitlines()]
+        assert kinds == ["spawned"]  # no turn_started -- nothing was mutated
 
 
 def _seed_record(worker_dir):
