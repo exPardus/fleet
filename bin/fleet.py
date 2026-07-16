@@ -30,7 +30,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -220,8 +219,8 @@ def template_settings_path() -> Path:
 def instance_settings_path() -> Path:
     """Machine-local, gitignored settings instance (SPEC §14):
     state/worker-settings.json, rendered by `fleet init` from
-    template_settings_path(). Every worker turn's --settings argv value
-    points here (build_turn_argv's default), never at the template."""
+    template_settings_path(). Every worker dispatch's --settings argv value
+    points here (dispatch_bg's default), never at the template."""
     return state_dir() / "worker-settings.json"
 
 
@@ -300,12 +299,6 @@ class UnsupportedPlatformError(NotImplementedError):
 class _WindowsPlatform:
     """Windows implementation of every OS-specific fleet operation."""
 
-    def detached_popen_kwargs(self) -> dict:
-        """Popen kwargs for a fully detached child (SPEC §6): survives the
-        parent CLI invocation exiting and isn't torn down with the parent's
-        process group (e.g. a Ctrl-C in the manager's shell)."""
-        return {"creationflags": subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP}
-
     def get_process_info(self, pid):
         """Three-way probe (F15/M4). Returns:
           * None                 -- the pid does not exist (definitely gone)
@@ -358,47 +351,6 @@ class _WindowsPlatform:
             return name, ctime
         except Exception:
             return None
-
-    def kill_process_tree(self, pid, run=subprocess.run) -> bool:
-        """`taskkill /PID <pid> /T /F` (SPEC §5 interrupt row): best-effort
-        kill of the whole process tree rooted at pid. Returns True iff
-        taskkill itself reported success (exit code 0); callers treat
-        interrupt as best-effort regardless (the caller still marks the
-        worker idle -- a turn that ignored the kill is still not something
-        `fleet` can wait on)."""
-        try:
-            result = run(
-                ["taskkill", "/PID", str(int(pid)), "/T", "/F"],
-                capture_output=True, text=True, timeout=10,
-            )
-            return result.returncode == 0
-        except Exception:
-            return False
-
-    def build_attach_argv(self, cwd, sid: str, which=shutil.which) -> list:
-        """Argv for `fleet attach` (SPEC §5 attach row, §9): Windows
-        Terminal (`wt`) if present on PATH, else a detached PowerShell
-        fallback via Start-Process. Both resume with the worker's cwd (the
-        --resume cwd-scope invariant, SPEC §2)."""
-        cwd = str(cwd)
-        if which("wt"):
-            return ["wt", "-d", cwd, "--", "claude", "--resume", sid]
-        # F2: cwd is interpolated into a PowerShell single-quoted string
-        # literal below. An unescaped `'` in cwd (e.g. C:\Users\O'Brien\proj)
-        # would terminate that string early -> ParserError -- and this
-        # happens silently: no terminal opens, but `fleet attach` still
-        # reports success (cmd_attach never checks the detached child's exit
-        # code, by design -- see cmd_attach's docstring). Double any embedded
-        # `'` per PowerShell single-quoted-string escaping rules. The `wt`
-        # branch above is unaffected: list2cmdline double-quotes each argv
-        # element, and a `'` is a literal character inside a double-quoted
-        # Windows command-line argument.
-        ps_cwd = cwd.replace("'", "''")
-        ps_command = (
-            f"Start-Process powershell -WorkingDirectory '{ps_cwd}' "
-            f"-ArgumentList '-NoExit','-Command','claude --resume {sid}'"
-        )
-        return ["powershell", "-Command", ps_command]
 
     def autoclean_task_query(self, task_name: str, run=subprocess.run):
         """None ONLY when the task is definitively absent; its command
@@ -482,17 +434,8 @@ class _PosixPlatform:
             "this build only supports Windows"
         )
 
-    def detached_popen_kwargs(self) -> dict:
-        self._unsupported("detached_popen_kwargs")
-
     def get_process_info(self, pid):
         self._unsupported("get_process_info")
-
-    def kill_process_tree(self, pid, run=None) -> bool:
-        self._unsupported("kill_process_tree")
-
-    def build_attach_argv(self, cwd, sid: str, which=None) -> list:
-        self._unsupported("build_attach_argv")
 
     def autoclean_task_query(self, task_name: str, run=None):
         self._unsupported("autoclean_task_query")
@@ -997,14 +940,13 @@ def _last_line_type(log_path) -> str | None:
 
 
 # Post-testing wave, item 1c (stress-report Finding 1, zombie-escape hatch):
-# how long a "working"/turn_pid=None pre-claim is allowed to sit before
-# recompute_status stops treating it as a real in-flight launch and demotes
-# it to "dead" instead. Every real launcher (launch_turn, called
-# synchronously from cmd_spawn/cmd_send/cmd_respawn) stamps the real pid
-# within, at most, LAUNCH_DOA_WINDOW_SECONDS (3s) plus one Popen() call --
-# so a claim still unstamped after ten minutes did not just lose a race, it
-# lost its launcher (the `fleet` CLI process itself crashed, was killed, or
-# lost power between the pre-claim write and the post-launch commit).
+# how long a "working" pre-claim (session_id=None) is allowed to sit before
+# a recompute stops treating it as a real in-flight dispatch and demotes it
+# to "dead" instead. Every real dispatch path (cmd_spawn/cmd_send/
+# cmd_respawn via dispatch_bg) stamps the real sid synchronously -- so a
+# claim still unstamped after ten minutes did not just lose a race, it lost
+# its launcher (the `fleet` CLI process itself crashed, was killed, or lost
+# power between the pre-claim write and the post-dispatch commit).
 LAUNCH_CLAIM_MAX_AGE_SECONDS = 600.0
 
 
@@ -1375,7 +1317,7 @@ def mode_flags(mode: str) -> list:
 
 
 # ---------------------------------------------------------------------------
-# Turn launcher (SPEC §6): pure argv builder + detached Popen.
+# Claude executable resolution + worker environment (shared by dispatch_bg).
 # ---------------------------------------------------------------------------
 
 class ClaudeNotFoundError(Exception):
@@ -1384,7 +1326,8 @@ class ClaudeNotFoundError(Exception):
 
 def resolve_claude_executable(which=shutil.which) -> str:
     """Resolve the real claude executable (claude.cmd/claude.exe on Windows)
-    via shutil.which -- Popen needs the concrete path, not the bare name."""
+    via shutil.which -- subprocess.run needs the concrete path, not the bare
+    name."""
     exe = which("claude")
     if not exe:
         raise ClaudeNotFoundError(
@@ -1392,83 +1335,6 @@ def resolve_claude_executable(which=shutil.which) -> str:
             "expected claude.cmd or claude.exe on this machine)"
         )
     return exe
-
-
-def build_turn_argv(claude_exe: str, sid: str, first: bool, mode: str,
-                     model: str | None = None, max_budget_usd: float | None = None,
-                     settings_path: str | None = None, setting_sources: str | None = None) -> list:
-    """Pure argv builder for one worker turn (SPEC §6). Raises ValueError
-    (via mode_flags) for an unknown mode -- kept a pure function per the
-    Task 2 brief so every mode/model/budget combo is unit-testable without
-    touching Popen at all.
-
-    settings_path defaults to str(instance_settings_path()) -- resolved
-    fresh on every call (not baked into the signature at def-time, SPEC
-    §14) so it follows FLEET_HOME/env-var overrides and test sandboxes the
-    same way every other path helper in this module does. Callers needing
-    the real machine instance must have already run `fleet init`
-    (cmd_spawn/cmd_send enforce this via _require_instance_settings before
-    ever reaching here).
-
-    setting_sources is a Task 5 audit-gap item (SPEC §6 L125, spec-audit
-    gap 5): a raw passthrough string (whatever `claude --setting-sources`
-    itself accepts, e.g. "user,project") appended verbatim as
-    `--setting-sources <value>` when given -- fleet does not parse or
-    validate its contents, only forwards it, so a worker repo's own
-    foreign Stop-hook (or other unwanted merged settings) can be excluded
-    per spawn without fleet inventing its own mini-grammar for it."""
-    if settings_path is None:
-        settings_path = str(instance_settings_path())
-    argv = [claude_exe, "-p", "--output-format", "stream-json", "--verbose", "--include-hook-events"]
-    argv += ["--session-id", sid] if first else ["--resume", sid]
-    argv += ["--settings", settings_path]
-    argv += mode_flags(mode)
-    if model:
-        argv += ["--model", model]
-    if max_budget_usd is not None:
-        argv += ["--max-budget-usd", str(max_budget_usd)]
-    if setting_sources:
-        argv += ["--setting-sources", setting_sources]
-    return argv
-
-
-class TurnLaunchError(Exception):
-    """Raised when Popen() itself fails to start a turn process, OR (F-DOA)
-    when the child dies during init before consuming its prompt. Callers
-    (cmd_spawn et al) must restore_mailbox_claim() the pending claim on this
-    exception -- the mailbox was never consumed by a live turn."""
-
-
-# F-DOA/F-BLOCK: bounded window, after Popen() returns, during which
-# launch_turn watches for a child that dies before consuming its prompt.
-# Long enough to catch a fast init crash (bad --settings, MCP startup
-# failure, auth/license error, invalid --resume sid); short enough to never
-# meaningfully delay the manager for a healthy launch (the writer thread
-# below typically finishes -- and this window is exited -- almost
-# immediately for any launch that isn't actually wedged).
-LAUNCH_DOA_WINDOW_SECONDS = 3.0
-_DOA_POLL_INTERVAL_SECONDS = 0.05
-
-
-def _write_prompt_and_close_stdin(proc, prompt: str, error_box: list) -> None:
-    """Daemon-thread target (F-BLOCK): write the prompt to proc.stdin and
-    close it, off the calling thread. The Windows anonymous-pipe buffer is
-    ~4 KB and claude only reads the prompt after booting, so a synchronous
-    write on the caller's thread would block fleet spawn/send for the
-    child's entire boot (or indefinitely if it wedges pre-read). A
-    BrokenPipeError here means the child's read end already closed -- i.e.
-    it died before consuming the prompt (F-DOA) -- and is captured into
-    error_box for launch_turn to inspect; any other OSError is best-effort
-    (matches the pre-fix behavior for a hiccup on an already-started
-    process) and is swallowed."""
-    try:
-        if proc.stdin is not None:
-            proc.stdin.write(prompt.encode("utf-8"))
-            proc.stdin.close()
-    except BrokenPipeError as exc:
-        error_box.append(exc)
-    except OSError:
-        pass
 
 
 def _worker_env(name: str) -> dict:
@@ -1490,125 +1356,6 @@ def _worker_env(name: str) -> dict:
     env.pop("CLAUDE_CODE_SESSION_ID", None)
     env["FLEET_WORKER"] = name
     return env
-
-
-def launch_turn(name: str, cwd, sid: str, prompt: str, mode: str, first: bool = False,
-                 model=None, max_budget_usd=None, setting_sources=None,
-                 popen=subprocess.Popen, get_process_info=None, which=shutil.which) -> dict:
-    """Start one detached worker turn (SPEC §6): resolve claude, build argv,
-    open per-worker logs (stdout -> logs/<name>.jsonl, stderr -> a separate
-    logs/<name>.err so stderr noise never breaks jsonl parsing), Popen
-    PLATFORM.detached_popen_kwargs() (the platform adapter, SPEC §14) with
-    the worker's cwd (the --resume cwd-scope invariant, SPEC §2), hand the
-    prompt write-and-close to a daemon thread (F-BLOCK -- never block the
-    calling thread on the child's stdin) and watch for a DOA child within a
-    bounded window (F-DOA), then query the new process's creation time via
-    get_process_info (defaults to PLATFORM.get_process_info) so the registry
-    can store an unambiguous turn_pid_ctime via ctime_to_iso -- the only
-    serializer callers may use (F5 bridge).
-
-    Returns {"turn_pid", "turn_pid_ctime", "log_path", "err_log_path"}.
-
-    Raises ClaudeNotFoundError / TurnLaunchError for failures BEFORE or
-    DURING the Popen() call itself, OR (F-DOA) when the child is detected to
-    have died during init before consuming its prompt -- callers must
-    restore_mailbox_claim() the pending claim in either case (the
-    launch-sequence contract). Once launch_turn returns rather than raises,
-    the turn is considered launched and the caller finalizes the claim and
-    records turn_pid. This finalize-vs-restore decision stays entirely in
-    the caller (cmd_spawn et al), keyed only on whether this function
-    returned or raised.
-    """
-    # Phase1 kernel 4 (cwd preflight): never launch/resume a turn into a
-    # vanished directory. Every launch path (spawn, send-resume, respawn)
-    # funnels through here, so one guard covers them all -- and raising
-    # BEFORE the Popen keeps the launch-sequence contract intact (the caller
-    # restores the mailbox claim on any raise, same as a resolve/argv error).
-    if not os.path.isdir(cwd):
-        raise TurnLaunchError(f"registered cwd no longer exists, refusing to launch {name!r}: {cwd}")
-
-    claude_exe = resolve_claude_executable(which=which)
-    argv = build_turn_argv(claude_exe, sid, first, mode, model=model, max_budget_usd=max_budget_usd,
-                            setting_sources=setting_sources)
-
-    logs_dir().mkdir(parents=True, exist_ok=True)
-    log_path = logs_dir() / f"{name}.jsonl"
-    err_path = logs_dir() / f"{name}.err"
-
-    out_f = open(log_path, "ab")
-    err_f = open(err_path, "ab")
-    try:
-        try:
-            proc = popen(
-                argv,
-                cwd=str(cwd),
-                stdin=subprocess.PIPE,
-                stdout=out_f,
-                stderr=err_f,
-                env=_worker_env(name),
-                **PLATFORM.detached_popen_kwargs(),
-            )
-        except OSError as exc:
-            raise TurnLaunchError(f"failed to launch claude turn for {name!r}: {exc}") from exc
-    finally:
-        out_f.close()
-        err_f.close()
-
-    # Popen() succeeded -- hand the prompt write off to a daemon thread
-    # (F-BLOCK) so a slow/wedged reader can never block this thread, then
-    # watch for a DOA child within a bounded window (F-DOA): either the
-    # writer sees the read end already closed (BrokenPipeError) or poll()
-    # reports a nonzero exit before the window elapses. Both are launch
-    # failures; the caller's except path restores the mailbox claim and
-    # rolls back the registry. A poll() of 0 is a legitimate ultra-fast
-    # completed turn, not a failure. If the writer is still blocked when the
-    # window elapses (a wedged pre-read child that never dies), this is
-    # accepted as success -- irreducible without an unbounded wait, and it
-    # self-surfaces later as a no-progress `working` worker.
-    writer_error: list = []
-    writer = threading.Thread(
-        target=_write_prompt_and_close_stdin, args=(proc, prompt, writer_error), daemon=True,
-    )
-    writer.start()
-
-    deadline = time.monotonic() + LAUNCH_DOA_WINDOW_SECONDS
-    while True:
-        writer.join(_DOA_POLL_INTERVAL_SECONDS)
-        if writer_error:
-            raise TurnLaunchError(
-                f"claude turn for {name!r} closed its stdin before consuming the prompt "
-                f"(child exited during init): {writer_error[0]}"
-            )
-        rc = proc.poll()
-        if rc is not None:
-            if rc != 0:
-                raise TurnLaunchError(
-                    f"claude turn for {name!r} exited with code {rc} during its launch "
-                    "window, before consuming its prompt"
-                )
-            break  # rc == 0: legitimate ultra-fast completed turn -- success
-        if not writer.is_alive():
-            break  # writer finished (wrote+closed, or a best-effort OSError)
-                   # and the process has not exited -- healthy launch
-        if time.monotonic() >= deadline:
-            break  # bounded window elapsed with the writer still blocked --
-                   # accepted as success (see docstring residual above)
-
-    get_process_info = get_process_info or PLATFORM.get_process_info
-    ctime_iso = None
-    try:
-        info = get_process_info(proc.pid)
-        if info is not None:
-            ctime_iso = ctime_to_iso(info[1])
-    except Exception:
-        ctime_iso = None
-
-    return {
-        "turn_pid": proc.pid,
-        "turn_pid_ctime": ctime_iso,
-        "log_path": str(log_path),
-        "err_log_path": str(err_path),
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -2579,7 +2326,7 @@ def _require_instance_settings() -> None:
     checked at spawn/send time, before any registry mutation or Popen call,
     so a missing instance never leaves a half-created worker record or a
     consumed mailbox claim behind. Without this check, a turn would still
-    launch (build_turn_argv's --settings default just points at a
+    dispatch (dispatch_bg's --settings default just points at a
     nonexistent path) and `claude` would silently ignore the bad
     --settings value in print mode (SPEC §7) -- fleet hooks would simply
     never fire, with no error anywhere."""
@@ -2590,14 +2337,14 @@ def _require_instance_settings() -> None:
 
 
 # Post-testing wave, item 1b (stress-report Finding 1, CRITICAL): how many
-# times / how long cmd_spawn, cmd_send's idle-resume path, and cmd_respawn
-# retry their post-launch commit lock (the one that stamps the real
-# turn_pid into the registry) before giving up. Deliberately several times
+# times / how long cmd_spawn, cmd_send's fork-steer path, and cmd_respawn
+# retry their post-dispatch commit lock (the one that stamps the real
+# sid into the registry) before giving up. Deliberately several times
 # the ordinary LOCK_TIMEOUT_SECONDS (5.0s): by the time this lock is
-# reached, launch_turn() has ALREADY succeeded -- a real, billable, running
-# `claude` process exists and its pid is known -- so losing this race
+# reached, dispatch_bg() has ALREADY succeeded -- a real, billable, running
+# `claude` session exists and its sid is known -- so losing this race
 # forever would strand it as a permanent zombie registry record (status=
-# "working"/turn_pid=None, which every recovery lever historically refused
+# "working"/session_id=None, which every recovery lever historically refused
 # to touch; item 1c's LAUNCH_CLAIM_MAX_AGE_SECONDS now bounds that too, but
 # retrying hard here is the first, much faster line of defense). Total
 # backoff across all attempts is ~30s (each attempt itself may also spend
@@ -2608,8 +2355,8 @@ LAUNCH_COMMIT_BACKOFF_SECONDS = (1.0, 2.0, 4.0, 8.0, 8.0, 7.0)
 
 def _commit_launched_turn(commit_fn, sleep=time.sleep) -> bool:
     """Run `commit_fn()` -- a zero-argument callable that itself acquires
-    `fleet_lock()` and performs a post-launch registry commit (stamping
-    turn_pid/turn_pid_ctime/turns/last_activity, matching cmd_spawn/
+    `fleet_lock()` and performs a post-dispatch registry commit (stamping
+    session_id/native_short_id/turns/last_activity, matching cmd_spawn/
     cmd_send/cmd_respawn's own shape) -- retrying on FleetLockTimeout with
     backoff (LAUNCH_COMMIT_BACKOFF_SECONDS) up to LAUNCH_COMMIT_MAX_ATTEMPTS
     times.
@@ -2617,11 +2364,11 @@ def _commit_launched_turn(commit_fn, sleep=time.sleep) -> bool:
     Returns True once `commit_fn()` completes without raising
     FleetLockTimeout. Returns False if every attempt timed out -- the
     caller (cmd_spawn/cmd_send/cmd_respawn) MUST NOT abandon the
-    already-launched turn on a False return: it must still report the
-    launch as successful (raising here would tempt an operator into
-    retrying the same `fleet` subcommand, which would launch a SECOND live
-    turn on top of the one already running) and instead call
-    `_report_stranded_turn` for a loud, actionable warning plus a
+    already-dispatched session on a False return: it must still surface the
+    dispatch as real (raising raw would tempt an operator into retrying the
+    same `fleet` subcommand, which would double-dispatch a SECOND live
+    session on top of the one already running) and instead call
+    `_report_stranded_native_turn` for a loud, actionable warning plus a
     best-effort event.
 
     Debt roll-up item 3: a NON-lock OSError out of `commit_fn()` (ENOSPC
@@ -2637,8 +2384,7 @@ def _commit_launched_turn(commit_fn, sleep=time.sleep) -> bool:
     commit_fn, a commit_fn must not raise OSError after save_registry has
     made its mutation durable -- a retry would re-run a non-idempotent
     body against already-committed state (fork-steer's reload lands in
-    its orphaned branch; the legacy resume shape double-increments
-    `turns`). Concretely: post-save event appends inside a commit_fn go
+    its orphaned branch). Concretely: post-save event appends inside a commit_fn go
     through `_append_event_quiet`, and mailbox migration is best-effort
     by construction (_migrate_residual_mailbox swallows OSError). Every
     step before save_registry is safely retryable -- save itself is
@@ -2658,43 +2404,14 @@ def _commit_launched_turn(commit_fn, sleep=time.sleep) -> bool:
     return False
 
 
-def _report_stranded_turn(name: str, sid: str, info: dict) -> None:
-    """Post-launch commit lock exhausted every retry in
-    `_commit_launched_turn`: a real, already-running turn's pid could not
-    be stamped into the registry. Never fail silently -- print a loud,
-    actionable stderr message (status/kill/attach/wait are all blind to
-    this turn until the record is repaired) and best-effort append an
-    event for later forensics. Deliberately does not raise: the calling
-    `fleet` subcommand still completes and reports success, since the turn
-    genuinely IS running -- raising here would read as "the launch
-    failed" and could tempt an operator into retrying, launching a SECOND
-    live turn onto the same session."""
-    print(
-        f"fleet: CRITICAL: {name}: turn launched (pid={info.get('turn_pid')}, "
-        f"session {sid}) but the registry commit failed after "
-        f"{LAUNCH_COMMIT_MAX_ATTEMPTS} lock-acquisition attempts -- the "
-        "record is stuck at status=working/turn_pid=null (the F1 "
-        "launch-in-flight state). It will auto-demote to dead after "
-        f"LAUNCH_CLAIM_MAX_AGE_SECONDS ({LAUNCH_CLAIM_MAX_AGE_SECONDS:.0f}s) "
-        f"of inactivity; recover with `fleet respawn {name} --force` once "
-        "that happens, or hand-edit state/fleet.json now to set "
-        f"turn_pid={info.get('turn_pid')} directly.",
-        file=sys.stderr,
-    )
-    try:
-        append_event("turn_commit_failed", name, session_id=sid, turn_pid=info.get("turn_pid"))
-    except OSError:
-        pass
-
-
 def _report_stranded_native_turn(name: str, sid: str, short_id: str) -> None:
-    """T4 fix wave (Critical C2): native analog of `_report_stranded_turn`
-    above, for cmd_spawn's post-dispatch stamp lock -- reached only after
+    """T4 fix wave (Critical C2): stranded-dispatch report for cmd_spawn's
+    post-dispatch stamp lock -- reached only after
     dispatch_bg already returned a real, joined sid (a live `claude --bg`
     session genuinely exists) but every `_commit_launched_turn` retry
     timed out acquiring fleet_lock() to stamp it into the registry.
 
-    Unlike the legacy path, there is no OS pid fallback here -- native
+    There is no OS pid fallback here -- native
     sids come entirely from `claude` itself, never fleet -- so `sid`/
     `short_id` are the ONLY recovery handles that exist anywhere once this
     stack frame unwinds. Never fail silently: print a loud, actionable
@@ -4206,234 +3923,28 @@ def _cmd_send_native(name: str, before: dict, message: str,
     return 0
 
 
-def cmd_send(args, popen=subprocess.Popen, get_process_info=None, which=shutil.which,
-             sleep=time.sleep, run=subprocess.run) -> int:
-    """`fleet send <name> <text|@file>` (SPEC §5 send row, §9 attach
-    asymmetry), rewritten under the uniform status-claim protocol (F1+F6,
-    review wave 3):
-
-    M-B T7: a native (`dispatch_kind:"bg"`) record forks off to
-    `_cmd_send_native` right after the unknown-name check below --
-    everything else in this docstring/function body describes the LEGACY
-    (Popen) path only, untouched.
-
-    - working -> append the message to mailbox/<sid>.md (small
-      open(...,"a") write); the running turn's hooks pick it up mid-turn or
-      at Stop.
-    - idle -> atomically pre-claim status="working"/turn_pid=None in the
-      SAME fleet_lock that recomputed and observed "idle" (F1 -- mirrors
-      new_worker_record's shape; recompute_status's launch-in-flight guard
-      then refuses to demote this window, so a concurrent
-      send/attach/status sees "working" and refuses instead of racing a
-      second live turn onto this session). Outside the lock: append the
-      new message to the mailbox, THEN compose_prompt with an empty task
-      (F6 -- the message flows through the mailbox drain uniformly with any
-      prior mail, not through compose_prompt's task argument, so it is
-      never doubled and never silently dropped), then launch_turn. On
-      success, re-acquire the lock once to stamp turn_pid/turn_pid_ctime/
-      turns/last_activity and re-assert status="working" (matches
-      cmd_spawn's second-lock re-assert, F-RACE). On failure,
-      restore_mailbox_claim() the drained mail (so the new message
-      survives) and conditionally roll the pre-claim back to "idle" (only
-      if the record is still in the exact claim state this path wrote --
-      status=="working" and turn_pid is None -- a concurrent actor may have
-      legitimately moved it on already).
-    - attached -> append to the mailbox like "working", but also print the
-      attach-asymmetry warning (SPEC §9): the attached TUI runs without
-      --settings, so hooks don't fire and the mail queues untouched until
-      the next headless turn.
-    - dead -> a clear error suggesting `fleet respawn`, never a silent no-op.
+def cmd_send(args, which=shutil.which, sleep=time.sleep, run=subprocess.run) -> int:
+    """`fleet send <name> <text|@file>` (SPEC §5 send row): steer a native
+    worker via `_cmd_send_native` -- mailbox queue while a turn is running,
+    fork-steer (RATIFIED G2b) when idle.
 
     SPEC §14: refuses up front (_require_instance_settings) if the
-    worker-settings instance is missing -- checked unconditionally even
-    though only the idle-resume branch below actually launches a turn,
-    because `fleet spawn` (the only way a worker could exist at all) already
-    requires the instance, so a real fleet never reaches this check with it
-    absent; simplicity wins over branch-specific placement here.
-    """
+    worker-settings instance is missing -- the fork-steer branch dispatches
+    a turn, and `fleet spawn` (the only way a worker could exist at all)
+    already requires the instance."""
     _require_instance_settings()
 
     message = _read_task_arg(args.message)
 
-    # M-B T7: routing is decided via a LOCK-FREE peek (mirrors the
-    # respawn provenance guard's own _read_registry_readonly use) so the
-    # legacy path below keeps its EXACT pre-T7 lock-acquisition count --
-    # test_resilience.py/test_steering.py's lock-exhaustion tests assert on
-    # that count directly. An unknown/unreadable name here just falls
-    # through to the legacy path's own (unchanged) unknown-worker check.
-    _ok, _reason, _snap = _read_registry_readonly()
-    if _ok and args.name in _snap["workers"] and is_native(_snap["workers"][args.name]):
-        refuse_if_archived(args.name, _snap["workers"][args.name], "send")
-        return _cmd_send_native(args.name, dict(_snap["workers"][args.name]), message,
-                                run=run, which=which, sleep=sleep)
-
-    # ---- legacy path below: byte-identical to the pre-T7 implementation ----
     with fleet_lock():
         data = load_registry()
         if args.name not in data["workers"]:
             raise FleetCliError(f"unknown worker: {args.name!r}")
-        before = data["workers"][args.name]
-        after = recompute_worker(args.name, before, get_process_info=get_process_info, sleep=sleep)
-        status = after["status"]
-        if status != before["status"]:
-            append_event("status_changed", args.name, old=before["status"], new=after["status"])
-        if status == "idle":
-            # F13/M5 cumulative-cost check: the CLI --max-budget-usd is a
-            # PER-TURN cap, so a worker steered with N sends could run turns
-            # 2..N and blow past its lifetime budget one turn at a time. This
-            # is the worker-lifetime enforcement SPEC §11 documents: before
-            # claiming a RESUME launch, compare the persisted cumulative
-            # cost_usd against the persisted (immutable) max_budget_usd; if
-            # already exceeded, REFUSE the resume and FLAG the worker
-            # "over_budget" (a sticky status, see recompute_status) instead
-            # of launching an over-cap turn.
-            mb = after.get("max_budget_usd")
-            spent = _registry_cost(after.get("cost_usd", 0.0))
-            if mb is not None and spent > mb:
-                after["status"] = "over_budget"
-                data["workers"][args.name] = after
-                save_registry(data)
-                append_event("budget_exceeded", args.name, cost_usd=spent, max_budget_usd=mb)
-                raise FleetCliError(
-                    f"{args.name}: cumulative cost ${spent:.4f} exceeds max_budget_usd "
-                    f"${mb} -- refusing resume (worker flagged over_budget); respawn with a "
-                    "higher --max-budget-usd or retire it"
-                )
-            # Kernel 10 (F12=M24) cumulative-TOKEN check: the token_ceiling is
-            # the hard cap the Stop hook only ever ALLOWS against (invariant
-            # 2 -- the hook never blocks). Enforcement lives HERE: before a
-            # RESUME launch, sum the session's tokens from the log's result
-            # events and refuse if already over, flagging the worker
-            # over_ceiling (sticky, see recompute_status). Mirrors the
-            # over_budget refusal directly above.
-            tc = after.get("token_ceiling")
-            if tc is not None:
-                used = _sum_result_tokens(logs_dir() / f"{args.name}.jsonl") or 0
-                # FIX-3 (F-2): >= not > -- the Stop hook (stop_mailbox.py) allows
-                # stop at tokens >= ceiling; the fleet-side refusal must use the
-                # SAME boundary so tokens == ceiling is treated as over by both
-                # halves (at ==, > would let fleet launch a turn the hook would
-                # already allow-stop on -- a cross-half disagreement).
-                if used >= tc:
-                    after["status"] = "over_ceiling"
-                    data["workers"][args.name] = after
-                    save_registry(data)
-                    append_event("ceiling_exceeded", args.name, tokens=used, token_ceiling=tc)
-                    raise FleetCliError(
-                        f"{args.name}: cumulative tokens {used} reached token_ceiling "
-                        f"{tc} -- refusing resume (worker flagged over_ceiling); respawn "
-                        "with a higher --token-ceiling or retire it"
-                    )
-            # F1 pre-claim: atomic decide+claim, same lock, before release.
-            after["status"] = "working"
-            after["turn_pid"] = None
-            # Post-testing wave, item 1c: stamp last_activity to NOW at the
-            # moment of the claim (mirroring new_worker_record's
-            # created=now_iso() stamp that cmd_spawn/cmd_respawn's own
-            # pre-claims get for free) -- recompute_worker's own
-            # last_activity refresh just above reflects the log's mtime
-            # from BEFORE this claim (e.g. the prior turn's completion,
-            # possibly long ago), which would otherwise make
-            # recompute_status's new LAUNCH_CLAIM_MAX_AGE_SECONDS guard
-            # see this brand-new claim as already stale and wrongly demote
-            # a genuinely in-flight launch straight to "dead".
-            after["last_activity"] = now_iso()
-        data["workers"][args.name] = after
-        save_registry(data)
-        sid = after["session_id"]
-        # F9 (item 8, review M3): for a working/attached worker the mailbox
-        # append MUST happen UNDER this same fleet_lock -- not after release.
-        # sid was read under the lock, so appending here (still holding it)
-        # makes send atomic w.r.t. respawn's drain+sid-swap: a concurrent
-        # respawn cannot swap the sid out and drain the old mailbox in the
-        # window between reading sid and appending, so no message ever lands
-        # in a pre-swap mailbox after the swap (SPEC invariants 3, 7). The
-        # mail_sent event is a single-writer audit record (invariant 6), not a
-        # DLQ.
-        if status in ("working", "attached"):
-            append_mailbox(sid, message)
-            append_event("mail_sent", args.name, sid=sid, status=status)
+        before = dict(data["workers"][args.name])
 
-    if status == "working":
-        print(f"{args.name}: turn running -- message queued to mailbox")
-        return 0
-
-    if status == "attached":
-        print(
-            f"{args.name}: attached -- message queued to mailbox, but the attached "
-            "terminal runs without --settings so fleet hooks don't fire there; it "
-            "will not be delivered until the next headless turn (SPEC §9)"
-        )
-        return 0
-
-    if status == "dead":
-        raise FleetCliError(f"{args.name}: worker is dead -- run `fleet respawn {args.name}` first")
-
-    # idle -> resume-turn launch. F6: append the new message to the mailbox
-    # FIRST, then let compose_prompt drain the mailbox uniformly (prior mail
-    # + this message, in order) -- task is intentionally empty so the
-    # message is never carried both ways. The append is outside the lock here
-    # (unlike working/attached above), but that is safe: this branch already
-    # pre-claimed status="working"/turn_pid=None under the lock, and a
-    # concurrent respawn refuses on a launch-in-flight claim -- so the sid
-    # cannot be swapped out from under this append.
-    append_mailbox(sid, message)
-    append_event("mail_sent", args.name, sid=sid, status="idle")
-    prompt, claim = compose_prompt(args.name, after["cwd"], "", sid)
-    try:
-        info = launch_turn(
-            args.name, after["cwd"], sid, prompt, after["mode"], first=False,
-            # F13/M5: re-emit the persisted cap + setting-sources on the
-            # RESUME launch -- a missing re-pass is the exact failure this
-            # closes (turns 2..N ran uncapped, foreign-hook remedy gone).
-            model=after.get("model"), max_budget_usd=after.get("max_budget_usd"),
-            setting_sources=after.get("setting_sources"),
-            popen=popen, get_process_info=get_process_info, which=which,
-        )
-        finalize_mailbox_claim(claim)
-    except BaseException:
-        # Task-4-verdict re-review, Fix 2: BaseException (not Exception) --
-        # a Ctrl-C landing mid-launch must still run this rollback. An
-        # except Exception here would let KeyboardInterrupt skip straight
-        # past it, pinning the pre-claim ("working"+turn_pid is None) as a
-        # permanently-guarded ghost claim (recompute_status's launch-in-
-        # flight guard never demotes it) and leaking the drained
-        # mailbox's ".claimed" file forever.
-        restore_mailbox_claim(claim)
-        with fleet_lock():
-            data = load_registry()
-            r = data["workers"].get(args.name)
-            if r is not None and r.get("status") == "working" and r.get("turn_pid") is None:
-                r["status"] = "idle"
-                save_registry(data)
-        raise
-
-    def _commit():
-        with fleet_lock():
-            data = load_registry()
-            r = data["workers"].get(args.name)
-            if r is not None:
-                # Re-assert "working" (F-RACE, matches cmd_spawn's
-                # second-lock re-assert): a concurrent status/wait could
-                # have recomputed a spurious transition in the gap between
-                # the pre-claim above and this stamp.
-                r["status"] = "working"
-                r["turn_pid"] = info["turn_pid"]
-                r["turn_pid_ctime"] = info["turn_pid_ctime"]
-                r["turns"] = r.get("turns", 0) + 1
-                r["last_activity"] = now_iso()
-                save_registry(data)
-            _append_event_quiet("turn_started", args.name, session_id=sid,
-                                turn_pid=info["turn_pid"])
-
-    # Post-testing wave, item 1b (stress-report Finding 1, CRITICAL): retry
-    # with backoff instead of a single bare lock acquisition -- see
-    # cmd_spawn's identical shape and _commit_launched_turn's docstring.
-    if not _commit_launched_turn(_commit, sleep=sleep):
-        _report_stranded_turn(args.name, sid, info)
-
-    print(f"{args.name}: resumed -- {info['log_path']}")
-    return 0
+    refuse_if_archived(args.name, before, "send")
+    return _cmd_send_native(args.name, before, message,
+                            run=run, which=which, sleep=sleep)
 
 
 def _resume_one_limited_native(name: str, old_sid: str, cwd, mode, model, category,
@@ -4535,11 +4046,9 @@ def _resume_one_limited_native(name: str, old_sid: str, cwd, mode, model, catego
     return True
 
 
-def _resume_one_limited(name: str, popen, get_process_info, which, sleep,
-                        run=subprocess.run) -> bool:
-    """Relaunch a single `limited` worker through the ordinary
-    fleet_lock-guarded launch path -- the SAME pre-claim / one-live-claude /
-    universal-drain shape cmd_send's idle-resume uses (invariants 6, 7).
+def _resume_one_limited(name: str, which, sleep, run=subprocess.run) -> bool:
+    """Relaunch a single `limited` worker via the native fork-steer
+    (`_resume_one_limited_native`, RATIFIED G2(b)).
 
     Returns True iff a resume turn was actually launched, False if the worker
     was skipped because it was no longer `limited` when the claiming lock was
@@ -4549,22 +4058,10 @@ def _resume_one_limited(name: str, popen, get_process_info, which, sleep,
     BEFORE pre-claiming (FIX-1/F-A1 -- mirrors cmd_send's idle re-check: the
     caller's eligibility decision was made against a lock-released snapshot, so
     two racing sweeps both snapshot `limited`; without this re-check the second
-    clobbers the first's live pre-claim and starts a second `claude --resume`
-    on one sid, orphaning the first turn_pid). A vanished worker raises a clean
-    FleetCliError, never a raw KeyError. Then pre-claim status="working"/
-    turn_pid=None (recompute's launch-in-flight guard then refuses to demote
-    this window).
-
-    M-B T6: a native (`dispatch_kind:"bg"`) record forks off to
-    `_resume_one_limited_native` here (RATIFIED G2(b) fork-steer) --
-    everything below this point is the legacy Popen path, untouched.
-
-    Outside the lock: drain mailbox + journal (compose_prompt with
-    journal_path -- F31's "mailbox + journal" resume), launch_turn re-passing
-    the spawn-recorded max_budget_usd/setting_sources (else the cap and
-    foreign-hook remedy vanish on the resumed turn), then commit the turn_pid.
-    On failure, restore the mailbox claim and roll the pre-claim back to
-    `limited` (the park), never leaving a ghost claim."""
+    clobbers the first's live pre-claim and starts a second dispatch on one
+    sid). A vanished worker raises a clean FleetCliError, never a raw
+    KeyError. Then pre-claim status="working" (recompute's launch-in-flight
+    guard then refuses to demote this window)."""
     with fleet_lock():
         data = load_registry()
         rec = data["workers"].get(name)
@@ -4577,12 +4074,10 @@ def _resume_one_limited(name: str, popen, get_process_info, which, sleep,
         # it, ...). Skip rather than pre-claim a second live turn onto the sid.
         if rec.get("status") != "limited":
             return False
-        native = is_native(rec)
         rec["status"] = "working"
-        rec["turn_pid"] = None
-        # Stamp a fresh last_activity so recompute_status's stale-pre-claim
-        # guard (LAUNCH_CLAIM_MAX_AGE_SECONDS) doesn't reap this in-flight
-        # launch against the log's old mtime (mirrors cmd_send's idle-resume).
+        # Stamp a fresh last_activity so the stale-pre-claim guard
+        # (LAUNCH_CLAIM_MAX_AGE_SECONDS) doesn't reap this in-flight
+        # launch against an old timestamp.
         rec["last_activity"] = now_iso()
         data["workers"][name] = rec
         save_registry(data)
@@ -4590,69 +4085,21 @@ def _resume_one_limited(name: str, popen, get_process_info, which, sleep,
         cwd = rec["cwd"]
         mode = rec["mode"]
         model = rec.get("model")
-        max_budget_usd = rec.get("max_budget_usd")
         setting_sources = rec.get("setting_sources")
         category = rec.get("category")
         token_ceiling = rec.get("token_ceiling")
 
-    if native:
-        return _resume_one_limited_native(name, sid, cwd, mode, model, category,
-                                          setting_sources, token_ceiling,
-                                          run=run, which=which, sleep=sleep)
-
-    journal_path = journals_dir() / f"{name}.md"
-    prompt, claim = compose_prompt(name, cwd, "", sid, journal_path=journal_path)
-    try:
-        info = launch_turn(
-            name, cwd, sid, prompt, mode, first=False,
-            model=model, max_budget_usd=max_budget_usd, setting_sources=setting_sources,
-            popen=popen, get_process_info=get_process_info, which=which,
-        )
-        finalize_mailbox_claim(claim)
-    except BaseException:
-        # BaseException (not Exception): a Ctrl-C mid-launch must still roll the
-        # pre-claim back to `limited`, or the record stays a permanently-guarded
-        # ghost claim (working+turn_pid=None) and leaks the drained claim file.
-        restore_mailbox_claim(claim)
-        with fleet_lock():
-            data = load_registry()
-            r = data["workers"].get(name)
-            if r is not None and r.get("status") == "working" and r.get("turn_pid") is None:
-                r["status"] = "limited"
-                save_registry(data)
-        raise
-
-    def _commit():
-        with fleet_lock():
-            data = load_registry()
-            r = data["workers"].get(name)
-            if r is not None:
-                r["status"] = "working"
-                r["turn_pid"] = info["turn_pid"]
-                r["turn_pid_ctime"] = info["turn_pid_ctime"]
-                r["turns"] = r.get("turns", 0) + 1
-                r["last_activity"] = now_iso()
-                save_registry(data)
-            _append_event_quiet("limit_resumed", name, session_id=sid,
-                                turn_pid=info["turn_pid"])
-
-    if not _commit_launched_turn(_commit, sleep=sleep):
-        _report_stranded_turn(name, sid, info)
-    return True
+    return _resume_one_limited_native(name, sid, cwd, mode, model, category,
+                                      setting_sources, token_ceiling,
+                                      run=run, which=which, sleep=sleep)
 
 
-def cmd_resume_limited(args, popen=subprocess.Popen, get_process_info=None, which=shutil.which,
-                       sleep=time.sleep, run=subprocess.run) -> int:
+def cmd_resume_limited(args, which=shutil.which, sleep=time.sleep,
+                       run=subprocess.run) -> int:
     """`fleet resume-limited [name] [--force-now]` (SPEC §5 resume-limited row,
     UL1 / F31): the RECOMMENDED explicit resume sweep (UL-OQ3) -- NOT an
     automatic status/launch-time side-effect (invariant 1 daemonless forbids a
     read-view from launching turns; no resident process auto-wakes).
-
-    M-B T6: `run` is additive -- the native fork-steer branch's dispatch_bg
-    call needs a `subprocess.run`-shaped injectable, threaded alongside (not
-    instead of) the legacy `popen`/`get_process_info` pair, since a single
-    sweep can cover both a legacy and a native `limited` worker in the same
-    call. `_resume_one_limited` picks the branch per-worker via `is_native`.
 
     For each `limited` worker whose limit_reset_at has PASSED, relaunch the
     pending work via _resume_one_limited (the fleet_lock-guarded launch path)
@@ -4695,7 +4142,7 @@ def cmd_resume_limited(args, popen=subprocess.Popen, get_process_info=None, whic
         # FIX-1: _resume_one_limited re-validates `limited` under its own lock
         # and returns False if a concurrent actor already moved the worker --
         # report that as a skip, never as a (non-existent) resume.
-        if _resume_one_limited(name, popen, get_process_info, which, sleep, run=run):
+        if _resume_one_limited(name, which, sleep, run=run):
             resumed.append(name)
         else:
             skipped.append((name, "no longer limited (concurrent change)"))
@@ -4707,75 +4154,6 @@ def cmd_resume_limited(args, popen=subprocess.Popen, get_process_info=None, whic
     if not resumed and not skipped:
         print("no limited workers")
     return 0
-
-
-def _interrupt_worker(name: str, get_process_info=None, kill_process_tree=None) -> str:
-    """Kill the running turn for `name`, if one is verifiably still alive
-    (ctime-checked via pid_alive -- PID reuse must never kill an innocent
-    process, SPEC §4). Shared by cmd_interrupt and cmd_attach's --force
-    path.
-
-    Returns one of three outcomes (F3+F4 uniform contract):
-      - "killed": the turn was alive, kill_process_tree() was invoked, and
-        a post-kill pid_alive() re-check confirms it is now gone -- the
-        registry is committed to status="idle" and an "interrupted" event
-        is appended.
-      - "not_running": nothing was alive to kill (a friendly no-op, not an
-        error -- the operator may race a turn that already finished); no
-        mutation.
-      - "kill_failed": the turn was alive, a kill was attempted, but the
-        pid is STILL alive afterward. The registry is left untouched --
-        marking idle here (the pre-fix defect) would let a caller launch a
-        second live `claude` onto a session whose turn is still running.
-        Callers must treat this as a hard failure, not a silent demotion.
-
-    F4: the subprocess-shaped work (pid_alive's PowerShell Get-Process,
-    kill_process_tree's taskkill) runs OUTSIDE fleet_lock -- both can take
-    several seconds and LOCK_TIMEOUT_SECONDS is only 5.0, so holding the
-    lock across them would make every concurrent `fleet` command fail with
-    FleetLockTimeout. Shape: snapshot turn_pid/ctime under lock -> release
-    -> probe/kill/re-verify outside the lock -> re-acquire only to commit
-    "killed" (status write + its event stay under the same lock, preserving
-    that ordering).
-
-    F5 residual (documented, not fixed): Windows can reuse `pid` between
-    the pre-kill pid_alive check and the taskkill call (TOCTOU) -- in the
-    accepted, vanishingly unlikely worst case taskkill could hit an
-    unrelated process that reused the pid within that window. The
-    immediate pre-kill and post-kill pid_alive re-checks bound this to one
-    subprocess-spawn latency; they do not close it.
-
-    kill_process_tree defaults to PLATFORM.kill_process_tree (the platform
-    adapter, SPEC §14) but is injectable so tests exercise the state
-    machine without shelling out to a real taskkill.
-    """
-    kill_process_tree = kill_process_tree or PLATFORM.kill_process_tree
-
-    with fleet_lock():
-        data = load_registry()
-        if name not in data["workers"]:
-            raise FleetCliError(f"unknown worker: {name!r}")
-        rec = data["workers"][name]
-        pid = rec.get("turn_pid")
-        ctime_iso = rec.get("turn_pid_ctime")
-
-    if not pid_alive(pid, ctime_iso, get_process_info=get_process_info):
-        return "not_running"
-
-    kill_process_tree(pid)
-
-    if pid_alive(pid, ctime_iso, get_process_info=get_process_info):
-        return "kill_failed"
-
-    with fleet_lock():
-        data = load_registry()
-        rec = data["workers"].get(name)
-        if rec is not None:
-            rec["status"] = "idle"
-            data["workers"][name] = rec
-            save_registry(data)
-        append_event("interrupted", name, turn_pid=pid)
-    return "killed"
 
 
 def _cmd_interrupt_native(name: str, rec: dict, run=subprocess.run, which=shutil.which) -> int:
@@ -4878,221 +4256,37 @@ def _cmd_interrupt_native(name: str, rec: dict, run=subprocess.run, which=shutil
     return 0
 
 
-def cmd_interrupt(args, get_process_info=None, kill_process_tree=None,
-                  run=subprocess.run, which=shutil.which) -> int:
-    """`fleet interrupt <name>` (SPEC §5 interrupt row): ctime-verify the
-    registered turn_pid, kill its whole process tree via the platform
-    adapter, re-verify the kill (F3), mark idle, append an event.
-    Not-running is a friendly no-op. A verified-failed kill is a loud
-    warning and a nonzero exit -- the registry is deliberately left as-is
-    (never marked idle while the turn may still be alive).
-
-    M-B T8: native (`dispatch_kind:"bg"`) records route to
-    `_cmd_interrupt_native` instead -- `claude stop` + tombstone + a status
-    of `interrupted` (never `idle`, unlike the legacy branch below), guarded
-    to only actually fire on a `working` verdict (T8 fix wave, adv C1) --
-    every other status refuses or friendly-no-ops rather than un-terminaling
-    a sticky status via a silent overwrite."""
+def cmd_interrupt(args, run=subprocess.run, which=shutil.which) -> int:
+    """`fleet interrupt <name>` (SPEC §5 interrupt row): `claude stop` +
+    tombstone + a status of `interrupted` (never `idle`) via
+    `_cmd_interrupt_native`, guarded to only actually fire on a `working`
+    verdict (T8 fix wave, adv C1) -- every other status refuses or
+    friendly-no-ops rather than un-terminaling a sticky status via a
+    silent overwrite."""
     with fleet_lock():
         data = load_registry()
         if args.name not in data["workers"]:
             raise FleetCliError(f"unknown worker: {args.name!r}")
         rec = dict(data["workers"][args.name])
 
-    if is_native(rec):
-        refuse_if_archived(args.name, rec, "interrupt")
-        return _cmd_interrupt_native(args.name, rec, run=run, which=which)
-
-    outcome = _interrupt_worker(args.name, get_process_info=get_process_info, kill_process_tree=kill_process_tree)
-    if outcome == "killed":
-        print(f"{args.name}: interrupted")
-        return 0
-    if outcome == "not_running":
-        print(f"{args.name}: no turn running -- nothing to interrupt")
-        return 0
-    print(
-        f"fleet: {args.name}: kill attempted but the turn still appears to be running -- "
-        "not marked idle; retry or investigate before attaching/sending",
-        file=sys.stderr,
-    )
-    return 1
+    refuse_if_archived(args.name, rec, "interrupt")
+    return _cmd_interrupt_native(args.name, rec, run=run, which=which)
 
 
-def cmd_attach(args, popen=subprocess.Popen, get_process_info=None, which=shutil.which,
-               kill_process_tree=None, sleep=time.sleep) -> int:
-    """`fleet attach <name> [--force]` (SPEC §5 attach row, §9 hybrid
-    model), rewritten under the uniform status-claim protocol (F1) plus the
-    verified-kill contract (F3/F4, review wave 3):
-
-    - already attached -> print a no-op warning.
-    - working, no --force -> refuse (FleetCliError).
-    - working, --force, turn_pid is None -> refuse loudly (FleetCliError,
-      task-4-verdict re-review Fix 1). This is a turn-starter's own
-      pre-claim window (spawn/send's launch-in-flight write, still lasting
-      the whole launch_turn duration) -- there is no real pid yet, so
-      _interrupt_worker would see pid=None, pid_alive(None)=False, and
-      report "not_running", which used to read as clear-to-proceed and
-      would race a second live claude onto the session against the
-      concurrent starter. No registry write beyond the recompute persist,
-      no popen.
-    - working, --force, turn_pid set -> interrupt via _interrupt_worker
-      OUTSIDE any lock held by this function (F4 -- taskkill/Get-Process
-      must never run under fleet_lock). "killed" or "not_running" both mean
-      the turn is no longer alive, so attach proceeds to the claim below;
-      "kill_failed" (F3 -- the turn is still verifiably alive after the
-      kill attempt) aborts loudly via FleetCliError with NO registry write
-      and NO popen. The post-interrupt re-lock (F1, final-review.md) does
-      NOT claim unconditionally: _interrupt_worker's "killed" branch
-      commits idle and releases ITS OWN lock first, widening a real window
-      (the Get-Process/taskkill call can take hundreds of ms) in which a
-      concurrent `fleet send` can acquire the lock, observe idle, and
-      pre-claim a brand-new working/turn_pid=None launch -- the re-lock
-      checks the record's raw status is still exactly what
-      _interrupt_worker's own commit left it in (idle, or dead if a
-      concurrent `fleet kill` won the race instead) and refuses loudly
-      (no claim) otherwise, rather than stamping "attached" over that
-      concurrent claim (or a concurrent attach).
-    - idle (or otherwise attachable) -> atomically pre-claim
-      status="attached"/attached_since in the SAME fleet_lock that observed
-      the attachable state (F1 -- status="attached" already survives
-      recompute via the existing F7 guard, so this needs no new guard,
-      only the ordering flip: claim before popen, never after). The
-      terminal is then launched via PLATFORM.build_attach_argv (wt, else a
-      detached PowerShell fallback -- F2 escapes any `'` in cwd for the PS
-      fallback) OUTSIDE the lock, resumed in the worker's cwd (the
-      --resume cwd-scope invariant, SPEC §2). If popen() itself raises, the
-      claim is rolled back to idle (conditionally -- only if the record is
-      still exactly "attached" that this call wrote). The attach terminal
-      is intentionally detached, so its exit code is deliberately never
-      probed (see build_attach_argv's docstring) -- correctness here comes
-      from the claim ordering and the escaping fix, not from watching a
-      detached child.
-    """
-    needs_force_interrupt = False
-
+def cmd_attach(args) -> int:
+    """`fleet attach <name>` (SPEC §5 attach row): a native (`--bg`) session
+    has no fleet-owned terminal to spawn -- point the operator at the agents
+    menu / `claude attach` instead (M-B scope fence: native attach
+    integration is a later milestone)."""
     with fleet_lock():
         data = load_registry()
         if args.name not in data["workers"]:
             raise FleetCliError(f"unknown worker: {args.name!r}")
         before = data["workers"][args.name]
-        # M-B T8 (M-B scope fence): native (`dispatch_kind:"bg"`) sessions
-        # have no legacy pid to `--resume` into a detached terminal, and no
-        # `recompute_worker` PID/log-tail probe applies to them -- refuse
-        # before touching the registry at all (native attach integration is
-        # M-C-or-later). Legacy attach below is unchanged.
-        if is_native(before):
-            raise FleetCliError(
-                f"{args.name}: native worker -- attach via the agents menu (Ctrl+T in claude) "
-                f"or: claude attach {before.get('session_id')}"
-            )
-        after = recompute_worker(args.name, before, get_process_info=get_process_info, sleep=sleep)
-        if after["status"] != before["status"]:
-            append_event("status_changed", args.name, old=before["status"], new=after["status"])
-
-        if after["status"] == "attached":
-            data["workers"][args.name] = after
-            save_registry(data)
-            print(f"{args.name}: already attached")
-            return 0
-
-        if after["status"] == "working":
-            if not args.force:
-                data["workers"][args.name] = after
-                save_registry(data)
-                raise FleetCliError(
-                    f"{args.name}: turn is running -- pass --force to interrupt it first, "
-                    "or wait for it to finish"
-                )
-            if after.get("turn_pid") is None:
-                # Task-4-verdict re-review, Fix 1: this is a turn-starter's
-                # pre-claim window (status=="working", turn_pid is None --
-                # see recompute_status's launch-in-flight guard above),
-                # lasting the whole launch_turn duration. There is no real
-                # pid yet to verify-kill: _interrupt_worker would snapshot
-                # pid=None, pid_alive(None)=False, and return "not_running"
-                # -- which cmd_attach would otherwise treat as clear-to-
-                # proceed, popen-ing a second live claude while the
-                # concurrent starter brings its own up. Refuse loudly
-                # instead of racing it. Non-force already refuses on
-                # "working" above; this only closes the --force hole.
-                data["workers"][args.name] = after
-                save_registry(data)
-                raise FleetCliError(
-                    f"launch in flight for {args.name}; retry in a few seconds"
-                )
-            # --force: persist the recompute and release -- the kill itself
-            # (F4) must happen outside this lock.
-            data["workers"][args.name] = after
-            save_registry(data)
-            needs_force_interrupt = True
-        else:
-            # Attachable (idle): claim atomically in this same lock (F1).
-            after["status"] = "attached"
-            after["attached_since"] = now_iso()
-            data["workers"][args.name] = after
-            save_registry(data)
-            append_event("attached", args.name)
-
-    cwd = after["cwd"]
-    sid = after["session_id"]
-
-    if needs_force_interrupt:
-        outcome = _interrupt_worker(args.name, get_process_info=get_process_info, kill_process_tree=kill_process_tree)
-        if outcome == "kill_failed":
-            raise FleetCliError(
-                f"{args.name}: --force could not verify the running turn was killed -- "
-                "aborting attach (it may still be running)"
-            )
-        # "killed" or "not_running": the turn is no longer alive (or never
-        # was); claim "attached" now, in a fresh lock.
-        #
-        # F1 (final-review.md): this re-lock must not claim unconditionally.
-        # _interrupt_worker's "killed" branch commits status="idle" and
-        # releases ITS lock -- widening a real window (Get-Process/taskkill
-        # takes hundreds of ms) in which a concurrent `fleet send`'s own
-        # idle-resume can acquire the lock first, observe idle, and
-        # pre-claim status="working"/turn_pid=None for a brand-new launch.
-        # Re-check the RAW status (not a fresh recompute -- recomputing
-        # here could itself demote a legitimate idle to dead on log
-        # evidence unrelated to this race and falsely refuse) is still
-        # exactly what _interrupt_worker's own commit left it in (idle, or
-        # dead if a concurrent `fleet kill` won instead) before writing
-        # "attached" over it -- refuse instead of clobbering a concurrent
-        # claim (or a concurrent "attached") with our own.
-        with fleet_lock():
-            data = load_registry()
-            r = data["workers"].get(args.name)
-            if r is None:
-                raise FleetCliError(f"unknown worker: {args.name!r}")
-            if r.get("status") not in ("idle", "dead"):
-                raise FleetCliError(
-                    f"{args.name}: worker was claimed concurrently during --force takeover; retry"
-                )
-            r["status"] = "attached"
-            r["attached_since"] = now_iso()
-            data["workers"][args.name] = r
-            save_registry(data)
-            append_event("attached", args.name)
-
-    argv = PLATFORM.build_attach_argv(cwd, sid, which=which)
-    try:
-        popen(argv, cwd=str(cwd), **PLATFORM.detached_popen_kwargs())
-    except BaseException:
-        # Task-4-verdict re-review, Fix 2: BaseException so a Ctrl-C during
-        # the popen call still rolls the "attached" pre-claim back to
-        # idle -- except Exception would let KeyboardInterrupt through and
-        # leave the worker permanently (and falsely) marked "attached".
-        with fleet_lock():
-            data = load_registry()
-            r = data["workers"].get(args.name)
-            if r is not None and r.get("status") == "attached":
-                r["status"] = "idle"
-                r["attached_since"] = None
-                save_registry(data)
-        raise
-
-    print(f"{args.name}: attached -- {argv[0]}")
-    return 0
+    raise FleetCliError(
+        f"{args.name}: native worker -- attach via the agents menu (Ctrl+T in claude) "
+        f"or: claude attach {before.get('session_id')}"
+    )
 
 
 def cmd_release(args) -> int:
@@ -5440,331 +4634,41 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
     return 0
 
 
-def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shutil.which,
-                kill_process_tree=None, sleep=time.sleep, run=subprocess.run,
-                clock=time.monotonic) -> int:
+def cmd_respawn(args, run=subprocess.run, which=shutil.which,
+                sleep=time.sleep, clock=time.monotonic) -> int:
     """`fleet respawn <name> [--task <text>] [--force]` (SPEC §5 respawn
-    row): the context-reset lever -- a fresh session_id under the same
+    row): the context-reset lever -- a fresh native session under the same
     name/cwd/mode/model, prompted with the preamble + task (original,
     truncated per the registry schema, or --task's override) + the
     worker's journal (state/journals/<name>.md, labeled, if it exists) +
-    the OLD session_id's drained mailbox (consumed via the same
-    claim/finalize/restore discipline as every other launch path here --
-    never orphaned). Follows the uniform status-claim protocol verbatim
-    (task-4-verdict.md "Uniform status-claim protocol", cited by name for
-    respawn): pre-claim status="working"/turn_pid=None for the NEW record
-    under one fleet_lock, launch strictly outside any lock, conditional
-    rollback to the pre-respawn snapshot on BaseException, pid-stamp +
-    re-assert "working" on success.
-
-    Refuses while a turn is actively running unless --force, in which case
-    it reuses _interrupt_worker's verified-kill contract exactly like
-    cmd_attach's --force path (F3/F4): "killed"/"not_running" both mean
-    the old turn is no longer alive, so respawn proceeds; "kill_failed"
-    aborts loudly with NO registry mutation. A launch-in-flight window
-    (status=="working", turn_pid is None -- another spawn/send/respawn/
-    attach mid-launch) also refuses loudly under --force, same as
-    cmd_attach's Fix-1 guard -- there is no real pid yet to verify-kill.
-    An "attached" worker is NOT treated as "turn running" (attach never
-    sets turn_pid) -- but it IS a live human TUI holding the name, so (Task
-    5 fix wave, Finding 5 / task-5-review.md Important #2) respawn mirrors
-    cmd_attach's own working-state guard for it: without --force it refuses
-    loudly (FleetCliError, no mutation beyond the recompute persist) rather
-    than silently reassigning the name out from under the operator's
-    `claude --resume` terminal and rerouting their queued mail into a fresh
-    session they never see. With --force it proceeds directly (no kill
-    needed -- there is no turn_pid to interrupt), and the takeover releases
-    the attach as a side effect: new_worker_record always starts
-    attached_since=None, so the old attached TUI is simply orphaned from
-    the registry once the new record replaces it -- a documented residual
-    (the operator closes the stale terminal manually; nothing in fleet can
-    revoke a detached terminal).
-
-    cost_usd is carried over from the pre-respawn snapshot, NOT reset to
-    0.0: it tracks total money spent on the NAMED worker across its whole
-    lifetime, not per-session -- a respawn is a context reset (fresh
-    session_id, fresh turns counter, fresh transcript), not a billing
-    reset. turns resets to 0 (then to 1 once the new turn actually
-    launches, mirroring cmd_spawn's own 0->1 transition for a first turn).
-    The carried cost_usd is also stamped onto the new record's
-    cost_baseline (Task 5 fix wave, Finding 4) -- recompute_worker adds
-    this baseline to the rotated-fresh log's own trailing result cost,
-    so the very next status/wait/send poll after the new session's first
-    turn does not clobber the carried total down to just that turn's own
-    cost.
-
-    The log is rotated (_rotate_worker_log) once the new record is
-    committed, before compose_prompt/launch_turn -- unconditionally,
-    matching the SPEC §5 respawn row, since launch_turn's log file is
-    opened append-mode and would otherwise tack the new turn's stdout onto
-    the old session's transcript regardless of whether the new launch
-    itself succeeds.
-
-    NOTE (Task 5 spec-audit gap: cost-accumulation validation): this
-    cumulative-cost_usd behavior is asserted by unit tests here against a
-    fabricated registry/log fixture, but was NOT validated end-to-end
-    against a real 2-turn `claude` invocation (no real claude process is
-    ever spawned by this test suite, by design) -- that validation is
-    explicitly deferred to the project's manual integration smoke test
-    (SPEC §12), not implemented in this task.
-    """
+    the OLD session's drained mailbox. See `_cmd_respawn_native` for the
+    full dispatch/rollback contract (liveness gate, --force stop +
+    tombstone, fast-completion race, carried-forward fields)."""
     _require_instance_settings()
 
-    task_override = _read_task_arg(args.task) if args.task else None
-    new_sid = str(uuid.uuid4())
-    needs_force_interrupt = False
-
-    # §5.1: respawn retires the old session id and rotates its log. Ask before
-    # doing that to a worker this session did not spawn. Reads the registry
-    # WITHOUT the lock (a lock-free read, like `status --stale-ok`) and prompts
-    # outside it: a prompt must never block the fleet, and the guard must not
-    # perturb the lock-acquisition sequence the launch path depends on.
+    # §5.1: respawn retires the old session id. Ask before doing that to a
+    # worker this session did not spawn. Reads the registry WITHOUT the lock
+    # (a lock-free read, like `status --stale-ok`) and prompts outside it: a
+    # prompt must never block the fleet.
     _ok, _reason, _snap = _read_registry_readonly()
     if _ok and args.name in _snap["workers"]:
         _confirm_destructive("respawn (retire the session of)", [args.name], _snap["workers"],
                              assume_yes=getattr(args, "yes", False))
-
-    # M-B T7: a native (`dispatch_kind:"bg"`) record forks off to
-    # _cmd_respawn_native here -- everything below is the legacy Popen path,
-    # untouched. Routing reuses the SAME lock-free snapshot fetched above
-    # for the provenance guard (never an extra fleet_lock() acquisition --
-    # test_resilience.py's lock-exhaustion tests assert on the legacy
-    # path's exact lock-call count). An unknown/unreadable name here just
-    # falls through to the legacy path's own (unchanged) unknown-worker
-    # check under its first real lock.
-    if _ok and args.name in _snap["workers"] and is_native(_snap["workers"][args.name]):
-        refuse_if_archived(args.name, _snap["workers"][args.name], "respawn")
-        return _cmd_respawn_native(args, dict(_snap["workers"][args.name]),
-                                   run=run, which=which, sleep=sleep, clock=clock)
-
-    with fleet_lock():
-        data = load_registry()
-        if args.name not in data["workers"]:
-            raise FleetCliError(f"unknown worker: {args.name!r}")
-        before = data["workers"][args.name]
-        after = recompute_worker(args.name, before, get_process_info=get_process_info, sleep=sleep)
-        if after["status"] != before["status"]:
-            append_event("status_changed", args.name, old=before["status"], new=after["status"])
-
-        old_sid = after["session_id"]
-        cwd = after["cwd"]
-        mode = after["mode"]
-        model = after.get("model")
-        # F13/M5: respawn is a launch path too -- carry the persisted cap +
-        # setting-sources forward onto the new record (and its launch argv)
-        # UNLESS an explicit --max-budget-usd/--setting-sources override is
-        # passed (default None -> carry forward).
-        max_budget_usd = (args.max_budget_usd if getattr(args, "max_budget_usd", None) is not None
-                          else after.get("max_budget_usd"))
-        setting_sources = (args.setting_sources if getattr(args, "setting_sources", None) is not None
-                           else after.get("setting_sources"))
-        # Kernel 10 (F12=M24): respawn is a launch path -- carry the persisted
-        # token_ceiling forward onto the new record UNLESS an explicit
-        # --token-ceiling override is passed (default None -> carry forward),
-        # exactly like max_budget_usd above.
-        token_ceiling = (args.token_ceiling if getattr(args, "token_ceiling", None) is not None
-                         else after.get("token_ceiling"))
-        cost_usd = _registry_cost(after.get("cost_usd", 0.0))
-        task_for_record = task_override if task_override is not None else after.get("task", "")
-
-        if after["status"] == "working":
-            if not args.force:
-                data["workers"][args.name] = after
-                save_registry(data)
-                raise FleetCliError(
-                    f"{args.name}: turn is running -- pass --force to interrupt it first, "
-                    "or wait for it to finish"
-                )
-            if after.get("turn_pid") is None:
-                # Same launch-in-flight refusal as cmd_attach's Fix 1:
-                # nothing real to verify-kill yet.
-                data["workers"][args.name] = after
-                save_registry(data)
-                raise FleetCliError(
-                    f"launch in flight for {args.name}; retry in a few seconds"
-                )
-            data["workers"][args.name] = after
-            save_registry(data)
-            needs_force_interrupt = True
-            prior_snapshot = None  # filled in below, after the verified kill
-        elif after["status"] == "attached" and not args.force:
-            # Finding 5 (task-5 adversarial review / task-5-review.md
-            # Important #2): mirror cmd_attach's own working-state guard
-            # -- a live human TUI owns this name, refuse instead of
-            # silently stealing it and rerouting the drained mailbox into
-            # a session the operator never sees.
-            data["workers"][args.name] = after
-            save_registry(data)
-            raise FleetCliError(
-                f"{args.name}: worker is attached -- release it first "
-                f"(`fleet release {args.name}`) or pass --force to take it over"
-            )
-        else:
-            # Not actively running (idle/dead), or attached with --force
-            # (the takeover releases the attach as a side effect --
-            # new_worker_record always starts attached_since=None) --
-            # pre-claim the NEW record right here, atomically with the
-            # decision (F1 protocol): status="working"/turn_pid=None
-            # until the launch below stamps a real pid.
-            prior_snapshot = after
-            new_record = new_worker_record(
-                new_sid, cwd, task_for_record, mode, model=model,
-                max_budget_usd=max_budget_usd, setting_sources=setting_sources,
-                token_ceiling=token_ceiling)
-            new_record["cost_usd"] = cost_usd  # cumulative -- see docstring
-            new_record["cost_baseline"] = cost_usd  # Finding 4 -- see docstring
-            # Provenance is IMMUTABLE across respawn (§5.1): respawning someone
-            # else's worker must not silently transfer ownership to the
-            # respawner, or a single forced respawn launders a foreign worker
-            # into a freely-killable one.
-            new_record["spawned_by"] = prior_snapshot.get("spawned_by")
-            data["workers"][args.name] = new_record
-            save_registry(data)
-            append_event("respawned", args.name, old_session_id=old_sid, new_session_id=new_sid)
-
-    if needs_force_interrupt:
-        outcome = _interrupt_worker(args.name, get_process_info=get_process_info, kill_process_tree=kill_process_tree)
-        if outcome == "kill_failed":
-            raise FleetCliError(
-                f"{args.name}: --force could not verify the running turn was killed -- "
-                "aborting respawn (it may still be running)"
-            )
-        # "killed" or "not_running": the old turn is no longer alive.
-        # _interrupt_worker's own "killed" path already committed
-        # status="idle" on the (still old_sid) record -- re-read it as the
-        # accurate rollback target before overwriting with the new record.
-        #
-        # F1 (final-review.md): mirror cmd_attach's guard -- the window
-        # between _interrupt_worker's idle-commit (its lock release) and
-        # this re-lock is exactly where a concurrent `fleet send`'s
-        # idle-resume can pre-claim status="working"/turn_pid=None (or a
-        # concurrent attach can claim "attached"). Check the RAW status
-        # (not a fresh recompute -- recomputing here could itself demote a
-        # legitimate idle to dead on log evidence unrelated to this race
-        # and falsely refuse) is still exactly what _interrupt_worker's
-        # own commit left it in (idle, or dead if a concurrent `fleet
-        # kill` won instead) and refuse to overwrite anything else --
-        # otherwise the send-launched turn would run orphaned against the
-        # old sid while the registry tracks this new one.
+        before = dict(_snap["workers"][args.name])
+    else:
+        # Unknown name or unreadable registry: resolve under the lock so a
+        # corrupt registry surfaces through load_registry's quarantine and an
+        # unknown worker gets the uniform error.
         with fleet_lock():
             data = load_registry()
-            r = data["workers"].get(args.name)
-            if r is None:
+            if args.name not in data["workers"]:
                 raise FleetCliError(f"unknown worker: {args.name!r}")
-            if r.get("status") not in ("idle", "dead"):
-                raise FleetCliError(
-                    f"{args.name}: worker was claimed concurrently during --force takeover; retry"
-                )
-            prior_snapshot = dict(r)
-            new_record = new_worker_record(
-                new_sid, cwd, task_for_record, mode, model=model,
-                max_budget_usd=max_budget_usd, setting_sources=setting_sources,
-                token_ceiling=token_ceiling)
-            new_record["cost_usd"] = cost_usd  # cumulative -- see docstring
-            new_record["cost_baseline"] = cost_usd  # Finding 4 -- see docstring
-            # Provenance is IMMUTABLE across respawn (§5.1): respawning someone
-            # else's worker must not silently transfer ownership to the
-            # respawner, or a single forced respawn launders a foreign worker
-            # into a freely-killable one.
-            new_record["spawned_by"] = prior_snapshot.get("spawned_by")
-            data["workers"][args.name] = new_record
-            save_registry(data)
-            append_event("respawned", args.name, old_session_id=old_sid, new_session_id=new_sid)
+            before = dict(data["workers"][args.name])
+        _confirm_destructive("respawn (retire the session of)", [args.name],
+                             {args.name: before}, assume_yes=getattr(args, "yes", False))
 
-    # Log rotation (SPEC §5): unconditional, before launch -- see
-    # _rotate_worker_log's docstring for why this must happen before
-    # launch_turn's append-mode log open.
-    #
-    # B2 (rotation clean-fail): if the log is still held (a follower or
-    # just-killed claude), _rotate_worker_log raises LogRotationError after
-    # its retries. At this point the NEW pre-claimed record is already
-    # persisted but NO turn has launched and NO mailbox claim exists yet
-    # (compose_prompt runs below), so clean-fail here: un-rotate any partial
-    # rename, restore the exact pre-respawn snapshot (guarded on the still-
-    # unlaunched claim), and raise -- never a half-swapped record (invariant
-    # 7). sleep is threaded through so the retry backoff is test-injectable.
-    try:
-        _rotate_worker_log(args.name, sleep=sleep)
-    except LogRotationError as exc:
-        _unrotate_worker_log(args.name)
-        with fleet_lock():
-            data = load_registry()
-            r = data["workers"].get(args.name)
-            if (r is not None and r.get("session_id") == new_sid
-                    and r.get("status") == "working" and r.get("turn_pid") is None):
-                data["workers"][args.name] = prior_snapshot
-                save_registry(data)
-                append_event(
-                    "respawn_failed", args.name, error=str(exc),
-                    old_session_id=old_sid, attempted_session_id=new_sid,
-                )
-        raise
-
-    # Kernel 10 (fleet half): the new session gets its own sid-keyed ceiling
-    # file (the old sid's is now stale/harmless) so the Stop hook keeps its
-    # allow-stop signal across the respawn. Written after the successful
-    # rotation, before launch.
-    _write_ceiling_file(new_sid, token_ceiling)
-
-    journal_path = journals_dir() / f"{args.name}.md"
-    prompt, claim = compose_prompt(args.name, cwd, task_for_record, old_sid, journal_path=journal_path)
-    try:
-        info = launch_turn(
-            args.name, cwd, new_sid, prompt, mode, first=True,
-            # F13/M5: carry the persisted (or overridden) cap + setting-sources
-            # onto the fresh-session launch argv.
-            model=model, max_budget_usd=max_budget_usd, setting_sources=setting_sources,
-            popen=popen, get_process_info=get_process_info, which=which,
-        )
-        finalize_mailbox_claim(claim)
-    except BaseException as exc:
-        # Conditional rollback (uniform protocol): restore the exact
-        # pre-respawn snapshot, but ONLY if the record is still in the
-        # precise claim state this call wrote (a concurrent actor may have
-        # legitimately moved it on already).
-        restore_mailbox_claim(claim)
-        with fleet_lock():
-            data = load_registry()
-            r = data["workers"].get(args.name)
-            if (r is not None and r.get("session_id") == new_sid
-                    and r.get("status") == "working" and r.get("turn_pid") is None):
-                # Finding 1 (task-5 adversarial review): un-rotate the log
-                # BEFORE restoring the registry snapshot -- the restored
-                # record points at old_sid's history, which the
-                # unconditional pre-launch rotation moved to
-                # logs/<name>.jsonl.1 and launch_turn's failed-launch
-                # append-open then stubbed out with an empty file.
-                _unrotate_worker_log(args.name)
-                data["workers"][args.name] = prior_snapshot
-                save_registry(data)
-                append_event(
-                    "respawn_failed", args.name, error=str(exc),
-                    old_session_id=old_sid, attempted_session_id=new_sid,
-                )
-        raise
-
-    def _commit():
-        with fleet_lock():
-            data = load_registry()
-            r = data["workers"].get(args.name)
-            if r is not None and r.get("session_id") == new_sid:
-                r["status"] = "working"
-                r["turn_pid"] = info["turn_pid"]
-                r["turn_pid_ctime"] = info["turn_pid_ctime"]
-                r["turns"] = 1
-                r["last_activity"] = now_iso()
-                save_registry(data)
-            _append_event_quiet("turn_started", args.name, session_id=new_sid,
-                                turn_pid=info["turn_pid"])
-
-    # Post-testing wave, item 1b (stress-report Finding 1, CRITICAL): retry
-    # with backoff instead of a single bare lock acquisition -- see
-    # cmd_spawn's identical shape and _commit_launched_turn's docstring.
-    if not _commit_launched_turn(_commit, sleep=sleep):
-        _report_stranded_turn(args.name, new_sid, info)
-
-    print(f"{args.name} {new_sid} {info['log_path']}")
-    return 0
+    refuse_if_archived(args.name, before, "respawn")
+    return _cmd_respawn_native(args, before, run=run, which=which, sleep=sleep, clock=clock)
 
 
 _RETIRED_SID_SWEEP_TIMEOUT_SECONDS = 5
@@ -5856,116 +4760,37 @@ def _cmd_kill_native(name: str, rec: dict, run=subprocess.run, which=shutil.whic
     return 0
 
 
-def cmd_kill(args, get_process_info=None, kill_process_tree=None, sleep=time.sleep,
-             run=subprocess.run, which=shutil.which) -> int:
-    """`fleet kill <name>` (SPEC §5): interrupt the turn if one is alive
-    (reusing _interrupt_worker's verified-kill contract), then
-    unconditionally mark the worker "dead" and append a "killed" event --
-    kill is the terminal, "retire this worker" action, distinct from
-    `fleet interrupt` (which only pauses a turn and marks idle). If the
-    kill could not be verified ("kill_failed"), the worker is still marked
-    dead (kill is meant to be final) but a loud warning is printed and the
-    exit code is nonzero so the operator investigates the process
-    manually -- unlike `fleet interrupt`, which deliberately leaves status
-    alone on kill_failed rather than lie about it, `fleet kill`'s whole
-    point is to retire the registry entry regardless.
+def cmd_kill(args, run=subprocess.run, which=shutil.which) -> int:
+    """`fleet kill <name>` (SPEC §5): stop the native session (plus retired
+    sids best-effort), write fleet's own tombstone, then unconditionally
+    mark the worker "dead" and append a "killed" event -- kill is the
+    terminal, "retire this worker" action, distinct from `fleet interrupt`
+    (which marks `interrupted`, a respawn-eligible state). See
+    `_cmd_kill_native` for the stop/tombstone contract.
 
-    Finding 3 (task-5 adversarial review): a single "not_running" verdict
-    from _interrupt_worker rests on one pid_alive() probe, and
-    get_process_info returns None on ANY exception (a transient
-    PowerShell hiccup, not just a genuinely dead process) -- worst case
-    that misclassifies a live turn as not-running and permanently marks
-    it "dead" while the real process keeps going, untracked. Before
-    trusting a "not_running" verdict, wait _DEAD_CONFIRM_DELAY_SECONDS
-    and re-run the whole _interrupt_worker check (itself a no-op/no-
-    mutation call when it again finds nothing alive, so this is safe to
-    repeat): if the process turns out to actually be alive on the second
-    pass, this re-run performs the real kill instead of silently
-    orphaning it as "dead".
-
-    F2 (final-review.md): attach --force and respawn --force both refuse
-    on a launch-in-flight claim (status=="working" and turn_pid is None --
-    a spawn/send/attach/respawn pre-claim mid-launch_turn, with no real pid
-    yet to verify-kill); kill lacked this guard. Without it, kill would
-    snapshot pid=None, pid_alive(None)=False -> "not_running" on both
-    probes, and unconditionally mark the worker dead -- either silently
-    lying (the launcher's post-launch stamp re-asserts working+pid right
-    after, so kill did nothing) or, worse, opening a window for a
-    concurrent `fleet clean` to see dead+turn_pid=None (the recompute
-    launch-in-flight guard no longer protects it) and delete the logs/
-    mailbox of a live, just-launched worker out from under it. Refuse
-    loudly instead, like the other two commands.
-
-    Post-testing wave, item 1c: this guard checks the RAW stored status
-    directly rather than calling recompute_worker (deliberately, to avoid a
-    probe just to decide whether to refuse) -- so it duplicates
-    recompute_status's own `_launch_claim_expired` check inline (cheap: it
-    only needs the record's own `last_activity`, no subprocess call) rather
-    than trusting a possibly-stale persisted status. Without this, an
-    EXPIRED claim (last_activity older than LAUNCH_CLAIM_MAX_AGE_SECONDS --
-    the fleet CLI died mid-launch and nothing ever re-persisted the demoted
-    status) would refuse `fleet kill` forever, since nothing else in this
-    command's path calls recompute_worker to flip the raw stored status to
-    "dead" first.
-
-    M-B T8: native (`dispatch_kind:"bg"`) records route through
-    `_cmd_kill_native` after the shared unknown-worker/launch-in-flight-
-    guard/`_confirm_destructive` prelude below -- the launch-in-flight guard
-    for native mirrors the legacy one's wording but keys on `session_id is
-    None` (native never uses `turn_pid`) rather than `turn_pid is None`."""
+    Launch-in-flight guard: a pre-claim with `session_id is None` (dispatch
+    still in flight, not yet expired per `_launch_claim_expired`) refuses
+    loudly -- there is no real session to stop yet, and marking it dead
+    would race the in-flight dispatch's own commit."""
     with fleet_lock():
         data = load_registry()
         if args.name not in data["workers"]:
             raise FleetCliError(f"unknown worker: {args.name!r}")
         rec = data["workers"][args.name]
-        native = is_native(rec)
-        if native:
-            refuse_if_archived(args.name, rec, "kill")
-            if rec.get("session_id") is None and not _launch_claim_expired(rec.get("last_activity")):
-                raise FleetCliError(
-                    f"launch in flight for {args.name}; retry in a few seconds"
-                )
-        elif (rec.get("status") == "working" and rec.get("turn_pid") is None
-                and not _launch_claim_expired(rec.get("last_activity"))):
+        refuse_if_archived(args.name, rec, "kill")
+        if rec.get("session_id") is None and not _launch_claim_expired(rec.get("last_activity")):
             raise FleetCliError(
                 f"launch in flight for {args.name}; retry in a few seconds"
             )
         workers_snapshot = {args.name: dict(rec)}
 
     # §5.1: acknowledge before retiring a worker this session did not spawn.
-    # Runs BEFORE _interrupt_worker (refusing after the turn is already dead
-    # would help nobody) and OUTSIDE fleet_lock (an interactive prompt must
-    # never block every other fleet command on a human's keystroke).
+    # OUTSIDE fleet_lock (an interactive prompt must never block every other
+    # fleet command on a human's keystroke).
     _confirm_destructive("kill", [args.name], workers_snapshot,
                          assume_yes=getattr(args, "yes", False))
 
-    if native:
-        return _cmd_kill_native(args.name, workers_snapshot[args.name], run=run, which=which)
-
-    outcome = _interrupt_worker(args.name, get_process_info=get_process_info, kill_process_tree=kill_process_tree)
-    if outcome == "not_running":
-        sleep(_DEAD_CONFIRM_DELAY_SECONDS)
-        outcome = _interrupt_worker(args.name, get_process_info=get_process_info, kill_process_tree=kill_process_tree)
-
-    with fleet_lock():
-        data = load_registry()
-        rec = data["workers"].get(args.name)
-        if rec is not None:
-            rec["status"] = "dead"
-            rec["turn_pid"] = None
-            rec["turn_pid_ctime"] = None
-            save_registry(data)
-        append_event("killed", args.name, interrupt_outcome=outcome)
-
-    if outcome == "kill_failed":
-        print(
-            f"fleet: {args.name}: kill attempted but the turn still appears to be running -- "
-            "marked dead anyway (kill is a terminal action); investigate the process manually",
-            file=sys.stderr,
-        )
-        return 1
-    print(f"{args.name}: killed")
-    return 0
+    return _cmd_kill_native(args.name, workers_snapshot[args.name], run=run, which=which)
 
 
 def _remove_worker_files(name: str, sid: str, retired_sids: list = ()) -> list:
@@ -7754,12 +6579,11 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run, get_process_info=No
     every health check below and prints one [PASS]/[FAIL] line each;
     exits nonzero iff any check is not ok.
 
-    Snapshots the registry under one fleet_lock() (matching
-    _interrupt_worker's snapshot pattern) then runs every check OUTSIDE
-    the lock: several checks shell out (claude --version, claude agents
-    --json, two real hook-smoke subprocesses) and holding fleet_lock
-    across them would starve every concurrent `fleet` command exactly the
-    way F4 existed to prevent for _interrupt_worker."""
+    Snapshots the registry under one fleet_lock() then runs every check
+    OUTSIDE the lock: several checks shell out (claude --version, claude
+    agents --json, two real hook-smoke subprocesses) and holding fleet_lock
+    across them would starve every concurrent `fleet` command (F4
+    doctrine)."""
     with fleet_lock():
         data = load_registry()
     workers = data.get("workers", {})
@@ -9335,7 +8159,7 @@ def main(argv=None) -> int:
     except RegistryCorruptError as exc:
         print(f"fleet: registry error: {exc}", file=sys.stderr)
         return 1
-    except (FleetCliError, ClaudeNotFoundError, TurnLaunchError, ValueError, FleetLockTimeout,
+    except (FleetCliError, ClaudeNotFoundError, ValueError, FleetLockTimeout,
             UnsupportedPlatformError) as exc:
         print(f"fleet: {exc}", file=sys.stderr)
         return 1
