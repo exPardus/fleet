@@ -3776,7 +3776,13 @@ def _cmd_send_native(name: str, before: dict, message: str,
             )
 
         if status == "working":
-            data["workers"][name] = after
+            # S5 fix (final wave): strip the transient waiting_for_permission
+            # key before persisting -- T5's I1 pattern (cmd_status/cmd_wait/
+            # cmd_clean), replicated here since this working-branch persist
+            # was the one T7-era commit path that missed it.
+            persisted = dict(after)
+            persisted.pop("waiting_for_permission", None)
+            data["workers"][name] = persisted
             save_registry(data)
             sid = after["session_id"]
             if sid is None:
@@ -3830,6 +3836,14 @@ def _cmd_send_native(name: str, before: dict, message: str,
         # send) never re-derives this in-flight window as stale-outcome
         # "idle" again (has_fresh_outcome is anchored on last_dispatch_at,
         # never on the outcome record's mere presence).
+        # S3 fix (final wave): snapshot the PRE-pre-claim last_dispatch_at so
+        # a failed dispatch's rollback can restore it verbatim. Restoring
+        # only status="idle" (as before) leaves the anchor advanced to this
+        # attempt's timestamp -- the next recompute anchors has_fresh_outcome
+        # on THAT timestamp, and the worker's genuinely-fresh-but-now-stale
+        # outcome record (predating this failed attempt) no longer vouches
+        # for it -- permanently stranding an idle worker as dead-suspected.
+        prior_last_dispatch_at = after.get("last_dispatch_at")
         after["status"] = "working"
         after["turn_pid"] = None
         after["last_activity"] = now_iso()
@@ -3858,17 +3872,28 @@ def _cmd_send_native(name: str, before: dict, message: str,
             if (r is not None and r.get("status") == "working"
                     and r.get("session_id") == old_sid):
                 r["status"] = "idle"
+                r["last_dispatch_at"] = prior_last_dispatch_at
                 save_registry(data)
         raise
 
     new_sid = result["session_id"]
     short_id = result["short_id"]
 
+    # S2 fix (final wave): the success commit used to guard only `r is not
+    # None`, unconditionally restamping over whatever a concurrent
+    # kill/interrupt/respawn --force did during the seconds-to-minutes
+    # dispatch window. Condition on `r.get("session_id") == old_sid` --
+    # mirroring the rollback's own condition above -- so a record that
+    # moved on (killed, tombstoned, or replaced by a fresh respawn
+    # pre-claim with session_id=None) is never silently restamped back to
+    # "working" under the fork's new sid.
+    commit_orphaned = {"flag": False}
+
     def _commit():
         with fleet_lock():
             data = load_registry()
             r = data["workers"].get(name)
-            if r is not None:
+            if r is not None and r.get("session_id") == old_sid:
                 _restamp_after_steer(r, new_sid, short_id)
                 r["status"] = "working"
                 r["turn_pid"] = None
@@ -3883,17 +3908,26 @@ def _cmd_send_native(name: str, before: dict, message: str,
                 # reference again.
                 _migrate_residual_mailbox(old_sid, new_sid)
                 # T7 fix wave (Minor, event-append symmetry): keep
-                # append_event inside the same `if r is not None:` guard as
-                # the mutation -- matches cmd_spawn's own commit shape.
-                # Previously fired unconditionally, so a concurrent
-                # kill/clean racing this window got a "steered" event in
-                # its audit trail even though no registry mutation happened.
+                # append_event inside the same guard as the mutation --
+                # matches cmd_spawn's own commit shape. Previously fired
+                # unconditionally, so a concurrent kill/clean racing this
+                # window got a "steered" event in its audit trail even
+                # though no registry mutation happened.
                 append_event("steered", name, old_session_id=old_sid,
                             new_session_id=new_sid, short_id=short_id)
+            elif r is not None:
+                commit_orphaned["flag"] = True
+                append_event("steer_orphaned", name, old_session_id=old_sid,
+                            new_session_id=new_sid)
 
     if not _commit_launched_turn(_commit, sleep=sleep):
         _report_stranded_native_turn(name, new_sid, short_id)
         return 1
+
+    if commit_orphaned["flag"]:
+        print(f"{name}: changed during dispatch (killed/interrupted?) -- "
+              f"new session {short_id} left for manual adoption or archive")
+        return 0
 
     _write_ceiling_file(new_sid, token_ceiling)
     # T7 fix wave (Minor, ceiling-file leak): the OLD sid's ceiling file is
@@ -4197,11 +4231,15 @@ def _resume_one_limited_native(name: str, old_sid: str, cwd, mode, model, catego
     except OSError:
         pass
 
+    # S2 fix (final wave): mirror send's own guard -- only restamp when the
+    # record still matches the pre-dispatch snapshot (session_id == old_sid).
+    commit_orphaned = {"flag": False}
+
     def _commit():
         with fleet_lock():
             data = load_registry()
             r = data["workers"].get(name)
-            if r is not None:
+            if r is not None and r.get("session_id") == old_sid:
                 r["retired_sids"] = list(r.get("retired_sids", [])) + [old_sid]
                 r["session_id"] = new_sid
                 r["native_short_id"] = short_id
@@ -4217,10 +4255,17 @@ def _resume_one_limited_native(name: str, old_sid: str, cwd, mode, model, catego
                 # OLD-sid mailbox onto the new fork -- see
                 # _migrate_residual_mailbox's docstring.
                 _migrate_residual_mailbox(old_sid, new_sid)
-            append_event("limit_resumed", name, old_session_id=old_sid, session_id=new_sid)
+                append_event("limit_resumed", name, old_session_id=old_sid, session_id=new_sid)
+            elif r is not None:
+                commit_orphaned["flag"] = True
+                append_event("steer_orphaned", name, old_session_id=old_sid,
+                            new_session_id=new_sid)
 
     if not _commit_launched_turn(_commit, sleep=sleep):
         _report_stranded_native_turn(name, new_sid, short_id)
+    elif commit_orphaned["flag"]:
+        print(f"{name}: changed during dispatch (killed/interrupted?) -- "
+              f"new session {short_id} left for manual adoption or archive")
     return True
 
 
@@ -7073,7 +7118,12 @@ def _atomic_append_bytes(path: Path, data: bytes) -> None:
     try:
         written = wintypes.DWORD(0)
         ok = kernel32.WriteFile(handle, data, len(data), ctypes.byref(written), None)
-        if not ok:
+        # Roll-up item 4: a partial write (ok=True, written.value < len(data))
+        # produces a torn JSONL line that read_outcomes silently skips --
+        # the exact silent-loss failure class T1's CRITICAL fix existed to
+        # kill. Treat it the same as a WriteFile failure: raise OSError
+        # (already inside this function's raise-OSError contract).
+        if not ok or written.value != len(data):
             raise OSError(f"WriteFile failed for {path}: {ctypes.WinError()}")
     finally:
         kernel32.CloseHandle(handle)
@@ -7201,8 +7251,17 @@ def _restamp_after_steer(record: dict, new_sid: str, short_id: str) -> None:
     stamp last_dispatch_at (the fresh-outcome anchor for the NEXT
     recompute), and bump turns -- mirrors _resume_one_limited_native's
     inline commit shape, shared here so `send` and a future resume-limited
-    refactor stay in lockstep."""
-    record["retired_sids"] = list(record.get("retired_sids", [])) + [record["session_id"]]
+    refactor stay in lockstep.
+
+    S2 fix (final wave), defense-in-depth: never append a None into
+    retired_sids -- a caller reached here with `record["session_id"]` is
+    None (e.g. a respawn --force's fresh pre-claim) would otherwise poison
+    retired_sids, which `_cmd_kill_native`'s sweep later feeds straight into
+    `_stop_native_session(None)` -> `run([exe, "stop", None])`, a TypeError
+    outside the caught (OSError, SubprocessError) tuple."""
+    old_sid = record["session_id"]
+    if old_sid is not None:
+        record["retired_sids"] = list(record.get("retired_sids", [])) + [old_sid]
     record["session_id"] = new_sid
     record["native_short_id"] = short_id
     record["last_dispatch_at"] = now_iso()
@@ -7460,7 +7519,11 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
     # mistaken for the one just launched. A snapshot fetch failure never
     # blocks dispatch -- fall back to an empty exclusion set.
     pre_ok, pre_entries = roster_fetch()
-    pre_sids = ({e.get("sessionId") for e in pre_entries if isinstance(e, dict)}
+    # Roll-up item 3: filter the sessionId VALUE's type too -- a dict-valued
+    # sessionId (CLI drift / hostile roster) would otherwise land in the set
+    # and raise TypeError from the unhashable value.
+    pre_sids = ({e.get("sessionId") for e in pre_entries
+                 if isinstance(e, dict) and isinstance(e.get("sessionId"), str)}
                 if pre_ok else frozenset())
     try:
         proc = run(argv, cwd=str(cwd), env=_worker_env(name),
@@ -7999,8 +8062,10 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     roster_fetch = lambda: _fetch_agents_roster(which=which, run=run)  # noqa: E731
     exe = resolve_claude_executable(which=which)
     pre_ok, pre_payload = roster_fetch()
+    # Roll-up item 3: same hostile-sessionId-value guard as dispatch_bg's
+    # pre-snapshot above.
     pre_sids = {e.get("sessionId") for e in (pre_payload if pre_ok else [])
-                if isinstance(e, dict)}
+                if isinstance(e, dict) and isinstance(e.get("sessionId"), str)}
     name = f"sup|{successor_inc}|successor"
     argv = [exe, "--bg", "-n", name]
     if getattr(args, "model", None):
@@ -8127,7 +8192,10 @@ def cmd_sup_handoff_abort(args, which=shutil.which, run=subprocess.run) -> int:
         else:
             flag = read_handoff_abort_flag()
             recorded_sid = flag.get("successor_sid") if flag is not None else None
-            if recorded_sid != args.successor_sid:
+            # Roll-up item 8: an abort flag recorded with successor_sid=None
+            # (the dispatch-failed shape) must never match an
+            # args.successor_sid that is itself None -- guard both sides.
+            if args.successor_sid is None or recorded_sid != args.successor_sid:
                 raise FleetCliError(
                     f"no HANDSHAKE and --successor-sid {args.successor_sid} matches no "
                     f"recorded limbo successor -- refusing to stop an unverified session "
@@ -8145,18 +8213,15 @@ def cmd_sup_handoff_abort(args, which=shutil.which, run=subprocess.run) -> int:
         })
         claim["heartbeat_at"] = now_iso()   # old resumes duty
         write_incarnation(claim)
-    exe = resolve_claude_executable(which=which)
-    try:
-        proc = run([exe, "stop", args.successor_sid], capture_output=True, text=True,
-                   encoding="utf-8", errors="replace", timeout=60)
-    except (OSError, subprocess.SubprocessError) as exc:
-        print(f"WARNING: `claude stop {args.successor_sid}` stop failed "
-              f"({exc}) -- successor may still be live; stop it manually via the "
-              f"agents menu. Abort flag is set either way.")
-        return 0
-    if proc.returncode != 0:
-        print(f"WARNING: `claude stop {args.successor_sid}` stop failed "
-              f"(exit {proc.returncode}: {(proc.stderr or '').strip()[:200]}) -- "
+    # S1 fix (final wave): route through _stop_native_session -- the ONLY
+    # sanctioned stop primitive -- instead of an inline full-sid `run(...)`.
+    # T12 established `claude stop` requires the SHORT id; the raw full-sid
+    # call here no-op'd 100% of the time (job-ref conversion is entirely
+    # internal to _stop_native_session/_rm_native_session, and this was not
+    # a call site of either).
+    stopped = _stop_native_session(args.successor_sid, run=run, which=which, timeout=60)
+    if not stopped:
+        print(f"WARNING: `claude stop {args.successor_sid}` stop failed -- "
               f"successor may still be live; stop it manually via the agents menu. "
               f"Abort flag is set either way.")
     else:
