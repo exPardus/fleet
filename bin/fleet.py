@@ -6118,23 +6118,42 @@ def _archive_move_and_rm(n: str, sid: str, retired: list, dest_dir: Path,
         print(f"fleet: {n}: rm {s[:8]}... {'ok' if ok else 'failed'}", file=sys.stderr)
 
 
+def _native_job_ref(sid: str) -> str:
+    """T12 fix wave (finding 2): `claude stop`/`claude rm` require the SHORT
+    id, not the full `session_id` fleet stores/passes everywhere -- empirically
+    confirmed 2/2 (`claude stop <full-uuid>` -> "No job matching", the same
+    call with the 8-char short id -> success). Every observed short id is the
+    first hyphen-delimited segment of the full sid, so derive it uniformly
+    here rather than special-casing callers that do/don't have a stored
+    `native_short_id` (retired sids have none)."""
+    return sid.split("-", 1)[0] if sid else sid
+
+
 def _rm_native_session(sid: str, run=subprocess.run, which=shutil.which,
                        timeout: int = 30) -> bool:
     """`claude rm <sid>` (G12 CONFIRMED): the archival primitive -- removes
     the roster entry and its backing `~/.claude/jobs/<short-id>/` dir.
     Never raises: an unresolvable `claude` executable or any subprocess
     error both resolve to False, exactly like `_stop_native_session` --
-    the caller treats every rm as best-effort/non-fatal and reports it."""
+    the caller treats every rm as best-effort/non-fatal and reports it.
+
+    T12 fix wave (finding 2): `claude rm` requires the SHORT id -- converts
+    via `_native_job_ref` first; on a nonzero exit, retries once with the
+    full sid (belt-and-braces against a future CLI accepting full ids)."""
     try:
         exe = resolve_claude_executable(which)
     except ClaudeNotFoundError:
         return False
-    try:
-        proc = run([exe, "rm", sid], capture_output=True, text=True,
-                  encoding="utf-8", errors="replace", timeout=timeout)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return proc.returncode == 0
+    refs = dict.fromkeys((_native_job_ref(sid), sid))
+    for ref in refs:
+        try:
+            proc = run([exe, "rm", ref], capture_output=True, text=True,
+                      encoding="utf-8", errors="replace", timeout=timeout)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        if proc.returncode == 0:
+            return True
+    return False
 
 
 def _archive_move(src: Path, dest: Path, name: str) -> None:
@@ -7154,17 +7173,25 @@ def _stop_native_session(sid: str, run=subprocess.run, which=shutil.which,
     sid's budget) but `_cmd_kill_native`'s retired-sid sweep passes 5s --
     those stops are best-effort only and unbounded wall-time across a
     long-lived worker's whole retired_sids history is the actual defect
-    being fixed, not the primary sid's own stop."""
+    being fixed, not the primary sid's own stop.
+
+    T12 fix wave (finding 2): `claude stop` requires the SHORT id -- converts
+    via `_native_job_ref` first; on a nonzero exit, retries once with the
+    full sid (belt-and-braces against a future CLI accepting full ids)."""
     try:
         exe = resolve_claude_executable(which)
     except ClaudeNotFoundError:
         return False
-    try:
-        proc = run([exe, "stop", sid], capture_output=True, text=True,
-                  encoding="utf-8", errors="replace", timeout=timeout)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return proc.returncode == 0
+    refs = dict.fromkeys((_native_job_ref(sid), sid))
+    for ref in refs:
+        try:
+            proc = run([exe, "stop", ref], capture_output=True, text=True,
+                      encoding="utf-8", errors="replace", timeout=timeout)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        if proc.returncode == 0:
+            return True
+    return False
 
 
 def _restamp_after_steer(record: dict, new_sid: str, short_id: str) -> None:
@@ -7300,6 +7327,21 @@ NATIVE_NAME_HINT_MAX = 40
 # to a single literal, behavior-identical.
 _BG_SHORT_ID_RE = re.compile(r"backgrounded\s*·\s*(\S+)\s*·")
 
+# T12 fix wave (finding 3, discovered during live verification): the daemon
+# colorizes the short id in `--bg` stdout whenever the CHILD inherits a
+# color-forcing env var (FORCE_COLOR/CLICOLOR_FORCE) from the parent shell --
+# it does NOT gate on stdout being a real tty, so this fires even though
+# `dispatch_bg`'s subprocess.run pipes stdout (capture_output=True). Left
+# unstripped, `\S+` in _BG_SHORT_ID_RE greedily swallows the ANSI CSI codes
+# wrapping the id (confirmed live: stdout repr'd to
+# `'backgrounded \xb7 \x1b[36m8e4a79bb\x1b[39m \xb7 ...'`), so the captured
+# "short id" never prefix-matches any real sessionId and the roster-join
+# loop spins to its full NATIVE_JOIN_VERIFY_SECONDS deadline every time --
+# live-confirmed root cause of every "no roster entry joined -- possible
+# DOA" failure in this environment (FORCE_COLOR=3 is set); with it stripped,
+# the join succeeds on the first poll (<1s).
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
 
 class NativeDispatchError(Exception):
     """T4 fix wave (Critical C1): carries the short id whenever dispatch_bg
@@ -7326,7 +7368,8 @@ def render_native_name(category, name: str, hint: str) -> str:
 
 
 def _parse_bg_short_id(stdout_text: str):
-    m = _BG_SHORT_ID_RE.search(stdout_text or "")
+    clean = _ANSI_ESCAPE_RE.sub("", stdout_text or "")
+    m = _BG_SHORT_ID_RE.search(clean)
     return m.group(1) if m else None
 
 
@@ -7393,6 +7436,12 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
     if resume_sid:
         argv += ["--resume", resume_sid]
     argv += ["-n", rendered, "--settings", settings.as_posix()]
+    # T12 fix wave (finding 1): the task file lives under FLEET_HOME/tasks,
+    # virtually always outside the worker's own --dir cwd -- under any
+    # non-bypass mode the worker's first Read on it hangs forever on an
+    # unapprovable headless permission prompt. --add-dir pre-authorizes
+    # tasks_dir() specifically (least privilege -- never FLEET_HOME wholesale).
+    argv += ["--add-dir", tasks_dir().as_posix()]
     # T4 fix wave (Important I1): additive param -- forwards the persisted
     # --setting-sources value onto the native --bg argv, which the frozen
     # T3 dispatch_bg signature never carried. UNOBSERVED under --bg at
