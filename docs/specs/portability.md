@@ -3,6 +3,8 @@
 **Status:** ready-for-build (C4, 3 reviews + 3 fix waves + boot-identity re-scope, 2026-07-10) — BUILD WAVES REMAIN GATED on the SOAK GATE 1 signature
 **Inherits:** SPEC.md architecture, ROADMAP.md principles (esp. #5: one platform-adapter module).
 
+**[SUPERSEDED — native-substrate pivot 2026-07-13]** This whole spec's probe-matrix / `boot_identity` / `killpg` liveness design is superseded: process hosting and liveness are now owned by the native daemon (`claude agents`), not PID probing over a detached `Popen`. See `docs/superpowers/specs/2026-07-13-native-agents-pivot-design.md` §3 and `docs/specs/native-substrate.md`. MOVED, not deleted — kept below for history; do not build against it.
+
 ## Goal
 
 `fleet` works identically on Windows 10/11, Linux, macOS. Zero machine-specific content in git; `fleet init` generates it locally.
@@ -23,6 +25,8 @@ In: platform adapter module (`bin/platform_adapter.py` or section of fleet.py), 
 
 ## Decisions
 
+**[SUPERSEDED — native-substrate pivot 2026-07-13]** — daemon owns liveness now; see header.
+
 Every OQ resolution as one row. `Owner` is the exact C4 build task (per `docs/PLAN.md` Campaign 4) that implements it.
 
 | # | Decision | Evidence | Owner task | Residual risk |
@@ -42,6 +46,8 @@ Every OQ resolution as one row. `Owner` is the exact C4 build task (per `docs/PL
 
 ## Per-OS probe matrix
 
+**[SUPERSEDED — native-substrate pivot 2026-07-13]** — daemon owns liveness now; see header.
+
 | OS | Liveness query | ctime source | Tolerance | alive-unknown discriminator | Accepted residual |
 |---|---|---|---|---|---|
 | **Windows** (shipped reference, SPEC §4) | PowerShell `Get-Process -Id <pid>`, `Get-CimInstance Win32_Process` fallback | `$p.StartTime` (or CIM `CreationDate`) — a once-captured wall-clock instant, never recomputed on read | ±2 s | `.StartTime` throws `Win32Exception` (unelevated probe of a higher-integrity worker) — a PROBE-READ failure; a null/unparseable **stored** `turn_pid_ctime` is `"gone"`, not alive-unknown (F6 correction, matches shipped `bin/fleet.py:620-621`) | **Fix-wave F18 retag:** the doctor **elevation-mismatch** check is genuinely unbuilt, but its owner tag is stale — C2 is merged and closed (`48a50e0`); hardening kernel item 9 will not build it. Re-tagged: **unowned Windows-only residual, out of portability scope** (no POSIX analogue needed — POSIX has no UAC-style elevation split with the same probe-visibility failure mode). Everything else of the three-way probe is shipped. |
@@ -49,6 +55,8 @@ Every OQ resolution as one row. `Owner` is the exact C4 build task (per `docs/PL
 | **macOS** (D3, D4 — F5/F12/F13/F15/R2 fixes applied) | `ps -o state=,lstart=,comm= -p <pid>` with `LC_ALL=C` forced | `lstart` field (a once-captured wall-clock instant like Windows, immune to F1 — see D2's note), `strptime("%a %b %d %H:%M:%S %Y")` then labeled `tzinfo=timezone.utc` directly, **not converted via `time.mktime`** (F5/R2 fix-wave 2 — `mktime` reads the calling process's `TZ`, which reintroduced F1's failure class; a label is deterministic, a conversion isn't) | ±2 s (retains its original read-jitter meaning — this quantity is not boot-relative) | Empty/unparseable `ps` output (probe-read failure, sentinel `("claude", None)` per F3); a null/unparseable **stored** ctime is definitely-gone, not alive-unknown (F6) | **Implementation ships in `port-adapter-a`; the probe mechanism itself IS exercised by CI (F15 — see D10's reconciliation)**, so "correctness unverified on real hardware" is now scoped narrower: unverified against a *real operator attach/spawn workflow*, not against the probe's basic alive/gone/unknown classification, which `macos-latest` CI does exercise. **The DST-boundary residual this cell previously carried is retired (R2)** — no conversion means no DST question. State alphabet is `{Z}` only (F12 — `X`/`x` are Linux-only, do not carry over). Re-verify the operator-workflow gap on demand. |
 
 ## Platform adapter interface
+
+**[SUPERSEDED — native-substrate pivot 2026-07-13]** — daemon owns process hosting/kill now; see header.
 
 Exact method signatures `_PosixPlatform` (`bin/fleet.py:313-334`, currently a stub raising `UnsupportedPlatformError` from every method) must implement, derived from `_WindowsPlatform`'s shipped public surface (`bin/fleet.py:209-310`) — the duck-typed contract `TestPlatformAdapterBoundary`'s source-scan tests enforce (no ABC/Protocol exists; the contract is "same method names, same call sites in core, one selection branch at `PLATFORM = _WindowsPlatform() if os.name == "nt" else _PosixPlatform()`," `bin/fleet.py:340`).
 
@@ -256,6 +264,8 @@ The Windows side pins argv byte-for-byte (`["wt", "-d", cwd, "--", "claude", "--
 
 ## Boot identity (SPEC §4 F33)
 
+**[SUPERSEDED — native-substrate pivot 2026-07-13]** — F33's `turn_pid_boot_id` was never shipped and is cancelled, not carried into the native substrate; see header.
+
 **The decision is not this spec's.** `docs/SPEC.md` appendix **F33** + §4 own the registry field `turn_pid_boot_id`, the `probe_liveness` gate, the five failure cases, and the grep-enumerated eleven-site core-edit list. A portability spec specifies an adapter; core is SPEC.md's business. Two fix waves violated that boundary and each shipped a defect one call site away. **Do not re-specify the core plumbing here, and do not let a builder infer it from this section.**
 
 What this spec owns is exactly one adapter method, pinned in `## Platform adapter interface` above:
@@ -286,6 +296,8 @@ What this spec owns is exactly one adapter method, pinned in `## Platform adapte
 **`port-posix-smoke` must record**, on the real exercise box: `cat /proc/sys/kernel/random/boot_id`; whether fleet runs in a container; and, if so, whether a fresh process's `/proc/<pid>/stat` field 22 is host-uptime-scale or near-zero (the `CLONE_NEWTIME` question F33 residual 1 leaves open).
 
 ## Test port plan (B3)
+
+**[SUPERSEDED — native-substrate pivot 2026-07-13]** — ports the now-superseded probe adapter's test suite; see header.
 
 File-by-file, from the exact current line numbers (grepped this session; a builder should re-grep before editing since line numbers drift):
 
@@ -334,6 +346,8 @@ Each of the thirteen must pass the now-required keyword-only `stored_boot_id=` *
 
 ## Invariants touched
 
+**[SUPERSEDED — native-substrate pivot 2026-07-13]** — see header.
+
 Cites the SPEC.md numbered "Architectural invariants" section (§ "Architectural invariants (numbered)").
 
 - **Invariant 8 — platform-adapter-only OS branching.** The whole point of this phase: all OS-specific launch/liveness/kill/attach/notify behavior sits behind the adapter (`_PosixPlatform`, D1/D2/D3/D4/D6/D5), no scattered `if platform` in core. The one new wrinkle — `build_attach_argv`'s `None` sentinel and `cmd_attach`'s consequent `None`-check — stays inside the invariant because the branch is on a return VALUE, not an OS name/platform check (see `## Platform adapter interface`, consumer-side note); `TestPlatformAdapterBoundary`'s two source-scan tests remain the mechanical enforcement, unmodified (D12/Finding #2).
@@ -341,6 +355,8 @@ Cites the SPEC.md numbered "Architectural invariants" section (§ "Architectural
 - **Invariant 7 — one-live-claude-per-session.** Newly cited (the stub named only 5 and 8). The three-way probe's alive-unknown-never-demoted rule (D4) and the kill-tree residual (D6) both bear directly on this invariant: a false "definitely-gone" verdict on POSIX would let a launch path start a second live claude on a session whose turn is actually still running — the exact failure the Windows probe's ctime-match and never-demote-alive-unknown rules exist to prevent (SPEC §4). D6's kill-tree accepted residual (a `setsid()`-escaped grandchild survives a kill) does not itself threaten invariant 7 — it is orphaned worker-side tooling, not a second live `claude` on the fleet-tracked session — but is recorded here because it is the one place POSIX's kill primitive provides weaker guarantees than Windows'. **Fix-wave 2 (R1):** a false "definitely-**gone**" is not the only invariant-7-adjacent failure a bad liveness verdict can cause — the fix-wave-1 synthetic-epoch representation, before R1's boot-identity gate, could also produce a false "**alive**" across a reboot, which does not itself double-launch a claude but does authorize `_interrupt_worker`'s `killpg` against a live, unrelated process group (a different failure this invariant's rationale did not originally anticipate, since the shipped Windows probe's absolute `StartTime` has no boot-relative analogue to get this wrong). D2's boot-identity gate closes it by construction (a boot-id mismatch is routed to definitely-gone, which `_interrupt_worker`'s pre-kill `pid_alive` check already refuses to act on) rather than by tightening the existing alive-unknown rule.
 
 ## Done criteria
+
+**[SUPERSEDED — native-substrate pivot 2026-07-13]** — see header; this build is not gated on these criteria.
 
 Sharpened against `docs/PLAN.md` Campaign 4's task table (`spec-portability`, build waves, `port-ci`, `port-posix-smoke`):
 
@@ -355,6 +371,8 @@ Sharpened against `docs/PLAN.md` Campaign 4's task table (`spec-portability`, bu
 **Not a done criterion (F19 — explicit, not silently dropped):** D7's doctor exec-check (does the embedded `{{PYTHON}}` path still execute) is DEFERRED, demand-gated — `port-adapter-b` may add it opportunistically but no criterion above requires it; it is re-vetted (promoted to required) the first time a venv-move/distro-upgrade actually breaks a worker in practice.
 
 ## Open questions
+
+**[SUPERSEDED — native-substrate pivot 2026-07-13]** — see header.
 
 All resolved. None left open, per the done criterion this task itself is graded against.
 
