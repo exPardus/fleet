@@ -152,6 +152,23 @@ class TestHuskSweep:
         assert fleet._sweep_husks(False, run=run, which=lambda _: "claude") == []
         assert rm_targets(calls) == []
 
+    def test_startup_transient_state_only_entry_never_selected(self, home):
+        """Live finding 2026-07-16: a freshly dispatched session's roster
+        entry is state-only for its first seconds -- the same shape the
+        sweep's liveness test reads as dead. Must never be rm'd: its sid
+        is the current session_id of a non-archived record, so the
+        PROTECTED set covers it regardless of the roster transient (and a
+        pre-registry-stamp sid is unowned => default-deny). Pinned
+        explicitly so the protection isn't accidental."""
+        seed_worker("justborn", SID_LIVE, status="working")
+        transient = {"id": SID_LIVE[:8], "sessionId": SID_LIVE,
+                     "name": "fleet|justborn|t", "kind": "background",
+                     "state": "working"}  # no status, no pid
+        calls = []
+        run = fake_run_factory([transient], calls=calls)
+        assert fleet._sweep_husks(False, run=run, which=lambda _: "claude") == []
+        assert rm_targets(calls) == []
+
     def test_tombstone_sid_is_a_husk(self, home):
         seed_worker("tomb", SID_TOMB, archived_at=_iso(NOW))
         run = fake_run_factory([roster_dead(SID_TOMB)])
@@ -910,6 +927,30 @@ class TestDoctorAutoclean:
             json.dumps({"ts": _iso(NOW)}), encoding="utf-8")
         _, ok, msg = fleet._doctor_check_autoclean()
         assert ok and "task installed" in msg
+
+    def test_stamp_errors_surfaced(self, home, monkeypatch):
+        """LOW advisory (confirmation pass): a bricked run must not read as
+        green-and-fresh -- the stamp's errors array reaches the note."""
+        monkeypatch.setattr(fleet.PLATFORM, "autoclean_task_query",
+                            lambda task_name, run=None: "py fleet.py autoclean")
+        fleet.autoclean_stamp_path().write_text(
+            json.dumps({"ts": _iso(NOW),
+                        "errors": ["husks: FleetCliError: boom"]}),
+            encoding="utf-8")
+        _, ok, msg = fleet._doctor_check_autoclean()
+        assert ok  # still note-only
+        assert "error" in msg and "boom" in msg
+
+    def test_quarantine_artifact_surfaced(self, home, monkeypatch):
+        """LOW advisory: a present fleet.json.corrupt.* means tier 2 is
+        refusing itself -- doctor must say so even with no task installed."""
+        monkeypatch.setattr(fleet.PLATFORM, "autoclean_task_query",
+                            lambda task_name, run=None: None)
+        (home / "state" / "fleet.json.corrupt.20260716T000000Z").write_text(
+            "{", encoding="utf-8")
+        _, ok, msg = fleet._doctor_check_autoclean()
+        assert ok  # still note-only
+        assert "quarantine artifact" in msg
 
     def test_unsupported_platform_skipped(self, home, monkeypatch):
         def raiser(task_name, run=None):

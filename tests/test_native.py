@@ -930,6 +930,63 @@ class TestNativeRecompute:
         assert out["status"] == "dead-suspected"
 
 
+class TestDispatchGraceWindow:
+    """Live finding 2026-07-16 (pin suite RED 3/6): a freshly dispatched
+    --bg session's roster entry carries STATE ONLY ({'state':'working'},
+    no status/pid) for its first seconds -- status+pid appear only once
+    the process attaches. The field-presence rule reads state-only as
+    dead, so the no-outcome investigation verdicted a healthy 1.5s-old
+    worker dead-suspected and `fleet wait` returned instantly (the pin
+    repro). Within the dispatch grace window (same principle and constant
+    as the sid=None pre-claim guard, anchored on last_dispatch_at) the
+    verdict must stay `working`."""
+
+    def _fresh_rec(self, native_home, seconds_ago=2, **kw):
+        return seed_native_worker(
+            native_home, status="working",
+            last_dispatch_at=fleet.ctime_to_iso(
+                datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)),
+            **kw)
+
+    def test_state_only_entry_within_grace_stays_working(self, native_home):
+        rec = self._fresh_rec(native_home)
+        entry = make_roster_entry(SID, status=None, pid=None, state="working")
+        out = fleet.recompute_worker_native("w1", rec, [entry])
+        assert out["status"] == "working"
+
+    def test_roster_gone_within_grace_stays_working(self, native_home):
+        rec = self._fresh_rec(native_home)
+        out = fleet.recompute_worker_native("w1", rec, [])
+        assert out["status"] == "working"
+
+    def test_state_only_past_grace_no_outcome_dead_suspected(self, native_home):
+        # existing behavior pinned: past the window, today's verdict holds
+        rec = self._fresh_rec(native_home,
+                              seconds_ago=fleet.LAUNCH_CLAIM_MAX_AGE_SECONDS + 60)
+        entry = make_roster_entry(SID, status=None, pid=None, state="working")
+        out = fleet.recompute_worker_native("w1", rec, [entry])
+        assert out["status"] == "dead-suspected"
+
+    def test_state_only_with_fresh_outcome_goes_idle(self, native_home):
+        # turn completed during the window: the fresh-outcome check runs
+        # BEFORE the grace check, so completion is never masked as working
+        rec = self._fresh_rec(native_home)
+        fleet.append_outcome("w1", {"ts": fleet.now_iso(), "session_id": SID,
+                                    "kind": "result"})
+        entry = make_roster_entry(SID, status=None, pid=None, state="done")
+        out = fleet.recompute_worker_native("w1", rec, [entry])
+        assert out["status"] == "idle"
+
+    def test_limit_park_wins_over_grace(self, native_home, monkeypatch):
+        # a limit wall detected in the transcript parks limited even inside
+        # the window -- grace only guards the dead-suspected demotion
+        monkeypatch.setattr(fleet, "_limit_scan_hook",
+                            lambda sid, **kw: (True, "2026-07-17T00:00:00Z", "session_5h"))
+        rec = self._fresh_rec(native_home)
+        out = fleet.recompute_worker_native("w1", rec, [])
+        assert out["status"] == "limited"
+
+
 class TestEpochFreeze:
     def test_fetch_failure_is_suspicious(self):
         assert fleet.native_epoch_suspicious(False, "no claude", {}) is True
