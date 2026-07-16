@@ -3554,6 +3554,7 @@ def cmd_wait(args, get_process_info=None, sleep=time.sleep, clock=time.monotonic
     # freeze, or `finished` itself empty) falls back to the poll verdict,
     # which is the only one that exists for it.
     persisted_status: dict = {}
+    epoch_frozen = False
     if finished:
         # M-B T5: wait_for_workers already picked the terminal verdict for
         # any native name in `finished` via recompute_worker_native (never
@@ -3633,6 +3634,14 @@ def cmd_wait(args, get_process_info=None, sleep=time.sleep, clock=time.monotonic
         results = [e for e in tail_events(log_path, n=None) if e["kind"] == "result"]
         summary = results[-1]["text"] if results else "(no result event)"
         print(f"{n}: {status} -- {_truncate(summary, 120)}")
+    # Debt roll-up item 9 (T5-era residual): when the persist step's OWN
+    # roster fetch froze (G9), the rows above fall back to the earlier poll
+    # verdict -- the only one that exists -- and nothing was persisted. Say
+    # so, same convention as cmd_status/cmd_clean's freeze line, instead of
+    # letting the stale verdict read as current-and-committed.
+    if epoch_frozen:
+        print("EPOCH: roster suspicious at persist -- native rows show the "
+              "pre-freeze poll verdict; nothing persisted (G9)")
 
     if pending:
         if mode == "any" and finished:
