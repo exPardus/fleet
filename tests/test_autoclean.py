@@ -273,6 +273,109 @@ class TestRegistryFailOpen:
         assert fleet._sweep_husks(False, run=run, which=lambda _: "claude") == []
 
 
+class TestQuarantineArtifactGuard:
+    """NEW-1 (re-review, MED): the F1 refusal keyed solely on registry-file
+    ABSENCE. Two repro'd bypasses: (D) a routine spawn recreates fleet.json
+    with one record -> next tick rm's the OLD idle worker's session; (F) an
+    operator follows the old message's own 'or recreate' advice with an
+    empty registry -> same rm. Tier 2 must refuse while any
+    state/fleet.json.corrupt.* artifact exists, regardless of whether a
+    fleet.json is present."""
+
+    def _quarantine(self, home):
+        (home / "state" / "fleet.json").write_text("{corrupt", encoding="utf-8")
+        with pytest.raises(fleet.RegistryCorruptError):
+            fleet.load_registry()
+        artifacts = list((home / "state").glob("fleet.json.corrupt.*"))
+        assert artifacts, "quarantine rename did not happen"
+
+    def test_probe_d_spawn_recreated_registry_refuses(self, home):
+        fleet.append_event("turn_started", "oldworker", session_id=SID_EVENTS)
+        self._quarantine(home)
+        seed_worker("newworker", SID_LIVE, status="working")  # fresh registry, one record
+        calls = []
+        run = fake_run_factory([roster_dead(SID_EVENTS), roster_live(SID_LIVE)],
+                               calls=calls)
+        with pytest.raises(fleet.FleetCliError, match="quarantine"):
+            fleet._sweep_husks(False, run=run, which=lambda _: "claude")
+        assert rm_targets(calls) == []
+
+    def test_probe_f_recreated_empty_registry_refuses(self, home):
+        fleet.append_event("turn_started", "oldworker", session_id=SID_EVENTS)
+        self._quarantine(home)
+        fleet.save_registry({"workers": {}})  # operator "recreates"
+        calls = []
+        run = fake_run_factory([roster_dead(SID_EVENTS)], calls=calls)
+        with pytest.raises(fleet.FleetCliError, match="quarantine"):
+            fleet._sweep_husks(False, run=run, which=lambda _: "claude")
+        assert rm_targets(calls) == []
+
+    def test_artifact_cleared_and_registry_restored_sweep_resumes(self, home):
+        fleet.append_event("turn_started", "w", session_id=SID_EVENTS)
+        self._quarantine(home)
+        for p in (home / "state").glob("fleet.json.corrupt.*"):
+            p.unlink()
+        fleet.save_registry({"workers": {}})
+        run = fake_run_factory([roster_dead(SID_EVENTS)])
+        assert fleet._sweep_husks(False, run=run,
+                                  which=lambda _: "claude") == [SID_EVENTS]
+
+    def test_refusal_messages_never_advise_recreate(self, home):
+        # artifact-present refusal
+        fleet.append_event("turn_started", "w", session_id=SID_EVENTS)
+        self._quarantine(home)
+        fleet.save_registry({"workers": {}})
+        with pytest.raises(fleet.FleetCliError) as exc1:
+            fleet._sweep_husks(False, run=fake_run_factory([roster_dead(SID_EVENTS)]),
+                               which=lambda _: "claude")
+        # missing-registry refusal (artifact cleared, registry gone)
+        for p in (home / "state").glob("fleet.json.corrupt.*"):
+            p.unlink()
+        (home / "state" / "fleet.json").unlink()
+        with pytest.raises(fleet.FleetCliError) as exc2:
+            fleet._sweep_husks(False, run=fake_run_factory([roster_dead(SID_EVENTS)]),
+                               which=lambda _: "claude")
+        assert "recreate" not in str(exc1.value)
+        assert "recreate" not in str(exc2.value)
+
+
+class TestFleetHomeValidation:
+    """NEW-2 (re-review, LOW): --fleet-home was used verbatim -- a relative
+    path operated on a cwd-relative phantom home (System32 under Task
+    Scheduler) and a nonexistent home was silently mkdir'd."""
+
+    def test_nonexistent_home_refused_nothing_created(self, home):
+        phantom = home / "no-such-home"
+        with pytest.raises(fleet.FleetCliError, match="fleet-home"):
+            fleet.cmd_autoclean(_autoclean_args(fleet_home=str(phantom)),
+                                run=fake_run_factory([]), which=lambda _: "claude")
+        assert not phantom.exists()
+
+    def test_nonexistent_home_refused_even_dry_run(self, home):
+        phantom = home / "no-such-home"
+        with pytest.raises(fleet.FleetCliError, match="fleet-home"):
+            fleet.cmd_autoclean(_autoclean_args(fleet_home=str(phantom), dry_run=True),
+                                run=fake_run_factory([]), which=lambda _: "claude")
+        assert not phantom.exists()
+
+    def test_relative_home_resolved_before_use(self, home, monkeypatch, tmp_path_factory):
+        elsewhere = tmp_path_factory.mktemp("elsewhere")
+        monkeypatch.chdir(elsewhere)
+        # relative name that exists under neither cwd -> refused, no phantom
+        with pytest.raises(fleet.FleetCliError, match="fleet-home"):
+            fleet.cmd_autoclean(_autoclean_args(fleet_home="phantom-rel"),
+                                run=fake_run_factory([]), which=lambda _: "claude")
+        assert not (elsewhere / "phantom-rel").exists()
+
+    def test_existing_home_still_accepted(self, home, tmp_path_factory):
+        other = tmp_path_factory.mktemp("other-home")
+        (other / "state").mkdir()
+        rc = fleet.cmd_autoclean(_autoclean_args(fleet_home=str(other)),
+                                 run=fake_run_factory([]), which=lambda _: "claude")
+        assert rc == 0
+        assert (other / "state" / "autoclean-last-run.json").exists()
+
+
 class TestExpireTombstones:
     def test_expired_tombstone_dropped_files_kept(self, home):
         seed_worker("tomb", SID_TOMB, archived_at=_iso(NOW - timedelta(hours=100)))

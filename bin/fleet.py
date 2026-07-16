@@ -6620,11 +6620,31 @@ def _sweep_husks(dry_run: bool, run=subprocess.run, which=shutil.which) -> list:
     with fleet_lock():
         registry_missing = not registry_path().exists()
         data = {"workers": {}} if registry_missing else load_registry()
+    # NEW-1 (re-review, MED): the F1 absence check alone has two repro'd
+    # bypasses -- a routine spawn recreates fleet.json with one record, and
+    # an operator "recreating" an empty registry does the same: either way
+    # the file is PRESENT, the protected set is thin, and every
+    # pre-quarantine worker's events-vouched session becomes rm-eligible.
+    # So: any quarantine artifact on disk refuses the sweep outright,
+    # registry present or not. Deliberate deviation from the reviewed
+    # "artifact newer than current fleet.json" comparison: os.rename
+    # preserves mtime, so the artifact's mtime is the PRE-corruption write
+    # time and any recreated registry is always newer -- the comparison
+    # would never fire on exactly the spawn-recreation bypass it exists to
+    # stop. Presence-only is the sound superset; the operator clears the
+    # artifact (after restoring what it holds) to re-arm the sweep.
+    quarantine_artifacts = sorted(state_dir().glob("fleet.json.corrupt.*"))
+    if quarantine_artifacts:
+        raise FleetCliError(
+            f"husk sweep refused: quarantine artifact present "
+            f"({quarantine_artifacts[-1].name}) -- a corrupt registry was "
+            f"renamed aside and its workers may be missing from the current "
+            f"one; restore the quarantined file, then remove the artifact (NEW-1)")
     if registry_missing and (_events_sids() or _archive_dir_sids()):
         raise FleetCliError(
-            "husk sweep refused: state/fleet.json is missing while fleet "
-            "evidence (events.jsonl / logs/archive) exists -- possible "
-            "quarantine aftermath; restore or recreate the registry first (F1)")
+            "husk sweep refused: the registry (state/fleet.json) is missing "
+            "while fleet evidence (events.jsonl / logs/archive) exists -- "
+            "possible quarantine aftermath; restore the quarantined file first (F1)")
     workers = data.get("workers", {})
     if native_epoch_suspicious(roster_ok, payload, workers):
         raise FleetCliError("husk sweep refused: roster suspicious (G9)")
@@ -6716,8 +6736,17 @@ def cmd_autoclean(args, run=subprocess.run, which=shutil.which) -> int:
     provides no operator environment for the env-var route."""
     fleet_home_override = getattr(args, "fleet_home", None)
     if fleet_home_override:
+        # NEW-2 (re-review, LOW): resolve + validate, never use verbatim --
+        # a relative path is cwd-dependent (System32 under Task Scheduler)
+        # and a nonexistent home would be silently mkdir'd into a phantom
+        # (fleet_lock/stamp writes create state/ even under --dry-run).
+        resolved_home = Path(fleet_home_override).resolve()
+        if not resolved_home.is_dir():
+            raise FleetCliError(
+                f"--fleet-home does not exist or is not a directory: "
+                f"{resolved_home} (from {fleet_home_override!r})")
         global FLEET_HOME
-        FLEET_HOME = Path(fleet_home_override)
+        FLEET_HOME = resolved_home
     dry_run = bool(getattr(args, "dry_run", False))
     ttl_hours = getattr(args, "ttl_hours", None)
     expire_hours = getattr(args, "expire_tombstones_hours", None)
