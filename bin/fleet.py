@@ -477,7 +477,13 @@ def fleet_lock(timeout: float = LOCK_TIMEOUT_SECONDS):
         # acquirer until the stale-break window. Close and remove what we
         # just created (O_EXCL guarantees it is ours; no successor can have
         # legitimately claimed it inside the stale window) before re-raising.
-        os.close(fd)
+        # Fix-wave F4: the close itself is guarded -- if it also raised, the
+        # unlink was skipped (stranding the lock file anyway) and the close
+        # error masked the original write error on the way out.
+        try:
+            os.close(fd)
+        except OSError:
+            pass
         try:
             path.unlink()
         except OSError:
@@ -7587,7 +7593,8 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
     # mistaken for the one just launched. A snapshot fetch failure never
     # blocks dispatch -- fall back to an empty exclusion set.
     pre_ok, pre_entries = roster_fetch()
-    # Roll-up item 3: filter the sessionId VALUE's type too -- a dict-valued
+    # Unhashable-sessionId guard (debt roll-up, mislabeled "item 3" in an
+    # earlier wave): filter the sessionId VALUE's type too -- a dict-valued
     # sessionId (CLI drift / hostile roster) would otherwise land in the set
     # and raise TypeError from the unhashable value.
     pre_sids = ({e.get("sessionId") for e in pre_entries
@@ -8134,8 +8141,7 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     roster_fetch = lambda: _fetch_agents_roster(which=which, run=run)  # noqa: E731
     exe = resolve_claude_executable(which=which)
     pre_ok, pre_payload = roster_fetch()
-    # Roll-up item 3: same hostile-sessionId-value guard as dispatch_bg's
-    # pre-snapshot above.
+    # Same unhashable-sessionId guard as dispatch_bg's pre-snapshot above.
     pre_sids = {e.get("sessionId") for e in (pre_payload if pre_ok else [])
                 if isinstance(e, dict) and isinstance(e.get("sessionId"), str)}
     name = f"sup|{successor_inc}|successor"
