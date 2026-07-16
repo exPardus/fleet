@@ -711,8 +711,18 @@ def _append_event_quiet(kind: str, name: str, **fields) -> None:
     try:
         append_event(kind, name, **fields)
     except OSError as exc:
-        print(f"fleet: WARNING: event {kind!r} for {name} not recorded ({exc}) "
-              "-- registry commit unaffected", file=sys.stderr)
+        # Fix-wave N1: the notice itself must never raise back into the
+        # retried commit_fn (EPIPE is an OSError; a closed stderr raises
+        # ValueError). Fix-wave micro: include the fields payload -- for a
+        # lost turn_started/steered the sid in there IS what the forensics
+        # line exists to preserve.
+        try:
+            payload = json.dumps(fields, default=str)
+            print(f"fleet: WARNING: event {kind!r} for {name} not recorded "
+                  f"({exc}) -- fields {payload} -- registry commit unaffected",
+                  file=sys.stderr)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -2918,7 +2928,12 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
                     rec["turns"] = 1
                     rec["last_activity"] = now_iso()
                     save_registry(data)
-                    append_event("turn_started", args.name, session_id=fast_sid)
+                    # Fix-wave N2: post-save, same class as the retried
+                    # commit_fns -- a raw OSError here crashed the CLI after
+                    # the commit was durable, skipping the ceiling write and
+                    # success line (committed fast-completion read as a
+                    # failed spawn).
+                    _append_event_quiet("turn_started", args.name, session_id=fast_sid)
             _write_ceiling_file(fast_sid, record.get("token_ceiling"))
             print(f"{args.name} {fast_sid} (native bg, fast completion before join)")
             return 0
@@ -5194,7 +5209,9 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
                     rec["turns"] = 1
                     rec["last_activity"] = now_iso()
                     save_registry(data)
-                    append_event("turn_started", name, session_id=fast_sid)
+                    # Fix-wave N2: see cmd_spawn's fast-completion block --
+                    # post-save OSError must not crash a durable commit.
+                    _append_event_quiet("turn_started", name, session_id=fast_sid)
             _write_ceiling_file(fast_sid, token_ceiling)
             print(f"{name} {fast_sid} (native bg, fast completion before join)")
             return 0
