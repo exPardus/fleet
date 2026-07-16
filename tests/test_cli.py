@@ -324,7 +324,7 @@ class TestCmdSpawn:
         assert rec["cwd"] == str(worker_dir)
         assert rec["mode"] == "dontask"
         assert rec["model"] == "haiku"
-        assert rec["turn_pid"] is None  # native flow never populates the legacy Popen field
+        assert "turn_pid" not in rec  # legacy Popen field retired (pivot spec §6)
         assert rec["turns"] == 1
 
     def test_spawn_persists_setting_sources(self, isolated_home, tmp_path, monkeypatch):
