@@ -1,10 +1,9 @@
-"""Unit tests for the claude-fleet M1 CLI layer (bin/fleet.py: main() +
-argparse subcommands + detached turn launcher).
+"""Unit tests for the claude-fleet CLI layer (bin/fleet.py: main() +
+argparse subcommands + native dispatch plumbing).
 
-No real claude process is ever spawned: every test that reaches launch_turn
-injects a fake `popen` and a fake `get_process_info`. Every test monkeypatches
-fleet.FLEET_HOME to a pytest tmp_path (autouse fixture below), same discipline
-as test_core.py.
+No real claude process is ever spawned: every test injects a fake `run` /
+`which` / roster fetch. Every test monkeypatches fleet.FLEET_HOME to a
+pytest tmp_path (autouse fixture below), same discipline as test_core.py.
 """
 import io
 import json
@@ -35,50 +34,6 @@ def isolated_home(tmp_path, monkeypatch):
 
 def _parse(ctime_iso):
     return datetime.strptime(ctime_iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-
-
-class FakeStdin:
-    def __init__(self, raise_on_write=None, block_event=None):
-        self.written = b""
-        self.closed = False
-        # F-DOA: if set, write() raises this instead of appending bytes
-        # (simulates the child's read end having closed -- BrokenPipeError).
-        self._raise_on_write = raise_on_write
-        # F-BLOCK: if set, write() blocks on this threading.Event before
-        # doing anything else (simulates a slow/wedged reader).
-        self._block_event = block_event
-
-    def write(self, data):
-        if self._block_event is not None:
-            self._block_event.wait()
-        if self._raise_on_write is not None:
-            raise self._raise_on_write
-        self.written += data
-
-    def close(self):
-        self.closed = True
-
-
-class FakeProc:
-    def __init__(self, pid, stdin=None, poll_returns=None):
-        self.pid = pid
-        self.stdin = stdin if stdin is not None else FakeStdin()
-        # F-DOA/F-BLOCK: poll_returns is either None (process never exits --
-        # the default, matching a normal healthy launch) or a fixed int
-        # returncode that poll() reports from the very first call onward.
-        self._poll_returns = poll_returns
-
-    def poll(self):
-        return self._poll_returns
-
-
-def _fake_popen(proc, calls=None):
-    def popen(argv, **kwargs):
-        if calls is not None:
-            calls["argv"] = argv
-            calls["kwargs"] = kwargs
-        return proc
-    return popen
 
 
 def _spawn_args(name, dir_, task, mode="dontask", model=None, max_budget_usd=None):
@@ -131,90 +86,6 @@ def _native_roster_with(sid=NATIVE_SID, **kw):
             return True, []
         return True, [_make_native_roster_entry(sid, **kw)]
     return fetch
-
-
-# ---------------------------------------------------------------------------
-# build_turn_argv (pure argv builder, SPEC §6)
-# ---------------------------------------------------------------------------
-
-class TestBuildTurnArgv:
-    def test_first_turn_uses_session_id(self):
-        argv = fleet.build_turn_argv("claude.cmd", "sid-1", first=True, mode="omit")
-        assert "--session-id" in argv
-        assert argv[argv.index("--session-id") + 1] == "sid-1"
-        assert "--resume" not in argv
-
-    def test_resume_turn_uses_resume(self):
-        argv = fleet.build_turn_argv("claude.cmd", "sid-1", first=False, mode="omit")
-        assert "--resume" in argv
-        assert argv[argv.index("--resume") + 1] == "sid-1"
-        assert "--session-id" not in argv
-
-    def test_mandatory_flags_present(self):
-        argv = fleet.build_turn_argv("claude.cmd", "sid-1", first=True, mode="omit")
-        assert argv[0] == "claude.cmd"
-        for flag in ("-p", "--output-format", "stream-json", "--verbose", "--include-hook-events"):
-            assert flag in argv
-
-    def test_settings_path_included(self):
-        # SPEC §14: WORKER_SETTINGS_PATH (a fixed module constant) was
-        # replaced by instance_settings_path(), resolved fresh per call so
-        # it follows FLEET_HOME (env-var override / test sandboxes) like
-        # every other path helper in this module.
-        argv = fleet.build_turn_argv("claude.cmd", "sid-1", first=True, mode="omit")
-        assert "--settings" in argv
-        assert argv[argv.index("--settings") + 1] == str(fleet.instance_settings_path())
-
-    def test_settings_path_explicit_override_wins(self):
-        argv = fleet.build_turn_argv(
-            "claude.cmd", "sid-1", first=True, mode="omit", settings_path="C:/custom/settings.json",
-        )
-        assert argv[argv.index("--settings") + 1] == "C:/custom/settings.json"
-
-    @pytest.mark.parametrize("mode,expected", [
-        ("bypass", ["--dangerously-skip-permissions"]),
-        ("accept", ["--permission-mode", "acceptEdits"]),
-        ("dontask", ["--permission-mode", "dontAsk"]),
-        ("plan", ["--permission-mode", "plan"]),
-        ("omit", []),
-    ])
-    def test_mode_flags_embedded(self, mode, expected):
-        argv = fleet.build_turn_argv("claude.cmd", "sid-1", first=True, mode=mode)
-        if expected:
-            idx = argv.index(expected[0])
-            assert argv[idx:idx + len(expected)] == expected
-        else:
-            assert "--permission-mode" not in argv
-            assert "--dangerously-skip-permissions" not in argv
-
-    def test_model_flag_included_when_given(self):
-        argv = fleet.build_turn_argv("claude.cmd", "sid-1", first=True, mode="omit", model="haiku")
-        assert argv[argv.index("--model") + 1] == "haiku"
-
-    def test_model_flag_omitted_when_none(self):
-        argv = fleet.build_turn_argv("claude.cmd", "sid-1", first=True, mode="omit", model=None)
-        assert "--model" not in argv
-
-    def test_max_budget_flag_included_when_given(self):
-        argv = fleet.build_turn_argv("claude.cmd", "sid-1", first=True, mode="omit", max_budget_usd=2.5)
-        assert argv[argv.index("--max-budget-usd") + 1] == "2.5"
-
-    def test_max_budget_flag_omitted_when_none(self):
-        argv = fleet.build_turn_argv("claude.cmd", "sid-1", first=True, mode="omit", max_budget_usd=None)
-        assert "--max-budget-usd" not in argv
-
-    def test_setting_sources_flag_included_when_given(self):
-        argv = fleet.build_turn_argv(
-            "claude.cmd", "sid-1", first=True, mode="omit", setting_sources="user,project")
-        assert argv[argv.index("--setting-sources") + 1] == "user,project"
-
-    def test_setting_sources_flag_omitted_when_none(self):
-        argv = fleet.build_turn_argv("claude.cmd", "sid-1", first=True, mode="omit", setting_sources=None)
-        assert "--setting-sources" not in argv
-
-    def test_invalid_mode_raises(self):
-        with pytest.raises(ValueError):
-            fleet.build_turn_argv("claude.cmd", "sid-1", first=True, mode="yolo")
 
 
 # ---------------------------------------------------------------------------
@@ -426,156 +297,6 @@ class TestResolveClaudeExecutable:
 
 
 # ---------------------------------------------------------------------------
-# launch_turn (Popen injected -- no real claude spawn)
-# ---------------------------------------------------------------------------
-
-class TestLaunchTurn:
-    def test_launch_writes_prompt_to_stdin_and_closes_it(self, isolated_home):
-        proc = FakeProc(pid=4321)
-        popen = _fake_popen(proc)
-        ctime = datetime(2026, 7, 7, 12, 0, 0, tzinfo=timezone.utc)
-        info = fleet.launch_turn(
-            "probe-1", isolated_home, "sid-1", "hello prompt", "omit", first=True,
-            popen=popen, get_process_info=lambda pid: ("claude.exe", ctime),
-            which=lambda n: "claude.cmd",
-        )
-        assert proc.stdin.written == "hello prompt".encode("utf-8")
-        assert proc.stdin.closed is True
-        assert info["turn_pid"] == 4321
-        assert info["turn_pid_ctime"] == fleet.ctime_to_iso(ctime)
-
-    def test_launch_creates_log_files(self, isolated_home):
-        proc = FakeProc(pid=1)
-        popen = _fake_popen(proc)
-        fleet.launch_turn(
-            "probe-1", isolated_home, "sid-1", "x", "omit", first=True,
-            popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd",
-        )
-        assert (isolated_home / "logs" / "probe-1.jsonl").exists()
-        assert (isolated_home / "logs" / "probe-1.err").exists()
-
-    def test_launch_passes_cwd_and_creationflags(self, isolated_home):
-        proc = FakeProc(pid=1)
-        calls = {}
-        popen = _fake_popen(proc, calls)
-        fleet.launch_turn(
-            "probe-1", isolated_home, "sid-1", "x", "omit", first=True,
-            popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd",
-        )
-        assert calls["kwargs"]["cwd"] == str(isolated_home)
-        assert calls["kwargs"]["creationflags"] == (
-            fleet.subprocess.DETACHED_PROCESS | fleet.subprocess.CREATE_NEW_PROCESS_GROUP
-        )
-
-    def test_claude_not_found_raises_before_popen_called(self, isolated_home):
-        def popen(*a, **kw):
-            raise AssertionError("popen must not be called when claude is not on PATH")
-
-        with pytest.raises(fleet.ClaudeNotFoundError):
-            fleet.launch_turn(
-                "probe-1", isolated_home, "sid-1", "x", "omit", first=True,
-                popen=popen, get_process_info=lambda pid: None, which=lambda n: None,
-            )
-
-    def test_popen_failure_raises_turn_launch_error(self, isolated_home):
-        def popen(*a, **kw):
-            raise OSError("boom")
-
-        with pytest.raises(fleet.TurnLaunchError):
-            fleet.launch_turn(
-                "probe-1", isolated_home, "sid-1", "x", "omit", first=True,
-                popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd",
-            )
-
-    def test_process_info_none_yields_none_ctime_not_an_error(self, isolated_home):
-        proc = FakeProc(pid=1)
-        popen = _fake_popen(proc)
-        info = fleet.launch_turn(
-            "probe-1", isolated_home, "sid-1", "x", "omit", first=True,
-            popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd",
-        )
-        assert info["turn_pid_ctime"] is None
-
-    # -----------------------------------------------------------------
-    # F-DOA: a child that dies during init before consuming its prompt
-    # must be reported as a launch failure, not a running turn.
-    # -----------------------------------------------------------------
-
-    def test_broken_pipe_write_with_nonzero_poll_raises_turn_launch_error(self, isolated_home):
-        """The exact testDOA.py scenario: the child closed its read end
-        before the prompt was consumed (BrokenPipeError) and poll() confirms
-        it already exited nonzero -- this must raise, not report success."""
-        stdin = FakeStdin(raise_on_write=BrokenPipeError())
-        proc = FakeProc(pid=4321, stdin=stdin, poll_returns=1)
-        popen = _fake_popen(proc)
-        with pytest.raises(fleet.TurnLaunchError):
-            fleet.launch_turn(
-                "probe-1", isolated_home, "sid-1", "hello prompt", "omit", first=True,
-                popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd",
-            )
-
-    def test_buffered_write_succeeds_but_nonzero_poll_raises(self, isolated_home):
-        """Small-prompt case: the write is buffered and returns cleanly, but
-        the child has already exited nonzero within the window -- BrokenPipe
-        alone would miss this, so poll() must be checked too."""
-        proc = FakeProc(pid=4321, poll_returns=7)
-        popen = _fake_popen(proc)
-        with pytest.raises(fleet.TurnLaunchError):
-            fleet.launch_turn(
-                "probe-1", isolated_home, "sid-1", "hello prompt", "omit", first=True,
-                popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd",
-            )
-
-    def test_zero_poll_within_window_is_success_not_failure(self, isolated_home):
-        """An ultra-fast legitimately-completed turn (rc == 0) must not be
-        misreported as a launch failure."""
-        proc = FakeProc(pid=4321, poll_returns=0)
-        popen = _fake_popen(proc)
-        info = fleet.launch_turn(
-            "probe-1", isolated_home, "sid-1", "hello prompt", "omit", first=True,
-            popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd",
-        )
-        assert info["turn_pid"] == 4321
-
-    # -----------------------------------------------------------------
-    # F-BLOCK: the prompt write must not block the manager thread.
-    # -----------------------------------------------------------------
-
-    def test_blocked_writer_with_process_alive_returns_within_bounded_window(self, isolated_home, monkeypatch):
-        """A wedged/slow-booting child that never reads stdin (poll() stays
-        None) must not hang launch_turn forever -- it returns within the
-        bounded DOA window and is treated as success (F-DOA residual)."""
-        monkeypatch.setattr(fleet, "LAUNCH_DOA_WINDOW_SECONDS", 0.2)
-        block_event = threading.Event()
-        stdin = FakeStdin(block_event=block_event)
-        proc = FakeProc(pid=4321, stdin=stdin, poll_returns=None)
-        popen = _fake_popen(proc)
-
-        start = fleet.time.monotonic()
-        info = fleet.launch_turn(
-            "probe-1", isolated_home, "sid-1", "hello prompt", "omit", first=True,
-            popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd",
-        )
-        elapsed = fleet.time.monotonic() - start
-
-        assert elapsed < 2.0  # bounded, not hung
-        assert info["turn_pid"] == 4321
-
-        # release the wedged write so the daemon thread can finish cleanly;
-        # no exception should escape (it has nowhere to go but the holder).
-        block_event.set()
-
-    # M-B T4: test_blocked_writer_turn_pid_recorded_by_cmd_spawn (the
-    # orphan-pid regression via cmd_spawn's post-launch lock) is DELETED --
-    # cmd_spawn no longer calls launch_turn/Popen at all (native `--bg`
-    # dispatch via dispatch_bg, see TestCmdSpawn below); the blocked-writer
-    # DOA-window mechanism it exercised only exists for launch_turn callers
-    # that still use it (cmd_send/cmd_respawn), already covered by
-    # test_blocked_writer_with_process_alive_returns_within_bounded_window
-    # above.
-
-
-# ---------------------------------------------------------------------------
 # cmd_spawn (M-B T4: native `--bg` dispatch via dispatch_bg -- see
 # tests/test_native.py::TestCmdSpawnNative for the launch-contract-specific
 # cases: USD-budget refusal, dispatch-failure rollback, join-expiry
@@ -782,10 +503,10 @@ class TestCmdSpawn:
 
 
 # ---------------------------------------------------------------------------
-# _commit_launched_turn / _report_stranded_turn (post-testing wave, item 1b:
-# stress-report Finding 1, CRITICAL -- the post-launch commit lock in
-# cmd_spawn/cmd_send/cmd_respawn must not strand an already-launched, live
-# turn just because that ONE lock acquisition timed out.)
+# _commit_launched_turn (post-testing wave, item 1b: stress-report Finding 1,
+# CRITICAL -- the post-dispatch commit lock in cmd_spawn/cmd_send/cmd_respawn
+# must not strand an already-dispatched, live session just because that ONE
+# lock acquisition timed out.)
 # ---------------------------------------------------------------------------
 
 class TestCommitLaunchedTurn:
@@ -861,29 +582,6 @@ class TestCommitLaunchedTurn:
         assert fleet._commit_launched_turn(commit, sleep=lambda s: None) is False
         err = capsys.readouterr().err
         assert "No space left on device" in err
-
-
-class TestReportStrandedTurn:
-    def test_prints_loud_message_and_appends_event(self, isolated_home, capsys):
-        info = {"turn_pid": 4242, "turn_pid_ctime": "2026-07-07T12:00:00Z", "log_path": "x.jsonl"}
-        fleet._report_stranded_turn("probe-1", "sid-123", info)
-
-        err = capsys.readouterr().err
-        assert "CRITICAL" in err
-        assert "probe-1" in err
-        assert "4242" in err
-
-        events = [json.loads(line) for line in fleet.events_path().read_text(encoding="utf-8").splitlines()]
-        assert any(e["kind"] == "turn_commit_failed" and e["name"] == "probe-1" for e in events)
-
-    def test_never_raises_even_if_append_event_fails(self, isolated_home, monkeypatch, capsys):
-        def broken_append_event(*a, **kw):
-            raise OSError("disk full")
-
-        monkeypatch.setattr(fleet, "append_event", broken_append_event)
-        info = {"turn_pid": 1, "turn_pid_ctime": None, "log_path": "x.jsonl"}
-        fleet._report_stranded_turn("probe-1", "sid-123", info)  # must not raise
-        assert "CRITICAL" in capsys.readouterr().err
 
 
 class TestCmdSpawnNativeCommitLockRetry:

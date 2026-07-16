@@ -384,50 +384,21 @@ class TestStatuslineAsciiFallback:
         assert statusline._stdout_can_encode("# fleet") is True
 
 
-class TestLaunchTurnEnvStamp:
-    def _fake_popen_factory(self, captured):
-        class _Proc:
-            def __init__(self):
-                self.stdin = io.BytesIO()
-                self.pid = 4321
+class TestWorkerEnvStamp:
+    def test_child_env_carries_fleet_worker_name(self):
+        env = fleet._worker_env("pmbot")
+        assert env["FLEET_WORKER"] == "pmbot"
 
-            def poll(self):
-                return None
-
-        def fake_popen(argv, **kwargs):
-            captured.update(kwargs)
-            return _Proc()
-        return fake_popen
-
-    def _stub_launch(self, monkeypatch):
-        monkeypatch.setattr(fleet, "resolve_claude_executable", lambda which=None: "claude")
-        monkeypatch.setattr(
-            fleet.PLATFORM, "get_process_info",
-            lambda pid: ("claude", fleet.datetime.now(fleet.timezone.utc)))
-
-    def test_child_env_carries_fleet_worker_name(self, home, tmp_path, monkeypatch):
-        captured = {}
-        self._stub_launch(monkeypatch)
-        proj = tmp_path / "proj"
-        proj.mkdir()
-
-        fleet.launch_turn("pmbot", proj, "sid-1", "prompt", "dontask", first=True,
-                          popen=self._fake_popen_factory(captured))
-
-        assert captured["env"]["FLEET_WORKER"] == "pmbot"
-
-    def test_child_env_preserves_the_parent_environment(self, home, tmp_path, monkeypatch):
-        captured = {}
+    def test_child_env_preserves_the_parent_environment(self, monkeypatch):
         monkeypatch.setenv("FLEET_TEST_SENTINEL", "kept")
-        self._stub_launch(monkeypatch)
-        proj = tmp_path / "proj"
-        proj.mkdir()
+        env = fleet._worker_env("pmbot")
+        assert env["FLEET_TEST_SENTINEL"] == "kept"
+        assert "PATH" in env
 
-        fleet.launch_turn("pmbot", proj, "sid-1", "prompt", "dontask", first=True,
-                          popen=self._fake_popen_factory(captured))
-
-        assert captured["env"]["FLEET_TEST_SENTINEL"] == "kept"
-        assert "PATH" in captured["env"]
+    def test_child_env_strips_caller_session_id(self, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "mgr-sid")
+        env = fleet._worker_env("pmbot")
+        assert "CLAUDE_CODE_SESSION_ID" not in env
 
 
 @pytest.fixture
