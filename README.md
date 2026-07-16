@@ -137,7 +137,9 @@ Full install detail, including the collaborator/multi-machine setup and the `--s
 | `fleet respawn` | Fresh session for a worker (context-reset lever) |
 | `fleet resume-limited` | Relaunch workers parked on a usage limit past their reset horizon |
 | `fleet kill` | Interrupt (if running) and mark a worker dead |
-| `fleet clean` | Remove dead workers and their logs/mailboxes/journals |
+| `fleet clean` | Remove dead workers and their logs/mailboxes/journals (`--dead-only`/`--tombstones` to tier) |
+| `fleet archive` | Auto-archive terminal-state native workers past a TTL (registry tombstone survives) |
+| `fleet autoclean` | Staleness sweep: archive TTL pass + fleet-owned daemon-husk removal; scheduled via `fleet init --autoclean` |
 | `fleet doctor` | Run fleet health checks |
 
 ## Roadmap
