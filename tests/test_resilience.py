@@ -1,14 +1,16 @@
-"""Unit tests for Task 5 (M4 resilience): respawn / kill / clean / doctor,
-plus the spec-audit-gap items (spawn --setting-sources passthrough, peek
-tokens, and the tail-read perf optimization for status/wait polling).
+"""Unit tests for resilience surfaces that survived the native-substrate
+pivot: doctor checks, resume-limited sweep logic, limited-park surfacing,
+cost-coercion hardening, and the destructive-clean file sweep. The legacy
+Popen respawn/kill/clean state machines were deleted with the legacy
+dispatch path (pivot spec §6, M-C); their native counterparts are covered
+in test_native.py.
 
-Same discipline as test_steering.py / test_cli.py: no real claude process,
-no real taskkill/PowerShell/wt/claude-agents subprocess is ever invoked in
-the state-machine tests -- every test injects a fake popen /
-get_process_info / which / kill_process_tree / run. The doctor hook-smoke
-checks are the one deliberate exception (SPEC's "end-to-end" requirement):
-those run the real hook scripts as real subprocesses against a scratch
-temp FLEET_HOME, mirroring tests/test_hooks.py's own technique.
+Same discipline as test_steering.py / test_cli.py: no real claude process
+is invoked in the state-machine tests -- every test injects a fake run /
+which / roster fetch. The doctor hook-smoke checks are the one deliberate
+exception (SPEC's "end-to-end" requirement): those run the real hook
+scripts as real subprocesses against a scratch temp FLEET_HOME, mirroring
+tests/test_hooks.py's own technique.
 """
 import json
 import os
@@ -79,1186 +81,57 @@ def _fake_popen(proc, calls=None):
     return popen
 
 
-def _seed_worker(name, status=None, turn_pid=None, turn_pid_ctime=None,
-                  cwd=None, mode="dontask", model=None, sid=None,
-                  task="original task text", log_result=False, cost_usd=0.0):
-    # Kernel 4 cwd preflight: launch_turn now refuses to launch into a
-    # vanished cwd, so the default seeded cwd must be a real directory
-    # (FLEET_HOME, created by the isolated_home fixture). Tests that need a
-    # specific cwd pass it explicitly and create it themselves.
+def _seed_worker(name, status=None, cwd=None, mode="dontask", model=None,
+                 sid=None, token_ceiling=None, **_ignored):
+    """Save a single native-shaped worker registry record."""
     if cwd is None:
         cwd = str(fleet.FLEET_HOME)
     sid = sid or str(uuid.uuid4())
-    rec = fleet.new_worker_record(sid, cwd, task, mode, model=model)
+    rec = fleet.new_worker_record(sid, cwd, "some task", mode, model=model,
+                                  token_ceiling=token_ceiling, dispatch_kind="bg")
+    rec["last_dispatch_at"] = fleet.now_iso()
     if status is not None:
         rec["status"] = status
-    rec["turn_pid"] = turn_pid
-    rec["turn_pid_ctime"] = turn_pid_ctime
-    rec["cost_usd"] = cost_usd
-    data = fleet.load_registry()  # merge, not overwrite -- tests may seed several workers
+    data = {"workers": {}}
+    try:
+        data = fleet.load_registry()
+    except Exception:
+        pass
     data["workers"][name] = rec
     fleet.save_registry(data)
-    if log_result:
-        log = fleet.logs_dir() / f"{name}.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text(
-            f'{{"type":"result","result":"done","total_cost_usd":{cost_usd}}}\n', encoding="utf-8",
-        )
     return sid, rec
 
 
 # ---------------------------------------------------------------------------
-# _rotate_worker_log
-# ---------------------------------------------------------------------------
-
-class TestRotateWorkerLog:
-    def test_rotates_jsonl_and_err(self, isolated_home):
-        logs = fleet.logs_dir()
-        logs.mkdir(parents=True, exist_ok=True)
-        (logs / "probe-1.jsonl").write_text("old jsonl", encoding="utf-8")
-        (logs / "probe-1.err").write_text("old err", encoding="utf-8")
-
-        fleet._rotate_worker_log("probe-1")
-
-        assert not (logs / "probe-1.jsonl").exists()
-        assert not (logs / "probe-1.err").exists()
-        assert (logs / "probe-1.jsonl.1").read_text(encoding="utf-8") == "old jsonl"
-        assert (logs / "probe-1.err.1").read_text(encoding="utf-8") == "old err"
-
-    def test_overwrites_existing_dot_one(self, isolated_home):
-        logs = fleet.logs_dir()
-        logs.mkdir(parents=True, exist_ok=True)
-        (logs / "probe-1.jsonl").write_text("newer", encoding="utf-8")
-        (logs / "probe-1.jsonl.1").write_text("stale-from-a-prior-respawn", encoding="utf-8")
-
-        fleet._rotate_worker_log("probe-1")
-
-        assert (logs / "probe-1.jsonl.1").read_text(encoding="utf-8") == "newer"
-
-    def test_missing_logs_is_a_noop(self, isolated_home):
-        fleet._rotate_worker_log("nope")  # must not raise
-
-    def test_retries_on_permission_error_then_succeeds(self, isolated_home, monkeypatch):
-        # B2: a follower / just-killed claude may still hold the log handle
-        # for a short window (Windows sharing violation -> PermissionError on
-        # os.replace). Retry briefly, then succeed once the handle clears.
-        logs = fleet.logs_dir()
-        logs.mkdir(parents=True, exist_ok=True)
-        (logs / "probe-1.jsonl").write_text("old", encoding="utf-8")
-
-        real_replace = os.replace
-        state = {"fails": 2}
-
-        def flaky(src, dst, *a, **k):
-            if str(src).endswith(".jsonl") and state["fails"] > 0:
-                state["fails"] -= 1
-                raise PermissionError(13, "sharing violation")
-            return real_replace(src, dst, *a, **k)
-
-        monkeypatch.setattr(fleet.os, "replace", flaky)
-        slept = []
-        fleet._rotate_worker_log("probe-1", sleep=lambda s: slept.append(s))
-
-        assert state["fails"] == 0          # both retries consumed
-        assert slept                        # it actually backed off
-        assert (logs / "probe-1.jsonl.1").read_text(encoding="utf-8") == "old"
-
-    def test_raises_log_rotation_error_after_exhausting_retries(self, isolated_home, monkeypatch):
-        logs = fleet.logs_dir()
-        logs.mkdir(parents=True, exist_ok=True)
-        (logs / "probe-1.jsonl").write_text("old", encoding="utf-8")
-
-        def always_locked(src, dst, *a, **k):
-            if str(src).endswith(".jsonl"):
-                raise PermissionError(13, "sharing violation")
-            return os.replace(src, dst)  # never reached for .jsonl
-
-        monkeypatch.setattr(fleet.os, "replace", always_locked)
-        with pytest.raises(fleet.LogRotationError, match="probe-1"):
-            fleet._rotate_worker_log("probe-1", sleep=lambda s: None)
-
-
-class TestRespawnLogRotationCleanFail:
-    def test_respawn_clean_fails_when_log_locked(self, isolated_home, monkeypatch):
-        # B2: if rotation cannot complete (log still held), respawn must
-        # clean-fail -- NO new turn, NO sid-swap (invariant 7) -- with the
-        # registry restored to the pre-respawn snapshot and the log un-rotated.
-        old_sid, _ = _seed_worker("probe-1", status="idle", log_result=True, cost_usd=1.0)
-        logs = fleet.logs_dir()
-        (logs / "probe-1.jsonl").write_text(
-            '{"type":"result","result":"done","total_cost_usd":1.0}\n', encoding="utf-8")
-
-        real_replace = os.replace
-
-        def locked(src, dst, *a, **k):
-            if str(src).endswith(".jsonl") and not str(src).endswith(".jsonl.1"):
-                raise PermissionError(13, "sharing violation")
-            return real_replace(src, dst, *a, **k)
-
-        monkeypatch.setattr(fleet.os, "replace", locked)
-
-        def popen(*a, **kw):
-            raise AssertionError("must not launch a turn when rotation clean-failed")
-
-        args = fleet.build_parser().parse_args(["respawn", "probe-1"])
-        with pytest.raises(fleet.FleetCliError, match="probe-1"):
-            fleet.cmd_respawn(
-                args, popen=popen, get_process_info=_dead_info, which=lambda n: "claude.cmd",
-                sleep=lambda s: None,
-            )
-
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        assert rec["session_id"] == old_sid   # NO sid-swap
-        assert rec["status"] == "idle"         # snapshot restored
-        assert rec["turn_pid"] is None
-        # log is un-rotated back onto the live path
-        assert (logs / "probe-1.jsonl").exists()
-        assert not (logs / "probe-1.jsonl.1").exists()
-
-    def test_respawn_succeeds_while_follower_mid_poll(self, isolated_home, monkeypatch):
-        # "respawn succeeds while a follower is mid-poll": the log handle is
-        # held only briefly (one retry), then clears -- rotation retries and
-        # the respawn completes normally with a fresh sid.
-        old_sid, _ = _seed_worker("probe-1", status="idle", log_result=True)
-        logs = fleet.logs_dir()
-        (logs / "probe-1.jsonl").write_text(
-            '{"type":"result","result":"done","total_cost_usd":0.0}\n', encoding="utf-8")
-
-        real_replace = os.replace
-        state = {"fails": 1}
-
-        def flaky(src, dst, *a, **k):
-            if str(src).endswith(".jsonl") and not str(src).endswith(".jsonl.1") and state["fails"] > 0:
-                state["fails"] -= 1
-                raise PermissionError(13, "follower still polling the log")
-            return real_replace(src, dst, *a, **k)
-
-        monkeypatch.setattr(fleet.os, "replace", flaky)
-        proc = FakeProc(pid=7)
-        args = fleet.build_parser().parse_args(["respawn", "probe-1"])
-        rc = fleet.cmd_respawn(
-            args, popen=_fake_popen(proc), get_process_info=_dead_info, which=lambda n: "claude.cmd",
-            sleep=lambda s: None,
-        )
-        assert rc == 0
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        assert rec["session_id"] != old_sid   # sid-swap happened
-        assert rec["turn_pid"] == 7
-
 
 # ---------------------------------------------------------------------------
-# fleet respawn
+# _coerce_cost / _registry_cost hardening (fuzz-report Findings F3+F4) --
+# survivors of the log-pipeline deletion: these guard the registry's own
+# cost_baseline/cost_usd round-trip against poisoned values.
 # ---------------------------------------------------------------------------
 
-class TestCmdRespawn:
-    def test_missing_instance_settings_raises(self, isolated_home):
-        fleet.instance_settings_path().unlink()
-        _seed_worker("probe-1", status="idle", log_result=True)
-        args = fleet.build_parser().parse_args(["respawn", "probe-1"])
-        with pytest.raises(fleet.FleetCliError, match="fleet init"):
-            fleet.cmd_respawn(args, get_process_info=_dead_info, which=lambda n: "claude.cmd")
+class TestCoerceCostHardening:
+    def test_cleanly_numeric_string_is_coerced(self):
+        assert fleet._coerce_cost("5.00") == 5.0
 
-    def test_unknown_worker_raises(self, isolated_home):
-        args = fleet.build_parser().parse_args(["respawn", "nope"])
-        with pytest.raises(fleet.FleetCliError):
-            fleet.cmd_respawn(args, get_process_info=_dead_info)
+    def test_non_numeric_string_is_none(self):
+        assert fleet._coerce_cost("lots") is None
 
-    def test_refuses_while_working_without_force(self, isolated_home):
-        _seed_worker("probe-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_is_none(self, value):
+        assert fleet._coerce_cost(value) is None
 
-        def popen(*a, **kw):
-            raise AssertionError("must not launch while refusing")
+    def test_negative_is_none(self):
+        assert fleet._coerce_cost(-0.5) is None
 
-        args = fleet.build_parser().parse_args(["respawn", "probe-1"])
-        with pytest.raises(fleet.FleetCliError):
-            fleet.cmd_respawn(args, popen=popen, get_process_info=_alive_info, which=lambda n: "claude.cmd")
-
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        assert rec["status"] == "working"
-
-    def test_force_refuses_during_launch_in_flight(self, isolated_home):
-        _seed_worker("probe-1", status="working", turn_pid=None)
-
-        def kill_process_tree(pid):
-            raise AssertionError("must not attempt a kill with no real pid yet")
-
-        args = fleet.build_parser().parse_args(["respawn", "probe-1", "--force"])
-        with pytest.raises(fleet.FleetCliError, match="launch in flight"):
-            fleet.cmd_respawn(
-                args, get_process_info=_dead_info, which=lambda n: "claude.cmd",
-                kill_process_tree=kill_process_tree,
-            )
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        assert rec["status"] == "working"
-        assert rec["turn_pid"] is None
-
-    def test_force_raises_when_kill_verification_fails(self, isolated_home):
-        old_sid, _ = _seed_worker("probe-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
-
-        def popen(*a, **kw):
-            raise AssertionError("must not launch when --force kill verification fails")
-
-        args = fleet.build_parser().parse_args(["respawn", "probe-1", "--force"])
-        with pytest.raises(fleet.FleetCliError):
-            fleet.cmd_respawn(
-                args, popen=popen, get_process_info=_alive_info, which=lambda n: "claude.cmd",
-                kill_process_tree=lambda pid: None,
-            )
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        assert rec["status"] == "working"
-        assert rec["session_id"] == old_sid  # never replaced
-
-    def test_force_interrupts_then_respawns(self, isolated_home):
-        old_sid, _ = _seed_worker(
-            "probe-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME, cost_usd=2.5,
-        )
-        killed = {"done": False}
-
-        def kill_process_tree(pid):
-            killed["done"] = True
-
-        def get_process_info(pid):
-            return None if killed["done"] else _alive_info(pid)
-
-        proc = FakeProc(pid=999)
-        args = fleet.build_parser().parse_args(["respawn", "probe-1", "--force"])
-        rc = fleet.cmd_respawn(
-            args, popen=_fake_popen(proc), get_process_info=get_process_info, which=lambda n: "claude.cmd",
-            kill_process_tree=kill_process_tree,
-        )
-
-        assert rc == 0
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        assert rec["session_id"] != old_sid
-        assert rec["status"] == "working"
-        assert rec["turn_pid"] == 999
-        assert rec["turns"] == 1
-        assert rec["cost_usd"] == 2.5  # cumulative, carried over
-
-    def test_force_refuses_when_reclaimed_between_interrupt_and_relock(self, isolated_home, monkeypatch):
-        """F1 (final-review.md): mirrors cmd_attach's own regression test --
-        the window between _interrupt_worker's idle-commit (releasing its
-        own lock) and respawn's re-lock is exactly where a concurrent
-        `fleet send` can pre-claim status="working"/turn_pid=None for a
-        brand-new launch. Simulate it by having the (faked) interrupt path
-        leave that concurrent pre-claim instead of idle before reporting
-        "killed": respawn's re-lock must refuse instead of overwriting the
-        record with a new-sid record (which would orphan the send-launched
-        turn against the old sid while the registry tracks the new one)."""
-        old_sid, _ = _seed_worker("probe-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
-
-        def fake_interrupt_worker(name, get_process_info=None, kill_process_tree=None):
-            data = fleet.load_registry()
-            rec = data["workers"][name]
-            rec["status"] = "working"
-            rec["turn_pid"] = None  # the concurrent send's own launch-in-flight claim
-            fleet.save_registry(data)
-            return "killed"
-
-        monkeypatch.setattr(fleet, "_interrupt_worker", fake_interrupt_worker)
-
-        def popen(*a, **kw):
-            raise AssertionError("must not launch over a concurrently reclaimed worker")
-
-        args = fleet.build_parser().parse_args(["respawn", "probe-1", "--force"])
-        with pytest.raises(fleet.FleetCliError, match="claimed concurrently"):
-            fleet.cmd_respawn(args, popen=popen, get_process_info=_alive_info, which=lambda n: "claude.cmd")
-
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        assert rec["status"] == "working"
-        assert rec["turn_pid"] is None
-        assert rec["session_id"] == old_sid  # never replaced
-
-    def test_attached_worker_refuses_respawn_without_force(self, isolated_home):
-        """Finding 5 (task-5 adversarial review / task-5-review.md
-        Important #2): a live human TUI owns an attached worker's name --
-        respawn must mirror cmd_attach's own working-state guard and
-        refuse instead of silently stealing it and rerouting the drained
-        mailbox into a session the operator never sees."""
-        _seed_worker("probe-1", status="attached")
-
-        def popen(*a, **kw):
-            raise AssertionError("must not launch while refusing")
-
-        args = fleet.build_parser().parse_args(["respawn", "probe-1"])
-        with pytest.raises(fleet.FleetCliError, match="attached"):
-            fleet.cmd_respawn(args, popen=popen, get_process_info=_dead_info, which=lambda n: "claude.cmd")
-
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        assert rec["status"] == "attached"
-
-    def test_attached_worker_respawns_with_force_and_releases_attach(self, isolated_home):
-        """--force proceeds directly (no turn_pid to interrupt) and the
-        takeover releases the attach as a side effect (new_worker_record
-        always starts attached_since=None)."""
-        old_sid, _ = _seed_worker("probe-1", status="attached")
-        data = fleet.load_registry()
-        data["workers"]["probe-1"]["attached_since"] = "2026-07-07T10:00:00Z"
-        fleet.save_registry(data)
-
-        proc = FakeProc(pid=42)
-        args = fleet.build_parser().parse_args(["respawn", "probe-1", "--force"])
-        rc = fleet.cmd_respawn(args, popen=_fake_popen(proc), get_process_info=_dead_info, which=lambda n: "claude.cmd")
-        assert rc == 0
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        assert rec["status"] == "working"
-        assert rec["attached_since"] is None
-        assert rec["session_id"] != old_sid
-
-    def test_new_uuid_same_name_cwd_mode_model(self, isolated_home, tmp_path):
-        proj = tmp_path / "some" / "proj"
-        proj.mkdir(parents=True)  # kernel 4 preflight: cwd must really exist
-        old_sid, _ = _seed_worker("probe-1", status="idle", cwd=proj.as_posix(), mode="bypass",
-                                   model="opus", log_result=True)
-        proc = FakeProc(pid=7)
-        args = fleet.build_parser().parse_args(["respawn", "probe-1"])
-        fleet.cmd_respawn(args, popen=_fake_popen(proc), get_process_info=_dead_info, which=lambda n: "claude.cmd")
-
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        assert uuid.UUID(rec["session_id"])
-        assert rec["session_id"] != old_sid
-        assert rec["cwd"] == proj.as_posix()
-        assert rec["mode"] == "bypass"
-        assert rec["model"] == "opus"
-
-    def test_turns_reset_then_one_after_launch(self, isolated_home):
-        _seed_worker("probe-1", status="idle", log_result=True)
-        proc = FakeProc(pid=7)
-        args = fleet.build_parser().parse_args(["respawn", "probe-1"])
-        fleet.cmd_respawn(args, popen=_fake_popen(proc), get_process_info=_dead_info, which=lambda n: "claude.cmd")
-        assert fleet.load_registry()["workers"]["probe-1"]["turns"] == 1
-
-    def test_commit_lock_exhaustion_does_not_abandon_the_launched_turn(
-        self, isolated_home, monkeypatch, capsys,
-    ):
-        """Post-testing wave, item 1b (stress-report Finding 1, CRITICAL --
-        "Same defect shape elsewhere"): cmd_respawn's final post-launch
-        commit lock is the same unwrapped shape as cmd_spawn's. If every
-        retry times out, cmd_respawn must not raise (a real turn is
-        already running under new_sid) -- it reports success loudly-with-
-        a-warning, same contract as cmd_spawn/cmd_send."""
-        _seed_worker("probe-1", status="idle", log_result=True)
-        proc = FakeProc(pid=42)
-
-        real_fleet_lock = fleet.fleet_lock
-        calls = {"n": 0}
-
-        @contextmanager
-        def flaky(timeout=fleet.LOCK_TIMEOUT_SECONDS):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                # cmd_respawn's own pre-claim lock -- must succeed.
-                with real_fleet_lock(timeout=timeout):
-                    yield
-            else:
-                # Every post-launch commit attempt fails.
-                raise fleet.FleetLockTimeout("simulated")
-
-        monkeypatch.setattr(fleet, "fleet_lock", flaky)
-
-        args = fleet.build_parser().parse_args(["respawn", "probe-1"])
-        rc = fleet.cmd_respawn(
-            args, popen=_fake_popen(proc), get_process_info=_dead_info,
-            which=lambda n: "claude.cmd", sleep=lambda s: None,
-        )
-
-        assert rc == 0
-        err = capsys.readouterr().err
-        assert "CRITICAL" in err
-        assert "probe-1" in err
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        assert rec["status"] == "working"
-        assert rec["turn_pid"] is None  # never got stamped
-        events = [json.loads(line) for line in fleet.events_path().read_text(encoding="utf-8").splitlines()]
-        assert any(e["kind"] == "turn_commit_failed" for e in events)
-
-    def test_old_sid_recorded_to_events(self, isolated_home):
-        old_sid, _ = _seed_worker("probe-1", status="idle", log_result=True)
-        proc = FakeProc(pid=7)
-        args = fleet.build_parser().parse_args(["respawn", "probe-1"])
-        fleet.cmd_respawn(args, popen=_fake_popen(proc), get_process_info=_dead_info, which=lambda n: "claude.cmd")
-
-        events = [json.loads(line) for line in fleet.events_path().read_text(encoding="utf-8").splitlines()]
-        respawned = [e for e in events if e["kind"] == "respawned"]
-        assert len(respawned) == 1
-        assert respawned[0]["old_session_id"] == old_sid
-
-    def test_prompt_includes_journal_and_drains_old_mailbox(self, isolated_home):
-        old_sid, _ = _seed_worker("probe-1", status="idle", log_result=True, task="do the original thing")
-        journal = fleet.journals_dir() / "probe-1.md"
-        journal.parent.mkdir(parents=True, exist_ok=True)
-        journal.write_text("goal: ship X\ndone: half of it", encoding="utf-8")
-        mbox = fleet.mailbox_dir()
-        mbox.mkdir(parents=True, exist_ok=True)
-        (mbox / f"{old_sid}.md").write_text("manager note before respawn", encoding="utf-8")
-
-        proc = FakeProc(pid=7)
-        args = fleet.build_parser().parse_args(["respawn", "probe-1"])
-        fleet.cmd_respawn(args, popen=_fake_popen(proc), get_process_info=_dead_info, which=lambda n: "claude.cmd")
-
-        prompt = proc.stdin.written.decode("utf-8")
-        assert "do the original thing" in prompt
-        assert "goal: ship X" in prompt
-        assert "manager note before respawn" in prompt
-        # consumed, not orphaned
-        assert not (mbox / f"{old_sid}.md").exists()
-        assert list(mbox.glob("*.claimed.*")) == []
-
-    def test_task_override_replaces_original_task_in_prompt(self, isolated_home):
-        _seed_worker("probe-1", status="idle", log_result=True, task="do the original thing")
-        proc = FakeProc(pid=7)
-        args = fleet.build_parser().parse_args(["respawn", "probe-1", "--task", "do something else entirely"])
-        fleet.cmd_respawn(args, popen=_fake_popen(proc), get_process_info=_dead_info, which=lambda n: "claude.cmd")
-
-        prompt = proc.stdin.written.decode("utf-8")
-        assert "do something else entirely" in prompt
-        assert "do the original thing" not in prompt
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        assert rec["task"] == "do something else entirely"
-
-    def test_launches_with_first_true_new_session_id(self, isolated_home):
-        _seed_worker("probe-1", status="idle", log_result=True)
-        calls = []
-        proc = FakeProc(pid=7)
-        args = fleet.build_parser().parse_args(["respawn", "probe-1"])
-        fleet.cmd_respawn(args, popen=_fake_popen(proc, calls), get_process_info=_dead_info, which=lambda n: "claude.cmd")
-
-        argv = calls[0][1]
-        assert "--session-id" in argv
-        assert "--resume" not in argv
-        new_sid = fleet.load_registry()["workers"]["probe-1"]["session_id"]
-        assert argv[argv.index("--session-id") + 1] == new_sid
-
-    def test_respawn_carries_forward_budget_and_setting_sources(self, isolated_home):
-        # F13 (item 7, M5): respawn is a context reset, not a config reset --
-        # the persisted max_budget_usd/setting_sources carry forward onto the
-        # new record AND onto the fresh-session launch argv (respawn is a
-        # launch path too).
-        _seed_worker("probe-1", status="idle", log_result=True)
-        data = fleet.load_registry()
-        data["workers"]["probe-1"]["max_budget_usd"] = 4.0
-        data["workers"]["probe-1"]["setting_sources"] = "user,project"
-        fleet.save_registry(data)
-
-        calls = []
-        proc = FakeProc(pid=7)
-        args = fleet.build_parser().parse_args(["respawn", "probe-1"])
-        fleet.cmd_respawn(args, popen=_fake_popen(proc, calls), get_process_info=_dead_info, which=lambda n: "claude.cmd")
-
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        assert rec["max_budget_usd"] == 4.0
-        assert rec["setting_sources"] == "user,project"
-
-        argv = calls[0][1]
-        assert argv[argv.index("--max-budget-usd") + 1] == "4.0"
-        assert argv[argv.index("--setting-sources") + 1] == "user,project"
-
-    def test_respawn_override_replaces_persisted_budget_and_setting_sources(self, isolated_home):
-        # "carries them forward unless explicitly overridden" -- an explicit
-        # --max-budget-usd/--setting-sources on respawn replaces the carried
-        # value.
-        _seed_worker("probe-1", status="idle", log_result=True)
-        data = fleet.load_registry()
-        data["workers"]["probe-1"]["max_budget_usd"] = 4.0
-        data["workers"]["probe-1"]["setting_sources"] = "user,project"
-        fleet.save_registry(data)
-
-        proc = FakeProc(pid=7)
-        args = fleet.build_parser().parse_args([
-            "respawn", "probe-1", "--max-budget-usd", "9.0", "--setting-sources", "user",
-        ])
-        fleet.cmd_respawn(args, popen=_fake_popen(proc), get_process_info=_dead_info, which=lambda n: "claude.cmd")
-
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        assert rec["max_budget_usd"] == 9.0
-        assert rec["setting_sources"] == "user"
-
-    def test_log_rotation_happens_before_launch(self, isolated_home):
-        logs = fleet.logs_dir()
-        logs.mkdir(parents=True, exist_ok=True)
-        (logs / "probe-1.jsonl").write_text("old transcript", encoding="utf-8")
-        _seed_worker("probe-1", status="idle", log_result=False)
-        # overwrite with old transcript content post-seed (log_result=False
-        # above so _seed_worker doesn't clobber our fixture content) --
-        # but idle requires a trailing result line for recompute_status,
-        # so seed one that still counts as "old transcript" for rotation.
-        (logs / "probe-1.jsonl").write_text(
-            'old transcript\n{"type":"result","result":"done","total_cost_usd":0.1}\n', encoding="utf-8",
-        )
-        proc = FakeProc(pid=7)
-        args = fleet.build_parser().parse_args(["respawn", "probe-1"])
-        fleet.cmd_respawn(args, popen=_fake_popen(proc), get_process_info=_dead_info, which=lambda n: "claude.cmd")
-
-        assert "old transcript" in (logs / "probe-1.jsonl.1").read_text(encoding="utf-8")
-        assert (logs / "probe-1.jsonl").exists()  # launch_turn recreated it (append-mode open)
-
-    def test_pre_claim_working_visible_before_launch(self, isolated_home):
-        """Uniform status-claim protocol: by the time popen is reached, a
-        fresh registry read must already observe the NEW pre-claimed
-        record (status=="working", turn_pid is None)."""
-        _seed_worker("probe-1", status="idle", log_result=True)
-
-        def popen(argv, **kwargs):
-            rec = fleet.load_registry()["workers"]["probe-1"]
-            assert rec["status"] == "working"
-            assert rec["turn_pid"] is None
-            return FakeProc(pid=555)
-
-        args = fleet.build_parser().parse_args(["respawn", "probe-1"])
-        rc = fleet.cmd_respawn(args, popen=popen, get_process_info=_dead_info, which=lambda n: "claude.cmd")
-        assert rc == 0
-
-    def test_launch_failure_rolls_back_to_prior_snapshot_and_restores_mailbox(self, isolated_home):
-        old_sid, _ = _seed_worker("probe-1", status="idle", log_result=True, cost_usd=1.0)
-        mbox = fleet.mailbox_dir()
-        mbox.mkdir(parents=True, exist_ok=True)
-        (mbox / f"{old_sid}.md").write_text("pending note", encoding="utf-8")
-
-        def popen(*a, **kw):
-            raise OSError("boom")
-
-        args = fleet.build_parser().parse_args(["respawn", "probe-1"])
-        with pytest.raises(fleet.TurnLaunchError):
-            fleet.cmd_respawn(args, popen=popen, get_process_info=_dead_info, which=lambda n: "claude.cmd")
-
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        assert rec["session_id"] == old_sid
-        assert rec["cost_usd"] == 1.0
-        restored = (mbox / f"{old_sid}.md").read_text(encoding="utf-8")
-        assert "pending note" in restored
-        assert list(mbox.glob("*.claimed.*")) == []
-
-        events = [json.loads(line) for line in fleet.events_path().read_text(encoding="utf-8").splitlines()]
-        assert any(e["kind"] == "respawn_failed" for e in events)
-
-    def test_launch_failure_rolls_back_on_keyboard_interrupt(self, isolated_home):
-        old_sid, _ = _seed_worker("probe-1", status="idle", log_result=True)
-
-        def popen(*a, **kw):
-            raise KeyboardInterrupt()
-
-        args = fleet.build_parser().parse_args(["respawn", "probe-1"])
-        with pytest.raises(KeyboardInterrupt):
-            fleet.cmd_respawn(args, popen=popen, get_process_info=_dead_info, which=lambda n: "claude.cmd")
-
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        assert rec["session_id"] == old_sid
-
-    def test_force_path_rollback_restores_idle_old_sid(self, isolated_home):
-        """Rollback after a --force respawn must restore the POST-INTERRUPT
-        state (old_sid, idle) -- not the stale pre-interrupt "working"
-        snapshot, which would falsely resurrect a pid that was just
-        killed. turn_pid itself is left as _interrupt_worker's own
-        "killed" transition leaves it (it only flips status, exactly like
-        cmd_interrupt's own contract) -- not additionally cleared here."""
-        old_sid, _ = _seed_worker("probe-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
-        killed = {"done": False}
-
-        def kill_process_tree(pid):
-            killed["done"] = True
-
-        def get_process_info(pid):
-            return None if killed["done"] else _alive_info(pid)
-
-        def popen(*a, **kw):
-            raise OSError("boom")
-
-        args = fleet.build_parser().parse_args(["respawn", "probe-1", "--force"])
-        with pytest.raises(fleet.TurnLaunchError):
-            fleet.cmd_respawn(
-                args, popen=popen, get_process_info=get_process_info, which=lambda n: "claude.cmd",
-                kill_process_tree=kill_process_tree,
-            )
-
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        assert rec["session_id"] == old_sid
-        assert rec["status"] == "idle"
-
-    def test_launch_failure_rollback_unrotates_log_and_preserves_transcript(self, isolated_home):
-        """Finding 1 (task-5 adversarial review): _rotate_worker_log runs
-        unconditionally before the launch attempt; if the launch then
-        fails, the rollback must un-rotate the log BEFORE restoring the
-        registry snapshot, or the restored (old_sid) worker's transcript
-        is stranded in .jsonl.1 while the live path sees the empty file
-        launch_turn's failed append-open (re-)created -- recomputing to
-        "dead" despite the registry correctly saying "idle"."""
-        old_sid, _ = _seed_worker("probe-1", status="idle", cost_usd=1.0, log_result=False)
-        logs = fleet.logs_dir()
-        logs.mkdir(parents=True, exist_ok=True)
-        original_transcript = (
-            '{"type":"assistant","message":{"content":[{"type":"text","text":'
-            '"original session content XYZ"}]}}\n'
-            '{"type":"result","result":"done","total_cost_usd":1.0}\n'
-        )
-        (logs / "probe-1.jsonl").write_text(original_transcript, encoding="utf-8")
-
-        def popen(*a, **kw):
-            raise OSError("boom")
-
-        args = fleet.build_parser().parse_args(["respawn", "probe-1"])
-        with pytest.raises(fleet.TurnLaunchError):
-            fleet.cmd_respawn(args, popen=popen, get_process_info=_dead_info, which=lambda n: "claude.cmd")
-
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        assert rec["session_id"] == old_sid
-        assert rec["status"] == "idle"
-
-        # the .1 file must be gone (restored back onto the live path) --
-        # not left stranding the real transcript
-        assert not (logs / "probe-1.jsonl.1").exists()
-        restored = (logs / "probe-1.jsonl").read_text(encoding="utf-8")
-        assert "original session content XYZ" in restored
-        assert fleet.tail_events(logs / "probe-1.jsonl", n=20)
-        assert fleet._last_line_type(logs / "probe-1.jsonl") == "result"
-        # the "recompute_status now returns dead from an empty log" defect
-        # this fix closes:
-        status = fleet.recompute_status(
-            None, None, logs / "probe-1.jsonl", current_status="idle", get_process_info=_dead_info,
-        )
-        assert status == "idle"
-
-    def test_second_respawn_after_failed_respawn_does_not_destroy_history(self, isolated_home):
-        """A failed respawn's rollback must leave the worker in a state
-        where a SUBSEQUENT (successful) respawn rotates the real restored
-        transcript into .1 -- not an empty stub that would permanently
-        overwrite it (Finding 1's "destroys history" escalation)."""
-        _seed_worker("probe-1", status="idle", log_result=False)
-        logs = fleet.logs_dir()
-        logs.mkdir(parents=True, exist_ok=True)
-        original_transcript = (
-            '{"type":"assistant","message":{"content":[{"type":"text","text":'
-            '"irreplaceable history"}]}}\n'
-            '{"type":"result","result":"done","total_cost_usd":0.0}\n'
-        )
-        (logs / "probe-1.jsonl").write_text(original_transcript, encoding="utf-8")
-
-        def failing_popen(*a, **kw):
-            raise OSError("boom")
-
-        args = fleet.build_parser().parse_args(["respawn", "probe-1"])
-        with pytest.raises(fleet.TurnLaunchError):
-            fleet.cmd_respawn(args, popen=failing_popen, get_process_info=_dead_info, which=lambda n: "claude.cmd")
-
-        # second respawn, this time succeeding
-        proc = FakeProc(pid=7)
-        rc = fleet.cmd_respawn(args, popen=_fake_popen(proc), get_process_info=_dead_info, which=lambda n: "claude.cmd")
-        assert rc == 0
-
-        assert "irreplaceable history" in (logs / "probe-1.jsonl.1").read_text(encoding="utf-8")
-
-
-# ---------------------------------------------------------------------------
-# cost_usd cumulative-across-respawns (Finding 4, task-5 adversarial review)
-# ---------------------------------------------------------------------------
-
-class TestCostBaseline:
-    def test_respawn_stamps_carried_cost_as_new_baseline(self, isolated_home):
-        _seed_worker("probe-1", status="idle", log_result=True, cost_usd=2.5)
-        proc = FakeProc(pid=7)
-        args = fleet.build_parser().parse_args(["respawn", "probe-1"])
-        fleet.cmd_respawn(args, popen=_fake_popen(proc), get_process_info=_dead_info, which=lambda n: "claude.cmd")
-
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        assert rec["cost_usd"] == 2.5
-        assert rec["cost_baseline"] == 2.5
-
-    def test_cost_accumulates_after_respawn_and_new_session_result(self, isolated_home):
-        """Finding 4: carried 2.50 + a fresh post-respawn session result of
-        0.30 must recompute to 2.80, not clobber down to 0.30."""
-        _seed_worker("probe-1", status="idle", log_result=True, cost_usd=2.5)
-        proc = FakeProc(pid=7)
-        args = fleet.build_parser().parse_args(["respawn", "probe-1"])
-        fleet.cmd_respawn(args, popen=_fake_popen(proc), get_process_info=_dead_info, which=lambda n: "claude.cmd")
-
-        # simulate the new session's own log gaining its first result event
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.write_text('{"type":"result","result":"done","total_cost_usd":0.3}\n', encoding="utf-8")
-
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info)
-        assert updated["cost_usd"] == pytest.approx(2.8)
-
-    def test_recompute_worker_tolerates_missing_cost_baseline_key(self, isolated_home):
-        """Old registry records that predate cost_baseline must default it
-        to 0.0 rather than raise or misbehave."""
-        _seed_worker("probe-1", status="idle", log_result=False, cost_usd=0.0)
-        data = fleet.load_registry()
-        del data["workers"]["probe-1"]["cost_baseline"]
-        fleet.save_registry(data)
-
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text('{"type":"result","result":"done","total_cost_usd":0.7}\n', encoding="utf-8")
-
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info)
-        assert updated["cost_usd"] == pytest.approx(0.7)
-
-    def test_sums_multiple_result_events_in_one_session(self, isolated_home):
-        """SMOKE-B (integration-smoke.md Finding B, live-proven): `claude`
-        reports cost PER-INVOCATION on `--resume` turns, not cumulatively --
-        observed live where a second send-resumed turn's own result event
-        reported a SMALLER total_cost_usd than the first. recompute_worker
-        used to take only the LAST result event's cost, so a multi-turn
-        `send` sequence within one session (cost_baseline stays 0.0 there,
-        it's only set on respawn) would drop the displayed total down to
-        just the latest turn instead of the session's real running total.
-        Two result events (0.03 + 0.01) in the current log must sum to
-        0.04."""
-        _seed_worker("probe-1", status="idle", log_result=False, cost_usd=0.0)
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text(
-            '{"type":"result","result":"turn one","total_cost_usd":0.03}\n'
-            '{"type":"system","subtype":"hook_response","hook_name":"SessionStart:resume"}\n'
-            '{"type":"result","result":"turn two","total_cost_usd":0.01}\n',
-            encoding="utf-8",
-        )
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info)
-        assert updated["cost_usd"] == pytest.approx(0.04)
-
-    def test_sums_multiple_result_events_plus_baseline(self, isolated_home):
-        """Same as above, but with a nonzero cost_baseline carried from a
-        prior respawn -- the sum must still add on top of the baseline,
-        not replace it."""
-        _seed_worker("probe-1", status="idle", log_result=False, cost_usd=2.5)
-        data = fleet.load_registry()
-        data["workers"]["probe-1"]["cost_baseline"] = 2.5
-        fleet.save_registry(data)
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text(
-            '{"type":"result","result":"turn one","total_cost_usd":0.03}\n'
-            '{"type":"result","result":"turn two","total_cost_usd":0.01}\n',
-            encoding="utf-8",
-        )
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info)
-        assert updated["cost_usd"] == pytest.approx(2.54)
-
-
-# ---------------------------------------------------------------------------
-# _sum_result_costs / _coerce_cost hardening (fuzz-report Findings F3+F4)
-# ---------------------------------------------------------------------------
-
-class TestCostHardening:
-    def test_string_cost_is_coerced_when_cleanly_numeric(self, isolated_home):
-        """Finding F3 (HIGH): a `total_cost_usd` that arrives as a JSON
-        string (e.g. "5.00") used to raise TypeError ('float' + 'str') --
-        never raises now, and a cleanly-numeric string is still summed."""
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text('{"type":"result","total_cost_usd":"5.00","result":"x"}\n', encoding="utf-8")
-        assert fleet._sum_result_costs(log) == pytest.approx(5.0)
-
-    def test_non_numeric_string_cost_is_skipped_not_raised(self, isolated_home):
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text('{"type":"result","total_cost_usd":"garbage","result":"x"}\n', encoding="utf-8")
-        # No other result event with a valid cost -> None (nothing to sum).
-        assert fleet._sum_result_costs(log) is None
-
-    @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
-    def test_non_finite_cost_is_skipped(self, isolated_home, literal):
-        """Finding F4 (MEDIUM): json.loads accepts NaN/Infinity/-Infinity
-        by default -- summing one straight in permanently poisons cost_usd
-        with no crash and no visible warning. Must be skipped instead."""
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text(f'{{"type":"result","total_cost_usd":{literal},"result":"x"}}\n', encoding="utf-8")
-        assert fleet._sum_result_costs(log) is None
-
-    def test_negative_cost_is_skipped(self, isolated_home):
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text('{"type":"result","total_cost_usd":-1.5,"result":"x"}\n', encoding="utf-8")
-        assert fleet._sum_result_costs(log) is None
-
-    def test_bad_cost_line_among_good_ones_only_drops_the_bad_one(self, isolated_home):
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text(
-            '{"type":"result","total_cost_usd":0.03,"result":"one"}\n'
-            '{"type":"result","total_cost_usd":NaN,"result":"two"}\n'
-            '{"type":"result","total_cost_usd":0.01,"result":"three"}\n',
-            encoding="utf-8",
-        )
-        assert fleet._sum_result_costs(log) == pytest.approx(0.04)
-
-    def test_recompute_worker_tolerates_poisoned_cost_baseline(self, isolated_home):
-        """A registry record whose cost_baseline was already poisoned
-        (NaN/Infinity/negative -- e.g. persisted before this hardening
-        existed, or hand-edited) must not propagate forward forever:
-        _registry_cost falls back to 0.0 instead of contaminating the
-        freshly-summed total."""
-        _seed_worker("probe-1", status="idle", log_result=False, cost_usd=0.0)
-        data = fleet.load_registry()
-        data["workers"]["probe-1"]["cost_baseline"] = float("nan")
-        fleet.save_registry(data)
-
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text('{"type":"result","result":"done","total_cost_usd":0.5}\n', encoding="utf-8")
-
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info)
-        assert updated["cost_usd"] == pytest.approx(0.5)
-
-    def test_coerce_cost_rejects_bool(self):
-        """A JSON true/false is never a sane cost, even though bool is an
-        int subclass in Python."""
+    def test_bool_is_rejected_even_though_int_subclass(self):
         assert fleet._coerce_cost(True) is None
-        assert fleet._coerce_cost(False) is None
 
+    def test_registry_cost_falls_back_to_zero(self):
+        assert fleet._registry_cost(float("nan")) == 0.0
+        assert fleet._registry_cost(None) == 0.0
+        assert fleet._registry_cost(1.25) == 1.25
 
-# ---------------------------------------------------------------------------
-# fleet kill
-# ---------------------------------------------------------------------------
-
-class TestCmdKill:
-    def test_unknown_worker_raises(self, isolated_home):
-        args = fleet.build_parser().parse_args(["kill", "nope"])
-        with pytest.raises(fleet.FleetCliError):
-            fleet.cmd_kill(args, get_process_info=_dead_info)
-
-    def test_refuses_during_launch_in_flight(self, isolated_home):
-        """F2 (final-review.md): attach --force and respawn --force both
-        refuse on a launch-in-flight claim (status=="working", turn_pid is
-        None -- a spawn/send/attach/respawn pre-claim mid-launch, no real
-        pid yet to verify-kill); kill lacked this guard. Before the fix,
-        kill would snapshot pid=None, pid_alive(None)=False -> "not_running"
-        on both probes, and unconditionally mark the worker dead -- opening
-        a window for a concurrent `fleet clean` to delete the logs/mailbox
-        of a live, just-launched worker (the recompute launch-in-flight
-        guard no longer protects a dead+turn_pid=None record)."""
-        _seed_worker("probe-1", status="working", turn_pid=None)
-
-        def kill_process_tree(pid):
-            raise AssertionError("must not attempt a kill with no real pid yet")
-
-        args = fleet.build_parser().parse_args(["kill", "probe-1"])
-        with pytest.raises(fleet.FleetCliError, match="launch in flight"):
-            fleet.cmd_kill(args, get_process_info=_dead_info, kill_process_tree=kill_process_tree)
-
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        assert rec["status"] == "working"
-        assert rec["turn_pid"] is None
-
-    def test_expired_launch_claim_is_not_refused(self, isolated_home):
-        """Post-testing wave, item 1c (zombie escape hatch): a
-        "working"/turn_pid=None claim whose last_activity is older than
-        LAUNCH_CLAIM_MAX_AGE_SECONDS is no longer a real in-flight launch
-        (the launcher stamps a pid within seconds; this old means the
-        `fleet` CLI process that owned the launch died mid-claim) -- kill
-        must proceed instead of refusing forever."""
-        sid, _ = _seed_worker("probe-1", status="working", turn_pid=None)
-        data = fleet.load_registry()
-        stale = fleet.ctime_to_iso(datetime.now(timezone.utc) - timedelta(seconds=fleet.LAUNCH_CLAIM_MAX_AGE_SECONDS + 1))
-        data["workers"]["probe-1"]["last_activity"] = stale
-        fleet.save_registry(data)
-
-        args = fleet.build_parser().parse_args(["kill", "probe-1"])
-        rc = fleet.cmd_kill(
-            args, get_process_info=_dead_info, kill_process_tree=lambda pid: None, sleep=lambda s: None,
-        )
-
-        assert rc == 0
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        assert rec["status"] == "dead"
-
-    def test_kills_running_turn_and_marks_dead(self, isolated_home, capsys):
-        _seed_worker("probe-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
-        killed = {"done": False}
-
-        def kill_process_tree(pid):
-            killed["done"] = True
-
-        def get_process_info(pid):
-            return None if killed["done"] else _alive_info(pid)
-
-        args = fleet.build_parser().parse_args(["kill", "probe-1"])
-        rc = fleet.cmd_kill(args, get_process_info=get_process_info, kill_process_tree=kill_process_tree)
-
-        assert rc == 0
-        assert "killed" in capsys.readouterr().out
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        assert rec["status"] == "dead"
-        assert rec["turn_pid"] is None
-        events = [json.loads(line) for line in fleet.events_path().read_text(encoding="utf-8").splitlines()]
-        assert any(e["kind"] == "killed" for e in events)
-
-    def test_idle_worker_is_marked_dead_without_kill_attempt(self, isolated_home):
-        _seed_worker("probe-1", status="idle", turn_pid=111, turn_pid_ctime=ALIVE_CTIME, log_result=True)
-
-        def kill_process_tree(pid):
-            raise AssertionError("must not attempt a kill when nothing is running")
-
-        args = fleet.build_parser().parse_args(["kill", "probe-1"])
-        rc = fleet.cmd_kill(
-            args, get_process_info=_dead_info, kill_process_tree=kill_process_tree, sleep=lambda s: None,
-        )
-
-        assert rc == 0
-        assert fleet.load_registry()["workers"]["probe-1"]["status"] == "dead"
-
-    def test_kill_failed_still_marks_dead_but_warns_and_nonzero(self, isolated_home, capsys):
-        _seed_worker("probe-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
-        args = fleet.build_parser().parse_args(["kill", "probe-1"])
-        rc = fleet.cmd_kill(args, get_process_info=_alive_info, kill_process_tree=lambda pid: None)
-
-        assert rc != 0
-        combined = "".join(capsys.readouterr())
-        assert "probe-1" in combined
-        assert fleet.load_registry()["workers"]["probe-1"]["status"] == "dead"
-
-    def test_flaky_once_not_running_probe_still_kills_a_live_worker(self, isolated_home):
-        """Finding 3 (task-5 adversarial review): a single get_process_info
-        probe returning None can be a transient failure (any exception ->
-        None), not a genuinely dead process. Before finalizing "not
-        running" -> dead, kill must re-verify after a delay -- and if
-        that second probe finds the turn actually alive, kill it for
-        real rather than orphaning it as "dead"."""
-        _seed_worker("probe-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
-        calls = {"n": 0}
-        killed = {"done": False}
-        slept = []
-
-        def get_process_info(pid):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return None  # transient false-negative on the first probe
-            return None if killed["done"] else _alive_info(pid)
-
-        def kill_process_tree(pid):
-            killed["done"] = True
-
-        args = fleet.build_parser().parse_args(["kill", "probe-1"])
-        rc = fleet.cmd_kill(
-            args, get_process_info=get_process_info, kill_process_tree=kill_process_tree,
-            sleep=slept.append,
-        )
-
-        assert rc == 0
-        assert killed["done"] is True  # the real kill was actually attempted
-        assert slept  # the confirm delay was actually taken
-        assert fleet.load_registry()["workers"]["probe-1"]["status"] == "dead"
-
-    def test_consistently_not_running_worker_is_still_marked_dead(self, isolated_home):
-        """Corroborating with a second probe must not block a genuinely
-        dead worker from being marked dead."""
-        _seed_worker("probe-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
-        calls = {"n": 0}
-
-        def get_process_info(pid):
-            calls["n"] += 1
-            return None
-
-        def kill_process_tree(pid):
-            raise AssertionError("nothing alive to kill")
-
-        args = fleet.build_parser().parse_args(["kill", "probe-1"])
-        rc = fleet.cmd_kill(
-            args, get_process_info=get_process_info, kill_process_tree=kill_process_tree,
-            sleep=lambda s: None,
-        )
-
-        assert rc == 0
-        assert calls["n"] >= 2  # confirmed via a second probe
-        assert fleet.load_registry()["workers"]["probe-1"]["status"] == "dead"
-
-
-# ---------------------------------------------------------------------------
-# fleet clean
-# ---------------------------------------------------------------------------
-
-class TestCmdClean:
-    def test_removes_dead_worker_and_files(self, isolated_home, capsys):
-        sid, _ = _seed_worker("dead-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME, log_result=False)
-        # no result line + dead pid -> recomputes to "dead"
-        logs = fleet.logs_dir()
-        logs.mkdir(parents=True, exist_ok=True)
-        (logs / "dead-1.jsonl").write_text("junk\n", encoding="utf-8")
-        (logs / "dead-1.jsonl.1").write_text("older junk\n", encoding="utf-8")
-        (logs / "dead-1.err").write_text("", encoding="utf-8")
-        mbox = fleet.mailbox_dir()
-        mbox.mkdir(parents=True, exist_ok=True)
-        (mbox / f"{sid}.md").write_text("stray mail", encoding="utf-8")
-        journal = fleet.journals_dir() / "dead-1.md"
-        journal.parent.mkdir(parents=True, exist_ok=True)
-        journal.write_text("journal content", encoding="utf-8")
-
-        args = fleet.build_parser().parse_args(["clean"])
-        rc = fleet.cmd_clean(args, get_process_info=_dead_info, sleep=lambda s: None)
-
-        assert rc == 0
-        assert "dead-1" not in fleet.load_registry()["workers"]
-        assert not (logs / "dead-1.jsonl").exists()
-        assert not (logs / "dead-1.jsonl.1").exists()
-        assert not (logs / "dead-1.err").exists()
-        assert not (mbox / f"{sid}.md").exists()
-        assert not journal.exists()
-        out = capsys.readouterr().out
-        assert "dead-1" in out
-        assert sid in out
-
-    def test_sweeps_orphaned_claimed_files_for_removed_sid(self, isolated_home):
-        sid, _ = _seed_worker("dead-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME, log_result=False)
-        mbox = fleet.mailbox_dir()
-        mbox.mkdir(parents=True, exist_ok=True)
-        claimed = mbox / f"{sid}.md.claimed.4321"
-        claimed.write_text("orphaned claim litter", encoding="utf-8")
-
-        args = fleet.build_parser().parse_args(["clean"])
-        fleet.cmd_clean(args, get_process_info=_dead_info, sleep=lambda s: None)
-
-        assert not claimed.exists()
-
-    def test_flaky_once_probe_does_not_delete_a_live_worker(self, isolated_home):
-        """Finding 3 (task-5 adversarial review): clean's deletion is
-        irreversible, but "dead" rests on a single pid_alive() probe that
-        can misfire on a transient get_process_info failure. A worker
-        that looks dead on the first pass but alive on a second, delayed
-        probe must NOT be removed."""
-        sid, _ = _seed_worker("flaky-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME, log_result=False)
-        logs = fleet.logs_dir()
-        logs.mkdir(parents=True, exist_ok=True)
-        (logs / "flaky-1.jsonl").write_text("junk, no trailing result\n", encoding="utf-8")
-        calls = {"n": 0}
-        slept = []
-
-        def get_process_info(pid):
-            calls["n"] += 1
-            return None if calls["n"] == 1 else _alive_info(pid)
-
-        args = fleet.build_parser().parse_args(["clean"])
-        rc = fleet.cmd_clean(args, get_process_info=get_process_info, sleep=slept.append)
-
-        assert rc == 0
-        assert slept  # the confirm delay was actually taken
-        assert "flaky-1" in fleet.load_registry()["workers"]
-        assert (logs / "flaky-1.jsonl").exists()
-        assert fleet.load_registry()["workers"]["flaky-1"]["status"] == "working"
-
-    def test_consistently_dead_worker_is_still_removed(self, isolated_home):
-        """Corroborating with a second probe must not block a genuinely
-        dead worker from being cleaned."""
-        sid, _ = _seed_worker("dead-2", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME, log_result=False)
-        logs = fleet.logs_dir()
-        logs.mkdir(parents=True, exist_ok=True)
-        (logs / "dead-2.jsonl").write_text("junk, no trailing result\n", encoding="utf-8")
-        calls = {"n": 0}
-
-        def get_process_info(pid):
-            calls["n"] += 1
-            return None
-
-        args = fleet.build_parser().parse_args(["clean"])
-        rc = fleet.cmd_clean(args, get_process_info=get_process_info, sleep=lambda s: None)
-
-        assert rc == 0
-        assert calls["n"] >= 2  # confirmed via a second probe
-        assert "dead-2" not in fleet.load_registry()["workers"]
-        assert not (logs / "dead-2.jsonl").exists()
-
-    def test_leaves_idle_working_attached_workers_untouched(self, isolated_home):
-        _seed_worker("idle-1", status="idle", log_result=True)
-        _seed_worker("working-1", status="working", turn_pid=222, turn_pid_ctime=ALIVE_CTIME)
-        _seed_worker("attached-1", status="attached")
-
-        args = fleet.build_parser().parse_args(["clean"])
-        fleet.cmd_clean(args, get_process_info=_alive_info)
-
-        workers = fleet.load_registry()["workers"]
-        assert set(workers) == {"idle-1", "working-1", "attached-1"}
-
-    def test_nothing_to_clean_prints_friendly_message(self, isolated_home, capsys):
-        _seed_worker("idle-1", status="idle", log_result=True)
-        args = fleet.build_parser().parse_args(["clean"])
-        rc = fleet.cmd_clean(args, get_process_info=_dead_info)
-        assert rc == 0
-        assert "nothing to clean" in capsys.readouterr().out
-
-    def test_confirm_delay_does_not_hold_fleet_lock(self, isolated_home):
-        """Review wave 5b: the dead-confirm sleep must not run inside
-        `with fleet_lock()` -- it used to, blocking every concurrent fleet
-        command for _DEAD_CONFIRM_DELAY_SECONDS. Reuses the reentrancy/
-        lock-probe technique from
-        test_snapshots_registry_without_holding_lock_across_checks: a fake
-        `sleep` that tries to acquire fleet_lock itself. If cmd_clean
-        still held the lock across the sleep, this nested acquisition
-        would raise FleetLockTimeout."""
-        _seed_worker("dead-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME, log_result=False)
-        logs = fleet.logs_dir()
-        logs.mkdir(parents=True, exist_ok=True)
-        (logs / "dead-1.jsonl").write_text("junk, no trailing result\n", encoding="utf-8")
-
-        def probing_sleep(seconds):
-            with fleet.fleet_lock(timeout=0.5):
-                pass  # must not raise FleetLockTimeout
-
-        args = fleet.build_parser().parse_args(["clean"])
-        rc = fleet.cmd_clean(args, get_process_info=_dead_info, sleep=probing_sleep)
-
-        assert rc == 0
-        assert "dead-1" not in fleet.load_registry()["workers"]
-
-    def test_first_pass_probe_does_not_hold_fleet_lock(self, isolated_home):
-        """Stress residual, Finding N1 (re-review of 550df0a): clean's FIRST
-        pass used to call recompute_worker's real probe for every worker
-        inside the single `with fleet_lock():` block -- the same
-        recompute-all-under-lock shape that made `fleet status` a
-        stress-critical (see test_cli.py's
-        TestCmdStatus.test_probe_does_not_hold_fleet_lock). Reuses the same
-        nested-lock probe technique as
-        test_confirm_delay_does_not_hold_fleet_lock: a fake
-        get_process_info that itself tries to acquire fleet_lock. If
-        cmd_clean's first pass still held the lock across this probe, the
-        nested acquisition would raise FleetLockTimeout."""
-        _seed_worker("probe-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME, log_result=False)
-        logs = fleet.logs_dir()
-        logs.mkdir(parents=True, exist_ok=True)
-        (logs / "probe-1.jsonl").write_text("junk, no trailing result\n", encoding="utf-8")
-
-        def probing_get_process_info(pid):
-            with fleet.fleet_lock(timeout=0.5):
-                pass  # must not raise FleetLockTimeout
-            return _alive_info(pid)  # keep it alive/non-dead -- not the point of this test
-
-        args = fleet.build_parser().parse_args(["clean"])
-        rc = fleet.cmd_clean(args, get_process_info=probing_get_process_info, sleep=lambda s: None)
-        assert rc == 0
-
-    def test_respawned_meanwhile_is_spared_not_deleted(self, isolated_home):
-        """A worker that looks dead on pass 1 but gets respawned (registry
-        entry mutated) by a concurrent command while clean's lock is
-        released for the confirm sleep must be spared -- clean must not
-        delete or overwrite it on the strength of a verdict computed
-        against now-stale pre-sleep data."""
-        sid, _ = _seed_worker("respawn-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME, log_result=False)
-        logs = fleet.logs_dir()
-        logs.mkdir(parents=True, exist_ok=True)
-        (logs / "respawn-1.jsonl").write_text("junk, no trailing result\n", encoding="utf-8")
-
-        def respawn_meanwhile(seconds):
-            data = fleet.load_registry()
-            data["workers"]["respawn-1"]["turn_pid"] = 999
-            data["workers"]["respawn-1"]["turn_pid_ctime"] = ALIVE_CTIME
-            data["workers"]["respawn-1"]["status"] = "working"
-            fleet.save_registry(data)
-
-        args = fleet.build_parser().parse_args(["clean"])
-        rc = fleet.cmd_clean(args, get_process_info=_dead_info, sleep=respawn_meanwhile)
-
-        assert rc == 0
-        workers = fleet.load_registry()["workers"]
-        assert "respawn-1" in workers
-        assert workers["respawn-1"]["turn_pid"] == 999
-
-
-# ---------------------------------------------------------------------------
-# fleet doctor -- individual checks
-# ---------------------------------------------------------------------------
 
 class _FakeResult:
     def __init__(self, returncode=0, stdout="", stderr=""):
@@ -1452,20 +325,6 @@ class TestDoctorTerminalLauncher:
 
 
 class TestDoctorRegistryChecks:
-    def test_stale_pid_reported_but_ok(self, isolated_home):
-        _, rec = _seed_worker("probe-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
-        workers = {"probe-1": rec}
-        name, ok, msg = fleet._doctor_check_stale_pids(workers, get_process_info=_dead_info)
-        assert ok is True
-        assert "probe-1" in msg
-
-    def test_no_stale_pid_when_alive(self, isolated_home):
-        _, rec = _seed_worker("probe-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
-        workers = {"probe-1": rec}
-        name, ok, msg = fleet._doctor_check_stale_pids(workers, get_process_info=_alive_info)
-        assert ok is True
-        assert "no stale" in msg
-
     def test_orphaned_mailbox_reported(self, isolated_home):
         # F9: orphaned-mailbox detection now lives in the orphaned-claims check
         # (with sid + first-line disposition), not _doctor_check_mailboxes --
@@ -1521,22 +380,6 @@ class TestDoctorRegistryChecks:
         name, ok, msg = fleet._doctor_check_orphaned_claims()
         assert ok is True
         assert "no orphaned" in msg
-
-    def test_log_sizes_over_threshold_reported(self, isolated_home, monkeypatch):
-        logs = fleet.logs_dir()
-        logs.mkdir(parents=True, exist_ok=True)
-        big = logs / "probe-1.jsonl"
-        big.write_text("x", encoding="utf-8")
-        monkeypatch.setattr(fleet, "_LOG_SIZE_WARN_BYTES", 0)  # force over-threshold without a real 50MB file
-        name, ok, msg = fleet._doctor_check_log_sizes()
-        assert ok is True
-        assert "probe-1.jsonl" in msg
-
-    def test_no_big_logs(self, isolated_home):
-        name, ok, msg = fleet._doctor_check_log_sizes()
-        assert ok is True
-        assert "no log files" in msg
-
 
 class TestDoctorClaudeAgents:
     def test_command_absent_is_note_only(self, isolated_home):
@@ -1633,16 +476,6 @@ class TestCmdDoctorOrchestration:
 # ---------------------------------------------------------------------------
 
 class TestSettingSourcesPassthrough:
-    def test_build_turn_argv_includes_flag_when_given(self):
-        argv = fleet.build_turn_argv("claude.cmd", "sid-1", first=True, mode="omit",
-                                      setting_sources="user,project")
-        assert "--setting-sources" in argv
-        assert argv[argv.index("--setting-sources") + 1] == "user,project"
-
-    def test_build_turn_argv_omits_flag_when_absent(self):
-        argv = fleet.build_turn_argv("claude.cmd", "sid-1", first=True, mode="omit")
-        assert "--setting-sources" not in argv
-
     def test_spawn_persists_and_forwards_setting_sources(self, isolated_home, tmp_path, monkeypatch):
         # T4 fix wave (Important I1): --setting-sources is persisted in the
         # registry at spawn AND forwarded onto the native --bg argv via
@@ -1722,136 +555,6 @@ class TestSettingSourcesPassthrough:
 
 # ---------------------------------------------------------------------------
 # peek tokens (spec-audit gap 5)
-# ---------------------------------------------------------------------------
-
-class TestPeekTokens:
-    def test_format_tokens_known_keys(self):
-        s = fleet._format_tokens({"input_tokens": 10, "output_tokens": 20})
-        assert "in=10" in s
-        assert "out=20" in s
-
-    def test_format_tokens_empty(self):
-        assert fleet._format_tokens({}) == "-"
-
-    def test_format_tokens_unknown_shape_falls_back_to_dump(self):
-        s = fleet._format_tokens({"weird_key": 1})
-        assert "weird_key" in s
-
-    def test_peek_prints_tokens_alongside_cost(self, isolated_home, capsys):
-        sid = str(uuid.uuid4())
-        rec = fleet.new_worker_record(sid, "C:/x", "task", "dontask")
-        fleet.save_registry({"workers": {"probe-1": rec}})
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text(
-            '{"type":"result","result":"all done","total_cost_usd":0.1,'
-            '"usage":{"input_tokens":123,"output_tokens":45}}\n',
-            encoding="utf-8",
-        )
-        args = fleet.build_parser().parse_args(["peek", "probe-1"])
-        rc = fleet.cmd_peek(args)
-        assert rc == 0
-        out = capsys.readouterr().out
-        assert "in=123" in out
-        assert "out=45" in out
-        assert "$0.10" in out
-
-
-# ---------------------------------------------------------------------------
-# tail-read perf optimization (spec-audit gap: status/wait poll tail reads)
-# ---------------------------------------------------------------------------
-
-class TestTailReadPerf:
-    def _fabricate_large_log(self, log_path, total_bytes=70_000):
-        """Build a >64KB log: a long run of junk padding lines, followed by
-        a single well-formed trailing result event."""
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        padding_line = ("x" * 200) + "\n"
-        with open(log_path, "w", encoding="utf-8") as f:
-            written = 0
-            while written < total_bytes:
-                f.write(padding_line)
-                written += len(padding_line)
-            f.write('{"type":"assistant","message":{"content":"hello from the tail"}}\n')
-            f.write('{"type":"result","result":"done at the tail","total_cost_usd":0.42}\n')
-
-    def test_last_line_type_finds_trailing_result_past_64kb(self, isolated_home):
-        log = fleet.logs_dir() / "big.jsonl"
-        self._fabricate_large_log(log)
-        assert log.stat().st_size > fleet._TAIL_READ_BYTES
-        assert fleet._last_line_type(log) == "result"
-
-    def test_tail_events_finds_trailing_entries_past_64kb(self, isolated_home):
-        log = fleet.logs_dir() / "big.jsonl"
-        self._fabricate_large_log(log)
-        entries = fleet.tail_events(log, n=20)
-        kinds_texts = [(e["kind"], e.get("text")) for e in entries]
-        assert ("result", "done at the tail") in kinds_texts
-
-    def test_recompute_status_resolves_idle_on_large_log_with_trailing_result(self, isolated_home):
-        log = fleet.logs_dir() / "big.jsonl"
-        self._fabricate_large_log(log)
-        status = fleet.recompute_status(111, ALIVE_CTIME, log, current_status="working", get_process_info=_dead_info)
-        assert status == "idle"
-
-    def test_small_log_unaffected_reads_whole_file(self, isolated_home):
-        log = fleet.logs_dir() / "small.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text('{"type":"result","result":"tiny","total_cost_usd":0.01}\n', encoding="utf-8")
-        assert log.stat().st_size < fleet._TAIL_READ_BYTES
-        assert fleet._last_line_type(log) == "result"
-
-    def test_partial_leading_line_in_tail_window_is_discarded_not_misparsed(self, isolated_home):
-        """When the 64KB window's start lands mid-line, the partial
-        fragment must be dropped rather than fed to json.loads as if it
-        were a whole line (it would just fail to parse and be skipped
-        anyway, but this pins that no spurious data leaks through)."""
-        log = fleet.logs_dir() / "big2.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        # Build a log where a padding line straddles the tail-window
-        # boundary, then a clean trailing result line.
-        with open(log, "wb") as f:
-            f.write(b"y" * (fleet._TAIL_READ_BYTES + 50))
-            f.write(b"\n")
-            f.write(b'{"type":"result","result":"clean tail","total_cost_usd":0.2}\n')
-        assert fleet._last_line_type(log) == "result"
-
-    def test_oversized_trailing_line_falls_back_to_whole_file(self, isolated_home):
-        """Finding 2 (task-5 adversarial review): if the trailing window's
-        ONLY newline is the oversized final line's own terminator,
-        "discard up to and including the first newline" drops that whole
-        line instead of trimming a partial leading fragment. A single
-        stream-json event (e.g. a big result payload) exceeding 64KB must
-        not be silently lost -- fall back to a whole-file read."""
-        log = fleet.logs_dir() / "bigline.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        result_obj = {"type": "result", "result": "x" * 70_000, "total_cost_usd": 0.55}
-        with open(log, "w", encoding="utf-8") as f:
-            f.write(json.dumps(result_obj) + "\n")
-        assert log.stat().st_size > fleet._TAIL_READ_BYTES
-
-        assert fleet._last_line_type(log) == "result"
-        entries = fleet.tail_events(log, n=20)
-        assert any(e["kind"] == "result" for e in entries)
-
-    def test_no_newline_anywhere_in_tail_window_falls_back_to_whole_file(self, isolated_home):
-        """The window can also contain NO newline at all (an oversized
-        final line still being written, with no terminator yet) --
-        that must fall back to a whole-file read too, rather than
-        parsing an empty/truncated chunk."""
-        log = fleet.logs_dir() / "nonl.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        with open(log, "wb") as f:
-            f.write(b'{"type":"result","result":"leading","total_cost_usd":0.1}\n')
-            f.write(b"z" * (fleet._TAIL_READ_BYTES + 5000))  # no trailing newline yet
-        assert log.stat().st_size > fleet._TAIL_READ_BYTES
-
-        lines = fleet._read_tail_lines(log)
-        assert any(line.startswith('{"type":"result"') for line in lines)
-
-
-# ---------------------------------------------------------------------------
-# Kernel 1 (fleet-side) -- doctor hook-error tail surfacing
 # ---------------------------------------------------------------------------
 
 class TestDoctorHookErrors:
@@ -1948,55 +651,6 @@ class TestDoctorHookRegistration:
 # Kernel 4 -- abnormal-turn-end journal note + cwd preflight
 # ---------------------------------------------------------------------------
 
-class TestAbnormalTurnEndNote:
-    def _crash_log(self, name):
-        log = fleet.logs_dir() / f"{name}.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text('{"type":"assistant","message":{"content":[]}}\n', encoding="utf-8")
-
-    def test_crash_classification_appends_note(self, isolated_home):
-        sid, rec = _seed_worker("probe-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
-        self._crash_log("probe-1")
-        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info)
-        assert updated["status"] == "dead"
-        journal = fleet.journals_dir() / "probe-1.md"
-        assert journal.exists()
-        assert "turn ended abnormally" in journal.read_text(encoding="utf-8")
-
-    def test_note_written_once_per_crash(self, isolated_home):
-        sid, rec = _seed_worker("probe-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
-        self._crash_log("probe-1")
-        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info)
-        # feeding the now-"dead" record back must not append a second note
-        fleet.recompute_worker("probe-1", updated, get_process_info=_dead_info)
-        journal = fleet.journals_dir() / "probe-1.md"
-        assert journal.read_text(encoding="utf-8").count("turn ended abnormally") == 1
-
-    def test_clean_finish_writes_no_note(self, isolated_home):
-        # working -> idle (trailing result) is a NORMAL finish, not a crash
-        sid, rec = _seed_worker(
-            "probe-1", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME, log_result=True,
-        )
-        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info)
-        assert updated["status"] == "idle"
-        journal = fleet.journals_dir() / "probe-1.md"
-        assert not journal.exists() or "turn ended abnormally" not in journal.read_text(encoding="utf-8")
-
-
-class TestCwdPreflight:
-    def test_launch_turn_refuses_vanished_cwd(self, isolated_home, tmp_path):
-        gone = tmp_path / "vanished"  # never created
-
-        def popen(*a, **kw):
-            raise AssertionError("must not launch a turn into a vanished cwd")
-
-        with pytest.raises(fleet.TurnLaunchError, match="cwd"):
-            fleet.launch_turn(
-                "probe-1", gone, "sid-1", "prompt", "dontask",
-                popen=popen, which=lambda n: "claude.cmd",
-            )
-
-
 # ---------------------------------------------------------------------------
 # Item 8 (F9): send-lock serialization + mail events + orphaned-mailbox doctor
 # ---------------------------------------------------------------------------
@@ -2008,58 +662,16 @@ def _read_events():
     return [json.loads(line) for line in p.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-class TestSendLockSerialization:
-    """F9 (item 8, review M3): cmd_send's mailbox append for a working/attached
-    worker must happen UNDER fleet_lock so a concurrent respawn drain+sid-swap
-    is atomic w.r.t. send -- no message lands in the pre-swap mailbox after the
-    swap (SPEC invariants 3 atomic-single-file-mailbox, 7 one-live-claude)."""
-
-    def test_send_append_atomic_with_respawn_swap(self, isolated_home, monkeypatch):
-        """Deterministic interleaving (required): inject a respawn-style
-        swap+drain (which runs UNDER fleet_lock) at the moment cmd_send
-        appends. If the append is (correctly) inside the lock, the injected
-        swap's own lock acquire times out and cannot sneak in mid-append; if
-        the append is outside the lock (the bug), the swap orphans the message
-        in the pre-swap mailbox. RED before the lock fix, GREEN after."""
-        old_sid, _ = _seed_worker("w", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
-        new_sid = "swapped-" + old_sid
-        orig_append = fleet.append_mailbox
-        state = {"n": 0}
-
-        def racing_append(sid, message):
-            state["n"] += 1
-            if state["n"] == 1:
-                try:
-                    with fleet.fleet_lock(timeout=0.15):
-                        data = fleet.load_registry()
-                        data["workers"]["w"]["session_id"] = new_sid
-                        fleet.save_registry(data)
-                        oldmb = fleet.mailbox_dir() / f"{old_sid}.md"
-                        if oldmb.exists():
-                            oldmb.rename(oldmb.with_name(f"{old_sid}.md.claimed.test"))
-                except fleet.FleetLockTimeout:
-                    pass
-            return orig_append(sid, message)
-
-        monkeypatch.setattr(fleet, "append_mailbox", racing_append)
-        args = fleet.build_parser().parse_args(["send", "w", "critical instruction"])
-        rc = fleet.cmd_send(args, get_process_info=_alive_info, which=lambda n: "claude.cmd")
-        assert rc == 0
-
-        current_sid = fleet.load_registry()["workers"]["w"]["session_id"]
-        mb = fleet.mailbox_dir() / f"{current_sid}.md"
-        assert mb.exists(), f"tracked mailbox {current_sid}.md missing -- message orphaned by swap"
-        assert "critical instruction" in mb.read_text(encoding="utf-8")
-
-
 class TestMailEvents:
     """F9: fleet.py (sole writer) emits mail_sent (cmd_send) and mail_drained
     (compose-time drain) audit events -- not a DLQ, no redelivery machinery."""
 
-    def test_send_to_working_emits_mail_sent(self, isolated_home):
-        sid, _ = _seed_worker("w", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
+    def test_send_to_working_emits_mail_sent(self, isolated_home, monkeypatch):
+        sid, _ = _seed_worker("w", status="working")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, [
+            {"sessionId": sid, "state": "working", "status": "busy", "pid": 1}]))
         args = fleet.build_parser().parse_args(["send", "w", "ping"])
-        fleet.cmd_send(args, get_process_info=_alive_info, which=lambda n: "claude.cmd")
+        fleet.cmd_send(args, which=lambda n: "claude.cmd")
         sent = [e for e in _read_events() if e["kind"] == "mail_sent"]
         assert sent, "no mail_sent event emitted"
         assert sent[-1]["name"] == "w"
@@ -2119,82 +731,6 @@ class TestOrphanedMailboxDoctor:
 # Item 9 (F15): PID-probe three-way + retry-once-before-dead + doctor check
 # ---------------------------------------------------------------------------
 
-class TestProbeThreeWay:
-    """F15 (item 9, review M4): the probe distinguishes alive / gone /
-    exists-but-unreadable (= alive-unknown). alive-unknown is NEVER demoted to
-    dead; a working->dead transition retries the probe once before demoting."""
-
-    def test_probe_liveness_alive(self, isolated_home):
-        gpi = lambda pid: ("claude.exe", _parse(ALIVE_CTIME))
-        assert fleet.probe_liveness(111, ALIVE_CTIME, get_process_info=gpi) == "alive"
-
-    def test_probe_liveness_gone(self, isolated_home):
-        assert fleet.probe_liveness(111, ALIVE_CTIME, get_process_info=lambda pid: None) == "gone"
-
-    def test_probe_liveness_unknown_on_unreadable_starttime(self, isolated_home):
-        gpi = lambda pid: ("claude.exe", None)  # process exists, StartTime unreadable
-        assert fleet.probe_liveness(111, ALIVE_CTIME, get_process_info=gpi) == "unknown"
-
-    def test_alive_unknown_never_demoted_to_dead(self, isolated_home):
-        log = fleet.logs_dir() / "w.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text('{"type":"assistant","message":{"content":"mid-turn"}}\n', encoding="utf-8")
-        gpi = lambda pid: ("claude.exe", None)  # unreadable -> alive-unknown
-        status = fleet.recompute_status(
-            111, ALIVE_CTIME, log, current_status="working", get_process_info=gpi,
-            sleep=lambda *_: None,
-        )
-        assert status == "working"
-
-    def test_working_to_dead_retries_probe_once_before_demoting(self, isolated_home):
-        log = fleet.logs_dir() / "w.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text('{"type":"assistant","message":{"content":"mid-turn"}}\n', encoding="utf-8")
-        calls = {"n": 0}
-
-        def gpi(pid):
-            calls["n"] += 1
-            return None  # gone on both probes
-
-        status = fleet.recompute_status(
-            111, ALIVE_CTIME, log, current_status="working", get_process_info=gpi,
-            sleep=lambda *_: None,
-        )
-        assert status == "dead"
-        assert calls["n"] == 2, "probe must be retried once before demoting to dead"
-
-    def test_retry_absorbs_transient_probe_miss(self, isolated_home):
-        log = fleet.logs_dir() / "w.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text('{"type":"assistant","message":{"content":"mid-turn"}}\n', encoding="utf-8")
-        calls = {"n": 0}
-
-        def gpi(pid):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return None  # transient hiccup
-            return ("claude.exe", _parse(ALIVE_CTIME))  # actually alive
-
-        status = fleet.recompute_status(
-            111, ALIVE_CTIME, log, current_status="working", get_process_info=gpi,
-            sleep=lambda *_: None,
-        )
-        assert status == "working", "a live worker must not be reaped on a probe hiccup"
-
-    def test_doctor_flags_unreadable_starttime(self, isolated_home):
-        _, rec = _seed_worker("w", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
-        gpi = lambda pid: ("claude.exe", None)  # alive-unknown
-        name, ok, msg = fleet._doctor_check_unreadable_starttime({"w": rec}, get_process_info=gpi)
-        assert ok is True
-        assert "w" in msg
-
-    def test_doctor_no_unreadable_starttime(self, isolated_home):
-        _, rec = _seed_worker("w", status="working", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
-        name, ok, msg = fleet._doctor_check_unreadable_starttime({"w": rec}, get_process_info=_alive_info)
-        assert ok is True
-        assert "no" in msg.lower()
-
-
 # ---------------------------------------------------------------------------
 # Kernel 10 fleet half (F12=M24): token-ceiling ENFORCEMENT (fleet-side)
 # ---------------------------------------------------------------------------
@@ -2205,305 +741,127 @@ def _set_field(name, **fields):
     fleet.save_registry(data)
 
 
-class TestTokenCeilingEnforcement:
-    def test_idle_resume_refuses_and_flags_when_cumulative_over_ceiling(self, isolated_home):
-        # Hard enforcement fleet-side: before a RESUME turn, compare the
-        # cumulative session tokens (summed from the log's result events)
-        # against the persisted token_ceiling; if exceeded, REFUSE the launch
-        # and FLAG the worker over_ceiling. The Stop hook only ALLOWS a stop --
-        # it never blocks -- so the hard cap lives here (invariant 2).
-        sid, _ = _seed_worker("probe-1", status="idle", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text(
-            '{"type":"result","usage":{"input_tokens":900,"output_tokens":200}}\n', encoding="utf-8")
-        _set_field("probe-1", token_ceiling=1000)
+class TestTokenCeilingNative:
+    def test_status_flags_over_ceiling(self, isolated_home, monkeypatch, capsys):
+        sid, _ = _seed_worker("probe-1", status="over_ceiling")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, [
+            {"sessionId": sid, "state": "idle", "status": "idle", "pid": 1}]))
+        args = fleet.build_parser().parse_args(["status"])
+        fleet.cmd_status(args)
+        assert "over-ceiling" in capsys.readouterr().out
 
-        def popen(*a, **kw):
-            raise AssertionError("must not launch a resume turn once over the token ceiling")
+    def test_fork_steer_refuses_at_exactly_ceiling(self, isolated_home, monkeypatch):
+        """FIX-3 (F-2) boundary, native lane: the Stop hook allows stop at
+        tokens >= ceiling; the fleet-side fork-steer refusal must also use
+        >= so tokens == ceiling is treated as over by BOTH halves."""
+        sid, _ = _seed_worker("probe-1", status="idle", token_ceiling=1000)
+        fleet.append_outcome("probe-1", {"ts": fleet.now_iso(), "session_id": sid,
+                                         "kind": "result", "result_text": "done",
+                                         "input_tokens": 600, "output_tokens": 400})
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, [
+            {"sessionId": sid, "state": "idle", "status": "idle", "pid": 1}]))
+
+        def boom_run(*a, **kw):
+            raise AssertionError("must not dispatch at tokens == ceiling")
 
         args = fleet.build_parser().parse_args(["send", "probe-1", "keep going"])
         with pytest.raises(fleet.FleetCliError, match="ceiling"):
-            fleet.cmd_send(args, popen=popen, get_process_info=_dead_info, which=lambda n: "claude.cmd")
+            fleet.cmd_send(args, run=boom_run, which=lambda n: "claude.cmd")
+        assert fleet.load_registry()["workers"]["probe-1"]["status"] == "over_ceiling"
 
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        assert rec["status"] == "over_ceiling"
-
-    def test_idle_resume_launches_when_under_ceiling(self, isolated_home):
-        sid, _ = _seed_worker("probe-1", status="idle", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text(
-            '{"type":"result","usage":{"input_tokens":100,"output_tokens":20}}\n', encoding="utf-8")
-        _set_field("probe-1", token_ceiling=100000)
-
-        proc = FakeProc(pid=222)
-        args = fleet.build_parser().parse_args(["send", "probe-1", "go"])
-        rc = fleet.cmd_send(args, popen=_fake_popen(proc), get_process_info=_dead_info, which=lambda n: "claude.cmd")
-        assert rc == 0
-        assert fleet.load_registry()["workers"]["probe-1"]["status"] == "working"
-
-    def test_over_ceiling_status_is_sticky_across_recompute(self, isolated_home):
-        _seed_worker("probe-1", status="over_ceiling", log_result=True)
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info)
-        assert updated["status"] == "over_ceiling"
-
-    def test_status_flags_over_ceiling(self, isolated_home, capsys):
-        _seed_worker("probe-1", status="over_ceiling")
-        args = fleet.build_parser().parse_args(["status"])
-        fleet.cmd_status(args, get_process_info=_dead_info)
-        out = capsys.readouterr().out
-        assert "over" in out.lower() and "ceiling" in out.lower()
-
-    def test_respawn_writes_ceiling_file_for_new_sid_when_carried(self, isolated_home):
-        # respawn is a fresh session (new sid) -- the carried token_ceiling
-        # must land in a ceiling file keyed to the NEW sid, or the hook half
-        # would silently lose its allow-stop signal on a respawned worker.
-        old_sid, _ = _seed_worker("probe-1", status="idle", log_result=True)
-        _set_field("probe-1", token_ceiling=777)
-
-        proc = FakeProc(pid=7)
-        args = fleet.build_parser().parse_args(["respawn", "probe-1"])
-        fleet.cmd_respawn(args, popen=_fake_popen(proc), get_process_info=_dead_info, which=lambda n: "claude.cmd")
-
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        new_sid = rec["session_id"]
-        assert new_sid != old_sid
-        assert rec["token_ceiling"] == 777
-        ceiling_file = fleet.state_dir() / "ceilings" / new_sid
-        assert ceiling_file.read_text(encoding="utf-8").strip() == "777"
-
-
-# ---------------------------------------------------------------------------
-# UL1 usage-limit resilience kernel (item 11 / SPEC F31)
-# ---------------------------------------------------------------------------
 
 _NO_SLEEP = lambda *a, **k: None
 
 
-def _write_err(name, text):
-    err = fleet.logs_dir() / f"{name}.err"
-    err.parent.mkdir(parents=True, exist_ok=True)
-    err.write_text(text, encoding="utf-8")
-
-
-def _write_no_result_log(name):
-    # A turn that ENDED with no trailing `result` stream event -- the errored
-    # shape the classifier reads as crash-dead unless the limit signal fires.
-    log = fleet.logs_dir() / f"{name}.jsonl"
-    log.parent.mkdir(parents=True, exist_ok=True)
-    log.write_text('{"type":"system","subtype":"init"}\n', encoding="utf-8")
-
-
-class TestUsageLimitSchema:
-    def test_new_worker_record_has_additive_limit_fields_defaulting_none(self, isolated_home):
-        rec = fleet.new_worker_record("sid-1", str(fleet.FLEET_HOME), "task", "dontask")
-        assert rec["limit_reset_at"] is None
-        assert rec["limit_kind"] is None
-
-    def test_limit_fields_round_trip_through_registry(self, isolated_home):
-        _seed_worker("probe-1", status="limited")
-        _set_field("probe-1", limit_reset_at="2026-07-08T18:00:00Z", limit_kind="session_5h")
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        assert rec["limit_reset_at"] == "2026-07-08T18:00:00Z"
-        assert rec["limit_kind"] == "session_5h"
-
-    def test_recompute_tolerates_record_missing_limit_fields(self, isolated_home):
-        # An OLD record predating the additive fields must recompute cleanly
-        # (readers default the missing field to None -- M1 additive rule).
-        _seed_worker("probe-1", status="idle", log_result=True, cost_usd=0.1)
-        data = fleet.load_registry()
-        rec = data["workers"]["probe-1"]
-        rec.pop("limit_reset_at", None)
-        rec.pop("limit_kind", None)
-        fleet.save_registry(data)
-        updated = fleet.recompute_worker("probe-1", fleet.load_registry()["workers"]["probe-1"],
-                                         get_process_info=_dead_info, sleep=_NO_SLEEP)
-        assert updated["status"] == "idle"
-
-
-class TestUsageLimitDetection:
-    def test_errored_no_result_with_limit_stderr_parks_limited(self, isolated_home):
-        _seed_worker("probe-1", status="working", turn_pid=999, turn_pid_ctime=ALIVE_CTIME)
-        _write_no_result_log("probe-1")
-        _write_err("probe-1", "Claude usage limit reached. resets at 2026-07-08T18:00:00Z")
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info, sleep=_NO_SLEEP)
-        assert updated["status"] == "limited"
-        assert updated["limit_reset_at"] == "2026-07-08T18:00:00Z"
-
-    def test_weekly_limit_stderr_sets_weekly_kind(self, isolated_home):
-        _seed_worker("probe-1", status="working", turn_pid=999, turn_pid_ctime=ALIVE_CTIME)
-        _write_no_result_log("probe-1")
-        _write_err("probe-1", "You have hit your weekly usage limit. Try again later.")
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info, sleep=_NO_SLEEP)
-        assert updated["status"] == "limited"
-        assert updated["limit_kind"] == "weekly"
-
-    def test_limit_stderr_without_parseable_reset_parks_with_null_horizon(self, isolated_home):
-        _seed_worker("probe-1", status="working", turn_pid=999, turn_pid_ctime=ALIVE_CTIME)
-        _write_no_result_log("probe-1")
-        _write_err("probe-1", "usage limit reached")
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info, sleep=_NO_SLEEP)
-        assert updated["status"] == "limited"
-        assert updated["limit_reset_at"] is None
-
-    def test_errored_no_result_non_limit_stderr_stays_crash_dead(self, isolated_home):
-        _seed_worker("probe-1", status="working", turn_pid=999, turn_pid_ctime=ALIVE_CTIME)
-        _write_no_result_log("probe-1")
-        _write_err("probe-1", "Traceback (most recent call last):\n  KeyError: 'foo'")
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info, sleep=_NO_SLEEP)
-        assert updated["status"] == "dead"
-        # crash-dead path drops the abnormal-turn-end journal landmark
-        journal = fleet.journals_dir() / "probe-1.md"
-        assert "turn ended abnormally" in journal.read_text(encoding="utf-8")
-
-    def test_park_does_not_write_abnormal_turn_note(self, isolated_home):
-        _seed_worker("probe-1", status="working", turn_pid=999, turn_pid_ctime=ALIVE_CTIME)
-        _write_no_result_log("probe-1")
-        _write_err("probe-1", "usage limit reached. resets at 2026-07-08T18:00:00Z")
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info, sleep=_NO_SLEEP)
-        journal = fleet.journals_dir() / "probe-1.md"
-        assert not (journal.exists() and "turn ended abnormally" in journal.read_text(encoding="utf-8"))
-
-
-class TestUsageLimitStickyExemption:
-    def test_limited_never_demoted_to_dead_on_gone_probe(self, isolated_home):
-        # A parked `limited` worker legitimately holds NO live claude (turn
-        # ended at the plan wall, not a crash). recompute must NEVER demote it.
-        _seed_worker("probe-1", status="limited", turn_pid=999, turn_pid_ctime=ALIVE_CTIME)
-        _write_no_result_log("probe-1")
-        _set_field("probe-1", limit_reset_at="2026-07-08T18:00:00Z", limit_kind="session_5h")
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info, sleep=_NO_SLEEP)
-        assert updated["status"] == "limited"
-
-    def test_recompute_status_returns_limited_sticky(self, isolated_home):
-        assert fleet.recompute_status(None, None, "nonexistent.jsonl",
-                                      current_status="limited") == "limited"
+def _iso_at(dt):
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _past():
-    return fleet.ctime_to_iso(datetime.now(timezone.utc) - timedelta(hours=1))
+    return _iso_at(datetime.now(timezone.utc) - timedelta(hours=1))
 
 
 def _future():
-    return fleet.ctime_to_iso(datetime.now(timezone.utc) + timedelta(hours=1))
+    return _iso_at(datetime.now(timezone.utc) + timedelta(hours=1))
 
 
 class TestCmdResumeLimited:
-    def test_past_horizon_worker_relaunched_and_flipped_working(self, isolated_home):
+    def _stub_native_resume(self, monkeypatch, calls):
+        def fake(name, old_sid, cwd, mode, model, category,
+                 setting_sources, token_ceiling, run, which, sleep):
+            calls.append(name)
+            return True
+        monkeypatch.setattr(fleet, "_resume_one_limited_native", fake)
+
+    def test_past_horizon_worker_relaunched_and_flipped_working(self, isolated_home, monkeypatch):
         _seed_worker("probe-1", status="limited")
         _set_field("probe-1", limit_reset_at=_past(), limit_kind="session_5h")
         calls = []
-        proc = FakeProc(pid=7)
+        self._stub_native_resume(monkeypatch, calls)
         args = fleet.build_parser().parse_args(["resume-limited"])
-        rc = fleet.cmd_resume_limited(args, popen=_fake_popen(proc, calls),
-                                      get_process_info=_dead_info, which=lambda n: "claude.cmd",
-                                      sleep=_NO_SLEEP)
+        rc = fleet.cmd_resume_limited(args, which=lambda n: "claude.cmd", sleep=_NO_SLEEP)
         assert rc == 0
-        assert len(calls) == 1  # a real launch happened
+        assert calls == ["probe-1"]
         rec = fleet.load_registry()["workers"]["probe-1"]
         assert rec["status"] == "working"
-        assert rec["turn_pid"] == 7
 
-    def test_before_horizon_worker_skipped(self, isolated_home):
+    def test_before_horizon_worker_skipped(self, isolated_home, monkeypatch, capsys):
         _seed_worker("probe-1", status="limited")
         _set_field("probe-1", limit_reset_at=_future(), limit_kind="session_5h")
         calls = []
-        proc = FakeProc(pid=7)
+        self._stub_native_resume(monkeypatch, calls)
         args = fleet.build_parser().parse_args(["resume-limited"])
-        fleet.cmd_resume_limited(args, popen=_fake_popen(proc, calls),
-                                 get_process_info=_dead_info, which=lambda n: "claude.cmd",
-                                 sleep=_NO_SLEEP)
-        assert calls == []  # no launch
+        rc = fleet.cmd_resume_limited(args, which=lambda n: "claude.cmd", sleep=_NO_SLEEP)
+        assert rc == 0
+        assert calls == []
+        assert "still before reset horizon" in capsys.readouterr().out
         assert fleet.load_registry()["workers"]["probe-1"]["status"] == "limited"
 
-    def test_null_horizon_worker_skipped_without_force(self, isolated_home):
+    def test_null_horizon_worker_skipped_without_force(self, isolated_home, monkeypatch, capsys):
         _seed_worker("probe-1", status="limited")
         _set_field("probe-1", limit_reset_at=None, limit_kind=None)
         calls = []
-        proc = FakeProc(pid=7)
+        self._stub_native_resume(monkeypatch, calls)
         args = fleet.build_parser().parse_args(["resume-limited"])
-        fleet.cmd_resume_limited(args, popen=_fake_popen(proc, calls),
-                                 get_process_info=_dead_info, which=lambda n: "claude.cmd",
-                                 sleep=_NO_SLEEP)
+        rc = fleet.cmd_resume_limited(args, which=lambda n: "claude.cmd", sleep=_NO_SLEEP)
+        assert rc == 0
         assert calls == []
-        assert fleet.load_registry()["workers"]["probe-1"]["status"] == "limited"
+        assert "--force-now" in capsys.readouterr().out
 
-    def test_null_horizon_worker_relaunched_with_force_now(self, isolated_home):
+    def test_null_horizon_worker_relaunched_with_force_now(self, isolated_home, monkeypatch):
         _seed_worker("probe-1", status="limited")
         _set_field("probe-1", limit_reset_at=None, limit_kind=None)
         calls = []
-        proc = FakeProc(pid=7)
+        self._stub_native_resume(monkeypatch, calls)
         args = fleet.build_parser().parse_args(["resume-limited", "probe-1", "--force-now"])
-        fleet.cmd_resume_limited(args, popen=_fake_popen(proc, calls),
-                                 get_process_info=_dead_info, which=lambda n: "claude.cmd",
-                                 sleep=_NO_SLEEP)
-        assert len(calls) == 1
-        assert fleet.load_registry()["workers"]["probe-1"]["status"] == "working"
+        rc = fleet.cmd_resume_limited(args, which=lambda n: "claude.cmd", sleep=_NO_SLEEP)
+        assert rc == 0
+        assert calls == ["probe-1"]
 
-    def test_before_horizon_relaunched_with_force_now(self, isolated_home):
+    def test_before_horizon_relaunched_with_force_now(self, isolated_home, monkeypatch):
         _seed_worker("probe-1", status="limited")
-        _set_field("probe-1", limit_reset_at=_future(), limit_kind="weekly")
+        _set_field("probe-1", limit_reset_at=_future(), limit_kind="session_5h")
         calls = []
-        proc = FakeProc(pid=7)
+        self._stub_native_resume(monkeypatch, calls)
         args = fleet.build_parser().parse_args(["resume-limited", "probe-1", "--force-now"])
-        fleet.cmd_resume_limited(args, popen=_fake_popen(proc, calls),
-                                 get_process_info=_dead_info, which=lambda n: "claude.cmd",
-                                 sleep=_NO_SLEEP)
-        assert len(calls) == 1
+        rc = fleet.cmd_resume_limited(args, which=lambda n: "claude.cmd", sleep=_NO_SLEEP)
+        assert rc == 0
+        assert calls == ["probe-1"]
 
-    def test_resume_repasses_budget_and_setting_sources(self, isolated_home):
-        _seed_worker("probe-1", status="limited")
-        _set_field("probe-1", limit_reset_at=_past(), limit_kind="session_5h",
-                   max_budget_usd=4.0, setting_sources="user,project")
+    def test_non_limited_worker_left_untouched(self, isolated_home, monkeypatch, capsys):
+        _seed_worker("probe-1", status="idle")
         calls = []
-        proc = FakeProc(pid=7)
+        self._stub_native_resume(monkeypatch, calls)
         args = fleet.build_parser().parse_args(["resume-limited"])
-        fleet.cmd_resume_limited(args, popen=_fake_popen(proc, calls),
-                                 get_process_info=_dead_info, which=lambda n: "claude.cmd",
-                                 sleep=_NO_SLEEP)
-        argv = calls[0][1]
-        assert argv[argv.index("--max-budget-usd") + 1] == "4.0"
-        assert argv[argv.index("--setting-sources") + 1] == "user,project"
-
-    def test_non_limited_worker_left_untouched(self, isolated_home):
-        _seed_worker("probe-1", status="idle", log_result=True)
-        calls = []
-        proc = FakeProc(pid=7)
-        args = fleet.build_parser().parse_args(["resume-limited"])
-        fleet.cmd_resume_limited(args, popen=_fake_popen(proc, calls),
-                                 get_process_info=_dead_info, which=lambda n: "claude.cmd",
-                                 sleep=_NO_SLEEP)
+        rc = fleet.cmd_resume_limited(args, which=lambda n: "claude.cmd", sleep=_NO_SLEEP)
+        assert rc == 0
         assert calls == []
-        assert fleet.load_registry()["workers"]["probe-1"]["status"] == "idle"
+        assert "not limited" in capsys.readouterr().out
 
     def test_named_unknown_worker_raises(self, isolated_home):
+        args = fleet.build_parser().parse_args(["resume-limited", "ghost"])
         with pytest.raises(fleet.FleetCliError):
-            args = fleet.build_parser().parse_args(["resume-limited", "nope"])
-            fleet.cmd_resume_limited(args, popen=_fake_popen(FakeProc(pid=7)),
-                                     get_process_info=_dead_info, which=lambda n: "claude.cmd",
-                                     sleep=_NO_SLEEP)
-
-    def test_launch_failure_rolls_back_to_limited(self, isolated_home):
-        _seed_worker("probe-1", status="limited")
-        _set_field("probe-1", limit_reset_at=_past(), limit_kind="session_5h")
-
-        def boom(argv, **kwargs):
-            raise fleet.TurnLaunchError("dead-on-arrival")
-
-        args = fleet.build_parser().parse_args(["resume-limited"])
-        with pytest.raises(fleet.TurnLaunchError):
-            fleet.cmd_resume_limited(args, popen=boom, get_process_info=_dead_info,
-                                     which=lambda n: "claude.cmd", sleep=_NO_SLEEP)
-        # pre-claim must roll back to the park, not strand as a ghost claim
-        assert fleet.load_registry()["workers"]["probe-1"]["status"] == "limited"
+            fleet.cmd_resume_limited(args, which=lambda n: "claude.cmd", sleep=_NO_SLEEP)
 
 
 class TestLimitedSurfacing:
@@ -2553,98 +911,44 @@ class TestLimitedSurfacing:
 # ---------------------------------------------------------------------------
 
 class TestFix1ResumeUnderLockRevalidation:
-    def test_second_resume_skips_when_no_longer_limited(self, isolated_home):
+    def test_second_resume_skips_when_no_longer_limited(self, isolated_home, monkeypatch):
         # F-A1/F-1 (HIGH): a resume that snapshotted `limited` must re-check
         # the record IS STILL `limited` under its own claiming lock before
-        # pre-claiming -- else two racing sweeps both launch a second
-        # `claude --resume` on one sid (one-live-claude break). After the first
-        # resume flips it to working, the second must skip, not double-launch.
+        # pre-claiming -- else two racing sweeps both fork-steer a second
+        # dispatch onto one sid. After the first resume flips it to working,
+        # the second must skip, not double-launch.
         _seed_worker("probe-1", status="limited")
         _set_field("probe-1", limit_reset_at=_past(), limit_kind="session_5h")
         calls = []
-        popen = _fake_popen(FakeProc(pid=7), calls)
-        launched1 = fleet._resume_one_limited("probe-1", popen, _dead_info,
-                                              lambda n: "claude.cmd", _NO_SLEEP)
-        launched2 = fleet._resume_one_limited("probe-1", popen, _dead_info,
-                                              lambda n: "claude.cmd", _NO_SLEEP)
+
+        def fake(name, old_sid, cwd, mode, model, category,
+                 setting_sources, token_ceiling, run, which, sleep):
+            calls.append(name)
+            return True
+        monkeypatch.setattr(fleet, "_resume_one_limited_native", fake)
+        launched1 = fleet._resume_one_limited("probe-1", lambda n: "claude.cmd", _NO_SLEEP)
+        launched2 = fleet._resume_one_limited("probe-1", lambda n: "claude.cmd", _NO_SLEEP)
         assert launched1 is True
         assert launched2 is False
-        assert len(calls) == 1  # exactly one launch, no double-launch
+        assert len(calls) == 1  # exactly one dispatch, no double-launch
 
     def test_vanished_worker_raises_clean_error_not_keyerror(self, isolated_home):
         with pytest.raises(fleet.FleetCliError):
-            fleet._resume_one_limited("ghost", _fake_popen(FakeProc(pid=7)), _dead_info,
-                                      lambda n: "claude.cmd", _NO_SLEEP)
-
-
-class TestFix2TighterLimitRegex:
-    @pytest.mark.parametrize("stderr", [
-        "OSError: [Errno 122] EDQUOT: Disk quota exceeded writing transcript",
-        "MCP server proxy: upstream returned 429 rate limit exceeded",
-        "ConnectionResetError: connection reset by peer, try again later",
-    ])
-    def test_infra_crash_stderr_stays_crash_dead(self, isolated_home, stderr):
-        # F-A2 (MEDIUM): these are genuine infra crashes, NOT a Claude plan
-        # wall. They must classify crash-dead (with the abnormal-turn note),
-        # never a silent null-horizon park.
-        _seed_worker("probe-1", status="working", turn_pid=999, turn_pid_ctime=ALIVE_CTIME)
-        _write_no_result_log("probe-1")
-        _write_err("probe-1", stderr)
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info, sleep=_NO_SLEEP)
-        assert updated["status"] == "dead"
-        journal = fleet.journals_dir() / "probe-1.md"
-        assert "turn ended abnormally" in journal.read_text(encoding="utf-8")
-
-    def test_real_plan_wall_noun_shape_still_parks(self, isolated_home):
-        _seed_worker("probe-1", status="working", turn_pid=999, turn_pid_ctime=ALIVE_CTIME)
-        _write_no_result_log("probe-1")
-        _write_err("probe-1", "Claude usage limit reached for this session.")
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info, sleep=_NO_SLEEP)
-        assert updated["status"] == "limited"
-
-    def test_real_plan_wall_limit_resets_at_shape_still_parks(self, isolated_home):
-        _seed_worker("probe-1", status="working", turn_pid=999, turn_pid_ctime=ALIVE_CTIME)
-        _write_no_result_log("probe-1")
-        _write_err("probe-1", "You've reached your limit. It resets at 2026-07-08T18:00:00Z.")
-        rec = fleet.load_registry()["workers"]["probe-1"]
-        updated = fleet.recompute_worker("probe-1", rec, get_process_info=_dead_info, sleep=_NO_SLEEP)
-        assert updated["status"] == "limited"
-        assert updated["limit_reset_at"] == "2026-07-08T18:00:00Z"
-
-
-class TestFix3TokenCeilingBoundary:
-    def test_idle_resume_refuses_at_exactly_ceiling(self, isolated_home):
-        # F-2 (LOW): the Stop hook allows stop at tokens >= ceiling; the
-        # fleet-side refusal must also use >= so tokens == ceiling is treated
-        # as over by BOTH halves (no disagreement at the boundary).
-        _seed_worker("probe-1", status="idle", turn_pid=111, turn_pid_ctime=ALIVE_CTIME)
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text(
-            '{"type":"result","usage":{"input_tokens":600,"output_tokens":400}}\n', encoding="utf-8")
-        _set_field("probe-1", token_ceiling=1000)  # 600+400 == 1000 exactly
-
-        def popen(*a, **kw):
-            raise AssertionError("must not launch at tokens == ceiling")
-
-        args = fleet.build_parser().parse_args(["send", "probe-1", "keep going"])
-        with pytest.raises(fleet.FleetCliError, match="ceiling"):
-            fleet.cmd_send(args, popen=popen, get_process_info=_dead_info, which=lambda n: "claude.cmd")
-        assert fleet.load_registry()["workers"]["probe-1"]["status"] == "over_ceiling"
+            fleet._resume_one_limited("ghost", lambda n: "claude.cmd", _NO_SLEEP)
 
 
 class TestFix5OrphanedCeilingFiles:
-    def test_clean_removes_dead_worker_ceiling_file(self, isolated_home):
+    def test_clean_removes_dead_worker_ceiling_file(self, isolated_home, monkeypatch):
         # F-4 (LOW): state/ceilings/<sid> is never cleaned -> resource leak.
-        # cmd_clean must sweep it alongside logs/mailbox/journal.
+        # cmd_clean must sweep it alongside the other per-worker artifacts.
         sid, _ = _seed_worker("probe-1", status="dead")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, [
+            {"sessionId": sid, "state": "idle", "status": "idle", "pid": 1}]))
         ceiling = fleet.ceiling_file_path(sid)
         ceiling.parent.mkdir(parents=True, exist_ok=True)
         ceiling.write_text("500", encoding="utf-8")
         args = fleet.build_parser().parse_args(["clean"])
-        fleet.cmd_clean(args, get_process_info=_dead_info, sleep=_NO_SLEEP)
+        fleet.cmd_clean(args)
         assert not ceiling.exists()
 
     def test_doctor_notes_orphaned_ceiling_file(self, isolated_home):
