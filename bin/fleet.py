@@ -6779,6 +6779,15 @@ def _autoclean_task_command() -> str:
     return f'"{py}" "{script}" autoclean --fleet-home "{home}"'
 
 
+def _autoclean_task_is_ours(command: str) -> bool:
+    """F4: ownership = the existing task runs OUR fleet.py -- the exact
+    resolved script path, slash- and case-normalized (Windows paths carry
+    both variances through schtasks XML round-trips). Never a substring
+    like 'autoclean': a foreign C:/tools/autoclean.exe task must refuse."""
+    ours = str(_autoclean_script_path()).replace("\\", "/").lower()
+    return ours in (command or "").replace("\\", "/").lower()
+
+
 def _install_autoclean_task(interval_hours, force: bool) -> None:
     if interval_hours is None:
         interval_hours = AUTOCLEAN_INTERVAL_HOURS_DEFAULT
@@ -6822,10 +6831,11 @@ def _install_autoclean_task(interval_hours, force: bool) -> None:
                 f"cannot determine whether task {AUTOCLEAN_TASK_NAME!r} already "
                 f"exists ({exc}) -- retry, or rerun with --force to install anyway")
         existing = None
-    if existing is not None and "autoclean" not in existing and not force:
+    if existing is not None and not _autoclean_task_is_ours(existing) and not force:
         raise FleetCliError(
-            f"scheduled task {AUTOCLEAN_TASK_NAME!r} exists and does not look "
-            f"fleet-owned ({existing[:120]!r}) -- rerun with --force to overwrite")
+            f"scheduled task {AUTOCLEAN_TASK_NAME!r} exists and is not "
+            f"fleet-owned (does not run this fleet.py; found {existing[:120]!r}) "
+            f"-- rerun with --force to overwrite")
     ok, msg = PLATFORM.autoclean_task_install(AUTOCLEAN_TASK_NAME, command, interval_hours)
     if not ok:
         raise FleetCliError(f"schtasks create failed: {msg}")
