@@ -1019,37 +1019,6 @@ class TestWaitForWorkers:
         assert finished == {"probe-1": "idle", "probe-2": "idle"}
 
 
-# ---------------------------------------------------------------------------
-# F-TEST-CORRUPT: RegistryCorruptError must propagate through the CLI layer
-# to main()'s dedicated handler -- never swallowed, never degraded to an
-# empty registry (spec review Minor 2).
-# ---------------------------------------------------------------------------
-
-class TestRegistryCorruptPropagatesThroughMain:
-    def test_corrupt_registry_reaches_mains_dedicated_handler(self, isolated_home, capsys):
-        state = isolated_home / "state"
-        # exist_ok=True: the isolated_home fixture (SPEC §14) already creates
-        # state/ to stub a worker-settings.json instance.
-        state.mkdir(parents=True, exist_ok=True)
-        (state / "fleet.json").write_text("{not json", encoding="utf-8")
-
-        rc = fleet.main(["status"])
-
-        assert rc == 1
-        err = capsys.readouterr().err
-        assert "registry error" in err.lower()
-
-    def test_corrupt_registry_raised_not_caught_at_cmd_level(self, isolated_home):
-        state = isolated_home / "state"
-        # exist_ok=True: the isolated_home fixture (SPEC §14) already creates
-        # state/ to stub a worker-settings.json instance.
-        state.mkdir(parents=True, exist_ok=True)
-        (state / "fleet.json").write_text("{not json", encoding="utf-8")
-
-        args = fleet.build_parser().parse_args(["status"])
-        with pytest.raises(fleet.RegistryCorruptError):
-            fleet.cmd_status(args)
-
     def test_any_mode_returns_as_soon_as_one_finishes(self, isolated_home, monkeypatch):
         sid1, _ = _seed_native("probe-1", fresh_outcome=True)
         sid2 = str(uuid.uuid4())
@@ -1083,6 +1052,38 @@ class TestRegistryCorruptPropagatesThroughMain:
         assert finished == {}
         assert pending == {"probe-1"}
 
+
+
+# ---------------------------------------------------------------------------
+# F-TEST-CORRUPT: RegistryCorruptError must propagate through the CLI layer
+# to main()'s dedicated handler -- never swallowed, never degraded to an
+# empty registry (spec review Minor 2).
+# ---------------------------------------------------------------------------
+
+class TestRegistryCorruptPropagatesThroughMain:
+    def test_corrupt_registry_reaches_mains_dedicated_handler(self, isolated_home, capsys):
+        state = isolated_home / "state"
+        # exist_ok=True: the isolated_home fixture (SPEC §14) already creates
+        # state/ to stub a worker-settings.json instance.
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "fleet.json").write_text("{not json", encoding="utf-8")
+
+        rc = fleet.main(["status"])
+
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "registry error" in err.lower()
+
+    def test_corrupt_registry_raised_not_caught_at_cmd_level(self, isolated_home):
+        state = isolated_home / "state"
+        # exist_ok=True: the isolated_home fixture (SPEC §14) already creates
+        # state/ to stub a worker-settings.json instance.
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "fleet.json").write_text("{not json", encoding="utf-8")
+
+        args = fleet.build_parser().parse_args(["status"])
+        with pytest.raises(fleet.RegistryCorruptError):
+            fleet.cmd_status(args)
 
 class TestCmdWait:
     def test_wait_unknown_worker_raises(self, isolated_home):
