@@ -193,6 +193,17 @@ class TestRosterLiveSids:
         ]
         assert fleet._roster_live_sids(entries) == {"a", "c"}
 
+    def test_hostile_sessionid_value_filtered_not_raised(self):
+        # Debt roll-up item 2, third grepped site: a dict-valued sessionId
+        # (CLI drift / hostile roster) must be filtered, never raise
+        # TypeError from an unhashable value landing in the live-sid set.
+        entries = [
+            {"sessionId": {"nested": "hostile"}, "status": "busy"},
+            {"sessionId": ["also", "unhashable"], "pid": 7},
+            {"sessionId": "ok", "status": "idle"},
+        ]
+        assert fleet._roster_live_sids(entries) == {"ok"}
+
 
 def _fake_run_roster(entries):
     """Injectable subprocess.run double returning a roster JSON payload."""
