@@ -911,6 +911,30 @@ class TestDoctorAutoclean:
         _, ok, msg = fleet._doctor_check_autoclean()
         assert ok and "task installed" in msg
 
+    def test_stamp_errors_surfaced(self, home, monkeypatch):
+        """LOW advisory (confirmation pass): a bricked run must not read as
+        green-and-fresh -- the stamp's errors array reaches the note."""
+        monkeypatch.setattr(fleet.PLATFORM, "autoclean_task_query",
+                            lambda task_name, run=None: "py fleet.py autoclean")
+        fleet.autoclean_stamp_path().write_text(
+            json.dumps({"ts": _iso(NOW),
+                        "errors": ["husks: FleetCliError: boom"]}),
+            encoding="utf-8")
+        _, ok, msg = fleet._doctor_check_autoclean()
+        assert ok  # still note-only
+        assert "error" in msg and "boom" in msg
+
+    def test_quarantine_artifact_surfaced(self, home, monkeypatch):
+        """LOW advisory: a present fleet.json.corrupt.* means tier 2 is
+        refusing itself -- doctor must say so even with no task installed."""
+        monkeypatch.setattr(fleet.PLATFORM, "autoclean_task_query",
+                            lambda task_name, run=None: None)
+        (home / "state" / "fleet.json.corrupt.20260716T000000Z").write_text(
+            "{", encoding="utf-8")
+        _, ok, msg = fleet._doctor_check_autoclean()
+        assert ok  # still note-only
+        assert "quarantine artifact" in msg
+
     def test_unsupported_platform_skipped(self, home, monkeypatch):
         def raiser(task_name, run=None):
             raise fleet.UnsupportedPlatformError("posix stub")
