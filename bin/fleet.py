@@ -6057,8 +6057,12 @@ def cmd_clean(args, get_process_info=None, sleep=time.sleep,
     ]
 
     # §5.1: this is the moment `clean` knows exactly which workers it will
-    # DELETE (registry entry, logs, mailbox and journal -- irreversible; only
-    # the claude session survives, resumable by sid from events.jsonl). Ask
+    # DELETE (registry entry, logs, mailbox and journal -- irreversible; the
+    # claude session survives clean ITSELF, resumable by sid from
+    # events.jsonl -- but F5 caveat: once the autoclean scheduler is
+    # installed, tier 2 will `claude rm` that very session on its next sweep
+    # (post-clean it is owned-by-events and unprotected), so sid-recovery is
+    # a promptly-or-never affordance, not a durable one). Ask
     # before sweeping any worker this session did not spawn. Outside the lock:
     # a prompt must never block the fleet. One combined confirm covers both
     # legacy and native candidates from this single invocation.
