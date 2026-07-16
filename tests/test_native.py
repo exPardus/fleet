@@ -1986,6 +1986,9 @@ class TestCmdSendNative:
         assert "left for manual adoption" not in captured.out
         assert "fork-steered" in captured.out
         assert "not recorded" in captured.err  # loud best-effort note
+        # Fix-wave micro: the note must carry the fields payload -- the sid
+        # is what the lost forensics line existed to preserve.
+        assert new_sid in captured.err
         rec = fleet.load_registry()["workers"]["w1"]
         assert rec["session_id"] == new_sid          # durable commit stands
         assert old_sid in rec["retired_sids"]
