@@ -285,6 +285,13 @@ def ctime_to_iso(dt: datetime) -> str:
 # that no other function in this module references os.name/sys.platform.
 # ---------------------------------------------------------------------------
 
+class AutocleanTaskQueryError(Exception):
+    """schtasks could not say whether the autoclean task exists (F3:
+    transient failure, access denied, timeout). Callers fail CLOSED --
+    treating this as "task absent" would let a /Create /F clobber a
+    foreign task of the same name on a hiccup."""
+
+
 class UnsupportedPlatformError(NotImplementedError):
     """Raised by every _PosixPlatform method: there is no POSIX backend yet
     (Phase 1.5, SPEC §14) -- this build only supports Windows."""
@@ -394,17 +401,37 @@ class _WindowsPlatform:
         return ["powershell", "-Command", ps_command]
 
     def autoclean_task_query(self, task_name: str, run=subprocess.run):
-        """None if no scheduled task named `task_name` exists; else its
-        command string ("" when the XML is unparseable). Uses `/XML` output
-        rather than `/FO LIST` -- the LIST field labels ("Task To Run:")
-        are locale-translated, the XML element names are not."""
+        """None ONLY when the task is definitively absent; its command
+        string when installed ("" if the XML is unparseable); raises
+        AutocleanTaskQueryError when existence cannot be determined (F3:
+        callers must fail CLOSED -- reading a transient failure as
+        "absent" licensed /Create /F over a foreign task).
+
+        Two locale-safe steps: existence via the full `/FO CSV` listing
+        (a targeted /TN query's not-found error string is locale-
+        translated and indistinguishable from access-denied by exit code;
+        the listing's exit code + name presence are not), then the
+        command via `/XML` (element names are not translated either)."""
+        try:
+            listing = run(["schtasks", "/Query", "/FO", "CSV"],
+                          capture_output=True, text=True, timeout=30)
+        except Exception as exc:
+            raise AutocleanTaskQueryError(f"schtasks listing failed: {exc}")
+        if listing.returncode != 0:
+            raise AutocleanTaskQueryError(
+                f"schtasks listing exit {listing.returncode}: "
+                f"{(listing.stderr or '').strip()[:200]}")
+        if f'"\\{task_name}"' not in (listing.stdout or ""):
+            return None  # definitively absent
         try:
             proc = run(["schtasks", "/Query", "/TN", task_name, "/XML"],
                        capture_output=True, text=True, timeout=15)
-        except Exception:
-            return None
+        except Exception as exc:
+            raise AutocleanTaskQueryError(f"schtasks XML query failed: {exc}")
         if proc.returncode != 0:
-            return None
+            raise AutocleanTaskQueryError(
+                f"schtasks XML query exit {proc.returncode}: "
+                f"{(proc.stderr or '').strip()[:200]}")
         xml = proc.stdout or ""
         parts = []
         for tag in ("Command", "Arguments"):
@@ -6786,7 +6813,15 @@ def _install_autoclean_task(interval_hours, force: bool) -> None:
             " -- run from the canonical fleet home, or rerun with --force")
 
     command = _autoclean_task_command()
-    existing = PLATFORM.autoclean_task_query(AUTOCLEAN_TASK_NAME)
+    try:
+        existing = PLATFORM.autoclean_task_query(AUTOCLEAN_TASK_NAME)
+    except AutocleanTaskQueryError as exc:
+        # F3: fail closed -- unknown existence must not become /Create /F.
+        if not force:
+            raise FleetCliError(
+                f"cannot determine whether task {AUTOCLEAN_TASK_NAME!r} already "
+                f"exists ({exc}) -- retry, or rerun with --force to install anyway")
+        existing = None
     if existing is not None and "autoclean" not in existing and not force:
         raise FleetCliError(
             f"scheduled task {AUTOCLEAN_TASK_NAME!r} exists and does not look "
@@ -7338,6 +7373,8 @@ def _doctor_check_autoclean(run=subprocess.run):
         existing = PLATFORM.autoclean_task_query(AUTOCLEAN_TASK_NAME, run=run)
     except UnsupportedPlatformError:
         return ("autoclean", True, "scheduler query unsupported on this platform -- skipped")
+    except AutocleanTaskQueryError as exc:
+        return ("autoclean", True, f"scheduler query failed ({exc}) -- state unknown; {stamp_note}")
     if existing is None:
         return ("autoclean", True,
                 f"no scheduled task installed (fleet init --autoclean) -- "
