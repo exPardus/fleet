@@ -6,4 +6,178 @@
 **Location:** `C:\proga\claude-fleet` (system-wide tool, own repo — never part of any managed project)
 **Target machine:** Windows 10, PowerShell, Git Bash present, Python via `py -3.13`, Claude Code CLI ≥ 2.1.207 (the pin-tested version; see §2).
 
-*(v3 body lands in the commits following the structure move.)*
+## 0. How to read this document
+
+Everything here is **descriptive of `bin/fleet.py` at `c63d7dd`** unless tagged `[PRESCRIPTIVE]` or `[DRAFT — not specced]`. The v2.x doctrine stands: any claim that code exists or is absent must be verifiable by grep at a stated commit — enumeration by inspection is a defect (the C4/spec-unbuilt-audit lesson, recorded in full in `docs/SPEC-v2-history.md` §4). Line numbers below are at `c63d7dd` and will drift; the function names are the durable anchors.
+
+## 1. Problem, decision, architecture
+
+One manager Claude Code session spawns, monitors, steers, and collects results from many worker sessions across arbitrary project directories on this machine, with a persistent knowledge loop and a supervisor identity that survives reboots and context exhaustion.
+
+**The pivot decision (2026-07-13, spec of record: `docs/superpowers/specs/2026-07-13-native-agents-pivot-design.md`):** Claude Code ships a native background-agent substrate — a per-user daemon, `claude --bg` dispatch, `claude agents --json` roster, `claude stop/logs/attach/rm`. Fleet rebased onto it. The **daemon owns process hosting** (spawn, liveness, attach UX, reap); **fleet owns the semantic layer** (task identity, mailbox steering, token budgets, journal + respawn continuity, outcome capture, archival hygiene, the knowledge loop) and re-implements v2's lifecycle discipline — launch contract, completed-vs-died discrimination, never-demote-unknown, one-live-session-per-name — on the new substrate rather than deleting it. A long-lived **supervisor** (persistent identity in files, disposable session body) sits on top.
+
+```
+agents screen (claude agents TUI)                ← the user's window (Anthropic UX)
+        │
+native daemon (~/.claude/daemon, ~/.claude/jobs) ← process hosting: spawn, attach, reap
+        │
+worker = claude --bg session                     ← dispatched from project cwd, fleet hooks inside
+        │
+fleet sidecar (bin/fleet.py + bin/hooks/)        ← semantics: registry, mailbox, ceiling, journal,
+        │                                           outcome store, verdict engine, archival, knowledge
+supervisor = claim-holding session               ← identity in supervisor/ files, body is any session
+```
+
+**Registry keyed by worker name; `session_id` is a mutable per-incarnation field.** Fork-steer and respawn mint new sids (retired ones accumulate in `retired_sids`); a key must survive that, so the sid cannot be the key. Liveness truth = `claude agents --json` roster joined on sid, filtered through the outcome discriminator (§5) — never PID probing (`grep -n "probe_liveness\|turn_pid\|DETACHED_PROCESS" bin/fleet.py` → no matches).
+
+**Sanctioned native interface = the `claude` CLI + `--json` only.** Fleet never reads or writes `~/.claude/daemon/` or `~/.claude/jobs/`. Never raw pid kills: the daemon auto-respawns a `taskkill`-ed session under a new pid (contract G10) — `claude stop <id>` only.
+
+## 2. The substrate contract (pointer, not duplicate)
+
+`docs/specs/native-substrate.md` is the **G-row contract**: the 13 gate verdicts (G1–G13), the dispatch argv, the closed 9-key roster schema with its field-presence-per-state table, the dispatch-grace startup transient, the result/cost contract (Stop-hook payload + transcript tail; **no USD figure exists anywhere** — G3), the steering contract (fork-with-transcript, G2(b) RATIFIED), and the known hazards (stdin wedge, silent limit walls, `ai-title` name mutation, stop-fires-no-Stop-hook). v3 references it and does not restate it. Everything there was observed at `claude` 2.1.207; the pin-test tier (§12) re-verifies on version change, and `fleet doctor` warns when `claude --version` has moved since the last recorded pin pass (`_doctor_check_pin_version` @5078, `record_pin_pass` @114).
+
+## 3. Repo layout (as it exists today)
+
+```
+C:\proga\claude-fleet\
+  bin\
+    fleet.py                 # single-file CLI, py -3.13, stdlib only (7378 lines @ c63d7dd)
+    fleet_statusline.py      # statusline renderer (imports fleet.py; read-only view)
+    fleet.cmd / fleet        # PATH shims (cmd.exe + POSIX sh)
+    hooks\
+      posttooluse_mailbox.py # mid-turn mailbox injection
+      stop_mailbox.py        # turn-end mailbox drain / stop-block
+      stop_outcome.py        # Stop-hook terminal-outcome record (M-B; §8)
+      postcompact_journal.py # compaction marker → worker journal
+      sessionstart_fleet.py  # manager-session briefing (suppressed in workers)
+      run_py.sh              # interpreter resolver for non-Windows shells
+  worker-settings.template.json  # git-tracked hook-wiring template; `fleet init` renders it
+  .claude-plugin\plugin.json # plugin `fleet` (commands + skill + SessionStart; NO statusline)
+  commands\                  # /fleet:* slash commands (read-only inline; mutating = prompt templates)
+  skills\fleet\SKILL.md      # manager skill
+  supervisor\                # GOALS.md + JOURNAL.md git-tracked; INCARNATION/HANDSHAKE gitignored
+  knowledge\                 # git-tracked: INDEX.md, playbooks/, projects/, lessons.md
+  state\                     # gitignored
+    fleet.json / fleet.lock  # registry (single writer: fleet.py) + atomic-rename lock
+    events.jsonl             # append-only lifecycle events, fleet.py ONLY
+    worker-settings.json     # rendered machine-local instance passed via --settings
+    outcomes\<key>.jsonl     # terminal-outcome store (§8); key = name, sid fallback
+    tasks\<name>.md          # task-file bootstrap bodies (§6)
+    ceilings\<sid>.txt       # token-ceiling files the Stop hook reads
+    journals\<name>.md       # worker journals
+    autoclean-last-run.json  # autoclean run stamp
+  logs\                      # gitignored; logs\archive\<name>\ = archived evidence (§10)
+  mailbox\                   # gitignored; <sid>.md pending messages
+  docs\SPEC.md               # this file; docs\SPEC-v2-history.md = the moved v2.3 body
+```
+
+Receipt: path helpers `state_dir/logs_dir/mailbox_dir/journals_dir/ceilings_dir/outcomes_dir/tasks_dir/archive_root/pin_pass_path` @ `bin/fleet.py:61-110`. There is **no per-worker `logs/<name>.jsonl` stdout pipeline** — that died with §6 of the pivot spec (the mc-delete wave, −7130 lines).
+
+## 4. Registry schema (`state\fleet.json`) — as it is today
+
+`new_worker_record` (@591-655) is the schema authority:
+
+```json
+{
+  "workers": {
+    "mc-spec": {
+      "session_id": "uuid | null while dispatch is in flight",
+      "cwd": "C:\\proga\\fleet-mc-spec",
+      "task": "first 200 chars of the original task",
+      "mode": "bypass | accept | dontask | plan | omit",
+      "model": null,
+      "max_budget_usd": null,
+      "setting_sources": null,
+      "token_ceiling": null,
+      "spawned_by": "CLAUDE_CODE_SESSION_ID of the spawner, or null (human shell)",
+      "created": "ISO-8601 UTC",
+      "status": "working | idle | attached | dead | dead-suspected | limited | over_budget | over_ceiling | interrupted",
+      "attached_since": null,
+      "limit_reset_at": null,
+      "limit_kind": null,
+      "turns": 0,
+      "cost_usd": 0.0,
+      "cost_baseline": 0.0,
+      "last_activity": "ISO-8601 UTC",
+      "dispatch_kind": "bg",
+      "category": null,
+      "native_short_id": "short id from --bg stdout, or null",
+      "last_dispatch_at": "ISO-8601 UTC; restamped at every dispatch/steer/resume",
+      "retired_sids": [],
+      "archived_at": null
+    }
+  }
+}
+```
+
+- **Native discriminator:** `is_native(record)` ⇔ `dispatch_kind == "bg"` (@146). Every worker dispatched today is native. The deleted PID fields (`turn_pid`, `turn_pid_ctime`, `turn_pid_boot_id`) no longer exist in the schema; **tolerate-and-ignore**: a pre-pivot record carrying them loads fine (readers `.get()` what they need, `save_registry` round-trips unknown keys) and they decide nothing.
+- **Additive-schema rule (carried from v2.1 M1, still binding):** fields are added, never renamed/removed; readers default missing fields; the single writer preserves unknown fields on round-trip. No migration step, no format-version gate.
+- **Single-writer discipline:** only `fleet.py` writes `fleet.json`, under `state\fleet.lock` (`fleet_lock` @402 — atomic-rename lock, 5 s timeout, 30 s stale takeover). A JSON-unparseable registry is **quarantined** aside (`_quarantine_registry` @510 → `fleet.json.corrupt.<ts>`), a `registry_corrupt` event appended, exit 1 loud — never silently reset to empty.
+- **Names:** human-chosen, `[a-z0-9-]+` (`NAME_RE` @472), and **never uuid-shaped** (`_SID_SHAPE_RE` @478, autoclean F6: a name-keyed archive filename must not be able to impersonate a session id).
+- **Spawn-immutable fields:** `mode`/`cwd`/`model`/`setting_sources`/`token_ceiling`/`spawned_by` are recorded at spawn and re-passed by every later launch path (steer, resume-limited, respawn carry-forward). `max_budget_usd` survives in the schema for legacy tolerance but is **refused at dispatch time** under native (G3, §9).
+- **Cost fields (`cost_usd`/`cost_baseline`) are legacy-tolerated, not native-fed:** no sanctioned native source carries a dollar figure (contract: USD REFUTED-for-contract), so native accounting is **token-based** — `_native_cumulative_tokens` (@1060) sums `input+output` tokens across the worker's outcome records for the ceiling check, and `status` renders a token summary (`_native_token_summary` @2519).
+- **Archived tombstones:** `archived_at` set ⇒ frozen history — hidden from default `status`, never recomputed, refused by every mutating verb via `refuse_if_archived` (@152); only `fleet clean` may delete it.
+
+## 5. The verdict engine (replaces PID liveness)
+
+`recompute_worker_native` (@1379) derives status for a native record from **one roster fetch + the outcome store**, in a binding order:
+
+1. **Sticky statuses pass through:** `_NATIVE_STICKY = ("dead", "over_budget", "over_ceiling", "limited", "interrupted", "attached")` (@1310). `dead-suspected` is deliberately **not** sticky — it is a verdict, not a state, re-evaluated every recompute so a late-arriving outcome record can flip it back to idle.
+2. **`session_id is None` = dispatch in flight:** stays `working` while the pre-claim is younger than `LAUNCH_CLAIM_MAX_AGE_SECONDS` (600 s, @778); older demotes to `dead` (the launcher died between pre-claim and stamp).
+3. **Roster entry present and live** — live ⇔ the entry carries `status` or `pid` keys (`state` alone is never live; contract field-presence table): roster `busy`/`waiting` → `working` (`waiting` additionally flags `waiting_for_permission`); roster `idle` → **fresh-outcome check**: `has_fresh_outcome(name, sid, since=last_dispatch_at)` (@5803) → `idle`, else → investigate.
+4. **Roster entry dead (state-only) or roster-gone:** same fresh-outcome check → `idle`, else → investigate.
+
+**The fresh-outcome predicate is sid- AND timestamp-filtered** — anchored on `last_dispatch_at` (fallback `created`), never on mere record presence: a dead predecessor's outcome, or this worker's own previous turn's outcome, must not vouch for the current turn.
+
+**The no-outcome investigation** (`_investigate_no_outcome` @1344), shared by both no-outcome paths:
+1. **Limit scan first (usage-limit continuity, §10):** `transcript_limit_scan` over the transcript tail; limit-shaped → park `limited` with parsed `limit_reset_at`/`limit_kind`.
+2. **Dispatch grace window:** `_dispatch_grace_active` (@1314) — a freshly dispatched `--bg` session's roster entry is state-only (`{'state':'working'}`, no `status`/`pid`) for its first seconds, indistinguishable from dead by field presence (live pin-suite finding 2026-07-16); within the window (same 600 s constant, anchored on `last_dispatch_at`) the verdict holds at `working`.
+3. Else **`dead-suspected`** — surfaced, advisory, **never auto-respawned** (never-demote-unknown carried to the new substrate; respawn is non-idempotent).
+
+**G9 epoch-freeze discipline:** `native_epoch_suspicious` (@1448) — the roster fetch failed, OR came back empty while some native record's last-committed status is `working` with a real sid (a daemon restart must never read as "everything died"). While true, **no native record is recomputed or written**: `status`/`wait`/`clean` skip verdicts that pass, `send`/`respawn` refuse outright. The supervisor boot ritual runs the same check first (`supervisor_epoch_check` @6548).
+
+**Lock shape (F4 doctrine, everywhere):** snapshot under one `fleet.lock`, release, do the roster fetch + every recompute with **no lock held**, re-acquire once to merge — and merge only records that still equal their pre-fetch snapshot (a concurrent mutation wins over a verdict computed against stale data). No lock is ever held across a subprocess.
+
+## 6. Dispatch contract (`dispatch_bg` @6167)
+
+Every native launch — spawn, fork-steer, resume-limited, respawn — funnels through one choke point:
+
+```
+claude --bg [--resume <old-sid>] -n "<cat>|<name>|<hint>" --settings state/worker-settings.json
+       --add-dir <FLEET_HOME>/state/tasks [--setting-sources <s>] <mode flags> [--model m]
+       "Read <FLEET_HOME>/state/tasks/<name>.md and follow it exactly."
+```
+
+- **Task-file bootstrap (G8):** the composed prompt body (preamble + task + drained mailbox + journal) is written to `state/tasks/<name>.md`; argv carries only the tiny fixed prompt. Argv >32,767 chars fails at CreateProcess; stdin wedges the session (contract hazard) — neither is ever used.
+- **`--add-dir` pre-authorizes exactly `tasks_dir()`** (least privilege): the task file lives outside the worker's cwd, and under any non-bypass mode the first Read would otherwise hang forever on an unapprovable headless permission prompt.
+- **Name guard at the choke point:** rejects non-`NAME_RE` and uuid-shaped names (F6) even from a future direct caller.
+- **Settings are the rendered instance** (`state/worker-settings.json`), never the template; a missing instance hard-fails before any mutation (`_require_instance_settings` @1736) — never a hookless worker looking healthy in the roster.
+- **Rendered name = `<category>|<name>|<hint>`** (`render_native_name` @6067; `DEFAULT_CATEGORY = "fleet"`, hint clamped to 40). Display-only: the roster join is by sid, never by name (`ai-title` can mutate a forked session's name — contract hazard).
+- **Short-id join (G6 fallback — `--session-id` does not compose with `--bg`):** parse the short id from `--bg` stdout after **ANSI-stripping** it (`_ANSI_ESCAPE_RE` @6049, applied @6077 — the daemon's stdout can carry escapes), then join to the full sid via roster polling (`_join_roster_by_short_id` @6089, 60 s window, 3 s poll), **excluding every sid captured in a pre-dispatch roster snapshot** so a foreign session sharing the prefix can never be adopted. No join within the window ⇒ `NativeDispatchError` carrying the short id (the operator's only recovery handle; also `add_note`-ed onto any exception escaping mid-join).
+- **Attach-verify (`_await_attach` @6114, 30 s window):** a joined roster entry is not a started session — rarely the daemon mints the entry and never attaches the runner (the never-attach wedge, live finding 2026-07-16). Life signals, any of: entry gains `status`/`pid`; entry reached a terminal/blocked state literal (it RAN — the discriminator owns the verdict); entry vanished post-join (reaped, not wedge-shaped); an outcome record for the sid exists (fast completion). **H1:** a full-window roster blackout (zero successful fetches) is CANNOT-VERIFY, never a wedge verdict — raises loudly and touches nothing, because a wedge verdict licenses stop/rm and must never be issued against a session never once observed.
+- **Single safe wedge-retry (C1):** on a wedge verdict, `claude stop` + `claude rm` the wedged session with short timeouts, then **verify** the cleanup (re-fetch; entry gone or still status/pid-free = retry-safe; entry live or roster unavailable = **refuse the retry** — two live sessions on one task file is the disaster case). Retry the whole dispatch exactly once with a fresh pre-snapshot; a second consecutive wedge gives up loudly. Events: `dispatch_wedged`, `dispatch_retried`.
+
+**Launch contract around the choke point (spawn shape, `cmd_spawn` @2128):** pre-claim the record under `fleet.lock` with `session_id=None` + `last_dispatch_at` stamped → dispatch outside the lock → re-lock and stamp sid/short-id via `_commit_launched_turn` (@1769: 6 attempts, backoff — a lock timeout must not strand a live session; on exhaustion `_report_stranded_native_turn` prints the recovery handles and the pre-claim is **kept**, never popped, because a live session exists) → on dispatch failure, roll the pre-claim back. **Fast-completion exception:** a worker can finish before the join resolves; if an outcome record for this name is newer than the pre-claim, commit `idle` with the outcome's sid instead of rolling back a finished task (`_fast_completion_sid` @5927).
+
+## 7. Lifecycle verbs — native wrappers over roster + outcome store
+
+| Verb | Native behavior (receipt) |
+|---|---|
+| `spawn <name> --dir --task [--mode dontask] [--model] [--category] [--token-ceiling] [--setting-sources]` | §6 launch contract. `--max-budget-usd` **refused** (G3: no USD under `--bg`); `--token-ceiling` is the only fleet-side cap. Ceiling file written after the sid is known (@2320). Default mode `dontask` (@7153); mode map `MODE_FLAGS` @949. |
+| `send <name> <text\|@file>` | `_cmd_send_native` @2928. Working (roster busy/waiting) → mailbox append, unchanged mid-turn path (G1). Idle → **fork-steer** (RATIFIED G2(b)): ceiling check via summed outcome tokens, pre-claim, mailbox append rides the drain, `dispatch_bg(resume_sid=old_sid)` mints a NEW sid; `_restamp_after_steer` (@5877) retires the old sid, restamps sid/short-id, `_migrate_residual_mailbox` (@5901) re-points late mail. Refuses: dead-suspected, dead/interrupted (→ respawn), limited (→ resume-limited), other sticky states, and any G9-suspicious roster. Rollback restores the mailbox claim and the pre-claim **only if** the record still matches the claim this call wrote. |
+| `status [name] [--json] [--stale-ok] [--all]` | `cmd_status` @2355. Authoritative path: F4 lock shape, one roster fetch, recompute + conditional merge, table + anomaly flags. `--stale-ok` = the probe-free/lock-free/write-free view path (`status_snapshot` @1558). Archived records hidden by default (`--all` or a named query includes them) and **never recomputed**. Epoch-frozen ⇒ verdicts carried, not derived. |
+| `peek <name> [-n]` | `_cmd_peek_native` @2607: last n substantive transcript records (assistant text/tool_use, user vs `isMeta`), tolerant parsing, works mid-turn (daemon writes the transcript live). No stream-json log exists to read. |
+| `result <name>` | `_cmd_result_native` @2662: latest outcome record for the CURRENT sid; `kind=="result"` prints `result_text` on stdout (script-pure) + token/model line on stderr; a tombstone kind or missing/null record exits 1 with a distinct reason. |
+| `wait <name...> [--any\|--all] [--timeout]` | `wait_for_workers` @2711: poll-recompute until `NATIVE_TERMINAL_STATUSES` (@1305: idle, dead, dead-suspected, limited, over_ceiling, interrupted). One roster fetch per poll shared across names; epoch-frozen polls trust nothing; archived records resolve immediately from frozen status. |
+| `attach <name>` / `release <name>` | `cmd_attach` @3579 **refuses and redirects**: a native session has no fleet-owned terminal — use the agents menu (Ctrl+T) or `claude attach <sid>` (M-B scope fence; native attach integration is a later milestone). `release` @3595 still flips a stale `attached` record → idle. |
+| `interrupt <name>` | `_cmd_interrupt_native` @3462: guard — only `status=="working"` is interruptible (T8 C1: every other status refused, nothing overwritten). `claude stop <sid>` (never raw kill), write fleet's own `interrupted` tombstone (G10: stop fires no Stop hook), mark sticky `interrupted`. Respawn is a separate, explicit decision — an interrupted task is definitionally started; auto-respawn would re-run side effects. |
+| `respawn <name> [--task]` | `_cmd_respawn_native` @3620: **fresh dispatch, no `--resume`** — the context reset is the point; journal + old-sid mailbox carried via `compose_prompt(journal_path=...)`. Old-sid liveness gated on the **roster**, not the stored label; roster-fetch failure refuses (never assume dead on ambiguity). `--force` on a live old session: stop → **always re-verify via roster** (reported success gets one 2 s grace re-fetch; reported failure aborts on first still-live check) → still-live aborts the respawn (never two live sessions under one name). Stopped tombstone written regardless of the stop's exit code. Carries forward cwd/mode/model/category/setting_sources/token_ceiling/spawned_by/cost fields; `retired_sids` += old sid. No log rotation — there is no log. |
+| `kill <name> [--yes]` / `clean [--dead-only\|--tombstones]` | `_cmd_kill_native` @3891: `claude stop` current sid + best-effort sweep of `retired_sids` (cap 20 most recent, 5 s each — T8 I1 wall-time bound; skips any sid that is another worker's current sid), tombstone, mark dead unconditionally; unverified stop still marks dead but exits 1 loudly. `cmd_clean` @4083: deletable = `dead` ONLY (never dead-suspected/limited/idle/interrupted/working); F4 lock shape + epoch freeze; archived tombstones are always swept (pure file deletion — their sids were already `claude rm`-ed at archive time); tiering flags per `docs/specs/autoclean.md` D2. |
+| `resume-limited [name] [--force-now]` | §10. Native resume = fork-steer per G2(b) (`_resume_one_limited_native` @3255). |
+| `archive [--ttl-hours] [--dry-run]` / `autoclean` | §11. |
+| `doctor` | §13 roster. |
+| `sup-boot / sup-checkpoint / sup-heartbeat / sup-status / sup-handoff-begin / sup-handoff-complete / sup-handoff-abort` | §12 supervisor protocol (parser rows @7266-7292). |
+| `init [--statusline [--chain\|--force]] [--autoclean [--autoclean-interval-hours N]] [--autoclean-remove]` | Renders `state/worker-settings.json` from the template; `--statusline` installs into `~/.claude/settings.json` refusing foreign incumbents (terminal-surface D6); `--autoclean` installs the Windows Scheduled Task with the F2/F3/F4 install guards (`_install_autoclean_task` @4958, guards `_marker_guard_problems` @4921). |
+| `home` / `knowledge` | Print resolved `FLEET_HOME`; print `knowledge/INDEX.md`. |
+
+*(continued in §8–§15)*
