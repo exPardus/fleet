@@ -39,10 +39,12 @@ def _rec(spawned_by=None, status="dead", **over):
         "model": None, "max_budget_usd": None, "setting_sources": None,
         "token_ceiling": None, "spawned_by": spawned_by,
         "created": "2026-07-09T12:00:00Z", "status": status,
-        "turn_pid": None, "turn_pid_ctime": None, "attached_since": None,
+        "attached_since": None,
         "limit_reset_at": None, "limit_kind": None, "turns": 1,
         "cost_baseline": 0.0, "cost_usd": 1.0,
         "last_activity": "2026-07-09T12:00:00Z",
+        "dispatch_kind": "bg", "category": None, "native_short_id": None,
+        "last_dispatch_at": None, "retired_sids": [], "archived_at": None,
     }
     base.update(over)
     return base
@@ -158,8 +160,8 @@ class TestCliIntegration:
         self._write(home, {"victim": _rec(spawned_by="sess-B", status="idle")})
 
         def no_kill(*a, **k):
-            raise AssertionError("kill must be refused before any process is touched")
-        monkeypatch.setattr(fleet, "_interrupt_worker", no_kill)
+            raise AssertionError("kill must be refused before any session is stopped")
+        monkeypatch.setattr(fleet, "_stop_native_session", no_kill)
 
         with pytest.raises(fleet.DestructiveActionRefused):
             fleet.cmd_kill(argparse.Namespace(name="victim", yes=False))
@@ -170,10 +172,10 @@ class TestCliIntegration:
 
     def test_kill_proceeds_on_your_own_worker(self, home, monkeypatch):
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-A")
-        monkeypatch.setattr(fleet, "_interrupt_worker", lambda *a, **k: "not_running")
+        monkeypatch.setattr(fleet, "_stop_native_session", lambda *a, **k: True)
         self._write(home, {"mine": _rec(spawned_by="sess-A", status="idle")})
 
-        rc = fleet.cmd_kill(argparse.Namespace(name="mine", yes=False), sleep=lambda s: None)
+        rc = fleet.cmd_kill(argparse.Namespace(name="mine", yes=False))
 
         assert rc == 0
         data = json.loads((home / "state" / "fleet.json").read_text(encoding="utf-8"))
@@ -181,29 +183,31 @@ class TestCliIntegration:
 
     def test_kill_foreign_with_yes_proceeds(self, home, monkeypatch):
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-A")
-        monkeypatch.setattr(fleet, "_interrupt_worker", lambda *a, **k: "not_running")
+        monkeypatch.setattr(fleet, "_stop_native_session", lambda *a, **k: True)
         self._write(home, {"victim": _rec(spawned_by="sess-B", status="idle")})
 
-        rc = fleet.cmd_kill(argparse.Namespace(name="victim", yes=True), sleep=lambda s: None)
+        rc = fleet.cmd_kill(argparse.Namespace(name="victim", yes=True))
         assert rc == 0
 
     def test_clean_refuses_to_sweep_foreign_dead_workers(self, home, monkeypatch, capsys):
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-A")
-        monkeypatch.setattr(fleet, "recompute_worker", lambda n, r, **k: dict(r, status="dead"))
+        monkeypatch.setattr(fleet, "recompute_worker_native", lambda n, r, entries: dict(r, status="dead"))
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, [{"sessionId": "sid-1", "status": "idle", "state": "idle"}]))
         self._write(home, {"victim": _rec(spawned_by="sess-B", status="dead")})
 
         with pytest.raises(fleet.DestructiveActionRefused):
-            fleet.cmd_clean(argparse.Namespace(yes=False), sleep=lambda s: None)
+            fleet.cmd_clean(argparse.Namespace(yes=False))
 
         data = json.loads((home / "state" / "fleet.json").read_text(encoding="utf-8"))
         assert "victim" in data["workers"], "clean must not delete a refused worker"
 
     def test_clean_sweeps_your_own_dead_workers_without_asking(self, home, monkeypatch):
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-A")
-        monkeypatch.setattr(fleet, "recompute_worker", lambda n, r, **k: dict(r, status="dead"))
+        monkeypatch.setattr(fleet, "recompute_worker_native", lambda n, r, entries: dict(r, status="dead"))
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, [{"sessionId": "sid-1", "status": "idle", "state": "idle"}]))
         self._write(home, {"mine": _rec(spawned_by="sess-A", status="dead")})
 
-        rc = fleet.cmd_clean(argparse.Namespace(yes=False), sleep=lambda s: None)
+        rc = fleet.cmd_clean(argparse.Namespace(yes=False))
 
         assert rc == 0
         data = json.loads((home / "state" / "fleet.json").read_text(encoding="utf-8"))
@@ -212,22 +216,24 @@ class TestCliIntegration:
     def test_clean_refuses_the_whole_batch_when_one_worker_is_foreign(self, home, monkeypatch):
         # A batch that mixes yours and theirs must not half-delete.
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-A")
-        monkeypatch.setattr(fleet, "recompute_worker", lambda n, r, **k: dict(r, status="dead"))
+        monkeypatch.setattr(fleet, "recompute_worker_native", lambda n, r, entries: dict(r, status="dead"))
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, [{"sessionId": "s1", "status": "idle", "state": "idle"}]))
         self._write(home, {"mine": _rec(spawned_by="sess-A", status="dead", session_id="s1"),
                            "theirs": _rec(spawned_by="sess-B", status="dead", session_id="s2")})
 
         with pytest.raises(fleet.DestructiveActionRefused):
-            fleet.cmd_clean(argparse.Namespace(yes=False), sleep=lambda s: None)
+            fleet.cmd_clean(argparse.Namespace(yes=False))
 
         data = json.loads((home / "state" / "fleet.json").read_text(encoding="utf-8"))
         assert set(data["workers"]) == {"mine", "theirs"}
 
     def test_clean_with_nothing_dead_never_prompts(self, home, monkeypatch):
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-A")
-        monkeypatch.setattr(fleet, "recompute_worker", lambda n, r, **k: dict(r, status="idle"))
+        monkeypatch.setattr(fleet, "recompute_worker_native", lambda n, r, entries: dict(r, status="idle"))
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, [{"sessionId": "sid-1", "status": "idle", "state": "idle"}]))
         self._write(home, {"theirs": _rec(spawned_by="sess-B", status="idle")})
 
-        assert fleet.cmd_clean(argparse.Namespace(yes=False), sleep=lambda s: None) == 0
+        assert fleet.cmd_clean(argparse.Namespace(yes=False)) == 0
 
 
 class TestRespawnDoesNotLaunderOwnership:
@@ -285,7 +291,13 @@ class TestRealCliRefusesCleanly:
         assert survivor["workers"]["victim"]["status"] == "idle"
 
     def test_agent_killing_its_own_worker_succeeds(self, tmp_path):
+        # session_id=None with a long-expired claim: the real CLI proceeds
+        # straight to the terminal dead mark without shelling out a
+        # `claude stop` (no live session for this fabricated worker).
         self._seed(tmp_path, spawned_by="an-agent")
+        data = json.loads((tmp_path / "state" / "fleet.json").read_text(encoding="utf-8"))
+        data["workers"]["victim"]["session_id"] = None
+        (tmp_path / "state" / "fleet.json").write_text(json.dumps(data), encoding="utf-8")
         out = self._run(tmp_path, "kill", "victim")
         assert out.returncode == 0, out.stderr
         data = json.loads((tmp_path / "state" / "fleet.json").read_text(encoding="utf-8"))

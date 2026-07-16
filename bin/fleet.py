@@ -30,7 +30,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -150,14 +149,6 @@ def is_native(record: dict) -> bool:
     return record.get("dispatch_kind") == "bg"
 
 
-def refuse_if_legacy(name: str, record: dict, action: str) -> None:
-    if not is_native(record):
-        raise FleetCliError(
-            f"{name}: pre-pivot worker -- {action} unavailable; "
-            "kill or clean via legacy path"
-        )
-
-
 def refuse_if_archived(name: str, record: dict, action: str) -> None:
     """M-B T9 (spec §5.1.2): a tombstoned (archived_at set) worker is
     history-only -- every native mutating command refuses it up front
@@ -220,8 +211,8 @@ def template_settings_path() -> Path:
 def instance_settings_path() -> Path:
     """Machine-local, gitignored settings instance (SPEC §14):
     state/worker-settings.json, rendered by `fleet init` from
-    template_settings_path(). Every worker turn's --settings argv value
-    points here (build_turn_argv's default), never at the template."""
+    template_settings_path(). Every worker dispatch's --settings argv value
+    points here (dispatch_bg's default), never at the template."""
     return state_dir() / "worker-settings.json"
 
 
@@ -263,14 +254,6 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def ctime_to_iso(dt: datetime) -> str:
-    """Serialize a process creation-time datetime to the registry's
-    turn_pid_ctime format (round-trips through _parse_iso). This is the
-    only serializer callers should use to store turn_pid_ctime --
-    datetime.isoformat() yields "+00:00" and breaks _parse_iso."""
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
 # ---------------------------------------------------------------------------
 # === PLATFORM ADAPTER START (SPEC §14 portability mandate) ===
 #
@@ -299,106 +282,6 @@ class UnsupportedPlatformError(NotImplementedError):
 
 class _WindowsPlatform:
     """Windows implementation of every OS-specific fleet operation."""
-
-    def detached_popen_kwargs(self) -> dict:
-        """Popen kwargs for a fully detached child (SPEC §6): survives the
-        parent CLI invocation exiting and isn't torn down with the parent's
-        process group (e.g. a Ctrl-C in the manager's shell)."""
-        return {"creationflags": subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP}
-
-    def get_process_info(self, pid):
-        """Three-way probe (F15/M4). Returns:
-          * None                 -- the pid does not exist (definitely gone)
-          * (image_name, ctime)  -- process exists and its UTC start time was
-                                    readable (alive-and-readable)
-          * (image_name, None)   -- process exists but its StartTime is
-                                    unreadable (Access Denied on an elevated/
-                                    system process, or CIM also fails) -- the
-                                    "exists-but-unreadable = alive-unknown"
-                                    case, which callers must NEVER classify as
-                                    dead (never reap a live worker on a probe
-                                    hiccup, SPEC §4/F20 three-way probe).
-
-        stdlib subprocess route (no third-party deps): asks PowerShell's
-        Get-Process for the process name and UTC start time; the try/catch in
-        the script emits a `NAME|ACCESS_DENIED` marker when StartTime throws,
-        after one Get-CimInstance (Win32_Process CreationDate) fallback
-        attempt. Kept as a single small method so pid_alive()/probe_liveness()/
-        recompute_status()/launch_turn() can accept an injected replacement in
-        tests instead of touching real processes.
-        """
-        try:
-            script = (
-                f"$p = Get-Process -Id {int(pid)} -ErrorAction SilentlyContinue; "
-                "if ($p) { "
-                "  try { "
-                "    \"$($p.ProcessName)|$($p.StartTime.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss'))\" "
-                "  } catch { "
-                "    try { "
-                f"      $c = Get-CimInstance Win32_Process -Filter \"ProcessId={int(pid)}\" -ErrorAction Stop; "
-                "      \"$($p.ProcessName)|$($c.CreationDate.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss'))\" "
-                "    } catch { "
-                "      \"$($p.ProcessName)|ACCESS_DENIED\" "
-                "    } "
-                "  } "
-                "}"
-            )
-            result = subprocess.run(
-                ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-                capture_output=True, text=True, timeout=5,
-            )
-            line = (result.stdout or "").strip()
-            if not line or "|" not in line:
-                return None
-            name, ctime_str = line.rsplit("|", 1)
-            if ctime_str == "ACCESS_DENIED":
-                # Process exists, StartTime unreadable -> alive-unknown.
-                return name, None
-            ctime = datetime.strptime(ctime_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
-            return name, ctime
-        except Exception:
-            return None
-
-    def kill_process_tree(self, pid, run=subprocess.run) -> bool:
-        """`taskkill /PID <pid> /T /F` (SPEC §5 interrupt row): best-effort
-        kill of the whole process tree rooted at pid. Returns True iff
-        taskkill itself reported success (exit code 0); callers treat
-        interrupt as best-effort regardless (the caller still marks the
-        worker idle -- a turn that ignored the kill is still not something
-        `fleet` can wait on)."""
-        try:
-            result = run(
-                ["taskkill", "/PID", str(int(pid)), "/T", "/F"],
-                capture_output=True, text=True, timeout=10,
-            )
-            return result.returncode == 0
-        except Exception:
-            return False
-
-    def build_attach_argv(self, cwd, sid: str, which=shutil.which) -> list:
-        """Argv for `fleet attach` (SPEC §5 attach row, §9): Windows
-        Terminal (`wt`) if present on PATH, else a detached PowerShell
-        fallback via Start-Process. Both resume with the worker's cwd (the
-        --resume cwd-scope invariant, SPEC §2)."""
-        cwd = str(cwd)
-        if which("wt"):
-            return ["wt", "-d", cwd, "--", "claude", "--resume", sid]
-        # F2: cwd is interpolated into a PowerShell single-quoted string
-        # literal below. An unescaped `'` in cwd (e.g. C:\Users\O'Brien\proj)
-        # would terminate that string early -> ParserError -- and this
-        # happens silently: no terminal opens, but `fleet attach` still
-        # reports success (cmd_attach never checks the detached child's exit
-        # code, by design -- see cmd_attach's docstring). Double any embedded
-        # `'` per PowerShell single-quoted-string escaping rules. The `wt`
-        # branch above is unaffected: list2cmdline double-quotes each argv
-        # element, and a `'` is a literal character inside a double-quoted
-        # Windows command-line argument.
-        ps_cwd = cwd.replace("'", "''")
-        ps_command = (
-            f"Start-Process powershell -WorkingDirectory '{ps_cwd}' "
-            f"-ArgumentList '-NoExit','-Command','claude --resume {sid}'"
-        )
-        return ["powershell", "-Command", ps_command]
 
     def autoclean_task_query(self, task_name: str, run=subprocess.run):
         """None ONLY when the task is definitively absent; its command
@@ -481,18 +364,6 @@ class _PosixPlatform:
             f"{what} has no POSIX implementation yet (Phase 1.5, SPEC §14); "
             "this build only supports Windows"
         )
-
-    def detached_popen_kwargs(self) -> dict:
-        self._unsupported("detached_popen_kwargs")
-
-    def get_process_info(self, pid):
-        self._unsupported("get_process_info")
-
-    def kill_process_tree(self, pid, run=None) -> bool:
-        self._unsupported("kill_process_tree")
-
-    def build_attach_argv(self, cwd, sid: str, which=None) -> list:
-        self._unsupported("build_attach_argv")
 
     def autoclean_task_query(self, task_name: str, run=None):
         self._unsupported("autoclean_task_query")
@@ -754,8 +625,6 @@ def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
         "spawned_by": spawned_by,
         "created": created,
         "status": "working",
-        "turn_pid": None,
-        "turn_pid_ctime": None,
         "attached_since": None,
         # UL1 (item 11 / F31): usage-limit park horizon. limit_reset_at is the
         # ISO-8601 UTC instant the Claude plan window resets (or None when the
@@ -833,75 +702,17 @@ def _append_event_quiet(kind: str, name: str, **fields) -> None:
 
 
 # ---------------------------------------------------------------------------
-# PID liveness (SPEC §4)
+# Timestamp parsing (registry ISO format)
 # ---------------------------------------------------------------------------
 
 def _parse_iso(ctime_iso: str) -> datetime:
     return datetime.strptime(ctime_iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 
 
-# F-CMD: an npm/claude.cmd install resolves to claude.cmd, which Popen runs
-# via cmd.exe -- the pid Python gets back is cmd.exe's (later re-parented to
-# node), so the recorded image name is "cmd" or "node", never "claude". The
-# recorded-pid + ctime (+/-2s) match below is what actually guards against
-# false positives, not this name test, so broadening it is safe (a reused
-# pid landing on an unrelated cmd/node/claude process within 2s of the
-# recorded ctime is the accepted, vanishingly unlikely residual).
-_ALIVE_IMAGE_NAMES = {"claude", "node", "cmd"}
-
-
-def probe_liveness(pid, ctime_iso, get_process_info=None) -> str:
-    """Three-way liveness probe (F15/M4). Returns one of:
-      * "alive"   -- pid exists, is a claude/node/cmd process (F-CMD), and its
-                     creation time matches ctime_iso within +/-2s
-      * "unknown" -- pid exists and matches the image name, but its start time
-                     is unreadable (get_process_info returned (name, None) --
-                     the exists-but-unreadable = ALIVE-UNKNOWN case). Callers
-                     must NEVER demote this to "dead" (never reap a live worker
-                     on a probe hiccup, SPEC §4/F20 three-way probe).
-      * "gone"    -- pid is absent, is an unrelated (reused) process, or the
-                     recorded ctime is unparseable/does not match (PID reuse
-                     otherwise misclassifies a dead worker as alive, SPEC §4).
-    """
-    if pid is None or ctime_iso is None:
-        return "gone"
-    get_process_info = get_process_info or PLATFORM.get_process_info
-    info = get_process_info(pid)
-    if info is None:
-        return "gone"
-    name, ctime = info
-    name_l = (name or "").lower()
-    if not any(candidate in name_l for candidate in _ALIVE_IMAGE_NAMES):
-        return "gone"
-    if ctime is None:
-        # Process exists + image name matches, but StartTime unreadable.
-        return "unknown"
-    try:
-        recorded = _parse_iso(ctime_iso)
-    except (ValueError, TypeError):
-        return "gone"
-    return "alive" if abs((ctime - recorded).total_seconds()) <= 2.0 else "gone"
-
-
-def pid_alive(pid, ctime_iso, get_process_info=None) -> bool:
-    """True iff the three-way probe reports "alive" -- i.e. pid exists, is a
-    claude/node/cmd process (F-CMD), and its creation time matches ctime_iso
-    within +/-2s (PID reuse otherwise misclassifies a dead worker as working
-    -- SPEC §4). "unknown"/"gone" both return False here; callers needing the
-    alive-unknown distinction (recompute_status) use probe_liveness directly."""
-    return probe_liveness(pid, ctime_iso, get_process_info=get_process_info) == "alive"
-
-
-# Task 5 perf item (SPEC §12): status/wait polling calls _last_line_type /
-# tail_events once per worker per poll -- on a multi-hundred-MB stream-json
-# log (verbose+stream-json is fat, SPEC §11 "log bloat") a whole-file
-# f.readlines() every poll is wasteful. Every real caller in this module
-# only ever wants the trailing well-formed line or the trailing N digest
-# events (_last_line_type, tail_events(n=...), and recompute_worker's
-# tail_events(n=50)) -- all comfortably within a 64KB trailing window for
-# any log this fleet actually produces, so reading just the tail is
-# behaviorally identical to reading the whole file for every real call
-# site, not merely "close enough".
+# Task 5 perf item (SPEC §12): transcript-tail readers (native peek,
+# transcript_limit_scan) only ever want a bounded trailing slice -- on a
+# multi-hundred-MB transcript a whole-file read would be wasteful, and a
+# 64KB trailing window covers every real call site.
 _TAIL_READ_BYTES = 64 * 1024
 
 
@@ -956,66 +767,24 @@ def _read_tail_lines(log_path) -> list:
     return chunk.decode("utf-8-sig", errors="replace").splitlines()
 
 
-def _last_line_type(log_path) -> str | None:
-    """Return the "type" field of the last SUBSTANTIVE well-formed JSON line
-    in log_path (perf: reads only the trailing window via _read_tail_lines,
-    see above).
-
-    SMOKE-A (integration-smoke.md Finding A, live-proven): a completed
-    turn's own "result" event is NOT reliably the literal last line written
-    to the log -- an async hook's response (observed live: a fresh spawn's
-    "SessionStart:startup" hook, a `send`-resumed turn's
-    "SessionStart:resume" hook) can race the result line and land after it,
-    on every real launch this fleet produced in the integration smoke test.
-    Classifying by the literal last line then misreads a healthy,
-    result-bearing completed turn as "dead" instead of "idle" (recompute_
-    status's rule is keyed on "trailing result event"). Fix: scan backwards
-    past any `"type":"system"` line -- hook_started/hook_response/
-    hook_progress, and other bookkeeping lines like init/thinking_tokens
-    are all type "system" -- and past any junk/non-JSON line, returning the
-    type of the first genuinely substantive event found (result/assistant/
-    user -- i.e. something the turn's own model loop emitted, not hook or
-    system plumbing)."""
-    log_path = Path(log_path)
-    if not log_path.exists():
-        return None
-    for line in reversed(_read_tail_lines(log_path)):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        if not isinstance(obj, dict):
-            continue
-        etype = obj.get("type")
-        if etype == "system":
-            continue  # hook/system bookkeeping -- not substantive, keep scanning
-        return etype
-    return None
-
-
 # Post-testing wave, item 1c (stress-report Finding 1, zombie-escape hatch):
-# how long a "working"/turn_pid=None pre-claim is allowed to sit before
-# recompute_status stops treating it as a real in-flight launch and demotes
-# it to "dead" instead. Every real launcher (launch_turn, called
-# synchronously from cmd_spawn/cmd_send/cmd_respawn) stamps the real pid
-# within, at most, LAUNCH_DOA_WINDOW_SECONDS (3s) plus one Popen() call --
-# so a claim still unstamped after ten minutes did not just lose a race, it
-# lost its launcher (the `fleet` CLI process itself crashed, was killed, or
-# lost power between the pre-claim write and the post-launch commit).
+# how long a "working" pre-claim (session_id=None) is allowed to sit before
+# a recompute stops treating it as a real in-flight dispatch and demotes it
+# to "dead" instead. Every real dispatch path (cmd_spawn/cmd_send/
+# cmd_respawn via dispatch_bg) stamps the real sid synchronously -- so a
+# claim still unstamped after ten minutes did not just lose a race, it lost
+# its launcher (the `fleet` CLI process itself crashed, was killed, or lost
+# power between the pre-claim write and the post-dispatch commit).
 LAUNCH_CLAIM_MAX_AGE_SECONDS = 600.0
 
 
 def _launch_claim_expired(last_activity_iso) -> bool:
-    """True iff a "working"/turn_pid=None pre-claim's last_activity is older
+    """True iff a "working" pre-claim's (session_id=None) last_activity is older
     than LAUNCH_CLAIM_MAX_AGE_SECONDS (or is missing/unparseable -- treated
     as NOT expired, matching the pre-fix behavior of never demoting when
-    there's no age information to go on). Shared by recompute_status (the
-    general liveness recompute) and cmd_kill's own launch-in-flight guard
-    (which intentionally skips a full recompute_worker probe, so it needs
-    this check standalone)."""
+    there's no age information to go on). Shared by the native recompute
+    (`recompute_worker_native`, `_dispatch_grace_active`) and cmd_kill's
+    own launch-in-flight guard."""
     if not last_activity_iso:
         return False
     try:
@@ -1025,191 +794,13 @@ def _launch_claim_expired(last_activity_iso) -> bool:
     return age > LAUNCH_CLAIM_MAX_AGE_SECONDS
 
 
-def recompute_status(pid, ctime_iso, log_path, current_status: str | None = None, get_process_info=None,
-                     last_activity_iso=None, sleep=time.sleep) -> str:
-    """working / idle / dead, per SPEC §4: stale PID + trailing result event
-    -> idle; stale PID + no trailing result event -> dead. If current_status
-    is "attached", that state takes priority and is returned immediately --
-    liveness recomputation must never clobber an operator's manual attach
-    (F7).
-
-    F1 launch-in-flight guard: a "working" record whose turn_pid is still
-    None is a pre-claim -- every turn-starting path (cmd_spawn's
-    new_worker_record, cmd_send's idle-resume, future respawn) writes
-    status="working"/turn_pid=None atomically under fleet_lock BEFORE the
-    turn process actually exists, specifically so a concurrent reader
-    (another send/attach/status) observes the claim and refuses instead of
-    racing a second live `claude` onto the same session (SPEC §6/§9
-    one-live-claude invariant). That guarantee only holds if recompute
-    refuses to demote this exact window -- so, like "attached", "working"
-    with pid is None is returned as-is here, never reinterpreted as
-    idle/dead. Scoped tightly to pid is None: a "working" record with a
-    real (non-None) pid that turns out to be dead must still demote
-    normally (see the regression test pinning this).
-
-    Zombie escape hatch (post-testing wave, item 1c -- was "Residual
-    (documented, not fixed)" above): the guard above is now time-bounded via
-    `last_activity_iso` + LAUNCH_CLAIM_MAX_AGE_SECONDS. If the `fleet` CLI
-    process itself is killed between the pre-claim write and the
-    post-launch pid-stamp -- or the post-launch commit lock is lost for
-    good (see `_commit_launched_turn`'s own docstring for the bounded-retry
-    mitigation of the common case) -- the record no longer stays pinned
-    "working" forever: once `last_activity` is older than
-    LAUNCH_CLAIM_MAX_AGE_SECONDS (real launchers stamp the pid within
-    seconds), this demotes straight to "dead", making it recoverable through
-    every normal dead-worker path (`fleet kill`, `fleet attach --force`,
-    `fleet respawn --force`/`fleet respawn`, `fleet clean`) instead of
-    requiring manual registry surgery. `last_activity_iso=None` (the
-    default, and what every pre-fix caller still passes) preserves the old
-    "never demote" behavior -- callers must opt in by passing the record's
-    own `last_activity` field.
-
-    SMOKE-D (integration-smoke.md Finding D, live-proven): "dead" set by an
-    operator action (`fleet kill`) must be STICKY, mirroring the "attached"
-    guard above -- recompute's job is demotion (working/idle -> dead), not
-    resurrection. Without this, a killed worker whose log tail legitimately
-    ends on a trailing result event (the common "healthy, done" case) would
-    recompute straight back to "idle" on the very next status/clean call --
-    live-reproduced: `kill` marked it dead, and the immediate next `clean`
-    (and a bare `status`) flipped it back to idle, making `kill` non-
-    terminal and the worker permanently un-cleanable via the CLI. `fleet
-    respawn` is the one recovery lever out of "dead" -- it always starts a
-    brand-new record via new_worker_record (status="working"), never by
-    demoting through this function, so this guard cannot block a real
-    recovery.
-    """
-    if current_status == "attached":
-        return "attached"
-    if current_status == "dead":
-        return "dead"
-    # Phase1 kernel item 7 (F13/M5): "over_budget" is a sticky terminal flag
-    # set by cmd_send's cumulative-cost check when a worker's lifetime
-    # cost_usd exceeds its persisted max_budget_usd. Like "attached"/"dead",
-    # a liveness recompute must never silently revert it to idle/dead -- the
-    # operator raises the cap (a fresh respawn record) or retires the worker.
-    if current_status == "over_budget":
-        return "over_budget"
-    # Kernel 10 (F12=M24): "over_ceiling" is the token analog of over_budget
-    # -- set by cmd_send's cumulative-token check when a worker's session
-    # tokens exceed its persisted token_ceiling. Sticky for the same reason:
-    # a liveness recompute must not silently revert it (respawn with a higher
-    # ceiling, or retire the worker).
-    if current_status == "over_ceiling":
-        return "over_ceiling"
-    # UL1 (item 11 / F31): "limited" is a plan-usage-limit park, sticky-until-
-    # reset exactly as dead/attached are sticky. A liveness recompute must
-    # NEVER demote it to dead: a parked worker legitimately holds no live
-    # claude (its turn ended at the plan wall, not in a crash), so "no live PID
-    # + no result" is the EXPECTED shape here, not a crash signal. The sole
-    # exits are a `fleet resume-limited` launch (limited -> working, once
-    # now >= limit_reset_at) or `respawn --force` (a fresh new_worker_record).
-    if current_status == "limited":
-        return "limited"
-    if current_status == "working" and pid is None:
-        if _launch_claim_expired(last_activity_iso):
-            return "dead"
-        return "working"
-    # F15/M4 three-way probe: "alive" and "unknown" (exists-but-unreadable
-    # StartTime) BOTH stay working -- alive-unknown is never demoted to dead,
-    # so a live worker whose StartTime is momentarily unreadable is never
-    # reaped (SPEC §4/F20). Only a "gone" verdict is a demotion candidate.
-    verdict = probe_liveness(pid, ctime_iso, get_process_info=get_process_info)
-    if verdict in ("alive", "unknown"):
-        return "working"
-    if _last_line_type(log_path) == "result":
-        return "idle"
-    # verdict == "gone" AND no trailing result -> would demote to "dead". For a
-    # working record with a real pid, retry the probe ONCE after a short delay
-    # (mirroring _DEAD_CONFIRM_DELAY_SECONDS) before committing to dead, so a
-    # single transient probe miss cannot reap a live turn.
-    if current_status == "working" and pid is not None:
-        sleep(_DEAD_CONFIRM_DELAY_SECONDS)
-        verdict = probe_liveness(pid, ctime_iso, get_process_info=get_process_info)
-        if verdict in ("alive", "unknown"):
-            return "working"
-        if _last_line_type(log_path) == "result":
-            return "idle"
-    return "dead"
-
-
 # ---------------------------------------------------------------------------
 # Stream-jsonl parsing (SPEC §6, §5 peek/result rows)
 # ---------------------------------------------------------------------------
 
-_TEXT_TRUNCATE = 200
-_RESULT_TRUNCATE = 500
-_INPUT_TRUNCATE = 150
-
-
 def _truncate(text, limit) -> str:
     text = text if isinstance(text, str) else str(text)
     return text if len(text) <= limit else text[:limit] + "..."
-
-
-def _digest_event(obj: dict):
-    """Reduce one raw stream-json object to a small peek/result digest dict,
-    or None if this event type isn't relevant to peek/result (e.g. system)."""
-    etype = obj.get("type")
-    if etype == "result":
-        text = obj.get("result")
-        if text is None:
-            text = obj.get("text", "")
-        cost = obj.get("total_cost_usd", obj.get("cost_usd"))
-        tokens = obj.get("usage") or {}
-        return {"kind": "result", "text": _truncate(text, _RESULT_TRUNCATE), "cost_usd": cost, "tokens": tokens}
-
-    if etype in ("assistant", "user"):
-        message = obj.get("message") or {}
-        content = message.get("content")
-        if isinstance(content, str):
-            return {"kind": "assistant_text", "text": _truncate(content, _TEXT_TRUNCATE)}
-        if isinstance(content, list):
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-                btype = block.get("type")
-                if btype == "tool_use":
-                    brief = _truncate(json.dumps(block.get("input", {}), default=str), _INPUT_TRUNCATE)
-                    return {"kind": "tool_call", "name": block.get("name", "?"), "input": brief}
-                if btype == "text":
-                    return {"kind": "assistant_text", "text": _truncate(block.get("text", ""), _TEXT_TRUNCATE)}
-        return None
-    return None
-
-
-def tail_events(log_path, n: int = 20) -> list:
-    """Defensively parse a worker's stream-json log, returning up to n
-    peek/result digest entries (oldest first). Skips non-JSON/junk lines
-    and system-only events; tolerates missing or truncated files.
-
-    Perf (SPEC §12): reads only the trailing window via _read_tail_lines
-    rather than the whole file -- every caller here only ever wants a
-    bounded trailing slice of events, so this is behaviorally identical to
-    a whole-file read for any log this fleet actually produces (see
-    _read_tail_lines's docstring)."""
-    log_path = Path(log_path)
-    if not log_path.exists():
-        return []
-    lines = _read_tail_lines(log_path)
-
-    entries = []
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except (json.JSONDecodeError, ValueError):
-            continue  # junk line or truncated final line -- skip defensively
-        if not isinstance(obj, dict):
-            continue
-        digest = _digest_event(obj)
-        if digest is not None:
-            entries.append(digest)
-
-    if n is not None:
-        entries = entries[-n:]
-    return entries
 
 
 # ---------------------------------------------------------------------------
@@ -1375,7 +966,7 @@ def mode_flags(mode: str) -> list:
 
 
 # ---------------------------------------------------------------------------
-# Turn launcher (SPEC §6): pure argv builder + detached Popen.
+# Claude executable resolution + worker environment (shared by dispatch_bg).
 # ---------------------------------------------------------------------------
 
 class ClaudeNotFoundError(Exception):
@@ -1384,7 +975,8 @@ class ClaudeNotFoundError(Exception):
 
 def resolve_claude_executable(which=shutil.which) -> str:
     """Resolve the real claude executable (claude.cmd/claude.exe on Windows)
-    via shutil.which -- Popen needs the concrete path, not the bare name."""
+    via shutil.which -- subprocess.run needs the concrete path, not the bare
+    name."""
     exe = which("claude")
     if not exe:
         raise ClaudeNotFoundError(
@@ -1392,83 +984,6 @@ def resolve_claude_executable(which=shutil.which) -> str:
             "expected claude.cmd or claude.exe on this machine)"
         )
     return exe
-
-
-def build_turn_argv(claude_exe: str, sid: str, first: bool, mode: str,
-                     model: str | None = None, max_budget_usd: float | None = None,
-                     settings_path: str | None = None, setting_sources: str | None = None) -> list:
-    """Pure argv builder for one worker turn (SPEC §6). Raises ValueError
-    (via mode_flags) for an unknown mode -- kept a pure function per the
-    Task 2 brief so every mode/model/budget combo is unit-testable without
-    touching Popen at all.
-
-    settings_path defaults to str(instance_settings_path()) -- resolved
-    fresh on every call (not baked into the signature at def-time, SPEC
-    §14) so it follows FLEET_HOME/env-var overrides and test sandboxes the
-    same way every other path helper in this module does. Callers needing
-    the real machine instance must have already run `fleet init`
-    (cmd_spawn/cmd_send enforce this via _require_instance_settings before
-    ever reaching here).
-
-    setting_sources is a Task 5 audit-gap item (SPEC §6 L125, spec-audit
-    gap 5): a raw passthrough string (whatever `claude --setting-sources`
-    itself accepts, e.g. "user,project") appended verbatim as
-    `--setting-sources <value>` when given -- fleet does not parse or
-    validate its contents, only forwards it, so a worker repo's own
-    foreign Stop-hook (or other unwanted merged settings) can be excluded
-    per spawn without fleet inventing its own mini-grammar for it."""
-    if settings_path is None:
-        settings_path = str(instance_settings_path())
-    argv = [claude_exe, "-p", "--output-format", "stream-json", "--verbose", "--include-hook-events"]
-    argv += ["--session-id", sid] if first else ["--resume", sid]
-    argv += ["--settings", settings_path]
-    argv += mode_flags(mode)
-    if model:
-        argv += ["--model", model]
-    if max_budget_usd is not None:
-        argv += ["--max-budget-usd", str(max_budget_usd)]
-    if setting_sources:
-        argv += ["--setting-sources", setting_sources]
-    return argv
-
-
-class TurnLaunchError(Exception):
-    """Raised when Popen() itself fails to start a turn process, OR (F-DOA)
-    when the child dies during init before consuming its prompt. Callers
-    (cmd_spawn et al) must restore_mailbox_claim() the pending claim on this
-    exception -- the mailbox was never consumed by a live turn."""
-
-
-# F-DOA/F-BLOCK: bounded window, after Popen() returns, during which
-# launch_turn watches for a child that dies before consuming its prompt.
-# Long enough to catch a fast init crash (bad --settings, MCP startup
-# failure, auth/license error, invalid --resume sid); short enough to never
-# meaningfully delay the manager for a healthy launch (the writer thread
-# below typically finishes -- and this window is exited -- almost
-# immediately for any launch that isn't actually wedged).
-LAUNCH_DOA_WINDOW_SECONDS = 3.0
-_DOA_POLL_INTERVAL_SECONDS = 0.05
-
-
-def _write_prompt_and_close_stdin(proc, prompt: str, error_box: list) -> None:
-    """Daemon-thread target (F-BLOCK): write the prompt to proc.stdin and
-    close it, off the calling thread. The Windows anonymous-pipe buffer is
-    ~4 KB and claude only reads the prompt after booting, so a synchronous
-    write on the caller's thread would block fleet spawn/send for the
-    child's entire boot (or indefinitely if it wedges pre-read). A
-    BrokenPipeError here means the child's read end already closed -- i.e.
-    it died before consuming the prompt (F-DOA) -- and is captured into
-    error_box for launch_turn to inspect; any other OSError is best-effort
-    (matches the pre-fix behavior for a hiccup on an already-started
-    process) and is swallowed."""
-    try:
-        if proc.stdin is not None:
-            proc.stdin.write(prompt.encode("utf-8"))
-            proc.stdin.close()
-    except BrokenPipeError as exc:
-        error_box.append(exc)
-    except OSError:
-        pass
 
 
 def _worker_env(name: str) -> dict:
@@ -1490,125 +1005,6 @@ def _worker_env(name: str) -> dict:
     env.pop("CLAUDE_CODE_SESSION_ID", None)
     env["FLEET_WORKER"] = name
     return env
-
-
-def launch_turn(name: str, cwd, sid: str, prompt: str, mode: str, first: bool = False,
-                 model=None, max_budget_usd=None, setting_sources=None,
-                 popen=subprocess.Popen, get_process_info=None, which=shutil.which) -> dict:
-    """Start one detached worker turn (SPEC §6): resolve claude, build argv,
-    open per-worker logs (stdout -> logs/<name>.jsonl, stderr -> a separate
-    logs/<name>.err so stderr noise never breaks jsonl parsing), Popen
-    PLATFORM.detached_popen_kwargs() (the platform adapter, SPEC §14) with
-    the worker's cwd (the --resume cwd-scope invariant, SPEC §2), hand the
-    prompt write-and-close to a daemon thread (F-BLOCK -- never block the
-    calling thread on the child's stdin) and watch for a DOA child within a
-    bounded window (F-DOA), then query the new process's creation time via
-    get_process_info (defaults to PLATFORM.get_process_info) so the registry
-    can store an unambiguous turn_pid_ctime via ctime_to_iso -- the only
-    serializer callers may use (F5 bridge).
-
-    Returns {"turn_pid", "turn_pid_ctime", "log_path", "err_log_path"}.
-
-    Raises ClaudeNotFoundError / TurnLaunchError for failures BEFORE or
-    DURING the Popen() call itself, OR (F-DOA) when the child is detected to
-    have died during init before consuming its prompt -- callers must
-    restore_mailbox_claim() the pending claim in either case (the
-    launch-sequence contract). Once launch_turn returns rather than raises,
-    the turn is considered launched and the caller finalizes the claim and
-    records turn_pid. This finalize-vs-restore decision stays entirely in
-    the caller (cmd_spawn et al), keyed only on whether this function
-    returned or raised.
-    """
-    # Phase1 kernel 4 (cwd preflight): never launch/resume a turn into a
-    # vanished directory. Every launch path (spawn, send-resume, respawn)
-    # funnels through here, so one guard covers them all -- and raising
-    # BEFORE the Popen keeps the launch-sequence contract intact (the caller
-    # restores the mailbox claim on any raise, same as a resolve/argv error).
-    if not os.path.isdir(cwd):
-        raise TurnLaunchError(f"registered cwd no longer exists, refusing to launch {name!r}: {cwd}")
-
-    claude_exe = resolve_claude_executable(which=which)
-    argv = build_turn_argv(claude_exe, sid, first, mode, model=model, max_budget_usd=max_budget_usd,
-                            setting_sources=setting_sources)
-
-    logs_dir().mkdir(parents=True, exist_ok=True)
-    log_path = logs_dir() / f"{name}.jsonl"
-    err_path = logs_dir() / f"{name}.err"
-
-    out_f = open(log_path, "ab")
-    err_f = open(err_path, "ab")
-    try:
-        try:
-            proc = popen(
-                argv,
-                cwd=str(cwd),
-                stdin=subprocess.PIPE,
-                stdout=out_f,
-                stderr=err_f,
-                env=_worker_env(name),
-                **PLATFORM.detached_popen_kwargs(),
-            )
-        except OSError as exc:
-            raise TurnLaunchError(f"failed to launch claude turn for {name!r}: {exc}") from exc
-    finally:
-        out_f.close()
-        err_f.close()
-
-    # Popen() succeeded -- hand the prompt write off to a daemon thread
-    # (F-BLOCK) so a slow/wedged reader can never block this thread, then
-    # watch for a DOA child within a bounded window (F-DOA): either the
-    # writer sees the read end already closed (BrokenPipeError) or poll()
-    # reports a nonzero exit before the window elapses. Both are launch
-    # failures; the caller's except path restores the mailbox claim and
-    # rolls back the registry. A poll() of 0 is a legitimate ultra-fast
-    # completed turn, not a failure. If the writer is still blocked when the
-    # window elapses (a wedged pre-read child that never dies), this is
-    # accepted as success -- irreducible without an unbounded wait, and it
-    # self-surfaces later as a no-progress `working` worker.
-    writer_error: list = []
-    writer = threading.Thread(
-        target=_write_prompt_and_close_stdin, args=(proc, prompt, writer_error), daemon=True,
-    )
-    writer.start()
-
-    deadline = time.monotonic() + LAUNCH_DOA_WINDOW_SECONDS
-    while True:
-        writer.join(_DOA_POLL_INTERVAL_SECONDS)
-        if writer_error:
-            raise TurnLaunchError(
-                f"claude turn for {name!r} closed its stdin before consuming the prompt "
-                f"(child exited during init): {writer_error[0]}"
-            )
-        rc = proc.poll()
-        if rc is not None:
-            if rc != 0:
-                raise TurnLaunchError(
-                    f"claude turn for {name!r} exited with code {rc} during its launch "
-                    "window, before consuming its prompt"
-                )
-            break  # rc == 0: legitimate ultra-fast completed turn -- success
-        if not writer.is_alive():
-            break  # writer finished (wrote+closed, or a best-effort OSError)
-                   # and the process has not exited -- healthy launch
-        if time.monotonic() >= deadline:
-            break  # bounded window elapsed with the writer still blocked --
-                   # accepted as success (see docstring residual above)
-
-    get_process_info = get_process_info or PLATFORM.get_process_info
-    ctime_iso = None
-    try:
-        info = get_process_info(proc.pid)
-        if info is not None:
-            ctime_iso = ctime_to_iso(info[1])
-    except Exception:
-        ctime_iso = None
-
-    return {
-        "turn_pid": proc.pid,
-        "turn_pid_ctime": ctime_iso,
-        "log_path": str(log_path),
-        "err_log_path": str(err_path),
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -1661,112 +1057,14 @@ def _registry_cost(value) -> float:
     return coerced if coerced is not None else 0.0
 
 
-def _sum_result_costs(log_path) -> float | None:
-    """Sum the cost of every "result" event in the WHOLE log file (not just
-    the trailing window), or None if the file is missing/unreadable or has
-    no result event at all (caller keeps the prior cost_usd unchanged in
-    that case).
-
-    SMOKE-B (integration-smoke.md Finding B, live-proven): cost is reported
-    PER-INVOCATION on `--resume` turns, not cumulatively by `claude` itself
-    -- observed live across a spawn + two `send`-resumed turns in the same
-    session, where the second turn's own result event reported a SMALLER
-    total_cost_usd than the first (a fresh per-turn number, not a running
-    session total). recompute_worker used to take only `results[-1]`'s
-    cost, so a multi-turn `send` sequence within one session (no respawn --
-    cost_baseline stays 0.0 there) would silently drop the display back to
-    just the latest turn's cost instead of the session's real running
-    total. Summing every result event's cost in the current log file fixes
-    this; a whole-file read is acceptable here (unlike the hot tail-read
-    path used for status/wait polling) because logs rotate to a fresh file
-    on every respawn (_rotate_worker_log) and doctor's log-size check warns
-    well before a single file could grow unreasonably large."""
-    log_path = Path(log_path)
-    if not log_path.exists():
-        return None
-    try:
-        raw = log_path.read_bytes()
-    except OSError:
-        return None
-    total = 0.0
-    found = False
-    for line in raw.decode("utf-8-sig", errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        if not isinstance(obj, dict) or obj.get("type") != "result":
-            continue
-        cost = obj.get("total_cost_usd", obj.get("cost_usd"))
-        if cost is not None:
-            coerced = _coerce_cost(cost)
-            if coerced is not None:
-                total += coerced
-                found = True
-    return total if found else None
-
-
-def _sum_result_tokens(log_path) -> int | None:
-    """Sum input_tokens+output_tokens across every "result" event's usage in
-    the WHOLE log file, or None if the file is missing/unreadable or carries
-    no result event with usage at all (caller treats None as "nothing proven
-    over ceiling").
-
-    Fleet-side half of kernel 10 (F12=M24): the cumulative session token
-    count used to HARD-enforce a worker's token_ceiling before a resume
-    launch. Reads the SAME token keys as the Stop hook's _current_tokens
-    (input_tokens+output_tokens), best-effort -- but the two halves have
-    DIFFERENT enforcement roles, not an identical computation: the Stop hook
-    only ever ALLOWS a stop (never blocks -- invariant 2), while fleet hard-
-    ENFORCES the refusal here (over_ceiling + a refused resume). FIX-3 aligns
-    only the >= boundary so they agree on when tokens == ceiling counts as
-    over. A whole-file read is
-    acceptable for the same reason _sum_result_costs's is: logs rotate to a
-    fresh file on every respawn. Bogus values (bool, negative, non-int) are
-    skipped, mirroring _coerce_cost's defensive stance."""
-    log_path = Path(log_path)
-    if not log_path.exists():
-        return None
-    try:
-        raw = log_path.read_bytes()
-    except OSError:
-        return None
-    total = 0
-    found = False
-    for line in raw.decode("utf-8-sig", errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        if not isinstance(obj, dict) or obj.get("type") != "result":
-            continue
-        usage = obj.get("usage")
-        if not isinstance(usage, dict):
-            continue
-        for key in ("input_tokens", "output_tokens"):
-            val = usage.get(key)
-            if isinstance(val, bool) or not isinstance(val, int) or val < 0:
-                continue
-            total += val
-            found = True
-    return total if found else None
-
-
 def _native_cumulative_tokens(name: str) -> int:
     """Sum input_tokens+output_tokens across every kind=="result" outcome
-    record for this native worker (all past sids/turns) -- native's
-    lifetime-cumulative analog of `_sum_result_tokens`'s legacy log-tail sum
-    (native has no logs/<name>.jsonl to read), used by cmd_send's
-    fork-steer path for the token_ceiling refusal check (Kernel 10, M-B
-    T7). Bogus values (bool, negative, non-int) are skipped, mirroring
-    _sum_result_tokens's defensive stance; missing/no records -> 0 (never
-    None -- 0 correctly compares as under any positive ceiling)."""
+    record for this native worker (all past sids/turns) -- the lifetime-
+    cumulative token sum (native has no logs/<name>.jsonl to read), used
+    by cmd_send's fork-steer path for the token_ceiling refusal check
+    (Kernel 10, M-B T7). Bogus values (bool, negative, non-int) are
+    skipped; missing/no records -> 0 (never None -- 0 correctly compares
+    as under any positive ceiling)."""
     total = 0
     for rec in read_outcomes(name):
         if not isinstance(rec, dict) or rec.get("kind") != "result":
@@ -1794,29 +1092,9 @@ def _native_cumulative_tokens(name: str) -> int:
 # must never be swallowed as a park.
 # ---------------------------------------------------------------------------
 
-# FIX-2 (F-A2): tightened to recognize a CLAUDE PLAN usage-limit wall, never an
-# ordinary infra crash. Require a plan/usage-limit NOUN adjacent to "limit"
-# (usage|weekly|session|plan|5-hour limit), OR the explicit "limit ... resets
-# at <time>" wall shape. Deliberately DROPS the bare `quota` / bare `rate limit`
-# / bare `try again later` alternatives that collided with real failures --
-# disk-quota (EDQUOT), an upstream MCP `429 rate limit`, a `try again later`
-# assertion -- which must stay the crash-dead path (surfaced + journal note),
-# not a silent null-horizon park. When unsure, prefer crash-dead.
-_LIMIT_STDERR_RE = re.compile(
-    r"(?:usage|weekly|session|plan|5-?\s?hour)\s+limit"
-    r"|limit\b.{0,40}?\bresets?\s+at",
-    re.IGNORECASE | re.DOTALL,
-)
 # A machine-readable reset instant, IF the (as-yet-unconfirmed) signal carries
 # one in ISO-8601 UTC form. Best-effort only; absence -> null horizon.
 _LIMIT_RESET_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
-
-
-def _stderr_is_limit_shaped(text: str) -> bool:
-    """True iff a turn's stderr tail matches the conservative usage-limit
-    pattern (fallback detection -- DEFERRED-TO-KERNEL-PROBE). Empty/None -> not
-    limit-shaped (a silent crash is NOT a park)."""
-    return bool(text) and bool(_LIMIT_STDERR_RE.search(text))
 
 
 def _parse_limit_signal(text: str):
@@ -1836,18 +1114,6 @@ def _parse_limit_signal(text: str):
     elif "5-hour" in low or "5 hour" in low or "session" in low:
         kind = "session_5h"
     return reset_at, kind
-
-
-def _read_stderr_tail(name: str, limit: int = 4000) -> str:
-    """Read the tail of a worker's stderr log (logs/<name>.err) best-effort --
-    the classifier's only window onto a limit-shaped turn end. Missing/unreadable
-    -> empty string (treated as not limit-shaped)."""
-    err = logs_dir() / f"{name}.err"
-    try:
-        data = err.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
-    return data[-limit:]
 
 
 def _limit_reset_passed(record: dict) -> bool:
@@ -2023,78 +1289,6 @@ def _is_substantive_transcript_record(rec: dict) -> bool:
             elif isinstance(part, str) and part.strip():
                 return True
     return False
-
-
-def _append_abnormal_turn_note(name: str) -> None:
-    """Append a one-line abnormal-turn-end landmark to the worker's journal
-    (phase1 kernel 4). Best-effort: a journal we cannot write must never break
-    a status recompute, so any OSError is swallowed."""
-    try:
-        journals_dir().mkdir(parents=True, exist_ok=True)
-        journal = journals_dir() / f"{name}.md"
-        with open(journal, "a", encoding="utf-8") as f:
-            f.write(f"\nturn ended abnormally at {now_iso()}\n")
-    except OSError:
-        pass
-
-
-def recompute_worker(name: str, record: dict, get_process_info=None, sleep=time.sleep) -> dict:
-    """Return an updated copy of `record` with status/cost_usd/last_activity
-    refreshed from live PID + log-tail state. Never mutates other fields
-    (turns, task, mode, ...); never clobbers an "attached" status
-    (recompute_status's own guard, F7).
-
-    cost_usd = cost_baseline + the SUM of every result event's cost in the
-    current log file (Task 5 fix wave, Finding 4 + SMOKE-B). cost_baseline
-    carries the prior-sessions total across a respawn's fresh log (Finding
-    4); summing every result event in the current file (rather than taking
-    only the last one) also carries the running total across multiple
-    `send`-resumed turns within one session, since a turn's own result
-    event reports only that turn's own per-invocation cost, not a session-
-    cumulative figure (SMOKE-B). cost_baseline defaults to 0.0 for records
-    that predate this field."""
-    log_path = logs_dir() / f"{name}.jsonl"
-    updated = dict(record)
-    updated["status"] = recompute_status(
-        record.get("turn_pid"), record.get("turn_pid_ctime"), log_path,
-        current_status=record.get("status"), get_process_info=get_process_info,
-        last_activity_iso=record.get("last_activity"), sleep=sleep,
-    )
-    # Phase1 kernel 4: a turn that WAS "working" with a real (non-None)
-    # turn_pid and just classified "dead" is a crashed turn (stale/gone PID +
-    # no trailing result). Drop an abnormal-turn-end landmark in the worker's
-    # journal so a respawn's carried-forward context knows the last turn did
-    # not finish cleanly. Guarded on the working(real pid)->dead transition,
-    # so it fires ONCE per crash: once persisted "dead" (which is sticky),
-    # the input status is no longer "working" and this is skipped.
-    if (record.get("status") == "working" and record.get("turn_pid") is not None
-            and updated["status"] == "dead"):
-        # UL1 (item 11 / F31): a no-`result` crash-dead turn is NOT
-        # unconditionally a crash -- it may be a Claude PLAN usage-limit wall.
-        # Test the (conservative, DEFERRED-TO-KERNEL-PROBE) stderr signal FIRST:
-        # limit-shaped -> park `limited` (recording the reset horizon if
-        # parseable, surfacing for operator confirmation), NOT crash-dead, and
-        # DON'T drop the abnormal-turn note (a park is not a crash). A
-        # non-limit-shaped errored turn falls through to the ordinary crash-dead
-        # landmark -- the fallback never swallows a genuine crash as a park.
-        stderr_tail = _read_stderr_tail(name)
-        if _stderr_is_limit_shaped(stderr_tail):
-            reset_at, kind = _parse_limit_signal(stderr_tail)
-            updated["status"] = "limited"
-            updated["limit_reset_at"] = reset_at
-            updated["limit_kind"] = kind
-            append_event("limited_suspected", name, limit_reset_at=reset_at, limit_kind=kind)
-        else:
-            _append_abnormal_turn_note(name)
-    cost_sum = _sum_result_costs(log_path)
-    if cost_sum is not None:
-        updated["cost_usd"] = _registry_cost(record.get("cost_baseline", 0.0)) + cost_sum
-    try:
-        mtime = log_path.stat().st_mtime
-        updated["last_activity"] = ctime_to_iso(datetime.fromtimestamp(mtime, tz=timezone.utc))
-    except OSError:
-        pass
-    return updated
 
 
 # ---------------------------------------------------------------------------
@@ -2334,7 +1528,7 @@ def _worker_flags(record: dict) -> list:
 # read-only derivation every view consumes -- statusline, `status --json
 # --stale-ok`, the SessionStart hook, and (later) watchtower / web UI.
 #
-# D1: no fleet_lock, no PLATFORM.get_process_info, no write. This runs on a
+# D1: no fleet_lock, no liveness probe, no write. This runs on a
 # statusline hot path that refires after every assistant message.
 # D4: it must NOT call load_registry() -- that quarantines a corrupt registry
 # (a write, and a 10s-refresh loop would shred operator evidence). Views
@@ -2433,30 +1627,6 @@ def status_snapshot(now=None, include_archived: bool = False) -> dict:
     return snap
 
 
-def hook_events_present(log_path) -> bool:
-    """Whether any hook event (PostToolUse/Stop additionalContext, requires
-    --include-hook-events at spawn) appears anywhere in the raw log -- the
-    alarm `fleet peek` shows for the "settings validation errors are
-    swallowed in print mode" silent-failure mode (SPEC §7, §9).
-
-    Deliberately searches for the bare substring "hookEventName" (no
-    surrounding quotes): a live captured transcript (`claude -p
-    --output-format stream-json --verbose`) shows Claude Code wraps a hook's
-    own stdout inside a `system`/`hook_response` event's "output"/"stdout"
-    string fields, so the hook's `{"hookSpecificOutput": {"hookEventName":
-    ...}}` JSON appears there with its quotes backslash-escaped
-    (`\"hookEventName\"`), not as literal top-level `"hookEventName"` text.
-    The bare word substring matches either form."""
-    log_path = Path(log_path)
-    if not log_path.exists():
-        return False
-    try:
-        text = log_path.read_text(encoding="utf-8-sig", errors="replace")
-    except OSError:
-        return False
-    return "hookEventName" in text
-
-
 # ---------------------------------------------------------------------------
 # Portability: worker-settings template render + instance freshness (SPEC §14)
 #
@@ -2551,16 +1721,6 @@ class FleetCliError(Exception):
     a raw traceback."""
 
 
-class LogRotationError(FleetCliError):
-    """B2 (rotation retry): _rotate_worker_log exhausted its PermissionError
-    retries -- a follower or just-killed claude still holds the log handle
-    (Windows sharing violation). cmd_respawn catches this to CLEAN-FAIL the
-    respawn: _unrotate any partial rename, restore the pre-respawn registry
-    snapshot, and raise -- NO new turn, NO sid-swap (invariant 7). A
-    FleetCliError subclass so an unexpected escape still surfaces as a clean
-    one-line CLI error, not a traceback."""
-
-
 def _read_task_arg(task: str) -> str:
     """`@file` task syntax (SPEC §5): a task string starting with `@` names
     a file whose contents are the task text."""
@@ -2579,7 +1739,7 @@ def _require_instance_settings() -> None:
     checked at spawn/send time, before any registry mutation or Popen call,
     so a missing instance never leaves a half-created worker record or a
     consumed mailbox claim behind. Without this check, a turn would still
-    launch (build_turn_argv's --settings default just points at a
+    dispatch (dispatch_bg's --settings default just points at a
     nonexistent path) and `claude` would silently ignore the bad
     --settings value in print mode (SPEC §7) -- fleet hooks would simply
     never fire, with no error anywhere."""
@@ -2590,14 +1750,14 @@ def _require_instance_settings() -> None:
 
 
 # Post-testing wave, item 1b (stress-report Finding 1, CRITICAL): how many
-# times / how long cmd_spawn, cmd_send's idle-resume path, and cmd_respawn
-# retry their post-launch commit lock (the one that stamps the real
-# turn_pid into the registry) before giving up. Deliberately several times
+# times / how long cmd_spawn, cmd_send's fork-steer path, and cmd_respawn
+# retry their post-dispatch commit lock (the one that stamps the real
+# sid into the registry) before giving up. Deliberately several times
 # the ordinary LOCK_TIMEOUT_SECONDS (5.0s): by the time this lock is
-# reached, launch_turn() has ALREADY succeeded -- a real, billable, running
-# `claude` process exists and its pid is known -- so losing this race
+# reached, dispatch_bg() has ALREADY succeeded -- a real, billable, running
+# `claude` session exists and its sid is known -- so losing this race
 # forever would strand it as a permanent zombie registry record (status=
-# "working"/turn_pid=None, which every recovery lever historically refused
+# "working"/session_id=None, which every recovery lever historically refused
 # to touch; item 1c's LAUNCH_CLAIM_MAX_AGE_SECONDS now bounds that too, but
 # retrying hard here is the first, much faster line of defense). Total
 # backoff across all attempts is ~30s (each attempt itself may also spend
@@ -2608,8 +1768,8 @@ LAUNCH_COMMIT_BACKOFF_SECONDS = (1.0, 2.0, 4.0, 8.0, 8.0, 7.0)
 
 def _commit_launched_turn(commit_fn, sleep=time.sleep) -> bool:
     """Run `commit_fn()` -- a zero-argument callable that itself acquires
-    `fleet_lock()` and performs a post-launch registry commit (stamping
-    turn_pid/turn_pid_ctime/turns/last_activity, matching cmd_spawn/
+    `fleet_lock()` and performs a post-dispatch registry commit (stamping
+    session_id/native_short_id/turns/last_activity, matching cmd_spawn/
     cmd_send/cmd_respawn's own shape) -- retrying on FleetLockTimeout with
     backoff (LAUNCH_COMMIT_BACKOFF_SECONDS) up to LAUNCH_COMMIT_MAX_ATTEMPTS
     times.
@@ -2617,11 +1777,11 @@ def _commit_launched_turn(commit_fn, sleep=time.sleep) -> bool:
     Returns True once `commit_fn()` completes without raising
     FleetLockTimeout. Returns False if every attempt timed out -- the
     caller (cmd_spawn/cmd_send/cmd_respawn) MUST NOT abandon the
-    already-launched turn on a False return: it must still report the
-    launch as successful (raising here would tempt an operator into
-    retrying the same `fleet` subcommand, which would launch a SECOND live
-    turn on top of the one already running) and instead call
-    `_report_stranded_turn` for a loud, actionable warning plus a
+    already-dispatched session on a False return: it must still surface the
+    dispatch as real (raising raw would tempt an operator into retrying the
+    same `fleet` subcommand, which would double-dispatch a SECOND live
+    session on top of the one already running) and instead call
+    `_report_stranded_native_turn` for a loud, actionable warning plus a
     best-effort event.
 
     Debt roll-up item 3: a NON-lock OSError out of `commit_fn()` (ENOSPC
@@ -2637,8 +1797,7 @@ def _commit_launched_turn(commit_fn, sleep=time.sleep) -> bool:
     commit_fn, a commit_fn must not raise OSError after save_registry has
     made its mutation durable -- a retry would re-run a non-idempotent
     body against already-committed state (fork-steer's reload lands in
-    its orphaned branch; the legacy resume shape double-increments
-    `turns`). Concretely: post-save event appends inside a commit_fn go
+    its orphaned branch). Concretely: post-save event appends inside a commit_fn go
     through `_append_event_quiet`, and mailbox migration is best-effort
     by construction (_migrate_residual_mailbox swallows OSError). Every
     step before save_registry is safely retryable -- save itself is
@@ -2658,43 +1817,14 @@ def _commit_launched_turn(commit_fn, sleep=time.sleep) -> bool:
     return False
 
 
-def _report_stranded_turn(name: str, sid: str, info: dict) -> None:
-    """Post-launch commit lock exhausted every retry in
-    `_commit_launched_turn`: a real, already-running turn's pid could not
-    be stamped into the registry. Never fail silently -- print a loud,
-    actionable stderr message (status/kill/attach/wait are all blind to
-    this turn until the record is repaired) and best-effort append an
-    event for later forensics. Deliberately does not raise: the calling
-    `fleet` subcommand still completes and reports success, since the turn
-    genuinely IS running -- raising here would read as "the launch
-    failed" and could tempt an operator into retrying, launching a SECOND
-    live turn onto the same session."""
-    print(
-        f"fleet: CRITICAL: {name}: turn launched (pid={info.get('turn_pid')}, "
-        f"session {sid}) but the registry commit failed after "
-        f"{LAUNCH_COMMIT_MAX_ATTEMPTS} lock-acquisition attempts -- the "
-        "record is stuck at status=working/turn_pid=null (the F1 "
-        "launch-in-flight state). It will auto-demote to dead after "
-        f"LAUNCH_CLAIM_MAX_AGE_SECONDS ({LAUNCH_CLAIM_MAX_AGE_SECONDS:.0f}s) "
-        f"of inactivity; recover with `fleet respawn {name} --force` once "
-        "that happens, or hand-edit state/fleet.json now to set "
-        f"turn_pid={info.get('turn_pid')} directly.",
-        file=sys.stderr,
-    )
-    try:
-        append_event("turn_commit_failed", name, session_id=sid, turn_pid=info.get("turn_pid"))
-    except OSError:
-        pass
-
-
 def _report_stranded_native_turn(name: str, sid: str, short_id: str) -> None:
-    """T4 fix wave (Critical C2): native analog of `_report_stranded_turn`
-    above, for cmd_spawn's post-dispatch stamp lock -- reached only after
+    """T4 fix wave (Critical C2): stranded-dispatch report for cmd_spawn's
+    post-dispatch stamp lock -- reached only after
     dispatch_bg already returned a real, joined sid (a live `claude --bg`
     session genuinely exists) but every `_commit_launched_turn` retry
     timed out acquiring fleet_lock() to stamp it into the registry.
 
-    Unlike the legacy path, there is no OS pid fallback here -- native
+    There is no OS pid fallback here -- native
     sids come entirely from `claude` itself, never fleet -- so `sid`/
     `short_id` are the ONLY recovery handles that exist anywhere once this
     stack frame unwinds. Never fail silently: print a loud, actionable
@@ -3002,8 +2132,8 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
     M-B T4: native `--bg` dispatch replaces detached Popen).
 
     Launch contract (M-B spec §3): pre-claim a registry record under
-    fleet_lock with session_id=None (the analog of the legacy turn_pid=None
-    pre-claim -- _launch_claim_expired bounds it via last_activity), dispatch
+    fleet_lock with session_id=None (a launch-in-flight claim --
+    _launch_claim_expired bounds it via last_activity), dispatch
     outside the lock via dispatch_bg, then re-lock to stamp the real sid/
     short id, OR roll back -- EXCEPT when a fast worker already finished
     (an outcome record for this name newer than the pre-claim) even though
@@ -3138,7 +2268,7 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
         # Task-4-verdict re-review Fix 2): a Ctrl-C or any other unexpected
         # exception escaping dispatch_bg must not leave a ghost
         # "working"+session_id=None pre-claim behind, pinned forever by
-        # recompute_status's launch-in-flight guard. Same guarded-pop shape
+        # the recompute launch-in-flight guard. Same guarded-pop shape
         # as the NativeDispatchError branch above; re-raised verbatim
         # (not wrapped in FleetCliError) so e.g. KeyboardInterrupt still
         # propagates as itself.
@@ -3222,34 +2352,18 @@ def _hook_error_count() -> int:
     return len(_hook_error_lines())
 
 
-def cmd_status(args, get_process_info=None, sleep=time.sleep) -> int:
+def cmd_status(args) -> int:
     """`fleet status [name]` (SPEC §5 status row): recompute liveness/cost
     for the named worker (or all workers), persist any transitions, print a
     compact table with anomaly flags.
 
-    Post-testing wave, item 1a (stress-report Finding 1, CRITICAL): this
-    used to recompute (and persist) EVERY worker's liveness inside one
-    `with fleet_lock():` block. recompute_worker's probe (get_process_info,
-    which defaults to a real PowerShell `Get-Process` subprocess call per
-    currently-"working" pid) costs on the order of ~0.3s each -- measured
-    directly, a bare `fleet status` over 8 simultaneously-"working" workers
-    held the lock for ~2.4s. Several such calls queued back-to-back
-    comfortably exceed LOCK_TIMEOUT_SECONDS (5.0s) for anyone else waiting
-    on the lock, including a spawn/send/respawn sitting at its own
-    post-launch commit lock (_commit_launched_turn) after a real, live
-    `claude` turn has ALREADY been started -- which is exactly what
-    stranded those turns as permanent zombie registry records under real
-    concurrent load.
-
-    Restructured to the same snapshot -> probe (no lock held) -> re-acquire
-    -> conditional-commit shape already used by `_interrupt_worker` (F4)
-    and `cmd_clean` (review wave 5b) for the identical reason: snapshot the
-    named records under the lock, release it, run every recompute_worker
-    probe with NO lock held at all, then re-acquire once to merge verdicts
-    -- but only for records that still match their pre-probe snapshot
-    exactly (a concurrent command that mutated a record while the lock was
-    released is left alone, its own write respected, rather than being
-    clobbered by a verdict computed against now-stale data)."""
+    Shape (stress-report Finding 1 / F4 doctrine): snapshot the named
+    records under one fleet_lock, release it, run the roster fetch and
+    every recompute with NO lock held, then re-acquire once to merge
+    verdicts -- but only for records that still match their pre-probe
+    snapshot exactly (a concurrent command that mutated a record while the
+    lock was released is left alone, its own write respected, rather than
+    being clobbered by a verdict computed against now-stale data)."""
     # Phase 1.6 (D1/D2): --stale-ok is the probe-free, lock-free, write-free
     # read path every view uses. Returns last-COMMITTED status plus
     # stale_seconds; it never asserts liveness it did not probe for.
@@ -3277,39 +2391,30 @@ def cmd_status(args, get_process_info=None, sleep=time.sleep) -> int:
     names = [n for n in requested if include_archived or not before_all[n].get("archived_at")]
     before = before_all
 
-    # M-B T5: native (dispatch_kind:"bg") records have no OS pid to probe --
-    # they go through recompute_worker_native (roster + outcome store)
-    # instead of recompute_worker's PID/log-tail probe. Legacy records keep
-    # today's path untouched.
-    native_names = [n for n in names if is_native(before[n])]
-    legacy_names = [n for n in names if n not in native_names]
     # M-B T9: an archived native record is frozen history -- its evidence
     # files (outcomes/journal/task) have already been moved to the archive
     # dir, so recompute_worker_native would have nothing fresh to read and
     # could misfire into dead-suspected/limited. Never recompute it; just
     # carry its last-committed record forward unchanged.
-    native_active_names = [n for n in native_names if not before[n].get("archived_at")]
+    active_names = [n for n in names if not before[n].get("archived_at")]
 
     # ONE roster fetch per invocation, outside the lock (F4 doctrine), only
-    # when a native worker is actually being asked about.
+    # when a live worker is actually being asked about.
     roster_entries = []
     epoch_frozen = False
-    if native_active_names:
+    if active_names:
         roster_ok, payload = _fetch_agents_roster()
         roster_entries = payload if roster_ok else []
         epoch_frozen = native_epoch_suspicious(roster_ok, roster_entries, all_workers)
 
-    # Probe every named worker's liveness with NO lock held (see docstring
-    # above) -- this is the (potentially several-seconds-total) expensive
-    # part.
-    after = {n: recompute_worker(n, before[n], get_process_info=get_process_info, sleep=sleep)
-             for n in legacy_names}
-    for n in native_names:
-        if n not in native_active_names:
-            after[n] = before[n]  # archived: frozen, never recomputed
-        elif epoch_frozen:
-            # G9: roster suspicious -- no native record is recomputed or
-            # written this invocation; display whatever is last-committed.
+    # Recompute every named worker's verdict with NO lock held (see
+    # docstring above).
+    after = {}
+    for n in names:
+        if n not in active_names or epoch_frozen:
+            # Archived: frozen, never recomputed. Epoch-frozen (G9): roster
+            # suspicious -- no record is recomputed or written this
+            # invocation; display whatever is last-committed.
             after[n] = before[n]
         else:
             after[n] = recompute_worker_native(n, before[n], roster_entries)
@@ -3345,25 +2450,22 @@ def cmd_status(args, get_process_info=None, sleep=time.sleep) -> int:
                 changed = True
                 if persisted_after["status"] != current["status"]:
                     append_event("status_changed", n, old=current["status"], new=persisted_after["status"])
-                    # M-B T5: a native verdict landing on limited/dead-
-                    # suspected also gets its own named event, mirroring
-                    # recompute_worker's own limited_suspected append for
-                    # the legacy crash-dead branch -- guarded on the same
+                    # M-B T5: a verdict landing on limited/dead-suspected
+                    # also gets its own named event -- guarded on the same
                     # old!=new transition above, so a dead-suspected record
                     # that stays dead-suspected across reruns never re-fires.
-                    if n in native_names:
-                        if persisted_after["status"] == "limited":
-                            append_event("limited_suspected", n,
-                                        limit_reset_at=persisted_after.get("limit_reset_at"),
-                                        limit_kind=persisted_after.get("limit_kind"))
-                        elif persisted_after["status"] == "dead-suspected":
-                            append_event("dead_suspected", n)
+                    if persisted_after["status"] == "limited":
+                        append_event("limited_suspected", n,
+                                    limit_reset_at=persisted_after.get("limit_reset_at"),
+                                    limit_kind=persisted_after.get("limit_kind"))
+                    elif persisted_after["status"] == "dead-suspected":
+                        append_event("dead_suspected", n)
             display[n] = after[n]
         if changed:
             save_registry(data)
 
     if epoch_frozen:
-        print("EPOCH: roster suspicious -- native verdicts frozen (G9); legacy rows only")
+        print("EPOCH: roster suspicious -- verdicts frozen (G9); rows show last-committed state")
 
     if getattr(args, "json", False):
         # The authoritative path has already persisted its verdicts above, so
@@ -3464,28 +2566,6 @@ def _print_status_table(data: dict, names) -> None:
         )
 
 
-_TOKEN_KEY_ABBREV = (
-    ("input_tokens", "in"),
-    ("output_tokens", "out"),
-    ("cache_creation_input_tokens", "cache_w"),
-    ("cache_read_input_tokens", "cache_r"),
-)
-
-
-def _format_tokens(tokens: dict) -> str:
-    """Compact "in=X out=Y cache_r=Z" rendering of a result event's usage
-    dict for `fleet peek` (spec-audit gap 5: peek shows tokens alongside
-    cost, SPEC §5 peek row -- _digest_event already captures "tokens" from
-    the raw "usage" field). Falls back to a truncated raw dump for an
-    unrecognized/empty shape rather than silently showing nothing."""
-    if not tokens:
-        return "-"
-    parts = [f"{short}={tokens[key]}" for key, short in _TOKEN_KEY_ABBREV if key in tokens]
-    if not parts:
-        return _truncate(json.dumps(tokens, default=str), 60)
-    return " ".join(parts)
-
-
 def _render_native_peek_lines(rec: dict) -> list:
     """Rendered display lines for one substantive transcript record
     (`_is_substantive_transcript_record` already gated the caller's
@@ -3567,40 +2647,16 @@ def _cmd_peek_native(name: str, sid, n: int) -> int:
 
 def cmd_peek(args) -> int:
     """`fleet peek <name> [-n 20]` (SPEC §5 peek row): digest of recent
-    stream events plus whether fleet hooks have fired.
-
-    M-B T8: native (`dispatch_kind:"bg"`) records route to
-    `_cmd_peek_native` -- there is no `logs/<name>.jsonl` stream for a
-    daemon-hosted session; the digest comes from the sid's own transcript
-    tail instead."""
+    substantive transcript records via `_cmd_peek_native` -- the digest
+    comes from the sid's own transcript tail (daemon-hosted sessions have
+    no fleet-owned stdout log)."""
     with fleet_lock():
         data = load_registry()
         if args.name not in data["workers"]:
             raise FleetCliError(f"unknown worker: {args.name!r}")
         rec = data["workers"][args.name]
 
-    if is_native(rec):
-        return _cmd_peek_native(args.name, rec.get("session_id"), args.lines)
-
-    log_path = logs_dir() / f"{args.name}.jsonl"
-    entries = tail_events(log_path, n=args.lines)
-    hooks = hook_events_present(log_path)
-    print(f"-- {args.name} (hooks: {'seen' if hooks else 'not seen'}) --")
-    if not entries:
-        print("(no events yet)")
-        return 0
-    for e in entries:
-        kind = e["kind"]
-        if kind == "tool_call":
-            print(f"[tool] {e['name']}: {e['input']}")
-        elif kind == "assistant_text":
-            print(f"[text] {e['text']}")
-        elif kind == "result":
-            cost = e.get("cost_usd")
-            cost_s = f"${cost:.2f}" if isinstance(cost, (int, float)) else "?"
-            tok_s = _format_tokens(e.get("tokens") or {})
-            print(f"[result] {cost_s} tokens:{tok_s} {e['text']}")
-    return 0
+    return _cmd_peek_native(args.name, rec.get("session_id"), args.lines)
 
 
 def _cmd_result_native(name: str, sid) -> int:
@@ -3641,33 +2697,19 @@ def _cmd_result_native(name: str, sid) -> int:
 
 def cmd_result(args) -> int:
     """`fleet result <name>` (SPEC §5 result row): final result event text
-    of the last completed turn, nothing else.
-
-    M-B T8: native (`dispatch_kind:"bg"`) records route to
-    `_cmd_result_native` -- result text lives in the Stop-hook outcome
-    store (`latest_outcome`), never in a `logs/<name>.jsonl` stream that
-    only legacy workers have."""
+    of the last completed turn, nothing else -- result text lives in the
+    Stop-hook outcome store (`latest_outcome`)."""
     with fleet_lock():
         data = load_registry()
         if args.name not in data["workers"]:
             raise FleetCliError(f"unknown worker: {args.name!r}")
         rec = data["workers"][args.name]
 
-    if is_native(rec):
-        return _cmd_result_native(args.name, rec.get("session_id"))
-
-    log_path = logs_dir() / f"{args.name}.jsonl"
-    entries = tail_events(log_path, n=None)
-    results = [e for e in entries if e["kind"] == "result"]
-    if not results:
-        print(f"{args.name}: no completed turn result yet")
-        return 1
-    print(results[-1]["text"])
-    return 0
+    return _cmd_result_native(args.name, rec.get("session_id"))
 
 
 def wait_for_workers(names, mode: str = "all", timeout=None, poll_interval: float = 3.0,
-                      get_process_info=None, sleep=time.sleep, clock=time.monotonic):
+                      sleep=time.sleep, clock=time.monotonic):
     """Poll registry-recomputed liveness for `names` (re-reading the
     registry each pass, so a concurrent respawn/interrupt is picked up)
     until the wait condition is met or timeout elapses.
@@ -3691,17 +2733,16 @@ def wait_for_workers(names, mode: str = "all", timeout=None, poll_interval: floa
         data = load_registry()
         workers = data["workers"]
 
-        # M-B T5: one roster fetch per poll shared by every native name
-        # still pending (not per-name) -- and the same epoch-freeze
-        # discipline as cmd_status: a suspicious roster this poll means no
-        # native verdict is trusted this poll (they simply stay pending).
-        # T9: an archived native record never consults the roster either.
-        native_pending = [n for n in pending
-                          if n in workers and is_native(workers[n])
-                          and not workers[n].get("archived_at")]
+        # M-B T5: one roster fetch per poll shared by every name still
+        # pending (not per-name) -- and the same epoch-freeze discipline as
+        # cmd_status: a suspicious roster this poll means no verdict is
+        # trusted this poll (they simply stay pending). T9: an archived
+        # record never consults the roster either.
+        live_pending = [n for n in pending
+                        if n in workers and not workers[n].get("archived_at")]
         roster_entries = []
         epoch_frozen = False
-        if native_pending:
+        if live_pending:
             roster_ok, payload = _fetch_agents_roster()
             roster_entries = payload if roster_ok else []
             epoch_frozen = native_epoch_suspicious(roster_ok, roster_entries, workers)
@@ -3716,21 +2757,10 @@ def wait_for_workers(names, mode: str = "all", timeout=None, poll_interval: floa
                 finished[n] = rec.get("status")
                 pending.discard(n)
                 continue
-            if is_native(rec):
-                if epoch_frozen:
-                    continue
-                status = recompute_worker_native(n, rec, roster_entries)["status"]
-                if status in NATIVE_TERMINAL_STATUSES:
-                    finished[n] = status
-                    pending.discard(n)
+            if epoch_frozen:
                 continue
-            log_path = logs_dir() / f"{n}.jsonl"
-            status = recompute_status(
-                rec.get("turn_pid"), rec.get("turn_pid_ctime"), log_path,
-                current_status=rec.get("status"), get_process_info=get_process_info,
-                last_activity_iso=rec.get("last_activity"), sleep=sleep,
-            )
-            if status != "working":
+            status = recompute_worker_native(n, rec, roster_entries)["status"]
+            if status in NATIVE_TERMINAL_STATUSES:
                 finished[n] = status
                 pending.discard(n)
         if not pending:
@@ -3743,7 +2773,7 @@ def wait_for_workers(names, mode: str = "all", timeout=None, poll_interval: floa
     return finished, pending
 
 
-def cmd_wait(args, get_process_info=None, sleep=time.sleep, clock=time.monotonic) -> int:
+def cmd_wait(args, sleep=time.sleep, clock=time.monotonic) -> int:
     """`fleet wait <name...> [--any|--all] [--timeout s]` (SPEC §5 wait
     row): block until turn(s) end, persist any status transitions, print a
     one-line result summary per finished worker. Nonzero exit on timeout.
@@ -3768,8 +2798,7 @@ def cmd_wait(args, get_process_info=None, sleep=time.sleep, clock=time.monotonic
 
     mode = "any" if args.any else "all"
     finished, pending = wait_for_workers(
-        args.names, mode=mode, timeout=args.timeout,
-        get_process_info=get_process_info, sleep=sleep, clock=clock,
+        args.names, mode=mode, timeout=args.timeout, sleep=sleep, clock=clock,
     )
 
     # T5 fix wave (Minor: print-vs-persist race): the persist step below
@@ -3787,8 +2816,7 @@ def cmd_wait(args, get_process_info=None, sleep=time.sleep, clock=time.monotonic
     epoch_frozen = False
     if finished:
         # M-B T5: wait_for_workers already picked the terminal verdict for
-        # any native name in `finished` via recompute_worker_native (never
-        # recompute_worker's PID probe -- native records have no turn_pid).
+        # any name in `finished` via recompute_worker_native.
         # Re-derive the same way here for the persist step, one more roster
         # fetch outside the lock (F4), so a worker that flips into
         # `limited`/`dead-suspected` gets its horizon fields and its named
@@ -3802,12 +2830,12 @@ def cmd_wait(args, get_process_info=None, sleep=time.sleep, clock=time.monotonic
         # the tombstone to `dead-suspected`, appending a spurious event on
         # top of a record `cmd_status`/`cmd_clean` both treat as immutable.
         snap_workers = load_registry()["workers"]
-        native_finished = [n for n in finished
-                           if n in snap_workers and is_native(snap_workers[n])
-                           and not snap_workers[n].get("archived_at")]
+        live_finished = [n for n in finished
+                         if n in snap_workers
+                         and not snap_workers[n].get("archived_at")]
         roster_entries = []
         epoch_frozen = False
-        if native_finished:
+        if live_finished:
             roster_ok, payload = _fetch_agents_roster()
             roster_entries = payload if roster_ok else []
             epoch_frozen = native_epoch_suspicious(roster_ok, roster_entries, snap_workers)
@@ -3821,14 +2849,11 @@ def cmd_wait(args, get_process_info=None, sleep=time.sleep, clock=time.monotonic
                     continue
                 if rec.get("archived_at") is not None:
                     continue  # frozen tombstone -- never recompute/persist/event
-                if is_native(rec):
-                    if epoch_frozen:
-                        # G9: roster suspicious -- leave this native record
-                        # untouched (unwritten), same freeze as cmd_status.
-                        continue
-                    updated = recompute_worker_native(n, rec, roster_entries)
-                else:
-                    updated = recompute_worker(n, rec, get_process_info=get_process_info, sleep=sleep)
+                if epoch_frozen:
+                    # G9: roster suspicious -- leave this record untouched
+                    # (unwritten), same freeze as cmd_status.
+                    continue
+                updated = recompute_worker_native(n, rec, roster_entries)
                 # T5 fix wave (I1): strip the transient waiting_for_permission
                 # flag before it lands in the registry (see cmd_status for
                 # the identical rationale) -- native "working" statuses
@@ -3842,13 +2867,12 @@ def cmd_wait(args, get_process_info=None, sleep=time.sleep, clock=time.monotonic
                 changed = True
                 if persisted["status"] != rec["status"]:
                     append_event("status_changed", n, old=rec["status"], new=persisted["status"])
-                    if is_native(rec):
-                        if persisted["status"] == "limited":
-                            append_event("limited_suspected", n,
-                                        limit_reset_at=persisted.get("limit_reset_at"),
-                                        limit_kind=persisted.get("limit_kind"))
-                        elif persisted["status"] == "dead-suspected":
-                            append_event("dead_suspected", n)
+                    if persisted["status"] == "limited":
+                        append_event("limited_suspected", n,
+                                    limit_reset_at=persisted.get("limit_reset_at"),
+                                    limit_kind=persisted.get("limit_kind"))
+                    elif persisted["status"] == "dead-suspected":
+                        append_event("dead_suspected", n)
             # T9 fix wave (finding I-4a): if every finished worker this
             # invocation was either archived (skipped above) or -- in
             # principle -- otherwise unchanged, do not touch the registry
@@ -3858,11 +2882,20 @@ def cmd_wait(args, get_process_info=None, sleep=time.sleep, clock=time.monotonic
             if changed:
                 save_registry(data)
 
+    # Summary text comes from the Stop-hook outcome store (the legacy
+    # logs/<name>.jsonl pipeline is gone, pivot spec §6): the latest
+    # kind=="result" outcome for the worker's current sid, else the
+    # unchanged "(no result event)" placeholder.
+    summary_workers = load_registry()["workers"]
     for n, status in finished.items():
         status = persisted_status.get(n, status)
-        log_path = logs_dir() / f"{n}.jsonl"
-        results = [e for e in tail_events(log_path, n=None) if e["kind"] == "result"]
-        summary = results[-1]["text"] if results else "(no result event)"
+        rec = summary_workers.get(n) or {}
+        outcome = latest_outcome(n, rec.get("session_id")) if rec.get("session_id") else None
+        summary = None
+        if outcome is not None and outcome.get("kind") == "result":
+            summary = outcome.get("result_text")
+        if summary is None:
+            summary = "(no result event)"
         print(f"{n}: {status} -- {_truncate(summary, 120)}")
     # Debt roll-up item 9 (T5-era residual): when the persist step's OWN
     # roster fetch froze (G9), the rows above fall back to the earlier poll
@@ -3892,20 +2925,14 @@ def cmd_wait(args, get_process_info=None, sleep=time.sleep, clock=time.monotonic
 # rows, §9 hybrid interaction model, §14 platform adapter)
 # ---------------------------------------------------------------------------
 
-def _cmd_send_native(name: str, before: dict, message: str,
+def _cmd_send_native(name: str, message: str,
                      run=subprocess.run, which=shutil.which, sleep=time.sleep) -> int:
-    """Native (`dispatch_kind:"bg"`) counterpart of `cmd_send`'s legacy body
-    below -- fork-steer per RATIFIED G2(b), M-B Task 7.
-
-    `before` is the caller's already-locked snapshot of the record (`cmd_send`
-    only routes here once it has confirmed `is_native`); `refuse_if_legacy`
-    below is pure defense in depth against a future misrouted call, not the
-    primary gate.
+    """`cmd_send`'s engine -- fork-steer per RATIFIED G2(b), M-B Task 7.
 
     Roster fetched ONCE, outside any lock (F4 doctrine), then the verdict
     (`recompute_worker_native`) is (re)computed under a single fresh lock --
-    the record is re-read here rather than trusting `before`, since an
-    unbounded amount of time may have passed since the caller's snapshot.
+    the record is re-read here rather than trusting the caller's snapshot,
+    since an unbounded amount of time may have passed since it was taken.
 
     Verdict branches:
       - working (roster busy/waiting) -> append_mailbox + mail_sent event,
@@ -3917,8 +2944,8 @@ def _cmd_send_native(name: str, before: dict, message: str,
       - idle -> FORK-STEER: token-ceiling cumulative check (mirrors legacy's
         over_ceiling refusal; native has no logs/<name>.jsonl, so
         `_native_cumulative_tokens` sums the outcome store instead; USD
-        check is skipped entirely -- G3), pre-claim `working` (turn_pid
-        stays None -- native never used it), then OUTSIDE the lock:
+        check is skipped entirely -- G3), pre-claim `working`, then
+        OUTSIDE the lock:
         append_mailbox(old_sid, message) FIRST so the message rides the
         drain (F6 pattern), compose_prompt(name, cwd, "", old_sid) (claims
         the mailbox, no journal_path -- this is a steer, not a context
@@ -3932,8 +2959,6 @@ def _cmd_send_native(name: str, before: dict, message: str,
       - anything else reached here (over_ceiling/over_budget/attached --
         native sticky statuses this task's contract does not otherwise
         enumerate) refuses generically rather than silently mis-steering."""
-    refuse_if_legacy(name, before, "send")
-
     roster_ok, payload = _fetch_agents_roster(which=which, run=run)
     roster_entries = payload if roster_ok else []
 
@@ -4093,7 +3118,6 @@ def _cmd_send_native(name: str, before: dict, message: str,
                 )
 
         # F1 pre-claim: atomic decide+claim, same lock, before release.
-        # turn_pid stays None -- native records never populate it.
         # T7 fix wave (CRITICAL-2 fix 2a): also restamp last_dispatch_at --
         # the in-flight anchor cmd_spawn's own pre-claim stamps, mirrored
         # here so a concurrent recompute (any caller, not just a racing
@@ -4109,7 +3133,6 @@ def _cmd_send_native(name: str, before: dict, message: str,
         # for it -- permanently stranding an idle worker as dead-suspected.
         prior_last_dispatch_at = after.get("last_dispatch_at")
         after["status"] = "working"
-        after["turn_pid"] = None
         after["last_activity"] = now_iso()
         after["last_dispatch_at"] = now_iso()
         data["workers"][name] = after
@@ -4160,7 +3183,6 @@ def _cmd_send_native(name: str, before: dict, message: str,
             if r is not None and r.get("session_id") == old_sid:
                 _restamp_after_steer(r, new_sid, short_id)
                 r["status"] = "working"
-                r["turn_pid"] = None
                 r["last_activity"] = now_iso()
                 save_registry(data)
                 # T7 fix wave (CRITICAL-2 fix 2c): a steering message that
@@ -4206,234 +3228,28 @@ def _cmd_send_native(name: str, before: dict, message: str,
     return 0
 
 
-def cmd_send(args, popen=subprocess.Popen, get_process_info=None, which=shutil.which,
-             sleep=time.sleep, run=subprocess.run) -> int:
-    """`fleet send <name> <text|@file>` (SPEC §5 send row, §9 attach
-    asymmetry), rewritten under the uniform status-claim protocol (F1+F6,
-    review wave 3):
-
-    M-B T7: a native (`dispatch_kind:"bg"`) record forks off to
-    `_cmd_send_native` right after the unknown-name check below --
-    everything else in this docstring/function body describes the LEGACY
-    (Popen) path only, untouched.
-
-    - working -> append the message to mailbox/<sid>.md (small
-      open(...,"a") write); the running turn's hooks pick it up mid-turn or
-      at Stop.
-    - idle -> atomically pre-claim status="working"/turn_pid=None in the
-      SAME fleet_lock that recomputed and observed "idle" (F1 -- mirrors
-      new_worker_record's shape; recompute_status's launch-in-flight guard
-      then refuses to demote this window, so a concurrent
-      send/attach/status sees "working" and refuses instead of racing a
-      second live turn onto this session). Outside the lock: append the
-      new message to the mailbox, THEN compose_prompt with an empty task
-      (F6 -- the message flows through the mailbox drain uniformly with any
-      prior mail, not through compose_prompt's task argument, so it is
-      never doubled and never silently dropped), then launch_turn. On
-      success, re-acquire the lock once to stamp turn_pid/turn_pid_ctime/
-      turns/last_activity and re-assert status="working" (matches
-      cmd_spawn's second-lock re-assert, F-RACE). On failure,
-      restore_mailbox_claim() the drained mail (so the new message
-      survives) and conditionally roll the pre-claim back to "idle" (only
-      if the record is still in the exact claim state this path wrote --
-      status=="working" and turn_pid is None -- a concurrent actor may have
-      legitimately moved it on already).
-    - attached -> append to the mailbox like "working", but also print the
-      attach-asymmetry warning (SPEC §9): the attached TUI runs without
-      --settings, so hooks don't fire and the mail queues untouched until
-      the next headless turn.
-    - dead -> a clear error suggesting `fleet respawn`, never a silent no-op.
+def cmd_send(args, which=shutil.which, sleep=time.sleep, run=subprocess.run) -> int:
+    """`fleet send <name> <text|@file>` (SPEC §5 send row): steer a native
+    worker via `_cmd_send_native` -- mailbox queue while a turn is running,
+    fork-steer (RATIFIED G2b) when idle.
 
     SPEC §14: refuses up front (_require_instance_settings) if the
-    worker-settings instance is missing -- checked unconditionally even
-    though only the idle-resume branch below actually launches a turn,
-    because `fleet spawn` (the only way a worker could exist at all) already
-    requires the instance, so a real fleet never reaches this check with it
-    absent; simplicity wins over branch-specific placement here.
-    """
+    worker-settings instance is missing -- the fork-steer branch dispatches
+    a turn, and `fleet spawn` (the only way a worker could exist at all)
+    already requires the instance."""
     _require_instance_settings()
 
     message = _read_task_arg(args.message)
 
-    # M-B T7: routing is decided via a LOCK-FREE peek (mirrors the
-    # respawn provenance guard's own _read_registry_readonly use) so the
-    # legacy path below keeps its EXACT pre-T7 lock-acquisition count --
-    # test_resilience.py/test_steering.py's lock-exhaustion tests assert on
-    # that count directly. An unknown/unreadable name here just falls
-    # through to the legacy path's own (unchanged) unknown-worker check.
-    _ok, _reason, _snap = _read_registry_readonly()
-    if _ok and args.name in _snap["workers"] and is_native(_snap["workers"][args.name]):
-        refuse_if_archived(args.name, _snap["workers"][args.name], "send")
-        return _cmd_send_native(args.name, dict(_snap["workers"][args.name]), message,
-                                run=run, which=which, sleep=sleep)
-
-    # ---- legacy path below: byte-identical to the pre-T7 implementation ----
     with fleet_lock():
         data = load_registry()
         if args.name not in data["workers"]:
             raise FleetCliError(f"unknown worker: {args.name!r}")
-        before = data["workers"][args.name]
-        after = recompute_worker(args.name, before, get_process_info=get_process_info, sleep=sleep)
-        status = after["status"]
-        if status != before["status"]:
-            append_event("status_changed", args.name, old=before["status"], new=after["status"])
-        if status == "idle":
-            # F13/M5 cumulative-cost check: the CLI --max-budget-usd is a
-            # PER-TURN cap, so a worker steered with N sends could run turns
-            # 2..N and blow past its lifetime budget one turn at a time. This
-            # is the worker-lifetime enforcement SPEC §11 documents: before
-            # claiming a RESUME launch, compare the persisted cumulative
-            # cost_usd against the persisted (immutable) max_budget_usd; if
-            # already exceeded, REFUSE the resume and FLAG the worker
-            # "over_budget" (a sticky status, see recompute_status) instead
-            # of launching an over-cap turn.
-            mb = after.get("max_budget_usd")
-            spent = _registry_cost(after.get("cost_usd", 0.0))
-            if mb is not None and spent > mb:
-                after["status"] = "over_budget"
-                data["workers"][args.name] = after
-                save_registry(data)
-                append_event("budget_exceeded", args.name, cost_usd=spent, max_budget_usd=mb)
-                raise FleetCliError(
-                    f"{args.name}: cumulative cost ${spent:.4f} exceeds max_budget_usd "
-                    f"${mb} -- refusing resume (worker flagged over_budget); respawn with a "
-                    "higher --max-budget-usd or retire it"
-                )
-            # Kernel 10 (F12=M24) cumulative-TOKEN check: the token_ceiling is
-            # the hard cap the Stop hook only ever ALLOWS against (invariant
-            # 2 -- the hook never blocks). Enforcement lives HERE: before a
-            # RESUME launch, sum the session's tokens from the log's result
-            # events and refuse if already over, flagging the worker
-            # over_ceiling (sticky, see recompute_status). Mirrors the
-            # over_budget refusal directly above.
-            tc = after.get("token_ceiling")
-            if tc is not None:
-                used = _sum_result_tokens(logs_dir() / f"{args.name}.jsonl") or 0
-                # FIX-3 (F-2): >= not > -- the Stop hook (stop_mailbox.py) allows
-                # stop at tokens >= ceiling; the fleet-side refusal must use the
-                # SAME boundary so tokens == ceiling is treated as over by both
-                # halves (at ==, > would let fleet launch a turn the hook would
-                # already allow-stop on -- a cross-half disagreement).
-                if used >= tc:
-                    after["status"] = "over_ceiling"
-                    data["workers"][args.name] = after
-                    save_registry(data)
-                    append_event("ceiling_exceeded", args.name, tokens=used, token_ceiling=tc)
-                    raise FleetCliError(
-                        f"{args.name}: cumulative tokens {used} reached token_ceiling "
-                        f"{tc} -- refusing resume (worker flagged over_ceiling); respawn "
-                        "with a higher --token-ceiling or retire it"
-                    )
-            # F1 pre-claim: atomic decide+claim, same lock, before release.
-            after["status"] = "working"
-            after["turn_pid"] = None
-            # Post-testing wave, item 1c: stamp last_activity to NOW at the
-            # moment of the claim (mirroring new_worker_record's
-            # created=now_iso() stamp that cmd_spawn/cmd_respawn's own
-            # pre-claims get for free) -- recompute_worker's own
-            # last_activity refresh just above reflects the log's mtime
-            # from BEFORE this claim (e.g. the prior turn's completion,
-            # possibly long ago), which would otherwise make
-            # recompute_status's new LAUNCH_CLAIM_MAX_AGE_SECONDS guard
-            # see this brand-new claim as already stale and wrongly demote
-            # a genuinely in-flight launch straight to "dead".
-            after["last_activity"] = now_iso()
-        data["workers"][args.name] = after
-        save_registry(data)
-        sid = after["session_id"]
-        # F9 (item 8, review M3): for a working/attached worker the mailbox
-        # append MUST happen UNDER this same fleet_lock -- not after release.
-        # sid was read under the lock, so appending here (still holding it)
-        # makes send atomic w.r.t. respawn's drain+sid-swap: a concurrent
-        # respawn cannot swap the sid out and drain the old mailbox in the
-        # window between reading sid and appending, so no message ever lands
-        # in a pre-swap mailbox after the swap (SPEC invariants 3, 7). The
-        # mail_sent event is a single-writer audit record (invariant 6), not a
-        # DLQ.
-        if status in ("working", "attached"):
-            append_mailbox(sid, message)
-            append_event("mail_sent", args.name, sid=sid, status=status)
+        before = dict(data["workers"][args.name])
 
-    if status == "working":
-        print(f"{args.name}: turn running -- message queued to mailbox")
-        return 0
-
-    if status == "attached":
-        print(
-            f"{args.name}: attached -- message queued to mailbox, but the attached "
-            "terminal runs without --settings so fleet hooks don't fire there; it "
-            "will not be delivered until the next headless turn (SPEC §9)"
-        )
-        return 0
-
-    if status == "dead":
-        raise FleetCliError(f"{args.name}: worker is dead -- run `fleet respawn {args.name}` first")
-
-    # idle -> resume-turn launch. F6: append the new message to the mailbox
-    # FIRST, then let compose_prompt drain the mailbox uniformly (prior mail
-    # + this message, in order) -- task is intentionally empty so the
-    # message is never carried both ways. The append is outside the lock here
-    # (unlike working/attached above), but that is safe: this branch already
-    # pre-claimed status="working"/turn_pid=None under the lock, and a
-    # concurrent respawn refuses on a launch-in-flight claim -- so the sid
-    # cannot be swapped out from under this append.
-    append_mailbox(sid, message)
-    append_event("mail_sent", args.name, sid=sid, status="idle")
-    prompt, claim = compose_prompt(args.name, after["cwd"], "", sid)
-    try:
-        info = launch_turn(
-            args.name, after["cwd"], sid, prompt, after["mode"], first=False,
-            # F13/M5: re-emit the persisted cap + setting-sources on the
-            # RESUME launch -- a missing re-pass is the exact failure this
-            # closes (turns 2..N ran uncapped, foreign-hook remedy gone).
-            model=after.get("model"), max_budget_usd=after.get("max_budget_usd"),
-            setting_sources=after.get("setting_sources"),
-            popen=popen, get_process_info=get_process_info, which=which,
-        )
-        finalize_mailbox_claim(claim)
-    except BaseException:
-        # Task-4-verdict re-review, Fix 2: BaseException (not Exception) --
-        # a Ctrl-C landing mid-launch must still run this rollback. An
-        # except Exception here would let KeyboardInterrupt skip straight
-        # past it, pinning the pre-claim ("working"+turn_pid is None) as a
-        # permanently-guarded ghost claim (recompute_status's launch-in-
-        # flight guard never demotes it) and leaking the drained
-        # mailbox's ".claimed" file forever.
-        restore_mailbox_claim(claim)
-        with fleet_lock():
-            data = load_registry()
-            r = data["workers"].get(args.name)
-            if r is not None and r.get("status") == "working" and r.get("turn_pid") is None:
-                r["status"] = "idle"
-                save_registry(data)
-        raise
-
-    def _commit():
-        with fleet_lock():
-            data = load_registry()
-            r = data["workers"].get(args.name)
-            if r is not None:
-                # Re-assert "working" (F-RACE, matches cmd_spawn's
-                # second-lock re-assert): a concurrent status/wait could
-                # have recomputed a spurious transition in the gap between
-                # the pre-claim above and this stamp.
-                r["status"] = "working"
-                r["turn_pid"] = info["turn_pid"]
-                r["turn_pid_ctime"] = info["turn_pid_ctime"]
-                r["turns"] = r.get("turns", 0) + 1
-                r["last_activity"] = now_iso()
-                save_registry(data)
-            _append_event_quiet("turn_started", args.name, session_id=sid,
-                                turn_pid=info["turn_pid"])
-
-    # Post-testing wave, item 1b (stress-report Finding 1, CRITICAL): retry
-    # with backoff instead of a single bare lock acquisition -- see
-    # cmd_spawn's identical shape and _commit_launched_turn's docstring.
-    if not _commit_launched_turn(_commit, sleep=sleep):
-        _report_stranded_turn(args.name, sid, info)
-
-    print(f"{args.name}: resumed -- {info['log_path']}")
-    return 0
+    refuse_if_archived(args.name, before, "send")
+    return _cmd_send_native(args.name, message,
+                            run=run, which=which, sleep=sleep)
 
 
 def _resume_one_limited_native(name: str, old_sid: str, cwd, mode, model, category,
@@ -4443,9 +3259,8 @@ def _resume_one_limited_native(name: str, old_sid: str, cwd, mode, model, catego
     fork-steer per RATIFIED G2(b): `claude --bg --resume <old_sid>` MINTS A
     NEW SID (the original session's own roster entry, sid, and event count
     are left untouched, Steering contract) rather than waking the same live
-    session. Called with the pre-claim (status="working"/turn_pid=None)
-    already committed by `_resume_one_limited` under its own lock, exactly
-    like the legacy branch.
+    session. Called with the pre-claim (status="working") already
+    committed by `_resume_one_limited` under its own lock.
 
     Outside any lock: drain the OLD sid's mailbox into a steer body via
     compose_prompt(..., old_sid, journal_path=...) -- same "mailbox +
@@ -4459,7 +3274,7 @@ def _resume_one_limited_native(name: str, old_sid: str, cwd, mode, model, catego
     On success: retire old_sid into retired_sids, restamp session_id/
     native_short_id to the NEW sid, re-point the ceiling file (the new sid
     didn't exist before dispatch_bg returned it), clear the limit fields,
-    and commit turn_pid/turns/last_dispatch_at/last_activity via the same
+    and commit turns/last_dispatch_at/last_activity via the same
     retry-wrapped `_commit_launched_turn` stamp step cmd_spawn's native path
     uses -- dispatch_bg is itself synchronous (it already blocks through the
     roster join), so the only remaining race is the registry commit lock,
@@ -4480,7 +3295,7 @@ def _resume_one_limited_native(name: str, old_sid: str, cwd, mode, model, catego
         with fleet_lock():
             data = load_registry()
             r = data["workers"].get(name)
-            if r is not None and r.get("status") == "working" and r.get("turn_pid") is None:
+            if r is not None and r.get("status") == "working" and r.get("session_id") == old_sid:
                 r["status"] = "limited"
                 save_registry(data)
         raise
@@ -4509,7 +3324,6 @@ def _resume_one_limited_native(name: str, old_sid: str, cwd, mode, model, catego
                 r["session_id"] = new_sid
                 r["native_short_id"] = short_id
                 r["status"] = "working"
-                r["turn_pid"] = None
                 r["last_dispatch_at"] = now_iso()
                 r["last_activity"] = now_iso()
                 r["turns"] = r.get("turns", 0) + 1
@@ -4535,11 +3349,9 @@ def _resume_one_limited_native(name: str, old_sid: str, cwd, mode, model, catego
     return True
 
 
-def _resume_one_limited(name: str, popen, get_process_info, which, sleep,
-                        run=subprocess.run) -> bool:
-    """Relaunch a single `limited` worker through the ordinary
-    fleet_lock-guarded launch path -- the SAME pre-claim / one-live-claude /
-    universal-drain shape cmd_send's idle-resume uses (invariants 6, 7).
+def _resume_one_limited(name: str, which, sleep, run=subprocess.run) -> bool:
+    """Relaunch a single `limited` worker via the native fork-steer
+    (`_resume_one_limited_native`, RATIFIED G2(b)).
 
     Returns True iff a resume turn was actually launched, False if the worker
     was skipped because it was no longer `limited` when the claiming lock was
@@ -4549,22 +3361,10 @@ def _resume_one_limited(name: str, popen, get_process_info, which, sleep,
     BEFORE pre-claiming (FIX-1/F-A1 -- mirrors cmd_send's idle re-check: the
     caller's eligibility decision was made against a lock-released snapshot, so
     two racing sweeps both snapshot `limited`; without this re-check the second
-    clobbers the first's live pre-claim and starts a second `claude --resume`
-    on one sid, orphaning the first turn_pid). A vanished worker raises a clean
-    FleetCliError, never a raw KeyError. Then pre-claim status="working"/
-    turn_pid=None (recompute's launch-in-flight guard then refuses to demote
-    this window).
-
-    M-B T6: a native (`dispatch_kind:"bg"`) record forks off to
-    `_resume_one_limited_native` here (RATIFIED G2(b) fork-steer) --
-    everything below this point is the legacy Popen path, untouched.
-
-    Outside the lock: drain mailbox + journal (compose_prompt with
-    journal_path -- F31's "mailbox + journal" resume), launch_turn re-passing
-    the spawn-recorded max_budget_usd/setting_sources (else the cap and
-    foreign-hook remedy vanish on the resumed turn), then commit the turn_pid.
-    On failure, restore the mailbox claim and roll the pre-claim back to
-    `limited` (the park), never leaving a ghost claim."""
+    clobbers the first's live pre-claim and starts a second dispatch on one
+    sid). A vanished worker raises a clean FleetCliError, never a raw
+    KeyError. Then pre-claim status="working" (recompute's launch-in-flight
+    guard then refuses to demote this window)."""
     with fleet_lock():
         data = load_registry()
         rec = data["workers"].get(name)
@@ -4577,12 +3377,10 @@ def _resume_one_limited(name: str, popen, get_process_info, which, sleep,
         # it, ...). Skip rather than pre-claim a second live turn onto the sid.
         if rec.get("status") != "limited":
             return False
-        native = is_native(rec)
         rec["status"] = "working"
-        rec["turn_pid"] = None
-        # Stamp a fresh last_activity so recompute_status's stale-pre-claim
-        # guard (LAUNCH_CLAIM_MAX_AGE_SECONDS) doesn't reap this in-flight
-        # launch against the log's old mtime (mirrors cmd_send's idle-resume).
+        # Stamp a fresh last_activity so the stale-pre-claim guard
+        # (LAUNCH_CLAIM_MAX_AGE_SECONDS) doesn't reap this in-flight
+        # launch against an old timestamp.
         rec["last_activity"] = now_iso()
         data["workers"][name] = rec
         save_registry(data)
@@ -4590,69 +3388,21 @@ def _resume_one_limited(name: str, popen, get_process_info, which, sleep,
         cwd = rec["cwd"]
         mode = rec["mode"]
         model = rec.get("model")
-        max_budget_usd = rec.get("max_budget_usd")
         setting_sources = rec.get("setting_sources")
         category = rec.get("category")
         token_ceiling = rec.get("token_ceiling")
 
-    if native:
-        return _resume_one_limited_native(name, sid, cwd, mode, model, category,
-                                          setting_sources, token_ceiling,
-                                          run=run, which=which, sleep=sleep)
-
-    journal_path = journals_dir() / f"{name}.md"
-    prompt, claim = compose_prompt(name, cwd, "", sid, journal_path=journal_path)
-    try:
-        info = launch_turn(
-            name, cwd, sid, prompt, mode, first=False,
-            model=model, max_budget_usd=max_budget_usd, setting_sources=setting_sources,
-            popen=popen, get_process_info=get_process_info, which=which,
-        )
-        finalize_mailbox_claim(claim)
-    except BaseException:
-        # BaseException (not Exception): a Ctrl-C mid-launch must still roll the
-        # pre-claim back to `limited`, or the record stays a permanently-guarded
-        # ghost claim (working+turn_pid=None) and leaks the drained claim file.
-        restore_mailbox_claim(claim)
-        with fleet_lock():
-            data = load_registry()
-            r = data["workers"].get(name)
-            if r is not None and r.get("status") == "working" and r.get("turn_pid") is None:
-                r["status"] = "limited"
-                save_registry(data)
-        raise
-
-    def _commit():
-        with fleet_lock():
-            data = load_registry()
-            r = data["workers"].get(name)
-            if r is not None:
-                r["status"] = "working"
-                r["turn_pid"] = info["turn_pid"]
-                r["turn_pid_ctime"] = info["turn_pid_ctime"]
-                r["turns"] = r.get("turns", 0) + 1
-                r["last_activity"] = now_iso()
-                save_registry(data)
-            _append_event_quiet("limit_resumed", name, session_id=sid,
-                                turn_pid=info["turn_pid"])
-
-    if not _commit_launched_turn(_commit, sleep=sleep):
-        _report_stranded_turn(name, sid, info)
-    return True
+    return _resume_one_limited_native(name, sid, cwd, mode, model, category,
+                                      setting_sources, token_ceiling,
+                                      run=run, which=which, sleep=sleep)
 
 
-def cmd_resume_limited(args, popen=subprocess.Popen, get_process_info=None, which=shutil.which,
-                       sleep=time.sleep, run=subprocess.run) -> int:
+def cmd_resume_limited(args, which=shutil.which, sleep=time.sleep,
+                       run=subprocess.run) -> int:
     """`fleet resume-limited [name] [--force-now]` (SPEC §5 resume-limited row,
     UL1 / F31): the RECOMMENDED explicit resume sweep (UL-OQ3) -- NOT an
     automatic status/launch-time side-effect (invariant 1 daemonless forbids a
     read-view from launching turns; no resident process auto-wakes).
-
-    M-B T6: `run` is additive -- the native fork-steer branch's dispatch_bg
-    call needs a `subprocess.run`-shaped injectable, threaded alongside (not
-    instead of) the legacy `popen`/`get_process_info` pair, since a single
-    sweep can cover both a legacy and a native `limited` worker in the same
-    call. `_resume_one_limited` picks the branch per-worker via `is_native`.
 
     For each `limited` worker whose limit_reset_at has PASSED, relaunch the
     pending work via _resume_one_limited (the fleet_lock-guarded launch path)
@@ -4695,7 +3445,7 @@ def cmd_resume_limited(args, popen=subprocess.Popen, get_process_info=None, whic
         # FIX-1: _resume_one_limited re-validates `limited` under its own lock
         # and returns False if a concurrent actor already moved the worker --
         # report that as a skip, never as a (non-existent) resume.
-        if _resume_one_limited(name, popen, get_process_info, which, sleep, run=run):
+        if _resume_one_limited(name, which, sleep, run=run):
             resumed.append(name)
         else:
             skipped.append((name, "no longer limited (concurrent change)"))
@@ -4707,75 +3457,6 @@ def cmd_resume_limited(args, popen=subprocess.Popen, get_process_info=None, whic
     if not resumed and not skipped:
         print("no limited workers")
     return 0
-
-
-def _interrupt_worker(name: str, get_process_info=None, kill_process_tree=None) -> str:
-    """Kill the running turn for `name`, if one is verifiably still alive
-    (ctime-checked via pid_alive -- PID reuse must never kill an innocent
-    process, SPEC §4). Shared by cmd_interrupt and cmd_attach's --force
-    path.
-
-    Returns one of three outcomes (F3+F4 uniform contract):
-      - "killed": the turn was alive, kill_process_tree() was invoked, and
-        a post-kill pid_alive() re-check confirms it is now gone -- the
-        registry is committed to status="idle" and an "interrupted" event
-        is appended.
-      - "not_running": nothing was alive to kill (a friendly no-op, not an
-        error -- the operator may race a turn that already finished); no
-        mutation.
-      - "kill_failed": the turn was alive, a kill was attempted, but the
-        pid is STILL alive afterward. The registry is left untouched --
-        marking idle here (the pre-fix defect) would let a caller launch a
-        second live `claude` onto a session whose turn is still running.
-        Callers must treat this as a hard failure, not a silent demotion.
-
-    F4: the subprocess-shaped work (pid_alive's PowerShell Get-Process,
-    kill_process_tree's taskkill) runs OUTSIDE fleet_lock -- both can take
-    several seconds and LOCK_TIMEOUT_SECONDS is only 5.0, so holding the
-    lock across them would make every concurrent `fleet` command fail with
-    FleetLockTimeout. Shape: snapshot turn_pid/ctime under lock -> release
-    -> probe/kill/re-verify outside the lock -> re-acquire only to commit
-    "killed" (status write + its event stay under the same lock, preserving
-    that ordering).
-
-    F5 residual (documented, not fixed): Windows can reuse `pid` between
-    the pre-kill pid_alive check and the taskkill call (TOCTOU) -- in the
-    accepted, vanishingly unlikely worst case taskkill could hit an
-    unrelated process that reused the pid within that window. The
-    immediate pre-kill and post-kill pid_alive re-checks bound this to one
-    subprocess-spawn latency; they do not close it.
-
-    kill_process_tree defaults to PLATFORM.kill_process_tree (the platform
-    adapter, SPEC §14) but is injectable so tests exercise the state
-    machine without shelling out to a real taskkill.
-    """
-    kill_process_tree = kill_process_tree or PLATFORM.kill_process_tree
-
-    with fleet_lock():
-        data = load_registry()
-        if name not in data["workers"]:
-            raise FleetCliError(f"unknown worker: {name!r}")
-        rec = data["workers"][name]
-        pid = rec.get("turn_pid")
-        ctime_iso = rec.get("turn_pid_ctime")
-
-    if not pid_alive(pid, ctime_iso, get_process_info=get_process_info):
-        return "not_running"
-
-    kill_process_tree(pid)
-
-    if pid_alive(pid, ctime_iso, get_process_info=get_process_info):
-        return "kill_failed"
-
-    with fleet_lock():
-        data = load_registry()
-        rec = data["workers"].get(name)
-        if rec is not None:
-            rec["status"] = "idle"
-            data["workers"][name] = rec
-            save_registry(data)
-        append_event("interrupted", name, turn_pid=pid)
-    return "killed"
 
 
 def _cmd_interrupt_native(name: str, rec: dict, run=subprocess.run, which=shutil.which) -> int:
@@ -4878,221 +3559,37 @@ def _cmd_interrupt_native(name: str, rec: dict, run=subprocess.run, which=shutil
     return 0
 
 
-def cmd_interrupt(args, get_process_info=None, kill_process_tree=None,
-                  run=subprocess.run, which=shutil.which) -> int:
-    """`fleet interrupt <name>` (SPEC §5 interrupt row): ctime-verify the
-    registered turn_pid, kill its whole process tree via the platform
-    adapter, re-verify the kill (F3), mark idle, append an event.
-    Not-running is a friendly no-op. A verified-failed kill is a loud
-    warning and a nonzero exit -- the registry is deliberately left as-is
-    (never marked idle while the turn may still be alive).
-
-    M-B T8: native (`dispatch_kind:"bg"`) records route to
-    `_cmd_interrupt_native` instead -- `claude stop` + tombstone + a status
-    of `interrupted` (never `idle`, unlike the legacy branch below), guarded
-    to only actually fire on a `working` verdict (T8 fix wave, adv C1) --
-    every other status refuses or friendly-no-ops rather than un-terminaling
-    a sticky status via a silent overwrite."""
+def cmd_interrupt(args, run=subprocess.run, which=shutil.which) -> int:
+    """`fleet interrupt <name>` (SPEC §5 interrupt row): `claude stop` +
+    tombstone + a status of `interrupted` (never `idle`) via
+    `_cmd_interrupt_native`, guarded to only actually fire on a `working`
+    verdict (T8 fix wave, adv C1) -- every other status refuses or
+    friendly-no-ops rather than un-terminaling a sticky status via a
+    silent overwrite."""
     with fleet_lock():
         data = load_registry()
         if args.name not in data["workers"]:
             raise FleetCliError(f"unknown worker: {args.name!r}")
         rec = dict(data["workers"][args.name])
 
-    if is_native(rec):
-        refuse_if_archived(args.name, rec, "interrupt")
-        return _cmd_interrupt_native(args.name, rec, run=run, which=which)
-
-    outcome = _interrupt_worker(args.name, get_process_info=get_process_info, kill_process_tree=kill_process_tree)
-    if outcome == "killed":
-        print(f"{args.name}: interrupted")
-        return 0
-    if outcome == "not_running":
-        print(f"{args.name}: no turn running -- nothing to interrupt")
-        return 0
-    print(
-        f"fleet: {args.name}: kill attempted but the turn still appears to be running -- "
-        "not marked idle; retry or investigate before attaching/sending",
-        file=sys.stderr,
-    )
-    return 1
+    refuse_if_archived(args.name, rec, "interrupt")
+    return _cmd_interrupt_native(args.name, rec, run=run, which=which)
 
 
-def cmd_attach(args, popen=subprocess.Popen, get_process_info=None, which=shutil.which,
-               kill_process_tree=None, sleep=time.sleep) -> int:
-    """`fleet attach <name> [--force]` (SPEC §5 attach row, §9 hybrid
-    model), rewritten under the uniform status-claim protocol (F1) plus the
-    verified-kill contract (F3/F4, review wave 3):
-
-    - already attached -> print a no-op warning.
-    - working, no --force -> refuse (FleetCliError).
-    - working, --force, turn_pid is None -> refuse loudly (FleetCliError,
-      task-4-verdict re-review Fix 1). This is a turn-starter's own
-      pre-claim window (spawn/send's launch-in-flight write, still lasting
-      the whole launch_turn duration) -- there is no real pid yet, so
-      _interrupt_worker would see pid=None, pid_alive(None)=False, and
-      report "not_running", which used to read as clear-to-proceed and
-      would race a second live claude onto the session against the
-      concurrent starter. No registry write beyond the recompute persist,
-      no popen.
-    - working, --force, turn_pid set -> interrupt via _interrupt_worker
-      OUTSIDE any lock held by this function (F4 -- taskkill/Get-Process
-      must never run under fleet_lock). "killed" or "not_running" both mean
-      the turn is no longer alive, so attach proceeds to the claim below;
-      "kill_failed" (F3 -- the turn is still verifiably alive after the
-      kill attempt) aborts loudly via FleetCliError with NO registry write
-      and NO popen. The post-interrupt re-lock (F1, final-review.md) does
-      NOT claim unconditionally: _interrupt_worker's "killed" branch
-      commits idle and releases ITS OWN lock first, widening a real window
-      (the Get-Process/taskkill call can take hundreds of ms) in which a
-      concurrent `fleet send` can acquire the lock, observe idle, and
-      pre-claim a brand-new working/turn_pid=None launch -- the re-lock
-      checks the record's raw status is still exactly what
-      _interrupt_worker's own commit left it in (idle, or dead if a
-      concurrent `fleet kill` won the race instead) and refuses loudly
-      (no claim) otherwise, rather than stamping "attached" over that
-      concurrent claim (or a concurrent attach).
-    - idle (or otherwise attachable) -> atomically pre-claim
-      status="attached"/attached_since in the SAME fleet_lock that observed
-      the attachable state (F1 -- status="attached" already survives
-      recompute via the existing F7 guard, so this needs no new guard,
-      only the ordering flip: claim before popen, never after). The
-      terminal is then launched via PLATFORM.build_attach_argv (wt, else a
-      detached PowerShell fallback -- F2 escapes any `'` in cwd for the PS
-      fallback) OUTSIDE the lock, resumed in the worker's cwd (the
-      --resume cwd-scope invariant, SPEC §2). If popen() itself raises, the
-      claim is rolled back to idle (conditionally -- only if the record is
-      still exactly "attached" that this call wrote). The attach terminal
-      is intentionally detached, so its exit code is deliberately never
-      probed (see build_attach_argv's docstring) -- correctness here comes
-      from the claim ordering and the escaping fix, not from watching a
-      detached child.
-    """
-    needs_force_interrupt = False
-
+def cmd_attach(args) -> int:
+    """`fleet attach <name>` (SPEC §5 attach row): a native (`--bg`) session
+    has no fleet-owned terminal to spawn -- point the operator at the agents
+    menu / `claude attach` instead (M-B scope fence: native attach
+    integration is a later milestone)."""
     with fleet_lock():
         data = load_registry()
         if args.name not in data["workers"]:
             raise FleetCliError(f"unknown worker: {args.name!r}")
         before = data["workers"][args.name]
-        # M-B T8 (M-B scope fence): native (`dispatch_kind:"bg"`) sessions
-        # have no legacy pid to `--resume` into a detached terminal, and no
-        # `recompute_worker` PID/log-tail probe applies to them -- refuse
-        # before touching the registry at all (native attach integration is
-        # M-C-or-later). Legacy attach below is unchanged.
-        if is_native(before):
-            raise FleetCliError(
-                f"{args.name}: native worker -- attach via the agents menu (Ctrl+T in claude) "
-                f"or: claude attach {before.get('session_id')}"
-            )
-        after = recompute_worker(args.name, before, get_process_info=get_process_info, sleep=sleep)
-        if after["status"] != before["status"]:
-            append_event("status_changed", args.name, old=before["status"], new=after["status"])
-
-        if after["status"] == "attached":
-            data["workers"][args.name] = after
-            save_registry(data)
-            print(f"{args.name}: already attached")
-            return 0
-
-        if after["status"] == "working":
-            if not args.force:
-                data["workers"][args.name] = after
-                save_registry(data)
-                raise FleetCliError(
-                    f"{args.name}: turn is running -- pass --force to interrupt it first, "
-                    "or wait for it to finish"
-                )
-            if after.get("turn_pid") is None:
-                # Task-4-verdict re-review, Fix 1: this is a turn-starter's
-                # pre-claim window (status=="working", turn_pid is None --
-                # see recompute_status's launch-in-flight guard above),
-                # lasting the whole launch_turn duration. There is no real
-                # pid yet to verify-kill: _interrupt_worker would snapshot
-                # pid=None, pid_alive(None)=False, and return "not_running"
-                # -- which cmd_attach would otherwise treat as clear-to-
-                # proceed, popen-ing a second live claude while the
-                # concurrent starter brings its own up. Refuse loudly
-                # instead of racing it. Non-force already refuses on
-                # "working" above; this only closes the --force hole.
-                data["workers"][args.name] = after
-                save_registry(data)
-                raise FleetCliError(
-                    f"launch in flight for {args.name}; retry in a few seconds"
-                )
-            # --force: persist the recompute and release -- the kill itself
-            # (F4) must happen outside this lock.
-            data["workers"][args.name] = after
-            save_registry(data)
-            needs_force_interrupt = True
-        else:
-            # Attachable (idle): claim atomically in this same lock (F1).
-            after["status"] = "attached"
-            after["attached_since"] = now_iso()
-            data["workers"][args.name] = after
-            save_registry(data)
-            append_event("attached", args.name)
-
-    cwd = after["cwd"]
-    sid = after["session_id"]
-
-    if needs_force_interrupt:
-        outcome = _interrupt_worker(args.name, get_process_info=get_process_info, kill_process_tree=kill_process_tree)
-        if outcome == "kill_failed":
-            raise FleetCliError(
-                f"{args.name}: --force could not verify the running turn was killed -- "
-                "aborting attach (it may still be running)"
-            )
-        # "killed" or "not_running": the turn is no longer alive (or never
-        # was); claim "attached" now, in a fresh lock.
-        #
-        # F1 (final-review.md): this re-lock must not claim unconditionally.
-        # _interrupt_worker's "killed" branch commits status="idle" and
-        # releases ITS lock -- widening a real window (Get-Process/taskkill
-        # takes hundreds of ms) in which a concurrent `fleet send`'s own
-        # idle-resume can acquire the lock first, observe idle, and
-        # pre-claim status="working"/turn_pid=None for a brand-new launch.
-        # Re-check the RAW status (not a fresh recompute -- recomputing
-        # here could itself demote a legitimate idle to dead on log
-        # evidence unrelated to this race and falsely refuse) is still
-        # exactly what _interrupt_worker's own commit left it in (idle, or
-        # dead if a concurrent `fleet kill` won instead) before writing
-        # "attached" over it -- refuse instead of clobbering a concurrent
-        # claim (or a concurrent "attached") with our own.
-        with fleet_lock():
-            data = load_registry()
-            r = data["workers"].get(args.name)
-            if r is None:
-                raise FleetCliError(f"unknown worker: {args.name!r}")
-            if r.get("status") not in ("idle", "dead"):
-                raise FleetCliError(
-                    f"{args.name}: worker was claimed concurrently during --force takeover; retry"
-                )
-            r["status"] = "attached"
-            r["attached_since"] = now_iso()
-            data["workers"][args.name] = r
-            save_registry(data)
-            append_event("attached", args.name)
-
-    argv = PLATFORM.build_attach_argv(cwd, sid, which=which)
-    try:
-        popen(argv, cwd=str(cwd), **PLATFORM.detached_popen_kwargs())
-    except BaseException:
-        # Task-4-verdict re-review, Fix 2: BaseException so a Ctrl-C during
-        # the popen call still rolls the "attached" pre-claim back to
-        # idle -- except Exception would let KeyboardInterrupt through and
-        # leave the worker permanently (and falsely) marked "attached".
-        with fleet_lock():
-            data = load_registry()
-            r = data["workers"].get(args.name)
-            if r is not None and r.get("status") == "attached":
-                r["status"] = "idle"
-                r["attached_since"] = None
-                save_registry(data)
-        raise
-
-    print(f"{args.name}: attached -- {argv[0]}")
-    return 0
+    raise FleetCliError(
+        f"{args.name}: native worker -- attach via the agents menu (Ctrl+T in claude) "
+        f"or: claude attach {before.get('session_id')}"
+    )
 
 
 def cmd_release(args) -> int:
@@ -5119,95 +3616,6 @@ def cmd_release(args) -> int:
 # CLI: resilience commands (SPEC §5 respawn/kill/clean/doctor rows, §7,
 # §11) -- Task 5 / M4.
 # ---------------------------------------------------------------------------
-
-# Task 5 fix wave, Finding 3 (task-5 adversarial review): a single
-# get_process_info probe returning "not alive" can be a transient failure
-# (get_process_info returns None on ANY exception, including a slow
-# PowerShell timeout under serial multi-worker probing) rather than a
-# genuinely dead process. `fleet kill`'s not-running verdict and `fleet
-# clean`'s dead-worker deletion are both hard-to-reverse (kill permanently
-# retires the registry entry; clean deletes the logs/mailbox/journal
-# outright), so both re-check after this delay and only finalize when
-# BOTH probes agree.
-_DEAD_CONFIRM_DELAY_SECONDS = 0.5
-
-
-_ROTATE_RETRY_ATTEMPTS = 5
-_ROTATE_RETRY_DELAY_SECONDS = 0.1
-
-
-def _rotate_worker_log(name: str, sleep=time.sleep) -> None:
-    """Rename logs/<name>.jsonl -> logs/<name>.jsonl.1 (and the matching
-    .err -> .err.1), overwriting any existing .1 (SPEC §5 respawn row /
-    §11 log-bloat handling). Uses os.replace rather than Path.rename:
-    Path.rename raises FileExistsError on Windows when the destination
-    already exists (e.g. a worker respawned twice), whereas os.replace
-    atomically overwrites it. launch_turn opens logs/<name>.jsonl in
-    append-binary mode ("ab") -- without this rotation, a respawned turn's
-    stdout would tack onto the previous session's transcript instead of
-    starting a fresh log.
-
-    B2 (rotation PermissionError retry): a just-killed claude turn, or a
-    concurrent follower (`fleet peek`/`result`/`status` reading the tail, or
-    the OS still closing the killed child's stdout handle), can hold an open
-    handle on logs/<name>.jsonl for a brief window -- on Windows os.replace
-    then raises PermissionError (sharing violation). Retry briefly
-    (_ROTATE_RETRY_ATTEMPTS with _ROTATE_RETRY_DELAY_SECONDS backoff); on
-    continued failure raise LogRotationError naming the likely holder, so
-    cmd_respawn can clean-fail the respawn (un-rotate + snapshot restore, no
-    new turn, no sid-swap) rather than half-swapping the record. `sleep` is
-    injectable so tests exercise the retry without a real delay."""
-    d = logs_dir()
-    for suffix in (".jsonl", ".err"):
-        src = d / f"{name}{suffix}"
-        if not src.exists():
-            continue
-        dst = d / f"{name}{suffix}.1"
-        last_exc = None
-        for attempt in range(_ROTATE_RETRY_ATTEMPTS):
-            try:
-                os.replace(str(src), str(dst))
-                last_exc = None
-                break
-            except PermissionError as exc:
-                last_exc = exc
-                if attempt < _ROTATE_RETRY_ATTEMPTS - 1:
-                    sleep(_ROTATE_RETRY_DELAY_SECONDS)
-        if last_exc is not None:
-            raise LogRotationError(
-                f"could not rotate {src.name} for {name!r}: still locked after "
-                f"{_ROTATE_RETRY_ATTEMPTS} attempts -- a follower or just-killed "
-                f"claude turn likely still holds the log handle"
-            ) from last_exc
-
-
-def _unrotate_worker_log(name: str) -> None:
-    """Undo _rotate_worker_log: move logs/<name>.jsonl.1 back over
-    logs/<name>.jsonl (and the matching .err pair), overwriting whatever
-    is currently there. Missing .1 files are tolerated (nothing was
-    rotated, or a previous un-rotate already ran) -- a silent no-op, not
-    an error.
-
-    Task 5 fix wave, Finding 1 (task-5 adversarial review): cmd_respawn's
-    launch-failure rollback restores the registry to the pre-respawn
-    snapshot but, without this, never restores the LOG file --
-    _rotate_worker_log already ran unconditionally before the failed
-    launch, and launch_turn's append-mode open((re-)creates an empty
-    logs/<name>.jsonl before the Popen that then raised. Every log-reading
-    command (`peek`/`result`/`status` recompute) is keyed by name, so a
-    rolled-back-but-not-un-rotated worker would look "dead" (empty log,
-    no trailing result) despite the registry correctly reporting its old
-    idle/dead state, and a SECOND failed or successful respawn would then
-    rotate that empty file over the only surviving copy of the real
-    transcript in .1, destroying it. os.replace atomically overwrites the
-    empty stub launch_turn created, so the restored worker's log path
-    points at its real history again."""
-    d = logs_dir()
-    for suffix in (".jsonl", ".err"):
-        rotated = d / f"{name}{suffix}.1"
-        if rotated.exists():
-            os.replace(str(rotated), str(d / f"{name}{suffix}"))
-
 
 def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.which,
                         sleep=time.sleep, clock=time.monotonic) -> int:
@@ -5270,9 +3678,8 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
 
     old_sid = before.get("session_id")
     if old_sid is None:
-        # Launch-in-flight pre-claim (native analog of legacy's
-        # turn_pid-is-None guard): no real sid exists yet to stop or fork
-        # from, and no launch-in-flight window has a live process to verify.
+        # Launch-in-flight pre-claim: no real sid exists yet to stop or
+        # fork from.
         raise FleetCliError(f"launch in flight for {name}; retry in a few seconds")
 
     cwd = before["cwd"]
@@ -5440,331 +3847,41 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
     return 0
 
 
-def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shutil.which,
-                kill_process_tree=None, sleep=time.sleep, run=subprocess.run,
-                clock=time.monotonic) -> int:
+def cmd_respawn(args, run=subprocess.run, which=shutil.which,
+                sleep=time.sleep, clock=time.monotonic) -> int:
     """`fleet respawn <name> [--task <text>] [--force]` (SPEC §5 respawn
-    row): the context-reset lever -- a fresh session_id under the same
+    row): the context-reset lever -- a fresh native session under the same
     name/cwd/mode/model, prompted with the preamble + task (original,
     truncated per the registry schema, or --task's override) + the
     worker's journal (state/journals/<name>.md, labeled, if it exists) +
-    the OLD session_id's drained mailbox (consumed via the same
-    claim/finalize/restore discipline as every other launch path here --
-    never orphaned). Follows the uniform status-claim protocol verbatim
-    (task-4-verdict.md "Uniform status-claim protocol", cited by name for
-    respawn): pre-claim status="working"/turn_pid=None for the NEW record
-    under one fleet_lock, launch strictly outside any lock, conditional
-    rollback to the pre-respawn snapshot on BaseException, pid-stamp +
-    re-assert "working" on success.
-
-    Refuses while a turn is actively running unless --force, in which case
-    it reuses _interrupt_worker's verified-kill contract exactly like
-    cmd_attach's --force path (F3/F4): "killed"/"not_running" both mean
-    the old turn is no longer alive, so respawn proceeds; "kill_failed"
-    aborts loudly with NO registry mutation. A launch-in-flight window
-    (status=="working", turn_pid is None -- another spawn/send/respawn/
-    attach mid-launch) also refuses loudly under --force, same as
-    cmd_attach's Fix-1 guard -- there is no real pid yet to verify-kill.
-    An "attached" worker is NOT treated as "turn running" (attach never
-    sets turn_pid) -- but it IS a live human TUI holding the name, so (Task
-    5 fix wave, Finding 5 / task-5-review.md Important #2) respawn mirrors
-    cmd_attach's own working-state guard for it: without --force it refuses
-    loudly (FleetCliError, no mutation beyond the recompute persist) rather
-    than silently reassigning the name out from under the operator's
-    `claude --resume` terminal and rerouting their queued mail into a fresh
-    session they never see. With --force it proceeds directly (no kill
-    needed -- there is no turn_pid to interrupt), and the takeover releases
-    the attach as a side effect: new_worker_record always starts
-    attached_since=None, so the old attached TUI is simply orphaned from
-    the registry once the new record replaces it -- a documented residual
-    (the operator closes the stale terminal manually; nothing in fleet can
-    revoke a detached terminal).
-
-    cost_usd is carried over from the pre-respawn snapshot, NOT reset to
-    0.0: it tracks total money spent on the NAMED worker across its whole
-    lifetime, not per-session -- a respawn is a context reset (fresh
-    session_id, fresh turns counter, fresh transcript), not a billing
-    reset. turns resets to 0 (then to 1 once the new turn actually
-    launches, mirroring cmd_spawn's own 0->1 transition for a first turn).
-    The carried cost_usd is also stamped onto the new record's
-    cost_baseline (Task 5 fix wave, Finding 4) -- recompute_worker adds
-    this baseline to the rotated-fresh log's own trailing result cost,
-    so the very next status/wait/send poll after the new session's first
-    turn does not clobber the carried total down to just that turn's own
-    cost.
-
-    The log is rotated (_rotate_worker_log) once the new record is
-    committed, before compose_prompt/launch_turn -- unconditionally,
-    matching the SPEC §5 respawn row, since launch_turn's log file is
-    opened append-mode and would otherwise tack the new turn's stdout onto
-    the old session's transcript regardless of whether the new launch
-    itself succeeds.
-
-    NOTE (Task 5 spec-audit gap: cost-accumulation validation): this
-    cumulative-cost_usd behavior is asserted by unit tests here against a
-    fabricated registry/log fixture, but was NOT validated end-to-end
-    against a real 2-turn `claude` invocation (no real claude process is
-    ever spawned by this test suite, by design) -- that validation is
-    explicitly deferred to the project's manual integration smoke test
-    (SPEC §12), not implemented in this task.
-    """
+    the OLD session's drained mailbox. See `_cmd_respawn_native` for the
+    full dispatch/rollback contract (liveness gate, --force stop +
+    tombstone, fast-completion race, carried-forward fields)."""
     _require_instance_settings()
 
-    task_override = _read_task_arg(args.task) if args.task else None
-    new_sid = str(uuid.uuid4())
-    needs_force_interrupt = False
-
-    # §5.1: respawn retires the old session id and rotates its log. Ask before
-    # doing that to a worker this session did not spawn. Reads the registry
-    # WITHOUT the lock (a lock-free read, like `status --stale-ok`) and prompts
-    # outside it: a prompt must never block the fleet, and the guard must not
-    # perturb the lock-acquisition sequence the launch path depends on.
+    # §5.1: respawn retires the old session id. Ask before doing that to a
+    # worker this session did not spawn. Reads the registry WITHOUT the lock
+    # (a lock-free read, like `status --stale-ok`) and prompts outside it: a
+    # prompt must never block the fleet.
     _ok, _reason, _snap = _read_registry_readonly()
     if _ok and args.name in _snap["workers"]:
         _confirm_destructive("respawn (retire the session of)", [args.name], _snap["workers"],
                              assume_yes=getattr(args, "yes", False))
-
-    # M-B T7: a native (`dispatch_kind:"bg"`) record forks off to
-    # _cmd_respawn_native here -- everything below is the legacy Popen path,
-    # untouched. Routing reuses the SAME lock-free snapshot fetched above
-    # for the provenance guard (never an extra fleet_lock() acquisition --
-    # test_resilience.py's lock-exhaustion tests assert on the legacy
-    # path's exact lock-call count). An unknown/unreadable name here just
-    # falls through to the legacy path's own (unchanged) unknown-worker
-    # check under its first real lock.
-    if _ok and args.name in _snap["workers"] and is_native(_snap["workers"][args.name]):
-        refuse_if_archived(args.name, _snap["workers"][args.name], "respawn")
-        return _cmd_respawn_native(args, dict(_snap["workers"][args.name]),
-                                   run=run, which=which, sleep=sleep, clock=clock)
-
-    with fleet_lock():
-        data = load_registry()
-        if args.name not in data["workers"]:
-            raise FleetCliError(f"unknown worker: {args.name!r}")
-        before = data["workers"][args.name]
-        after = recompute_worker(args.name, before, get_process_info=get_process_info, sleep=sleep)
-        if after["status"] != before["status"]:
-            append_event("status_changed", args.name, old=before["status"], new=after["status"])
-
-        old_sid = after["session_id"]
-        cwd = after["cwd"]
-        mode = after["mode"]
-        model = after.get("model")
-        # F13/M5: respawn is a launch path too -- carry the persisted cap +
-        # setting-sources forward onto the new record (and its launch argv)
-        # UNLESS an explicit --max-budget-usd/--setting-sources override is
-        # passed (default None -> carry forward).
-        max_budget_usd = (args.max_budget_usd if getattr(args, "max_budget_usd", None) is not None
-                          else after.get("max_budget_usd"))
-        setting_sources = (args.setting_sources if getattr(args, "setting_sources", None) is not None
-                           else after.get("setting_sources"))
-        # Kernel 10 (F12=M24): respawn is a launch path -- carry the persisted
-        # token_ceiling forward onto the new record UNLESS an explicit
-        # --token-ceiling override is passed (default None -> carry forward),
-        # exactly like max_budget_usd above.
-        token_ceiling = (args.token_ceiling if getattr(args, "token_ceiling", None) is not None
-                         else after.get("token_ceiling"))
-        cost_usd = _registry_cost(after.get("cost_usd", 0.0))
-        task_for_record = task_override if task_override is not None else after.get("task", "")
-
-        if after["status"] == "working":
-            if not args.force:
-                data["workers"][args.name] = after
-                save_registry(data)
-                raise FleetCliError(
-                    f"{args.name}: turn is running -- pass --force to interrupt it first, "
-                    "or wait for it to finish"
-                )
-            if after.get("turn_pid") is None:
-                # Same launch-in-flight refusal as cmd_attach's Fix 1:
-                # nothing real to verify-kill yet.
-                data["workers"][args.name] = after
-                save_registry(data)
-                raise FleetCliError(
-                    f"launch in flight for {args.name}; retry in a few seconds"
-                )
-            data["workers"][args.name] = after
-            save_registry(data)
-            needs_force_interrupt = True
-            prior_snapshot = None  # filled in below, after the verified kill
-        elif after["status"] == "attached" and not args.force:
-            # Finding 5 (task-5 adversarial review / task-5-review.md
-            # Important #2): mirror cmd_attach's own working-state guard
-            # -- a live human TUI owns this name, refuse instead of
-            # silently stealing it and rerouting the drained mailbox into
-            # a session the operator never sees.
-            data["workers"][args.name] = after
-            save_registry(data)
-            raise FleetCliError(
-                f"{args.name}: worker is attached -- release it first "
-                f"(`fleet release {args.name}`) or pass --force to take it over"
-            )
-        else:
-            # Not actively running (idle/dead), or attached with --force
-            # (the takeover releases the attach as a side effect --
-            # new_worker_record always starts attached_since=None) --
-            # pre-claim the NEW record right here, atomically with the
-            # decision (F1 protocol): status="working"/turn_pid=None
-            # until the launch below stamps a real pid.
-            prior_snapshot = after
-            new_record = new_worker_record(
-                new_sid, cwd, task_for_record, mode, model=model,
-                max_budget_usd=max_budget_usd, setting_sources=setting_sources,
-                token_ceiling=token_ceiling)
-            new_record["cost_usd"] = cost_usd  # cumulative -- see docstring
-            new_record["cost_baseline"] = cost_usd  # Finding 4 -- see docstring
-            # Provenance is IMMUTABLE across respawn (§5.1): respawning someone
-            # else's worker must not silently transfer ownership to the
-            # respawner, or a single forced respawn launders a foreign worker
-            # into a freely-killable one.
-            new_record["spawned_by"] = prior_snapshot.get("spawned_by")
-            data["workers"][args.name] = new_record
-            save_registry(data)
-            append_event("respawned", args.name, old_session_id=old_sid, new_session_id=new_sid)
-
-    if needs_force_interrupt:
-        outcome = _interrupt_worker(args.name, get_process_info=get_process_info, kill_process_tree=kill_process_tree)
-        if outcome == "kill_failed":
-            raise FleetCliError(
-                f"{args.name}: --force could not verify the running turn was killed -- "
-                "aborting respawn (it may still be running)"
-            )
-        # "killed" or "not_running": the old turn is no longer alive.
-        # _interrupt_worker's own "killed" path already committed
-        # status="idle" on the (still old_sid) record -- re-read it as the
-        # accurate rollback target before overwriting with the new record.
-        #
-        # F1 (final-review.md): mirror cmd_attach's guard -- the window
-        # between _interrupt_worker's idle-commit (its lock release) and
-        # this re-lock is exactly where a concurrent `fleet send`'s
-        # idle-resume can pre-claim status="working"/turn_pid=None (or a
-        # concurrent attach can claim "attached"). Check the RAW status
-        # (not a fresh recompute -- recomputing here could itself demote a
-        # legitimate idle to dead on log evidence unrelated to this race
-        # and falsely refuse) is still exactly what _interrupt_worker's
-        # own commit left it in (idle, or dead if a concurrent `fleet
-        # kill` won instead) and refuse to overwrite anything else --
-        # otherwise the send-launched turn would run orphaned against the
-        # old sid while the registry tracks this new one.
+        before = dict(_snap["workers"][args.name])
+    else:
+        # Unknown name or unreadable registry: resolve under the lock so a
+        # corrupt registry surfaces through load_registry's quarantine and an
+        # unknown worker gets the uniform error.
         with fleet_lock():
             data = load_registry()
-            r = data["workers"].get(args.name)
-            if r is None:
+            if args.name not in data["workers"]:
                 raise FleetCliError(f"unknown worker: {args.name!r}")
-            if r.get("status") not in ("idle", "dead"):
-                raise FleetCliError(
-                    f"{args.name}: worker was claimed concurrently during --force takeover; retry"
-                )
-            prior_snapshot = dict(r)
-            new_record = new_worker_record(
-                new_sid, cwd, task_for_record, mode, model=model,
-                max_budget_usd=max_budget_usd, setting_sources=setting_sources,
-                token_ceiling=token_ceiling)
-            new_record["cost_usd"] = cost_usd  # cumulative -- see docstring
-            new_record["cost_baseline"] = cost_usd  # Finding 4 -- see docstring
-            # Provenance is IMMUTABLE across respawn (§5.1): respawning someone
-            # else's worker must not silently transfer ownership to the
-            # respawner, or a single forced respawn launders a foreign worker
-            # into a freely-killable one.
-            new_record["spawned_by"] = prior_snapshot.get("spawned_by")
-            data["workers"][args.name] = new_record
-            save_registry(data)
-            append_event("respawned", args.name, old_session_id=old_sid, new_session_id=new_sid)
+            before = dict(data["workers"][args.name])
+        _confirm_destructive("respawn (retire the session of)", [args.name],
+                             {args.name: before}, assume_yes=getattr(args, "yes", False))
 
-    # Log rotation (SPEC §5): unconditional, before launch -- see
-    # _rotate_worker_log's docstring for why this must happen before
-    # launch_turn's append-mode log open.
-    #
-    # B2 (rotation clean-fail): if the log is still held (a follower or
-    # just-killed claude), _rotate_worker_log raises LogRotationError after
-    # its retries. At this point the NEW pre-claimed record is already
-    # persisted but NO turn has launched and NO mailbox claim exists yet
-    # (compose_prompt runs below), so clean-fail here: un-rotate any partial
-    # rename, restore the exact pre-respawn snapshot (guarded on the still-
-    # unlaunched claim), and raise -- never a half-swapped record (invariant
-    # 7). sleep is threaded through so the retry backoff is test-injectable.
-    try:
-        _rotate_worker_log(args.name, sleep=sleep)
-    except LogRotationError as exc:
-        _unrotate_worker_log(args.name)
-        with fleet_lock():
-            data = load_registry()
-            r = data["workers"].get(args.name)
-            if (r is not None and r.get("session_id") == new_sid
-                    and r.get("status") == "working" and r.get("turn_pid") is None):
-                data["workers"][args.name] = prior_snapshot
-                save_registry(data)
-                append_event(
-                    "respawn_failed", args.name, error=str(exc),
-                    old_session_id=old_sid, attempted_session_id=new_sid,
-                )
-        raise
-
-    # Kernel 10 (fleet half): the new session gets its own sid-keyed ceiling
-    # file (the old sid's is now stale/harmless) so the Stop hook keeps its
-    # allow-stop signal across the respawn. Written after the successful
-    # rotation, before launch.
-    _write_ceiling_file(new_sid, token_ceiling)
-
-    journal_path = journals_dir() / f"{args.name}.md"
-    prompt, claim = compose_prompt(args.name, cwd, task_for_record, old_sid, journal_path=journal_path)
-    try:
-        info = launch_turn(
-            args.name, cwd, new_sid, prompt, mode, first=True,
-            # F13/M5: carry the persisted (or overridden) cap + setting-sources
-            # onto the fresh-session launch argv.
-            model=model, max_budget_usd=max_budget_usd, setting_sources=setting_sources,
-            popen=popen, get_process_info=get_process_info, which=which,
-        )
-        finalize_mailbox_claim(claim)
-    except BaseException as exc:
-        # Conditional rollback (uniform protocol): restore the exact
-        # pre-respawn snapshot, but ONLY if the record is still in the
-        # precise claim state this call wrote (a concurrent actor may have
-        # legitimately moved it on already).
-        restore_mailbox_claim(claim)
-        with fleet_lock():
-            data = load_registry()
-            r = data["workers"].get(args.name)
-            if (r is not None and r.get("session_id") == new_sid
-                    and r.get("status") == "working" and r.get("turn_pid") is None):
-                # Finding 1 (task-5 adversarial review): un-rotate the log
-                # BEFORE restoring the registry snapshot -- the restored
-                # record points at old_sid's history, which the
-                # unconditional pre-launch rotation moved to
-                # logs/<name>.jsonl.1 and launch_turn's failed-launch
-                # append-open then stubbed out with an empty file.
-                _unrotate_worker_log(args.name)
-                data["workers"][args.name] = prior_snapshot
-                save_registry(data)
-                append_event(
-                    "respawn_failed", args.name, error=str(exc),
-                    old_session_id=old_sid, attempted_session_id=new_sid,
-                )
-        raise
-
-    def _commit():
-        with fleet_lock():
-            data = load_registry()
-            r = data["workers"].get(args.name)
-            if r is not None and r.get("session_id") == new_sid:
-                r["status"] = "working"
-                r["turn_pid"] = info["turn_pid"]
-                r["turn_pid_ctime"] = info["turn_pid_ctime"]
-                r["turns"] = 1
-                r["last_activity"] = now_iso()
-                save_registry(data)
-            _append_event_quiet("turn_started", args.name, session_id=new_sid,
-                                turn_pid=info["turn_pid"])
-
-    # Post-testing wave, item 1b (stress-report Finding 1, CRITICAL): retry
-    # with backoff instead of a single bare lock acquisition -- see
-    # cmd_spawn's identical shape and _commit_launched_turn's docstring.
-    if not _commit_launched_turn(_commit, sleep=sleep):
-        _report_stranded_turn(args.name, new_sid, info)
-
-    print(f"{args.name} {new_sid} {info['log_path']}")
-    return 0
+    refuse_if_archived(args.name, before, "respawn")
+    return _cmd_respawn_native(args, before, run=run, which=which, sleep=sleep, clock=clock)
 
 
 _RETIRED_SID_SWEEP_TIMEOUT_SECONDS = 5
@@ -5840,8 +3957,6 @@ def _cmd_kill_native(name: str, rec: dict, run=subprocess.run, which=shutil.whic
         r = data["workers"].get(name)
         if r is not None:
             r["status"] = "dead"
-            r["turn_pid"] = None
-            r["turn_pid_ctime"] = None
             save_registry(data)
         append_event("killed", name, interrupt_outcome=stopped_ok)
 
@@ -5856,116 +3971,37 @@ def _cmd_kill_native(name: str, rec: dict, run=subprocess.run, which=shutil.whic
     return 0
 
 
-def cmd_kill(args, get_process_info=None, kill_process_tree=None, sleep=time.sleep,
-             run=subprocess.run, which=shutil.which) -> int:
-    """`fleet kill <name>` (SPEC §5): interrupt the turn if one is alive
-    (reusing _interrupt_worker's verified-kill contract), then
-    unconditionally mark the worker "dead" and append a "killed" event --
-    kill is the terminal, "retire this worker" action, distinct from
-    `fleet interrupt` (which only pauses a turn and marks idle). If the
-    kill could not be verified ("kill_failed"), the worker is still marked
-    dead (kill is meant to be final) but a loud warning is printed and the
-    exit code is nonzero so the operator investigates the process
-    manually -- unlike `fleet interrupt`, which deliberately leaves status
-    alone on kill_failed rather than lie about it, `fleet kill`'s whole
-    point is to retire the registry entry regardless.
+def cmd_kill(args, run=subprocess.run, which=shutil.which) -> int:
+    """`fleet kill <name>` (SPEC §5): stop the native session (plus retired
+    sids best-effort), write fleet's own tombstone, then unconditionally
+    mark the worker "dead" and append a "killed" event -- kill is the
+    terminal, "retire this worker" action, distinct from `fleet interrupt`
+    (which marks `interrupted`, a respawn-eligible state). See
+    `_cmd_kill_native` for the stop/tombstone contract.
 
-    Finding 3 (task-5 adversarial review): a single "not_running" verdict
-    from _interrupt_worker rests on one pid_alive() probe, and
-    get_process_info returns None on ANY exception (a transient
-    PowerShell hiccup, not just a genuinely dead process) -- worst case
-    that misclassifies a live turn as not-running and permanently marks
-    it "dead" while the real process keeps going, untracked. Before
-    trusting a "not_running" verdict, wait _DEAD_CONFIRM_DELAY_SECONDS
-    and re-run the whole _interrupt_worker check (itself a no-op/no-
-    mutation call when it again finds nothing alive, so this is safe to
-    repeat): if the process turns out to actually be alive on the second
-    pass, this re-run performs the real kill instead of silently
-    orphaning it as "dead".
-
-    F2 (final-review.md): attach --force and respawn --force both refuse
-    on a launch-in-flight claim (status=="working" and turn_pid is None --
-    a spawn/send/attach/respawn pre-claim mid-launch_turn, with no real pid
-    yet to verify-kill); kill lacked this guard. Without it, kill would
-    snapshot pid=None, pid_alive(None)=False -> "not_running" on both
-    probes, and unconditionally mark the worker dead -- either silently
-    lying (the launcher's post-launch stamp re-asserts working+pid right
-    after, so kill did nothing) or, worse, opening a window for a
-    concurrent `fleet clean` to see dead+turn_pid=None (the recompute
-    launch-in-flight guard no longer protects it) and delete the logs/
-    mailbox of a live, just-launched worker out from under it. Refuse
-    loudly instead, like the other two commands.
-
-    Post-testing wave, item 1c: this guard checks the RAW stored status
-    directly rather than calling recompute_worker (deliberately, to avoid a
-    probe just to decide whether to refuse) -- so it duplicates
-    recompute_status's own `_launch_claim_expired` check inline (cheap: it
-    only needs the record's own `last_activity`, no subprocess call) rather
-    than trusting a possibly-stale persisted status. Without this, an
-    EXPIRED claim (last_activity older than LAUNCH_CLAIM_MAX_AGE_SECONDS --
-    the fleet CLI died mid-launch and nothing ever re-persisted the demoted
-    status) would refuse `fleet kill` forever, since nothing else in this
-    command's path calls recompute_worker to flip the raw stored status to
-    "dead" first.
-
-    M-B T8: native (`dispatch_kind:"bg"`) records route through
-    `_cmd_kill_native` after the shared unknown-worker/launch-in-flight-
-    guard/`_confirm_destructive` prelude below -- the launch-in-flight guard
-    for native mirrors the legacy one's wording but keys on `session_id is
-    None` (native never uses `turn_pid`) rather than `turn_pid is None`."""
+    Launch-in-flight guard: a pre-claim with `session_id is None` (dispatch
+    still in flight, not yet expired per `_launch_claim_expired`) refuses
+    loudly -- there is no real session to stop yet, and marking it dead
+    would race the in-flight dispatch's own commit."""
     with fleet_lock():
         data = load_registry()
         if args.name not in data["workers"]:
             raise FleetCliError(f"unknown worker: {args.name!r}")
         rec = data["workers"][args.name]
-        native = is_native(rec)
-        if native:
-            refuse_if_archived(args.name, rec, "kill")
-            if rec.get("session_id") is None and not _launch_claim_expired(rec.get("last_activity")):
-                raise FleetCliError(
-                    f"launch in flight for {args.name}; retry in a few seconds"
-                )
-        elif (rec.get("status") == "working" and rec.get("turn_pid") is None
-                and not _launch_claim_expired(rec.get("last_activity"))):
+        refuse_if_archived(args.name, rec, "kill")
+        if rec.get("session_id") is None and not _launch_claim_expired(rec.get("last_activity")):
             raise FleetCliError(
                 f"launch in flight for {args.name}; retry in a few seconds"
             )
         workers_snapshot = {args.name: dict(rec)}
 
     # §5.1: acknowledge before retiring a worker this session did not spawn.
-    # Runs BEFORE _interrupt_worker (refusing after the turn is already dead
-    # would help nobody) and OUTSIDE fleet_lock (an interactive prompt must
-    # never block every other fleet command on a human's keystroke).
+    # OUTSIDE fleet_lock (an interactive prompt must never block every other
+    # fleet command on a human's keystroke).
     _confirm_destructive("kill", [args.name], workers_snapshot,
                          assume_yes=getattr(args, "yes", False))
 
-    if native:
-        return _cmd_kill_native(args.name, workers_snapshot[args.name], run=run, which=which)
-
-    outcome = _interrupt_worker(args.name, get_process_info=get_process_info, kill_process_tree=kill_process_tree)
-    if outcome == "not_running":
-        sleep(_DEAD_CONFIRM_DELAY_SECONDS)
-        outcome = _interrupt_worker(args.name, get_process_info=get_process_info, kill_process_tree=kill_process_tree)
-
-    with fleet_lock():
-        data = load_registry()
-        rec = data["workers"].get(args.name)
-        if rec is not None:
-            rec["status"] = "dead"
-            rec["turn_pid"] = None
-            rec["turn_pid_ctime"] = None
-            save_registry(data)
-        append_event("killed", args.name, interrupt_outcome=outcome)
-
-    if outcome == "kill_failed":
-        print(
-            f"fleet: {args.name}: kill attempted but the turn still appears to be running -- "
-            "marked dead anyway (kill is a terminal action); investigate the process manually",
-            file=sys.stderr,
-        )
-        return 1
-    print(f"{args.name}: killed")
-    return 0
+    return _cmd_kill_native(args.name, workers_snapshot[args.name], run=run, which=which)
 
 
 def _remove_worker_files(name: str, sid: str, retired_sids: list = ()) -> list:
@@ -6044,142 +4080,79 @@ def _remove_worker_files(name: str, sid: str, retired_sids: list = ()) -> list:
     return removed
 
 
-def cmd_clean(args, get_process_info=None, sleep=time.sleep,
-              run=subprocess.run, which=shutil.which) -> int:
+def cmd_clean(args, run=subprocess.run, which=shutil.which) -> int:
     """`fleet clean` (SPEC §5): recompute every worker's status; any that
-    resolve to "dead" are removed from the registry along with their logs
-    (current + rotated), mailbox file, orphaned mailbox claim files for
-    that sid (T3-F2), and journal. Prints one line per removed worker.
-    Never touches idle/working/attached workers. A worker whose recompute
-    merely changes status (without becoming dead) is persisted like
-    `fleet status` does, not removed.
+    resolve to "dead" are removed from the registry along with their
+    on-disk artifacts (`_remove_worker_files`). Prints one line per removed
+    worker. Never touches idle/working/attached workers. A worker whose
+    recompute merely changes status (without becoming dead) is persisted
+    like `fleet status` does, not removed.
 
-    Finding 3 (task-5 adversarial review): deletion here is irreversible,
-    but "dead" rests on a single pid_alive() probe that can misfire on a
-    transient get_process_info failure (any exception -> None, not just a
-    genuinely dead process). A worker that recomputes to "dead" on the
-    first pass is NOT removed on the strength of that alone -- it is
-    re-recomputed (from the same pre-clean snapshot) after
-    _DEAD_CONFIRM_DELAY_SECONDS, and only removed if the SECOND pass also
-    says "dead". If the second pass disagrees, the worker is persisted
-    with that (non-dead) status instead, exactly like a normal recompute
-    -- the flaky first probe never gets to destroy anything. The delay is
-    paid once per `clean` invocation (batched across every dead candidate),
-    not once per worker.
+    Shape (F4 doctrine, mirrors cmd_status): snapshot every record under
+    one fleet_lock, release it, do ONE roster fetch + every
+    `recompute_worker_native` verdict with no lock held, then re-acquire
+    to merge -- but only for records that still match their pre-probe
+    snapshot exactly (full-dict equality), sparing anything a concurrent
+    command mutated while the lock was released. The roster verdict is
+    deterministic given one fetch, so no second-pass confirm delay is
+    needed (that existed for the legacy PID probe's transient flakiness).
 
-    Review wave 5b (re-review of eef1c88): the confirm delay used to run
-    INSIDE the single `with fleet_lock()` block, blocking every other
-    concurrent fleet command for _DEAD_CONFIRM_DELAY_SECONDS -- `fleet
-    kill` already got this right (its sleep sits outside its lock; see
-    cmd_kill above). Restructured to mirror that shape: snapshot the dead
-    candidates and release the lock, sleep + re-probe with no lock held at
-    all, then re-acquire the lock only to merge the second-pass verdicts.
-    On that second acquisition, each candidate's registry entry is
-    re-checked against its pre-sleep snapshot -- if a concurrent command
-    respawned (or otherwise mutated) it while the lock was released, that
-    candidate is spared untouched rather than deleted or overwritten with
-    a verdict computed against now-stale data.
-
-    Stress residual, Finding N1 (re-review of 550df0a): review wave 5b
-    above only moved the CONFIRM DELAY's re-probe outside the lock -- the
-    FIRST pass still called recompute_worker's real probe (get_process_info,
-    ~0.3s each against a "working" pid) for every worker inside the single
-    `with fleet_lock()` block, the same recompute-all-under-lock shape that
-    made `fleet status` a stress-critical (see cmd_status's docstring
-    above): a concurrent `clean` over a large registry could hold the lock
-    for seconds and strand an in-flight spawn/send/respawn commit. Fixed by
-    applying the identical snapshot -> probe (no lock held) -> re-acquire
-    -> conditional-commit shape cmd_status uses: snapshot every named
-    record under the lock, release it, run every first-pass
-    recompute_worker probe with no lock held at all, then re-acquire once
-    to merge verdicts -- but only for records that still match their
-    pre-probe snapshot exactly (full-dict equality), sparing anything a
-    concurrent command mutated while the lock was released rather than
-    clobbering it with a verdict computed against now-stale data.
-
-    M-B T8: native (`dispatch_kind:"bg"`) records route through
-    `recompute_worker_native` instead of the legacy PID-probe dance -- ONE
-    roster fetch for the whole invocation (mirrors cmd_status's split, F4
-    doctrine: never hold fleet_lock across the roster subprocess call).
-    That verdict is deterministic given one fetch (no transient-probe
-    flakiness the way a `get_process_info` hiccup can misfire), so native
-    candidates need no second-pass confirm-delay re-check -- only legacy's
-    PID-probe path does.
-
-    Deletable native statuses: `dead` ONLY -- exact legacy parity (T8 fix
-    wave, review CRITICAL). An earlier revision of this docstring/set also
-    swept `idle` and `interrupted`, on the premise that those matched
-    "today's legacy semantics"; that premise was false (legacy's own
-    `cmd_clean` docstring and body are dead-only, confirmed against
-    `8e79dbe`) and the wider sweep was a real hazard: `idle` means
-    finished-and-still-steerable (an operator can still `fleet send` it;
-    T9's idle-with-TTL archival is the milestone that will own retiring
-    idle workers deliberately, on a timer -- not this command, unannounced),
-    and `interrupted` is respawn-eligible by design (an operator who wants
-    to abandon an interrupted worker kills it first; `clean` sweeping it
-    out from under them removes that choice). NEVER `dead-suspected` (a
-    surfaced, still-undecided verdict, not a finished state), `limited`
-    (parked, not finished), `idle`, `interrupted`, or `working`. `claude
-    rm`-ing the roster entry itself is T9's territory -- this command never
-    touches the roster, only fleet's own files.
+    Deletable statuses: `dead` ONLY (T8 fix wave, review CRITICAL). NEVER
+    `dead-suspected` (a surfaced, still-undecided verdict, not a finished
+    state), `limited` (parked, not finished), `idle` (finished-and-still-
+    steerable), `interrupted` (respawn-eligible by design), or `working`.
+    `claude rm`-ing the roster entry itself is T9's territory -- this
+    command never touches the roster, only fleet's own files.
 
     G9 epoch-freeze: a suspicious roster fetch (failure, or an empty roster
-    while some native worker's own last-committed record still claims a
-    live turn) means clean REFUSES to touch ANY native record this
-    invocation -- no recompute, no delete, prints the freeze line. Legacy
-    cleaning proceeds unaffected.
+    while some worker's own last-committed record still claims a live
+    turn) means clean REFUSES to touch ANY live record this invocation --
+    no recompute, no delete, prints the freeze line. Archived tombstones
+    are still swept (see below).
 
-    M-B T9 (spec §5.1.2): an archived (`archived_at` set) native record is
-    ALWAYS doomed here, regardless of epoch-freeze or its (frozen) status --
+    M-B T9 (spec §5.1.2): an archived (`archived_at` set) record is ALWAYS
+    doomed here, regardless of epoch-freeze or its (frozen) status --
     `fleet archive` already `claude rm`'d every sid, so there is no roster
     verdict left to compute; this is pure file deletion (registry entry +
-    the `logs/archive/<name>/` dir `_remove_worker_files` now also sweeps).
+    the `logs/archive/<name>/` dir `_remove_worker_files` also sweeps).
     It never enters `recompute_worker_native`/the roster fetch at all.
 
     Autoclean tiering split (docs/specs/autoclean.md D2): `--dead-only`
     spares every tombstone (sweep only confirmed-dead workers);
-    `--tombstones` sweeps ONLY archived tombstones -- no legacy probe, no
-    native recompute, nothing else touched. Default remains both."""
+    `--tombstones` sweeps ONLY archived tombstones -- no recompute,
+    nothing else touched. Default remains both."""
     _NATIVE_CLEAN_DELETABLE = {"dead"}
     dead_only = bool(getattr(args, "dead_only", False))
     tombstones_only = bool(getattr(args, "tombstones", False))
 
     removed = []  # list of (name, sid, retired_sids)
-    pending_confirm = []  # (name, before) -- looked dead on pass 1, lock held
     with fleet_lock():
         data = load_registry()
         names = sorted(data["workers"])
         before = {n: data["workers"][n] for n in names}
 
-    native_all_names = [n for n in names if is_native(before[n])]
-    native_archived_names = [n for n in native_all_names if before[n].get("archived_at")]
-    native_names = [n for n in native_all_names if n not in native_archived_names]
-    legacy_names = [n for n in names if n not in native_all_names]
-    doomed_archived_names = [] if dead_only else list(native_archived_names)
+    archived_names = [n for n in names if before[n].get("archived_at")]
+    live_names = [n for n in names if n not in archived_names]
+    doomed_archived_names = [] if dead_only else list(archived_names)
     if tombstones_only:
-        native_names = []
-        legacy_names = []
+        live_names = []
 
     # ONE roster fetch per invocation, outside the lock (F4 doctrine), only
-    # when a non-archived native worker is actually in the registry.
+    # when a non-archived worker is actually in the registry.
     roster_entries = []
     epoch_frozen = False
-    if native_names:
+    if live_names:
         roster_ok, payload = _fetch_agents_roster(which=which, run=run)
         roster_entries = payload if roster_ok else []
         epoch_frozen = native_epoch_suspicious(roster_ok, roster_entries, before)
 
-    # Probe every legacy worker's liveness with NO lock held (see docstring
-    # above) -- this is the (potentially several-seconds-total) expensive
-    # part. Native verdicts come from the single roster fetch above instead.
-    after = {n: recompute_worker(n, before[n], get_process_info=get_process_info, sleep=sleep)
-             for n in legacy_names}
-    if native_names and not epoch_frozen:
-        for n in native_names:
+    after = {}
+    if live_names and not epoch_frozen:
+        for n in live_names:
             after[n] = recompute_worker_native(n, before[n], roster_entries)
 
-    native_doomed_now = []  # (name, before) -- native verdict already final, no confirm-delay needed
-    native_doomed_now.extend((n, before[n]) for n in doomed_archived_names)
+    doomed_now = []  # (name, before) -- verdict already final
+    doomed_now.extend((n, before[n]) for n in doomed_archived_names)
     changed = False
     with fleet_lock():
         data = load_registry()
@@ -6190,62 +4163,39 @@ def cmd_clean(args, get_process_info=None, sleep=time.sleep,
                 # was released for probing -- spare it, don't act on a
                 # verdict computed against now-stale pre-probe data.
                 continue
-            if n in native_archived_names:
-                continue  # queued into native_doomed_now above (unless --dead-only spared it)
-            if n in native_names:
-                if epoch_frozen:
-                    continue  # G9: no native record recomputed or written this invocation
-                verdict = after[n]
-                if verdict["status"] in _NATIVE_CLEAN_DELETABLE:
-                    native_doomed_now.append((n, before[n]))
-                    continue
-                persisted = dict(verdict)
-                persisted.pop("waiting_for_permission", None)
-                if persisted != current:
-                    if persisted["status"] != current["status"]:
-                        append_event("status_changed", n, old=current["status"], new=persisted["status"])
-                        changed = True
-                    data["workers"][n] = persisted
-                continue
-            if n not in legacy_names:
+            if n in archived_names:
+                continue  # queued into doomed_now above (unless --dead-only spared it)
+            if n not in live_names:
                 continue  # excluded by --tombstones: never probed, never touched
-            if after[n]["status"] == "dead":
-                pending_confirm.append((n, before[n]))
-            else:
-                if after[n]["status"] != current["status"]:
-                    append_event("status_changed", n, old=current["status"], new=after[n]["status"])
+            if epoch_frozen:
+                continue  # G9: no record recomputed or written this invocation
+            verdict = after[n]
+            if verdict["status"] in _NATIVE_CLEAN_DELETABLE:
+                doomed_now.append((n, before[n]))
+                continue
+            persisted = dict(verdict)
+            persisted.pop("waiting_for_permission", None)
+            if persisted != current:
+                if persisted["status"] != current["status"]:
+                    append_event("status_changed", n, old=current["status"], new=persisted["status"])
                     changed = True
-                data["workers"][n] = after[n]
+                data["workers"][n] = persisted
         if changed:
             save_registry(data)
 
     if epoch_frozen:
-        print("EPOCH: roster suspicious -- native verdicts frozen (G9); legacy cleaning only")
-
-    if pending_confirm:
-        sleep(_DEAD_CONFIRM_DELAY_SECONDS)
-
-    # Second probe: no lock held, mirroring cmd_kill's re-check shape.
-    # Legacy candidates only -- native verdicts are already final (one
-    # deterministic roster fetch, no flaky get_process_info probe to
-    # corroborate).
-    confirmations = [
-        (n, before, recompute_worker(n, before, get_process_info=get_process_info, sleep=sleep))
-        for n, before in pending_confirm
-    ]
+        print("EPOCH: roster suspicious -- verdicts frozen (G9); nothing cleaned this pass")
 
     # §5.1: this is the moment `clean` knows exactly which workers it will
-    # DELETE (registry entry, logs, mailbox and journal -- irreversible; the
-    # claude session survives clean ITSELF, resumable by sid from
-    # events.jsonl -- but F5 caveat: once the autoclean scheduler is
-    # installed, tier 2 will `claude rm` that very session on its next sweep
-    # (post-clean it is owned-by-events and unprotected), so sid-recovery is
-    # a promptly-or-never affordance, not a durable one). Ask
-    # before sweeping any worker this session did not spawn. Outside the lock:
-    # a prompt must never block the fleet. One combined confirm covers both
-    # legacy and native candidates from this single invocation.
-    doomed = {n: before for n, before, confirmed in confirmations if confirmed["status"] == "dead"}
-    doomed.update({n: before for n, before in native_doomed_now})
+    # DELETE (registry entry + on-disk artifacts -- irreversible; the claude
+    # session survives clean ITSELF, resumable by sid from events.jsonl --
+    # but F5 caveat: once the autoclean scheduler is installed, tier 2 will
+    # `claude rm` that very session on its next sweep (post-clean it is
+    # owned-by-events and unprotected), so sid-recovery is a promptly-or-
+    # never affordance, not a durable one). Ask before sweeping any worker
+    # this session did not spawn. Outside the lock: a prompt must never
+    # block the fleet.
+    doomed = {n: rec for n, rec in doomed_now}
     if doomed:
         # T9 fix wave (finding M-6): an archived target's confirm line names
         # what is actually being destroyed -- not just "logs + journal" but
@@ -6261,23 +4211,7 @@ def cmd_clean(args, get_process_info=None, sleep=time.sleep,
     changed = False
     with fleet_lock():
         data = load_registry()
-        for n, before, confirmed in confirmations:
-            current = data["workers"].get(n)
-            if current != before:
-                # Respawned/mutated by someone else while our lock was
-                # released -- spare it, don't act on a stale verdict.
-                continue
-            if confirmed["status"] != before["status"]:
-                append_event("status_changed", n, old=before["status"], new=confirmed["status"])
-                changed = True
-            if confirmed["status"] == "dead":
-                removed.append((n, confirmed["session_id"], confirmed.get("retired_sids", [])))
-                data["workers"].pop(n, None)
-                changed = True
-            else:
-                data["workers"][n] = confirmed
-
-        for n, before_rec in native_doomed_now:
+        for n, before_rec in doomed_now:
             current = data["workers"].get(n)
             if current != before_rec:
                 # Mutated concurrently since the first lock released --
@@ -7088,10 +5022,11 @@ def _remove_autoclean_task() -> None:
 # that must never fail to run. ASCII carries the same ok/not-ok signal
 # unambiguously without that risk.
 #
-# Every check that is explicitly "note-only"/"warn" per the Task 5 brief
-# (legacy settings file, stale PIDs, orphaned/pending mailboxes, stale
-# attaches, orphaned *.claimed.* files, fleet-unknown claude-agents
-# sessions, log sizes) always returns ok=True -- it can inform, never turn
+# Every check that is explicitly "note-only"/"warn" (legacy settings
+# file, orphaned/pending mailboxes, stale attaches, orphaned *.claimed.*
+# files, fleet-unknown claude-agents sessions, limited parks, legacy-mix,
+# dead-suspected, autoclean scheduler state) always returns ok=True -- it
+# can inform, never turn
 # doctor red. Only genuinely broken infrastructure (claude missing/too
 # old, a malformed/backslash-broken/stale settings instance, a hook that
 # doesn't fire end-to-end) counts as a hard failure.
@@ -7339,47 +5274,6 @@ def _doctor_check_terminal_launcher(which=shutil.which):
     return ("terminal-launcher", True, "wt not found -- attach falls back to a detached PowerShell window")
 
 
-def _doctor_check_stale_pids(workers: dict, get_process_info=None):
-    """M-B T11: native records never populate `turn_pid` (dispatch is
-    `--bg`, not a fleet-forked subprocess), so the `is_native` guard is
-    belt-and-suspenders -- the turn_pid-is-not-None condition alone would
-    already exclude them. Guarding explicitly documents that this check is
-    legacy-only rather than relying on an incidental field default."""
-    stale = [
-        name for name, rec in workers.items()
-        if not is_native(rec)
-        and rec.get("status") == "working" and rec.get("turn_pid") is not None
-        and not pid_alive(rec.get("turn_pid"), rec.get("turn_pid_ctime"), get_process_info=get_process_info)
-    ]
-    if stale:
-        return ("stale-pids", True,
-                f"{len(stale)} worker(s) show a stale turn_pid (run `fleet status` to refresh): {', '.join(stale)}")
-    return ("stale-pids", True, "no stale turn_pid entries")
-
-
-def _doctor_check_unreadable_starttime(workers: dict, get_process_info=None):
-    """F15 (item 9): surface working workers whose turn process EXISTS but
-    whose StartTime is unreadable (probe_liveness -> "unknown", the
-    alive-unknown case). These are deliberately never demoted to dead by
-    recompute_status, so doctor is where an operator learns the probe could
-    not fully confirm them -- note-only (always PASS), never a hard failure.
-
-    M-B T11: legacy-only, same rationale as `_doctor_check_stale_pids` --
-    native records carry no `turn_pid` for this to ever probe."""
-    unknown = [
-        name for name, rec in workers.items()
-        if not is_native(rec)
-        and rec.get("status") == "working" and rec.get("turn_pid") is not None
-        and probe_liveness(rec.get("turn_pid"), rec.get("turn_pid_ctime"),
-                           get_process_info=get_process_info) == "unknown"
-    ]
-    if unknown:
-        return ("unreadable-starttime", True,
-                f"{len(unknown)} working worker(s) with an unreadable process StartTime "
-                f"(alive-unknown -- never reaped, verify manually): {', '.join(unknown)}")
-    return ("unreadable-starttime", True, "no workers with an unreadable StartTime")
-
-
 def _doctor_check_mailboxes(workers: dict):
     # F9 (item 8): orphaned mailbox files (sid matches no worker) are now
     # reported by _doctor_check_orphaned_claims (with sid + first-line
@@ -7430,17 +5324,19 @@ def _doctor_check_limited_parks(workers: dict):
 
 
 def _doctor_check_legacy_mix(workers: dict):
-    """M-B T11 (spec §5.1 coexistence): advisory-only (always ok=True) --
-    a legacy (pre-pivot, `dispatch_kind` absent) record is read-only, not
-    broken; naming it just points the operator at `kill`/`clean`. Archived
-    records are excluded even though they're also non-native, since they're
-    already history and doctor's other archived-aware checks cover them."""
+    """Advisory-only (always ok=True): a legacy (pre-pivot, `dispatch_kind`
+    absent) record is unmanageable by this build -- the legacy dispatch/
+    probe path it needs was deleted (pivot spec §6, M-C). Nothing enforces
+    read-only; the truthful advice is retire-only (kill/clean/archive).
+    Archived records are excluded even though they're also non-native,
+    since they're already history and doctor's other archived-aware checks
+    cover them."""
     legacy = sorted(name for name, rec in workers.items()
                     if not is_native(rec) and rec.get("archived_at") is None)
     if legacy:
         return ("legacy-mix", True,
-                f"{len(legacy)} pre-pivot worker(s): {', '.join(legacy)} -- read-only; "
-                "kill or clean (spec 5.1 coexistence)")
+                f"{len(legacy)} pre-pivot worker(s): {', '.join(legacy)} -- "
+                "unmanageable by this build; kill/clean/archive only")
     return ("legacy-mix", True, "no pre-pivot workers")
 
 
@@ -7568,24 +5464,6 @@ def _doctor_check_claude_agents(workers: dict, which=shutil.which, run=subproces
     if unknown:
         return ("claude-agents", True, f"{len(unknown)} claude agent session(s) not tracked by fleet: {', '.join(unknown)}")
     return ("claude-agents", True, "no fleet-unknown claude agent sessions")
-
-
-_LOG_SIZE_WARN_BYTES = 50 * 1024 * 1024
-
-
-def _doctor_check_log_sizes():
-    big = []
-    d = logs_dir()
-    if d.exists():
-        for path in d.glob("*"):
-            try:
-                if path.is_file() and path.stat().st_size > _LOG_SIZE_WARN_BYTES:
-                    big.append(f"{path.name} ({path.stat().st_size // (1024 * 1024)}MB)")
-            except OSError:
-                continue
-    if big:
-        return ("log-sizes", True, f"{len(big)} log file(s) over 50MB: {', '.join(big)}")
-    return ("log-sizes", True, "no log files over 50MB")
 
 
 def _doctor_check_autoclean(run=subprocess.run):
@@ -7749,17 +5627,16 @@ def _doctor_check_hook_registration():
             f"all registered hook events known and command paths exist ({registered})")
 
 
-def cmd_doctor(args, which=shutil.which, run=subprocess.run, get_process_info=None) -> int:
+def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
     """`fleet doctor` (SPEC §5 doctor row, §7 silent-failure alarm): runs
     every health check below and prints one [PASS]/[FAIL] line each;
     exits nonzero iff any check is not ok.
 
-    Snapshots the registry under one fleet_lock() (matching
-    _interrupt_worker's snapshot pattern) then runs every check OUTSIDE
-    the lock: several checks shell out (claude --version, claude agents
-    --json, two real hook-smoke subprocesses) and holding fleet_lock
-    across them would starve every concurrent `fleet` command exactly the
-    way F4 existed to prevent for _interrupt_worker."""
+    Snapshots the registry under one fleet_lock() then runs every check
+    OUTSIDE the lock: several checks shell out (claude --version, claude
+    agents --json, two real hook-smoke subprocesses) and holding fleet_lock
+    across them would starve every concurrent `fleet` command (F4
+    doctrine)."""
     with fleet_lock():
         data = load_registry()
     workers = data.get("workers", {})
@@ -7774,8 +5651,6 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run, get_process_info=No
         functools.partial(_doctor_check_posttooluse_hook_smoke, run=run),
         functools.partial(_doctor_check_stop_hook_smoke, run=run),
         functools.partial(_doctor_check_terminal_launcher, which=which),
-        functools.partial(_doctor_check_stale_pids, workers, get_process_info=get_process_info),
-        functools.partial(_doctor_check_unreadable_starttime, workers, get_process_info=get_process_info),
         functools.partial(_doctor_check_mailboxes, workers),
         functools.partial(_doctor_check_stale_attaches, workers),
         functools.partial(_doctor_check_limited_parks, workers),
@@ -7783,7 +5658,6 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run, get_process_info=No
         functools.partial(_doctor_check_dead_suspected, workers),
         functools.partial(_doctor_check_orphaned_claims, workers=workers),
         functools.partial(_doctor_check_claude_agents, workers, which=which, run=run),
-        functools.partial(_doctor_check_log_sizes),
         functools.partial(_doctor_check_autoclean, run=run),
         functools.partial(_doctor_check_fleet_home_marker),
         functools.partial(_doctor_check_hook_errors),
@@ -9335,7 +7209,7 @@ def main(argv=None) -> int:
     except RegistryCorruptError as exc:
         print(f"fleet: registry error: {exc}", file=sys.stderr)
         return 1
-    except (FleetCliError, ClaudeNotFoundError, TurnLaunchError, ValueError, FleetLockTimeout,
+    except (FleetCliError, ClaudeNotFoundError, ValueError, FleetLockTimeout,
             UnsupportedPlatformError) as exc:
         print(f"fleet: {exc}", file=sys.stderr)
         return 1

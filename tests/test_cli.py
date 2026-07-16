@@ -1,10 +1,9 @@
-"""Unit tests for the claude-fleet M1 CLI layer (bin/fleet.py: main() +
-argparse subcommands + detached turn launcher).
+"""Unit tests for the claude-fleet CLI layer (bin/fleet.py: main() +
+argparse subcommands + native dispatch plumbing).
 
-No real claude process is ever spawned: every test that reaches launch_turn
-injects a fake `popen` and a fake `get_process_info`. Every test monkeypatches
-fleet.FLEET_HOME to a pytest tmp_path (autouse fixture below), same discipline
-as test_core.py.
+No real claude process is ever spawned: every test injects a fake `run` /
+`which` / roster fetch. Every test monkeypatches fleet.FLEET_HOME to a
+pytest tmp_path (autouse fixture below), same discipline as test_core.py.
 """
 import io
 import json
@@ -35,50 +34,6 @@ def isolated_home(tmp_path, monkeypatch):
 
 def _parse(ctime_iso):
     return datetime.strptime(ctime_iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-
-
-class FakeStdin:
-    def __init__(self, raise_on_write=None, block_event=None):
-        self.written = b""
-        self.closed = False
-        # F-DOA: if set, write() raises this instead of appending bytes
-        # (simulates the child's read end having closed -- BrokenPipeError).
-        self._raise_on_write = raise_on_write
-        # F-BLOCK: if set, write() blocks on this threading.Event before
-        # doing anything else (simulates a slow/wedged reader).
-        self._block_event = block_event
-
-    def write(self, data):
-        if self._block_event is not None:
-            self._block_event.wait()
-        if self._raise_on_write is not None:
-            raise self._raise_on_write
-        self.written += data
-
-    def close(self):
-        self.closed = True
-
-
-class FakeProc:
-    def __init__(self, pid, stdin=None, poll_returns=None):
-        self.pid = pid
-        self.stdin = stdin if stdin is not None else FakeStdin()
-        # F-DOA/F-BLOCK: poll_returns is either None (process never exits --
-        # the default, matching a normal healthy launch) or a fixed int
-        # returncode that poll() reports from the very first call onward.
-        self._poll_returns = poll_returns
-
-    def poll(self):
-        return self._poll_returns
-
-
-def _fake_popen(proc, calls=None):
-    def popen(argv, **kwargs):
-        if calls is not None:
-            calls["argv"] = argv
-            calls["kwargs"] = kwargs
-        return proc
-    return popen
 
 
 def _spawn_args(name, dir_, task, mode="dontask", model=None, max_budget_usd=None):
@@ -131,90 +86,6 @@ def _native_roster_with(sid=NATIVE_SID, **kw):
             return True, []
         return True, [_make_native_roster_entry(sid, **kw)]
     return fetch
-
-
-# ---------------------------------------------------------------------------
-# build_turn_argv (pure argv builder, SPEC §6)
-# ---------------------------------------------------------------------------
-
-class TestBuildTurnArgv:
-    def test_first_turn_uses_session_id(self):
-        argv = fleet.build_turn_argv("claude.cmd", "sid-1", first=True, mode="omit")
-        assert "--session-id" in argv
-        assert argv[argv.index("--session-id") + 1] == "sid-1"
-        assert "--resume" not in argv
-
-    def test_resume_turn_uses_resume(self):
-        argv = fleet.build_turn_argv("claude.cmd", "sid-1", first=False, mode="omit")
-        assert "--resume" in argv
-        assert argv[argv.index("--resume") + 1] == "sid-1"
-        assert "--session-id" not in argv
-
-    def test_mandatory_flags_present(self):
-        argv = fleet.build_turn_argv("claude.cmd", "sid-1", first=True, mode="omit")
-        assert argv[0] == "claude.cmd"
-        for flag in ("-p", "--output-format", "stream-json", "--verbose", "--include-hook-events"):
-            assert flag in argv
-
-    def test_settings_path_included(self):
-        # SPEC §14: WORKER_SETTINGS_PATH (a fixed module constant) was
-        # replaced by instance_settings_path(), resolved fresh per call so
-        # it follows FLEET_HOME (env-var override / test sandboxes) like
-        # every other path helper in this module.
-        argv = fleet.build_turn_argv("claude.cmd", "sid-1", first=True, mode="omit")
-        assert "--settings" in argv
-        assert argv[argv.index("--settings") + 1] == str(fleet.instance_settings_path())
-
-    def test_settings_path_explicit_override_wins(self):
-        argv = fleet.build_turn_argv(
-            "claude.cmd", "sid-1", first=True, mode="omit", settings_path="C:/custom/settings.json",
-        )
-        assert argv[argv.index("--settings") + 1] == "C:/custom/settings.json"
-
-    @pytest.mark.parametrize("mode,expected", [
-        ("bypass", ["--dangerously-skip-permissions"]),
-        ("accept", ["--permission-mode", "acceptEdits"]),
-        ("dontask", ["--permission-mode", "dontAsk"]),
-        ("plan", ["--permission-mode", "plan"]),
-        ("omit", []),
-    ])
-    def test_mode_flags_embedded(self, mode, expected):
-        argv = fleet.build_turn_argv("claude.cmd", "sid-1", first=True, mode=mode)
-        if expected:
-            idx = argv.index(expected[0])
-            assert argv[idx:idx + len(expected)] == expected
-        else:
-            assert "--permission-mode" not in argv
-            assert "--dangerously-skip-permissions" not in argv
-
-    def test_model_flag_included_when_given(self):
-        argv = fleet.build_turn_argv("claude.cmd", "sid-1", first=True, mode="omit", model="haiku")
-        assert argv[argv.index("--model") + 1] == "haiku"
-
-    def test_model_flag_omitted_when_none(self):
-        argv = fleet.build_turn_argv("claude.cmd", "sid-1", first=True, mode="omit", model=None)
-        assert "--model" not in argv
-
-    def test_max_budget_flag_included_when_given(self):
-        argv = fleet.build_turn_argv("claude.cmd", "sid-1", first=True, mode="omit", max_budget_usd=2.5)
-        assert argv[argv.index("--max-budget-usd") + 1] == "2.5"
-
-    def test_max_budget_flag_omitted_when_none(self):
-        argv = fleet.build_turn_argv("claude.cmd", "sid-1", first=True, mode="omit", max_budget_usd=None)
-        assert "--max-budget-usd" not in argv
-
-    def test_setting_sources_flag_included_when_given(self):
-        argv = fleet.build_turn_argv(
-            "claude.cmd", "sid-1", first=True, mode="omit", setting_sources="user,project")
-        assert argv[argv.index("--setting-sources") + 1] == "user,project"
-
-    def test_setting_sources_flag_omitted_when_none(self):
-        argv = fleet.build_turn_argv("claude.cmd", "sid-1", first=True, mode="omit", setting_sources=None)
-        assert "--setting-sources" not in argv
-
-    def test_invalid_mode_raises(self):
-        with pytest.raises(ValueError):
-            fleet.build_turn_argv("claude.cmd", "sid-1", first=True, mode="yolo")
 
 
 # ---------------------------------------------------------------------------
@@ -278,37 +149,6 @@ class TestTokenCeilingRecordAndSum:
         fleet.save_registry({"workers": {"probe-1": rec}})
         loaded = fleet.load_registry()["workers"]["probe-1"]
         assert loaded.get("token_ceiling") is None
-
-    def test_sum_result_tokens_sums_input_plus_output_across_results(self, isolated_home):
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text(
-            '{"type":"assistant","message":{"usage":{"input_tokens":9999}}}\n'
-            '{"type":"result","usage":{"input_tokens":100,"output_tokens":20}}\n'
-            '{"type":"result","usage":{"input_tokens":30,"output_tokens":5}}\n',
-            encoding="utf-8",
-        )
-        # only "result" events counted (assistant usage ignored): 100+20+30+5
-        assert fleet._sum_result_tokens(log) == 155
-
-    def test_sum_result_tokens_none_when_no_result(self, isolated_home):
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text('{"type":"assistant","message":{"usage":{"input_tokens":10}}}\n', encoding="utf-8")
-        assert fleet._sum_result_tokens(log) is None
-
-    def test_sum_result_tokens_none_when_missing(self, isolated_home):
-        assert fleet._sum_result_tokens(fleet.logs_dir() / "nope.jsonl") is None
-
-    def test_sum_result_tokens_ignores_bogus_usage_values(self, isolated_home):
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text(
-            '{"type":"result","usage":{"input_tokens":true,"output_tokens":-5}}\n'
-            '{"type":"result","usage":{"input_tokens":40,"output_tokens":2}}\n',
-            encoding="utf-8",
-        )
-        assert fleet._sum_result_tokens(log) == 42
 
 
 class TestSpawnWritesCeilingFile:
@@ -426,156 +266,6 @@ class TestResolveClaudeExecutable:
 
 
 # ---------------------------------------------------------------------------
-# launch_turn (Popen injected -- no real claude spawn)
-# ---------------------------------------------------------------------------
-
-class TestLaunchTurn:
-    def test_launch_writes_prompt_to_stdin_and_closes_it(self, isolated_home):
-        proc = FakeProc(pid=4321)
-        popen = _fake_popen(proc)
-        ctime = datetime(2026, 7, 7, 12, 0, 0, tzinfo=timezone.utc)
-        info = fleet.launch_turn(
-            "probe-1", isolated_home, "sid-1", "hello prompt", "omit", first=True,
-            popen=popen, get_process_info=lambda pid: ("claude.exe", ctime),
-            which=lambda n: "claude.cmd",
-        )
-        assert proc.stdin.written == "hello prompt".encode("utf-8")
-        assert proc.stdin.closed is True
-        assert info["turn_pid"] == 4321
-        assert info["turn_pid_ctime"] == fleet.ctime_to_iso(ctime)
-
-    def test_launch_creates_log_files(self, isolated_home):
-        proc = FakeProc(pid=1)
-        popen = _fake_popen(proc)
-        fleet.launch_turn(
-            "probe-1", isolated_home, "sid-1", "x", "omit", first=True,
-            popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd",
-        )
-        assert (isolated_home / "logs" / "probe-1.jsonl").exists()
-        assert (isolated_home / "logs" / "probe-1.err").exists()
-
-    def test_launch_passes_cwd_and_creationflags(self, isolated_home):
-        proc = FakeProc(pid=1)
-        calls = {}
-        popen = _fake_popen(proc, calls)
-        fleet.launch_turn(
-            "probe-1", isolated_home, "sid-1", "x", "omit", first=True,
-            popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd",
-        )
-        assert calls["kwargs"]["cwd"] == str(isolated_home)
-        assert calls["kwargs"]["creationflags"] == (
-            fleet.subprocess.DETACHED_PROCESS | fleet.subprocess.CREATE_NEW_PROCESS_GROUP
-        )
-
-    def test_claude_not_found_raises_before_popen_called(self, isolated_home):
-        def popen(*a, **kw):
-            raise AssertionError("popen must not be called when claude is not on PATH")
-
-        with pytest.raises(fleet.ClaudeNotFoundError):
-            fleet.launch_turn(
-                "probe-1", isolated_home, "sid-1", "x", "omit", first=True,
-                popen=popen, get_process_info=lambda pid: None, which=lambda n: None,
-            )
-
-    def test_popen_failure_raises_turn_launch_error(self, isolated_home):
-        def popen(*a, **kw):
-            raise OSError("boom")
-
-        with pytest.raises(fleet.TurnLaunchError):
-            fleet.launch_turn(
-                "probe-1", isolated_home, "sid-1", "x", "omit", first=True,
-                popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd",
-            )
-
-    def test_process_info_none_yields_none_ctime_not_an_error(self, isolated_home):
-        proc = FakeProc(pid=1)
-        popen = _fake_popen(proc)
-        info = fleet.launch_turn(
-            "probe-1", isolated_home, "sid-1", "x", "omit", first=True,
-            popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd",
-        )
-        assert info["turn_pid_ctime"] is None
-
-    # -----------------------------------------------------------------
-    # F-DOA: a child that dies during init before consuming its prompt
-    # must be reported as a launch failure, not a running turn.
-    # -----------------------------------------------------------------
-
-    def test_broken_pipe_write_with_nonzero_poll_raises_turn_launch_error(self, isolated_home):
-        """The exact testDOA.py scenario: the child closed its read end
-        before the prompt was consumed (BrokenPipeError) and poll() confirms
-        it already exited nonzero -- this must raise, not report success."""
-        stdin = FakeStdin(raise_on_write=BrokenPipeError())
-        proc = FakeProc(pid=4321, stdin=stdin, poll_returns=1)
-        popen = _fake_popen(proc)
-        with pytest.raises(fleet.TurnLaunchError):
-            fleet.launch_turn(
-                "probe-1", isolated_home, "sid-1", "hello prompt", "omit", first=True,
-                popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd",
-            )
-
-    def test_buffered_write_succeeds_but_nonzero_poll_raises(self, isolated_home):
-        """Small-prompt case: the write is buffered and returns cleanly, but
-        the child has already exited nonzero within the window -- BrokenPipe
-        alone would miss this, so poll() must be checked too."""
-        proc = FakeProc(pid=4321, poll_returns=7)
-        popen = _fake_popen(proc)
-        with pytest.raises(fleet.TurnLaunchError):
-            fleet.launch_turn(
-                "probe-1", isolated_home, "sid-1", "hello prompt", "omit", first=True,
-                popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd",
-            )
-
-    def test_zero_poll_within_window_is_success_not_failure(self, isolated_home):
-        """An ultra-fast legitimately-completed turn (rc == 0) must not be
-        misreported as a launch failure."""
-        proc = FakeProc(pid=4321, poll_returns=0)
-        popen = _fake_popen(proc)
-        info = fleet.launch_turn(
-            "probe-1", isolated_home, "sid-1", "hello prompt", "omit", first=True,
-            popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd",
-        )
-        assert info["turn_pid"] == 4321
-
-    # -----------------------------------------------------------------
-    # F-BLOCK: the prompt write must not block the manager thread.
-    # -----------------------------------------------------------------
-
-    def test_blocked_writer_with_process_alive_returns_within_bounded_window(self, isolated_home, monkeypatch):
-        """A wedged/slow-booting child that never reads stdin (poll() stays
-        None) must not hang launch_turn forever -- it returns within the
-        bounded DOA window and is treated as success (F-DOA residual)."""
-        monkeypatch.setattr(fleet, "LAUNCH_DOA_WINDOW_SECONDS", 0.2)
-        block_event = threading.Event()
-        stdin = FakeStdin(block_event=block_event)
-        proc = FakeProc(pid=4321, stdin=stdin, poll_returns=None)
-        popen = _fake_popen(proc)
-
-        start = fleet.time.monotonic()
-        info = fleet.launch_turn(
-            "probe-1", isolated_home, "sid-1", "hello prompt", "omit", first=True,
-            popen=popen, get_process_info=lambda pid: None, which=lambda n: "claude.cmd",
-        )
-        elapsed = fleet.time.monotonic() - start
-
-        assert elapsed < 2.0  # bounded, not hung
-        assert info["turn_pid"] == 4321
-
-        # release the wedged write so the daemon thread can finish cleanly;
-        # no exception should escape (it has nowhere to go but the holder).
-        block_event.set()
-
-    # M-B T4: test_blocked_writer_turn_pid_recorded_by_cmd_spawn (the
-    # orphan-pid regression via cmd_spawn's post-launch lock) is DELETED --
-    # cmd_spawn no longer calls launch_turn/Popen at all (native `--bg`
-    # dispatch via dispatch_bg, see TestCmdSpawn below); the blocked-writer
-    # DOA-window mechanism it exercised only exists for launch_turn callers
-    # that still use it (cmd_send/cmd_respawn), already covered by
-    # test_blocked_writer_with_process_alive_returns_within_bounded_window
-    # above.
-
-
-# ---------------------------------------------------------------------------
 # cmd_spawn (M-B T4: native `--bg` dispatch via dispatch_bg -- see
 # tests/test_native.py::TestCmdSpawnNative for the launch-contract-specific
 # cases: USD-budget refusal, dispatch-failure rollback, join-expiry
@@ -603,7 +293,7 @@ class TestCmdSpawn:
         assert rec["cwd"] == str(worker_dir)
         assert rec["mode"] == "dontask"
         assert rec["model"] == "haiku"
-        assert rec["turn_pid"] is None  # native flow never populates the legacy Popen field
+        assert "turn_pid" not in rec  # legacy Popen field retired (pivot spec §6)
         assert rec["turns"] == 1
 
     def test_spawn_persists_setting_sources(self, isolated_home, tmp_path, monkeypatch):
@@ -735,7 +425,7 @@ class TestCmdSpawn:
         flow: cmd_spawn's rollback must also catch BaseException -- a Ctrl-C
         landing during dispatch must still pop the just-created registry
         record, not leave a ghost "working"+session_id=None record pinned
-        forever by recompute_status's launch-in-flight guard."""
+        forever by the recompute launch-in-flight guard."""
         worker_dir = tmp_path / "proj"
         worker_dir.mkdir()
 
@@ -752,7 +442,7 @@ class TestCmdSpawn:
     def test_spawn_reasserts_working_after_concurrent_recompute_race(self, isolated_home, tmp_path, monkeypatch):
         """F-RACE: between cmd_spawn's create-lock (record written with
         session_id=None) and its post-dispatch stamp lock, a concurrent
-        `fleet status` can recompute_status(...) -> "dead" and persist it.
+        `fleet status` can recompute a "dead" verdict and persist it.
         The stamp lock must re-assert status="working" so the live worker
         is not left permanently `dead` (testRace.py in the adversarial
         review; same contract under native dispatch)."""
@@ -782,10 +472,10 @@ class TestCmdSpawn:
 
 
 # ---------------------------------------------------------------------------
-# _commit_launched_turn / _report_stranded_turn (post-testing wave, item 1b:
-# stress-report Finding 1, CRITICAL -- the post-launch commit lock in
-# cmd_spawn/cmd_send/cmd_respawn must not strand an already-launched, live
-# turn just because that ONE lock acquisition timed out.)
+# _commit_launched_turn (post-testing wave, item 1b: stress-report Finding 1,
+# CRITICAL -- the post-dispatch commit lock in cmd_spawn/cmd_send/cmd_respawn
+# must not strand an already-dispatched, live session just because that ONE
+# lock acquisition timed out.)
 # ---------------------------------------------------------------------------
 
 class TestCommitLaunchedTurn:
@@ -861,29 +551,6 @@ class TestCommitLaunchedTurn:
         assert fleet._commit_launched_turn(commit, sleep=lambda s: None) is False
         err = capsys.readouterr().err
         assert "No space left on device" in err
-
-
-class TestReportStrandedTurn:
-    def test_prints_loud_message_and_appends_event(self, isolated_home, capsys):
-        info = {"turn_pid": 4242, "turn_pid_ctime": "2026-07-07T12:00:00Z", "log_path": "x.jsonl"}
-        fleet._report_stranded_turn("probe-1", "sid-123", info)
-
-        err = capsys.readouterr().err
-        assert "CRITICAL" in err
-        assert "probe-1" in err
-        assert "4242" in err
-
-        events = [json.loads(line) for line in fleet.events_path().read_text(encoding="utf-8").splitlines()]
-        assert any(e["kind"] == "turn_commit_failed" and e["name"] == "probe-1" for e in events)
-
-    def test_never_raises_even_if_append_event_fails(self, isolated_home, monkeypatch, capsys):
-        def broken_append_event(*a, **kw):
-            raise OSError("disk full")
-
-        monkeypatch.setattr(fleet, "append_event", broken_append_event)
-        info = {"turn_pid": 1, "turn_pid_ctime": None, "log_path": "x.jsonl"}
-        fleet._report_stranded_turn("probe-1", "sid-123", info)  # must not raise
-        assert "CRITICAL" in capsys.readouterr().err
 
 
 class TestCmdSpawnNativeCommitLockRetry:
@@ -1141,71 +808,23 @@ def _seed_record(worker_dir):
 
 
 # ---------------------------------------------------------------------------
-# recompute_worker / cmd_status transitions
+# cmd_status transitions (native verdict engine wired through the CLI)
 # ---------------------------------------------------------------------------
 
-class TestRecomputeWorker:
-    def test_working_to_idle_on_result_line(self, isolated_home):
-        sid = str(uuid.uuid4())
-        rec = fleet.new_worker_record(sid, "C:/x", "task", "dontask")
-        rec["turn_pid"] = 111
-        rec["turn_pid_ctime"] = "2026-07-07T12:00:00Z"
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text(
-            '{"type":"result","subtype":"success","result":"all done","total_cost_usd":0.5}\n',
-            encoding="utf-8",
-        )
-        updated = fleet.recompute_worker("probe-1", rec, get_process_info=lambda pid: None)
-        assert updated["status"] == "idle"
-        assert updated["cost_usd"] == 0.5
 
-    def test_working_to_dead_on_crash_no_result_line(self, isolated_home):
-        sid = str(uuid.uuid4())
-        rec = fleet.new_worker_record(sid, "C:/x", "task", "dontask")
-        rec["turn_pid"] = 111
-        rec["turn_pid_ctime"] = "2026-07-07T12:00:00Z"
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text('{"type":"assistant","message":{"content":[]}}\n', encoding="utf-8")
-        updated = fleet.recompute_worker("probe-1", rec, get_process_info=lambda pid: None)
-        assert updated["status"] == "dead"
-
-    def test_stays_working_when_pid_alive(self, isolated_home):
-        sid = str(uuid.uuid4())
-        rec = fleet.new_worker_record(sid, "C:/x", "task", "dontask")
-        rec["turn_pid"] = 111
-        rec["turn_pid_ctime"] = "2026-07-07T12:00:00Z"
-        info = lambda pid: ("claude.exe", _parse("2026-07-07T12:00:00Z"))
-        updated = fleet.recompute_worker("probe-1", rec, get_process_info=info)
-        assert updated["status"] == "working"
-
-    def test_attached_not_clobbered(self, isolated_home):
-        sid = str(uuid.uuid4())
-        rec = fleet.new_worker_record(sid, "C:/x", "task", "dontask")
-        rec["status"] = "attached"
-        rec["turn_pid"] = 111
-        rec["turn_pid_ctime"] = "2026-07-07T12:00:00Z"
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text('{"type":"result","result":"done"}\n', encoding="utf-8")
-        updated = fleet.recompute_worker("probe-1", rec, get_process_info=lambda pid: None)
-        assert updated["status"] == "attached"
-
-    def test_expired_launch_claim_demotes_to_dead(self, isolated_home):
-        """Post-testing wave, item 1c: recompute_worker must plumb the
-        record's own last_activity through to recompute_status so an
-        expired "working"/turn_pid=None claim (the fleet CLI died mid-
-        launch, per the zombie-escape-hatch fix) actually demotes here,
-        not just when recompute_status is called directly."""
-        sid = str(uuid.uuid4())
-        rec = fleet.new_worker_record(sid, "C:/x", "task", "dontask")
-        rec["turn_pid"] = None
-        rec["last_activity"] = fleet.ctime_to_iso(
-            datetime.now(timezone.utc) - timedelta(seconds=fleet.LAUNCH_CLAIM_MAX_AGE_SECONDS + 1)
-        )
-        updated = fleet.recompute_worker("probe-1", rec, get_process_info=lambda pid: None)
-        assert updated["status"] == "dead"
+def _seed_native(name, sid=None, status=None, fresh_outcome=False):
+    """Save one native worker record; optionally a fresh result outcome so a
+    roster-idle verdict resolves to idle instead of dead-suspected."""
+    sid = sid or str(uuid.uuid4())
+    rec = fleet.new_worker_record(sid, "C:/x", "task", "dontask", dispatch_kind="bg")
+    rec["last_dispatch_at"] = fleet.now_iso()
+    if status is not None:
+        rec["status"] = status
+    fleet.save_registry({"workers": {name: rec}})
+    if fresh_outcome:
+        fleet.append_outcome(name, {"ts": fleet.now_iso(), "session_id": sid,
+                                    "kind": "result", "result_text": "all set"})
+    return sid, rec
 
 
 class TestCmdStatus:
@@ -1214,130 +833,85 @@ class TestCmdStatus:
         with pytest.raises(fleet.FleetCliError):
             fleet.cmd_status(args)
 
-    def test_status_prints_table_with_all_workers(self, isolated_home, capsys):
-        sid1, sid2 = str(uuid.uuid4()), str(uuid.uuid4())
-        rec1 = fleet.new_worker_record(sid1, "C:/x", "task1", "dontask")
-        rec2 = fleet.new_worker_record(sid2, "C:/y", "task2", "bypass")
-        fleet.save_registry({"workers": {"probe-1": rec1, "probe-2": rec2}})
+    def test_status_prints_table_with_all_workers(self, isolated_home, capsys, monkeypatch):
+        sid1, _ = _seed_native("probe-1")
+        sid2 = str(uuid.uuid4())
+        data = fleet.load_registry()
+        rec2 = fleet.new_worker_record(sid2, "C:/y", "task2", "bypass", dispatch_kind="bg")
+        data["workers"]["probe-2"] = rec2
+        fleet.save_registry(data)
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, [
+            _make_native_roster_entry(sid1), _make_native_roster_entry(sid2)]))
         args = fleet.build_parser().parse_args(["status"])
-        rc = fleet.cmd_status(args, get_process_info=lambda pid: None)
+        rc = fleet.cmd_status(args)
         assert rc == 0
         out = capsys.readouterr().out
         assert "probe-1" in out
         assert "probe-2" in out
 
-    def test_status_flags_idle_with_pending_mail(self, isolated_home, capsys):
-        """Fix wave 1 (F1): a "working" record with turn_pid=None is now the
-        pre-claim launch-in-flight window and recompute_status refuses to
-        demote it (a raw new_worker_record() with turn_pid never stamped
-        would otherwise be indistinguishable from a real in-flight launch).
-        Use a real, dead turn_pid here so the ordinary (non-guarded)
-        liveness path demotes it to idle."""
-        sid = str(uuid.uuid4())
-        rec = fleet.new_worker_record(sid, "C:/x", "task", "dontask")
-        rec["turn_pid"] = 111
-        rec["turn_pid_ctime"] = "2026-07-07T12:00:00Z"
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text('{"type":"result","result":"done"}\n', encoding="utf-8")
-        fleet.save_registry({"workers": {"probe-1": rec}})
+    def test_status_flags_idle_with_pending_mail(self, isolated_home, capsys, monkeypatch):
+        sid, _ = _seed_native("probe-1", fresh_outcome=True)
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, [
+            _make_native_roster_entry(sid, status="idle")]))
         mbox = fleet.mailbox_dir()
         mbox.mkdir(parents=True, exist_ok=True)
         (mbox / f"{sid}.md").write_text("please check X", encoding="utf-8")
 
         args = fleet.build_parser().parse_args(["status"])
-        fleet.cmd_status(args, get_process_info=lambda pid: None)
+        fleet.cmd_status(args)
         out = capsys.readouterr().out
         assert "idle+mail" in out
 
-    def test_status_persists_recomputed_status(self, isolated_home):
-        sid = str(uuid.uuid4())
-        rec = fleet.new_worker_record(sid, "C:/x", "task", "dontask")
-        rec["turn_pid"] = 111
-        rec["turn_pid_ctime"] = "2026-07-07T12:00:00Z"
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text('{"type":"result","result":"done"}\n', encoding="utf-8")
-        fleet.save_registry({"workers": {"probe-1": rec}})
+    def test_status_persists_recomputed_status(self, isolated_home, monkeypatch):
+        sid, _ = _seed_native("probe-1", fresh_outcome=True)
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, [
+            _make_native_roster_entry(sid, status="idle")]))
 
         args = fleet.build_parser().parse_args(["status", "probe-1"])
-        fleet.cmd_status(args, get_process_info=lambda pid: None)
+        fleet.cmd_status(args)
 
         assert fleet.load_registry()["workers"]["probe-1"]["status"] == "idle"
 
-    def test_probe_does_not_hold_fleet_lock(self, isolated_home):
-        """Post-testing wave, item 1a (stress-report Finding 1, CRITICAL):
-        cmd_status used to recompute (and probe) every worker inside one
-        `with fleet_lock():` block -- get_process_info can cost hundreds of
-        ms per real subprocess call, and several workers'-worth of that
-        while holding the lock starved concurrent commands (including a
-        spawn/send/respawn's own post-launch commit lock, after a real
-        turn had already been launched). Reuses the lock-probe technique
-        from test_resilience.py's test_confirm_delay_does_not_hold_fleet_lock
-        / test_snapshots_registry_without_holding_lock_across_checks: a
-        fake get_process_info that itself tries to acquire fleet_lock. If
-        cmd_status still held the lock across the probe, this nested
-        acquisition would raise FleetLockTimeout."""
-        sid1, sid2 = str(uuid.uuid4()), str(uuid.uuid4())
-        rec1 = fleet.new_worker_record(sid1, "C:/x", "t1", "dontask")
-        rec1["turn_pid"], rec1["turn_pid_ctime"] = 111, "2026-07-07T12:00:00Z"
-        rec2 = fleet.new_worker_record(sid2, "C:/y", "t2", "dontask")
-        rec2["turn_pid"], rec2["turn_pid_ctime"] = 222, "2026-07-07T12:00:00Z"
-        fleet.save_registry({"workers": {"probe-1": rec1, "probe-2": rec2}})
+    def test_roster_fetch_does_not_hold_fleet_lock(self, isolated_home, monkeypatch):
+        """Stress-report Finding 1 heritage: cmd_status must run its roster
+        fetch/recompute with NO fleet_lock held. A roster fetch that itself
+        tries to acquire fleet_lock would raise FleetLockTimeout if
+        cmd_status still held the lock across it."""
+        sid, _ = _seed_native("probe-1")
 
-        def probing_get_process_info(pid):
+        def probing_fetch(**_):
             with fleet.fleet_lock(timeout=0.5):
                 pass  # must not raise FleetLockTimeout
-            return None  # both workers recompute to dead/idle-ish; not the point of this test
+            return True, [_make_native_roster_entry(sid)]
 
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", probing_fetch)
         args = fleet.build_parser().parse_args(["status"])
-        rc = fleet.cmd_status(args, get_process_info=probing_get_process_info)
+        rc = fleet.cmd_status(args)
         assert rc == 0
 
-    def test_concurrent_mutation_during_probe_is_not_clobbered(self, isolated_home):
+    def test_concurrent_mutation_during_probe_is_not_clobbered(self, isolated_home, monkeypatch):
         """A worker mutated by a concurrent command while cmd_status's lock
-        is released for probing must be spared -- cmd_status must not
-        overwrite that concurrent write with a verdict computed against
-        now-stale pre-probe data (mirrors cmd_clean's respawned-meanwhile
-        guard)."""
-        sid = str(uuid.uuid4())
-        rec = fleet.new_worker_record(sid, "C:/x", "t1", "dontask")
-        rec["turn_pid"], rec["turn_pid_ctime"] = 111, "2026-07-07T12:00:00Z"
-        fleet.save_registry({"workers": {"probe-1": rec}})
+        is released for the roster fetch must be spared -- cmd_status must
+        not overwrite that concurrent write with a verdict computed against
+        now-stale pre-probe data."""
+        sid, _ = _seed_native("probe-1", fresh_outcome=True)
 
-        def mutating_get_process_info(pid):
+        def mutating_fetch(**_):
             data = fleet.load_registry()
             data["workers"]["probe-1"]["turns"] = 999
             fleet.save_registry(data)
-            return None
+            return True, [_make_native_roster_entry(sid, status="idle")]
 
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", mutating_fetch)
         args = fleet.build_parser().parse_args(["status"])
-        rc = fleet.cmd_status(args, get_process_info=mutating_get_process_info)
+        rc = fleet.cmd_status(args)
         assert rc == 0
         assert fleet.load_registry()["workers"]["probe-1"]["turns"] == 999
 
 
 # ---------------------------------------------------------------------------
-# hook_events_present / cmd_peek
+# cmd_peek (native transcript digest)
 # ---------------------------------------------------------------------------
-
-class TestHookEventsPresent:
-    def test_present_when_hookeventname_in_log(self, tmp_path):
-        log = tmp_path / "w.jsonl"
-        log.write_text(
-            '{"type":"system","hookSpecificOutput":{"hookEventName":"PostToolUse"}}\n',
-            encoding="utf-8",
-        )
-        assert fleet.hook_events_present(log) is True
-
-    def test_absent_when_no_hook_events(self, tmp_path):
-        log = tmp_path / "w.jsonl"
-        log.write_text('{"type":"assistant","message":{"content":[]}}\n', encoding="utf-8")
-        assert fleet.hook_events_present(log) is False
-
-    def test_missing_log_is_absent(self, tmp_path):
-        assert fleet.hook_events_present(tmp_path / "nope.jsonl") is False
-
 
 class TestCmdPeek:
     def test_peek_unknown_worker_raises(self, isolated_home):
@@ -1345,17 +919,15 @@ class TestCmdPeek:
         with pytest.raises(fleet.FleetCliError):
             fleet.cmd_peek(args)
 
-    def test_peek_prints_digest(self, isolated_home, capsys):
-        sid = str(uuid.uuid4())
-        rec = fleet.new_worker_record(sid, "C:/x", "task", "dontask")
-        fleet.save_registry({"workers": {"probe-1": rec}})
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text(
+    def test_peek_prints_transcript_digest(self, isolated_home, capsys, monkeypatch):
+        sid, _ = _seed_native("probe-1")
+        transcript = isolated_home / "transcript.jsonl"
+        transcript.write_text(
             '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}\n'
-            '{"type":"result","result":"all done","total_cost_usd":0.1}\n',
+            '{"type":"assistant","message":{"content":[{"type":"text","text":"all done"}]}}\n',
             encoding="utf-8",
         )
+        monkeypatch.setattr(fleet, "find_transcript_path", lambda name, s: transcript)
         args = fleet.build_parser().parse_args(["peek", "probe-1"])
         rc = fleet.cmd_peek(args)
         assert rc == 0
@@ -1363,14 +935,13 @@ class TestCmdPeek:
         assert "Bash" in out
         assert "all done" in out
 
-    def test_peek_no_events_yet(self, isolated_home, capsys):
-        sid = str(uuid.uuid4())
-        rec = fleet.new_worker_record(sid, "C:/x", "task", "dontask")
-        fleet.save_registry({"workers": {"probe-1": rec}})
+    def test_peek_no_transcript_yet_exits_nonzero_with_hint(self, isolated_home, capsys, monkeypatch):
+        _seed_native("probe-1")
+        monkeypatch.setattr(fleet, "find_transcript_path", lambda name, s: None)
         args = fleet.build_parser().parse_args(["peek", "probe-1"])
         rc = fleet.cmd_peek(args)
-        assert rc == 0
-        assert "no events yet" in capsys.readouterr().out
+        assert rc == 1
+        assert "no transcript" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
@@ -1384,16 +955,10 @@ class TestCmdResult:
             fleet.cmd_result(args)
 
     def test_result_prints_final_result_text_only(self, isolated_home, capsys):
-        sid = str(uuid.uuid4())
-        rec = fleet.new_worker_record(sid, "C:/x", "task", "dontask")
-        fleet.save_registry({"workers": {"probe-1": rec}})
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text(
-            '{"type":"assistant","message":{"content":[{"type":"text","text":"thinking..."}]}}\n'
-            '{"type":"result","result":"the final answer","total_cost_usd":0.2}\n',
-            encoding="utf-8",
-        )
+        sid, _ = _seed_native("probe-1")
+        fleet.append_outcome("probe-1", {"ts": fleet.now_iso(), "session_id": sid,
+                                         "kind": "result",
+                                         "result_text": "the final answer"})
         args = fleet.build_parser().parse_args(["result", "probe-1"])
         rc = fleet.cmd_result(args)
         assert rc == 0
@@ -1401,13 +966,11 @@ class TestCmdResult:
         assert out == "the final answer"
 
     def test_result_none_yet_prints_clear_message_and_nonzero(self, isolated_home, capsys):
-        sid = str(uuid.uuid4())
-        rec = fleet.new_worker_record(sid, "C:/x", "task", "dontask")
-        fleet.save_registry({"workers": {"probe-1": rec}})
+        _seed_native("probe-1")
         args = fleet.build_parser().parse_args(["result", "probe-1"])
         rc = fleet.cmd_result(args)
         assert rc != 0
-        assert "no completed turn result" in capsys.readouterr().out
+        assert "no outcome record" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
@@ -1426,37 +989,69 @@ class FakeClock:
 
 
 class TestWaitForWorkers:
-    def test_all_mode_waits_for_every_worker(self, isolated_home):
-        sid1, sid2 = str(uuid.uuid4()), str(uuid.uuid4())
-        rec1 = fleet.new_worker_record(sid1, "C:/x", "t1", "dontask")
-        rec1["turn_pid"], rec1["turn_pid_ctime"] = 111, "2026-07-07T12:00:00Z"
-        rec2 = fleet.new_worker_record(sid2, "C:/y", "t2", "dontask")
-        rec2["turn_pid"], rec2["turn_pid_ctime"] = 222, "2026-07-07T12:00:00Z"
-        fleet.save_registry({"workers": {"probe-1": rec1, "probe-2": rec2}})
-        for name in ("probe-1", "probe-2"):
-            log = fleet.logs_dir() / f"{name}.jsonl"
-            log.parent.mkdir(parents=True, exist_ok=True)
-            log.write_text('{"type":"result","result":"done"}\n', encoding="utf-8")
+    def test_all_mode_waits_for_every_worker(self, isolated_home, monkeypatch):
+        sid1, _ = _seed_native("probe-1", fresh_outcome=True)
+        sid2 = str(uuid.uuid4())
+        data = fleet.load_registry()
+        rec2 = fleet.new_worker_record(sid2, "C:/y", "t2", "dontask", dispatch_kind="bg")
+        rec2["last_dispatch_at"] = fleet.now_iso()
+        data["workers"]["probe-2"] = rec2
+        fleet.save_registry(data)
+        fleet.append_outcome("probe-2", {"ts": fleet.now_iso(), "session_id": sid2,
+                                         "kind": "result"})
 
         calls = {"n": 0}
 
-        def info(pid):
+        def fetch(**_):
             calls["n"] += 1
-            # probe-1 (111) finishes after the first poll; probe-2 (222)
-            # finishes after the second poll.
-            if pid == 111:
-                return None
-            if pid == 222:
-                return None if calls["n"] > 4 else ("claude.exe", _parse("2026-07-07T12:00:00Z"))
-            return None
+            # probe-1 idles immediately; probe-2 stays busy for two polls.
+            e2_status = "idle" if calls["n"] > 2 else "busy"
+            return True, [_make_native_roster_entry(sid1, status="idle"),
+                          _make_native_roster_entry(sid2, status=e2_status)]
 
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", fetch)
         clock = FakeClock()
         finished, pending = fleet.wait_for_workers(
             ["probe-1", "probe-2"], mode="all", timeout=None, poll_interval=1.0,
-            get_process_info=info, sleep=clock.sleep, clock=clock.now,
+            sleep=clock.sleep, clock=clock.now,
         )
         assert pending == set()
         assert finished == {"probe-1": "idle", "probe-2": "idle"}
+
+
+    def test_any_mode_returns_as_soon_as_one_finishes(self, isolated_home, monkeypatch):
+        sid1, _ = _seed_native("probe-1", fresh_outcome=True)
+        sid2 = str(uuid.uuid4())
+        data = fleet.load_registry()
+        rec2 = fleet.new_worker_record(sid2, "C:/y", "t2", "dontask", dispatch_kind="bg")
+        rec2["last_dispatch_at"] = fleet.now_iso()
+        data["workers"]["probe-2"] = rec2
+        fleet.save_registry(data)
+
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, [
+            _make_native_roster_entry(sid1, status="idle"),
+            _make_native_roster_entry(sid2, status="busy")]))
+        clock = FakeClock()
+        finished, pending = fleet.wait_for_workers(
+            ["probe-1", "probe-2"], mode="any", timeout=None, poll_interval=1.0,
+            sleep=clock.sleep, clock=clock.now,
+        )
+        assert finished == {"probe-1": "idle"}
+        assert pending == {"probe-2"}
+
+    def test_timeout_leaves_pending_nonempty(self, isolated_home, monkeypatch):
+        sid, _ = _seed_native("probe-1")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, [
+            _make_native_roster_entry(sid, status="busy")]))
+
+        clock = FakeClock()
+        finished, pending = fleet.wait_for_workers(
+            ["probe-1"], mode="all", timeout=5.0, poll_interval=1.0,
+            sleep=clock.sleep, clock=clock.now,
+        )
+        assert finished == {}
+        assert pending == {"probe-1"}
+
 
 
 # ---------------------------------------------------------------------------
@@ -1490,66 +1085,19 @@ class TestRegistryCorruptPropagatesThroughMain:
         with pytest.raises(fleet.RegistryCorruptError):
             fleet.cmd_status(args)
 
-    def test_any_mode_returns_as_soon_as_one_finishes(self, isolated_home):
-        sid1, sid2 = str(uuid.uuid4()), str(uuid.uuid4())
-        rec1 = fleet.new_worker_record(sid1, "C:/x", "t1", "dontask")
-        rec1["turn_pid"], rec1["turn_pid_ctime"] = 111, "2026-07-07T12:00:00Z"
-        rec2 = fleet.new_worker_record(sid2, "C:/y", "t2", "dontask")
-        rec2["turn_pid"], rec2["turn_pid_ctime"] = 222, "2026-07-07T12:00:00Z"
-        fleet.save_registry({"workers": {"probe-1": rec1, "probe-2": rec2}})
-        for name in ("probe-1", "probe-2"):
-            log = fleet.logs_dir() / f"{name}.jsonl"
-            log.parent.mkdir(parents=True, exist_ok=True)
-            log.write_text('{"type":"result","result":"done"}\n', encoding="utf-8")
-
-        def info(pid):
-            if pid == 111:
-                return None  # probe-1 already stopped
-            return ("claude.exe", _parse("2026-07-07T12:00:00Z"))  # probe-2 still working forever
-
-        clock = FakeClock()
-        finished, pending = fleet.wait_for_workers(
-            ["probe-1", "probe-2"], mode="any", timeout=None, poll_interval=1.0,
-            get_process_info=info, sleep=clock.sleep, clock=clock.now,
-        )
-        assert finished == {"probe-1": "idle"}
-        assert pending == {"probe-2"}
-
-    def test_timeout_leaves_pending_nonempty(self, isolated_home):
-        sid = str(uuid.uuid4())
-        rec = fleet.new_worker_record(sid, "C:/x", "t1", "dontask")
-        rec["turn_pid"], rec["turn_pid_ctime"] = 111, "2026-07-07T12:00:00Z"
-        fleet.save_registry({"workers": {"probe-1": rec}})
-
-        def info(pid):
-            return ("claude.exe", _parse("2026-07-07T12:00:00Z"))  # never finishes
-
-        clock = FakeClock()
-        finished, pending = fleet.wait_for_workers(
-            ["probe-1"], mode="all", timeout=5.0, poll_interval=1.0,
-            get_process_info=info, sleep=clock.sleep, clock=clock.now,
-        )
-        assert finished == {}
-        assert pending == {"probe-1"}
-
-
 class TestCmdWait:
     def test_wait_unknown_worker_raises(self, isolated_home):
         args = fleet.build_parser().parse_args(["wait", "nope"])
         with pytest.raises(fleet.FleetCliError):
-            fleet.cmd_wait(args, get_process_info=lambda pid: None, sleep=lambda s: None, clock=lambda: 0.0)
+            fleet.cmd_wait(args, sleep=lambda s: None, clock=lambda: 0.0)
 
-    def test_wait_all_prints_finish_and_returns_zero(self, isolated_home, capsys):
-        sid = str(uuid.uuid4())
-        rec = fleet.new_worker_record(sid, "C:/x", "t1", "dontask")
-        rec["turn_pid"], rec["turn_pid_ctime"] = 111, "2026-07-07T12:00:00Z"
-        fleet.save_registry({"workers": {"probe-1": rec}})
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text('{"type":"result","result":"all set"}\n', encoding="utf-8")
+    def test_wait_all_prints_finish_and_returns_zero(self, isolated_home, capsys, monkeypatch):
+        sid, _ = _seed_native("probe-1", fresh_outcome=True)
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, [
+            _make_native_roster_entry(sid, status="idle")]))
 
         args = fleet.build_parser().parse_args(["wait", "probe-1"])
-        rc = fleet.cmd_wait(args, get_process_info=lambda pid: None, sleep=lambda s: None, clock=lambda: 0.0)
+        rc = fleet.cmd_wait(args, sleep=lambda s: None, clock=lambda: 0.0)
 
         assert rc == 0
         out = capsys.readouterr().out
@@ -1557,42 +1105,37 @@ class TestCmdWait:
         assert "all set" in out
         assert fleet.load_registry()["workers"]["probe-1"]["status"] == "idle"
 
-    def test_wait_timeout_returns_nonzero(self, isolated_home, capsys):
-        sid = str(uuid.uuid4())
-        rec = fleet.new_worker_record(sid, "C:/x", "t1", "dontask")
-        rec["turn_pid"], rec["turn_pid_ctime"] = 111, "2026-07-07T12:00:00Z"
-        fleet.save_registry({"workers": {"probe-1": rec}})
+    def test_wait_timeout_returns_nonzero(self, isolated_home, capsys, monkeypatch):
+        sid, _ = _seed_native("probe-1")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, [
+            _make_native_roster_entry(sid, status="busy")]))
 
         clock = FakeClock()
         args = fleet.build_parser().parse_args(["wait", "probe-1", "--timeout", "3"])
-        rc = fleet.cmd_wait(
-            args, get_process_info=lambda pid: ("claude.exe", _parse("2026-07-07T12:00:00Z")),
-            sleep=clock.sleep, clock=clock.now,
-        )
+        rc = fleet.cmd_wait(args, sleep=clock.sleep, clock=clock.now)
         assert rc != 0
         assert "timed out" in capsys.readouterr().out
 
-    def test_wait_any_success_with_pending_returns_zero_and_says_still_working(self, isolated_home, capsys):
+    def test_wait_any_success_with_pending_returns_zero_and_says_still_working(
+            self, isolated_home, capsys, monkeypatch):
         """Post-testing wave, item 4 (live-report scenario 2): `wait --any`
         returning as soon as ONE worker finishes, with others still
         pending, is success -- not a timeout. Must exit 0 and must not
         call the still-running worker "timed out"."""
-        sid_fast = str(uuid.uuid4())
-        rec_fast = fleet.new_worker_record(sid_fast, "C:/x", "t1", "dontask")
-        rec_fast["turn_pid"], rec_fast["turn_pid_ctime"] = 111, "2026-07-07T12:00:00Z"
+        sid_fast, _ = _seed_native("probe-fast", fresh_outcome=True)
         sid_slow = str(uuid.uuid4())
-        rec_slow = fleet.new_worker_record(sid_slow, "C:/y", "t2", "dontask")
-        rec_slow["turn_pid"], rec_slow["turn_pid_ctime"] = 222, "2026-07-07T12:00:00Z"
-        fleet.save_registry({"workers": {"probe-fast": rec_fast, "probe-slow": rec_slow}})
-        log = fleet.logs_dir() / "probe-fast.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text('{"type":"result","result":"done fast"}\n', encoding="utf-8")
+        data = fleet.load_registry()
+        rec_slow = fleet.new_worker_record(sid_slow, "C:/y", "t2", "dontask", dispatch_kind="bg")
+        rec_slow["last_dispatch_at"] = fleet.now_iso()
+        data["workers"]["probe-slow"] = rec_slow
+        fleet.save_registry(data)
 
-        def info(pid):
-            return None if pid == 111 else ("claude.exe", _parse("2026-07-07T12:00:00Z"))
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, [
+            _make_native_roster_entry(sid_fast, status="idle"),
+            _make_native_roster_entry(sid_slow, status="busy")]))
 
         args = fleet.build_parser().parse_args(["wait", "probe-fast", "probe-slow", "--any"])
-        rc = fleet.cmd_wait(args, get_process_info=info, sleep=lambda s: None, clock=lambda: 0.0)
+        rc = fleet.cmd_wait(args, sleep=lambda s: None, clock=lambda: 0.0)
 
         assert rc == 0
         out = capsys.readouterr().out
@@ -1631,29 +1174,24 @@ class TestArgparseWiring:
 # ---------------------------------------------------------------------------
 
 class TestStatusHookErrorCount:
-    def _seed_idle(self, name="probe-1"):
-        sid = str(uuid.uuid4())
-        rec = fleet.new_worker_record(sid, "C:/x", "task", "dontask")
-        rec["turn_pid"] = 111
-        rec["turn_pid_ctime"] = "2026-07-07T12:00:00Z"
-        log = fleet.logs_dir() / f"{name}.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text('{"type":"result","result":"done"}\n', encoding="utf-8")
-        fleet.save_registry({"workers": {name: rec}})
+    def _seed_idle(self, monkeypatch, name="probe-1"):
+        sid, _ = _seed_native(name, fresh_outcome=True)
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, [
+            _make_native_roster_entry(sid, status="idle")]))
 
-    def test_no_hook_errors_no_footer(self, isolated_home, capsys):
-        self._seed_idle()
-        fleet.cmd_status(fleet.build_parser().parse_args(["status"]), get_process_info=lambda pid: None)
+    def test_no_hook_errors_no_footer(self, isolated_home, capsys, monkeypatch):
+        self._seed_idle(monkeypatch)
+        fleet.cmd_status(fleet.build_parser().parse_args(["status"]))
         out = capsys.readouterr().out
         assert "hook-error" not in out
 
-    def test_hook_error_count_shown_when_nonzero(self, isolated_home, capsys):
-        self._seed_idle()
+    def test_hook_error_count_shown_when_nonzero(self, isolated_home, capsys, monkeypatch):
+        self._seed_idle(monkeypatch)
         fleet.hook_errors_path().write_text(
             "2026-07-08T00:00:00Z s1 err\n2026-07-08T00:01:00Z s2 err\n2026-07-08T00:02:00Z s3 err\n",
             encoding="utf-8",
         )
-        fleet.cmd_status(fleet.build_parser().parse_args(["status"]), get_process_info=lambda pid: None)
+        fleet.cmd_status(fleet.build_parser().parse_args(["status"]))
         out = capsys.readouterr().out
         assert "hook-error" in out
         assert "3" in out
