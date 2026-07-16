@@ -83,6 +83,12 @@ def _resolve_name(session_id, fleet_home):
     try:
         with open(_registry_path(fleet_home), "r", encoding="utf-8") as f:
             reg = json.load(f)
+        # Wrong-shape defense (same as stop_outcome.py::_resolve_name): a
+        # syntactically-valid but non-dict document (e.g. a top-level list)
+        # would raise AttributeError from .get() below, escape the
+        # (OSError, ValueError) net, and skip the landmark write entirely.
+        if not isinstance(reg, dict):
+            return None
         workers = reg.get("workers", {})
         if not isinstance(workers, dict):
             return None
