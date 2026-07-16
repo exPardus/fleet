@@ -34,7 +34,7 @@ supervisor = claim-holding session               ← identity in supervisor/ fil
 
 ## 2. The substrate contract (pointer, not duplicate)
 
-`docs/specs/native-substrate.md` is the **G-row contract**: the 13 gate verdicts (G1–G13), the dispatch argv, the closed 9-key roster schema with its field-presence-per-state table, the dispatch-grace startup transient, the result/cost contract (Stop-hook payload + transcript tail; **no USD figure exists anywhere** — G3), the steering contract (fork-with-transcript, G2(b) RATIFIED), and the known hazards (stdin wedge, silent limit walls, `ai-title` name mutation, stop-fires-no-Stop-hook). v3 references it and does not restate it. Everything there was observed at `claude` 2.1.207; the pin-test tier (§12) re-verifies on version change, and `fleet doctor` warns when `claude --version` has moved since the last recorded pin pass (`_doctor_check_pin_version` @5078, `record_pin_pass` @114).
+`docs/specs/native-substrate.md` is the **G-row contract**: the 13 gate verdicts (G1–G13), the dispatch argv, the closed 9-key roster schema with its field-presence-per-state table, the dispatch-grace startup transient, the result/cost contract (Stop-hook payload + transcript tail; **no USD figure exists anywhere** — G3), the steering contract (fork-with-transcript, G2(b) RATIFIED), and the known hazards (stdin wedge, silent limit walls, `ai-title` name mutation, stop-fires-no-Stop-hook). v3 references it and does not restate it. Everything there was observed at `claude` 2.1.207; the pin-test tier (§17) re-verifies on version change, and `fleet doctor` warns when `claude --version` has moved since the last recorded pin pass (`_doctor_check_pin_version` @5078, `record_pin_pass` @114).
 
 ## 3. Repo layout (as it exists today)
 
@@ -66,7 +66,7 @@ C:\proga\claude-fleet\
     ceilings\<sid>.txt       # token-ceiling files the Stop hook reads
     journals\<name>.md       # worker journals
     autoclean-last-run.json  # autoclean run stamp
-  logs\                      # gitignored; logs\archive\<name>\ = archived evidence (§10)
+  logs\                      # gitignored; logs\archive\<name>\ = archived evidence (§11)
   mailbox\                   # gitignored; <sid>.md pending messages
   docs\SPEC.md               # this file; docs\SPEC-v2-history.md = the moved v2.3 body
 ```
@@ -180,4 +180,92 @@ claude --bg [--resume <old-sid>] -n "<cat>|<name>|<hint>" --settings state/worke
 | `init [--statusline [--chain\|--force]] [--autoclean [--autoclean-interval-hours N]] [--autoclean-remove]` | Renders `state/worker-settings.json` from the template; `--statusline` installs into `~/.claude/settings.json` refusing foreign incumbents (terminal-surface D6); `--autoclean` installs the Windows Scheduled Task with the F2/F3/F4 install guards (`_install_autoclean_task` @4958, guards `_marker_guard_problems` @4921). |
 | `home` / `knowledge` | Print resolved `FLEET_HOME`; print `knowledge/INDEX.md`. |
 
-*(continued in §8–§15)*
+## 8. Outcome store + the hook write boundary
+
+**The outcome store** (`state/outcomes/<key>.jsonl`; key = worker NAME resolved from the registry, sid-keyed fallback on any resolution failure) is the discriminator's data source and the result surface. Writers, exactly two:
+
+- **The Stop hook** (`bin/hooks/stop_outcome.py`): on every natural turn end, appends a `kind:"result"` record — result text from the payload's `last_assistant_message` (feature-detected; value shape UNOBSERVED at 2.1.207) with a transcript-tail fallback (last `type:"assistant"` record's `message.content[].text` — the contract's verified shape), plus token usage and model. Standalone stdlib, never imports `fleet.py`, never blocks, exits 0 on every path.
+- **Fleet-side tombstones** (`write_tombstone_outcome` @5834, kinds `killed | interrupted | stopped` @5702): `claude stop` fires **no** Stop hook (G10), so every stop-shaped verb (interrupt, kill, respawn `--force`) records its own outcome — a stopped worker with no record would misclassify as `dead-suspected` forever, or worse as silently completed.
+
+Both writers use a **single-syscall Win32 `FILE_APPEND_DATA` atomic append** (`_atomic_append_bytes` @5712, mirrored in the hook): plain buffered `open(...,"a")` appends lose whole records under concurrent writers on Windows, and the hook and a fleet tombstone can hit the same file in the same instant. Records are keyed by sid + timestamp; readers: `read_outcomes`/`latest_outcome`/`has_fresh_outcome` @5772-5833 (`OUTCOME_FRESH_SLACK_SECONDS = 5`).
+
+**Hook write boundary (the sanctioned list, v2.3 item (d) carried forward).** Hooks NEVER write the registry or `events.jsonl`. Hooks MAY write, and only: (a) `mailbox\<sid>.md` + its `.claimed.<pid>` rename; (b) `state\hook-errors.log` (append-mode, best-effort, no lock); (c) their own worker's journal, via PostCompact only; (d) their own worker's terminal-outcome record, via the Stop hook only. Registry access from a hook is read-only and failure-tolerant; every hook exits 0 on every failure. `fleet doctor` smoke-tests both mailbox hooks and lints the registered hook events (`_KNOWN_HOOK_EVENTS = {PostToolUse, Stop, PostCompact}` @5576 — SessionStart rides the plugin, and `stop_outcome.py` is wired as a second Stop entry in the settings template).
+
+## 9. Steering, mailbox, budget
+
+**Mid-turn steering is unchanged from v2** (G1: hooks fire inside `--bg` sessions): `send` to a working worker appends to `mailbox\<sid>.md`; PostToolUse claims-by-`os.replace` and injects `<MANAGER MESSAGE>` at the next tool boundary; Stop drains-or-blocks. Exception-proof, exit-0, claim-race-tolerant — all v2 §7 semantics stand and the moved history file remains their reference; they are substrate-independent.
+
+**Idle steering = fork-steer (RATIFIED G2(b)).** No CLI channel injects a prompt into an existing idle daemon session; `claude --bg --resume <sid>` **forks** — new sid, full transcript carried. Fleet adopts the fork as the worker's new canonical identity: old sid → `retired_sids`, mailbox re-pointed, ceiling file re-written, fresh `-n` restamp (which is also when a category change renders — no post-hoc rename channel exists, G13). The **universal drain rule** survives: every launch path (spawn, fork-steer, resume-limited, respawn) drains the current sid's mailbox into the composed prompt, and `status` flags `idle+mail`.
+
+**Budget = token ceiling, not dollars.** `--max-budget-usd` does not exist under `--bg` and no sanctioned source carries a USD figure (G3) — spawn and respawn **refuse** it outright (@2188, @3674). The fleet-side cap is `token_ceiling`: persisted spawn-immutable in the registry, written to the sid-keyed ceiling file (`_write_ceiling_file` @164) that the Stop hook reads to allow-stop despite pending mail, and enforced before every fork-steer — `_native_cumulative_tokens` (@1060) sums the outcome store; at/over ceiling the steer is refused and the worker flagged sticky `over_ceiling` (@3103-3117, event `ceiling_exceeded`). `over_budget` remains in the sticky set for legacy-record tolerance.
+
+## 10. Usage-limit continuity (rehomed for the silent wall)
+
+A plan-limit wall under `--bg` is **silent**: no Stop hook fires, roster state is unchanged — the only sanctioned evidence is a synthetic 429 assistant record with a reset time inside the transcript (G11, naturally pinned). Detection therefore rides the **no-outcome investigation path** (§5), not hooks and not stderr (neither channel exists any more): `transcript_limit_scan` (@1184) reads the transcript tail through the module seam `_limit_scan_hook`, parses limit-shaped text + reset instant (`_parse_limit_signal` @1100), and parks the worker **`limited`** — sticky, exempt from every demotion, never archived, never steered (`send` refuses and points at `resume-limited`).
+
+Resume is the explicit sweep it always was: `fleet resume-limited [name] [--force-now]` relaunches each `limited` worker whose `limit_reset_at` has passed — **as a fork-steer** (`_resume_one_limited_native` @3255: drain old-sid mailbox + journal into a continuation body, `dispatch_bg(resume_sid=old_sid, hint="resume past limit")`, retire the old sid, restamp, clear the limit fields). Unknown horizon (`limit_reset_at = null`) is skipped without `--force-now`; failures roll the park back to `limited` cleanly. `status` flags `resets <when>` / resume-eligible (flag only — a view never launches); `doctor` NOTEs parks past their horizon and unknown horizons (`_doctor_check_limited_parks` @5300). Native auto-resume does not exist; fleet's layer carries the full recovery load.
+
+## 11. Archive + autoclean (staleness is cleaned up without anyone remembering)
+
+Full design: `docs/specs/autoclean.md` (ready-for-build → shipped M-C). As built:
+
+- **`fleet archive`** (@4443): TTL sweep. Eligibility gates in binding order (`_archive_eligible` @4250): native + not already archived; recomputed status ∈ {idle, dead, interrupted}; roster entry absent or dead (**never** a live-process entry); an outcome record exists for the current sid (any kind — no record is dead-suspected territory, never auto-archived); TTL elapsed (default 24 h) on a parseable `last_activity` (unparseable fails safe). `limited` is never archived. Archive = evidence files (outcomes, journal, task file) moved to `logs/archive/<name>/`, registry entry tombstoned (`archived_at`), native sessions removed via `claude rm` (current + retired sids, G12). Reversible history; deletion stays `fleet clean`.
+- **`fleet autoclean`** (@4812): the scheduled first-class command (D1 — an ordinary mutating CLI verb; views untouched). Tier 1 (default-on) = the archive TTL pass. Tier 2 (default-on) = daemon-husk removal under the sid-based **default-deny ownership discriminator** (owned ∧ ¬protected ∧ roster-not-live ∧ no pending mail; owned-evidence = registry sids/retired sids + archive-dir sid files + events sids, @4626-4688); refuses when the registry is absent-but-evidence-exists (F1) or any `fleet.json.corrupt.*` quarantine artifact exists (NEW-1); foreign sessions — above all the operator's own — are untouchable. Tier 3 (default-OFF, `--expire-tombstones-hours`) = registry tombstone expiry, deleting no files. `RegistryCorruptError` aborts the whole run; other tier failures are isolated. Run stamp `state/autoclean-last-run.json` + `autoclean_run`/`husk_removed`/`tombstone_expired` events.
+- **Scheduler bridge:** `fleet init --autoclean` installs Windows Scheduled Task `claude-fleet-autoclean` (schtasks, default 6-hourly) with the F2/F3/F4 guards: home embedded in the command, refuse worktree/foreign-marker/mismatched-fleet.py homes, ownership by exact normalized path (never substring), fail-closed on a query error. Guards run before init writes anything (N1). Platform adapter seam: `autoclean_task_install/query/remove` on `_WindowsPlatform`; `_PosixPlatform` raises `UnsupportedPlatformError`.
+
+## 12. Supervisor protocol (§4 of the pivot spec — survives unchanged, now with verbs)
+
+**Soul = files:** `supervisor/GOALS.md` (operator-owned) + `supervisor/JOURNAL.md` (append-only, claim-holder-only) + `knowledge/` — git-tracked. **Body = any session** holding the claim: `supervisor/INCARNATION` (gitignored), written only under `fleet.lock`, read lock-free (atomic `os.replace` writes), carrying incarnation id, sid, and a heartbeat the holder refreshes at every checkpoint/beat (`SUPERVISOR_CLAIM_STALE_SECONDS = 3600` @6367).
+
+- **`sup-boot`** (@6657): the one boot ritual — roster-epoch sanity check FIRST (`supervisor_epoch_check` @6548; suspicious roster freezes the claim decision too), then the claim rules (`supervisor_claim_decision` @6560): holder live in roster or a fresher incarnation checkpointed ⇒ refuse read-only; roster-gone + heartbeat stale ⇒ seize (journal a SEIZED checkpoint, delete any orphan HANDSHAKE); roster-gone + heartbeat fresh ⇒ freeze + page operator, never seize on ambiguity. Emits the boot bundle (GOALS + journal tail + roster + fleet snapshot).
+- **`sup-checkpoint` / `sup-heartbeat`** (@6741/@6755): journal append (claim holder only, kinds `SUPERVISOR_JOURNAL_KINDS` @6371) / heartbeat refresh without a journal write.
+- **Handoff** (`sup-handoff-begin/complete/abort` @6823/@6931/@6963): old dispatches a claim-pending successor via `dispatch_bg` (successor task rendered @6803), successor writes `supervisor/HANDSHAKE` (not a journal write — it holds no claim yet); `complete` verifies the HANDSHAKE names the successor actually dispatched, transfers the claim under `fleet.lock`, deletes HANDSHAKE; `abort` stops the limbo successor (`SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS = 300`), removes HANDSHAKE, raises the doctor-visible abort flag (@6407). Operator band: begin handoff at ~300k context tokens, hard-latest 500k.
+- **Nag predicate is file-only** (views never probe): GOALS active AND (no claim OR heartbeat older than S) — `supervisor_goals_active`/`supervisor_status_line` @7037/@7049, surfaced by `_doctor_check_supervisor_claim`/`_doctor_check_supervisor_handoff` @7079/@7088. Nothing auto-restarts a supervisor; human-restarted, doctor-nagged.
+
+Heartbeat primitive: in-session `ScheduleWakeup` self-rearm, confirmed real (G7); `claude stop` permanently kills a scheduled wake — a stopped supervisor never self-resumes.
+
+## 13. Doctor roster — as it is today
+
+21 checks (`grep -c "def _doctor_check_" bin/fleet.py` → 21), note-only unless infrastructure is actually broken: `claude_version` (≥ 2.1.202), `pin_version` (claude moved since last recorded pin pass — §17), `instance_settings` (validates + hook-path lint), `instance_freshness`, `legacy_settings`, `posttooluse_hook_smoke` + `stop_hook_smoke` (synthetic-stdin fire of both mailbox hooks), `terminal_launcher`, `mailboxes` (orphaned/pending), `stale_attaches`, `limited_parks` (past-horizon / unknown-horizon / weekly notes), `legacy_mix` (pre-pivot records present — read-only legacy, finish or kill), `dead_suspected` (surfaced verdicts awaiting decision), `orphaned_claims`, `claude_agents` (fleet-unknown roster sessions, overlay-aware), `autoclean` (task installed/stale-run via the adapter query), `fleet_home_marker`, `hook_errors` (tail of `state/hook-errors.log`), `hook_registration` (event-name lint), `supervisor_claim`, `supervisor_handoff`.
+
+## 14. Views / terminal surface (binding rules, unchanged)
+
+`docs/specs/terminal-surface.md` remains binding: a view (statusline, `/fleet:*` read-only commands, SessionStart briefing) never takes `fleet.lock`, never probes anything live, never writes, never quarantines — it reads `fleet.status_snapshot()` and exits 0 (CLAUDE.md rule; enforced by `tests/test_terminal_surface.py`, including the no-inline-exec lint on mutating slash commands). Post-pivot the "never probes a PID" clause generalizes: the snapshot path also never fetches the roster — roster fetches belong to mutating/authoritative commands only. `FLEET_WORKER` in a worker's environment suppresses the SessionStart briefing (D5; stamped by `_worker_env` @989).
+
+## 15. Destructive-command guard + provenance (survives the pivot verbatim)
+
+`spawned_by` records the spawner's `CLAUDE_CODE_SESSION_ID` (or null for a human shell), immutable across respawn. `kill`/`clean`/`respawn` refuse a foreign worker (differing or unknown owner) without `--yes`; the guard applies to Claude sessions only (`_confirm_destructive` @1928, `_worker_is_foreign` @1910). Worker turns **strip `CLAUDE_CODE_SESSION_ID`** from the child env and stamp `FLEET_WORKER=<name>` (`_worker_env` @989-1008) — an inherited sid would let a worker retire its siblings as if it were the manager. `interrupt` stays exempt (ends a turn, not a worker). Recovery after an over-eager clean: `state/events.jsonl` is append-only and untouched by `clean`; archived evidence survives under `logs/archive/`.
+
+## 16. Architectural invariants — post-pivot status of the nine
+
+The v2 numbering is retained so old citations resolve; each invariant's post-pivot meaning is stated.
+
+1. **daemonless launch → fleet-daemonless.** Every *fleet* action is a short-lived CLI invocation; fleet ships no resident process. The native daemon is Anthropic's substrate, not fleet's — fleet works with it via CLI only, and autoclean's scheduled task is an OS-scheduler invocation of the ordinary CLI, not a daemon.
+2. **exit-0 hooks** — unchanged, now four hooks (+ manager SessionStart).
+3. **atomic single-file mailbox** — unchanged (`os.replace` claim).
+4. **journal-injection-at-respawn** — unchanged; respawn and resume-limited both compose the journal into the launch prompt.
+5. **cwd-scoped resume → cwd-scoped dispatch.** Every dispatch runs with `cwd=<registered cwd>` (immutable after spawn); fork-steer inherits the transcript, and the daemon owns session storage.
+6. **single-writer registry** — unchanged (`fleet.lock`; F4 no-lock-across-subprocess shape added).
+7. **one-live-claude-per-session → one live session per name.** The pre-claim window, the fork-steer restamp, respawn's roster-verified stop, and the wedge-retry's verified cleanup (C1) all enforce it; the sid itself is single-writer to the daemon.
+8. **platform-adapter-only OS branching** — unchanged; the adapter surface is now attach-terminal + autoclean schtasks (the probe/kill/popen methods died with §6).
+9. **one-state-many-views** — unchanged; registry + outcome store are the state, `status_snapshot()` the one derivation.
+
+New, carried from the pivot spec and enforced in code: **never-demote-unknown** (dead-suspected is advisory; nothing auto-respawns), **G9 epoch freeze** (an empty/failed roster never mass-demotes), **tombstone obligation** (every fleet-initiated stop writes its own outcome record), **no daemon/jobs file access** (CLI + `--json` only).
+
+## 17. Testing — the tiers as they exist
+
+- **Unit tier** (pytest, no claude): `tests/test_core.py`, `test_native.py` (verdict engine, dispatch_bg with injected roster/run/clock, wedge + H1 + fast-completion), `test_steering.py`, `test_resilience.py`, `test_supervisor.py` (claim/handoff/seizure state machine), `test_autoclean.py` (ownership discriminator incl. fault-injection), `test_hooks.py`, `test_cli.py`, `test_destructive_guard.py`, `test_terminal_surface.py` (view lints).
+- **Live pin suite** (`tests/integration/test_native_pin.py`, gated `FLEET_LIVE=1`, haiku, temp `FLEET_HOME`): six pins — dispatch + roster contract, Stop-hook outcome, fork-steer, stop-no-hook tombstone, archive + `claude rm`, record-pass stamp (feeding doctor's `pin_version` check). Run before campaigns and after every `claude` version change.
+- **Gone with the pivot:** the v2 tier-3 stream-json smoke suite and the `tests/fixtures/streams/` corpus (deleted with the stdout pipeline; `ls tests/fixtures` → no such dir). Historical references to that corpus in the moved v2 body and in ROADMAP/PLAN are bannered, not live contracts. Removals delete their tests in the same commit.
+
+## 18. Milestones
+
+- **M-0 — spike + contract: SHIPPED** (2026-07-14; `docs/specs/native-substrate.md`, G-table verdicts + ratifications).
+- **M-A — supervisor identity: SHIPPED** (soul files, claim/seizure, boot ritual, handoff, checkpoint discipline).
+- **M-B — native dispatch: SHIPPED** (launch contract on `--bg`, outcome discriminator, Stop-hook capture, fork-steer, `claude stop` kill, usage-limit rehoming, coexistence, pin tests).
+- **M-C — deletions + hardening + SPEC v3: SHIPPED except this document's ratification** (§6 legacy deletions −7130 lines; autoclean; dispatch hardening C1/H1; this rewrite is the closing deliverable, pending review).
+- **Future candidates `[DRAFT — not specced]`:** three-tier command (interface/supervisor/workers split, `docs/specs/three-tier-command.md` — a draft proposal awaiting adversarial design review; v3 records its existence and specs nothing from it); native attach integration; POSIX autoclean seam.
+
+## 19. History
+
+The complete v1→v2.3 body — problem statement, detached-launch design, PID liveness, the F1–F33 finding record, and every correction narrative (the grep-don't-recall doctrine's origin) — lives verbatim in `docs/SPEC-v2-history.md`. It is the record of why the rules above exist; it is not buildable surface.
