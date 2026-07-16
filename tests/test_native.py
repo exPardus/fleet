@@ -4237,7 +4237,7 @@ class TestDoctorCheckLegacyMix:
         assert ok is True
         assert "1 pre-pivot worker(s)" in msg
         assert "old-worker" in msg
-        assert "spec 5.1 coexistence" in msg
+        assert "unmanageable by this build" in msg
 
     def test_archived_native_worker_not_counted_as_legacy(self, native_home):
         rec = seed_native_worker(native_home, name="w1", status="idle", archived_at=_iso(NOW))

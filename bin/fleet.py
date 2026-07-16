@@ -5022,10 +5022,11 @@ def _remove_autoclean_task() -> None:
 # that must never fail to run. ASCII carries the same ok/not-ok signal
 # unambiguously without that risk.
 #
-# Every check that is explicitly "note-only"/"warn" per the Task 5 brief
-# (legacy settings file, stale PIDs, orphaned/pending mailboxes, stale
-# attaches, orphaned *.claimed.* files, fleet-unknown claude-agents
-# sessions, log sizes) always returns ok=True -- it can inform, never turn
+# Every check that is explicitly "note-only"/"warn" (legacy settings
+# file, orphaned/pending mailboxes, stale attaches, orphaned *.claimed.*
+# files, fleet-unknown claude-agents sessions, limited parks, legacy-mix,
+# dead-suspected, autoclean scheduler state) always returns ok=True -- it
+# can inform, never turn
 # doctor red. Only genuinely broken infrastructure (claude missing/too
 # old, a malformed/backslash-broken/stale settings instance, a hook that
 # doesn't fire end-to-end) counts as a hard failure.
@@ -5323,17 +5324,19 @@ def _doctor_check_limited_parks(workers: dict):
 
 
 def _doctor_check_legacy_mix(workers: dict):
-    """M-B T11 (spec §5.1 coexistence): advisory-only (always ok=True) --
-    a legacy (pre-pivot, `dispatch_kind` absent) record is read-only, not
-    broken; naming it just points the operator at `kill`/`clean`. Archived
-    records are excluded even though they're also non-native, since they're
-    already history and doctor's other archived-aware checks cover them."""
+    """Advisory-only (always ok=True): a legacy (pre-pivot, `dispatch_kind`
+    absent) record is unmanageable by this build -- the legacy dispatch/
+    probe path it needs was deleted (pivot spec §6, M-C). Nothing enforces
+    read-only; the truthful advice is retire-only (kill/clean/archive).
+    Archived records are excluded even though they're also non-native,
+    since they're already history and doctor's other archived-aware checks
+    cover them."""
     legacy = sorted(name for name, rec in workers.items()
                     if not is_native(rec) and rec.get("archived_at") is None)
     if legacy:
         return ("legacy-mix", True,
-                f"{len(legacy)} pre-pivot worker(s): {', '.join(legacy)} -- read-only; "
-                "kill or clean (spec 5.1 coexistence)")
+                f"{len(legacy)} pre-pivot worker(s): {', '.join(legacy)} -- "
+                "unmanageable by this build; kill/clean/archive only")
     return ("legacy-mix", True, "no pre-pivot workers")
 
 
