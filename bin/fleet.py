@@ -7456,38 +7456,64 @@ def _doctor_check_log_sizes():
 def _doctor_check_autoclean(run=subprocess.run):
     """Note-only (docs/specs/autoclean.md D4): reports scheduler-task state
     (installed/missing) and last-run staleness from the run stamp. Never
-    turns doctor red -- a missing task is a choice, not broken plumbing."""
-    stamp_note = None
+    turns doctor red -- a missing task is a choice, not broken plumbing.
+
+    LOW advisory (confirmation pass): a fresh timestamp alone can lie --
+    the stamp's `errors` array and a lingering fleet.json.corrupt.*
+    artifact (which makes tier 2 refuse itself, NEW-1) both mean the sweep
+    is NOT actually doing its job. Both are appended to whichever note is
+    returned, so a bricked sweep never reads green-and-fresh."""
+    stamp_note, stale, run_errors = "no run recorded yet", False, []
     try:
         raw = json.loads(autoclean_stamp_path().read_text(encoding="utf-8"))
         last = _parse_iso(raw.get("ts"))
         age_h = (datetime.now(timezone.utc) - last).total_seconds() / 3600.0
         stamp_note = f"last run {age_h:.1f}h ago"
         stale = age_h > AUTOCLEAN_STALE_RUN_HOURS
+        errs = raw.get("errors")
+        if isinstance(errs, list):
+            run_errors = [str(e) for e in errs if e]
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
-        stamp_note, stale = "no run recorded yet", False
+        pass
+
+    extras = []
+    if run_errors:
+        extras.append(f"last run reported {len(run_errors)} error(s): "
+                      f"{run_errors[0][:120]}")
+    try:
+        artifacts = sorted(state_dir().glob("fleet.json.corrupt.*"))
+    except OSError:
+        artifacts = []
+    if artifacts:
+        extras.append(f"quarantine artifact present ({artifacts[-1].name}) -- "
+                      f"husk sweep is refusing itself (NEW-1); restore the "
+                      f"quarantined data, then remove the artifact")
+    suffix = ("; " + "; ".join(extras)) if extras else ""
+
     try:
         existing = PLATFORM.autoclean_task_query(AUTOCLEAN_TASK_NAME, run=run)
     except UnsupportedPlatformError:
-        return ("autoclean", True, "scheduler query unsupported on this platform -- skipped")
+        return ("autoclean", True,
+                f"scheduler query unsupported on this platform -- skipped{suffix}")
     except AutocleanTaskQueryError as exc:
-        return ("autoclean", True, f"scheduler query failed ({exc}) -- state unknown; {stamp_note}")
+        return ("autoclean", True,
+                f"scheduler query failed ({exc}) -- state unknown; {stamp_note}{suffix}")
     if existing is None:
         return ("autoclean", True,
                 f"no scheduled task installed (fleet init --autoclean) -- "
-                f"staleness sweeps are manual; {stamp_note}")
+                f"staleness sweeps are manual; {stamp_note}{suffix}")
     # F2: a task pinned to a deleted worktree's fleet.py fails silently on
     # every trigger -- flag it (note-only, but actionable).
     for tok in re.findall(r'"([^"]+)"', existing):
         if tok.lower().endswith("fleet.py") and not Path(tok).exists():
             return ("autoclean", True,
                     f"task installed but pinned to a missing path ({tok}) -- "
-                    f"reinstall from the canonical home: fleet init --autoclean")
+                    f"reinstall from the canonical home: fleet init --autoclean{suffix}")
     if stale:
         return ("autoclean", True,
                 f"task installed but {stamp_note} (> {AUTOCLEAN_STALE_RUN_HOURS:.0f}h) "
-                f"-- scheduler may be stale")
-    return ("autoclean", True, f"task installed; {stamp_note}")
+                f"-- scheduler may be stale{suffix}")
+    return ("autoclean", True, f"task installed; {stamp_note}{suffix}")
 
 
 def _doctor_check_fleet_home_marker():
