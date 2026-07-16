@@ -1,5 +1,5 @@
 ---
-description: 'Fleet health check — claude version, hook wiring, stale PIDs and attaches, orphaned mailboxes, log sizes.'
+description: 'Fleet health check — claude version, hook wiring, stale attaches, orphaned mailboxes, limited parks, autoclean scheduler state.'
 allowed-tools: 'Bash(fleet doctor:*)'
 ---
 
