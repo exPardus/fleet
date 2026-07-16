@@ -381,10 +381,22 @@ def test_5_pin_archive_rm(sandbox: Sandbox):
     retired = list(rec.get("retired_sids", []))
 
     # gate 3 (docs/specs/native-substrate.md-derived _archive_eligible): the
-    # roster entry for the CURRENT sid must be gone-or-dead. The forked
-    # session may stay "briefly live" (status+pid still present) for a few
-    # seconds right after its turn ends -- poll rather than assume.
-    _wait_for_roster_gone_or_dead(sid, timeout=60)
+    # roster entry for the CURRENT sid must be gone-or-dead. Live-verification
+    # finding (T12 fix wave): an idle `--bg` session does NOT self-clear its
+    # roster liveness (status+pid) within any short window on its own --
+    # live-confirmed it stays fully live (status="idle", pid present) for
+    # 75+ seconds with no sign of self-expiry. In real usage this is a
+    # non-issue (archive only runs against workers idle for HOURS past the
+    # TTL, by which point the real daemon session has long since exited on
+    # its own); the pin suite's own compressed timeline is the only reason
+    # it's visible here -- last_activity is fast-forwarded 25h below, but
+    # the REAL daemon session backing it is only seconds old. Simulate what
+    # 25 real hours would have already done to the process: stop every sid
+    # (current + retired -- the fork-steer in test_3 left the OLD sid's
+    # roster entry live per G2b, so it needs the same treatment) directly.
+    for s in [sid, *retired]:
+        _claude("stop", s[:8], timeout=15)
+        _wait_for_roster_gone_or_dead(s, timeout=60)
 
     # Force last_activity back past the TTL (test-only direct registry
     # edit, as the task instructs -- recompute_worker_native never rewrites
@@ -400,7 +412,13 @@ def test_5_pin_archive_rm(sandbox: Sandbox):
     assert "eligible" in dry.stdout, f"pin-w1 not archive-eligible:\n{dry.stdout}"
 
     a = sandbox.fleet("archive", "pin-w1")
-    assert "skipped" not in a.stdout.lower(), a.stdout
+    # cmd_archive's own summary line unconditionally reads "archived N
+    # worker(s), skipped M" (bin/fleet.py:6337) -- a blanket "skipped" not
+    # in stdout check can never pass even on full success (M=0). Live
+    # verification (T12 fix wave) is the first real exercise of this exact
+    # message; check for the PER-WORKER skip line ("pin-w1: skipped --
+    # <reason>", fleet.py:6283) instead of the always-present summary word.
+    assert "pin-w1: skipped" not in a.stdout, a.stdout
     assert "epoch" not in a.stdout.lower(), a.stdout
 
     after = sandbox.worker("pin-w1")
