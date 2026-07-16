@@ -1946,6 +1946,52 @@ class TestCmdSendNative:
         assert not (fleet.mailbox_dir() / f"{old_sid}.md").exists()
         assert "steered" in _events_kinds(native_home)
 
+    def test_fork_steer_commit_survives_event_append_oserror(self, native_home,
+                                                             monkeypatch, capsys):
+        # Fix-wave F1: _commit_launched_turn retries OSError, so an
+        # append_event OSError escaping AFTER save_registry made the restamp
+        # durable used to re-run the non-idempotent commit body -- the retry
+        # reloaded, saw session_id already == new_sid, fell into the orphaned
+        # branch, misreported a COMMITTED steer as "left for manual adoption"
+        # and skipped the ceiling write. Post-save event appends are now
+        # best-effort (_append_event_quiet): commit stands, steer reported
+        # normally, ceiling written, failure named on stderr.
+        old_sid = SID
+        new_sid = "ccccdddd-9999-8888-7777-666655554444"
+        seed_native_worker(native_home, sid=old_sid, status="idle", token_ceiling=500)
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": old_sid, "kind": "result"})
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_sequence(
+            (True, []),                                          # cmd_send's own verdict fetch
+            (True, []),                                          # dispatch_bg pre-dispatch snapshot
+            (True, [make_roster_entry(new_sid, status="idle")]),  # join poll
+        ))
+        real_append = fleet.append_event
+        state = {"raised": False}
+
+        def poisoned_append(kind, name, **fields):
+            if kind == "steered" and not state["raised"]:
+                state["raised"] = True
+                raise OSError(28, "No space left on device")
+            return real_append(kind, name, **fields)
+
+        monkeypatch.setattr(fleet, "append_event", poisoned_append)
+        rc = fleet.cmd_send(
+            _send_args(message="go do X"),
+            run=_fake_run_factory(stdout="backgrounded · ccccdddd · fleet|w1|go do X\n"),
+            which=lambda _: "claude", sleep=lambda s: None,
+        )
+        assert rc == 0
+        assert state["raised"]  # the poison genuinely fired
+        captured = capsys.readouterr()
+        assert "left for manual adoption" not in captured.out
+        assert "fork-steered" in captured.out
+        assert "not recorded" in captured.err  # loud best-effort note
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["session_id"] == new_sid          # durable commit stands
+        assert old_sid in rec["retired_sids"]
+        assert fleet.ceiling_file_path(new_sid).exists()  # ceiling write not skipped
+        assert "steer_orphaned" not in _events_kinds(native_home)
+
     def test_idle_native_over_ceiling_refuses_no_dispatch(self, native_home, monkeypatch):
         old_sid = SID
         seed_native_worker(native_home, sid=old_sid, status="idle", token_ceiling=100)

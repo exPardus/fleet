@@ -691,6 +691,24 @@ def append_event(kind: str, name: str, **fields) -> None:
         f.write(json.dumps(record) + "\n")
 
 
+def _append_event_quiet(kind: str, name: str, **fields) -> None:
+    """Best-effort append_event for use INSIDE a commit_fn retried by
+    `_commit_launched_turn` (debt fix-wave F1). That helper retries OSError,
+    and an event-append OSError escaping AFTER save_registry already made
+    the mutation durable would re-run a NON-idempotent commit body: the
+    fork-steer retry reloads, sees session_id already restamped, and falls
+    into its orphaned branch (misreporting a committed steer and skipping
+    the ceiling write); the legacy resume shape double-increments `turns`.
+    The registry commit is the retried atomic core -- a lost forensics line
+    must never re-run or misreport it, so log the failure loudly and move
+    on."""
+    try:
+        append_event(kind, name, **fields)
+    except OSError as exc:
+        print(f"fleet: WARNING: event {kind!r} for {name} not recorded ({exc}) "
+              "-- registry commit unaffected", file=sys.stderr)
+
+
 # ---------------------------------------------------------------------------
 # PID liveness (SPEC §4)
 # ---------------------------------------------------------------------------
@@ -2446,7 +2464,19 @@ def _commit_launched_turn(commit_fn, sleep=time.sleep) -> bool:
     the same backoff (Windows sharing violations are transient), and on
     exhaustion reported to stderr and folded into the same False return
     -- the turn is just as launched, and letting the OSError escape raw
-    would read as a failed launch and tempt the same double-launch retry."""
+    would read as a failed launch and tempt the same double-launch retry.
+
+    CONTRACT (fix-wave F1): because OSError now retries the WHOLE
+    commit_fn, a commit_fn must not raise OSError after save_registry has
+    made its mutation durable -- a retry would re-run a non-idempotent
+    body against already-committed state (fork-steer's reload lands in
+    its orphaned branch; the legacy resume shape double-increments
+    `turns`). Concretely: post-save event appends inside a commit_fn go
+    through `_append_event_quiet`, and mailbox migration is best-effort
+    by construction (_migrate_residual_mailbox swallows OSError). Every
+    step before save_registry is safely retryable -- save itself is
+    atomic (temp file + os.replace), so a failed save left nothing
+    committed."""
     for attempt in range(LAUNCH_COMMIT_MAX_ATTEMPTS):
         try:
             commit_fn()
@@ -2949,7 +2979,7 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
                 rec["turns"] = 1
                 rec["last_activity"] = now_iso()
                 save_registry(data)
-                append_event("turn_started", args.name, session_id=sid)
+                _append_event_quiet("turn_started", args.name, session_id=sid)
 
     if not _commit_launched_turn(_commit_native_stamp, sleep=sleep):
         _report_stranded_native_turn(args.name, sid, short_id)
@@ -3947,12 +3977,12 @@ def _cmd_send_native(name: str, before: dict, message: str,
                 # unconditionally, so a concurrent kill/clean racing this
                 # window got a "steered" event in its audit trail even
                 # though no registry mutation happened.
-                append_event("steered", name, old_session_id=old_sid,
-                            new_session_id=new_sid, short_id=short_id)
+                _append_event_quiet("steered", name, old_session_id=old_sid,
+                                    new_session_id=new_sid, short_id=short_id)
             elif r is not None:
                 commit_orphaned["flag"] = True
-                append_event("steer_orphaned", name, old_session_id=old_sid,
-                            new_session_id=new_sid)
+                _append_event_quiet("steer_orphaned", name, old_session_id=old_sid,
+                                    new_session_id=new_sid)
 
     if not _commit_launched_turn(_commit, sleep=sleep):
         _report_stranded_native_turn(name, new_sid, short_id)
@@ -4193,7 +4223,8 @@ def cmd_send(args, popen=subprocess.Popen, get_process_info=None, which=shutil.w
                 r["turns"] = r.get("turns", 0) + 1
                 r["last_activity"] = now_iso()
                 save_registry(data)
-            append_event("turn_started", args.name, session_id=sid, turn_pid=info["turn_pid"])
+            _append_event_quiet("turn_started", args.name, session_id=sid,
+                                turn_pid=info["turn_pid"])
 
     # Post-testing wave, item 1b (stress-report Finding 1, CRITICAL): retry
     # with backoff instead of a single bare lock acquisition -- see
@@ -4289,11 +4320,12 @@ def _resume_one_limited_native(name: str, old_sid: str, cwd, mode, model, catego
                 # OLD-sid mailbox onto the new fork -- see
                 # _migrate_residual_mailbox's docstring.
                 _migrate_residual_mailbox(old_sid, new_sid)
-                append_event("limit_resumed", name, old_session_id=old_sid, session_id=new_sid)
+                _append_event_quiet("limit_resumed", name, old_session_id=old_sid,
+                                    session_id=new_sid)
             elif r is not None:
                 commit_orphaned["flag"] = True
-                append_event("steer_orphaned", name, old_session_id=old_sid,
-                            new_session_id=new_sid)
+                _append_event_quiet("steer_orphaned", name, old_session_id=old_sid,
+                                    new_session_id=new_sid)
 
     if not _commit_launched_turn(_commit, sleep=sleep):
         _report_stranded_native_turn(name, new_sid, short_id)
@@ -4401,7 +4433,8 @@ def _resume_one_limited(name: str, popen, get_process_info, which, sleep,
                 r["turns"] = r.get("turns", 0) + 1
                 r["last_activity"] = now_iso()
                 save_registry(data)
-            append_event("limit_resumed", name, session_id=sid, turn_pid=info["turn_pid"])
+            _append_event_quiet("limit_resumed", name, session_id=sid,
+                                turn_pid=info["turn_pid"])
 
     if not _commit_launched_turn(_commit, sleep=sleep):
         _report_stranded_turn(name, sid, info)
@@ -5194,7 +5227,7 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
                 r["turns"] = 1
                 r["last_activity"] = now_iso()
                 save_registry(data)
-                append_event("turn_started", name, session_id=new_sid)
+                _append_event_quiet("turn_started", name, session_id=new_sid)
 
     if not _commit_launched_turn(_commit, sleep=sleep):
         _report_stranded_native_turn(name, new_sid, short_id)
@@ -5519,7 +5552,8 @@ def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shuti
                 r["turns"] = 1
                 r["last_activity"] = now_iso()
                 save_registry(data)
-            append_event("turn_started", args.name, session_id=new_sid, turn_pid=info["turn_pid"])
+            _append_event_quiet("turn_started", args.name, session_id=new_sid,
+                                turn_pid=info["turn_pid"])
 
     # Post-testing wave, item 1b (stress-report Finding 1, CRITICAL): retry
     # with backoff instead of a single bare lock acquisition -- see
