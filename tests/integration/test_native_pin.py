@@ -60,7 +60,14 @@ ROSTER_SCHEMA_KEYS = {"pid", "id", "cwd", "kind", "startedAt",
 # NOT the pin suite's actual expected latency (haiku turns here are trivial),
 # just an outer bound so a genuinely wedged dispatch fails loud instead of
 # hanging the suite.
-SPAWN_TIMEOUT = 240
+# M2 (mc/pinfix review): a spawn that hits the never-attach wedge retry adds
+# up to ~1 attach window (30s) + bounded cleanup (2x10s) + a second
+# dispatch/join/attach pass on top of the ordinary path; theoretical
+# worst-case with every subprocess at max timeout stacks toward ~570s but
+# needs three simultaneous 60-120s stalls -- realistic wedge retries add
+# 40-80s. 420s covers the realistic retry path with margin while still
+# failing loud on a genuinely hung dispatch.
+SPAWN_TIMEOUT = 420
 WAIT_TIMEOUT = 220
 CLI_TIMEOUT = 60
 
