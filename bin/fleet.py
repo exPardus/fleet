@@ -8221,10 +8221,14 @@ def cmd_sup_handoff_abort(args, which=shutil.which, run=subprocess.run) -> int:
         else:
             flag = read_handoff_abort_flag()
             recorded_sid = flag.get("successor_sid") if flag is not None else None
-            # Roll-up item 8: an abort flag recorded with successor_sid=None
-            # (the dispatch-failed shape) must never match an
-            # args.successor_sid that is itself None -- guard both sides.
-            if args.successor_sid is None or recorded_sid != args.successor_sid:
+            # Roll-up item 8 (simplified): an abort flag recorded with
+            # successor_sid=None (the dispatch-failed shape) names nothing
+            # verifiable to stop -- refuse on the RECORDED side, whatever the
+            # caller passed. The old args-side None check was dead via the
+            # CLI (argparse required=True) and is now subsumed: a None
+            # args.successor_sid can only match a None recorded_sid, which
+            # this refuses first.
+            if recorded_sid is None or recorded_sid != args.successor_sid:
                 raise FleetCliError(
                     f"no HANDSHAKE and --successor-sid {args.successor_sid} matches no "
                     f"recorded limbo successor -- refusing to stop an unverified session "
