@@ -832,6 +832,36 @@ class TestCommitLaunchedTurn:
         with pytest.raises(ValueError):
             fleet._commit_launched_turn(commit, sleep=lambda s: None)
 
+    def test_oserror_retried_like_lock_timeout_then_succeeds(self):
+        # Debt roll-up item 3: a transient non-lock OSError (Windows sharing
+        # violation on save_registry) gets the same backoff as
+        # FleetLockTimeout instead of escaping raw to the caller.
+        calls = {"n": 0}
+
+        def commit():
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise PermissionError("sharing violation")
+
+        slept = []
+        assert fleet._commit_launched_turn(commit, sleep=slept.append) is True
+        assert calls["n"] == 3
+        assert slept == list(fleet.LAUNCH_COMMIT_BACKOFF_SECONDS[:2])
+
+    def test_oserror_exhaustion_returns_false_and_reports(self, capsys):
+        # Debt roll-up item 3: on exhaustion the OSError folds into the same
+        # False return (turn IS launched -- caller must go down the
+        # _report_stranded_* path, never see the raw exception, which would
+        # read as a failed launch and tempt a double-launch retry) and is
+        # named on stderr so it is not silently indistinguishable from a
+        # plain lock timeout.
+        def commit():
+            raise OSError(28, "No space left on device")
+
+        assert fleet._commit_launched_turn(commit, sleep=lambda s: None) is False
+        err = capsys.readouterr().err
+        assert "No space left on device" in err
+
 
 class TestReportStrandedTurn:
     def test_prints_loud_message_and_appends_event(self, isolated_home, capsys):

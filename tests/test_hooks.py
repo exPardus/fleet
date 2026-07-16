@@ -592,6 +592,33 @@ class TestKernel3PostCompact:
         assert proc.returncode == 0
         assert journal_path(tmp_path, sid).exists()
 
+    @pytest.mark.parametrize("doc", [
+        [1, 2, 3],                        # top-level list
+        "just a string",                  # top-level string
+        {"workers": [1, 2]},              # workers not a dict
+        {"workers": {"w": ["not", "a", "dict"]}},  # record not a dict
+    ])
+    def test_wrong_shape_registry_falls_back_to_sid_journal(self, tmp_path, doc):
+        # Debt roll-up item 1: T2's wrong-shape defense (see
+        # stop_outcome.py::_resolve_name) was missing here -- a
+        # syntactically-valid but non-dict fleet.json raised AttributeError
+        # out of _resolve_name, unwound into __main__'s handler, and skipped
+        # the landmark write entirely (silent loss). Must instead resolve to
+        # None and fall back to the sid-keyed journal, no swallowed crash.
+        sid = "wrongshape-sid"
+        state = tmp_path / "state"
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "fleet.json").write_text(json.dumps(doc), encoding="utf-8")
+
+        proc = run_hook(POSTCOMPACT, json.dumps({"session_id": sid}), tmp_path)
+
+        assert proc.returncode == 0
+        assert proc.stderr == ""
+        # a genuine fallback, not an exception logged by the outer handler
+        assert len(read_hook_errors(tmp_path)) == 0
+        body = journal_path(tmp_path, sid).read_text(encoding="utf-8")
+        assert "context compacted here" in body
+
     def test_invalid_sid_skips_and_writes_nothing(self, tmp_path):
         (tmp_path / "state" / "journals").mkdir(parents=True, exist_ok=True)
         target = tmp_path / "evil.md"

@@ -471,6 +471,25 @@ def fleet_lock(timeout: float = LOCK_TIMEOUT_SECONDS):
             time.sleep(LOCK_RETRY_INTERVAL_SECONDS)
     try:
         os.write(fd, token.encode("utf-8"))
+    except OSError:
+        # Debt roll-up item 6: a failed token write (ENOSPC) used to leak
+        # the fd AND strand a token-less lock file that blocked every
+        # acquirer until the stale-break window. Close and remove what we
+        # just created (O_EXCL guarantees it is ours; no successor can have
+        # legitimately claimed it inside the stale window) before re-raising.
+        # Fix-wave F4: the close itself is guarded -- if it also raised, the
+        # unlink was skipped (stranding the lock file anyway) and the close
+        # error masked the original write error on the way out.
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
+    try:
         os.close(fd)
         yield
     finally:
@@ -676,6 +695,34 @@ def append_event(kind: str, name: str, **fields) -> None:
     record.update(fields)
     with open(events_path(), "a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
+
+
+def _append_event_quiet(kind: str, name: str, **fields) -> None:
+    """Best-effort append_event for use INSIDE a commit_fn retried by
+    `_commit_launched_turn` (debt fix-wave F1). That helper retries OSError,
+    and an event-append OSError escaping AFTER save_registry already made
+    the mutation durable would re-run a NON-idempotent commit body: the
+    fork-steer retry reloads, sees session_id already restamped, and falls
+    into its orphaned branch (misreporting a committed steer and skipping
+    the ceiling write); the legacy resume shape double-increments `turns`.
+    The registry commit is the retried atomic core -- a lost forensics line
+    must never re-run or misreport it, so log the failure loudly and move
+    on."""
+    try:
+        append_event(kind, name, **fields)
+    except OSError as exc:
+        # Fix-wave N1: the notice itself must never raise back into the
+        # retried commit_fn (EPIPE is an OSError; a closed stderr raises
+        # ValueError). Fix-wave micro: include the fields payload -- for a
+        # lost turn_started/steered the sid in there IS what the forensics
+        # line exists to preserve.
+        try:
+            payload = json.dumps(fields, default=str)
+            print(f"fleet: WARNING: event {kind!r} for {name} not recorded "
+                  f"({exc}) -- fields {payload} -- registry commit unaffected",
+                  file=sys.stderr)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -2424,13 +2471,37 @@ def _commit_launched_turn(commit_fn, sleep=time.sleep) -> bool:
     retrying the same `fleet` subcommand, which would launch a SECOND live
     turn on top of the one already running) and instead call
     `_report_stranded_turn` for a loud, actionable warning plus a
-    best-effort event."""
+    best-effort event.
+
+    Debt roll-up item 3: a NON-lock OSError out of `commit_fn()` (ENOSPC
+    on save_registry, a Windows PermissionError from a concurrent reader
+    holding fleet.json open, ...) is handled the same way, cross-cutting
+    at this helper so every call site is covered at once: retried with
+    the same backoff (Windows sharing violations are transient), and on
+    exhaustion reported to stderr and folded into the same False return
+    -- the turn is just as launched, and letting the OSError escape raw
+    would read as a failed launch and tempt the same double-launch retry.
+
+    CONTRACT (fix-wave F1): because OSError now retries the WHOLE
+    commit_fn, a commit_fn must not raise OSError after save_registry has
+    made its mutation durable -- a retry would re-run a non-idempotent
+    body against already-committed state (fork-steer's reload lands in
+    its orphaned branch; the legacy resume shape double-increments
+    `turns`). Concretely: post-save event appends inside a commit_fn go
+    through `_append_event_quiet`, and mailbox migration is best-effort
+    by construction (_migrate_residual_mailbox swallows OSError). Every
+    step before save_registry is safely retryable -- save itself is
+    atomic (temp file + os.replace), so a failed save left nothing
+    committed."""
     for attempt in range(LAUNCH_COMMIT_MAX_ATTEMPTS):
         try:
             commit_fn()
             return True
-        except FleetLockTimeout:
+        except (FleetLockTimeout, OSError) as exc:
             if attempt == LAUNCH_COMMIT_MAX_ATTEMPTS - 1:
+                if not isinstance(exc, FleetLockTimeout):
+                    print(f"fleet: post-launch registry commit raised {exc!r} "
+                          "on the final attempt", file=sys.stderr)
                 return False
             sleep(LAUNCH_COMMIT_BACKOFF_SECONDS[attempt])
     return False
@@ -2857,7 +2928,12 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
                     rec["turns"] = 1
                     rec["last_activity"] = now_iso()
                     save_registry(data)
-                    append_event("turn_started", args.name, session_id=fast_sid)
+                    # Fix-wave N2: post-save, same class as the retried
+                    # commit_fns -- a raw OSError here crashed the CLI after
+                    # the commit was durable, skipping the ceiling write and
+                    # success line (committed fast-completion read as a
+                    # failed spawn).
+                    _append_event_quiet("turn_started", args.name, session_id=fast_sid)
             _write_ceiling_file(fast_sid, record.get("token_ceiling"))
             print(f"{args.name} {fast_sid} (native bg, fast completion before join)")
             return 0
@@ -2924,7 +3000,7 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
                 rec["turns"] = 1
                 rec["last_activity"] = now_iso()
                 save_registry(data)
-                append_event("turn_started", args.name, session_id=sid)
+                _append_event_quiet("turn_started", args.name, session_id=sid)
 
     if not _commit_launched_turn(_commit_native_stamp, sleep=sleep):
         _report_stranded_native_turn(args.name, sid, short_id)
@@ -3529,6 +3605,7 @@ def cmd_wait(args, get_process_info=None, sleep=time.sleep, clock=time.monotonic
     # freeze, or `finished` itself empty) falls back to the poll verdict,
     # which is the only one that exists for it.
     persisted_status: dict = {}
+    epoch_frozen = False
     if finished:
         # M-B T5: wait_for_workers already picked the terminal verdict for
         # any native name in `finished` via recompute_worker_native (never
@@ -3608,6 +3685,14 @@ def cmd_wait(args, get_process_info=None, sleep=time.sleep, clock=time.monotonic
         results = [e for e in tail_events(log_path, n=None) if e["kind"] == "result"]
         summary = results[-1]["text"] if results else "(no result event)"
         print(f"{n}: {status} -- {_truncate(summary, 120)}")
+    # Debt roll-up item 9 (T5-era residual): when the persist step's OWN
+    # roster fetch froze (G9), the rows above fall back to the earlier poll
+    # verdict -- the only one that exists -- and nothing was persisted. Say
+    # so, same convention as cmd_status/cmd_clean's freeze line, instead of
+    # letting the stale verdict read as current-and-committed.
+    if epoch_frozen:
+        print("EPOCH: roster suspicious at persist -- native rows show the "
+              "pre-freeze poll verdict; nothing persisted (G9)")
 
     if pending:
         if mode == "any" and finished:
@@ -3913,12 +3998,12 @@ def _cmd_send_native(name: str, before: dict, message: str,
                 # unconditionally, so a concurrent kill/clean racing this
                 # window got a "steered" event in its audit trail even
                 # though no registry mutation happened.
-                append_event("steered", name, old_session_id=old_sid,
-                            new_session_id=new_sid, short_id=short_id)
+                _append_event_quiet("steered", name, old_session_id=old_sid,
+                                    new_session_id=new_sid, short_id=short_id)
             elif r is not None:
                 commit_orphaned["flag"] = True
-                append_event("steer_orphaned", name, old_session_id=old_sid,
-                            new_session_id=new_sid)
+                _append_event_quiet("steer_orphaned", name, old_session_id=old_sid,
+                                    new_session_id=new_sid)
 
     if not _commit_launched_turn(_commit, sleep=sleep):
         _report_stranded_native_turn(name, new_sid, short_id)
@@ -4159,7 +4244,8 @@ def cmd_send(args, popen=subprocess.Popen, get_process_info=None, which=shutil.w
                 r["turns"] = r.get("turns", 0) + 1
                 r["last_activity"] = now_iso()
                 save_registry(data)
-            append_event("turn_started", args.name, session_id=sid, turn_pid=info["turn_pid"])
+            _append_event_quiet("turn_started", args.name, session_id=sid,
+                                turn_pid=info["turn_pid"])
 
     # Post-testing wave, item 1b (stress-report Finding 1, CRITICAL): retry
     # with backoff instead of a single bare lock acquisition -- see
@@ -4255,11 +4341,12 @@ def _resume_one_limited_native(name: str, old_sid: str, cwd, mode, model, catego
                 # OLD-sid mailbox onto the new fork -- see
                 # _migrate_residual_mailbox's docstring.
                 _migrate_residual_mailbox(old_sid, new_sid)
-                append_event("limit_resumed", name, old_session_id=old_sid, session_id=new_sid)
+                _append_event_quiet("limit_resumed", name, old_session_id=old_sid,
+                                    session_id=new_sid)
             elif r is not None:
                 commit_orphaned["flag"] = True
-                append_event("steer_orphaned", name, old_session_id=old_sid,
-                            new_session_id=new_sid)
+                _append_event_quiet("steer_orphaned", name, old_session_id=old_sid,
+                                    new_session_id=new_sid)
 
     if not _commit_launched_turn(_commit, sleep=sleep):
         _report_stranded_native_turn(name, new_sid, short_id)
@@ -4367,7 +4454,8 @@ def _resume_one_limited(name: str, popen, get_process_info, which, sleep,
                 r["turns"] = r.get("turns", 0) + 1
                 r["last_activity"] = now_iso()
                 save_registry(data)
-            append_event("limit_resumed", name, session_id=sid, turn_pid=info["turn_pid"])
+            _append_event_quiet("limit_resumed", name, session_id=sid,
+                                turn_pid=info["turn_pid"])
 
     if not _commit_launched_turn(_commit, sleep=sleep):
         _report_stranded_turn(name, sid, info)
@@ -5121,7 +5209,9 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
                     rec["turns"] = 1
                     rec["last_activity"] = now_iso()
                     save_registry(data)
-                    append_event("turn_started", name, session_id=fast_sid)
+                    # Fix-wave N2: see cmd_spawn's fast-completion block --
+                    # post-save OSError must not crash a durable commit.
+                    _append_event_quiet("turn_started", name, session_id=fast_sid)
             _write_ceiling_file(fast_sid, token_ceiling)
             print(f"{name} {fast_sid} (native bg, fast completion before join)")
             return 0
@@ -5160,7 +5250,7 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
                 r["turns"] = 1
                 r["last_activity"] = now_iso()
                 save_registry(data)
-                append_event("turn_started", name, session_id=new_sid)
+                _append_event_quiet("turn_started", name, session_id=new_sid)
 
     if not _commit_launched_turn(_commit, sleep=sleep):
         _report_stranded_native_turn(name, new_sid, short_id)
@@ -5485,7 +5575,8 @@ def cmd_respawn(args, popen=subprocess.Popen, get_process_info=None, which=shuti
                 r["turns"] = 1
                 r["last_activity"] = now_iso()
                 save_registry(data)
-            append_event("turn_started", args.name, session_id=new_sid, turn_pid=info["turn_pid"])
+            _append_event_quiet("turn_started", args.name, session_id=new_sid,
+                                turn_pid=info["turn_pid"])
 
     # Post-testing wave, item 1b (stress-report Finding 1, CRITICAL): retry
     # with backoff instead of a single bare lock acquisition -- see
@@ -7519,7 +7610,8 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
     # mistaken for the one just launched. A snapshot fetch failure never
     # blocks dispatch -- fall back to an empty exclusion set.
     pre_ok, pre_entries = roster_fetch()
-    # Roll-up item 3: filter the sessionId VALUE's type too -- a dict-valued
+    # Unhashable-sessionId guard (debt roll-up, mislabeled "item 3" in an
+    # earlier wave): filter the sessionId VALUE's type too -- a dict-valued
     # sessionId (CLI drift / hostile roster) would otherwise land in the set
     # and raise TypeError from the unhashable value.
     pre_sids = ({e.get("sessionId") for e in pre_entries
@@ -7743,9 +7835,13 @@ def _roster_live_sids(entries: list) -> set:
     exist only while the process lives; a lingering `state:"done"` entry
     (observed surviving >=3h21m) must NOT count as live, or a finished
     predecessor would block every successor claim for hours."""
+    # Same hostile-sessionId-value guard as dispatch_bg's pre-snapshot: a
+    # dict-valued sessionId (CLI drift / hostile roster) must never raise
+    # TypeError from an unhashable value landing in the set.
     return {
         e.get("sessionId") for e in entries
-        if isinstance(e, dict) and e.get("sessionId") and ("status" in e or "pid" in e)
+        if isinstance(e, dict) and isinstance(e.get("sessionId"), str)
+        and e.get("sessionId") and ("status" in e or "pid" in e)
     }
 
 
@@ -8062,8 +8158,7 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     roster_fetch = lambda: _fetch_agents_roster(which=which, run=run)  # noqa: E731
     exe = resolve_claude_executable(which=which)
     pre_ok, pre_payload = roster_fetch()
-    # Roll-up item 3: same hostile-sessionId-value guard as dispatch_bg's
-    # pre-snapshot above.
+    # Same unhashable-sessionId guard as dispatch_bg's pre-snapshot above.
     pre_sids = {e.get("sessionId") for e in (pre_payload if pre_ok else [])
                 if isinstance(e, dict) and isinstance(e.get("sessionId"), str)}
     name = f"sup|{successor_inc}|successor"
@@ -8104,8 +8199,13 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
         while clock() < deadline:
             ok, payload = roster_fetch()
             if ok:
+                # Same hostile-sessionId-value guard as pre_sids above: a
+                # dict-valued sessionId would raise TypeError from the
+                # unhashable membership test against the set.
                 fresh = [e for e in payload if isinstance(e, dict)
-                         and e.get("name") == name and e.get("sessionId")
+                         and e.get("name") == name
+                         and isinstance(e.get("sessionId"), str)
+                         and e.get("sessionId")
                          and e.get("sessionId") not in pre_sids]
                 if fresh:
                     successor_sid = fresh[0]["sessionId"]
@@ -8192,10 +8292,14 @@ def cmd_sup_handoff_abort(args, which=shutil.which, run=subprocess.run) -> int:
         else:
             flag = read_handoff_abort_flag()
             recorded_sid = flag.get("successor_sid") if flag is not None else None
-            # Roll-up item 8: an abort flag recorded with successor_sid=None
-            # (the dispatch-failed shape) must never match an
-            # args.successor_sid that is itself None -- guard both sides.
-            if args.successor_sid is None or recorded_sid != args.successor_sid:
+            # Roll-up item 8 (simplified): an abort flag recorded with
+            # successor_sid=None (the dispatch-failed shape) names nothing
+            # verifiable to stop -- refuse on the RECORDED side, whatever the
+            # caller passed. The old args-side None check was dead via the
+            # CLI (argparse required=True) and is now subsumed: a None
+            # args.successor_sid can only match a None recorded_sid, which
+            # this refuses first.
+            if recorded_sid is None or recorded_sid != args.successor_sid:
                 raise FleetCliError(
                     f"no HANDSHAKE and --successor-sid {args.successor_sid} matches no "
                     f"recorded limbo successor -- refusing to stop an unverified session "

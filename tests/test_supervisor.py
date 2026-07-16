@@ -193,6 +193,17 @@ class TestRosterLiveSids:
         ]
         assert fleet._roster_live_sids(entries) == {"a", "c"}
 
+    def test_hostile_sessionid_value_filtered_not_raised(self):
+        # Debt roll-up item 2, third grepped site: a dict-valued sessionId
+        # (CLI drift / hostile roster) must be filtered, never raise
+        # TypeError from an unhashable value landing in the live-sid set.
+        entries = [
+            {"sessionId": {"nested": "hostile"}, "status": "busy"},
+            {"sessionId": ["also", "unhashable"], "pid": 7},
+            {"sessionId": "ok", "status": "idle"},
+        ]
+        assert fleet._roster_live_sids(entries) == {"ok"}
+
 
 def _fake_run_roster(entries):
     """Injectable subprocess.run double returning a roster JSON payload."""
@@ -459,6 +470,30 @@ class TestHandoff:
         out = capsys.readouterr().out
         assert "falling back to name join (G6 fallback)" in out
         assert "SUCCESSOR-SID: sid-fallback-joined" in out
+
+    def test_name_join_fallback_filters_hostile_sessionid_value(self, sup_home, capsys):
+        # Debt roll-up item 2, fourth grepped site: the G6 name-join
+        # fallback's `not in pre_sids` membership test hashes the sessionId
+        # value -- a dict-valued one (CLI drift / hostile roster) raised
+        # TypeError instead of being filtered.
+        self._hold()
+        state = {"name": None}
+        def run(argv, **kw):
+            if "--bg" in argv:
+                state["name"] = next(a for a in argv if a.startswith("sup|"))
+                return SimpleNamespace(returncode=0, stdout="launched (no short id token)\n", stderr="")
+            entries = [{"sessionId": "sid-old", "status": "busy"}]
+            if state["name"]:
+                entries += [
+                    {"sessionId": {"nested": "hostile"}, "status": "busy",
+                     "name": state["name"]},
+                    {"sessionId": "sid-fallback-joined", "status": "busy",
+                     "name": state["name"]},
+                ]
+            return SimpleNamespace(returncode=0, stdout=json.dumps(entries), stderr="")
+        rc = self._begin(run)
+        assert rc == 0
+        assert "SUCCESSOR-SID: sid-fallback-joined" in capsys.readouterr().out
 
     def test_begin_doa_when_successor_never_appears(self, sup_home, capsys, monkeypatch):
         # shrink the verify window: with a no-op sleep the real 60s window
