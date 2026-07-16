@@ -2424,13 +2424,25 @@ def _commit_launched_turn(commit_fn, sleep=time.sleep) -> bool:
     retrying the same `fleet` subcommand, which would launch a SECOND live
     turn on top of the one already running) and instead call
     `_report_stranded_turn` for a loud, actionable warning plus a
-    best-effort event."""
+    best-effort event.
+
+    Debt roll-up item 3: a NON-lock OSError out of `commit_fn()` (ENOSPC
+    on save_registry, a Windows PermissionError from a concurrent reader
+    holding fleet.json open, ...) is handled the same way, cross-cutting
+    at this helper so every call site is covered at once: retried with
+    the same backoff (Windows sharing violations are transient), and on
+    exhaustion reported to stderr and folded into the same False return
+    -- the turn is just as launched, and letting the OSError escape raw
+    would read as a failed launch and tempt the same double-launch retry."""
     for attempt in range(LAUNCH_COMMIT_MAX_ATTEMPTS):
         try:
             commit_fn()
             return True
-        except FleetLockTimeout:
+        except (FleetLockTimeout, OSError) as exc:
             if attempt == LAUNCH_COMMIT_MAX_ATTEMPTS - 1:
+                if not isinstance(exc, FleetLockTimeout):
+                    print(f"fleet: post-launch registry commit raised {exc!r} "
+                          "on the final attempt", file=sys.stderr)
                 return False
             sleep(LAUNCH_COMMIT_BACKOFF_SECONDS[attempt])
     return False
