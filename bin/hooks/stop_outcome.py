@@ -60,7 +60,9 @@ def _atomic_append_bytes(path: Path, data: bytes) -> None:
     try:
         written = wintypes.DWORD(0)
         ok = kernel32.WriteFile(handle, data, len(data), ctypes.byref(written), None)
-        if not ok:
+        # Roll-up item 4: same partial-write check as bin/fleet.py's copy --
+        # a torn JSONL line is silently skipped by read_outcomes otherwise.
+        if not ok or written.value != len(data):
             raise OSError(f"WriteFile failed for {path}: {ctypes.WinError()}")
     finally:
         kernel32.CloseHandle(handle)
