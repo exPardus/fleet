@@ -14,7 +14,7 @@ py -3.13 -m pytest tests/
 
 That runs the default tiers: unit (registry/parser/prompt logic, no `claude` invoked) and hooks (subprocess tests against the real hook scripts, still no `claude`). Both are fast — expect single-digit seconds.
 
-A third tier exists: live integration (`tests/integration/`), gated behind `FLEET_LIVE=1`. It spends real (small, haiku-model) money dispatching an actual worker in a temp `FLEET_HOME` sandbox, and is required — not optional — before merging any change to `launch_turn`, the hook scripts, or the stream-json parsers:
+A third tier exists: live integration (`tests/integration/`), gated behind `FLEET_LIVE=1`. It spends real (small, haiku-model) money dispatching an actual worker in a temp `FLEET_HOME` sandbox, and is required — not optional — before merging any change to `dispatch_bg`, the hook scripts, or the outcome-store parsers:
 
 ```
 FLEET_LIVE=1 py -3.13 -m pytest tests/integration/
@@ -46,7 +46,7 @@ Every non-trivial spec or code change goes through an adversarial review before 
 
 ## PR expectations
 
-- Run `py -3.13 -m pytest tests/` green before opening a PR. If your change touches `launch_turn`, `bin/hooks/*`, or a stream parser, also run the `FLEET_LIVE=1` tier and say so in the PR description.
+- Run `py -3.13 -m pytest tests/` green before opening a PR. If your change touches `dispatch_bg`, `bin/hooks/*`, or an outcome-store parser, also run the `FLEET_LIVE=1` tier and say so in the PR description.
 - Say which of `docs/SPEC.md`'s numbered invariants your change touches, and why it's still preserved, if it touches the core lifecycle at all.
 - Keep `bin/fleet.py` stdlib-only — no new dependencies.
 - Small, focused PRs beat large ones. This is a solo-maintainer project with a heavy review culture; a PR that's easy to attack adversarially is a PR that merges faster.
