@@ -2117,13 +2117,48 @@ _NATIVE_STICKY = ("dead", "over_budget", "over_ceiling", "limited",
                   "interrupted", "attached")
 
 
+def _dispatch_grace_active(record: dict) -> bool:
+    """Live finding 2026-07-16 (FLEET_LIVE pin suite RED 3/6): a freshly
+    dispatched --bg session's roster entry carries STATE ONLY
+    ({'state':'working'}, no `status`, no `pid`) for its first seconds --
+    `status`+`pid` appear only once the process attaches (empirically
+    confirmed: the same entry later showed status:'idle' + pid and the
+    outcome landed PIN-OK). The contract's field-presence rule reads
+    state-only as dead, so without a grace window the no-outcome
+    investigation verdicted a healthy 1.5-second-old worker dead-suspected
+    and `fleet wait` (dead-suspected is NATIVE_TERMINAL) returned
+    instantly.
+
+    Same principle as the sid=None dispatch-in-flight guard, and
+    deliberately the SAME window (`LAUNCH_CLAIM_MAX_AGE_SECONDS`, via
+    `_launch_claim_expired`): both cases are "the launch machinery is
+    still getting this session onto its feet -- never demote on absent
+    evidence inside that budget," and one shared constant beats a second
+    magic number. Anchored on `last_dispatch_at` (falling back to
+    `created`, which every record carries) -- the same stamp every
+    dispatch/steer/resume refreshes. A genuinely dead-at-birth session
+    still surfaces dead-suspected once the window lapses; that verdict is
+    advisory-only (never auto-respawned), so a delayed true-positive is
+    cheap where the 1.5s false-positive broke `fleet wait` and the pin
+    suite. Missing/unparseable anchor => grace stays active (the
+    never-demote-without-age-information rule `_launch_claim_expired`
+    already implements)."""
+    anchor = record.get("last_dispatch_at") or record.get("created")
+    return not _launch_claim_expired(anchor)
+
+
 def _investigate_no_outcome(name: str, record: dict, updated: dict) -> dict:
     """No fresh outcome record for the current sid: limit wall (silent,
-    G11) or genuinely dead. Scans the transcript tail via `_limit_scan_hook`
-    (module-level seam, `transcript_limit_scan` in production, swappable
-    in tests); limit-shaped -> park `limited` (never auto-respawned before
-    the horizon), else -> `dead-suspected` (surfaced, never auto-respawned,
-    re-evaluated every recompute).
+    G11), startup transient, or genuinely dead. Scans the transcript tail
+    via `_limit_scan_hook` (module-level seam, `transcript_limit_scan` in
+    production, swappable in tests); limit-shaped -> park `limited` (never
+    auto-respawned before the horizon); else, within the dispatch grace
+    window (`_dispatch_grace_active` -- the state-only startup transient,
+    or an outcome that simply hasn't flushed yet) -> stay `working`; else
+    -> `dead-suspected` (surfaced, never auto-respawned, re-evaluated
+    every recompute). The grace check lives HERE, once, so both of
+    `recompute_worker_native`'s call sites (roster-idle and
+    roster-dead-or-gone) share it rather than duplicating the window.
 
     Resolves the transcript path itself via find_transcript_path(name,
     sid) -- the record may live under either the outcome store's NAME key
@@ -2140,6 +2175,9 @@ def _investigate_no_outcome(name: str, record: dict, updated: dict) -> dict:
             updated["limit_reset_at"] = reset_at
             updated["limit_kind"] = kind
             return updated
+    if _dispatch_grace_active(record):
+        updated["status"] = "working"
+        return updated
     updated["status"] = "dead-suspected"
     return updated
 
@@ -2160,6 +2198,12 @@ def recompute_worker_native(name: str, record: dict, roster_entries: list) -> di
     4. Roster entry present but dead (`state`-only), or roster-gone
        entirely: same fresh-outcome check as the idle branch above (covers
        `stopped`/`failed`/`done`-reaped).
+
+    Both no-outcome paths route through `_investigate_no_outcome`, which
+    (live finding 2026-07-16) holds the verdict at `working` while the
+    dispatch grace window is active -- a freshly dispatched session's
+    roster entry is state-only for its first seconds, which is
+    indistinguishable from dead by field presence alone.
 
     Anchoring the fresh-outcome check on `last_dispatch_at` (never on the
     outcome record's mere presence) is what stops a dead predecessor's
@@ -7547,38 +7591,64 @@ def _doctor_check_log_sizes():
 def _doctor_check_autoclean(run=subprocess.run):
     """Note-only (docs/specs/autoclean.md D4): reports scheduler-task state
     (installed/missing) and last-run staleness from the run stamp. Never
-    turns doctor red -- a missing task is a choice, not broken plumbing."""
-    stamp_note = None
+    turns doctor red -- a missing task is a choice, not broken plumbing.
+
+    LOW advisory (confirmation pass): a fresh timestamp alone can lie --
+    the stamp's `errors` array and a lingering fleet.json.corrupt.*
+    artifact (which makes tier 2 refuse itself, NEW-1) both mean the sweep
+    is NOT actually doing its job. Both are appended to whichever note is
+    returned, so a bricked sweep never reads green-and-fresh."""
+    stamp_note, stale, run_errors = "no run recorded yet", False, []
     try:
         raw = json.loads(autoclean_stamp_path().read_text(encoding="utf-8"))
         last = _parse_iso(raw.get("ts"))
         age_h = (datetime.now(timezone.utc) - last).total_seconds() / 3600.0
         stamp_note = f"last run {age_h:.1f}h ago"
         stale = age_h > AUTOCLEAN_STALE_RUN_HOURS
+        errs = raw.get("errors")
+        if isinstance(errs, list):
+            run_errors = [str(e) for e in errs if e]
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
-        stamp_note, stale = "no run recorded yet", False
+        pass
+
+    extras = []
+    if run_errors:
+        extras.append(f"last run reported {len(run_errors)} error(s): "
+                      f"{run_errors[0][:120]}")
+    try:
+        artifacts = sorted(state_dir().glob("fleet.json.corrupt.*"))
+    except OSError:
+        artifacts = []
+    if artifacts:
+        extras.append(f"quarantine artifact present ({artifacts[-1].name}) -- "
+                      f"husk sweep is refusing itself (NEW-1); restore the "
+                      f"quarantined data, then remove the artifact")
+    suffix = ("; " + "; ".join(extras)) if extras else ""
+
     try:
         existing = PLATFORM.autoclean_task_query(AUTOCLEAN_TASK_NAME, run=run)
     except UnsupportedPlatformError:
-        return ("autoclean", True, "scheduler query unsupported on this platform -- skipped")
+        return ("autoclean", True,
+                f"scheduler query unsupported on this platform -- skipped{suffix}")
     except AutocleanTaskQueryError as exc:
-        return ("autoclean", True, f"scheduler query failed ({exc}) -- state unknown; {stamp_note}")
+        return ("autoclean", True,
+                f"scheduler query failed ({exc}) -- state unknown; {stamp_note}{suffix}")
     if existing is None:
         return ("autoclean", True,
                 f"no scheduled task installed (fleet init --autoclean) -- "
-                f"staleness sweeps are manual; {stamp_note}")
+                f"staleness sweeps are manual; {stamp_note}{suffix}")
     # F2: a task pinned to a deleted worktree's fleet.py fails silently on
     # every trigger -- flag it (note-only, but actionable).
     for tok in re.findall(r'"([^"]+)"', existing):
         if tok.lower().endswith("fleet.py") and not Path(tok).exists():
             return ("autoclean", True,
                     f"task installed but pinned to a missing path ({tok}) -- "
-                    f"reinstall from the canonical home: fleet init --autoclean")
+                    f"reinstall from the canonical home: fleet init --autoclean{suffix}")
     if stale:
         return ("autoclean", True,
                 f"task installed but {stamp_note} (> {AUTOCLEAN_STALE_RUN_HOURS:.0f}h) "
-                f"-- scheduler may be stale")
-    return ("autoclean", True, f"task installed; {stamp_note}")
+                f"-- scheduler may be stale{suffix}")
+    return ("autoclean", True, f"task installed; {stamp_note}{suffix}")
 
 
 def _doctor_check_fleet_home_marker():

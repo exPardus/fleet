@@ -108,6 +108,8 @@ absolute paths for every path-bearing flag regardless of invoking shell.
 
 **`status`/`state` disjoint axes (restated as a design rule):** interactive entries carry `status` only, never `state`, never `id`; dead background entries carry `state` only, never `status`, never `pid`; only live background entries carry both. A consumer must treat `pid`/`status` as present-only-while-the-backing-process-lives — their absence means "dead, read `state` instead," and their presence (e.g. `state: "working"` with no `pid`) does not by itself prove liveness either (VERDICTS.md §G3, §G8 stdin-wedge row).
 
+**Startup transient (amended 2026-07-16, live pin-suite finding):** state-only is dead ONLY outside the dispatch grace window. A freshly dispatched `--bg` session's roster entry exists for its first seconds with STATE ONLY (`{'state': 'working'}`, no `status`, no `pid`) — `status`+`pid` appear once the process attaches. Empirically confirmed: the same entry later showed `status: 'idle'` + `pid` and the session's outcome landed normally (PIN-OK), while the pre-amendment rule verdicted it dead-suspected ~1.5 s after spawn and `fleet wait` returned instantly. Consumers must treat a state-only (or roster-gone) entry with no fresh outcome as *still launching*, not dead, while within a grace window anchored on the record's `last_dispatch_at` (fleet: `_dispatch_grace_active`, sharing `LAUNCH_CLAIM_MAX_AGE_SECONDS` with the sid=None pre-claim guard).
+
 ---
 
 ## Result/cost contract
