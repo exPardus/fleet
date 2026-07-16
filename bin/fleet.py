@@ -262,14 +262,6 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def ctime_to_iso(dt: datetime) -> str:
-    """Serialize a process creation-time datetime to the registry's
-    turn_pid_ctime format (round-trips through _parse_iso). This is the
-    only serializer callers should use to store turn_pid_ctime --
-    datetime.isoformat() yields "+00:00" and breaks _parse_iso."""
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
 # ---------------------------------------------------------------------------
 # === PLATFORM ADAPTER START (SPEC §14 portability mandate) ===
 #
@@ -641,8 +633,6 @@ def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
         "spawned_by": spawned_by,
         "created": created,
         "status": "working",
-        "turn_pid": None,
-        "turn_pid_ctime": None,
         "attached_since": None,
         # UL1 (item 11 / F31): usage-limit park horizon. limit_reset_at is the
         # ISO-8601 UTC instant the Claude plan window resets (or None when the
@@ -843,7 +833,7 @@ LAUNCH_CLAIM_MAX_AGE_SECONDS = 600.0
 
 
 def _launch_claim_expired(last_activity_iso) -> bool:
-    """True iff a "working"/turn_pid=None pre-claim's last_activity is older
+    """True iff a "working" pre-claim's (session_id=None) last_activity is older
     than LAUNCH_CLAIM_MAX_AGE_SECONDS (or is missing/unparseable -- treated
     as NOT expired, matching the pre-fix behavior of never demoting when
     there's no age information to go on). Shared by the native recompute
@@ -2444,8 +2434,8 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
     M-B T4: native `--bg` dispatch replaces detached Popen).
 
     Launch contract (M-B spec §3): pre-claim a registry record under
-    fleet_lock with session_id=None (the analog of the legacy turn_pid=None
-    pre-claim -- _launch_claim_expired bounds it via last_activity), dispatch
+    fleet_lock with session_id=None (a launch-in-flight claim --
+    _launch_claim_expired bounds it via last_activity), dispatch
     outside the lock via dispatch_bg, then re-lock to stamp the real sid/
     short id, OR roll back -- EXCEPT when a fast worker already finished
     (an outcome record for this name newer than the pre-claim) even though
@@ -3188,8 +3178,7 @@ def cmd_wait(args, sleep=time.sleep, clock=time.monotonic) -> int:
     epoch_frozen = False
     if finished:
         # M-B T5: wait_for_workers already picked the terminal verdict for
-        # any native name in `finished` via recompute_worker_native (never
-        # recompute_worker's PID probe -- native records have no turn_pid).
+        # any name in `finished` via recompute_worker_native.
         # Re-derive the same way here for the persist step, one more roster
         # fetch outside the lock (F4), so a worker that flips into
         # `limited`/`dead-suspected` gets its horizon fields and its named
@@ -3323,8 +3312,8 @@ def _cmd_send_native(name: str, before: dict, message: str,
       - idle -> FORK-STEER: token-ceiling cumulative check (mirrors legacy's
         over_ceiling refusal; native has no logs/<name>.jsonl, so
         `_native_cumulative_tokens` sums the outcome store instead; USD
-        check is skipped entirely -- G3), pre-claim `working` (turn_pid
-        stays None -- native never used it), then OUTSIDE the lock:
+        check is skipped entirely -- G3), pre-claim `working`, then
+        OUTSIDE the lock:
         append_mailbox(old_sid, message) FIRST so the message rides the
         drain (F6 pattern), compose_prompt(name, cwd, "", old_sid) (claims
         the mailbox, no journal_path -- this is a steer, not a context
@@ -3499,7 +3488,6 @@ def _cmd_send_native(name: str, before: dict, message: str,
                 )
 
         # F1 pre-claim: atomic decide+claim, same lock, before release.
-        # turn_pid stays None -- native records never populate it.
         # T7 fix wave (CRITICAL-2 fix 2a): also restamp last_dispatch_at --
         # the in-flight anchor cmd_spawn's own pre-claim stamps, mirrored
         # here so a concurrent recompute (any caller, not just a racing
@@ -3515,7 +3503,6 @@ def _cmd_send_native(name: str, before: dict, message: str,
         # for it -- permanently stranding an idle worker as dead-suspected.
         prior_last_dispatch_at = after.get("last_dispatch_at")
         after["status"] = "working"
-        after["turn_pid"] = None
         after["last_activity"] = now_iso()
         after["last_dispatch_at"] = now_iso()
         data["workers"][name] = after
@@ -3566,7 +3553,6 @@ def _cmd_send_native(name: str, before: dict, message: str,
             if r is not None and r.get("session_id") == old_sid:
                 _restamp_after_steer(r, new_sid, short_id)
                 r["status"] = "working"
-                r["turn_pid"] = None
                 r["last_activity"] = now_iso()
                 save_registry(data)
                 # T7 fix wave (CRITICAL-2 fix 2c): a steering message that
@@ -3643,9 +3629,8 @@ def _resume_one_limited_native(name: str, old_sid: str, cwd, mode, model, catego
     fork-steer per RATIFIED G2(b): `claude --bg --resume <old_sid>` MINTS A
     NEW SID (the original session's own roster entry, sid, and event count
     are left untouched, Steering contract) rather than waking the same live
-    session. Called with the pre-claim (status="working"/turn_pid=None)
-    already committed by `_resume_one_limited` under its own lock, exactly
-    like the legacy branch.
+    session. Called with the pre-claim (status="working") already
+    committed by `_resume_one_limited` under its own lock.
 
     Outside any lock: drain the OLD sid's mailbox into a steer body via
     compose_prompt(..., old_sid, journal_path=...) -- same "mailbox +
@@ -3659,7 +3644,7 @@ def _resume_one_limited_native(name: str, old_sid: str, cwd, mode, model, catego
     On success: retire old_sid into retired_sids, restamp session_id/
     native_short_id to the NEW sid, re-point the ceiling file (the new sid
     didn't exist before dispatch_bg returned it), clear the limit fields,
-    and commit turn_pid/turns/last_dispatch_at/last_activity via the same
+    and commit turns/last_dispatch_at/last_activity via the same
     retry-wrapped `_commit_launched_turn` stamp step cmd_spawn's native path
     uses -- dispatch_bg is itself synchronous (it already blocks through the
     roster join), so the only remaining race is the registry commit lock,
@@ -3680,7 +3665,7 @@ def _resume_one_limited_native(name: str, old_sid: str, cwd, mode, model, catego
         with fleet_lock():
             data = load_registry()
             r = data["workers"].get(name)
-            if r is not None and r.get("status") == "working" and r.get("turn_pid") is None:
+            if r is not None and r.get("status") == "working" and r.get("session_id") == old_sid:
                 r["status"] = "limited"
                 save_registry(data)
         raise
@@ -3709,7 +3694,6 @@ def _resume_one_limited_native(name: str, old_sid: str, cwd, mode, model, catego
                 r["session_id"] = new_sid
                 r["native_short_id"] = short_id
                 r["status"] = "working"
-                r["turn_pid"] = None
                 r["last_dispatch_at"] = now_iso()
                 r["last_activity"] = now_iso()
                 r["turns"] = r.get("turns", 0) + 1
@@ -4141,9 +4125,8 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
 
     old_sid = before.get("session_id")
     if old_sid is None:
-        # Launch-in-flight pre-claim (native analog of legacy's
-        # turn_pid-is-None guard): no real sid exists yet to stop or fork
-        # from, and no launch-in-flight window has a live process to verify.
+        # Launch-in-flight pre-claim: no real sid exists yet to stop or
+        # fork from.
         raise FleetCliError(f"launch in flight for {name}; retry in a few seconds")
 
     cwd = before["cwd"]
@@ -4421,8 +4404,6 @@ def _cmd_kill_native(name: str, rec: dict, run=subprocess.run, which=shutil.whic
         r = data["workers"].get(name)
         if r is not None:
             r["status"] = "dead"
-            r["turn_pid"] = None
-            r["turn_pid_ctime"] = None
             save_registry(data)
         append_event("killed", name, interrupt_outcome=stopped_ok)
 
