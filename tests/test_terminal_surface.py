@@ -146,8 +146,9 @@ class TestStatusSnapshot:
 class TestStatusSnapshotIsPure:
     def test_never_probes(self, home, monkeypatch):
         def boom(*a, **k):
-            raise AssertionError("status_snapshot must never probe a PID")
-        monkeypatch.setattr(fleet.PLATFORM, "get_process_info", boom)
+            raise AssertionError("status_snapshot must never probe liveness")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", boom)
+        monkeypatch.setattr(fleet.subprocess, "run", boom)
         _write_registry(home, {"pmbot": _rec()})
         fleet.status_snapshot()
 
@@ -173,7 +174,8 @@ class TestStatusJsonFlags:
     def test_stale_ok_json_prints_snapshot_and_never_probes(self, home, capsys, monkeypatch):
         def boom(*a, **k):
             raise AssertionError("--stale-ok must never probe")
-        monkeypatch.setattr(fleet.PLATFORM, "get_process_info", boom)
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", boom)
+        monkeypatch.setattr(fleet.subprocess, "run", boom)
         _write_registry(home, {"pmbot": _rec()})
 
         rc = fleet.cmd_status(self._args(json=True, stale_ok=True))

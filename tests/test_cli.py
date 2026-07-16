@@ -425,7 +425,7 @@ class TestCmdSpawn:
         flow: cmd_spawn's rollback must also catch BaseException -- a Ctrl-C
         landing during dispatch must still pop the just-created registry
         record, not leave a ghost "working"+session_id=None record pinned
-        forever by recompute_status's launch-in-flight guard."""
+        forever by the recompute launch-in-flight guard."""
         worker_dir = tmp_path / "proj"
         worker_dir.mkdir()
 
@@ -442,7 +442,7 @@ class TestCmdSpawn:
     def test_spawn_reasserts_working_after_concurrent_recompute_race(self, isolated_home, tmp_path, monkeypatch):
         """F-RACE: between cmd_spawn's create-lock (record written with
         session_id=None) and its post-dispatch stamp lock, a concurrent
-        `fleet status` can recompute_status(...) -> "dead" and persist it.
+        `fleet status` can recompute a "dead" verdict and persist it.
         The stamp lock must re-assert status="working" so the live worker
         is not left permanently `dead` (testRace.py in the adversarial
         review; same contract under native dispatch)."""
