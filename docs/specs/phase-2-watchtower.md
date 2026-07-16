@@ -76,4 +76,6 @@ Salvaged kernels to include (from IDEA-FORGE-REPORT §4 — build as scoped, do 
 
 ## Done criteria
 
+**[SUPERSEDED (mechanism only) — native-substrate pivot 2026-07-13]** — the "killed-PID" fault-injection criterion below assumes PID-liveness polling; see header.
+
 Week of real use: zero silently-dead workers; context-threshold notification observed firing before a worker degraded; CLI unaffected with watchtower stopped; fault-injection acceptance tests (F29) green (killed-PID → crash event ≤1 poll interval; synthetic thresholds fire at spec'd numbers). *(Auto-respawn done-criterion deleted per F20 — auto-respawn is out of Phase-2 scope.)*
