@@ -8137,13 +8137,20 @@ NATIVE_DISPATCH_TIMEOUT_SECONDS = 120.0
 # Never-attach wedge (live finding #2, 2026-07-16): across 12 healthy probe
 # spawns, status+pid appeared on the joined roster entry 4-6s post-dispatch
 # (outcome ~10-15s); 30s is 5x that observed ceiling as loaded-daemon
-# headroom. A false positive is cheap by construction -- the only session
-# ever stopped is one with NO process, NO transcript activity and NO
-# outcome (provably unstarted), so an over-tight window costs one wasted
-# session + one redispatch, never lost work; an over-generous window just
-# delays wedge detection. 30s balances the two.
+# headroom. CALIBRATION, not proof (n=12, one machine, one day) -- which is
+# why a wedge verdict is not trusted blindly: the cleanup path verifies the
+# stop/rm outcome and re-checks the roster before any retry (C1), and a
+# full-window fetch blackout aborts rather than verdicts (H1). An
+# over-tight window costs one stopped-and-verified session + one
+# redispatch; an over-generous one just delays wedge detection.
 NATIVE_ATTACH_VERIFY_SECONDS = 30.0
 NATIVE_ATTACH_POLL_SECONDS = 2.0
+# M2: wedge-path stop/rm run with this short timeout instead of the default
+# 30s -- the wedge path sits inside spawn latency budgets (callers' outer
+# timeouts, the pin suite's SPAWN_TIMEOUT); three stacked 30s subprocess
+# stalls would turn a slow-daemon day into a blown harness rather than a
+# slow spawn.
+NATIVE_WEDGE_CLEANUP_TIMEOUT_SECONDS = 10
 DEFAULT_CATEGORY = "fleet"
 NATIVE_NAME_HINT_MAX = 40
 
@@ -8247,11 +8254,21 @@ def _await_attach(name, sid, roster_fetch, sleep, clock,
       * an outcome record for this sid exists -- completed before any poll
         ever saw it live (fast-completion race).
     A transient roster-fetch failure is simply retried until the deadline
-    (never treated as a wedge on its own)."""
+    (never treated as a wedge on its own).
+
+    H1 (adversarial review): a FULL-WINDOW blackout -- zero successful
+    fetches before the deadline -- is CANNOT-VERIFY, never a wedge
+    verdict. A wedge verdict licenses stop/rm of the session; issuing it
+    against a session we never once observed could kill a live turn
+    mid-tool-run. Raises NativeDispatchError instead (loud abort; the
+    caller's DOA handling surfaces it and the session, whatever its
+    actual state, is left untouched)."""
     deadline = clock() + verify_seconds
+    verified_once = False
     while True:
         ok, entries = roster_fetch()
         if ok:
+            verified_once = True
             entry = _roster_entry_for(entries, sid)
             if entry is None:
                 return True
@@ -8262,6 +8279,13 @@ def _await_attach(name, sid, roster_fetch, sleep, clock,
         if read_outcomes(name, sid=sid):
             return True
         if clock() >= deadline:
+            if not verified_once:
+                raise NativeDispatchError(
+                    f"cannot verify attachment of {name!r} session {sid}: "
+                    f"every roster fetch failed for {verify_seconds:.0f}s -- "
+                    f"aborting dispatch WITHOUT touching the session (H1: "
+                    f"an unobserved session is never treated as a wedge)",
+                    short_id=sid.split("-", 1)[0])
             return False
         sleep(NATIVE_ATTACH_POLL_SECONDS)
 
@@ -8319,9 +8343,15 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
     argv.append(tiny_prompt)
     def _dispatch_once():
         """One dispatch + roster join. Per-attempt so the never-attach
-        retry below re-runs the WHOLE sequence -- fresh pre-snapshot (the
-        wedged sid may still linger in the roster if its rm failed), fresh
-        `claude --bg` call, fresh short id, fresh join."""
+        retry below re-runs the WHOLE sequence with a FRESH pre-snapshot.
+        M1 (review): the wedged sid itself can never collide with the
+        retry's join -- the join is short-id-prefix based and attempt 2
+        gets a different prefix -- so the snapshot's real job is FOREIGN
+        sessions: anything minted during attempt 1's attach window whose
+        sid happens to share attempt 2's short-id prefix is present in the
+        fresh snapshot and excluded; a stale (attempt-1) snapshot would
+        predate it and let the join bind a foreign session. Pinned by
+        test_fresh_presnapshot_excludes_foreign_prefix_collision."""
         # Snapshot the roster ONCE before dispatching -- any sid already
         # present (sharing the short-id prefix fleet is about to receive)
         # is excluded from the join below, so a foreign concurrent session
@@ -8369,14 +8399,56 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
                 f"recover manually via claude agents", short_id=short_id)
         return sid, short_id
 
+    def _cleanup_wedged(sid, short_id):
+        """Stop + rm a wedge-verdicted session and VERIFY the outcome
+        (C1 CRITICAL, adversarial review): the stop/rm booleans were
+        previously discarded and the retry dispatched unconditionally --
+        but a false wedge (attach slower than the window under daemon
+        overload) plus a failed stop (same overload, correlated) meant
+        attempt 1 could attach AFTER attempt 2 launched: two live sessions
+        on one task file, only sid2 tracked, and the rogue -- being
+        status/pid-live -- is skipped by every husk sweep forever. Per
+        _stop_native_session's own contract, False means COULD NOT VERIFY:
+        re-fetch the roster and declare the retry safe only if the entry
+        is verifiably gone or still status/pid-free. Returns
+        (stopped, removed, retry_safe, detail).
+
+        M2: both subprocesses run with the short wedge-path timeout --
+        this path sits inside spawn latency budgets (pin SPAWN_TIMEOUT);
+        a hung schtasks-style 30s x 3 stall here is the difference between
+        a slow spawn and a blown harness."""
+        stopped = _stop_native_session(sid, run=run, which=which,
+                                       timeout=NATIVE_WEDGE_CLEANUP_TIMEOUT_SECONDS)
+        removed = _rm_native_session(sid, run=run, which=which,
+                                     timeout=NATIVE_WEDGE_CLEANUP_TIMEOUT_SECONDS)
+        retry_safe = True
+        detail = f"stop={'ok' if stopped else 'FAILED'}/rm={'ok' if removed else 'FAILED'}"
+        if not (stopped and removed):
+            ok, entries = roster_fetch()
+            if not ok:
+                retry_safe = False
+                detail += ", recheck=unavailable"
+            else:
+                entry = _roster_entry_for(entries, sid)
+                if entry is None:
+                    detail += ", recheck=gone"
+                elif "status" in entry or "pid" in entry:
+                    retry_safe = False
+                    detail += ", recheck=LIVE"
+                else:
+                    detail += ", recheck=still-unattached"
+        return stopped, removed, retry_safe, detail
+
     # Never-attach wedge guard (live finding #2, 2026-07-16): a joined
     # roster entry is NOT a started session -- rarely (~1/13 hand-probed
     # spawns that day) the daemon mints the entry and never attaches the
-    # runner. Verify attachment; on a wedge, stop/rm the provably-unstarted
-    # session and redispatch EXACTLY ONCE (safe: no process ever existed,
-    # no tool ran, the task file is untouched input). A second consecutive
-    # wedge gives up loudly -- callers (cmd_spawn DOA rollback et al.)
-    # surface it; never a silent working-forever record.
+    # runner. Verify attachment; on a wedge, stop/rm the session -- unstarted
+    # as far as every observation shows (no process, no tool ran, task file
+    # untouched; the 30s window is calibration against n=12 healthy probes,
+    # not proof, which is exactly why _cleanup_wedged verifies before any
+    # retry) -- and redispatch EXACTLY ONCE. A second consecutive wedge
+    # gives up loudly -- callers (cmd_spawn DOA rollback et al.) surface
+    # it; never a silent working-forever record.
     sid, short_id = _dispatch_once()
     if _await_attach(name, sid, roster_fetch, sleep, clock):
         return {"session_id": sid, "short_id": short_id, "rendered_name": rendered}
@@ -8384,21 +8456,26 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
     print(f"fleet: {name}: session {short_id} joined the roster but never "
           f"attached within {NATIVE_ATTACH_VERIFY_SECONDS:.0f}s -- stopping "
           f"the wedged session and retrying once", file=sys.stderr)
-    _stop_native_session(sid, run=run, which=which)
-    _rm_native_session(sid, run=run, which=which)
-    _append_event_quiet("dispatch_retried", name, wedged_session_id=sid)
+    stopped1, removed1, retry_safe, detail1 = _cleanup_wedged(sid, short_id)
+    if not retry_safe:
+        raise NativeDispatchError(
+            f"wedged session {short_id} for {name!r} could not be verified "
+            f"stopped ({detail1}) -- refusing the retry: redispatching over a "
+            f"possibly-live session risks two sessions on one task (C1)",
+            short_id=short_id)
+    _append_event_quiet("dispatch_retried", name, wedged_session_id=sid,
+                        cleanup=detail1)
 
     sid2, short_id2 = _dispatch_once()
     if _await_attach(name, sid2, roster_fetch, sleep, clock):
         return {"session_id": sid2, "short_id": short_id2, "rendered_name": rendered}
     _append_event_quiet("dispatch_wedged", name, session_id=sid2, short_id=short_id2)
-    _stop_native_session(sid2, run=run, which=which)
-    _rm_native_session(sid2, run=run, which=which)
+    _stopped2, _removed2, _retry_safe2, detail2 = _cleanup_wedged(sid2, short_id2)
     raise NativeDispatchError(
         f"two consecutive --bg dispatches for {name!r} joined the roster but "
         f"never attached (no pid/status, no outcome) within "
         f"{NATIVE_ATTACH_VERIFY_SECONDS:.0f}s each -- daemon dispatch wedge; "
-        f"both sessions stopped/removed (short ids {short_id}, {short_id2})",
+        f"cleanup: {short_id} {detail1}; {short_id2} {detail2}",
         short_id=short_id2)
 
 
