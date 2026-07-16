@@ -325,6 +325,36 @@ class TestLockContention:
             assert lock_path.exists()
         assert not lock_path.exists()
 
+    def test_failed_token_write_closes_fd_and_removes_lock_file(self, isolated_home, monkeypatch):
+        # Debt roll-up item 6: an ENOSPC during the token write used to leak
+        # the fd and strand a token-less lock file that blocked every
+        # acquirer until the stale-break window.
+        import os as _os
+        lock_path = fleet.state_dir() / "fleet.lock"
+        opened = []
+        real_open, real_write = _os.open, _os.write
+
+        def recording_open(*a, **kw):
+            fd = real_open(*a, **kw)
+            opened.append(fd)
+            return fd
+
+        def enospc_write(fd, data):
+            if fd in opened:
+                raise OSError(28, "No space left on device")
+            return real_write(fd, data)
+
+        monkeypatch.setattr(fleet.os, "open", recording_open)
+        monkeypatch.setattr(fleet.os, "write", enospc_write)
+        with pytest.raises(OSError, match="No space left"):
+            with fleet.fleet_lock():
+                pass  # pragma: no cover
+        monkeypatch.undo()
+        assert len(opened) == 1
+        with pytest.raises(OSError):
+            _os.fstat(opened[0])  # fd was closed on the error path
+        assert not lock_path.exists()  # no token-less lock file stranded
+
     def test_release_is_ownership_checked_does_not_delete_successors_lock(self, isolated_home):
         # Simulate a successor stealing the lock file (e.g. it broke a
         # falsely-stale lock) while we still believe we hold it: overwrite
