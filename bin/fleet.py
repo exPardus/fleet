@@ -6664,7 +6664,15 @@ def cmd_autoclean(args, run=subprocess.run, which=shutil.which) -> int:
     an environmental hiccup in one tier doesn't waste the others; a corrupt
     registry is not a hiccup -- tier 1's load already quarantine-renamed
     the file, so "continue to tier 2" means sweeping against a missing
-    registry, the exact fail-open the reviewer repro'd."""
+    registry, the exact fail-open the reviewer repro'd.
+
+    `--fleet-home` (F2): overrides the module FLEET_HOME before anything
+    reads a path -- the scheduled task carries it because Task Scheduler
+    provides no operator environment for the env-var route."""
+    fleet_home_override = getattr(args, "fleet_home", None)
+    if fleet_home_override:
+        global FLEET_HOME
+        FLEET_HOME = Path(fleet_home_override)
     dry_run = bool(getattr(args, "dry_run", False))
     ttl_hours = getattr(args, "ttl_hours", None)
     expire_hours = getattr(args, "expire_tombstones_hours", None)
@@ -6721,14 +6729,27 @@ def cmd_autoclean(args, run=subprocess.run, which=shutil.which) -> int:
     return 1 if errors else 0
 
 
+def _autoclean_script_path() -> Path:
+    """The fleet.py the scheduled task will pin. A seam (monkeypatchable)
+    so tests can model canonical-vs-worktree installs without moving files."""
+    return Path(__file__).resolve()
+
+
 def _autoclean_task_command() -> str:
     """The Scheduled Task's command line: the exact interpreter running
     this `fleet init` plus this fleet.py -- mirroring cmd_init's own
     sys.executable-as-{{PYTHON}} doctrine (a scheduled task cannot fall
-    back to a bare `py` on PATH either)."""
+    back to a bare `py` on PATH either).
+
+    F2 (adversarial review, HIGH): FLEET_HOME is embedded EXPLICITLY as an
+    argv flag -- Task Scheduler runs with no operator environment, so
+    without it fleet.py falls back to script-location resolution and the
+    task sweeps whatever repo copy it happens to live in (a worktree's
+    empty state/, forever, doctor green) instead of the operator's home."""
     py = Path(sys.executable).resolve()
-    script = Path(__file__).resolve()
-    return f'"{py}" "{script}" autoclean'
+    script = _autoclean_script_path()
+    home = Path(FLEET_HOME).resolve()
+    return f'"{py}" "{script}" autoclean --fleet-home "{home}"'
 
 
 def _install_autoclean_task(interval_hours, force: bool) -> None:
@@ -6737,6 +6758,33 @@ def _install_autoclean_task(interval_hours, force: bool) -> None:
     interval_hours = int(interval_hours)
     if not 1 <= interval_hours <= 23:
         raise FleetCliError("--autoclean-interval-hours must be 1..23 (schtasks /SC HOURLY /MO)")
+
+    # F2 home guards: a scheduled task outlives this shell -- refuse to pin
+    # it to a fleet.py that is not the target home's own copy, to a linked
+    # git worktree (dies with the worktree), or to a home that contradicts
+    # the machine's fleet-home marker. --force overrides all three.
+    home = Path(FLEET_HOME).resolve()
+    script = _autoclean_script_path()
+    problems = []
+    if script.parent.parent != home:
+        problems.append(f"this fleet.py ({script}) is not the target home's copy ({home})")
+    if (home / ".git").is_file():
+        problems.append(f"{home} is a linked git worktree (.git is a file) -- "
+                        "a task pinned here dies with the worktree")
+    marker_home = None
+    try:
+        marker = fleet_home_marker_path()
+        if marker.exists():
+            marker_home = Path(marker.read_text(encoding="utf-8").strip()).resolve()
+    except (OSError, ValueError):
+        marker_home = None
+    if marker_home is not None and marker_home != home:
+        problems.append(f"machine fleet-home marker points at {marker_home}, not {home}")
+    if problems and not force:
+        raise FleetCliError(
+            "autoclean install refused (F2): " + "; ".join(problems) +
+            " -- run from the canonical fleet home, or rerun with --force")
+
     command = _autoclean_task_command()
     existing = PLATFORM.autoclean_task_query(AUTOCLEAN_TASK_NAME)
     if existing is not None and "autoclean" not in existing and not force:
@@ -7294,6 +7342,13 @@ def _doctor_check_autoclean(run=subprocess.run):
         return ("autoclean", True,
                 f"no scheduled task installed (fleet init --autoclean) -- "
                 f"staleness sweeps are manual; {stamp_note}")
+    # F2: a task pinned to a deleted worktree's fleet.py fails silently on
+    # every trigger -- flag it (note-only, but actionable).
+    for tok in re.findall(r'"([^"]+)"', existing):
+        if tok.lower().endswith("fleet.py") and not Path(tok).exists():
+            return ("autoclean", True,
+                    f"task installed but pinned to a missing path ({tok}) -- "
+                    f"reinstall from the canonical home: fleet init --autoclean")
     if stale:
         return ("autoclean", True,
                 f"task installed but {stamp_note} (> {AUTOCLEAN_STALE_RUN_HOURS:.0f}h) "
@@ -8859,6 +8914,9 @@ def build_parser() -> argparse.ArgumentParser:
                              help="tier 3 (default OFF): drop registry tombstones older than "
                                   "this; files in logs/archive/ are never deleted")
     p_autoclean.add_argument("--dry-run", action="store_true", dest="dry_run")
+    p_autoclean.add_argument("--fleet-home", dest="fleet_home", default=None,
+                             help="explicit FLEET_HOME override; the scheduled task "
+                                  "always passes this (Task Scheduler has no operator env)")
 
     sub.add_parser("doctor", help="run fleet health checks")
 
