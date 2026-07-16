@@ -75,23 +75,13 @@ class TestRegistryV2:
                                       dispatch_kind="bg", category="camp5")
         assert rec["dispatch_kind"] == "bg" and rec["category"] == "camp5"
 
-    def test_is_native_and_legacy_refusal(self, native_home):
-        native = {"dispatch_kind": "bg"}
-        legacy = {"session_id": "old"}  # pre-pivot record: key absent entirely
-        assert fleet.is_native(native) is True
-        assert fleet.is_native(legacy) is False
-        with pytest.raises(fleet.FleetCliError, match="pre-pivot"):
-            fleet.refuse_if_legacy("w1", legacy, "send")
-        fleet.refuse_if_legacy("w1", native, "send")  # no raise
+    def test_is_native_discriminates_on_dispatch_kind(self, native_home):
+        assert fleet.is_native({"dispatch_kind": "bg"}) is True
+        assert fleet.is_native({"session_id": "old"}) is False  # pre-pivot shape
 
     @pytest.mark.parametrize("bad", [None, "junk", [], 42])
     def test_is_native_non_dict_returns_false(self, native_home, bad):
         assert fleet.is_native(bad) is False
-
-    @pytest.mark.parametrize("bad", [None, "junk", [], 42])
-    def test_refuse_if_legacy_non_dict_raises_fleet_cli_error(self, native_home, bad):
-        with pytest.raises(fleet.FleetCliError, match="pre-pivot"):
-            fleet.refuse_if_legacy("w1", bad, "send")
 
 
 class TestOutcomeStore:
@@ -1928,11 +1918,6 @@ class TestNativeCumulativeTokens:
 
 
 class TestCmdSendNative:
-    def test_legacy_refuses(self, native_home):
-        legacy = {"session_id": "old"}  # dispatch_kind absent entirely
-        with pytest.raises(fleet.FleetCliError, match="pre-pivot"):
-            fleet._cmd_send_native("w1", legacy, "hello")
-
     def test_busy_native_appends_mailbox(self, native_home, monkeypatch):
         old_sid = SID
         seed_native_worker(native_home, sid=old_sid, status="idle")
