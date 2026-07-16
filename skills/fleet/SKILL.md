@@ -30,9 +30,10 @@ You are the manager of a fleet of Claude Code worker sessions on this machine. T
 | `fleet interrupt <name>` | Stop current turn. Legacy: kills the pid, marks idle. Native: `claude stop` + marks `interrupted` (never idle -- respawn is a separate decision). Follow with `send`/`respawn` to redirect. |
 | `fleet respawn <name> [--task <text>] [--force]` | Fresh session_id, same name/cwd/mode/model + journal + drained mailbox. THE context-reset lever. Refuses while a turn is running unless `--force` (interrupts first). `--task` overrides the original task text. |
 | `fleet kill <name>` | Interrupt (if running) and mark dead + event. Terminal — use `respawn` to bring the worker back. |
-| `fleet clean` | Remove dead workers + their logs/mailboxes/journals; prints what was removed. |
+| `fleet clean [--dead-only\|--tombstones]` | Remove dead workers + their logs/mailboxes/journals; prints what was removed. `--dead-only` spares archived tombstones; `--tombstones` sweeps only tombstones (incl. their `logs/archive/<name>/` history). |
 | `fleet archive [name] [--ttl-hours F] [--dry-run]` | Auto-retire idle/dead/interrupted native workers past a TTL (default 24h): moves journal/outcomes/task file into `logs/archive/<name>/`, `claude rm`s every sid (current + retired), keeps the registry entry as a tombstone (`fleet clean` is still the only deleter). `--dry-run` prints eligibility verdicts, mutates nothing. Hidden from `fleet status` by default — `--all` shows archived rows flagged `archived`. |
-| `fleet doctor` | Health check (claude/version, hook wiring + smoke test, stale PIDs/attaches, orphaned mailboxes, log sizes, ...). Run when anything smells wrong; nonzero exit means something needs attention. |
+| `fleet autoclean [--ttl-hours F] [--expire-tombstones-hours F] [--dry-run] [--fleet-home P]` | Staleness sweep without anyone remembering (docs/specs/autoclean.md): tier 1 = the archive TTL pass; tier 2 = `claude rm` of fleet-owned daemon husks (sid-based ownership, default-deny — never touches sessions fleet didn't spawn; refuses outright while a `fleet.json.corrupt.*` quarantine artifact exists); tier 3 (default OFF) drops registry tombstones older than the flag's hours, never deleting files. `--fleet-home` = explicit home override (resolved, must exist — the scheduled task always passes it, Task Scheduler has no operator env). Installed as a Scheduled Task via `fleet init --autoclean [--autoclean-interval-hours N]` (default every 6h); uninstall via `fleet init --autoclean-remove`. |
+| `fleet doctor` | Health check (claude/version, hook wiring + smoke test, stale PIDs/attaches, orphaned mailboxes, log sizes, autoclean scheduler state, ...). Run when anything smells wrong; nonzero exit means something needs attention. |
 | `fleet sup-boot [--handoff-inc <id>]` | Supervisor boot ritual: epoch check → claim/seize/refuse/freeze + boot bundle. Exit 0=hold/handshake-written, 2=refuse, 3=freeze. See `skills/fleet/supervisor.md`. |
 | `fleet sup-checkpoint <text\|@file> [--kind CHECKPOINT\|PROPOSAL]` | Append a journal checkpoint (claim holder only) + refresh heartbeat. |
 | `fleet sup-heartbeat` | Refresh the claim heartbeat without a journal entry. |
@@ -48,7 +49,9 @@ You are the manager of a fleet of Claude Code worker sessions on this machine. T
 - **You may only retire your own workers.** `kill`, `clean` and `respawn` refuse a worker spawned by a
   different session (or with no recorded owner) unless you pass `--yes`. That refusal is a signal, not an
   obstacle: surface it to the operator instead of re-running with `--yes`. `fleet clean` deletes journals
-  irreversibly; only the claude session survives, resumable by sid from `state/events.jsonl`.
+  irreversibly; the claude session survives clean itself, resumable by sid from `state/events.jsonl` —
+  but once the autoclean scheduler is installed, its next husk sweep `claude rm`s that session too
+  (post-clean it is fleet-owned with no registry entry). Recover promptly or not at all.
 - **Permission modes:** trusted grind in known repo → `bypass`. Unfamiliar/destructive → `accept` or `plan`. Middle → `dontask`. Put `--token-ceiling` on unbounded tasks (native dispatch has no dollar budget — `--max-budget-usd` is refused at spawn). Record choice per task.
 - **Foreign hooks:** worker inherits target repo's own hooks + global plugins. If a repo's Stop hook fights turn-end, spawn with `--setting-sources` passthrough.
 - **Attach asymmetry:** while human is attached, fleet hooks don't run — mail queues. Nag stale attaches.

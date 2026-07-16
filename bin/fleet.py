@@ -285,6 +285,13 @@ def ctime_to_iso(dt: datetime) -> str:
 # that no other function in this module references os.name/sys.platform.
 # ---------------------------------------------------------------------------
 
+class AutocleanTaskQueryError(Exception):
+    """schtasks could not say whether the autoclean task exists (F3:
+    transient failure, access denied, timeout). Callers fail CLOSED --
+    treating this as "task absent" would let a /Create /F clobber a
+    foreign task of the same name on a hiccup."""
+
+
 class UnsupportedPlatformError(NotImplementedError):
     """Raised by every _PosixPlatform method: there is no POSIX backend yet
     (Phase 1.5, SPEC §14) -- this build only supports Windows."""
@@ -393,6 +400,76 @@ class _WindowsPlatform:
         )
         return ["powershell", "-Command", ps_command]
 
+    def autoclean_task_query(self, task_name: str, run=subprocess.run):
+        """None ONLY when the task is definitively absent; its command
+        string when installed ("" if the XML is unparseable); raises
+        AutocleanTaskQueryError when existence cannot be determined (F3:
+        callers must fail CLOSED -- reading a transient failure as
+        "absent" licensed /Create /F over a foreign task).
+
+        Two locale-safe steps: existence via the full `/FO CSV` listing
+        (a targeted /TN query's not-found error string is locale-
+        translated and indistinguishable from access-denied by exit code;
+        the listing's exit code + name presence are not), then the
+        command via `/XML` (element names are not translated either)."""
+        try:
+            listing = run(["schtasks", "/Query", "/FO", "CSV"],
+                          capture_output=True, text=True, timeout=30)
+        except Exception as exc:
+            raise AutocleanTaskQueryError(f"schtasks listing failed: {exc}")
+        if listing.returncode != 0:
+            raise AutocleanTaskQueryError(
+                f"schtasks listing exit {listing.returncode}: "
+                f"{(listing.stderr or '').strip()[:200]}")
+        if f'"\\{task_name}"' not in (listing.stdout or ""):
+            return None  # definitively absent
+        try:
+            proc = run(["schtasks", "/Query", "/TN", task_name, "/XML"],
+                       capture_output=True, text=True, timeout=15)
+        except Exception as exc:
+            raise AutocleanTaskQueryError(f"schtasks XML query failed: {exc}")
+        if proc.returncode != 0:
+            raise AutocleanTaskQueryError(
+                f"schtasks XML query exit {proc.returncode}: "
+                f"{(proc.stderr or '').strip()[:200]}")
+        xml = proc.stdout or ""
+        parts = []
+        for tag in ("Command", "Arguments"):
+            m = re.search(rf"<{tag}>(.*?)</{tag}>", xml, re.S)
+            if m:
+                text = m.group(1).strip()
+                for ent, ch in (("&quot;", '"'), ("&lt;", "<"),
+                                ("&gt;", ">"), ("&amp;", "&")):
+                    text = text.replace(ent, ch)
+                parts.append(text)
+        return " ".join(p for p in parts if p)
+
+    def autoclean_task_install(self, task_name: str, command: str,
+                               interval_hours: int, run=subprocess.run):
+        """(ok, message). `/F` makes re-install idempotent -- the caller is
+        responsible for the refuse-foreign-task check BEFORE calling this."""
+        try:
+            proc = run(["schtasks", "/Create", "/F", "/TN", task_name,
+                        "/TR", command, "/SC", "HOURLY", "/MO", str(int(interval_hours))],
+                       capture_output=True, text=True, timeout=30)
+        except Exception as exc:
+            return (False, str(exc))
+        if proc.returncode != 0:
+            return (False, (proc.stderr or proc.stdout or "").strip()[:300])
+        return (True, "")
+
+    def autoclean_task_remove(self, task_name: str, run=subprocess.run):
+        """(ok, message). Missing task counts as failure -- the caller
+        reports it; nothing here raises."""
+        try:
+            proc = run(["schtasks", "/Delete", "/TN", task_name, "/F"],
+                       capture_output=True, text=True, timeout=30)
+        except Exception as exc:
+            return (False, str(exc))
+        if proc.returncode != 0:
+            return (False, (proc.stderr or proc.stdout or "").strip()[:300])
+        return (True, "")
+
 
 class _PosixPlatform:
     """Stub POSIX backend: every method raises UnsupportedPlatformError.
@@ -416,6 +493,16 @@ class _PosixPlatform:
 
     def build_attach_argv(self, cwd, sid: str, which=None) -> list:
         self._unsupported("build_attach_argv")
+
+    def autoclean_task_query(self, task_name: str, run=None):
+        self._unsupported("autoclean_task_query")
+
+    def autoclean_task_install(self, task_name: str, command: str,
+                               interval_hours: int, run=None):
+        self._unsupported("autoclean_task_install")
+
+    def autoclean_task_remove(self, task_name: str, run=None):
+        self._unsupported("autoclean_task_remove")
 
 
 # The one and only os.name branch in this module: selects which adapter
@@ -513,11 +600,31 @@ def fleet_lock(timeout: float = LOCK_TIMEOUT_SECONDS):
 
 NAME_RE = re.compile(r"^[a-z0-9-]+$")
 
+# Sids are the daemon's session UUIDs; archive evidence files are named
+# `<sid>.jsonl`/`<sid>.md`, so a UUID-shaped stem under logs/archive/*/ is
+# a sid fleet once owned (_archive_dir_sids). Shared with validate_name's
+# F6 refusal so worker names can never collide with that keyspace.
+_SID_SHAPE_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
 
 def validate_name(name: str, existing=()) -> None:
-    """Raise ValueError unless name matches [a-z0-9-]+ and isn't in `existing`."""
+    """Raise ValueError unless name matches [a-z0-9-]+ and isn't in `existing`.
+
+    F6 (adversarial review): uuid-shaped names are refused outright. Names
+    and session ids share keyspaces in several stores (name-keyed AND
+    sid-keyed outcome files, archive evidence basenames, `read_outcomes`'
+    dual lookup), and `_archive_dir_sids` harvests sid-SHAPED stems as
+    owned evidence -- a worker named exactly a foreign session's uuid would
+    make that foreign session husk-rm-eligible after archival. Rejecting
+    at the single creation choke point makes the whole conflation class
+    unrepresentable instead of patching one reader at a time."""
     if not name or not NAME_RE.match(name):
         raise ValueError(f"invalid worker name {name!r}: must match [a-z0-9-]+")
+    if _SID_SHAPE_RE.match(name):
+        raise ValueError(
+            f"invalid worker name {name!r}: uuid-shaped names are reserved "
+            f"for session ids (F6)")
     if name in existing:
         raise ValueError(f"worker name already exists: {name!r}")
 
@@ -2790,7 +2897,26 @@ def cmd_init(args) -> int:
     {{PYTHON}} -- the absolute path of the interpreter running `fleet init`
     itself, which is what every worker turn's hook subprocess must invoke
     (hooks run outside fleet.py, spawned by `claude`, so they cannot fall
-    back to a bare `py`/`python3` on PATH)."""
+    back to a bare `py`/`python3` on PATH).
+
+    N1 (re-review, MED): the home guards are evaluated BEFORE anything is
+    written. Previously the marker (and settings) were stamped first and
+    `_install_autoclean_task`'s marker-mismatch guard then compared against
+    a marker this very invocation had just repointed -- it could never fire
+    on the real init path, and a worktree `fleet init` left the machine's
+    SessionStart/statusline reading the worktree's empty registry (a
+    dangling marker once the worktree was deleted). Now: with --autoclean,
+    a guard problem refuses the WHOLE init before any write; without it,
+    the worktree-local settings render (legitimate for testing) but the
+    GLOBAL marker stamp is skipped, loudly. --force overrides both."""
+    marker_problems = _marker_guard_problems()
+    force = getattr(args, "force", False)
+    if getattr(args, "autoclean", False) and marker_problems and not force:
+        raise FleetCliError(
+            "fleet init --autoclean refused before writing anything (N1): "
+            + "; ".join(marker_problems)
+            + " -- run from the canonical fleet home, or rerun with --force")
+
     template_path = template_settings_path()
     if not template_path.exists():
         raise FleetCliError(
@@ -2803,16 +2929,25 @@ def cmd_init(args) -> int:
     instance_path.parent.mkdir(parents=True, exist_ok=True)
     instance_path.write_text(rendered, encoding="utf-8")
 
-    _write_fleet_home_marker()
+    if marker_problems and not force:
+        marker_line = "NOT stamped (N1): " + "; ".join(marker_problems) + " (--force to override)"
+    else:
+        _write_fleet_home_marker()
+        marker_line = str(fleet_home_marker_path())
 
     print(f"fleet init: wrote {instance_path}")
     print(f"  python:      {Path(sys.executable).resolve().as_posix()}")
     print(f"  fleet home:  {Path(FLEET_HOME).resolve().as_posix()}")
-    print(f"  marker:      {fleet_home_marker_path()}")
+    print(f"  marker:      {marker_line}")
 
     if getattr(args, "statusline", False):
         _install_statusline(force=getattr(args, "force", False),
                             chain=getattr(args, "chain", False))
+    if getattr(args, "autoclean", False):
+        _install_autoclean_task(getattr(args, "autoclean_interval_hours", None),
+                                force=getattr(args, "force", False))
+    if getattr(args, "autoclean_remove", False):
+        _remove_autoclean_task()
     return 0
 
 
@@ -5955,8 +6090,15 @@ def cmd_clean(args, get_process_info=None, sleep=time.sleep,
     `fleet archive` already `claude rm`'d every sid, so there is no roster
     verdict left to compute; this is pure file deletion (registry entry +
     the `logs/archive/<name>/` dir `_remove_worker_files` now also sweeps).
-    It never enters `recompute_worker_native`/the roster fetch at all."""
+    It never enters `recompute_worker_native`/the roster fetch at all.
+
+    Autoclean tiering split (docs/specs/autoclean.md D2): `--dead-only`
+    spares every tombstone (sweep only confirmed-dead workers);
+    `--tombstones` sweeps ONLY archived tombstones -- no legacy probe, no
+    native recompute, nothing else touched. Default remains both."""
     _NATIVE_CLEAN_DELETABLE = {"dead"}
+    dead_only = bool(getattr(args, "dead_only", False))
+    tombstones_only = bool(getattr(args, "tombstones", False))
 
     removed = []  # list of (name, sid, retired_sids)
     pending_confirm = []  # (name, before) -- looked dead on pass 1, lock held
@@ -5969,6 +6111,10 @@ def cmd_clean(args, get_process_info=None, sleep=time.sleep,
     native_archived_names = [n for n in native_all_names if before[n].get("archived_at")]
     native_names = [n for n in native_all_names if n not in native_archived_names]
     legacy_names = [n for n in names if n not in native_all_names]
+    doomed_archived_names = [] if dead_only else list(native_archived_names)
+    if tombstones_only:
+        native_names = []
+        legacy_names = []
 
     # ONE roster fetch per invocation, outside the lock (F4 doctrine), only
     # when a non-archived native worker is actually in the registry.
@@ -5989,7 +6135,7 @@ def cmd_clean(args, get_process_info=None, sleep=time.sleep,
             after[n] = recompute_worker_native(n, before[n], roster_entries)
 
     native_doomed_now = []  # (name, before) -- native verdict already final, no confirm-delay needed
-    native_doomed_now.extend((n, before[n]) for n in native_archived_names)
+    native_doomed_now.extend((n, before[n]) for n in doomed_archived_names)
     changed = False
     with fleet_lock():
         data = load_registry()
@@ -6001,7 +6147,7 @@ def cmd_clean(args, get_process_info=None, sleep=time.sleep,
                 # verdict computed against now-stale pre-probe data.
                 continue
             if n in native_archived_names:
-                continue  # already queued into native_doomed_now above
+                continue  # queued into native_doomed_now above (unless --dead-only spared it)
             if n in native_names:
                 if epoch_frozen:
                     continue  # G9: no native record recomputed or written this invocation
@@ -6017,6 +6163,8 @@ def cmd_clean(args, get_process_info=None, sleep=time.sleep,
                         changed = True
                     data["workers"][n] = persisted
                 continue
+            if n not in legacy_names:
+                continue  # excluded by --tombstones: never probed, never touched
             if after[n]["status"] == "dead":
                 pending_confirm.append((n, before[n]))
             else:
@@ -6043,8 +6191,12 @@ def cmd_clean(args, get_process_info=None, sleep=time.sleep,
     ]
 
     # §5.1: this is the moment `clean` knows exactly which workers it will
-    # DELETE (registry entry, logs, mailbox and journal -- irreversible; only
-    # the claude session survives, resumable by sid from events.jsonl). Ask
+    # DELETE (registry entry, logs, mailbox and journal -- irreversible; the
+    # claude session survives clean ITSELF, resumable by sid from
+    # events.jsonl -- but F5 caveat: once the autoclean scheduler is
+    # installed, tier 2 will `claude rm` that very session on its next sweep
+    # (post-clean it is owned-by-events and unprotected), so sid-recovery is
+    # a promptly-or-never affordance, not a durable one). Ask
     # before sweeping any worker this session did not spawn. Outside the lock:
     # a prompt must never block the fleet. One combined confirm covers both
     # legacy and native candidates from this single invocation.
@@ -6472,6 +6624,411 @@ def cmd_archive(args, run=subprocess.run, which=shutil.which) -> int:
     skipped_count = len(names) - archived_count
     print(f"archived {archived_count} worker(s), skipped {skipped_count}")
     return 0
+
+
+# ---------------------------------------------------------------------------
+# Autoclean (docs/specs/autoclean.md): staleness cleaned up without anyone
+# remembering. One mutating command, three callers (the Scheduled Task
+# `fleet init --autoclean` installs, a supervisor beat, an operator by
+# hand). Tier 1 = the existing archive TTL pass; tier 2 = daemon-husk
+# removal under a sid-based default-deny ownership discriminator; tier 3
+# (default-OFF) = registry tombstone expiry, never file deletion --
+# `fleet clean` stays the only deleter.
+# ---------------------------------------------------------------------------
+
+AUTOCLEAN_TASK_NAME = "claude-fleet-autoclean"
+AUTOCLEAN_INTERVAL_HOURS_DEFAULT = 6
+AUTOCLEAN_STALE_RUN_HOURS = 48.0
+
+
+def autoclean_stamp_path() -> Path:
+    return state_dir() / "autoclean-last-run.json"
+
+
+def _registry_owned_and_protected_sids(workers: dict) -> tuple:
+    """(owned, protected) sid sets from the registry snapshot. owned =
+    every session_id/retired_sid of every record INCLUDING tombstones;
+    protected = the same fields of NON-archived records only (a tracked,
+    live worker's history belongs to `fleet archive`, never the husk
+    sweep). Field-shape drift tolerated the same way the doctor's
+    claude-agents check tolerates it: non-dict records, non-str sids and
+    non-list retired_sids are skipped, never trusted."""
+    owned, protected = set(), set()
+    for rec in workers.values():
+        if not isinstance(rec, dict):
+            continue
+        sids = []
+        sid = rec.get("session_id")
+        if isinstance(sid, str):
+            sids.append(sid)
+        retired = rec.get("retired_sids")
+        if isinstance(retired, list):
+            sids.extend(s for s in retired if isinstance(s, str))
+        owned.update(sids)
+        if rec.get("archived_at") is None:
+            protected.update(sids)
+    return owned, protected
+
+
+def _archive_dir_sids() -> set:
+    """Sid-shaped filenames under logs/archive/*/ -- owned history that
+    survives even after `fleet clean` deletes the registry tombstone."""
+    out = set()
+    root = archive_root()
+    try:
+        if not root.exists():
+            return out
+        for path in root.glob("*/*"):
+            stem = path.stem
+            if _SID_SHAPE_RE.match(stem):
+                out.add(stem)
+    except OSError:
+        pass
+    return out
+
+
+def _events_sids() -> set:
+    """Every session_id fleet ever stamped into events.jsonl
+    (turn_started/archived/cleaned/...) -- the ownership source that
+    survives `fleet clean` removing the registry entry entirely.
+    Unparseable lines are skipped, never fatal."""
+    out = set()
+    try:
+        with open(events_path(), encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    ev = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                sid = ev.get("session_id") if isinstance(ev, dict) else None
+                if isinstance(sid, str):
+                    out.add(sid)
+    except OSError:
+        pass
+    return out
+
+
+def _sweep_husks(dry_run: bool, run=subprocess.run, which=shutil.which) -> list:
+    """Tier 2 (autoclean.md D2): `claude rm` roster sessions fleet owns but
+    no longer tracks live. Default-deny: a sid absent from every fleet
+    record -- foremost the operator's own interactive sessions -- is never
+    selected. Returns the list of removed sids; raises FleetCliError when
+    the roster is unavailable/suspicious (the caller isolates tiers).
+
+    F1 (adversarial review, HIGH): default-deny includes "no registry = no
+    sweep". A corrupt fleet.json gets quarantine-RENAMED by whichever tier
+    loads it first, so the next load sees a MISSING file and returns empty
+    workers -- emptying the protected set while events.jsonl/logs/archive
+    still vouch those sids as owned, which would rm the resumable session
+    of every idle/limited/interrupted worker. The guard lives HERE (not
+    only in the caller) so the NEXT scheduled run after a quarantine
+    cannot fail open either: registry absent + any owned-evidence present
+    => refuse, exactly like the G9 epoch refusal. A genuinely fresh home
+    (no registry, no evidence) still proceeds -- nothing is owned, the
+    sweep is a no-op. A present-but-corrupt registry raises
+    RegistryCorruptError from load_registry; the caller treats that as
+    run-abort, never tier-skip."""
+    roster_ok, payload = _fetch_agents_roster(which=which, run=run)
+    if not roster_ok:
+        raise FleetCliError(f"husk sweep skipped: {payload}")
+    with fleet_lock():
+        registry_missing = not registry_path().exists()
+        data = {"workers": {}} if registry_missing else load_registry()
+    # NEW-1 (re-review, MED): the F1 absence check alone has two repro'd
+    # bypasses -- a routine spawn recreates fleet.json with one record, and
+    # an operator "recreating" an empty registry does the same: either way
+    # the file is PRESENT, the protected set is thin, and every
+    # pre-quarantine worker's events-vouched session becomes rm-eligible.
+    # So: any quarantine artifact on disk refuses the sweep outright,
+    # registry present or not. Deliberate deviation from the reviewed
+    # "artifact newer than current fleet.json" comparison: os.rename
+    # preserves mtime, so the artifact's mtime is the PRE-corruption write
+    # time and any recreated registry is always newer -- the comparison
+    # would never fire on exactly the spawn-recreation bypass it exists to
+    # stop. Presence-only is the sound superset; the operator clears the
+    # artifact (after restoring what it holds) to re-arm the sweep.
+    quarantine_artifacts = sorted(state_dir().glob("fleet.json.corrupt.*"))
+    if quarantine_artifacts:
+        raise FleetCliError(
+            f"husk sweep refused: quarantine artifact present "
+            f"({quarantine_artifacts[-1].name}) -- a corrupt registry was "
+            f"renamed aside and its workers may be missing from the current "
+            f"one; restore the quarantined file, then remove the artifact (NEW-1)")
+    if registry_missing and (_events_sids() or _archive_dir_sids()):
+        raise FleetCliError(
+            "husk sweep refused: the registry (state/fleet.json) is missing "
+            "while fleet evidence (events.jsonl / logs/archive) exists -- "
+            "possible quarantine aftermath; restore the quarantined file first (F1)")
+    workers = data.get("workers", {})
+    if native_epoch_suspicious(roster_ok, payload, workers):
+        raise FleetCliError("husk sweep refused: roster suspicious (G9)")
+
+    owned, protected = _registry_owned_and_protected_sids(workers)
+    owned |= _archive_dir_sids()
+    owned |= _events_sids()
+
+    removed = []
+    for entry in payload:
+        if not isinstance(entry, dict):
+            continue
+        sid = entry.get("sessionId")
+        if not isinstance(sid, str):
+            continue
+        if sid not in owned or sid in protected:
+            continue
+        if "status" in entry or "pid" in entry:
+            continue  # live session -- never touched (same test as archive gate 3)
+        try:
+            mailbox = mailbox_dir() / f"{sid}.md"
+            if mailbox.exists() and mailbox.stat().st_size > 0:
+                continue  # pending mail is not garbage
+        except OSError:
+            continue  # can't prove no mail -- fail safe, skip
+        display = entry.get("name") if isinstance(entry.get("name"), str) else sid[:8]
+        if dry_run:
+            print(f"husk: would rm {sid} ({display})")
+            continue
+        if _rm_native_session(sid, run=run, which=which):
+            append_event("husk_removed", display, session_id=sid)
+            print(f"husk: rm {sid} ({display})")
+            removed.append(sid)
+        else:
+            print(f"husk: rm {sid} FAILED -- left in place", file=sys.stderr)
+    return removed
+
+
+def _expire_tombstones(expire_hours: float, dry_run: bool) -> list:
+    """Tier 3 (autoclean.md D2, opt-in only): pop registry tombstones whose
+    archived_at is older than `expire_hours` AND whose evidence move is
+    complete. Deletes NO files -- logs/archive/<name>/ stays on disk, so
+    `fleet clean` remains the only deleter. Returns [(name, sid), ...]."""
+    expired = []
+    now = datetime.now(timezone.utc)
+    with fleet_lock():
+        data = load_registry()
+        for n, rec in sorted(data.get("workers", {}).items()):
+            if not isinstance(rec, dict) or rec.get("archived_at") is None:
+                continue
+            try:
+                archived_at = _parse_iso(rec.get("archived_at"))
+            except (ValueError, TypeError):
+                continue  # unparseable stamp -- never expire on bad data
+            if (now - archived_at).total_seconds() / 3600.0 < expire_hours:
+                continue
+            if _archive_resume_pending(n, rec):
+                continue  # evidence files not fully moved -- keep the tombstone
+            if dry_run:
+                print(f"tombstone: would expire {n}")
+                continue
+            expired.append((n, rec.get("session_id")))
+        if expired:
+            for n, _sid in expired:
+                data["workers"].pop(n, None)
+            save_registry(data)
+            for n, sid in expired:
+                append_event("tombstone_expired", n, session_id=sid)
+                print(f"tombstone: expired {n} (archive dir kept on disk)")
+    return expired
+
+
+def cmd_autoclean(args, run=subprocess.run, which=shutil.which) -> int:
+    """`fleet autoclean [--ttl-hours F] [--expire-tombstones-hours F]
+    [--dry-run]` (docs/specs/autoclean.md): tier 1 archive TTL pass +
+    tier 2 husk sweep, tier 3 tombstone expiry only with its flag. Tiers
+    are isolated -- one tier failing never blocks the next (D3); errors
+    land in stderr, the run stamp, one `autoclean_run` event, and exit 1.
+
+    F1 exception to tier isolation: RegistryCorruptError ABORTS THE WHOLE
+    RUN (re-raised, no stamp, exit via main's handler). Isolation exists so
+    an environmental hiccup in one tier doesn't waste the others; a corrupt
+    registry is not a hiccup -- tier 1's load already quarantine-renamed
+    the file, so "continue to tier 2" means sweeping against a missing
+    registry, the exact fail-open the reviewer repro'd.
+
+    `--fleet-home` (F2): overrides the module FLEET_HOME before anything
+    reads a path -- the scheduled task carries it because Task Scheduler
+    provides no operator environment for the env-var route."""
+    fleet_home_override = getattr(args, "fleet_home", None)
+    if fleet_home_override:
+        # NEW-2 (re-review, LOW): resolve + validate, never use verbatim --
+        # a relative path is cwd-dependent (System32 under Task Scheduler)
+        # and a nonexistent home would be silently mkdir'd into a phantom
+        # (fleet_lock/stamp writes create state/ even under --dry-run).
+        resolved_home = Path(fleet_home_override).resolve()
+        if not resolved_home.is_dir():
+            raise FleetCliError(
+                f"--fleet-home does not exist or is not a directory: "
+                f"{resolved_home} (from {fleet_home_override!r})")
+        global FLEET_HOME
+        FLEET_HOME = resolved_home
+    dry_run = bool(getattr(args, "dry_run", False))
+    ttl_hours = getattr(args, "ttl_hours", None)
+    expire_hours = getattr(args, "expire_tombstones_hours", None)
+    errors = []
+
+    archive_rc = None
+    try:
+        archive_args = argparse.Namespace(name=None, ttl_hours=ttl_hours, dry_run=dry_run)
+        archive_rc = cmd_archive(archive_args, run=run, which=which)
+        if archive_rc != 0:
+            errors.append(f"archive: exit {archive_rc}")
+    except RegistryCorruptError:
+        raise  # F1: run-abort, never tier-skip
+    except Exception as exc:  # noqa: BLE001 -- tier isolation (D3)
+        errors.append(f"archive: {type(exc).__name__}: {exc}")
+        print(f"autoclean: archive tier failed: {exc}", file=sys.stderr)
+
+    husks = []
+    try:
+        husks = _sweep_husks(dry_run, run=run, which=which)
+    except RegistryCorruptError:
+        raise  # F1: run-abort, never tier-skip
+    except Exception as exc:  # noqa: BLE001 -- tier isolation (D3)
+        errors.append(f"husks: {type(exc).__name__}: {exc}")
+        print(f"autoclean: husk tier failed: {exc}", file=sys.stderr)
+
+    tombstones = []
+    if expire_hours is not None:
+        try:
+            tombstones = _expire_tombstones(expire_hours, dry_run)
+        except RegistryCorruptError:
+            raise  # F1: run-abort, never tier-skip
+        except Exception as exc:  # noqa: BLE001 -- tier isolation (D3)
+            errors.append(f"tombstones: {type(exc).__name__}: {exc}")
+            print(f"autoclean: tombstone tier failed: {exc}", file=sys.stderr)
+
+    summary = {"ts": now_iso(), "dry_run": dry_run, "archive_rc": archive_rc,
+               "husks_removed": len(husks), "tombstones_expired": len(tombstones),
+               "errors": errors}
+    if not dry_run:
+        try:
+            state_dir().mkdir(parents=True, exist_ok=True)
+            autoclean_stamp_path().write_text(json.dumps(summary), encoding="utf-8")
+        except OSError as exc:
+            errors.append(f"stamp: {exc}")
+        try:
+            append_event("autoclean_run", "*", archive_rc=archive_rc,
+                         husks_removed=len(husks),
+                         tombstones_expired=len(tombstones), errors=errors)
+        except OSError as exc:
+            print(f"autoclean: event append failed: {exc}", file=sys.stderr)
+    print(f"autoclean: husks_removed={len(husks)} tombstones_expired={len(tombstones)}"
+          f" errors={len(errors)}{' (dry-run)' if dry_run else ''}")
+    return 1 if errors else 0
+
+
+def _autoclean_script_path() -> Path:
+    """The fleet.py the scheduled task will pin. A seam (monkeypatchable)
+    so tests can model canonical-vs-worktree installs without moving files."""
+    return Path(__file__).resolve()
+
+
+def _autoclean_task_command() -> str:
+    """The Scheduled Task's command line: the exact interpreter running
+    this `fleet init` plus this fleet.py -- mirroring cmd_init's own
+    sys.executable-as-{{PYTHON}} doctrine (a scheduled task cannot fall
+    back to a bare `py` on PATH either).
+
+    F2 (adversarial review, HIGH): FLEET_HOME is embedded EXPLICITLY as an
+    argv flag -- Task Scheduler runs with no operator environment, so
+    without it fleet.py falls back to script-location resolution and the
+    task sweeps whatever repo copy it happens to live in (a worktree's
+    empty state/, forever, doctor green) instead of the operator's home."""
+    py = Path(sys.executable).resolve()
+    script = _autoclean_script_path()
+    home = Path(FLEET_HOME).resolve()
+    return f'"{py}" "{script}" autoclean --fleet-home "{home}"'
+
+
+def _marker_guard_problems() -> list:
+    """N1: the home-guard subset that protects GLOBAL machine state (the
+    ~/.claude/fleet-home marker): the resolved home being a linked git
+    worktree, or an existing marker that already points elsewhere. Shared
+    by `cmd_init`'s marker stamp -- which must evaluate these BEFORE
+    writing anything, or a worktree init repoints the marker and thereby
+    defeats the very marker-mismatch guard the autoclean install relies
+    on -- and by `_install_autoclean_task` (which adds its own
+    script-location check on top). Deliberately EXCLUDES that script
+    check: a sandboxed/relocated home with no .git file and no
+    conflicting marker is a legitimate marker target."""
+    home = Path(FLEET_HOME).resolve()
+    problems = []
+    if (home / ".git").is_file():
+        problems.append(f"{home} is a linked git worktree (.git is a file) -- "
+                        "a task pinned here dies with the worktree")
+    marker_home = None
+    try:
+        marker = fleet_home_marker_path()
+        if marker.exists():
+            marker_home = Path(marker.read_text(encoding="utf-8").strip()).resolve()
+    except (OSError, ValueError):
+        marker_home = None
+    if marker_home is not None and marker_home != home:
+        problems.append(f"machine fleet-home marker points at {marker_home}, not {home}")
+    return problems
+
+
+def _autoclean_task_is_ours(command: str) -> bool:
+    """F4: ownership = the existing task runs OUR fleet.py -- the exact
+    resolved script path, slash- and case-normalized (Windows paths carry
+    both variances through schtasks XML round-trips). Never a substring
+    like 'autoclean': a foreign C:/tools/autoclean.exe task must refuse."""
+    ours = str(_autoclean_script_path()).replace("\\", "/").lower()
+    return ours in (command or "").replace("\\", "/").lower()
+
+
+def _install_autoclean_task(interval_hours, force: bool) -> None:
+    if interval_hours is None:
+        interval_hours = AUTOCLEAN_INTERVAL_HOURS_DEFAULT
+    interval_hours = int(interval_hours)
+    if not 1 <= interval_hours <= 23:
+        raise FleetCliError("--autoclean-interval-hours must be 1..23 (schtasks /SC HOURLY /MO)")
+
+    # F2 home guards: a scheduled task outlives this shell -- refuse to pin
+    # it to a fleet.py that is not the target home's own copy, to a linked
+    # git worktree (dies with the worktree), or to a home that contradicts
+    # the machine's fleet-home marker. --force overrides all three.
+    home = Path(FLEET_HOME).resolve()
+    script = _autoclean_script_path()
+    problems = []
+    if script.parent.parent != home:
+        problems.append(f"this fleet.py ({script}) is not the target home's copy ({home})")
+    problems += _marker_guard_problems()
+    if problems and not force:
+        raise FleetCliError(
+            "autoclean install refused (F2): " + "; ".join(problems) +
+            " -- run from the canonical fleet home, or rerun with --force")
+
+    command = _autoclean_task_command()
+    try:
+        existing = PLATFORM.autoclean_task_query(AUTOCLEAN_TASK_NAME)
+    except AutocleanTaskQueryError as exc:
+        # F3: fail closed -- unknown existence must not become /Create /F.
+        if not force:
+            raise FleetCliError(
+                f"cannot determine whether task {AUTOCLEAN_TASK_NAME!r} already "
+                f"exists ({exc}) -- retry, or rerun with --force to install anyway")
+        existing = None
+    if existing is not None and not _autoclean_task_is_ours(existing) and not force:
+        raise FleetCliError(
+            f"scheduled task {AUTOCLEAN_TASK_NAME!r} exists and is not "
+            f"fleet-owned (does not run this fleet.py; found {existing[:120]!r}) "
+            f"-- rerun with --force to overwrite")
+    ok, msg = PLATFORM.autoclean_task_install(AUTOCLEAN_TASK_NAME, command, interval_hours)
+    if not ok:
+        raise FleetCliError(f"schtasks create failed: {msg}")
+    print(f"fleet init: scheduled task {AUTOCLEAN_TASK_NAME!r} installed "
+          f"(every {interval_hours}h)")
+    print(f"  command:   {command}")
+    print(f"  uninstall: fleet init --autoclean-remove "
+          f"(or: schtasks /Delete /TN {AUTOCLEAN_TASK_NAME} /F)")
+
+
+def _remove_autoclean_task() -> None:
+    ok, msg = PLATFORM.autoclean_task_remove(AUTOCLEAN_TASK_NAME)
+    if not ok:
+        raise FleetCliError(f"schtasks delete failed: {msg}")
+    print(f"fleet init: scheduled task {AUTOCLEAN_TASK_NAME!r} removed")
 
 
 # ---------------------------------------------------------------------------
@@ -6987,6 +7544,43 @@ def _doctor_check_log_sizes():
     return ("log-sizes", True, "no log files over 50MB")
 
 
+def _doctor_check_autoclean(run=subprocess.run):
+    """Note-only (docs/specs/autoclean.md D4): reports scheduler-task state
+    (installed/missing) and last-run staleness from the run stamp. Never
+    turns doctor red -- a missing task is a choice, not broken plumbing."""
+    stamp_note = None
+    try:
+        raw = json.loads(autoclean_stamp_path().read_text(encoding="utf-8"))
+        last = _parse_iso(raw.get("ts"))
+        age_h = (datetime.now(timezone.utc) - last).total_seconds() / 3600.0
+        stamp_note = f"last run {age_h:.1f}h ago"
+        stale = age_h > AUTOCLEAN_STALE_RUN_HOURS
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        stamp_note, stale = "no run recorded yet", False
+    try:
+        existing = PLATFORM.autoclean_task_query(AUTOCLEAN_TASK_NAME, run=run)
+    except UnsupportedPlatformError:
+        return ("autoclean", True, "scheduler query unsupported on this platform -- skipped")
+    except AutocleanTaskQueryError as exc:
+        return ("autoclean", True, f"scheduler query failed ({exc}) -- state unknown; {stamp_note}")
+    if existing is None:
+        return ("autoclean", True,
+                f"no scheduled task installed (fleet init --autoclean) -- "
+                f"staleness sweeps are manual; {stamp_note}")
+    # F2: a task pinned to a deleted worktree's fleet.py fails silently on
+    # every trigger -- flag it (note-only, but actionable).
+    for tok in re.findall(r'"([^"]+)"', existing):
+        if tok.lower().endswith("fleet.py") and not Path(tok).exists():
+            return ("autoclean", True,
+                    f"task installed but pinned to a missing path ({tok}) -- "
+                    f"reinstall from the canonical home: fleet init --autoclean")
+    if stale:
+        return ("autoclean", True,
+                f"task installed but {stamp_note} (> {AUTOCLEAN_STALE_RUN_HOURS:.0f}h) "
+                f"-- scheduler may be stale")
+    return ("autoclean", True, f"task installed; {stamp_note}")
+
+
 def _doctor_check_fleet_home_marker():
     """The `~/.claude/fleet-home` marker must exist and point at THIS fleet.
 
@@ -7120,6 +7714,7 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run, get_process_info=No
         functools.partial(_doctor_check_orphaned_claims, workers=workers),
         functools.partial(_doctor_check_claude_agents, workers, which=which, run=run),
         functools.partial(_doctor_check_log_sizes),
+        functools.partial(_doctor_check_autoclean, run=run),
         functools.partial(_doctor_check_fleet_home_marker),
         functools.partial(_doctor_check_hook_errors),
         functools.partial(_doctor_check_supervisor_claim),
@@ -7565,8 +8160,10 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
     # --bg launch and `task_file_path(name)` is not traversal-safe on its
     # own -- guard here too so a future direct-call path can't escape
     # tasks_dir().
-    if not name or not NAME_RE.match(name):
-        raise NativeDispatchError(f"invalid worker name: {name!r} (must match {NAME_RE.pattern})")
+    if not name or not NAME_RE.match(name) or _SID_SHAPE_RE.match(name):
+        raise NativeDispatchError(
+            f"invalid worker name: {name!r} (must match {NAME_RE.pattern}; "
+            f"uuid-shaped names are reserved for session ids, F6)")
     if roster_fetch is None:
         roster_fetch = lambda: _fetch_agents_roster(which=which, run=run)  # noqa: E731
     try:
@@ -8431,7 +9028,17 @@ def build_parser() -> argparse.ArgumentParser:
                         help="with --statusline: keep an existing foreign statusline and print "
                              "fleet's row beneath it")
     p_init.add_argument("--force", action="store_true",
-                        help="with --statusline: overwrite an existing foreign statusline")
+                        help="with --statusline/--autoclean: overwrite a foreign statusline / "
+                             "scheduled task")
+    p_init.add_argument("--autoclean", action="store_true",
+                        help="install/update the Windows Scheduled Task that runs "
+                             "`fleet autoclean` on an interval")
+    p_init.add_argument("--autoclean-interval-hours", type=int, default=None,
+                        dest="autoclean_interval_hours",
+                        help=f"with --autoclean: run interval in hours, 1-23 "
+                             f"(default {AUTOCLEAN_INTERVAL_HOURS_DEFAULT})")
+    p_init.add_argument("--autoclean-remove", action="store_true", dest="autoclean_remove",
+                        help="uninstall the autoclean scheduled task")
 
     p_spawn = sub.add_parser("spawn", help="spawn a new worker session")
     p_spawn.add_argument("name")
@@ -8525,11 +9132,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_clean = sub.add_parser("clean", help="remove dead workers and their logs/mailboxes/journals")
     p_clean.add_argument("--yes", action="store_true",
                          help="confirm deleting workers this session did not spawn")
+    clean_tier = p_clean.add_mutually_exclusive_group()
+    clean_tier.add_argument("--dead-only", action="store_true", dest="dead_only",
+                            help="sweep only confirmed-dead workers; spare archived tombstones")
+    clean_tier.add_argument("--tombstones", action="store_true",
+                            help="sweep only archived tombstones; touch nothing else")
 
     p_archive = sub.add_parser("archive", help="auto-archive terminal-state native workers past a TTL")
     p_archive.add_argument("name", nargs="?", default=None)
     p_archive.add_argument("--ttl-hours", type=float, default=None, dest="ttl_hours")
     p_archive.add_argument("--dry-run", action="store_true", dest="dry_run")
+
+    p_autoclean = sub.add_parser(
+        "autoclean",
+        help="staleness sweep: archive TTL pass + fleet-owned daemon-husk rm "
+             "(docs/specs/autoclean.md)")
+    p_autoclean.add_argument("--ttl-hours", type=float, default=None, dest="ttl_hours",
+                             help="tier-1 archive TTL (default 24)")
+    p_autoclean.add_argument("--expire-tombstones-hours", type=float, default=None,
+                             dest="expire_tombstones_hours",
+                             help="tier 3 (default OFF): drop registry tombstones older than "
+                                  "this; files in logs/archive/ are never deleted")
+    p_autoclean.add_argument("--dry-run", action="store_true", dest="dry_run")
+    p_autoclean.add_argument("--fleet-home", dest="fleet_home", default=None,
+                             help="explicit FLEET_HOME override; the scheduled task "
+                                  "always passes this (Task Scheduler has no operator env)")
 
     sub.add_parser("doctor", help="run fleet health checks")
 
@@ -8615,6 +9242,8 @@ def main(argv=None) -> int:
             return cmd_clean(args)
         if args.command == "archive":
             return cmd_archive(args)
+        if args.command == "autoclean":
+            return cmd_autoclean(args)
         if args.command == "doctor":
             return cmd_doctor(args)
         if args.command == "sup-boot":
