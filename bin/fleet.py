@@ -2826,7 +2826,26 @@ def cmd_init(args) -> int:
     {{PYTHON}} -- the absolute path of the interpreter running `fleet init`
     itself, which is what every worker turn's hook subprocess must invoke
     (hooks run outside fleet.py, spawned by `claude`, so they cannot fall
-    back to a bare `py`/`python3` on PATH)."""
+    back to a bare `py`/`python3` on PATH).
+
+    N1 (re-review, MED): the home guards are evaluated BEFORE anything is
+    written. Previously the marker (and settings) were stamped first and
+    `_install_autoclean_task`'s marker-mismatch guard then compared against
+    a marker this very invocation had just repointed -- it could never fire
+    on the real init path, and a worktree `fleet init` left the machine's
+    SessionStart/statusline reading the worktree's empty registry (a
+    dangling marker once the worktree was deleted). Now: with --autoclean,
+    a guard problem refuses the WHOLE init before any write; without it,
+    the worktree-local settings render (legitimate for testing) but the
+    GLOBAL marker stamp is skipped, loudly. --force overrides both."""
+    marker_problems = _marker_guard_problems()
+    force = getattr(args, "force", False)
+    if getattr(args, "autoclean", False) and marker_problems and not force:
+        raise FleetCliError(
+            "fleet init --autoclean refused before writing anything (N1): "
+            + "; ".join(marker_problems)
+            + " -- run from the canonical fleet home, or rerun with --force")
+
     template_path = template_settings_path()
     if not template_path.exists():
         raise FleetCliError(
@@ -2839,12 +2858,16 @@ def cmd_init(args) -> int:
     instance_path.parent.mkdir(parents=True, exist_ok=True)
     instance_path.write_text(rendered, encoding="utf-8")
 
-    _write_fleet_home_marker()
+    if marker_problems and not force:
+        marker_line = "NOT stamped (N1): " + "; ".join(marker_problems) + " (--force to override)"
+    else:
+        _write_fleet_home_marker()
+        marker_line = str(fleet_home_marker_path())
 
     print(f"fleet init: wrote {instance_path}")
     print(f"  python:      {Path(sys.executable).resolve().as_posix()}")
     print(f"  fleet home:  {Path(FLEET_HOME).resolve().as_posix()}")
-    print(f"  marker:      {fleet_home_marker_path()}")
+    print(f"  marker:      {marker_line}")
 
     if getattr(args, "statusline", False):
         _install_statusline(force=getattr(args, "force", False),
@@ -6826,6 +6849,34 @@ def _autoclean_task_command() -> str:
     return f'"{py}" "{script}" autoclean --fleet-home "{home}"'
 
 
+def _marker_guard_problems() -> list:
+    """N1: the home-guard subset that protects GLOBAL machine state (the
+    ~/.claude/fleet-home marker): the resolved home being a linked git
+    worktree, or an existing marker that already points elsewhere. Shared
+    by `cmd_init`'s marker stamp -- which must evaluate these BEFORE
+    writing anything, or a worktree init repoints the marker and thereby
+    defeats the very marker-mismatch guard the autoclean install relies
+    on -- and by `_install_autoclean_task` (which adds its own
+    script-location check on top). Deliberately EXCLUDES that script
+    check: a sandboxed/relocated home with no .git file and no
+    conflicting marker is a legitimate marker target."""
+    home = Path(FLEET_HOME).resolve()
+    problems = []
+    if (home / ".git").is_file():
+        problems.append(f"{home} is a linked git worktree (.git is a file) -- "
+                        "a task pinned here dies with the worktree")
+    marker_home = None
+    try:
+        marker = fleet_home_marker_path()
+        if marker.exists():
+            marker_home = Path(marker.read_text(encoding="utf-8").strip()).resolve()
+    except (OSError, ValueError):
+        marker_home = None
+    if marker_home is not None and marker_home != home:
+        problems.append(f"machine fleet-home marker points at {marker_home}, not {home}")
+    return problems
+
+
 def _autoclean_task_is_ours(command: str) -> bool:
     """F4: ownership = the existing task runs OUR fleet.py -- the exact
     resolved script path, slash- and case-normalized (Windows paths carry
@@ -6851,18 +6902,7 @@ def _install_autoclean_task(interval_hours, force: bool) -> None:
     problems = []
     if script.parent.parent != home:
         problems.append(f"this fleet.py ({script}) is not the target home's copy ({home})")
-    if (home / ".git").is_file():
-        problems.append(f"{home} is a linked git worktree (.git is a file) -- "
-                        "a task pinned here dies with the worktree")
-    marker_home = None
-    try:
-        marker = fleet_home_marker_path()
-        if marker.exists():
-            marker_home = Path(marker.read_text(encoding="utf-8").strip()).resolve()
-    except (OSError, ValueError):
-        marker_home = None
-    if marker_home is not None and marker_home != home:
-        problems.append(f"machine fleet-home marker points at {marker_home}, not {home}")
+    problems += _marker_guard_problems()
     if problems and not force:
         raise FleetCliError(
             "autoclean install refused (F2): " + "; ".join(problems) +
