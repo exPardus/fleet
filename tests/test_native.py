@@ -75,23 +75,13 @@ class TestRegistryV2:
                                       dispatch_kind="bg", category="camp5")
         assert rec["dispatch_kind"] == "bg" and rec["category"] == "camp5"
 
-    def test_is_native_and_legacy_refusal(self, native_home):
-        native = {"dispatch_kind": "bg"}
-        legacy = {"session_id": "old"}  # pre-pivot record: key absent entirely
-        assert fleet.is_native(native) is True
-        assert fleet.is_native(legacy) is False
-        with pytest.raises(fleet.FleetCliError, match="pre-pivot"):
-            fleet.refuse_if_legacy("w1", legacy, "send")
-        fleet.refuse_if_legacy("w1", native, "send")  # no raise
+    def test_is_native_discriminates_on_dispatch_kind(self, native_home):
+        assert fleet.is_native({"dispatch_kind": "bg"}) is True
+        assert fleet.is_native({"session_id": "old"}) is False  # pre-pivot shape
 
     @pytest.mark.parametrize("bad", [None, "junk", [], 42])
     def test_is_native_non_dict_returns_false(self, native_home, bad):
         assert fleet.is_native(bad) is False
-
-    @pytest.mark.parametrize("bad", [None, "junk", [], 42])
-    def test_refuse_if_legacy_non_dict_raises_fleet_cli_error(self, native_home, bad):
-        with pytest.raises(fleet.FleetCliError, match="pre-pivot"):
-            fleet.refuse_if_legacy("w1", bad, "send")
 
 
 class TestOutcomeStore:
@@ -944,7 +934,7 @@ class TestDispatchGraceWindow:
     def _fresh_rec(self, native_home, seconds_ago=2, **kw):
         return seed_native_worker(
             native_home, status="working",
-            last_dispatch_at=fleet.ctime_to_iso(
+            last_dispatch_at=_iso(
                 datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)),
             **kw)
 
@@ -1038,49 +1028,14 @@ class TestNativeTokenSummary:
 
 
 class TestCmdStatusNative:
-    def test_native_busy_stays_working_and_never_pid_probed(self, native_home, monkeypatch):
+    def test_native_busy_stays_working(self, native_home, monkeypatch):
         seed_native_worker(native_home, status="working")
         monkeypatch.setattr(fleet, "_fetch_agents_roster",
                             _fixed_roster(True, [make_roster_entry(SID, status="busy")]))
-
-        def _boom(*a, **k):
-            raise AssertionError("recompute_worker (PID probe) must not run for a native record")
-        monkeypatch.setattr(fleet, "recompute_worker", _boom)
 
         rc = fleet.cmd_status(_status_args())
         assert rc == 0
         assert fleet.load_registry()["workers"]["w1"]["status"] == "working"
-
-    def test_legacy_worker_still_uses_pid_probe(self, native_home):
-        rec = fleet.new_worker_record("legacy-sid-0000", "C:/proj", "do it", "accept")
-        rec["status"] = "working"
-        rec["turn_pid"] = 4242
-        rec["turn_pid_ctime"] = fleet.now_iso()
-        data = fleet.load_registry()
-        data["workers"]["legacy1"] = rec
-        fleet.save_registry(data)
-
-        rc = fleet.cmd_status(_status_args(), get_process_info=lambda pid: None)
-        assert rc == 0
-        assert fleet.load_registry()["workers"]["legacy1"]["status"] == "dead"
-
-    def test_mixed_native_and_legacy_split_correctly(self, native_home, monkeypatch):
-        seed_native_worker(native_home, status="working")
-        legacy = fleet.new_worker_record("legacy-sid-0001", "C:/proj", "do it", "accept")
-        legacy["status"] = "working"
-        legacy["turn_pid"] = 4242
-        legacy["turn_pid_ctime"] = fleet.now_iso()
-        data = fleet.load_registry()
-        data["workers"]["legacy1"] = legacy
-        fleet.save_registry(data)
-        monkeypatch.setattr(fleet, "_fetch_agents_roster",
-                            _fixed_roster(True, [make_roster_entry(SID, status="busy")]))
-
-        rc = fleet.cmd_status(_status_args(), get_process_info=lambda pid: None)
-        assert rc == 0
-        workers = fleet.load_registry()["workers"]
-        assert workers["w1"]["status"] == "working"
-        assert workers["legacy1"]["status"] == "dead"
 
     def test_epoch_freeze_prints_warning_and_freezes_native_write(self, native_home, monkeypatch, capsys):
         rec = seed_native_worker(native_home, status="working")
@@ -1089,7 +1044,7 @@ class TestCmdStatusNative:
         rc = fleet.cmd_status(_status_args())
         assert rc == 0
         out = capsys.readouterr().out
-        assert "EPOCH: roster suspicious -- native verdicts frozen (G9); legacy rows only" in out
+        assert "EPOCH: roster suspicious -- verdicts frozen (G9)" in out
         assert fleet.load_registry()["workers"]["w1"] == rec
 
     def test_dead_suspected_event_fires_once_not_per_rerun(self, native_home, monkeypatch):
@@ -1928,11 +1883,6 @@ class TestNativeCumulativeTokens:
 
 
 class TestCmdSendNative:
-    def test_legacy_refuses(self, native_home):
-        legacy = {"session_id": "old"}  # dispatch_kind absent entirely
-        with pytest.raises(fleet.FleetCliError, match="pre-pivot"):
-            fleet._cmd_send_native("w1", legacy, "hello")
-
     def test_busy_native_appends_mailbox(self, native_home, monkeypatch):
         old_sid = SID
         seed_native_worker(native_home, sid=old_sid, status="idle")
@@ -2566,37 +2516,6 @@ class TestCmdRespawnNative:
         with pytest.raises(fleet.FleetCliError, match="G3"):
             fleet.cmd_respawn(_respawn_args(max_budget_usd=5.0), which=lambda _: "claude")
 
-    def test_no_log_rotation_for_native(self, native_home, monkeypatch):
-        old_sid = "deadbeef-0000-1111-2222-333344445555"
-        seed_native_worker(native_home, sid=old_sid, status="idle")
-        # 1st call: liveness check (old sid gone). 2nd: dispatch_bg pre-dispatch
-        # snapshot (new sid not minted yet). 3rd+: join poll (new sid present).
-        monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_sequence(
-            (True, []),
-            (True, []),
-            (True, [make_roster_entry(SID, status="idle")]),
-        ))
-        # A native worker has no logs/<name>.jsonl at all -- if respawn ever
-        # tried to rotate it, this would raise (no such file / attribute).
-        rotate_calls = []
-        real_rotate = fleet._rotate_worker_log
-        def spy_rotate(*a, **kw):
-            rotate_calls.append((a, kw))
-            return real_rotate(*a, **kw)
-        monkeypatch.setattr(fleet, "_rotate_worker_log", spy_rotate)
-        fleet.cmd_respawn(
-            _respawn_args(),
-            run=_fake_run_factory(stdout="backgrounded · aaaabbbb · fleet|w1|t\n"),
-            which=lambda _: "claude", sleep=lambda s: None,
-        )
-        assert rotate_calls == []
-
-    # -----------------------------------------------------------------
-    # T7 fix wave (task-7-adversarial.md MAJOR): `_stop_native_session`
-    # returning True is just the stop command's own exit code, not proof
-    # the daemon actually tore the session down -- re-verify the roster
-    # after EVERY --force stop attempt, not only a reported failure.
-    # -----------------------------------------------------------------
     def test_force_aborts_when_stop_succeeds_but_roster_still_live_after_retry(
             self, native_home, monkeypatch):
         old_sid = SID
@@ -2748,43 +2667,6 @@ class TestCmdRespawnNative:
         assert rec["status"] == "idle"
         assert "respawn_failed" in _events_kinds(native_home)
 
-    def test_legacy_respawn_still_works_byte_identical(self, native_home):
-        # Guard against a regression in the is_native routing itself: a
-        # genuinely legacy (pre-pivot) record must still respawn via the
-        # untouched Popen path, never routed into _cmd_respawn_native.
-        rec = fleet.new_worker_record("legacy-sid-0000", str(native_home), "do it", "accept")
-        rec["status"] = "idle"
-        rec["turn_pid"] = None
-        fleet.save_registry({"workers": {"legacy1": rec}})
-
-        class FakeStdin:
-            def __init__(self):
-                self.written = b""
-            def write(self, data):
-                self.written += data
-            def close(self):
-                pass
-
-        class FakeProc:
-            def __init__(self, pid):
-                self.pid = pid
-                self.stdin = FakeStdin()
-            def poll(self):
-                return None
-
-        proc = FakeProc(pid=999)
-        rc = fleet.cmd_respawn(_respawn_args(name="legacy1"),
-                               popen=lambda *a, **kw: proc, which=lambda _: "claude.cmd")
-        assert rc == 0
-        after = fleet.load_registry()["workers"]["legacy1"]
-        assert after["dispatch_kind"] is None
-        assert after["session_id"] != "legacy-sid-0000"
-
-
-# ---------------------------------------------------------------------------
-# M-B Task 8: claude-stop kill/interrupt + tombstones, peek/result rehome,
-# utf-8 stdout, native clean.
-# ---------------------------------------------------------------------------
 
 def _kill_args(name="w1", yes=True):
     from types import SimpleNamespace
@@ -2830,7 +2712,7 @@ class TestCmdKillNative:
 
     def test_expired_launch_claim_is_not_refused(self, native_home):
         rec = fleet.new_worker_record(None, "C:/proj", "t", "accept", dispatch_kind="bg")
-        rec["last_activity"] = fleet.ctime_to_iso(
+        rec["last_activity"] = _iso(
             datetime.now(timezone.utc) - timedelta(seconds=fleet.LAUNCH_CLAIM_MAX_AGE_SECONDS + 1))
         fleet.save_registry({"workers": {"w1": rec}})
 
@@ -2849,7 +2731,6 @@ class TestCmdKillNative:
         assert stop_call[0] == ["claude", "stop", fleet._native_job_ref(SID)]
         rec = fleet.load_registry()["workers"]["w1"]
         assert rec["status"] == "dead"
-        assert rec["turn_pid"] is None
         outcomes = fleet.read_outcomes("w1", sid=SID)
         assert any(o["kind"] == "killed" for o in outcomes)
         assert "killed" in _events_kinds(native_home)
@@ -2947,18 +2828,6 @@ class TestCmdKillNative:
     def test_unknown_worker_raises(self, native_home):
         with pytest.raises(fleet.FleetCliError):
             fleet.cmd_kill(_kill_args(name="nope"), which=lambda _: "claude")
-
-    def test_legacy_kill_still_works_byte_identical(self, native_home):
-        # Guard against a regression in the is_native routing itself.
-        rec = fleet.new_worker_record("legacy-sid", "C:/proj", "t", "accept")
-        rec["status"] = "idle"
-        fleet.save_registry({"workers": {"legacy1": rec}})
-
-        rc = fleet.cmd_kill(_kill_args(name="legacy1"), get_process_info=lambda pid: None,
-                            kill_process_tree=lambda pid: None)
-        assert rc == 0
-        assert fleet.load_registry()["workers"]["legacy1"]["status"] == "dead"
-
 
 class TestCmdInterruptNative:
     def test_marks_interrupted_not_idle(self, native_home):
@@ -3109,30 +2978,6 @@ class TestCmdInterruptNative:
         verdict = fleet.recompute_worker_native("w1", after_interrupt, [])
         assert verdict["status"] == "interrupted"
 
-    def test_legacy_interrupt_still_works_byte_identical(self, native_home):
-        ctime_iso = "2026-07-07T12:00:00Z"
-        rec = fleet.new_worker_record("legacy-sid", "C:/proj", "t", "accept")
-        rec["turn_pid"] = 111
-        rec["turn_pid_ctime"] = ctime_iso
-        fleet.save_registry({"workers": {"legacy1": rec}})
-
-        killed = {"done": False}
-
-        def kill_process_tree(pid):
-            killed["done"] = True
-
-        def get_process_info(pid):
-            if killed["done"]:
-                return None
-            return ("claude.exe", datetime.strptime(ctime_iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc))
-
-        rc = fleet.cmd_interrupt(_interrupt_args(name="legacy1"),
-                                 get_process_info=get_process_info,
-                                 kill_process_tree=kill_process_tree)
-        assert rc == 0
-        assert fleet.load_registry()["workers"]["legacy1"]["status"] == "idle"
-
-
 class TestCmdResultNative:
     def test_prints_result_text_and_token_line(self, native_home, capsys):
         seed_native_worker(native_home, sid=SID, status="idle")
@@ -3187,17 +3032,6 @@ class TestCmdResultNative:
     def test_unknown_worker_raises(self, native_home):
         with pytest.raises(fleet.FleetCliError):
             fleet.cmd_result(_result_args(name="nope"))
-
-    def test_legacy_result_still_works_byte_identical(self, native_home):
-        rec = fleet.new_worker_record("legacy-sid", "C:/proj", "t", "accept")
-        fleet.save_registry({"workers": {"legacy1": rec}})
-        log_path = fleet.logs_dir() / "legacy1.jsonl"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_path.write_text(json.dumps({"type": "result", "result": "hi", "usage": {},
-                                        "total_cost_usd": 0.0}) + "\n", encoding="utf-8")
-        rc = fleet.cmd_result(_result_args(name="legacy1"))
-        assert rc == 0
-
 
 class TestCmdPeekNative:
     def _write_transcript(self, home, sid, records):
@@ -3265,13 +3099,6 @@ class TestCmdPeekNative:
     def test_unknown_worker_raises(self, native_home):
         with pytest.raises(fleet.FleetCliError):
             fleet.cmd_peek(_peek_args(name="nope"))
-
-    def test_legacy_peek_still_works_byte_identical(self, native_home):
-        rec = fleet.new_worker_record("legacy-sid", "C:/proj", "t", "accept")
-        fleet.save_registry({"workers": {"legacy1": rec}})
-        rc = fleet.cmd_peek(_peek_args(name="legacy1"))
-        assert rc == 0
-
 
 class TestCmdAttachNative:
     def test_refuses_with_hint(self, native_home):
@@ -3403,41 +3230,22 @@ class TestCmdCleanNative:
         fleet.cmd_clean(_clean_args())
         assert "w1" in fleet.load_registry()["workers"]
 
-    def test_epoch_frozen_refuses_native_but_legacy_proceeds(self, native_home, monkeypatch, capsys):
+    def test_epoch_frozen_refuses_all_cleaning(self, native_home, monkeypatch, capsys):
         seed_native_worker(native_home, name="native-w", sid=SID, status="dead")
-        legacy = fleet.new_worker_record("legacy-sid", "C:/proj", "t", "accept")
-        legacy["status"] = "working"
-        legacy["turn_pid"] = 111
-        legacy["turn_pid_ctime"] = fleet.ctime_to_iso(datetime.now(timezone.utc))
-        data = fleet.load_registry()
-        data["workers"]["legacy-w"] = legacy
-        fleet.save_registry(data)
         monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (False, "roster fetch failed"))
 
-        def get_process_info(pid):
-            return None  # legacy-w recomputes to dead
-
-        rc = fleet.cmd_clean(_clean_args(), get_process_info=get_process_info, sleep=lambda s: None)
+        rc = fleet.cmd_clean(_clean_args())
         assert rc == 0
         out = capsys.readouterr().out
         assert "EPOCH" in out
         workers = fleet.load_registry()["workers"]
         assert "native-w" in workers  # frozen -- untouched
-        assert "legacy-w" not in workers  # legacy cleaning proceeds unaffected
 
-    def test_unrelated_worker_untouched_when_no_native_records(self, native_home):
-        rec = fleet.new_worker_record("legacy-sid", "C:/proj", "t", "accept")
-        rec["status"] = "idle"
-        fleet.save_registry({"workers": {"legacy1": rec}})
-        # A genuinely idle legacy record needs a trailing-result log line to
-        # recompute as "idle" rather than "dead" (no pid, no log evidence).
-        log_path = fleet.logs_dir() / "legacy1.jsonl"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_path.write_text(json.dumps({"type": "result", "result": "hi", "usage": {},
-                                        "total_cost_usd": 0.0}) + "\n", encoding="utf-8")
+    def test_empty_registry_never_fetches_roster(self, native_home):
+        fleet.save_registry({"workers": {}})
 
         def boom_roster(**kw):
-            raise AssertionError("must not fetch the roster with no native worker in the registry")
+            raise AssertionError("must not fetch the roster with no worker in the registry")
 
         import fleet as fleet_mod
         monkeypatch_target = fleet_mod._fetch_agents_roster
@@ -3447,7 +3255,6 @@ class TestCmdCleanNative:
         finally:
             fleet_mod._fetch_agents_roster = monkeypatch_target
         assert rc == 0
-        assert "legacy1" in fleet.load_registry()["workers"]
 
 
 # ---------------------------------------------------------------------------
@@ -3468,7 +3275,7 @@ def seed_archive_ready_worker(home, name="w1", sid=SID, status="idle",
     record for its current sid."""
     overrides.setdefault(
         "last_activity",
-        fleet.ctime_to_iso(datetime.now(timezone.utc) - timedelta(hours=age_hours)),
+        _iso(datetime.now(timezone.utc) - timedelta(hours=age_hours)),
     )
     overrides.setdefault("retired_sids", list(retired_sids))
     rec = seed_native_worker(home, name=name, sid=sid, status=status, **overrides)
@@ -3748,7 +3555,7 @@ class TestCmdArchive:
 
     def test_custom_ttl_hours_flows_through(self, native_home, capsys):
         seed_native_worker(native_home, sid=SID, status="idle",
-                           last_activity=fleet.ctime_to_iso(
+                           last_activity=_iso(
                                datetime.now(timezone.utc) - timedelta(hours=2)))
         fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": SID, "kind": "result"})
         rc = fleet.cmd_archive(_archive_args(dry_run=True, ttl_hours=1.0),
@@ -4430,7 +4237,7 @@ class TestDoctorCheckLegacyMix:
         assert ok is True
         assert "1 pre-pivot worker(s)" in msg
         assert "old-worker" in msg
-        assert "spec 5.1 coexistence" in msg
+        assert "unmanageable by this build" in msg
 
     def test_archived_native_worker_not_counted_as_legacy(self, native_home):
         rec = seed_native_worker(native_home, name="w1", status="idle", archived_at=_iso(NOW))
@@ -4458,50 +4265,8 @@ class TestDoctorCheckDeadSuspected:
         # A record whose live process would actually resolve differently
         # today still gets named -- this check never touches the roster or
         # any liveness probe, only the snapshot's own `status` field.
-        rec = seed_native_worker(native_home, name="w1", status="dead-suspected",
-                                 turn_pid=999999)
+        rec = seed_native_worker(native_home, name="w1", status="dead-suspected")
         name, ok, msg = fleet._doctor_check_dead_suspected({"w1": rec})
-        assert "w1" in msg
-
-
-class TestDoctorNativeSkipStalePids:
-    def test_native_record_with_dead_turn_pid_not_flagged(self, native_home):
-        # Native dispatch never populates turn_pid, but a bogus/stale one
-        # (e.g. carried over from a legacy->native edit) must still not
-        # trip this legacy-only check.
-        rec = seed_native_worker(native_home, name="w1", status="working",
-                                 turn_pid=999999, turn_pid_ctime=None)
-        name, ok, msg = fleet._doctor_check_stale_pids(
-            {"w1": rec}, get_process_info=lambda pid: None)
-        assert ok is True
-        assert "no stale turn_pid" in msg
-
-    def test_legacy_record_with_dead_turn_pid_still_flagged(self, native_home):
-        legacy = fleet.new_worker_record(SID, "C:/proj", "t", "accept")
-        legacy["status"] = "working"
-        legacy["turn_pid"] = 999999
-        name, ok, msg = fleet._doctor_check_stale_pids(
-            {"w1": legacy}, get_process_info=lambda pid: None)
-        assert ok is True
-        assert "w1" in msg
-
-
-class TestDoctorNativeSkipUnreadableStarttime:
-    def test_native_record_with_unknown_liveness_not_flagged(self, native_home, monkeypatch):
-        rec = seed_native_worker(native_home, name="w1", status="working",
-                                 turn_pid=999999, turn_pid_ctime=None)
-        monkeypatch.setattr(fleet, "probe_liveness", lambda *a, **k: "unknown")
-        name, ok, msg = fleet._doctor_check_unreadable_starttime({"w1": rec})
-        assert ok is True
-        assert "no workers with an unreadable" in msg
-
-    def test_legacy_record_with_unknown_liveness_still_flagged(self, native_home, monkeypatch):
-        legacy = fleet.new_worker_record(SID, "C:/proj", "t", "accept")
-        legacy["status"] = "working"
-        legacy["turn_pid"] = 999999
-        monkeypatch.setattr(fleet, "probe_liveness", lambda *a, **k: "unknown")
-        name, ok, msg = fleet._doctor_check_unreadable_starttime({"w1": legacy})
-        assert ok is True
         assert "w1" in msg
 
 
@@ -4621,7 +4386,7 @@ class TestCmdDoctorCheckIsolation:
         assert "[FAIL] _doctor_check_claude_agents: check crashed: TypeError: " \
                "'int' object is not iterable" in out
         # checks registered AFTER the crashing one still ran and printed.
-        assert "log-sizes" in out
+        assert "autoclean" in out
         assert "fleet-home marker" in out
         assert "supervisor" in out
         assert rc == 1
