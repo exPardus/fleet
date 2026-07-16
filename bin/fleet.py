@@ -471,6 +471,19 @@ def fleet_lock(timeout: float = LOCK_TIMEOUT_SECONDS):
             time.sleep(LOCK_RETRY_INTERVAL_SECONDS)
     try:
         os.write(fd, token.encode("utf-8"))
+    except OSError:
+        # Debt roll-up item 6: a failed token write (ENOSPC) used to leak
+        # the fd AND strand a token-less lock file that blocked every
+        # acquirer until the stale-break window. Close and remove what we
+        # just created (O_EXCL guarantees it is ours; no successor can have
+        # legitimately claimed it inside the stale window) before re-raising.
+        os.close(fd)
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
+    try:
         os.close(fd)
         yield
     finally:
