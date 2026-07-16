@@ -6,7 +6,7 @@ One Claude Code session — the **manager** — that spawns, monitors, steers, a
 
 ## Why
 
-Claude Code's own background agents (`claude --bg`, `claude agents`) cover spawn, list, and monitor. They do not cover a named registry with per-task permission modes, mid-turn mailbox steering, journals with respawn continuity, attach/headless conflict guards, budget and token ceilings, or a knowledge base that gets smarter across sessions. `claude-fleet` is exactly that layer — currently sitting on top of its own detached-launch machinery, and mid-pivot onto the native substrate (see [Status](#status) below).
+Claude Code's own background agents (`claude --bg`, `claude agents`) cover spawn, list, and monitor. They do not cover a named registry with per-task permission modes, mid-turn mailbox steering, journals with respawn continuity, attach/headless conflict guards, budget and token ceilings, or a knowledge base that gets smarter across sessions. `claude-fleet` is exactly that layer — now dispatched onto Claude Code's native background-agent substrate rather than its own detached-launch machinery (see [Status](#status) below).
 
 ## See it in action
 
@@ -93,9 +93,9 @@ No daemon in the core loop: every `fleet` command is a short-lived CLI invocatio
 
 ## Status
 
-**Working v2.1 today.** Two self-hosted campaigns have shipped hardening kernels into fleet's own codebase — including a real revert-on-red drill — plus external dogfooding on non-fleet repos. 720 pytest tests, `fleet doctor` clean. The architecture, its nine load-bearing invariants, and the full command surface are specified in [`docs/SPEC.md`](docs/SPEC.md).
+**Native dispatch shipped end-to-end, pin-verified.** M-0 (native-substrate spike) through M-B (native dispatch: registry v2, outcome capture/discriminator, usage-limit continuity, `claude stop`/tombstone teardown, doctor pin-gate) are complete — fleet hands process hosting and liveness to Claude Code's native background-agent daemon (`claude --bg`, the agents menu) and keeps the semantic layer (mailbox steering, budgets, journals, the knowledge loop) on top. Live pin suite: `FLEET_LIVE=1 pytest tests/integration/test_native_pin.py` — 6/6 green, three consecutive runs, at commit `76eca87`. Design: [`docs/superpowers/specs/2026-07-13-native-agents-pivot-design.md`](docs/superpowers/specs/2026-07-13-native-agents-pivot-design.md); contract: [`docs/specs/native-substrate.md`](docs/specs/native-substrate.md).
 
-**In flight: a pivot onto Claude Code's native background-agent substrate** (`claude --bg`, the agents daemon) — fleet keeps the semantic layer (mailbox steering, budgets, journals, the knowledge loop) but hands process hosting to the native daemon, and adds a persistent **supervisor**: a manager identity that survives context exhaustion and reboots by handing off between incarnations. This unlocks fleet workers showing up natively in the Claude Code agents menu, and a fleet that keeps running when you're not watching it. Design: [`docs/superpowers/specs/2026-07-13-native-agents-pivot-design.md`](docs/superpowers/specs/2026-07-13-native-agents-pivot-design.md). The M-0 spike (13 go/no-go experiments against the real daemon) is nearly complete — receipts in [`spike/m0/VERDICTS.md`](spike/m0/VERDICTS.md).
+**In progress: M-C — deletion + SPEC v3.** Retiring the now-superseded detached-launch/PID-probe machinery — bannered (specific sections only: `docs/SPEC.md` §2/§4/§6 and the v2.2 boot-identity appendix), not deleted, in [`docs/SPEC.md`](docs/SPEC.md); the whole of [`docs/specs/portability.md`](docs/specs/portability.md) is bannered, since that spec's entire subject is the now-dead probe/adapter design — and rewriting SPEC.md against the native substrate, gated on a soak campaign of real usage before it lands. `docs/SPEC.md` remains the spec of record for the architecture, its invariants, and the full command surface until that rewrite ships.
 
 ## Quickstart
 
