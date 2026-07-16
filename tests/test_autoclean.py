@@ -535,6 +535,25 @@ class TestSchedulerInstall:
         (_, _, hours), = platform_stub["installs"]
         assert hours == 12
 
+    def test_foreign_task_containing_word_autoclean_refused(self, home,
+                                                            canonical_install,
+                                                            platform_stub):
+        """F4: ownership must be our exact fleet.py path, never the
+        substring 'autoclean' -- a third-party C:/tools/autoclean.exe task
+        was silently overwritten pre-fix."""
+        platform_stub["query"] = '"C:/tools/autoclean.exe" nightly --quiet'
+        with pytest.raises(fleet.FleetCliError, match="fleet-owned"):
+            fleet._install_autoclean_task(None, force=False)
+        assert platform_stub["installs"] == []
+
+    def test_own_task_recognized_slash_and_case_insensitive(self, home,
+                                                            canonical_install,
+                                                            platform_stub):
+        cmd = fleet._autoclean_task_command()
+        platform_stub["query"] = cmd.replace("\\", "/").upper()
+        fleet._install_autoclean_task(None, force=False)
+        assert len(platform_stub["installs"]) == 1
+
     @pytest.mark.parametrize("bad", [0, 24, -3])
     def test_interval_validated(self, home, canonical_install, platform_stub, bad):
         with pytest.raises(fleet.FleetCliError, match="1..23"):
