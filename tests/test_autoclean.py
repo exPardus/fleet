@@ -152,6 +152,23 @@ class TestHuskSweep:
         assert fleet._sweep_husks(False, run=run, which=lambda _: "claude") == []
         assert rm_targets(calls) == []
 
+    def test_startup_transient_state_only_entry_never_selected(self, home):
+        """Live finding 2026-07-16: a freshly dispatched session's roster
+        entry is state-only for its first seconds -- the same shape the
+        sweep's liveness test reads as dead. Must never be rm'd: its sid
+        is the current session_id of a non-archived record, so the
+        PROTECTED set covers it regardless of the roster transient (and a
+        pre-registry-stamp sid is unowned => default-deny). Pinned
+        explicitly so the protection isn't accidental."""
+        seed_worker("justborn", SID_LIVE, status="working")
+        transient = {"id": SID_LIVE[:8], "sessionId": SID_LIVE,
+                     "name": "fleet|justborn|t", "kind": "background",
+                     "state": "working"}  # no status, no pid
+        calls = []
+        run = fake_run_factory([transient], calls=calls)
+        assert fleet._sweep_husks(False, run=run, which=lambda _: "claude") == []
+        assert rm_targets(calls) == []
+
     def test_tombstone_sid_is_a_husk(self, home):
         seed_worker("tomb", SID_TOMB, archived_at=_iso(NOW))
         run = fake_run_factory([roster_dead(SID_TOMB)])
