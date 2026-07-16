@@ -6554,12 +6554,32 @@ def _sweep_husks(dry_run: bool, run=subprocess.run, which=shutil.which) -> list:
     no longer tracks live. Default-deny: a sid absent from every fleet
     record -- foremost the operator's own interactive sessions -- is never
     selected. Returns the list of removed sids; raises FleetCliError when
-    the roster is unavailable/suspicious (the caller isolates tiers)."""
+    the roster is unavailable/suspicious (the caller isolates tiers).
+
+    F1 (adversarial review, HIGH): default-deny includes "no registry = no
+    sweep". A corrupt fleet.json gets quarantine-RENAMED by whichever tier
+    loads it first, so the next load sees a MISSING file and returns empty
+    workers -- emptying the protected set while events.jsonl/logs/archive
+    still vouch those sids as owned, which would rm the resumable session
+    of every idle/limited/interrupted worker. The guard lives HERE (not
+    only in the caller) so the NEXT scheduled run after a quarantine
+    cannot fail open either: registry absent + any owned-evidence present
+    => refuse, exactly like the G9 epoch refusal. A genuinely fresh home
+    (no registry, no evidence) still proceeds -- nothing is owned, the
+    sweep is a no-op. A present-but-corrupt registry raises
+    RegistryCorruptError from load_registry; the caller treats that as
+    run-abort, never tier-skip."""
     roster_ok, payload = _fetch_agents_roster(which=which, run=run)
     if not roster_ok:
         raise FleetCliError(f"husk sweep skipped: {payload}")
     with fleet_lock():
-        data = load_registry()
+        registry_missing = not registry_path().exists()
+        data = {"workers": {}} if registry_missing else load_registry()
+    if registry_missing and (_events_sids() or _archive_dir_sids()):
+        raise FleetCliError(
+            "husk sweep refused: state/fleet.json is missing while fleet "
+            "evidence (events.jsonl / logs/archive) exists -- possible "
+            "quarantine aftermath; restore or recreate the registry first (F1)")
     workers = data.get("workers", {})
     if native_epoch_suspicious(roster_ok, payload, workers):
         raise FleetCliError("husk sweep refused: roster suspicious (G9)")
@@ -6637,7 +6657,14 @@ def cmd_autoclean(args, run=subprocess.run, which=shutil.which) -> int:
     [--dry-run]` (docs/specs/autoclean.md): tier 1 archive TTL pass +
     tier 2 husk sweep, tier 3 tombstone expiry only with its flag. Tiers
     are isolated -- one tier failing never blocks the next (D3); errors
-    land in stderr, the run stamp, one `autoclean_run` event, and exit 1."""
+    land in stderr, the run stamp, one `autoclean_run` event, and exit 1.
+
+    F1 exception to tier isolation: RegistryCorruptError ABORTS THE WHOLE
+    RUN (re-raised, no stamp, exit via main's handler). Isolation exists so
+    an environmental hiccup in one tier doesn't waste the others; a corrupt
+    registry is not a hiccup -- tier 1's load already quarantine-renamed
+    the file, so "continue to tier 2" means sweeping against a missing
+    registry, the exact fail-open the reviewer repro'd."""
     dry_run = bool(getattr(args, "dry_run", False))
     ttl_hours = getattr(args, "ttl_hours", None)
     expire_hours = getattr(args, "expire_tombstones_hours", None)
@@ -6649,6 +6676,8 @@ def cmd_autoclean(args, run=subprocess.run, which=shutil.which) -> int:
         archive_rc = cmd_archive(archive_args, run=run, which=which)
         if archive_rc != 0:
             errors.append(f"archive: exit {archive_rc}")
+    except RegistryCorruptError:
+        raise  # F1: run-abort, never tier-skip
     except Exception as exc:  # noqa: BLE001 -- tier isolation (D3)
         errors.append(f"archive: {type(exc).__name__}: {exc}")
         print(f"autoclean: archive tier failed: {exc}", file=sys.stderr)
@@ -6656,6 +6685,8 @@ def cmd_autoclean(args, run=subprocess.run, which=shutil.which) -> int:
     husks = []
     try:
         husks = _sweep_husks(dry_run, run=run, which=which)
+    except RegistryCorruptError:
+        raise  # F1: run-abort, never tier-skip
     except Exception as exc:  # noqa: BLE001 -- tier isolation (D3)
         errors.append(f"husks: {type(exc).__name__}: {exc}")
         print(f"autoclean: husk tier failed: {exc}", file=sys.stderr)
@@ -6664,6 +6695,8 @@ def cmd_autoclean(args, run=subprocess.run, which=shutil.which) -> int:
     if expire_hours is not None:
         try:
             tombstones = _expire_tombstones(expire_hours, dry_run)
+        except RegistryCorruptError:
+            raise  # F1: run-abort, never tier-skip
         except Exception as exc:  # noqa: BLE001 -- tier isolation (D3)
             errors.append(f"tombstones: {type(exc).__name__}: {exc}")
             print(f"autoclean: tombstone tier failed: {exc}", file=sys.stderr)

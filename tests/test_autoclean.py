@@ -212,6 +212,67 @@ class TestHuskSweep:
             fleet._sweep_husks(False, run=run, which=lambda _: "claude")
 
 
+class TestRegistryFailOpen:
+    """F1 (adversarial review, HIGH): a quarantined/missing registry must
+    never empty the protected set while events/archive evidence still
+    vouches sids as fleet-owned -- that combination rm'd resumable
+    idle/limited/interrupted workers' sessions in the reviewer's repro."""
+
+    def _seed(self, home):
+        seed_worker("idleworker", SID_LIVE, status="idle")
+        fleet.append_event("turn_started", "idleworker", session_id=SID_LIVE)
+        return [roster_dead(SID_LIVE)]
+
+    def test_run_a_intact_registry_spares_protected(self, home):
+        roster = self._seed(home)
+        calls = []
+        rc = fleet.cmd_autoclean(_autoclean_args(),
+                                 run=fake_run_factory(roster, calls=calls),
+                                 which=lambda _: "claude")
+        assert rc == 0 and rm_targets(calls) == []
+
+    def test_run_b_corrupt_registry_aborts_whole_run_zero_rm(self, home):
+        roster = self._seed(home)
+        (home / "state" / "fleet.json").write_text("{corrupt", encoding="utf-8")
+        calls = []
+        with pytest.raises(fleet.RegistryCorruptError):
+            fleet.cmd_autoclean(_autoclean_args(),
+                                run=fake_run_factory(roster, calls=calls),
+                                which=lambda _: "claude")
+        assert rm_targets(calls) == []
+
+    def test_run_c_missing_registry_with_evidence_refuses_zero_rm(self, home):
+        roster = self._seed(home)
+        (home / "state" / "fleet.json").unlink()
+        calls = []
+        rc = fleet.cmd_autoclean(_autoclean_args(),
+                                 run=fake_run_factory(roster, calls=calls),
+                                 which=lambda _: "claude")
+        assert rc == 1  # loud refusal, not a silent empty sweep
+        assert rm_targets(calls) == []
+
+    def test_sweep_refuses_missing_registry_with_events_evidence(self, home):
+        fleet.append_event("turn_started", "w", session_id=SID_EVENTS)
+        (home / "state" / "fleet.json").unlink()
+        with pytest.raises(fleet.FleetCliError, match="registry"):
+            fleet._sweep_husks(False, run=fake_run_factory([roster_dead(SID_EVENTS)]),
+                               which=lambda _: "claude")
+
+    def test_sweep_refuses_missing_registry_with_archive_evidence(self, home):
+        d = fleet.archive_root() / "oldworker"
+        d.mkdir(parents=True)
+        (d / f"{SID_ARCHDIR}.jsonl").write_text("{}", encoding="utf-8")
+        (home / "state" / "fleet.json").unlink()
+        with pytest.raises(fleet.FleetCliError, match="registry"):
+            fleet._sweep_husks(False, run=fake_run_factory([roster_dead(SID_ARCHDIR)]),
+                               which=lambda _: "claude")
+
+    def test_sweep_fresh_home_missing_registry_no_evidence_proceeds(self, home):
+        (home / "state" / "fleet.json").unlink()
+        run = fake_run_factory([roster_dead(SID_FOREIGN)])
+        assert fleet._sweep_husks(False, run=run, which=lambda _: "claude") == []
+
+
 class TestExpireTombstones:
     def test_expired_tombstone_dropped_files_kept(self, home):
         seed_worker("tomb", SID_TOMB, archived_at=_iso(NOW - timedelta(hours=100)))
