@@ -3,6 +3,8 @@
 **Status:** stub — amendment-injected 2026-07-08 (Wave 1B `stub-inject-watchtower`); OQs NOT resolved — awaiting C5 `spec-watchtower` for the ready-for-build flip.
 **Inherits:** SPEC.md, ROADMAP.md principles. Requires portability spec built first.
 
+**[SUPERSEDED — native-substrate pivot 2026-07-13]** This stub's PID-liveness polling premise (dead/crashed detection via `probe_liveness`, kill-a-PID fault injection) is superseded: liveness now comes from the daemon roster + the outcome discriminator, not a poll loop probing PIDs. Watchtower's detect-and-notify duties fold into the supervisor's heartbeat/beat loop instead of a standalone `fleet watch` process. See `docs/superpowers/specs/2026-07-13-native-agents-pivot-design.md` §3/§4 and `docs/specs/native-substrate.md`. MOVED, not deleted — kept below for history; do not build against it.
+
 ## Goal
 
 Foreground `fleet watch` loop: nothing in the fleet fails silently; context/budget managed proactively. Core CLI must remain fully functional when watchtower is not running (principle #2 / invariant 1 daemonless launch — watchtower is additive).
@@ -36,6 +38,8 @@ Salvaged kernels to include (from IDEA-FORGE-REPORT §4 — build as scoped, do 
 **Autostart + desktop-notifier platform targets (F23 = review M13):** the Windows target is a LOGON-TRIGGERED INTERACTIVE scheduled task (schtasks /sc onlogon, run-only-when-logged-on, current user — no /ru SYSTEM, no service wrapper); macOS = launchd user agent in the gui domain; Linux = systemd --user unit. All three sit behind the platform adapter (invariant 8). Specify the Windows desktop notifier as the PowerShell WinRT toast shell-out through the platform adapter; the file notifier is the always-works fallback when the toast path is unavailable.
 
 <!-- F29 -->
+**[SUPERSEDED — native-substrate pivot 2026-07-13]** The "kill a live turn PID" fault-injection premise below assumes PID-liveness probing; a native-substrate equivalent would fault-inject against the daemon roster / outcome discriminator instead. See header.
+
 **Rule-engine test strategy (F29 = review M16):** rules are pure functions (parsed stream events + registry snapshot → typed event or None), unit-tested against the git-tracked fixture corpus from M7. The file notifier is the test seam for fault-injection acceptance tests: kill a live turn PID → crash event within ≤1 poll interval; synthetic result events → thresholds fire at spec'd numbers; watchtower stopped → full CLI suite still green (principle #2, directly testable). The week-of-use soak stays IN ADDITION to, never instead of, the injectable tests.
 
 - Rules and thresholds live in a config file in state/ or a git-tracked `watch.toml` — decide which (machine-specific overrides vs shared defaults). [C5 to resolve]
@@ -71,5 +75,7 @@ Salvaged kernels to include (from IDEA-FORGE-REPORT §4 — build as scoped, do 
 - **Invariant 1 — daemonless launch.** Watchtower is additive: an OPTIONAL foreground `fleet watch` loop (F22), never a required resident process. The core CLI works fully with it stopped (F29 test seam asserts this). It reads the single-source registry/logs and derives views (invariant 9); it does not become the system's heartbeat. Not broken.
 
 ## Done criteria
+
+**[SUPERSEDED (mechanism only) — native-substrate pivot 2026-07-13]** — the "killed-PID" fault-injection criterion below assumes PID-liveness polling; see header.
 
 Week of real use: zero silently-dead workers; context-threshold notification observed firing before a worker degraded; CLI unaffected with watchtower stopped; fault-injection acceptance tests (F29) green (killed-PID → crash event ≤1 poll interval; synthetic thresholds fire at spec'd numbers). *(Auto-respawn done-criterion deleted per F20 — auto-respawn is out of Phase-2 scope.)*
