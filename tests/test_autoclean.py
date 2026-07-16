@@ -556,21 +556,78 @@ class TestSchedulerInstall:
             fleet._remove_autoclean_task()
 
 
+class TestQueryFailClosed:
+    """F3 (adversarial review, MED): a query that ERRORS (timeout, access
+    denied, schtasks failure) must never read as "task absent" -- that
+    licensed /Create /F over a foreign task on a transient hiccup."""
+
+    def test_listing_failure_raises_not_none(self):
+        def run(argv, **kw):
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="Access is denied.")
+        with pytest.raises(fleet.AutocleanTaskQueryError):
+            fleet._WindowsPlatform().autoclean_task_query("t", run=run)
+
+    def test_listing_exception_raises_not_none(self):
+        def run(argv, **kw):
+            raise OSError("schtasks vanished")
+        with pytest.raises(fleet.AutocleanTaskQueryError):
+            fleet._WindowsPlatform().autoclean_task_query("t", run=run)
+
+    def test_xml_step_failure_raises_not_none(self):
+        def run(argv, **kw):
+            if "/XML" in argv:
+                return types.SimpleNamespace(returncode=1, stdout="", stderr="denied")
+            return types.SimpleNamespace(returncode=0, stdout='"\\t","Ready"', stderr="")
+        with pytest.raises(fleet.AutocleanTaskQueryError):
+            fleet._WindowsPlatform().autoclean_task_query("t", run=run)
+
+    def test_definitively_missing_is_none(self):
+        def run(argv, **kw):
+            assert "/XML" not in argv  # no targeted query for an absent task
+            return types.SimpleNamespace(
+                returncode=0, stdout='"TaskName","Status"\n"\\OtherTask","Ready"', stderr="")
+        assert fleet._WindowsPlatform().autoclean_task_query("t", run=run) is None
+
+    def test_install_refuses_on_query_error(self, home, canonical_install,
+                                            platform_stub, monkeypatch):
+        def raiser(task_name, run=None):
+            raise fleet.AutocleanTaskQueryError("transient")
+        monkeypatch.setattr(fleet.PLATFORM, "autoclean_task_query", raiser)
+        with pytest.raises(fleet.FleetCliError, match="cannot determine"):
+            fleet._install_autoclean_task(None, force=False)
+        assert platform_stub["installs"] == []
+
+    def test_install_force_proceeds_on_query_error(self, home, canonical_install,
+                                                   platform_stub, monkeypatch):
+        def raiser(task_name, run=None):
+            raise fleet.AutocleanTaskQueryError("transient")
+        monkeypatch.setattr(fleet.PLATFORM, "autoclean_task_query", raiser)
+        fleet._install_autoclean_task(None, force=True)
+        assert len(platform_stub["installs"]) == 1
+
+    def test_doctor_query_error_is_note_only(self, home, monkeypatch):
+        def raiser(task_name, run=None):
+            raise fleet.AutocleanTaskQueryError("transient")
+        monkeypatch.setattr(fleet.PLATFORM, "autoclean_task_query", raiser)
+        _, ok, msg = fleet._doctor_check_autoclean()
+        assert ok and "query failed" in msg
+
+
 class TestWindowsAdapterSchtasks:
+    @staticmethod
+    def _run_two_step(xml, listing='"TaskName","Status"\n"\\t","Ready"'):
+        def run(argv, **kw):
+            assert argv[:2] == ["schtasks", "/Query"]
+            if "/XML" in argv:
+                return types.SimpleNamespace(returncode=0, stdout=xml, stderr="")
+            return types.SimpleNamespace(returncode=0, stdout=listing, stderr="")
+        return run
+
     def test_query_parses_xml_and_unescapes(self):
         xml = ('<Task><Exec><Command>&quot;C:\\py.exe&quot;</Command>'
                '<Arguments>&quot;C:\\fleet.py&quot; autoclean</Arguments></Exec></Task>')
-
-        def run(argv, **kw):
-            assert argv[:2] == ["schtasks", "/Query"] and "/XML" in argv
-            return types.SimpleNamespace(returncode=0, stdout=xml, stderr="")
-        out = fleet._WindowsPlatform().autoclean_task_query("t", run=run)
+        out = fleet._WindowsPlatform().autoclean_task_query("t", run=self._run_two_step(xml))
         assert out == '"C:\\py.exe" "C:\\fleet.py" autoclean'
-
-    def test_query_missing_task_is_none(self):
-        def run(argv, **kw):
-            return types.SimpleNamespace(returncode=1, stdout="", stderr="not found")
-        assert fleet._WindowsPlatform().autoclean_task_query("t", run=run) is None
 
     def test_install_argv_shape(self):
         seen = []
