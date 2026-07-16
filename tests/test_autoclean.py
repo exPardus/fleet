@@ -670,6 +670,34 @@ class TestWindowsAdapterSchtasks:
         assert ok and seen == [["schtasks", "/Delete", "/TN", "t", "/F"]]
 
 
+class TestUuidShapedNames:
+    """F6 (adversarial review, LOW): a worker NAMED exactly a foreign
+    session's uuid would, after archival, plant logs/archive/<name>/
+    <name>.jsonl whose sid-shaped stem widens the owned set -- making that
+    foreign session rm-eligible. Fixed at the creation choke point: names
+    can never be uuid-shaped, so the conflation is unrepresentable."""
+
+    def test_validate_name_refuses_uuid_shape(self):
+        with pytest.raises(ValueError, match="uuid"):
+            fleet.validate_name(SID_FOREIGN)
+
+    def test_validate_name_refuses_uuid_shape_any_case(self):
+        with pytest.raises(ValueError, match="uuid"):
+            fleet.validate_name(SID_FOREIGN.lower())
+
+    def test_dispatch_bg_refuses_uuid_shape(self, home):
+        def forbid(argv, **kw):
+            raise AssertionError(f"no subprocess may run for a refused name: {argv}")
+        with pytest.raises(fleet.NativeDispatchError, match="uuid"):
+            fleet.dispatch_bg(SID_FOREIGN, home, "task", "accept",
+                              run=forbid, which=lambda _: "claude",
+                              roster_fetch=lambda: (False, "forbidden"))
+
+    def test_ordinary_names_still_pass(self):
+        fleet.validate_name("mc-autoclean")
+        fleet.validate_name("w1")
+
+
 class TestDoctorAutoclean:
     def test_not_installed_is_note_only(self, home, monkeypatch):
         monkeypatch.setattr(fleet.PLATFORM, "autoclean_task_query",

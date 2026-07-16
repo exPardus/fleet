@@ -581,11 +581,31 @@ def fleet_lock(timeout: float = LOCK_TIMEOUT_SECONDS):
 
 NAME_RE = re.compile(r"^[a-z0-9-]+$")
 
+# Sids are the daemon's session UUIDs; archive evidence files are named
+# `<sid>.jsonl`/`<sid>.md`, so a UUID-shaped stem under logs/archive/*/ is
+# a sid fleet once owned (_archive_dir_sids). Shared with validate_name's
+# F6 refusal so worker names can never collide with that keyspace.
+_SID_SHAPE_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
 
 def validate_name(name: str, existing=()) -> None:
-    """Raise ValueError unless name matches [a-z0-9-]+ and isn't in `existing`."""
+    """Raise ValueError unless name matches [a-z0-9-]+ and isn't in `existing`.
+
+    F6 (adversarial review): uuid-shaped names are refused outright. Names
+    and session ids share keyspaces in several stores (name-keyed AND
+    sid-keyed outcome files, archive evidence basenames, `read_outcomes`'
+    dual lookup), and `_archive_dir_sids` harvests sid-SHAPED stems as
+    owned evidence -- a worker named exactly a foreign session's uuid would
+    make that foreign session husk-rm-eligible after archival. Rejecting
+    at the single creation choke point makes the whole conflation class
+    unrepresentable instead of patching one reader at a time."""
     if not name or not NAME_RE.match(name):
         raise ValueError(f"invalid worker name {name!r}: must match [a-z0-9-]+")
+    if _SID_SHAPE_RE.match(name):
+        raise ValueError(
+            f"invalid worker name {name!r}: uuid-shaped names are reserved "
+            f"for session ids (F6)")
     if name in existing:
         raise ValueError(f"worker name already exists: {name!r}")
 
@@ -6506,12 +6526,6 @@ AUTOCLEAN_TASK_NAME = "claude-fleet-autoclean"
 AUTOCLEAN_INTERVAL_HOURS_DEFAULT = 6
 AUTOCLEAN_STALE_RUN_HOURS = 48.0
 
-# Sids are the daemon's session UUIDs; archive evidence files are named
-# `<sid>.jsonl`/`<sid>.md`, so a UUID-shaped stem under logs/archive/*/ is
-# a sid fleet once owned.
-_SID_SHAPE_RE = re.compile(
-    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
-
 
 def autoclean_stamp_path() -> Path:
     return state_dir() / "autoclean-last-run.json"
@@ -7986,8 +8000,10 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
     # --bg launch and `task_file_path(name)` is not traversal-safe on its
     # own -- guard here too so a future direct-call path can't escape
     # tasks_dir().
-    if not name or not NAME_RE.match(name):
-        raise NativeDispatchError(f"invalid worker name: {name!r} (must match {NAME_RE.pattern})")
+    if not name or not NAME_RE.match(name) or _SID_SHAPE_RE.match(name):
+        raise NativeDispatchError(
+            f"invalid worker name: {name!r} (must match {NAME_RE.pattern}; "
+            f"uuid-shaped names are reserved for session ids, F6)")
     if roster_fetch is None:
         roster_fetch = lambda: _fetch_agents_roster(which=which, run=run)  # noqa: E731
     try:
