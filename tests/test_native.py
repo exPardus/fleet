@@ -951,13 +951,207 @@ class TestDispatchWedgeRetry:
         kinds = _events_kinds(native_home)
         assert "dispatch_wedged" not in kinds and "dispatch_retried" not in kinds
 
-    def test_second_attempt_excludes_wedged_sid_from_join(self, native_home):
-        # the wedged sid may linger in the roster (rm best-effort) -- the
-        # retry's fresh pre-snapshot excludes it, so the join can only bind
-        # the NEW session even though both entries share the roster.
-        run, fetch = _wedge_env(second_healthy=True)
-        out = self._dispatch(run, fetch)
-        assert out["session_id"] == SID2  # never re-binds the wedged SID
+    def test_fresh_presnapshot_excludes_foreign_prefix_collision(self, native_home):
+        """M1 (review): the real reason each attempt takes a FRESH
+        pre-snapshot. The wedged sid itself can never collide (join is
+        short-id-prefix based; attempt 2 gets a different prefix) -- the
+        hazard is a FOREIGN session appearing DURING attempt 1 whose sid
+        happens to share attempt 2's short-id prefix. A stale (attempt-1)
+        snapshot predates it and would bind the foreign session; the fresh
+        snapshot excludes it."""
+        foreign = "ccccdddd-ffff-ffff-ffff-ffffffffffff"
+        state = {"bg": 0}
+
+        def fake_run(argv, **kwargs):
+            import types
+            if "--bg" in argv:
+                state["bg"] += 1
+                short = "aaaabbbb" if state["bg"] == 1 else "ccccdddd"
+                return types.SimpleNamespace(
+                    returncode=0,
+                    stdout=f"backgrounded · {short} · fleet|w1|t\n", stderr="")
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        def fetch(**_):
+            entries = []
+            if state["bg"] >= 1:
+                # foreign session, minted during attempt 1, FIRST in the
+                # roster -- a stale snapshot would let join bind it
+                entries.append({"id": "ccccdddd", "sessionId": foreign,
+                                "name": "operator session",
+                                "kind": "background", "state": "working",
+                                "status": "busy", "pid": 999})
+                entries.append({"id": "aaaabbbb", "sessionId": SID,
+                                "name": "fleet|w1|t", "kind": "background",
+                                "state": "working"})  # wedged
+            if state["bg"] >= 2:
+                entries.append({"id": "ccccdddd", "sessionId": SID2,
+                                "name": "fleet|w1|t", "kind": "background",
+                                "state": "working", "status": "busy",
+                                "pid": 4242})
+            return True, entries
+
+        clock = _FakeClock()
+        out = fleet.dispatch_bg("w1", "C:/proj", "b", "accept", run=fake_run,
+                                which=lambda _: "claude",
+                                sleep=lambda s: clock.advance(s),
+                                roster_fetch=fetch, clock=clock)
+        assert out["session_id"] == SID2  # never the foreign prefix-collider
+
+    def test_c1_stop_failure_and_live_recheck_refuses_retry(self, native_home):
+        """C1 CRITICAL (review injection 3b): stop/rm exit 1 on the wedge
+        path while the 'wedged' session comes alive -- redispatching would
+        put two live sessions on one task file with only sid2 tracked.
+        The retry must be REFUSED: check the stop/rm booleans, re-fetch
+        the roster, and raise unless the entry is verifiably gone or still
+        status/pid-free."""
+        state = {"bg": 0, "stop_attempted": False}
+
+        def fake_run(argv, **kwargs):
+            import types
+            if "--bg" in argv:
+                state["bg"] += 1
+                return types.SimpleNamespace(
+                    returncode=0,
+                    stdout="backgrounded · aaaabbbb · fleet|w1|t\n", stderr="")
+            if len(argv) >= 2 and argv[1] in ("stop", "rm"):
+                state["stop_attempted"] = True
+                return types.SimpleNamespace(returncode=1, stdout="",
+                                             stderr="daemon busy")
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        def fetch(**_):
+            if state["bg"] == 0:
+                return True, []
+            entry = {"id": "aaaabbbb", "sessionId": SID, "name": "fleet|w1|t",
+                     "kind": "background", "state": "working"}
+            if state["stop_attempted"]:
+                # came alive under the same overload that failed the stop
+                entry["status"] = "busy"
+                entry["pid"] = 31337
+            return True, [entry]
+
+        clock = _FakeClock()
+        with pytest.raises(fleet.NativeDispatchError, match="refus"):
+            fleet.dispatch_bg("w1", "C:/proj", "b", "accept", run=fake_run,
+                              which=lambda _: "claude",
+                              sleep=lambda s: clock.advance(s),
+                              roster_fetch=fetch, clock=clock)
+        assert state["bg"] == 1  # retry NEVER dispatched
+        kinds = _events_kinds(native_home)
+        assert "dispatch_retried" not in kinds
+
+    def test_c1_stop_failure_but_still_unattached_recheck_allows_retry(self, native_home):
+        """Companion: stop/rm failed but the recheck shows the entry still
+        status/pid-free -- the reviewer's prescribed safe condition; the
+        single retry proceeds."""
+        state = {"bg": 0}
+
+        def fake_run(argv, **kwargs):
+            import types
+            if "--bg" in argv:
+                state["bg"] += 1
+                short = "aaaabbbb" if state["bg"] == 1 else "ccccdddd"
+                return types.SimpleNamespace(
+                    returncode=0,
+                    stdout=f"backgrounded · {short} · fleet|w1|t\n", stderr="")
+            if len(argv) >= 2 and argv[1] in ("stop", "rm"):
+                return types.SimpleNamespace(returncode=1, stdout="",
+                                             stderr="daemon busy")
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        def fetch(**_):
+            entries = []
+            if state["bg"] >= 1:
+                entries.append({"id": "aaaabbbb", "sessionId": SID,
+                                "name": "fleet|w1|t", "kind": "background",
+                                "state": "working"})  # still unattached
+            if state["bg"] >= 2:
+                entries.append({"id": "ccccdddd", "sessionId": SID2,
+                                "name": "fleet|w1|t", "kind": "background",
+                                "state": "working", "status": "busy",
+                                "pid": 4242})
+            return True, entries
+
+        clock = _FakeClock()
+        out = fleet.dispatch_bg("w1", "C:/proj", "b", "accept", run=fake_run,
+                                which=lambda _: "claude",
+                                sleep=lambda s: clock.advance(s),
+                                roster_fetch=fetch, clock=clock)
+        assert out["session_id"] == SID2
+        assert state["bg"] == 2
+
+    def test_c1_stop_failure_and_recheck_blackout_refuses_retry(self, native_home):
+        """Stop failed AND the verification re-fetch itself fails: cannot
+        verify => cannot retry."""
+        state = {"bg": 0, "stop_attempted": False}
+
+        def fake_run(argv, **kwargs):
+            import types
+            if "--bg" in argv:
+                state["bg"] += 1
+                return types.SimpleNamespace(
+                    returncode=0,
+                    stdout="backgrounded · aaaabbbb · fleet|w1|t\n", stderr="")
+            if len(argv) >= 2 and argv[1] in ("stop", "rm"):
+                state["stop_attempted"] = True
+                return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        def fetch(**_):
+            if state["stop_attempted"]:
+                return False, "roster unavailable"
+            if state["bg"] == 0:
+                return True, []
+            return True, [{"id": "aaaabbbb", "sessionId": SID,
+                           "name": "fleet|w1|t", "kind": "background",
+                           "state": "working"}]
+
+        clock = _FakeClock()
+        with pytest.raises(fleet.NativeDispatchError, match="refus"):
+            fleet.dispatch_bg("w1", "C:/proj", "b", "accept", run=fake_run,
+                              which=lambda _: "claude",
+                              sleep=lambda s: clock.advance(s),
+                              roster_fetch=fetch, clock=clock)
+        assert state["bg"] == 1
+
+    def test_h1_full_attach_blackout_aborts_never_stops(self, native_home):
+        """H1 HIGH (review): a full-window roster blackout during attach
+        verification is CANNOT-VERIFY, not a wedge -- stopping a session we
+        cannot see could kill it mid-tool-run. Abort the dispatch loudly;
+        zero stop/rm calls."""
+        state = {"bg": 0, "post_join": False}
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(argv)
+            import types
+            if "--bg" in argv:
+                state["bg"] += 1
+                return types.SimpleNamespace(
+                    returncode=0,
+                    stdout="backgrounded · aaaabbbb · fleet|w1|t\n", stderr="")
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        def fetch(**_):
+            if state["bg"] == 0:
+                return True, []
+            if not state["post_join"]:
+                state["post_join"] = True  # the join sighting
+                return True, [{"id": "aaaabbbb", "sessionId": SID,
+                               "name": "fleet|w1|t", "kind": "background",
+                               "state": "working"}]
+            return False, "roster blackout"
+
+        clock = _FakeClock()
+        with pytest.raises(fleet.NativeDispatchError, match="verif"):
+            fleet.dispatch_bg("w1", "C:/proj", "b", "accept", run=fake_run,
+                              which=lambda _: "claude",
+                              sleep=lambda s: clock.advance(s),
+                              roster_fetch=fetch, clock=clock)
+        assert not any(len(a) >= 2 and a[1] in ("stop", "rm") for a in calls)
+        assert state["bg"] == 1
+        assert "dispatch_wedged" not in _events_kinds(native_home)
 
 
 class TestNativeRecompute:
