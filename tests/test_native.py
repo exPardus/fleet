@@ -237,6 +237,15 @@ class TestParseBgShortId:
     def test_missing_line_returns_none(self):
         assert fleet._parse_bg_short_id("error: whatever") is None
 
+    def test_strips_ansi_color_codes_around_short_id(self):
+        # T12 fix wave (finding 3): a color-forcing env var (FORCE_COLOR)
+        # makes the daemon wrap the short id in ANSI CSI codes even though
+        # stdout is piped, not a tty -- live-confirmed repr:
+        # 'backgrounded \xb7 \x1b[36m8e4a79bb\x1b[39m \xb7 timing-probe\n...'
+        out = ("backgrounded \xb7 \x1b[36mdeadbeef\x1b[39m \xb7 fleet|w1|task\n"
+               "\x1b[2m  claude agents             list sessions\x1b[22m\n")
+        assert fleet._parse_bg_short_id(out) == "deadbeef"
+
 
 def _fake_run_factory(stdout="backgrounded · aaaabbbb · fleet|w1|t\n", rc=0, calls=None):
     def fake_run(argv, **kwargs):
@@ -309,6 +318,19 @@ class TestDispatchBg:
         assert kwargs["env"].get("FLEET_WORKER")
         assert "CLAUDE_CODE_SESSION_ID" not in kwargs["env"]
         assert kwargs["cwd"] == "C:/proj"
+
+    def test_argv_pre_authorizes_tasks_dir_via_add_dir(self, native_home):
+        # T12 fix wave (finding 1): the task file lives under
+        # FLEET_HOME/tasks, outside the worker's own --dir cwd -- without
+        # --add-dir the worker's first Read on it hangs forever under any
+        # non-bypass mode. Pin the exact flag + posix path (tasks_dir()
+        # only, never FLEET_HOME wholesale -- least privilege).
+        calls = []
+        fleet.dispatch_bg("w1", "C:/proj", "b", "accept",
+                          run=_fake_run_factory(calls=calls), which=lambda _: "claude",
+                          sleep=lambda s: None, roster_fetch=_roster_with())
+        argv = calls[0][0]
+        assert argv[argv.index("--add-dir") + 1] == fleet.tasks_dir().as_posix()
 
     def test_resume_sid_inserts_resume_flag(self, native_home):
         calls = []
@@ -1610,21 +1632,45 @@ def _respawn_args(name="w1", task=None, force=False, yes=True,
 # M-B Task 7: send fork-steer + native respawn.
 # ---------------------------------------------------------------------------
 
+class TestNativeJobRef:
+    def test_first_hyphen_segment(self, native_home):
+        assert fleet._native_job_ref("aaaabbbb-1111-2222-3333-444455556666") == "aaaabbbb"
+
+    def test_no_hyphen_returns_whole_sid(self, native_home):
+        assert fleet._native_job_ref("plainsid") == "plainsid"
+
+    def test_empty_returns_empty(self, native_home):
+        assert fleet._native_job_ref("") == ""
+
+
 class TestStopNativeSession:
-    def test_true_on_rc_zero(self, native_home):
+    def test_true_on_rc_zero_short_id(self, native_home):
         calls = []
         assert fleet._stop_native_session(
             "sid-1", run=_fake_run_factory(rc=0, calls=calls), which=lambda _: "claude"
         ) is True
+        assert len(calls) == 1
         argv, kwargs = calls[0]
-        assert argv == ["claude", "stop", "sid-1"]
+        assert argv == ["claude", "stop", "sid"]
         assert kwargs["capture_output"] is True
         assert kwargs["text"] is True
         assert kwargs["encoding"] == "utf-8"
         assert kwargs["errors"] == "replace"
         assert kwargs["timeout"] == 30
 
-    def test_false_on_nonzero_rc(self, native_home):
+    def test_retries_once_with_full_sid_on_short_id_failure(self, native_home):
+        calls = []
+        rcs = iter([1, 0])
+
+        def run(argv, **kw):
+            calls.append((argv, kw))
+            return subprocess.CompletedProcess(argv, next(rcs))
+        assert fleet._stop_native_session(
+            "sid-1", run=run, which=lambda _: "claude"
+        ) is True
+        assert [c[0] for c in calls] == [["claude", "stop", "sid"], ["claude", "stop", "sid-1"]]
+
+    def test_false_on_nonzero_rc_both_attempts(self, native_home):
         assert fleet._stop_native_session(
             "sid-1", run=_fake_run_factory(rc=1), which=lambda _: "claude"
         ) is False
@@ -1643,6 +1689,45 @@ class TestStopNativeSession:
         def run(argv, **kw):
             raise subprocess.TimeoutExpired(cmd=argv, timeout=30)
         assert fleet._stop_native_session("sid-1", run=run, which=lambda _: "claude") is False
+
+
+class TestRmNativeSession:
+    def test_true_on_rc_zero_short_id(self, native_home):
+        calls = []
+        assert fleet._rm_native_session(
+            "sid-1", run=_fake_run_factory(rc=0, calls=calls), which=lambda _: "claude"
+        ) is True
+        assert len(calls) == 1
+        argv, kwargs = calls[0]
+        assert argv == ["claude", "rm", "sid"]
+        assert kwargs["timeout"] == 30
+
+    def test_retries_once_with_full_sid_on_short_id_failure(self, native_home):
+        calls = []
+        rcs = iter([1, 0])
+
+        def run(argv, **kw):
+            calls.append((argv, kw))
+            return subprocess.CompletedProcess(argv, next(rcs))
+        assert fleet._rm_native_session(
+            "sid-1", run=run, which=lambda _: "claude"
+        ) is True
+        assert [c[0] for c in calls] == [["claude", "rm", "sid"], ["claude", "rm", "sid-1"]]
+
+    def test_false_on_nonzero_rc_both_attempts(self, native_home):
+        assert fleet._rm_native_session(
+            "sid-1", run=_fake_run_factory(rc=1), which=lambda _: "claude"
+        ) is False
+
+    def test_false_when_claude_not_found(self, native_home):
+        def boom_run(*a, **kw):
+            raise AssertionError("must not run when claude cannot be resolved")
+        assert fleet._rm_native_session("sid-1", run=boom_run, which=lambda _: None) is False
+
+    def test_false_on_oserror(self, native_home):
+        def run(argv, **kw):
+            raise OSError("boom")
+        assert fleet._rm_native_session("sid-1", run=run, which=lambda _: "claude") is False
 
 
 class TestRestampAfterSteer:
@@ -2148,7 +2233,7 @@ class TestCmdRespawnNative:
         )
         assert rc == 0
         stop_call = next(c for c in stop_calls if c[0][:2] == ["claude", "stop"])
-        assert stop_call[0] == ["claude", "stop", old_sid]
+        assert stop_call[0] == ["claude", "stop", fleet._native_job_ref(old_sid)]
         outcomes = fleet.read_outcomes("w1", sid=old_sid)
         assert any(o["kind"] == "stopped" for o in outcomes)
         rec = fleet.load_registry()["workers"]["w1"]
@@ -2461,7 +2546,7 @@ class TestCmdKillNative:
         assert rc == 0
         assert "killed" in capsys.readouterr().out
         stop_call = next(c for c in calls if c[0][:2] == ["claude", "stop"])
-        assert stop_call[0] == ["claude", "stop", SID]
+        assert stop_call[0] == ["claude", "stop", fleet._native_job_ref(SID)]
         rec = fleet.load_registry()["workers"]["w1"]
         assert rec["status"] == "dead"
         assert rec["turn_pid"] is None
@@ -2471,37 +2556,38 @@ class TestCmdKillNative:
 
     def test_stops_retired_sids_best_effort(self, native_home):
         rec = seed_native_worker(native_home, sid=SID, status="working")
-        rec["retired_sids"] = ["retired-1", "retired-2"]
+        rec["retired_sids"] = ["retired1-a", "retired2-b"]
         fleet.save_registry({"workers": {"w1": rec}})
         calls = []
         fleet.cmd_kill(_kill_args(), run=_fake_run_factory(rc=0, calls=calls), which=lambda _: "claude")
         stopped = {c[0][2] for c in calls if c[0][:2] == ["claude", "stop"]}
-        assert stopped == {SID, "retired-1", "retired-2"}
+        assert stopped == {fleet._native_job_ref(SID), "retired1", "retired2"}
 
     # T8 fix wave (adv I1, Important) -- retired-sid sweep wall-time bound.
 
     def test_retired_sid_stops_use_short_timeout_primary_keeps_full_budget(self, native_home):
         rec = seed_native_worker(native_home, sid=SID, status="working")
-        rec["retired_sids"] = ["retired-1", "retired-2"]
+        rec["retired_sids"] = ["retired1-a", "retired2-b"]
         fleet.save_registry({"workers": {"w1": rec}})
         calls = []
         fleet.cmd_kill(_kill_args(), run=_fake_run_factory(rc=0, calls=calls), which=lambda _: "claude")
         stop_calls = {c[0][2]: c[1] for c in calls if c[0][:2] == ["claude", "stop"]}
-        assert stop_calls[SID]["timeout"] == 30
-        assert stop_calls["retired-1"]["timeout"] == fleet._RETIRED_SID_SWEEP_TIMEOUT_SECONDS
-        assert stop_calls["retired-2"]["timeout"] == fleet._RETIRED_SID_SWEEP_TIMEOUT_SECONDS
+        assert stop_calls[fleet._native_job_ref(SID)]["timeout"] == 30
+        assert stop_calls["retired1"]["timeout"] == fleet._RETIRED_SID_SWEEP_TIMEOUT_SECONDS
+        assert stop_calls["retired2"]["timeout"] == fleet._RETIRED_SID_SWEEP_TIMEOUT_SECONDS
         assert fleet._RETIRED_SID_SWEEP_TIMEOUT_SECONDS == 5
 
     def test_retired_sid_sweep_capped_at_20_most_recent(self, native_home):
         rec = seed_native_worker(native_home, sid=SID, status="working")
-        rec["retired_sids"] = [f"retired-{i}" for i in range(50)]
+        rec["retired_sids"] = [f"retired{i:02d}-x" for i in range(50)]
         fleet.save_registry({"workers": {"w1": rec}})
         calls = []
         fleet.cmd_kill(_kill_args(), run=_fake_run_factory(rc=0, calls=calls), which=lambda _: "claude")
-        stopped_retired = [c[0][2] for c in calls if c[0][:2] == ["claude", "stop"] and c[0][2] != SID]
+        stopped_retired = [c[0][2] for c in calls
+                           if c[0][:2] == ["claude", "stop"] and c[0][2] != fleet._native_job_ref(SID)]
         assert len(stopped_retired) == 20
         # the 20 MOST RECENT (last 20 of the list), not the first 20.
-        assert set(stopped_retired) == {f"retired-{i}" for i in range(30, 50)}
+        assert set(stopped_retired) == {f"retired{i:02d}" for i in range(30, 50)}
 
     def test_retired_sid_sweep_prints_one_progress_line_per_sid(self, native_home, capsys):
         rec = seed_native_worker(native_home, sid=SID, status="working")
@@ -2542,7 +2628,8 @@ class TestCmdKillNative:
         assert rc == 0
         stopped = {c[0][2] for c in calls if c[0][:2] == ["claude", "stop"]}
         assert victim_sid not in stopped
-        assert stopped == {SID}
+        assert fleet._native_job_ref(victim_sid) not in stopped
+        assert stopped == {fleet._native_job_ref(SID)}
         err = capsys.readouterr().err
         assert "skipping" in err
         # victim's own registry record is untouched.
@@ -2585,7 +2672,7 @@ class TestCmdInterruptNative:
         calls = []
         fleet.cmd_interrupt(_interrupt_args(), run=_fake_run_factory(rc=0, calls=calls), which=lambda _: "claude")
         stop_call = next(c for c in calls if c[0][:2] == ["claude", "stop"])
-        assert stop_call[0] == ["claude", "stop", SID]
+        assert stop_call[0] == ["claude", "stop", fleet._native_job_ref(SID)]
         outcomes = fleet.read_outcomes("w1", sid=SID)
         assert any(o["kind"] == "interrupted" for o in outcomes)
         assert "interrupted" in _events_kinds(native_home)
@@ -3238,13 +3325,13 @@ class TestCmdArchive:
         assert "w1: skipped -- status:working" in capsys.readouterr().out
 
     def test_archive_moves_files_and_rms_all_sids(self, native_home):
-        seed_archive_ready_worker(native_home, retired_sids=["retired-1", "retired-2"])
+        seed_archive_ready_worker(native_home, retired_sids=["retired1-a", "retired2-b"])
         # sid-keyed outcome files (the Stop hook's fallback key) for the
         # current sid AND each retired sid -- these are separate FILES
         # (outcome_path(sid)), not the name-keyed one seed_archive_ready_worker
         # already wrote.
         fleet.append_outcome(SID, {"ts": _iso(NOW), "session_id": SID, "kind": "result"})
-        for s in ["retired-1", "retired-2"]:
+        for s in ["retired1-a", "retired2-b"]:
             fleet.append_outcome(s, {"ts": _iso(NOW), "session_id": s, "kind": "result"})
         task_file = fleet.task_file_path("w1")
         task_file.parent.mkdir(parents=True, exist_ok=True)
@@ -3259,15 +3346,15 @@ class TestCmdArchive:
         assert rc == 0
 
         rm_sids = {c[0][2] for c in calls if c[0][:2] == ["claude", "rm"]}
-        assert rm_sids == {SID, "retired-1", "retired-2"}
+        assert rm_sids == {fleet._native_job_ref(SID), "retired1", "retired2"}
 
         dest = fleet.archive_root() / "w1"
         assert (dest / "journal.md").read_text(encoding="utf-8") == "journal text"
         assert (dest / "task.md").exists()
         assert (dest / "w1.jsonl").exists()          # name-keyed outcome file
         assert (dest / f"{SID}.jsonl").exists()       # current sid's outcome file
-        assert (dest / "retired-1.jsonl").exists()
-        assert (dest / "retired-2.jsonl").exists()
+        assert (dest / "retired1-a.jsonl").exists()
+        assert (dest / "retired2-b.jsonl").exists()
         assert not task_file.exists()
         assert not journal.exists()
         assert not fleet.outcome_path("w1").exists()
@@ -3296,7 +3383,7 @@ class TestCmdArchive:
         assert rc == 0
 
         rm_sids = {c[0][2] for c in calls if c[0][:2] == ["claude", "rm"]}
-        assert rm_sids == {SID}  # only the (dead-per-roster) current sid was rm'd
+        assert rm_sids == {fleet._native_job_ref(SID)}  # only the (dead-per-roster) current sid was rm'd
         err = capsys.readouterr().err
         assert "skipping rm" in err and "session live in roster" in err
         # the archive itself still proceeds -- the live retired sid is
@@ -3444,7 +3531,7 @@ class TestCmdArchiveForeignRosterUntouched:
         assert rc == 0
         rm_sids = {c[0][2] for c in calls if c[0][:2] == ["claude", "rm"]}
         assert "foreign-sid-999" not in rm_sids
-        assert rm_sids == {SID, "retired-1"}
+        assert rm_sids == {fleet._native_job_ref(SID), fleet._native_job_ref("retired-1")}
 
 
 class TestRefuseIfArchived:
@@ -3725,7 +3812,7 @@ class TestCmdArchiveCrashResume:
         assert (dest / f"{SID}.md").read_text(encoding="utf-8") == "pending mail"
 
         rm_sids = {c[0][2] for c in calls if c[0][:2] == ["claude", "rm"]}
-        assert rm_sids == {SID, "retired-1"}
+        assert rm_sids == {fleet._native_job_ref(SID), fleet._native_job_ref("retired-1")}
         # exactly one "archived" event total -- the resume never appends a second.
         assert _events_kinds(native_home).count("archived") == 1
 
