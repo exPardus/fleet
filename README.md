@@ -6,7 +6,7 @@ One Claude Code session — the **manager** — that spawns, monitors, steers, a
 
 ## Why
 
-Claude Code's own background agents (`claude --bg`, `claude agents`) cover spawn, list, and monitor. They do not cover a named registry with per-task permission modes, mid-turn mailbox steering, journals with respawn continuity, attach/headless conflict guards, budget and token ceilings, or a knowledge base that gets smarter across sessions. `claude-fleet` is exactly that layer — currently sitting on top of its own detached-launch machinery, and mid-pivot onto the native substrate (see [Status](#status) below).
+Claude Code's own background agents (`claude --bg`, `claude agents`) cover spawn, list, and monitor. They do not cover a named registry with per-task permission modes, mid-turn mailbox steering, journals with respawn continuity, attach/headless conflict guards, budget and token ceilings, or a knowledge base that gets smarter across sessions. `claude-fleet` is exactly that layer — now dispatched onto Claude Code's native background-agent substrate rather than its own detached-launch machinery (see [Status](#status) below).
 
 ## See it in action
 
