@@ -810,6 +810,156 @@ def _events_kinds(home):
     return [json.loads(ln)["kind"] for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
 
 
+SID2 = "ccccdddd-1111-2222-3333-444455556666"
+
+
+def _wedge_env(second_healthy=True, calls=None):
+    """Coupled run/roster fakes for the never-attach wedge (live finding #2,
+    2026-07-16). Attempt 1's session (SID, short aaaabbbb) joins the roster
+    but stays state-only FOREVER -- the wedge shape. Attempt 2's session
+    (SID2, short ccccdddd) is live (status+pid) when `second_healthy`, else
+    wedged the same way."""
+    state = {"bg": 0}
+
+    def fake_run(argv, **kwargs):
+        if calls is not None:
+            calls.append(argv)
+        import types
+        if "--bg" in argv:
+            state["bg"] += 1
+            short = "aaaabbbb" if state["bg"] == 1 else "ccccdddd"
+            return types.SimpleNamespace(
+                returncode=0, stdout=f"backgrounded · {short} · fleet|w1|t\n",
+                stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def fetch(**_):
+        entries = []
+        if state["bg"] >= 1:
+            entries.append({"id": "aaaabbbb", "sessionId": SID,
+                            "name": "fleet|w1|t", "kind": "background",
+                            "state": "working"})  # wedged: state-only forever
+        if state["bg"] >= 2:
+            e = {"id": "ccccdddd", "sessionId": SID2, "name": "fleet|w1|t",
+                 "kind": "background", "state": "working"}
+            if second_healthy:
+                e["status"] = "busy"
+                e["pid"] = 4242
+            entries.append(e)
+        return True, entries
+
+    return fake_run, fetch
+
+
+class TestAwaitAttach:
+    def _clocked(self):
+        clock = _FakeClock()
+        return clock, (lambda s: clock.advance(s))
+
+    def test_status_or_pid_is_attached(self, native_home):
+        clock, sleep = self._clocked()
+        fetch = lambda **_: (True, [make_roster_entry(SID, status="busy")])  # noqa: E731
+        assert fleet._await_attach("w1", SID, fetch, sleep, clock) is True
+
+    def test_state_only_then_live_attaches(self, native_home):
+        clock, sleep = self._clocked()
+        seq = _roster_sequence(
+            (True, [make_roster_entry(SID, status=None, pid=None, state="working")]),
+            (True, [make_roster_entry(SID, status="busy")]),
+        )
+        assert fleet._await_attach("w1", SID, seq, sleep, clock) is True
+
+    def test_entry_gone_after_join_is_not_a_wedge(self, native_home):
+        clock, sleep = self._clocked()
+        assert fleet._await_attach("w1", SID, lambda **_: (True, []),
+                                   sleep, clock) is True
+
+    @pytest.mark.parametrize("literal", ["done", "failed", "stopped", "blocked"])
+    def test_terminal_state_literal_means_it_ran(self, native_home, literal):
+        clock, sleep = self._clocked()
+        entry = make_roster_entry(SID, status=None, pid=None, state=literal)
+        assert fleet._await_attach("w1", SID, lambda **_: (True, [entry]),
+                                   sleep, clock) is True
+
+    def test_outcome_record_means_it_completed(self, native_home):
+        clock, sleep = self._clocked()
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": SID,
+                                    "kind": "result"})
+        entry = make_roster_entry(SID, status=None, pid=None, state="working")
+        assert fleet._await_attach("w1", SID, lambda **_: (True, [entry]),
+                                   sleep, clock) is True
+
+    def test_state_only_forever_is_the_wedge(self, native_home):
+        clock, sleep = self._clocked()
+        entry = make_roster_entry(SID, status=None, pid=None, state="working")
+        assert fleet._await_attach("w1", SID, lambda **_: (True, [entry]),
+                                   sleep, clock) is False
+        assert clock.t >= fleet.NATIVE_ATTACH_VERIFY_SECONDS
+
+    def test_fetch_failure_retried_never_a_wedge_verdict_early(self, native_home):
+        clock, sleep = self._clocked()
+        seq = _roster_sequence(
+            (False, "transient"),
+            (True, [make_roster_entry(SID, status="busy")]),
+        )
+        assert fleet._await_attach("w1", SID, seq, sleep, clock) is True
+
+
+class TestDispatchWedgeRetry:
+    def _dispatch(self, run, fetch, clock=None):
+        clock = clock or _FakeClock()
+        return fleet.dispatch_bg(
+            "w1", "C:/proj", "b", "accept", run=run, which=lambda _: "claude",
+            sleep=lambda s: clock.advance(s), roster_fetch=fetch, clock=clock)
+
+    def test_wedge_then_healthy_retries_once_returns_second_sid(self, native_home):
+        calls = []
+        run, fetch = _wedge_env(second_healthy=True, calls=calls)
+        out = self._dispatch(run, fetch)
+        assert out["session_id"] == SID2 and out["short_id"] == "ccccdddd"
+        bg = [a for a in calls if "--bg" in a]
+        assert len(bg) == 2
+        # the wedged session was stopped AND removed, by short id
+        assert ["claude", "stop", "aaaabbbb"] in calls
+        assert ["claude", "rm", "aaaabbbb"] in calls
+        kinds = _events_kinds(native_home)
+        assert kinds.count("dispatch_wedged") == 1
+        assert kinds.count("dispatch_retried") == 1
+
+    def test_wedge_then_wedge_gives_up_loudly(self, native_home):
+        calls = []
+        run, fetch = _wedge_env(second_healthy=False, calls=calls)
+        with pytest.raises(fleet.NativeDispatchError, match="never attached") as exc:
+            self._dispatch(run, fetch)
+        assert exc.value.short_id == "ccccdddd"
+        assert len([a for a in calls if "--bg" in a]) == 2  # EXACTLY once retried
+        for short in ("aaaabbbb", "ccccdddd"):
+            assert ["claude", "stop", short] in calls
+            assert ["claude", "rm", short] in calls
+        kinds = _events_kinds(native_home)
+        assert kinds.count("dispatch_wedged") == 2
+        assert kinds.count("dispatch_retried") == 1
+
+    def test_healthy_dispatch_never_retries_no_wedge_events(self, native_home):
+        calls = []
+        out = fleet.dispatch_bg("w1", "C:/proj", "b", "accept",
+                                run=_fake_run_factory(calls=calls),
+                                which=lambda _: "claude", sleep=lambda s: None,
+                                roster_fetch=_roster_with())
+        assert out["session_id"] == SID
+        assert len([a for a, _kw in calls if "--bg" in a]) == 1
+        kinds = _events_kinds(native_home)
+        assert "dispatch_wedged" not in kinds and "dispatch_retried" not in kinds
+
+    def test_second_attempt_excludes_wedged_sid_from_join(self, native_home):
+        # the wedged sid may linger in the roster (rm best-effort) -- the
+        # retry's fresh pre-snapshot excludes it, so the join can only bind
+        # the NEW session even though both entries share the roster.
+        run, fetch = _wedge_env(second_healthy=True)
+        out = self._dispatch(run, fetch)
+        assert out["session_id"] == SID2  # never re-binds the wedged SID
+
+
 class TestNativeRecompute:
     def _rec(self, native_home, status="working", **kw):
         return seed_native_worker(native_home, status=status, **kw)
