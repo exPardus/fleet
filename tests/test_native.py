@@ -1223,6 +1223,27 @@ class TestCmdWaitNative:
         assert "w1: idle" in out
         assert "dead-suspected" not in out
 
+    def test_persist_step_epoch_freeze_prints_notice_and_persists_nothing(
+            self, native_home, monkeypatch, capsys):
+        # Debt roll-up item 9 (T5-era residual): when the persist step's own
+        # roster fetch is suspicious (G9), the summary rows can only show the
+        # pre-freeze poll verdict and nothing is written -- the output must
+        # say so (same convention as cmd_status/cmd_clean's freeze line)
+        # instead of letting the stale verdict read as current-and-committed.
+        seed_native_worker(native_home, status="working",
+                           last_dispatch_at=_iso(NOW - timedelta(minutes=1)))
+        monkeypatch.setattr(fleet, "wait_for_workers",
+                            lambda *a, **k: ({"w1": "dead-suspected"}, set()))
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            _fixed_roster(False, "roster fetch failed"))
+        rc = fleet.cmd_wait(_wait_args(["w1"]), sleep=lambda s: None, clock=_FakeClock())
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "w1: dead-suspected" in out
+        assert "EPOCH" in out and "nothing persisted" in out
+        # frozen: the record was left untouched, not demoted
+        assert fleet.load_registry()["workers"]["w1"]["status"] == "working"
+
 
 class TestSnapshotTableNative:
     """T5 fix wave (Minor: task-5-review.md M2) -- `_print_snapshot_table`/
@@ -1924,6 +1945,55 @@ class TestCmdSendNative:
         # message rides the mailbox drain -- old sid's mailbox is claimed+finalized
         assert not (fleet.mailbox_dir() / f"{old_sid}.md").exists()
         assert "steered" in _events_kinds(native_home)
+
+    def test_fork_steer_commit_survives_event_append_oserror(self, native_home,
+                                                             monkeypatch, capsys):
+        # Fix-wave F1: _commit_launched_turn retries OSError, so an
+        # append_event OSError escaping AFTER save_registry made the restamp
+        # durable used to re-run the non-idempotent commit body -- the retry
+        # reloaded, saw session_id already == new_sid, fell into the orphaned
+        # branch, misreported a COMMITTED steer as "left for manual adoption"
+        # and skipped the ceiling write. Post-save event appends are now
+        # best-effort (_append_event_quiet): commit stands, steer reported
+        # normally, ceiling written, failure named on stderr.
+        old_sid = SID
+        new_sid = "ccccdddd-9999-8888-7777-666655554444"
+        seed_native_worker(native_home, sid=old_sid, status="idle", token_ceiling=500)
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": old_sid, "kind": "result"})
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_sequence(
+            (True, []),                                          # cmd_send's own verdict fetch
+            (True, []),                                          # dispatch_bg pre-dispatch snapshot
+            (True, [make_roster_entry(new_sid, status="idle")]),  # join poll
+        ))
+        real_append = fleet.append_event
+        state = {"raised": False}
+
+        def poisoned_append(kind, name, **fields):
+            if kind == "steered" and not state["raised"]:
+                state["raised"] = True
+                raise OSError(28, "No space left on device")
+            return real_append(kind, name, **fields)
+
+        monkeypatch.setattr(fleet, "append_event", poisoned_append)
+        rc = fleet.cmd_send(
+            _send_args(message="go do X"),
+            run=_fake_run_factory(stdout="backgrounded · ccccdddd · fleet|w1|go do X\n"),
+            which=lambda _: "claude", sleep=lambda s: None,
+        )
+        assert rc == 0
+        assert state["raised"]  # the poison genuinely fired
+        captured = capsys.readouterr()
+        assert "left for manual adoption" not in captured.out
+        assert "fork-steered" in captured.out
+        assert "not recorded" in captured.err  # loud best-effort note
+        # Fix-wave micro: the note must carry the fields payload -- the sid
+        # is what the lost forensics line existed to preserve.
+        assert new_sid in captured.err
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["session_id"] == new_sid          # durable commit stands
+        assert old_sid in rec["retired_sids"]
+        assert fleet.ceiling_file_path(new_sid).exists()  # ceiling write not skipped
+        assert "steer_orphaned" not in _events_kinds(native_home)
 
     def test_idle_native_over_ceiling_refuses_no_dispatch(self, native_home, monkeypatch):
         old_sid = SID
