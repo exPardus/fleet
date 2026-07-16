@@ -319,6 +319,7 @@ def _autoclean_args(**kw):
     kw.setdefault("ttl_hours", None)
     kw.setdefault("expire_tombstones_hours", None)
     kw.setdefault("dry_run", False)
+    kw.setdefault("fleet_home", None)
     return argparse.Namespace(**kw)
 
 
@@ -407,56 +408,140 @@ class TestCleanTieringSplit:
             fleet.build_parser().parse_args(["clean", "--dead-only", "--tombstones"])
 
 
-class TestSchedulerInstall:
-    @pytest.fixture
-    def platform_stub(self, monkeypatch):
-        state = {"query": None, "installs": [], "removes": [],
-                 "install_ok": (True, ""), "remove_ok": (True, "")}
-        monkeypatch.setattr(fleet.PLATFORM, "autoclean_task_query",
-                            lambda task_name, run=None: state["query"])
-        monkeypatch.setattr(
-            fleet.PLATFORM, "autoclean_task_install",
-            lambda task_name, command, interval_hours, run=None:
-                state["installs"].append((task_name, command, interval_hours))
-                or state["install_ok"])
-        monkeypatch.setattr(
-            fleet.PLATFORM, "autoclean_task_remove",
-            lambda task_name, run=None:
-                state["removes"].append(task_name) or state["remove_ok"])
-        return state
+@pytest.fixture
+def platform_stub(monkeypatch):
+    state = {"query": None, "installs": [], "removes": [],
+             "install_ok": (True, ""), "remove_ok": (True, "")}
+    monkeypatch.setattr(fleet.PLATFORM, "autoclean_task_query",
+                        lambda task_name, run=None: state["query"])
+    monkeypatch.setattr(
+        fleet.PLATFORM, "autoclean_task_install",
+        lambda task_name, command, interval_hours, run=None:
+            state["installs"].append((task_name, command, interval_hours))
+            or state["install_ok"])
+    monkeypatch.setattr(
+        fleet.PLATFORM, "autoclean_task_remove",
+        lambda task_name, run=None:
+            state["removes"].append(task_name) or state["remove_ok"])
+    return state
 
-    def test_fresh_install_default_interval(self, platform_stub, capsys):
+
+@pytest.fixture
+def canonical_install(home, monkeypatch):
+    """Make the sandboxed home look canonical (F2): the resolved fleet.py
+    sits under it, so the home-guards pass and install paths can be tested."""
+    script = home / "bin" / "fleet.py"
+    monkeypatch.setattr(fleet, "_autoclean_script_path", lambda: script,
+                        raising=False)
+    return script
+
+
+class TestInstallHomeGuards:
+    """F2 (adversarial review, HIGH): Task Scheduler runs without operator
+    env, so the task command must carry FLEET_HOME explicitly, and an
+    install whose fleet.py is not the target home's copy (worktree!) must
+    refuse -- otherwise the task sweeps a wrong/soon-deleted home forever
+    while doctor stays green."""
+
+    def test_task_command_embeds_fleet_home(self, home, canonical_install):
+        cmd = fleet._autoclean_task_command()
+        assert "--fleet-home" in cmd
+        assert str(Path(home).resolve()) in cmd
+
+    def test_autoclean_honors_fleet_home_flag(self, home, tmp_path_factory):
+        other = tmp_path_factory.mktemp("other-home")
+        (other / "state").mkdir()
+        rc = fleet.cmd_autoclean(_autoclean_args(fleet_home=str(other)),
+                                 run=fake_run_factory([]), which=lambda _: "claude")
+        assert rc == 0
+        assert (other / "state" / "autoclean-last-run.json").exists()
+        assert not (home / "state" / "autoclean-last-run.json").exists()
+
+    def test_install_refuses_script_outside_home(self, home, platform_stub):
+        # no canonical_install: the real _autoclean_script_path (this repo's
+        # bin/fleet.py) is NOT under the sandboxed home
+        with pytest.raises(fleet.FleetCliError, match="F2"):
+            fleet._install_autoclean_task(None, force=False)
+        assert platform_stub["installs"] == []
+
+    def test_install_refuses_linked_worktree_home(self, home, platform_stub,
+                                                  canonical_install):
+        (home / ".git").write_text("gitdir: C:/somewhere/.git/worktrees/x",
+                                   encoding="utf-8")
+        with pytest.raises(fleet.FleetCliError, match="worktree"):
+            fleet._install_autoclean_task(None, force=False)
+        assert platform_stub["installs"] == []
+
+    def test_install_allows_canonical_repo_home(self, home, platform_stub,
+                                                canonical_install):
+        (home / ".git").mkdir()  # a real repo: .git is a DIRECTORY
+        fleet._install_autoclean_task(None, force=False)
+        assert len(platform_stub["installs"]) == 1
+
+    def test_install_refuses_marker_mismatch(self, home, platform_stub,
+                                             canonical_install, tmp_path_factory):
+        marker = fleet.fleet_home_marker_path()
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(str(tmp_path_factory.mktemp("real-home")), encoding="utf-8")
+        with pytest.raises(fleet.FleetCliError, match="marker"):
+            fleet._install_autoclean_task(None, force=False)
+        assert platform_stub["installs"] == []
+
+    def test_install_passes_matching_marker(self, home, platform_stub,
+                                            canonical_install):
+        marker = fleet.fleet_home_marker_path()
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(Path(home).resolve().as_posix() + "\n", encoding="utf-8")
+        fleet._install_autoclean_task(None, force=False)
+        assert len(platform_stub["installs"]) == 1
+
+    def test_force_overrides_home_guards(self, home, platform_stub):
+        fleet._install_autoclean_task(None, force=True)
+        assert len(platform_stub["installs"]) == 1
+
+    def test_doctor_flags_missing_pinned_path(self, home, monkeypatch):
+        gone = str(home / "gone-worktree" / "bin" / "fleet.py")
+        monkeypatch.setattr(
+            fleet.PLATFORM, "autoclean_task_query",
+            lambda task_name, run=None: f'"C:/py.exe" "{gone}" autoclean')
+        _, ok, msg = fleet._doctor_check_autoclean()
+        assert ok and "missing" in msg.lower()
+
+
+class TestSchedulerInstall:
+    def test_fresh_install_default_interval(self, home, canonical_install,
+                                            platform_stub, capsys):
         fleet._install_autoclean_task(None, force=False)
         (task_name, command, hours), = platform_stub["installs"]
         assert task_name == fleet.AUTOCLEAN_TASK_NAME
         assert hours == fleet.AUTOCLEAN_INTERVAL_HOURS_DEFAULT
-        assert command.endswith(" autoclean") and "fleet.py" in command
+        assert ' autoclean --fleet-home "' in command and "fleet.py" in command
         assert "uninstall" in capsys.readouterr().out
 
-    def test_refuses_foreign_task(self, platform_stub):
+    def test_refuses_foreign_task(self, home, canonical_install, platform_stub):
         platform_stub["query"] = '"C:/other/backup.exe" nightly'
         with pytest.raises(fleet.FleetCliError, match="fleet-owned"):
             fleet._install_autoclean_task(None, force=False)
         assert platform_stub["installs"] == []
 
-    def test_force_overwrites_foreign_task(self, platform_stub):
+    def test_force_overwrites_foreign_task(self, home, canonical_install, platform_stub):
         platform_stub["query"] = '"C:/other/backup.exe" nightly'
         fleet._install_autoclean_task(None, force=True)
         assert len(platform_stub["installs"]) == 1
 
-    def test_idempotent_reinstall_of_own_task(self, platform_stub):
-        platform_stub["query"] = '"C:/py.exe" "C:/fleet/bin/fleet.py" autoclean'
+    def test_idempotent_reinstall_of_own_task(self, home, canonical_install, platform_stub):
+        platform_stub["query"] = fleet._autoclean_task_command()
         fleet._install_autoclean_task(12, force=False)
         (_, _, hours), = platform_stub["installs"]
         assert hours == 12
 
     @pytest.mark.parametrize("bad", [0, 24, -3])
-    def test_interval_validated(self, platform_stub, bad):
+    def test_interval_validated(self, home, canonical_install, platform_stub, bad):
         with pytest.raises(fleet.FleetCliError, match="1..23"):
             fleet._install_autoclean_task(bad, force=False)
         assert platform_stub["installs"] == []
 
-    def test_install_failure_raises(self, platform_stub):
+    def test_install_failure_raises(self, home, canonical_install, platform_stub):
         platform_stub["install_ok"] = (False, "access denied")
         with pytest.raises(fleet.FleetCliError, match="access denied"):
             fleet._install_autoclean_task(None, force=False)
