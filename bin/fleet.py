@@ -8134,6 +8134,16 @@ def _fast_completion_sid(name: str, since_iso: str, short_id: str | None = None)
 NATIVE_JOIN_VERIFY_SECONDS = 60.0   # keep in sync with SUPERVISOR_ROSTER_VERIFY_SECONDS below (same window, independently defined -- Finding 3)
 NATIVE_JOIN_POLL_SECONDS = 3.0
 NATIVE_DISPATCH_TIMEOUT_SECONDS = 120.0
+# Never-attach wedge (live finding #2, 2026-07-16): across 12 healthy probe
+# spawns, status+pid appeared on the joined roster entry 4-6s post-dispatch
+# (outcome ~10-15s); 30s is 5x that observed ceiling as loaded-daemon
+# headroom. A false positive is cheap by construction -- the only session
+# ever stopped is one with NO process, NO transcript activity and NO
+# outcome (provably unstarted), so an over-tight window costs one wasted
+# session + one redispatch, never lost work; an over-generous window just
+# delays wedge detection. 30s balances the two.
+NATIVE_ATTACH_VERIFY_SECONDS = 30.0
+NATIVE_ATTACH_POLL_SECONDS = 2.0
 DEFAULT_CATEGORY = "fleet"
 NATIVE_NAME_HINT_MAX = 40
 
@@ -8220,6 +8230,42 @@ def _join_roster_by_short_id(short_id, roster_fetch, sleep,
         sleep(NATIVE_JOIN_POLL_SECONDS)
 
 
+def _await_attach(name, sid, roster_fetch, sleep, clock,
+                  verify_seconds=NATIVE_ATTACH_VERIFY_SECONDS):
+    """True iff a freshly joined --bg session shows LIFE within the window;
+    False = the never-attach wedge (live finding #2, 2026-07-16: the daemon
+    occasionally mints the roster entry but never starts the runner --
+    state:'working', no status/pid, no transcript, no outcome, forever).
+
+    Life signals, cheapest-reliable-first per the probe forensics (12
+    healthy spawns: status+pid at 4-6s post-dispatch, outcome ~10-15s):
+      * roster entry carries `status` or `pid` -- the process attached;
+      * roster entry reached a terminal/blocked state literal (done/failed/
+        stopped/blocked) -- it RAN; the discriminator owns the verdict;
+      * roster entry VANISHED post-join -- reaped, not the wedge shape;
+        the discriminator + dispatch grace window own it;
+      * an outcome record for this sid exists -- completed before any poll
+        ever saw it live (fast-completion race).
+    A transient roster-fetch failure is simply retried until the deadline
+    (never treated as a wedge on its own)."""
+    deadline = clock() + verify_seconds
+    while True:
+        ok, entries = roster_fetch()
+        if ok:
+            entry = _roster_entry_for(entries, sid)
+            if entry is None:
+                return True
+            if "status" in entry or "pid" in entry:
+                return True
+            if entry.get("state") in ("done", "failed", "stopped", "blocked"):
+                return True
+        if read_outcomes(name, sid=sid):
+            return True
+        if clock() >= deadline:
+            return False
+        sleep(NATIVE_ATTACH_POLL_SECONDS)
+
+
 def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
                 hint="", resume_sid=None, settings_path=None,
                 setting_sources=None,
@@ -8271,53 +8317,89 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
     if model:
         argv += ["--model", model]
     argv.append(tiny_prompt)
-    # Snapshot the roster ONCE before dispatching -- any sid already present
-    # (sharing the short-id prefix fleet is about to receive) is excluded
-    # from the join below, so a foreign concurrent session can never be
-    # mistaken for the one just launched. A snapshot fetch failure never
-    # blocks dispatch -- fall back to an empty exclusion set.
-    pre_ok, pre_entries = roster_fetch()
-    # Unhashable-sessionId guard (debt roll-up, mislabeled "item 3" in an
-    # earlier wave): filter the sessionId VALUE's type too -- a dict-valued
-    # sessionId (CLI drift / hostile roster) would otherwise land in the set
-    # and raise TypeError from the unhashable value.
-    pre_sids = ({e.get("sessionId") for e in pre_entries
-                 if isinstance(e, dict) and isinstance(e.get("sessionId"), str)}
-                if pre_ok else frozenset())
-    try:
-        proc = run(argv, cwd=str(cwd), env=_worker_env(name),
-                   capture_output=True, text=True, encoding="utf-8",
-                   errors="replace", timeout=NATIVE_DISPATCH_TIMEOUT_SECONDS)
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise NativeDispatchError(f"--bg dispatch failed: {exc}") from exc
-    if proc.returncode != 0:
-        raise NativeDispatchError(
-            f"--bg dispatch exited {proc.returncode}: "
-            f"{(proc.stderr or proc.stdout or '').strip()[:400]}")
-    short_id = _parse_bg_short_id(proc.stdout or "")
-    if not short_id:
-        raise NativeDispatchError(
-            f"could not parse short id from --bg stdout: {(proc.stdout or '').strip()[:400]}")
-    try:
-        sid = _join_roster_by_short_id(short_id, roster_fetch, sleep,
-                                       exclude_sids=pre_sids, clock=clock)
-    except BaseException as exc:
-        # T4 fix wave (Important, Ctrl-C mid-join): a live --bg session was
-        # already dispatched (proc.returncode == 0, short_id parsed) by the
-        # time this loop runs -- if Ctrl-C (or any other exception) lands
-        # here, the short id is the only handle an operator has left to
-        # find it again via `claude agents`. add_note survives re-raise
-        # through cmd_spawn's except BaseException handler, which has no
-        # other way to recover it (dispatch_bg stays opaque -- no message
-        # parsing per the T4 design).
-        exc.add_note(f"fleet_short_id={short_id}")
-        raise
-    if sid is None:
-        raise NativeDispatchError(
-            f"dispatched (short id {short_id}) but no roster entry joined "
-            f"within {NATIVE_JOIN_VERIFY_SECONDS:.0f}s -- possible DOA; "
-            f"recover manually via claude agents", short_id=short_id)
-    return {"session_id": sid, "short_id": short_id, "rendered_name": rendered}
+    def _dispatch_once():
+        """One dispatch + roster join. Per-attempt so the never-attach
+        retry below re-runs the WHOLE sequence -- fresh pre-snapshot (the
+        wedged sid may still linger in the roster if its rm failed), fresh
+        `claude --bg` call, fresh short id, fresh join."""
+        # Snapshot the roster ONCE before dispatching -- any sid already
+        # present (sharing the short-id prefix fleet is about to receive)
+        # is excluded from the join below, so a foreign concurrent session
+        # can never be mistaken for the one just launched. A snapshot fetch
+        # failure never blocks dispatch -- fall back to an empty exclusion
+        # set. Unhashable-sessionId guard (debt roll-up): filter the
+        # sessionId VALUE's type too -- a dict-valued sessionId (CLI drift/
+        # hostile roster) would otherwise raise TypeError from the set.
+        pre_ok, pre_entries = roster_fetch()
+        pre_sids = ({e.get("sessionId") for e in pre_entries
+                     if isinstance(e, dict) and isinstance(e.get("sessionId"), str)}
+                    if pre_ok else frozenset())
+        try:
+            proc = run(argv, cwd=str(cwd), env=_worker_env(name),
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=NATIVE_DISPATCH_TIMEOUT_SECONDS)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise NativeDispatchError(f"--bg dispatch failed: {exc}") from exc
+        if proc.returncode != 0:
+            raise NativeDispatchError(
+                f"--bg dispatch exited {proc.returncode}: "
+                f"{(proc.stderr or proc.stdout or '').strip()[:400]}")
+        short_id = _parse_bg_short_id(proc.stdout or "")
+        if not short_id:
+            raise NativeDispatchError(
+                f"could not parse short id from --bg stdout: {(proc.stdout or '').strip()[:400]}")
+        try:
+            sid = _join_roster_by_short_id(short_id, roster_fetch, sleep,
+                                           exclude_sids=pre_sids, clock=clock)
+        except BaseException as exc:
+            # T4 fix wave (Important, Ctrl-C mid-join): a live --bg session
+            # was already dispatched (proc.returncode == 0, short_id parsed)
+            # by the time this loop runs -- if Ctrl-C (or any other
+            # exception) lands here, the short id is the only handle an
+            # operator has left to find it again via `claude agents`.
+            # add_note survives re-raise through cmd_spawn's except
+            # BaseException handler, which has no other way to recover it
+            # (dispatch_bg stays opaque -- no message parsing per T4).
+            exc.add_note(f"fleet_short_id={short_id}")
+            raise
+        if sid is None:
+            raise NativeDispatchError(
+                f"dispatched (short id {short_id}) but no roster entry joined "
+                f"within {NATIVE_JOIN_VERIFY_SECONDS:.0f}s -- possible DOA; "
+                f"recover manually via claude agents", short_id=short_id)
+        return sid, short_id
+
+    # Never-attach wedge guard (live finding #2, 2026-07-16): a joined
+    # roster entry is NOT a started session -- rarely (~1/13 hand-probed
+    # spawns that day) the daemon mints the entry and never attaches the
+    # runner. Verify attachment; on a wedge, stop/rm the provably-unstarted
+    # session and redispatch EXACTLY ONCE (safe: no process ever existed,
+    # no tool ran, the task file is untouched input). A second consecutive
+    # wedge gives up loudly -- callers (cmd_spawn DOA rollback et al.)
+    # surface it; never a silent working-forever record.
+    sid, short_id = _dispatch_once()
+    if _await_attach(name, sid, roster_fetch, sleep, clock):
+        return {"session_id": sid, "short_id": short_id, "rendered_name": rendered}
+    _append_event_quiet("dispatch_wedged", name, session_id=sid, short_id=short_id)
+    print(f"fleet: {name}: session {short_id} joined the roster but never "
+          f"attached within {NATIVE_ATTACH_VERIFY_SECONDS:.0f}s -- stopping "
+          f"the wedged session and retrying once", file=sys.stderr)
+    _stop_native_session(sid, run=run, which=which)
+    _rm_native_session(sid, run=run, which=which)
+    _append_event_quiet("dispatch_retried", name, wedged_session_id=sid)
+
+    sid2, short_id2 = _dispatch_once()
+    if _await_attach(name, sid2, roster_fetch, sleep, clock):
+        return {"session_id": sid2, "short_id": short_id2, "rendered_name": rendered}
+    _append_event_quiet("dispatch_wedged", name, session_id=sid2, short_id=short_id2)
+    _stop_native_session(sid2, run=run, which=which)
+    _rm_native_session(sid2, run=run, which=which)
+    raise NativeDispatchError(
+        f"two consecutive --bg dispatches for {name!r} joined the roster but "
+        f"never attached (no pid/status, no outcome) within "
+        f"{NATIVE_ATTACH_VERIFY_SECONDS:.0f}s each -- daemon dispatch wedge; "
+        f"both sessions stopped/removed (short ids {short_id}, {short_id2})",
+        short_id=short_id2)
 
 
 # ---------------------------------------------------------------------------
