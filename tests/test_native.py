@@ -1223,6 +1223,27 @@ class TestCmdWaitNative:
         assert "w1: idle" in out
         assert "dead-suspected" not in out
 
+    def test_persist_step_epoch_freeze_prints_notice_and_persists_nothing(
+            self, native_home, monkeypatch, capsys):
+        # Debt roll-up item 9 (T5-era residual): when the persist step's own
+        # roster fetch is suspicious (G9), the summary rows can only show the
+        # pre-freeze poll verdict and nothing is written -- the output must
+        # say so (same convention as cmd_status/cmd_clean's freeze line)
+        # instead of letting the stale verdict read as current-and-committed.
+        seed_native_worker(native_home, status="working",
+                           last_dispatch_at=_iso(NOW - timedelta(minutes=1)))
+        monkeypatch.setattr(fleet, "wait_for_workers",
+                            lambda *a, **k: ({"w1": "dead-suspected"}, set()))
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            _fixed_roster(False, "roster fetch failed"))
+        rc = fleet.cmd_wait(_wait_args(["w1"]), sleep=lambda s: None, clock=_FakeClock())
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "w1: dead-suspected" in out
+        assert "EPOCH" in out and "nothing persisted" in out
+        # frozen: the record was left untouched, not demoted
+        assert fleet.load_registry()["workers"]["w1"]["status"] == "working"
+
 
 class TestSnapshotTableNative:
     """T5 fix wave (Minor: task-5-review.md M2) -- `_print_snapshot_table`/
