@@ -7743,9 +7743,13 @@ def _roster_live_sids(entries: list) -> set:
     exist only while the process lives; a lingering `state:"done"` entry
     (observed surviving >=3h21m) must NOT count as live, or a finished
     predecessor would block every successor claim for hours."""
+    # Same hostile-sessionId-value guard as dispatch_bg's pre-snapshot: a
+    # dict-valued sessionId (CLI drift / hostile roster) must never raise
+    # TypeError from an unhashable value landing in the set.
     return {
         e.get("sessionId") for e in entries
-        if isinstance(e, dict) and e.get("sessionId") and ("status" in e or "pid" in e)
+        if isinstance(e, dict) and isinstance(e.get("sessionId"), str)
+        and e.get("sessionId") and ("status" in e or "pid" in e)
     }
 
 
