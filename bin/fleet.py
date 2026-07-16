@@ -717,16 +717,10 @@ def _parse_iso(ctime_iso: str) -> datetime:
     return datetime.strptime(ctime_iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 
 
-# Task 5 perf item (SPEC §12): status/wait polling calls _last_line_type /
-# tail_events once per worker per poll -- on a multi-hundred-MB stream-json
-# log (verbose+stream-json is fat, SPEC §11 "log bloat") a whole-file
-# f.readlines() every poll is wasteful. Every real caller in this module
-# only ever wants the trailing well-formed line or the trailing N digest
-# events (_last_line_type, tail_events(n=...), and recompute_worker's
-# tail_events(n=50)) -- all comfortably within a 64KB trailing window for
-# any log this fleet actually produces, so reading just the tail is
-# behaviorally identical to reading the whole file for every real call
-# site, not merely "close enough".
+# Task 5 perf item (SPEC §12): transcript-tail readers (native peek,
+# transcript_limit_scan) only ever want a bounded trailing slice -- on a
+# multi-hundred-MB transcript a whole-file read would be wasteful, and a
+# 64KB trailing window covers every real call site.
 _TAIL_READ_BYTES = 64 * 1024
 
 
@@ -781,46 +775,6 @@ def _read_tail_lines(log_path) -> list:
     return chunk.decode("utf-8-sig", errors="replace").splitlines()
 
 
-def _last_line_type(log_path) -> str | None:
-    """Return the "type" field of the last SUBSTANTIVE well-formed JSON line
-    in log_path (perf: reads only the trailing window via _read_tail_lines,
-    see above).
-
-    SMOKE-A (integration-smoke.md Finding A, live-proven): a completed
-    turn's own "result" event is NOT reliably the literal last line written
-    to the log -- an async hook's response (observed live: a fresh spawn's
-    "SessionStart:startup" hook, a `send`-resumed turn's
-    "SessionStart:resume" hook) can race the result line and land after it,
-    on every real launch this fleet produced in the integration smoke test.
-    Classifying by the literal last line then misreads a healthy,
-    result-bearing completed turn as "dead" instead of "idle" (recompute_
-    status's rule is keyed on "trailing result event"). Fix: scan backwards
-    past any `"type":"system"` line -- hook_started/hook_response/
-    hook_progress, and other bookkeeping lines like init/thinking_tokens
-    are all type "system" -- and past any junk/non-JSON line, returning the
-    type of the first genuinely substantive event found (result/assistant/
-    user -- i.e. something the turn's own model loop emitted, not hook or
-    system plumbing)."""
-    log_path = Path(log_path)
-    if not log_path.exists():
-        return None
-    for line in reversed(_read_tail_lines(log_path)):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        if not isinstance(obj, dict):
-            continue
-        etype = obj.get("type")
-        if etype == "system":
-            continue  # hook/system bookkeeping -- not substantive, keep scanning
-        return etype
-    return None
-
-
 # Post-testing wave, item 1c (stress-report Finding 1, zombie-escape hatch):
 # how long a "working" pre-claim (session_id=None) is allowed to sit before
 # a recompute stops treating it as a real in-flight dispatch and demotes it
@@ -852,80 +806,9 @@ def _launch_claim_expired(last_activity_iso) -> bool:
 # Stream-jsonl parsing (SPEC §6, §5 peek/result rows)
 # ---------------------------------------------------------------------------
 
-_TEXT_TRUNCATE = 200
-_RESULT_TRUNCATE = 500
-_INPUT_TRUNCATE = 150
-
-
 def _truncate(text, limit) -> str:
     text = text if isinstance(text, str) else str(text)
     return text if len(text) <= limit else text[:limit] + "..."
-
-
-def _digest_event(obj: dict):
-    """Reduce one raw stream-json object to a small peek/result digest dict,
-    or None if this event type isn't relevant to peek/result (e.g. system)."""
-    etype = obj.get("type")
-    if etype == "result":
-        text = obj.get("result")
-        if text is None:
-            text = obj.get("text", "")
-        cost = obj.get("total_cost_usd", obj.get("cost_usd"))
-        tokens = obj.get("usage") or {}
-        return {"kind": "result", "text": _truncate(text, _RESULT_TRUNCATE), "cost_usd": cost, "tokens": tokens}
-
-    if etype in ("assistant", "user"):
-        message = obj.get("message") or {}
-        content = message.get("content")
-        if isinstance(content, str):
-            return {"kind": "assistant_text", "text": _truncate(content, _TEXT_TRUNCATE)}
-        if isinstance(content, list):
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-                btype = block.get("type")
-                if btype == "tool_use":
-                    brief = _truncate(json.dumps(block.get("input", {}), default=str), _INPUT_TRUNCATE)
-                    return {"kind": "tool_call", "name": block.get("name", "?"), "input": brief}
-                if btype == "text":
-                    return {"kind": "assistant_text", "text": _truncate(block.get("text", ""), _TEXT_TRUNCATE)}
-        return None
-    return None
-
-
-def tail_events(log_path, n: int = 20) -> list:
-    """Defensively parse a worker's stream-json log, returning up to n
-    peek/result digest entries (oldest first). Skips non-JSON/junk lines
-    and system-only events; tolerates missing or truncated files.
-
-    Perf (SPEC §12): reads only the trailing window via _read_tail_lines
-    rather than the whole file -- every caller here only ever wants a
-    bounded trailing slice of events, so this is behaviorally identical to
-    a whole-file read for any log this fleet actually produces (see
-    _read_tail_lines's docstring)."""
-    log_path = Path(log_path)
-    if not log_path.exists():
-        return []
-    lines = _read_tail_lines(log_path)
-
-    entries = []
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except (json.JSONDecodeError, ValueError):
-            continue  # junk line or truncated final line -- skip defensively
-        if not isinstance(obj, dict):
-            continue
-        digest = _digest_event(obj)
-        if digest is not None:
-            entries.append(digest)
-
-    if n is not None:
-        entries = entries[-n:]
-    return entries
 
 
 # ---------------------------------------------------------------------------
@@ -1182,112 +1065,14 @@ def _registry_cost(value) -> float:
     return coerced if coerced is not None else 0.0
 
 
-def _sum_result_costs(log_path) -> float | None:
-    """Sum the cost of every "result" event in the WHOLE log file (not just
-    the trailing window), or None if the file is missing/unreadable or has
-    no result event at all (caller keeps the prior cost_usd unchanged in
-    that case).
-
-    SMOKE-B (integration-smoke.md Finding B, live-proven): cost is reported
-    PER-INVOCATION on `--resume` turns, not cumulatively by `claude` itself
-    -- observed live across a spawn + two `send`-resumed turns in the same
-    session, where the second turn's own result event reported a SMALLER
-    total_cost_usd than the first (a fresh per-turn number, not a running
-    session total). recompute_worker used to take only `results[-1]`'s
-    cost, so a multi-turn `send` sequence within one session (no respawn --
-    cost_baseline stays 0.0 there) would silently drop the display back to
-    just the latest turn's cost instead of the session's real running
-    total. Summing every result event's cost in the current log file fixes
-    this; a whole-file read is acceptable here (unlike the hot tail-read
-    path used for status/wait polling) because logs rotate to a fresh file
-    on every respawn (_rotate_worker_log) and doctor's log-size check warns
-    well before a single file could grow unreasonably large."""
-    log_path = Path(log_path)
-    if not log_path.exists():
-        return None
-    try:
-        raw = log_path.read_bytes()
-    except OSError:
-        return None
-    total = 0.0
-    found = False
-    for line in raw.decode("utf-8-sig", errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        if not isinstance(obj, dict) or obj.get("type") != "result":
-            continue
-        cost = obj.get("total_cost_usd", obj.get("cost_usd"))
-        if cost is not None:
-            coerced = _coerce_cost(cost)
-            if coerced is not None:
-                total += coerced
-                found = True
-    return total if found else None
-
-
-def _sum_result_tokens(log_path) -> int | None:
-    """Sum input_tokens+output_tokens across every "result" event's usage in
-    the WHOLE log file, or None if the file is missing/unreadable or carries
-    no result event with usage at all (caller treats None as "nothing proven
-    over ceiling").
-
-    Fleet-side half of kernel 10 (F12=M24): the cumulative session token
-    count used to HARD-enforce a worker's token_ceiling before a resume
-    launch. Reads the SAME token keys as the Stop hook's _current_tokens
-    (input_tokens+output_tokens), best-effort -- but the two halves have
-    DIFFERENT enforcement roles, not an identical computation: the Stop hook
-    only ever ALLOWS a stop (never blocks -- invariant 2), while fleet hard-
-    ENFORCES the refusal here (over_ceiling + a refused resume). FIX-3 aligns
-    only the >= boundary so they agree on when tokens == ceiling counts as
-    over. A whole-file read is
-    acceptable for the same reason _sum_result_costs's is: logs rotate to a
-    fresh file on every respawn. Bogus values (bool, negative, non-int) are
-    skipped, mirroring _coerce_cost's defensive stance."""
-    log_path = Path(log_path)
-    if not log_path.exists():
-        return None
-    try:
-        raw = log_path.read_bytes()
-    except OSError:
-        return None
-    total = 0
-    found = False
-    for line in raw.decode("utf-8-sig", errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        if not isinstance(obj, dict) or obj.get("type") != "result":
-            continue
-        usage = obj.get("usage")
-        if not isinstance(usage, dict):
-            continue
-        for key in ("input_tokens", "output_tokens"):
-            val = usage.get(key)
-            if isinstance(val, bool) or not isinstance(val, int) or val < 0:
-                continue
-            total += val
-            found = True
-    return total if found else None
-
-
 def _native_cumulative_tokens(name: str) -> int:
     """Sum input_tokens+output_tokens across every kind=="result" outcome
-    record for this native worker (all past sids/turns) -- native's
-    lifetime-cumulative analog of `_sum_result_tokens`'s legacy log-tail sum
-    (native has no logs/<name>.jsonl to read), used by cmd_send's
-    fork-steer path for the token_ceiling refusal check (Kernel 10, M-B
-    T7). Bogus values (bool, negative, non-int) are skipped, mirroring
-    _sum_result_tokens's defensive stance; missing/no records -> 0 (never
-    None -- 0 correctly compares as under any positive ceiling)."""
+    record for this native worker (all past sids/turns) -- the lifetime-
+    cumulative token sum (native has no logs/<name>.jsonl to read), used
+    by cmd_send's fork-steer path for the token_ceiling refusal check
+    (Kernel 10, M-B T7). Bogus values (bool, negative, non-int) are
+    skipped; missing/no records -> 0 (never None -- 0 correctly compares
+    as under any positive ceiling)."""
     total = 0
     for rec in read_outcomes(name):
         if not isinstance(rec, dict) or rec.get("kind") != "result":
@@ -1315,29 +1100,9 @@ def _native_cumulative_tokens(name: str) -> int:
 # must never be swallowed as a park.
 # ---------------------------------------------------------------------------
 
-# FIX-2 (F-A2): tightened to recognize a CLAUDE PLAN usage-limit wall, never an
-# ordinary infra crash. Require a plan/usage-limit NOUN adjacent to "limit"
-# (usage|weekly|session|plan|5-hour limit), OR the explicit "limit ... resets
-# at <time>" wall shape. Deliberately DROPS the bare `quota` / bare `rate limit`
-# / bare `try again later` alternatives that collided with real failures --
-# disk-quota (EDQUOT), an upstream MCP `429 rate limit`, a `try again later`
-# assertion -- which must stay the crash-dead path (surfaced + journal note),
-# not a silent null-horizon park. When unsure, prefer crash-dead.
-_LIMIT_STDERR_RE = re.compile(
-    r"(?:usage|weekly|session|plan|5-?\s?hour)\s+limit"
-    r"|limit\b.{0,40}?\bresets?\s+at",
-    re.IGNORECASE | re.DOTALL,
-)
 # A machine-readable reset instant, IF the (as-yet-unconfirmed) signal carries
 # one in ISO-8601 UTC form. Best-effort only; absence -> null horizon.
 _LIMIT_RESET_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
-
-
-def _stderr_is_limit_shaped(text: str) -> bool:
-    """True iff a turn's stderr tail matches the conservative usage-limit
-    pattern (fallback detection -- DEFERRED-TO-KERNEL-PROBE). Empty/None -> not
-    limit-shaped (a silent crash is NOT a park)."""
-    return bool(text) and bool(_LIMIT_STDERR_RE.search(text))
 
 
 def _parse_limit_signal(text: str):
@@ -1357,18 +1122,6 @@ def _parse_limit_signal(text: str):
     elif "5-hour" in low or "5 hour" in low or "session" in low:
         kind = "session_5h"
     return reset_at, kind
-
-
-def _read_stderr_tail(name: str, limit: int = 4000) -> str:
-    """Read the tail of a worker's stderr log (logs/<name>.err) best-effort --
-    the classifier's only window onto a limit-shaped turn end. Missing/unreadable
-    -> empty string (treated as not limit-shaped)."""
-    err = logs_dir() / f"{name}.err"
-    try:
-        data = err.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
-    return data[-limit:]
 
 
 def _limit_reset_passed(record: dict) -> bool:
@@ -1544,19 +1297,6 @@ def _is_substantive_transcript_record(rec: dict) -> bool:
             elif isinstance(part, str) and part.strip():
                 return True
     return False
-
-
-def _append_abnormal_turn_note(name: str) -> None:
-    """Append a one-line abnormal-turn-end landmark to the worker's journal
-    (phase1 kernel 4). Best-effort: a journal we cannot write must never break
-    a status recompute, so any OSError is swallowed."""
-    try:
-        journals_dir().mkdir(parents=True, exist_ok=True)
-        journal = journals_dir() / f"{name}.md"
-        with open(journal, "a", encoding="utf-8") as f:
-            f.write(f"\nturn ended abnormally at {now_iso()}\n")
-    except OSError:
-        pass
 
 
 # ---------------------------------------------------------------------------
@@ -1895,30 +1635,6 @@ def status_snapshot(now=None, include_archived: bool = False) -> dict:
     return snap
 
 
-def hook_events_present(log_path) -> bool:
-    """Whether any hook event (PostToolUse/Stop additionalContext, requires
-    --include-hook-events at spawn) appears anywhere in the raw log -- the
-    alarm `fleet peek` shows for the "settings validation errors are
-    swallowed in print mode" silent-failure mode (SPEC §7, §9).
-
-    Deliberately searches for the bare substring "hookEventName" (no
-    surrounding quotes): a live captured transcript (`claude -p
-    --output-format stream-json --verbose`) shows Claude Code wraps a hook's
-    own stdout inside a `system`/`hook_response` event's "output"/"stdout"
-    string fields, so the hook's `{"hookSpecificOutput": {"hookEventName":
-    ...}}` JSON appears there with its quotes backslash-escaped
-    (`\"hookEventName\"`), not as literal top-level `"hookEventName"` text.
-    The bare word substring matches either form."""
-    log_path = Path(log_path)
-    if not log_path.exists():
-        return False
-    try:
-        text = log_path.read_text(encoding="utf-8-sig", errors="replace")
-    except OSError:
-        return False
-    return "hookEventName" in text
-
-
 # ---------------------------------------------------------------------------
 # Portability: worker-settings template render + instance freshness (SPEC §14)
 #
@@ -2011,16 +1727,6 @@ class FleetCliError(Exception):
     """User-facing CLI error (bad args, unknown worker, missing dir/file,
     ...) -- caught in main() and reported as a clean one-line message, never
     a raw traceback."""
-
-
-class LogRotationError(FleetCliError):
-    """B2 (rotation retry): _rotate_worker_log exhausted its PermissionError
-    retries -- a follower or just-killed claude still holds the log handle
-    (Windows sharing violation). cmd_respawn catches this to CLEAN-FAIL the
-    respawn: _unrotate any partial rename, restore the pre-respawn registry
-    snapshot, and raise -- NO new turn, NO sid-swap (invariant 7). A
-    FleetCliError subclass so an unexpected escape still surfaces as a clean
-    one-line CLI error, not a traceback."""
 
 
 def _read_task_arg(task: str) -> str:
@@ -2868,28 +2574,6 @@ def _print_status_table(data: dict, names) -> None:
         )
 
 
-_TOKEN_KEY_ABBREV = (
-    ("input_tokens", "in"),
-    ("output_tokens", "out"),
-    ("cache_creation_input_tokens", "cache_w"),
-    ("cache_read_input_tokens", "cache_r"),
-)
-
-
-def _format_tokens(tokens: dict) -> str:
-    """Compact "in=X out=Y cache_r=Z" rendering of a result event's usage
-    dict for `fleet peek` (spec-audit gap 5: peek shows tokens alongside
-    cost, SPEC §5 peek row -- _digest_event already captures "tokens" from
-    the raw "usage" field). Falls back to a truncated raw dump for an
-    unrecognized/empty shape rather than silently showing nothing."""
-    if not tokens:
-        return "-"
-    parts = [f"{short}={tokens[key]}" for key, short in _TOKEN_KEY_ABBREV if key in tokens]
-    if not parts:
-        return _truncate(json.dumps(tokens, default=str), 60)
-    return " ".join(parts)
-
-
 def _render_native_peek_lines(rec: dict) -> list:
     """Rendered display lines for one substantive transcript record
     (`_is_substantive_transcript_record` already gated the caller's
@@ -2971,40 +2655,16 @@ def _cmd_peek_native(name: str, sid, n: int) -> int:
 
 def cmd_peek(args) -> int:
     """`fleet peek <name> [-n 20]` (SPEC §5 peek row): digest of recent
-    stream events plus whether fleet hooks have fired.
-
-    M-B T8: native (`dispatch_kind:"bg"`) records route to
-    `_cmd_peek_native` -- there is no `logs/<name>.jsonl` stream for a
-    daemon-hosted session; the digest comes from the sid's own transcript
-    tail instead."""
+    substantive transcript records via `_cmd_peek_native` -- the digest
+    comes from the sid's own transcript tail (daemon-hosted sessions have
+    no fleet-owned stdout log)."""
     with fleet_lock():
         data = load_registry()
         if args.name not in data["workers"]:
             raise FleetCliError(f"unknown worker: {args.name!r}")
         rec = data["workers"][args.name]
 
-    if is_native(rec):
-        return _cmd_peek_native(args.name, rec.get("session_id"), args.lines)
-
-    log_path = logs_dir() / f"{args.name}.jsonl"
-    entries = tail_events(log_path, n=args.lines)
-    hooks = hook_events_present(log_path)
-    print(f"-- {args.name} (hooks: {'seen' if hooks else 'not seen'}) --")
-    if not entries:
-        print("(no events yet)")
-        return 0
-    for e in entries:
-        kind = e["kind"]
-        if kind == "tool_call":
-            print(f"[tool] {e['name']}: {e['input']}")
-        elif kind == "assistant_text":
-            print(f"[text] {e['text']}")
-        elif kind == "result":
-            cost = e.get("cost_usd")
-            cost_s = f"${cost:.2f}" if isinstance(cost, (int, float)) else "?"
-            tok_s = _format_tokens(e.get("tokens") or {})
-            print(f"[result] {cost_s} tokens:{tok_s} {e['text']}")
-    return 0
+    return _cmd_peek_native(args.name, rec.get("session_id"), args.lines)
 
 
 def _cmd_result_native(name: str, sid) -> int:
@@ -3045,29 +2705,15 @@ def _cmd_result_native(name: str, sid) -> int:
 
 def cmd_result(args) -> int:
     """`fleet result <name>` (SPEC §5 result row): final result event text
-    of the last completed turn, nothing else.
-
-    M-B T8: native (`dispatch_kind:"bg"`) records route to
-    `_cmd_result_native` -- result text lives in the Stop-hook outcome
-    store (`latest_outcome`), never in a `logs/<name>.jsonl` stream that
-    only legacy workers have."""
+    of the last completed turn, nothing else -- result text lives in the
+    Stop-hook outcome store (`latest_outcome`)."""
     with fleet_lock():
         data = load_registry()
         if args.name not in data["workers"]:
             raise FleetCliError(f"unknown worker: {args.name!r}")
         rec = data["workers"][args.name]
 
-    if is_native(rec):
-        return _cmd_result_native(args.name, rec.get("session_id"))
-
-    log_path = logs_dir() / f"{args.name}.jsonl"
-    entries = tail_events(log_path, n=None)
-    results = [e for e in entries if e["kind"] == "result"]
-    if not results:
-        print(f"{args.name}: no completed turn result yet")
-        return 1
-    print(results[-1]["text"])
-    return 0
+    return _cmd_result_native(args.name, rec.get("session_id"))
 
 
 def wait_for_workers(names, mode: str = "all", timeout=None, poll_interval: float = 3.0,
@@ -3986,83 +3632,6 @@ def cmd_release(args) -> int:
 # CLI: resilience commands (SPEC §5 respawn/kill/clean/doctor rows, §7,
 # §11) -- Task 5 / M4.
 # ---------------------------------------------------------------------------
-
-_ROTATE_RETRY_ATTEMPTS = 5
-_ROTATE_RETRY_DELAY_SECONDS = 0.1
-
-
-def _rotate_worker_log(name: str, sleep=time.sleep) -> None:
-    """Rename logs/<name>.jsonl -> logs/<name>.jsonl.1 (and the matching
-    .err -> .err.1), overwriting any existing .1 (SPEC §5 respawn row /
-    §11 log-bloat handling). Uses os.replace rather than Path.rename:
-    Path.rename raises FileExistsError on Windows when the destination
-    already exists (e.g. a worker respawned twice), whereas os.replace
-    atomically overwrites it. launch_turn opens logs/<name>.jsonl in
-    append-binary mode ("ab") -- without this rotation, a respawned turn's
-    stdout would tack onto the previous session's transcript instead of
-    starting a fresh log.
-
-    B2 (rotation PermissionError retry): a just-killed claude turn, or a
-    concurrent follower (`fleet peek`/`result`/`status` reading the tail, or
-    the OS still closing the killed child's stdout handle), can hold an open
-    handle on logs/<name>.jsonl for a brief window -- on Windows os.replace
-    then raises PermissionError (sharing violation). Retry briefly
-    (_ROTATE_RETRY_ATTEMPTS with _ROTATE_RETRY_DELAY_SECONDS backoff); on
-    continued failure raise LogRotationError naming the likely holder, so
-    cmd_respawn can clean-fail the respawn (un-rotate + snapshot restore, no
-    new turn, no sid-swap) rather than half-swapping the record. `sleep` is
-    injectable so tests exercise the retry without a real delay."""
-    d = logs_dir()
-    for suffix in (".jsonl", ".err"):
-        src = d / f"{name}{suffix}"
-        if not src.exists():
-            continue
-        dst = d / f"{name}{suffix}.1"
-        last_exc = None
-        for attempt in range(_ROTATE_RETRY_ATTEMPTS):
-            try:
-                os.replace(str(src), str(dst))
-                last_exc = None
-                break
-            except PermissionError as exc:
-                last_exc = exc
-                if attempt < _ROTATE_RETRY_ATTEMPTS - 1:
-                    sleep(_ROTATE_RETRY_DELAY_SECONDS)
-        if last_exc is not None:
-            raise LogRotationError(
-                f"could not rotate {src.name} for {name!r}: still locked after "
-                f"{_ROTATE_RETRY_ATTEMPTS} attempts -- a follower or just-killed "
-                f"claude turn likely still holds the log handle"
-            ) from last_exc
-
-
-def _unrotate_worker_log(name: str) -> None:
-    """Undo _rotate_worker_log: move logs/<name>.jsonl.1 back over
-    logs/<name>.jsonl (and the matching .err pair), overwriting whatever
-    is currently there. Missing .1 files are tolerated (nothing was
-    rotated, or a previous un-rotate already ran) -- a silent no-op, not
-    an error.
-
-    Task 5 fix wave, Finding 1 (task-5 adversarial review): cmd_respawn's
-    launch-failure rollback restores the registry to the pre-respawn
-    snapshot but, without this, never restores the LOG file --
-    _rotate_worker_log already ran unconditionally before the failed
-    launch, and launch_turn's append-mode open((re-)creates an empty
-    logs/<name>.jsonl before the Popen that then raised. Every log-reading
-    command (`peek`/`result`/`status` recompute) is keyed by name, so a
-    rolled-back-but-not-un-rotated worker would look "dead" (empty log,
-    no trailing result) despite the registry correctly reporting its old
-    idle/dead state, and a SECOND failed or successful respawn would then
-    rotate that empty file over the only surviving copy of the real
-    transcript in .1, destroying it. os.replace atomically overwrites the
-    empty stub launch_turn created, so the restored worker's log path
-    points at its real history again."""
-    d = logs_dir()
-    for suffix in (".jsonl", ".err"):
-        rotated = d / f"{name}{suffix}.1"
-        if rotated.exists():
-            os.replace(str(rotated), str(d / f"{name}{suffix}"))
-
 
 def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.which,
                         sleep=time.sleep, clock=time.monotonic) -> int:
@@ -5910,24 +5479,6 @@ def _doctor_check_claude_agents(workers: dict, which=shutil.which, run=subproces
     return ("claude-agents", True, "no fleet-unknown claude agent sessions")
 
 
-_LOG_SIZE_WARN_BYTES = 50 * 1024 * 1024
-
-
-def _doctor_check_log_sizes():
-    big = []
-    d = logs_dir()
-    if d.exists():
-        for path in d.glob("*"):
-            try:
-                if path.is_file() and path.stat().st_size > _LOG_SIZE_WARN_BYTES:
-                    big.append(f"{path.name} ({path.stat().st_size // (1024 * 1024)}MB)")
-            except OSError:
-                continue
-    if big:
-        return ("log-sizes", True, f"{len(big)} log file(s) over 50MB: {', '.join(big)}")
-    return ("log-sizes", True, "no log files over 50MB")
-
-
 def _doctor_check_autoclean(run=subprocess.run):
     """Note-only (docs/specs/autoclean.md D4): reports scheduler-task state
     (installed/missing) and last-run staleness from the run stamp. Never
@@ -6120,7 +5671,6 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
         functools.partial(_doctor_check_dead_suspected, workers),
         functools.partial(_doctor_check_orphaned_claims, workers=workers),
         functools.partial(_doctor_check_claude_agents, workers, which=which, run=run),
-        functools.partial(_doctor_check_log_sizes),
         functools.partial(_doctor_check_autoclean, run=run),
         functools.partial(_doctor_check_fleet_home_marker),
         functools.partial(_doctor_check_hook_errors),
