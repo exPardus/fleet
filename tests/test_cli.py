@@ -150,37 +150,6 @@ class TestTokenCeilingRecordAndSum:
         loaded = fleet.load_registry()["workers"]["probe-1"]
         assert loaded.get("token_ceiling") is None
 
-    def test_sum_result_tokens_sums_input_plus_output_across_results(self, isolated_home):
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text(
-            '{"type":"assistant","message":{"usage":{"input_tokens":9999}}}\n'
-            '{"type":"result","usage":{"input_tokens":100,"output_tokens":20}}\n'
-            '{"type":"result","usage":{"input_tokens":30,"output_tokens":5}}\n',
-            encoding="utf-8",
-        )
-        # only "result" events counted (assistant usage ignored): 100+20+30+5
-        assert fleet._sum_result_tokens(log) == 155
-
-    def test_sum_result_tokens_none_when_no_result(self, isolated_home):
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text('{"type":"assistant","message":{"usage":{"input_tokens":10}}}\n', encoding="utf-8")
-        assert fleet._sum_result_tokens(log) is None
-
-    def test_sum_result_tokens_none_when_missing(self, isolated_home):
-        assert fleet._sum_result_tokens(fleet.logs_dir() / "nope.jsonl") is None
-
-    def test_sum_result_tokens_ignores_bogus_usage_values(self, isolated_home):
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text(
-            '{"type":"result","usage":{"input_tokens":true,"output_tokens":-5}}\n'
-            '{"type":"result","usage":{"input_tokens":40,"output_tokens":2}}\n',
-            encoding="utf-8",
-        )
-        assert fleet._sum_result_tokens(log) == 42
-
 
 class TestSpawnWritesCeilingFile:
     def test_spawn_writes_sid_keyed_ceiling_file_when_configured(self, isolated_home, tmp_path, monkeypatch):
@@ -941,26 +910,8 @@ class TestCmdStatus:
 
 
 # ---------------------------------------------------------------------------
-# hook_events_present / cmd_peek
+# cmd_peek (native transcript digest)
 # ---------------------------------------------------------------------------
-
-class TestHookEventsPresent:
-    def test_present_when_hookeventname_in_log(self, tmp_path):
-        log = tmp_path / "w.jsonl"
-        log.write_text(
-            '{"type":"system","hookSpecificOutput":{"hookEventName":"PostToolUse"}}\n',
-            encoding="utf-8",
-        )
-        assert fleet.hook_events_present(log) is True
-
-    def test_absent_when_no_hook_events(self, tmp_path):
-        log = tmp_path / "w.jsonl"
-        log.write_text('{"type":"assistant","message":{"content":[]}}\n', encoding="utf-8")
-        assert fleet.hook_events_present(log) is False
-
-    def test_missing_log_is_absent(self, tmp_path):
-        assert fleet.hook_events_present(tmp_path / "nope.jsonl") is False
-
 
 class TestCmdPeek:
     def test_peek_unknown_worker_raises(self, isolated_home):
@@ -968,17 +919,15 @@ class TestCmdPeek:
         with pytest.raises(fleet.FleetCliError):
             fleet.cmd_peek(args)
 
-    def test_peek_prints_digest(self, isolated_home, capsys):
-        sid = str(uuid.uuid4())
-        rec = fleet.new_worker_record(sid, "C:/x", "task", "dontask")
-        fleet.save_registry({"workers": {"probe-1": rec}})
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text(
+    def test_peek_prints_transcript_digest(self, isolated_home, capsys, monkeypatch):
+        sid, _ = _seed_native("probe-1")
+        transcript = isolated_home / "transcript.jsonl"
+        transcript.write_text(
             '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}\n'
-            '{"type":"result","result":"all done","total_cost_usd":0.1}\n',
+            '{"type":"assistant","message":{"content":[{"type":"text","text":"all done"}]}}\n',
             encoding="utf-8",
         )
+        monkeypatch.setattr(fleet, "find_transcript_path", lambda name, s: transcript)
         args = fleet.build_parser().parse_args(["peek", "probe-1"])
         rc = fleet.cmd_peek(args)
         assert rc == 0
@@ -986,14 +935,13 @@ class TestCmdPeek:
         assert "Bash" in out
         assert "all done" in out
 
-    def test_peek_no_events_yet(self, isolated_home, capsys):
-        sid = str(uuid.uuid4())
-        rec = fleet.new_worker_record(sid, "C:/x", "task", "dontask")
-        fleet.save_registry({"workers": {"probe-1": rec}})
+    def test_peek_no_transcript_yet_exits_nonzero_with_hint(self, isolated_home, capsys, monkeypatch):
+        _seed_native("probe-1")
+        monkeypatch.setattr(fleet, "find_transcript_path", lambda name, s: None)
         args = fleet.build_parser().parse_args(["peek", "probe-1"])
         rc = fleet.cmd_peek(args)
-        assert rc == 0
-        assert "no events yet" in capsys.readouterr().out
+        assert rc == 1
+        assert "no transcript" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
@@ -1007,16 +955,10 @@ class TestCmdResult:
             fleet.cmd_result(args)
 
     def test_result_prints_final_result_text_only(self, isolated_home, capsys):
-        sid = str(uuid.uuid4())
-        rec = fleet.new_worker_record(sid, "C:/x", "task", "dontask")
-        fleet.save_registry({"workers": {"probe-1": rec}})
-        log = fleet.logs_dir() / "probe-1.jsonl"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text(
-            '{"type":"assistant","message":{"content":[{"type":"text","text":"thinking..."}]}}\n'
-            '{"type":"result","result":"the final answer","total_cost_usd":0.2}\n',
-            encoding="utf-8",
-        )
+        sid, _ = _seed_native("probe-1")
+        fleet.append_outcome("probe-1", {"ts": fleet.now_iso(), "session_id": sid,
+                                         "kind": "result",
+                                         "result_text": "the final answer"})
         args = fleet.build_parser().parse_args(["result", "probe-1"])
         rc = fleet.cmd_result(args)
         assert rc == 0
@@ -1024,13 +966,11 @@ class TestCmdResult:
         assert out == "the final answer"
 
     def test_result_none_yet_prints_clear_message_and_nonzero(self, isolated_home, capsys):
-        sid = str(uuid.uuid4())
-        rec = fleet.new_worker_record(sid, "C:/x", "task", "dontask")
-        fleet.save_registry({"workers": {"probe-1": rec}})
+        _seed_native("probe-1")
         args = fleet.build_parser().parse_args(["result", "probe-1"])
         rc = fleet.cmd_result(args)
         assert rc != 0
-        assert "no completed turn result" in capsys.readouterr().out
+        assert "no outcome record" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
