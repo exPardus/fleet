@@ -149,14 +149,6 @@ def is_native(record: dict) -> bool:
     return record.get("dispatch_kind") == "bg"
 
 
-def refuse_if_legacy(name: str, record: dict, action: str) -> None:
-    if not is_native(record):
-        raise FleetCliError(
-            f"{name}: pre-pivot worker -- {action} unavailable; "
-            "kill or clean via legacy path"
-        )
-
-
 def refuse_if_archived(name: str, record: dict, action: str) -> None:
     """M-B T9 (spec §5.1.2): a tombstoned (archived_at set) worker is
     history-only -- every native mutating command refuses it up front
@@ -2933,20 +2925,14 @@ def cmd_wait(args, sleep=time.sleep, clock=time.monotonic) -> int:
 # rows, §9 hybrid interaction model, §14 platform adapter)
 # ---------------------------------------------------------------------------
 
-def _cmd_send_native(name: str, before: dict, message: str,
+def _cmd_send_native(name: str, message: str,
                      run=subprocess.run, which=shutil.which, sleep=time.sleep) -> int:
-    """Native (`dispatch_kind:"bg"`) counterpart of `cmd_send`'s legacy body
-    below -- fork-steer per RATIFIED G2(b), M-B Task 7.
-
-    `before` is the caller's already-locked snapshot of the record (`cmd_send`
-    only routes here once it has confirmed `is_native`); `refuse_if_legacy`
-    below is pure defense in depth against a future misrouted call, not the
-    primary gate.
+    """`cmd_send`'s engine -- fork-steer per RATIFIED G2(b), M-B Task 7.
 
     Roster fetched ONCE, outside any lock (F4 doctrine), then the verdict
     (`recompute_worker_native`) is (re)computed under a single fresh lock --
-    the record is re-read here rather than trusting `before`, since an
-    unbounded amount of time may have passed since the caller's snapshot.
+    the record is re-read here rather than trusting the caller's snapshot,
+    since an unbounded amount of time may have passed since it was taken.
 
     Verdict branches:
       - working (roster busy/waiting) -> append_mailbox + mail_sent event,
@@ -2973,8 +2959,6 @@ def _cmd_send_native(name: str, before: dict, message: str,
       - anything else reached here (over_ceiling/over_budget/attached --
         native sticky statuses this task's contract does not otherwise
         enumerate) refuses generically rather than silently mis-steering."""
-    refuse_if_legacy(name, before, "send")
-
     roster_ok, payload = _fetch_agents_roster(which=which, run=run)
     roster_entries = payload if roster_ok else []
 
@@ -3264,7 +3248,7 @@ def cmd_send(args, which=shutil.which, sleep=time.sleep, run=subprocess.run) -> 
         before = dict(data["workers"][args.name])
 
     refuse_if_archived(args.name, before, "send")
-    return _cmd_send_native(args.name, before, message,
+    return _cmd_send_native(args.name, message,
                             run=run, which=which, sleep=sleep)
 
 
