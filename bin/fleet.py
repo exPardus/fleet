@@ -8142,8 +8142,13 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
         while clock() < deadline:
             ok, payload = roster_fetch()
             if ok:
+                # Same hostile-sessionId-value guard as pre_sids above: a
+                # dict-valued sessionId would raise TypeError from the
+                # unhashable membership test against the set.
                 fresh = [e for e in payload if isinstance(e, dict)
-                         and e.get("name") == name and e.get("sessionId")
+                         and e.get("name") == name
+                         and isinstance(e.get("sessionId"), str)
+                         and e.get("sessionId")
                          and e.get("sessionId") not in pre_sids]
                 if fresh:
                     successor_sid = fresh[0]["sessionId"]
