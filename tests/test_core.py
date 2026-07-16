@@ -39,39 +39,54 @@ class TestPaths:
         fleet.state_dir()
         assert not (isolated_home / "state").exists()
 
-    def test_default_fleet_home_is_repo_root(self, monkeypatch):
-        # Without monkeypatching, FLEET_HOME must be derived from __file__:
+    def test_default_fleet_home_is_repo_root(self):
+        # Without the env override, FLEET_HOME must be derived from __file__:
         # parent.parent of bin/fleet.py == repo root.
-        monkeypatch.delenv("FLEET_HOME", raising=False)
-        import importlib
-        importlib.reload(fleet)
-        assert fleet.FLEET_HOME == fleet.Path(fleet.__file__).resolve().parent.parent
+        got = _fleet_home_in_fresh_interpreter(env_override=None)
+        assert got == str(fleet.Path(fleet.__file__).resolve().parent.parent)
 
     def test_template_and_instance_settings_paths_derive_from_fleet_home(self, isolated_home):
         assert fleet.template_settings_path() == isolated_home / "worker-settings.template.json"
         assert fleet.instance_settings_path() == isolated_home / "state" / "worker-settings.json"
 
 
+def _fleet_home_in_fresh_interpreter(env_override):
+    """str(fleet.FLEET_HOME) as a FRESH interpreter derives it at import.
+
+    Debt roll-up item 7: these tests used importlib.reload(fleet) to
+    re-exercise the import-time read, which rebound every class/function in
+    the shared module object mid-suite -- any test ordering that held a
+    pre-reload reference (an exception class in a raises(), a fixture-cached
+    callable) could break, and a failure between reload and restore left
+    FLEET_HOME env-derived for whoever imported next. A subprocess observes
+    the same import-time logic with zero in-process mutation."""
+    import subprocess
+    import sys
+    env = {k: v for k, v in os.environ.items() if k != "FLEET_HOME"}
+    if env_override is not None:
+        env["FLEET_HOME"] = env_override
+    out = subprocess.run(
+        [sys.executable, "-c", "import fleet; print(fleet.FLEET_HOME)"],
+        capture_output=True, text=True, env=env, timeout=60,
+        cwd=str(fleet.Path(fleet.__file__).resolve().parent))
+    assert out.returncode == 0, out.stderr
+    return out.stdout.strip()
+
+
 class TestFleetHomeEnvOverride:
     """SPEC §14: env var FLEET_HOME wins over the __file__-derived default,
     read once at import into the module-global (same discipline as
-    bin/hooks/*.py's own _fleet_home()). Reloads the module to exercise the
-    import-time read; the next test's isolated_home autouse fixture
-    monkeypatches FLEET_HOME again regardless, so no explicit restore is
-    needed here (matches the existing test_default_fleet_home_is_repo_root
-    pattern above)."""
+    bin/hooks/*.py's own _fleet_home()). Exercised in a fresh subprocess
+    interpreter -- see _fleet_home_in_fresh_interpreter's docstring for why
+    the old importlib.reload approach was fragile."""
 
-    def test_env_var_wins_when_set(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("FLEET_HOME", str(tmp_path))
-        import importlib
-        importlib.reload(fleet)
-        assert fleet.FLEET_HOME == tmp_path
+    def test_env_var_wins_when_set(self, tmp_path):
+        got = _fleet_home_in_fresh_interpreter(env_override=str(tmp_path))
+        assert got == str(tmp_path)
 
-    def test_env_var_absent_falls_back_to_file_derived_default(self, monkeypatch):
-        monkeypatch.delenv("FLEET_HOME", raising=False)
-        import importlib
-        importlib.reload(fleet)
-        assert fleet.FLEET_HOME == fleet.Path(fleet.__file__).resolve().parent.parent
+    def test_env_var_absent_falls_back_to_file_derived_default(self):
+        got = _fleet_home_in_fresh_interpreter(env_override=None)
+        assert got == str(fleet.Path(fleet.__file__).resolve().parent.parent)
 
 
 # ---------------------------------------------------------------------------
@@ -324,6 +339,36 @@ class TestLockContention:
         with fleet.fleet_lock():
             assert lock_path.exists()
         assert not lock_path.exists()
+
+    def test_failed_token_write_closes_fd_and_removes_lock_file(self, isolated_home, monkeypatch):
+        # Debt roll-up item 6: an ENOSPC during the token write used to leak
+        # the fd and strand a token-less lock file that blocked every
+        # acquirer until the stale-break window.
+        import os as _os
+        lock_path = fleet.state_dir() / "fleet.lock"
+        opened = []
+        real_open, real_write = _os.open, _os.write
+
+        def recording_open(*a, **kw):
+            fd = real_open(*a, **kw)
+            opened.append(fd)
+            return fd
+
+        def enospc_write(fd, data):
+            if fd in opened:
+                raise OSError(28, "No space left on device")
+            return real_write(fd, data)
+
+        monkeypatch.setattr(fleet.os, "open", recording_open)
+        monkeypatch.setattr(fleet.os, "write", enospc_write)
+        with pytest.raises(OSError, match="No space left"):
+            with fleet.fleet_lock():
+                pass  # pragma: no cover
+        monkeypatch.undo()
+        assert len(opened) == 1
+        with pytest.raises(OSError):
+            _os.fstat(opened[0])  # fd was closed on the error path
+        assert not lock_path.exists()  # no token-less lock file stranded
 
     def test_release_is_ownership_checked_does_not_delete_successors_lock(self, isolated_home):
         # Simulate a successor stealing the lock file (e.g. it broke a
