@@ -2,6 +2,7 @@
 import argparse
 import io
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -670,6 +671,8 @@ class TestCollaboratorInstall:
         # Mode 100755: a cloned shim that is not executable cannot be exec'd.
         assert tracked.split()[0] == "100755", f"expected mode 100755, got: {tracked.split()[0]}"
 
+    @pytest.mark.skipif(shutil.which("sh") is None,
+                        reason="requires sh on PATH (roll-up item 11)")
     def test_shim_prefers_an_explicit_fleet_python(self, tmp_path):
         script = tmp_path / "say.py"
         script.write_text("print('ran')", encoding="utf-8")
@@ -691,6 +694,8 @@ class TestCollaboratorInstall:
         assert tracked, "bin/fleet must be committed"
         assert tracked.split()[0] == "100755", f"expected mode 100755, got: {tracked.split()[0]}"
 
+    @pytest.mark.skipif(shutil.which("sh") is None,
+                        reason="requires sh on PATH (roll-up item 11)")
     def test_posix_cli_shim_runs_the_cli(self):
         out = subprocess.run(
             ["sh", str(REPO / "bin" / "fleet"), "--help"],
@@ -724,6 +729,8 @@ class TestCollaboratorInstall:
         assert "*.sh text eol=lf" in attrs
         assert "bin/fleet text eol=lf" in attrs
 
+    @pytest.mark.skipif(shutil.which("sh") is None,
+                        reason="requires sh on PATH (roll-up item 11)")
     def test_shim_exits_zero_when_no_interpreter_exists(self, tmp_path):
         # invariant 2: a hook never breaks a session, even with no python.
         script = tmp_path / "say.py"

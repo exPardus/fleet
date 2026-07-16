@@ -152,6 +152,25 @@ class TestOutcomeStore:
         rec = fleet.read_outcomes("w1")[0]
         assert rec["result_text"] == "short"
 
+    def test_atomic_append_partial_write_raises_not_silently_truncates(
+            self, native_home, tmp_path, monkeypatch):
+        # Roll-up item 4: WriteFile returning success (ok=True) with
+        # written < len(data) -- a partial write -- must raise OSError, not
+        # silently truncate. A torn JSONL line is exactly what
+        # read_outcomes silently skips, the same silent-loss failure class
+        # T1's CRITICAL fix existed to kill.
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+
+        def short_write_file(handle, data, size, written_ptr, overlapped):
+            written_ptr._obj.value = 1   # claims success, only 1 byte written
+            return 1                      # nonzero == TRUE (ok)
+
+        monkeypatch.setattr(kernel32, "WriteFile", short_write_file)
+        target = tmp_path / "out.jsonl"
+        with pytest.raises(OSError):
+            fleet._atomic_append_bytes(target, b"hello world\n")
+
     # T5 fix wave (Critical C1): has_fresh_outcome's default `kinds`
     # argument must exclude tombstones -- see task-5-adversarial.md's C1
     # repro. A fresh tombstone must never be read as "the turn finished".
@@ -373,6 +392,21 @@ class TestDispatchBg:
         # fast-completion recovery depends on this attribute being set (see
         # _fast_completion_sid).
         assert exc_info.value.short_id == "aaaabbbb"
+
+    def test_pre_snapshot_filters_hostile_sessionid_value(self, native_home):
+        # Roll-up item 3: a dict-valued sessionId in the pre-dispatch roster
+        # snapshot (CLI drift / hostile roster) must not raise TypeError from
+        # an unhashable value landing in the exclusion set.
+        state = {"n": 0}
+        def roster_fetch(**_):
+            state["n"] += 1
+            if state["n"] == 1:
+                return True, [{"sessionId": {"nested": "hostile"}}]
+            return True, [make_roster_entry(SID, status="idle")]
+        out = fleet.dispatch_bg("w1", "C:/proj", "b", "accept",
+                                run=_fake_run_factory(), which=lambda _: "claude",
+                                sleep=lambda s: None, roster_fetch=roster_fetch)
+        assert out["session_id"] == SID
 
     def test_other_dispatch_errors_leave_short_id_none(self, native_home):
         # Failure causes before a short id is ever parsed (bad name, missing
@@ -1490,6 +1524,42 @@ class TestNativeResumeLimited:
         assert rc == 0
         assert migrate_calls == [(old_sid, new_sid)]
 
+    def test_resume_commit_orphaned_when_record_changed_during_dispatch(
+            self, native_home, monkeypatch, capsys):
+        # S2 fix (final wave): mirrors send's own guard -- a concurrent
+        # actor that moves session_id off old_sid during the resume's
+        # dispatch window must not have its record silently restamped back
+        # to the fork's new sid.
+        old_sid = SID
+        new_sid = "ccccdddd-9999-8888-7777-666655554444"
+        other_sid = "eeeeffff-0000-1111-2222-333344445555"
+        seed_native_worker(native_home, sid=old_sid, status="limited",
+                           limit_reset_at="2026-07-15T00:00:00Z")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_with(new_sid))
+        from types import SimpleNamespace
+
+        def run(argv, **kw):
+            if "--bg" in argv:
+                data = fleet.load_registry()
+                data["workers"]["w1"]["session_id"] = other_sid
+                fleet.save_registry(data)
+            import types
+            return types.SimpleNamespace(
+                returncode=0, stdout="backgrounded · ccccdddd · fleet|w1|resume\n", stderr="")
+
+        args = SimpleNamespace(name="w1", force_now=False)
+        rc = fleet.cmd_resume_limited(args, run=run, which=lambda _: "claude",
+                                      sleep=lambda s: None)
+        assert rc == 0
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["session_id"] == other_sid
+        assert old_sid not in rec.get("retired_sids", [])
+        events = _events_kinds(native_home)
+        assert "limit_resumed" not in events
+        assert "steer_orphaned" in events
+        out = capsys.readouterr().out
+        assert "changed during dispatch" in out
+
 
 # ---------------------------------------------------------------------------
 # M-B Task 6 fix wave (task-6-adversarial.md): C1 OSError-proof scan, C2
@@ -1741,6 +1811,19 @@ class TestRestampAfterSteer:
         assert rec["turns"] == 4
         assert rec["last_dispatch_at"] is not None
 
+    def test_none_session_id_never_lands_in_retired_sids(self, native_home):
+        # S2 fix (final wave), defense-in-depth: a respawn --force's fresh
+        # pre-claim record has session_id=None -- _restamp_after_steer must
+        # never append that None into retired_sids (it would later reach
+        # _cmd_kill_native's sweep and crash on `run([exe, "stop", None])`,
+        # a TypeError outside the caught (OSError, SubprocessError) tuple).
+        rec = seed_native_worker(native_home, sid="old-sid")
+        rec["session_id"] = None
+        fleet._restamp_after_steer(rec, "new-sid", "newshort")
+        assert rec["session_id"] == "new-sid"
+        assert None not in rec["retired_sids"]
+        assert rec["retired_sids"] == []
+
     def test_appends_to_existing_retired_sids(self, native_home):
         rec = seed_native_worker(native_home, sid="s2")
         rec["retired_sids"] = ["s0", "s1"]
@@ -1789,6 +1872,28 @@ class TestCmdSendNative:
         rec = fleet.load_registry()["workers"]["w1"]
         assert rec["status"] == "working"
         assert rec["session_id"] == old_sid
+
+    def test_waiting_native_appends_mailbox_never_persists_transient_flag(
+            self, native_home, monkeypatch):
+        # S5 fix (final wave): T5's I1 pattern (strip waiting_for_permission
+        # before any registry save) was replicated in cmd_status/cmd_wait/
+        # cmd_clean but missed in send's own working-branch persist -- a
+        # roster "waiting" verdict leaked the transient key straight into
+        # fleet.json.
+        old_sid = SID
+        seed_native_worker(native_home, sid=old_sid, status="idle")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            lambda **_: (True, [make_roster_entry(old_sid, status="waiting")]))
+
+        def run(*a, **kw):
+            raise AssertionError("must not dispatch while the turn is waiting")
+
+        rc = fleet.cmd_send(_send_args(message="check the logs"),
+                           run=run, which=lambda _: "claude", sleep=lambda s: None)
+        assert rc == 0
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["status"] == "working"
+        assert "waiting_for_permission" not in rec
 
     def test_idle_native_fork_steers_and_restamps(self, native_home, monkeypatch):
         old_sid = SID
@@ -1886,6 +1991,34 @@ class TestCmdSendNative:
         # the message must survive the rollback, not be lost
         mailbox = fleet.mailbox_dir() / f"{old_sid}.md"
         assert "go" in mailbox.read_text(encoding="utf-8")
+
+    def test_fork_steer_rollback_restores_last_dispatch_at_too(self, native_home, monkeypatch):
+        # S3 fix (final wave): the pre-claim advances last_dispatch_at to
+        # "now" before dispatch; a failed dispatch's rollback used to
+        # restore only status="idle", leaving the anchor advanced. The next
+        # recompute then anchors has_fresh_outcome on the ADVANCED
+        # timestamp, so the worker's genuinely-fresh (but now stale-looking)
+        # outcome record no longer vouches for it -- permanently stranding
+        # an idle worker as dead-suspected. Restoring last_dispatch_at
+        # verbatim is what keeps the next recompute landing on idle.
+        old_sid = SID
+        original_anchor = _iso(NOW - timedelta(minutes=5))
+        seed_native_worker(native_home, sid=old_sid, status="idle",
+                           last_dispatch_at=original_anchor)
+        # Outcome genuinely finished AFTER the original anchor, BEFORE this
+        # failed steer attempt's own pre-claim timestamp.
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": old_sid, "kind": "result"})
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
+        with pytest.raises(fleet.NativeDispatchError):
+            fleet.cmd_send(_send_args(message="go"), run=_fake_run_factory(rc=1),
+                           which=lambda _: "claude", sleep=lambda s: None)
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["status"] == "idle"
+        assert rec["last_dispatch_at"] == original_anchor
+        # The real proof: the NEXT recompute (empty roster -- sid reaped)
+        # must land on idle, not dead-suspected.
+        verdict = fleet.recompute_worker_native("w1", rec, [])
+        assert verdict["status"] == "idle"
 
     # -----------------------------------------------------------------
     # T7 fix wave (task-7-adversarial.md CRITICAL-1): send during an
@@ -2124,6 +2257,46 @@ class TestCmdSendNative:
         assert rc == 0
         assert fleet.load_registry()["workers"] == {}
         assert "steered" not in _events_kinds(native_home)
+
+    def test_fork_steer_commit_orphaned_when_record_changed_during_dispatch(
+            self, native_home, monkeypatch, capsys):
+        # S2 fix (final wave): the success commit used to guard only `r is
+        # not None`, unconditionally restamping over whatever a concurrent
+        # kill/interrupt/respawn --force did during the dispatch window.
+        # Model a concurrent actor that replaces session_id with an
+        # unrelated sid (e.g. a respawn --force's own fresh dispatch)
+        # between this call's pre-claim and its post-dispatch commit.
+        old_sid = SID
+        new_sid = "ccccdddd-9999-8888-7777-666655554444"
+        other_sid = "eeeeffff-0000-1111-2222-333344445555"
+        seed_native_worker(native_home, sid=old_sid, status="idle")
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": old_sid, "kind": "result"})
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_sequence(
+            (True, []), (True, []), (True, [make_roster_entry(new_sid, status="idle")]),
+        ))
+
+        def run(argv, **kw):
+            if "--bg" in argv:
+                data = fleet.load_registry()
+                data["workers"]["w1"]["session_id"] = other_sid
+                fleet.save_registry(data)
+            import types
+            return types.SimpleNamespace(
+                returncode=0, stdout="backgrounded · ccccdddd · fleet|w1|go\n", stderr="")
+
+        rc = fleet.cmd_send(_send_args(message="go"), run=run,
+                            which=lambda _: "claude", sleep=lambda s: None)
+        assert rc == 0
+        rec = fleet.load_registry()["workers"]["w1"]
+        # NOT restamped to the fork's new sid -- the concurrent actor wins.
+        assert rec["session_id"] == other_sid
+        assert old_sid not in rec.get("retired_sids", [])
+        events = _events_kinds(native_home)
+        assert "steered" not in events
+        assert "steer_orphaned" in events
+        out = capsys.readouterr().out
+        assert "changed during dispatch" in out
+        assert new_sid[:8] in out
 
 
 class TestMigrateResidualMailbox:
@@ -3039,8 +3212,24 @@ class TestCmdCleanNative:
         # `claude --resume` survives regardless, but fleet's OWN
         # bookkeeping (registry entry, outcomes, task file) must not
         # vanish out from under an operator who can still `fleet send` it.
-        seed_native_worker(native_home, sid=SID, status="idle")
-        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
+        #
+        # Roll-up item 6: the original version of this test seeded an idle
+        # worker with an EMPTY roster and no outcome record --
+        # recompute_worker_native derives dead-suspected for that shape
+        # (itself also non-deletable), so the test never actually exercised
+        # a genuine `idle` verdict against the clean sweep. Force one: a
+        # live roster entry (status="idle") plus a fresh outcome record for
+        # the same sid, dispatched before the outcome's ts.
+        last_dispatch_at = _iso(NOW - timedelta(minutes=5))
+        rec = seed_native_worker(native_home, sid=SID, status="idle",
+                                 last_dispatch_at=last_dispatch_at)
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": SID, "kind": "result"})
+        roster = [make_roster_entry(SID, status="idle")]
+        # Sanity: the seeded shape genuinely recomputes to idle, not
+        # dead-suspected -- otherwise this test would silently degrade back
+        # into the same test-theater it replaces.
+        assert fleet.recompute_worker_native("w1", rec, roster)["status"] == "idle"
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, roster))
         fleet.cmd_clean(_clean_args())
         assert "w1" in fleet.load_registry()["workers"]
 

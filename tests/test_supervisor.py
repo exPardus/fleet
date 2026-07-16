@@ -389,6 +389,26 @@ class TestHandoff:
         dispatch = next(c for c in run.calls if "--bg" in c)
         assert any(a.startswith("sup|inc-") for a in dispatch)
 
+    def test_begin_pre_snapshot_filters_hostile_sessionid_value(self, sup_home):
+        # Roll-up item 3: a dict-valued sessionId in the roster payload (CLI
+        # drift / hostile roster) must not raise TypeError from an
+        # unhashable value landing in cmd_sup_handoff_begin's own pre_sids
+        # exclusion set.
+        self._hold()
+        state = {"dispatched": False}
+        def run(argv, **kw):
+            if "--bg" in argv:
+                state["dispatched"] = True
+                return SimpleNamespace(returncode=0,
+                                       stdout="backgrounded · succ0001 · sup\n", stderr="")
+            entries = [{"sessionId": "sid-old", "status": "busy"},
+                       {"sessionId": {"nested": "hostile"}, "status": "busy"}]
+            if state["dispatched"]:
+                entries.append({"sessionId": "succ0001-full", "status": "busy"})
+            return SimpleNamespace(returncode=0, stdout=json.dumps(entries), stderr="")
+        rc = self._begin(run)
+        assert rc == 0
+
     def test_successor_dispatch_passes_fleet_home_cwd(self, sup_home):
         self._hold()
         kwargs_seen = []
@@ -556,7 +576,10 @@ class TestHandoff:
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         args = SimpleNamespace(sid="sid-old", successor_sid="sid-new")
         assert fleet.cmd_sup_handoff_abort(args, which=_fake_which, run=run) == 0
-        assert stopped and stopped[0][-2:] == ["stop", "sid-new"]
+        # S1 fix (final wave): routes through _stop_native_session -- tries
+        # the SHORT job-ref ("sid", the first hyphen segment) first, not the
+        # raw full sid.
+        assert stopped and stopped[0][-2:] == ["stop", fleet._native_job_ref("sid-new")]
         assert fleet.read_handshake() is None
         assert fleet.handoff_abort_flag_path().exists()
         assert fleet.supervisor_journal_latest()["kind"] == "HANDOFF-ABORT"
@@ -633,6 +656,26 @@ class TestHandoff:
             calls.append(argv)
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         args = SimpleNamespace(sid="sid-old", successor_sid="sid-whatever")
+        with pytest.raises(fleet.FleetCliError, match="matches no recorded limbo successor"):
+            fleet.cmd_sup_handoff_abort(args, which=_fake_which, run=run)
+        assert not calls   # nothing stopped
+
+    def test_handoff_abort_refuses_on_none_successor_sid_matching_none_flag(self, sup_home):
+        # Roll-up item 8: an abort flag recorded with successor_sid=None
+        # (the dispatch-failed shape) must not be treated as matching an
+        # args.successor_sid that is itself None -- unreachable via the CLI
+        # (argparse required=True) but must refuse, not proceed into
+        # `claude stop None`.
+        self._hold()
+        fleet._write_json_atomic(fleet.handoff_abort_flag_path(), {
+            "aborted_at": fleet.now_iso(), "reason": "successor-doa",
+            "successor_sid": None, "successor_short_id": None,
+            "holder": "inc-old"})
+        calls = []
+        def run(argv, **kw):
+            calls.append(argv)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        args = SimpleNamespace(sid="sid-old", successor_sid=None)
         with pytest.raises(fleet.FleetCliError, match="matches no recorded limbo successor"):
             fleet.cmd_sup_handoff_abort(args, which=_fake_which, run=run)
         assert not calls   # nothing stopped
