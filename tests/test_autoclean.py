@@ -1,0 +1,500 @@
+"""Autoclean tests (docs/specs/autoclean.md): ownership discriminator
+(fault-injected), husk sweep gates, tier isolation, tier-3 default-off,
+clean tiering split, scheduler install/remove/doctor."""
+import argparse
+import json
+import types
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+import fleet
+
+
+def _iso(dt):
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+NOW = datetime.now(timezone.utc)
+
+SID_LIVE = "aaaa1111-1111-2222-3333-444455556666"
+SID_RETIRED = "bbbb2222-1111-2222-3333-444455556666"
+SID_TOMB = "cccc3333-1111-2222-3333-444455556666"
+SID_EVENTS = "dddd4444-1111-2222-3333-444455556666"
+SID_ARCHDIR = "eeee5555-1111-2222-3333-444455556666"
+SID_FOREIGN = "ffff6666-1111-2222-3333-444455556666"
+
+
+@pytest.fixture
+def home(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet, "FLEET_HOME", tmp_path)
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "worker-settings.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "mailbox").mkdir()
+    fleet.save_registry({"workers": {}})
+    return tmp_path
+
+
+def seed_worker(name, sid, *, status="idle", archived_at=None, retired=(), **overrides):
+    rec = fleet.new_worker_record(sid, "C:/proj", "task", "accept", dispatch_kind="bg")
+    rec["status"] = status
+    rec["archived_at"] = archived_at
+    rec["retired_sids"] = list(retired)
+    rec["last_activity"] = _iso(NOW - timedelta(minutes=5))
+    rec.update(overrides)
+    data = fleet.load_registry()
+    data["workers"][name] = rec
+    fleet.save_registry(data)
+    return rec
+
+
+def roster_dead(sid, name="fleet|w|t"):
+    return {"id": sid[:8], "sessionId": sid, "name": name, "kind": "background",
+            "state": "done"}
+
+
+def roster_live(sid, name="fleet|w|t"):
+    return {"id": sid[:8], "sessionId": sid, "name": name, "kind": "background",
+            "state": "working", "status": "busy", "pid": 4242}
+
+
+def fake_run_factory(roster, calls=None, rm_rc=0):
+    stdout = json.dumps(roster)
+
+    def fake_run(argv, **kwargs):
+        if calls is not None:
+            calls.append(argv)
+        if len(argv) >= 2 and argv[1] == "agents":
+            return types.SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+        return types.SimpleNamespace(returncode=rm_rc, stdout="", stderr="")
+    return fake_run
+
+
+def rm_targets(calls):
+    return [argv[2] for argv in calls if len(argv) >= 3 and argv[1] == "rm"]
+
+
+def read_events(home):
+    path = home / "state" / "events.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines() if ln]
+
+
+class TestOwnershipDiscriminator:
+    def test_registry_sets(self, home):
+        seed_worker("live", SID_LIVE, retired=[SID_RETIRED])
+        seed_worker("tomb", SID_TOMB, archived_at=_iso(NOW))
+        data = fleet.load_registry()
+        owned, protected = fleet._registry_owned_and_protected_sids(data["workers"])
+        assert owned == {SID_LIVE, SID_RETIRED, SID_TOMB}
+        assert protected == {SID_LIVE, SID_RETIRED}
+
+    def test_registry_shape_drift_tolerated(self, home):
+        workers = {"a": "not-a-dict",
+                   "b": {"session_id": 42, "retired_sids": "bare-string"},
+                   "c": {"session_id": SID_LIVE, "retired_sids": [7, SID_RETIRED]}}
+        owned, protected = fleet._registry_owned_and_protected_sids(workers)
+        assert owned == {SID_LIVE, SID_RETIRED}
+        assert protected == {SID_LIVE, SID_RETIRED}
+
+    def test_archive_dir_sids(self, home):
+        d = fleet.archive_root() / "oldworker"
+        d.mkdir(parents=True)
+        (d / f"{SID_ARCHDIR}.jsonl").write_text("{}", encoding="utf-8")
+        (d / "journal.md").write_text("j", encoding="utf-8")
+        (d / "task.md").write_text("t", encoding="utf-8")
+        assert fleet._archive_dir_sids() == {SID_ARCHDIR}
+
+    def test_archive_dir_missing(self, home):
+        assert fleet._archive_dir_sids() == set()
+
+    def test_events_sids(self, home):
+        fleet.append_event("turn_started", "w1", session_id=SID_EVENTS)
+        fleet.append_event("spawned", "w1")  # no sid field
+        with open(fleet.events_path(), "a", encoding="utf-8") as f:
+            f.write("not json\n")
+        assert SID_EVENTS in fleet._events_sids()
+
+    def test_events_missing_file(self, home):
+        assert fleet._events_sids() == set()
+
+
+class TestHuskSweep:
+    def test_fault_inject_foreign_session_never_selected(self, home):
+        """THE ownership test: a roster session fleet has no record of --
+        the operator's own interactive session -- must never be rm'd. A
+        genuine husk beside it IS rm'd, so removing the owned-set filter
+        makes this test fail (the foreign sid would join rm_targets)."""
+        fleet.append_event("turn_started", "gone-worker", session_id=SID_EVENTS)
+        calls = []
+        run = fake_run_factory([roster_dead(SID_FOREIGN, name="operator session"),
+                                roster_dead(SID_EVENTS)], calls=calls)
+        removed = fleet._sweep_husks(False, run=run, which=lambda _: "claude")
+        targets = rm_targets(calls)
+        assert removed == [SID_EVENTS]
+        assert SID_FOREIGN[:8] not in targets and SID_FOREIGN not in targets
+        assert SID_EVENTS.split("-", 1)[0] in targets
+
+    def test_foreign_only_roster_no_rm_at_all(self, home):
+        calls = []
+        run = fake_run_factory([roster_dead(SID_FOREIGN)], calls=calls)
+        assert fleet._sweep_husks(False, run=run, which=lambda _: "claude") == []
+        assert rm_targets(calls) == []
+
+    def test_protected_current_and_retired_sids_spared(self, home):
+        seed_worker("live", SID_LIVE, retired=[SID_RETIRED])
+        calls = []
+        run = fake_run_factory([roster_dead(SID_LIVE), roster_dead(SID_RETIRED)],
+                               calls=calls)
+        assert fleet._sweep_husks(False, run=run, which=lambda _: "claude") == []
+        assert rm_targets(calls) == []
+
+    def test_tombstone_sid_is_a_husk(self, home):
+        seed_worker("tomb", SID_TOMB, archived_at=_iso(NOW))
+        run = fake_run_factory([roster_dead(SID_TOMB)])
+        assert fleet._sweep_husks(False, run=run, which=lambda _: "claude") == [SID_TOMB]
+
+    def test_archive_dir_sid_is_a_husk(self, home):
+        d = fleet.archive_root() / "oldworker"
+        d.mkdir(parents=True)
+        (d / f"{SID_ARCHDIR}.jsonl").write_text("{}", encoding="utf-8")
+        run = fake_run_factory([roster_dead(SID_ARCHDIR)])
+        assert fleet._sweep_husks(False, run=run, which=lambda _: "claude") == [SID_ARCHDIR]
+
+    def test_live_roster_entry_never_rmd(self, home):
+        seed_worker("tomb", SID_TOMB, archived_at=_iso(NOW))
+        calls = []
+        run = fake_run_factory([roster_live(SID_TOMB)], calls=calls)
+        assert fleet._sweep_husks(False, run=run, which=lambda _: "claude") == []
+        assert rm_targets(calls) == []
+
+    def test_pending_mail_spares_husk(self, home):
+        fleet.append_event("turn_started", "w", session_id=SID_EVENTS)
+        (fleet.mailbox_dir() / f"{SID_EVENTS}.md").write_text("mail!", encoding="utf-8")
+        run = fake_run_factory([roster_dead(SID_EVENTS)])
+        assert fleet._sweep_husks(False, run=run, which=lambda _: "claude") == []
+
+    def test_dry_run_rms_nothing_events_nothing(self, home):
+        fleet.append_event("turn_started", "w", session_id=SID_EVENTS)
+        events_before = len(read_events(home))
+        calls = []
+        run = fake_run_factory([roster_dead(SID_EVENTS)], calls=calls)
+        assert fleet._sweep_husks(True, run=run, which=lambda _: "claude") == []
+        assert rm_targets(calls) == []
+        assert len(read_events(home)) == events_before
+
+    def test_rm_failure_reported_not_counted(self, home):
+        fleet.append_event("turn_started", "w", session_id=SID_EVENTS)
+        run = fake_run_factory([roster_dead(SID_EVENTS)], rm_rc=1)
+        assert fleet._sweep_husks(False, run=run, which=lambda _: "claude") == []
+        assert not any(e["kind"] == "husk_removed" for e in read_events(home))
+
+    def test_husk_removed_event_appended(self, home):
+        seed_worker("tomb", SID_TOMB, archived_at=_iso(NOW))
+        run = fake_run_factory([roster_dead(SID_TOMB)])
+        fleet._sweep_husks(False, run=run, which=lambda _: "claude")
+        evs = [e for e in read_events(home) if e["kind"] == "husk_removed"]
+        assert len(evs) == 1 and evs[0]["session_id"] == SID_TOMB
+
+    def test_roster_failure_raises(self, home):
+        def bad_run(argv, **kwargs):
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="boom")
+        with pytest.raises(fleet.FleetCliError):
+            fleet._sweep_husks(False, run=bad_run, which=lambda _: "claude")
+
+    def test_epoch_suspicious_refuses(self, home):
+        seed_worker("busy", SID_LIVE, status="working")
+        run = fake_run_factory([])  # empty roster while a record claims a live turn
+        with pytest.raises(fleet.FleetCliError, match="G9"):
+            fleet._sweep_husks(False, run=run, which=lambda _: "claude")
+
+
+class TestExpireTombstones:
+    def test_expired_tombstone_dropped_files_kept(self, home):
+        seed_worker("tomb", SID_TOMB, archived_at=_iso(NOW - timedelta(hours=100)))
+        d = fleet.archive_root() / "tomb"
+        d.mkdir(parents=True)
+        (d / "journal.md").write_text("history", encoding="utf-8")
+        expired = fleet._expire_tombstones(72.0, False)
+        assert [n for n, _ in expired] == ["tomb"]
+        assert "tomb" not in fleet.load_registry()["workers"]
+        assert (d / "journal.md").exists()  # NO file deletion, ever
+        assert any(e["kind"] == "tombstone_expired" for e in read_events(home))
+
+    def test_fresh_tombstone_kept(self, home):
+        seed_worker("tomb", SID_TOMB, archived_at=_iso(NOW - timedelta(hours=1)))
+        assert fleet._expire_tombstones(72.0, False) == []
+        assert "tomb" in fleet.load_registry()["workers"]
+
+    def test_pending_move_tombstone_never_expired(self, home):
+        seed_worker("tomb", SID_TOMB, archived_at=_iso(NOW - timedelta(hours=100)))
+        # evidence file still at its pre-move location -> resume territory
+        fleet.journals_dir().mkdir(parents=True, exist_ok=True)
+        (fleet.journals_dir() / "tomb.md").write_text("j", encoding="utf-8")
+        assert fleet._expire_tombstones(72.0, False) == []
+        assert "tomb" in fleet.load_registry()["workers"]
+
+    def test_unparseable_archived_at_kept(self, home):
+        seed_worker("tomb", SID_TOMB, archived_at="garbage")
+        assert fleet._expire_tombstones(0.1, False) == []
+        assert "tomb" in fleet.load_registry()["workers"]
+
+    def test_non_archived_never_touched(self, home):
+        seed_worker("live", SID_LIVE, status="idle",
+                    last_activity=_iso(NOW - timedelta(hours=999)))
+        assert fleet._expire_tombstones(0.1, False) == []
+        assert "live" in fleet.load_registry()["workers"]
+
+    def test_dry_run_mutates_nothing(self, home):
+        seed_worker("tomb", SID_TOMB, archived_at=_iso(NOW - timedelta(hours=100)))
+        assert fleet._expire_tombstones(72.0, True) == []
+        assert "tomb" in fleet.load_registry()["workers"]
+
+
+def _autoclean_args(**kw):
+    kw.setdefault("ttl_hours", None)
+    kw.setdefault("expire_tombstones_hours", None)
+    kw.setdefault("dry_run", False)
+    return argparse.Namespace(**kw)
+
+
+class TestCmdAutoclean:
+    def test_tier_isolation_archive_crash_husks_still_swept(self, home, monkeypatch):
+        seed_worker("tomb", SID_TOMB, archived_at=_iso(NOW))
+
+        def boom(*a, **k):
+            raise RuntimeError("tier-1 exploded")
+        monkeypatch.setattr(fleet, "cmd_archive", boom)
+        calls = []
+        run = fake_run_factory([roster_dead(SID_TOMB)], calls=calls)
+        rc = fleet.cmd_autoclean(_autoclean_args(), run=run, which=lambda _: "claude")
+        assert rc == 1  # the failure is loud...
+        assert SID_TOMB.split("-", 1)[0] in rm_targets(calls)  # ...but tier 2 ran
+
+    def test_tier3_default_off(self, home):
+        seed_worker("tomb", SID_TOMB, archived_at=_iso(NOW - timedelta(hours=9999)))
+        run = fake_run_factory([])
+        rc = fleet.cmd_autoclean(_autoclean_args(), run=run, which=lambda _: "claude")
+        assert rc == 0
+        assert "tomb" in fleet.load_registry()["workers"]  # ancient, still kept
+
+    def test_tier3_with_flag(self, home):
+        seed_worker("tomb", SID_TOMB, archived_at=_iso(NOW - timedelta(hours=9999)))
+        run = fake_run_factory([])
+        rc = fleet.cmd_autoclean(_autoclean_args(expire_tombstones_hours=72.0),
+                                 run=run, which=lambda _: "claude")
+        assert rc == 0
+        assert "tomb" not in fleet.load_registry()["workers"]
+
+    def test_stamp_and_summary_event_written(self, home):
+        run = fake_run_factory([])
+        rc = fleet.cmd_autoclean(_autoclean_args(), run=run, which=lambda _: "claude")
+        assert rc == 0
+        stamp = json.loads(fleet.autoclean_stamp_path().read_text(encoding="utf-8"))
+        assert stamp["husks_removed"] == 0 and stamp["errors"] == []
+        assert any(e["kind"] == "autoclean_run" for e in read_events(home))
+
+    def test_dry_run_writes_no_stamp(self, home):
+        run = fake_run_factory([])
+        rc = fleet.cmd_autoclean(_autoclean_args(dry_run=True),
+                                 run=run, which=lambda _: "claude")
+        assert rc == 0
+        assert not fleet.autoclean_stamp_path().exists()
+
+
+def _clean_args(**kw):
+    kw.setdefault("yes", True)
+    kw.setdefault("dead_only", False)
+    kw.setdefault("tombstones", False)
+    return argparse.Namespace(**kw)
+
+
+class TestCleanTieringSplit:
+    def test_default_sweeps_tombstones(self, home):
+        seed_worker("tomb", SID_TOMB, archived_at=_iso(NOW))
+        rc = fleet.cmd_clean(_clean_args(), run=fake_run_factory([]),
+                             which=lambda _: "claude")
+        assert rc == 0
+        assert "tomb" not in fleet.load_registry()["workers"]
+
+    def test_dead_only_spares_tombstones(self, home):
+        seed_worker("tomb", SID_TOMB, archived_at=_iso(NOW))
+        rc = fleet.cmd_clean(_clean_args(dead_only=True), run=fake_run_factory([]),
+                             which=lambda _: "claude")
+        assert rc == 0
+        assert "tomb" in fleet.load_registry()["workers"]
+
+    def test_tombstones_only_touches_nothing_else(self, home):
+        seed_worker("tomb", SID_TOMB, archived_at=_iso(NOW))
+        seed_worker("idleworker", SID_LIVE, status="idle")
+        calls = []
+        rc = fleet.cmd_clean(_clean_args(tombstones=True),
+                             run=fake_run_factory([roster_dead(SID_LIVE)], calls=calls),
+                             which=lambda _: "claude")
+        assert rc == 0
+        workers = fleet.load_registry()["workers"]
+        assert "tomb" not in workers and "idleworker" in workers
+        # --tombstones never probes: no roster fetch, no recompute persisted
+        assert not any(len(a) >= 2 and a[1] == "agents" for a in calls)
+        assert workers["idleworker"]["status"] == "idle"
+
+    def test_flags_mutually_exclusive(self):
+        with pytest.raises(SystemExit):
+            fleet.build_parser().parse_args(["clean", "--dead-only", "--tombstones"])
+
+
+class TestSchedulerInstall:
+    @pytest.fixture
+    def platform_stub(self, monkeypatch):
+        state = {"query": None, "installs": [], "removes": [],
+                 "install_ok": (True, ""), "remove_ok": (True, "")}
+        monkeypatch.setattr(fleet.PLATFORM, "autoclean_task_query",
+                            lambda task_name, run=None: state["query"])
+        monkeypatch.setattr(
+            fleet.PLATFORM, "autoclean_task_install",
+            lambda task_name, command, interval_hours, run=None:
+                state["installs"].append((task_name, command, interval_hours))
+                or state["install_ok"])
+        monkeypatch.setattr(
+            fleet.PLATFORM, "autoclean_task_remove",
+            lambda task_name, run=None:
+                state["removes"].append(task_name) or state["remove_ok"])
+        return state
+
+    def test_fresh_install_default_interval(self, platform_stub, capsys):
+        fleet._install_autoclean_task(None, force=False)
+        (task_name, command, hours), = platform_stub["installs"]
+        assert task_name == fleet.AUTOCLEAN_TASK_NAME
+        assert hours == fleet.AUTOCLEAN_INTERVAL_HOURS_DEFAULT
+        assert command.endswith(" autoclean") and "fleet.py" in command
+        assert "uninstall" in capsys.readouterr().out
+
+    def test_refuses_foreign_task(self, platform_stub):
+        platform_stub["query"] = '"C:/other/backup.exe" nightly'
+        with pytest.raises(fleet.FleetCliError, match="fleet-owned"):
+            fleet._install_autoclean_task(None, force=False)
+        assert platform_stub["installs"] == []
+
+    def test_force_overwrites_foreign_task(self, platform_stub):
+        platform_stub["query"] = '"C:/other/backup.exe" nightly'
+        fleet._install_autoclean_task(None, force=True)
+        assert len(platform_stub["installs"]) == 1
+
+    def test_idempotent_reinstall_of_own_task(self, platform_stub):
+        platform_stub["query"] = '"C:/py.exe" "C:/fleet/bin/fleet.py" autoclean'
+        fleet._install_autoclean_task(12, force=False)
+        (_, _, hours), = platform_stub["installs"]
+        assert hours == 12
+
+    @pytest.mark.parametrize("bad", [0, 24, -3])
+    def test_interval_validated(self, platform_stub, bad):
+        with pytest.raises(fleet.FleetCliError, match="1..23"):
+            fleet._install_autoclean_task(bad, force=False)
+        assert platform_stub["installs"] == []
+
+    def test_install_failure_raises(self, platform_stub):
+        platform_stub["install_ok"] = (False, "access denied")
+        with pytest.raises(fleet.FleetCliError, match="access denied"):
+            fleet._install_autoclean_task(None, force=False)
+
+    def test_remove(self, platform_stub):
+        fleet._remove_autoclean_task()
+        assert platform_stub["removes"] == [fleet.AUTOCLEAN_TASK_NAME]
+
+    def test_remove_failure_raises(self, platform_stub):
+        platform_stub["remove_ok"] = (False, "no such task")
+        with pytest.raises(fleet.FleetCliError, match="no such task"):
+            fleet._remove_autoclean_task()
+
+
+class TestWindowsAdapterSchtasks:
+    def test_query_parses_xml_and_unescapes(self):
+        xml = ('<Task><Exec><Command>&quot;C:\\py.exe&quot;</Command>'
+               '<Arguments>&quot;C:\\fleet.py&quot; autoclean</Arguments></Exec></Task>')
+
+        def run(argv, **kw):
+            assert argv[:2] == ["schtasks", "/Query"] and "/XML" in argv
+            return types.SimpleNamespace(returncode=0, stdout=xml, stderr="")
+        out = fleet._WindowsPlatform().autoclean_task_query("t", run=run)
+        assert out == '"C:\\py.exe" "C:\\fleet.py" autoclean'
+
+    def test_query_missing_task_is_none(self):
+        def run(argv, **kw):
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="not found")
+        assert fleet._WindowsPlatform().autoclean_task_query("t", run=run) is None
+
+    def test_install_argv_shape(self):
+        seen = []
+
+        def run(argv, **kw):
+            seen.append(argv)
+            return types.SimpleNamespace(returncode=0, stdout="ok", stderr="")
+        ok, _ = fleet._WindowsPlatform().autoclean_task_install("t", "cmdline", 6, run=run)
+        assert ok
+        argv, = seen
+        assert argv == ["schtasks", "/Create", "/F", "/TN", "t", "/TR", "cmdline",
+                        "/SC", "HOURLY", "/MO", "6"]
+
+    def test_remove_argv_shape(self):
+        seen = []
+
+        def run(argv, **kw):
+            seen.append(argv)
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        ok, _ = fleet._WindowsPlatform().autoclean_task_remove("t", run=run)
+        assert ok and seen == [["schtasks", "/Delete", "/TN", "t", "/F"]]
+
+
+class TestDoctorAutoclean:
+    def test_not_installed_is_note_only(self, home, monkeypatch):
+        monkeypatch.setattr(fleet.PLATFORM, "autoclean_task_query",
+                            lambda task_name, run=None: None)
+        name, ok, msg = fleet._doctor_check_autoclean()
+        assert (name, ok) == ("autoclean", True) and "fleet init --autoclean" in msg
+
+    def test_installed_no_stamp(self, home, monkeypatch):
+        monkeypatch.setattr(fleet.PLATFORM, "autoclean_task_query",
+                            lambda task_name, run=None: "py fleet.py autoclean")
+        _, ok, msg = fleet._doctor_check_autoclean()
+        assert ok and "no run recorded yet" in msg
+
+    def test_installed_stale_stamp(self, home, monkeypatch):
+        monkeypatch.setattr(fleet.PLATFORM, "autoclean_task_query",
+                            lambda task_name, run=None: "py fleet.py autoclean")
+        fleet.autoclean_stamp_path().write_text(
+            json.dumps({"ts": _iso(NOW - timedelta(hours=60))}), encoding="utf-8")
+        _, ok, msg = fleet._doctor_check_autoclean()
+        assert ok and "stale" in msg
+
+    def test_installed_fresh_stamp(self, home, monkeypatch):
+        monkeypatch.setattr(fleet.PLATFORM, "autoclean_task_query",
+                            lambda task_name, run=None: "py fleet.py autoclean")
+        fleet.autoclean_stamp_path().write_text(
+            json.dumps({"ts": _iso(NOW)}), encoding="utf-8")
+        _, ok, msg = fleet._doctor_check_autoclean()
+        assert ok and "task installed" in msg
+
+    def test_unsupported_platform_skipped(self, home, monkeypatch):
+        def raiser(task_name, run=None):
+            raise fleet.UnsupportedPlatformError("posix stub")
+        monkeypatch.setattr(fleet.PLATFORM, "autoclean_task_query", raiser)
+        _, ok, msg = fleet._doctor_check_autoclean()
+        assert ok and "skipped" in msg
+
+
+class TestParser:
+    def test_autoclean_parses(self):
+        args = fleet.build_parser().parse_args(
+            ["autoclean", "--ttl-hours", "12", "--expire-tombstones-hours", "72",
+             "--dry-run"])
+        assert args.ttl_hours == 12.0
+        assert args.expire_tombstones_hours == 72.0
+        assert args.dry_run is True
+
+    def test_init_autoclean_flags_parse(self):
+        args = fleet.build_parser().parse_args(
+            ["init", "--autoclean", "--autoclean-interval-hours", "4"])
+        assert args.autoclean is True and args.autoclean_interval_hours == 4
