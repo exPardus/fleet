@@ -74,3 +74,5 @@ The mutable cursor against the immutable contract `docs/PLAN.md`. A resuming man
 | M-D | 2.1.212 contract rehome | dispatched | md-contract working (transient daemon, 8th pin catch) | 2026-07-17 |
 | M-D | claim-nonce spec slice | pending | gated on md-contract merge (adjudication item 4); build gated on operator ratification | 2026-07-17 |
 | M-D | shipped-code defects (handoff dispatch no-hooks, autoclean ownership predicate) | pending | from design gate; after md-contract merge | 2026-07-17 |
+| M-D | ulparser MERGED to fleet-impl | done | 2 fix waves (C1 anchor; N2 3.10-floor) + final gate merge verdict 424b668; post-merge unit 1080/1080; FLEET_LIVE deferred to contract merge (fixed pins live there) | 2026-07-17 |
+| M-D | contract rehome waves | in-review | M1-M5 + ND1-3 disposed (1110/1110, pins 6/6); final re-review in flight | 2026-07-17 |
