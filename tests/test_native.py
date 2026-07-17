@@ -1659,14 +1659,25 @@ def _write_native_transcript(home, sid, records):
 
 
 # Real observed G7 evidence shape (spike/m0/VERDICTS.md transcript record
-# 201) -- binding fixture per task-6-brief.md.
+# 201) -- binding fixture per task-6-brief.md. N1 fix wave
+# (MD-ULPARSER-REVIEW-2026-07-17.md re-review): every real `assistant`
+# record carries a `timestamp` (re-reviewer checked 1545/1545 assistant
+# records across 12 real transcripts) -- record 201's own timestamp is the
+# corroborated G7 instant, 2026-07-13T22:32:01.933Z (VERDICTS.md:428-436,
+# :441-445). Included here so the default fixture exercises the
+# PRODUCTION anchor path, not the fallback. LIMIT_RECORD_NO_TIMESTAMP
+# below is the explicit fixture for the (defensive-only, N3) missing-
+# timestamp case.
 LIMIT_RECORD = {
     "type": "assistant",
     "message": {"model": "<synthetic>", "role": "assistant",
                 "content": [{"type": "text",
                              "text": "You've hit your session limit — resets 4:40am (Asia/Qyzylorda)"}]},
     "error": "rate_limit", "isApiErrorMessage": True, "apiErrorStatus": 429,
+    "timestamp": "2026-07-13T22:32:01.933Z",
 }
+
+LIMIT_RECORD_NO_TIMESTAMP = {k: v for k, v in LIMIT_RECORD.items() if k != "timestamp"}
 
 
 class TestTranscriptLimitScan:
@@ -1674,7 +1685,12 @@ class TestTranscriptLimitScan:
         t = _write_native_transcript(tmp_path, SID, [{"type": "user"}, LIMIT_RECORD])
         is_limit, reset_at, kind = fleet.transcript_limit_scan(SID, transcript_path=t)
         assert is_limit is True
-        assert reset_at is None  # observed text is local-format, not ISO
+        # N1 fix wave: LIMIT_RECORD now carries its real corroborated
+        # timestamp, so this exercises the production anchor path (C1) --
+        # exact instant, no clock freezing needed (that determinism *is*
+        # the regression guard: it fails if the anchor ever reverts to
+        # wall-clock time).
+        assert reset_at == "2026-07-13T23:40:00Z"
         assert kind == "session_5h"
 
     def test_iso_reset_in_text_is_parsed(self, native_home, tmp_path):
@@ -1697,6 +1713,89 @@ class TestTranscriptLimitScan:
     def test_non_synthetic_shapes_do_not_park(self, native_home, tmp_path, rec):
         t = _write_native_transcript(tmp_path, SID, [rec])
         assert fleet.transcript_limit_scan(SID, transcript_path=t)[0] is False
+
+
+class TestTranscriptLimitScanAnchoring:
+    """C1 fix wave (MD-ULPARSER-REVIEW-2026-07-17.md): the horizon must
+    anchor to the TRANSCRIPT RECORD's own timestamp, not to the wall clock
+    at parse/scan time. `limited` is sticky (fleet.py _NATIVE_STICKY) so a
+    park's horizon is derived exactly once -- anchoring to "now" meant a
+    scan that first observes the park after the quoted local reset had
+    already passed rolled the horizon a full day late, permanently.
+
+    These fixtures pin a `timestamp` field on the message record (LIMIT_RECORD
+    carries its real corroborated one by default -- N1 fix wave, every real
+    `assistant` record has one) so the expected output is a fixed constant --
+    no `datetime.now` freezing needed anywhere. That is the regression
+    guard: if the anchor ever reverts to wall-clock time, these tests fail
+    no matter what instant they happen to run at.
+
+    N3 fix wave: a missing or unparseable timestamp is no longer a
+    wall-clock guess either -- it parks a null horizon, the same
+    conservative outcome as an unknown tz. See
+    test_missing_timestamp_parks_null_horizon /
+    test_garbage_timestamp_parks_null_horizon below.
+    """
+
+    def _record(self, timestamp):
+        rec = json.loads(json.dumps(LIMIT_RECORD))
+        rec["timestamp"] = timestamp
+        return rec
+
+    def test_anchors_to_message_instant_same_evening(self, native_home, tmp_path):
+        # The real corroborated G7 timeline (VERDICTS.md:428-436): 429 hit
+        # at 2026-07-13T22:32:01.933Z, message "resets 4:40am
+        # (Asia/Qyzylorda)". True reset instant is 2026-07-13T23:40:00Z --
+        # the actual resume landed 8 minutes later, at 23:48:10Z.
+        rec = self._record("2026-07-13T22:32:01.933Z")
+        t = _write_native_transcript(tmp_path, SID, [rec])
+        is_limit, reset_at, kind = fleet.transcript_limit_scan(SID, transcript_path=t)
+        assert is_limit is True
+        assert reset_at == "2026-07-13T23:40:00Z"
+        assert kind == "session_5h"
+
+    def test_anchors_correctly_even_when_scanned_a_day_late(self, native_home, tmp_path, monkeypatch):
+        # C1's exact repro (review §1): if the anchor were still wall-clock
+        # time, scanning this record long after 23:40Z would roll the
+        # horizon forward a full day (2026-07-14T23:40:00Z, WRONG). Force
+        # datetime.now to a moment 09:00 local the NEXT morning -- the
+        # scanner must still use the record's own timestamp and produce
+        # the correct 2026-07-13T23:40:00Z, proving `now` is never
+        # consulted when the record has a valid timestamp.
+        real_datetime = fleet.datetime
+
+        class _FrozenLate(real_datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return real_datetime(2026, 7, 14, 4, 0, 0, tzinfo=timezone.utc)
+
+        monkeypatch.setattr(fleet, "datetime", _FrozenLate)
+        rec = self._record("2026-07-13T22:32:01.933Z")
+        t = _write_native_transcript(tmp_path, SID, [rec])
+        is_limit, reset_at, kind = fleet.transcript_limit_scan(SID, transcript_path=t)
+        assert is_limit is True
+        assert reset_at == "2026-07-13T23:40:00Z"
+
+    def test_missing_timestamp_parks_null_horizon(self, native_home, tmp_path):
+        # N3 fix wave: no `timestamp` (LIMIT_RECORD_NO_TIMESTAMP) ->
+        # _record_time returns None -> the local-format branch is never
+        # resolved against the wall clock -- reset_at stays None, a
+        # conservative null-horizon park (never a guessed, possibly
+        # 24h-wrong instant).
+        t = _write_native_transcript(tmp_path, SID, [LIMIT_RECORD_NO_TIMESTAMP])
+        is_limit, reset_at, kind = fleet.transcript_limit_scan(SID, transcript_path=t)
+        assert is_limit is True
+        assert reset_at is None
+        assert kind == "session_5h"
+
+    def test_garbage_timestamp_parks_null_horizon(self, native_home, tmp_path):
+        # N3: an unparseable `timestamp` is exactly as anchor-less as a
+        # missing one -- same null-park outcome, never a wall-clock guess.
+        rec = self._record("not-a-timestamp")
+        t = _write_native_transcript(tmp_path, SID, [rec])
+        is_limit, reset_at, kind = fleet.transcript_limit_scan(SID, transcript_path=t)
+        assert is_limit is True
+        assert reset_at is None
 
     def test_missing_transcript_is_not_limit(self, native_home):
         assert fleet.transcript_limit_scan("no-such-sid")[0] is False
@@ -1768,6 +1867,24 @@ class TestLimitParkViaDiscriminator:
         monkeypatch.setattr(fleet.Path, "home", staticmethod(lambda: tmp_path))
         rec = seed_native_worker(native_home)
         _write_native_transcript(tmp_path, SID, [LIMIT_RECORD])
+        out = fleet.recompute_worker_native("w1", rec, [make_roster_entry(SID, status="idle")])
+        assert out["status"] == "limited"
+        assert out["limit_kind"] == "session_5h"
+        # N1 fix wave: LIMIT_RECORD now carries its real corroborated
+        # timestamp, so this goes through the full discriminator path
+        # (recompute_worker_native) on the PRODUCTION anchor -- exact
+        # instant, no clock freezing needed.
+        assert out["limit_reset_at"] == "2026-07-13T23:40:00Z"
+
+    def test_idle_no_outcome_limit_transcript_no_timestamp_parks_null_horizon(self, native_home, tmp_path, monkeypatch):
+        """N3 fix wave: a record with no `timestamp` (defensive-only per
+        N1 -- every real assistant record carries one) must never guess a
+        horizon off the wall clock. It still parks `limited` (the 429 gate
+        is unaffected), but the horizon stays null -- the conservative,
+        `--force-now`-recoverable outcome, same standard as an unknown tz."""
+        monkeypatch.setattr(fleet.Path, "home", staticmethod(lambda: tmp_path))
+        rec = seed_native_worker(native_home)
+        _write_native_transcript(tmp_path, SID, [LIMIT_RECORD_NO_TIMESTAMP])
         out = fleet.recompute_worker_native("w1", rec, [make_roster_entry(SID, status="idle")])
         assert out["status"] == "limited"
         assert out["limit_kind"] == "session_5h"
