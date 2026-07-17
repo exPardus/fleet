@@ -5,6 +5,7 @@
 **Owner:** Altai
 **Location:** `C:\proga\claude-fleet` (system-wide tool, own repo — never part of any managed project)
 **Target machine:** Windows 10, PowerShell, Git Bash present, Python via `py -3.13`, Claude Code CLI ≥ 2.1.207 (the pin-tested version; see §2).
+**Portability directive (operator, 2026-07-17) [PRESCRIPTIVE]:** everything must be multi-platform — Windows, macOS, and Linux. The Windows 10 machine above is the *reference* box, not the only target. New features ship with all-OS support through the platform adapter (invariant 8, §16), or with an explicit `UnsupportedPlatformError` seam plus a tracked gap — never with silent Windows-only assumptions. The goal of `docs/specs/portability.md` (identical behavior on Win/Linux/macOS, zero machine-specific content in git) is reaffirmed even though that spec's probe-matrix mechanics were superseded by the native pivot. Known gaps at v3, all in-scope to close: autoclean scheduling is schtasks-only (`_PosixPlatform` raises), attach-terminal is Windows-only, and interpreter resolution is `py -3.13`-shaped on Windows (POSIX shim `bin/hooks/run_py.sh` exists).
 
 ## 0. How to read this document
 
@@ -250,7 +251,7 @@ The v2 numbering is retained so old citations resolve; each invariant's post-piv
 5. **cwd-scoped resume → cwd-scoped dispatch.** Every dispatch runs with `cwd=<registered cwd>` (immutable after spawn); fork-steer inherits the transcript, and the daemon owns session storage.
 6. **single-writer registry** — unchanged (`fleet.lock`; F4 no-lock-across-subprocess shape added).
 7. **one-live-claude-per-session → one live session per name.** The pre-claim window, the fork-steer restamp, respawn's roster-verified stop, and the wedge-retry's verified cleanup (C1) all enforce it; the sid itself is single-writer to the daemon.
-8. **platform-adapter-only OS branching** — unchanged; the adapter surface is now attach-terminal + autoclean schtasks (the probe/kill/popen methods died with §6).
+8. **platform-adapter-only OS branching** — unchanged; the adapter surface is now attach-terminal + autoclean schtasks (the probe/kill/popen methods died with §6). Per the 2026-07-17 portability directive (header), the adapter's POSIX side must reach parity — cron/launchd for autoclean, a POSIX attach path — and a raising `_PosixPlatform` is a tracked gap, not an accepted end state; new adapter methods land with all three OS implementations or an explicit gap note.
 9. **one-state-many-views** — unchanged; registry + outcome store are the state, `status_snapshot()` the one derivation.
 
 New, carried from the pivot spec and enforced in code: **never-demote-unknown** (dead-suspected is advisory; nothing auto-respawns), **G9 epoch freeze** (an empty/failed roster never mass-demotes), **tombstone obligation** (every fleet-initiated stop writes its own outcome record), **no daemon/jobs file access** (CLI + `--json` only).
