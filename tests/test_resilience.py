@@ -636,6 +636,59 @@ class TestParseLimitSignalLocalFormat:
         reset_at, _ = fleet._parse_limit_signal("resets 12am (Asia/Qyzylorda)", now=now)
         assert reset_at == "2026-07-17T19:00:00Z"
 
+    def test_no_anchor_never_guesses_via_wall_clock(self):
+        # N3 fix wave: `now=None` (the record-timestamp anchor was
+        # unavailable) must not fall back to the wall clock for the
+        # local-format branch -- it stays unresolved (None), a
+        # conservative null-horizon park, never a possibly-wrong guess.
+        reset_at, kind = fleet._parse_limit_signal(
+            "session limit -- resets 4:40am (Asia/Qyzylorda)")
+        assert reset_at is None
+        assert kind == "session_5h"  # kind detection is independent of the anchor
+
+
+# ---------------------------------------------------------------------------
+# N2 fix wave (MD-ULPARSER-REVIEW-2026-07-17.md re-review): `_record_time`
+# must parse a trailing-Z timestamp WITHOUT relying on
+# `datetime.fromisoformat`'s native `Z` support, which is Python 3.11+
+# only. This repo's documented floor is 3.10 (docs/specs/portability.md
+# D9, SPEC.md's multi-platform directive) -- on 3.10, `fromisoformat("...Z")`
+# raises ValueError, which is exactly how C1 silently reverted in full
+# pre-N2 (bad timestamp -> None -> old wall-clock-guess behavior). These
+# tests run on this repo's dev interpreter (3.13, where the naive
+# `fromisoformat("...Z")` form would ALSO happen to work) so they cannot
+# themselves fail on a 3.10 floor violation -- they pin the trailing-Z
+# input/output contract so any future edit that reintroduces a
+# 3.11-only parse gets caught the moment a 3.10 CI job exists
+# (portability.md D9 recommends one), and so the intent is explicit in
+# the meantime, per the review's own closing suggestion.
+# ---------------------------------------------------------------------------
+
+class TestRecordTimeParsing:
+    def test_trailing_z_fractional_seconds(self):
+        # The exact real G7 evidence form (spike/m0/VERDICTS.md:441).
+        dt = fleet._record_time({"timestamp": "2026-07-13T23:48:10.741Z"})
+        assert dt == datetime(2026, 7, 13, 23, 48, 10, 741000, tzinfo=timezone.utc)
+
+    def test_trailing_z_whole_seconds(self):
+        dt = fleet._record_time({"timestamp": "2026-07-13T23:48:10Z"})
+        assert dt == datetime(2026, 7, 13, 23, 48, 10, tzinfo=timezone.utc)
+
+    def test_explicit_offset_still_parses(self):
+        dt = fleet._record_time({"timestamp": "2026-07-13T23:48:10+05:00"})
+        assert dt.utcoffset().total_seconds() == 5 * 3600
+
+    def test_naive_timestamp_assumed_utc(self):
+        dt = fleet._record_time({"timestamp": "2026-07-13T23:48:10"})
+        assert dt == datetime(2026, 7, 13, 23, 48, 10, tzinfo=timezone.utc)
+
+    @pytest.mark.parametrize("rec", [
+        {}, {"timestamp": None}, {"timestamp": 123}, {"timestamp": "garbage"},
+        {"timestamp": ""}, "not-a-dict", None,
+    ])
+    def test_garbage_returns_none(self, rec):
+        assert fleet._record_time(rec) is None
+
 
 class TestDoctorHookErrors:
     def test_no_log_passes(self, isolated_home):
