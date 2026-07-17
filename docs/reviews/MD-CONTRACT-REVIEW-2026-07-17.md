@@ -846,3 +846,474 @@ is reported (M4), and a commit that says `stop` when it means `rm` (M5).
 
 `VERDICT: fix-wave(M1, M2, M3, M4, M5, m1, m2, m3, m4, m5, N1, N2, N3)`
 `SPURIOUS-FIX: none`
+
+---
+---
+
+# RE-REVIEW — 2026-07-17 (wave 2)
+
+**Reviewer:** fleet worker `md-contract-review` (bg session)
+**Range:** `a71e7c4..e2ee7c5` — `eda3328` (fix: surface starved husk sweeps; classify stop; rm by roster id), `1407757` (test: branch on fleet's own rm classification), `e2ee7c5` (docs: correct the receipts; disposition table)
+**Machine:** Windows 10 Pro 19045, `claude 2.1.212`, `py -3.13`
+**Grep receipts pinned `# at e2ee7c5`** unless a line says otherwise.
+
+## RE-REVIEW VERDICT: fix-wave(ND-1, ND-2, ND-3)
+
+**All 13 findings FIXED. 0 NOT-FIXED, 0 REGRESSED, 0 SPURIOUS-FIX.**
+**3 new defects, all introduced by the fix wave itself: 1 MAJOR, 2 MINOR. 1 nit.**
+**Injections: 12 / 12 red** (my original 5, my 2 wave-1 green probes — both now red — and 5 new ones against the new code).
+**Suite: 1097 passed / 6 skipped** (was 1075; +22 tests) before and after every injection. **FLEET_LIVE pin: 6/6 green** (69.04s). **Tree clean.**
+
+This is a good fix wave. Every finding was fixed *as named*, each one is now pinned
+by a test that dies when the fix is reverted, and the two gaps I could only
+demonstrate by deleting code (Injections F and G) are the two the builder bound
+tests to first. The corrections to the findings doc go further than I asked: the
+count commands are now receipts in their own right, and the unverified-claim list
+became a numbered operator item. Nothing was fixed that was not broken.
+
+The three new defects are all the same shape, and it is the shape the brief
+predicted: **a fix applied at one call site and not at its twin.** ND-1 is the
+serious one — `m1`'s hardening went to both `rm` call sites and neither `stop` call
+site, in the commit that gave `stop` the very inference `m1` exists to make safe. I
+have a working repro.
+
+### Fix wave (ordered)
+
+1. **ND-1** (MAJOR) — pass `ref=rec.get("native_short_id")` at `_cmd_kill_native`'s stop call.
+2. **ND-2** (MINOR) — implement the `_daemon_alive()` fallback the pin's comment promises.
+3. **ND-3** (MINOR) — threshold the doctor note on a streak, not on the first deferral.
+4. **n1** (nit) — one line of the re-pasted §Q4 receipt is still hand-edited.
+
+---
+
+## Disposition of the wave-1 findings
+
+| # | finding | disposition | evidence |
+|---|---|---|---|
+| **M1** | starved sweep surfaces nowhere | **FIXED** | `_sweep_husks` → `(removed, deferred)`; `husks_deferred` rides the stamp (`:5051`), the `autoclean_run` event (`:5063`) and the summary line; `_doctor_check_autoclean` appends the note (`:5685`). Note-only, `errors` untouched, rc still 0 — exactly as named, and `test_deferral_is_not_an_error_and_does_not_flip_rc` pins the restraint. Injection F (wave 1: **green**) and new Injections F2/K now red. **See ND-3 for the threshold.** |
+| **M2** | §Q4 grep receipt hand-edited: 14 of 16 hits, `_sweep_husks` omitted | **FIXED** | Re-ran at the base ref: 16 hits. The doc now pastes 16, pinned to `c1277bd`, `# noqa: E731` restored; the audit table gained a bolded **4709** row (`_sweep_husks`, epoch-guarded, verdict "none" — matching my own independent audit) and a `6591` row. **See nit n1.** |
+| **M3** | `16/16`/`3/3` miscounted | **FIXED** | Re-derived every figure against the live log: `idle_exit`=**15**, of which `live_workers=0`=**15**; `upgrade`=**4** (`1 1 4 1`); `shutting down`=**19**; `daemon start`=**25**. All six match the doc. The count commands are now receipts, and the corrected prose names line 515 as the dropped upgrade whose aftermath it quotes. |
+| **M4** | `RM_TRANSIENT` provenance overstated | **FIXED, and then some** | Module docstring split by stub; `RM_TRANSIENT` tagged `[OBSERVED interactive 2026-07-17 manager session — NOT RE-OBSERVED HERE]`; the em-dash labelled a transcription choice, not evidence. My requested (c) landed as `TestUnknownMessageShapeFailsSafe` — the fail-safe guarantee is now contract, not an accident of structure — plus `test_transient_matches_regardless_of_dash_style` (5 dash styles) and `test_stream_and_case_do_not_matter`. My requested (d) landed as spec operator item **5**, which correctly generalises to the two other unverified claims I flagged ("rm does not revive the daemon" and "`claude agents --json` still answers"). |
+| **M5** | `stop` unclassified; spec's justification false at 2 of 5 call sites | **FIXED** | `_stop_native_session_status` added, sharing `_classify_native_cli_result`; `_stop_native_session` kept as its bool face. `_cmd_kill_native` reports `stop_outcome` verbatim, `'timeout'` is gone, and the spec now reads "…**was** left unchanged because 'callers re-check the roster'…" — the false claim is retracted, not quietly dropped. `test_kill_on_an_already_gone_sid_stamps_outcome_true` also pins the G10 tombstone on the gone path. **See ND-1.** |
+| **m1** | `gone` short-circuit is the one fail-unsafe direction | **FIXED as named** (on `rm`) | Both hygiene call sites pass the roster entry's own `id`; `test_sweep_passes_the_rosters_own_id_not_a_derived_ref` pins it with an `id` deliberately unequal to the derived prefix. Injection H red. Fallback verified independently — see **Surface 2**. **Not applied to `stop` — ND-1.** |
+| **m2** | pin samples the confound | **FIXED as named** | Test 5 branches on `"deferred (daemon-transient)" in a.stderr`. **See ND-2 and Surface 4.** |
+| **m3** | G12 column self-contradicts | **FIXED** | Both superseded items struck through and tagged `[SUPERSEDED …]`; the still-genuinely-UNOBSERVED third (transcript clearing) correctly left alone. Verdict untouched — no self-ratification. |
+| **m4** | test never asserted "still archives" | **FIXED** | `assert dest.exists() and any(dest.iterdir())`, with a journal seeded so there is something to move. |
+| **m5** | docstring miscites §Q3 | **FIXED** | Split: the full-uuid half is marked a receipt, the transient short-circuit "REASONING, NOT A RECEIPT … so it is untested". |
+| **N1** | spurious `rc=1`→`rc=0` | **FIXED** | |
+| **N2** | hyphen vs em-dash | **FIXED** | Em-dash everywhere, with the dash explicitly labelled a transcription choice. |
+| **N3** | `no-claude`/`error` glosses unpinned | **FIXED** | `TestRmOutcomeNotes` pins all four. Injection G (wave 1: **green**) now red. |
+
+**SPURIOUS-FIX: none.** I checked each fix against its finding: nothing was
+hardened on suspicion, no roster read changed, `_stop_native_session`'s bool face
+was preserved for its existing callers rather than rewritten, and the deferral was
+deliberately kept out of `errors` — the one place a fix could have over-reached
+into cry-wolf, and it did not.
+
+---
+
+# New defects
+
+## ND-1 — MAJOR: `m1`'s hardening went to both `rm` call sites and **neither `stop` call site** — in the commit that gave `stop` the inference `m1` exists to make safe.
+
+`eda3328` did two things at once. It taught `stop` that `gone` means success (M5),
+and it taught `rm` never to trust a *derived* ref for a `gone` verdict (m1). It did
+not join them up.
+
+`_rm_native_session_status` gained a `ref` parameter, and its new docstring states
+the hazard exactly right:
+
+> `ref` (m1 fix wave …) overrides the DERIVED short id with one the caller read
+> from the roster entry itself (the CLI's own `id` field). **This is the one
+> direction in which classifying `gone` as success could fail UNSAFE:** the `gone`
+> inference ("the sid already reached the desired end state") is sound only if the
+> ref was right, and `_native_job_ref` derives it by string-splitting rather than
+> reading it.
+
+`_stop_native_session_status` accepts the same `ref` parameter and points at that
+docstring:
+
+> `ref` overrides the derived short id -- see `_rm_native_session_status` for why
+> a caller holding the roster entry should pass the CLI's own `id` (m1).
+
+**Neither stop call site passes it** (`bin/fleet.py:3938-3942`, `:3955-3957`):
+
+```python
+    stop_outcome = "no-sid"
+    if sid:
+        stopped_ok, stop_outcome = _stop_native_session_status(sid, run=run,
+                                                               which=which)
+```
+
+So `fleet kill` derives `sid.split("-", 1)[0]`, and a ref the CLI rejects answers
+`No job matching` → `gone` → **success**.
+
+**The record has the CLI's own id in hand and it is never read.** `native_short_id`
+is a registry field — *"short id from --bg stdout (G6 fallback)"* (`bin/fleet.py:654`)
+— and `_cmd_kill_native` already holds the record it lives on.
+
+### Repro (run this session, `bin/fleet.py` @ `e2ee7c5`)
+
+A stubbed CLI that answers only to its own short id — exactly the drift `m1`'s fix
+exists to survive:
+
+```
+registry native_short_id (the CLI's own id) : 'zz9qk7xd'
+ref fleet actually used                     : ['aaaabbbb']
+fleet kill exit code                        : 0
+event interrupt_outcome                     : True
+registry status                             : dead
+stdout                                      : w1: killed
+
+THE SESSION WAS NEVER STOPPED -- the CLI only ever saw a ref it rejects.
+
+Contrast, same commit, the SWEEP path (m1 fix applied):
+  sweep rm ref used: ['zz9qk7xd']  <- the roster's own id. Correct.
+```
+
+Note the ref list has **one** entry: `gone` short-circuits before the full-sid
+retry, so the ref the CLI *would* have accepted is never tried. The two halves of
+one commit, on one machine, on one sid, disagree about which identifier to trust.
+
+**Failure scenario.** A future CLI changes the short-id format (lengthens it,
+disambiguates a collision, stops accepting the bare 8-char prefix — the same drift
+class `m1` is written against). `fleet kill w1` derives a ref the daemon rejects,
+reads `No job matching` as "already gone", prints `w1: killed`, exits **0**, stamps
+`interrupt_outcome=True`, and marks the worker dead. **The bg session keeps
+running, and fleet has just forgotten it exists** — untracked, unattributed, and
+skipped by every husk sweep forever because it is `status`/`pid`-live. That is the
+rogue-session class `_cleanup_wedged`'s own docstring calls a C1 CRITICAL, reached
+here through the front door.
+
+**Severity, argued honestly.** This is drift-conditional exactly like `m1` — at
+2.1.212 the derived ref is correct, so nothing is broken today, and I rated `m1`
+MINOR on that basis. ND-1 is MAJOR rather than MINOR for three reasons: the
+consequence is a live untracked session rather than a husk leak plus a false event;
+the pre-fix code was *fail-safe* on this input (rc=1, "investigate the session
+manually" — cry-wolf in the common case, but it would have caught this one), so the
+wave removed the only signal without making the true case detectable; and the fix
+is one line, using a mechanism that shipped in the same commit.
+
+**Named fix.** At `_cmd_kill_native`'s primary-sid stop, pass the id fleet already
+captured:
+
+```python
+        stopped_ok, stop_outcome = _stop_native_session_status(
+            sid, run=run, which=which, ref=rec.get("native_short_id") or None)
+```
+
+Retired sids keep the derived fallback — they have no `native_short_id`, exactly as
+`_native_job_ref`'s docstring says, and that is what the fallback is for. Pin it
+with the mirror of the test that already exists for the sweep
+(`test_sweep_passes_the_rosters_own_id_not_a_derived_ref` →
+`test_kill_stops_by_the_captured_short_id_not_a_derived_ref`).
+
+**One honest caveat on the fix.** `native_short_id` is not uniformly the CLI's own
+id today. Four of its six writes take it from `--bg` stdout (`:2307`, `:3325`,
+`:3834`, `:6123`); two derive it on a fast path (`:2235`, `:3793` —
+`fast_sid.partition("-")[0] or fast_sid[:8]`). So the fix is a strict improvement
+on 4 of 6 paths and a no-op on the other 2, not a cure. The residual derivation is
+worth its own look — it is the same "derive rather than read" pattern `m1`
+condemned, sitting one layer up.
+
+Also worth noting: `_native_job_ref`'s docstring still argues *against* this fix —
+*"derive it uniformly here rather than special-casing callers that do/don't have a
+stored `native_short_id`"*. That was a sound T12-era call, but `eda3328` introduced
+the special-casing anyway (the `ref` parameter) and gave the reason. The docstring
+is now stale and should say so.
+
+---
+
+## ND-2 — MINOR: the pin's `_daemon_alive()` fallback is documented but not implemented; the skip now rests entirely on the one string nobody has ever observed.
+
+`m2`'s fix is right in substance — branching on fleet's own in-process
+classification really is race-free where a later probe is not. But the comment
+promises a fallback the code does not contain
+(`tests/integration/test_native_pin.py:530-536`):
+
+> `_daemon_alive()` is retained for the diagnostic paste (what makes a RED
+> self-explaining) **and as the fallback when the archive path printed no
+> classification line at all.**
+
+Every use of `alive` in the file:
+
+```
+$ grep -n "alive" tests/integration/test_native_pin.py
+541:    alive, status_text = _daemon_alive()
+561:        f"--- claude daemon status (sampled after the fact; alive={alive!r}) "
+```
+
+Assigned once, interpolated into an assert message once. **It appears in no branch
+condition.** The skip is `if leftover and rm_deferred:` and nothing else. This is
+precisely the M1 defect in miniature: a comment asserting what the code does not do.
+
+**Why it bites.** `rm_deferred` matches the literal `"deferred (daemon-transient)"`,
+which fleet prints only when `_NATIVE_CLI_TRANSIENT_RE` matched — and that regex is
+built on a message **two waves have now failed to observe** (M4). If the real
+dead-daemon message does not contain `background service may be restarting`, the
+classifier correctly falls to `failed`, fleet correctly prints `deferred (failed)`,
+`rm_deferred` is `False`, and test 5 hard-asserts:
+
+> …still present in `claude agents --json --all` after archive, and fleet did NOT
+> report a daemon-transient deferral for the rm … **this is a genuine contract
+> regression, not the daemon-lifecycle confound**
+
+— on a machine whose daemon is simply down. That is the exact false-RED confound
+`m2` was written to kill, reintroduced and now conditional on an unverified string.
+The old `alive is False` check would have caught it. Fail-loud and test-only, so
+MINOR — but it is a live-tier RED that costs a wave to diagnose.
+
+**Named fix.** Implement the documented fallback:
+
+```python
+    rm_deferred = "deferred (daemon-transient)" in archive_err
+    rm_unclassified = "deferred (" in archive_err and not rm_deferred
+    alive, status_text = _daemon_alive()
+    if leftover and (rm_deferred or (rm_unclassified and alive is False)):
+        pytest.skip(...)
+```
+
+Fleet's classification stays primary; `_daemon_alive()` becomes the corroborating
+fallback for the shape nobody has seen. Also worth pinning the coupling: test 5
+matches an internal print format with nothing binding the two — rename
+`_rm_outcome_note`'s output and the pin breaks silently until the next live run.
+Export the literal as a constant both sides import, or assert the format in a unit
+test.
+
+---
+
+## ND-3 — MINOR: the doctor note fires on the **first** deferral, so it fires on the normal case — which is the cry-wolf pattern this whole branch exists to kill.
+
+`bin/fleet.py:5685-5692`:
+
+```python
+    if husks_deferred > 0:
+        extras.append(
+            f"last run DEFERRED {husks_deferred} husk(s) -- ...
+            f"roster and every pass retries them, but a permanently "
+            f"unreachable daemon starves this tier silently -- if this count "
+            f"persists across runs, check `claude daemon status`")
+```
+
+The branch's own evidence says a deferral is the **routine** state for this tier.
+§Q2, quoted into the spec as a hazard:
+
+> `fleet archive` and the `fleet autoclean` scheduled task only ever run against
+> workers that are *not* live, which is exactly the zero-live-worker state in which
+> the daemon has idle-exited. **Fleet's hygiene tier is the one code path most
+> likely to meet a dead daemon**
+
+So on a quiet machine with hourly autoclean, the daemon is idle-exited for most
+runs, every husk defers, and doctor carries this note on nearly every invocation.
+An operator habituates to it in a week — and then the permanently-starved case, the
+one M1 exists to surface, renders **identically**. M1's actual point was
+distinguishing routine deferral from starvation, and the fix surfaces the state
+without distinguishing the two.
+
+The note text concedes the gap itself: *"if this count persists across runs"*. The
+stamp holds **one** run (`bin/fleet.py:5050-5053` — a flat dict, overwritten each
+pass, no history), so doctor cannot see persistence, and neither can an operator
+reading doctor's output. The note asks the reader to perform a correlation the data
+it is printed from cannot support.
+
+**The data now exists.** `eda3328` added `husks_deferred` to the `autoclean_run`
+event (`:5063`), and `events.jsonl` is append-only history.
+
+**Failure scenario.** Operator runs `fleet doctor` weekly. It has said "last run
+DEFERRED 2 husk(s)" every week for a month — normal, the machine is quiet. In week
+five the daemon breaks permanently. Doctor says "last run DEFERRED 47 husk(s)". The
+only difference is a number nobody was reading, in a note that has cried wolf 30
+times.
+
+**Named fix.** Make the note streak-aware. Either carry a counter in the stamp
+(`husks_deferred_streak`: increment when `husks_deferred > 0`, reset to 0 whenever
+a pass removes a husk or defers none), or have `_doctor_check_autoclean` read the
+last N `autoclean_run` events and count consecutive non-zero `husks_deferred`. Note
+only past a threshold (3 consecutive is a sane default — an hourly task, so ~3h of
+uninterrupted starvation), and put the streak in the text: *"deferred on the last 7
+consecutive runs (47 husks) — the daemon has not been reachable since <ts>"*. That
+is the sentence that distinguishes starvation from Tuesday. Keep it note-only:
+`ok=True` remains correct, per D4 and per `test_doctor_surfaces_a_starved_sweep`.
+
+---
+
+# nit
+
+- **n1** — the corrected §Q4 receipt (M2) is *still* not a paste. Line 6858 is
+  printed with 8 leading spaces; the file has 4 (line 6182, its twin, genuinely has
+  8 — the indentation was copied across). 15 of 16 lines are byte-identical:
+  ```
+  $ git show c1277bd:bin/fleet.py > /tmp/fleet_base.py
+  $ diff <(grep -n '_fetch_agents_roster(|"agents", "--json"' /tmp/fleet_base.py) <doc block>
+  16c16
+  < 6858:    roster_fetch = lambda: _fetch_agents_roster(which=which, run=run)  # noqa: E731
+  ---
+  > 6858:        roster_fetch = lambda: _fetch_agents_roster(which=which, run=run)  # noqa: E731
+  ```
+  M2's substance is fixed — the omitted `4709` row is there, bolded, with the right
+  verdict — so this does not re-open it. But the fix for "hand-edited, not pasted"
+  is hand-edited, on the same line pair whose `# noqa` suffix was mangled the first
+  time. Re-paste the block from a real terminal.
+
+---
+
+# The brief's four attack surfaces
+
+## Surface 1 — M5 stop classification: does already-gone mask a NOT-gone? Does the tombstone still get written?
+
+**Masking: YES — see ND-1** (MAJOR, repro'd). The mechanism is a ref the CLI
+rejects, not sid reuse or a stale roster id:
+
+- **Stale roster id — not reachable.** `_cmd_kill_native` never reads the roster; it
+  works from the registry record. There is no roster id to go stale.
+- **Name collision — already guarded.** The `other_current_sids` check
+  (`:3930-3934`) skips any retired sid matching another worker's live `session_id`
+  and says so, explicitly for the corrupted-registry case.
+- **Sid reuse — not applicable.** G10's respawn reuses a `sessionId` under a *new
+  pid*; the ref stays valid, so `stop` still targets the right job.
+- **Ref mismatch — the live one.** Prefix-derivation cannot model any short-id
+  scheme that is not "first hyphen segment". This is ND-1.
+
+**Tombstone: intact on every path. Verified, not assumed.**
+`write_tombstone_outcome(name, sid, "killed")` (`:3971`) sits *before* the registry
+commit and is unconditional on `stopped_ok` — the classification change cannot
+reach it. `_archive_move_and_rm` is likewise still called *after* `archived_at` +
+`append_event("archived")` are committed. Both are now pinned rather than
+incidental: `test_kill_on_an_already_gone_sid_stamps_outcome_true` asserts the
+`killed` outcome record on the gone path, and
+`test_transient_rm_reports_retryable_and_still_archives` finally asserts `dest` has
+content (m4). The one hole is pre-existing and unchanged: `sid is None` → no
+tombstone, `stopped_ok=True`, `stop_outcome="no-sid"`.
+
+## Surface 2 — m1 rm-by-roster-id: does the target fall back sanely when the roster entry is absent?
+
+**YES. Verified across every malformed shape, this session:**
+
+```
+entry ABSENT (dead daemon / stale snapshot)  -> rm ref ['aaaabbbb']   # derived fallback
+entry present, NO `id` key                   -> rm ref ['aaaabbbb']
+entry present, id=None                       -> rm ref ['aaaabbbb']
+entry present, id='' (empty)                 -> rm ref ['aaaabbbb']
+entry present, id=12345 (non-str)            -> rm ref ['aaaabbbb']
+entry present, id='realid8'                  -> rm ref ['realid8']    # the CLI's own id
+```
+
+The `isinstance(entry_ref, str) and entry_ref` guard covers absent / missing-key /
+None / empty / non-str, and `_archive_move_and_rm` additionally guards
+`isinstance(entry, dict)` for the entry itself. Absent entry → `ref=None` → derived
+ref → exactly the pre-`m1` behaviour, which is the correct floor: `m1` was never a
+claim that the derived ref is *wrong* today, only that a `gone` verdict should not
+*rest* on it when better is available. Where nothing better is available, the
+fallback is the honest answer. No new defect. `_sweep_husks` cannot hit the absent
+case at all — it iterates the roster payload, so an entry always exists.
+
+## Surface 3 — the new deferral surfaces: does doctor actually go non-green? Is the threshold sane?
+
+**Non-green: NO — and that is correct, by design, and is what I named.** Every
+return in `_doctor_check_autoclean` is `("autoclean", True, …)`; the check is
+note-only per `docs/specs/autoclean.md` D4 (*"Never turns doctor red — a missing
+task is a choice, not broken plumbing"*), and turning it red would contradict the
+branch's own finding that a transient daemon is normal. My wave-1 named fix asked
+for `extras`, which is what shipped, and `test_doctor_surfaces_a_starved_sweep`
+pins `ok is True` with the comment "still note-only, never red". The note **is**
+visible by default — `cmd_doctor` prints one `[PASS]`/`[FAIL]` line per check with
+its message, so there is no `-v` to forget.
+
+**Starved sweep, injected — the surface works end to end:**
+
+| surface | before the wave | at `e2ee7c5` |
+|---|---|---|
+| run stamp | `husks_removed=0`, no deferral field | `"husks_deferred": 1` |
+| `autoclean_run` event | `husks_removed=0` | `husks_deferred=1` |
+| summary line | `husks_removed=0 … errors=0` | `husks_removed=0 husks_deferred=1 …` |
+| `fleet doctor` | `task installed; last run 0.3h ago` | `…; last run DEFERRED 1 husk(s) -- …` |
+| exit code | 0 | 0 (deliberate — `test_deferral_is_not_an_error_and_does_not_flip_rc`) |
+
+**Threshold: NOT sane — ND-3.** `> 0` fires on the normal case.
+
+## Surface 4 — pin 1407757: does it still test the DAEMON, or only fleet's bookkeeping?
+
+**It still tests the daemon.** Both assertions hit the vendor and both can fail
+when the vendor changes:
+
+- `assert not leftover` reads the **real** roster (`claude agents --json --all`)
+  after a **real** `claude rm` and asserts the sid is gone. That is vendor
+  behaviour, not fleet's.
+- The rm-taxonomy probe runs a **real** `claude rm <short>` and asserts rc=1 +
+  `no job matching`. It is the only thing in the tree that would catch the vendor
+  reverting `gone` to rc=0 and rotting the classifier's `gone` branch — the exact
+  "can it fail when the vendor changes again" test. It still hard-asserts.
+
+Fleet's own classification gates only the **skip**, which is the right place for
+it: "was the environment able to deliver this contract at all" is a different
+question from "did the CLI honour it", and fleet's in-process verdict answers the
+first without a race. The change also *narrows* one hole I did not flag in wave 1:
+under the old `alive is True` gate, a `cause=upgrade` restart (which the findings
+doc documents, 4/4 with live workers) would leave the daemon *alive* a second later
+while rm had genuinely failed mid-restart → false RED. The new gate skips it
+correctly.
+
+The residue is ND-2: the skip is keyed on an unverified string with no fallback,
+and on an internal print format with nothing binding the two.
+
+---
+
+# Injection table (wave 2)
+
+Every injection applied to `bin/fleet.py`, reverted with `git checkout --
+bin/fleet.py` immediately after; full `tests/` suite each time. **Final `git
+status`: clean.** Baseline **1097 passed, 6 skipped**.
+
+| # | path broken | result | note |
+|---|---|---|---|
+| A | `_NATIVE_CLI_TRANSIENT_RE` → never matches | 🔴 **9 failed** | was 6 in wave 1 |
+| B | `_NATIVE_CLI_GONE_RE` → never matches | 🔴 **13 failed** | was 7 |
+| C | classifier tie-break: `gone` before `daemon-transient` | 🔴 **1 failed** | |
+| D | `rm`'s transient retry short-circuit deleted | 🔴 **1 failed** | |
+| E | rc=0 fast path deleted | 🔴 **24 failed** | was 4 |
+| **F** | **entire `if deferred:` roll-up deleted** | 🔴 **1 failed** | **wave 1: GREEN (this was M1)** |
+| **F2** | **`husks_deferred` dropped from the run stamp** | 🔴 **2 failed** | new surface |
+| **G** | **`_rm_outcome_note` `no-claude`/`error` → `"XXX"`** | 🔴 **2 failed** | **wave 1: GREEN (this was N3)** |
+| **H** | **`_sweep_husks` reverts to the derived ref (m1 undone)** | 🔴 **1 failed** | new surface |
+| **I** | **`stop`: `gone` back to failure (M5 undone)** | 🔴 **6 failed** | new surface |
+| **J** | **unknown message shape → `gone` (fail-safe inverted)** | 🔴 **18 failed** | new surface |
+| **K** | **doctor drops the `husks_deferred` note (M1 surface gone)** | 🔴 **1 failed** | new surface |
+
+**12 / 12 red.** Both wave-1 green probes are now pinned. The blast radius of the
+original five grew (A 6→9, B 7→13, E 4→24), which is what a real pin tier looks
+like. Injection J is the one I care about most: inverting the fail-safe guarantee
+kills 18 tests, so M4's "diagnosis degrades, correctness does not" is now contract.
+
+**No injection stayed green.** I could not construct one against the new code that
+did — including against the ND-1 path, because ND-1 is not a broken line to revert:
+it is a call that was never made. That is precisely why it needed a repro instead.
+
+---
+
+# Receipts re-run (wave 2)
+
+| # | receipt | result |
+|---|---|---|
+| M3 counts | `grep -c` idle_exit / live_workers=0 / upgrade / live_workers values / shutting down / daemon start | ✅ **15 / 15 / 4 / `1 1 4 1` / 19 / 25** — all six match the corrected doc |
+| M2 grep | `grep -n '_fetch_agents_roster(...)'` @ `c1277bd` | ✅ **16 hits**, `4709` and `6591` both present in the doc's block and the table; ⚠️ 1 line's indentation still fabricated (**n1**) |
+| Suite | `py -3.13 -m pytest tests/ -q` | ✅ **1097 passed, 6 skipped** before and after all 12 injections |
+| Pin | `FLEET_LIVE=1 pytest tests/integration/test_native_pin.py -q` | ✅ **6 passed in 69.04s** on the rewritten test 5 |
+| ND-1 | `fleet kill` with a CLI that rejects the derived ref | ❌ **rc=0, `w1: killed`, `interrupt_outcome=True`, status=dead** — session never stopped |
+| Surface 2 | `_archive_move_and_rm` ref selection across 6 entry shapes | ✅ derived fallback in all 5 malformed/absent shapes |
+
+## Still unreachable — unchanged from wave 1
+
+Every dead-daemon receipt. I remain a `--bg` session, so the daemon cannot
+idle-exit while I run, and the only routes are banned (`claude daemon stop`) or not
+mine to take. The transient message's exact bytes, "rm does not revive the daemon",
+and "`claude agents --json` still answers with the daemon down" are all still
+manager reports. **The fix wave handled this correctly** — it did not quietly
+inherit them: the stub is tagged, the regex is deliberately narrow, the fail-safe
+fallback is now pinned, and spec operator item 5 asks for the capture by name. This
+is the right disposition for evidence nobody in the chain can reach; it is not a
+finding against the wave, and it should not block the merge. It should block
+*ratification* of G12's dead-daemon bullet, which is exactly what the spec now says.
+
+---
+
+`RE-REVIEW VERDICT: fix-wave(ND-1, ND-2, ND-3)`
