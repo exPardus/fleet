@@ -1,8 +1,13 @@
 # Three-tier command: interface / supervisor / workers — DRAFT PROPOSAL
 
-Status: **PROPOSAL, not ready-for-build.** Operator-originated (2026-07-16, mid-M-C
-conversation). Needs an adversarial design review before any milestone claims it —
-no author self-promotion; this draft was written by the acting supervisor session.
+Status: **PROPOSAL — RESTRUCTURE REQUIRED (dual-lens design gate, 2026-07-17).** Both
+independent reviews (`docs/reviews/THREE-TIER-DESIGN-REVIEW-2026-07-17-{break,spec}.md`)
+returned `restructure`; the binding merged list + sequencing is
+`docs/reviews/THREE-TIER-ADJUDICATION-2026-07-17.md`. Root cause: the claim protocol is
+keyed on the session id, which fork-steer (the draft's own beat mechanism) rotates —
+per-body claim nonce is a hard prerequisite, its own slice. Do NOT spec or build from
+this draft as written. Operator-originated (2026-07-16, mid-M-C conversation); this
+draft was written by the acting supervisor session (no author self-promotion).
 
 ## The operator's model (verbatim intent)
 
