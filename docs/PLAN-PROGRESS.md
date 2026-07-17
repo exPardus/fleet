@@ -69,3 +69,8 @@ The mutable cursor against the immutable contract `docs/PLAN.md`. A resuming man
 | M-D | token-efficiency clause (template v1.6 + spawn-etiquette G3 fix) | done | 6c33f08 | 2026-07-17 |
 | M-D | three-tier design review gate (dual-lens: break + spec) | pending | task files md-review-break/md-review-spec written; spawn held on pin verdict | 2026-07-17 |
 | M-D | UL horizon parser (local-format reset times) | pending | task file md-ulparser + worktree fleet-md-ulparser ready; spawn held on pin verdict | 2026-07-17 |
+| M-D | three-tier design gate (dual-lens) | done | both lenses RESTRUCTURE; adjudication de4177a (binding list, nonce = prerequisite slice); verdicts f1c0ed1/79a5f38 | 2026-07-17 |
+| M-D | ulparser build | done-pending-review | 3d55b51 on md/ulparser, 1063/1063 manager-verified; hostile review md-ulparser-review in flight | 2026-07-17 |
+| M-D | 2.1.212 contract rehome | dispatched | md-contract working (transient daemon, 8th pin catch) | 2026-07-17 |
+| M-D | claim-nonce spec slice | pending | gated on md-contract merge (adjudication item 4); build gated on operator ratification | 2026-07-17 |
+| M-D | shipped-code defects (handoff dispatch no-hooks, autoclean ownership predicate) | pending | from design gate; after md-contract merge | 2026-07-17 |

@@ -106,3 +106,19 @@ mc/pinfix merged (c63d7dd) after fresh-context re-reviewer returned merge-YES (4
 ## 2026-07-16T20:51:45Z CHECKPOINT inc=inc-20260716T130803Z-5325 sid=90bab65e-b4af-4c63-9c64-d4b4ea3d9037
 
 CAMPAIGN CLOSE: M-C COMPLETE, NATIVE-SUBSTRATE PIVOT DONE (M-0 through M-C all shipped). main = 187ce0f: SPEC v3 promoted spec-of-record (author mc-spec, reviewer fix-wave applied, manager promotion), section-6 legacy deleted (-7130 lines), autoclean shipped + schtasks LIVE every 6h, dispatch hardening (grace window + attach-verify/wedge-retry after CRITICAL caught pre-merge), 1054 tests + pin 6/6 at close. Knowledge loop closed: lessons #2026-07-17-mc (zombie-manager class, roster time-axis, 529 re-brief-lean, UL prod proof), INDEX, NEXT-SESSION rewritten (M-D candidate: three-tier command + per-body claim nonce). M-B era worktrees pruned; mc-* worktrees await worker auto-archive (the new feature owns it). Incidents survived: dual-supervisor fork (stopped, evidenced), 2 host deaths, plan-limit park+resume, 529 storm. Operator asks delivered: automatic cleanup (live), three-tier proposal (drafted), token-efficiency plan (in draft + template clause pending M-D).
+
+## 2026-07-17T01:12:00Z BOOT inc=inc-20260717T011200Z-f1d0 sid=8b0d1ec8-a531-4a43-9a01-3827d786d1c3
+
+fresh claim: no existing claim -- fresh claim
+
+## 2026-07-17T01:12:15Z CHECKPOINT inc=inc-20260717T011200Z-f1d0 sid=8b0d1ec8-a531-4a43-9a01-3827d786d1c3
+
+Succession: operator-authorized stop of stale body inc-20260716T130803Z-5325 (sid 90bab65e, bg session state=done, heartbeat 01:04:27Z). 'claude stop 90bab65e' verified; census clean (roster live=3, all mc-* husks; no second fleet-cwd session — no zombie evidence this time). sup-boot refuse->freeze (roster-gone+fresh-heartbeat, G9 heuristic blind to authorized stop); operator pre-ratified seize, INCARNATION cleared as delegate, fresh claim taken. G10: this record IS the old body's death record. New duties this incarnation: (1) operator directive — multi-platform (macOS+Linux) requirement into SPEC; (2) pin-gate re-run, claude 2.1.211->2.1.212; (3) M-D per docs/NEXT-SESSION.md: three-tier adversarial design review first, token clause, UL horizon parser.
+
+## 2026-07-17T01:20:28Z CHECKPOINT inc=inc-20260717T011200Z-f1d0 sid=8b0d1ec8-a531-4a43-9a01-3827d786d1c3
+
+M-D open. Done: SPEC portability directive (21f3e77), token-clause template v1.6 (6c33f08). PIN TIER RED on claude 2.1.212 -- test_3 fork-steer: hooks did not fire in forked sid ('settings did not survive --bg --resume'), test_5 downstream. Fleet passes --settings on resume (fleet.py:6198). Re-running full tier for flake check; if repro -> contract break, 8th live catch, fork-steer (idle send + resume-limited) broken at 2.1.212. Task files written: md-review-break, md-review-spec (three-tier gate), md-ulparser. Spawns held until pin verdict.
+
+## 2026-07-17T01:29:13Z CHECKPOINT inc=inc-20260717T011200Z-f1d0 sid=8b0d1ec8-a531-4a43-9a01-3827d786d1c3
+
+M-D wave dispatched (4 workers, all opus except ulparser=sonnet, bypass): md-contract (2.1.212 transient-daemon rehome, worktree md/contract, ceiling 4M, containment: temp FLEET_HOME + sid allowlist + daemon-stop ban), md-review-break + md-review-spec (three-tier dual-lens gate, docs-only on fleet-impl, briefs carry daemon-transiency evidence + today's succession-freeze evidence), md-ulparser (local-format limit horizons, worktree md/ulparser). ROOT CAUSE pinned before dispatch: 2.1.212 daemon origin=transient, idle-exit 5s (daemon.log receipts); rm/stop vs dead daemon fail without revival; agents --json reads stale roster.json; rm-with-live-daemon leaves --all entry. Pin tier = 8th live catch. Doctor pin-gate deliberately left RED until md-contract's pins go 6/6 (deviation from doctor-clean-before-spawn recorded: the spawns ARE the remedy).
