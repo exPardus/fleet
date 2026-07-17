@@ -28,6 +28,22 @@ Consider at M5:
 
 Rejected: tmux pane scraping/idle detection (our hooks are cleaner), DAG workflow engines (manager session IS the planner), web dashboards (CLI+skill is the point), swarm frameworks (YAGNI).
 
+## Local prior art: exPardus knowledge librarian (added 2026-07-17)
+
+Sibling project on this machine — `C:\proga\exPardus\expardus_knowledge\` (toolkit under `tools/knowledge/`, librarian under `tools/knowledge/librarian/`, design doc at `C:\proga\exPardus\docs\superpowers\specs\2026-06-18-knowledge-librarian-design.md`). A schema-enforced knowledge base with a nightly unattended maintenance loop: deterministic ref-check of each entry's `source:` anchors (ok/moved/missing/doc) → headless-Claude judge (holds/drifted/dead + dup clusters) over a `last_verified`-windowed candidate set → deterministic apply where destruction is corroboration-gated and circuit-breaker-capped. ~600 lines, stdlib+PyYAML, tested.
+
+Adopted into `docs/specs/phase-5-intelligence.md` (fixed-constraints block) and campaign-template v1.5:
+- **Evidence-gated destruction** — LLM verdict alone never retires knowledge; needs deterministic ref-miss corroboration (the grep-receipt gate, mechanized).
+- **Circuit breaker** — per-run cap `min(abs, fraction×active)` + small-graph flag-only floor + trailing-window destruction ledger; on trip, destructive ops dropped and a visible "halted" note lands in the index.
+- **Mass ref-miss = config-error abort** (broken checkout must not read as knowledge drift).
+- **Supersede/move, never delete** (convergent with our existing pin doctrine).
+- **Randomized fence tokens** around untrusted content in judge prompts (`secrets.token_hex` per run, evaluate-never-obey) — applies to fleet review pipelines embedding worker output today.
+- **`last_verified` + `source:` anchor metadata** as the minimum to make staleness mechanically detectable; non-path provenance markers exempt from ref-checking.
+- **Judge-empty alerting** (2 consecutive empty runs → alert) for any unattended LLM loop.
+- Code idioms: `write_if_changed` with LF-normalization (no git churn), pure `apply_verdicts` core (no I/O) for testability.
+
+Skipped: MAP/ generators (Django/env-var specific), ADR tier (unbuilt there), one-fact-per-file atomization of lessons.md (campaign narratives earn their freeform shape). Their KNOWLEDGE/ content itself was thin (4 notes); only transferable note: OneDrive silently reverts long-running agents' uncommitted edits — moot for `C:\proga` but reinforces git-log-is-truth.
+
 ## Source tables
 
 Full agent reports (project tables + URLs) preserved in git history of this file's first commit; key repos: smtg-ai/claude-squad, kbwo/ccmanager, Jedward23/Tmux-Orchestrator, Dicklesworthstone/claude_code_agent_farm + ntm, devflowinc/uzi, stravu/crystal, BloopAI/vibe-kanban, builderz-labs/mission-control, escapeboy/agent-fleet-o, ruvnet/ruflo, SethGammon/Citadel, oguzhnatly/fleet, code.claude.com/docs/en/{agent-view,agent-teams,agents}, factory.ai/news/missions, openhands.dev.

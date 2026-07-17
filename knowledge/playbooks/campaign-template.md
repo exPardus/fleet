@@ -1,5 +1,6 @@
 # Campaign template — the reusable fleet-campaign instrument
 
+**Version 1.5 (2026-07-17)** — imported prior art (not campaign scar): exPardus knowledge-librarian safety doctrine folded in — evidence-gated knowledge retirement + per-pass retirement cap (§2 corollaries), source-anchor + verified-date convention for code-asserting knowledge entries (§8). Full design adopted in `docs/specs/phase-5-intelligence.md`; provenance in `docs/PRIOR-ART.md` §"Local prior art".
 **Version 1.4 (2026-07-10)** — C4 spec-wave amendments, all one lesson: **an enumeration produced by inspection is wrong.** New §2 GREP-RECEIPT GATE (mandatory for any task specifying a change to code it does not own); authors may never promote their own spec (§3); re-reviews must carry a `SPURIOUS-FIX` verdict (§3); `[UNBUILT]` claims must be grep-verifiable at a stated commit, and prose claims *about* tags must be audited too (§2). See `lessons.md#2026-07-10-c4-spec-portability`.
 **Version 1.3 (2026-07-09)** — External dogfood #1 (`stupidbox`) amendments: `fleet respawn` ignores task-file edits — re-pass `--task @file` to change scope (§3 f); own-vs-foreign worker discipline on a shared fleet install before any bulk kill/clean (§1). See `lessons.md#2026-07-09-dogfood-stupidbox`.
 **Version 1.2 (2026-07-09)** — Campaign-2 amendments (first code campaign): merge-gate demo-skip + fixture-restore + revert-the-revert sequence (§5), git-log-is-truth verification checkpoint (§3 g), hook-source demo-test task convention (§2). See `lessons.md#2026-07-09-c2`.
@@ -78,6 +79,13 @@ Corollaries, each earned:
 - [ ] **Retire a stale pin by MOVING it**, not deleting it. A §12 regression moved from "pins unbuilt
       fixes" to "passes today" keeps protecting its fix; a deleted pin is a silent regression wearing
       a cleanup's clothes.
+- [ ] **Retirement is evidence-gated and capped** (v1.5, exPardus librarian doctrine). No knowledge
+      entry, pin, or `[UNBUILT]` tag is retired/moved on a verdict alone — a reviewer's, a judge
+      model's, or the manager's own reading. Retirement needs its deterministic receipt (grep at a
+      stated commit showing the anchor gone/moved), pasted where the retirement happens. Cap
+      retirements per pass (a sweep proposing to retire many entries at once is more likely a broken
+      premise than mass drift — C4's 7 false tags came from exactly one unswept assumption); over the
+      cap, flag for review instead of retiring.
 - [ ] **A fix wave's failure mode is a new defect one call site away.** Both C4 fix waves closed
       their target finding and broke an adjacent thing, in the same direction, for the same reason.
       Budget a re-review for every fix wave; never merge a fix wave on the author's own report.
@@ -186,6 +194,12 @@ The campaign's closing wave. Every item is required to close:
 
 - [ ] **`lessons.md` entry** — what worked / what stalled / prompt patterns, AND **≥1 concrete process change** (the anti-ritual gate; normally an amendment to THIS template). No process change = entry rejected.
 - [ ] **`INDEX.md` updated** with pointers to the new lessons.
+- [ ] **Anchor code-asserting entries** (v1.5): any new knowledge entry/pin whose claim is about code
+      (a function's behavior, a flag, a tag's truth) names its source anchor (`file:function` or
+      `file:line`-ish) and its verified-at date/commit, so a later mechanical ref-check (Phase 5
+      librarian, `docs/specs/phase-5-intelligence.md`) can grade it ok/moved/missing instead of a
+      human re-reading everything. Narrative lessons (what-happened prose) are exempt — do not
+      atomize them.
 - [ ] **`knowledge/projects/<project>.md` updated** — capture project-specific facts learned live (bugs, interpreter quirks, landmarks).
 - [ ] **Advance `docs/PLAN-PROGRESS.md`** — mark this campaign's rows `done` with commit/evidence refs; committed as part of this step.
 - [ ] **Amend THIS template with the campaign's friction** — bump the version line, date it, and fold in whatever this campaign proved that the template did not yet say. This is the mechanism that keeps the instrument alive.
