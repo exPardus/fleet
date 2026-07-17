@@ -346,3 +346,279 @@ mid-development run — all pass now; noted so nobody mistakes the cache for a l
 Per the M-C standard (*"fix waves minted new defects in 3 of 5 waves"*, `lessons.md:607`), the
 C1 fix wants the new-defect-hunt re-review — the anchor change moves the horizon for **every**
 parked worker, and the `--force-now` path must keep working when `timestamp` is absent or malformed.
+
+---
+---
+
+# RE-REVIEW — fix wave `ee68eb6` (2026-07-17)
+
+**Diff:** `19173ad..ee68eb6` — *fix(limits): anchor UL reset horizon to transcript record timestamp, not parse time*
+**Scope:** verify C1 / D5 / D6 + mandatory new-defect hunt on the new code.
+**Suite:** full `pytest -q` → **1068 passed, 6 skipped** (58.37s; was 1063+6 — the wave adds 5 tests, none removed).
+
+## RE-REVIEW VERDICT: `fix-wave(N2 blocking; N1 + N3 same wave)`
+
+**All three ordered findings are genuinely fixed** — C1's anchor is real, correct, and
+corroborated; this is not a paper fix. But the hunt turned up a **new defect that silently
+reverts C1 on a documented-supported platform** (N2), which is exactly the failure mode the
+wave was warned about. It is a one-line fix.
+
+| Finding | Verdict |
+|---|---|
+| **C1** — horizon anchored to parse time | ✅ **FIXED** |
+| **D5** — stale caller contract docstring | ✅ **FIXED** |
+| **D6** — tests can't catch C1 | ✅ **FIXED** |
+| **N1** — canonical fixture lacks the field the fix depends on; comment asserts a falsehood about the real record | 🆕 DESIGN-QUESTION |
+| **N2** — `fromisoformat("…Z")` is **3.11+**; violates the documented 3.10+ floor → **C1 silently reverts on 3.10** | 🆕 **CONFIRMED-BUG (blocking)** |
+| **N3** — bad-timestamp fallback reproduces C1's wrong horizon rather than a null park | 🆕 DESIGN-QUESTION |
+| SPURIOUS-FIX check on the wave | ✅ None — every line traces to an ordered finding |
+
+---
+
+## 1. C1 — **FIXED**
+
+**Receipts (`# at ee68eb6`):** `bin/fleet.py:1243-1260` (`_record_time`), `bin/fleet.py:1345`
+(`_parse_limit_signal("\n".join(parts), now=_record_time(rec))`).
+
+The §1 repro, re-run against the fixed code:
+
+```
+Message fired 2026-07-16 22:00 local (17:00Z). TRUE reset = 2026-07-16T23:40:00Z
+anchored horizon = 2026-07-16T23:40:00Z  OK
+  ^ same answer no matter when the scan runs -- `now` is not consulted at all.
+
+=== the real G7 case ===
+429 at 22:32:01.933Z -> horizon 2026-07-13T23:40:00Z  OK (== corroborated 23:40Z same-day)
+```
+
+**The overnight 23:40Z case now produces 23:40Z same-day, as mandated.** The defect is
+eliminated at the root rather than papered over: because the horizon is a pure function of the
+message instant, the entire class of "when did the scan run" bugs is gone — the 04:41-local and
+09:00-local rows that were `WRONG by +1 day` in the original review are now structurally
+impossible, not merely tested-against.
+
+**The wave took the review's `_parse_iso` warning.** `_record_time` uses
+`datetime.fromisoformat`, not `_parse_iso` — so the fractional-second trap (`…:01.933Z`) that
+would have made this fix a silent no-op was avoided. Good. (But see N2: `fromisoformat` carries
+its own version trap the wave did not clear.)
+
+**Verified the anchor is genuinely load-bearing, not decorative.** `_record_time` is only
+consulted at the limit branch (`:1345`), so there is no per-record cost on the tail walk.
+
+## 2. D5 — **FIXED**
+
+`bin/fleet.py:1277-1292` — the stale paragraph is gone, replaced with an accurate account that
+also records *why* (stickiness + the 24h roll). Grep-receipt for the stale claim across live
+code and specs:
+
+```
+grep -rn "usually None|realistic recovery|realistic resume path" bin/ docs/   # excl. docs/reviews, docs/superpowers/plans
+(no hits)
+```
+
+Only the historical plan doc (`docs/superpowers/plans/2026-07-15-native-pivot-mB-dispatch.md:1068`)
+still carries the old claim, which is correct — it's a frozen historical record, as the original
+review noted.
+
+## 3. D6 — **FIXED**
+
+`tests/test_native.py` gains `TestTranscriptLimitScanAnchoring` (4 tests) plus
+`test_idle_no_outcome_limit_transcript_anchors_to_record_timestamp`.
+
+**Yes — the e2e test is genuinely end-to-end, and I checked this specifically.** It is not a
+`_parse_limit_signal` unit test wearing an e2e costume:
+
+- `test_anchors_to_message_instant_same_evening` writes a real transcript file and calls
+  `fleet.transcript_limit_scan(SID, transcript_path=t)`, asserting the exact
+  `"2026-07-13T23:40:00Z"` — the full scan path.
+- `test_idle_no_outcome_limit_transcript_anchors_to_record_timestamp` goes one layer further
+  out, through `fleet.recompute_worker_native(...)` — the actual discriminator — asserting
+  `out["limit_reset_at"] == "2026-07-13T23:40:00Z"`. **This is the seam the original review
+  flagged as untested by construction.** It is now covered.
+- `test_anchors_correctly_even_when_scanned_a_day_late` monkeypatches `fleet.datetime.now` to
+  `2026-07-14T04:00Z` — a moment when the *broken* code returned `2026-07-14T23:40:00Z` — and
+  asserts `2026-07-13T23:40:00Z`. **This is a true regression guard**: it fails if the anchor
+  ever reverts to wall-clock. I confirmed the monkeypatch actually bites (`_next_local_reset_utc`
+  resolves `datetime` as a module global, so the patched subclass is what `now()` hits).
+
+The wave's design insight is worth crediting: with the anchor correct, the expected value is a
+**constant**, so most of these tests need no clock freezing at all. That is a stronger guard than
+the frozen-clock test the review asked for.
+
+---
+
+## 4. N2 — 🆕 **CONFIRMED-BUG (blocking): C1 silently reverts on the documented 3.10 floor**
+
+**The wave introduces a Python 3.11+ runtime requirement into a codebase whose spec pins a
+3.10+ floor.** `datetime.fromisoformat` only accepts a trailing `Z` from **3.11**. On 3.10 it
+raises `ValueError` — which `_record_time` catches and converts to `None`, falling back to the
+wall clock. That is C1, in full, restored, silently.
+
+**Receipts:**
+- `bin/fleet.py:1250-1256` (`ee68eb6`) — `dt = datetime.fromisoformat(ts)` / `except ValueError: return None`.
+- `docs/specs/portability.md:42` (**D9**) — *"Python floor: **3.10+**"*, and it reasons explicitly that *"Ubuntu 22.04 LTS ships Python 3.10 as `python3`"*.
+- `docs/SPEC.md:8` — **[PRESCRIPTIVE]** operator directive, dated **2026-07-17** (this wave's own day): *"everything must be multi-platform — Windows, macOS, and Linux … never with silent Windows-only assumptions."*
+- `CLAUDE.md:8` — *"Python is `py -3.13` (bare `python` resolves to 3.10)."*
+
+**Demonstrated on a real 3.10 interpreter on this machine, using `_record_time`'s verbatim logic
+and the real G7 record shape:**
+
+```
+interpreter: 3.10.1
+_record_time({'timestamp': '2026-07-13T22:32:01.933Z'}) -> None
+=> None on 3.10 => _parse_limit_signal falls back to datetime.now()
+=> C1 SILENTLY REVERTS IN FULL on the documented floor. No error, no signal.
+```
+
+Compare 3.13, same input → `2026-07-13 22:32:01.933000+00:00`. The failure is **total** (every
+real record, not an edge case), **silent** (no raise, no log, no operator signal), and
+**invisible to the suite** (tests run on 3.13 and pass). The 3.10-only degradation would surface
+as workers mysteriously parked a day long on Linux, with the exact symptom C1 described and a
+green test suite pointing away from it.
+
+**Note D9's own grep list** — it enumerates 3.10+-only features (`match`, `tomllib`,
+`datetime.UTC`, `removeprefix`, `zip(strict=)`, …) and asserts zero hits. `fromisoformat`-with-`Z`
+is a **3.11+** feature that list doesn't cover, so the existing guard could not have caught this.
+The wave's own docstring even says *"`datetime.fromisoformat` (3.11+)"* — the requirement was
+noticed and written down, but not checked against the floor.
+
+**Fix — one line, 3.7+ safe (verified on 3.10 above):**
+
+```python
+dt = datetime.fromisoformat(ts[:-1] + "+00:00" if ts.endswith("Z") else ts)
+```
+
+Fold into the same wave; add the `Z`-suffix form to D9's grep list so the floor is guarded going
+forward.
+
+## 5. N1 — 🆕 DESIGN-QUESTION: the canonical fixture lacks the field the fix depends on
+
+`tests/test_native.py` `LIMIT_RECORD` carries **no** `timestamp`, and the wave's new comment
+elevates that into a claim about reality:
+
+> *"LIMIT_RECORD (the pinned real G7 evidence shape) carries no `timestamp` field"*
+
+**That claim is empirically false.** I checked 12 real transcripts on this machine
+(`~/.claude/projects/*/*.jsonl`, 3,707 records):
+
+```
+record type                   with_ts /  total
+assistant                        1545 /   1545      <-- 100%
+user                              754 /    754      <-- 100%
+attachment                        368 /    368
+last-prompt                         0 /    185   <-- missing
+mode / permission-mode / ai-title   0 /    493   <-- missing
+file-history-snapshot               0 /     36   <-- missing
+```
+
+**Every `assistant` record carries a timestamp.** The records that lack one are pure bookkeeping
+types, none of which can pass the scanner's limit gate (`isApiErrorMessage` + 429/`rate_limit`,
+`bin/fleet.py:1341`) — the limit record is `type: "assistant"`.
+
+The fixture's omission is an artifact of the *doc quote*, not of the record: `spike/m0/VERDICTS.md:431`
+abridges record 201 to its `message` + error fields (note the mismatched braces — the envelope is
+elided), while the adjacent records quoted verbatim at `:441-445` all show `"timestamp":"…"`.
+
+**Why it matters** (the fix is still correct in production — this is about the tests):
+1. The **default** fixture exercises the *fallback* path, not the production path. The two
+   headline assertions (`test_native.py:1677`, `:1855`) are therefore shape-only when production
+   would give an exact instant — they are weaker than they need to be, and weaker than D6 asked.
+2. It writes a false fact about the real evidence into the suite, where the next maintainer will
+   read it as settled and may reason from it.
+3. **It interacts with N2.** The comment frames the wall-clock fallback as the normal path for
+   "the real record shape". If that were true, N2 would be harmless. It isn't — which is why the
+   fallback must be treated as genuinely exceptional.
+
+**Fix:** add `"timestamp": "2026-07-13T22:32:01.933Z"` to `LIMIT_RECORD`, promote the two
+shape-only assertions to exact instants, and keep the fallback tests on an explicitly
+timestamp-stripped copy (they already build records via a local `_record` helper, so this is cheap).
+
+## 6. N3 — 🆕 DESIGN-QUESTION: the fallback reproduces C1 rather than parking null
+
+When `_record_time` returns `None`, `_parse_limit_signal` falls back to `datetime.now()` — i.e.
+it re-enters exactly the code path this review classified as a **wrong horizon**. Run:
+
+```
+ts=garbage  anchor=None  -> reset_at=2026-07-17T23:40:00Z kind=session_5h   # wall-clock roll = C1
+```
+
+By this review's own accepted standard — *"a wrong horizon is worse than a null one"* — the
+fallback for an **unparseable** timestamp should arguably be a **null horizon** (`reset_at=None`
+→ conservative park → `--force-now`), not a confident guess. The wave chose "preserve pre-anchor
+behavior", which is a defensible read of *"falls back to the real wall clock (today's pre-anchor
+behavior)"*, and given N1's finding that real records always carry a timestamp, this path is
+defensive-only and rare.
+
+**But it stops being rare the moment N2 bites**: on 3.10, this fallback is the *only* path. N3 is
+what converts N2 from "the anchor is skipped" into "the anchor is skipped **and** a wrong horizon
+is confidently written". Fixing N2 makes N3 low-stakes again; fixing N3 too would make the 3.10
+degradation safe-by-default rather than wrong-by-default. **Recommend both** — they are
+independent one-liners and together they turn a silent 24h-wrong horizon into a visible null park.
+
+---
+
+## 7. New-defect hunt — attacks that FAILED (the new code held)
+
+**7.1 `_record_time` fuzz — 21/21 clean, never raised.** Every case returned `None` or an
+**aware** datetime (the invariant `_parse_limit_signal.astimezone()` depends on):
+
+```
+absent / None / empty / garbage / int / float / list / dict / bool / "Z" /
+"2026-13-45T99:99:99Z" / year-0 / epoch-str          -> None            ok
+"…933" (naive)        -> 2026-07-13 22:32:01.933+00:00                  ok  (assumed UTC)
+"…933+05:00"          -> 2026-07-13 22:32:01.933+05:00                  ok
+"…933-08:00"          -> 2026-07-14 03:32:01.933-08:00                  ok
+"2026-07-13" (date)   -> 2026-07-13 00:00:00+00:00                      ok
+nanosecond precision  -> 2026-07-13 22:32:01.933123+00:00               ok
+rec not a dict / None -> None                                           ok
+```
+
+The `isinstance(rec, dict)` and `isinstance(ts, str)` guards are load-bearing and correct —
+without them `.get` / `fromisoformat` would raise `AttributeError` / `TypeError`, neither caught
+by the bare `except ValueError`. **No input escapes as an exception**, so the scanner's
+never-raises contract holds.
+
+**7.2 "What tz is the timestamp in?" — handled.** Offset-aware inputs are preserved and converted
+correctly; naive inputs are assumed UTC (`dt.replace(tzinfo=timezone.utc)`), which matches the
+observed `Z`-suffixed reality. Verified the semantics end-to-end — the naive and `+05:00` forms
+denoting the *same instant* both yield the identical, correct horizon:
+
+```
+ts=naive       anchor=2026-07-13 22:32:01.933+00:00 -> reset_at=2026-07-13T23:40:00Z
+ts=offset+05   anchor=2026-07-14 03:32:01.933+05:00 -> reset_at=2026-07-13T23:40:00Z
+```
+
+**7.3 Does a bad timestamp crash the scanner? No.** Falls back cleanly (see N3 for the
+*semantics* of that fallback — the mechanism itself is sound and `is_limit` stays `True`, so a
+park still happens; only the horizon degrades).
+
+**7.4 Arithmetic overflow at `datetime.MAX` — safe.** `"9999-12-31T23:59:59Z"` anchors fine, then
+`candidate += timedelta(days=1)` overflows — but raises `OverflowError`, **not** `ValueError`,
+and is caught by `_next_local_reset_utc`'s blanket `except Exception` → `None`. Verified:
+`(None, 'session_5h')`. The blanket catch there is doing real work; the review notes the
+asymmetry (`_record_time` catches only `ValueError`) is nonetheless **correct as written**, since
+7.1 proves nothing else can escape its guards.
+
+**7.5 No regression in D1–D4.** The wave did not touch the regex, the 12-hour table, or
+`_next_local_reset_utc`'s DST handling; D2/D3/D4 stand exactly as filed. tz-data availability
+(D1) is unchanged and still incidental.
+
+**7.6 SPURIOUS-FIX check on the wave — none.** Every changed line traces to C1, D5, or D6. No
+speculative refactors, no unrelated cleanups, and the wave correctly declined to touch the
+follow-up findings it wasn't asked to fix.
+
+---
+
+## 8. Recommended wave (all one-liners)
+
+1. **N2 (blocking)** — `ts[:-1] + "+00:00" if ts.endswith("Z") else ts` before `fromisoformat`;
+   add the `Z`-suffix form to `portability.md` D9's grep list.
+2. **N1** — put `timestamp` on `LIMIT_RECORD`, promote the two shape-only assertions to exact
+   instants, keep fallback tests on a stripped copy, and correct the comment's claim about the
+   real record shape.
+3. **N3** — consider `reset_at=None` (conservative null park) when the timestamp is
+   present-but-unparseable, per "a wrong horizon is worse than a null one".
+
+**Ideally N2 lands with a test that would actually catch it** — a 3.10 CI job (`port-ci` is
+already spec'd in `portability.md:42`) or, cheaper, a direct unit test on `_record_time`
+asserting the `Z` form parses, which at least pins the intent even though it can't fail on 3.13.
