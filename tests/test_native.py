@@ -3934,7 +3934,14 @@ class TestCmdArchive:
         rc = fleet.cmd_archive(_archive_args(), run=_archive_fake_run(rc=1), which=lambda _: "claude")
         assert rc == 0
         assert fleet.load_registry()["workers"]["w1"]["archived_at"] is not None
-        assert "rm aaaabbbb... failed" in capsys.readouterr().err
+        # 2.1.212 contract change [PENDING-RATIFICATION]: rm failures are now
+        # reported as "deferred (<outcome>)" with the reason spelled out --
+        # rc=1 alone no longer means "failed" (it can mean already-gone, or a
+        # transient dead daemon). Evidence: docs/reviews/
+        # CLAUDE-2.1.212-CONTRACT-2026-07-17.md §Q3. This stub emits a bare
+        # rc=1 with no message, so it classifies as the unknown-failure case.
+        # Unchanged, and the point of this test: non-fatal, still archives.
+        assert "rm aaaabbbb... deferred (failed)" in capsys.readouterr().err
 
     def test_collision_suffixes_existing_archive_dir(self, native_home):
         fleet.archive_root().mkdir(parents=True, exist_ok=True)
