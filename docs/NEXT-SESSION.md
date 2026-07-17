@@ -1,36 +1,31 @@
-# Next session — after M-C (pivot COMPLETE, 2026-07-17)
+# Next session — after M-C (pivot COMPLETE, closed 2026-07-17)
 
-Previous handoff (M-C: deletion + SPEC v3, 2026-07-16) is superseded — fully executed. See `knowledge/lessons.md#2026-07-17-mc` for the campaign record.
+Previous handoff (M-C: deletion + SPEC v3) is superseded — fully executed and closed. Campaign record: `knowledge/lessons.md#2026-07-17-mc`. Supervisor journal has the blow-by-blow.
 
-## State
+## State (all verified at close)
 
-- **The native-substrate pivot is DONE: M-0, M-A, M-B, M-C all shipped.** `main` = `fleet-impl` @ the mc/pinfix merge (pushed). fleet.py 7378 lines (was 9345); 1054 unit tests + 6-pin FLEET_LIVE tier, all green at close; doctor 12+/12 PASS.
-- M-C delivered: 9 debt items; **autoclean** (`fleet autoclean`, `fleet clean --dead-only|--tombstones`, `fleet init --autoclean` schtasks install — **INSTALLED AND LIVE on this machine, every 6h**, doctor-monitored); supersession banners; §6 deletions (detached-Popen, probe-liveness, PID fields, stdout log pipeline, refuse_if_legacy — all grep-dead); dispatch hardening (grace window for the roster startup transient; attach-verify + verified single wedge-retry); **SPEC v3** (status at handoff time: see below).
-- Every merge passed adversarial+spec review pairs, fix waves, and re-reviews with new-defect hunts (fired 3/5 — see lessons).
+- **The native-substrate pivot is DONE: M-0, M-A, M-B, M-C shipped.** `main` = `fleet-impl` = `187ce0f`, pushed. fleet.py 7378 lines (was 9345); **1054 unit tests + 6-pin FLEET_LIVE tier green at close**; doctor all-PASS.
+- **`docs/SPEC.md` is v3, SPEC OF RECORD** (authored `mc-spec`, adversarial review fix-wave `30e2441` applied, manager-promoted — no self-promotion). v2.3 history intact in `docs/SPEC-v2-history.md`. The G-row contract stays `docs/specs/native-substrate.md` (pin-tested at 2.1.211; doctor pin-gate enforces re-runs on version bumps).
+- **Autoclean is LIVE on this machine**: schtasks `claude-fleet-autoclean` every 6h, `--fleet-home` pinned to `C:/proga/claude-fleet`, doctor-monitored. Tier 1 archives stale workers (24h TTL), tier 2 sweeps fleet-owned daemon husks (sid-based default-deny), tier 3 (tombstone expiry) default-OFF. `fleet clean` remains the only file deleter.
+- M-C also delivered: 9 debt items, supersession banners, §6 deletions (every class grep-receipted to 0), dispatch hardening — grace window (roster startup transient) + attach-verify/single-verified-wedge-retry (C1 double-launch caught pre-merge by the review gate).
+- Residual fleet: 5 idle `mc-*` workers + their `C:/proga/fleet-mc-*` worktrees — **leave them; autoclean retires the workers, then the worktrees are removable** (`git worktree remove` + branch delete; branches all merged).
 
-## SPEC v3 status
+## The job: pick and run M-D
 
-Drafted by `mc-spec` (branch `mc/spec`, 5 commits: v3 body 271 lines, v2.3 moved intact to `docs/SPEC-v2-history.md`, stale-corpus banners in ROADMAP/PLAN). Adversarial promotion review was in flight at the last checkpoint — **check the journal tail / mc/spec branch state before assuming it merged.** If the review returned PROMOTE and it merged: SPEC.md v3 is the spec of record. If not: finish that gate first; the reviewer prompt and rules (no self-promotion, MOVE-never-delete history) are in the journal.
+Priority-ordered candidates (operator signals from 2026-07-16 conversation embedded):
 
-## Open items (priority order)
+1. **Three-tier command** (`docs/specs/three-tier-command.md`, DRAFT-PROPOSAL — operator-originated: human-facing interface session / background supervisor-as-fleet-worker with scheduled beats / workers). Run an **adversarial design review first** (no build before the gate; the draft's own Hazards section is the review brief seed). Build deltas if ratified: `fleet sup-spawn`, `fleet init --supervisor-beat N` (reuse the autoclean schtasks plumbing + its N1 guard lessons verbatim), `NEEDS-OPERATOR` journal kind + interface-tier nag, **per-body claim nonce** (closes the zombie-manager class — a fork-session restart created a second live supervisor sharing claim+sid; the claim protocol is blind to it).
+2. **Token-efficiency clause** (operator ask): fold terse compressed-output contracts into `knowledge/playbooks/campaign-template.md` + `spawn-etiquette.md` task-brief boilerplate (tier-boundary messages only; code/commits/specs/review-verdicts stay full-precision). Cheap, do it alongside whatever else runs.
+3. **UL horizon-parser gap**: "resets 12am (Asia/Qyzylorda)" unparsed → null-horizon park needing `resume-limited --force-now`. Small scanner fix + test (the exact message text is in the journal and lessons).
+4. **Dogfood outward** (standing goal 5): a non-fleet campaign. Overdue — last external run was stupidbox 2026-07-09.
+5. Small/cosmetic backlog: retired-fork sessions sitting `blocked` in the agents menu (consider autoclean tier-2 stop-then-rm extension or file upstream); live-test marker-isolation verify (post-N1 guards likely close it — confirm and delete the open-defect note from M-B lessons); zombie transcript `c787a667*.jsonl` kept as evidence — delete when the claim nonce lands.
 
-1. **Three-tier command proposal** (`docs/specs/three-tier-command.md`, DRAFT) — operator-originated: human-facing interface session / background supervisor (a fleet worker with scheduled beats) / workers. Needs an adversarial design review before any build (M-D candidate). Includes the **per-body claim nonce** fix for the zombie-manager class (see lessons — a fork-session restart created a second live supervisor body sharing claim+sid; the claim protocol cannot see it).
-2. **UL horizon-parser gap**: "resets 12am (Asia/Qyzylorda)" not parsed → null-horizon park requiring `resume-limited --force-now`. Small fix + test in the transcript scanner.
-3. **Compressed output contracts at tier boundaries** (operator ask, token efficiency): fold a terse-output clause into campaign-template + spawn-etiquette task briefs (NOT a plugin prerequisite). Draft language in three-tier-command.md §hazards.
-4. **Live-test marker isolation** (open defect from M-B lessons): temp-home `fleet init` in live tests clobbered the real `~/.claude/fleet-home` marker once; post-N1 init guards the marker, but verify the pin suite path and add an explicit isolation fixture if any gap remains.
-5. **Dogfood outward** (standing goal 5): next campaign should be a non-fleet repo. External friction is the best defect report.
-6. Cosmetic/upstream: retired fork-predecessor sessions can sit `blocked` in the agents menu ("requires input" on a husk nobody will answer) — fleet stops them on discovery; consider an autoclean tier-2 extension (stop-then-rm for retired-sid blocked entries) or file upstream.
+## Standing rules (unchanged, they keep earning it)
 
-## Standing rules (unchanged)
-
-- CLAUDE.md binds (py -3.13, forward slashes in hooks, no Git-Bash `&`, views read-only).
-- Adversarial review of evidence AND code; new-defect hunt on every fix wave; grep-receipt gate on every enumeration; no author promotes its own spec.
-- Never trust a mocked `run=` test as proof a real CLI call works — the live pin tier has now caught production Criticals seven times.
-- Push `fleet-impl` + ff `main` at every green milestone. Supervisor GOALS.md binds the manager (frugality, beats, 300–500k handoff band).
-- One steer per worker turn until a supersede convention exists (two-message scope confusion, see lessons).
-
-## Cleanup owed (cheap)
-
-- Worktrees: `C:/proga/fleet-mc-*` (debt/autoclean/docs/delete/spec) removable after mc/spec merges (`git worktree remove` + branch delete); also stale `C:/proga/fleet-mb-*` and `C:/proga/claude-fleet-wt/c2` from earlier campaigns.
-- `mc-*` fleet workers: idle, will auto-archive via the live schtasks autoclean past 24h — no action needed (that's the feature).
-- Zombie transcript `c787a667*.jsonl` in the project dir: kept as incident evidence; delete when the per-body-nonce work lands.
+- CLAUDE.md binds (py -3.13; forward slashes in hook commands; no Git-Bash `&`; views read-only).
+- Adversarial+spec review pairs on every branch; **new-defect hunt on every fix wave** (fired 3/5 waves in M-C, including a reopened double-launch); grep-receipt gate on every enumeration; no author promotes its own spec.
+- Never trust a mocked `run=` test as proof a real CLI call works — the live pin tier has caught production Criticals **seven times**. Run it at every merge gate and on every `claude` version bump.
+- Roster/contract field-presence rules need a TIME AXIS — steady-state truths can be false during transitions (the M-C grace-window lesson).
+- One steer per worker turn (two-message scope confusion is real); phantom steers in your own vocabulary → suspect your own lineage first (fork-session zombie), event-timeline + process census + `claude stop`, keep the transcript.
+- During 529 storms: don't resume 100k-token subagent transcripts — re-brief a fresh lean agent; backoff 3m/10m/20m.
+- Push `fleet-impl` + ff `main` at every green milestone. Supervisor GOALS.md binds the manager (frugality, long beats, 300–500k handoff band).
