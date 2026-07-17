@@ -4380,8 +4380,18 @@ def _archive_move_and_rm(n: str, sid: str, retired: list, dest_dir: Path,
             print(f"fleet: {n}: skipping rm {s[:8]}... -- session live in roster",
                   file=sys.stderr)
             continue
-        ok = _rm_native_session(s, run=run, which=which)
-        print(f"fleet: {n}: rm {s[:8]}... {'ok' if ok else 'failed'}", file=sys.stderr)
+        ok, outcome = _rm_native_session_status(s, run=run, which=which)
+        if ok:
+            # 2.1.212 contract change [PENDING-RATIFICATION]: "gone" (rc=1
+            # "No job matching") is success -- the sid is off the roster,
+            # which is all this phase wanted. Evidence: findings §Q3.
+            print(f"fleet: {n}: rm {s[:8]}... {outcome}", file=sys.stderr)
+            continue
+        # Non-fatal by design (the tombstone is already committed): name WHY,
+        # so a retryable dead-daemon skip is not read as a broken archive. The
+        # husk stays on the roster and the autoclean husk tier retries it.
+        print(f"fleet: {n}: rm {s[:8]}... deferred ({outcome}) -- "
+              f"{_rm_outcome_note(outcome)}", file=sys.stderr)
 
 
 def _native_job_ref(sid: str) -> str:
@@ -4395,31 +4405,109 @@ def _native_job_ref(sid: str) -> str:
     return sid.split("-", 1)[0] if sid else sid
 
 
-def _rm_native_session(sid: str, run=subprocess.run, which=shutil.which,
-                       timeout: int = 30) -> bool:
-    """`claude rm <sid>` (G12 CONFIRMED): the archival primitive -- removes
-    the roster entry and its backing `~/.claude/jobs/<short-id>/` dir.
-    Never raises: an unresolvable `claude` executable or any subprocess
-    error both resolve to False, exactly like `_stop_native_session` --
-    the caller treats every rm as best-effort/non-fatal and reports it.
+# 2.1.212 contract change [PENDING-RATIFICATION]. Evidence:
+# docs/reviews/CLAUDE-2.1.212-CONTRACT-2026-07-17.md §Q3. `claude rm`'s exit
+# code is THREE-WAY AMBIGUOUS -- rc=1 means already-gone, dead-daemon, or a
+# real failure, and only the message tells them apart:
+#   rc=0  "removed <id>"                                            -> ok
+#   rc=1  "No job matching '<id>'"                                  -> gone
+#   rc=1  "couldn't remove <id> - the background service may be
+#          restarting. Try again in a moment."                      -> transient
+# `claude stop`'s gone-message carries an extra hint sentence ("Run 'claude
+# agents' to list running sessions.") but the same leading phrase.
+_NATIVE_CLI_GONE_RE = re.compile(r"no job matching", re.I)
+_NATIVE_CLI_TRANSIENT_RE = re.compile(r"background service may be restarting", re.I)
 
-    T12 fix wave (finding 2): `claude rm` requires the SHORT id -- converts
-    via `_native_job_ref` first; on a nonzero exit, retries once with the
-    full sid (belt-and-braces against a future CLI accepting full ids)."""
+
+def _classify_native_cli_result(proc) -> str:
+    """"ok" | "gone" | "daemon-transient" | "failed" for a finished `claude
+    rm`/`claude stop` subprocess.
+
+    "gone" is a SUCCESS-EQUIVALENT: the sid already reached the end state the
+    caller wanted. G12 recorded rm as idempotent on an already-gone id; at
+    2.1.212 that is refuted in FORM (rc=1, not rc=0) though not in EFFECT --
+    hence classify-by-message rather than by exit code.
+
+    "daemon-transient" is checked FIRST and deliberately wins a tie: the
+    daemon is transient (it idle-exits once no worker or client holds it
+    open, findings §Q4), so a retryable failure must never be downgraded to
+    "already clean" -- that would silently claim success for a husk that is
+    still on the roster."""
+    if proc.returncode == 0:
+        return "ok"
+    text = f"{proc.stdout or ''}\n{proc.stderr or ''}"
+    if _NATIVE_CLI_TRANSIENT_RE.search(text):
+        return "daemon-transient"
+    if _NATIVE_CLI_GONE_RE.search(text):
+        return "gone"
+    return "failed"
+
+
+def _rm_native_session_status(sid: str, run=subprocess.run, which=shutil.which,
+                              timeout: int = 30) -> tuple:
+    """(ok, outcome) for `claude rm <sid>` -- the archival primitive (G12):
+    removes the roster entry and its backing `~/.claude/jobs/<short-id>/` dir.
+    `outcome` is a `_classify_native_cli_result` verdict, plus "no-claude" /
+    "error" for the two never-ran cases; `ok` is True for "ok" and "gone".
+
+    Never raises: an unresolvable `claude` executable or any subprocess error
+    both resolve to (False, ...), exactly like `_stop_native_session` -- every
+    caller treats rm as best-effort/non-fatal and reports the outcome.
+
+    T12 fix wave (finding 2): `claude rm` requires the SHORT id -- converts via
+    `_native_job_ref` first; on an UNCLASSIFIED nonzero exit, retries once with
+    the full sid (belt-and-braces against a future CLI accepting full ids).
+    2.1.212 [PENDING-RATIFICATION]: the two message-classified outcomes
+    short-circuit that retry -- findings §Q3 confirms the full-uuid call
+    returns the same "No job matching", and a dead daemon rejects both refs
+    identically, so retrying only doubles the stall on a scheduled autoclean
+    run against a machine whose daemon has idle-exited."""
     try:
         exe = resolve_claude_executable(which)
     except ClaudeNotFoundError:
-        return False
+        return (False, "no-claude")
     refs = dict.fromkeys((_native_job_ref(sid), sid))
+    outcome = "failed"
     for ref in refs:
         try:
             proc = run([exe, "rm", ref], capture_output=True, text=True,
                       encoding="utf-8", errors="replace", timeout=timeout)
         except (OSError, subprocess.SubprocessError):
-            return False
-        if proc.returncode == 0:
-            return True
-    return False
+            return (False, "error")
+        outcome = _classify_native_cli_result(proc)
+        if outcome in ("ok", "gone"):
+            return (True, outcome)
+        if outcome == "daemon-transient":
+            return (False, outcome)
+    return (False, outcome)
+
+
+def _rm_native_session(sid: str, run=subprocess.run, which=shutil.which,
+                       timeout: int = 30) -> bool:
+    """Bool face of `_rm_native_session_status` for callers that only need
+    "is the sid off the roster now?" -- True for both a fresh removal and an
+    already-gone id."""
+    ok, _outcome = _rm_native_session_status(sid, run=run, which=which,
+                                             timeout=timeout)
+    return ok
+
+
+def _rm_outcome_note(outcome: str) -> str:
+    """Operator-facing gloss for a non-success `_rm_native_session_status`
+    outcome -- the difference between "retry will fix this" and "look at
+    this" (findings §Q2: fleet's hygiene tier is the code path most likely
+    to meet a dead daemon and the least able to revive it -- only a dispatch
+    revives it, and no hygiene pass may mint a billable session as a side
+    effect)."""
+    if outcome == "daemon-transient":
+        return ("the background daemon is down/restarting -- it is transient "
+                "at 2.1.212 and only a dispatch revives it; RETRYABLE, the "
+                "next pass sweeps this sid")
+    if outcome == "no-claude":
+        return "claude not on PATH"
+    if outcome == "error":
+        return "the rm subprocess could not be run"
+    return "unknown rm failure"
 
 
 def _archive_move(src: Path, dest: Path, name: str) -> None:
@@ -4746,6 +4834,7 @@ def _sweep_husks(dry_run: bool, run=subprocess.run, which=shutil.which) -> list:
     owned |= _events_sids()
 
     removed = []
+    deferred = []
     for entry in payload:
         if not isinstance(entry, dict):
             continue
@@ -4766,12 +4855,25 @@ def _sweep_husks(dry_run: bool, run=subprocess.run, which=shutil.which) -> list:
         if dry_run:
             print(f"husk: would rm {sid} ({display})")
             continue
-        if _rm_native_session(sid, run=run, which=which):
+        ok, outcome = _rm_native_session_status(sid, run=run, which=which)
+        if ok:
+            # 2.1.212 [PENDING-RATIFICATION]: "gone" means the roster snapshot
+            # this sweep read was merely stale -- the husk IS off the roster,
+            # so it counts as removed rather than crying wolf every run
+            # (findings §Q3: rm is not idempotent in FORM, only in EFFECT).
             append_event("husk_removed", display, session_id=sid)
-            print(f"husk: rm {sid} ({display})")
+            print(f"husk: rm {sid} ({display}) [{outcome}]")
             removed.append(sid)
         else:
-            print(f"husk: rm {sid} FAILED -- left in place", file=sys.stderr)
+            deferred.append(sid)
+            print(f"husk: rm {sid} ({display}) deferred ({outcome}) -- "
+                  f"{_rm_outcome_note(outcome)}", file=sys.stderr)
+    if deferred:
+        # Loud, non-fatal, and honest about the retry: the sweep's own return
+        # value counts only what it actually removed, so a caller reporting
+        # husks_removed=0 is never mistaken for "nothing to do" (findings §Q2).
+        print(f"husk: {len(deferred)} husk(s) left on the roster for the next "
+              f"pass: {', '.join(s[:8] for s in deferred)}", file=sys.stderr)
     return removed
 
 
