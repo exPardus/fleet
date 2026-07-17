@@ -1146,15 +1146,26 @@ def _parse_limit_signal(text: str, *, now: "datetime | None" = None):
     (M-D item 3) -- 12am/12pm are normalized to 00:00/12:00 (the classic
     12-o'clock bug), and the next occurrence at-or-after `now` of that
     wall-clock time is converted to UTC via `_next_local_reset_utc`. `now`
-    is keyword-only, defaulting to the real wall clock; its sole
-    production caller (`transcript_limit_scan`) passes the transcript
-    record's own timestamp (C1 fix wave) so the horizon anchors to when
-    the signal actually fired, not to whenever the scan happens to run."""
+    is keyword-only; its sole production caller (`transcript_limit_scan`)
+    passes the transcript record's own timestamp (C1 fix wave) so the
+    horizon anchors to when the signal actually fired, not to whenever the
+    scan happens to run.
+
+    N3 fix wave (MD-ULPARSER-REVIEW-2026-07-17.md re-review): `now=None`
+    (record timestamp absent or unparseable -- see `_record_time`) no
+    longer resolves the local-format branch against the real wall clock.
+    That fallback reproduced C1's exact defect -- a confidently wrong
+    horizon -- on every path where the anchor is unavailable, including
+    every Python-3.10 run pre-N2. Without a message-instant anchor the
+    local-format branch is left unresolved (`reset_at` stays `None`): a
+    conservative null-horizon park, same standard as an unknown tz or
+    missing tz-data. `--force-now` remains the recovery, as documented at
+    the `transcript_limit_scan` call site."""
     reset_at = None
     m = _LIMIT_RESET_RE.search(text or "")
     if m:
         reset_at = m.group(0)
-    else:
+    elif now is not None:
         m2 = _LIMIT_RESET_LOCAL_RE.search(text or "")
         if m2:
             hour_s, minute_s, ampm, tz_name = m2.groups()
@@ -1245,16 +1256,24 @@ def _record_time(rec: dict):
     or None on absence/garbage. Records carry fractional-second ISO-8601
     (e.g. "2026-07-13T23:48:10.741Z", spike/m0/VERDICTS.md:441) -- NOT
     `_parse_iso`'s strict `%Y-%m-%dT%H:%M:%SZ`, which rejects that
-    fractional form. `datetime.fromisoformat` (3.11+) parses it directly,
-    trailing `Z` included. A missing/non-string/unparseable timestamp
-    returns None -- the caller then falls back to the real wall clock,
-    same as before this anchor existed (C1 fix wave, MD-ULPARSER-REVIEW-
-    2026-07-17.md)."""
+    fractional form.
+
+    N2 fix wave (MD-ULPARSER-REVIEW-2026-07-17.md re-review): plain
+    `datetime.fromisoformat(ts)` only accepts a trailing `Z` from Python
+    **3.11** -- this repo's documented floor is 3.10 (docs/specs/
+    portability.md D9, SPEC.md's multi-platform directive). On 3.10 every
+    real (`Z`-suffixed) record raised ValueError here, silently falling
+    back to the wall clock and reverting C1 in full. Swap the trailing `Z`
+    for an explicit `+00:00` offset before parsing -- `fromisoformat` has
+    accepted numeric UTC offsets since 3.7, so this is floor-safe. A
+    missing/non-string/unparseable timestamp returns None; per N3 the
+    caller treats that as "cannot anchor" and parks a null horizon rather
+    than guessing via the wall clock."""
     ts = rec.get("timestamp") if isinstance(rec, dict) else None
     if not isinstance(ts, str):
         return None
     try:
-        dt = datetime.fromisoformat(ts)
+        dt = datetime.fromisoformat(ts[:-1] + "+00:00" if ts.endswith("Z") else ts)
     except ValueError:
         return None
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
@@ -1287,9 +1306,13 @@ def transcript_limit_scan(sid: str, transcript_path=None):
     self-corrected). Anchoring to the message instant instead yields the
     first occurrence at-or-after when the signal actually fired, which is
     the correct reset regardless of how late the scan runs. A missing or
-    unparseable `timestamp` falls back to the real wall clock (today's
-    pre-anchor behavior). Never raises: a missing/unreadable transcript or
-    an unparseable line both fall through to (False, None, None).
+    unparseable `timestamp` (N3 fix wave, same review doc) is never
+    guessed against the wall clock -- without a message-instant anchor,
+    the local-format branch stays unresolved and reset_at is None: a
+    conservative null-horizon park, same as an unknown tz or missing
+    tz-data (`resume-limited --force-now` is the recovery). Never raises:
+    a missing/unreadable transcript or an unparseable line both fall
+    through to (False, None, None).
 
     transcript_path may be given directly (the discriminator's own call
     site resolves it once via find_transcript_path(name, sid) and hands
