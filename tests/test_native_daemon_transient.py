@@ -2,10 +2,19 @@
 CLAUDE-2.1.212-CONTRACT-2026-07-17.md).
 
 Pins the failure-message taxonomy of `claude rm`/`claude stop` and the
-hygiene-path behavior it forces. Every expectation here is anchored to a
-receipt in that findings doc -- these are unit tests over injected `run`
-stubs whose stdout/stderr/returncode are copied VERBATIM from the live
-probes, so the taxonomy stays pinned without a live daemon.
+hygiene-path behavior it forces. These are unit tests over injected `run`
+stubs, so the taxonomy stays pinned without a live daemon.
+
+PROVENANCE, precisely (M4 fix wave, review MD-CONTRACT-REVIEW-2026-07-17.md).
+The earlier version of this docstring claimed every stub was "copied VERBATIM
+from the live probes". That was true of `RM_OK`, `RM_GONE` and `STOP_GONE`
+(re-run and confirmed byte-identical by the reviewer, receipts R1/R2/R3) and
+FALSE of the one stub that matters, `RM_TRANSIENT`: the dead-daemon state is
+unreachable from a --bg session (findings §Q2), so nobody in this evidence
+chain has ever held those bytes. The tell was in the same commit -- three
+transcriptions of that message, two different dashes. A verbatim capture
+cannot disagree with itself. Each stub below now carries its own provenance
+tag; do not relabel a manager report as a live probe.
 
 Why this file exists (findings §Q2/§Q3): `rc=1` from `claude rm` is
 three-way ambiguous at 2.1.212 -- already-gone (success-equivalent),
@@ -27,21 +36,40 @@ import fleet
 SID = "aaaa1111-1111-2222-3333-444455556666"
 
 # ---------------------------------------------------------------------------
-# Verbatim live receipts (findings doc Q3). Exit codes and message text are
-# copied from the probe output -- do not "tidy" them.
+# [OBSERVED 2.1.212 — live probe, findings §Q3] Exit codes and message text
+# copied from probe output -- do not "tidy" them.
 # ---------------------------------------------------------------------------
 RM_OK = types.SimpleNamespace(returncode=0, stdout="removed aaaa1111", stderr="")
 RM_GONE = types.SimpleNamespace(returncode=1, stdout="No job matching 'aaaa1111'", stderr="")
+STOP_GONE = types.SimpleNamespace(
+    returncode=1,
+    stdout="No job matching 'aaaa1111'. Run 'claude agents' to list running sessions.",
+    stderr="")
+
+# [OBSERVED interactive 2026-07-17 manager session — NOT RE-OBSERVED HERE]
+# The dead-daemon state is unreachable from a --bg session: the daemon cannot
+# idle-exit while a bg session holds it open, and reaching it needs either
+# `claude daemon stop` (banned -- machine-wide blast radius) or ending sessions
+# we do not own (findings §Q2). TWO independent waves have now failed to reach
+# it -- the builder and the reviewer, who is also a --bg session. The exact
+# bytes, the rc, and even the stream (stdout vs stderr) of this message are a
+# MANAGER REPORT, not a capture.
+#
+# This is why `_NATIVE_CLI_TRANSIENT_RE` deliberately matches ONLY the
+# dash-free middle phrase "background service may be restarting": the wording
+# and punctuation around it are exactly the parts nobody has verified. The
+# em-dash below is a transcription choice, NOT evidence -- the regex spans it
+# on neither side, and `test_transient_matches_regardless_of_dash_style` pins
+# that. If a drift ever escapes the regex anyway, the unknown shape falls to
+# `failed`, which is behaviourally identical to `daemon-transient` on every
+# axis that touches state -- pinned by
+# `TestUnknownMessageShapeFailsSafe`. Diagnosis degrades; correctness does not.
 RM_TRANSIENT = types.SimpleNamespace(
     returncode=1,
     stdout="",
     stderr="couldn't remove aaaa1111 — the background service may be "
            "restarting. Try again in a moment.")
 RM_UNKNOWN = types.SimpleNamespace(returncode=1, stdout="", stderr="kaboom")
-STOP_GONE = types.SimpleNamespace(
-    returncode=1,
-    stdout="No job matching 'aaaa1111'. Run 'claude agents' to list running sessions.",
-    stderr="")
 
 
 class TestNativeCliClassifier:
@@ -72,6 +100,66 @@ class TestNativeCliClassifier:
         # Retryable must never be downgraded to "already clean" -- that would
         # silently claim success for a husk that is still on the roster.
         assert fleet._classify_native_cli_result(both) == "daemon-transient"
+
+    def test_transient_matches_regardless_of_dash_style(self):
+        """M4: the transient message's exact bytes are a manager report, not a
+        capture -- so the regex must not depend on the parts nobody verified.
+        It matches only the dash-free middle phrase; every dash style, and the
+        wording around it, is free to drift."""
+        for dash in ("—", "-", "–", ":", ""):
+            proc = types.SimpleNamespace(
+                returncode=1, stdout="",
+                stderr=f"couldn't remove aaaa1111 {dash} the background service "
+                       f"may be restarting. Try again in a moment.")
+            assert fleet._classify_native_cli_result(proc) == "daemon-transient", (
+                f"dash style {dash!r} broke the match")
+
+    def test_stream_and_case_do_not_matter(self):
+        """Provenance again (M4): nobody has verified whether the transient
+        message lands on stdout or stderr. Both must classify."""
+        on_stdout = types.SimpleNamespace(
+            returncode=1, stdout="The Background Service May Be Restarting", stderr="")
+        assert fleet._classify_native_cli_result(on_stdout) == "daemon-transient"
+
+
+class TestUnknownMessageShapeFailsSafe:
+    """M4(c): the guarantee that makes the thin provenance survivable -- an
+    unrecognised message degrades DIAGNOSIS, never CORRECTNESS. Pinned as
+    contract rather than left as an accident of structure for the next
+    reviewer to rediscover."""
+
+    THIRD_SHAPE = types.SimpleNamespace(
+        returncode=1, stdout="",
+        stderr="El servicio en segundo plano se está reiniciando")  # locale drift
+
+    def test_unknown_shape_is_not_success(self):
+        ok, outcome = fleet._rm_native_session_status(
+            SID, run=lambda *a, **k: self.THIRD_SHAPE, which=lambda _: "claude")
+        assert (ok, outcome) == (False, "failed")
+
+    def test_unknown_shape_never_claims_a_removal(self, home):
+        """The state-touching axis: no husk_removed event, not counted in
+        `removed`, husk stays -- identical to daemon-transient."""
+        fleet.append_event("turn_started", "gone-worker", session_id=SID_HUSK)
+        run = _run_factory([_roster_dead(SID_HUSK)], self.THIRD_SHAPE)
+        removed, deferred = fleet._sweep_husks(False, run=run, which=lambda _: "claude")
+        assert removed == []
+        assert deferred == [SID_HUSK]
+        kinds = [json.loads(ln)["kind"]
+                 for ln in fleet.events_path().read_text(encoding="utf-8").splitlines() if ln]
+        assert "husk_removed" not in kinds
+
+    def test_unknown_shape_is_deferred_exactly_like_transient(self, home):
+        """Behavioural equivalence, stated as an assertion: the ONLY difference
+        a locale drift may cause is the operator-facing note text."""
+        fleet.append_event("turn_started", "gone-worker", session_id=SID_HUSK)
+        unknown = fleet._sweep_husks(
+            False, run=_run_factory([_roster_dead(SID_HUSK)], self.THIRD_SHAPE),
+            which=lambda _: "claude")
+        transient = fleet._sweep_husks(
+            False, run=_run_factory([_roster_dead(SID_HUSK)], RM_TRANSIENT),
+            which=lambda _: "claude")
+        assert unknown == transient == ([], [SID_HUSK])
 
 
 class TestRmNativeSessionStatus:
@@ -197,12 +285,17 @@ class TestHuskSweepAgainstDeadDaemon:
         is exactly the zero-live-worker state where the daemon has exited)."""
         fleet.append_event("turn_started", "gone-worker", session_id=SID_HUSK)
         run = _run_factory([_roster_dead(SID_HUSK)], RM_TRANSIENT)
-        removed = fleet._sweep_husks(False, run=run, which=lambda _: "claude")
+        removed, deferred = fleet._sweep_husks(False, run=run, which=lambda _: "claude")
         assert removed == [], "a transient rm failure must never count as removed"
+        assert deferred == [SID_HUSK]
         err = capsys.readouterr().err
         assert "daemon" in err.lower(), err
         assert "retr" in err.lower(), f"operator must be told it is retryable: {err}"
         assert SID_HUSK[:8] in err
+        # M1 / Injection F: the roll-up line itself. The reviewer deleted this
+        # block and the whole suite stayed green -- nothing observed it.
+        assert "left on the roster for the next pass" in err, (
+            f"the deferral roll-up must survive: {err}")
 
     def test_transient_husk_records_no_removal_event(self, home):
         fleet.append_event("turn_started", "gone-worker", session_id=SID_HUSK)
@@ -218,13 +311,129 @@ class TestHuskSweepAgainstDeadDaemon:
         run cry wolf about sids that are already clean."""
         fleet.append_event("turn_started", "gone-worker", session_id=SID_HUSK)
         run = _run_factory([_roster_dead(SID_HUSK)], RM_GONE)
-        removed = fleet._sweep_husks(False, run=run, which=lambda _: "claude")
-        assert removed == [SID_HUSK]
+        removed, deferred = fleet._sweep_husks(False, run=run, which=lambda _: "claude")
+        assert (removed, deferred) == ([SID_HUSK], [])
 
     def test_dead_daemon_sweep_does_not_raise(self, home):
         fleet.append_event("turn_started", "gone-worker", session_id=SID_HUSK)
         run = _run_factory([_roster_dead(SID_HUSK)], RM_TRANSIENT)
         fleet._sweep_husks(False, run=run, which=lambda _: "claude")  # must not raise
+
+    def test_sweep_passes_the_rosters_own_id_not_a_derived_ref(self, home):
+        """m1: the `gone`->success inference is sound ONLY if the ref was
+        right, and a durable husk_removed event rides on it. The roster entry
+        carries the CLI's own `id`; a derived split() guess would turn a
+        future ref-format drift into `No job matching` -> a false removal.
+        Here the entry's id deliberately differs from the derived prefix."""
+        fleet.append_event("turn_started", "gone-worker", session_id=SID_HUSK)
+        entry = _roster_dead(SID_HUSK)
+        entry["id"] = "cli0wnid"           # NOT SID_HUSK.split("-")[0]
+        calls = []
+        run = _run_factory([entry], RM_OK, calls=calls)
+        fleet._sweep_husks(False, run=run, which=lambda _: "claude")
+        rm_refs = [a[2] for a in calls if len(a) >= 3 and a[1] == "rm"]
+        assert rm_refs == ["cli0wnid"], (
+            f"sweep must rm by the roster's own id, got {rm_refs}")
+
+
+class TestStarvationIsVisible:
+    """M1: a permanently dead daemon starves the husk tier. Before this wave it
+    surfaced NOWHERE -- the stamp, the autoclean_run event, the summary line and
+    the exit code were byte-identical to a clean run with nothing to do
+    (`husks_removed=0 errors=0`, rc=0), and doctor read "task installed; last
+    run 0.3h ago" forever while the roster filled with husks. The reviewer
+    proved the gap by deleting the stderr roll-up with the full suite still
+    green: there was nothing outside a local variable to bind a test to.
+    These tests are that binding -- Injection F must now go red."""
+
+    def _autoclean_args(self, **kw):
+        base = dict(ttl_hours=None, expire_tombstones_hours=None, dry_run=False,
+                    fleet_home=None)
+        base.update(kw)
+        return types.SimpleNamespace(**base)
+
+    def test_deferred_husks_reach_the_run_stamp(self, home):
+        fleet.append_event("turn_started", "gone-worker", session_id=SID_HUSK)
+        run = _run_factory([_roster_dead(SID_HUSK)], RM_TRANSIENT)
+        fleet.cmd_autoclean(self._autoclean_args(), run=run, which=lambda _: "claude")
+        stamp = json.loads(fleet.autoclean_stamp_path().read_text(encoding="utf-8"))
+        assert stamp["husks_deferred"] == 1, (
+            f"a starved sweep must not be byte-identical to a clean one: {stamp}")
+        assert stamp["husks_removed"] == 0
+
+    def test_deferred_husks_reach_the_autoclean_run_event(self, home):
+        fleet.append_event("turn_started", "gone-worker", session_id=SID_HUSK)
+        run = _run_factory([_roster_dead(SID_HUSK)], RM_TRANSIENT)
+        fleet.cmd_autoclean(self._autoclean_args(), run=run, which=lambda _: "claude")
+        events = [json.loads(ln) for ln in
+                  fleet.events_path().read_text(encoding="utf-8").splitlines() if ln]
+        runs = [e for e in events if e.get("kind") == "autoclean_run"]
+        assert runs and runs[-1]["husks_deferred"] == 1, runs
+
+    def test_deferral_is_not_an_error_and_does_not_flip_rc(self, home):
+        """Deliberate: a transient daemon is routine. Pushing deferrals into
+        `errors` would turn it red on every quiet machine -- the exact
+        cry-wolf this branch set out to kill."""
+        fleet.append_event("turn_started", "gone-worker", session_id=SID_HUSK)
+        run = _run_factory([_roster_dead(SID_HUSK)], RM_TRANSIENT)
+        rc = fleet.cmd_autoclean(self._autoclean_args(), run=run, which=lambda _: "claude")
+        assert rc == 0
+        stamp = json.loads(fleet.autoclean_stamp_path().read_text(encoding="utf-8"))
+        assert stamp["errors"] == []
+
+    def test_clean_run_reports_zero_deferred(self, home):
+        fleet.append_event("turn_started", "gone-worker", session_id=SID_HUSK)
+        run = _run_factory([_roster_dead(SID_HUSK)], RM_OK)
+        fleet.cmd_autoclean(self._autoclean_args(), run=run, which=lambda _: "claude")
+        stamp = json.loads(fleet.autoclean_stamp_path().read_text(encoding="utf-8"))
+        assert (stamp["husks_removed"], stamp["husks_deferred"]) == (1, 0)
+
+    def test_doctor_surfaces_a_starved_sweep(self, home):
+        """The surface an operator actually reads. Doctor stays note-only
+        (a transient daemon is not broken plumbing) but must stop reading
+        green-and-fresh while every pass defers."""
+        fleet.autoclean_stamp_path().write_text(json.dumps({
+            "ts": fleet.now_iso(), "dry_run": False, "archive_rc": 0,
+            "husks_removed": 0, "husks_deferred": 3, "tombstones_expired": 0,
+            "errors": []}), encoding="utf-8")
+        name, ok, note = fleet._doctor_check_autoclean(
+            run=lambda *a, **k: types.SimpleNamespace(returncode=1, stdout="", stderr=""))
+        assert (name, ok) == ("autoclean", True), "still note-only, never red"
+        assert "3 husk" in note.lower() and "daemon" in note.lower(), note
+
+    def test_doctor_silent_when_nothing_deferred(self, home):
+        fleet.autoclean_stamp_path().write_text(json.dumps({
+            "ts": fleet.now_iso(), "husks_removed": 2, "husks_deferred": 0,
+            "errors": []}), encoding="utf-8")
+        _n, _ok, note = fleet._doctor_check_autoclean(
+            run=lambda *a, **k: types.SimpleNamespace(returncode=1, stdout="", stderr=""))
+        assert "defer" not in note.lower(), note
+
+
+class TestStopClassification:
+    """M5: `stop` shares rm's discriminator. `fleet kill` on an already-gone
+    sid must succeed-as-already-gone -- and still tombstone."""
+
+    def test_stop_gone_is_success(self):
+        ok, outcome = fleet._stop_native_session_status(
+            SID, run=lambda *a, **k: STOP_GONE, which=lambda _: "claude")
+        assert (ok, outcome) == (True, "gone")
+
+    def test_stop_transient_is_not_success(self):
+        ok, outcome = fleet._stop_native_session_status(
+            SID, run=lambda *a, **k: RM_TRANSIENT, which=lambda _: "claude")
+        assert (ok, outcome) == (False, "daemon-transient")
+
+    def test_stop_bool_face_keeps_its_contract(self):
+        assert fleet._stop_native_session(
+            SID, run=lambda *a, **k: STOP_GONE, which=lambda _: "claude") is True
+        assert fleet._stop_native_session(
+            SID, run=lambda *a, **k: RM_UNKNOWN, which=lambda _: "claude") is False
+
+    def test_stop_unknown_failure_still_could_not_verify(self):
+        ok, outcome = fleet._stop_native_session_status(
+            SID, run=lambda *a, **k: RM_UNKNOWN, which=lambda _: "claude")
+        assert (ok, outcome) == (False, "failed")
 
 
 class TestArchiveRmAgainstDeadDaemon:
@@ -232,14 +441,25 @@ class TestArchiveRmAgainstDeadDaemon:
         """Archive commits the tombstone BEFORE the rm phase by design, so a
         dead daemon must not undo the archive -- but it must not be reported
         as a plain failure either: the sid stays on the roster and the husk
-        tier retries it."""
+        tier retries it.
+
+        m4 fix wave: this test bound `dest` and never asserted on it -- it was
+        named for a property it did not check, which reads as coverage while
+        pinning nothing. A refactor moving the rm phase ahead of the
+        `archived_at` commit would have stayed green. Now the archive itself
+        is asserted."""
         dest = home / "logs" / "archive" / "w1"
+        journal = fleet.journals_dir() / "w1.md"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text("evidence\n", encoding="utf-8")
         fleet._archive_move_and_rm("w1", SID, [], dest,
                                    roster_entries=[_roster_dead(SID)],
                                    run=_run_factory([], RM_TRANSIENT),
                                    which=lambda _: "claude")
         err = capsys.readouterr().err
         assert "daemon" in err.lower() and "retr" in err.lower(), err
+        assert dest.exists() and any(dest.iterdir()), (
+            f"a deferred rm must not undo the archive: nothing moved into {dest}")
 
     def test_already_gone_rm_is_reported_as_ok_not_failed(self, home, capsys):
         fleet._archive_move_and_rm("w1", SID, [], home / "logs" / "archive" / "w1",
@@ -249,3 +469,22 @@ class TestArchiveRmAgainstDeadDaemon:
         err = capsys.readouterr().err
         assert "failed" not in err.lower(), (
             f"an already-gone sid must not be reported as a failure: {err}")
+
+
+class TestRmOutcomeNotes:
+    """N3: only the `daemon-transient` gloss was pinned -- the reviewer swapped
+    the other two for "XXX" and the whole suite stayed green. If the retryable
+    gloss is worth pinning, so is "claude not on PATH"."""
+
+    def test_transient_note_names_the_daemon_and_the_retry(self):
+        note = fleet._rm_outcome_note("daemon-transient")
+        assert "daemon" in note.lower() and "retr" in note.lower(), note
+
+    def test_no_claude_note_names_the_path_problem(self):
+        assert "path" in fleet._rm_outcome_note("no-claude").lower()
+
+    def test_error_note_names_the_subprocess(self):
+        assert "subprocess" in fleet._rm_outcome_note("error").lower()
+
+    def test_unknown_outcome_has_a_gloss(self):
+        assert fleet._rm_outcome_note("failed").strip()
