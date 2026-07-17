@@ -514,24 +514,52 @@ def test_5_pin_archive_rm(sandbox: Sandbox):
     leftover = {s: next((e for e in roster_after if e.get("sessionId") == s), None)
                 for s in all_archived_sids}
     leftover = {s: e for s, e in leftover.items() if e is not None}
+
+    # m2 fix wave (review MD-CONTRACT-REVIEW-2026-07-17.md): branch on FLEET'S
+    # OWN classification of the rm it just ran, not on an independent, later
+    # probe of the same variable.
+    #
+    # `_daemon_alive()` SAMPLES the confound; it does not control it, and it is
+    # racy in BOTH directions. The daemon idle-exits ~5s after the last client
+    # disconnects, and this test stops every worker, waits for gone-or-dead,
+    # then archives -- comfortably more than 5s of zero live workers. So the
+    # daemon can be ALIVE during rm (rm works, roster should be clean) and DEAD
+    # by the sample: a genuine regression would then be converted into a skip,
+    # i.e. the suite would report success for the exact break it exists to
+    # catch. The other direction is just as real on this machine: daemon dead
+    # at rm, then a sibling worker dispatches (the only thing that revives it)
+    # before the sample -> hard assert -> a false RED blamed on a "contract
+    # regression".
+    #
+    # `_archive_move_and_rm` already classified the outcome from the CLI's own
+    # message, in-process, at rm time, and printed it. That signal is race-free
+    # because it IS the rm. `_daemon_alive()` is retained for the diagnostic
+    # paste (what makes a RED self-explaining) and as the fallback when the
+    # archive path printed no classification line at all.
+    archive_err = a.stderr or ""
+    rm_deferred = "deferred (daemon-transient)" in archive_err
     alive, status_text = _daemon_alive()
-    if leftover and alive is False:
+    if leftover and rm_deferred:
         pytest.skip(
-            "ACHIEVABLE-CONTRACT SKIP [2.1.212, PENDING-RATIFICATION]: the "
-            f"transient daemon idle-exited during this run, so `claude rm` "
-            f"could not remove {sorted(s[:8] for s in leftover)} -- rm does "
-            "not revive the daemon (findings §Q2). Fleet's archive path "
-            "reports these as retryable deferrals and the husk tier sweeps "
-            "them on the next pass, which is the contract this suite can "
-            f"hold the CLI to.\n--- claude daemon status ---\n{status_text}"
+            "ACHIEVABLE-CONTRACT SKIP [2.1.212, PENDING-RATIFICATION]: fleet's "
+            "own archive path classified the rm as `deferred "
+            "(daemon-transient)` -- the transient daemon was down at rm time, "
+            f"so `claude rm` could not remove {sorted(s[:8] for s in leftover)} "
+            "and does not revive it (findings §Q2). The husk tier sweeps these "
+            "on the next pass; that is the contract this suite can hold the CLI "
+            f"to.\n--- fleet archive stderr ---\n{archive_err.strip()}"
+            f"\n--- claude daemon status (sampled after the fact) ---\n{status_text}"
         )
     assert not leftover, (
         f"sid(s) {sorted(s[:8] for s in leftover)} still present in `claude "
-        f"agents --json --all` after archive, WITH A LIVE DAEMON "
-        f"(alive={alive!r}) -- rm-with-live-daemon is live-confirmed to "
-        f"remove the entry and its jobs dir in <1s (findings §Q1), so this is "
-        f"a genuine contract regression, not the daemon-lifecycle confound: "
-        f"{leftover}\n--- claude daemon status ---\n{status_text}"
+        f"agents --json --all` after archive, and fleet did NOT report a "
+        f"daemon-transient deferral for the rm -- rm-with-live-daemon is "
+        f"live-confirmed to remove the entry and its jobs dir in <1s (findings "
+        f"§Q1), so this is a genuine contract regression, not the "
+        f"daemon-lifecycle confound: {leftover}\n"
+        f"--- fleet archive stderr ---\n{archive_err.strip()}\n"
+        f"--- claude daemon status (sampled after the fact; alive={alive!r}) "
+        f"---\n{status_text}"
     )
 
     # 2.1.212 contract change [PENDING-RATIFICATION]: G12 IDEMPOTENCY REFUTED.
@@ -543,12 +571,23 @@ def test_5_pin_archive_rm(sandbox: Sandbox):
     # what makes rc alone a three-way-ambiguous signal and forces
     # bin/fleet.py's `_classify_native_cli_result` to read the message. Pinned
     # here because a silent revert to rc=0 would let that classifier's "gone"
-    # branch rot undetected. Skipped, not asserted, against a dead daemon:
-    # the transient failure would mask the message under test.
-    if alive is True and sid:
+    # branch rot undetected.
+    #
+    # m2: keyed off THIS call's own output, not a separate `_daemon_alive()`
+    # probe -- a dead daemon answers with the transient message instead, which
+    # is self-identifying and race-free. Sampling daemon liveness separately
+    # would be one probe too late (the daemon can die in between).
+    if sid:
         again = _claude("rm", sid[:8], timeout=15)
-        again_text = (again.stdout or "") + (again.stderr or "")
-        assert again.returncode == 1 and "no job matching" in again_text.lower(), (
+        again_text = ((again.stdout or "") + (again.stderr or "")).lower()
+        if "background service may be restarting" in again_text:
+            pytest.skip(
+                "ACHIEVABLE-CONTRACT SKIP [2.1.212]: the transient daemon went "
+                "down before the rm-taxonomy probe, so the CLI answered with "
+                "the dead-daemon message instead of the already-gone one. "
+                f"Output: {again_text.strip()!r}"
+            )
+        assert again.returncode == 1 and "no job matching" in again_text, (
             "rm-on-an-already-removed-id no longer reports rc=1 'No job "
             f"matching' (rc={again.returncode}, output={again_text.strip()!r}) "
             "-- the 2.1.212 taxonomy bin/fleet.py classifies on has changed; "
