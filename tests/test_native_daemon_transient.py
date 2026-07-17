@@ -391,7 +391,18 @@ class TestStarvationIsVisible:
     def test_doctor_surfaces_a_starved_sweep(self, home):
         """The surface an operator actually reads. Doctor stays note-only
         (a transient daemon is not broken plumbing) but must stop reading
-        green-and-fresh while every pass defers."""
+        green-and-fresh while every pass defers.
+
+        ND-3 fix wave: this test used to seed a stamp alone and assert the note
+        fired. That pinned the defect ND-3 names -- noting the FIRST deferral,
+        i.e. the routine case, which habituates the operator until real
+        starvation renders like Tuesday. Starvation is now a STREAK, so the
+        history that proves it must exist. `TestDeferralStreakThreshold` owns
+        the boundary cases; this keeps the end-to-end surface assertion."""
+        for _ in range(fleet.AUTOCLEAN_DEFERRAL_STREAK_THRESHOLD):
+            fleet.append_event("autoclean_run", "*", archive_rc=0,
+                               husks_removed=0, husks_deferred=3,
+                               tombstones_expired=0, errors=[])
         fleet.autoclean_stamp_path().write_text(json.dumps({
             "ts": fleet.now_iso(), "dry_run": False, "archive_rc": 0,
             "husks_removed": 0, "husks_deferred": 3, "tombstones_expired": 0,
@@ -408,6 +419,116 @@ class TestStarvationIsVisible:
         _n, _ok, note = fleet._doctor_check_autoclean(
             run=lambda *a, **k: types.SimpleNamespace(returncode=1, stdout="", stderr=""))
         assert "defer" not in note.lower(), note
+
+
+class TestDeferralLineFormat:
+    """ND-2: the deferral line's shape is a CONTRACT -- the live pin
+    (tests/integration/test_native_pin.py) branches on it to tell a dead-daemon
+    skip from a real contract regression. Nothing bound the two sides, so a
+    rename would leave the pin passing until the next live run against a dead
+    daemon. Both sides now import `NATIVE_RM_DEFERRED_PREFIX`; this pins the
+    rendered shape the pin actually greps for."""
+
+    def test_transient_line_shape_is_what_the_pin_greps_for(self):
+        assert fleet._rm_deferred_line("daemon-transient") == "deferred (daemon-transient)"
+
+    def test_prefix_constant_matches_the_rendered_line(self):
+        assert fleet._rm_deferred_line("failed").startswith(
+            fleet.NATIVE_RM_DEFERRED_PREFIX)
+
+    def test_archive_stderr_carries_the_exact_pin_token(self, home, capsys):
+        """End-to-end: the token the pin greps for really reaches stderr."""
+        fleet._archive_move_and_rm("w1", SID, [], home / "logs" / "archive" / "w1",
+                                   roster_entries=[_roster_dead(SID)],
+                                   run=_run_factory([], RM_TRANSIENT),
+                                   which=lambda _: "claude")
+        assert "deferred (daemon-transient)" in capsys.readouterr().err
+
+    def test_unclassified_deferral_is_distinguishable_from_transient(self, home, capsys):
+        """The pin's ND-2 fallback keys on exactly this: a deferral that is NOT
+        daemon-transient (an unpredicted message shape) renders with the same
+        prefix but a different outcome."""
+        fleet._archive_move_and_rm("w1", SID, [], home / "logs" / "archive" / "w1",
+                                   roster_entries=[_roster_dead(SID)],
+                                   run=_run_factory([], RM_UNKNOWN),
+                                   which=lambda _: "claude")
+        err = capsys.readouterr().err
+        assert f"{fleet.NATIVE_RM_DEFERRED_PREFIX} (" in err
+        assert "deferred (daemon-transient)" not in err
+
+
+class TestDeferralStreakThreshold:
+    """ND-3: a single deferral is Tuesday; N in a row is starvation. Doctor must
+    tell them apart, and the streak can only come from append-only history --
+    the run stamp holds one pass."""
+
+    def _run_event(self, deferred, removed=0):
+        fleet.append_event("autoclean_run", "*", archive_rc=0,
+                           husks_removed=removed, husks_deferred=deferred,
+                           tombstones_expired=0, errors=[])
+
+    def _stamp(self, deferred):
+        fleet.autoclean_stamp_path().write_text(json.dumps({
+            "ts": fleet.now_iso(), "dry_run": False, "archive_rc": 0,
+            "husks_removed": 0, "husks_deferred": deferred,
+            "tombstones_expired": 0, "errors": []}), encoding="utf-8")
+
+    def _doctor(self):
+        return fleet._doctor_check_autoclean(
+            run=lambda *a, **k: types.SimpleNamespace(returncode=1, stdout="", stderr=""))
+
+    def test_streak_counts_consecutive_deferring_runs(self, home):
+        for _ in range(3):
+            self._run_event(2)
+        streak, husks, since = fleet._autoclean_deferral_streak()
+        assert (streak, husks) == (3, 2) and since
+
+    def test_a_successful_sweep_resets_the_streak(self, home):
+        self._run_event(5)
+        self._run_event(5)
+        self._run_event(0, removed=1)   # daemon was reachable -> not starving
+        assert fleet._autoclean_deferral_streak()[0] == 0
+
+    def test_streak_only_counts_the_most_recent_consecutive_run(self, home):
+        self._run_event(9)
+        self._run_event(0, removed=1)
+        self._run_event(4)
+        assert fleet._autoclean_deferral_streak()[0] == 1
+
+    def test_missing_history_is_not_a_crash(self, home):
+        assert fleet._autoclean_deferral_streak() == (0, 0, None)
+
+    def test_pre_m1_events_without_the_field_are_ignored(self, home):
+        fleet.append_event("autoclean_run", "*", archive_rc=0, husks_removed=0)
+        assert fleet._autoclean_deferral_streak()[0] == 0
+
+    def test_doctor_is_silent_on_a_routine_single_deferral(self, home):
+        """THE ND-3 test: the normal case per this branch's own §Q2 must NOT
+        render like starvation, or the operator habituates and the real thing
+        is invisible."""
+        self._run_event(2)
+        self._stamp(2)
+        _n, ok, note = self._doctor()
+        assert ok is True
+        assert "defer" not in note.lower(), (
+            f"a single deferral is routine -- doctor must not cry wolf: {note}")
+
+    def test_doctor_is_silent_below_the_threshold(self, home):
+        for _ in range(fleet.AUTOCLEAN_DEFERRAL_STREAK_THRESHOLD - 1):
+            self._run_event(2)
+        self._stamp(2)
+        assert "defer" not in self._doctor()[2].lower()
+
+    def test_doctor_reports_at_the_threshold_with_the_streak(self, home):
+        for _ in range(fleet.AUTOCLEAN_DEFERRAL_STREAK_THRESHOLD):
+            self._run_event(7)
+        self._stamp(7)
+        _n, ok, note = self._doctor()
+        assert ok is True, "still note-only -- a transient daemon is not broken plumbing"
+        low = note.lower()
+        assert "defer" in low and "consecutive" in low, note
+        assert str(fleet.AUTOCLEAN_DEFERRAL_STREAK_THRESHOLD) in note, note
+        assert "daemon" in low, note
 
 
 class TestStopClassification:

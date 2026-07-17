@@ -3123,6 +3123,41 @@ class TestCmdKillNative:
         assert "stopping retired session retired1... ok" in err
         assert "stopping retired session retired2... ok" in err
 
+    def test_kill_stops_by_the_captured_short_id_not_a_derived_ref(self, native_home, capsys):
+        """ND-1 (re-review MD-CONTRACT-REVIEW-2026-07-17.md), the mirror of
+        `test_sweep_passes_the_rosters_own_id_not_a_derived_ref`.
+
+        The M5 commit gave `stop` the inference "gone == success"; the m1 commit
+        taught `rm` never to trust a DERIVED ref for exactly that inference --
+        and hardened both rm sites and neither stop site. Repro'd: with a CLI
+        that answers only to its own short id, `fleet kill` derived
+        sid.split("-")[0], read `No job matching` as `gone`, printed "killed",
+        exited 0, stamped interrupt_outcome=True and marked the worker dead --
+        while the session kept running, untracked, skipped by every husk sweep
+        forever because it is status/pid-live.
+
+        `native_short_id` here is deliberately NOT the derived prefix."""
+        import types as _t
+        rec = seed_native_worker(native_home, sid=SID, status="working")
+        rec["native_short_id"] = "zz9qk7xd"          # NOT SID.split("-")[0]
+        fleet.save_registry({"workers": {"w1": rec}})
+
+        refs = []
+
+        def only_own_id(argv, **kwargs):
+            ref = argv[2] if len(argv) > 2 else None
+            refs.append(ref)
+            if ref == "zz9qk7xd":
+                return _t.SimpleNamespace(returncode=0, stdout=f"stopped {ref}",
+                                          stderr="")
+            return _t.SimpleNamespace(returncode=1,
+                                      stdout=f"No job matching '{ref}'", stderr="")
+
+        rc = fleet.cmd_kill(_kill_args(), run=only_own_id, which=lambda _: "claude")
+        assert refs and refs[0] == "zz9qk7xd", (
+            f"kill must stop by the CAPTURED short id, not a derived one: {refs}")
+        assert rc == 0
+
     def test_kill_on_an_already_gone_sid_succeeds_as_gone(self, native_home, capsys):
         """M5 fix wave (review MD-CONTRACT-REVIEW-2026-07-17.md): `claude stop`
         on an already-gone sid exits 1 with "No job matching" (live receipt,
