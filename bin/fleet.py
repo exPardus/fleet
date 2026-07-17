@@ -1096,17 +1096,87 @@ def _native_cumulative_tokens(name: str) -> int:
 # one in ISO-8601 UTC form. Best-effort only; absence -> null horizon.
 _LIMIT_RESET_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 
+# The observed production shape instead (M-C park journal 2026-07-16,
+# knowledge/lessons.md:607): a LOCAL wall-clock time + IANA tz name, e.g.
+# "resets 4:40am (Asia/Qyzylorda)" or "resets 12am (Asia/Qyzylorda)" (the
+# hour-only form is the production gap this fallback closes). Only
+# consulted when the ISO regex above finds nothing (ISO keeps precedence).
+_LIMIT_RESET_LOCAL_RE = re.compile(
+    r"resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([A-Za-z_]+(?:/[A-Za-z_+\-0-9]+)+)\)",
+    re.IGNORECASE,
+)
 
-def _parse_limit_signal(text: str):
+
+def _next_local_reset_utc(hour: int, minute: int, tz_name: str, *, now: "datetime | None" = None):
+    """UTC ISO-8601 instant of the next occurrence of `hour:minute` local wall-
+    clock time in the named IANA tz, or None if the tz can't be resolved.
+
+    `zoneinfo` is stdlib but its DATA is not guaranteed on Windows (no
+    `tzdata` pip package -- this repo stays stdlib-only). The module is
+    imported here (inside the helper, not at module scope) so a plain
+    `import fleet` never gains a hard dependency on tz-data being present;
+    any lookup failure (unknown zone, missing data, whatever shape the
+    stdlib raises) falls back to None -- a conservative null-horizon park,
+    never a guessed UTC time or approximated offset."""
+    import zoneinfo
+    try:
+        tz = zoneinfo.ZoneInfo(tz_name)
+    except Exception:
+        return None
+    try:
+        moment = (now if now is not None else datetime.now(timezone.utc)).astimezone(tz)
+        candidate = moment.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if candidate < moment:
+            candidate += timedelta(days=1)
+        return candidate.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        return None
+
+
+def _parse_limit_signal(text: str, *, now: "datetime | None" = None):
     """Best-effort (reset_at, kind) from a limit-shaped stderr tail. reset_at is
     an ISO-8601 UTC string if one is present, else None (park with an unknown
     horizon -- never auto-resumed blind); kind is 'weekly' | 'session_5h' | None
     by keyword. Parser is pinned to the observed signal by the kernel probe
-    later; today it stays conservative and returns None where uncertain."""
+    later; today it stays conservative and returns None where uncertain.
+
+    ISO-8601 (`_LIMIT_RESET_RE`) keeps absolute precedence over existing
+    consumers. When absent, falls back to the LOCAL wall-clock + IANA tz
+    shape (`_LIMIT_RESET_LOCAL_RE`) actually observed in production
+    (M-D item 3) -- 12am/12pm are normalized to 00:00/12:00 (the classic
+    12-o'clock bug), and the next occurrence at-or-after `now` of that
+    wall-clock time is converted to UTC via `_next_local_reset_utc`. `now`
+    is keyword-only; its sole production caller (`transcript_limit_scan`)
+    passes the transcript record's own timestamp (C1 fix wave) so the
+    horizon anchors to when the signal actually fired, not to whenever the
+    scan happens to run.
+
+    N3 fix wave (MD-ULPARSER-REVIEW-2026-07-17.md re-review): `now=None`
+    (record timestamp absent or unparseable -- see `_record_time`) no
+    longer resolves the local-format branch against the real wall clock.
+    That fallback reproduced C1's exact defect -- a confidently wrong
+    horizon -- on every path where the anchor is unavailable, including
+    every Python-3.10 run pre-N2. Without a message-instant anchor the
+    local-format branch is left unresolved (`reset_at` stays `None`): a
+    conservative null-horizon park, same standard as an unknown tz or
+    missing tz-data. `--force-now` remains the recovery, as documented at
+    the `transcript_limit_scan` call site."""
     reset_at = None
     m = _LIMIT_RESET_RE.search(text or "")
     if m:
         reset_at = m.group(0)
+    elif now is not None:
+        m2 = _LIMIT_RESET_LOCAL_RE.search(text or "")
+        if m2:
+            hour_s, minute_s, ampm, tz_name = m2.groups()
+            hour = int(hour_s)
+            minute = int(minute_s) if minute_s else 0
+            ampm = ampm.lower()
+            if ampm == "am":
+                hour24 = 0 if hour == 12 else hour
+            else:
+                hour24 = 12 if hour == 12 else hour + 12
+            reset_at = _next_local_reset_utc(hour24, minute, tz_name, now=now)
     kind = None
     low = (text or "").lower()
     if "week" in low:
@@ -1181,6 +1251,34 @@ def find_transcript_path(name: str, sid: str):
     return candidates[0]
 
 
+def _record_time(rec: dict):
+    """Aware UTC datetime from a transcript record's own `timestamp` field,
+    or None on absence/garbage. Records carry fractional-second ISO-8601
+    (e.g. "2026-07-13T23:48:10.741Z", spike/m0/VERDICTS.md:441) -- NOT
+    `_parse_iso`'s strict `%Y-%m-%dT%H:%M:%SZ`, which rejects that
+    fractional form.
+
+    N2 fix wave (MD-ULPARSER-REVIEW-2026-07-17.md re-review): plain
+    `datetime.fromisoformat(ts)` only accepts a trailing `Z` from Python
+    **3.11** -- this repo's documented floor is 3.10 (docs/specs/
+    portability.md D9, SPEC.md's multi-platform directive). On 3.10 every
+    real (`Z`-suffixed) record raised ValueError here, silently falling
+    back to the wall clock and reverting C1 in full. Swap the trailing `Z`
+    for an explicit `+00:00` offset before parsing -- `fromisoformat` has
+    accepted numeric UTC offsets since 3.7, so this is floor-safe. A
+    missing/non-string/unparseable timestamp returns None; per N3 the
+    caller treats that as "cannot anchor" and parks a null horizon rather
+    than guessing via the wall clock."""
+    ts = rec.get("timestamp") if isinstance(rec, dict) else None
+    if not isinstance(ts, str):
+        return None
+    try:
+        dt = datetime.fromisoformat(ts[:-1] + "+00:00" if ts.endswith("Z") else ts)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
 def transcript_limit_scan(sid: str, transcript_path=None):
     """(is_limit, reset_at, kind) from sid's transcript tail (G11 / Known
     hazards: a rate-limit 429 fires NO Stop hook and leaves the roster
@@ -1198,12 +1296,23 @@ def transcript_limit_scan(sid: str, transcript_path=None):
 
     Scans the tail window (`_read_tail_lines` -- perf: bounded bytes, no
     whole-file parse) newest-first, first match wins. Horizon/kind reuse
-    `_parse_limit_signal` verbatim against the record's
-    `message.content[].text` -- the observed real signal carries a
-    LOCAL-format time, not ISO, so reset_at is usually None (park with an
-    unknown horizon; `resume-limited --force-now` is the realistic
-    recovery). Never raises: a missing/unreadable transcript or an
-    unparseable line both fall through to (False, None, None).
+    `_parse_limit_signal` against the record's `message.content[].text`,
+    anchored via `now=_record_time(rec)` to the TRANSCRIPT RECORD'S OWN
+    timestamp -- not the wall clock at parse time (C1 fix wave,
+    MD-ULPARSER-REVIEW-2026-07-17.md: `limited` is sticky, so a park's
+    horizon is parsed exactly once; anchoring to "now" meant any scan that
+    first observed the park after the quoted local reset time had already
+    passed rolled the horizon a full day late -- 24h wrong, and never
+    self-corrected). Anchoring to the message instant instead yields the
+    first occurrence at-or-after when the signal actually fired, which is
+    the correct reset regardless of how late the scan runs. A missing or
+    unparseable `timestamp` (N3 fix wave, same review doc) is never
+    guessed against the wall clock -- without a message-instant anchor,
+    the local-format branch stays unresolved and reset_at is None: a
+    conservative null-horizon park, same as an unknown tz or missing
+    tz-data (`resume-limited --force-now` is the recovery). Never raises:
+    a missing/unreadable transcript or an unparseable line both fall
+    through to (False, None, None).
 
     transcript_path may be given directly (the discriminator's own call
     site resolves it once via find_transcript_path(name, sid) and hands
@@ -1256,7 +1365,7 @@ def transcript_limit_scan(sid: str, transcript_path=None):
             msg = rec.get("message") or {}
             parts = [c.get("text", "") for c in (msg.get("content") or [])
                      if isinstance(c, dict) and c.get("type") == "text"]
-            reset_at, kind = _parse_limit_signal("\n".join(parts))
+            reset_at, kind = _parse_limit_signal("\n".join(parts), now=_record_time(rec))
             return True, reset_at, kind
         # First qualifying (error-shaped or substantive) record does not
         # match the limit shape -- it is the authoritative "last thing
