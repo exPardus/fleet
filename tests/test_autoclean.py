@@ -132,7 +132,7 @@ class TestHuskSweep:
         calls = []
         run = fake_run_factory([roster_dead(SID_FOREIGN, name="operator session"),
                                 roster_dead(SID_EVENTS)], calls=calls)
-        removed = fleet._sweep_husks(False, run=run, which=lambda _: "claude")
+        removed, _deferred = fleet._sweep_husks(False, run=run, which=lambda _: "claude")
         targets = rm_targets(calls)
         assert removed == [SID_EVENTS]
         assert SID_FOREIGN[:8] not in targets and SID_FOREIGN not in targets
@@ -141,7 +141,7 @@ class TestHuskSweep:
     def test_foreign_only_roster_no_rm_at_all(self, home):
         calls = []
         run = fake_run_factory([roster_dead(SID_FOREIGN)], calls=calls)
-        assert fleet._sweep_husks(False, run=run, which=lambda _: "claude") == []
+        assert fleet._sweep_husks(False, run=run, which=lambda _: "claude")[0] == []
         assert rm_targets(calls) == []
 
     def test_protected_current_and_retired_sids_spared(self, home):
@@ -149,7 +149,7 @@ class TestHuskSweep:
         calls = []
         run = fake_run_factory([roster_dead(SID_LIVE), roster_dead(SID_RETIRED)],
                                calls=calls)
-        assert fleet._sweep_husks(False, run=run, which=lambda _: "claude") == []
+        assert fleet._sweep_husks(False, run=run, which=lambda _: "claude")[0] == []
         assert rm_targets(calls) == []
 
     def test_startup_transient_state_only_entry_never_selected(self, home):
@@ -166,47 +166,47 @@ class TestHuskSweep:
                      "state": "working"}  # no status, no pid
         calls = []
         run = fake_run_factory([transient], calls=calls)
-        assert fleet._sweep_husks(False, run=run, which=lambda _: "claude") == []
+        assert fleet._sweep_husks(False, run=run, which=lambda _: "claude")[0] == []
         assert rm_targets(calls) == []
 
     def test_tombstone_sid_is_a_husk(self, home):
         seed_worker("tomb", SID_TOMB, archived_at=_iso(NOW))
         run = fake_run_factory([roster_dead(SID_TOMB)])
-        assert fleet._sweep_husks(False, run=run, which=lambda _: "claude") == [SID_TOMB]
+        assert fleet._sweep_husks(False, run=run, which=lambda _: "claude")[0] == [SID_TOMB]
 
     def test_archive_dir_sid_is_a_husk(self, home):
         d = fleet.archive_root() / "oldworker"
         d.mkdir(parents=True)
         (d / f"{SID_ARCHDIR}.jsonl").write_text("{}", encoding="utf-8")
         run = fake_run_factory([roster_dead(SID_ARCHDIR)])
-        assert fleet._sweep_husks(False, run=run, which=lambda _: "claude") == [SID_ARCHDIR]
+        assert fleet._sweep_husks(False, run=run, which=lambda _: "claude")[0] == [SID_ARCHDIR]
 
     def test_live_roster_entry_never_rmd(self, home):
         seed_worker("tomb", SID_TOMB, archived_at=_iso(NOW))
         calls = []
         run = fake_run_factory([roster_live(SID_TOMB)], calls=calls)
-        assert fleet._sweep_husks(False, run=run, which=lambda _: "claude") == []
+        assert fleet._sweep_husks(False, run=run, which=lambda _: "claude")[0] == []
         assert rm_targets(calls) == []
 
     def test_pending_mail_spares_husk(self, home):
         fleet.append_event("turn_started", "w", session_id=SID_EVENTS)
         (fleet.mailbox_dir() / f"{SID_EVENTS}.md").write_text("mail!", encoding="utf-8")
         run = fake_run_factory([roster_dead(SID_EVENTS)])
-        assert fleet._sweep_husks(False, run=run, which=lambda _: "claude") == []
+        assert fleet._sweep_husks(False, run=run, which=lambda _: "claude")[0] == []
 
     def test_dry_run_rms_nothing_events_nothing(self, home):
         fleet.append_event("turn_started", "w", session_id=SID_EVENTS)
         events_before = len(read_events(home))
         calls = []
         run = fake_run_factory([roster_dead(SID_EVENTS)], calls=calls)
-        assert fleet._sweep_husks(True, run=run, which=lambda _: "claude") == []
+        assert fleet._sweep_husks(True, run=run, which=lambda _: "claude")[0] == []
         assert rm_targets(calls) == []
         assert len(read_events(home)) == events_before
 
     def test_rm_failure_reported_not_counted(self, home):
         fleet.append_event("turn_started", "w", session_id=SID_EVENTS)
         run = fake_run_factory([roster_dead(SID_EVENTS)], rm_rc=1)
-        assert fleet._sweep_husks(False, run=run, which=lambda _: "claude") == []
+        assert fleet._sweep_husks(False, run=run, which=lambda _: "claude")[0] == []
         assert not any(e["kind"] == "husk_removed" for e in read_events(home))
 
     def test_husk_removed_event_appended(self, home):
@@ -287,7 +287,7 @@ class TestRegistryFailOpen:
     def test_sweep_fresh_home_missing_registry_no_evidence_proceeds(self, home):
         (home / "state" / "fleet.json").unlink()
         run = fake_run_factory([roster_dead(SID_FOREIGN)])
-        assert fleet._sweep_husks(False, run=run, which=lambda _: "claude") == []
+        assert fleet._sweep_husks(False, run=run, which=lambda _: "claude")[0] == []
 
 
 class TestQuarantineArtifactGuard:
@@ -335,7 +335,7 @@ class TestQuarantineArtifactGuard:
         fleet.save_registry({"workers": {}})
         run = fake_run_factory([roster_dead(SID_EVENTS)])
         assert fleet._sweep_husks(False, run=run,
-                                  which=lambda _: "claude") == [SID_EVENTS]
+                                  which=lambda _: "claude")[0] == [SID_EVENTS]
 
     def test_refusal_messages_never_advise_recreate(self, home):
         # artifact-present refusal
