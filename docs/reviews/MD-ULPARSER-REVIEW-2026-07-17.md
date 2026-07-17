@@ -622,3 +622,286 @@ follow-up findings it wasn't asked to fix.
 **Ideally N2 lands with a test that would actually catch it** — a 3.10 CI job (`port-ci` is
 already spec'd in `portability.md:42`) or, cheaper, a direct unit test on `_record_time`
 asserting the `Z` form parses, which at least pins the intent even though it can't fail on 3.13.
+
+---
+---
+
+# RE-REVIEW 2 — final gate, wave-2 commit `74b0b37` (2026-07-17)
+
+**Diff:** `eb0d22d..74b0b37` — *fix(limits): 3.10-safe timestamp parse + null-park on unresolved anchor*
+**Scope:** verify N1 / N2 / N3; new-defect hunt on the changed lines only; rule on the `portability.md` touch; re-confirm the §1 and G7 repros; suite.
+**Suite:** full `pytest -q` → **1080 passed, 6 skipped** (52.57s; was 1068+6 — wave adds 12 tests, none removed).
+
+## RE-REVIEW VERDICT: `merge`
+
+| Finding | Verdict |
+|---|---|
+| **N1** — fixture lacked `timestamp`; comment asserted a falsehood | ✅ **FIXED** (over-delivered — the whole shape-only assertion class is gone) |
+| **N2** — `fromisoformat("…Z")` is 3.11+, breaking the 3.10 floor | ✅ **FIXED** (verified on a real 3.10 interpreter) |
+| **N3** — unresolved anchor fell back to the wall clock | ✅ **FIXED** (no path reaches the wall clock) |
+| SPURIOUS-FIX check | ✅ None |
+| New defects on the changed lines | None blocking — two non-blocking nits (§5) |
+| §1 repro / G7 repro | ✅ Both still anchor correctly |
+
+Three waves, three clean closes. The parser now produces a horizon that is a pure function of
+the message instant, or no horizon at all — there is no third outcome, and no path that guesses.
+
+---
+
+## 1. N2 — **FIXED** (verified on the floor that broke it)
+
+**Receipt (`# at 74b0b37`), `bin/fleet.py:1275`:**
+
+```python
+dt = datetime.fromisoformat(ts[:-1] + "+00:00" if ts.endswith("Z") else ts)
+```
+
+This is the exact fix the re-review specified, and the precedence is right (`+` binds tighter
+than the conditional, so the rewrite applies to the string, not the parse).
+
+**The decisive check — the same real 3.10 interpreter that demonstrated the bug last round:**
+
+```
+import fleet on 3.10.1 -> OK
+
+=== N2 REGRESSION CHECK ON THE FLOOR (this is what was broken at ee68eb6) ===
+  trailing Z     -> anchor=2026-07-13 22:32:01.933000+00:00   reset_at=2026-07-13T23:40:00Z  OK
+  Z no frac      -> anchor=2026-07-13 22:32:01+00:00          reset_at=2026-07-13T23:40:00Z  OK
+  offset +05:00  -> anchor=2026-07-14 03:32:01.933000+05:00   reset_at=2026-07-13T23:40:00Z  OK
+  offset -08:00  -> anchor=2026-07-13 14:32:01.933000-08:00   reset_at=2026-07-13T23:40:00Z  OK
+```
+
+Last round this same input returned `None` on 3.10 and silently reverted C1. It now resolves.
+`bin/fleet.py` also still *imports* cleanly on 3.10 — the floor is intact, not merely
+the one line.
+
+**Both offset forms and the trailing-Z form, as mandated** (3.13, and all four semantically
+identical instants converge on one horizon):
+
+```
+  trailing Z       2026-07-13T22:32:01.933Z         utc=2026-07-13 22:32:01.933000+00:00  OK
+  Z, no fraction   2026-07-13T22:32:01Z             utc=2026-07-13 22:32:01+00:00         OK
+  offset +05:00    2026-07-14T03:32:01.933+05:00    utc=2026-07-13 22:32:01.933000+00:00  OK
+  offset -08:00    2026-07-13T14:32:01.933-08:00    utc=2026-07-13 22:32:01.933000+00:00  OK
+  offset +00:00    2026-07-13T22:32:01.933+00:00    utc=2026-07-13 22:32:01.933000+00:00  OK
+  naive (no tz)    2026-07-13T22:32:01.933          utc=2026-07-13 22:32:01.933000+00:00  OK
+-> every form drives reset_at=2026-07-13T23:40:00Z
+```
+
+The `+05:00` and `-08:00` cases matter beyond coverage: they prove the `Z`-rewrite didn't
+special-case UTC into correctness while corrupting genuine offsets.
+
+## 2. N3 — **FIXED**; no path reaches the wall clock
+
+**Receipt, `bin/fleet.py:1163`:** `else:` → **`elif now is not None:`**. Without an anchor the
+local-format branch is never entered, so `reset_at` stays `None`.
+
+```
+=== N3: confirm NO path reaches the wall clock (local branch w/o anchor) ===
+  no timestamp   anchor=None -> reset_at=None kind=session_5h  NULL-PARK OK
+  garbage ts     anchor=None -> reset_at=None kind=session_5h  NULL-PARK OK
+  int ts         anchor=None -> reset_at=None kind=session_5h  NULL-PARK OK
+  bare Z         anchor=None -> reset_at=None kind=session_5h  NULL-PARK OK
+```
+
+**Confirmed by construction, not just by test.** The only wall-clock read in the limit path is
+`bin/fleet.py:1127` (`now if now is not None else datetime.now(timezone.utc)`), inside
+`_next_local_reset_utc`. Its **sole** caller is `bin/fleet.py:1179`, which now sits inside the
+`elif now is not None` guard — so `now` there is never `None`. Full caller receipt:
+
+```
+bin/fleet.py:1179   _next_local_reset_utc(hour24, minute, tz_name, now=now)   # inside the guard
+bin/fleet.py:1368   _parse_limit_signal("\n".join(parts), now=_record_time(rec))  # sole prod caller
+```
+
+The wall-clock default at `:1127` is therefore **unreachable in production**. (See §5.1 — it is
+now vestigial, a non-blocking nit.)
+
+**No regression in ISO precedence**, which shares the branch and had to survive the `elif`:
+
+```
+_parse_limit_signal("resets 2026-07-18T09:00:00Z", now=None) -> 2026-07-18T09:00:00Z  OK
+```
+
+ISO still resolves with no anchor — correct, since an ISO instant is absolute and needs none.
+`kind` detection also stays anchor-independent (`session_5h` still returned alongside a null
+horizon), so a null-horizon park still records *why* it parked.
+
+**The semantic is now uniform**: unknown tz, missing tz-data, and unresolvable anchor all park
+null. The parser has exactly two outcomes — a correct horizon or none — which is the standard
+this review has argued for throughout ("a wrong horizon is worse than a null one").
+
+## 3. N1 — **FIXED** (over-delivered)
+
+`tests/test_native.py` — `LIMIT_RECORD` now carries the real G7 instant, with a derived
+negative fixture:
+
+```python
+"timestamp": "2026-07-13T22:32:01.933Z",
+...
+LIMIT_RECORD_NO_TIMESTAMP = {k: v for k, v in LIMIT_RECORD.items() if k != "timestamp"}
+```
+
+That is exactly the recommended shape: the canonical fixture is now production-representative,
+and the fallback tests opt *in* to the timestamp-less shape explicitly rather than inheriting it
+by accident. The false comment about the real record is gone.
+
+**Better than asked — the shape-only class is eliminated entirely:**
+
+```
+grep -rn "fullmatch" tests/test_native.py
+(no hits)
+```
+
+Every `_LIMIT_RESET_RE.fullmatch(...)` is replaced by an exact instant
+(`== "2026-07-13T23:40:00Z"`) or a null-park assertion. This is the natural consequence of N3:
+with no wall-clock path left, *nothing* in the limit tests depends on when they run, so no
+assertion needs to be clock-tolerant. The suite's weakest assertions were not merely upgraded —
+the reason they existed was removed.
+
+## 4. §1 and G7 repros — both still anchor
+
+```
+=== §1 REPRO (overnight park) ===
+  msg 2026-07-16 22:00 local -> 2026-07-16T23:40:00Z  OK (same-day 23:40Z)
+=== G7 REPRO (real corroborated timeline) ===
+  429 at 22:32:01.933Z -> 2026-07-13T23:40:00Z  OK (real resume was 23:48:10Z)
+```
+
+Both unchanged from the wave-1 result, on both 3.13 and 3.10.
+
+---
+
+## 5. New-defect hunt — changed lines only
+
+**Clean. Two non-blocking nits, no defects.**
+
+**5.1 Nit — the wall-clock default at `bin/fleet.py:1127` is now vestigial.** With `_parse_limit_signal`
+enforcing the `elif now is not None` guard, `_next_local_reset_utc`'s `now: datetime | None = None`
+default can no longer be reached from production. It is a **latent footgun rather than a live
+bug**: a future caller invoking `_next_local_reset_utc(hour, minute, tz)` directly, without
+`now=`, would silently resolve against the wall clock — reintroducing C1 one call site away,
+which is precisely how C1 arose the first time. Making `now` a required positional/keyword (or
+raising on `None`) would make the invariant structural rather than conventional. **Not blocking**
+— nothing reaches it today, and the review will not hold a merge on a hypothetical caller.
+
+**5.2 Nit — `portability.md` D9's cross-reference is dangling** (pre-existing, inherited by the
+wave, not created by it). See §6.
+
+**5.3 Z-rewrite edge cases — all safe.** The rewrite is a blind string splice, so I attacked it
+with inputs where that could misfire. Every one degrades to a null park; none raises, none
+yields a naive datetime:
+
+```
+'Z'                          -> None    # "" + "+00:00" -> ValueError -> None
+'2026-07-13T22:32:01+00:00Z' -> None    # double offset -> ValueError -> None
+'2026-07-13T22:32:01.933z'   -> None    # lowercase z not matched by endswith("Z")
+''  /  'ZZ'                  -> None
+'…933Z ' / ' …933Z'          -> None    # whitespace-padded
+```
+
+The lowercase-`z` case is worth naming: it does **not** match `endswith("Z")`, so it passes
+through raw and fails to parse → null park. Real records emit uppercase `Z`
+(`spike/m0/VERDICTS.md:441`), and the failure direction is conservative, so this is correct as
+written rather than a gap.
+
+**5.4 The new tests are honest about their own limits.** `TestRecordTimeParsing`'s header states
+plainly that the tests run on 3.13 — where the *naive* `fromisoformat("…Z")` would also pass —
+so they *cannot themselves fail on a 3.10 floor violation*; they pin the input/output contract
+so a future regression is caught the moment a 3.10 CI job exists (`portability.md` D9 recommends
+one). That is exactly the review's closing suggestion, adopted with its limitation declared
+rather than papered over. Credit where due: a lesser wave would have presented these as proof of
+the 3.10 fix. The actual 3.10 proof is §1's interpreter run.
+
+**5.5 SPURIOUS-FIX check — none.** Every changed line traces to N1, N2, or N3. The wave did not
+touch the regex, the 12-hour table, `_next_local_reset_utc`'s DST handling, or the follow-up
+findings it wasn't asked to fix (D1–D4 stand exactly as filed).
+
+---
+
+## 6. Ruling — is the `portability.md` touch legal?
+
+**What the wave changed** (one row, `docs/specs/portability.md:42`, D9's evidence cell — the
+grep list of 3.10+-only features). Added, inline:
+
+> *"and — N2 fix wave addition, MD-ULPARSER-REVIEW-2026-07-17.md re-review, closes the gap this
+> list didn't cover — `datetime.fromisoformat(...)` on a trailing-`Z` string, which only accepts
+> `Z` natively from **3.11** (a 3.10 interpreter raises `ValueError`; `bin/fleet.py`'s
+> `_record_time` avoids it by rewriting `Z` to `+00:00` before parsing, a form `fromisoformat`
+> has accepted since 3.7)"*
+
+**What the banner actually supersedes** (`portability.md:6`, quoted in full):
+
+> *"**[SUPERSEDED — native-substrate pivot 2026-07-13]** This **whole spec's probe-matrix /
+> `boot_identity` / `killpg` liveness design** is superseded: process hosting and liveness are now
+> owned by the native daemon … MOVED, not deleted — kept below for history; **do not build
+> against it**."*
+
+**Ruling: LEGAL — the touch belongs where it landed, and is not a defect of this wave.**
+
+1. **It is outside the superseded scope.** The banner names three things — probe-matrix,
+   `boot_identity`, `killpg` liveness. D9 is a *Python version floor*, none of those. The banner
+   supersedes a **design**, not the document's every factual row.
+2. **SPEC.md explicitly keeps this spec's goal alive.** `docs/SPEC.md:8` (PRESCRIPTIVE, dated
+   today): *"The goal of `docs/specs/portability.md` … is reaffirmed even though that spec's
+   probe-matrix mechanics were superseded by the native pivot."* The pivot retired the mechanics,
+   not the portability contract.
+3. **This review asked for it.** The re-review's §8 said: *"add the `Z`-suffix form to D9's grep
+   list."* The wave did exactly that, minimally, in the one row that exists. Ruling it illegal now
+   would be this reviewer moving the goalposts onto its own instruction.
+4. **The load-bearing protection isn't the spec anyway** — it's `_record_time`'s own docstring
+   (`bin/fleet.py:1258-1270`), which carries the full 3.11-vs-3.10 explanation *at the code a
+   maintainer would edit*. The D9 entry is belt-and-braces. Correctly placed, but not the thing
+   doing the work.
+
+**However — a real doc-hygiene gap surfaced, which the wave inherited rather than caused.**
+D9's own anchor is **dangling**:
+
+> D9: *"confirming (not revising) SPEC §14's existing 'Target floor: Python 3.10+' line — no drift
+> between this spec and SPEC.md."*
+
+```
+grep -n "Target floor" docs/SPEC.md   -> NO MATCH
+grep -n "^## 14" docs/SPEC.md         -> 235:## 14. Views / terminal surface (binding rules, unchanged)
+```
+
+**SPEC §14 is "Views / terminal surface"; no "Target floor" line exists in SPEC.md at all.** D9's
+"no drift between this spec and SPEC.md" is vacuous — there is nothing on the other side. The
+floor's only live, authoritative home is a code header, `bin/fleet.py:14`:
+
+> *"Requires Python 3.10+ (dev machine: py -3.13). Stdlib only -- no pip deps"*
+
+So the 3.10 floor is currently declared in a code comment and elaborated in a spec whose own
+banner says *"do not build against it"*, citing a SPEC section that doesn't exist. **This is a
+pre-existing defect** (it predates all three waves; SPEC v3 evidently renumbered or dropped the
+line D9 was written against) and it is **out of scope for `md/ulparser`** — a UL-parser branch
+should not be relitigating where the Python floor lives.
+
+**Recommend as a follow-up on a docs branch, not a gate on this one:** give the floor a live home
+— a line in SPEC.md, or promote `bin/fleet.py:14` to the cited authority — and fix D9's dangling
+`SPEC §14` reference. Flagged here so it is not lost; explicitly **not** a fix-wave item.
+
+---
+
+## 7. Final disposition
+
+`RE-REVIEW VERDICT: merge`
+
+**All seven findings across three rounds are closed or consciously deferred:**
+
+| | Status |
+|---|---|
+| C1 (CONFIRMED-BUG) | FIXED, wave 1 — verified on the real G7 timeline |
+| D5, D6 | FIXED, wave 1 |
+| N1, N2, N3 | FIXED, wave 2 — N2 verified on a real 3.10 interpreter |
+| D1, D2, D3, D4 | Open **follow-ups by design** — filed, non-blocking, never ordered into a wave |
+
+**Open follow-ups, unchanged and carried forward** (none block this merge): **D1** tz-data is
+still incidental on this host (recommend a `fleet doctor` check); **D2** no 1..12 hour validation
+(`13am` → 1pm); **D3** DST fold/gap semantics (≤1h, errs late; Qyzylorda has no DST);
+**D4** the tz regex needs ≥1 `/` so `(UTC)` can't match (fails safe). Plus §5.1 (vestigial
+wall-clock default) and §6 (the floor's documentation home).
+
+**The wave-2 fix wave minted no new defects** — notable against the M-C base rate this review
+opened with (`lessons.md:607`: *"fix waves minted new defects in 3 of 5 waves"*). Wave 1 did mint
+one (N2, caught here); wave 2 is clean.
