@@ -34,3 +34,75 @@ MILESTONE: spec 5.1.1 usage-limit continuity COMPLETE and merged (T6, review pai
 ## 2026-07-15T22:52:09Z CHECKPOINT inc=inc-20260715T114655Z-a938 sid=0eb3c88e-5638-41fa-aa08-6a1b89d08732
 
 M-B T7-T11 merged (eec028b..now): steering w/ 2 fix waves (double-fork race killed), stop/tombstones + cp1252 fix, tombstone-first archival, handoff fast-follows + abort evidence rule, doctor pin-gate w/ per-check isolation. 11/12 tasks done. T12 next: FLEET_LIVE pin tier + docs sweep, then final whole-branch review.
+
+## 2026-07-16T01:36:45Z CHECKPOINT inc=inc-20260715T114655Z-a938 sid=0eb3c88e-5638-41fa-aa08-6a1b89d08732
+
+M-B MILESTONE COMPLETE (4f52f37 on main): native dispatch shipped end-to-end -- launch contract on --bg, outcome discriminator, UL continuity (spec 5.1.1, standing goal 2), fork-steer, claude-stop kill/interrupt w/ tombstones, auto-archival (5.1.2), categories (5.1.3), handoff fast-follows, doctor pin-gate, FLEET_LIVE pin tier GREEN at 2.1.211 + recorded. Campaign: 12 tasks + final wave, 13 fleet workers implementing the substrate they ran on, subagent review pairs + fix waves killed ~15 Criticals pre-merge, pin suite caught 3 more invisible to all unit tests. 1162 tests (from 764). Knowledge captured. Next: M-C (deletion + SPEC v3) per docs/NEXT-SESSION.md -- soak first, deferred items enumerated in final-review.md.
+
+## 2026-07-16T13:08:03Z SEIZED inc=inc-20260716T130803Z-5325 sid=90bab65e-b4af-4c63-9c64-d4b4ea3d9037
+
+seized from inc-20260715T114655Z-a938: holder roster-gone, heartbeat stale (41478s > 3600s)
+
+## 2026-07-16T13:09:40Z CHECKPOINT inc=inc-20260716T130803Z-5325 sid=90bab65e-b4af-4c63-9c64-d4b4ea3d9037
+
+M-C campaign start (inc-20260716T130803Z-5325): scope = NEXT-SESSION.md (deletions per pivot-spec 6, banners per 3, SPEC v3, soak) + operator directive 'automatic agent cleanup' folded in as feature task. Fleet mixed: 10 native mb-* under TTL, 3 legacy (mb-t2/t3/t4) to retire before refuse_if_legacy deletion. Plan: 3 parallel workers (mc-debt, mc-autoclean, mc-docs) in worktrees, review pairs gate, deletions last after native-only confirmed.
+
+## 2026-07-16T13:40:25Z CHECKPOINT inc=inc-20260716T130803Z-5325 sid=90bab65e-b4af-4c63-9c64-d4b4ea3d9037
+
+M-C wave 1 built: mc-debt (9/9 items, 1175 tests), mc-autoclean (fleet autoclean + clean tiering + init --autoclean schtasks + doctor check, 1219 tests, sid-based default-deny husk discriminator), mc-docs (banners on 4 docs + SPEC 4 amend + README reword, 7 commits). 5 review subagents launched (adversarial+spec pairs on code branches, single on docs). Known merge conflict: README touched by both mc-docs and mc-autoclean. Fleet cleanup done earlier: 10 archived, 3 legacy cleaned, 15 husks rm'd, registry empty = native-only confirmed.
+
+## 2026-07-16T14:23:27Z CHECKPOINT inc=inc-20260716T130803Z-5325 sid=90bab65e-b4af-4c63-9c64-d4b4ea3d9037
+
+M-C review gate: 5/5 verdicts in. Spec reviews both fully COMPLIANT (mutation-verified fault-inject tests). Adversarial: mc-debt 1 MED (OSError retry re-runs non-idempotent commit_fns -> false orphaned + ceiling skip) + 3 LOW; mc-autoclean 2 HIGH (corrupt-registry fail-open husk sweep rm's fleet's own protected sessions; schtasks install can pin worktree fleet.py, no FLEET_HOME guard) + 1 MED + 2 LOW, foreign-session default-deny HELD under all injections; mc-docs no-critical, 7 findings, 4 ordered fixed (F33 appendix banner stopgap etc). Fix waves dispatched to all 3 workers via fork-steer. Banner variant '(mechanism only)' recorded in mc-delete task file. Host process restarted twice mid-campaign -- workers + subagent reviewers all resumed lossless (soak evidence for native dispatch).
+
+## 2026-07-16T14:25:27Z CHECKPOINT inc=inc-20260716T130803Z-5325 sid=90bab65e-b4af-4c63-9c64-d4b4ea3d9037
+
+M-C review gate: 5/5 verdicts in. Spec reviews both fully COMPLIANT (mutation-verified fault-inject tests). Adversarial mc-debt: 1 MED (OSError retry re-runs non-idempotent commit_fns -> false orphaned + ceiling skip) + 3 LOW -> fix wave running. Adversarial mc-autoclean: 2 HIGH (quarantine fail-open -> mass rm of own workers next tick; schtasks task pins worktree fleet.py + drops FLEET_HOME) + 1 MED + 3 LOW, verdict NOT-scheduler-safe until fixed -> fix wave running (note: predecessor host process had already dispatched an overlapping fix wave before dying; both messages delivered, compatible). Docs: 7 findings, no Critical -> fix wave DONE (F1-stopgap/F2/F4/F7), re-review with new-defect hunt running. mc-delete task file updated with banner-variant grep note.
+
+## 2026-07-16T14:44:46Z CHECKPOINT inc=inc-20260716T130803Z-5325 sid=90bab65e-b4af-4c63-9c64-d4b4ea3d9037
+
+M-C review loop closing: mc-docs CLOSED (db8a107, re-review ALL-FIXED + 2 LOW residuals fixed w/ grep receipts). mc-debt CLOSED (67cf788, re-review ALL-FIXED + fault-inject re-verified; _append_event_quiet mechanism kills retry-reruns-nonidempotent-commit_fn class; +N1 EPIPE guard, N2 fast-completion swaps). mc-autoclean fix wave 6/6 landed (96b9b34..6aed44a, 1246 tests, +27; no-registry-no-sweep, --fleet-home embedded, fail-closed query, path-based ownership, uuid-name refusal at choke point) -- final adversarial re-review running (2 HIGH demand re-verified repro before merge). Worker self-caught+removed a leaked uuid-named test session from real roster.
+
+## 2026-07-16T14:46:11Z CHECKPOINT inc=inc-20260716T130803Z-5325 sid=90bab65e-b4af-4c63-9c64-d4b4ea3d9037
+
+mc/debt + mc/docs merged to fleet-impl (bfb6678), suite 1176 green, pushed. mc/debt: 9 roll-up items + retry-idempotency (_append_event_quiet mechanism) after re-review + polish. mc/docs: banners + SPEC v2.3 + README after 2 fix waves (fix wave minted a new MED, 4th confirmation of the doctrine). mc/autoclean fix wave done (6/6 incl both HIGHs: no-registry-no-sweep guard, --fleet-home embedded task command + worktree-install refusal); re-review with new-defect hunt running, focus on the new --fleet-home global flag. Merge of autoclean + main ff after its re-review returns clean.
+
+## 2026-07-16T15:02:34Z CHECKPOINT inc=inc-20260716T130803Z-5325 sid=90bab65e-b4af-4c63-9c64-d4b4ea3d9037
+
+mc/autoclean waves: fix wave 1 (6/6 incl 2 HIGH), re-review minted N1/N2/N3 (5th fix-wave-mints-defect confirmation), micro-wave 2 fixed N2+N3 (2edadeb, quarantine-artifact presence guard — worker correctly rejected my suggested mtime comparison as unsound, rename preserves mtime), N1 dispatched separately after a two-message scope mixup the worker flagged honestly. LIVE FRICTION FINDINGS for lessons: (1) fleet wait returned early racing a fork-steer dispatch (worker status working + mail pending at wait exit); (2) two steer messages landed in one worker turn with conflicting scope — mailbox delivery batching needs a doctrine note (one steer per turn, or explicit supersede marker).
+
+## 2026-07-16T15:21:22Z CHECKPOINT inc=inc-20260716T130803Z-5325 sid=90bab65e-b4af-4c63-9c64-d4b4ea3d9037
+
+PIN SUITE RED post-merge, root-caused live: --bg roster entries are STATE-ONLY for the first seconds (no status/pid until process attaches) -- contract's 'state-only = dead' rule false during startup transient; recompute verdicts a healthy newborn dead-suspected, fleet wait returns instantly. Deterministic today (2/2), green yesterday (window unsampled). NOT a merge regression -- latent since M-B, exposed by timing. Repro: temp-home spawn + wait -> dead-suspected in 1.5s, worker then completed PIN-OK fine. Fix dispatched to mc-autoclean: launch-grace window in recompute roster-dead branch (extend _launch_claim_expired precedent), contract doc amendment, tests. Pin rerun after. dbg husks rm'd (temp proj dir busy, cleans on reboot). 6th live-tier-catches-what-units-miss confirmation.
+
+## 2026-07-16T15:28:32Z CHECKPOINT inc=inc-20260716T130803Z-5325 sid=90bab65e-b4af-4c63-9c64-d4b4ea3d9037
+
+mc-autoclean fully closed pending one gate: all review findings fixed (2edadeb residuals, bc92764 N1 marker-order, cd70ab3 doctor advisory), reviewer MERGE-READY + scheduler-safe YES. THEN worker's own live pin run found prod Critical #4-of-class: fresh --bg roster entry state-only for first seconds -> contract read as dead -> dead-suspected at 1.5s -> fleet wait returns instantly (pins 2/3/5 red; also explains this manager's own premature wait today). Fixed 8d04fe8 (dispatch grace window on last_dispatch_at, 600s shared constant, live-repro'd red pre-fix, suite 1267) + native-substrate.md contract amend. Final adversarial gate on that one commit running; merge x3 follows.
+
+## 2026-07-16T15:32:04Z CHECKPOINT inc=inc-20260716T130803Z-5325 sid=90bab65e-b4af-4c63-9c64-d4b4ea3d9037
+
+MILESTONE: M-C wave 1 fully merged + soak-gated. fleet-impl 1d5174b pushed, main ff'd. 1278 unit tests, pin suite 3x consecutive 6/6 green. Discriminator dispatch-grace fix (startup state-only transient) merged after live pin catch + root-cause + red/green fix cycle. mc-delete spawned (387af19f) on the pivot-spec section-6 deletion wave: detached-Popen machinery, probe_liveness/probe-ctime, PID registry fields, logs pipeline, refuse_if_legacy retirement. Registry native-only precondition satisfied (fleet emptied this morning; all current workers native).
+
+## 2026-07-16T15:41:03Z CHECKPOINT inc=inc-20260716T130803Z-5325 sid=90bab65e-b4af-4c63-9c64-d4b4ea3d9037
+
+POST-MERGE CHECKS: unit suite 1278/18 GREEN on merged fleet-impl (1d5174b, all three M-C branches). FLEET_LIVE pin tier RED 3/6 (pins 2/3/5 again) — grace fix treated symptom, real defect is fresh-outcome path live (worker stuck working forever, outcome never reads fresh). mc-autoclean steered to root-cause on mc/pinfix off merged tree with live repro + 6/6 bar. NOTE: merges/push/main-ff/mc-delete-spawn were done by the OPERATOR manually at green (standing directive) — reconstructed after initially suspecting a twin manager; predecessor host's pre-death fix-wave sends explain the doubled mailbox messages. main is ff'd+pushed WITH the red-pin defect — campaign progression blocked until pins green. mc-delete continues (deletion scope orthogonal to outcome-freshness surface).
+
+## 2026-07-16T16:04:51Z PROPOSAL inc=inc-20260716T130803Z-5325 sid=90bab65e-b4af-4c63-9c64-d4b4ea3d9037
+
+Operator proposes three-tier split: human-facing interface session (thin context, brief-authoring) / background supervisor (claim holder, campaign mechanics, respawnable) / workers. Draft captured at docs/specs/three-tier-command.md — substrate mostly exists (durable bg sessions + mailbox + claim rituals + M-C scheduler bridge); deltas: fleet sup-spawn, fleet init --supervisor-beat, NEEDS-OPERATOR routing, doctrine that humans steer only via interface tier (today's phantom-steer incident is the motivating evidence). Token-efficiency: propose compressed output contracts mandatory at tier boundaries via campaign-template clause, NOT a plugin prerequisite. Candidate M-D campaign after SPEC v3; adversarial design review first, no self-promotion.
+
+## 2026-07-16T16:11:19Z CHECKPOINT inc=inc-20260716T130803Z-5325 sid=90bab65e-b4af-4c63-9c64-d4b4ea3d9037
+
+INCIDENT RESOLVED: dual supervisor bodies. Phantom steers (14:23Z-16:03Z, 7 sends: 'final micro-wave', 'One last LOW advisory', 'URGENT root-cause task', ...) came from c787a667 -- a fork-session resume of THIS conversation created ~20:56 local during a host restart, running daemon-hosted with full campaign context, independently re-deriving and dispatching my decisions in paraphrase. Confirmed via transcript identity (same first user message), process census (fork-session --resume cmdline), event-timeline correlation (each phantom seconds-minutes after mine). Operator confirmed not-theirs. Zombie stopped via claude stop c787a667; transcript kept as evidence; user's own peek session 43c8e51d cleared (unrelated legit exploration). Claim-protocol gap exposed: both bodies share incarnation id + sid -- sup-claim cannot discriminate bodies of one lineage; logged as hazard in three-tier-command.md draft, lessons entry at close. mc-autoclean now on 0e9329c3 (zombie's steer) mid-turn on dispatch-path work, suite 1292 -- letting it finish, adjudicating output after.
+
+## 2026-07-16T19:15:34Z CHECKPOINT inc=inc-20260716T130803Z-5325 sid=90bab65e-b4af-4c63-9c64-d4b4ea3d9037
+
+mc/delete merged to fleet-impl + pushed: pivot section-6 deletions complete, fleet.py 9345->7216, 1036 tests green, adversarial (no CRIT/HIGH, 5 injections red) + spec (fully compliant) + LOW sweep. Both workers rode a plan-limit park through midnight reset via resume-limited --force-now -- UL continuity battle-proven in production (note: 'resets 12am (Asia/Qyzylorda)' horizon format unparsed by scanner -> null-horizon park, G11 gap for lessons). mc/pinfix CRITICAL fix wave done (all 6 findings, injection red/green + live pin 6/6) -- re-review with new-defect hunt running. After pinfix verdict: merge onto post-delete base (dispatch_bg conflict expected), final live gate, SPEC v3.
+
+## 2026-07-16T20:22:36Z CHECKPOINT inc=inc-20260716T130803Z-5325 sid=90bab65e-b4af-4c63-9c64-d4b4ea3d9037
+
+mc/pinfix merged (c63d7dd) after fresh-context re-reviewer returned merge-YES (4x 529 kills on the big-transcript reviewer -- lesson: resume-with-huge-context is 529-fragile, fresh lean agent with findings baked into brief got through). fleet-impl + main pushed @ c63d7dd: 1054 tests, live pin 6/6. M-C code COMPLETE. mc-spec spawned for SPEC v3 (draft-pending-review, no self-promotion). Remaining: spec review + promote, autoclean scheduled-task install from canonical home, lessons/INDEX/NEXT-SESSION, worktree cleanup.
+
+## 2026-07-16T20:51:45Z CHECKPOINT inc=inc-20260716T130803Z-5325 sid=90bab65e-b4af-4c63-9c64-d4b4ea3d9037
+
+CAMPAIGN CLOSE: M-C COMPLETE, NATIVE-SUBSTRATE PIVOT DONE (M-0 through M-C all shipped). main = 187ce0f: SPEC v3 promoted spec-of-record (author mc-spec, reviewer fix-wave applied, manager promotion), section-6 legacy deleted (-7130 lines), autoclean shipped + schtasks LIVE every 6h, dispatch hardening (grace window + attach-verify/wedge-retry after CRITICAL caught pre-merge), 1054 tests + pin 6/6 at close. Knowledge loop closed: lessons #2026-07-17-mc (zombie-manager class, roster time-axis, 529 re-brief-lean, UL prod proof), INDEX, NEXT-SESSION rewritten (M-D candidate: three-tier command + per-body claim nonce). M-B era worktrees pruned; mc-* worktrees await worker auto-archive (the new feature owns it). Incidents survived: dual-supervisor fork (stopped, evidenced), 2 host deaths, plan-limit park+resume, 529 storm. Operator asks delivered: automatic cleanup (live), three-tier proposal (drafted), token-efficiency plan (in draft + template clause pending M-D).
