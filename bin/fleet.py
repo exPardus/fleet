@@ -1144,10 +1144,12 @@ def _parse_limit_signal(text: str, *, now: "datetime | None" = None):
     consumers. When absent, falls back to the LOCAL wall-clock + IANA tz
     shape (`_LIMIT_RESET_LOCAL_RE`) actually observed in production
     (M-D item 3) -- 12am/12pm are normalized to 00:00/12:00 (the classic
-    12-o'clock bug), and the next occurrence of that wall-clock time is
-    converted to UTC via `_next_local_reset_utc`. `now` is an optional
-    keyword-only override (real clock when omitted) so tests are
-    deterministic; it is never passed by any existing call site."""
+    12-o'clock bug), and the next occurrence at-or-after `now` of that
+    wall-clock time is converted to UTC via `_next_local_reset_utc`. `now`
+    is keyword-only, defaulting to the real wall clock; its sole
+    production caller (`transcript_limit_scan`) passes the transcript
+    record's own timestamp (C1 fix wave) so the horizon anchors to when
+    the signal actually fired, not to whenever the scan happens to run."""
     reset_at = None
     m = _LIMIT_RESET_RE.search(text or "")
     if m:
@@ -1238,6 +1240,26 @@ def find_transcript_path(name: str, sid: str):
     return candidates[0]
 
 
+def _record_time(rec: dict):
+    """Aware UTC datetime from a transcript record's own `timestamp` field,
+    or None on absence/garbage. Records carry fractional-second ISO-8601
+    (e.g. "2026-07-13T23:48:10.741Z", spike/m0/VERDICTS.md:441) -- NOT
+    `_parse_iso`'s strict `%Y-%m-%dT%H:%M:%SZ`, which rejects that
+    fractional form. `datetime.fromisoformat` (3.11+) parses it directly,
+    trailing `Z` included. A missing/non-string/unparseable timestamp
+    returns None -- the caller then falls back to the real wall clock,
+    same as before this anchor existed (C1 fix wave, MD-ULPARSER-REVIEW-
+    2026-07-17.md)."""
+    ts = rec.get("timestamp") if isinstance(rec, dict) else None
+    if not isinstance(ts, str):
+        return None
+    try:
+        dt = datetime.fromisoformat(ts)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
 def transcript_limit_scan(sid: str, transcript_path=None):
     """(is_limit, reset_at, kind) from sid's transcript tail (G11 / Known
     hazards: a rate-limit 429 fires NO Stop hook and leaves the roster
@@ -1255,12 +1277,19 @@ def transcript_limit_scan(sid: str, transcript_path=None):
 
     Scans the tail window (`_read_tail_lines` -- perf: bounded bytes, no
     whole-file parse) newest-first, first match wins. Horizon/kind reuse
-    `_parse_limit_signal` verbatim against the record's
-    `message.content[].text` -- the observed real signal carries a
-    LOCAL-format time, not ISO, so reset_at is usually None (park with an
-    unknown horizon; `resume-limited --force-now` is the realistic
-    recovery). Never raises: a missing/unreadable transcript or an
-    unparseable line both fall through to (False, None, None).
+    `_parse_limit_signal` against the record's `message.content[].text`,
+    anchored via `now=_record_time(rec)` to the TRANSCRIPT RECORD'S OWN
+    timestamp -- not the wall clock at parse time (C1 fix wave,
+    MD-ULPARSER-REVIEW-2026-07-17.md: `limited` is sticky, so a park's
+    horizon is parsed exactly once; anchoring to "now" meant any scan that
+    first observed the park after the quoted local reset time had already
+    passed rolled the horizon a full day late -- 24h wrong, and never
+    self-corrected). Anchoring to the message instant instead yields the
+    first occurrence at-or-after when the signal actually fired, which is
+    the correct reset regardless of how late the scan runs. A missing or
+    unparseable `timestamp` falls back to the real wall clock (today's
+    pre-anchor behavior). Never raises: a missing/unreadable transcript or
+    an unparseable line both fall through to (False, None, None).
 
     transcript_path may be given directly (the discriminator's own call
     site resolves it once via find_transcript_path(name, sid) and hands
@@ -1313,7 +1342,7 @@ def transcript_limit_scan(sid: str, transcript_path=None):
             msg = rec.get("message") or {}
             parts = [c.get("text", "") for c in (msg.get("content") or [])
                      if isinstance(c, dict) and c.get("type") == "text"]
-            reset_at, kind = _parse_limit_signal("\n".join(parts))
+            reset_at, kind = _parse_limit_signal("\n".join(parts), now=_record_time(rec))
             return True, reset_at, kind
         # First qualifying (error-shaped or substantive) record does not
         # match the limit shape -- it is the authoritative "last thing
