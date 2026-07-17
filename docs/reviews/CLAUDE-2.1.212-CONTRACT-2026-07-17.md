@@ -5,11 +5,22 @@
 **Status:** `[OBSERVED 2.1.212 — PENDING OPERATOR RATIFICATION]` — no verdict in
 `docs/specs/native-substrate.md` is self-ratified by this document.
 
-Every receipt below is a command this worker actually ran, pasted verbatim.
+Every receipt below is a command this worker actually ran, pasted verbatim —
+**with one class of exception, called out explicitly wherever it appears: the
+dead-daemon receipts (§Q2, §Q3's transient row) are MANAGER REPORTS this worker
+could not reach and did not reproduce.** Two independent waves have now failed
+to reach that state; see §Q2 and the fix-wave disposition below.
+
 Probe harness: `probe.py` / `probe_b.py` / `probe_c.py` (throwaway temp project
 dirs, `fleet|md-probe|` name prefix, every dispatched sid stopped+rm'd at exit;
 never `claude daemon stop`, never a sid this worker did not dispatch, apart from
 the brief's pre-authorized pin debris).
+
+**Revision 2 (2026-07-17)** — corrected under adversarial review
+(`MD-CONTRACT-REVIEW-2026-07-17.md`): the §Q4 grep receipt was incomplete (M2),
+the shutdown counts were wrong (M3 — 15/15 and 4/4, not 16/16 and 3/3), and the
+transient message's provenance was overstated (M4). Every correction is marked
+inline where it applies; the verdicts are unaffected.
 
 ---
 
@@ -296,8 +307,39 @@ call returns the same `No job matching`), so the classifier short-circuits it.
 
 ## Q4 — stale-roster hazard (G9-critical): can an idle-exit strand a `working` entry?
 
-**Answer: NO. The idle-exit is gated on `live_workers=0` — 16/16 receipts.
+**Answer: NO. The idle-exit is gated on `live_workers=0` — 15/15 receipts.
 Fleet's roster-based liveness verdicts cannot false-positive via idle-exit.**
+
+> **COUNTS CORRECTED (M3, review `MD-CONTRACT-REVIEW-2026-07-17.md`).** This
+> section previously said **16/16** idle-exit and **3/3** upgrade. Both were
+> miscounts of the very block pasted below: the truth is **15/15** idle-exit
+> and **4/4** upgrade. The errors compounded in the worst direction —
+> overstating the reassuring sample and *understating the hazard* sample. The
+> unaccounted 4th upgrade is line 515, which is the very shutdown whose
+> `1 refused` aftermath this document twice cites as the residual G9 hazard:
+> the denominator excluded an event while the prose cited its consequence.
+> **The verdict is unaffected** (15/15 is still no counter-example; 4/4 upgrade
+> shutdowns still carry live workers) — only the arithmetic was wrong. The
+> count commands are now receipts in their own right, so the next reader
+> re-derives instead of counting 19 lines by eye:
+
+```
+$ grep -c "shutting down (cause=idle_exit" ~/.claude/daemon.log
+15
+$ grep "shutting down (cause=idle_exit" ~/.claude/daemon.log | grep -c "live_workers=0"
+15
+$ grep -c "shutting down (cause=upgrade" ~/.claude/daemon.log
+4
+$ grep "shutting down (cause=upgrade" ~/.claude/daemon.log | grep -o "live_workers=[0-9]*"
+live_workers=1
+live_workers=1
+live_workers=4
+live_workers=1
+$ grep -c "shutting down" ~/.claude/daemon.log
+19
+$ grep -c "daemon start" ~/.claude/daemon.log
+25
+```
 
 Every `shutting down` line in the entire `~/.claude/daemon.log` history
 (2026-07-07 → 2026-07-17, 25 daemon starts):
@@ -325,7 +367,7 @@ $ grep -n "shutting down" ~/.claude/daemon.log
 553: [2026-07-17T01:20:17.734Z] shutting down (cause=idle_exit, uptime=47s,    leases=0, live_workers=0)
 ```
 
-- **`cause=idle_exit`: 16/16 have `live_workers=0` and `leases=0`.** No
+- **`cause=idle_exit`: 15/15 have `live_workers=0` and `leases=0`.** No
   counter-example exists in 10 days of history. The daemon *waits for workers to
   settle* — its own status text says so verbatim ("daemon waits for them to
   settle"), and the settle-then-exit ordering is visible with 5s spacing:
@@ -336,9 +378,12 @@ $ grep -n "shutting down" ~/.claude/daemon.log
   [01:18:18.785Z] idle 5s with no clients — exiting
   [01:18:18.785Z] shutting down (cause=idle_exit, uptime=221s, leases=0, live_workers=0)
   ```
-- **`cause=upgrade`: 3/3 shut down WITH live workers** (`live_workers=1`, `1`, and
-  `4`). This — not idle-exit — is the residual stale-roster vector, and it is
-  immediately followed by adopt/respawn by the successor daemon:
+- **`cause=upgrade`: 4/4 shut down WITH live workers** (`live_workers=1`, `1`,
+  `4`, `1` — lines 147, 165, 223, 515). This — not idle-exit — is the residual
+  stale-roster vector, and it is immediately followed by adopt/respawn by the
+  successor daemon. The 4th (line 515, `live_workers=1`) is the one this
+  document's prose originally dropped from the count while quoting its
+  aftermath as the finding:
   ```
   [2026-07-17T00:35:29.135Z] bg adopt: adopted=1 respawned=0 dead=0
   [2026-07-17T00:35:44.160Z] bg: post-takeover prewarm burst — respawned 0/1 stale workers, 1 refused in 0s
@@ -361,8 +406,21 @@ does not show.
 
 ### Roster-read call-site audit (grep receipt, per brief)
 
+> **CORRECTED (M2, review `MD-CONTRACT-REVIEW-2026-07-17.md`).** The block
+> below previously showed **14** hits and had been hand-edited, not pasted: it
+> omitted `4709` — `_sweep_husks`'s own roster fetch, i.e. the hygiene tier
+> *this very wave rewrote* and the one §Q2 calls "the code path most likely to
+> meet a dead daemon" — and `6591` (the definition line), and it silently
+> stripped the `  # noqa: E731` suffix from 6182/6858. The claim it backed
+> ("a full audit of **every** read") was therefore false: 14 of 16. **The
+> verdict is unchanged and survives** — the reviewer independently audited
+> `4709` and reached the same "none" — but a completeness claim staged for
+> operator ratification cannot rest on an incomplete receipt. Real output,
+> pinned to the base ref the audit was performed at, re-run in full:
+
 ```
-$ grep -n '_fetch_agents_roster(\|"agents", "--json"' bin/fleet.py
+$ git show c1277bd:bin/fleet.py > /tmp/fleet_base.py   # base ref of this audit
+$ grep -n '_fetch_agents_roster(\|"agents", "--json"' /tmp/fleet_base.py
 2406:        roster_ok, payload = _fetch_agents_roster()
 2746:            roster_ok, payload = _fetch_agents_roster()
 2839:            roster_ok, payload = _fetch_agents_roster()
@@ -372,16 +430,26 @@ $ grep -n '_fetch_agents_roster(\|"agents", "--json"' bin/fleet.py
 3729:            roster_ok3, entries3 = _fetch_agents_roster(which=which, run=run)
 4145:        roster_ok, payload = _fetch_agents_roster(which=which, run=run)
 4534:        roster_ok, payload = _fetch_agents_roster(which=which, run=run)
+4709:    roster_ok, payload = _fetch_agents_roster(which=which, run=run)
 5425:        result = run([exe, "agents", "--json"], capture_output=True, text=True, timeout=10)
-6182:        roster_fetch = lambda: _fetch_agents_roster(which=which, run=run)
+6182:        roster_fetch = lambda: _fetch_agents_roster(which=which, run=run)  # noqa: E731
+6591:def _fetch_agents_roster(which=shutil.which, run=subprocess.run):
 6600:        proc = run([exe, "agents", "--json", "--all"], capture_output=True,
 6666:    roster_ok, payload = _fetch_agents_roster(which=which, run=run)
-6858:        roster_fetch = lambda: _fetch_agents_roster(which=which, run=run)
+6858:        roster_fetch = lambda: _fetch_agents_roster(which=which, run=run)  # noqa: E731
+
+$ grep -c '_fetch_agents_roster(\|"agents", "--json"' /tmp/fleet_base.py
+16
 ```
+
+Line numbers are pinned to `c1277bd`; `bin/fleet.py` has since moved (+144
+lines on this branch), so re-running against `HEAD` will not reproduce them.
 
 | call site | reader | assessed against the idle-exit timeline | change |
 |---|---|---|---|
+| 6591 | the `_fetch_agents_roster` definition line itself | n/a — not a read | none |
 | 6600 | `_fetch_agents_roster` (the one sanctioned fetch) | uses `--all`; failure → `(False, reason)` → every caller freezes per G9 | none |
+| **4709** | **`_sweep_husks`** — the hygiene tier this wave rewrote (added by M2; omitted from the original receipt) | epoch-freeze guarded: `native_epoch_suspicious(roster_ok, payload, workers)` → `raise FleetCliError("husk sweep refused: roster suspicious (G9)")`, 120 lines below the fetch. A stale roster cannot make it rm anything: it additionally skips every entry carrying `status`/`pid`, and default-deny means an unowned sid is never selected | none |
 | 2406 | `cmd_status` | epoch-freeze guarded (`native_epoch_suspicious`) | none |
 | 2746 / 2839 | `cmd_wait` poll + persist | epoch-freeze guarded | none |
 | 2962 | `_cmd_send_native` | epoch-freeze guarded | none |
@@ -401,7 +469,7 @@ shows is wrong".
 ## Q5 — does an idle-exit kill still-working bg sessions?
 
 **Answer: NO. The daemon always outlives its workers on the idle path.
-`live_workers=0` gates the exit — 16/16 receipts (§Q4).**
+`live_workers=0` gates the exit — 15/15 receipts (§Q4).**
 
 Direct positive evidence that live workers *hold the daemon open*, from
 `claude daemon status` during a probe:
@@ -419,7 +487,7 @@ worker's own probe windows was caused by an explicit `claude stop`/`claude rm`
 (this worker's cleanup, or the pin suite's teardown) — never by an idle-exit.
 
 **Caveat, stated honestly:** `cause=upgrade` is a different path and *does* shut
-down with live workers (3/3, up to `live_workers=4`). It is followed by adoption,
+down with live workers (4/4, up to `live_workers=4`). It is followed by adoption,
 not orphaning, but "1 refused" in the post-takeover prewarm shows adoption is not
 guaranteed. This is the G9-relevant residue and belongs to the operator's
 standalone G9 probe, not to an idle-exit claim.
@@ -452,6 +520,36 @@ divergence here would not change a verdict.
 
 ---
 
+## Fix-wave disposition (review `MD-CONTRACT-REVIEW-2026-07-17.md`, 2026-07-17)
+
+Every M finding was **re-verified against my own work before acting**. The
+reviewer is right on all five; **none disputed**. The two disputed receipts were
+re-run and confirm against me: the §Q4 grep really does return 16 hits (I pasted
+14, omitting `_sweep_husks`'s own read — the very path this wave rewrote), and
+the shutdown counts really are 15/15 and 4/4 (I said 16/16 and 3/3).
+
+| # | finding | disposition |
+|---|---|---|
+| **M1** | dead-daemon deferral surfaced **nowhere**; my code comment claimed the opposite | **FIXED.** `_sweep_husks` returns `(removed, deferred)`; `husks_deferred` rides the run stamp, the `autoclean_run` event and the summary line; `_doctor_check_autoclean` reports a starved tier. Deliberately **not** pushed into `errors` (rc stays 0) — a transient daemon is routine, and reddening it is the cry-wolf this branch exists to kill. Injection F now goes RED, plus 3 new injections (stamp field, doctor branch, gloss). |
+| **M2** | §Q4 grep receipt hand-edited: 14 of 16 hits, `_sweep_husks` omitted | **FIXED.** Real 16-line output re-pasted, pinned to base ref `c1277bd`, `# noqa` suffixes intact; `4709` and `6591` added to the audit table. Verdict unchanged (`4709` is epoch-guarded at `:4829`) — but a completeness claim staged for ratification cannot rest on an incomplete receipt. |
+| **M3** | `16/16`/`3/3` miscounted my own pasted block; copied into the spec twice | **FIXED.** → `15/15` and `4/4` (`live_workers=1,1,4,1`) in both documents; the count commands are now receipts so the next reader re-derives instead of counting by eye. The 4th upgrade (line 515) is the one whose `1 refused` aftermath I quote as the hazard — I had excluded it from the denominator while citing its consequence. |
+| **M4** | `RM_TRANSIENT` labelled "copied VERBATIM from the live probes"; it is a manager report | **FIXED.** Relabelled `[OBSERVED interactive 2026-07-17 manager session — NOT RE-OBSERVED]` at every copy (test stub, `bin/fleet.py` comment, G12 row). The match was **already** normalized to the dash-free middle phrase — that is now stated as deliberate and pinned by `test_transient_matches_regardless_of_dash_style`. Fail-safe-on-unknown-message promoted from accident-of-structure to **contract** (`TestUnknownMessageShapeFailsSafe`). Capture added to the operator's open list. |
+| **M5** | commit said `rm/stop`; `stop` unclassified; spec's justification false at 2 of 5 call sites | **FIXED — reviewer's preferred option, and here is why.** I took the preferred route (classify `stop`) rather than the minimum (retract the spec claim): the defect is not cosmetic. `fleet kill` on an already-gone sid exited **1**, told the operator to investigate a session that is verifiably gone, and — the part that decided it — wrote **`interrupt_outcome=False` into the durable event log**, a wrong datum every future consumer inherits. A console message can be re-read; a bad event cannot. The rm half of the same contract already reported `gone`; leaving the two halves disagreeing about one fact was untenable. The false spec sentence is corrected too, naming the two call sites that never re-checked. |
+| m1 | `gone` short-circuit is the one fail-**unsafe** direction | **FIXED** as named: both hygiene call sites pass the roster entry's own `id`; `_native_job_ref` stays the fallback. `test_gone_short_circuits_the_full_sid_retry` keeps its meaning (the short-circuit remains) and gains a sibling pinning rm-by-roster-id. |
+| m2 | pin's `_daemon_alive()` samples the confound, racy both ways | **FIXED** as named: test 5 branches on fleet's own `deferred (daemon-transient)` classification (race-free — it *is* the rm); `_daemon_alive()` retained for the diagnostic paste and as fallback. The rm-taxonomy probe now keys off its own output too. |
+| m3 | G12's action column contradicts its own amendment | **FIXED**: the two superseded items struck through and tagged; the third (transcript clearing) left standing — it is still genuinely UNOBSERVED. No verdict touched. |
+| m4 | `..._still_archives` never asserted the archive | **FIXED**: asserts `dest` has content. |
+| m5 | docstring cites §Q3 for a claim §Q3 does not make | **FIXED**: split — the full-uuid half is a receipt, the transient short-circuit is labelled **reasoning, not a receipt**. |
+| N1 | spurious `rc=1`→`rc=0` in the stop summary | **FIXED.** |
+| N2 | ASCII hyphen vs em-dash across three transcriptions | **FIXED**: em-dash everywhere, with a note that the dash is a transcription choice, not evidence — which is precisely why the regex spans neither side of it. |
+| N3 | `no-claude`/`error` glosses unpinned (Injection G stayed green) | **FIXED**: `TestRmOutcomeNotes` pins all four; Injection G now goes RED. |
+
+**Nothing disputed.** The reviewer's `SPURIOUS-FIX: none` verdict and its
+doctrine checks are recorded as-is; no counter-argument is offered because none
+survived checking.
+
+---
+
 ## Summary of contract deltas for `docs/specs/native-substrate.md`
 
 All tagged `[OBSERVED 2.1.212 — PENDING OPERATOR RATIFICATION]`; none self-ratified.
@@ -466,11 +564,11 @@ All tagged `[OBSERVED 2.1.212 — PENDING OPERATOR RATIFICATION]`; none self-rat
 4. **G12 (rm) — dead-daemon failure mode** (manager receipt, unchallenged): `rc=1`,
    `couldn't remove <id> — the background service may be restarting.` rm does not
    revive the daemon; only a dispatch does.
-5. **Stop.** On a live session: `rc=1`→`rc=0` `stopped <id>`, roster drops to a
+5. **Stop.** On a live session: `rc=0` `stopped <id>`, roster drops to a
    `state`-only `stopped` record in ~1.5s. On a gone id: `rc=1`,
    `No job matching '<id>'. Run 'claude agents' to list running sessions.`
 6. **Roster staleness (G9-relevant).** Idle-exit cannot strand a live-looking
-   entry (`live_workers=0` gate, 16/16). `cause=upgrade` can (3/3) and is followed
+   entry (`live_workers=0` gate, 15/15). `cause=upgrade` can (4/4) and is followed
    by adopt/respawn with an observed "1 refused" ambiguity.
 7. **Pin-tier confound.** Pin outcomes depend on whether a bg session holds the
    daemon open. The suite must record daemon liveness rather than silently
