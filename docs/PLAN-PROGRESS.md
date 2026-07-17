@@ -64,3 +64,8 @@ The mutable cursor against the immutable contract `docs/PLAN.md`. A resuming man
 | C7 | Phase 4 web UI read-only (demand-gated build) | pending | GATED | — |
 | C8 | Phase 5 intelligence flag-sized (demand-gated build) | pending | GATED | — |
 | P6 | Reach backlog (demand-driven, per-item stub+gate) | pending | GATED | — |
+| M-D | pin-gate re-run (claude 2.1.211->2.1.212) | dispatched | first run RED: test_3 fork-steer hooks-absent + test_5 downstream; flake re-run in flight | 2026-07-17 |
+| M-D | SPEC portability directive (operator, multi-platform Win/macOS/Linux) | done | 21f3e77 | 2026-07-17 |
+| M-D | token-efficiency clause (template v1.6 + spawn-etiquette G3 fix) | done | 6c33f08 | 2026-07-17 |
+| M-D | three-tier design review gate (dual-lens: break + spec) | pending | task files md-review-break/md-review-spec written; spawn held on pin verdict | 2026-07-17 |
+| M-D | UL horizon parser (local-format reset times) | pending | task file md-ulparser + worktree fleet-md-ulparser ready; spawn held on pin verdict | 2026-07-17 |
