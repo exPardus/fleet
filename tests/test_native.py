@@ -1674,7 +1674,11 @@ class TestTranscriptLimitScan:
         t = _write_native_transcript(tmp_path, SID, [{"type": "user"}, LIMIT_RECORD])
         is_limit, reset_at, kind = fleet.transcript_limit_scan(SID, transcript_path=t)
         assert is_limit is True
-        assert reset_at is None  # observed text is local-format, not ISO
+        # M-D item 3: the local-format fallback now resolves this to a real
+        # UTC horizon instead of None (no frozen clock here, so just check
+        # the shape -- exact-instant coverage lives in
+        # TestParseLimitSignalLocalFormat in test_resilience.py).
+        assert fleet._LIMIT_RESET_RE.fullmatch(reset_at)
         assert kind == "session_5h"
 
     def test_iso_reset_in_text_is_parsed(self, native_home, tmp_path):
@@ -1771,7 +1775,8 @@ class TestLimitParkViaDiscriminator:
         out = fleet.recompute_worker_native("w1", rec, [make_roster_entry(SID, status="idle")])
         assert out["status"] == "limited"
         assert out["limit_kind"] == "session_5h"
-        assert out["limit_reset_at"] is None
+        # M-D item 3: local-format resolves to a real UTC horizon now.
+        assert fleet._LIMIT_RESET_RE.fullmatch(out["limit_reset_at"])
 
     def test_limited_stays_parked_never_dead_suspected(self, native_home):
         rec = seed_native_worker(native_home, status="limited")

@@ -1096,17 +1096,74 @@ def _native_cumulative_tokens(name: str) -> int:
 # one in ISO-8601 UTC form. Best-effort only; absence -> null horizon.
 _LIMIT_RESET_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 
+# The observed production shape instead (M-C park journal 2026-07-16,
+# knowledge/lessons.md:607): a LOCAL wall-clock time + IANA tz name, e.g.
+# "resets 4:40am (Asia/Qyzylorda)" or "resets 12am (Asia/Qyzylorda)" (the
+# hour-only form is the production gap this fallback closes). Only
+# consulted when the ISO regex above finds nothing (ISO keeps precedence).
+_LIMIT_RESET_LOCAL_RE = re.compile(
+    r"resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([A-Za-z_]+(?:/[A-Za-z_+\-0-9]+)+)\)",
+    re.IGNORECASE,
+)
 
-def _parse_limit_signal(text: str):
+
+def _next_local_reset_utc(hour: int, minute: int, tz_name: str, *, now: "datetime | None" = None):
+    """UTC ISO-8601 instant of the next occurrence of `hour:minute` local wall-
+    clock time in the named IANA tz, or None if the tz can't be resolved.
+
+    `zoneinfo` is stdlib but its DATA is not guaranteed on Windows (no
+    `tzdata` pip package -- this repo stays stdlib-only). The module is
+    imported here (inside the helper, not at module scope) so a plain
+    `import fleet` never gains a hard dependency on tz-data being present;
+    any lookup failure (unknown zone, missing data, whatever shape the
+    stdlib raises) falls back to None -- a conservative null-horizon park,
+    never a guessed UTC time or approximated offset."""
+    import zoneinfo
+    try:
+        tz = zoneinfo.ZoneInfo(tz_name)
+    except Exception:
+        return None
+    try:
+        moment = (now if now is not None else datetime.now(timezone.utc)).astimezone(tz)
+        candidate = moment.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if candidate < moment:
+            candidate += timedelta(days=1)
+        return candidate.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        return None
+
+
+def _parse_limit_signal(text: str, *, now: "datetime | None" = None):
     """Best-effort (reset_at, kind) from a limit-shaped stderr tail. reset_at is
     an ISO-8601 UTC string if one is present, else None (park with an unknown
     horizon -- never auto-resumed blind); kind is 'weekly' | 'session_5h' | None
     by keyword. Parser is pinned to the observed signal by the kernel probe
-    later; today it stays conservative and returns None where uncertain."""
+    later; today it stays conservative and returns None where uncertain.
+
+    ISO-8601 (`_LIMIT_RESET_RE`) keeps absolute precedence over existing
+    consumers. When absent, falls back to the LOCAL wall-clock + IANA tz
+    shape (`_LIMIT_RESET_LOCAL_RE`) actually observed in production
+    (M-D item 3) -- 12am/12pm are normalized to 00:00/12:00 (the classic
+    12-o'clock bug), and the next occurrence of that wall-clock time is
+    converted to UTC via `_next_local_reset_utc`. `now` is an optional
+    keyword-only override (real clock when omitted) so tests are
+    deterministic; it is never passed by any existing call site."""
     reset_at = None
     m = _LIMIT_RESET_RE.search(text or "")
     if m:
         reset_at = m.group(0)
+    else:
+        m2 = _LIMIT_RESET_LOCAL_RE.search(text or "")
+        if m2:
+            hour_s, minute_s, ampm, tz_name = m2.groups()
+            hour = int(hour_s)
+            minute = int(minute_s) if minute_s else 0
+            ampm = ampm.lower()
+            if ampm == "am":
+                hour24 = 0 if hour == 12 else hour
+            else:
+                hour24 = 12 if hour == 12 else hour + 12
+            reset_at = _next_local_reset_utc(hour24, minute, tz_name, now=now)
     kind = None
     low = (text or "").lower()
     if "week" in low:
