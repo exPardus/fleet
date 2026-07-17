@@ -436,7 +436,7 @@ $ grep -n '_fetch_agents_roster(\|"agents", "--json"' /tmp/fleet_base.py
 6591:def _fetch_agents_roster(which=shutil.which, run=subprocess.run):
 6600:        proc = run([exe, "agents", "--json", "--all"], capture_output=True,
 6666:    roster_ok, payload = _fetch_agents_roster(which=which, run=run)
-6858:        roster_fetch = lambda: _fetch_agents_roster(which=which, run=run)  # noqa: E731
+6858:    roster_fetch = lambda: _fetch_agents_roster(which=which, run=run)  # noqa: E731
 
 $ grep -c '_fetch_agents_roster(\|"agents", "--json"' /tmp/fleet_base.py
 16
@@ -547,6 +547,26 @@ the shutdown counts really are 15/15 and 4/4 (I said 16/16 and 3/3).
 **Nothing disputed.** The reviewer's `SPURIOUS-FIX: none` verdict and its
 doctrine checks are recorded as-is; no counter-argument is offered because none
 survived checking.
+
+## Fix-wave 2 disposition (re-review, 2026-07-17) — the twins wave 1 missed
+
+The re-review found all 13 wave-1 findings fixed, and three **new** defects that
+wave 1 *introduced or left half-done*. All three re-verified here before acting;
+**none disputed**.
+
+| # | finding | disposition |
+|---|---|---|
+| **ND-1** | **MAJOR.** `m1` hardened both `rm` call sites and **neither `stop` site** — in the same commit that gave `stop` the `gone`→success inference `m1` exists to make safe. | **FIXED + REPRO'D MYSELF FIRST.** My repro, against `e2ee7c5`: with a CLI answering only to its own short id, `fleet kill` used ref `['aaaabbbb']` (derived), got `No job matching` → `gone` → **rc=0, `w1: killed`, `interrupt_outcome=True`, status=dead — while the session ran on**. Fleet would then forget a live bg session that every husk sweep skips forever (status/pid-live): the rogue-session class `_cleanup_wedged` calls a C1 CRITICAL, reached through the front door. The reviewer's severity argument is exactly right and worth restating: **the pre-M5 code was fail-SAFE on this input** (rc=1, "investigate manually"), so my wave-1 "cry-wolf fix" removed the only signal that would have caught the true case. `_cmd_kill_native` now passes `ref=rec.get("native_short_id")`; re-running the repro shows ref `['zz9qk7xd']` and the session really stopped. Pinned by `test_kill_stops_by_the_captured_short_id_not_a_derived_ref` (red on revert, verified). Retired sids keep the derived fallback — they have no captured id, which is what `_native_job_ref` is for. **The reviewer's caveat is accepted and recorded, not papered over:** `native_short_id` is itself derived on 2 of its 6 write paths (the fast-sid paths), so this is a strict improvement on 4 paths and a no-op on 2 — *not a cure*. `_native_job_ref`'s docstring, which argued against this fix, is marked stale with the reason. |
+| **ND-2** | MINOR. The pin's `_daemon_alive()` fallback was **documented but never implemented** — `alive` appeared in no branch condition. | **FIXED as named.** This was M1's defect in miniature — a comment asserting what the code does not do — and mine. It bites because `rm_deferred` can only be True if `_NATIVE_CLI_TRANSIENT_RE` matched, and that regex rests on a string **two waves failed to observe** (M4): under any other real message, fleet correctly says `deferred (failed)` and test 5 would hard-assert "a genuine contract regression" on a machine whose daemon is merely down — the exact false-RED `m2` existed to kill. Fleet's classification stays primary; `_daemon_alive()` now corroborates the unclassified shape (`rm_unclassified and alive is False`). The pin still fails on vendor drift: a leftover sid with no deferral line, or a live/unknown daemon, hard-asserts. The reviewer's coupling point is also fixed: `NATIVE_RM_DEFERRED_PREFIX` is now a constant both sides import, pinned by `TestDeferralLineFormat` (red when renamed). **Bonus:** if the unclassified branch ever fires, the skip message tells the operator to capture the stderr — it is the receipt two waves could not get. |
+| **ND-3** | MINOR. The doctor note fired on the **first** deferral — the normal case per my own §Q2 — so starvation rendered like Tuesday. | **FIXED as named.** My M1 note even conceded the gap ("if this count persists across runs") while reading from a stamp that holds one pass and cannot show persistence. The streak now comes from `events.jsonl` (append-only, and carrying `husks_deferred` since M1): `_autoclean_deferral_streak()` counts consecutive deferring runs backwards from newest, resetting on any pass that removed a husk (proof the daemon was reachable). Doctor notes only at `AUTOCLEAN_DEFERRAL_STREAK_THRESHOLD` (3 — the scheduled task's floor is hourly, so ≥3h of unreachability) and prints the streak and its start. Still note-only (`ok=True`). The wave-1 test that pinned first-deferral firing was itself pinning the defect and is updated with the reason. |
+| n1 | the corrected §Q4 receipt was *still* hand-edited (line 6858 indented 8, file has 4) | **FIXED**, and verified mechanically this time rather than by eye: all 16 lines diffed byte-for-byte against `git show c1277bd:bin/fleet.py | grep -n …`, 0 mismatches. |
+
+**Standing lesson, recorded for the next wave.** Both ND-1 and ND-2 are the same
+error class: *a fix applied at one call site and not its twin, or promised in a
+comment and not in the code.* Wave 1 fixed `rm` and forgot `stop`; wave 1 wrote
+the fallback comment and no fallback. When this branch adds a `ref=`-style
+parameter or a documented fallback, grep every call site and assert the comment
+against the code before claiming the finding closed.
 
 ---
 

@@ -536,18 +536,46 @@ def test_5_pin_archive_rm(sandbox: Sandbox):
     # because it IS the rm. `_daemon_alive()` is retained for the diagnostic
     # paste (what makes a RED self-explaining) and as the fallback when the
     # archive path printed no classification line at all.
+    # ND-2 fix wave (re-review MD-CONTRACT-REVIEW-2026-07-17.md): the fallback
+    # below was DOCUMENTED by m2's comment and never implemented -- `alive`
+    # appeared in no branch condition, which is the M1 defect in miniature (a
+    # comment asserting what the code does not do). It matters because
+    # `rm_deferred` can only ever be True if `_NATIVE_CLI_TRANSIENT_RE` matched,
+    # and that regex is built on a message TWO WAVES HAVE FAILED TO OBSERVE
+    # (M4). If the real dead-daemon message does not contain "background service
+    # may be restarting", fleet correctly classifies `failed`, prints `deferred
+    # (failed)`, `rm_deferred` is False -- and this test hard-asserts "a genuine
+    # contract regression" on a machine whose daemon is simply down. That is the
+    # false-RED confound m2 was written to kill, reintroduced and made
+    # conditional on an unverified string.
+    #
+    # So: fleet's own classification stays PRIMARY (race-free -- it is the rm),
+    # and `_daemon_alive()` corroborates only for the shape nobody has seen. An
+    # unclassified deferral plus an independently-confirmed-dead daemon is the
+    # dead-daemon case under a wording this branch could not predict. The pin
+    # can still fail on vendor drift: a leftover sid with NO deferral line at
+    # all, or with a live/unknown daemon, still hard-asserts.
     archive_err = a.stderr or ""
-    rm_deferred = "deferred (daemon-transient)" in archive_err
+    rm_deferred = f"{fleet.NATIVE_RM_DEFERRED_PREFIX} (daemon-transient)" in archive_err
+    rm_unclassified = (f"{fleet.NATIVE_RM_DEFERRED_PREFIX} (" in archive_err
+                       and not rm_deferred)
     alive, status_text = _daemon_alive()
-    if leftover and rm_deferred:
+    if leftover and (rm_deferred or (rm_unclassified and alive is False)):
+        why = ("fleet's own archive path classified the rm as `deferred "
+               "(daemon-transient)`" if rm_deferred else
+               "fleet reported an UNCLASSIFIED deferral and `claude daemon "
+               "status` independently confirms the daemon is down -- i.e. the "
+               "dead-daemon case arrived under a message shape this branch "
+               "could not predict (M4: the transient string is unverified). "
+               "CAPTURE THE STDERR BELOW: it is the receipt two waves could "
+               "not get, and `_NATIVE_CLI_TRANSIENT_RE` should learn it")
         pytest.skip(
-            "ACHIEVABLE-CONTRACT SKIP [2.1.212, PENDING-RATIFICATION]: fleet's "
-            "own archive path classified the rm as `deferred "
-            "(daemon-transient)` -- the transient daemon was down at rm time, "
-            f"so `claude rm` could not remove {sorted(s[:8] for s in leftover)} "
-            "and does not revive it (findings §Q2). The husk tier sweeps these "
-            "on the next pass; that is the contract this suite can hold the CLI "
-            f"to.\n--- fleet archive stderr ---\n{archive_err.strip()}"
+            f"ACHIEVABLE-CONTRACT SKIP [2.1.212, PENDING-RATIFICATION]: {why} "
+            "-- the transient daemon was down at rm time, so `claude rm` could "
+            f"not remove {sorted(s[:8] for s in leftover)} and does not revive "
+            "it (findings §Q2). The husk tier sweeps these on the next pass; "
+            "that is the contract this suite can hold the CLI to."
+            f"\n--- fleet archive stderr ---\n{archive_err.strip()}"
             f"\n--- claude daemon status (sampled after the fact) ---\n{status_text}"
         )
     assert not leftover, (
