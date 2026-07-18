@@ -708,8 +708,11 @@ class TestCollaboratorInstall:
         # invariant 2: a hook never breaks a session, even with no python.
         script = tmp_path / "say.py"
         script.write_text("print('ran')", encoding="utf-8")
+        # sh by absolute path: the child env's PATH is deliberately emptied
+        # to starve the shim of interpreters, and on POSIX subprocess uses
+        # that same PATH to locate the executable itself.
         out = subprocess.run(
-            ["sh", str(REPO / "bin" / "hooks" / "run_py.sh"), str(script)],
+            [shutil.which("sh"), str(REPO / "bin" / "hooks" / "run_py.sh"), str(script)],
             capture_output=True, text=True,
             env={"PATH": str(tmp_path), "FLEET_PYTHON": ""})
         assert out.returncode == 0

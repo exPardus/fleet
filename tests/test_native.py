@@ -3,6 +3,7 @@ helper, discriminator, limit rehome, steering, stop/tombstones, archival."""
 import json
 import os
 import subprocess
+import sys
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,7 +17,7 @@ NOW = datetime(2026, 7, 15, 12, 0, 0, tzinfo=timezone.utc)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STOP_OUTCOME_HOOK = REPO_ROOT / "bin" / "hooks" / "stop_outcome.py"
-PY_CMD = ["py", "-3.13"]
+PY_CMD = [sys.executable]  # not `py -3.13`: Windows-only launcher
 
 
 def _iso(dt):
@@ -142,6 +143,9 @@ class TestOutcomeStore:
         rec = fleet.read_outcomes("w1")[0]
         assert rec["result_text"] == "short"
 
+    @pytest.mark.skipif(os.name != "nt",
+                        reason="pins the Win32 WriteFile partial-write check; "
+                               "the POSIX sibling below pins os.write's")
     def test_atomic_append_partial_write_raises_not_silently_truncates(
             self, native_home, tmp_path, monkeypatch):
         # Roll-up item 4: WriteFile returning success (ok=True) with
@@ -160,6 +164,28 @@ class TestOutcomeStore:
         target = tmp_path / "out.jsonl"
         with pytest.raises(OSError):
             fleet._atomic_append_bytes(target, b"hello world\n")
+
+    @pytest.mark.skipif(os.name == "nt",
+                        reason="POSIX sibling of the Win32 partial-write pin")
+    def test_atomic_append_partial_write_raises_posix(
+            self, native_home, tmp_path, monkeypatch):
+        # Same silent-truncation class as the Win32 pin above: os.write
+        # returning written < len(data) must raise, not tear a JSONL line.
+        # The wrapper delegates for every other payload so pytest's own
+        # fd writes during the test stay untouched.
+        payload = b"hello world\n"
+        real_write = os.write
+
+        def short_write(fd, data):
+            if data == payload:
+                real_write(fd, data[:1])
+                return 1
+            return real_write(fd, data)
+
+        monkeypatch.setattr(fleet.os, "write", short_write)
+        target = tmp_path / "out.jsonl"
+        with pytest.raises(OSError):
+            fleet._atomic_append_bytes(target, payload)
 
     # T5 fix wave (Critical C1): has_fresh_outcome's default `kinds`
     # argument must exclude tombstones -- see task-5-adversarial.md's C1
