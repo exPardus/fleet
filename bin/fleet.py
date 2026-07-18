@@ -4043,7 +4043,38 @@ def _cmd_kill_native(name: str, rec: dict, run=subprocess.run, which=shutil.whic
         }
 
     sid = rec.get("session_id")
-    stopped_ok = _stop_native_session(sid, run=run, which=which) if sid else True
+    # M5 fix wave: classify, so an already-gone sid reads as success rather
+    # than "could not verify". `stop_outcome` is reported verbatim below.
+    #
+    # ND-1 fix wave (re-review MD-CONTRACT-REVIEW-2026-07-17.md): pass the id
+    # fleet CAPTURED from `--bg` stdout, never a derived one. The M5 commit gave
+    # `stop` the inference "gone == success" and the m1 commit taught `rm` never
+    # to trust a derived ref for exactly that inference -- but it hardened both
+    # rm call sites and NEITHER stop site, in the same commit. Repro'd: with a
+    # CLI that answers only to its own short id, `fleet kill` derived
+    # sid.split("-")[0], got `No job matching` -> `gone` -> success, printed
+    # "w1: killed", exited 0, stamped interrupt_outcome=True and marked the
+    # worker dead -- WHILE THE SESSION KEPT RUNNING. Fleet then forgets a live
+    # bg session that every husk sweep skips forever (status/pid-live): the
+    # rogue-session class `_cleanup_wedged` calls a C1 CRITICAL, reached through
+    # the front door. Worse, the pre-M5 code was fail-SAFE on this input (rc=1,
+    # "investigate manually"), so that wave removed the only signal that would
+    # have caught the true case.
+    #
+    # Caveat, recorded honestly: `native_short_id` is itself derived on 2 of its
+    # 6 write paths (the fast-sid paths), so this is a strict improvement on the
+    # 4 paths that capture it from `--bg` stdout and a no-op on the other 2 --
+    # not a cure. Retired sids have no `native_short_id` at all and keep the
+    # derived fallback by design; that is what `_native_job_ref` is for.
+    stop_outcome = "no-sid"
+    if sid:
+        captured_ref = rec.get("native_short_id")
+        stopped_ok, stop_outcome = _stop_native_session_status(
+            sid, run=run, which=which,
+            ref=captured_ref if isinstance(captured_ref, str) and captured_ref
+            else None)
+    else:
+        stopped_ok = True
     retired_sids = list(rec.get("retired_sids", []) or [])[-_RETIRED_SID_SWEEP_CAP:]
     for retired in retired_sids:
         if retired in other_current_sids:
@@ -4054,10 +4085,16 @@ def _cmd_kill_native(name: str, rec: dict, run=subprocess.run, which=shutil.whic
                 file=sys.stderr,
             )
             continue
-        ok = _stop_native_session(retired, run=run, which=which,
-                                  timeout=_RETIRED_SID_SWEEP_TIMEOUT_SECONDS)
+        _ok, outcome = _stop_native_session_status(
+            retired, run=run, which=which,
+            timeout=_RETIRED_SID_SWEEP_TIMEOUT_SECONDS)
+        # M5: was `'ok' if ok else 'timeout'` -- which named a mechanism that
+        # usually did not occur. A retired sid is an abandoned fork, so
+        # "already gone" is the COMMON case, and it printed "timeout": a
+        # specific, wrong diagnosis inviting a hunt for a hung daemon. Print
+        # what actually happened.
         print(f"fleet: {name}: stopping retired session {retired[:8]}... "
-              f"{'ok' if ok else 'timeout'}", file=sys.stderr)
+              f"{outcome}", file=sys.stderr)
     if sid:
         write_tombstone_outcome(name, sid, "killed")
 
@@ -4070,9 +4107,14 @@ def _cmd_kill_native(name: str, rec: dict, run=subprocess.run, which=shutil.whic
         append_event("killed", name, interrupt_outcome=stopped_ok)
 
     if not stopped_ok:
+        # M5: reached only when the stop genuinely could not be verified --
+        # an already-gone sid ("gone") is now success, so `fleet kill` no
+        # longer exits 1 telling the operator to investigate a session that
+        # is verifiably, correctly gone.
         print(
-            f"fleet: {name}: claude stop could not be verified -- marked dead anyway "
-            "(kill is a terminal action); investigate the session manually",
+            f"fleet: {name}: claude stop could not be verified ({stop_outcome}) "
+            "-- marked dead anyway (kill is a terminal action); investigate "
+            "the session manually",
             file=sys.stderr,
         )
         return 1
@@ -4489,8 +4531,24 @@ def _archive_move_and_rm(n: str, sid: str, retired: list, dest_dir: Path,
             print(f"fleet: {n}: skipping rm {s[:8]}... -- session live in roster",
                   file=sys.stderr)
             continue
-        ok = _rm_native_session(s, run=run, which=which)
-        print(f"fleet: {n}: rm {s[:8]}... {'ok' if ok else 'failed'}", file=sys.stderr)
+        # m1: hand rm the CLI's OWN id from the roster entry rather than a
+        # string-split guess -- a rejected ref would report "No job matching",
+        # which this wave now reads as success.
+        entry_ref = entry.get("id") if isinstance(entry, dict) else None
+        ok, outcome = _rm_native_session_status(
+            s, run=run, which=which,
+            ref=entry_ref if isinstance(entry_ref, str) and entry_ref else None)
+        if ok:
+            # 2.1.212 contract change [PENDING-RATIFICATION]: "gone" (rc=1
+            # "No job matching") is success -- the sid is off the roster,
+            # which is all this phase wanted. Evidence: findings §Q3.
+            print(f"fleet: {n}: rm {s[:8]}... {outcome}", file=sys.stderr)
+            continue
+        # Non-fatal by design (the tombstone is already committed): name WHY,
+        # so a retryable dead-daemon skip is not read as a broken archive. The
+        # husk stays on the roster and the autoclean husk tier retries it.
+        print(f"fleet: {n}: rm {s[:8]}... {_rm_deferred_line(outcome)} -- "
+              f"{_rm_outcome_note(outcome)}", file=sys.stderr)
 
 
 def _native_job_ref(sid: str) -> str:
@@ -4500,35 +4558,161 @@ def _native_job_ref(sid: str) -> str:
     call with the 8-char short id -> success). Every observed short id is the
     first hyphen-delimited segment of the full sid, so derive it uniformly
     here rather than special-casing callers that do/don't have a stored
-    `native_short_id` (retired sids have none)."""
+    `native_short_id` (retired sids have none).
+
+    STALE as stated (ND-1 fix wave, re-review MD-CONTRACT-REVIEW-2026-07-17.md):
+    "derive it uniformly rather than special-casing callers" was a sound
+    T12-era call, but 2.1.212 made `gone` (rc=1 `No job matching`) mean SUCCESS
+    -- so a ref the CLI merely rejects is now indistinguishable from a session
+    that is really gone, and deriving it became fail-unsafe. Callers that hold
+    the CLI's own id (roster entry `id`, or the captured `native_short_id`)
+    now pass it via `ref=` and this function is their FALLBACK, not their
+    source of truth. Retired sids still have none, so they still land here --
+    which remains correct, since nothing better exists for them."""
     return sid.split("-", 1)[0] if sid else sid
+
+
+# 2.1.212 contract change [PENDING-RATIFICATION]. Evidence:
+# docs/reviews/CLAUDE-2.1.212-CONTRACT-2026-07-17.md §Q3. `claude rm`'s exit
+# code is THREE-WAY AMBIGUOUS -- rc=1 means already-gone, dead-daemon, or a
+# real failure, and only the message tells them apart:
+#   rc=0  "removed <id>"                                            -> ok
+#   rc=1  "No job matching '<id>'"                                  -> gone
+#   rc=1  "couldn't remove <id> — the background service may be
+#          restarting. Try again in a moment."                      -> transient
+# `claude stop`'s gone-message carries an extra hint sentence ("Run 'claude
+# agents' to list running sessions.") but the same leading phrase.
+#
+# PROVENANCE (M4/N2 fix wave, review MD-CONTRACT-REVIEW-2026-07-17.md): rows 1-2
+# are live receipts (§Q3). Row 3 is a MANAGER REPORT, never re-observed -- the
+# dead-daemon state is unreachable from a --bg session (§Q2) and two waves have
+# now failed to reach it. Its exact bytes, rc and stream are unverified, which
+# is exactly why `_NATIVE_CLI_TRANSIENT_RE` matches ONLY the dash-free middle
+# phrase and never the punctuation around it. (This comment previously spelled
+# that dash as an ASCII hyphen while every other copy used an em-dash -- three
+# transcriptions, two dashes, which is what exposed the false "verbatim" claim.
+# Em-dash everywhere now, on the understanding that it is a transcription
+# choice, not evidence.)
+_NATIVE_CLI_GONE_RE = re.compile(r"no job matching", re.I)
+_NATIVE_CLI_TRANSIENT_RE = re.compile(r"background service may be restarting", re.I)
+
+
+def _classify_native_cli_result(proc) -> str:
+    """"ok" | "gone" | "daemon-transient" | "failed" for a finished `claude
+    rm`/`claude stop` subprocess.
+
+    "gone" is a SUCCESS-EQUIVALENT: the sid already reached the end state the
+    caller wanted. G12 recorded rm as idempotent on an already-gone id; at
+    2.1.212 that is refuted in FORM (rc=1, not rc=0) though not in EFFECT --
+    hence classify-by-message rather than by exit code.
+
+    "daemon-transient" is checked FIRST and deliberately wins a tie: the
+    daemon is transient (it idle-exits once no worker or client holds it
+    open, findings §Q4), so a retryable failure must never be downgraded to
+    "already clean" -- that would silently claim success for a husk that is
+    still on the roster."""
+    if proc.returncode == 0:
+        return "ok"
+    text = f"{proc.stdout or ''}\n{proc.stderr or ''}"
+    if _NATIVE_CLI_TRANSIENT_RE.search(text):
+        return "daemon-transient"
+    if _NATIVE_CLI_GONE_RE.search(text):
+        return "gone"
+    return "failed"
+
+
+def _rm_native_session_status(sid: str, run=subprocess.run, which=shutil.which,
+                              timeout: int = 30, ref: str = None) -> tuple:
+    """(ok, outcome) for `claude rm <sid>` -- the archival primitive (G12):
+    removes the roster entry and its backing `~/.claude/jobs/<short-id>/` dir.
+    `outcome` is a `_classify_native_cli_result` verdict, plus "no-claude" /
+    "error" for the two never-ran cases; `ok` is True for "ok" and "gone".
+
+    Never raises: an unresolvable `claude` executable or any subprocess error
+    both resolve to (False, ...), exactly like `_stop_native_session` -- every
+    caller treats rm as best-effort/non-fatal and reports the outcome.
+
+    T12 fix wave (finding 2): `claude rm` requires the SHORT id -- converts via
+    `_native_job_ref` first; on an UNCLASSIFIED nonzero exit, retries once with
+    the full sid (belt-and-braces against a future CLI accepting full ids).
+    2.1.212 [PENDING-RATIFICATION]: the two message-classified outcomes
+    short-circuit that retry. §Q3 confirms the full-uuid call returns the same
+    `No job matching` -- that half is a receipt. The transient short-circuit is
+    REASONING, NOT A RECEIPT (m5 fix wave): a daemon that cannot answer cannot
+    discriminate refs, but the dead-daemon state is unreachable from a --bg
+    session (§Q2), so it is untested.
+
+    `ref` (m1 fix wave, review MD-CONTRACT-REVIEW-2026-07-17.md) overrides the
+    DERIVED short id with one the caller read from the roster entry itself
+    (the CLI's own `id` field). This is the one direction in which classifying
+    `gone` as success could fail UNSAFE: the `gone` inference ("the sid already
+    reached the desired end state") is sound only if the ref was right, and
+    `_native_job_ref` derives it by string-splitting rather than reading it. If
+    a future CLI stopped accepting the bare 8-char prefix, a rejected ref would
+    report `No job matching` -> `gone` -> a `husk_removed` event for a husk
+    that is still there. Callers holding the entry pass its `id`, so the
+    verdict rests on the CLI's own identifier and the short-circuit stays
+    honest; the derived ref remains the fallback for callers that have only a
+    sid (a retired fork, a tombstone)."""
+    try:
+        exe = resolve_claude_executable(which)
+    except ClaudeNotFoundError:
+        return (False, "no-claude")
+    refs = dict.fromkeys((ref or _native_job_ref(sid), sid))
+    outcome = "failed"
+    for r in refs:
+        try:
+            proc = run([exe, "rm", r], capture_output=True, text=True,
+                      encoding="utf-8", errors="replace", timeout=timeout)
+        except (OSError, subprocess.SubprocessError):
+            return (False, "error")
+        outcome = _classify_native_cli_result(proc)
+        if outcome in ("ok", "gone"):
+            return (True, outcome)
+        if outcome == "daemon-transient":
+            return (False, outcome)
+    return (False, outcome)
 
 
 def _rm_native_session(sid: str, run=subprocess.run, which=shutil.which,
                        timeout: int = 30) -> bool:
-    """`claude rm <sid>` (G12 CONFIRMED): the archival primitive -- removes
-    the roster entry and its backing `~/.claude/jobs/<short-id>/` dir.
-    Never raises: an unresolvable `claude` executable or any subprocess
-    error both resolve to False, exactly like `_stop_native_session` --
-    the caller treats every rm as best-effort/non-fatal and reports it.
+    """Bool face of `_rm_native_session_status` for callers that only need
+    "is the sid off the roster now?" -- True for both a fresh removal and an
+    already-gone id."""
+    ok, _outcome = _rm_native_session_status(sid, run=run, which=which,
+                                             timeout=timeout)
+    return ok
 
-    T12 fix wave (finding 2): `claude rm` requires the SHORT id -- converts
-    via `_native_job_ref` first; on a nonzero exit, retries once with the
-    full sid (belt-and-braces against a future CLI accepting full ids)."""
-    try:
-        exe = resolve_claude_executable(which)
-    except ClaudeNotFoundError:
-        return False
-    refs = dict.fromkeys((_native_job_ref(sid), sid))
-    for ref in refs:
-        try:
-            proc = run([exe, "rm", ref], capture_output=True, text=True,
-                      encoding="utf-8", errors="replace", timeout=timeout)
-        except (OSError, subprocess.SubprocessError):
-            return False
-        if proc.returncode == 0:
-            return True
-    return False
+
+# ND-2 (re-review MD-CONTRACT-REVIEW-2026-07-17.md): the deferral line's shape
+# is a CONTRACT, not an implementation detail -- tests/integration/
+# test_native_pin.py branches on it to tell a dead-daemon skip from a real
+# contract regression. Renaming it silently would leave the pin passing until
+# the next live run against a dead daemon. Both sides import this.
+NATIVE_RM_DEFERRED_PREFIX = "deferred"
+
+
+def _rm_deferred_line(outcome: str) -> str:
+    """The operator-facing deferral fragment, in one place (ND-2)."""
+    return f"{NATIVE_RM_DEFERRED_PREFIX} ({outcome})"
+
+
+def _rm_outcome_note(outcome: str) -> str:
+    """Operator-facing gloss for a non-success `_rm_native_session_status`
+    outcome -- the difference between "retry will fix this" and "look at
+    this" (findings §Q2: fleet's hygiene tier is the code path most likely
+    to meet a dead daemon and the least able to revive it -- only a dispatch
+    revives it, and no hygiene pass may mint a billable session as a side
+    effect)."""
+    if outcome == "daemon-transient":
+        return ("the background daemon is down/restarting -- it is transient "
+                "at 2.1.212 and only a dispatch revives it; RETRYABLE, the "
+                "next pass sweeps this sid")
+    if outcome == "no-claude":
+        return "claude not on PATH"
+    if outcome == "error":
+        return "the rm subprocess could not be run"
+    return "unknown rm failure"
 
 
 def _archive_move(src: Path, dest: Path, name: str) -> None:
@@ -4726,6 +4910,15 @@ def cmd_archive(args, run=subprocess.run, which=shutil.which) -> int:
 AUTOCLEAN_TASK_NAME = "claude-fleet-autoclean"
 AUTOCLEAN_INTERVAL_HOURS_DEFAULT = 6
 AUTOCLEAN_STALE_RUN_HOURS = 48.0
+# ND-3 (re-review MD-CONTRACT-REVIEW-2026-07-17.md): how many CONSECUTIVE
+# husk-deferring autoclean runs before doctor calls it starvation rather than
+# routine. A single deferral is the normal case at 2.1.212 -- the daemon is
+# transient and this tier is the one most likely to meet it dead (§Q2) -- so
+# noting the first one is cry-wolf. The scheduled task's floor is hourly
+# (`--autoclean-interval-hours` is 1..23), so 3 in a row is >=3h of an
+# unreachable daemon: long past any idle-exit, and short enough that a genuinely
+# broken daemon surfaces the same day.
+AUTOCLEAN_DEFERRAL_STREAK_THRESHOLD = 3
 
 
 def autoclean_stamp_path() -> Path:
@@ -4795,12 +4988,21 @@ def _events_sids() -> set:
     return out
 
 
-def _sweep_husks(dry_run: bool, run=subprocess.run, which=shutil.which) -> list:
+def _sweep_husks(dry_run: bool, run=subprocess.run, which=shutil.which) -> tuple:
     """Tier 2 (autoclean.md D2): `claude rm` roster sessions fleet owns but
     no longer tracks live. Default-deny: a sid absent from every fleet
     record -- foremost the operator's own interactive sessions -- is never
-    selected. Returns the list of removed sids; raises FleetCliError when
+    selected. Returns `(removed, deferred)`; raises FleetCliError when
     the roster is unavailable/suspicious (the caller isolates tiers).
+
+    M1 fix wave (review MD-CONTRACT-REVIEW-2026-07-17.md): `deferred` used
+    to be a local that died at the return, so a dead-daemon-starved sweep
+    was byte-identical to a clean one at every durable surface (stamp,
+    `autoclean_run` event, exit code) -- and the scheduled task is headless,
+    so the stderr roll-up went to a console nobody owns. A permanently dead
+    daemon could starve this tier for weeks while `fleet doctor` read
+    green-and-fresh. The reviewer proved the gap by deleting the roll-up
+    with the full suite still green. Deferred sids now reach the caller.
 
     F1 (adversarial review, HIGH): default-deny includes "no registry = no
     sweep". A corrupt fleet.json gets quarantine-RENAMED by whichever tier
@@ -4855,6 +5057,7 @@ def _sweep_husks(dry_run: bool, run=subprocess.run, which=shutil.which) -> list:
     owned |= _events_sids()
 
     removed = []
+    deferred = []
     for entry in payload:
         if not isinstance(entry, dict):
             continue
@@ -4875,13 +5078,33 @@ def _sweep_husks(dry_run: bool, run=subprocess.run, which=shutil.which) -> list:
         if dry_run:
             print(f"husk: would rm {sid} ({display})")
             continue
-        if _rm_native_session(sid, run=run, which=which):
+        # m1: the sweep read this entry from the roster -- use the CLI's own
+        # `id` rather than a derived one, so a "gone" verdict (which becomes a
+        # durable husk_removed event) can never rest on a ref the CLI rejected.
+        entry_ref = entry.get("id")
+        ok, outcome = _rm_native_session_status(
+            sid, run=run, which=which,
+            ref=entry_ref if isinstance(entry_ref, str) and entry_ref else None)
+        if ok:
+            # 2.1.212 [PENDING-RATIFICATION]: "gone" means the roster snapshot
+            # this sweep read was merely stale -- the husk IS off the roster,
+            # so it counts as removed rather than crying wolf every run
+            # (findings §Q3: rm is not idempotent in FORM, only in EFFECT).
             append_event("husk_removed", display, session_id=sid)
-            print(f"husk: rm {sid} ({display})")
+            print(f"husk: rm {sid} ({display}) [{outcome}]")
             removed.append(sid)
         else:
-            print(f"husk: rm {sid} FAILED -- left in place", file=sys.stderr)
-    return removed
+            deferred.append(sid)
+            print(f"husk: rm {sid} ({display}) {_rm_deferred_line(outcome)} -- "
+                  f"{_rm_outcome_note(outcome)}", file=sys.stderr)
+    if deferred:
+        # Loud, non-fatal, and honest about the retry. The stderr line alone is
+        # NOT enough (M1): it is invisible to the headless scheduled task, so
+        # `deferred` is returned to the caller, which carries it into the run
+        # stamp and the autoclean_run event -- the surfaces doctor reads.
+        print(f"husk: {len(deferred)} husk(s) left on the roster for the next "
+              f"pass: {', '.join(s[:8] for s in deferred)}", file=sys.stderr)
+    return removed, deferred
 
 
 def _expire_tombstones(expire_hours: float, dry_run: bool) -> list:
@@ -4965,9 +5188,9 @@ def cmd_autoclean(args, run=subprocess.run, which=shutil.which) -> int:
         errors.append(f"archive: {type(exc).__name__}: {exc}")
         print(f"autoclean: archive tier failed: {exc}", file=sys.stderr)
 
-    husks = []
+    husks, husks_deferred = [], []
     try:
-        husks = _sweep_husks(dry_run, run=run, which=which)
+        husks, husks_deferred = _sweep_husks(dry_run, run=run, which=which)
     except RegistryCorruptError:
         raise  # F1: run-abort, never tier-skip
     except Exception as exc:  # noqa: BLE001 -- tier isolation (D3)
@@ -4984,8 +5207,14 @@ def cmd_autoclean(args, run=subprocess.run, which=shutil.which) -> int:
             errors.append(f"tombstones: {type(exc).__name__}: {exc}")
             print(f"autoclean: tombstone tier failed: {exc}", file=sys.stderr)
 
+    # M1: `husks_deferred` rides the stamp, the event and the summary line so a
+    # starved sweep is distinguishable from a clean one. It deliberately does
+    # NOT join `errors` -- that would flip rc to 1 and turn a routine transient
+    # daemon state red, which is exactly the cry-wolf this branch set out to
+    # kill. Deferral is a note, not a failure; doctor is where it surfaces.
     summary = {"ts": now_iso(), "dry_run": dry_run, "archive_rc": archive_rc,
-               "husks_removed": len(husks), "tombstones_expired": len(tombstones),
+               "husks_removed": len(husks), "husks_deferred": len(husks_deferred),
+               "tombstones_expired": len(tombstones),
                "errors": errors}
     if not dry_run:
         try:
@@ -4996,10 +5225,13 @@ def cmd_autoclean(args, run=subprocess.run, which=shutil.which) -> int:
         try:
             append_event("autoclean_run", "*", archive_rc=archive_rc,
                          husks_removed=len(husks),
+                         husks_deferred=len(husks_deferred),
                          tombstones_expired=len(tombstones), errors=errors)
         except OSError as exc:
             print(f"autoclean: event append failed: {exc}", file=sys.stderr)
-    print(f"autoclean: husks_removed={len(husks)} tombstones_expired={len(tombstones)}"
+    print(f"autoclean: husks_removed={len(husks)} "
+          f"husks_deferred={len(husks_deferred)} "
+          f"tombstones_expired={len(tombstones)}"
           f" errors={len(errors)}{' (dry-run)' if dry_run else ''}")
     return 1 if errors else 0
 
@@ -5575,6 +5807,51 @@ def _doctor_check_claude_agents(workers: dict, which=shutil.which, run=subproces
     return ("claude-agents", True, "no fleet-unknown claude agent sessions")
 
 
+def _autoclean_deferral_streak() -> tuple:
+    """(streak, husks_on_latest, since_ts): how many of the MOST RECENT
+    consecutive `autoclean_run` events deferred at least one husk (ND-3).
+
+    The run stamp holds exactly one pass, so it can never answer "is this
+    persistent?" -- the question that separates a routine dead-daemon skip from
+    a starved tier. `events.jsonl` is append-only history and carries
+    `husks_deferred` since the M1 fix, so the streak is derived from there.
+
+    Counts backwards from the newest event and stops at the first pass that
+    deferred nothing -- a single successful sweep means the daemon was reachable
+    and the tier is not starving, regardless of what came before. Dry-run passes
+    are skipped entirely: they never rm anything, so they neither prove nor
+    disprove reachability. Any read/parse failure degrades to (0, 0, None) --
+    doctor is note-only and must never fail on unreadable history."""
+    try:
+        raw = events_path().read_text(encoding="utf-8")
+    except OSError:
+        return (0, 0, None)
+    runs = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or '"autoclean_run"' not in line:
+            continue
+        try:
+            rec = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if rec.get("kind") != "autoclean_run" or rec.get("dry_run"):
+            continue
+        deferred = rec.get("husks_deferred")
+        if not isinstance(deferred, int) or isinstance(deferred, bool):
+            continue  # pre-M1 event: no data, cannot vouch either way
+        runs.append((deferred, rec.get("ts")))
+    streak, husks, since = 0, 0, None
+    for deferred, ts in reversed(runs):
+        if deferred <= 0:
+            break
+        if streak == 0:
+            husks = deferred
+        streak += 1
+        since = ts or since
+    return (streak, husks, since)
+
+
 def _doctor_check_autoclean(run=subprocess.run):
     """Note-only (docs/specs/autoclean.md D4): reports scheduler-task state
     (installed/missing) and last-run staleness from the run stamp. Never
@@ -5584,8 +5861,32 @@ def _doctor_check_autoclean(run=subprocess.run):
     the stamp's `errors` array and a lingering fleet.json.corrupt.*
     artifact (which makes tier 2 refuse itself, NEW-1) both mean the sweep
     is NOT actually doing its job. Both are appended to whichever note is
-    returned, so a bricked sweep never reads green-and-fresh."""
+    returned, so a bricked sweep never reads green-and-fresh.
+
+    M1 fix wave (review MD-CONTRACT-REVIEW-2026-07-17.md): `husks_deferred`
+    is the third such lie and the reason this check existed at all was
+    defeated without it. A dead daemon defers every husk on every pass
+    while raising nothing into `errors` -- so the stamp read
+    `husks_removed=0, errors=[]`, identical to "nothing to do", and this
+    check said "task installed; last run 0.3h ago" forever while the roster
+    filled with husks. A deferring sweep is a bricked sweep and now says so.
+    Still note-only: a transient daemon is normal, not broken plumbing.
+
+    ND-3 fix wave (re-review MD-CONTRACT-REVIEW-2026-07-17.md): the M1 note
+    fired on the FIRST deferral -- i.e. on the normal case. §Q2's own finding is
+    that this tier is "the one code path most likely to meet a dead daemon", so
+    on a quiet machine with hourly autoclean nearly every run defers, doctor
+    carried the note nearly every invocation, an operator habituates in a week,
+    and then the permanently-starved case M1 exists to surface renders
+    IDENTICALLY -- the cry-wolf pattern this whole branch exists to kill. The
+    old note even conceded it ("if this count persists across runs") while
+    reading from a stamp that holds exactly one run and cannot show persistence.
+    So: read the STREAK from `events.jsonl` (append-only history, which
+    `husks_deferred` now rides) and note only past
+    `AUTOCLEAN_DEFERRAL_STREAK_THRESHOLD` consecutive starved sweeps. That is
+    the sentence that distinguishes starvation from Tuesday."""
     stamp_note, stale, run_errors = "no run recorded yet", False, []
+    husks_deferred = 0
     try:
         raw = json.loads(autoclean_stamp_path().read_text(encoding="utf-8"))
         last = _parse_iso(raw.get("ts"))
@@ -5595,6 +5896,9 @@ def _doctor_check_autoclean(run=subprocess.run):
         errs = raw.get("errors")
         if isinstance(errs, list):
             run_errors = [str(e) for e in errs if e]
+        deferred_raw = raw.get("husks_deferred")
+        if isinstance(deferred_raw, int) and not isinstance(deferred_raw, bool):
+            husks_deferred = deferred_raw
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         pass
 
@@ -5602,6 +5906,17 @@ def _doctor_check_autoclean(run=subprocess.run):
     if run_errors:
         extras.append(f"last run reported {len(run_errors)} error(s): "
                       f"{run_errors[0][:120]}")
+    streak, streak_husks, streak_since = _autoclean_deferral_streak()
+    if husks_deferred > 0 and streak >= AUTOCLEAN_DEFERRAL_STREAK_THRESHOLD:
+        since = f" since {streak_since}" if streak_since else ""
+        extras.append(
+            f"husk sweep DEFERRED on the last {streak} consecutive runs "
+            f"({streak_husks} husk(s) on the most recent) -- the background "
+            f"daemon has not been reachable{since}. A single deferral is "
+            f"routine (the daemon is transient at 2.1.212 and idle-exits once "
+            f"no session holds it open), but {streak} in a row means this tier "
+            f"is starving: the husks stay on the roster and nothing is "
+            f"reclaiming them. Check `claude daemon status`")
     try:
         artifacts = sorted(state_dir().glob("fleet.json.corrupt.*"))
     except OSError:
@@ -5947,16 +6262,29 @@ def write_tombstone_outcome(name: str, sid: str, kind: str) -> None:
                           "result_text": None})
 
 
-def _stop_native_session(sid: str, run=subprocess.run, which=shutil.which,
-                         timeout: int = 30) -> bool:
-    """`claude stop <sid>` (contract G10): the only sanctioned way to end a
-    --bg-managed session -- a raw pid kill triggers a silent daemon respawn
-    under the same sid (G10, never raw-kill). True iff the stop's own exit
-    code was 0. Never raises: an unresolvable `claude` executable, or any
-    OSError/SubprocessError (including TimeoutExpired) from the subprocess
-    call, both resolve to False -- the caller (cmd_respawn --force) treats
-    False as "could not verify the stop" and re-checks the roster before
-    ever proceeding (never claim two live sessions under one name).
+def _stop_native_session_status(sid: str, run=subprocess.run, which=shutil.which,
+                                timeout: int = 30, ref: str = None) -> tuple:
+    """(ok, outcome) for `claude stop <sid>` (contract G10): the only
+    sanctioned way to end a --bg-managed session -- a raw pid kill triggers a
+    silent daemon respawn under the same sid (G10, never raw-kill).
+
+    M5 fix wave (review MD-CONTRACT-REVIEW-2026-07-17.md): `stop` now shares
+    `rm`'s 3-way message discriminator instead of classifying on exit code
+    alone. `claude stop` against an already-gone id exits 1 with `No job
+    matching '<id>'. Run 'claude agents' to list running sessions.` (live
+    receipt, findings §Q3) -- the session is not running, which is precisely
+    what the caller wanted, exactly as for `rm`. Reading that as failure made
+    `fleet kill` on an already-gone sid exit 1 while telling the operator to
+    "investigate the session manually" about a session that is verifiably
+    gone, print a specific and WRONG "timeout" diagnosis for retired sids (the
+    common case -- retired sids are abandoned forks), and stamp
+    `interrupt_outcome=False` into the durable event log. Same cry-wolf this
+    wave cured on `rm`, left standing on `stop`.
+
+    `ok` is True for "ok" and "gone". Everything else stays False = COULD NOT
+    VERIFY, which every caller already handles fail-safe (`cmd_respawn
+    --force`/`_cleanup_wedged` re-check the roster before proceeding;
+    `_cmd_kill_native` marks dead anyway -- kill is terminal -- and warns).
 
     T8 fix wave (adv I1): `timeout` defaults to 30s (the primary/current
     sid's budget) but `_cmd_kill_native`'s retired-sid sweep passes 5s --
@@ -5965,22 +6293,39 @@ def _stop_native_session(sid: str, run=subprocess.run, which=shutil.which,
     being fixed, not the primary sid's own stop.
 
     T12 fix wave (finding 2): `claude stop` requires the SHORT id -- converts
-    via `_native_job_ref` first; on a nonzero exit, retries once with the
-    full sid (belt-and-braces against a future CLI accepting full ids)."""
+    via `_native_job_ref` first; on an UNCLASSIFIED nonzero exit, retries once
+    with the full sid (belt-and-braces against a future CLI accepting full
+    ids). `ref` overrides the derived short id -- see
+    `_rm_native_session_status` for why a caller holding the roster entry
+    should pass the CLI's own `id` (m1)."""
     try:
         exe = resolve_claude_executable(which)
     except ClaudeNotFoundError:
-        return False
-    refs = dict.fromkeys((_native_job_ref(sid), sid))
-    for ref in refs:
+        return (False, "no-claude")
+    refs = dict.fromkeys((ref or _native_job_ref(sid), sid))
+    outcome = "failed"
+    for r in refs:
         try:
-            proc = run([exe, "stop", ref], capture_output=True, text=True,
+            proc = run([exe, "stop", r], capture_output=True, text=True,
                       encoding="utf-8", errors="replace", timeout=timeout)
         except (OSError, subprocess.SubprocessError):
-            return False
-        if proc.returncode == 0:
-            return True
-    return False
+            return (False, "error")
+        outcome = _classify_native_cli_result(proc)
+        if outcome in ("ok", "gone"):
+            return (True, outcome)
+        if outcome == "daemon-transient":
+            return (False, outcome)
+    return (False, outcome)
+
+
+def _stop_native_session(sid: str, run=subprocess.run, which=shutil.which,
+                         timeout: int = 30) -> bool:
+    """Bool face of `_stop_native_session_status` -- "is this session not
+    running any more?". True for a fresh stop AND for an already-gone id;
+    False means COULD NOT VERIFY, which callers treat fail-safe."""
+    ok, _outcome = _stop_native_session_status(sid, run=run, which=which,
+                                               timeout=timeout)
+    return ok
 
 
 def _restamp_after_steer(record: dict, new_sid: str, short_id: str) -> None:
