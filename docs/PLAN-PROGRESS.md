@@ -64,3 +64,19 @@ The mutable cursor against the immutable contract `docs/PLAN.md`. A resuming man
 | C7 | Phase 4 web UI read-only (demand-gated build) | pending | GATED | — |
 | C8 | Phase 5 intelligence flag-sized (demand-gated build) | pending | GATED | — |
 | P6 | Reach backlog (demand-driven, per-item stub+gate) | pending | GATED | — |
+| M-D | pin-gate re-run (claude 2.1.211->2.1.212) | dispatched | first run RED: test_3 fork-steer hooks-absent + test_5 downstream; flake re-run in flight | 2026-07-17 |
+| M-D | SPEC portability directive (operator, multi-platform Win/macOS/Linux) | done | 21f3e77 | 2026-07-17 |
+| M-D | token-efficiency clause (template v1.6 + spawn-etiquette G3 fix) | done | 6c33f08 | 2026-07-17 |
+| M-D | three-tier design review gate (dual-lens: break + spec) | pending | task files md-review-break/md-review-spec written; spawn held on pin verdict | 2026-07-17 |
+| M-D | UL horizon parser (local-format reset times) | pending | task file md-ulparser + worktree fleet-md-ulparser ready; spawn held on pin verdict | 2026-07-17 |
+| M-D | three-tier design gate (dual-lens) | done | both lenses RESTRUCTURE; adjudication de4177a (binding list, nonce = prerequisite slice); verdicts f1c0ed1/79a5f38 | 2026-07-17 |
+| M-D | ulparser build | done-pending-review | 3d55b51 on md/ulparser, 1063/1063 manager-verified; hostile review md-ulparser-review in flight | 2026-07-17 |
+| M-D | 2.1.212 contract rehome | dispatched | md-contract working (transient daemon, 8th pin catch) | 2026-07-17 |
+| M-D | claim-nonce spec slice | pending | gated on md-contract merge (adjudication item 4); build gated on operator ratification | 2026-07-17 |
+| M-D | shipped-code defects (handoff dispatch no-hooks, autoclean ownership predicate) | pending | from design gate; after md-contract merge | 2026-07-17 |
+| M-D | ulparser MERGED to fleet-impl | done | 2 fix waves (C1 anchor; N2 3.10-floor) + final gate merge verdict 424b668; post-merge unit 1080/1080; FLEET_LIVE deferred to contract merge (fixed pins live there) | 2026-07-17 |
+| M-D | contract rehome waves | in-review | M1-M5 + ND1-3 disposed (1110/1110, pins 6/6); final re-review in flight | 2026-07-17 |
+| M-D | contract rehome MERGED to fleet-impl | done | 3 waves + final gate merge 84fd664; merge 7ac3ae5; post-merge unit 1136/1136; FLEET_LIVE 6/6 from interactive session (dead-daemon path verified); doctor clean; pin-gate stamped 2.1.214 | 2026-07-18 |
+| M-D | pin re-stamp claude 2.1.214 (bumped again overnight) | done | record_pin_pass, doctor pin-version PASS | 2026-07-18 |
+| M-D | claim-nonce spec slice | pending-next | gated: adjudication item 1-3; build gated on operator ratification | 2026-07-18 |
+| M-D | shipped-code defects (handoff no-hooks, autoclean predicate) + ND-4/nits | pending-next | small reviewed fix tasks | 2026-07-18 |

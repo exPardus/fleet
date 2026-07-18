@@ -1,5 +1,8 @@
 # Campaign template — the reusable fleet-campaign instrument
 
+**Version 1.7 (2026-07-18)** — M-D amendments (2.1.212 vendor break + design gate): (1) **PROBE-CONTEXT gate** — a live-behavior finding must state WHO ran the probe (interactive vs `--bg` worker); a `--bg` worker cannot observe the dead-daemon path (it is itself a live daemon client), so daemon-lifecycle claims from a bg session are structurally incomplete — the post-merge FLEET_LIVE run from the manager's interactive session is the standing verification (§5). (2) **VENDOR-BUMP gate** — run the live pin tier on every `claude` version bump, not just at merge; the 8th live catch was a vendor change (transient daemon), invisible to a review-clean tree (§5). (3) **new-defect-hunt held at 4/4 waves again** and `ESCALATE-beats-3rd-wave` held (both branches closed in 2 waves + final gate); the builder-named error class *"a fix at one call site not its twin; a fallback in a comment not the code"* is a grep-every-call-site + assert-comment-against-code check (§3 f). (4) **design-review-first** for an operator-originated design proposal: no build before a dual-lens design gate; the three-tier gate caught a foundational claim/sid collision a build campaign would have hit only after writing the scheduler (§3 b). See `lessons.md#2026-07-18-md`.
+**Version 1.6 (2026-07-17)** — token-efficiency clause (operator ask 2026-07-16, M-D item 2): every task file carries the compressed-output contract (§2 checklist item); tier-boundary messages terse, artifacts full-precision. Companion amendment in `spawn-etiquette.md` (which also corrects the stale `--max-budget-usd` bullet to `--token-ceiling`, refused-at-spawn under native G3).
+**Version 1.5 (2026-07-17)** — imported prior art (not campaign scar): exPardus knowledge-librarian safety doctrine folded in — evidence-gated knowledge retirement + per-pass retirement cap (§2 corollaries), source-anchor + verified-date convention for code-asserting knowledge entries (§8). Full design adopted in `docs/specs/phase-5-intelligence.md`; provenance in `docs/PRIOR-ART.md` §"Local prior art".
 **Version 1.4 (2026-07-10)** — C4 spec-wave amendments, all one lesson: **an enumeration produced by inspection is wrong.** New §2 GREP-RECEIPT GATE (mandatory for any task specifying a change to code it does not own); authors may never promote their own spec (§3); re-reviews must carry a `SPURIOUS-FIX` verdict (§3); `[UNBUILT]` claims must be grep-verifiable at a stated commit, and prose claims *about* tags must be audited too (§2). See `lessons.md#2026-07-10-c4-spec-portability`.
 **Version 1.3 (2026-07-09)** — External dogfood #1 (`stupidbox`) amendments: `fleet respawn` ignores task-file edits — re-pass `--task @file` to change scope (§3 f); own-vs-foreign worker discipline on a shared fleet install before any bulk kill/clean (§1). See `lessons.md#2026-07-09-dogfood-stupidbox`.
 **Version 1.2 (2026-07-09)** — Campaign-2 amendments (first code campaign): merge-gate demo-skip + fixture-restore + revert-the-revert sequence (§5), git-log-is-truth verification checkpoint (§3 g), hook-source demo-test task convention (§2). See `lessons.md#2026-07-09-c2`.
@@ -42,6 +45,7 @@ Every `--task` is a file at `state/tasks/<name>.md` (gitignored runtime dir). Fi
 - [ ] **Permission-mechanism line** (§6 below): states `bypass` / `bypass-with-containment` / `accept+allowlist`; for allowlist, quotes the exact `permissions.allow` entries.
 - [ ] **RESULT contract line** required: `RESULT: files=<paths> tests=<N>/<M> spec=<§-ref | no-drift> criteria=<one-line proof per criterion>` + `git log --oneline -3`. Malformed RESULT = task not done. The `spec=` field is mandatory for build tasks (mechanically inherits the anti-drift clause; the merge gate audits it).
 - [ ] **BLOCKED-with-evidence rule** stated for environment-dependent kernels: if a probed contract (e.g. an installed-CLI hook event) fails, report `BLOCKED:` with the probe evidence — never build against a guessed contract.
+- [ ] **Token-efficiency clause (v1.6, operator ask 2026-07-16):** the task file states "final message terse — the artifact/commits carry the substance" next to the RESULT contract. Tier-boundary messages (brief→supervisor, supervisor→worker steers, worker final messages) are compressed: no narration, no restated task, pointers over pastes. **Full-precision zones exempt, never compressed:** code, commit messages, specs, review verdict files, quoted error text. The clause lives in the task file, never delegated to a plugin (a plugin absent from the worker repo is a silent no-op; a task-file clause always arrives).
 
 **C1 amendment — spec-amendment task files (added Campaign 1):**
 - [ ] Tag each folded finding `[UNBUILT — owned by <kernel>]` when its fix is **not yet in shipped code** (prescriptive spec text describing behavior a later code kernel must build). This distinguishes descriptive amendments (true of the code today) from prescriptive ones (a promise the kernel owns).
@@ -78,6 +82,13 @@ Corollaries, each earned:
 - [ ] **Retire a stale pin by MOVING it**, not deleting it. A §12 regression moved from "pins unbuilt
       fixes" to "passes today" keeps protecting its fix; a deleted pin is a silent regression wearing
       a cleanup's clothes.
+- [ ] **Retirement is evidence-gated and capped** (v1.5, exPardus librarian doctrine). No knowledge
+      entry, pin, or `[UNBUILT]` tag is retired/moved on a verdict alone — a reviewer's, a judge
+      model's, or the manager's own reading. Retirement needs its deterministic receipt (grep at a
+      stated commit showing the anchor gone/moved), pasted where the retirement happens. Cap
+      retirements per pass (a sweep proposing to retire many entries at once is more likely a broken
+      premise than mass drift — C4's 7 false tags came from exactly one unswept assumption); over the
+      cap, flag for review instead of retiring.
 - [ ] **A fix wave's failure mode is a new defect one call site away.** Both C4 fix waves closed
       their target finding and broke an adjacent thing, in the same direction, for the same reason.
       Budget a re-review for every fix wave; never merge a fix wave on the author's own report.
@@ -186,6 +197,12 @@ The campaign's closing wave. Every item is required to close:
 
 - [ ] **`lessons.md` entry** — what worked / what stalled / prompt patterns, AND **≥1 concrete process change** (the anti-ritual gate; normally an amendment to THIS template). No process change = entry rejected.
 - [ ] **`INDEX.md` updated** with pointers to the new lessons.
+- [ ] **Anchor code-asserting entries** (v1.5): any new knowledge entry/pin whose claim is about code
+      (a function's behavior, a flag, a tag's truth) names its source anchor (`file:function` or
+      `file:line`-ish) and its verified-at date/commit, so a later mechanical ref-check (Phase 5
+      librarian, `docs/specs/phase-5-intelligence.md`) can grade it ok/moved/missing instead of a
+      human re-reading everything. Narrative lessons (what-happened prose) are exempt — do not
+      atomize them.
 - [ ] **`knowledge/projects/<project>.md` updated** — capture project-specific facts learned live (bugs, interpreter quirks, landmarks).
 - [ ] **Advance `docs/PLAN-PROGRESS.md`** — mark this campaign's rows `done` with commit/evidence refs; committed as part of this step.
 - [ ] **Amend THIS template with the campaign's friction** — bump the version line, date it, and fold in whatever this campaign proved that the template did not yet say. This is the mechanism that keeps the instrument alive.

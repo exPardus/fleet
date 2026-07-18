@@ -557,6 +557,139 @@ class TestSettingSourcesPassthrough:
 # peek tokens (spec-audit gap 5)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# M-D item 3: local-format ("resets 4:40am (Asia/Qyzylorda)") reset-time
+# fallback in _parse_limit_signal -- production gap, journal 2026-07-16 /
+# knowledge/lessons.md:607.
+# ---------------------------------------------------------------------------
+
+class TestParseLimitSignalLocalFormat:
+    def test_iso_wins_verbatim_over_local_text(self):
+        text = "resets 2026-07-18T04:40:00Z, but also resets 4:40am (Asia/Qyzylorda)"
+        reset_at, kind = fleet._parse_limit_signal(text)
+        assert reset_at == "2026-07-18T04:40:00Z"
+
+    def test_no_signal_returns_none_none(self):
+        assert fleet._parse_limit_signal("nothing to see here") == (None, None)
+
+    def test_unknown_timezone_returns_none_horizon(self):
+        now = datetime(2026, 7, 17, 10, 0, 0, tzinfo=timezone.utc)
+        reset_at, kind = fleet._parse_limit_signal(
+            "resets 4:40am (Not/AZone)", now=now)
+        assert reset_at is None
+
+    def test_zoneinfo_lookup_failure_falls_back_to_none(self, monkeypatch):
+        import zoneinfo
+
+        def boom(name):
+            raise zoneinfo.ZoneInfoNotFoundError(name)
+
+        monkeypatch.setattr(zoneinfo, "ZoneInfo", boom)
+        now = datetime(2026, 7, 17, 10, 0, 0, tzinfo=timezone.utc)
+        reset_at, kind = fleet._parse_limit_signal(
+            "resets 4:40am (Asia/Qyzylorda)", now=now)
+        assert reset_at is None
+
+    @pytest.mark.parametrize(
+        "text,now,expected",
+        [
+            # Asia/Qyzylorda is UTC+5, no DST. now=10:00 UTC == 15:00 local,
+            # so today's 04:40 local is already past -> rolls to tomorrow's
+            # 04:40 local, which lands on 2026-07-16T23:40:00Z in UTC (the
+            # local date rolls to the 17th but UTC is still 5h behind it).
+            (
+                "You've hit your session limit -- resets 4:40am (Asia/Qyzylorda)",
+                datetime(2026, 7, 16, 10, 0, 0, tzinfo=timezone.utc),
+                "2026-07-16T23:40:00Z",
+            ),
+            # 12am -> 00:00 local, hour-only form (the production gap).
+            # now=01:00 UTC == 06:00 local (past midnight) -> tomorrow.
+            (
+                "session limit -- resets 12am (Asia/Qyzylorda)",
+                datetime(2026, 7, 16, 1, 0, 0, tzinfo=timezone.utc),
+                "2026-07-16T19:00:00Z",
+            ),
+            # 12pm -> 12:00 local. now=01:00 UTC == 06:00 local -> today's
+            # noon local (still ahead) == 07:00 UTC same day.
+            (
+                "session limit -- resets 12pm (Asia/Qyzylorda)",
+                datetime(2026, 7, 16, 1, 0, 0, tzinfo=timezone.utc),
+                "2026-07-16T07:00:00Z",
+            ),
+            # 11:59pm -> 23:59 local, still ahead of 06:00 local -> today.
+            (
+                "session limit -- resets 11:59pm (Asia/Qyzylorda)",
+                datetime(2026, 7, 16, 1, 0, 0, tzinfo=timezone.utc),
+                "2026-07-16T18:59:00Z",
+            ),
+        ],
+    )
+    def test_local_format_parsed_to_correct_utc_instant(self, text, now, expected):
+        reset_at, kind = fleet._parse_limit_signal(text, now=now)
+        assert reset_at == expected
+        assert kind == "session_5h"
+
+    def test_already_past_today_rolls_to_tomorrow(self):
+        # now is exactly at local midnight + 1 minute -- today's "12am"
+        # occurrence is already behind now, must roll to tomorrow.
+        now = datetime(2026, 7, 16, 19, 1, 0, tzinfo=timezone.utc)  # 00:01 local
+        reset_at, _ = fleet._parse_limit_signal("resets 12am (Asia/Qyzylorda)", now=now)
+        assert reset_at == "2026-07-17T19:00:00Z"
+
+    def test_no_anchor_never_guesses_via_wall_clock(self):
+        # N3 fix wave: `now=None` (the record-timestamp anchor was
+        # unavailable) must not fall back to the wall clock for the
+        # local-format branch -- it stays unresolved (None), a
+        # conservative null-horizon park, never a possibly-wrong guess.
+        reset_at, kind = fleet._parse_limit_signal(
+            "session limit -- resets 4:40am (Asia/Qyzylorda)")
+        assert reset_at is None
+        assert kind == "session_5h"  # kind detection is independent of the anchor
+
+
+# ---------------------------------------------------------------------------
+# N2 fix wave (MD-ULPARSER-REVIEW-2026-07-17.md re-review): `_record_time`
+# must parse a trailing-Z timestamp WITHOUT relying on
+# `datetime.fromisoformat`'s native `Z` support, which is Python 3.11+
+# only. This repo's documented floor is 3.10 (docs/specs/portability.md
+# D9, SPEC.md's multi-platform directive) -- on 3.10, `fromisoformat("...Z")`
+# raises ValueError, which is exactly how C1 silently reverted in full
+# pre-N2 (bad timestamp -> None -> old wall-clock-guess behavior). These
+# tests run on this repo's dev interpreter (3.13, where the naive
+# `fromisoformat("...Z")` form would ALSO happen to work) so they cannot
+# themselves fail on a 3.10 floor violation -- they pin the trailing-Z
+# input/output contract so any future edit that reintroduces a
+# 3.11-only parse gets caught the moment a 3.10 CI job exists
+# (portability.md D9 recommends one), and so the intent is explicit in
+# the meantime, per the review's own closing suggestion.
+# ---------------------------------------------------------------------------
+
+class TestRecordTimeParsing:
+    def test_trailing_z_fractional_seconds(self):
+        # The exact real G7 evidence form (spike/m0/VERDICTS.md:441).
+        dt = fleet._record_time({"timestamp": "2026-07-13T23:48:10.741Z"})
+        assert dt == datetime(2026, 7, 13, 23, 48, 10, 741000, tzinfo=timezone.utc)
+
+    def test_trailing_z_whole_seconds(self):
+        dt = fleet._record_time({"timestamp": "2026-07-13T23:48:10Z"})
+        assert dt == datetime(2026, 7, 13, 23, 48, 10, tzinfo=timezone.utc)
+
+    def test_explicit_offset_still_parses(self):
+        dt = fleet._record_time({"timestamp": "2026-07-13T23:48:10+05:00"})
+        assert dt.utcoffset().total_seconds() == 5 * 3600
+
+    def test_naive_timestamp_assumed_utc(self):
+        dt = fleet._record_time({"timestamp": "2026-07-13T23:48:10"})
+        assert dt == datetime(2026, 7, 13, 23, 48, 10, tzinfo=timezone.utc)
+
+    @pytest.mark.parametrize("rec", [
+        {}, {"timestamp": None}, {"timestamp": 123}, {"timestamp": "garbage"},
+        {"timestamp": ""}, "not-a-dict", None,
+    ])
+    def test_garbage_returns_none(self, rec):
+        assert fleet._record_time(rec) is None
+
+
 class TestDoctorHookErrors:
     def test_no_log_passes(self, isolated_home):
         name, ok, msg = fleet._doctor_check_hook_errors()

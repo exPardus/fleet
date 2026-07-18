@@ -18,8 +18,21 @@ GATING: tests/conftest.py auto-marks every test under tests/integration/ as
 `live` and skips the whole file unless FLEET_LIVE=1 is set -- this file
 never runs in ordinary `pytest -q`.
 
+DAEMON LIFECYCLE (2.1.212, [PENDING-RATIFICATION] -- docs/reviews/
+CLAUDE-2.1.212-CONTRACT-2026-07-17.md): the daemon is TRANSIENT. It starts on
+demand at dispatch and idle-exits ~5s after the last client disconnects and
+its live-worker count hits 0. This suite's outcome therefore depends on a
+variable it does not control: whether any --bg session is holding the daemon
+open. `claude rm` cannot remove anything while the daemon is down (rc=1,
+"the background service may be restarting") and does NOT revive it -- only a
+dispatch does. Step 5 conditions its roster-gone assertion on
+`_daemon_alive()` for exactly this reason, and reports the daemon's state in
+every verdict so a RED is never again misread as "rm is broken".
+
 CONTAINMENT: FLEET_HOME is a throwaway temp dir (state/logs/mailbox/outcomes
 never touch the real fleet at C:/proga/claude-fleet or C:/proga/fleet-mb-t12).
+This suite NEVER runs `claude daemon stop`/`uninstall`: they terminate
+background sessions machine-wide, including sessions this suite does not own.
 The `claude` DAEMON ITSELF IS NOT SANDBOXED BY FLEET_HOME, though -- every
 `--bg` dispatch here creates a REAL entry in the operator's real `claude
 agents` roster. The module-scoped `sandbox` fixture tracks every sid this
@@ -77,6 +90,42 @@ def _claude(*args, timeout=30):
     rm+stop) -- the daemon is global, never scoped by FLEET_HOME."""
     return subprocess.run(["claude", *args], capture_output=True, text=True,
                           encoding="utf-8", errors="replace", timeout=timeout)
+
+
+# 2.1.212 contract change [PENDING-RATIFICATION]. Evidence: docs/reviews/
+# CLAUDE-2.1.212-CONTRACT-2026-07-17.md §Q1.4 + §Q4.
+#
+# THE PIN TIER'S OWN CONFOUND. At 2.1.212 the daemon is TRANSIENT: `claude
+# daemon --help` says "Service install is disabled in this version -- the
+# daemon runs on demand and exits when the last client disconnects", and it
+# idle-exits ~5s after the last client disconnects AND its live worker count
+# reaches 0 (16/16 `cause=idle_exit` shutdown lines in 10 days of daemon.log
+# carry `live_workers=0`; not one counter-example).
+#
+# So this suite's result silently depended on something it never measured:
+# whether ANY --bg session happened to be holding the daemon open. Run from a
+# bg worker (as the M-D wave was), the daemon never dies and the suite is
+# 6/6. Run from an interactive session on a quiet machine, the daemon can
+# idle-exit between the suite's own stop-everything step and its archive rm
+# -- and `claude rm` against a dead daemon fails (rc=1, "couldn't remove <id>
+# -- the background service may be restarting"), leaving the sid on the
+# roster. That is a DAEMON-LIFECYCLE failure, not a contract break, and the
+# pin must say so out loud instead of reporting "rm did not work".
+def _daemon_alive():
+    """(alive, status_text) from the sanctioned `claude daemon status`.
+    Read-only -- this suite NEVER runs `claude daemon stop`/`uninstall`
+    (machine-wide blast radius: it terminates background sessions that are
+    not this suite's)."""
+    try:
+        r = _claude("daemon", "status", timeout=20)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return (None, f"`claude daemon status` could not be run: {exc}")
+    text = (r.stdout or "") + (r.stderr or "")
+    if re.search(r"not running", text, re.I):
+        return (False, text.strip())
+    if re.search(r"^\s*pid:\s*\d+", text, re.M):
+        return (True, text.strip())
+    return (None, text.strip())
 
 
 def _roster():
@@ -226,9 +275,13 @@ def sandbox():
         yield sb
     finally:
         # Teardown: stop (best-effort) then rm every SHORT id this run
-        # dispatched. `claude rm` is idempotent on an already-gone id
-        # (contract G12) -- never raises the suite's own exit code on a
-        # partial cleanup. Also sweep any sid still tagged with our own
+        # dispatched. Both are best-effort and their exit codes are ignored
+        # -- teardown never raises the suite's own exit code on a partial
+        # cleanup. 2.1.212 contract change [PENDING-RATIFICATION]: rm is NOT
+        # idempotent in form on an already-gone id (rc=1 "No job matching",
+        # findings §Q3) -- this comment previously claimed it was, citing
+        # G12. Ignoring the exit code here is what makes that harmless.
+        # Also sweep any sid still tagged with our own
         # `fleet|pin-w*|` name prefix that isn't already tracked (belt and
         # braces against a tracking gap this run's own findings suggest
         # bin/fleet.py itself is prone to) -- NEVER touches a sid outside
@@ -436,13 +489,137 @@ def test_5_pin_archive_rm(sandbox: Sandbox):
         f"archive did not move any files into {dest}"
     )
 
+    # 2.1.212 contract change [PENDING-RATIFICATION]. Evidence: docs/reviews/
+    # CLAUDE-2.1.212-CONTRACT-2026-07-17.md §Q1 (3/3 samples) and §Q1.4.
+    #
+    # The archived sids SHOULD be gone from `--all`: rm-with-a-live-daemon is
+    # live-confirmed to remove the roster entry AND its backing
+    # ~/.claude/jobs/<short>/ dir in <1s -- against a settled session AND
+    # (newly observed, G12 had this as UNOBSERVED/out-of-contract) against a
+    # live mid-turn one. The brief's premise that rm leaves an `--all`
+    # tombstone behind is REFUTED; no relaxation of the roster-gone assertion
+    # is warranted on that ground.
+    #
+    # The ONE achievable-contract relaxation: a DEAD daemon. rm cannot remove
+    # anything while the transient daemon is down and does not revive it (only
+    # a dispatch does) -- fleet's own archive path now reports exactly this as
+    # a retryable "deferred (daemon-transient)" skip and leaves the husk for
+    # the next pass (bin/fleet.py `_rm_outcome_note`). Pinning roster-gone
+    # against a dead daemon would pin an outcome the CLI cannot deliver, so
+    # the assertion is conditioned on daemon liveness -- and the diagnostic
+    # names the daemon state either way, so a future RED is never again
+    # mistaken for "rm did not work".
     all_archived_sids = {sid, *retired}
     roster_after = _roster()
-    for s in all_archived_sids:
-        entry = next((e for e in roster_after if e.get("sessionId") == s), None)
-        assert entry is None, (
-            f"sid {s} still present in claude agents --json --all after "
-            f"archive (rm did not work): {entry}"
+    leftover = {s: next((e for e in roster_after if e.get("sessionId") == s), None)
+                for s in all_archived_sids}
+    leftover = {s: e for s, e in leftover.items() if e is not None}
+
+    # m2 fix wave (review MD-CONTRACT-REVIEW-2026-07-17.md): branch on FLEET'S
+    # OWN classification of the rm it just ran, not on an independent, later
+    # probe of the same variable.
+    #
+    # `_daemon_alive()` SAMPLES the confound; it does not control it, and it is
+    # racy in BOTH directions. The daemon idle-exits ~5s after the last client
+    # disconnects, and this test stops every worker, waits for gone-or-dead,
+    # then archives -- comfortably more than 5s of zero live workers. So the
+    # daemon can be ALIVE during rm (rm works, roster should be clean) and DEAD
+    # by the sample: a genuine regression would then be converted into a skip,
+    # i.e. the suite would report success for the exact break it exists to
+    # catch. The other direction is just as real on this machine: daemon dead
+    # at rm, then a sibling worker dispatches (the only thing that revives it)
+    # before the sample -> hard assert -> a false RED blamed on a "contract
+    # regression".
+    #
+    # `_archive_move_and_rm` already classified the outcome from the CLI's own
+    # message, in-process, at rm time, and printed it. That signal is race-free
+    # because it IS the rm. `_daemon_alive()` is retained for the diagnostic
+    # paste (what makes a RED self-explaining) and as the fallback when the
+    # archive path printed no classification line at all.
+    # ND-2 fix wave (re-review MD-CONTRACT-REVIEW-2026-07-17.md): the fallback
+    # below was DOCUMENTED by m2's comment and never implemented -- `alive`
+    # appeared in no branch condition, which is the M1 defect in miniature (a
+    # comment asserting what the code does not do). It matters because
+    # `rm_deferred` can only ever be True if `_NATIVE_CLI_TRANSIENT_RE` matched,
+    # and that regex is built on a message TWO WAVES HAVE FAILED TO OBSERVE
+    # (M4). If the real dead-daemon message does not contain "background service
+    # may be restarting", fleet correctly classifies `failed`, prints `deferred
+    # (failed)`, `rm_deferred` is False -- and this test hard-asserts "a genuine
+    # contract regression" on a machine whose daemon is simply down. That is the
+    # false-RED confound m2 was written to kill, reintroduced and made
+    # conditional on an unverified string.
+    #
+    # So: fleet's own classification stays PRIMARY (race-free -- it is the rm),
+    # and `_daemon_alive()` corroborates only for the shape nobody has seen. An
+    # unclassified deferral plus an independently-confirmed-dead daemon is the
+    # dead-daemon case under a wording this branch could not predict. The pin
+    # can still fail on vendor drift: a leftover sid with NO deferral line at
+    # all, or with a live/unknown daemon, still hard-asserts.
+    archive_err = a.stderr or ""
+    rm_deferred = f"{fleet.NATIVE_RM_DEFERRED_PREFIX} (daemon-transient)" in archive_err
+    rm_unclassified = (f"{fleet.NATIVE_RM_DEFERRED_PREFIX} (" in archive_err
+                       and not rm_deferred)
+    alive, status_text = _daemon_alive()
+    if leftover and (rm_deferred or (rm_unclassified and alive is False)):
+        why = ("fleet's own archive path classified the rm as `deferred "
+               "(daemon-transient)`" if rm_deferred else
+               "fleet reported an UNCLASSIFIED deferral and `claude daemon "
+               "status` independently confirms the daemon is down -- i.e. the "
+               "dead-daemon case arrived under a message shape this branch "
+               "could not predict (M4: the transient string is unverified). "
+               "CAPTURE THE STDERR BELOW: it is the receipt two waves could "
+               "not get, and `_NATIVE_CLI_TRANSIENT_RE` should learn it")
+        pytest.skip(
+            f"ACHIEVABLE-CONTRACT SKIP [2.1.212, PENDING-RATIFICATION]: {why} "
+            "-- the transient daemon was down at rm time, so `claude rm` could "
+            f"not remove {sorted(s[:8] for s in leftover)} and does not revive "
+            "it (findings §Q2). The husk tier sweeps these on the next pass; "
+            "that is the contract this suite can hold the CLI to."
+            f"\n--- fleet archive stderr ---\n{archive_err.strip()}"
+            f"\n--- claude daemon status (sampled after the fact) ---\n{status_text}"
+        )
+    assert not leftover, (
+        f"sid(s) {sorted(s[:8] for s in leftover)} still present in `claude "
+        f"agents --json --all` after archive, and fleet did NOT report a "
+        f"daemon-transient deferral for the rm -- rm-with-live-daemon is "
+        f"live-confirmed to remove the entry and its jobs dir in <1s (findings "
+        f"§Q1), so this is a genuine contract regression, not the "
+        f"daemon-lifecycle confound: {leftover}\n"
+        f"--- fleet archive stderr ---\n{archive_err.strip()}\n"
+        f"--- claude daemon status (sampled after the fact; alive={alive!r}) "
+        f"---\n{status_text}"
+    )
+
+    # 2.1.212 contract change [PENDING-RATIFICATION]: G12 IDEMPOTENCY REFUTED.
+    # Evidence: docs/reviews/CLAUDE-2.1.212-CONTRACT-2026-07-17.md §Q3 --
+    # `claude rm` on an already-removed id exits 1 with "No job matching
+    # '<id>'", NOT 0. G12 lists idempotency as UNOBSERVED and this file's own
+    # teardown comment used to assert rm "is idempotent on an already-gone id".
+    # It is idempotent in EFFECT (the sid stays gone) but not in FORM, which is
+    # what makes rc alone a three-way-ambiguous signal and forces
+    # bin/fleet.py's `_classify_native_cli_result` to read the message. Pinned
+    # here because a silent revert to rc=0 would let that classifier's "gone"
+    # branch rot undetected.
+    #
+    # m2: keyed off THIS call's own output, not a separate `_daemon_alive()`
+    # probe -- a dead daemon answers with the transient message instead, which
+    # is self-identifying and race-free. Sampling daemon liveness separately
+    # would be one probe too late (the daemon can die in between).
+    if sid:
+        again = _claude("rm", sid[:8], timeout=15)
+        again_text = ((again.stdout or "") + (again.stderr or "")).lower()
+        if "background service may be restarting" in again_text:
+            pytest.skip(
+                "ACHIEVABLE-CONTRACT SKIP [2.1.212]: the transient daemon went "
+                "down before the rm-taxonomy probe, so the CLI answered with "
+                "the dead-daemon message instead of the already-gone one. "
+                f"Output: {again_text.strip()!r}"
+            )
+        assert again.returncode == 1 and "no job matching" in again_text, (
+            "rm-on-an-already-removed-id no longer reports rc=1 'No job "
+            f"matching' (rc={again.returncode}, output={again_text.strip()!r}) "
+            "-- the 2.1.212 taxonomy bin/fleet.py classifies on has changed; "
+            "re-verify docs/specs/native-substrate.md G12"
         )
 
 
