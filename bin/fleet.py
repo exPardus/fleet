@@ -268,6 +268,13 @@ def now_iso() -> str:
 # that no other function in this module references os.name/sys.platform.
 # ---------------------------------------------------------------------------
 
+_FILE_APPEND_DATA = 0x0004
+_FILE_SHARE_READ = 0x00000001
+_FILE_SHARE_WRITE = 0x00000002
+_OPEN_ALWAYS = 4
+_FILE_ATTRIBUTE_NORMAL = 0x80
+
+
 class AutocleanTaskQueryError(Exception):
     """schtasks could not say whether the autoclean task exists (F3:
     transient failure, access denied, timeout). Callers fail CLOSED --
@@ -353,11 +360,62 @@ class _WindowsPlatform:
             return (False, (proc.stderr or proc.stdout or "").strip()[:300])
         return (True, "")
 
+    def atomic_append_bytes(self, path: Path, data: bytes) -> None:
+        """Single-syscall atomic append. Opens the file for FILE_APPEND_DATA
+        access ONLY (no GENERIC_WRITE) -- the Win32 kernel documents this
+        access mode as giving each WriteFile call atomic append semantics
+        across concurrently-open handles/processes, so two writers appending
+        "at the same instant" (Stop hook + fleet-side tombstone, see the
+        outcome-store banner) never interleave or clobber each other's line.
+
+        Deliberately NOT `os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY)`
+        + `os.write`: on Windows that goes through the C runtime's O_APPEND
+        emulation, which lseek()s to EOF and write()s as two separate steps
+        per call -- a real TOCTOU race between handles that reproducibly
+        drops whole clean records under concurrent writers (confirmed
+        empirically: 4 threads x 250 records via os.open+O_APPEND lost ~17%
+        of records with zero JSON-decode errors, i.e. silent loss, not
+        corruption). The FILE_APPEND_DATA-only handle below is the actual
+        OS-level fix; verified to lose zero of 1000 records under the same
+        test. (The POSIX backend CAN use O_APPEND -- there the kernel
+        performs seek+write atomically; the CRT emulation race is
+        Windows-only.)"""
+        kernel32 = ctypes.windll.kernel32
+        from ctypes import wintypes
+
+        create_file_w = kernel32.CreateFileW
+        create_file_w.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+            wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+        ]
+        create_file_w.restype = wintypes.HANDLE
+
+        handle = create_file_w(
+            str(path), _FILE_APPEND_DATA, _FILE_SHARE_READ | _FILE_SHARE_WRITE,
+            None, _OPEN_ALWAYS, _FILE_ATTRIBUTE_NORMAL, None,
+        )
+        if handle in (0, wintypes.HANDLE(-1).value):
+            raise OSError(f"CreateFileW failed for {path}: {ctypes.WinError()}")
+        try:
+            written = wintypes.DWORD(0)
+            ok = kernel32.WriteFile(handle, data, len(data), ctypes.byref(written), None)
+            # Roll-up item 4: a partial write (ok=True, written.value <
+            # len(data)) produces a torn JSONL line that read_outcomes
+            # silently skips -- the exact silent-loss failure class T1's
+            # CRITICAL fix existed to kill. Treat it the same as a WriteFile
+            # failure: raise OSError.
+            if not ok or written.value != len(data):
+                raise OSError(f"WriteFile failed for {path}: {ctypes.WinError()}")
+        finally:
+            kernel32.CloseHandle(handle)
+
 
 class _PosixPlatform:
-    """Stub POSIX backend: every method raises UnsupportedPlatformError.
-    Phase 1.5 fills these in (docs/specs/portability.md); Phase 1 targets
-    Windows only (SPEC §14)."""
+    """POSIX backend (macos-port). Implemented: atomic_append_bytes (the
+    outcome store -- load-bearing for every turn verdict). Still
+    unsupported: autoclean task scheduling (launchd/cron -- next in the
+    port plan); those methods raise UnsupportedPlatformError so
+    `fleet init --autoclean` fails loudly, not silently."""
 
     def _unsupported(self, what: str):
         raise UnsupportedPlatformError(
@@ -374,6 +432,25 @@ class _PosixPlatform:
 
     def autoclean_task_remove(self, task_name: str, run=None):
         self._unsupported("autoclean_task_remove")
+
+    def atomic_append_bytes(self, path: Path, data: bytes) -> None:
+        """Single-syscall atomic append via O_APPEND. POSIX specifies that
+        for a file opened with O_APPEND the seek-to-EOF and the write are
+        performed as one atomic step, so concurrent writers (Stop hook +
+        fleet-side tombstone) never interleave records this small -- the
+        same guarantee the Windows backend buys with a FILE_APPEND_DATA-only
+        handle (the CRT-emulation TOCTOU that forced ctypes there is a
+        Windows-only defect; see that docstring). A short write would tear
+        a JSONL line that read_outcomes silently skips, so it raises
+        exactly like the Windows partial-write check."""
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o666)
+        try:
+            written = os.write(fd, data)
+            if written != len(data):
+                raise OSError(
+                    f"short append to {path}: {written}/{len(data)} bytes")
+        finally:
+            os.close(fd)
 
 
 # The one and only os.name branch in this module: selects which adapter
@@ -5105,7 +5182,7 @@ def _doctor_check_pin_version(which=shutil.which, run=subprocess.run):
     pin = read_pin_pass()
     if pin is None:
         return ("pin-version", True,
-                "no pin-test pass recorded -- run FLEET_LIVE=1 py -3.13 -m pytest "
+                "no pin-test pass recorded -- run FLEET_LIVE=1 python -m pytest "
                 "tests/integration/test_native_pin.py")
     try:
         exe = resolve_claude_executable(which=which)
@@ -5702,61 +5779,13 @@ OUTCOME_RESULT_TEXT_MAX = 20000
 TOMBSTONE_KINDS = ("killed", "interrupted", "stopped")
 
 
-_FILE_APPEND_DATA = 0x0004
-_FILE_SHARE_READ = 0x00000001
-_FILE_SHARE_WRITE = 0x00000002
-_OPEN_ALWAYS = 4
-_FILE_ATTRIBUTE_NORMAL = 0x80
-
-
 def _atomic_append_bytes(path: Path, data: bytes) -> None:
-    """Single-syscall atomic append. Opens the file for FILE_APPEND_DATA
-    access ONLY (no GENERIC_WRITE) -- the Win32 kernel documents this access
-    mode as giving each WriteFile call atomic append semantics across
-    concurrently-open handles/processes, so two writers appending "at the
-    same instant" (Stop hook + fleet-side tombstone, see module banner)
-    never interleave or clobber each other's line.
-
-    Deliberately NOT `os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY)`
-    + `os.write`: on Windows that goes through the C runtime's O_APPEND
-    emulation, which lseek()s to EOF and write()s as two separate steps per
-    call -- a real TOCTOU race between handles that reproducibly drops whole
-    clean records under concurrent writers (confirmed empirically: 4
-    threads x 250 records via os.open+O_APPEND lost ~17% of records with
-    zero JSON-decode errors, i.e. silent loss, not corruption -- the same
-    failure mode the CRITICAL finding this fixes originally reported). The
-    FILE_APPEND_DATA-only handle below is the actual OS-level fix; verified
-    to lose zero of 1000 records under the same test. ctypes/kernel32 only
-    -- no platform-detection branch of any kind (this build targets Windows
-    only, SPEC §14)."""
-    kernel32 = ctypes.windll.kernel32
-    from ctypes import wintypes
-
-    create_file_w = kernel32.CreateFileW
-    create_file_w.argtypes = [
-        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
-        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
-    ]
-    create_file_w.restype = wintypes.HANDLE
-
-    handle = create_file_w(
-        str(path), _FILE_APPEND_DATA, _FILE_SHARE_READ | _FILE_SHARE_WRITE,
-        None, _OPEN_ALWAYS, _FILE_ATTRIBUTE_NORMAL, None,
-    )
-    if handle in (0, wintypes.HANDLE(-1).value):
-        raise OSError(f"CreateFileW failed for {path}: {ctypes.WinError()}")
-    try:
-        written = wintypes.DWORD(0)
-        ok = kernel32.WriteFile(handle, data, len(data), ctypes.byref(written), None)
-        # Roll-up item 4: a partial write (ok=True, written.value < len(data))
-        # produces a torn JSONL line that read_outcomes silently skips --
-        # the exact silent-loss failure class T1's CRITICAL fix existed to
-        # kill. Treat it the same as a WriteFile failure: raise OSError
-        # (already inside this function's raise-OSError contract).
-        if not ok or written.value != len(data):
-            raise OSError(f"WriteFile failed for {path}: {ctypes.WinError()}")
-    finally:
-        kernel32.CloseHandle(handle)
+    """Single-syscall atomic append; the guarantee is per-backend
+    (FILE_APPEND_DATA-only handle on Windows, O_APPEND on POSIX -- see the
+    PLATFORM adapter block, SPEC §14). Module-level name kept: callers and
+    tests pin it, and the raise-OSError-on-partial-write contract is the
+    adapter's, unchanged."""
+    PLATFORM.atomic_append_bytes(path, data)
 
 
 def append_outcome(key: str, record: dict) -> None:
@@ -6804,16 +6833,20 @@ def _render_successor_task(successor_inc: str, old_inc: str) -> str:
     """Successor bootstrap body (task-file bootstrap, contract G8 -- never
     argv for size-unbounded content). Paths rendered .as_posix()."""
     fleet_py = (FLEET_HOME / "bin" / "fleet.py").as_posix()
+    # The interpreter that is running fleet right now, not a hardcoded
+    # `py -3.13` (a Windows-only launcher): the successor must invoke the
+    # same Python this incarnation was launched with, on any platform.
+    py = Path(sys.executable).as_posix()
     return f"""You are the claude-fleet supervisor SUCCESSOR, incarnation {successor_inc}.
 Your predecessor ({old_inc}) dispatched you mid-handoff (spec docs/superpowers/specs/2026-07-13-native-agents-pivot-design.md §4).
 
 Do exactly this, in order:
-1. Run: py -3.13 {fleet_py} sup-boot --handoff-inc {successor_inc}
+1. Run: "{py}" {fleet_py} sup-boot --handoff-inc {successor_inc}
    This prints your boot bundle and writes supervisor/HANDSHAKE. You hold NO claim yet.
 2. Take NO spawn/respawn/send/kill/clean actions before claim transfer -- spec §4's double-spawn guard.
-3. Poll every ~30s (up to 10 minutes): py -3.13 {fleet_py} sup-status --json
+3. Poll every ~30s (up to 10 minutes): "{py}" {fleet_py} sup-status --json
    - When incarnation.incarnation_id == "{successor_inc}": the claim is yours. Run:
-     py -3.13 {fleet_py} sup-checkpoint "claim received via handoff from {old_inc}"
+     "{py}" {fleet_py} sup-checkpoint "claim received via handoff from {old_inc}"
      then read your boot bundle output and continue the supervisor duty per skills/fleet/supervisor.md.
    - If 10 minutes pass without transfer: the handoff was aborted. STOP -- take no actions,
      end your turn with the final message: HANDOFF-ORPHAN {successor_inc}
