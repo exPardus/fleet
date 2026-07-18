@@ -1685,14 +1685,25 @@ def _write_native_transcript(home, sid, records):
 
 
 # Real observed G7 evidence shape (spike/m0/VERDICTS.md transcript record
-# 201) -- binding fixture per task-6-brief.md.
+# 201) -- binding fixture per task-6-brief.md. N1 fix wave
+# (MD-ULPARSER-REVIEW-2026-07-17.md re-review): every real `assistant`
+# record carries a `timestamp` (re-reviewer checked 1545/1545 assistant
+# records across 12 real transcripts) -- record 201's own timestamp is the
+# corroborated G7 instant, 2026-07-13T22:32:01.933Z (VERDICTS.md:428-436,
+# :441-445). Included here so the default fixture exercises the
+# PRODUCTION anchor path, not the fallback. LIMIT_RECORD_NO_TIMESTAMP
+# below is the explicit fixture for the (defensive-only, N3) missing-
+# timestamp case.
 LIMIT_RECORD = {
     "type": "assistant",
     "message": {"model": "<synthetic>", "role": "assistant",
                 "content": [{"type": "text",
                              "text": "You've hit your session limit — resets 4:40am (Asia/Qyzylorda)"}]},
     "error": "rate_limit", "isApiErrorMessage": True, "apiErrorStatus": 429,
+    "timestamp": "2026-07-13T22:32:01.933Z",
 }
+
+LIMIT_RECORD_NO_TIMESTAMP = {k: v for k, v in LIMIT_RECORD.items() if k != "timestamp"}
 
 
 class TestTranscriptLimitScan:
@@ -1700,7 +1711,12 @@ class TestTranscriptLimitScan:
         t = _write_native_transcript(tmp_path, SID, [{"type": "user"}, LIMIT_RECORD])
         is_limit, reset_at, kind = fleet.transcript_limit_scan(SID, transcript_path=t)
         assert is_limit is True
-        assert reset_at is None  # observed text is local-format, not ISO
+        # N1 fix wave: LIMIT_RECORD now carries its real corroborated
+        # timestamp, so this exercises the production anchor path (C1) --
+        # exact instant, no clock freezing needed (that determinism *is*
+        # the regression guard: it fails if the anchor ever reverts to
+        # wall-clock time).
+        assert reset_at == "2026-07-13T23:40:00Z"
         assert kind == "session_5h"
 
     def test_iso_reset_in_text_is_parsed(self, native_home, tmp_path):
@@ -1723,6 +1739,89 @@ class TestTranscriptLimitScan:
     def test_non_synthetic_shapes_do_not_park(self, native_home, tmp_path, rec):
         t = _write_native_transcript(tmp_path, SID, [rec])
         assert fleet.transcript_limit_scan(SID, transcript_path=t)[0] is False
+
+
+class TestTranscriptLimitScanAnchoring:
+    """C1 fix wave (MD-ULPARSER-REVIEW-2026-07-17.md): the horizon must
+    anchor to the TRANSCRIPT RECORD's own timestamp, not to the wall clock
+    at parse/scan time. `limited` is sticky (fleet.py _NATIVE_STICKY) so a
+    park's horizon is derived exactly once -- anchoring to "now" meant a
+    scan that first observes the park after the quoted local reset had
+    already passed rolled the horizon a full day late, permanently.
+
+    These fixtures pin a `timestamp` field on the message record (LIMIT_RECORD
+    carries its real corroborated one by default -- N1 fix wave, every real
+    `assistant` record has one) so the expected output is a fixed constant --
+    no `datetime.now` freezing needed anywhere. That is the regression
+    guard: if the anchor ever reverts to wall-clock time, these tests fail
+    no matter what instant they happen to run at.
+
+    N3 fix wave: a missing or unparseable timestamp is no longer a
+    wall-clock guess either -- it parks a null horizon, the same
+    conservative outcome as an unknown tz. See
+    test_missing_timestamp_parks_null_horizon /
+    test_garbage_timestamp_parks_null_horizon below.
+    """
+
+    def _record(self, timestamp):
+        rec = json.loads(json.dumps(LIMIT_RECORD))
+        rec["timestamp"] = timestamp
+        return rec
+
+    def test_anchors_to_message_instant_same_evening(self, native_home, tmp_path):
+        # The real corroborated G7 timeline (VERDICTS.md:428-436): 429 hit
+        # at 2026-07-13T22:32:01.933Z, message "resets 4:40am
+        # (Asia/Qyzylorda)". True reset instant is 2026-07-13T23:40:00Z --
+        # the actual resume landed 8 minutes later, at 23:48:10Z.
+        rec = self._record("2026-07-13T22:32:01.933Z")
+        t = _write_native_transcript(tmp_path, SID, [rec])
+        is_limit, reset_at, kind = fleet.transcript_limit_scan(SID, transcript_path=t)
+        assert is_limit is True
+        assert reset_at == "2026-07-13T23:40:00Z"
+        assert kind == "session_5h"
+
+    def test_anchors_correctly_even_when_scanned_a_day_late(self, native_home, tmp_path, monkeypatch):
+        # C1's exact repro (review §1): if the anchor were still wall-clock
+        # time, scanning this record long after 23:40Z would roll the
+        # horizon forward a full day (2026-07-14T23:40:00Z, WRONG). Force
+        # datetime.now to a moment 09:00 local the NEXT morning -- the
+        # scanner must still use the record's own timestamp and produce
+        # the correct 2026-07-13T23:40:00Z, proving `now` is never
+        # consulted when the record has a valid timestamp.
+        real_datetime = fleet.datetime
+
+        class _FrozenLate(real_datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return real_datetime(2026, 7, 14, 4, 0, 0, tzinfo=timezone.utc)
+
+        monkeypatch.setattr(fleet, "datetime", _FrozenLate)
+        rec = self._record("2026-07-13T22:32:01.933Z")
+        t = _write_native_transcript(tmp_path, SID, [rec])
+        is_limit, reset_at, kind = fleet.transcript_limit_scan(SID, transcript_path=t)
+        assert is_limit is True
+        assert reset_at == "2026-07-13T23:40:00Z"
+
+    def test_missing_timestamp_parks_null_horizon(self, native_home, tmp_path):
+        # N3 fix wave: no `timestamp` (LIMIT_RECORD_NO_TIMESTAMP) ->
+        # _record_time returns None -> the local-format branch is never
+        # resolved against the wall clock -- reset_at stays None, a
+        # conservative null-horizon park (never a guessed, possibly
+        # 24h-wrong instant).
+        t = _write_native_transcript(tmp_path, SID, [LIMIT_RECORD_NO_TIMESTAMP])
+        is_limit, reset_at, kind = fleet.transcript_limit_scan(SID, transcript_path=t)
+        assert is_limit is True
+        assert reset_at is None
+        assert kind == "session_5h"
+
+    def test_garbage_timestamp_parks_null_horizon(self, native_home, tmp_path):
+        # N3: an unparseable `timestamp` is exactly as anchor-less as a
+        # missing one -- same null-park outcome, never a wall-clock guess.
+        rec = self._record("not-a-timestamp")
+        t = _write_native_transcript(tmp_path, SID, [rec])
+        is_limit, reset_at, kind = fleet.transcript_limit_scan(SID, transcript_path=t)
+        assert is_limit is True
+        assert reset_at is None
 
     def test_missing_transcript_is_not_limit(self, native_home):
         assert fleet.transcript_limit_scan("no-such-sid")[0] is False
@@ -1794,6 +1893,24 @@ class TestLimitParkViaDiscriminator:
         monkeypatch.setattr(fleet.Path, "home", staticmethod(lambda: tmp_path))
         rec = seed_native_worker(native_home)
         _write_native_transcript(tmp_path, SID, [LIMIT_RECORD])
+        out = fleet.recompute_worker_native("w1", rec, [make_roster_entry(SID, status="idle")])
+        assert out["status"] == "limited"
+        assert out["limit_kind"] == "session_5h"
+        # N1 fix wave: LIMIT_RECORD now carries its real corroborated
+        # timestamp, so this goes through the full discriminator path
+        # (recompute_worker_native) on the PRODUCTION anchor -- exact
+        # instant, no clock freezing needed.
+        assert out["limit_reset_at"] == "2026-07-13T23:40:00Z"
+
+    def test_idle_no_outcome_limit_transcript_no_timestamp_parks_null_horizon(self, native_home, tmp_path, monkeypatch):
+        """N3 fix wave: a record with no `timestamp` (defensive-only per
+        N1 -- every real assistant record carries one) must never guess a
+        horizon off the wall clock. It still parks `limited` (the 429 gate
+        is unaffected), but the horizon stays null -- the conservative,
+        `--force-now`-recoverable outcome, same standard as an unknown tz."""
+        monkeypatch.setattr(fleet.Path, "home", staticmethod(lambda: tmp_path))
+        rec = seed_native_worker(native_home)
+        _write_native_transcript(tmp_path, SID, [LIMIT_RECORD_NO_TIMESTAMP])
         out = fleet.recompute_worker_native("w1", rec, [make_roster_entry(SID, status="idle")])
         assert out["status"] == "limited"
         assert out["limit_kind"] == "session_5h"
@@ -3149,13 +3266,102 @@ class TestCmdKillNative:
         assert "stopping retired session retired1... ok" in err
         assert "stopping retired session retired2... ok" in err
 
-    def test_retired_sid_sweep_reports_timeout_on_stop_failure(self, native_home, capsys):
+    def test_kill_stops_by_the_captured_short_id_not_a_derived_ref(self, native_home, capsys):
+        """ND-1 (re-review MD-CONTRACT-REVIEW-2026-07-17.md), the mirror of
+        `test_sweep_passes_the_rosters_own_id_not_a_derived_ref`.
+
+        The M5 commit gave `stop` the inference "gone == success"; the m1 commit
+        taught `rm` never to trust a DERIVED ref for exactly that inference --
+        and hardened both rm sites and neither stop site. Repro'd: with a CLI
+        that answers only to its own short id, `fleet kill` derived
+        sid.split("-")[0], read `No job matching` as `gone`, printed "killed",
+        exited 0, stamped interrupt_outcome=True and marked the worker dead --
+        while the session kept running, untracked, skipped by every husk sweep
+        forever because it is status/pid-live.
+
+        `native_short_id` here is deliberately NOT the derived prefix."""
+        import types as _t
+        rec = seed_native_worker(native_home, sid=SID, status="working")
+        rec["native_short_id"] = "zz9qk7xd"          # NOT SID.split("-")[0]
+        fleet.save_registry({"workers": {"w1": rec}})
+
+        refs = []
+
+        def only_own_id(argv, **kwargs):
+            ref = argv[2] if len(argv) > 2 else None
+            refs.append(ref)
+            if ref == "zz9qk7xd":
+                return _t.SimpleNamespace(returncode=0, stdout=f"stopped {ref}",
+                                          stderr="")
+            return _t.SimpleNamespace(returncode=1,
+                                      stdout=f"No job matching '{ref}'", stderr="")
+
+        rc = fleet.cmd_kill(_kill_args(), run=only_own_id, which=lambda _: "claude")
+        assert refs and refs[0] == "zz9qk7xd", (
+            f"kill must stop by the CAPTURED short id, not a derived one: {refs}")
+        assert rc == 0
+
+    def test_kill_on_an_already_gone_sid_succeeds_as_gone(self, native_home, capsys):
+        """M5 fix wave (review MD-CONTRACT-REVIEW-2026-07-17.md): `claude stop`
+        on an already-gone sid exits 1 with "No job matching" (live receipt,
+        findings §Q3). Read as failure, `fleet kill` exited 1 and told the
+        operator to "investigate the session manually" about a session that is
+        verifiably, correctly gone -- while the rm half of the same contract
+        now reports a clean `gone`. The two halves disagreed about one fact.
+
+        The realistic trigger: archive removes a worker's roster entry, then
+        the operator kills the stale record."""
+        import types as _t
+        seed_native_worker(native_home, sid=SID, status="working")
+
+        def gone_run(argv, **kwargs):
+            return _t.SimpleNamespace(
+                returncode=1,
+                stdout="No job matching 'aaaabbbb'. Run 'claude agents' to "
+                       "list running sessions.",
+                stderr="")
+
+        rc = fleet.cmd_kill(_kill_args(), run=gone_run, which=lambda _: "claude")
+        out, err = capsys.readouterr()
+        assert rc == 0, f"kill on an already-gone sid must not exit 1: {err}"
+        assert "investigate" not in err.lower(), (
+            f"must not send the operator after a session that is gone: {err}")
+        assert "w1: killed" in out
+
+    def test_kill_on_an_already_gone_sid_stamps_outcome_true(self, native_home):
+        """The durable half of the same defect: `interrupt_outcome=False` was a
+        WRONG DATUM in the event log, not just a console message."""
+        import types as _t
+        seed_native_worker(native_home, sid=SID, status="working")
+        fleet.cmd_kill(_kill_args(),
+                       run=lambda *a, **k: _t.SimpleNamespace(
+                           returncode=1, stdout="No job matching 'aaaabbbb'.",
+                           stderr=""),
+                       which=lambda _: "claude")
+        events = [json.loads(ln) for ln in
+                  fleet.events_path().read_text(encoding="utf-8").splitlines() if ln]
+        killed = [e for e in events if e.get("kind") == "killed"]
+        assert killed and killed[-1]["interrupt_outcome"] is True, killed
+        # G10 tombstone obligation is unconditional -- unchanged by any of this.
+        assert any(o.get("kind") == "killed"
+                   for o in fleet.read_outcomes("w1", sid=SID))
+
+    def test_retired_sid_sweep_reports_outcome_on_stop_failure(self, native_home, capsys):
+        """M5 fix wave (review MD-CONTRACT-REVIEW-2026-07-17.md): this test
+        used to pin `... timeout` for ANY non-zero stop. That was a specific
+        and wrong diagnosis -- a retired sid is an abandoned fork, so
+        "already gone" is the common case, and naming it "timeout" invited
+        the operator to hunt a hung daemon that was never there. The sweep
+        now prints the classified outcome. This stub emits a bare rc=1 with
+        no message, which classifies as the unknown-failure case."""
         rec = seed_native_worker(native_home, sid=SID, status="working")
         rec["retired_sids"] = ["retired1sid"]
         fleet.save_registry({"workers": {"w1": rec}})
         fleet.cmd_kill(_kill_args(), run=_fake_run_factory(rc=1), which=lambda _: "claude")
         err = capsys.readouterr().err
-        assert "stopping retired session retired1... timeout" in err
+        assert "stopping retired session retired1... failed" in err
+        assert "timeout" not in err, (
+            f"'timeout' names a mechanism that did not occur: {err}")
 
     # T8 fix wave (adv M1, Minor) -- cross-worker ownership check on a
     # corrupted/hand-edited registry.
@@ -3960,7 +4166,14 @@ class TestCmdArchive:
         rc = fleet.cmd_archive(_archive_args(), run=_archive_fake_run(rc=1), which=lambda _: "claude")
         assert rc == 0
         assert fleet.load_registry()["workers"]["w1"]["archived_at"] is not None
-        assert "rm aaaabbbb... failed" in capsys.readouterr().err
+        # 2.1.212 contract change [PENDING-RATIFICATION]: rm failures are now
+        # reported as "deferred (<outcome>)" with the reason spelled out --
+        # rc=1 alone no longer means "failed" (it can mean already-gone, or a
+        # transient dead daemon). Evidence: docs/reviews/
+        # CLAUDE-2.1.212-CONTRACT-2026-07-17.md §Q3. This stub emits a bare
+        # rc=1 with no message, so it classifies as the unknown-failure case.
+        # Unchanged, and the point of this test: non-fatal, still archives.
+        assert "rm aaaabbbb... deferred (failed)" in capsys.readouterr().err
 
     def test_collision_suffixes_existing_archive_dir(self, native_home):
         fleet.archive_root().mkdir(parents=True, exist_ok=True)
