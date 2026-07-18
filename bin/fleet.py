@@ -7103,7 +7103,15 @@ def _roster_live_sids(entries: list) -> set:
     (docs/specs/native-substrate.md, roster contract): `status`/`pid` keys
     exist only while the process lives; a lingering `state:"done"` entry
     (observed surviving >=3h21m) must NOT count as live, or a finished
-    predecessor would block every successor claim for hours."""
+    predecessor would block every successor claim for hours.
+
+    posix-port live finding 2026-07-19 (macOS, claude 2.1.214): a finished
+    bg session's host process can LINGER after its turn ends -- the entry
+    keeps `pid` AND `status` ("idle") with `state:"done"`. The key-presence
+    heuristic alone therefore misreads it as live (observed blocking
+    `fleet respawn` on an idle worker). The documented terminal-state rule
+    must dominate key presence: `state:"done"` is never live, keys or not.
+    (On Windows the two conditions agree -- done entries lose pid/status.)"""
     # Same hostile-sessionId-value guard as dispatch_bg's pre-snapshot: a
     # dict-valued sessionId (CLI drift / hostile roster) must never raise
     # TypeError from an unhashable value landing in the set.
@@ -7111,6 +7119,7 @@ def _roster_live_sids(entries: list) -> set:
         e.get("sessionId") for e in entries
         if isinstance(e, dict) and isinstance(e.get("sessionId"), str)
         and e.get("sessionId") and ("status" in e or "pid" in e)
+        and e.get("state") != "done"
     }
 
 
