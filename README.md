@@ -59,37 +59,17 @@ Claude Code ships its own background agents (`claude --bg`, `claude agents`) —
 The registry, mailboxes, journals, and knowledge live on disk. The statusline, the `/fleet:*` slash commands, the manager session, the SessionStart briefing — all just *read the same files*. Add or drop a surface without touching the core. No surface owns data; no view ever probes a PID, takes a lock, or writes.
 
 ```mermaid
-flowchart TD
+flowchart TB
     M["🧑‍✈️ Manager session<br/>(you, or a Claude Code session)"]
-    M -->|"fleet CLI (short-lived commands)"| R
-
-    subgraph core["state/ — single source of truth"]
-        R["📋 registry · state/fleet.json<br/><i>single writer, lock-guarded</i>"]
-        MB["✉️ mailbox/"]
-        J["📓 journals/"]
-        O["🧾 outcomes/"]
-    end
-
-    subgraph workers["workers — durable claude --bg sessions"]
-        WA["worker A"]
-        WB["worker B"]
-        WC["worker C"]
-    end
-
-    R -. "keyed by name" .-> WA & WB & WC
-    WA & WB & WC -->|"PostToolUse / Stop / PostCompact hooks"| MB & J & O
-
-    K["📚 knowledge/ (git-tracked)<br/>INDEX · lessons · playbooks · projects"]
-    M -->|"reads at start, writes after every campaign"| K
-
-    classDef mgr fill:#1f6feb,stroke:#1f6feb,color:#fff
-    classDef state fill:#161b22,stroke:#30363d,color:#e6edf3
-    classDef work fill:#238636,stroke:#238636,color:#fff
-    classDef knowledge fill:#8957e5,stroke:#8957e5,color:#fff
-    class M mgr
-    class R,MB,J,O state
-    class WA,WB,WC work
-    class K knowledge
+    R["📋 Registry · state/fleet.json<br/>single writer · lock-guarded"]
+    W["🤖 Workers · durable claude --bg sessions<br/>(worker A · worker B · worker C · …)"]
+    F["🗂️ state files<br/>mailbox · journals · outcomes"]
+    K["📚 knowledge/ · git-tracked<br/>INDEX · lessons · playbooks"]
+    M -->|"fleet CLI"| R
+    R -->|"dispatch · steer"| W
+    W -->|"hooks each turn"| F
+    F -.->|"status derived"| R
+    M <-.->|"read at start · write after each campaign"| K
 ```
 
 Every `fleet` command is a short-lived CLI invocation. The registry is the single source of truth every view derives from — never independent state. **See it all explained with diagrams: [How claude-fleet works →](docs/concepts.md)**
