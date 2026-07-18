@@ -8,6 +8,13 @@ Every doc and doc-adjacent directory in this repo, one line each, tagged by audi
 
 If a doc isn't listed here, that's a gap — file an issue or add it in the same PR that adds the doc.
 
+## Start here (users)
+
+| Doc | Audience | What it's for |
+|---|---|---|
+| [`concepts.md`](concepts.md) | USERS | **How claude-fleet works** — the idea, the problem it solves, the layered architecture, the worker lifecycle, the knowledge loop. Diagrams throughout. The friendly companion to `SPEC.md`. |
+| [`getting-started.md`](getting-started.md) | USERS | Install → become the manager → spawn, steer, respawn, and run a first parallel campaign. The hands-on path. |
+
 ## Root
 
 | Doc | Audience | What it's for |
