@@ -6742,6 +6742,12 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
     settings = Path(settings_path) if settings_path else instance_settings_path()
     try:
         tasks_dir().mkdir(parents=True, exist_ok=True)
+        # journals_dir() must exist BEFORE dispatch: it goes onto --add-dir
+        # below, and claude silently grants nothing for a nonexistent dir --
+        # the worker's protocol-mandated journal Write then hangs on a
+        # permission prompt on any fresh fleet home (posix-port live
+        # finding 2026-07-18, part 2).
+        journals_dir().mkdir(parents=True, exist_ok=True)
         task_path = task_file_path(name)
         task_path.write_text(prompt_body, encoding="utf-8")
     except OSError as exc:
@@ -6757,7 +6763,15 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
     # non-bypass mode the worker's first Read on it hangs forever on an
     # unapprovable headless permission prompt. --add-dir pre-authorizes
     # tasks_dir() specifically (least privilege -- never FLEET_HOME wholesale).
-    argv += ["--add-dir", tasks_dir().as_posix()]
+    # posix-port live finding 2026-07-18: journals_dir() needs the same
+    # pre-authorization -- compose_prompt's preamble ORDERS the worker to
+    # "create it early; update it at each milestone", so under acceptEdits
+    # every worker's first journal Write hung on the same unapprovable
+    # prompt (latent upstream: campaigns run bypass, and the pin tasks are
+    # reply-only). Same least-privilege doctrine: the two specific dirs
+    # the worker protocol requires, never state/ or FLEET_HOME wholesale.
+    argv += ["--add-dir", tasks_dir().as_posix(),
+             "--add-dir", journals_dir().as_posix()]
     # T4 fix wave (Important I1): additive param -- forwards the persisted
     # --setting-sources value onto the native --bg argv, which the frozen
     # T3 dispatch_bg signature never carried. UNOBSERVED under --bg at

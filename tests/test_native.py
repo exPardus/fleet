@@ -354,18 +354,28 @@ class TestDispatchBg:
         assert "CLAUDE_CODE_SESSION_ID" not in kwargs["env"]
         assert kwargs["cwd"] == "C:/proj"
 
-    def test_argv_pre_authorizes_tasks_dir_via_add_dir(self, native_home):
+    def test_argv_pre_authorizes_tasks_and_journals_dirs_via_add_dir(self, native_home):
         # T12 fix wave (finding 1): the task file lives under
         # FLEET_HOME/tasks, outside the worker's own --dir cwd -- without
         # --add-dir the worker's first Read on it hangs forever under any
-        # non-bypass mode. Pin the exact flag + posix path (tasks_dir()
-        # only, never FLEET_HOME wholesale -- least privilege).
+        # non-bypass mode. posix-port live finding 2026-07-18: the journal
+        # the preamble orders the worker to "create early" lives under
+        # FLEET_HOME/state/journals and hung the same way on its first
+        # Write under acceptEdits. Pin the exact flags + posix paths (the
+        # two protocol-required dirs only, never FLEET_HOME wholesale --
+        # least privilege).
         calls = []
         fleet.dispatch_bg("w1", "C:/proj", "b", "accept",
                           run=_fake_run_factory(calls=calls), which=lambda _: "claude",
                           sleep=lambda s: None, roster_fetch=_roster_with())
         argv = calls[0][0]
-        assert argv[argv.index("--add-dir") + 1] == fleet.tasks_dir().as_posix()
+        added = [argv[i + 1] for i, tok in enumerate(argv) if tok == "--add-dir"]
+        assert added == [fleet.tasks_dir().as_posix(),
+                         fleet.journals_dir().as_posix()]
+        # Both dirs must EXIST at dispatch time -- claude silently grants
+        # nothing for a nonexistent --add-dir target (live finding part 2).
+        assert fleet.tasks_dir().is_dir()
+        assert fleet.journals_dir().is_dir()
 
     def test_resume_sid_inserts_resume_flag(self, native_home):
         calls = []
