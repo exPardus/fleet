@@ -259,13 +259,15 @@ def now_iso() -> str:
 #
 # This is the ONLY section of fleet.py permitted to branch on os.name /
 # sys.platform, read subprocess creation flags, or shell out to an
-# OS-specific tool (PowerShell Get-Process, taskkill, wt.exe,
-# Start-Process). Every other function in this module calls through the
-# PLATFORM singleton below instead of doing any of that itself. Windows is
-# the only implemented backend for now; the POSIX backend raises
-# UnsupportedPlatformError everywhere -- Phase 1.5 fills it in
-# (docs/specs/portability.md). A source-scan test (test_steering.py) enforces
-# that no other function in this module references os.name/sys.platform.
+# OS-specific tool (schtasks/crontab, ctypes/kernel32). Every other
+# function in this module calls through the PLATFORM singleton below
+# instead of doing any of that itself. Two implemented backends:
+# _WindowsPlatform (schtasks scheduling, FILE_APPEND_DATA outcome append)
+# and _PosixPlatform (crontab scheduling, O_APPEND outcome append --
+# macOS + Linux, the posix-port branch). UnsupportedPlatformError remains
+# the contract for any future genuinely-unportable operation. A
+# source-scan test (test_steering.py) enforces that no other function in
+# this module references os.name/sys.platform.
 # ---------------------------------------------------------------------------
 
 _FILE_APPEND_DATA = 0x0004
@@ -411,27 +413,98 @@ class _WindowsPlatform:
 
 
 class _PosixPlatform:
-    """POSIX backend (macos-port). Implemented: atomic_append_bytes (the
-    outcome store -- load-bearing for every turn verdict). Still
-    unsupported: autoclean task scheduling (launchd/cron -- next in the
-    port plan); those methods raise UnsupportedPlatformError so
-    `fleet init --autoclean` fails loudly, not silently."""
+    """POSIX backend (posix-port): macOS + Linux.
 
-    def _unsupported(self, what: str):
-        raise UnsupportedPlatformError(
-            f"{what} has no POSIX implementation yet (Phase 1.5, SPEC §14); "
-            "this build only supports Windows"
-        )
+    Autoclean scheduling uses the user crontab on both OSes -- macOS still
+    ships cron, and one crontab backend is strictly simpler than a
+    launchd-plist/cron split (launchd can become a refinement if cron's
+    macOS sandboxing ever bites; fleet's autoclean only touches user-owned
+    FLEET_HOME paths, which cron may). The fleet-owned entry is found by a
+    trailing `# <task_name>` tag, never by parsing schedules -- the same
+    "match our own marker, refuse to guess" doctrine as the schtasks
+    backend's task-name match."""
 
-    def autoclean_task_query(self, task_name: str, run=None):
-        self._unsupported("autoclean_task_query")
+    def _cron_tag(self, task_name: str) -> str:
+        return f"# {task_name}"
+
+    def _read_crontab(self, run):
+        """(lines, error). lines is None on failure; [] means 'user has no
+        crontab', a DEFINITIVE absence (crontab -l exits nonzero for it,
+        so it must be told apart from access failures by message -- cron
+        implementations do not localize 'no crontab', unlike schtasks'
+        locale-translated not-found error that forced the CSV dance on
+        Windows)."""
+        try:
+            proc = run(["crontab", "-l"], capture_output=True, text=True,
+                       timeout=30)
+        except Exception as exc:
+            return (None, f"crontab listing failed: {exc}")
+        if proc.returncode == 0:
+            return ((proc.stdout or "").splitlines(), "")
+        if "no crontab" in (proc.stderr or "").lower():
+            return ([], "")
+        return (None, f"crontab listing exit {proc.returncode}: "
+                      f"{(proc.stderr or '').strip()[:200]}")
+
+    def _write_crontab(self, lines, run):
+        """(ok, message). Installs the given lines as the user crontab."""
+        text = "\n".join(lines) + ("\n" if lines else "")
+        try:
+            proc = run(["crontab", "-"], input=text, capture_output=True,
+                       text=True, timeout=30)
+        except Exception as exc:
+            return (False, str(exc))
+        if proc.returncode != 0:
+            return (False, (proc.stderr or proc.stdout or "").strip()[:300])
+        return (True, "")
+
+    def autoclean_task_query(self, task_name: str, run=subprocess.run):
+        """None ONLY when the entry is definitively absent; its command
+        string when installed ("" if the line is unparseable); raises
+        AutocleanTaskQueryError when existence cannot be determined (F3:
+        callers must fail CLOSED, same contract as the schtasks backend)."""
+        lines, err = self._read_crontab(run)
+        if lines is None:
+            raise AutocleanTaskQueryError(err)
+        tag = self._cron_tag(task_name)
+        for line in lines:
+            if line.rstrip().endswith(tag):
+                body = line.rsplit(tag, 1)[0].strip()
+                # five schedule fields, then the command
+                parts = body.split(None, 5)
+                return parts[5] if len(parts) == 6 else ""
+        return None
 
     def autoclean_task_install(self, task_name: str, command: str,
-                               interval_hours: int, run=None):
-        self._unsupported("autoclean_task_install")
+                               interval_hours: int, run=subprocess.run):
+        """(ok, message). Idempotent re-install: any existing fleet-tagged
+        line is replaced -- the caller is responsible for the
+        refuse-foreign-task check BEFORE calling this (same split as the
+        schtasks backend's /F)."""
+        # % is a line separator inside a crontab command field; a command
+        # containing one would be silently mangled, not run.
+        if "%" in command or "\n" in command:
+            return (False, "command contains a character cron cannot "
+                           "carry literally (% or newline)")
+        lines, err = self._read_crontab(run)
+        if lines is None:
+            return (False, err)
+        tag = self._cron_tag(task_name)
+        kept = [ln for ln in lines if not ln.rstrip().endswith(tag)]
+        kept.append(f"0 */{int(interval_hours)} * * * {command} {tag}")
+        return self._write_crontab(kept, run)
 
-    def autoclean_task_remove(self, task_name: str, run=None):
-        self._unsupported("autoclean_task_remove")
+    def autoclean_task_remove(self, task_name: str, run=subprocess.run):
+        """(ok, message). Missing entry counts as failure -- the caller
+        reports it; nothing here raises."""
+        lines, err = self._read_crontab(run)
+        if lines is None:
+            return (False, err)
+        tag = self._cron_tag(task_name)
+        kept = [ln for ln in lines if not ln.rstrip().endswith(tag)]
+        if kept == lines:
+            return (False, f"no crontab entry tagged {tag!r}")
+        return self._write_crontab(kept, run)
 
     def atomic_append_bytes(self, path: Path, data: bytes) -> None:
         """Single-syscall atomic append via O_APPEND. POSIX specifies that
@@ -5071,18 +5144,17 @@ def _install_autoclean_task(interval_hours, force: bool) -> None:
             f"-- rerun with --force to overwrite")
     ok, msg = PLATFORM.autoclean_task_install(AUTOCLEAN_TASK_NAME, command, interval_hours)
     if not ok:
-        raise FleetCliError(f"schtasks create failed: {msg}")
+        raise FleetCliError(f"scheduler create failed: {msg}")
     print(f"fleet init: scheduled task {AUTOCLEAN_TASK_NAME!r} installed "
           f"(every {interval_hours}h)")
     print(f"  command:   {command}")
-    print(f"  uninstall: fleet init --autoclean-remove "
-          f"(or: schtasks /Delete /TN {AUTOCLEAN_TASK_NAME} /F)")
+    print(f"  uninstall: fleet init --autoclean-remove")
 
 
 def _remove_autoclean_task() -> None:
     ok, msg = PLATFORM.autoclean_task_remove(AUTOCLEAN_TASK_NAME)
     if not ok:
-        raise FleetCliError(f"schtasks delete failed: {msg}")
+        raise FleetCliError(f"scheduler delete failed: {msg}")
     print(f"fleet init: scheduled task {AUTOCLEAN_TASK_NAME!r} removed")
 
 

@@ -138,10 +138,5 @@ class TestPlatformAdapterBoundary:
                     else fleet._PosixPlatform)
         assert isinstance(fleet.PLATFORM, expected)
 
-    def test_posix_platform_raises_unsupported(self):
-        posix = fleet._PosixPlatform()
-        with pytest.raises(fleet.UnsupportedPlatformError):
-            posix.autoclean_task_query("t")
-
     def test_unsupported_platform_error_is_not_implemented_error(self):
         assert issubclass(fleet.UnsupportedPlatformError, NotImplementedError)
