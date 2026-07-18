@@ -193,6 +193,19 @@ class TestRosterLiveSids:
         ]
         assert fleet._roster_live_sids(entries) == {"a", "c"}
 
+    def test_lingering_done_process_with_keys_is_not_live(self):
+        # posix-port live finding 2026-07-19 (macOS, 2.1.214): a finished bg
+        # session's host process lingers -- entry keeps pid AND status with
+        # state:"done". Terminal state dominates key presence, or an idle
+        # worker's respawn is refused ("turn is running") forever.
+        entries = [
+            {"sessionId": "lingerer", "pid": 42707, "status": "idle",
+             "state": "done"},
+            {"sessionId": "live", "pid": 1, "status": "busy",
+             "state": "working"},
+        ]
+        assert fleet._roster_live_sids(entries) == {"live"}
+
     def test_hostile_sessionid_value_filtered_not_raised(self):
         # Debt roll-up item 2, third grepped site: a dict-valued sessionId
         # (CLI drift / hostile roster) must be filtered, never raise
