@@ -138,3 +138,15 @@ Waves in flight: md-ulparser fix ee68eb6 landed (anchor->record-timestamp, 1068/
 ## 2026-07-17T02:44:35Z CHECKPOINT inc=inc-20260717T011200Z-f1d0 sid=8b0d1ec8-a531-4a43-9a01-3827d786d1c3
 
 ulparser re-review: wave-1 3/3 FIXED but minted N2 BLOCKER (fromisoformat trailing-Z is 3.11+, floor is 3.10 -> C1 silently reverts on 3.10) + N1 fixture-vs-production + N3 wall-clock fallback should be null park. Wave 2 of max 3 sent to md-ulparser. Contract M-wave: 5/5 disposed, no disputes (both disputed receipts confirmed AGAINST builder), M5 took classify-stop option (kill on gone sid now exit 0 + real outcome, tombstone kept), m1 rm-by-roster-id, 1097/1097 + pins 6/6; re-review sent to md-contract-review (new-defect hunt: stop classification masks, rm-by-id absent-roster path, deferral surfaces, pin still tests daemon not bookkeeping). Operator open item logged: 3 dead-daemon claims remain manager-report-only (both waves are bg sessions, physically cannot observe) -- quiet-machine interactive G9 probe at merge gate covers it.
+
+## 2026-07-17T03:28:00Z CHECKPOINT inc=inc-20260717T011200Z-f1d0 sid=8b0d1ec8-a531-4a43-9a01-3827d786d1c3
+
+md/ulparser MERGED (2 waves + merge verdict; post-merge 1080/1080; live tier deferred to contract merge with rationale). Contract wave 2: ND 3/3 disposed incl ND-1 fail-unsafe kill (stop-by-captured-id fix + repro re-run), builder self-identified error class 'fix at one call site, not its twin' as standing check. Final re-review dispatched (fail-direction check on _daemon_alive, streak boundary, residual derived-id paths). Reviewer process note: backticks in double-quoted commit body got shell-expanded silently -- lessons candidate.
+
+## 2026-07-17T13:45:26Z CHECKPOINT inc=inc-20260717T011200Z-f1d0 sid=8b0d1ec8-a531-4a43-9a01-3827d786d1c3
+
+Host restart overnight (~10h gap): same sid resumed, heartbeat refreshed (NOTE claim wart: sup-boot REFUSES its own holder when heartbeat stale -- self-recognition missing, feeds nonce spec + lessons). md-contract-review final-gate turn died with restart (no commit = only truth; registry working was stale, fork sid gone from roster) -> interrupt + respawn --task rereview2. Awaiting verdict; then merge md/contract, FLEET_LIVE from interactive session, doctor, push, close-out wave.
+
+## 2026-07-17T15:32:48Z CHECKPOINT inc=inc-20260717T011200Z-f1d0 sid=8b0d1ec8-a531-4a43-9a01-3827d786d1c3
+
+md-contract-review parked limited overnight-resume path: horizon 'resets ...' PARSED to 2026-07-17T15:30:00Z by the newly-merged local-format parser -- first production validation of md/ulparser -- resume-limited cleared it cleanly. Reviewer back working on final gate. Prior monitor loop was PATH-broken (grep not found post-restart) -- fixed with explicit PATH export.
