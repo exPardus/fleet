@@ -3240,13 +3240,102 @@ class TestCmdKillNative:
         assert "stopping retired session retired1... ok" in err
         assert "stopping retired session retired2... ok" in err
 
-    def test_retired_sid_sweep_reports_timeout_on_stop_failure(self, native_home, capsys):
+    def test_kill_stops_by_the_captured_short_id_not_a_derived_ref(self, native_home, capsys):
+        """ND-1 (re-review MD-CONTRACT-REVIEW-2026-07-17.md), the mirror of
+        `test_sweep_passes_the_rosters_own_id_not_a_derived_ref`.
+
+        The M5 commit gave `stop` the inference "gone == success"; the m1 commit
+        taught `rm` never to trust a DERIVED ref for exactly that inference --
+        and hardened both rm sites and neither stop site. Repro'd: with a CLI
+        that answers only to its own short id, `fleet kill` derived
+        sid.split("-")[0], read `No job matching` as `gone`, printed "killed",
+        exited 0, stamped interrupt_outcome=True and marked the worker dead --
+        while the session kept running, untracked, skipped by every husk sweep
+        forever because it is status/pid-live.
+
+        `native_short_id` here is deliberately NOT the derived prefix."""
+        import types as _t
+        rec = seed_native_worker(native_home, sid=SID, status="working")
+        rec["native_short_id"] = "zz9qk7xd"          # NOT SID.split("-")[0]
+        fleet.save_registry({"workers": {"w1": rec}})
+
+        refs = []
+
+        def only_own_id(argv, **kwargs):
+            ref = argv[2] if len(argv) > 2 else None
+            refs.append(ref)
+            if ref == "zz9qk7xd":
+                return _t.SimpleNamespace(returncode=0, stdout=f"stopped {ref}",
+                                          stderr="")
+            return _t.SimpleNamespace(returncode=1,
+                                      stdout=f"No job matching '{ref}'", stderr="")
+
+        rc = fleet.cmd_kill(_kill_args(), run=only_own_id, which=lambda _: "claude")
+        assert refs and refs[0] == "zz9qk7xd", (
+            f"kill must stop by the CAPTURED short id, not a derived one: {refs}")
+        assert rc == 0
+
+    def test_kill_on_an_already_gone_sid_succeeds_as_gone(self, native_home, capsys):
+        """M5 fix wave (review MD-CONTRACT-REVIEW-2026-07-17.md): `claude stop`
+        on an already-gone sid exits 1 with "No job matching" (live receipt,
+        findings §Q3). Read as failure, `fleet kill` exited 1 and told the
+        operator to "investigate the session manually" about a session that is
+        verifiably, correctly gone -- while the rm half of the same contract
+        now reports a clean `gone`. The two halves disagreed about one fact.
+
+        The realistic trigger: archive removes a worker's roster entry, then
+        the operator kills the stale record."""
+        import types as _t
+        seed_native_worker(native_home, sid=SID, status="working")
+
+        def gone_run(argv, **kwargs):
+            return _t.SimpleNamespace(
+                returncode=1,
+                stdout="No job matching 'aaaabbbb'. Run 'claude agents' to "
+                       "list running sessions.",
+                stderr="")
+
+        rc = fleet.cmd_kill(_kill_args(), run=gone_run, which=lambda _: "claude")
+        out, err = capsys.readouterr()
+        assert rc == 0, f"kill on an already-gone sid must not exit 1: {err}"
+        assert "investigate" not in err.lower(), (
+            f"must not send the operator after a session that is gone: {err}")
+        assert "w1: killed" in out
+
+    def test_kill_on_an_already_gone_sid_stamps_outcome_true(self, native_home):
+        """The durable half of the same defect: `interrupt_outcome=False` was a
+        WRONG DATUM in the event log, not just a console message."""
+        import types as _t
+        seed_native_worker(native_home, sid=SID, status="working")
+        fleet.cmd_kill(_kill_args(),
+                       run=lambda *a, **k: _t.SimpleNamespace(
+                           returncode=1, stdout="No job matching 'aaaabbbb'.",
+                           stderr=""),
+                       which=lambda _: "claude")
+        events = [json.loads(ln) for ln in
+                  fleet.events_path().read_text(encoding="utf-8").splitlines() if ln]
+        killed = [e for e in events if e.get("kind") == "killed"]
+        assert killed and killed[-1]["interrupt_outcome"] is True, killed
+        # G10 tombstone obligation is unconditional -- unchanged by any of this.
+        assert any(o.get("kind") == "killed"
+                   for o in fleet.read_outcomes("w1", sid=SID))
+
+    def test_retired_sid_sweep_reports_outcome_on_stop_failure(self, native_home, capsys):
+        """M5 fix wave (review MD-CONTRACT-REVIEW-2026-07-17.md): this test
+        used to pin `... timeout` for ANY non-zero stop. That was a specific
+        and wrong diagnosis -- a retired sid is an abandoned fork, so
+        "already gone" is the common case, and naming it "timeout" invited
+        the operator to hunt a hung daemon that was never there. The sweep
+        now prints the classified outcome. This stub emits a bare rc=1 with
+        no message, which classifies as the unknown-failure case."""
         rec = seed_native_worker(native_home, sid=SID, status="working")
         rec["retired_sids"] = ["retired1sid"]
         fleet.save_registry({"workers": {"w1": rec}})
         fleet.cmd_kill(_kill_args(), run=_fake_run_factory(rc=1), which=lambda _: "claude")
         err = capsys.readouterr().err
-        assert "stopping retired session retired1... timeout" in err
+        assert "stopping retired session retired1... failed" in err
+        assert "timeout" not in err, (
+            f"'timeout' names a mechanism that did not occur: {err}")
 
     # T8 fix wave (adv M1, Minor) -- cross-worker ownership check on a
     # corrupted/hand-edited registry.
@@ -4051,7 +4140,14 @@ class TestCmdArchive:
         rc = fleet.cmd_archive(_archive_args(), run=_archive_fake_run(rc=1), which=lambda _: "claude")
         assert rc == 0
         assert fleet.load_registry()["workers"]["w1"]["archived_at"] is not None
-        assert "rm aaaabbbb... failed" in capsys.readouterr().err
+        # 2.1.212 contract change [PENDING-RATIFICATION]: rm failures are now
+        # reported as "deferred (<outcome>)" with the reason spelled out --
+        # rc=1 alone no longer means "failed" (it can mean already-gone, or a
+        # transient dead daemon). Evidence: docs/reviews/
+        # CLAUDE-2.1.212-CONTRACT-2026-07-17.md §Q3. This stub emits a bare
+        # rc=1 with no message, so it classifies as the unknown-failure case.
+        # Unchanged, and the point of this test: non-fatal, still archives.
+        assert "rm aaaabbbb... deferred (failed)" in capsys.readouterr().err
 
     def test_collision_suffixes_existing_archive_dir(self, native_home):
         fleet.archive_root().mkdir(parents=True, exist_ok=True)
