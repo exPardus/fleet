@@ -42,40 +42,17 @@ Three rules fall out of that bet, and they're load-bearing:
 ## The mental model
 
 ```mermaid
-flowchart TD
-    M["🧑‍✈️ Manager session<br/>(you, or a Claude Code session<br/>acting as fleet manager)"]
-    M -->|"fleet CLI<br/>(short-lived commands)"| R
-
-    subgraph core["state/ — the single source of truth (git-ignored runtime)"]
-        R["📋 registry<br/>state/fleet.json<br/><i>single writer, lock-guarded</i>"]
-        MB["✉️ mailbox/"]
-        J["📓 journals/"]
-        O["🧾 outcomes/"]
-    end
-
-    subgraph workers["worker sessions — each a durable claude --bg session"]
-        WA["worker A"]
-        WB["worker B"]
-        WC["worker C"]
-    end
-
-    R -. "keyed by name" .-> WA & WB & WC
-    WA & WB & WC -->|"PostToolUse / Stop / PostCompact hooks"| MB & J & O
-
-    subgraph know["knowledge/ — git-tracked memory"]
-        K["📚 INDEX · lessons · playbooks · projects"]
-    end
-
-    M -->|"reads at startup,<br/>writes after every campaign"| K
-
-    classDef mgr fill:#1f6feb,stroke:#1f6feb,color:#fff
-    classDef state fill:#161b22,stroke:#30363d,color:#e6edf3
-    classDef work fill:#238636,stroke:#238636,color:#fff
-    classDef knowledge fill:#8957e5,stroke:#8957e5,color:#fff
-    class M mgr
-    class R,MB,J,O state
-    class WA,WB,WC work
-    class K knowledge
+flowchart TB
+    M["🧑‍✈️ Manager session<br/>(you, or a Claude Code session)"]
+    R["📋 Registry · state/fleet.json<br/>single writer · lock-guarded"]
+    W["🤖 Workers · durable claude --bg sessions<br/>(worker A · worker B · worker C · …)"]
+    F["🗂️ state files<br/>mailbox · journals · outcomes"]
+    K["📚 knowledge/ · git-tracked<br/>INDEX · lessons · playbooks"]
+    M -->|"fleet CLI"| R
+    R -->|"dispatch · steer"| W
+    W -->|"hooks each turn"| F
+    F -.->|"status derived"| R
+    M <-.->|"read at start · write after each campaign"| K
 ```
 
 - A **worker** is not a process fleet babysits — it's a durable Claude Code session on disk, addressed by session id. It survives crashes, reboots, and the manager's death.
@@ -108,42 +85,27 @@ flowchart TD
 A worker moves through a small set of states. Fleet never guesses liveness by probing a PID — it derives each worker's status from **one roster fetch** (`claude agents --json`) joined with the **outcome store** (what actually finished). That derivation is the *verdict engine*.
 
 ```mermaid
+%%{init: {"stateDiagram": {"nodeSpacing": 55, "rankSpacing": 90}} }%%
 stateDiagram-v2
-    [*] --> working: fleet spawn
-    working --> idle: turn ends (outcome recorded)
-    idle --> working: fleet send (fork-steer) / respawn
-    working --> working: mailbox message injected mid-turn
-
-    idle --> limited: hit a usage limit
-    working --> limited: hit a usage limit
-    limited --> working: fleet resume-limited (after reset)
-
-    working --> over_ceiling: token cap exceeded
-    working --> interrupted: fleet interrupt
-
-    working --> dead: fleet kill
-    idle --> dead: fleet kill
-
-    working --> dead_suspected: ambiguous — no outcome, roster gone
-    dead_suspected --> idle: a late outcome record arrives
-    dead_suspected --> working: fleet respawn
-
-    interrupted --> working: fleet respawn
-    dead --> working: fleet respawn
-
-    idle --> archived: past TTL (fleet archive / autoclean)
-    dead --> archived: past TTL
-
-    over_ceiling --> [*]
-    archived --> [*]
-
-    note right of dead_suspected
-        Never auto-respawned.
-        Surfaced, advisory —
-        respawn re-runs side effects,
-        so it's always your call.
-    end note
+    direction LR
+    [*] --> working: spawn
+    working --> idle: turn ends
+    idle --> working: send / respawn
+    working --> limited: usage limit
+    limited --> working: resume-limited
+    working --> over_ceiling: token cap
+    working --> interrupted: interrupt
+    working --> dead: kill
+    working --> dead_suspected: ambiguous
+    dead_suspected --> idle: late outcome
+    dead_suspected --> working: respawn
+    interrupted --> working: respawn
+    dead --> working: respawn
+    idle --> archived: TTL
+    dead --> archived: TTL
 ```
+
+> `dead-suspected` is the safety valve: when fleet **can't confirm** a worker is alive or done, it lands here — surfaced and advisory, **never auto-respawned** (respawn re-runs side effects, so resurrection is always your call).
 
 The states that matter day to day:
 
@@ -172,16 +134,15 @@ The headline feature: change a worker's course mid-turn without ever attaching a
 sequenceDiagram
     participant M as Manager
     participant F as fleet CLI
-    participant MB as mailbox/&lt;sid&gt;.md
-    participant W as Worker (mid-turn)
+    participant MB as mailbox file
+    participant W as Worker · mid-turn
     participant H as PostToolUse hook
-
     M->>F: fleet send api-worker "also add tests"
     F->>MB: append message
     Note over W,H: worker keeps working…
     W->>H: reaches next tool boundary
     H->>MB: claim (atomic rename) + read
-    H-->>W: inject &lt;MANAGER MESSAGE&gt;
+    H-->>W: inject the MANAGER MESSAGE
     Note over W: worker sees the steer,<br/>adjusts course, continues
 ```
 
