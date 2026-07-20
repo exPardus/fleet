@@ -32,3 +32,20 @@ Priority-ordered:
 - Adversarial+spec review pairs on every branch; **new-defect hunt on every fix wave** (fired 4/4 waves in M-D); grep-receipt gate on every enumeration; no author promotes its own spec; **ESCALATE beats a 3rd fix wave** (held — both branches closed in 2 waves + final gate).
 - `git log` is the only truth a turn landed (529/403/restart all freeze cost+journal). `fleet wait ... run_in_background` dies on session teardown with no marker — a Monitor until-loop survives better.
 - Push `fleet-impl` + ff `main` at every green milestone. Supervisor GOALS.md binds the manager (frugality, long beats, 300–500k handoff band). **Claim wart:** after a >60m heartbeat gap, `sup-boot` refuses the same-sid holder — recover with `sup-heartbeat` (doesn't gate on staleness), not `sup-boot`, until the nonce lands.
+
+## M-E first wave — landed 2026-07-20 (posix-port, local only; fleet main untouched by hard operator constraint)
+
+Merged after 2 waves + final gate (doctrine held; 6th wave-minted defect caught pre-merge):
+handoff-successor dispatch now through dispatch_bg (hookless-successor defect closed);
+autoclean ownership predicate verb-anchored; ulparser D2/D4; comment nits n2/n3/n4/ND-4;
+claim-nonce spec drafted+amended → dual-lens AMEND-THEN-SOUND ×2 → final gate **SOUND**
+(docs/specs/claim-nonce.md, PROPOSAL — awaiting operator ratification). Suite 1148→1168/8.
+
+Backlog residuals filed by the final gate (bounded, not merge-blocking):
+- MED: handoff attempt-2 `TimeoutExpired` after daemon-side accept verdicts dispatch-failed
+  while a live successor exists (self-orphans in 10m; treat TimeoutExpired as ambiguous →
+  cheap name-join probe first).
+- LOW ×2 (pre-existing): C1/H1-path NativeDispatchError flagged successor-doa though possibly
+  live; name-join lacks an H1 cannot-verify guard on full-window roster blackout.
+- Uninstall gap (documented in-code): autoclean_task_remove deletes by name/tag without the
+  ownership predicate — a name-squatting foreign task is removable.
