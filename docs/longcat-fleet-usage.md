@@ -25,7 +25,25 @@ longcat            # your ~/.zshrc function; thinking is off via longcat-setting
 
 Thinking **must** stay off for LongCat (non-Anthropic models can't emit valid Anthropic thinking blocks — otherwise every turn after the first dies with `400 ... thinking block must contain non-whitespace thinking`). This is already handled: `longcat()` passes `--settings ~/.claude/longcat-settings.json` which sets `alwaysThinkingEnabled: false`. Don't remove that.
 
-### 2. Whole fleet on LongCat (dedicate the daemon)
+### 2. Whole fleet on LongCat
+
+> **Reality check (verified 2026-07-21):** the "just kill the daemon and reboot it under LongCat env" idea **does not work on a machine with a live Claude ecosystem.** The background daemon is *owned and auto-respawned by a persistent `claude` process* (the monarch, e.g. pid 51058) under **its** env — which is Anthropic. `pkill` the daemon and an Anthropic one reboots in under a second (watchdogs enforce this). You cannot win that race without tearing down the monarch and everything holding it, which breaks your normal Anthropic work. **Use the isolated-config approach below instead.**
+
+#### 2a. Isolated daemon namespace (the path that actually works)
+
+Give LongCat fleet work its **own** `CLAUDE_CONFIG_DIR` so it gets a **separate daemon** that never collides with your Anthropic monarch:
+
+```sh
+export CLAUDE_CONFIG_DIR="$HOME/.claude-longcat"   # separate namespace = separate daemon
+export ANTHROPIC_AUTH_TOKEN="…" ANTHROPIC_BASE_URL="https://api.longcat.chat/anthropic"
+export ANTHROPIC_MODEL="LongCat-2.0" ANTHROPIC_SMALL_FAST_MODEL="LongCat-2.0"
+# first --bg spawn here boots a LongCat-env daemon isolated from the Anthropic one
+fleet spawn w1 --dir <path> --task @task.md     # NO --model
+```
+
+Trade-offs: a second config dir means fleet state/settings there are separate (run `fleet init` once under it); your Anthropic and LongCat daemons coexist without a shared-backend collision. **Still unverified end-to-end** — this is the mechanically-correct path given the monarch finding, but it hasn't been run through a full spawn→send→respawn cycle yet.
+
+#### 2b. Original single-daemon idea (blocked — kept for the record)
 
 Because workers inherit the daemon's backend, boot the daemon **fresh under LongCat env** and every worker follows. Procedure:
 
