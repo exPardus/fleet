@@ -1322,11 +1322,18 @@ def _parse_limit_signal(text: str, *, now: "datetime | None" = None):
             hour = int(hour_s)
             minute = int(minute_s) if minute_s else 0
             ampm = ampm.lower()
-            if ampm == "am":
-                hour24 = 0 if hour == 12 else hour
-            else:
-                hour24 = 12 if hour == 12 else hour + 12
-            reset_at = _next_local_reset_utc(hour24, minute, tz_name, now=now)
+            # D2 (MD-ULPARSER-REVIEW): \d{1,2} admits hours outside the
+            # 12-hour clock -- "resets 13am" would otherwise convert into a
+            # well-formed WRONG horizon (13:00). Out-of-range -> reset_at
+            # stays None: the conservative null-horizon park, same standard
+            # as an unknown tz. (An out-of-range minute already lands there:
+            # datetime.replace raises and _next_local_reset_utc returns None.)
+            if 1 <= hour <= 12:
+                if ampm == "am":
+                    hour24 = 0 if hour == 12 else hour
+                else:
+                    hour24 = 12 if hour == 12 else hour + 12
+                reset_at = _next_local_reset_utc(hour24, minute, tz_name, now=now)
     kind = None
     low = (text or "").lower()
     if "week" in low:

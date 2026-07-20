@@ -636,6 +636,27 @@ class TestParseLimitSignalLocalFormat:
         reset_at, _ = fleet._parse_limit_signal("resets 12am (Asia/Qyzylorda)", now=now)
         assert reset_at == "2026-07-17T19:00:00Z"
 
+    @pytest.mark.parametrize("text", [
+        "session limit -- resets 13am (Asia/Qyzylorda)",
+        "session limit -- resets 0pm (Asia/Qyzylorda)",
+        "session limit -- resets 25am (Asia/Qyzylorda)",
+    ])
+    def test_out_of_range_hour_yields_null_horizon(self, text):
+        # D2 (MD-ULPARSER-REVIEW): \d{1,2} admits hours outside the 12-hour
+        # clock -- pre-fix "resets 13am" built a well-formed WRONG horizon
+        # (13:00 local). Out-of-range must be the conservative null-horizon
+        # park, never a confidently wrong instant.
+        now = datetime(2026, 7, 16, 1, 0, 0, tzinfo=timezone.utc)
+        reset_at, _ = fleet._parse_limit_signal(text, now=now)
+        assert reset_at is None
+
+    def test_boundary_hour_1pm_still_parses(self):
+        # 13:00 local (UTC+5) == 08:00 UTC; now=06:00 local -> today.
+        now = datetime(2026, 7, 16, 1, 0, 0, tzinfo=timezone.utc)
+        reset_at, _ = fleet._parse_limit_signal(
+            "resets 1pm (Asia/Qyzylorda)", now=now)
+        assert reset_at == "2026-07-16T08:00:00Z"
+
     def test_no_anchor_never_guesses_via_wall_clock(self):
         # N3 fix wave: `now=None` (the record-timestamp anchor was
         # unavailable) must not fall back to the wall clock for the
