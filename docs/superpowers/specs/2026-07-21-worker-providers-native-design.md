@@ -65,6 +65,22 @@ When a provider is active, fleet **suppresses its own `--model` argv** (`fleet.p
 
 `log()` / report the spike result explicitly — no silent assumption that it passed.
 
+### 4.2 SPIKE RESULT — 2026-07-21 — NEGATIVE (approach A dead)
+
+Ran on the live machine (daemon already up from the operator's fleet ecosystem — the realistic case):
+
+- Foreground `claude -p` with LongCat env → **`PONG`** (endpoint/token/model/thinking-off all good).
+- `claude --bg` with the *identical* env on the dispatch process → worker **failed** with `model_not_found` + `401`, synthetic message *"There's an issue with the selected model (LongCat-2.0)..."* — byte-for-byte the original fleet+LongCat failure. Transcript: `~/.claude/projects/-private-tmp/492c326f-...jsonl`.
+
+**Interpretation:** the model *name* propagated to the daemon, but **`ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` did not** — a `--bg` worker resolves its endpoint + auth from the **daemon's own process env**, fixed at daemon-boot, not from the dispatch process's env. Because the daemon is shared and long-lived, **all workers on it share one backend**; per-worker provider mixing (the chosen model) is structurally impossible via env injection. This is a CLI/daemon-architecture limit, not a fleet defect.
+
+**Consequence:** Approach A (§4) is not viable for the per-worker goal. Remaining paths, in order of likelihood:
+1. **Per-worker `--settings` file with an `env` block** — untested; MAY work where process-env fails, because settings are per-session config the daemon applies per session. Cost: token would land on disk (violates §3's secret rule) unless the CLI resolves settings-`env` from the host environment (unverified). Needs its own spike.
+2. **Dedicated daemon per backend** — run provider workers under a separate daemon booted with the provider env (e.g. a distinct `CLAUDE_CONFIG_DIR`/home). Heavier; changes fleet's single-daemon model.
+3. **Upstream CLI change** — `claude --bg` learns to carry per-session base-url/auth. Out of fleet's control.
+
+Do not implement §4 as written. Next step is a decision between (1)/(2)/park — see handoff.
+
 ## 5. Provenance & lifecycle
 
 - `provider` (the profile name string, or `None`) becomes an **additive** field on the worker record via `new_worker_record` (invariant 6: single-writer `fleet.py` under `fleet.lock`; additive-schema rule, same pattern as `setting_sources`/`model`/`token_ceiling`).
