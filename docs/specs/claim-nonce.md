@@ -195,7 +195,9 @@ in order; first match wins:
    next rotation, printing the current nonce) re-armed an ACTIVE same-sid zombie at
    every rotation — a resync treadmill that made rule 4 unreachable and the headline
    guarantee below false. Both lenses found this independently; it was the review's
-   top finding.
+   top finding. A crash after the grace is consumed but before the graced verb's
+   effect lands loses both the slot and the action; recovery is the body's next boot
+   — contested page at a fresh heartbeat, reclaim at a stale one — never freeze.
 3. **sid == claim.session_id AND nonce absent** → refuse: "claim is schema 2; pass
    --nonce (printed at your last rotation event). If you have LOST it, run sup-boot —
    an unproven reclaim against a fresh heartbeat is CONTESTED and pages the operator
@@ -306,7 +308,11 @@ recorded transition.
   Refuse while a handoff is in flight (`HANDSHAKE` present, or latest journal entry is
   `HANDOFF-BEGIN` without a matching complete/abort): the successor limbo protocol
   (`sup-handoff-abort`) owns that state; two cleanup paths racing is how limbo
-  successors leak.
+  successors leak. Known residual: a holder `sup-checkpoint` written between
+  `HANDOFF-BEGIN` and the successor's boot makes CHECKPOINT the latest entry and
+  defeats the latest-entry arm — a release in that gap orphans the successor loudly,
+  bounded by the handshake timeout (~10 min, `sup-handoff-abort`/doctor visible);
+  delay, not danger.
 - **Journal record.** `## <ts> RELEASED inc=<inc> sid=<caller-sid|operator>` with body
   = reason. The `sid=operator` literal (impossible as a real sid) makes human releases
   greppable. Written via `supervisor_journal_append` — single-writer discipline holds
@@ -344,7 +350,7 @@ the observed zombie class** (7 phantom sends were `send`s, not journal writes).
 **Model B — mutations-require-claim (soft fence).** Every mutating fleet verb, when
 (i) `INCARNATION` exists with schema ≥2 and a fresh heartbeat, (ii) the caller is a
 Claude session (`current_caller_session()` non-None), and (iii) the caller's sid is
-neither `claim.session_id` nor the target of a §5-passing `--sid` override, prints a
+not `claim.session_id`, prints a
 one-line warning naming the holder and refuses unless `--anyway` is passed. Humans at
 a shell are exempt (carve-out as in §7). The holder passes silently.
 
@@ -420,7 +426,10 @@ raw 32-cap was sized for rare rotations; under three-tier a beat IS a rotation
 `--yes` on the exact deployment this spec is a prerequisite of (break-lens 4).
 Compaction keys retention on the thing the list exists for — sids that still own a
 registered worker. Cost: one registry read inside rotation lock holds (registry
-loads under `fleet_lock` are the standard pattern).
+loads under `fleet_lock` are the standard pattern). An UNREADABLE registry at
+rotation skips compaction entirely (lineage carried unchanged, backstop cap still
+applied) — never compact against a falsely-empty view; the worst outcome on this
+path is later `--yes` friction, never widened ownership and never danger.
 
 Bounds, stated: (a) A worker spawned by a session that NEVER held the claim stays
 foreign — lineage is claim history, not machine history. (b) Records predating
