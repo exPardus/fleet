@@ -801,7 +801,11 @@ def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
         # --- M-B native-substrate fields (spec §5; None/[] on legacy records) ---
         "dispatch_kind": dispatch_kind,      # "bg" = daemon-hosted; None = pre-pivot Popen
         "category": category,                # agents-menu category (spec §5.1.3)
-        "native_short_id": None,             # short id from --bg stdout (G6 fallback)
+        "native_short_id": None,             # short id: --bg stdout (G6 fallback) on
+                                             # dispatch paths; DERIVED from the sid's
+                                             # first hyphen-segment on the two
+                                             # fast-completion commits (n2) -- see
+                                             # _native_job_ref for the consumer caveat
         "last_dispatch_at": None,            # stamped at every dispatch/steer/resume;
                                              # anchor for the fresh-outcome predicate
         "retired_sids": [],                  # prior sids retired by fork-steer/respawn
@@ -1251,8 +1255,19 @@ _LIMIT_RESET_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 # "resets 4:40am (Asia/Qyzylorda)" or "resets 12am (Asia/Qyzylorda)" (the
 # hour-only form is the production gap this fallback closes). Only
 # consulted when the ISO regex above finds nothing (ISO keeps precedence).
+#
+# D4 (MD-ULPARSER-REVIEW): the multi-segment arm requires a `/`, so
+# "(UTC)"-style single-segment zones never matched (null park -- safe but
+# lossy). The second arm admits them WITHOUT loosening into arbitrary
+# prose parentheticals: it is scoped case-sensitive ((?-i:) inside this
+# otherwise-IGNORECASE pattern) and requires a leading capital, the shape
+# every single-segment tzdata name has (UTC, GMT, Zulu, Japan, EST) and
+# prose asides ("(soon)", "(approx)") do not. A capitalized non-zone
+# still resolves to None in _next_local_reset_utc -- zoneinfo stays the
+# final arbiter; the regex only gates what is OFFERED to it.
 _LIMIT_RESET_LOCAL_RE = re.compile(
-    r"resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([A-Za-z_]+(?:/[A-Za-z_+\-0-9]+)+)\)",
+    r"resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*"
+    r"\(([A-Za-z_]+(?:/[A-Za-z_+\-0-9]+)+|(?-i:[A-Z][A-Za-z]+))\)",
     re.IGNORECASE,
 )
 
@@ -1322,11 +1337,18 @@ def _parse_limit_signal(text: str, *, now: "datetime | None" = None):
             hour = int(hour_s)
             minute = int(minute_s) if minute_s else 0
             ampm = ampm.lower()
-            if ampm == "am":
-                hour24 = 0 if hour == 12 else hour
-            else:
-                hour24 = 12 if hour == 12 else hour + 12
-            reset_at = _next_local_reset_utc(hour24, minute, tz_name, now=now)
+            # D2 (MD-ULPARSER-REVIEW): \d{1,2} admits hours outside the
+            # 12-hour clock -- "resets 13am" would otherwise convert into a
+            # well-formed WRONG horizon (13:00). Out-of-range -> reset_at
+            # stays None: the conservative null-horizon park, same standard
+            # as an unknown tz. (An out-of-range minute already lands there:
+            # datetime.replace raises and _next_local_reset_utc returns None.)
+            if 1 <= hour <= 12:
+                if ampm == "am":
+                    hour24 = 0 if hour == 12 else hour
+                else:
+                    hour24 = 12 if hour == 12 else hour + 12
+                reset_at = _next_local_reset_utc(hour24, minute, tz_name, now=now)
     kind = None
     low = (text or "").lower()
     if "week" in low:
@@ -2491,6 +2513,9 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
                 rec = data["workers"].get(args.name)
                 if rec is not None and rec.get("session_id") is None:
                     rec["session_id"] = fast_sid
+                    # n2: DERIVED ref, not the CLI's own --bg short id (that
+                    # stdout was never observed on this race path) -- see the
+                    # new_worker_record field comment and _native_job_ref.
                     rec["native_short_id"] = fast_sid.partition("-")[0] or fast_sid[:8]
                     rec["status"] = "idle"
                     rec["turns"] = 1
@@ -4049,6 +4074,9 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
                 rec = data["workers"].get(name)
                 if rec is not None and rec.get("session_id") is None:
                     rec["session_id"] = fast_sid
+                    # n2: DERIVED ref, not the CLI's own --bg short id (that
+                    # stdout was never observed on this race path) -- see the
+                    # new_worker_record field comment and _native_job_ref.
                     rec["native_short_id"] = fast_sid.partition("-")[0] or fast_sid[:8]
                     rec["status"] = "idle"
                     rec["turns"] = 1
@@ -5438,12 +5466,29 @@ def _marker_guard_problems() -> list:
 
 
 def _autoclean_task_is_ours(command: str) -> bool:
-    """F4: ownership = the existing task runs OUR fleet.py -- the exact
-    resolved script path, slash- and case-normalized (Windows paths carry
-    both variances through schtasks XML round-trips). Never a substring
-    like 'autoclean': a foreign C:/tools/autoclean.exe task must refuse."""
+    """F4: ownership = the existing task runs OUR fleet.py's AUTOCLEAN --
+    the exact resolved script path (slash- and case-normalized; Windows
+    paths carry both variances through schtasks XML round-trips)
+    immediately followed by the `autoclean` verb, i.e. the shape
+    `_autoclean_task_command` emits on both backends (schtasks joins
+    Command+Arguments; cron stores the command field verbatim). Path
+    alone is NOT ownership: the moment a second fleet-scheduled task
+    exists (a future beat task runs this same fleet.py with a different
+    verb), a path-substring answer calls it "ours" and licenses the
+    install path's /Create /F to clobber it. Never a substring like
+    'autoclean' either: a foreign C:/tools/autoclean.exe task must
+    refuse.
+
+    Scope, honestly: the ONLY caller is `_install_autoclean_task`'s
+    refuse-foreign gate. `_remove_autoclean_task` never consults this
+    predicate -- `autoclean_task_remove` deletes by task name (schtasks)
+    or trailing `# <task_name>` tag (cron) unconditionally, so uninstall
+    is gated by name-collision alone. Known gap, out of scope here: a
+    foreign task that squats our exact task name would be removed
+    without this shape check."""
     ours = str(_autoclean_script_path()).replace("\\", "/").lower()
-    return ours in (command or "").replace("\\", "/").lower()
+    norm = (command or "").replace("\\", "/").lower()
+    return re.search(re.escape(ours) + r'"?\s+autoclean(?=\s|$)', norm) is not None
 
 
 def _install_autoclean_task(interval_hours, force: bool) -> None:
@@ -5966,8 +6011,10 @@ def _autoclean_deferral_streak() -> tuple:
     `husks_deferred` since the M1 fix, so the streak is derived from there.
 
     Counts backwards from the newest event and stops at the first pass that
-    deferred nothing -- a single successful sweep means the daemon was reachable
-    and the tier is not starving, regardless of what came before. Dry-run passes
+    deferred nothing (n3: which includes a nothing-to-do pass -- zero husks
+    deferred proves nothing about daemon reachability; the streak measures
+    consecutive STARVED sweeps, not daemon uptime, and that is the honest
+    reading of what a break in it means). Dry-run passes
     are skipped entirely: they never rm anything, so they neither prove nor
     disprove reachability. Any read/parse failure degrades to (0, 0, None) --
     doctor is note-only and must never fail on unreadable history."""
@@ -6031,8 +6078,9 @@ def _doctor_check_autoclean(run=subprocess.run):
     old note even conceded it ("if this count persists across runs") while
     reading from a stamp that holds exactly one run and cannot show persistence.
     So: read the STREAK from `events.jsonl` (append-only history, which
-    `husks_deferred` now rides) and note only past
-    `AUTOCLEAN_DEFERRAL_STREAK_THRESHOLD` consecutive starved sweeps. That is
+    `husks_deferred` now rides) and note only AT or past
+    `AUTOCLEAN_DEFERRAL_STREAK_THRESHOLD` consecutive starved sweeps (n4: the
+    gate is `>=`, so the note first fires exactly AT the threshold). That is
     the sentence that distinguishes starvation from Tuesday."""
     stamp_note, stale, run_errors = "no run recorded yet", False, []
     husks_deferred = 0
@@ -7402,6 +7450,21 @@ Do exactly this, in order:
 """
 
 
+# sup-handoff-begin's public CLI surface takes raw claude `--permission-mode`
+# values; dispatch_bg speaks fleet mode names (MODE_FLAGS). Translate rather
+# than hand-roll argv around the choke point. "bypassPermissions" maps to
+# fleet "bypass" (--dangerously-skip-permissions -- claude's equivalent
+# switch); None/"default" mean "pass no mode flag at all".
+_SUCCESSOR_PERMISSION_MODE_TO_FLEET = {
+    None: "omit",
+    "default": "omit",
+    "acceptEdits": "accept",
+    "dontAsk": "dontask",
+    "plan": "plan",
+    "bypassPermissions": "bypass",
+}
+
+
 def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
                           sleep=time.sleep, clock=time.monotonic) -> int:
     """`fleet sup-handoff-begin [--model M] [--permission-mode P] [--sid S]`.
@@ -7410,14 +7473,39 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     OUTSIDE fleet_lock (F4 doctrine). Both failure paths (dispatch failure,
     successor DOA) raise the doctor-visible abort flag before returning
     (M-B T10 fix 1) -- a crash here must not leave the old side believing
-    a successor is in flight when none exists."""
+    a successor is in flight when none exists.
+
+    Three-tier gate 2026-07-17: the successor launches through dispatch_bg
+    -- the same choke point as every other native launch -- so it inherits
+    the full launch contract: worker-settings hook wiring (journaling,
+    Stop-block), tasks/journals --add-dir pre-authorization with both dirs
+    pre-created (055e5ac), task-file bootstrap (G8), FLEET_WORKER env with
+    CLAUDE_CODE_SESSION_ID stripped, and the never-attach wedge guard.
+    Previously this was a hand-rolled argv with NONE of that -- a
+    supervisor body with fewer safety rails than an ordinary worker."""
+    try:
+        # Validated before the journal checkpoint: a bad flag value should
+        # fail fast with nothing journaled and no abort flag raised.
+        mode = _SUCCESSOR_PERMISSION_MODE_TO_FLEET[getattr(args, "permission_mode", None)]
+    except KeyError:
+        choices = ", ".join(k for k in _SUCCESSOR_PERMISSION_MODE_TO_FLEET if k)
+        raise FleetCliError(f"invalid --permission-mode {args.permission_mode!r}: "
+                            f"choices are {choices}")
     with fleet_lock():
         claim, caller = _require_claim_holder(getattr(args, "sid", None))
         successor_inc = mint_incarnation_id()
-        task_path = state_dir() / f"supervisor-handoff-{successor_inc}.md"
-        task_path.parent.mkdir(parents=True, exist_ok=True)
-        task_path.write_text(_render_successor_task(successor_inc, claim["incarnation_id"]),
-                             encoding="utf-8")
+        # dispatch_bg's NAME_RE guard rejects the uppercase T/Z in a raw
+        # incarnation stamp, so the successor's worker name is the
+        # LOWERCASED inc id (still unique: digits + 4 lowercase hex chars);
+        # the true-case id travels in the task body, journal, and HANDSHAKE.
+        successor_name = successor_inc.lower()
+        task_path = task_file_path(successor_name)
+        task_body = _render_successor_task(successor_inc, claim["incarnation_id"])
+        # Checkpoint-then-act: the task file exists at dispatch_bg's
+        # canonical G8 path BEFORE the journal entry that references it;
+        # dispatch_bg re-writes the identical body at the identical path.
+        tasks_dir().mkdir(parents=True, exist_ok=True)
+        task_path.write_text(task_body, encoding="utf-8")
         supervisor_journal_append("HANDOFF-BEGIN", claim["incarnation_id"], caller,
                                   f"successor={successor_inc} task={task_path.as_posix()}")
         try:
@@ -7438,67 +7526,97 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
         })
 
     roster_fetch = lambda: _fetch_agents_roster(which=which, run=run)  # noqa: E731
-    exe = resolve_claude_executable(which=which)
+    # Pre-dispatch snapshot for the G6 name-join fallback below only --
+    # dispatch_bg takes its own, fresher snapshot for the short-id join.
+    # Same unhashable-sessionId guard as dispatch_bg's pre-snapshot.
     pre_ok, pre_payload = roster_fetch()
-    # Same unhashable-sessionId guard as dispatch_bg's pre-snapshot above.
     pre_sids = {e.get("sessionId") for e in (pre_payload if pre_ok else [])
                 if isinstance(e, dict) and isinstance(e.get("sessionId"), str)}
-    name = f"sup|{successor_inc}|successor"
-    argv = [exe, "--bg", "-n", name]
-    if getattr(args, "model", None):
-        argv += ["--model", args.model]
-    if getattr(args, "permission_mode", None):
-        argv += ["--permission-mode", args.permission_mode]
-    argv.append(f"Read {task_path.as_posix()} and follow it exactly.")
-    try:
-        proc = run(argv, cwd=str(FLEET_HOME), capture_output=True, text=True,
-                   encoding="utf-8", errors="replace", timeout=120)
-    except (OSError, subprocess.SubprocessError) as exc:
-        _abort_flag("dispatch-failed")
-        raise FleetCliError(f"successor dispatch failed: {exc} -- no successor to stop; "
-                            f"claim unchanged, duty continues")
-    if proc.returncode != 0:
-        _abort_flag("dispatch-failed")
-        raise FleetCliError(f"successor dispatch failed (exit {proc.returncode}): "
-                            f"{(proc.stderr or '').strip()[:300]} -- no successor to stop; "
-                            f"claim unchanged, duty continues")
+    rendered_name = render_native_name("sup", successor_name, "successor")
 
-    # Sid capture per contract G6: short id from --bg stdout, joined to the
-    # full sid by prefix match (T3 helper) -- never re-derive by polling the
-    # roster for a name match (ai-title collision hazard). Fall back to the
-    # old name-join loop ONLY when stdout was unparseable (G6 fallback of the
-    # fallback, M-B T10 fix 4).
-    short_id = _parse_bg_short_id(proc.stdout or "")
+    # dispatch_bg stays opaque (T4 doctrine: no message parsing) -- but
+    # `run` is OUR injectable, so observing the --bg call is how the except
+    # branch below distinguishes "no session exists" (report dispatch-failed)
+    # from "a LIVE successor may be stranded with no short-id handle"
+    # (stdout unparseable post-dispatch -- exactly the case the G6 name-join
+    # fallback exists for). Fix wave on 351d180 (finding 2): track the LAST
+    # --bg attempt only, never sticky-True across dispatch_bg's internal
+    # wedge-retry -- attempt-1 zero-exit followed by an attempt-2 dispatch
+    # failure (nonzero exit OR subprocess exception, hence the pessimistic
+    # reset before run) means nothing is running now (attempt-1's wedge was
+    # already cleaned before dispatch_bg retried), and the contract for that
+    # state is `dispatch-failed`, not a wasted name-join window + a
+    # `successor-doa` flag.
+    dispatched = {"ok": False}
+
+    def _observing_run(argv, **kwargs):
+        if "--bg" in argv:
+            dispatched["ok"] = False
+        result = run(argv, **kwargs)
+        if "--bg" in argv:
+            dispatched["ok"] = getattr(result, "returncode", 1) == 0
+        return result
+
     successor_sid = None
-    if short_id:
-        successor_sid = _join_roster_by_short_id(
-            short_id, roster_fetch, sleep,
-            verify_seconds=SUPERVISOR_ROSTER_VERIFY_SECONDS,
-            exclude_sids=pre_sids, clock=clock)
-    else:
-        print("short-id parse failed -- falling back to name join (G6 fallback)")
-        deadline = clock() + SUPERVISOR_ROSTER_VERIFY_SECONDS
-        while clock() < deadline:
-            ok, payload = roster_fetch()
-            if ok:
-                # Same hostile-sessionId-value guard as pre_sids above: a
-                # dict-valued sessionId would raise TypeError from the
-                # unhashable membership test against the set.
-                fresh = [e for e in payload if isinstance(e, dict)
-                         and e.get("name") == name
-                         and isinstance(e.get("sessionId"), str)
-                         and e.get("sessionId")
-                         and e.get("sessionId") not in pre_sids]
-                if fresh:
-                    successor_sid = fresh[0]["sessionId"]
-                    break
-            sleep(3)
-    if successor_sid is None:
-        _abort_flag("successor-doa", successor_short_id=short_id)
-        print(f"successor DOA: no roster entry named {name!r} appeared within "
-              f"{SUPERVISOR_ROSTER_VERIFY_SECONDS:.0f}s (contract G6 fallback). "
-              f"Claim unchanged -- duty continues; re-run sup-handoff-begin to retry.")
-        return 1
+    try:
+        out = dispatch_bg(successor_name, FLEET_HOME, task_body, mode,
+                          model=getattr(args, "model", None),
+                          category="sup", hint="successor",
+                          run=_observing_run, which=which, sleep=sleep,
+                          roster_fetch=roster_fetch, clock=clock)
+        successor_sid = out["session_id"]
+    except NativeDispatchError as exc:
+        short_id = exc.short_id
+        if short_id is None and not dispatched["ok"]:
+            _abort_flag("dispatch-failed")
+            raise FleetCliError(f"successor dispatch failed: {exc} -- no successor to "
+                                f"stop; claim unchanged, duty continues")
+        if short_id is None:
+            # Sid capture per contract G6: dispatch_bg's short-id prefix
+            # join is primary. This name-join loop is the G6 fallback of
+            # the fallback (M-B T10 fix 4), reached only when the FINAL
+            # --bg attempt succeeded but its stdout was unparseable: a live
+            # successor exists and abandoning it as DOA would strand a
+            # limbo supervisor body.
+            print("short-id parse failed -- falling back to name join (G6 fallback)")
+            deadline = clock() + SUPERVISOR_ROSTER_VERIFY_SECONDS
+            while clock() < deadline:
+                ok, payload = roster_fetch()
+                if ok:
+                    # Same hostile-sessionId-value guard as pre_sids above: a
+                    # dict-valued sessionId would raise TypeError from the
+                    # unhashable membership test against the set.
+                    #
+                    # Life signal required (fix wave on 351d180, finding 1 /
+                    # scenario S3): dispatch_bg's internal wedge-retry can
+                    # leave attempt-1's DEAD husk on the roster (stop/rm
+                    # unverified, recheck=still-unattached) under the SAME
+                    # rendered name as the live attempt-2 successor --
+                    # binding a husk reports rc=0 for a corpse while the
+                    # real successor runs unbound. `status`/`pid` is
+                    # _await_attach's "process attached" signal; terminal
+                    # state literals are deliberately NOT accepted here,
+                    # because _cleanup_wedged's `claude stop` can mint them
+                    # on a husk that never ran. A live successor gains
+                    # status/pid within seconds (attach forensics: 4-6s),
+                    # well inside this window; a husk never does, so an
+                    # all-husk roster polls to the deadline and reports DOA
+                    # rather than ever binding a dead entry.
+                    fresh = [e for e in payload if isinstance(e, dict)
+                             and e.get("name") == rendered_name
+                             and ("status" in e or "pid" in e)
+                             and isinstance(e.get("sessionId"), str)
+                             and e.get("sessionId")
+                             and e.get("sessionId") not in pre_sids]
+                    if fresh:
+                        successor_sid = fresh[0]["sessionId"]
+                        break
+                sleep(3)
+        if successor_sid is None:
+            _abort_flag("successor-doa", successor_short_id=short_id)
+            print(f"successor DOA: {exc}. Claim unchanged -- duty continues; "
+                  f"re-run sup-handoff-begin to retry.")
+            return 1
 
     print(f"SUCCESSOR-INC: {successor_inc}")
     print(f"SUCCESSOR-SID: {successor_sid}")

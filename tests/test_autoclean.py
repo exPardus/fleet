@@ -755,6 +755,18 @@ class TestSchedulerInstall:
         fleet._install_autoclean_task(None, force=False)
         assert len(platform_stub["installs"]) == 1
 
+    def test_same_fleet_py_other_verb_is_not_ours(self, home, canonical_install,
+                                                  platform_stub):
+        """Adjudicated F4 defect: ownership was a path-only substring, so ANY
+        scheduled task whose command contained this fleet.py -- e.g. a future
+        `fleet beat` task -- answered "ours" and the foreign-task refusal was
+        void. Ownership must discriminate the autoclean command shape."""
+        platform_stub["query"] = fleet._autoclean_task_command().replace(
+            " autoclean ", " beat ")
+        with pytest.raises(fleet.FleetCliError, match="fleet-owned"):
+            fleet._install_autoclean_task(None, force=False)
+        assert platform_stub["installs"] == []
+
     @pytest.mark.parametrize("bad", [0, 24, -3])
     def test_interval_validated(self, home, canonical_install, platform_stub, bad):
         with pytest.raises(fleet.FleetCliError, match="1..23"):
@@ -774,6 +786,36 @@ class TestSchedulerInstall:
         platform_stub["remove_ok"] = (False, "no such task")
         with pytest.raises(fleet.FleetCliError, match="no such task"):
             fleet._remove_autoclean_task()
+
+
+class TestOwnershipPredicate:
+    """Adjudicated F4 defect (path-only ownership): `_autoclean_task_is_ours`
+    must discriminate the actual autoclean task's command shape -- our
+    fleet.py path followed by the `autoclean` verb -- for BOTH backends'
+    query shapes (schtasks Command+Arguments join and the cron command
+    field are the same `_autoclean_task_command` string)."""
+
+    def test_real_autoclean_task_is_ours(self, home, canonical_install):
+        assert fleet._autoclean_task_is_ours(fleet._autoclean_task_command())
+
+    def test_other_fleet_verb_same_path_is_not_ours(self, home,
+                                                    canonical_install):
+        beat = fleet._autoclean_task_command().replace(" autoclean ", " beat ")
+        assert fleet._autoclean_script_path().as_posix() in beat.replace("\\", "/")
+        assert not fleet._autoclean_task_is_ours(beat)
+
+    def test_unrelated_task_is_not_ours(self, home, canonical_install):
+        assert not fleet._autoclean_task_is_ours(
+            '"C:/tools/autoclean.exe" nightly --quiet')
+        assert not fleet._autoclean_task_is_ours("")
+        assert not fleet._autoclean_task_is_ours(None)
+
+    def test_path_mentioned_elsewhere_verb_elsewhere_is_not_ours(
+            self, home, canonical_install):
+        """Path and verb both present but not adjacent: still foreign."""
+        script = fleet._autoclean_script_path()
+        cmd = f'"/usr/bin/beat-runner" "{script}" beat --note "runs autoclean later"'
+        assert not fleet._autoclean_task_is_ours(cmd)
 
 
 class TestQueryFailClosed:

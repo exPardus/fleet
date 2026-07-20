@@ -369,10 +369,28 @@ class TestHandoff:
                                  "claimed_at": _iso(NOW), "heartbeat_at": _iso(NOW),
                                  "claimed_via": "fresh"})
 
-    def _begin(self, run, sid="sid-old"):
-        args = SimpleNamespace(sid=sid, model=None, permission_mode=None)
+    class _Clock:
+        """Injectable monotonic clock; pairing sleep=advance exercises
+        dispatch_bg's real 60s join window in zero wall-clock time (same
+        pattern as test_native's _FakeClock)."""
+        def __init__(self):
+            self.t = 0.0
+
+        def __call__(self):
+            return self.t
+
+        def advance(self, dt):
+            self.t += dt
+
+    def _begin(self, run, sid="sid-old", clock=None, model=None,
+               permission_mode=None):
+        args = SimpleNamespace(sid=sid, model=model,
+                               permission_mode=permission_mode)
+        if clock is None:
+            return fleet.cmd_sup_handoff_begin(args, which=_fake_which, run=run,
+                                               sleep=lambda s: None)
         return fleet.cmd_sup_handoff_begin(args, which=_fake_which, run=run,
-                                           sleep=lambda s: None)
+                                           sleep=clock.advance, clock=clock)
 
     @staticmethod
     def _dispatch_then_roster(successor_sid="succ0001-full", short_id="succ0001"):
@@ -406,7 +424,10 @@ class TestHandoff:
         assert "HANDOFF-BEGIN" in latest_kinds
         out = capsys.readouterr().out
         assert "SUCCESSOR-SID: succ0001-full" in out and "SUCCESSOR-INC: inc-" in out
-        taskfiles = list((sup_home / "state").glob("supervisor-handoff-*.md"))
+        # Task file lives at dispatch_bg's canonical G8 path (state/tasks/
+        # <name>.md), written under the lock BEFORE dispatch (checkpoint-
+        # then-act) and re-written identically by dispatch_bg itself.
+        taskfiles = list(fleet.tasks_dir().glob("inc-*.md"))
         assert len(taskfiles) == 1
         body = taskfiles[0].read_text(encoding="utf-8")
         assert "sup-boot --handoff-inc" in body and "NO spawn" in body
@@ -444,6 +465,62 @@ class TestHandoff:
         assert rc == 0
         dispatch_kwargs = next(kw for kw, argv in zip(kwargs_seen, run.calls) if "--bg" in argv)
         assert dispatch_kwargs["cwd"] == str(sup_home)
+
+    def test_successor_launch_inherits_dispatch_bg_contract(self, sup_home):
+        """Three-tier gate 2026-07-17: the successor's launch path IS
+        dispatch_bg. Asserted on the choke point's observable artifacts
+        (mirrors TestDispatchBg): worker-settings hook wiring, tasks/
+        journals --add-dir pre-authorization with both dirs pre-created
+        (055e5ac -- journaling hangs otherwise), G8 task-file bootstrap +
+        tiny prompt, FLEET_WORKER env with CLAUDE_CODE_SESSION_ID stripped."""
+        self._hold()
+        base = self._dispatch_then_roster()
+        calls = []
+        def run(argv, **kw):
+            calls.append((argv, kw))
+            return base(argv, **kw)
+        assert self._begin(run) == 0
+        argv, kw = next((a, k) for a, k in calls if "--bg" in a)
+        # hook wiring: the rendered worker-settings instance, same as every
+        # native worker launch -- the whole point of the fix
+        assert argv[argv.index("--settings") + 1] == fleet.instance_settings_path().as_posix()
+        added = [argv[i + 1] for i, tok in enumerate(argv) if tok == "--add-dir"]
+        assert added == [fleet.tasks_dir().as_posix(), fleet.journals_dir().as_posix()]
+        assert fleet.tasks_dir().is_dir() and fleet.journals_dir().is_dir()
+        # G8 task-file bootstrap: argv carries only the tiny fixed prompt
+        taskfiles = list(fleet.tasks_dir().glob("inc-*.md"))
+        assert len(taskfiles) == 1
+        assert argv[-1] == f"Read {taskfiles[0].as_posix()} and follow it exactly."
+        # worker env contract (§5.1 provenance)
+        assert kw["env"]["FLEET_WORKER"] == taskfiles[0].stem
+        assert "CLAUDE_CODE_SESSION_ID" not in kw["env"]
+        assert kw["cwd"] == str(sup_home)
+        # no mode/model flags requested -> none passed
+        assert "--permission-mode" not in argv and "--model" not in argv
+
+    def test_successor_permission_mode_and_model_forwarded(self, sup_home):
+        self._hold()
+        base = self._dispatch_then_roster()
+        calls = []
+        def run(argv, **kw):
+            calls.append(argv)
+            return base(argv, **kw)
+        rc = self._begin(run, model="opus", permission_mode="acceptEdits")
+        assert rc == 0
+        argv = next(a for a in calls if "--bg" in a)
+        assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
+        assert argv[argv.index("--model") + 1] == "opus"
+
+    def test_successor_invalid_permission_mode_fails_fast(self, sup_home):
+        # Validated BEFORE the checkpoint: nothing journaled, no abort flag,
+        # nothing dispatched.
+        self._hold()
+        base = self._dispatch_then_roster()
+        with pytest.raises(fleet.FleetCliError, match="permission-mode"):
+            self._begin(base, permission_mode="yolo")
+        assert base.calls == []
+        assert "HANDOFF-BEGIN" not in [e["kind"] for e in fleet.supervisor_journal_entries()]
+        assert not fleet.handoff_abort_flag_path().exists()
 
     def test_successor_join_uses_short_id_prefix(self, sup_home, capsys):
         """ai-title collision hazard: TWO fresh roster entries share the
@@ -508,29 +585,136 @@ class TestHandoff:
         assert rc == 0
         assert "SUCCESSOR-SID: sid-fallback-joined" in capsys.readouterr().out
 
-    def test_begin_doa_when_successor_never_appears(self, sup_home, capsys, monkeypatch):
-        # shrink the verify window: with a no-op sleep the real 60s window
-        # would busy-spin for a full minute of wall clock
-        monkeypatch.setattr(fleet, "SUPERVISOR_ROSTER_VERIFY_SECONDS", 0.05)
+    def test_wedge_retry_husk_never_bound_by_name_join(self, sup_home, capsys):
+        """Fix wave on 351d180, finding 1 (reviewer scenario S3): attempt-1
+        wedges (joins, never attaches) and its stop/rm cannot be verified
+        (recheck=still-unattached -> dispatch_bg's retry proceeds with the
+        DEAD husk still on the roster); attempt-2 dispatches zero-exit but
+        with unparseable stdout. The G6 name-join then sees TWO
+        `sup|<inc>|successor` entries -- the husk and the live attempt-2
+        successor -- and must bind the one showing life (status/pid),
+        never report success for the corpse."""
+        self._hold()
+        state = {"bg": 0, "name": None}
+
+        def run(argv, **kw):
+            if "--bg" in argv:
+                state["bg"] += 1
+                state["name"] = argv[argv.index("-n") + 1]
+                if state["bg"] == 1:
+                    return SimpleNamespace(returncode=0,
+                                           stdout="backgrounded · husk0001 · sup\n", stderr="")
+                return SimpleNamespace(returncode=0,
+                                       stdout="launched (no short id token)\n", stderr="")
+            if argv[1] in ("stop", "rm"):
+                # cleanup unverifiable -> _cleanup_wedged rechecks the
+                # roster, finds the husk still status/pid-free
+                # (recheck=still-unattached), declares the retry safe --
+                # with the husk still listed
+                return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+            entries = [{"sessionId": "sid-old", "status": "busy"}]
+            if state["bg"] >= 1:
+                entries.append({"sessionId": "husk0001-dead", "name": state["name"]})
+            if state["bg"] >= 2:
+                entries.append({"sessionId": "live0002-real", "name": state["name"],
+                                "status": "busy"})
+            return SimpleNamespace(returncode=0, stdout=json.dumps(entries), stderr="")
+
+        rc = self._begin(run, clock=self._Clock())
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "falling back to name join (G6 fallback)" in out
+        assert "SUCCESSOR-SID: live0002-real" in out
+        assert "husk0001-dead" not in out
+        assert not fleet.handoff_abort_flag_path().exists()
+
+    def test_all_husk_name_join_reports_doa_never_binds_dead(self, sup_home, capsys):
+        """Companion to the S3 fix: when the ONLY name-matching entry never
+        shows status/pid (the wedge shape), the name-join must poll to its
+        deadline and report DOA -- binding a dead entry is worse than an
+        explicit abort flag the operator can act on."""
+        self._hold()
+        state = {"bg": 0, "name": None}
+
+        def run(argv, **kw):
+            if "--bg" in argv:
+                state["bg"] += 1
+                state["name"] = argv[argv.index("-n") + 1]
+                if state["bg"] == 1:
+                    return SimpleNamespace(returncode=0,
+                                           stdout="backgrounded · husk0001 · sup\n", stderr="")
+                return SimpleNamespace(returncode=0,
+                                       stdout="launched (no short id token)\n", stderr="")
+            if argv[1] in ("stop", "rm"):
+                return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+            entries = [{"sessionId": "sid-old", "status": "busy"}]
+            if state["bg"] >= 1:
+                entries.append({"sessionId": "husk0001-dead", "name": state["name"]})
+            return SimpleNamespace(returncode=0, stdout=json.dumps(entries), stderr="")
+
+        rc = self._begin(run, clock=self._Clock())
+        assert rc == 1
+        assert "DOA" in capsys.readouterr().out
+        flag = json.loads(fleet.handoff_abort_flag_path().read_text(encoding="utf-8"))
+        assert flag["reason"] == "successor-doa"
+        assert flag["successor_sid"] is None
+
+    def test_wedge_cleaned_then_failed_redispatch_flags_dispatch_failed(self, sup_home, capsys):
+        """Fix wave on 351d180, finding 2 (scenario S1): attempt-1 wedges
+        and is cleaned + verified gone (stop/rm ok, roster drops it);
+        attempt-2's --bg exits nonzero. Nothing is running -- the abort
+        flag must say `dispatch-failed`, and no name-join window may be
+        spent on a launch that never happened."""
+        self._hold()
+        state = {"bg": 0, "rm_done": False}
+
+        def run(argv, **kw):
+            if "--bg" in argv:
+                state["bg"] += 1
+                if state["bg"] == 1:
+                    return SimpleNamespace(returncode=0,
+                                           stdout="backgrounded · husk0001 · sup\n", stderr="")
+                return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+            if argv[1] == "stop":
+                return SimpleNamespace(returncode=0, stdout="stopped\n", stderr="")
+            if argv[1] == "rm":
+                state["rm_done"] = True
+                return SimpleNamespace(returncode=0, stdout="removed\n", stderr="")
+            entries = [{"sessionId": "sid-old", "status": "busy"}]
+            if state["bg"] >= 1 and not state["rm_done"]:
+                entries.append({"sessionId": "husk0001-dead"})
+            return SimpleNamespace(returncode=0, stdout=json.dumps(entries), stderr="")
+
+        with pytest.raises(fleet.FleetCliError, match="dispatch failed"):
+            self._begin(run, clock=self._Clock())
+        flag = json.loads(fleet.handoff_abort_flag_path().read_text(encoding="utf-8"))
+        assert flag["reason"] == "dispatch-failed"
+        assert flag["successor_sid"] is None and flag["successor_short_id"] is None
+        # the sticky-flag bug also burned the 60s name-join window before
+        # misflagging -- the fixed path must not enter it at all
+        assert "falling back to name join" not in capsys.readouterr().out
+
+    def test_begin_doa_when_successor_never_appears(self, sup_home, capsys):
+        # fake clock (sleep advances it): dispatch_bg's real 60s join window
+        # runs in zero wall-clock time
         self._hold()
         def run(argv, **kw):
             if "--bg" in argv:
                 return SimpleNamespace(returncode=0, stdout="backgrounded · abc · sup\n", stderr="")
             return SimpleNamespace(returncode=0, stdout=json.dumps(
                 [{"sessionId": "sid-old", "status": "busy"}]), stderr="")
-        rc = self._begin(run)
+        rc = self._begin(run, clock=self._Clock())
         assert rc == 1
         assert "DOA" in capsys.readouterr().out
 
-    def test_handoff_begin_doa_writes_abort_flag(self, sup_home, monkeypatch):
-        monkeypatch.setattr(fleet, "SUPERVISOR_ROSTER_VERIFY_SECONDS", 0.05)
+    def test_handoff_begin_doa_writes_abort_flag(self, sup_home):
         self._hold()
         def run(argv, **kw):
             if "--bg" in argv:
                 return SimpleNamespace(returncode=0, stdout="backgrounded · abc · sup\n", stderr="")
             return SimpleNamespace(returncode=0, stdout=json.dumps(
                 [{"sessionId": "sid-old", "status": "busy"}]), stderr="")
-        rc = self._begin(run)
+        rc = self._begin(run, clock=self._Clock())
         assert rc == 1
         flag = json.loads(fleet.handoff_abort_flag_path().read_text(encoding="utf-8"))
         assert flag["reason"] == "successor-doa"

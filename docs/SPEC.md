@@ -144,7 +144,7 @@ Receipt: path helpers `state_dir/logs_dir/mailbox_dir/journals_dir/ceilings_dir/
 
 ## 6. Dispatch contract (`dispatch_bg` @6167)
 
-Every native launch — spawn, fork-steer, resume-limited, respawn — funnels through one choke point:
+Every native launch — spawn, fork-steer, resume-limited, respawn, and the supervisor handoff successor (§12) — funnels through one choke point:
 
 ```
 claude --bg [--resume <old-sid>] -n "<cat>|<name>|<hint>" --settings state/worker-settings.json
