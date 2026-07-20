@@ -5474,9 +5474,18 @@ def _autoclean_task_is_ours(command: str) -> bool:
     Command+Arguments; cron stores the command field verbatim). Path
     alone is NOT ownership: the moment a second fleet-scheduled task
     exists (a future beat task runs this same fleet.py with a different
-    verb), a path-substring answer calls it "ours" and licenses install
-    /F or uninstall to eat it. Never a substring like 'autoclean' either:
-    a foreign C:/tools/autoclean.exe task must refuse."""
+    verb), a path-substring answer calls it "ours" and licenses the
+    install path's /Create /F to clobber it. Never a substring like
+    'autoclean' either: a foreign C:/tools/autoclean.exe task must
+    refuse.
+
+    Scope, honestly: the ONLY caller is `_install_autoclean_task`'s
+    refuse-foreign gate. `_remove_autoclean_task` never consults this
+    predicate -- `autoclean_task_remove` deletes by task name (schtasks)
+    or trailing `# <task_name>` tag (cron) unconditionally, so uninstall
+    is gated by name-collision alone. Known gap, out of scope here: a
+    foreign task that squats our exact task name would be removed
+    without this shape check."""
     ours = str(_autoclean_script_path()).replace("\\", "/").lower()
     norm = (command or "").replace("\\", "/").lower()
     return re.search(re.escape(ours) + r'"?\s+autoclean(?=\s|$)', norm) is not None
@@ -7526,17 +7535,26 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     rendered_name = render_native_name("sup", successor_name, "successor")
 
     # dispatch_bg stays opaque (T4 doctrine: no message parsing) -- but
-    # `run` is OUR injectable, so observing a zero-exit --bg call is how
-    # the except branch below distinguishes "no session exists" (report
-    # dispatch-failed) from "a LIVE successor may be stranded with no
-    # short-id handle" (stdout unparseable post-dispatch -- exactly the
-    # case the G6 name-join fallback exists for).
+    # `run` is OUR injectable, so observing the --bg call is how the except
+    # branch below distinguishes "no session exists" (report dispatch-failed)
+    # from "a LIVE successor may be stranded with no short-id handle"
+    # (stdout unparseable post-dispatch -- exactly the case the G6 name-join
+    # fallback exists for). Fix wave on 351d180 (finding 2): track the LAST
+    # --bg attempt only, never sticky-True across dispatch_bg's internal
+    # wedge-retry -- attempt-1 zero-exit followed by an attempt-2 dispatch
+    # failure (nonzero exit OR subprocess exception, hence the pessimistic
+    # reset before run) means nothing is running now (attempt-1's wedge was
+    # already cleaned before dispatch_bg retried), and the contract for that
+    # state is `dispatch-failed`, not a wasted name-join window + a
+    # `successor-doa` flag.
     dispatched = {"ok": False}
 
     def _observing_run(argv, **kwargs):
+        if "--bg" in argv:
+            dispatched["ok"] = False
         result = run(argv, **kwargs)
-        if "--bg" in argv and getattr(result, "returncode", 1) == 0:
-            dispatched["ok"] = True
+        if "--bg" in argv:
+            dispatched["ok"] = getattr(result, "returncode", 1) == 0
         return result
 
     successor_sid = None
@@ -7556,8 +7574,8 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
         if short_id is None:
             # Sid capture per contract G6: dispatch_bg's short-id prefix
             # join is primary. This name-join loop is the G6 fallback of
-            # the fallback (M-B T10 fix 4), reached only when the --bg
-            # subprocess succeeded but its stdout was unparseable: a live
+            # the fallback (M-B T10 fix 4), reached only when the FINAL
+            # --bg attempt succeeded but its stdout was unparseable: a live
             # successor exists and abandoning it as DOA would strand a
             # limbo supervisor body.
             print("short-id parse failed -- falling back to name join (G6 fallback)")
@@ -7568,8 +7586,25 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
                     # Same hostile-sessionId-value guard as pre_sids above: a
                     # dict-valued sessionId would raise TypeError from the
                     # unhashable membership test against the set.
+                    #
+                    # Life signal required (fix wave on 351d180, finding 1 /
+                    # scenario S3): dispatch_bg's internal wedge-retry can
+                    # leave attempt-1's DEAD husk on the roster (stop/rm
+                    # unverified, recheck=still-unattached) under the SAME
+                    # rendered name as the live attempt-2 successor --
+                    # binding a husk reports rc=0 for a corpse while the
+                    # real successor runs unbound. `status`/`pid` is
+                    # _await_attach's "process attached" signal; terminal
+                    # state literals are deliberately NOT accepted here,
+                    # because _cleanup_wedged's `claude stop` can mint them
+                    # on a husk that never ran. A live successor gains
+                    # status/pid within seconds (attach forensics: 4-6s),
+                    # well inside this window; a husk never does, so an
+                    # all-husk roster polls to the deadline and reports DOA
+                    # rather than ever binding a dead entry.
                     fresh = [e for e in payload if isinstance(e, dict)
                              and e.get("name") == rendered_name
+                             and ("status" in e or "pid" in e)
                              and isinstance(e.get("sessionId"), str)
                              and e.get("sessionId")
                              and e.get("sessionId") not in pre_sids]
