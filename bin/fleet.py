@@ -5438,12 +5438,20 @@ def _marker_guard_problems() -> list:
 
 
 def _autoclean_task_is_ours(command: str) -> bool:
-    """F4: ownership = the existing task runs OUR fleet.py -- the exact
-    resolved script path, slash- and case-normalized (Windows paths carry
-    both variances through schtasks XML round-trips). Never a substring
-    like 'autoclean': a foreign C:/tools/autoclean.exe task must refuse."""
+    """F4: ownership = the existing task runs OUR fleet.py's AUTOCLEAN --
+    the exact resolved script path (slash- and case-normalized; Windows
+    paths carry both variances through schtasks XML round-trips)
+    immediately followed by the `autoclean` verb, i.e. the shape
+    `_autoclean_task_command` emits on both backends (schtasks joins
+    Command+Arguments; cron stores the command field verbatim). Path
+    alone is NOT ownership: the moment a second fleet-scheduled task
+    exists (a future beat task runs this same fleet.py with a different
+    verb), a path-substring answer calls it "ours" and licenses install
+    /F or uninstall to eat it. Never a substring like 'autoclean' either:
+    a foreign C:/tools/autoclean.exe task must refuse."""
     ours = str(_autoclean_script_path()).replace("\\", "/").lower()
-    return ours in (command or "").replace("\\", "/").lower()
+    norm = (command or "").replace("\\", "/").lower()
+    return re.search(re.escape(ours) + r'"?\s+autoclean(?=\s|$)', norm) is not None
 
 
 def _install_autoclean_task(interval_hours, force: bool) -> None:
