@@ -7402,6 +7402,21 @@ Do exactly this, in order:
 """
 
 
+# sup-handoff-begin's public CLI surface takes raw claude `--permission-mode`
+# values; dispatch_bg speaks fleet mode names (MODE_FLAGS). Translate rather
+# than hand-roll argv around the choke point. "bypassPermissions" maps to
+# fleet "bypass" (--dangerously-skip-permissions -- claude's equivalent
+# switch); None/"default" mean "pass no mode flag at all".
+_SUCCESSOR_PERMISSION_MODE_TO_FLEET = {
+    None: "omit",
+    "default": "omit",
+    "acceptEdits": "accept",
+    "dontAsk": "dontask",
+    "plan": "plan",
+    "bypassPermissions": "bypass",
+}
+
+
 def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
                           sleep=time.sleep, clock=time.monotonic) -> int:
     """`fleet sup-handoff-begin [--model M] [--permission-mode P] [--sid S]`.
@@ -7410,14 +7425,39 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     OUTSIDE fleet_lock (F4 doctrine). Both failure paths (dispatch failure,
     successor DOA) raise the doctor-visible abort flag before returning
     (M-B T10 fix 1) -- a crash here must not leave the old side believing
-    a successor is in flight when none exists."""
+    a successor is in flight when none exists.
+
+    Three-tier gate 2026-07-17: the successor launches through dispatch_bg
+    -- the same choke point as every other native launch -- so it inherits
+    the full launch contract: worker-settings hook wiring (journaling,
+    Stop-block), tasks/journals --add-dir pre-authorization with both dirs
+    pre-created (055e5ac), task-file bootstrap (G8), FLEET_WORKER env with
+    CLAUDE_CODE_SESSION_ID stripped, and the never-attach wedge guard.
+    Previously this was a hand-rolled argv with NONE of that -- a
+    supervisor body with fewer safety rails than an ordinary worker."""
+    try:
+        # Validated before the journal checkpoint: a bad flag value should
+        # fail fast with nothing journaled and no abort flag raised.
+        mode = _SUCCESSOR_PERMISSION_MODE_TO_FLEET[getattr(args, "permission_mode", None)]
+    except KeyError:
+        choices = ", ".join(k for k in _SUCCESSOR_PERMISSION_MODE_TO_FLEET if k)
+        raise FleetCliError(f"invalid --permission-mode {args.permission_mode!r}: "
+                            f"choices are {choices}")
     with fleet_lock():
         claim, caller = _require_claim_holder(getattr(args, "sid", None))
         successor_inc = mint_incarnation_id()
-        task_path = state_dir() / f"supervisor-handoff-{successor_inc}.md"
-        task_path.parent.mkdir(parents=True, exist_ok=True)
-        task_path.write_text(_render_successor_task(successor_inc, claim["incarnation_id"]),
-                             encoding="utf-8")
+        # dispatch_bg's NAME_RE guard rejects the uppercase T/Z in a raw
+        # incarnation stamp, so the successor's worker name is the
+        # LOWERCASED inc id (still unique: digits + 4 lowercase hex chars);
+        # the true-case id travels in the task body, journal, and HANDSHAKE.
+        successor_name = successor_inc.lower()
+        task_path = task_file_path(successor_name)
+        task_body = _render_successor_task(successor_inc, claim["incarnation_id"])
+        # Checkpoint-then-act: the task file exists at dispatch_bg's
+        # canonical G8 path BEFORE the journal entry that references it;
+        # dispatch_bg re-writes the identical body at the identical path.
+        tasks_dir().mkdir(parents=True, exist_ok=True)
+        task_path.write_text(task_body, encoding="utf-8")
         supervisor_journal_append("HANDOFF-BEGIN", claim["incarnation_id"], caller,
                                   f"successor={successor_inc} task={task_path.as_posix()}")
         try:
@@ -7438,67 +7478,71 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
         })
 
     roster_fetch = lambda: _fetch_agents_roster(which=which, run=run)  # noqa: E731
-    exe = resolve_claude_executable(which=which)
+    # Pre-dispatch snapshot for the G6 name-join fallback below only --
+    # dispatch_bg takes its own, fresher snapshot for the short-id join.
+    # Same unhashable-sessionId guard as dispatch_bg's pre-snapshot.
     pre_ok, pre_payload = roster_fetch()
-    # Same unhashable-sessionId guard as dispatch_bg's pre-snapshot above.
     pre_sids = {e.get("sessionId") for e in (pre_payload if pre_ok else [])
                 if isinstance(e, dict) and isinstance(e.get("sessionId"), str)}
-    name = f"sup|{successor_inc}|successor"
-    argv = [exe, "--bg", "-n", name]
-    if getattr(args, "model", None):
-        argv += ["--model", args.model]
-    if getattr(args, "permission_mode", None):
-        argv += ["--permission-mode", args.permission_mode]
-    argv.append(f"Read {task_path.as_posix()} and follow it exactly.")
-    try:
-        proc = run(argv, cwd=str(FLEET_HOME), capture_output=True, text=True,
-                   encoding="utf-8", errors="replace", timeout=120)
-    except (OSError, subprocess.SubprocessError) as exc:
-        _abort_flag("dispatch-failed")
-        raise FleetCliError(f"successor dispatch failed: {exc} -- no successor to stop; "
-                            f"claim unchanged, duty continues")
-    if proc.returncode != 0:
-        _abort_flag("dispatch-failed")
-        raise FleetCliError(f"successor dispatch failed (exit {proc.returncode}): "
-                            f"{(proc.stderr or '').strip()[:300]} -- no successor to stop; "
-                            f"claim unchanged, duty continues")
+    rendered_name = render_native_name("sup", successor_name, "successor")
 
-    # Sid capture per contract G6: short id from --bg stdout, joined to the
-    # full sid by prefix match (T3 helper) -- never re-derive by polling the
-    # roster for a name match (ai-title collision hazard). Fall back to the
-    # old name-join loop ONLY when stdout was unparseable (G6 fallback of the
-    # fallback, M-B T10 fix 4).
-    short_id = _parse_bg_short_id(proc.stdout or "")
+    # dispatch_bg stays opaque (T4 doctrine: no message parsing) -- but
+    # `run` is OUR injectable, so observing a zero-exit --bg call is how
+    # the except branch below distinguishes "no session exists" (report
+    # dispatch-failed) from "a LIVE successor may be stranded with no
+    # short-id handle" (stdout unparseable post-dispatch -- exactly the
+    # case the G6 name-join fallback exists for).
+    dispatched = {"ok": False}
+
+    def _observing_run(argv, **kwargs):
+        result = run(argv, **kwargs)
+        if "--bg" in argv and getattr(result, "returncode", 1) == 0:
+            dispatched["ok"] = True
+        return result
+
     successor_sid = None
-    if short_id:
-        successor_sid = _join_roster_by_short_id(
-            short_id, roster_fetch, sleep,
-            verify_seconds=SUPERVISOR_ROSTER_VERIFY_SECONDS,
-            exclude_sids=pre_sids, clock=clock)
-    else:
-        print("short-id parse failed -- falling back to name join (G6 fallback)")
-        deadline = clock() + SUPERVISOR_ROSTER_VERIFY_SECONDS
-        while clock() < deadline:
-            ok, payload = roster_fetch()
-            if ok:
-                # Same hostile-sessionId-value guard as pre_sids above: a
-                # dict-valued sessionId would raise TypeError from the
-                # unhashable membership test against the set.
-                fresh = [e for e in payload if isinstance(e, dict)
-                         and e.get("name") == name
-                         and isinstance(e.get("sessionId"), str)
-                         and e.get("sessionId")
-                         and e.get("sessionId") not in pre_sids]
-                if fresh:
-                    successor_sid = fresh[0]["sessionId"]
-                    break
-            sleep(3)
-    if successor_sid is None:
-        _abort_flag("successor-doa", successor_short_id=short_id)
-        print(f"successor DOA: no roster entry named {name!r} appeared within "
-              f"{SUPERVISOR_ROSTER_VERIFY_SECONDS:.0f}s (contract G6 fallback). "
-              f"Claim unchanged -- duty continues; re-run sup-handoff-begin to retry.")
-        return 1
+    try:
+        out = dispatch_bg(successor_name, FLEET_HOME, task_body, mode,
+                          model=getattr(args, "model", None),
+                          category="sup", hint="successor",
+                          run=_observing_run, which=which, sleep=sleep,
+                          roster_fetch=roster_fetch, clock=clock)
+        successor_sid = out["session_id"]
+    except NativeDispatchError as exc:
+        short_id = exc.short_id
+        if short_id is None and not dispatched["ok"]:
+            _abort_flag("dispatch-failed")
+            raise FleetCliError(f"successor dispatch failed: {exc} -- no successor to "
+                                f"stop; claim unchanged, duty continues")
+        if short_id is None:
+            # Sid capture per contract G6: dispatch_bg's short-id prefix
+            # join is primary. This name-join loop is the G6 fallback of
+            # the fallback (M-B T10 fix 4), reached only when the --bg
+            # subprocess succeeded but its stdout was unparseable: a live
+            # successor exists and abandoning it as DOA would strand a
+            # limbo supervisor body.
+            print("short-id parse failed -- falling back to name join (G6 fallback)")
+            deadline = clock() + SUPERVISOR_ROSTER_VERIFY_SECONDS
+            while clock() < deadline:
+                ok, payload = roster_fetch()
+                if ok:
+                    # Same hostile-sessionId-value guard as pre_sids above: a
+                    # dict-valued sessionId would raise TypeError from the
+                    # unhashable membership test against the set.
+                    fresh = [e for e in payload if isinstance(e, dict)
+                             and e.get("name") == rendered_name
+                             and isinstance(e.get("sessionId"), str)
+                             and e.get("sessionId")
+                             and e.get("sessionId") not in pre_sids]
+                    if fresh:
+                        successor_sid = fresh[0]["sessionId"]
+                        break
+                sleep(3)
+        if successor_sid is None:
+            _abort_flag("successor-doa", successor_short_id=short_id)
+            print(f"successor DOA: {exc}. Claim unchanged -- duty continues; "
+                  f"re-run sup-handoff-begin to retry.")
+            return 1
 
     print(f"SUCCESSOR-INC: {successor_inc}")
     print(f"SUCCESSOR-SID: {successor_sid}")
