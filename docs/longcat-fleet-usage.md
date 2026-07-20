@@ -41,7 +41,11 @@ export ANTHROPIC_MODEL="LongCat-2.0" ANTHROPIC_SMALL_FAST_MODEL="LongCat-2.0"
 fleet spawn w1 --dir <path> --task @task.md     # NO --model
 ```
 
-Trade-offs: a second config dir means fleet state/settings there are separate (run `fleet init` once under it); your Anthropic and LongCat daemons coexist without a shared-backend collision. **Still unverified end-to-end** — this is the mechanically-correct path given the monarch finding, but it hasn't been run through a full spawn→send→respawn cycle yet.
+Or just use the **`longcat-fleet`** launcher (added to `~/.zshrc`): it exports the isolated `CLAUDE_CONFIG_DIR` + LongCat env and starts a manager session; `fleet spawn` from inside it puts workers on LongCat.
+
+**VERIFIED 2026-07-21:** a `--bg` worker in the `~/.claude-longcat` namespace booted its own daemon (`Starting background service…`) under LongCat env and replied `PONG` with **zero** `model_not_found` — the isolated daemon (env confirmed `ANTHROPIC_BASE_URL=…longcat…`, `CLAUDE_CONFIG_DIR=~/.claude-longcat`) never collides with the Anthropic monarch.
+
+Trade-offs: a second config dir means its fleet/plugin state is separate; your Anthropic and LongCat daemons coexist without a shared-backend collision. **Worker thinking:** the namespace's `settings.json` sets `alwaysThinkingEnabled:false`, which workers inherit — keep it, or they wedge on the thinking-block 400.
 
 #### 2b. Original single-daemon idea (blocked — kept for the record)
 
