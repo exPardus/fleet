@@ -585,6 +585,115 @@ class TestHandoff:
         assert rc == 0
         assert "SUCCESSOR-SID: sid-fallback-joined" in capsys.readouterr().out
 
+    def test_wedge_retry_husk_never_bound_by_name_join(self, sup_home, capsys):
+        """Fix wave on 351d180, finding 1 (reviewer scenario S3): attempt-1
+        wedges (joins, never attaches) and its stop/rm cannot be verified
+        (recheck=still-unattached -> dispatch_bg's retry proceeds with the
+        DEAD husk still on the roster); attempt-2 dispatches zero-exit but
+        with unparseable stdout. The G6 name-join then sees TWO
+        `sup|<inc>|successor` entries -- the husk and the live attempt-2
+        successor -- and must bind the one showing life (status/pid),
+        never report success for the corpse."""
+        self._hold()
+        state = {"bg": 0, "name": None}
+
+        def run(argv, **kw):
+            if "--bg" in argv:
+                state["bg"] += 1
+                state["name"] = argv[argv.index("-n") + 1]
+                if state["bg"] == 1:
+                    return SimpleNamespace(returncode=0,
+                                           stdout="backgrounded · husk0001 · sup\n", stderr="")
+                return SimpleNamespace(returncode=0,
+                                       stdout="launched (no short id token)\n", stderr="")
+            if argv[1] in ("stop", "rm"):
+                # cleanup unverifiable -> _cleanup_wedged rechecks the
+                # roster, finds the husk still status/pid-free
+                # (recheck=still-unattached), declares the retry safe --
+                # with the husk still listed
+                return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+            entries = [{"sessionId": "sid-old", "status": "busy"}]
+            if state["bg"] >= 1:
+                entries.append({"sessionId": "husk0001-dead", "name": state["name"]})
+            if state["bg"] >= 2:
+                entries.append({"sessionId": "live0002-real", "name": state["name"],
+                                "status": "busy"})
+            return SimpleNamespace(returncode=0, stdout=json.dumps(entries), stderr="")
+
+        rc = self._begin(run, clock=self._Clock())
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "falling back to name join (G6 fallback)" in out
+        assert "SUCCESSOR-SID: live0002-real" in out
+        assert "husk0001-dead" not in out
+        assert not fleet.handoff_abort_flag_path().exists()
+
+    def test_all_husk_name_join_reports_doa_never_binds_dead(self, sup_home, capsys):
+        """Companion to the S3 fix: when the ONLY name-matching entry never
+        shows status/pid (the wedge shape), the name-join must poll to its
+        deadline and report DOA -- binding a dead entry is worse than an
+        explicit abort flag the operator can act on."""
+        self._hold()
+        state = {"bg": 0, "name": None}
+
+        def run(argv, **kw):
+            if "--bg" in argv:
+                state["bg"] += 1
+                state["name"] = argv[argv.index("-n") + 1]
+                if state["bg"] == 1:
+                    return SimpleNamespace(returncode=0,
+                                           stdout="backgrounded · husk0001 · sup\n", stderr="")
+                return SimpleNamespace(returncode=0,
+                                       stdout="launched (no short id token)\n", stderr="")
+            if argv[1] in ("stop", "rm"):
+                return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+            entries = [{"sessionId": "sid-old", "status": "busy"}]
+            if state["bg"] >= 1:
+                entries.append({"sessionId": "husk0001-dead", "name": state["name"]})
+            return SimpleNamespace(returncode=0, stdout=json.dumps(entries), stderr="")
+
+        rc = self._begin(run, clock=self._Clock())
+        assert rc == 1
+        assert "DOA" in capsys.readouterr().out
+        flag = json.loads(fleet.handoff_abort_flag_path().read_text(encoding="utf-8"))
+        assert flag["reason"] == "successor-doa"
+        assert flag["successor_sid"] is None
+
+    def test_wedge_cleaned_then_failed_redispatch_flags_dispatch_failed(self, sup_home, capsys):
+        """Fix wave on 351d180, finding 2 (scenario S1): attempt-1 wedges
+        and is cleaned + verified gone (stop/rm ok, roster drops it);
+        attempt-2's --bg exits nonzero. Nothing is running -- the abort
+        flag must say `dispatch-failed`, and no name-join window may be
+        spent on a launch that never happened."""
+        self._hold()
+        state = {"bg": 0, "rm_done": False}
+
+        def run(argv, **kw):
+            if "--bg" in argv:
+                state["bg"] += 1
+                if state["bg"] == 1:
+                    return SimpleNamespace(returncode=0,
+                                           stdout="backgrounded · husk0001 · sup\n", stderr="")
+                return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+            if argv[1] == "stop":
+                return SimpleNamespace(returncode=0, stdout="stopped\n", stderr="")
+            if argv[1] == "rm":
+                state["rm_done"] = True
+                return SimpleNamespace(returncode=0, stdout="removed\n", stderr="")
+            entries = [{"sessionId": "sid-old", "status": "busy"}]
+            if state["bg"] >= 1 and not state["rm_done"]:
+                entries.append({"sessionId": "husk0001-dead"})
+            return SimpleNamespace(returncode=0, stdout=json.dumps(entries), stderr="")
+
+        with pytest.raises(fleet.FleetCliError, match="dispatch failed"):
+            self._begin(run, clock=self._Clock())
+        flag = json.loads(fleet.handoff_abort_flag_path().read_text(encoding="utf-8"))
+        assert flag["reason"] == "dispatch-failed"
+        assert flag["successor_sid"] is None and flag["successor_short_id"] is None
+        # the sticky-flag bug also burned the 60s name-join window before
+        # misflagging -- the fixed path must not enter it at all
+        assert "falling back to name join" not in capsys.readouterr().out
+
     def test_begin_doa_when_successor_never_appears(self, sup_home, capsys):
         # fake clock (sleep advances it): dispatch_bg's real 60s join window
         # runs in zero wall-clock time
