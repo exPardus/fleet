@@ -639,13 +639,19 @@ class TestParseLimitSignalLocalFormat:
     @pytest.mark.parametrize("text", [
         "session limit -- resets 13am (Asia/Qyzylorda)",
         "session limit -- resets 0pm (Asia/Qyzylorda)",
-        "session limit -- resets 25am (Asia/Qyzylorda)",
+        "session limit -- resets 23am (Asia/Qyzylorda)",
     ])
     def test_out_of_range_hour_yields_null_horizon(self, text):
         # D2 (MD-ULPARSER-REVIEW): \d{1,2} admits hours outside the 12-hour
         # clock -- pre-fix "resets 13am" built a well-formed WRONG horizon
         # (13:00 local). Out-of-range must be the conservative null-horizon
         # park, never a confidently wrong instant.
+        #
+        # Every param here FAILED with the guard reverted (verified): am
+        # 13..23 and 0pm all survive datetime.replace and become wrong
+        # instants pre-fix. Hours whose hour24 lands outside 0..23 (25am,
+        # 13pm, ...) already null-parked pre-fix via replace() raising --
+        # such values pin nothing and are deliberately NOT parametrized.
         now = datetime(2026, 7, 16, 1, 0, 0, tzinfo=timezone.utc)
         reset_at, _ = fleet._parse_limit_signal(text, now=now)
         assert reset_at is None

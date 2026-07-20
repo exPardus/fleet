@@ -5474,9 +5474,18 @@ def _autoclean_task_is_ours(command: str) -> bool:
     Command+Arguments; cron stores the command field verbatim). Path
     alone is NOT ownership: the moment a second fleet-scheduled task
     exists (a future beat task runs this same fleet.py with a different
-    verb), a path-substring answer calls it "ours" and licenses install
-    /F or uninstall to eat it. Never a substring like 'autoclean' either:
-    a foreign C:/tools/autoclean.exe task must refuse."""
+    verb), a path-substring answer calls it "ours" and licenses the
+    install path's /Create /F to clobber it. Never a substring like
+    'autoclean' either: a foreign C:/tools/autoclean.exe task must
+    refuse.
+
+    Scope, honestly: the ONLY caller is `_install_autoclean_task`'s
+    refuse-foreign gate. `_remove_autoclean_task` never consults this
+    predicate -- `autoclean_task_remove` deletes by task name (schtasks)
+    or trailing `# <task_name>` tag (cron) unconditionally, so uninstall
+    is gated by name-collision alone. Known gap, out of scope here: a
+    foreign task that squats our exact task name would be removed
+    without this shape check."""
     ours = str(_autoclean_script_path()).replace("\\", "/").lower()
     norm = (command or "").replace("\\", "/").lower()
     return re.search(re.escape(ours) + r'"?\s+autoclean(?=\s|$)', norm) is not None
