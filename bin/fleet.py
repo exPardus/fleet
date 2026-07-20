@@ -801,7 +801,11 @@ def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
         # --- M-B native-substrate fields (spec §5; None/[] on legacy records) ---
         "dispatch_kind": dispatch_kind,      # "bg" = daemon-hosted; None = pre-pivot Popen
         "category": category,                # agents-menu category (spec §5.1.3)
-        "native_short_id": None,             # short id from --bg stdout (G6 fallback)
+        "native_short_id": None,             # short id: --bg stdout (G6 fallback) on
+                                             # dispatch paths; DERIVED from the sid's
+                                             # first hyphen-segment on the two
+                                             # fast-completion commits (n2) -- see
+                                             # _native_job_ref for the consumer caveat
         "last_dispatch_at": None,            # stamped at every dispatch/steer/resume;
                                              # anchor for the fresh-outcome predicate
         "retired_sids": [],                  # prior sids retired by fork-steer/respawn
@@ -1251,8 +1255,19 @@ _LIMIT_RESET_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 # "resets 4:40am (Asia/Qyzylorda)" or "resets 12am (Asia/Qyzylorda)" (the
 # hour-only form is the production gap this fallback closes). Only
 # consulted when the ISO regex above finds nothing (ISO keeps precedence).
+#
+# D4 (MD-ULPARSER-REVIEW): the multi-segment arm requires a `/`, so
+# "(UTC)"-style single-segment zones never matched (null park -- safe but
+# lossy). The second arm admits them WITHOUT loosening into arbitrary
+# prose parentheticals: it is scoped case-sensitive ((?-i:) inside this
+# otherwise-IGNORECASE pattern) and requires a leading capital, the shape
+# every single-segment tzdata name has (UTC, GMT, Zulu, Japan, EST) and
+# prose asides ("(soon)", "(approx)") do not. A capitalized non-zone
+# still resolves to None in _next_local_reset_utc -- zoneinfo stays the
+# final arbiter; the regex only gates what is OFFERED to it.
 _LIMIT_RESET_LOCAL_RE = re.compile(
-    r"resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([A-Za-z_]+(?:/[A-Za-z_+\-0-9]+)+)\)",
+    r"resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*"
+    r"\(([A-Za-z_]+(?:/[A-Za-z_+\-0-9]+)+|(?-i:[A-Z][A-Za-z]+))\)",
     re.IGNORECASE,
 )
 
@@ -1322,11 +1337,18 @@ def _parse_limit_signal(text: str, *, now: "datetime | None" = None):
             hour = int(hour_s)
             minute = int(minute_s) if minute_s else 0
             ampm = ampm.lower()
-            if ampm == "am":
-                hour24 = 0 if hour == 12 else hour
-            else:
-                hour24 = 12 if hour == 12 else hour + 12
-            reset_at = _next_local_reset_utc(hour24, minute, tz_name, now=now)
+            # D2 (MD-ULPARSER-REVIEW): \d{1,2} admits hours outside the
+            # 12-hour clock -- "resets 13am" would otherwise convert into a
+            # well-formed WRONG horizon (13:00). Out-of-range -> reset_at
+            # stays None: the conservative null-horizon park, same standard
+            # as an unknown tz. (An out-of-range minute already lands there:
+            # datetime.replace raises and _next_local_reset_utc returns None.)
+            if 1 <= hour <= 12:
+                if ampm == "am":
+                    hour24 = 0 if hour == 12 else hour
+                else:
+                    hour24 = 12 if hour == 12 else hour + 12
+                reset_at = _next_local_reset_utc(hour24, minute, tz_name, now=now)
     kind = None
     low = (text or "").lower()
     if "week" in low:
@@ -2491,6 +2513,9 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
                 rec = data["workers"].get(args.name)
                 if rec is not None and rec.get("session_id") is None:
                     rec["session_id"] = fast_sid
+                    # n2: DERIVED ref, not the CLI's own --bg short id (that
+                    # stdout was never observed on this race path) -- see the
+                    # new_worker_record field comment and _native_job_ref.
                     rec["native_short_id"] = fast_sid.partition("-")[0] or fast_sid[:8]
                     rec["status"] = "idle"
                     rec["turns"] = 1
@@ -4049,6 +4074,9 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
                 rec = data["workers"].get(name)
                 if rec is not None and rec.get("session_id") is None:
                     rec["session_id"] = fast_sid
+                    # n2: DERIVED ref, not the CLI's own --bg short id (that
+                    # stdout was never observed on this race path) -- see the
+                    # new_worker_record field comment and _native_job_ref.
                     rec["native_short_id"] = fast_sid.partition("-")[0] or fast_sid[:8]
                     rec["status"] = "idle"
                     rec["turns"] = 1
@@ -5438,12 +5466,20 @@ def _marker_guard_problems() -> list:
 
 
 def _autoclean_task_is_ours(command: str) -> bool:
-    """F4: ownership = the existing task runs OUR fleet.py -- the exact
-    resolved script path, slash- and case-normalized (Windows paths carry
-    both variances through schtasks XML round-trips). Never a substring
-    like 'autoclean': a foreign C:/tools/autoclean.exe task must refuse."""
+    """F4: ownership = the existing task runs OUR fleet.py's AUTOCLEAN --
+    the exact resolved script path (slash- and case-normalized; Windows
+    paths carry both variances through schtasks XML round-trips)
+    immediately followed by the `autoclean` verb, i.e. the shape
+    `_autoclean_task_command` emits on both backends (schtasks joins
+    Command+Arguments; cron stores the command field verbatim). Path
+    alone is NOT ownership: the moment a second fleet-scheduled task
+    exists (a future beat task runs this same fleet.py with a different
+    verb), a path-substring answer calls it "ours" and licenses install
+    /F or uninstall to eat it. Never a substring like 'autoclean' either:
+    a foreign C:/tools/autoclean.exe task must refuse."""
     ours = str(_autoclean_script_path()).replace("\\", "/").lower()
-    return ours in (command or "").replace("\\", "/").lower()
+    norm = (command or "").replace("\\", "/").lower()
+    return re.search(re.escape(ours) + r'"?\s+autoclean(?=\s|$)', norm) is not None
 
 
 def _install_autoclean_task(interval_hours, force: bool) -> None:
@@ -5966,8 +6002,10 @@ def _autoclean_deferral_streak() -> tuple:
     `husks_deferred` since the M1 fix, so the streak is derived from there.
 
     Counts backwards from the newest event and stops at the first pass that
-    deferred nothing -- a single successful sweep means the daemon was reachable
-    and the tier is not starving, regardless of what came before. Dry-run passes
+    deferred nothing (n3: which includes a nothing-to-do pass -- zero husks
+    deferred proves nothing about daemon reachability; the streak measures
+    consecutive STARVED sweeps, not daemon uptime, and that is the honest
+    reading of what a break in it means). Dry-run passes
     are skipped entirely: they never rm anything, so they neither prove nor
     disprove reachability. Any read/parse failure degrades to (0, 0, None) --
     doctor is note-only and must never fail on unreadable history."""
@@ -6031,8 +6069,9 @@ def _doctor_check_autoclean(run=subprocess.run):
     old note even conceded it ("if this count persists across runs") while
     reading from a stamp that holds exactly one run and cannot show persistence.
     So: read the STREAK from `events.jsonl` (append-only history, which
-    `husks_deferred` now rides) and note only past
-    `AUTOCLEAN_DEFERRAL_STREAK_THRESHOLD` consecutive starved sweeps. That is
+    `husks_deferred` now rides) and note only AT or past
+    `AUTOCLEAN_DEFERRAL_STREAK_THRESHOLD` consecutive starved sweeps (n4: the
+    gate is `>=`, so the note first fires exactly AT the threshold). That is
     the sentence that distinguishes starvation from Tuesday."""
     stamp_note, stale, run_errors = "no run recorded yet", False, []
     husks_deferred = 0

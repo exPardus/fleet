@@ -555,6 +555,21 @@ def test_5_pin_archive_rm(sandbox: Sandbox):
     # dead-daemon case under a wording this branch could not predict. The pin
     # can still fail on vendor drift: a leftover sid with NO deferral line at
     # all, or with a live/unknown daemon, still hard-asserts.
+    #
+    # ND-4: the `alive is False` gate buys that at the price of a NARROW
+    # false-SKIP window, the exact direction m2's comment above warns about --
+    # daemon ALIVE at rm, `claude rm` genuinely regresses and prints an
+    # unclassified `deferred (failed)`, then the daemon idle-exits (~5s)
+    # before the `_daemon_alive()` sample -> `alive is False` -> skip, and a
+    # real regression reads green. In the unclassified branch `alive` is the
+    # ONLY discriminator (fleet prints the same line for message-drift and
+    # for a genuine rm regression), so the probe m2 banned from the gate is
+    # back in it. Accepted trade: pre-fix the drifted-message machine
+    # hard-asserted on EVERY run (a pin that cries wolf is a pin nobody
+    # reads), and this test's own sequence (>5s of zero live workers before
+    # archive) makes daemon-already-dead-at-rm -- where the skip is correct
+    # -- the overwhelmingly likely case. The real cure is M4's: capture the
+    # actual dead-daemon message bytes and this fallback retires itself.
     archive_err = a.stderr or ""
     rm_deferred = f"{fleet.NATIVE_RM_DEFERRED_PREFIX} (daemon-transient)" in archive_err
     rm_unclassified = (f"{fleet.NATIVE_RM_DEFERRED_PREFIX} (" in archive_err
