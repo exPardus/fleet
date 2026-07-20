@@ -657,6 +657,29 @@ class TestParseLimitSignalLocalFormat:
             "resets 1pm (Asia/Qyzylorda)", now=now)
         assert reset_at == "2026-07-16T08:00:00Z"
 
+    def test_single_segment_utc_zone_parses(self):
+        # D4 (MD-ULPARSER-REVIEW): the tz arm required a `/`, so "(UTC)"
+        # never matched and every UTC-named wall fell to the lossy null
+        # park. 13:00 UTC is ahead of now=01:00 UTC -> today.
+        now = datetime(2026, 7, 16, 1, 0, 0, tzinfo=timezone.utc)
+        reset_at, _ = fleet._parse_limit_signal("resets 1pm (UTC)", now=now)
+        assert reset_at == "2026-07-16T13:00:00Z"
+
+    @pytest.mark.parametrize("text", [
+        "resets 4am (soon)",       # lowercase prose aside must not match
+        "resets 4am (approx)",
+        "resets 4am (utc)",        # single-segment arm is case-sensitive
+    ])
+    def test_single_segment_arm_rejects_arbitrary_words(self, text):
+        assert fleet._LIMIT_RESET_LOCAL_RE.search(text) is None
+
+    def test_capitalized_non_zone_still_null_parks(self):
+        # The regex offers "(Soon)" to zoneinfo; resolution fails -> the
+        # same conservative null horizon as before, never a guess.
+        now = datetime(2026, 7, 16, 1, 0, 0, tzinfo=timezone.utc)
+        reset_at, _ = fleet._parse_limit_signal("resets 4am (Soon)", now=now)
+        assert reset_at is None
+
     def test_no_anchor_never_guesses_via_wall_clock(self):
         # N3 fix wave: `now=None` (the record-timestamp anchor was
         # unavailable) must not fall back to the wall clock for the

@@ -1251,8 +1251,19 @@ _LIMIT_RESET_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 # "resets 4:40am (Asia/Qyzylorda)" or "resets 12am (Asia/Qyzylorda)" (the
 # hour-only form is the production gap this fallback closes). Only
 # consulted when the ISO regex above finds nothing (ISO keeps precedence).
+#
+# D4 (MD-ULPARSER-REVIEW): the multi-segment arm requires a `/`, so
+# "(UTC)"-style single-segment zones never matched (null park -- safe but
+# lossy). The second arm admits them WITHOUT loosening into arbitrary
+# prose parentheticals: it is scoped case-sensitive ((?-i:) inside this
+# otherwise-IGNORECASE pattern) and requires a leading capital, the shape
+# every single-segment tzdata name has (UTC, GMT, Zulu, Japan, EST) and
+# prose asides ("(soon)", "(approx)") do not. A capitalized non-zone
+# still resolves to None in _next_local_reset_utc -- zoneinfo stays the
+# final arbiter; the regex only gates what is OFFERED to it.
 _LIMIT_RESET_LOCAL_RE = re.compile(
-    r"resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([A-Za-z_]+(?:/[A-Za-z_+\-0-9]+)+)\)",
+    r"resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*"
+    r"\(([A-Za-z_]+(?:/[A-Za-z_+\-0-9]+)+|(?-i:[A-Z][A-Za-z]+))\)",
     re.IGNORECASE,
 )
 
