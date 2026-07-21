@@ -655,6 +655,58 @@ class TestCollaboratorInstall:
             env={**__import__("os").environ, "FLEET_PYTHON": sys.executable})
         assert out.stdout.strip() == "ran"
 
+    @pytest.mark.skipif(shutil.which("sh") is None,
+                        reason="requires sh on PATH (roll-up item 11)")
+    def test_fleet_python_may_be_a_path_containing_spaces(self, tmp_path):
+        """posix-port campaign, follow-up 2 [PRODUCT DEFECT]. The shim's
+        `exec $FLEET_PYTHON` was unquoted so a multi-word override
+        (`py -3.13`) would word-split correctly -- which silently broke the
+        other legitimate shape, an interpreter PATH containing a space.
+        `C:\\Program Files\\Python310\\python.exe` split into `C:\\Program`,
+        `exec` failed, and `set -e` exited the shim NONZERO with no output:
+        a hook breaking the session (invariant 2), silently.
+
+        Surfaced only when a spaced interpreter and `sh` on PATH coincided --
+        this machine's 3.10 floor interpreter lives under `C:\\Program
+        Files`, while the case is skipped from a PowerShell run where `sh` is
+        absent. A symlink/copy into a spaced tmp dir reproduces it on any
+        host, so this does not depend on where the host keeps its pythons."""
+        spaced = tmp_path / "py thon dir"
+        spaced.mkdir()
+        interpreter = spaced / Path(sys.executable).name
+        shutil.copy2(sys.executable, interpreter)
+        assert " " in str(interpreter)
+
+        script = tmp_path / "say.py"
+        script.write_text("print('ran')", encoding="utf-8")
+        out = subprocess.run(
+            ["sh", str(REPO / "bin" / "hooks" / "run_py.sh"), str(script)],
+            capture_output=True, text=True,
+            env={**__import__("os").environ, "FLEET_PYTHON": str(interpreter)})
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.strip() == "ran", out.stderr
+
+    @pytest.mark.skipif(shutil.which("sh") is None,
+                        reason="requires sh on PATH (roll-up item 11)")
+    def test_fleet_python_still_accepts_a_multi_word_command(self, tmp_path):
+        """The control for the fix above: the quoted branch must not cost the
+        word-split shape the unquoted expansion existed for. `-x` is the
+        discriminator -- `py -3.13` is not an executable file, so it keeps
+        word-splitting."""
+        if shutil.which("py") is None:
+            pytest.skip("no `py` launcher (Windows-only) to form a "
+                        "multi-word override with")
+        script = tmp_path / "say.py"
+        script.write_text("print('ran')", encoding="utf-8")
+        major, minor = fleet.MIN_PYTHON_VERSION
+        out = subprocess.run(
+            ["sh", str(REPO / "bin" / "hooks" / "run_py.sh"), str(script)],
+            capture_output=True, text=True,
+            env={**__import__("os").environ,
+                 "FLEET_PYTHON": f"py -{major}.{minor}"})
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.strip() == "ran", out.stderr
+
     def test_posix_cli_shim_is_tracked_and_executable(self):
         # `fleet.cmd` only resolves from cmd.exe/PowerShell. bash ignores
         # PATHEXT, so a slash command's inline !`fleet status` -- which runs
