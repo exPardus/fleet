@@ -1,7 +1,10 @@
 """M-A supervisor identity tests (spec §4): state files, journal format,
 claim/seizure/handshake state machine, boot ritual, handoff, nag."""
 import json
+import os
+import re
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -19,6 +22,9 @@ def sup_home(tmp_path, monkeypatch):
     (tmp_path / "knowledge").mkdir()
     (tmp_path / "knowledge" / "INDEX.md").write_text("# Knowledge Index\n- entry one\n", encoding="utf-8")
     (tmp_path / "state").mkdir()
+    # Rendered worker-settings instance: the successor dispatch carries it as
+    # --settings and refuses when it is absent (SPEC §6, second dispatch path).
+    (tmp_path / "state" / "worker-settings.json").write_text('{"hooks": {}}', encoding="utf-8")
     return tmp_path
 
 
@@ -432,6 +438,166 @@ class TestHandoff:
         dispatch_kwargs = next(kw for kw, argv in zip(kwargs_seen, run.calls) if "--bg" in argv)
         assert dispatch_kwargs["cwd"] == str(sup_home)
 
+    # --- Defect A: the sanctioned second dispatch path (SPEC §6) -----------
+    #
+    # `cmd_sup_handoff_begin` does NOT go through `dispatch_bg` -- it cannot:
+    # an incarnation id (`inc-<8>T<6>Z-<4>`) carries uppercase T/Z and so fails
+    # `NAME_RE` at the choke point's own guard, and the successor's task file is
+    # already written to `state/supervisor-handoff-<inc>.md` and journaled by
+    # path, which `task_file_path(name)` would duplicate. The tests below pin
+    # the contract that makes the second path SANCTIONED rather than a bypass:
+    # it must carry the same hook wiring and the same process-identity hygiene
+    # the choke point carries.
+
+    def test_successor_dispatch_carries_instance_settings(self, sup_home):
+        """Defect A: a successor launched WITHOUT --settings gets none of
+        fleet's hooks (Stop outcome, Stop mailbox, PostToolUse mailbox,
+        PostCompact journal). All four degrade to sid-keyed writes when the
+        session has no registry record, so a successor genuinely benefits --
+        and its sid is exactly the handle sup-handoff-complete/-abort use."""
+        self._hold()
+        run = self._dispatch_then_roster()
+        assert self._begin(run) == 0
+        dispatch = next(c for c in run.calls if "--bg" in c)
+        assert "--settings" in dispatch
+        assert (dispatch[dispatch.index("--settings") + 1]
+                == fleet.instance_settings_path().as_posix())
+
+    def test_successor_dispatch_refused_without_rendered_settings(self, sup_home):
+        """Same doctrine as cmd_spawn's `_require_instance_settings`: claude
+        silently ignores a --settings path that does not exist, so a missing
+        instance would put the hookless successor back with no error anywhere.
+        Fail closed BEFORE the journal entry and the task file are written."""
+        self._hold()
+        fleet.instance_settings_path().unlink()
+        run = self._dispatch_then_roster()
+        with pytest.raises(fleet.FleetCliError, match="worker settings instance missing"):
+            self._begin(run)
+        assert not any("--bg" in c for c in run.calls)
+        assert [e["kind"] for e in fleet.supervisor_journal_entries()] == []
+        assert list((sup_home / "state").glob("supervisor-handoff-*.md")) == []
+
+    def test_successor_dispatch_always_carries_a_permission_mode(self, sup_home):
+        """B4/D6: `dispatch_bg` ends every worker argv with `mode_flags(mode)`
+        and every worker defaults to `dontask`. The successor emitted a
+        permission flag ONLY when the operator typed `--permission-mode`
+        (argparse default None), so the default path ran under claude's own
+        default mode -- and the successor's bootstrap opens with a Bash call,
+        which in a headless `--bg` session hangs forever on an unanswerable
+        permission prompt. That is the T12 wedge class this repo already paid
+        for once."""
+        self._hold()
+        run = self._dispatch_then_roster()
+        args = SimpleNamespace(sid="sid-old", model=None, permission_mode=None)
+        assert fleet.cmd_sup_handoff_begin(args, which=_fake_which, run=run,
+                                           sleep=lambda s: None) == 0
+        dispatch = next(c for c in run.calls if "--bg" in c)
+        expected = fleet.mode_flags(fleet.SUCCESSOR_DEFAULT_MODE)
+        assert expected, "the successor default mode must emit at least one flag"
+        for flag in expected:
+            assert flag in dispatch
+        # same default the worker choke point uses -- not a bespoke one
+        assert fleet.SUCCESSOR_DEFAULT_MODE in fleet.MODE_FLAGS
+
+    def test_explicit_permission_mode_overrides_the_successor_default(self, sup_home):
+        self._hold()
+        run = self._dispatch_then_roster()
+        args = SimpleNamespace(sid="sid-old", model=None, permission_mode="plan")
+        assert fleet.cmd_sup_handoff_begin(args, which=_fake_which, run=run,
+                                           sleep=lambda s: None) == 0
+        dispatch = next(c for c in run.calls if "--bg" in c)
+        assert dispatch[dispatch.index("--permission-mode") + 1] == "plan"
+        # exactly one mode opinion on the argv, never the default alongside it
+        assert dispatch.count("--permission-mode") == 1
+        assert "--dangerously-skip-permissions" not in dispatch
+
+    def test_successor_mode_uses_one_vocabulary_everywhere(self, sup_home):
+        """G3: the explicit branch took a RAW CLAUDE mode string while the
+        default branch took a FLEET mode name through `mode_flags()` -- two
+        vocabularies for one argument. Both branches now speak fleet mode
+        names, so `--permission-mode bypass` reaches the argv as
+        `--dangerously-skip-permissions`, exactly as `fleet spawn --mode
+        bypass` does. A raw claude spelling is refused by argparse rather than
+        silently forwarded."""
+        self._hold()
+        run = self._dispatch_then_roster()
+        args = SimpleNamespace(sid="sid-old", model=None, permission_mode="bypass")
+        assert fleet.cmd_sup_handoff_begin(args, which=_fake_which, run=run,
+                                           sleep=lambda s: None) == 0
+        dispatch = next(c for c in run.calls if "--bg" in c)
+        assert dispatch[-2:] != ["--permission-mode", "bypass"]
+        assert "--dangerously-skip-permissions" in dispatch
+        assert "--permission-mode" not in dispatch
+
+    def test_successor_permission_mode_is_constrained_to_fleet_mode_names(self):
+        """G3, the enforcement half: the parser must reject a vocabulary the
+        dispatch cannot speak. Without `choices`, `--permission-mode acceptEdits`
+        parsed fine and then raised ValueError deep inside `mode_flags`."""
+        parser = fleet.build_parser()
+        args = parser.parse_args(["sup-handoff-begin", "--permission-mode", "accept"])
+        assert args.permission_mode == "accept"
+        with pytest.raises(SystemExit):
+            parser.parse_args(["sup-handoff-begin", "--permission-mode", "acceptEdits"])
+
+    def test_missing_claude_refuses_before_journal_and_taskfile(self, sup_home):
+        """B5: `resolve_claude_executable` is the same class of pre-flight as
+        `_require_instance_settings` -- a missing external prerequisite. It ran
+        AFTER the journal write, the task-file write and the prior abort flag's
+        deletion, and raises `ClaudeNotFoundError` with no `_abort_flag` guard,
+        so a `claude` that dropped off PATH left HANDOFF-BEGIN journaled with no
+        successor and nothing for doctor to see -- contradicting the docstring's
+        promise that both failure paths raise the flag."""
+        self._hold()
+        calls = []
+        def run(argv, **kw):
+            calls.append(argv)
+            return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+        with pytest.raises(fleet.FleetCliError, match="claude executable not found"):
+            fleet.cmd_sup_handoff_begin(SimpleNamespace(sid="sid-old", model=None,
+                                                        permission_mode=None),
+                                        which=lambda _n: None, run=run,
+                                        sleep=lambda s: None)
+        assert fleet.supervisor_journal_entries() == []
+        assert list((sup_home / "state").glob("supervisor-handoff-*.md")) == []
+        assert calls == []
+
+    def test_missing_claude_leaves_a_prior_abort_flag_intact(self, sup_home):
+        """The refusal must not consume the previous handoff's evidence: the
+        `unlink()` of the abort flag sits inside the lock, after the pre-flights."""
+        self._hold()
+        fleet._write_json_atomic(fleet.handoff_abort_flag_path(),
+                                 {"reason": "successor-doa", "holder": "inc-older"})
+        with pytest.raises(fleet.FleetCliError, match="claude executable not found"):
+            fleet.cmd_sup_handoff_begin(SimpleNamespace(sid="sid-old", model=None,
+                                                        permission_mode=None),
+                                        which=lambda _n: None,
+                                        run=lambda *a, **k: SimpleNamespace(
+                                            returncode=0, stdout="[]", stderr=""),
+                                        sleep=lambda s: None)
+        flag = json.loads(fleet.handoff_abort_flag_path().read_text(encoding="utf-8"))
+        assert flag["reason"] == "successor-doa"
+
+    def test_successor_dispatch_uses_worker_env(self, sup_home, monkeypatch):
+        """§5.1 provenance: without `env=_worker_env(name)` the successor
+        inherits the OLD supervisor's CLAUDE_CODE_SESSION_ID. `cmd_sup_boot`
+        reads exactly that variable (@caller_sid) and writes it into the
+        HANDSHAKE, so an inherited value makes the successor hand back the old
+        holder's sid -- and `sup-handoff-complete --expect-sid <successor_sid>`
+        then refuses on a mismatch, wedging the handoff. Same reason
+        `dispatch_bg` strips it at every worker launch."""
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-old")
+        self._hold()
+        kwargs_seen = []
+        run = self._dispatch_then_roster()
+        def wrapped(argv, **kw):
+            kwargs_seen.append(kw)
+            return run(argv, **kw)
+        assert self._begin(wrapped) == 0
+        env = next(kw for kw, argv in zip(kwargs_seen, run.calls) if "--bg" in argv)["env"]
+        assert "CLAUDE_CODE_SESSION_ID" not in env
+        assert env["FLEET_WORKER"].startswith("sup|inc-")
+        assert env["PATH"] == os.environ["PATH"]  # inherited env, not a bare one
+
     def test_successor_join_uses_short_id_prefix(self, sup_home, capsys):
         """ai-title collision hazard: TWO fresh roster entries share the
         successor's display name; only the sid whose prefix matches the
@@ -826,3 +992,121 @@ class TestSessionStartLine:
         monkeypatch.setattr(mod, "fleet", fleet)   # hook resolves its own fleet import
         ctx = mod._build_context()
         assert "SUPERVISOR:" in ctx
+
+
+class TestDispatchPathsAreDocumented:
+    """Defect A regression: SPEC §6 claimed "one choke point for every --bg
+    launch" while `bin/fleet.py` has always had TWO argv builders. The claim is
+    now scoped to worker launches and the second path is named; these tests go
+    RED if either the code grows a third path or the SPEC text drops the
+    correction."""
+
+    REPO = Path(__file__).resolve().parents[1]
+    # B3 + G1: the guard SPEC §6.1 leans on has been evaded twice. It began as
+    # `r'^\s*argv = \[exe, "--bg"'` -- one spelling -- and injection I16 walked
+    # past it with `cmd = [claude_exe, "--bg", ...]`. The B3 widening to
+    # `r'\[[^\]\n]*"--bg"'` still could not cross a newline, so a builder whose
+    # list literal wraps (`argv = [\n    exe, "--bg", ...`) walked past that.
+    # Dropping the newline exclusion catches every spelling; verified still
+    # exactly 2 on the real source, and 3 under each evasion in
+    # `test_shape_guard_catches_every_third_builder_spelling`.
+    ARGV_BUILDER_RE = re.compile(r'\[[^\]]*"--bg"')
+    # Every builder that legitimately exists, by the function that owns it.
+    KNOWN_BUILDERS = ("dispatch_bg", "cmd_sup_handoff_begin")
+
+    def _source(self):
+        return (self.REPO / "bin" / "fleet.py").read_text(encoding="utf-8")
+
+    def _spec(self):
+        return (self.REPO / "docs" / "SPEC.md").read_text(encoding="utf-8")
+
+    def _section(self):
+        spec = self._spec()
+        return spec.split("## 6. Dispatch contract", 1)[1].split("\n## 7.", 1)[0]
+
+    def _subsection_61(self):
+        """D3: §6.1 ONLY. `_section()` spans §6 through §7, and §6's own lead
+        sentence and argv block already contain `cmd_sup_handoff_begin` and
+        `--settings` -- so a test asserting those against `_section()` stayed
+        green when the reviewer deleted §6.1 wholesale, while SPEC §6.1 claimed
+        the test 'fails if this subsection stops naming the path'. A spec
+        sentence asserting protection that does not exist is worse than none."""
+        return self._section().split("### 6.1", 1)[1]
+
+    def test_exactly_two_bg_argv_builders(self):
+        """Not a fix pin -- a shape guard. A THIRD argv builder means the
+        SPEC's enumeration is stale again and must be extended."""
+        assert len(self.ARGV_BUILDER_RE.findall(self._source())) == 2
+
+    @pytest.mark.parametrize("label,builder", [
+        ("plain", '\ndef _third(exe):\n    argv = [exe, "--bg", "-n", "p"]\n    return argv\n'),
+        ("renamed", '\ndef _third(x):\n    cmd = [x, "--bg", "-n", "p"]\n    return cmd\n'),
+        ("augmented", '\ndef _third(exe):\n    argv = [exe]\n    argv += ["--bg", "-n", "p"]\n    return argv\n'),
+        ("multiline", '\ndef _third(exe):\n    argv = [\n        exe, "--bg",\n        "-n", "p",\n    ]\n    return argv\n'),
+    ])
+    def test_shape_guard_catches_every_third_builder_spelling(self, label, builder):
+        """G1: this guard has now been evaded twice -- B3 (`cmd = [claude_exe,`
+        walked past the `argv = [exe,` spelling) and G1 (a builder whose list
+        literal wraps across a newline walked past `[^\\]\\n]*`). It is the guard
+        SPEC §6.1 leans on to keep the dispatch enumeration from going stale a
+        second time, so every spelling a real third builder could take is
+        pinned here rather than discovered by the next reviewer."""
+        source = self._source()
+        assert len(self.ARGV_BUILDER_RE.findall(source)) == 2, "baseline"
+        assert len(self.ARGV_BUILDER_RE.findall(source + builder)) == 3, label
+
+    def test_both_bg_argv_builders_live_in_the_documented_functions(self):
+        """B3, the other half: two builders is only reassuring if they are the
+        two §6.1 names. A third builder that REPLACED one of these would keep
+        the count at 2."""
+        source = self._source()
+        owners = []
+        for m in self.ARGV_BUILDER_RE.finditer(source):
+            head = source[:m.start()]
+            defs = re.findall(r"^def (\w+)", head, re.M)
+            owners.append(defs[-1] if defs else None)
+        assert sorted(owners) == sorted(self.KNOWN_BUILDERS)
+
+    def test_spec_lead_sentence_scopes_the_choke_point(self):
+        """The pre-fix lead read 'Every native launch ... funnels through one
+        choke point', which is false: the successor never did. It must now
+        scope to WORKER launches and say how many builders exist."""
+        # drop the remainder of the "## 6. Dispatch contract ..." heading line
+        body = self._section().split("\n", 1)[1]
+        lead = next(l for l in body.splitlines() if l.strip()).lower()
+        assert "worker" in lead
+        assert "two" in lead and "argv builder" in lead
+
+    def test_spec_names_the_successor_dispatch_path(self):
+        """D3: asserted against §6.1 alone, and against the tokens that carry
+        the subsection's load -- so deleting or hollowing it goes RED."""
+        sub = self._subsection_61()
+        assert "cmd_sup_handoff_begin" in sub
+        for token in ("--settings", "_worker_env", "_require_instance_settings",
+                      "supervisor-handoff-", "NAME_RE"):
+            assert token in sub, token
+
+    def test_spec_61_records_the_mode_flag_decision(self):
+        """B4/D6: §6.1's parity enumeration claimed the path carries what the
+        choke point carries and listed two deliberate omissions, silently
+        omitting the third and only hazardous asymmetry."""
+        sub = self._subsection_61()
+        assert "mode" in sub.lower()
+        assert "SUCCESSOR_DEFAULT_MODE" in sub
+
+    def test_spec_61_keeps_the_unobserved_hedge(self):
+        """D7: the branch's own docstring and commit message hedge the daemon
+        env-propagation claim; the SPEC stated it flatly. The spec is the
+        artifact a future builder trusts -- it must be the more careful one."""
+        sub = self._subsection_61()
+        assert "UNVERIFIED" in sub or "UNOBSERVED" in sub
+
+    def test_spec_12_does_not_claim_the_successor_uses_dispatch_bg(self):
+        """D2: §12 still read 'old dispatches a claim-pending successor via
+        `dispatch_bg`' -- false, and false in the same document whose §6.1
+        exists to explain why it cannot be `dispatch_bg`. The branch corrected
+        §6 and left the other half of the same inaccuracy standing."""
+        spec = self._spec()
+        section12 = spec.split("## 12. Supervisor protocol", 1)[1].split("\n## 13.", 1)[0]
+        assert "via `dispatch_bg`" not in section12
+        assert "§6.1" in section12

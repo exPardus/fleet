@@ -629,6 +629,33 @@ class TestInstallHomeGuards:
         _, ok, msg = fleet._doctor_check_autoclean()
         assert ok and "missing" in msg.lower()
 
+    def test_doctor_flags_missing_pinned_path_when_unquoted(self, home, monkeypatch):
+        """B6/D9: doctor's dead-pin scan required QUOTED tokens
+        (`re.findall(r'"([^"]+)"', ...)`) while the new ownership predicate
+        accepts bare tokens too. A task whose script path arrives unquoted --
+        the shape a schtasks XML round-trip can produce -- silently no-opped
+        the check, so doctor read green on a task pinned to a deleted
+        worktree. Both now tokenize through `_task_command_tokens`."""
+        gone = str(home / "gone-worktree" / "bin" / "fleet.py")
+        monkeypatch.setattr(
+            fleet.PLATFORM, "autoclean_task_query",
+            lambda task_name, run=None: f'"C:/py.exe" {gone} autoclean')
+        _, ok, msg = fleet._doctor_check_autoclean()
+        assert ok and "missing" in msg.lower()
+
+    def test_doctor_does_not_flag_a_live_pinned_path(self, home, monkeypatch,
+                                                     canonical_install):
+        """The twin direction: an existing fleet.py must NOT be reported as a
+        missing pin, or the widened tokenizer turns doctor into a crier."""
+        script = canonical_install
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text("# real\n", encoding="utf-8")
+        monkeypatch.setattr(
+            fleet.PLATFORM, "autoclean_task_query",
+            lambda task_name, run=None: fleet._autoclean_task_command())
+        _, ok, msg = fleet._doctor_check_autoclean()
+        assert ok and "missing" not in msg.lower()
+
 
 _INIT_TEMPLATE = '{"hooks": {}}'
 _CANONICAL = "C:/canonical/fleet-home"
@@ -754,6 +781,237 @@ class TestSchedulerInstall:
         platform_stub["query"] = cmd.replace("\\", "/").upper()
         fleet._install_autoclean_task(None, force=False)
         assert len(platform_stub["installs"]) == 1
+
+    # --- F4 ownership is FULL identity, not just the interpreter target ---
+    #
+    # Pre-fix the predicate was `str(_autoclean_script_path()) in command`, so
+    # it said "ours" for ANY scheduled task running this fleet.py. The moment a
+    # second fleet-owned task exists -- the three-tier adjudication's
+    # `fleet init --supervisor-beat` is the concrete near-term case --
+    # `fleet init --autoclean` would silently overwrite it. Ownership is now
+    # script path AND subcommand AND --fleet-home value.
+
+    def test_same_fleet_py_different_subcommand_is_not_ours(self, home,
+                                                            canonical_install,
+                                                            platform_stub):
+        """THE defect: a second fleet-owned scheduled task running the very
+        same fleet.py with a DIFFERENT verb must not be overwritten."""
+        script = fleet._autoclean_script_path()
+        platform_stub["query"] = (
+            f'"C:/py.exe" "{script}" supervisor-beat --fleet-home '
+            f'"{Path(home).resolve()}"')
+        with pytest.raises(fleet.FleetCliError, match="fleet-owned"):
+            fleet._install_autoclean_task(None, force=False)
+        assert platform_stub["installs"] == []
+
+    def test_same_script_and_verb_different_fleet_home_is_not_ours(
+            self, home, canonical_install, platform_stub, tmp_path_factory):
+        """Two fleets on one machine share a fleet.py path only when one is a
+        checkout of the other, but they never share a --fleet-home. A task
+        pinned to a different home is somebody else's sweep."""
+        script = fleet._autoclean_script_path()
+        other = tmp_path_factory.mktemp("other-fleet-home")
+        platform_stub["query"] = (
+            f'"C:/py.exe" "{script}" autoclean --fleet-home "{other.resolve()}"')
+        with pytest.raises(fleet.FleetCliError, match="fleet-owned"):
+            fleet._install_autoclean_task(None, force=False)
+        assert platform_stub["installs"] == []
+
+    def test_ownership_predicate_all_four_directions(self, home, canonical_install,
+                                                     tmp_path_factory):
+        """The predicate itself, platform-neutral (it takes a command string):
+        ours / foreign / same-script-other-verb / same-verb-other-home."""
+        script = fleet._autoclean_script_path()
+        other = tmp_path_factory.mktemp("other-fleet-home").resolve()
+        me = Path(home).resolve()
+        assert fleet._autoclean_task_is_ours(fleet._autoclean_task_command()) is True
+        assert fleet._autoclean_task_is_ours(
+            '"C:/tools/autoclean.exe" nightly --quiet') is False
+        assert fleet._autoclean_task_is_ours(
+            f'"C:/py.exe" "{script}" supervisor-beat --fleet-home "{me}"') is False
+        assert fleet._autoclean_task_is_ours(
+            f'"C:/py.exe" "{script}" autoclean --fleet-home "{other}"') is False
+
+    def test_spec_states_full_identity_ownership(self):
+        """SPEC §11 used to promise "ownership by exact normalized path",
+        which described the defect. Keep the doc true about what ships."""
+        spec = (Path(__file__).resolve().parents[1] / "docs" / "SPEC.md"
+                ).read_text(encoding="utf-8")
+        section = spec.split("## 11. Archive + autoclean", 1)[1].split("\n## 12.", 1)[0]
+        assert "ownership by exact normalized path" not in section
+        assert "ownership by full identity" in section
+        assert "--fleet-home" in section and "subcommand" in section
+
+    def test_autoclean_design_spec_states_full_identity_ownership(self):
+        """D1: `docs/specs/autoclean.md` is the design spec of record for this
+        subsystem (SPEC §11 links it as "Full design"), and it still specified
+        the PRE-FIX predicate -- "fleet-owned iff its command runs our exact
+        fleet.py path". A builder implementing the `--supervisor-beat` task
+        (the exact scenario this fix exists for) reads that file and rebuilds
+        the bug. SPEC.md alone was pinned, so the two could drift apart again
+        on the next wave; both are pinned now."""
+        design = (Path(__file__).resolve().parents[1] / "docs" / "specs"
+                  / "autoclean.md").read_text(encoding="utf-8")
+        assert "runs our exact fleet.py path" not in design
+        assert "_fleet_task_is_ours" in design
+        assert "--fleet-home" in design and "subcommand" in design
+
+    def test_ownership_requires_an_explicit_fleet_home(self, home, canonical_install):
+        """F2 embeds --fleet-home in every task fleet installs; a command
+        without it was installed by something else (or by a pre-F2 fleet) and
+        cannot be proven ours."""
+        script = fleet._autoclean_script_path()
+        assert fleet._autoclean_task_is_ours(f'"C:/py.exe" "{script}" autoclean') is False
+
+    def test_live_installed_task_command_is_ours(self, monkeypatch):
+        """M0 — the real artifact, verbatim. This exact string is the command
+        of the `claude-fleet-autoclean` scheduled task installed on the
+        operator's machine (manager-supplied, `schtasks /Query`, 2026-07-21);
+        `fleet init --autoclean` must recognize it rather than refuse to
+        update fleet's own live task. When the real artifact exists, the
+        fixture is the real artifact -- so this is pinned as a literal, not
+        rebuilt from `_autoclean_task_command()`.
+
+        Evaluated with FLEET_HOME and the script path set to the CANONICAL
+        home the live task pins. Evaluating it from a worktree checkout
+        answers False -- but so does the pre-fix path-only predicate, because
+        the worktree's fleet.py is a different path; see this test's sibling
+        below."""
+        live = (r'"C:\Users\Techn\AppData\Local\Programs\Python\Python313'
+                r'\python.exe" "C:\proga\claude-fleet\bin\fleet.py" autoclean '
+                r'--fleet-home "C:\proga\claude-fleet"')
+        canonical = Path(r"C:\proga\claude-fleet")
+        monkeypatch.setattr(fleet, "FLEET_HOME", canonical)
+        monkeypatch.setattr(fleet, "_autoclean_script_path",
+                            lambda: canonical / "bin" / "fleet.py", raising=False)
+        assert fleet._autoclean_task_is_ours(live) is True
+
+    def test_worktree_checkout_refuses_the_live_task_under_both_predicates(self, monkeypatch):
+        """The control the M0 probe lacked. A `False` verdict reached from a
+        worktree checkout is a probe artifact, not a regression: the pre-fix
+        path-only predicate refuses the same command for the same reason (the
+        worktree's fleet.py is not the path the live task pins). Pinning this
+        keeps the next reviewer from re-filing it as a new defect."""
+        live = (r'"C:\Users\Techn\AppData\Local\Programs\Python\Python313'
+                r'\python.exe" "C:\proga\claude-fleet\bin\fleet.py" autoclean '
+                r'--fleet-home "C:\proga\claude-fleet"')
+        worktree = Path(r"C:\proga\fleet-me-defects")
+        monkeypatch.setattr(fleet, "FLEET_HOME", worktree)
+        monkeypatch.setattr(fleet, "_autoclean_script_path",
+                            lambda: worktree / "bin" / "fleet.py", raising=False)
+        pre_fix_ours = str(worktree / "bin" / "fleet.py").replace("\\", "/").lower()
+        assert pre_fix_ours not in live.replace("\\", "/").lower()   # pre-fix: False
+        assert fleet._autoclean_task_is_ours(live) is False          # post-fix: False
+
+
+SPACED_HOME = r"C:\Program Files\My Fleet"
+SPACED_SCRIPT = r"C:\Program Files\My Fleet\bin\fleet.py"
+SPACED_PY = r"C:\Program Files\Python313\python.exe"
+
+
+@pytest.fixture
+def spaced_home(monkeypatch):
+    """B1: a FLEET_HOME whose path contains spaces -- the shape the quoted-run
+    tokenizer exists for, and which no test fed it before (injection I13
+    replaced `_TASK_ARG_RE` with a naive `\\S+` and the whole suite stayed
+    green). `tmp_path` on this machine never contains a space, so the fixture
+    is literal."""
+    monkeypatch.setattr(fleet, "FLEET_HOME", Path(SPACED_HOME))
+    monkeypatch.setattr(fleet, "_autoclean_script_path",
+                        lambda: Path(SPACED_SCRIPT), raising=False)
+    return Path(SPACED_HOME)
+
+
+class TestOwnershipQuotingVariants:
+    """B1 [CRITICAL]: the tokenizer's entire reason for existing was unpinned.
+    Each variant below records a DECISION, not just current behavior.
+
+    Accepted (must be `True`): every form fleet itself can produce, plus the
+    `--fleet-home=VALUE` spelling, which fleet's own argparse accepts and an
+    operator editing the task by hand may well write.
+
+    Refused (must be `False`, and safe): forms that cannot be tokenized
+    unambiguously. Refusal costs an operator one `--force` on a task that is
+    provably theirs; the opposite error is `/Create /F` over somebody else's
+    scheduled task. Both refusals are documented in `_fleet_task_is_ours`."""
+
+    @pytest.mark.parametrize("label,command", [
+        ("fleet's own rendering (both paths quoted)",
+         f'"{SPACED_PY}" "{SPACED_SCRIPT}" autoclean --fleet-home "{SPACED_HOME}"'),
+        ("schtasks XML split: <Command> unquoted, <Arguments> quoted",
+         f'{SPACED_PY} "{SPACED_SCRIPT}" autoclean --fleet-home "{SPACED_HOME}"'),
+        ("interpreter path unquoted, fleet paths quoted",
+         f'{SPACED_PY} "{SPACED_SCRIPT}" autoclean --fleet-home "{SPACED_HOME}"'),
+        ("--fleet-home=VALUE form (argparse accepts it, so must we)",
+         f'"{SPACED_PY}" "{SPACED_SCRIPT}" autoclean --fleet-home="{SPACED_HOME}"'),
+        ("forward slashes throughout (schtasks XML round-trip variance)",
+         f'"{SPACED_PY}" "{SPACED_SCRIPT}" autoclean --fleet-home "{SPACED_HOME}"'
+         .replace("\\", "/")),
+        ("uppercased throughout (schtasks XML round-trip variance)",
+         f'"{SPACED_PY}" "{SPACED_SCRIPT}" autoclean --fleet-home "{SPACED_HOME}"'.upper()),
+    ])
+    def test_accepted_quoting_variants_are_ours(self, spaced_home, label, command):
+        assert fleet._autoclean_task_is_ours(command) is True, label
+
+    @pytest.mark.parametrize("label,command", [
+        ("everything unquoted -- a space-bearing path is undecidable",
+         f'{SPACED_PY} {SPACED_SCRIPT} autoclean --fleet-home {SPACED_HOME}'),
+        ("sh-style single quotes -- no POSIX scheduler backend exists yet",
+         f"'{SPACED_PY}' '{SPACED_SCRIPT}' autoclean --fleet-home '{SPACED_HOME}'"),
+    ])
+    def test_undecidable_quoting_variants_refuse(self, spaced_home, label, command):
+        assert fleet._autoclean_task_is_ours(command) is False, label
+
+    def test_spaced_path_foreign_task_still_refused(self, spaced_home):
+        """The refusals above must not come from the predicate having simply
+        stopped working on spaced paths: a genuinely foreign task refuses too,
+        and the accepted variants above prove the ours-direction still fires."""
+        assert fleet._autoclean_task_is_ours(
+            f'"{SPACED_PY}" "C:\\Program Files\\Other\\bin\\fleet.py" autoclean '
+            f'--fleet-home "{SPACED_HOME}"') is False
+
+    def test_spaced_path_wrong_subcommand_still_refused(self, spaced_home):
+        assert fleet._autoclean_task_is_ours(
+            f'"{SPACED_PY}" "{SPACED_SCRIPT}" supervisor-beat '
+            f'--fleet-home "{SPACED_HOME}"') is False
+
+    @pytest.mark.parametrize("attack", [
+        # G2: the `=`-split used to MANUFACTURE a `--fleet-home` token out of
+        # another flag's value, so a command that never passed `--fleet-home`
+        # could be read as if it had. Inside the documented B7 envelope (the
+        # interpreter is unconstrained), but a predicate that can be FED a
+        # token it was never given is the shape B1 was -- and B1 reached
+        # production. The value of a `--flag=value` token is never a flag.
+        '--exclude=--fleet-home',
+        '--note=--fleet-home',
+        '-x=--fleet-home',
+    ])
+    def test_flag_value_can_never_manufacture_a_fleet_home_token(self, spaced_home, attack):
+        assert fleet._autoclean_task_is_ours(
+            f'"{SPACED_PY}" "{SPACED_SCRIPT}" autoclean '
+            f'{attack} "{SPACED_HOME}"') is False
+
+    def test_genuine_fleet_home_equals_form_still_ours(self, spaced_home):
+        """The G2 fix must not cost the `--fleet-home=VALUE` support B1 added."""
+        assert fleet._autoclean_task_is_ours(
+            f'"{SPACED_PY}" "{SPACED_SCRIPT}" autoclean '
+            f'--fleet-home="{SPACED_HOME}"') is True
+
+    def test_equals_form_tolerates_a_trailing_separator(self, spaced_home):
+        """The `=` value is re-normalized after its quotes come off, so B2's
+        trailing-separator rule reaches it too."""
+        assert fleet._autoclean_task_is_ours(
+            f'"{SPACED_PY}" "{SPACED_SCRIPT}" autoclean '
+            f'--fleet-home="{SPACED_HOME}\\"') is True
+
+    @pytest.mark.parametrize("suffix", ["\\", "/", "\\\\"])
+    def test_trailing_separator_on_fleet_home_still_ours(self, spaced_home, suffix):
+        """B2: `_normalize_task_token`'s `rstrip("/")` was unpinned -- injection
+        I14 deleted it and the suite stayed green. A directory argument that
+        round-trips through schtasks XML can pick up a trailing separator."""
+        assert fleet._autoclean_task_is_ours(
+            f'"{SPACED_PY}" "{SPACED_SCRIPT}" autoclean '
+            f'--fleet-home "{SPACED_HOME}{suffix}"') is True
 
     @pytest.mark.parametrize("bad", [0, 24, -3])
     def test_interval_validated(self, home, canonical_install, platform_stub, bad):
