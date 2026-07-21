@@ -10,6 +10,17 @@ consecutive waves and was stale again both times by the next commit.
 Precedent: `tests/test_terminal_surface.py`, which lints a doctrine rule the
 same way.
 
+RECEIPTS ARE VERIFIED AT THEIR PINNED COMMIT, NOT AT HEAD. The first version of
+this binding re-ran every receipt against the working tree, so when `me/ul` and
+`me/daemon` landed ahead of this branch and moved `bin/fleet.py` by ~620 lines,
+every line-anchored receipt went red and the merge was reverted. The receipts
+were correct; the tree was wrong. `verify_receipts.pinned_tree()` now
+materialises each block's `# at <sha>` and runs its commands there, so an
+unrelated commit cannot rot a receipt and re-pinning is a deliberate edit.
+`test_pinned_receipt_survives_head_drift` is the regression test for exactly
+that, and `test_working_tree_has_drifted_from_the_pin` keeps it from passing
+vacuously.
+
 Hermeticity: no network, no `~/.claude`, no live daemon, no `claude` binary.
 Receipts whose evidence lives outside the repo are marked `# volatile` in the
 document and are **not executed** here (`skip_volatile=True`). That marker is
@@ -28,6 +39,11 @@ import pathlib
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
+
+# A commit whose bin/fleet.py predates the me/ul + me/daemon merges, used by the
+# drift tests below. Any commit reachable from this branch works.
+PIN = "091d5fa"
+PINNED_LINE = "6849:def incarnation_path() -> Path:"
 HARNESS = REPO / "tools" / "verify_receipts.py"
 SPEC_DIR = REPO / "docs" / "specs"
 
@@ -48,7 +64,15 @@ UNENFORCED = {
         "literal grep output, and it greps for probe_liveness/pid_alive which the "
         "pivot deleted. Pre-existing; flagged to the manager, not fixed here."),
     "three-tier-command.md": "PROPOSAL - RESTRUCTURE REQUIRED; carries no receipts.",
-    "native-substrate.md": "G-row contract; prose + quoted CLI output, no pinned receipts.",
+    # me/daemon added a 2.1.216 daemon-lock row here carrying pasted evidence.
+    # It carries no `# at <sha>` pin, so it stays out of the enforced set -- and
+    # that is a real gap, not a clean exclusion: its evidence is a manager report
+    # of a machine-wide outage, exactly the kind of claim the harness exists to
+    # hold. Flagged to the manager; adopting the pin convention there is that
+    # spec owner's call, not this slice's.
+    "native-substrate.md": ("G-row contract; prose + quoted CLI output. The 2.1.216 "
+                            "row from me/daemon pastes evidence but carries no "
+                            "`# at <sha>` pin, so it cannot be resolved to a commit."),
     "autoclean.md": "predates the convention; no fenced receipts.",
     "terminal-surface.md": "predates the convention; no fenced receipts.",
     "providers.md": "predates the convention; no fenced receipts.",
@@ -194,15 +218,80 @@ def test_language_tagged_fence_is_a_boundary(vr):
     assert unclassified == []
 
 
+def test_working_tree_has_drifted_from_the_pin(vr):
+    """Guards the drift test below from passing vacuously.
+
+    If HEAD's bin/fleet.py ever equals the pinned one, `test_pinned_receipt_survives_head_drift`
+    proves nothing, because there would be no drift to survive.
+    """
+    rc, head = vr._git(REPO, "hash-object", "bin/fleet.py")
+    assert rc == 0
+    rc, pinned = vr._git(REPO, "rev-parse", f"{PIN}:bin/fleet.py")
+    assert rc == 0
+    if head.strip() == pinned.strip():
+        pytest.skip("bin/fleet.py at HEAD equals the pinned blob -- no drift to test")
+
+
+def test_pinned_receipt_survives_head_drift(vr):
+    """THE regression this whole mechanism exists for.
+
+    `me/ul` and `me/daemon` moved `bin/fleet.py` by ~620 lines. A receipt pinned
+    at a commit before that must still reproduce; the same receipt checked
+    against the working tree must not. Both halves are asserted, because only
+    the pair proves the pin is what is doing the work.
+    """
+    cmd = 'grep -n "def incarnation_path" bin/fleet.py'
+
+    pinned_doc = f"```\n# at {PIN}\n$ {cmd}\n{PINNED_LINE}\n```\n"
+    _n, failures, _w = vr.check(pinned_doc, REPO, quiet=True, strict=True)
+    assert not failures, (
+        "a receipt pinned at a commit rotted when HEAD moved -- pin resolution "
+        f"is not in effect: {[p for _r, p in failures]}")
+
+    live_doc = f"```\n# at {PIN}\n# live: deliberately checked against the working tree\n$ {cmd}\n{PINNED_LINE}\n```\n"
+    _n, failures, _w = vr.check(live_doc, REPO, quiet=True, strict=True)
+    assert failures, (
+        "the same receipt against the working tree should NOT reproduce after "
+        "HEAD drifted; if it does, this test is not exercising the drift")
+
+
+def test_moving_pin_is_an_error(vr):
+    """`# at HEAD` is not a pin. It reintroduces the rot with extra steps."""
+    doc = "```\n# at HEAD\n$ echo hi\nhi\n```\n"
+    _n, failures, _w = vr.check(doc, REPO, quiet=True, strict=True)
+    assert failures and "not a hex sha" in failures[0][1][0]
+
+
+def test_absent_pinned_commit_is_an_error_not_a_skip(vr):
+    """A sha the repo does not have cannot be verified -- that is a failure.
+
+    Shallow clones and history rewrites both produce this. Reporting green for
+    an unverifiable receipt is the exact failure the harness exists to prevent.
+    """
+    doc = "```\n# at deadbeefdeadbeef\n$ echo hi\nhi\n```\n"
+    _n, failures, _w = vr.check(doc, REPO, quiet=True, strict=True)
+    assert failures, "an absent pinned commit must fail, never skip"
+    assert "not present in this repo" in failures[0][1][0]
+
+
+def test_unpinned_receipt_fails_under_strict(vr):
+    """No pin and no `# live` means it would be checked against HEAD."""
+    doc = "```\n$ echo hi\nhi\n```\n"
+    _n, failures, _w = vr.check(doc, REPO, quiet=True, strict=True)
+    assert failures and "UNPINNED" in failures[0][1][0]
+
+
 def test_volatile_marker_is_honoured(vr):
     """`# volatile` must suppress a failure -- and only for the marked block."""
     doc = (
         "```\n"
+        f"# at {PIN}\n"
         "# volatile: drifts\n"
         "$ echo actual\n"
         "stale expected\n"
         "```\n"
         "```\n"
+        f"# at {PIN}\n"
         "$ echo actual\n"
         "stale expected\n"
         "```\n"
