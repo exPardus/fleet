@@ -7430,7 +7430,8 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
 
       * `NAME_RE` is `^[a-z0-9-]+$`, but an incarnation id is
         `inc-<YYYYMMDD>T<HHMMSS>Z-<hex4>` -- the T and Z are uppercase, so
-        the choke point's own name guard (@6631) refuses it outright;
+        the choke point's own name guard (the `NAME_RE`/`_SID_SHAPE_RE` check
+        opening `dispatch_bg`) refuses it outright;
       * `dispatch_bg` writes the prompt body to `task_file_path(name)`,
         while the successor's body is already written to
         `state/supervisor-handoff-<inc>.md` and journaled BY PATH in the

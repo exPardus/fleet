@@ -974,9 +974,16 @@ class TestDispatchPathsAreDocumented:
     correction."""
 
     REPO = Path(__file__).resolve().parents[1]
-    # matches the argv LIST LITERALS only -- every other `--bg` in fleet.py is
-    # prose inside a docstring or comment.
-    ARGV_BUILDER_RE = re.compile(r'^\s*argv = \[exe, "--bg"', re.M)
+    # B3: the guard SPEC §6.1 leans on used to be `r'^\s*argv = \[exe, "--bg"'`,
+    # which caught exactly one spelling. Injection I16 added a real third
+    # builder as `cmd = [claude_exe, "--bg", ...]` and walked straight past it,
+    # leaving the suite green -- a guard against this very defect recurring,
+    # evadable by one identifier rename. This matches `"--bg"` inside ANY
+    # same-line list literal, so `argv = [exe, ...]`, `cmd = [claude_exe, ...]`
+    # and `argv += ["--bg", ...]` are all caught.
+    ARGV_BUILDER_RE = re.compile(r'\[[^\]\n]*"--bg"')
+    # Every builder that legitimately exists, by the function that owns it.
+    KNOWN_BUILDERS = ("dispatch_bg", "cmd_sup_handoff_begin")
 
     def _source(self):
         return (self.REPO / "bin" / "fleet.py").read_text(encoding="utf-8")
@@ -988,10 +995,31 @@ class TestDispatchPathsAreDocumented:
         spec = self._spec()
         return spec.split("## 6. Dispatch contract", 1)[1].split("\n## 7.", 1)[0]
 
+    def _subsection_61(self):
+        """D3: §6.1 ONLY. `_section()` spans §6 through §7, and §6's own lead
+        sentence and argv block already contain `cmd_sup_handoff_begin` and
+        `--settings` -- so a test asserting those against `_section()` stayed
+        green when the reviewer deleted §6.1 wholesale, while SPEC §6.1 claimed
+        the test 'fails if this subsection stops naming the path'. A spec
+        sentence asserting protection that does not exist is worse than none."""
+        return self._section().split("### 6.1", 1)[1]
+
     def test_exactly_two_bg_argv_builders(self):
         """Not a fix pin -- a shape guard. A THIRD argv builder means the
         SPEC's enumeration is stale again and must be extended."""
         assert len(self.ARGV_BUILDER_RE.findall(self._source())) == 2
+
+    def test_both_bg_argv_builders_live_in_the_documented_functions(self):
+        """B3, the other half: two builders is only reassuring if they are the
+        two §6.1 names. A third builder that REPLACED one of these would keep
+        the count at 2."""
+        source = self._source()
+        owners = []
+        for m in self.ARGV_BUILDER_RE.finditer(source):
+            head = source[:m.start()]
+            defs = re.findall(r"^def (\w+)", head, re.M)
+            owners.append(defs[-1] if defs else None)
+        assert sorted(owners) == sorted(self.KNOWN_BUILDERS)
 
     def test_spec_lead_sentence_scopes_the_choke_point(self):
         """The pre-fix lead read 'Every native launch ... funnels through one
@@ -1004,6 +1032,35 @@ class TestDispatchPathsAreDocumented:
         assert "two" in lead and "argv builder" in lead
 
     def test_spec_names_the_successor_dispatch_path(self):
-        section = self._section()
-        assert "cmd_sup_handoff_begin" in section
-        assert "--settings" in section
+        """D3: asserted against §6.1 alone, and against the tokens that carry
+        the subsection's load -- so deleting or hollowing it goes RED."""
+        sub = self._subsection_61()
+        assert "cmd_sup_handoff_begin" in sub
+        for token in ("--settings", "_worker_env", "_require_instance_settings",
+                      "supervisor-handoff-", "NAME_RE"):
+            assert token in sub, token
+
+    def test_spec_61_records_the_mode_flag_decision(self):
+        """B4/D6: §6.1's parity enumeration claimed the path carries what the
+        choke point carries and listed two deliberate omissions, silently
+        omitting the third and only hazardous asymmetry."""
+        sub = self._subsection_61()
+        assert "mode" in sub.lower()
+        assert "SUCCESSOR_DEFAULT_MODE" in sub
+
+    def test_spec_61_keeps_the_unobserved_hedge(self):
+        """D7: the branch's own docstring and commit message hedge the daemon
+        env-propagation claim; the SPEC stated it flatly. The spec is the
+        artifact a future builder trusts -- it must be the more careful one."""
+        sub = self._subsection_61()
+        assert "UNVERIFIED" in sub or "UNOBSERVED" in sub
+
+    def test_spec_12_does_not_claim_the_successor_uses_dispatch_bg(self):
+        """D2: §12 still read 'old dispatches a claim-pending successor via
+        `dispatch_bg`' -- false, and false in the same document whose §6.1
+        exists to explain why it cannot be `dispatch_bg`. The branch corrected
+        §6 and left the other half of the same inaccuracy standing."""
+        spec = self._spec()
+        section12 = spec.split("## 12. Supervisor protocol", 1)[1].split("\n## 13.", 1)[0]
+        assert "via `dispatch_bg`" not in section12
+        assert "§6.1" in section12

@@ -842,6 +842,20 @@ class TestSchedulerInstall:
         assert "ownership by full identity" in section
         assert "--fleet-home" in section and "subcommand" in section
 
+    def test_autoclean_design_spec_states_full_identity_ownership(self):
+        """D1: `docs/specs/autoclean.md` is the design spec of record for this
+        subsystem (SPEC §11 links it as "Full design"), and it still specified
+        the PRE-FIX predicate -- "fleet-owned iff its command runs our exact
+        fleet.py path". A builder implementing the `--supervisor-beat` task
+        (the exact scenario this fix exists for) reads that file and rebuilds
+        the bug. SPEC.md alone was pinned, so the two could drift apart again
+        on the next wave; both are pinned now."""
+        design = (Path(__file__).resolve().parents[1] / "docs" / "specs"
+                  / "autoclean.md").read_text(encoding="utf-8")
+        assert "runs our exact fleet.py path" not in design
+        assert "_fleet_task_is_ours" in design
+        assert "--fleet-home" in design and "subcommand" in design
+
     def test_ownership_requires_an_explicit_fleet_home(self, home, canonical_install):
         """F2 embeds --fleet-home in every task fleet installs; a command
         without it was installed by something else (or by a pre-F2 fleet) and
