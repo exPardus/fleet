@@ -143,6 +143,11 @@ def stop_module():
     return _load_module(STOP, "stop_mailbox_under_test")
 
 
+@pytest.fixture(scope="module")
+def stop_outcome_module():
+    return _load_module(STOP_OUTCOME, "stop_outcome_under_test")
+
+
 # ---------------------------------------------------------------------
 # PostToolUse hook -- subprocess-level behavior
 # ---------------------------------------------------------------------
@@ -766,6 +771,63 @@ class TestKernel10TokenCeiling:
 # ---------------------------------------------------------------------
 # Stop-hook outcome writer (M-B T2)
 # ---------------------------------------------------------------------
+
+class TestStopOutcomeAtomicAppend:
+    """The hook carries its own copy of the atomic-append split because it
+    may not import fleet.py (standalone-hook doctrine). fleet.py's copy is
+    pinned by test_native.py's Win32/POSIX sibling pair; this hook copy was
+    NOT -- a reconcile fault-injection sweep deleted its posix short-write
+    guard and all 1376 tests stayed green on both platforms. These are the
+    hook-side siblings of those pins."""
+
+    @pytest.mark.skipif(os.name == "nt",
+                        reason="pins the hook's os.write partial-write check; "
+                               "the Win32 sibling below pins WriteFile's")
+    def test_posix_short_write_raises_not_silently_truncates(
+            self, stop_outcome_module, tmp_path, monkeypatch):
+        # A short os.write must raise, not tear the JSONL line --
+        # read_outcomes silently skips a torn record, so truncation here is
+        # invisible data loss, not a visible error.
+        payload = b'{"kind":"result"}\n'
+        real_write = os.write
+
+        def short_write(fd, data):
+            if data == payload:
+                real_write(fd, data[:1])
+                return 1
+            return real_write(fd, data)
+
+        monkeypatch.setattr(stop_outcome_module.os, "write", short_write)
+        with pytest.raises(OSError):
+            stop_outcome_module._atomic_append_bytes(
+                tmp_path / "out.jsonl", payload)
+
+    @pytest.mark.skipif(os.name != "nt",
+                        reason="POSIX sibling above pins os.write's check")
+    def test_win32_short_write_raises_not_silently_truncates(
+            self, stop_outcome_module, tmp_path, monkeypatch):
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+
+        def short_write_file(handle, data, size, written_ptr, overlapped):
+            written_ptr._obj.value = 1   # claims success, 1 byte written
+            return 1                     # nonzero == TRUE (ok)
+
+        monkeypatch.setattr(kernel32, "WriteFile", short_write_file)
+        with pytest.raises(OSError):
+            stop_outcome_module._atomic_append_bytes(
+                tmp_path / "out.jsonl", b'{"kind":"result"}\n')
+
+    def test_append_reaches_the_file_on_this_platform(
+            self, stop_outcome_module, tmp_path):
+        # Complementary positive pin: whichever branch this platform takes
+        # must actually append, so neither skipif above can hide a backend
+        # that raises unconditionally.
+        target = tmp_path / "out.jsonl"
+        stop_outcome_module._atomic_append_bytes(target, b"a\n")
+        stop_outcome_module._atomic_append_bytes(target, b"b\n")
+        assert target.read_bytes() == b"a\nb\n"
+
 
 class TestStopOutcome:
     def _payload(self, home, sid="sid-1", last_msg="All done.", transcript=None):

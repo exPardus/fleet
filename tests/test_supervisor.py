@@ -962,6 +962,33 @@ class TestHandoff:
         assert fleet.read_incarnation()["session_id"] == "sid-old"
 
 
+class TestSuccessorInterpreterIsPortable:
+    """The successor bootstrap must invoke the interpreter THIS incarnation
+    is running, never the `py -3.13` launcher -- `py` is Windows-only, so a
+    hardcoded one makes supervisor handoff unrunnable on macOS/Linux.
+
+    Unpinned until now: a reconcile fault-injection sweep reverted this to
+    `py -3.13` and the whole suite stayed green on both platforms, which is
+    exactly how a portability fix silently regresses."""
+
+    def test_body_uses_this_interpreter_not_the_windows_launcher(self, sup_home):
+        import sys
+        body = fleet._render_successor_task("inc-new", "inc-old")
+        assert Path(sys.executable).as_posix() in body
+        assert "py -3.13" not in body
+
+    def test_every_rendered_command_is_the_same_interpreter(self, sup_home):
+        # The body issues several commands (sup-boot, sup-status, ...); a
+        # partial fix that portably renders only the first one still leaves
+        # the successor wedged at step 3 on a non-Windows host.
+        import sys
+        body = fleet._render_successor_task("inc-new", "inc-old")
+        py = Path(sys.executable).as_posix()
+        invocations = re.findall(r'"([^"]*)"\s+\S*fleet\.py', body)
+        assert invocations, "no rendered fleet.py invocation found"
+        assert all(i == py for i in invocations), invocations
+
+
 class TestNag:
     def test_none_when_goals_absent(self, sup_home):
         fleet.goals_path().unlink()
