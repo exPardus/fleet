@@ -1,7 +1,10 @@
 """M-A supervisor identity tests (spec §4): state files, journal format,
 claim/seizure/handshake state machine, boot ritual, handoff, nag."""
 import json
+import os
+import re
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -19,6 +22,9 @@ def sup_home(tmp_path, monkeypatch):
     (tmp_path / "knowledge").mkdir()
     (tmp_path / "knowledge" / "INDEX.md").write_text("# Knowledge Index\n- entry one\n", encoding="utf-8")
     (tmp_path / "state").mkdir()
+    # Rendered worker-settings instance: the successor dispatch carries it as
+    # --settings and refuses when it is absent (SPEC §6, second dispatch path).
+    (tmp_path / "state" / "worker-settings.json").write_text('{"hooks": {}}', encoding="utf-8")
     return tmp_path
 
 
@@ -432,6 +438,66 @@ class TestHandoff:
         dispatch_kwargs = next(kw for kw, argv in zip(kwargs_seen, run.calls) if "--bg" in argv)
         assert dispatch_kwargs["cwd"] == str(sup_home)
 
+    # --- Defect A: the sanctioned second dispatch path (SPEC §6) -----------
+    #
+    # `cmd_sup_handoff_begin` does NOT go through `dispatch_bg` -- it cannot:
+    # an incarnation id (`inc-<8>T<6>Z-<4>`) carries uppercase T/Z and so fails
+    # `NAME_RE` at the choke point's own guard, and the successor's task file is
+    # already written to `state/supervisor-handoff-<inc>.md` and journaled by
+    # path, which `task_file_path(name)` would duplicate. The tests below pin
+    # the contract that makes the second path SANCTIONED rather than a bypass:
+    # it must carry the same hook wiring and the same process-identity hygiene
+    # the choke point carries.
+
+    def test_successor_dispatch_carries_instance_settings(self, sup_home):
+        """Defect A: a successor launched WITHOUT --settings gets none of
+        fleet's hooks (Stop outcome, Stop mailbox, PostToolUse mailbox,
+        PostCompact journal). All four degrade to sid-keyed writes when the
+        session has no registry record, so a successor genuinely benefits --
+        and its sid is exactly the handle sup-handoff-complete/-abort use."""
+        self._hold()
+        run = self._dispatch_then_roster()
+        assert self._begin(run) == 0
+        dispatch = next(c for c in run.calls if "--bg" in c)
+        assert "--settings" in dispatch
+        assert (dispatch[dispatch.index("--settings") + 1]
+                == fleet.instance_settings_path().as_posix())
+
+    def test_successor_dispatch_refused_without_rendered_settings(self, sup_home):
+        """Same doctrine as cmd_spawn's `_require_instance_settings`: claude
+        silently ignores a --settings path that does not exist, so a missing
+        instance would put the hookless successor back with no error anywhere.
+        Fail closed BEFORE the journal entry and the task file are written."""
+        self._hold()
+        fleet.instance_settings_path().unlink()
+        run = self._dispatch_then_roster()
+        with pytest.raises(fleet.FleetCliError, match="worker settings instance missing"):
+            self._begin(run)
+        assert not any("--bg" in c for c in run.calls)
+        assert [e["kind"] for e in fleet.supervisor_journal_entries()] == []
+        assert list((sup_home / "state").glob("supervisor-handoff-*.md")) == []
+
+    def test_successor_dispatch_uses_worker_env(self, sup_home, monkeypatch):
+        """§5.1 provenance: without `env=_worker_env(name)` the successor
+        inherits the OLD supervisor's CLAUDE_CODE_SESSION_ID. `cmd_sup_boot`
+        reads exactly that variable (@caller_sid) and writes it into the
+        HANDSHAKE, so an inherited value makes the successor hand back the old
+        holder's sid -- and `sup-handoff-complete --expect-sid <successor_sid>`
+        then refuses on a mismatch, wedging the handoff. Same reason
+        `dispatch_bg` strips it at every worker launch."""
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-old")
+        self._hold()
+        kwargs_seen = []
+        run = self._dispatch_then_roster()
+        def wrapped(argv, **kw):
+            kwargs_seen.append(kw)
+            return run(argv, **kw)
+        assert self._begin(wrapped) == 0
+        env = next(kw for kw, argv in zip(kwargs_seen, run.calls) if "--bg" in argv)["env"]
+        assert "CLAUDE_CODE_SESSION_ID" not in env
+        assert env["FLEET_WORKER"].startswith("sup|inc-")
+        assert env["PATH"] == os.environ["PATH"]  # inherited env, not a bare one
+
     def test_successor_join_uses_short_id_prefix(self, sup_home, capsys):
         """ai-title collision hazard: TWO fresh roster entries share the
         successor's display name; only the sid whose prefix matches the
@@ -826,3 +892,46 @@ class TestSessionStartLine:
         monkeypatch.setattr(mod, "fleet", fleet)   # hook resolves its own fleet import
         ctx = mod._build_context()
         assert "SUPERVISOR:" in ctx
+
+
+class TestDispatchPathsAreDocumented:
+    """Defect A regression: SPEC §6 claimed "one choke point for every --bg
+    launch" while `bin/fleet.py` has always had TWO argv builders. The claim is
+    now scoped to worker launches and the second path is named; these tests go
+    RED if either the code grows a third path or the SPEC text drops the
+    correction."""
+
+    REPO = Path(__file__).resolve().parents[1]
+    # matches the argv LIST LITERALS only -- every other `--bg` in fleet.py is
+    # prose inside a docstring or comment.
+    ARGV_BUILDER_RE = re.compile(r'^\s*argv = \[exe, "--bg"', re.M)
+
+    def _source(self):
+        return (self.REPO / "bin" / "fleet.py").read_text(encoding="utf-8")
+
+    def _spec(self):
+        return (self.REPO / "docs" / "SPEC.md").read_text(encoding="utf-8")
+
+    def _section(self):
+        spec = self._spec()
+        return spec.split("## 6. Dispatch contract", 1)[1].split("\n## 7.", 1)[0]
+
+    def test_exactly_two_bg_argv_builders(self):
+        """Not a fix pin -- a shape guard. A THIRD argv builder means the
+        SPEC's enumeration is stale again and must be extended."""
+        assert len(self.ARGV_BUILDER_RE.findall(self._source())) == 2
+
+    def test_spec_lead_sentence_scopes_the_choke_point(self):
+        """The pre-fix lead read 'Every native launch ... funnels through one
+        choke point', which is false: the successor never did. It must now
+        scope to WORKER launches and say how many builders exist."""
+        # drop the remainder of the "## 6. Dispatch contract ..." heading line
+        body = self._section().split("\n", 1)[1]
+        lead = next(l for l in body.splitlines() if l.strip()).lower()
+        assert "worker" in lead
+        assert "two" in lead and "argv builder" in lead
+
+    def test_spec_names_the_successor_dispatch_path(self):
+        section = self._section()
+        assert "cmd_sup_handoff_begin" in section
+        assert "--settings" in section
