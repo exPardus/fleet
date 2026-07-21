@@ -651,7 +651,16 @@ def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
         # --- M-B native-substrate fields (spec §5; None/[] on legacy records) ---
         "dispatch_kind": dispatch_kind,      # "bg" = daemon-hosted; None = pre-pivot Popen
         "category": category,                # agents-menu category (spec §5.1.3)
-        "native_short_id": None,             # short id from --bg stdout (G6 fallback)
+        # n2 (review MD-CONTRACT-REVIEW-2026-07-17.md): TWO provenances, and
+        # the difference is load-bearing. Normally the CLI's OWN short id, read
+        # from `--bg` stdout (G6 fallback) -- that is the capture the
+        # `gone`->success inference rests on. But on the fast-completion path
+        # (grep `fast_sid.partition`, 2 of the 6 write sites) there is no
+        # stdout to read and it is DERIVED from the sid by string-split, which
+        # is only as good as the CLI's id format. See `_native_job_ref` and
+        # docs/specs/native-substrate.md (G10 row, "the `gone`->success
+        # inference has a precondition") before trusting this field as a ref.
+        "native_short_id": None,
         "last_dispatch_at": None,            # stamped at every dispatch/steer/resume;
                                              # anchor for the fresh-outcome predicate
         "retired_sids": [],                  # prior sids retired by fork-steer/respawn
@@ -2341,6 +2350,10 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
                 rec = data["workers"].get(args.name)
                 if rec is not None and rec.get("session_id") is None:
                     rec["session_id"] = fast_sid
+                    # n2: DERIVED, not captured -- the dispatch raised before
+                    # any `--bg` stdout could be read, so this is a string
+                    # split of the sid, not the CLI's own id. See the
+                    # `native_short_id` schema comment.
                     rec["native_short_id"] = fast_sid.partition("-")[0] or fast_sid[:8]
                     rec["status"] = "idle"
                     rec["turns"] = 1
@@ -3899,6 +3912,9 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
                 rec = data["workers"].get(name)
                 if rec is not None and rec.get("session_id") is None:
                     rec["session_id"] = fast_sid
+                    # n2: DERIVED, not captured -- same as cmd_spawn's
+                    # fast-completion block. See the `native_short_id` schema
+                    # comment.
                     rec["native_short_id"] = fast_sid.partition("-")[0] or fast_sid[:8]
                     rec["status"] = "idle"
                     rec["turns"] = 1
@@ -5817,8 +5833,14 @@ def _autoclean_deferral_streak() -> tuple:
     `husks_deferred` since the M1 fix, so the streak is derived from there.
 
     Counts backwards from the newest event and stops at the first pass that
-    deferred nothing -- a single successful sweep means the daemon was reachable
-    and the tier is not starving, regardless of what came before. Dry-run passes
+    deferred NOTHING, regardless of what came before. n3 (review
+    MD-CONTRACT-REVIEW-2026-07-17.md) corrects the justification this line used
+    to carry ("a single successful sweep means the daemon was reachable"): the
+    reset rule is "deferred nothing", which ALSO fires on a nothing-to-do pass
+    -- a pass that found no husks proves nothing about reachability. The rule is
+    still the right one, for a weaker reason: what this streak measures is
+    UNRECLAIMED WORK PILING UP, and a pass with nothing left to defer is not
+    piling any up. Dry-run passes
     are skipped entirely: they never rm anything, so they neither prove nor
     disprove reachability. Any read/parse failure degrades to (0, 0, None) --
     doctor is note-only and must never fail on unreadable history."""
@@ -5882,9 +5904,15 @@ def _doctor_check_autoclean(run=subprocess.run):
     old note even conceded it ("if this count persists across runs") while
     reading from a stamp that holds exactly one run and cannot show persistence.
     So: read the STREAK from `events.jsonl` (append-only history, which
-    `husks_deferred` now rides) and note only past
-    `AUTOCLEAN_DEFERRAL_STREAK_THRESHOLD` consecutive starved sweeps. That is
-    the sentence that distinguishes starvation from Tuesday."""
+    `husks_deferred` now rides) and note only AT or past
+    `AUTOCLEAN_DEFERRAL_STREAK_THRESHOLD` consecutive starved sweeps (n4: the
+    code is `streak >= THRESHOLD`, so the note fires ON the 3rd, not after it).
+    That is the sentence that distinguishes starvation from Tuesday.
+
+    n3: the streak RESETS on any pass that deferred nothing -- which includes a
+    nothing-to-do pass, and therefore is not by itself proof that the daemon was
+    reachable. See `_autoclean_deferral_streak` for why that is still the right
+    rule."""
     stamp_note, stale, run_errors = "no run recorded yet", False, []
     husks_deferred = 0
     try:
