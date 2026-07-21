@@ -690,20 +690,28 @@ class TestCollaboratorInstall:
                         reason="requires sh on PATH (roll-up item 11)")
     def test_fleet_python_still_accepts_a_multi_word_command(self, tmp_path):
         """The control for the fix above: the quoted branch must not cost the
-        word-split shape the unquoted expansion existed for. `-x` is the
-        discriminator -- `py -3.13` is not an executable file, so it keeps
-        word-splitting."""
-        if shutil.which("py") is None:
-            pytest.skip("no `py` launcher (Windows-only) to form a "
-                        "multi-word override with")
+        word-split shape the unquoted expansion existed for (`py -3.13` is
+        the motivating case). `-x` is the discriminator -- a multi-word
+        string is not an executable file, so it keeps word-splitting.
+
+        Built from the running interpreter plus `-X utf8` rather than from
+        `py -3.13`: that launcher is Windows-only and would make this case
+        SKIP on Linux, which is precisely the kind of one-sided coverage this
+        campaign exists to remove. Copied into a space-FREE tmp dir so the
+        override is unambiguously multi-word and nothing else."""
+        plain = tmp_path / "nospace"
+        plain.mkdir()
+        interpreter = plain / Path(sys.executable).name
+        shutil.copy2(sys.executable, interpreter)
+        assert " " not in str(interpreter)
+
         script = tmp_path / "say.py"
         script.write_text("print('ran')", encoding="utf-8")
-        major, minor = fleet.MIN_PYTHON_VERSION
+        override = f"{interpreter} -X utf8"
         out = subprocess.run(
             ["sh", str(REPO / "bin" / "hooks" / "run_py.sh"), str(script)],
             capture_output=True, text=True,
-            env={**__import__("os").environ,
-                 "FLEET_PYTHON": f"py -{major}.{minor}"})
+            env={**__import__("os").environ, "FLEET_PYTHON": override})
         assert out.returncode == 0, out.stderr
         assert out.stdout.strip() == "ran", out.stderr
 
