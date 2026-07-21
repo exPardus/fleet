@@ -37,6 +37,80 @@ def _parse(ctime_iso):
     return datetime.strptime(ctime_iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 
 
+def _tzdata_available() -> bool:
+    """ME-UL-REVIEW-2026-07-21.md M2: `zoneinfo` is stdlib but its DATA is
+    not on Windows (no system tz database -- see D1/`_doctor_check_tzdata`);
+    on this host it resolves only by coincidence of an unrelated project's
+    `tzdata` pip package. Tests that need a REAL named-zone resolution
+    (as opposed to testing the null-park failure path, which mocks
+    `zoneinfo.ZoneInfo` and needs no real data) skip rather than fail on a
+    box without it -- a clean box is a valid environment, not a broken one.
+
+    ND-4 (re-review): probes all three zones the gated test classes
+    actually need (`America/New_York` for the DST tests, `Asia/Qyzylorda`
+    for the local-format/hour-validation tests, `UTC` for the
+    single-segment-zone tests) rather than just the first -- on a full
+    tzdb these are equivalent, but a partial one (e.g. a slim container
+    image shipping a zone subset) could resolve one and not another, and
+    probing only one would then skip too little (a test that needs a
+    missing zone still runs and fails) or too much (a test whose zone is
+    actually present gets skipped anyway)."""
+    import zoneinfo
+    try:
+        for zone in ("America/New_York", "Asia/Qyzylorda", "UTC"):
+            zoneinfo.ZoneInfo(zone)
+        return True
+    except Exception:
+        return False
+
+
+_TZDATA_SKIP_REASON = "requires real tz data (tzdata pip package or a system tz database)"
+
+
+class TestTzdataGuardCanary:
+    """ND-1 (ME-UL-REVIEW-2026-07-21.md, re-review, MAJOR): `_tzdata_available()`
+    gates 17+ tests -- every exact-instant local-format/DST/single-segment-zone
+    assertion in this file. If it ever silently returns `False` on a box that
+    actually HAS tz data, those tests vanish via `skipif` and the suite still
+    reads green (`1132 passed, 23 skipped`, no FAILED line) -- exactly the
+    "silently stops running" hazard the manager warned about, minted by the
+    manager's own M2 remedy. Deliberately NOT `skipif`-guarded itself.
+
+    ND-6 (re-review, nit): the first version of this canary cross-checked
+    `_tzdata_available()` against `_doctor_check_tzdata()` by equality. After
+    ND-4 widened the guard to probe THREE zones while the doctor check still
+    probes only `Asia/Qyzylorda`, an equality check diverges on a partial
+    tzdb that has Qyzylorda but is missing `America/New_York` or `UTC` --
+    the guard correctly returns `False`, the doctor check (only checking
+    Qyzylorda) returns `True`, and the canary would FAIL on that legitimate
+    (if unlikely) environment -- reintroducing the M2 failure mode one call
+    site away. `test_guard_agrees_with_independent_recomputation` fixes this
+    by comparing the guard against its own logic recomputed independently,
+    over the SAME zone set, rather than against a probe of a different set.
+    `test_doctor_check_agrees_when_all_needed_zones_resolve` keeps the
+    doctor cross-check but as a one-way implication (guard True implies
+    doctor True), which holds regardless of tzdb partiality since Qyzylorda
+    is one of the guard's three zones."""
+
+    def test_guard_agrees_with_independent_recomputation(self):
+        import zoneinfo
+
+        def resolves(zone):
+            try:
+                zoneinfo.ZoneInfo(zone)
+                return True
+            except Exception:
+                return False
+
+        assert _tzdata_available() == all(
+            resolves(z) for z in ("America/New_York", "Asia/Qyzylorda", "UTC"))
+
+    def test_doctor_check_agrees_when_all_needed_zones_resolve(self):
+        _name, _ok, msg = fleet._doctor_check_tzdata()
+        if _tzdata_available():
+            assert "resolves named zones" in msg
+
+
 ALIVE_CTIME = "2026-07-07T12:00:00Z"
 
 
@@ -170,6 +244,38 @@ class TestDoctorClaudeVersion:
             raise OSError("boom")
         name, ok, msg = fleet._doctor_check_claude_version(which=lambda n: "claude.cmd", run=run)
         assert ok is False
+
+
+class TestDoctorTzdata:
+    """D1 / §5.1 follow-up (MD-ULPARSER-REVIEW-2026-07-17.md): tz-data
+    availability was invisible -- a `fleet doctor` check now surfaces it."""
+
+    def test_zoneinfo_resolves_passes_plain(self, isolated_home, monkeypatch):
+        # ME-UL-REVIEW-2026-07-21.md M2: this must NOT depend on the real
+        # host actually having tz data -- that's a coincidence (D1), and a
+        # test asserting "tz data is present" inverts on exactly the clean
+        # box this check exists to detect (was RED under a tzdata import
+        # block; see the review's §4 repro). Stub the seam deterministically
+        # instead, mirroring the existing failure-branch test below.
+        import zoneinfo
+
+        monkeypatch.setattr(zoneinfo, "ZoneInfo", lambda name: object())
+        name, ok, msg = fleet._doctor_check_tzdata()
+        assert name == "tzdata"
+        assert ok is True
+        assert "resolves named zones" in msg
+
+    def test_zoneinfo_lookup_failure_is_pass_note_not_fail(self, isolated_home, monkeypatch):
+        import zoneinfo
+
+        def boom(name):
+            raise zoneinfo.ZoneInfoNotFoundError(name)
+
+        monkeypatch.setattr(zoneinfo, "ZoneInfo", boom)
+        name, ok, msg = fleet._doctor_check_tzdata()
+        assert name == "tzdata"
+        assert ok is True  # PASS-note, never FAIL -- absent tz data narrows, doesn't break
+        assert "pip install tzdata" in msg
 
 
 class TestDoctorInstanceSettings:
@@ -563,14 +669,15 @@ class TestSettingSourcesPassthrough:
 # knowledge/lessons.md:607.
 # ---------------------------------------------------------------------------
 
+@pytest.mark.skipif(not _tzdata_available(), reason=_TZDATA_SKIP_REASON)
 class TestParseLimitSignalLocalFormat:
     def test_iso_wins_verbatim_over_local_text(self):
         text = "resets 2026-07-18T04:40:00Z, but also resets 4:40am (Asia/Qyzylorda)"
-        reset_at, kind = fleet._parse_limit_signal(text)
+        reset_at, kind = fleet._parse_limit_signal(text, now=None)
         assert reset_at == "2026-07-18T04:40:00Z"
 
     def test_no_signal_returns_none_none(self):
-        assert fleet._parse_limit_signal("nothing to see here") == (None, None)
+        assert fleet._parse_limit_signal("nothing to see here", now=None) == (None, None)
 
     def test_unknown_timezone_returns_none_horizon(self):
         now = datetime(2026, 7, 17, 10, 0, 0, tzinfo=timezone.utc)
@@ -642,9 +749,158 @@ class TestParseLimitSignalLocalFormat:
         # local-format branch -- it stays unresolved (None), a
         # conservative null-horizon park, never a possibly-wrong guess.
         reset_at, kind = fleet._parse_limit_signal(
-            "session limit -- resets 4:40am (Asia/Qyzylorda)")
+            "session limit -- resets 4:40am (Asia/Qyzylorda)", now=None)
         assert reset_at is None
         assert kind == "session_5h"  # kind detection is independent of the anchor
+
+
+# ---------------------------------------------------------------------------
+# D2 (MD-ULPARSER-REVIEW-2026-07-17.md): 1..12 hour validation on the
+# 12-hour-clock local-format branch. Boundary on both sides of the valid
+# range -- 12am/12pm/1am are legitimate 12-hour-clock hours and must still
+# resolve; 13am/0pm are outside 1..12 and must null-park rather than
+# silently wrapping (the pre-fix bug: "13am" parsed as 1pm).
+# ---------------------------------------------------------------------------
+
+class TestParseLimitSignalHourValidation:
+    _NOW = datetime(2026, 7, 16, 1, 0, 0, tzinfo=timezone.utc)  # 06:00 Qyzylorda
+
+    @pytest.mark.parametrize(
+        "hour_text,expected",
+        [
+            ("12am", "2026-07-16T19:00:00Z"),  # 00:00 local -> tomorrow (past)
+            ("12pm", "2026-07-16T07:00:00Z"),   # 12:00 local -> today (ahead)
+            ("1am", "2026-07-16T20:00:00Z"),    # 01:00 local -> tomorrow (past)
+        ],
+    )
+    @pytest.mark.skipif(not _tzdata_available(), reason=_TZDATA_SKIP_REASON)
+    def test_valid_boundary_hours_still_resolve(self, hour_text, expected):
+        reset_at, _ = fleet._parse_limit_signal(
+            f"session limit -- resets {hour_text} (Asia/Qyzylorda)", now=self._NOW)
+        assert reset_at == expected
+
+    @pytest.mark.parametrize("hour_text", ["13am", "0pm"])
+    def test_out_of_range_hours_null_park_not_wrong_horizon(self, hour_text):
+        # Pre-fix: "13am" silently computed hour24=13 (only hour==12 is
+        # special-cased in the am branch) -> a well-formed but WRONG
+        # horizon (1pm). Post-fix: out-of-range hours take the null-park
+        # branch, same as an unresolvable tz.
+        reset_at, kind = fleet._parse_limit_signal(
+            f"session limit -- resets {hour_text} (Asia/Qyzylorda)", now=self._NOW)
+        assert reset_at is None
+        assert kind == "session_5h"  # kind detection is independent of the hour parse
+
+
+# ---------------------------------------------------------------------------
+# ND-5 (ME-UL-REVIEW-2026-07-21.md FINAL GATE, escalated): the tz-name
+# regex's single-segment branch is a CLOSED fixed-UTC allowlist, not an
+# open group validated only by `ZoneInfo`. Three straight rounds (D4 ->
+# DQ1 -> ND-2, see the comment at `_LIMIT_RESET_LOCAL_RE`) each argued a
+# safety direction for the open set and each argument was wrong in turn --
+# the set mixes geographic aliases (exact), never-DST fixed-offset keys
+# (late-drifting against a DST-observing zone at the same standard
+# offset), and DST-observing rule-only zones (early-drifting against a
+# zone permanently at that standard offset). No wording over that mix is
+# true; the allowlist sidesteps the whole class by admitting only keys
+# that mean UTC and nothing else, in every season.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(not _tzdata_available(), reason=_TZDATA_SKIP_REASON)
+class TestParseLimitSignalSingleSegmentZone:
+    _NOW = datetime(2026, 7, 16, 1, 0, 0, tzinfo=timezone.utc)
+
+    @pytest.mark.parametrize(
+        "zone", ["UTC", "UCT", "Universal", "Zulu", "Greenwich", "GMT0", "GMT+0", "GMT-0"])
+    def test_closed_set_member_resolves(self, zone):
+        reset_at, _ = fleet._parse_limit_signal(
+            f"session limit -- resets 4:40am ({zone})", now=self._NOW)
+        assert reset_at == "2026-07-16T04:40:00Z"
+
+    @pytest.mark.parametrize("zone", ["EST", "PST", "CET", "Singapore", "NotAZone"])
+    def test_non_allowlisted_single_segment_null_parks(self, zone):
+        # ND-5's load-bearing case: "EST" is the exact key the now-
+        # superseded ND-2 fix claimed was safely "late-only" (F4 proved it
+        # resolves EARLY against Pacific/Easter -- no one-directional
+        # wording over the open set was ever true). Under the prior open
+        # widening "(EST)" resolved to a real-but-wrong horizon
+        # (2026-07-16T09:40:00Z, 1h off from America/New_York's
+        # 08:40:00Z). It now null-parks -- never a wrong instant -- because
+        # the regex itself rejects it, without ever reaching `ZoneInfo`.
+        reset_at, kind = fleet._parse_limit_signal(
+            f"session limit -- resets 4:40am ({zone})", now=self._NOW)
+        assert reset_at is None
+        assert kind == "session_5h"
+
+
+# ---------------------------------------------------------------------------
+# ND-3 (ME-UL-REVIEW-2026-07-21.md re-review, MINOR): DQ1's widening was
+# pinned only in two coarse directions (a real single-segment name
+# resolves, a garbage word null-parks) -- nothing pinned that the
+# widened `_LIMIT_RESET_LOCAL_RE` char class itself rejects
+# whitespace/punctuation-bearing bracketed text, as opposed to that text
+# reaching `ZoneInfo` and being rejected there. Asserts against the regex
+# directly (no `ZoneInfo` call, no tzdata needed) so a future widening that
+# walks through the char class boundary is caught here rather than relying
+# on `ZoneInfo` to keep saving it.
+# ---------------------------------------------------------------------------
+
+class TestLimitResetLocalRegexBoundary:
+    @pytest.mark.parametrize("brack", ["(local time)", "(see below)", "(4:40)", "( UTC)", "(UTC )"])
+    def test_regex_itself_rejects_non_zone_shapes(self, brack):
+        assert fleet._LIMIT_RESET_LOCAL_RE.search(f"resets 4:40am {brack}") is None
+
+
+# ---------------------------------------------------------------------------
+# §5.1 (MD-ULPARSER-REVIEW-2026-07-17.md): the wall-clock default on `now`
+# is vestigial -- every real caller already passes it explicitly. Made
+# required (keyword-only, no default) so a future direct caller that
+# forgets `now=` gets a structural TypeError instead of silently
+# resolving against the wall clock (the exact shape C1 took).
+# ---------------------------------------------------------------------------
+
+class TestNowParameterRequired:
+    def test_parse_limit_signal_requires_now_kwarg(self):
+        # m5 (ME-UL-REVIEW-2026-07-21.md): match= so this stays pinned to
+        # the missing-keyword shape specifically, not any TypeError.
+        with pytest.raises(TypeError, match=r"missing 1 required keyword-only argument: 'now'"):
+            fleet._parse_limit_signal("resets 4:40am (Asia/Qyzylorda)")
+
+    def test_next_local_reset_utc_requires_now_kwarg(self):
+        with pytest.raises(TypeError, match=r"missing 1 required keyword-only argument: 'now'"):
+            fleet._next_local_reset_utc(4, 40, "Asia/Qyzylorda")
+
+
+# ---------------------------------------------------------------------------
+# M1 (ME-UL-REVIEW-2026-07-21.md): DST fold/gap semantics for
+# _next_local_reset_utc. Prior docstring claimed both directions resolved
+# late, never early -- false for the ambiguous fall-back case (resolved up
+# to 1h EARLY). No DST test existed anywhere in the suite before this. Both
+# cases need real America/New_York tz data -- skip (not fail) on a box
+# without it, same doctrine as the local-format tests above (M2).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(not _tzdata_available(), reason=_TZDATA_SKIP_REASON)
+class TestNextLocalResetUtcDst:
+    def test_ambiguous_fallback_resolves_late_not_early(self):
+        # 2025-11-02 01:30 America/New_York occurs twice (EDT then EST) as
+        # the clocks fall back. Anchor a day earlier -- far from the fold,
+        # so its own fold=0 carries no information -- and require rolling
+        # into the ambiguous day. Pre-fix this returned the FIRST (EDT,
+        # earlier) occurrence, 2025-11-02T05:30:00Z -- 1h early.
+        now = datetime(2025, 11, 1, 6, 0, 0, tzinfo=timezone.utc)
+        reset_at, _ = fleet._parse_limit_signal(
+            "session limit -- resets 1:30am (America/New_York)", now=now)
+        assert reset_at == "2025-11-02T06:30:00Z"  # second (EST) occurrence -- late
+
+    def test_gap_still_resolves_late_unaffected_by_fold_fix(self):
+        # 2025-03-09 02:30 America/New_York does not exist (spring-forward
+        # skips 2am-3am). This direction was already correct (pre-transition
+        # offset, the later reading) and must stay that way -- the fold fix
+        # must not trade a fold-case bug for a new gap-case one.
+        now = datetime(2025, 3, 9, 1, 0, 0, tzinfo=timezone.utc)
+        reset_at, _ = fleet._parse_limit_signal(
+            "session limit -- resets 2:30am (America/New_York)", now=now)
+        assert reset_at == "2025-03-09T07:30:00Z"
 
 
 # ---------------------------------------------------------------------------
