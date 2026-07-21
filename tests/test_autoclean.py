@@ -802,12 +802,34 @@ class TestSchedulerInstall:
             fleet._install_autoclean_task(None, force=False)
         assert platform_stub["installs"] == []
 
-    def test_own_task_recognized_slash_and_case_insensitive(self, home,
-                                                            canonical_install,
-                                                            platform_stub):
+    def test_round_trip_variance_recognition_follows_the_filesystem(
+            self, home, canonical_install, platform_stub):
+        """Was `test_own_task_recognized_slash_and_case_insensitive`, an
+        unconditional accept. posix-port campaign, Class 2: on Windows a
+        slash- and case-varied round-trip of fleet's own command still names
+        the same file, so the reinstall proceeds -- that half is unchanged.
+        On a case-sensitive filesystem the SAME string names a different
+        file, and accepting it would be the false MATCH documented in
+        `_normalize_task_token`, so it must be refused. This is the whole
+        install path, end to end, on both hosts -- the refusal is the safe
+        direction and `--force` recovers it."""
         cmd = fleet._autoclean_task_command()
         platform_stub["query"] = cmd.replace("\\", "/").upper()
-        fleet._install_autoclean_task(None, force=False)
+        if fleet.PLATFORM.task_paths_are_case_insensitive:
+            fleet._install_autoclean_task(None, force=False)
+            assert len(platform_stub["installs"]) == 1
+        else:
+            with pytest.raises(fleet.FleetCliError, match="fleet-owned"):
+                fleet._install_autoclean_task(None, force=False)
+            assert platform_stub["installs"] == []
+
+    def test_force_recovers_a_variance_refusal(self, home, canonical_install,
+                                               platform_stub):
+        """The stated recovery for the refusal above must actually work --
+        otherwise "costs one --force" is a claim, not a remedy."""
+        cmd = fleet._autoclean_task_command()
+        platform_stub["query"] = cmd.replace("\\", "/").upper()
+        fleet._install_autoclean_task(None, force=True)
         assert len(platform_stub["installs"]) == 1
 
     # --- F4 ownership is FULL identity, not just the interpreter target ---
