@@ -1102,46 +1102,47 @@ _LIMIT_RESET_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 # hour-only form is the production gap this fallback closes). Only
 # consulted when the ISO regex above finds nothing (ISO keeps precedence).
 #
-# D4 + m1 + DQ1 (MD-ULPARSER-REVIEW-2026-07-17.md D4;
-# ME-UL-REVIEW-2026-07-21.md m1/DQ1): the tz group used to require >=1 `/`,
-# so a single-segment zone name -- "(UTC)", "(Singapore)", "(EST5EDT)" --
-# could never match. The ORIGINAL justification for that gap (m1: "these
-# would need a curated alias table, or are ambiguous abbreviations") is
-# FALSE -- all three are canonical IANA keys that `zoneinfo.ZoneInfo`
-# resolves directly, verified: `ZoneInfo("UTC")`, `ZoneInfo("Singapore")`,
-# `ZoneInfo("EST5EDT")` all succeed, no alias table involved.
+# D4 + m1 + DQ1 + ND-2 + ND-5 (MD-ULPARSER-REVIEW-2026-07-17.md D4;
+# ME-UL-REVIEW-2026-07-21.md m1/DQ1/ND-2/ND-5): three straight attempts to
+# characterise an OPEN single-segment tz group as safe were each wrong in
+# turn -- D4's original gap comment claimed these names need a curated
+# alias table (false: they're canonical IANA keys); the DQ1 ruling that
+# widening "can never convert a null-park into a wrong horizon" (false:
+# `EST` in July resolves 1h off from `America/New_York`); and the ND-2
+# fix's own replacement claim that the mismatch "always resolves LATE,
+# never early" (also false -- see below). Every round narrowed the claim
+# and every round still overreached, because "single-segment tzdb key" is
+# not a category with one safety direction: it is a mix of geographic
+# aliases (exact), legacy fixed-offset keys (late-drifting relative to a
+# DST-observing zone at the same standard offset, e.g. `EST` vs
+# `America/New_York`), and rule-only zones that themselves observe DST
+# (early-drifting relative to a zone permanently at that standard offset,
+# e.g. `CET` resolves 1h EARLY vs `Africa/Algiers`, which is CET-standard
+# year-round with no DST -- and `EST` itself flips to early against
+# `Pacific/Easter`, the same key ND-2's fix called "known late"). No
+# wording over that mixed set can be made true.
 #
-# DQ1: the tz group is now widened to admit a single-segment name too.
-# This is safe for the same reason the multi-segment path already is:
-# `zoneinfo.ZoneInfo` -- not this regex -- is the validator. Any name this
-# wider group admits, real or garbage ("(soon)", "(NotAZone)"), is handed
-# to `ZoneInfo` inside `_next_local_reset_utc`; a name it resolves yields a
-# horizon, a name it rejects raises into the existing blanket
-# `except Exception: return None` and null-parks, exactly as an unresolvable
-# multi-segment name already did.
-#
-# ND-2 (ME-UL-REVIEW-2026-07-21.md re-review): "resolves -> correct" is
-# NOT quite right -- a THIRD case exists: a name `ZoneInfo` resolves to
-# something other than what the message meant. Widening admits 45
-# single-segment IANA keys, and a handful (`EST`, `MST`, `HST`, `GMT`,
-# `GMT0`, `Factory`, ...) are legacy FIXED-OFFSET zones that never observe
-# DST -- `EST` is a permanent UTC-5 zone, not "US Eastern time" -- so e.g.
-# `"resets 4:40am (EST)"` in July resolves to a horizon 1h off from what
-# `America/New_York` would give (verified below). Widening CAN convert a
-# null-park into a horizon that is wrong by the DST delta.
-#
-# The bar that actually matters survives: every such mismatch is a
-# never-DST reading of what would be a daylight-time hour, which always
-# resolves LATE, never early (verified across all 45 newly-admitted
-# single-segment keys, both DST phases). So the standing bias (a late
-# resume beats an early one) is intact -- widening can convert a null-park
-# into a correct horizon, or into one wrong by up to the DST delta, but
-# never into an EARLY one, which is the bar D4 actually set. The prior gap
-# was YAGNI (no production message had been observed in this shape), not a
-# safety measure.
+# ND-5 restructures instead of re-arguing: the single-segment branch is
+# now a CLOSED allowlist of fixed-UTC aliases only --
+# `{UTC, UCT, Universal, Zulu, Greenwich, GMT0, GMT+0, GMT-0}`. Every
+# member means UTC and only UTC, in every season -- no DST, no standard-
+# offset ambiguity, so no colloquial-vs-tzdb divergence is possible in
+# EITHER direction. This is a structural guarantee (closed enumeration),
+# not an argued one (open set + validator), which is what the prior three
+# rounds each mistook for equivalent and weren't. It keeps the whole of
+# what D4 asked for -- `"a bare (UTC) is plausible enough in a message to
+# be worth a follow-up"` -- and admits nothing else: `(EST)`, `(CET)`,
+# `(Singapore)` and any other bare word null-park via this regex, same as
+# before D4, never reaching `ZoneInfo` at all. Multi-segment names
+# (`Area/City`) are untouched by this change and remain fully open, with
+# `zoneinfo.ZoneInfo` -- not this regex -- as their validator: a name it
+# resolves yields a horizon, a name it rejects null-parks via the existing
+# blanket `except Exception: return None`.
+_LOCAL_UTC_ALIASES = "UTC|UCT|Universal|Zulu|Greenwich|GMT0|GMT\\+0|GMT-0"
+
 _LIMIT_RESET_LOCAL_RE = re.compile(
     r"resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*"
-    r"\(([A-Za-z_][A-Za-z_+\-0-9]*(?:/[A-Za-z_+\-0-9]+)*)\)",
+    r"\(((?:[A-Za-z_]+(?:/[A-Za-z_+\-0-9]+)+)|" + _LOCAL_UTC_ALIASES + r")\)",
     re.IGNORECASE,
 )
 
