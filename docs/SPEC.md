@@ -144,7 +144,7 @@ Receipt: path helpers `state_dir/logs_dir/mailbox_dir/journals_dir/ceilings_dir/
 
 ## 6. Dispatch contract (`dispatch_bg` @6167)
 
-Every native launch — spawn, fork-steer, resume-limited, respawn — funnels through one choke point:
+Every native **worker** launch — spawn, fork-steer, resume-limited, respawn — funnels through one choke point. It is not the only `--bg` launch in the codebase: there are exactly **two** argv builders, and the second (`cmd_sup_handoff_begin`) is specified at the end of this section.
 
 ```
 claude --bg [--resume <old-sid>] -n "<cat>|<name>|<hint>" --settings state/worker-settings.json
@@ -162,6 +162,29 @@ claude --bg [--resume <old-sid>] -n "<cat>|<name>|<hint>" --settings state/worke
 - **Single safe wedge-retry (C1):** on a wedge verdict, `claude stop` + `claude rm` the wedged session with short timeouts, then **verify** the cleanup (re-fetch; entry gone or still status/pid-free = retry-safe; entry live or roster unavailable = **refuse the retry** — two live sessions on one task file is the disaster case). Retry the whole dispatch exactly once with a fresh pre-snapshot; a second consecutive wedge gives up loudly. Events: `dispatch_wedged`, `dispatch_retried`.
 
 **Launch contract around the choke point (spawn shape, `cmd_spawn` @2128):** pre-claim the record under `fleet.lock` with `session_id=None` + `last_dispatch_at` stamped → dispatch outside the lock → re-lock and stamp sid/short-id via `_commit_launched_turn` (@1769: 6 attempts, backoff — a lock timeout must not strand a live session; on exhaustion `_report_stranded_native_turn` prints the recovery handles and the pre-claim is **kept**, never popped, because a live session exists) → on dispatch failure, roll the pre-claim back. **Fast-completion exception:** a worker can finish before the join resolves; if an outcome record for this name is newer than the pre-claim, commit `idle` with the outcome's sid instead of rolling back a finished task (`_fast_completion_sid` @5927).
+
+### 6.1 The second dispatch path — supervisor successor (`cmd_sup_handoff_begin` @7280)
+
+The supervisor handoff dispatches its successor with its own argv. This is **sanctioned and enumerated**, not a bypass — three properties of the choke point are wrong for a handoff:
+
+- **The name guard refuses it.** `NAME_RE` is `^[a-z0-9-]+$`; an incarnation id is `inc-<YYYYMMDD>T<HHMMSS>Z-<hex4>`, whose `T`/`Z` are uppercase. `dispatch_bg(name=<inc>)` raises before dispatching.
+- **The task file already exists elsewhere.** The successor bootstrap is written to `state/supervisor-handoff-<inc>.md` and journaled **by path** in the HANDOFF-BEGIN entry; `task_file_path(name)` would create a second one and orphan the journaled reference.
+- **The wedge-retry is the wrong remedy.** One re-dispatch of a worker is safe; one re-dispatch of a successor is two live sessions on one incarnation id — the double-spawn hazard §12/§4 exists to prevent.
+
+What the second path therefore **must** carry, and does:
+
+```
+claude --bg -n "sup|<inc>|successor" --settings state/worker-settings.json
+       [--model m] [--permission-mode p]
+       "Read <FLEET_HOME>/state/supervisor-handoff-<inc>.md and follow it exactly."
+       cwd=<FLEET_HOME>  env=_worker_env("sup|<inc>|successor")
+```
+
+- **`--settings` (the rendered instance), pre-flighted by `_require_instance_settings`** before the lock, so a refusal writes neither the journal entry nor the task file. A successor has no `state/fleet.json` record, and all four hooks degrade cleanly to **sid-keyed** writes in that case — `stop_outcome`/`postcompact_journal` fall back to the sid when `_resolve_name` misses, `posttooluse_mailbox`/`stop_mailbox` are sid-keyed throughout — with **no** `hook-errors.log` entry on any of the four. The successor's sid is exactly the handle `sup-handoff-complete --expect-sid` / `sup-handoff-abort --successor-sid` print and consume, so those files are addressable.
+- **`env=_worker_env(name)`** — §5.1 provenance. `cmd_sup_boot` derives `caller_sid` from `CLAUDE_CODE_SESSION_ID` and writes it into the HANDSHAKE; an inherited value from the outgoing holder would make the successor hand back the **predecessor's** sid, and `sup-handoff-complete`'s §4 dual verification would then refuse forever.
+- **No `--add-dir`** (cwd is `FLEET_HOME`; the task file is already inside it) and **no `--setting-sources`** (a per-worker persisted value; a successor has no record). Everything else — short-id join, pre-snapshot exclusion, G6 name-join fallback — is shared logic, called directly.
+
+Pinned by `TestDispatchPathsAreDocumented` (`tests/test_supervisor.py`), which fails if a third `--bg` argv builder appears or if this subsection stops naming the path.
 
 ## 7. Lifecycle verbs — native wrappers over roster + outcome store
 

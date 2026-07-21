@@ -6454,7 +6454,10 @@ def _fast_completion_sid(name: str, since_iso: str, short_id: str | None = None)
 
 
 # --------------------------------------------------------------------------
-# Native dispatch (M-B, spec §5): single choke point for every --bg launch.
+# Native dispatch (M-B, spec §6): the choke point for every --bg WORKER
+# launch (spawn / fork-steer / resume-limited / respawn). The supervisor
+# successor is dispatched by cmd_sup_handoff_begin's own argv -- spec §6.1
+# enumerates that second path and why it cannot route through here.
 # Task-file bootstrap (G8), short-id capture + sid-prefix roster join (G6
 # fallback), fresh -n render per dispatch (G13 / spec §5.1.3).
 # --------------------------------------------------------------------------
@@ -6624,8 +6627,8 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
                 run=subprocess.run, which=shutil.which, sleep=time.sleep,
                 roster_fetch=None, clock=time.monotonic):
     # Defense in depth (adversarial trap 6): every current caller
-    # pre-validates `name`, but this is the single choke point for every
-    # --bg launch and `task_file_path(name)` is not traversal-safe on its
+    # pre-validates `name`, but this is the choke point for every --bg
+    # WORKER launch and `task_file_path(name)` is not traversal-safe on its
     # own -- guard here too so a future direct-call path can't escape
     # tasks_dir().
     if not name or not NAME_RE.match(name) or _SID_SHAPE_RE.match(name):
@@ -7282,7 +7285,55 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     OUTSIDE fleet_lock (F4 doctrine). Both failure paths (dispatch failure,
     successor DOA) raise the doctor-visible abort flag before returning
     (M-B T10 fix 1) -- a crash here must not leave the old side believing
-    a successor is in flight when none exists."""
+    a successor is in flight when none exists.
+
+    SECOND DISPATCH PATH (SPEC §6, defect-A fix wave). This is the ONLY
+    `--bg` launch that does not go through `dispatch_bg`, and it cannot:
+
+      * `NAME_RE` is `^[a-z0-9-]+$`, but an incarnation id is
+        `inc-<YYYYMMDD>T<HHMMSS>Z-<hex4>` -- the T and Z are uppercase, so
+        the choke point's own name guard (@6631) refuses it outright;
+      * `dispatch_bg` writes the prompt body to `task_file_path(name)`,
+        while the successor's body is already written to
+        `state/supervisor-handoff-<inc>.md` and journaled BY PATH in the
+        HANDOFF-BEGIN entry below -- re-routing would leave two task files
+        and a journal entry naming the wrong one;
+      * `dispatch_bg`'s single safe wedge-retry re-dispatches the whole
+        launch once. For a worker that is correct; for a handoff it means a
+        second live successor on one incarnation id -- exactly the
+        double-spawn hazard spec §4 exists to prevent.
+
+    So the path stays, but it is SANCTIONED, not a bypass: it carries the
+    same `--settings` instance and the same `_worker_env` process identity
+    the choke point carries. Both are load-bearing:
+
+      * without `--settings`, the successor runs with NONE of fleet's hooks.
+        All four (Stop outcome, Stop mailbox, PostToolUse mailbox,
+        PostCompact journal) degrade cleanly to SID-keyed writes for a
+        session with no registry record -- and the successor's sid is
+        exactly the handle `sup-handoff-complete --expect-sid` /
+        `sup-handoff-abort --successor-sid` already print and consume. The
+        `_require_instance_settings()` pre-flight is the same doctrine
+        cmd_spawn applies: `claude` silently IGNORES a --settings path that
+        does not exist, so an unrendered instance would put the hookless
+        successor back with no error anywhere. It runs before the lock so a
+        refusal writes neither the journal entry nor the task file;
+      * without `env=_worker_env(name)`, the successor inherits the OLD
+        holder's `CLAUDE_CODE_SESSION_ID`, which `cmd_sup_boot` reads
+        directly (`caller_sid`) and writes into the HANDSHAKE -- so the
+        successor would hand back the predecessor's sid and
+        `sup-handoff-complete` would refuse on the §4 id mismatch, wedging
+        the handoff. (Whether the daemon actually propagates the launcher's
+        environment into the hosted session is UNOBSERVED here; the strip
+        is the same defense `dispatch_bg` applies at every worker launch,
+        and costs nothing if the daemon already isolates.)
+
+    NOT carried, deliberately: `--add-dir`. `dispatch_bg` needs it because
+    `tasks_dir()` sits outside the worker's cwd; this dispatch runs with
+    `cwd=FLEET_HOME` and its task file is `FLEET_HOME/state/...`, already
+    inside the authorized root. `--setting-sources` likewise: it is a
+    per-worker persisted value and a successor has no registry record."""
+    _require_instance_settings()
     with fleet_lock():
         claim, caller = _require_claim_holder(getattr(args, "sid", None))
         successor_inc = mint_incarnation_id()
@@ -7316,14 +7367,19 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     pre_sids = {e.get("sessionId") for e in (pre_payload if pre_ok else [])
                 if isinstance(e, dict) and isinstance(e.get("sessionId"), str)}
     name = f"sup|{successor_inc}|successor"
-    argv = [exe, "--bg", "-n", name]
+    # Same value dispatch_bg's --settings default resolves to (the RENDERED
+    # instance, never the template): the successor gets fleet's hooks. See
+    # this function's docstring for why this path is not dispatch_bg.
+    argv = [exe, "--bg", "-n", name,
+            "--settings", instance_settings_path().as_posix()]
     if getattr(args, "model", None):
         argv += ["--model", args.model]
     if getattr(args, "permission_mode", None):
         argv += ["--permission-mode", args.permission_mode]
     argv.append(f"Read {task_path.as_posix()} and follow it exactly.")
     try:
-        proc = run(argv, cwd=str(FLEET_HOME), capture_output=True, text=True,
+        proc = run(argv, cwd=str(FLEET_HOME), env=_worker_env(name),
+                   capture_output=True, text=True,
                    encoding="utf-8", errors="replace", timeout=120)
     except (OSError, subprocess.SubprocessError) as exc:
         _abort_flag("dispatch-failed")
