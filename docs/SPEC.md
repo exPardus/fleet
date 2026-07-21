@@ -268,7 +268,7 @@ New, carried from the pivot spec and enforced in code: **never-demote-unknown** 
 - **M-A — supervisor identity: SHIPPED** (soul files, claim/seizure, boot ritual, handoff, checkpoint discipline).
 - **M-B — native dispatch: SHIPPED** (launch contract on `--bg`, outcome discriminator, Stop-hook capture, fork-steer, `claude stop` kill, usage-limit rehoming, coexistence, pin tests).
 - **M-C — deletions + hardening + SPEC v3: SHIPPED except this document's ratification** (§6 legacy deletions −7130 lines; autoclean; dispatch hardening C1/H1; this rewrite is the closing deliverable, pending review).
-- **Future candidates `[DRAFT — not specced]`:** per-body supervisor claim nonce (`docs/specs/claim-nonce.md` — a `drafting` spec awaiting dual-lens review and operator ratification; the hard prerequisite of the three-tier restructure per `docs/reviews/THREE-TIER-ADJUDICATION-2026-07-17.md` §Sequencing; v3 records its existence and specs nothing from it); three-tier command (interface/supervisor/workers split, `docs/specs/three-tier-command.md` — a draft proposal awaiting adversarial design review; v3 records its existence and specs nothing from it); native attach integration; POSIX autoclean seam.
+- **Future candidates `[DRAFT — not specced]`:** three-tier command (interface/supervisor/workers split, `docs/specs/three-tier-command.md` — a draft proposal awaiting adversarial design review; v3 records its existence and specs nothing from it); native attach integration; POSIX autoclean seam.
 
 ## 19. History
 
