@@ -29,6 +29,11 @@ def _never_touch_the_real_home(tmp_path_factory, monkeypatch):
     developer's real marker with a pytest tmp dir, silently repointing their
     fleet hook at a directory that no longer exists. Caught 2026-07-09.
 
+    M-E adds the two READ-only daemon paths for a different reason: fleet never
+    writes them, but `_doctor_check_daemon_wedge` reads them, and a check whose
+    verdict depends on the developer's live daemon state is a flaky test. The
+    sandbox keeps the `.claude/<name>` shape so path-shape assertions still hold.
+
     Tests that assert on these paths override them again with their own value;
     this fixture only guarantees the default is never the real home."""
     import fleet
@@ -38,6 +43,10 @@ def _never_touch_the_real_home(tmp_path_factory, monkeypatch):
                         lambda: sandbox / ".claude" / "fleet-home")
     monkeypatch.setattr(fleet, "user_settings_path",
                         lambda: sandbox / ".claude" / "settings.json")
+    monkeypatch.setattr(fleet, "claude_daemon_lock_path",
+                        lambda: sandbox / ".claude" / "daemon.lock")
+    monkeypatch.setattr(fleet, "claude_daemon_log_path",
+                        lambda: sandbox / ".claude" / "daemon.log")
 
 
 @pytest.fixture(autouse=True)

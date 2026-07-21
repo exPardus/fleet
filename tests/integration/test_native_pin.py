@@ -555,6 +555,48 @@ def test_5_pin_archive_rm(sandbox: Sandbox):
     # dead-daemon case under a wording this branch could not predict. The pin
     # can still fail on vendor drift: a leftover sid with NO deferral line at
     # all, or with a live/unknown daemon, still hard-asserts.
+    #
+    # ND-4 fix wave (re-review MD-CONTRACT-REVIEW-2026-07-17.md). The paragraph
+    # above enumerates only the false-RED residuals and is silent on the
+    # false-SKIP this branch INTRODUCED -- the very failure m2's comment (30
+    # lines up) spends a paragraph on. Named here in full, because an
+    # unenumerated trade is indistinguishable from an unnoticed one:
+    #
+    #   daemon ALIVE at rm -> `claude rm` genuinely regresses -> fleet prints
+    #   `deferred (<something>)` -> `rm_unclassified` -> the daemon idle-exits
+    #   in the seconds before `_daemon_alive()` samples -> `alive is False` ->
+    #   SKIP. Green suite, regression masked. In the unclassified branch
+    #   `alive` is not corroboration; it is the ONLY discriminator, because
+    #   `deferred (failed)` is what fleet prints for BOTH "the dead-daemon
+    #   message drifted" (M4) and "`claude rm` regressed".
+    #
+    # The trade is still the right one and is kept deliberately: before ND-2
+    # this shape hard-asserted CERTAINLY on every run of a machine whose
+    # message drifted, and a pin that cries wolf every run is a pin nobody
+    # reads. The false-SKIP needs a narrow window (this test archives after >5s
+    # of zero live workers, so the daemon is most likely ALREADY dead at rm, in
+    # which case the skip is correct). The real cure is M4's -- capture the
+    # dead-daemon string and `_NATIVE_CLI_TRANSIENT_RE` learns it, at which
+    # point this whole fallback retires.
+    #
+    # ND-4's option (2) -- also sample `_daemon_alive()` BEFORE the archive and
+    # require BOTH samples dead -- was EVALUATED AND REJECTED, on two grounds:
+    #   1. It trades this false-SKIP for a NEW false-RED, symmetrically. Pre-
+    #      sample alive (a sibling worker dispatched, the only thing that
+    #      revives the daemon) -> daemon idle-exits -> dead at rm -> dead after
+    #      -> "both dead" is unsatisfied -> HARD ASSERT on a machine whose
+    #      daemon was simply down. That is precisely the false-RED confound m2
+    #      was written to kill, reintroduced through the other door. The brief
+    #      for this fix wave permits (2) only if it "cannot itself introduce a
+    #      new false-RED". It can.
+    #   2. The probe is not passive. `claude daemon status` connects as a
+    #      client, and the daemon idle-exits ~5s after the LAST CLIENT
+    #      disconnects -- so a pre-archive probe can reset the idle timer and
+    #      keep alive the very daemon whose death it is measuring. An observer
+    #      that perturbs the observable cannot "collapse the window"; it moves
+    #      it.
+    # The post-hoc sample stays where it is, and its limitation is now written
+    # down rather than discovered.
     archive_err = a.stderr or ""
     rm_deferred = f"{fleet.NATIVE_RM_DEFERRED_PREFIX} (daemon-transient)" in archive_err
     rm_unclassified = (f"{fleet.NATIVE_RM_DEFERRED_PREFIX} (" in archive_err

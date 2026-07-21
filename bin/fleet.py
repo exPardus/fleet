@@ -224,6 +224,27 @@ def user_settings_path() -> Path:
     return Path.home() / ".claude" / "settings.json"
 
 
+def claude_daemon_lock_path() -> Path:
+    """~/.claude/daemon.lock -- the vendor's background-daemon singleton lock.
+    READ-ONLY to fleet, always: nothing in this module may create, modify or
+    delete it (M-E, docs/specs/native-substrate.md, the stale-lock hazard row).
+    Separate helper so tests redirect it instead of reading a real machine.
+
+    Portable by construction: `Path.home()/".claude"` is the vendor's config
+    dir on Windows, macOS and Linux alike, so this needs no platform branch
+    (only the PLATFORM adapter block may carry one anyway).
+    [UNVERIFIED -- no POSIX box] The POSIX filename was not observed; it is the
+    same code path, and every consumer treats an absent file as "nothing to
+    check", so a POSIX-side name drift degrades to a PASS-note, never a FAIL."""
+    return Path.home() / ".claude" / "daemon.lock"
+
+
+def claude_daemon_log_path() -> Path:
+    """~/.claude/daemon.log -- the vendor's supervisor log. READ-ONLY, same
+    rules and same portability argument as claude_daemon_lock_path()."""
+    return Path.home() / ".claude" / "daemon.log"
+
+
 def statusline_script_path() -> Path:
     return FLEET_HOME / "bin" / "fleet_statusline.py"
 
@@ -651,7 +672,16 @@ def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
         # --- M-B native-substrate fields (spec §5; None/[] on legacy records) ---
         "dispatch_kind": dispatch_kind,      # "bg" = daemon-hosted; None = pre-pivot Popen
         "category": category,                # agents-menu category (spec §5.1.3)
-        "native_short_id": None,             # short id from --bg stdout (G6 fallback)
+        # n2 (review MD-CONTRACT-REVIEW-2026-07-17.md): TWO provenances, and
+        # the difference is load-bearing. Normally the CLI's OWN short id, read
+        # from `--bg` stdout (G6 fallback) -- that is the capture the
+        # `gone`->success inference rests on. But on the fast-completion path
+        # (grep `fast_sid.partition`, 2 of the 6 write sites) there is no
+        # stdout to read and it is DERIVED from the sid by string-split, which
+        # is only as good as the CLI's id format. See `_native_job_ref` and
+        # docs/specs/native-substrate.md (G10 row, "the `gone`->success
+        # inference has a precondition") before trusting this field as a ref.
+        "native_short_id": None,
         "last_dispatch_at": None,            # stamped at every dispatch/steer/resume;
                                              # anchor for the fresh-outcome predicate
         "retired_sids": [],                  # prior sids retired by fork-steer/respawn
@@ -2460,6 +2490,10 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
                 rec = data["workers"].get(args.name)
                 if rec is not None and rec.get("session_id") is None:
                     rec["session_id"] = fast_sid
+                    # n2: DERIVED, not captured -- the dispatch raised before
+                    # any `--bg` stdout could be read, so this is a string
+                    # split of the sid, not the CLI's own id. See the
+                    # `native_short_id` schema comment.
                     rec["native_short_id"] = fast_sid.partition("-")[0] or fast_sid[:8]
                     rec["status"] = "idle"
                     rec["turns"] = 1
@@ -4018,6 +4052,9 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
                 rec = data["workers"].get(name)
                 if rec is not None and rec.get("session_id") is None:
                     rec["session_id"] = fast_sid
+                    # n2: DERIVED, not captured -- same as cmd_spawn's
+                    # fast-completion block. See the `native_short_id` schema
+                    # comment.
                     rec["native_short_id"] = fast_sid.partition("-")[0] or fast_sid[:8]
                     rec["status"] = "idle"
                     rec["turns"] = 1
@@ -4714,6 +4751,67 @@ def _native_job_ref(sid: str) -> str:
 # choice, not evidence.)
 _NATIVE_CLI_GONE_RE = re.compile(r"no job matching", re.I)
 _NATIVE_CLI_TRANSIENT_RE = re.compile(r"background service may be restarting", re.I)
+
+# M-E (2026-07-21 substrate outage, docs/specs/native-substrate.md "the
+# daemon.lock PID-reuse wedge"). A `--bg` dispatch that dies with the
+# unreachable-service shape is NOT a per-worker hiccup: it means the daemon
+# could not be started at all, so every dispatch on the machine is down. The
+# live stderr, captured verbatim by the manager at 2.1.216:
+#
+#   Starting background service
+#   Couldn't reach the background service (background service did not become
+#   reachable within 45s) - run 'claude daemon status'
+#
+# Two independent halves are matched, either alone sufficient: the vendor may
+# reword the wrapper sentence or change the 45s timeout, and a diagnosis that
+# survives only the exact bytes is a diagnosis that expires. `Starting
+# background service` is deliberately NOT matched -- it is printed on healthy
+# dispatches too, so it is a prefix, not a symptom.
+_NATIVE_BG_UNREACHABLE_RE = re.compile(
+    r"couldn't reach the background service"
+    r"|background service did not become reachable", re.I)
+
+# Shared by the dispatch classifier above and _doctor_check_daemon_wedge --
+# one remedy text, so the two surfaces can never drift apart. The `stop --any`
+# sentence is a receipt, not a guess (manager, 2026-07-21: it printed `no daemon
+# running` and left the lock in place).
+#
+# F4 fix wave (review ME-DAEMON-REVIEW-2026-07-21.md): this text now opens with
+# a PRECONDITION, and that is the most important edit in it. It is the only
+# output in this feature that instructs a destructive, manual, irreversible-
+# without-backup action, and the signal that reaches it is not proof: the
+# dispatch classifier fires on `background service did not become reachable`,
+# which is a TIMEOUT -- a loaded machine, an AV scan of claude.exe, or a slow
+# binary-upgrade self-restart produce the same bytes while a HEALTHY daemon owns
+# the lock (reasoned, not observed: both logged self-restarts completed in ~1.2s,
+# 37x under the 45s timeout). Removing a live daemon's singleton lock destroys
+# the singleton guarantee -- the next start sees no lock and takes a fresh one.
+# So: confirm the holder is dead FIRST, and say plainly that a live daemon means
+# the lock is not stale.
+#
+# F3 fix wave (same review): the Windows line was cmd.exe syntax (`&&`, `%VAR%`)
+# while this project's documented primary Windows shell is PowerShell 5.1, in
+# which it is a hard parse error ("The token '&&' is not a valid statement
+# separator in this version") plus a literal, unexpanded `%USERPROFILE%`. An
+# operator following the old remedy got a parse error while dispatch was down
+# machine-wide. PowerShell is now the labelled Windows form; the cmd.exe form is
+# kept and labelled as such rather than dropped.
+NATIVE_DAEMON_WEDGE_REMEDY = (
+    "REMEDY -- PRECONDITION FIRST: only if NO `claude` session is running and "
+    "`claude daemon status` reports `not running`. If a daemon IS live the lock "
+    "is not stale and removing it is HARMFUL (it destroys the singleton "
+    "guarantee: the next start sees no lock and takes a fresh one). "
+    "Then back up and REMOVE the stale lock; PowerShell: "
+    "Copy-Item $env:USERPROFILE\\.claude\\daemon.lock $env:TEMP\\daemon.lock.bak; "
+    "Remove-Item $env:USERPROFILE\\.claude\\daemon.lock ; cmd.exe: "
+    'copy "%USERPROFILE%\\.claude\\daemon.lock" "%TEMP%\\daemon.lock.bak" && '
+    'del "%USERPROFILE%\\.claude\\daemon.lock" ; POSIX: '
+    "cp ~/.claude/daemon.lock /tmp/daemon.lock.bak && rm ~/.claude/daemon.lock ; "
+    "then re-run any dispatch -- the next `claude` start takes a fresh lock. "
+    "`claude daemon stop --any` is NOT sufficient: it prints `no daemon running` "
+    "and does not clear the lock (receipt: the 2026-07-21 outage). Fleet will "
+    "never do this for you -- nothing under ~/.claude is fleet-writable."
+)
 
 
 def _classify_native_cli_result(proc) -> str:
@@ -5936,8 +6034,14 @@ def _autoclean_deferral_streak() -> tuple:
     `husks_deferred` since the M1 fix, so the streak is derived from there.
 
     Counts backwards from the newest event and stops at the first pass that
-    deferred nothing -- a single successful sweep means the daemon was reachable
-    and the tier is not starving, regardless of what came before. Dry-run passes
+    deferred NOTHING, regardless of what came before. n3 (review
+    MD-CONTRACT-REVIEW-2026-07-17.md) corrects the justification this line used
+    to carry ("a single successful sweep means the daemon was reachable"): the
+    reset rule is "deferred nothing", which ALSO fires on a nothing-to-do pass
+    -- a pass that found no husks proves nothing about reachability. The rule is
+    still the right one, for a weaker reason: what this streak measures is
+    UNRECLAIMED WORK PILING UP, and a pass with nothing left to defer is not
+    piling any up. Dry-run passes
     are skipped entirely: they never rm anything, so they neither prove nor
     disprove reachability. Any read/parse failure degrades to (0, 0, None) --
     doctor is note-only and must never fail on unreadable history."""
@@ -6001,9 +6105,15 @@ def _doctor_check_autoclean(run=subprocess.run):
     old note even conceded it ("if this count persists across runs") while
     reading from a stamp that holds exactly one run and cannot show persistence.
     So: read the STREAK from `events.jsonl` (append-only history, which
-    `husks_deferred` now rides) and note only past
-    `AUTOCLEAN_DEFERRAL_STREAK_THRESHOLD` consecutive starved sweeps. That is
-    the sentence that distinguishes starvation from Tuesday."""
+    `husks_deferred` now rides) and note only AT or past
+    `AUTOCLEAN_DEFERRAL_STREAK_THRESHOLD` consecutive starved sweeps (n4: the
+    code is `streak >= THRESHOLD`, so the note fires ON the 3rd, not after it).
+    That is the sentence that distinguishes starvation from Tuesday.
+
+    n3: the streak RESETS on any pass that deferred nothing -- which includes a
+    nothing-to-do pass, and therefore is not by itself proof that the daemon was
+    reachable. See `_autoclean_deferral_streak` for why that is still the right
+    rule."""
     stamp_note, stale, run_errors = "no run recorded yet", False, []
     husks_deferred = 0
     try:
@@ -6105,6 +6215,331 @@ def _doctor_check_tzdata():
                 f"local-format limit-signal parsing (\"resets 4:40am (Zone/City)\") will "
                 f"null-park until tz data is installed: py -3.13 -m pip install tzdata")
     return ("tzdata", True, "zoneinfo resolves named zones (tz data present)")
+
+# --- M-E: wedged / unreachable background daemon ---------------------------
+#
+# The 2026-07-21 outage this exists for: `--bg` dispatch was dead machine-wide
+# for ~16h and `fleet doctor` reported 21 PASS / 0 FAIL. Full receipts in
+# docs/specs/native-substrate.md (Known hazards, "the daemon.lock PID-reuse
+# wedge").
+#
+# VENDOR SURFACE THIS DEPENDS ON (both will drift; both fail SAFE when they do):
+#   1. `~/.claude/daemon.lock` -- a JSON object with an integer `pid` and a
+#      numeric `startedAt` in epoch MILLISECONDS, UTC.
+#   2. `~/.claude/daemon.log` -- one record per line, prefixed
+#      `[<ISO-8601>Z] `, carrying the literal supervisor line
+#      `another daemon won the lock race (pid=<N>) — exiting`.
+# Nothing else is read, and no subprocess is run at all.
+#
+# TIME BASE (named deliberately -- fleet has been burned by mixed bases before):
+# BOTH quantities compared here are WALL-CLOCK UTC. `startedAt` is epoch-millis
+# UTC (verified arithmetically against the incident capture: 1784589928352 ->
+# 2026-07-20T23:25:28.352Z, 0.6s after that lock's own `daemon start` log line
+# at 23:25:27.750Z), and the log stamps are ISO-8601 with an explicit `Z`. No
+# monotonic, boot-relative or process-relative quantity enters the comparison.
+# The lock's `procStart` field is a THIRD base -- .NET ticks in LOCAL time
+# (639202047274516770 -> 2026-07-21T04:25:27 local = 23:25:27Z at UTC+5) -- and
+# is deliberately never read.
+_DAEMON_LOG_TS_RE = re.compile(
+    r"^\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?)Z\]")
+_DAEMON_LOCK_RACE_RE = re.compile(
+    r"another daemon won the lock race \(pid=(\d+)\)", re.I)
+
+# M1 fix wave (review ME-DAEMON-REVIEW-2026-07-21.md §M1). THE AGE GATE IS THE
+# DISCRIMINATOR; the other two are secondary. The original rule (>=3 refusals
+# spanning >=300s) could not fire on the incident it was built from, and no
+# threshold VALUE fixes that, because the instrument was wrong: refusal lines are
+# DEMAND-DRIVEN, minted one per attempted dispatch, never by the passage of time.
+# The 16h outage produced exactly ONE refusal, and the whole interval in which
+# more could accumulate -- first failed dispatch 15:07:01.868Z to the operator's
+# remedy at 15:09:42.909Z -- was 161 seconds. A wedge on a quiet machine emits
+# zero. Requiring three over five minutes required the operator to diagnose the
+# outage before the check would speak.
+#
+# Calibration, on all four lock-race refusals in the machine's real daemon.log
+# (2026-07-14 -> 2026-07-21); "age" is the refusal's distance from the lock its
+# named winner wrote, derived via the one directly-observed coupling (pid 15740:
+# `daemon start` 23:25:27.750Z vs `startedAt` 23:25:28.352Z = +0.602s):
+#
+#   refusal ts                  names pid   winner daemon start        age
+#   2026-07-14T01:15:07.492Z        28232   2026-07-14T01:15:06.243Z   0.647s  benign
+#   2026-07-14T06:49:12.297Z        47240   2026-07-14T06:49:11.163Z   0.532s  benign
+#   2026-07-17T00:35:28.269Z        39900   2026-07-17T00:35:27.217Z   0.450s  benign
+#   2026-07-21T15:07:01.868Z        15740   2026-07-20T23:25:27.750Z  56493.5s THE WEDGE
+#
+# 0.647s vs 56 493.5s -- 4.9 orders of magnitude. 300.0 sits 464x above the
+# largest benign sample and 0.5% of the way to the wedge. There is no
+# false-positive pressure for the count/span gates to defend against: the benign
+# races were never at risk of counting, because each names a winner that wrote
+# the lock milliseconds earlier. So one late refusal is enough.
+DAEMON_WEDGE_MIN_REFUSALS = 1
+DAEMON_WEDGE_MIN_LOCK_AGE_SECONDS = 300.0
+# ND-1: consumed by the F6 DEGRADED path ONLY (_daemon_wedge_degraded_verdict),
+# where `startedAt` is unusable so no age gate can run and this is the only
+# discriminator left. It is deliberately NOT consulted on the primary path: there
+# it made adding evidence weaken the verdict (1 refusal FAIL, 2 refusals 29s
+# apart PASS), i.e. the verdict tracked the operator's retry cadence instead of
+# the evidence. Full table and reasoning at the primary path's own comment.
+DAEMON_WEDGE_MIN_SPAN_SECONDS = 300.0
+
+
+def _parse_daemon_log_ts(line: str):
+    """UTC datetime for a `[2026-07-21T15:07:01.868Z] ...` daemon.log line, or
+    None if the line carries no parseable stamp.
+
+    `strptime`, NOT `fromisoformat`: under the 3.10 floor `fromisoformat`
+    rejects the trailing `Z` outright while 3.11+ accepts it (M-D shipped a bug
+    of exactly this shape), and a parser whose verdict depends on which
+    interpreter ran it is not a parser. The fractional part is optional --
+    2.1.216 emits milliseconds, and a build that stops doing so must not turn
+    every line into an unparseable one."""
+    m = _DAEMON_LOG_TS_RE.match(line)
+    if not m:
+        return None
+    stamp = m.group(1)
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(stamp, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def _doctor_check_daemon_wedge(lock_path=None, log_path=None):
+    """FAIL iff `~/.claude/daemon.lock` is demonstrably STALE: repeated daemon
+    starts, spread over time and long after the lock was written, were each
+    refused by that same lock. That is a machine-wide dispatch outage -- fleet
+    can spawn, respawn, steer and resume exactly nothing until it is cleared.
+
+    SIGNAL CHOICE, and why the other candidates were rejected.
+    Signals used: the lock's own (pid, startedAt), plus the supervisor's
+    `another daemon won the lock race (pid=N) — exiting` lines. Two files, no
+    subprocess. The discriminator is that a lock-race refusal only happens
+    after a client concluded no daemon was REACHABLE and launched a supervisor
+    -- when a healthy daemon is reachable, clients connect and no start is
+    attempted at all. So a refusal is already evidence of unreachability; the
+    ONE gate that turns it into a verdict is its AGE relative to the lock it was
+    refused by:
+      * >= DAEMON_WEDGE_MIN_LOCK_AGE_SECONDS after `startedAt`. A genuine
+        startup race resolves in under a second (the loser's line lands
+        milliseconds after the winner wrote the lock); a wedge's refusal is
+        hours old. Measured on all four real refusals in this machine's log:
+        0.647 / 0.532 / 0.450 s benign vs 56 493.5 s for the wedge. The
+        comparison is SIGNED, deliberately: a refusal dated BEFORE the current
+        lock was written is history from a previous lock and must never indict
+        this one (an absolute comparison would break the same self-clearing
+        property the pid match provides).
+      * >= DAEMON_WEDGE_MIN_REFUSALS (= 1) of them. See the constant: refusals
+        are demand-driven, so requiring several requires the operator to fail
+        several dispatches first, and the real incident only ever produced one.
+      * and NOTHING ELSE. There is no span/burst gate on this path (ND-1): one
+        used to sit here and it made adding evidence weaken the verdict -- one
+        refusal FAILed, two 29s apart PASSed. A rule whose answer depends on how
+        fast the operator retried is not reading the evidence. The age gate
+        needs no help; DAEMON_WEDGE_MIN_SPAN_SECONDS survives for the F6
+        degraded path alone.
+    Refusals naming a pid other than the lock's current holder are ignored, so
+    the check self-clears the moment an operator replaces the lock.
+
+    THE PROACTIVE GAP, stated rather than papered over (review
+    ME-DAEMON-REVIEW-2026-07-21.md §M1.c). Refusal lines are minted per
+    ATTEMPTED DISPATCH. A wedge on a machine where nobody has dispatched yet
+    emits zero of them, and this check is silent -- which is exactly the row a
+    `fleet doctor` run BEFORE dispatching would want. One dispatch attempt is
+    enough to make it speak (that is what MIN_REFUSALS=1 buys), and the
+    dispatch classifier itself covers the operator who did attempt one; but a
+    genuinely proactive detector needs a signal the vendor writes without being
+    asked. `~/.claude/daemon.status.json` is the promising candidate -- on the
+    live healthy machine it carries `supervisorPid` matching `daemon.lock.pid`
+    and a `writtenAt` 413 ms after the lock's `startedAt` -- but whether the
+    supervisor REWRITES it while running, and what it held during the wedge,
+    are both unobserved. [MANAGER-VERIFICATION REQUIRED] capture
+    `daemon.status.json` and `daemon/roster.json` alongside `daemon.lock` at
+    the next wedge. Nothing here is built on those files until then: building
+    on unverified vendor-file semantics is the failure this check was already
+    caught committing once.
+    `~/.claude/daemon/roster.json` mtime is NOT a candidate and was refuted on
+    this machine's own data: it is event-driven, not a heartbeat, and during
+    this very incident it was already 1.59 h stale while the daemon was
+    provably healthy (roster written ~02:20:59Z; daemon proven alive by an auth
+    refresh at 03:56:41Z). Any threshold tight enough to catch a wedge fires on
+    a healthy quiet machine.
+
+    (a) `claude daemon status` REJECTED. It is the most direct signal and it is
+    what the vendor tells you to run, but the hard constraint here is that a
+    probe must never START a daemon -- the vendor's own warning says `claude
+    agents` does -- and `daemon status`'s side-effect freedom IN THE
+    DEAD-DAEMON STATE cannot be verified from a `--bg` session, which is by
+    construction always holding a live daemon open (native-substrate.md, Known
+    hazards). Unverifiable means not called. A check that shells out to nothing
+    cannot start anything; that is the entire argument.
+    [MANAGER-VERIFICATION REQUIRED] if `daemon status` is ever confirmed
+    side-effect free on a dead daemon from an interactive session, it becomes
+    the better primary signal and this check should be revisited.
+
+    (d) PID-liveness / `procStart` comparison REJECTED, and the incident is the
+    reason: Windows recycled the dead daemon's pid onto `WacomHost`, a service
+    whose StartTime is unreadable to a normal-token probe. An unreadable start
+    time is INDETERMINATE and must never be read as "matches / still ours" --
+    so on the one case this check exists for, (d) returns "don't know" and
+    decides nothing. It also has no implementation to lean on: `probe_liveness`
+    / `get_process_info` / `boot_identity` were all deleted in the section-6
+    pivot (grep receipt, `bin/fleet.py` @ac3e34d: zero matches), so it would
+    mean a new PLATFORM adapter method with no POSIX backend.
+
+    FAIL DIRECTION -- chosen deliberately, and it is CONSERVATIVE. Doctor is
+    read every session, so a false FAIL is worse than a missed wedge. Every
+    unknown is a PASS-note: absent lock, unreadable/non-JSON lock, a lock with
+    no usable `pid`, absent or unreadable log, refusal lines fleet cannot date,
+    and refusals that are not late. The residual cost is the proactive gap
+    above, not lateness: once a single dispatch has been attempted the check
+    speaks.
+
+    F6 fix wave (same review): an unusable/out-of-range `startedAt` no longer
+    discards the evidence. The refusals naming this lock's pid are still fully
+    readable and still probative -- only the age gate cannot run -- so a
+    one-key field drift used to retire the check permanently. Without a usable
+    `startedAt` the check falls back to LOG-ONLY evidence: >= 2 refusals naming
+    the lock's pid, spanning >= DAEMON_WEDGE_MIN_SPAN_SECONDS. Two refusals
+    against the same lock five minutes apart cannot be a startup race, which is
+    sub-second. The message says the confidence is degraded and why.
+    Deliberately NOT implemented, and this is a scope call: the review also
+    suggested requiring "no intervening supervisor line indicating that pid was
+    serving". That needs semantics for vendor log lines nobody has catalogued,
+    which is the same unverified-vendor-surface move M1 charged. Recorded here
+    instead of guessed at.
+
+    NEVER MUTATES anything under `~/.claude` -- two reads, and it prints the
+    remedy. Pinned by test_check_mutates_nothing.
+
+    PORTABILITY (SPEC.md v3 invariant 8): pure `Path.home()` + `Path.read_text`
+    + `re`, so it resolves identically on Windows, macOS and Linux and carries
+    no platform branch. [UNVERIFIED -- no POSIX box] the POSIX daemon.log line
+    format and lock filename were not observed; if either differs, this check
+    finds no refusals and returns a PASS-note, which is the intended failure
+    direction."""
+    lock_path = Path(lock_path) if lock_path is not None else claude_daemon_lock_path()
+    log_path = Path(log_path) if log_path is not None else claude_daemon_log_path()
+    try:
+        lock = json.loads(lock_path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return ("daemon-wedge", True,
+                "no ~/.claude/daemon.lock -- no daemon singleton to be stale")
+    except (json.JSONDecodeError, ValueError):
+        return ("daemon-wedge", True,
+                "~/.claude/daemon.lock is not readable JSON -- skipped")
+    if not isinstance(lock, dict):
+        return ("daemon-wedge", True,
+                "~/.claude/daemon.lock has an unexpected shape -- skipped")
+    pid, started_ms = lock.get("pid"), lock.get("startedAt")
+    # `isinstance(True, int)` is True in Python and `1 == True`, so without the
+    # bool guard a lock carrying `"pid": true` would attribute every refusal
+    # naming pid 1 to it. Pinned by a `pid=1` refusal fixture -- a fixture
+    # naming any other pid can never reach this guard.
+    if not isinstance(pid, int) or isinstance(pid, bool):
+        return ("daemon-wedge", True,
+                "~/.claude/daemon.lock carries no usable pid -- skipped")
+    started = None
+    if isinstance(started_ms, (int, float)) and not isinstance(started_ms, bool):
+        try:
+            started = datetime.fromtimestamp(started_ms / 1000.0, timezone.utc)
+        except (OSError, OverflowError, ValueError):
+            started = None  # NaN, +-inf, out-of-range epoch -> F6 degraded path
+
+    refusals = []
+    for line in _read_tail_lines(log_path):
+        m = _DAEMON_LOCK_RACE_RE.search(line)
+        if m is None or int(m.group(1)) != pid:
+            continue
+        ts = _parse_daemon_log_ts(line)
+        if ts is None:
+            continue  # undateable -> INDETERMINATE, never evidence
+        refusals.append(ts)
+
+    if started is None:
+        # F6: degraded, log-only. The age gate is unavailable, so the only
+        # remaining discriminator is that two refusals against the SAME lock,
+        # minutes apart, cannot be a startup race (which is sub-second).
+        return _daemon_wedge_degraded_verdict(pid, refusals)
+
+    held_since = started.strftime("%Y-%m-%dT%H:%M:%SZ")
+    # SIGNED, not absolute: a refusal older than this lock belongs to a previous
+    # one and must never indict it.
+    late = [ts for ts in refusals
+            if (ts - started).total_seconds() >= DAEMON_WEDGE_MIN_LOCK_AGE_SECONDS]
+
+    if len(late) < DAEMON_WEDGE_MIN_REFUSALS:
+        return ("daemon-wedge", True,
+                f"daemon.lock held by pid {pid} since {held_since}; "
+                f"{len(late)} late lock-race refusal(s) in the daemon.log "
+                f"tail (< {DAEMON_WEDGE_MIN_REFUSALS}) -- no wedge signature")
+    # ND-1 (final gate, review ME-DAEMON-REVIEW-2026-07-21.md): there is NO span
+    # gate on this path, deliberately. It used to sit here, guarded at >= 2, and
+    # it made ADDING EVIDENCE WEAKEN THE VERDICT:
+    #
+    #   1 late refusal (the REAL incident)            -> FAIL (detected)
+    #   2 late refusals 29s apart (operator retried)  -> PASS (MISSED)
+    #   2 late refusals 2min apart                    -> PASS (MISSED)
+    #   2 late refusals 6min apart                    -> FAIL (detected)
+    #   3 late refusals 30s apart                     -> PASS (MISSED)
+    #
+    # i.e. the verdict tracked the OPERATOR'S RETRY CADENCE, not the evidence --
+    # and on the founding incident that is reachable, not exotic: the outage's
+    # evidence window was 161s, so any second dispatch attempt inside it (a
+    # retried `fleet spawn`, a sibling worktree, a plain interactive `claude`)
+    # minted a second refusal and flipped FAIL to PASS. Seven worktrees were
+    # live. The only reason the real log holds one refusal is that the operator
+    # diagnosed it in under three minutes.
+    #
+    # The age gate does not need the help: it separates the wedge from every
+    # real benign race by 4.9 orders of magnitude, and by this check's own model
+    # a refusal only happens after a client found no daemon reachable -- so two
+    # such events >= 300s after the lock was written mean the holder is not
+    # serving, burst or not. Pinned both ways by
+    # test_real_benign_races_pass_with_the_span_gate_disabled (all three real
+    # races still PASS at MIN_SPAN=0) and by the cadence table above, now a test.
+    # The span gate REMAINS in _daemon_wedge_degraded_verdict, where no age gate
+    # exists and it is the only discriminator there is.
+    newest = max(late)
+    age_h = (newest - started).total_seconds() / 3600.0
+    return ("daemon-wedge", False,
+            f"the Claude background daemon looks WEDGED: {len(late)} daemon "
+            f"start(s) were refused by ~/.claude/daemon.lock (pid {pid}, held "
+            f"since {held_since}); the most recent, at "
+            f"{newest.strftime('%Y-%m-%dT%H:%M:%SZ')}, was refused by a lock "
+            f"already {age_h:.1f}h old -- i.e. that pid is no longer a daemon "
+            f"(a recycled pid still looks alive), so EVERY `claude --bg` "
+            f"dispatch is failing machine-wide: no spawn, no respawn, no steer, "
+            f"no resume. {NATIVE_DAEMON_WEDGE_REMEDY}")
+
+
+def _daemon_wedge_degraded_verdict(pid, refusals):
+    """F6 fallback for a lock whose `startedAt` is missing, wrong-typed, NaN,
+    infinite or out of epoch range: the age gate cannot run, but the refusals
+    naming this lock's pid are still readable and still probative. Requires
+    >= 2 of them spanning >= DAEMON_WEDGE_MIN_SPAN_SECONDS -- a startup race
+    resolves sub-second, so two refusals against one lock minutes apart is not
+    one. Confidence is lower than the primary path and the message says so."""
+    if len(refusals) < 2:
+        return ("daemon-wedge", True,
+                f"~/.claude/daemon.lock (pid {pid}) carries no usable startedAt, "
+                f"so the lock-age gate cannot run; {len(refusals)} lock-race "
+                f"refusal(s) naming it (< 2) -- not enough for a degraded "
+                f"verdict")
+    span = (max(refusals) - min(refusals)).total_seconds()
+    if span < DAEMON_WEDGE_MIN_SPAN_SECONDS:
+        return ("daemon-wedge", True,
+                f"~/.claude/daemon.lock (pid {pid}) carries no usable startedAt, "
+                f"so the lock-age gate cannot run; {len(refusals)} refusals "
+                f"naming it span only {span:.0f}s -- one burst, not a wedge")
+    return ("daemon-wedge", False,
+            f"the Claude background daemon looks WEDGED (DEGRADED confidence): "
+            f"~/.claude/daemon.lock (pid {pid}) carries no usable startedAt, so "
+            f"the lock-age gate could not run -- but {len(refusals)} daemon "
+            f"starts were refused by it across {span / 3600.0:.1f}h, most "
+            f"recently at {max(refusals).strftime('%Y-%m-%dT%H:%M:%SZ')}, and a "
+            f"genuine startup race resolves in under a second. Confirm with "
+            f"`claude daemon status` before acting. {NATIVE_DAEMON_WEDGE_REMEDY}")
 
 
 def _doctor_check_fleet_home_marker():
@@ -6236,6 +6671,7 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
         functools.partial(_doctor_check_dead_suspected, workers),
         functools.partial(_doctor_check_orphaned_claims, workers=workers),
         functools.partial(_doctor_check_claude_agents, workers, which=which, run=run),
+        functools.partial(_doctor_check_daemon_wedge),
         functools.partial(_doctor_check_autoclean, run=run),
         functools.partial(_doctor_check_fleet_home_marker),
         functools.partial(_doctor_check_hook_errors),
@@ -6854,9 +7290,39 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
         except (OSError, subprocess.SubprocessError) as exc:
             raise NativeDispatchError(f"--bg dispatch failed: {exc}") from exc
         if proc.returncode != 0:
+            # F5 fix wave (review ME-DAEMON-REVIEW-2026-07-21.md): read BOTH
+            # streams, matching the twin classifier `_classify_native_cli_result`
+            # (`text = f"{proc.stdout}\n{proc.stderr}"`). The old
+            # `stderr or stdout` picked ONE: at 2.1.216 both the prefix and the
+            # symptom land on the same stream so it was latent, but a vendor
+            # that split them (prefix -> stderr, symptom -> stdout) silently
+            # disabled the whole diagnosis, since non-empty stderr short-circuits
+            # the `or`. stderr leads because that is where the real error was
+            # observed and the raw echo below stays readable.
+            detail = f"{proc.stderr or ''}\n{proc.stdout or ''}".strip()
+            # M-E: name the cause instead of echoing the vendor string. The
+            # unreachable-service shape is not this worker's problem -- it is
+            # the whole machine's, and the operator needs the remedy, not the
+            # bytes. The bytes are kept anyway (`vendor said`): the NEXT
+            # wording drift is only findable if they survive into the log.
+            if _NATIVE_BG_UNREACHABLE_RE.search(detail):
+                raise NativeDispatchError(
+                    f"--bg dispatch exited {proc.returncode}: the Claude "
+                    f"background service never became reachable, so NO fleet "
+                    f"dispatch can succeed on this machine (spawn, respawn, "
+                    f"steer, resume). Most likely cause: a STALE "
+                    f"~/.claude/daemon.lock whose pid was recycled onto an "
+                    f"unrelated process, making every daemon start lose a lock "
+                    f"race to a daemon that is already dead. Confirm with "
+                    f"`fleet doctor` (the daemon-wedge check) -- and if it "
+                    f"does NOT report a wedge, do not remove the lock: the "
+                    f"unreachable-service message is a 45s TIMEOUT, which a "
+                    f"loaded machine or a slow upgrade self-restart can also "
+                    f"produce while a healthy daemon owns it. "
+                    f"{NATIVE_DAEMON_WEDGE_REMEDY} -- vendor said: "
+                    f"{detail[:400]}")
             raise NativeDispatchError(
-                f"--bg dispatch exited {proc.returncode}: "
-                f"{(proc.stderr or proc.stdout or '').strip()[:400]}")
+                f"--bg dispatch exited {proc.returncode}: {detail[:400]}")
         short_id = _parse_bg_short_id(proc.stdout or "")
         if not short_id:
             raise NativeDispatchError(
