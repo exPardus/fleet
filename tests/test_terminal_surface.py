@@ -719,6 +719,118 @@ class TestCollaboratorInstall:
         assert out.stdout.strip() == ""
 
 
+class TestInterpreterFloor:
+    """posix-port campaign, follow-up 2. The interpreter floor was stated in
+    four places that could drift independently: `bin/hooks/run_py.sh`
+    (`>= (3, 10)` plus a candidate list), `bin/fleet.py`'s module docstring,
+    SPEC §14 and docs/specs/portability.md D9 -- while `bin/fleet.cmd` and
+    CLAUDE.md say `py -3.13`.
+
+    `fleet.MIN_PYTHON_VERSION` is now the single declaration and every other
+    statement is checked against it here. The `py -3.13` in `fleet.cmd` is a
+    dev-machine PREFERENCE, not a floor claim, and is deliberately left
+    alone: it can only fail loudly via the `py` launcher, never SELECT an
+    interpreter too old to run the tree, which is the hazard the shim's
+    open-ended floor actually carries.
+
+    None of this proves the tree RUNS at the floor -- that is what the 3.10
+    floor run does, and it is how `add_note` was found after two rounds of
+    grepping for 3.11+ APIs missed it. See `fleet._stash_short_id_note`."""
+
+    _SHIM = "bin/hooks/run_py.sh"
+
+    @property
+    def _shim_source(self):
+        return (REPO / self._SHIM).read_text(encoding="utf-8")
+
+    def test_floor_is_declared_as_data(self):
+        assert isinstance(fleet.MIN_PYTHON_VERSION, tuple)
+        assert len(fleet.MIN_PYTHON_VERSION) == 2
+        assert all(isinstance(part, int) for part in fleet.MIN_PYTHON_VERSION)
+
+    def test_shim_version_gate_matches_the_declared_floor(self):
+        major, minor = fleet.MIN_PYTHON_VERSION
+        assert f"sys.version_info >= ({major}, {minor})" in self._shim_source, (
+            f"{self._SHIM}'s version gate must match "
+            f"fleet.MIN_PYTHON_VERSION {fleet.MIN_PYTHON_VERSION}")
+
+    def test_shim_header_states_the_declared_floor(self):
+        major, minor = fleet.MIN_PYTHON_VERSION
+        assert f"Python >= {major}.{minor}" in self._shim_source
+
+    def test_shim_candidate_list_reaches_down_to_the_floor(self):
+        """The `for candidate in ...` list must actually offer a floor-version
+        interpreter by name. A gate that accepts 3.10 while the list stops at
+        python3.11 would silently make the effective floor 3.11 on a box
+        whose `python3` is older."""
+        major, minor = fleet.MIN_PYTHON_VERSION
+        assert f"python{major}.{minor} " in self._shim_source, (
+            f"{self._SHIM} must offer python{major}.{minor} as a candidate")
+
+    def test_module_docstring_states_the_declared_floor(self):
+        major, minor = fleet.MIN_PYTHON_VERSION
+        assert f"Requires Python {major}.{minor}+" in (fleet.__doc__ or "")
+
+    @pytest.mark.parametrize("rel,needle", [
+        ("docs/SPEC.md", "**Interpreter floor:** Python {major}.{minor}+"),
+        ("docs/specs/portability.md", "Python floor: **{major}.{minor}+**"),
+    ])
+    def test_docs_state_the_declared_floor(self, rel, needle):
+        major, minor = fleet.MIN_PYTHON_VERSION
+        text = (REPO / rel).read_text(encoding="utf-8")
+        assert needle.format(major=major, minor=minor) in text, (
+            f"{rel} must state the floor as fleet.MIN_PYTHON_VERSION does")
+
+    def test_short_id_note_survives_without_add_note(self):
+        """The floor leak itself, pinned. `BaseException.add_note` is 3.11+;
+        on 3.10 the bare call raised AttributeError from inside an
+        `except BaseException:` block and REPLACED the escaping exception --
+        losing both the operator's Ctrl-C and the short id that is the only
+        remaining handle on a live --bg session.
+
+        Simulated rather than skipped, so the case runs on every
+        interpreter: an exception object that has no `add_note` at all."""
+
+        class NoAddNote(BaseException):
+            """3.10-shaped: `__notes__` is writable, `add_note` does not
+            exist. Reproduced via `__getattribute__` because a subclass
+            cannot un-inherit `BaseException.add_note` on 3.11+, and a
+            `add_note = None` stub would exercise a different branch than a
+            genuinely missing attribute."""
+
+            def __getattribute__(self, name):
+                if name == "add_note":
+                    raise AttributeError(name)
+                return BaseException.__getattribute__(self, name)
+
+        exc = NoAddNote("boom")
+        assert not hasattr(exc, "add_note")
+
+        fleet._stash_short_id_note(exc, "abc123")
+
+        assert fleet._short_id_from_notes(exc) == "abc123"
+
+    def test_short_id_note_uses_add_note_when_it_exists(self):
+        exc = RuntimeError("boom")
+        fleet._stash_short_id_note(exc, "def456")
+        assert fleet._short_id_from_notes(exc) == "def456"
+        assert "fleet_short_id=def456" in getattr(exc, "__notes__", [])
+
+    def test_stashing_a_note_never_raises(self):
+        """A diagnostic note must never replace the exception it annotates --
+        that IS the defect being fixed. An object that rejects both routes
+        must still come back clean."""
+
+        class Hostile(BaseException):
+            __slots__ = ()          # no __dict__: attribute assignment fails
+
+            @property
+            def add_note(self):
+                raise RuntimeError("nope")
+
+        fleet._stash_short_id_note(Hostile(), "ghi789")   # must not raise
+
+
 class TestFleetHomeMarker:
     """A marketplace-installed plugin runs from a CACHE COPY of this repo whose
     state/ is gitignored and empty. Resolving FLEET_HOME from the script's own
@@ -1010,13 +1122,24 @@ class TestStatuslineChainInstall:
 
 
 class TestStatuslineChainRender:
+    """Delegate commands are shell STRINGS (`shell=True` -- the command comes
+    straight out of settings.json), so `sys.executable` must be quoted when
+    it is interpolated into one. It was not, which made these cases depend on
+    the running interpreter's path having no space in it: green under
+    `C:\\Users\\...\\Python313\\python.exe`, broken under
+    `C:\\Program Files\\Python310\\python.exe`. Worse than a false failure --
+    `test_a_failing_delegate_never_costs_fleets_row` PASSED on a spaced path
+    for the wrong reason (the delegate failed because `C:\\Program` is not a
+    command, not because of the `sys.exit(3)` it was meant to be testing).
+    Found by running the suite on the documented 3.10 floor interpreter."""
+
     def _chain(self, home, command):
         (home / "state" / "statusline-chain.json").write_text(
             json.dumps({"delegates": [{"command": command}]}), encoding="utf-8")
 
     def test_delegate_rows_print_above_fleets_row(self, home, statusline, capsys, monkeypatch):
         _write_registry(home, {"pmbot": _rec()})
-        self._chain(home, f'{sys.executable} -c "print(\'CAVEMAN ROW\')"')
+        self._chain(home, f'"{sys.executable}" -c "print(\'CAVEMAN ROW\')"')
         monkeypatch.setattr(statusline.sys, "stdin", io.StringIO("{}"))
         monkeypatch.setenv("NO_COLOR", "1")
 
@@ -1028,7 +1151,7 @@ class TestStatuslineChainRender:
 
     def test_delegate_receives_the_session_json_on_stdin(self, home, statusline, capsys, monkeypatch):
         _write_registry(home, {})
-        self._chain(home, f'{sys.executable} -c "import sys; sys.stdout.write(sys.stdin.read())"')
+        self._chain(home, f'"{sys.executable}" -c "import sys; sys.stdout.write(sys.stdin.read())"')
         monkeypatch.setattr(statusline.sys, "stdin", io.StringIO('{"model":"opus"}'))
         monkeypatch.setenv("NO_COLOR", "1")
 
@@ -1037,7 +1160,7 @@ class TestStatuslineChainRender:
 
     def test_a_failing_delegate_never_costs_fleets_row(self, home, statusline, capsys, monkeypatch):
         _write_registry(home, {"pmbot": _rec()})
-        self._chain(home, f'{sys.executable} -c "import sys; sys.exit(3)"')
+        self._chain(home, f'"{sys.executable}" -c "import sys; sys.exit(3)"')
         monkeypatch.setattr(statusline.sys, "stdin", io.StringIO("{}"))
         monkeypatch.setenv("NO_COLOR", "1")
 
