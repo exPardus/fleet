@@ -7,6 +7,7 @@ native counterparts are covered in test_native.py.
 Every test monkeypatches fleet.FLEET_HOME to a pytest tmp_path.
 """
 import json
+import os
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -132,13 +133,10 @@ class TestPlatformAdapterBoundary:
                            "sys.getwindowsversion", "os.uname", "os.sep"):
                 assert needle not in source, f"found {needle!r} in {rel}"
 
-    def test_windows_adapter_selected_on_this_machine(self):
-        assert isinstance(fleet.PLATFORM, fleet._WindowsPlatform)
-
-    def test_posix_platform_raises_unsupported(self):
-        posix = fleet._PosixPlatform()
-        with pytest.raises(fleet.UnsupportedPlatformError):
-            posix.autoclean_task_query("t")
+    def test_correct_adapter_selected_on_this_machine(self):
+        expected = (fleet._WindowsPlatform if os.name == "nt"
+                    else fleet._PosixPlatform)
+        assert isinstance(fleet.PLATFORM, expected)
 
     def test_unsupported_platform_error_is_not_implemented_error(self):
         assert issubclass(fleet.UnsupportedPlatformError, NotImplementedError)

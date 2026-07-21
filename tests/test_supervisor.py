@@ -199,6 +199,19 @@ class TestRosterLiveSids:
         ]
         assert fleet._roster_live_sids(entries) == {"a", "c"}
 
+    def test_lingering_done_process_with_keys_is_not_live(self):
+        # posix-port live finding 2026-07-19 (macOS, 2.1.214): a finished bg
+        # session's host process lingers -- entry keeps pid AND status with
+        # state:"done". Terminal state dominates key presence, or an idle
+        # worker's respawn is refused ("turn is running") forever.
+        entries = [
+            {"sessionId": "lingerer", "pid": 42707, "status": "idle",
+             "state": "done"},
+            {"sessionId": "live", "pid": 1, "status": "busy",
+             "state": "working"},
+        ]
+        assert fleet._roster_live_sids(entries) == {"live"}
+
     def test_hostile_sessionid_value_filtered_not_raised(self):
         # Debt roll-up item 2, third grepped site: a dict-valued sessionId
         # (CLI drift / hostile roster) must be filtered, never raise
@@ -362,10 +375,28 @@ class TestHandoff:
                                  "claimed_at": _iso(NOW), "heartbeat_at": _iso(NOW),
                                  "claimed_via": "fresh"})
 
-    def _begin(self, run, sid="sid-old"):
-        args = SimpleNamespace(sid=sid, model=None, permission_mode=None)
+    class _Clock:
+        """Injectable monotonic clock; pairing sleep=advance exercises
+        dispatch_bg's real 60s join window in zero wall-clock time (same
+        pattern as test_native's _FakeClock)."""
+        def __init__(self):
+            self.t = 0.0
+
+        def __call__(self):
+            return self.t
+
+        def advance(self, dt):
+            self.t += dt
+
+    def _begin(self, run, sid="sid-old", clock=None, model=None,
+               permission_mode=None):
+        args = SimpleNamespace(sid=sid, model=model,
+                               permission_mode=permission_mode)
+        if clock is None:
+            return fleet.cmd_sup_handoff_begin(args, which=_fake_which, run=run,
+                                               sleep=lambda s: None)
         return fleet.cmd_sup_handoff_begin(args, which=_fake_which, run=run,
-                                           sleep=lambda s: None)
+                                           sleep=clock.advance, clock=clock)
 
     @staticmethod
     def _dispatch_then_roster(successor_sid="succ0001-full", short_id="succ0001"):
@@ -661,29 +692,43 @@ class TestHandoff:
         assert rc == 0
         assert "SUCCESSOR-SID: sid-fallback-joined" in capsys.readouterr().out
 
-    def test_begin_doa_when_successor_never_appears(self, sup_home, capsys, monkeypatch):
-        # shrink the verify window: with a no-op sleep the real 60s window
-        # would busy-spin for a full minute of wall clock
-        monkeypatch.setattr(fleet, "SUPERVISOR_ROSTER_VERIFY_SECONDS", 0.05)
+    # REMOVED in the posix/provider reconcile merge: the three
+    # `dispatch_bg` wedge-retry tests from 351d180/51aaefe
+    # (test_wedge_retry_husk_never_bound_by_name_join,
+    # test_all_husk_name_join_reports_doa_never_binds_dead,
+    # test_wedge_cleaned_then_failed_redispatch_flags_dispatch_failed).
+    # They pin behaviour of a handoff path that lost this merge: their
+    # premise is dispatch_bg's INTERNAL single wedge-retry emitting a
+    # second `--bg` under the same rendered name. cmd_sup_handoff_begin is
+    # the sanctioned second dispatch path (SPEC 6) and issues exactly ONE
+    # `--bg` per call with a per-incarnation-unique name, so no retry husk
+    # can share a name with a live successor and the scenarios are
+    # unreachable, not merely unasserted. Nothing they covered is left
+    # untested on this path: the single dispatch's failure and DOA
+    # branches are pinned by test_begin_doa_when_successor_never_appears
+    # and the dispatch-failure tests below.
+
+    def test_begin_doa_when_successor_never_appears(self, sup_home, capsys):
+        # fake clock (sleep advances it): dispatch_bg's real 60s join window
+        # runs in zero wall-clock time
         self._hold()
         def run(argv, **kw):
             if "--bg" in argv:
                 return SimpleNamespace(returncode=0, stdout="backgrounded · abc · sup\n", stderr="")
             return SimpleNamespace(returncode=0, stdout=json.dumps(
                 [{"sessionId": "sid-old", "status": "busy"}]), stderr="")
-        rc = self._begin(run)
+        rc = self._begin(run, clock=self._Clock())
         assert rc == 1
         assert "DOA" in capsys.readouterr().out
 
-    def test_handoff_begin_doa_writes_abort_flag(self, sup_home, monkeypatch):
-        monkeypatch.setattr(fleet, "SUPERVISOR_ROSTER_VERIFY_SECONDS", 0.05)
+    def test_handoff_begin_doa_writes_abort_flag(self, sup_home):
         self._hold()
         def run(argv, **kw):
             if "--bg" in argv:
                 return SimpleNamespace(returncode=0, stdout="backgrounded · abc · sup\n", stderr="")
             return SimpleNamespace(returncode=0, stdout=json.dumps(
                 [{"sessionId": "sid-old", "status": "busy"}]), stderr="")
-        rc = self._begin(run)
+        rc = self._begin(run, clock=self._Clock())
         assert rc == 1
         flag = json.loads(fleet.handoff_abort_flag_path().read_text(encoding="utf-8"))
         assert flag["reason"] == "successor-doa"

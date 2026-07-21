@@ -1034,6 +1034,36 @@ class TestOwnershipQuotingVariants:
             fleet._remove_autoclean_task()
 
 
+class TestOwnershipPredicate:
+    """Adjudicated F4 defect (path-only ownership): `_autoclean_task_is_ours`
+    must discriminate the actual autoclean task's command shape -- our
+    fleet.py path followed by the `autoclean` verb -- for BOTH backends'
+    query shapes (schtasks Command+Arguments join and the cron command
+    field are the same `_autoclean_task_command` string)."""
+
+    def test_real_autoclean_task_is_ours(self, home, canonical_install):
+        assert fleet._autoclean_task_is_ours(fleet._autoclean_task_command())
+
+    def test_other_fleet_verb_same_path_is_not_ours(self, home,
+                                                    canonical_install):
+        beat = fleet._autoclean_task_command().replace(" autoclean ", " beat ")
+        assert fleet._autoclean_script_path().as_posix() in beat.replace("\\", "/")
+        assert not fleet._autoclean_task_is_ours(beat)
+
+    def test_unrelated_task_is_not_ours(self, home, canonical_install):
+        assert not fleet._autoclean_task_is_ours(
+            '"C:/tools/autoclean.exe" nightly --quiet')
+        assert not fleet._autoclean_task_is_ours("")
+        assert not fleet._autoclean_task_is_ours(None)
+
+    def test_path_mentioned_elsewhere_verb_elsewhere_is_not_ours(
+            self, home, canonical_install):
+        """Path and verb both present but not adjacent: still foreign."""
+        script = fleet._autoclean_script_path()
+        cmd = f'"/usr/bin/beat-runner" "{script}" beat --note "runs autoclean later"'
+        assert not fleet._autoclean_task_is_ours(cmd)
+
+
 class TestQueryFailClosed:
     """F3 (adversarial review, MED): a query that ERRORS (timeout, access
     denied, schtasks failure) must never read as "task absent" -- that
@@ -1127,6 +1157,119 @@ class TestWindowsAdapterSchtasks:
             return types.SimpleNamespace(returncode=0, stdout="", stderr="")
         ok, _ = fleet._WindowsPlatform().autoclean_task_remove("t", run=run)
         assert ok and seen == [["schtasks", "/Delete", "/TN", "t", "/F"]]
+
+
+class TestPosixAdapterCron:
+    """The crontab backend (posix-port) mirrors the schtasks contract:
+    query is fail-closed (F3), install is idempotent-replace, remove
+    treats a missing entry as failure. The fleet-owned line is found by
+    its trailing `# <task_name>` tag, never by schedule parsing."""
+
+    @staticmethod
+    def _run_factory(listing_rc=0, listing_out="", listing_err="",
+                     seen=None):
+        def run(argv, **kw):
+            if seen is not None:
+                seen.append((argv, kw.get("input")))
+            if argv == ["crontab", "-l"]:
+                return types.SimpleNamespace(
+                    returncode=listing_rc, stdout=listing_out, stderr=listing_err)
+            assert argv == ["crontab", "-"]
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        return run
+
+    # -- query --------------------------------------------------------
+
+    def test_query_no_crontab_is_definitively_absent(self):
+        run = self._run_factory(listing_rc=1, listing_err="no crontab for praha")
+        assert fleet._PosixPlatform().autoclean_task_query("t", run=run) is None
+
+    def test_query_other_nonzero_exit_raises_fail_closed(self):
+        run = self._run_factory(listing_rc=1, listing_err="permission denied")
+        with pytest.raises(fleet.AutocleanTaskQueryError):
+            fleet._PosixPlatform().autoclean_task_query("t", run=run)
+
+    def test_query_exception_raises_fail_closed(self):
+        def run(argv, **kw):
+            raise OSError("crontab vanished")
+        with pytest.raises(fleet.AutocleanTaskQueryError):
+            fleet._PosixPlatform().autoclean_task_query("t", run=run)
+
+    def test_query_finds_tagged_line_and_returns_command(self):
+        out = ("MAILTO=x\n"
+               "15 * * * * /foreign/job.sh # other-task\n"
+               '0 */6 * * * "/usr/bin/python3" "/f/fleet.py" autoclean # t\n')
+        run = self._run_factory(listing_out=out)
+        got = fleet._PosixPlatform().autoclean_task_query("t", run=run)
+        assert got == '"/usr/bin/python3" "/f/fleet.py" autoclean'
+
+    def test_query_untagged_crontab_is_none(self):
+        run = self._run_factory(listing_out="0 * * * * /foreign/job.sh # other\n")
+        assert fleet._PosixPlatform().autoclean_task_query("t", run=run) is None
+
+    def test_query_unparseable_tagged_line_is_empty_string_not_none(self):
+        # Same contract as the schtasks XML fallback: present-but-odd
+        # reads as installed ("" command), never as absent.
+        run = self._run_factory(listing_out="mangled # t\n")
+        assert fleet._PosixPlatform().autoclean_task_query("t", run=run) == ""
+
+    # -- install ------------------------------------------------------
+
+    def test_install_appends_tagged_entry_preserving_foreign_lines(self):
+        seen = []
+        run = self._run_factory(
+            listing_out="15 * * * * /foreign/job.sh # other\n", seen=seen)
+        ok, msg = fleet._PosixPlatform().autoclean_task_install("t", "cmdline", 6, run=run)
+        assert ok, msg
+        (_, written), = [(a, i) for a, i in seen if a == ["crontab", "-"]]
+        assert written == ("15 * * * * /foreign/job.sh # other\n"
+                           "0 */6 * * * cmdline # t\n")
+
+    def test_install_replaces_existing_tagged_line_idempotently(self):
+        seen = []
+        run = self._run_factory(listing_out="0 */3 * * * oldcmd # t\n", seen=seen)
+        ok, _ = fleet._PosixPlatform().autoclean_task_install("t", "newcmd", 6, run=run)
+        assert ok
+        (_, written), = [(a, i) for a, i in seen if a == ["crontab", "-"]]
+        assert written == "0 */6 * * * newcmd # t\n"
+
+    def test_install_with_no_prior_crontab(self):
+        seen = []
+        run = self._run_factory(listing_rc=1, listing_err="no crontab for praha",
+                                seen=seen)
+        ok, _ = fleet._PosixPlatform().autoclean_task_install("t", "cmdline", 6, run=run)
+        assert ok
+        (_, written), = [(a, i) for a, i in seen if a == ["crontab", "-"]]
+        assert written == "0 */6 * * * cmdline # t\n"
+
+    def test_install_refuses_percent_in_command(self):
+        # % is a line separator inside a crontab command field -- carrying
+        # it silently mangles the job instead of running it.
+        ok, msg = fleet._PosixPlatform().autoclean_task_install(
+            "t", "cmd --fmt %Y", 6, run=self._run_factory())
+        assert not ok and "%" in msg
+
+    def test_install_listing_failure_propagates_not_clobbers(self):
+        run = self._run_factory(listing_rc=1, listing_err="permission denied")
+        ok, msg = fleet._PosixPlatform().autoclean_task_install("t", "c", 6, run=run)
+        assert not ok and "permission denied" in msg
+
+    # -- remove -------------------------------------------------------
+
+    def test_remove_filters_only_the_tagged_line(self):
+        seen = []
+        run = self._run_factory(
+            listing_out=("15 * * * * /foreign/job.sh # other\n"
+                         "0 */6 * * * cmdline # t\n"), seen=seen)
+        ok, _ = fleet._PosixPlatform().autoclean_task_remove("t", run=run)
+        assert ok
+        (_, written), = [(a, i) for a, i in seen if a == ["crontab", "-"]]
+        assert written == "15 * * * * /foreign/job.sh # other\n"
+
+    def test_remove_missing_entry_is_failure(self):
+        run = self._run_factory(listing_out="0 * * * * /foreign/job.sh # other\n")
+        ok, msg = fleet._PosixPlatform().autoclean_task_remove("t", run=run)
+        assert not ok and "t" in msg
 
 
 class TestUuidShapedNames:

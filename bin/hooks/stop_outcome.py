@@ -37,10 +37,27 @@ _FILE_ATTRIBUTE_NORMAL = 0x80
 
 
 def _atomic_append_bytes(path: Path, data: bytes) -> None:
-    """Single-syscall atomic append; mirrors bin/fleet.py's
-    _atomic_append_bytes exactly (see that function's docstring for the
-    empirical record-loss evidence this fixes). ctypes/kernel32 only, no
-    platform-detection branch (this build targets Windows only, SPEC sec 14)."""
+    """Single-syscall atomic append; mirrors bin/fleet.py's PLATFORM
+    adapter exactly (see _WindowsPlatform.atomic_append_bytes for the
+    empirical record-loss evidence behind the Win32 path). This hook may
+    not import fleet.py (standalone doctrine), so it carries its own
+    two-branch copy: FILE_APPEND_DATA handle on Windows, O_APPEND on
+    POSIX (where the kernel performs seek+write atomically -- the CRT
+    O_APPEND emulation race is Windows-only)."""
+    if os.name == "nt":
+        _atomic_append_bytes_win32(path, data)
+    else:
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o666)
+        try:
+            written = os.write(fd, data)
+            if written != len(data):
+                raise OSError(
+                    f"short append to {path}: {written}/{len(data)} bytes")
+        finally:
+            os.close(fd)
+
+
+def _atomic_append_bytes_win32(path: Path, data: bytes) -> None:
     kernel32 = ctypes.windll.kernel32
     from ctypes import wintypes
 

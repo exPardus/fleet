@@ -3,6 +3,7 @@ helper, discriminator, limit rehome, steering, stop/tombstones, archival."""
 import json
 import os
 import subprocess
+import sys
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,7 +17,7 @@ NOW = datetime(2026, 7, 15, 12, 0, 0, tzinfo=timezone.utc)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STOP_OUTCOME_HOOK = REPO_ROOT / "bin" / "hooks" / "stop_outcome.py"
-PY_CMD = ["py", "-3.13"]
+PY_CMD = [sys.executable]  # not `py -3.13`: Windows-only launcher
 
 
 def _iso(dt):
@@ -142,6 +143,9 @@ class TestOutcomeStore:
         rec = fleet.read_outcomes("w1")[0]
         assert rec["result_text"] == "short"
 
+    @pytest.mark.skipif(os.name != "nt",
+                        reason="pins the Win32 WriteFile partial-write check; "
+                               "the POSIX sibling below pins os.write's")
     def test_atomic_append_partial_write_raises_not_silently_truncates(
             self, native_home, tmp_path, monkeypatch):
         # Roll-up item 4: WriteFile returning success (ok=True) with
@@ -160,6 +164,28 @@ class TestOutcomeStore:
         target = tmp_path / "out.jsonl"
         with pytest.raises(OSError):
             fleet._atomic_append_bytes(target, b"hello world\n")
+
+    @pytest.mark.skipif(os.name == "nt",
+                        reason="POSIX sibling of the Win32 partial-write pin")
+    def test_atomic_append_partial_write_raises_posix(
+            self, native_home, tmp_path, monkeypatch):
+        # Same silent-truncation class as the Win32 pin above: os.write
+        # returning written < len(data) must raise, not tear a JSONL line.
+        # The wrapper delegates for every other payload so pytest's own
+        # fd writes during the test stay untouched.
+        payload = b"hello world\n"
+        real_write = os.write
+
+        def short_write(fd, data):
+            if data == payload:
+                real_write(fd, data[:1])
+                return 1
+            return real_write(fd, data)
+
+        monkeypatch.setattr(fleet.os, "write", short_write)
+        target = tmp_path / "out.jsonl"
+        with pytest.raises(OSError):
+            fleet._atomic_append_bytes(target, payload)
 
     # T5 fix wave (Critical C1): has_fresh_outcome's default `kinds`
     # argument must exclude tombstones -- see task-5-adversarial.md's C1
@@ -328,18 +354,28 @@ class TestDispatchBg:
         assert "CLAUDE_CODE_SESSION_ID" not in kwargs["env"]
         assert kwargs["cwd"] == "C:/proj"
 
-    def test_argv_pre_authorizes_tasks_dir_via_add_dir(self, native_home):
+    def test_argv_pre_authorizes_tasks_and_journals_dirs_via_add_dir(self, native_home):
         # T12 fix wave (finding 1): the task file lives under
         # FLEET_HOME/tasks, outside the worker's own --dir cwd -- without
         # --add-dir the worker's first Read on it hangs forever under any
-        # non-bypass mode. Pin the exact flag + posix path (tasks_dir()
-        # only, never FLEET_HOME wholesale -- least privilege).
+        # non-bypass mode. posix-port live finding 2026-07-18: the journal
+        # the preamble orders the worker to "create early" lives under
+        # FLEET_HOME/state/journals and hung the same way on its first
+        # Write under acceptEdits. Pin the exact flags + posix paths (the
+        # two protocol-required dirs only, never FLEET_HOME wholesale --
+        # least privilege).
         calls = []
         fleet.dispatch_bg("w1", "C:/proj", "b", "accept",
                           run=_fake_run_factory(calls=calls), which=lambda _: "claude",
                           sleep=lambda s: None, roster_fetch=_roster_with())
         argv = calls[0][0]
-        assert argv[argv.index("--add-dir") + 1] == fleet.tasks_dir().as_posix()
+        added = [argv[i + 1] for i, tok in enumerate(argv) if tok == "--add-dir"]
+        assert added == [fleet.tasks_dir().as_posix(),
+                         fleet.journals_dir().as_posix()]
+        # Both dirs must EXIST at dispatch time -- claude silently grants
+        # nothing for a nonexistent --add-dir target (live finding part 2).
+        assert fleet.tasks_dir().is_dir()
+        assert fleet.journals_dir().is_dir()
 
     def test_resume_sid_inserts_resume_flag(self, native_home):
         calls = []

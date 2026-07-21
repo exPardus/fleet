@@ -12,10 +12,10 @@ See docs/SPEC.md for the full design (this file implements SPEC sections
 2, 4, 5, 6, 8, 11, 14).
 
 Requires Python 3.10+ (dev machine: py -3.13). Stdlib only -- no pip deps
-(SPEC §14 / docs/specs/portability.md fixed constraints). Windows is the
-only implemented PLATFORM backend for now (see the platform adapter block
-below); the module itself is written to the 3.10 floor so a POSIX backend
-(Phase 1.5) can run under distro pythons without a language-version bump.
+(SPEC §14 / docs/specs/portability.md fixed constraints). Two PLATFORM
+backends are implemented -- Windows and POSIX (macOS + Linux), see the
+platform adapter block below; the module is held to the 3.10 floor so the
+POSIX side runs under distro pythons without a language-version bump.
 """
 from __future__ import annotations
 
@@ -280,25 +280,50 @@ def now_iso() -> str:
 #
 # This is the ONLY section of fleet.py permitted to branch on os.name /
 # sys.platform, read subprocess creation flags, or shell out to an
-# OS-specific tool (PowerShell Get-Process, taskkill, wt.exe,
-# Start-Process). Every other function in this module calls through the
-# PLATFORM singleton below instead of doing any of that itself. Windows is
-# the only implemented backend for now; the POSIX backend raises
-# UnsupportedPlatformError everywhere -- Phase 1.5 fills it in
-# (docs/specs/portability.md). A source-scan test (test_steering.py) enforces
-# that no other function in this module references os.name/sys.platform.
+# OS-specific tool (schtasks/crontab, ctypes/kernel32). Every other
+# function in this module calls through the PLATFORM singleton below
+# instead of doing any of that itself. Two implemented backends:
+# _WindowsPlatform (schtasks scheduling, FILE_APPEND_DATA outcome append)
+# and _PosixPlatform (crontab scheduling, O_APPEND outcome append --
+# macOS + Linux, the posix-port branch). UnsupportedPlatformError remains
+# the contract for any future genuinely-unportable operation. A
+# source-scan test (test_steering.py) enforces that no other function in
+# this module references os.name/sys.platform.
 # ---------------------------------------------------------------------------
 
+_FILE_APPEND_DATA = 0x0004
+_FILE_SHARE_READ = 0x00000001
+_FILE_SHARE_WRITE = 0x00000002
+_OPEN_ALWAYS = 4
+_FILE_ATTRIBUTE_NORMAL = 0x80
+
+
 class AutocleanTaskQueryError(Exception):
-    """schtasks could not say whether the autoclean task exists (F3:
-    transient failure, access denied, timeout). Callers fail CLOSED --
-    treating this as "task absent" would let a /Create /F clobber a
-    foreign task of the same name on a hiccup."""
+    """The scheduler could not say whether the autoclean task exists (F3:
+    transient failure, access denied, timeout). Raised by BOTH backends --
+    schtasks on Windows, `crontab -l` on POSIX -- since both can fail in a
+    way that is not an answer. Callers fail CLOSED -- treating this as "task
+    absent" would let an install clobber a foreign task of the same name on a
+    hiccup (schtasks `/Create /F`, or a crontab rewrite that drops the
+    foreign line)."""
 
 
 class UnsupportedPlatformError(NotImplementedError):
-    """Raised by every _PosixPlatform method: there is no POSIX backend yet
-    (Phase 1.5, SPEC §14) -- this build only supports Windows."""
+    """A PLATFORM operation this OS has no implementation for.
+
+    NOT raised by any adapter method today: both backends implement the whole
+    surface (the posix port filled in what _PosixPlatform once stubbed). It is
+    the reserved contract for a genuinely-unportable FUTURE operation -- one
+    where some OS has no equivalent primitive at all, as opposed to a
+    different tool for the same job (schtasks vs crontab, FILE_APPEND_DATA vs
+    O_APPEND), which is what the adapter exists to absorb silently.
+
+    Two handlers stay wired, and must: `_doctor_check_autoclean` catches it
+    around `PLATFORM.autoclean_task_query` and degrades that tier to a
+    "unsupported on this platform -- skipped" PASS-note rather than failing
+    doctor; `main()` lists it in the top-level except so any other unportable
+    call exits 1 with a `fleet: <message>` line instead of a traceback. A new
+    unportable method inherits the second for free on the OS that lacks it."""
 
 
 class _WindowsPlatform:
@@ -374,27 +399,168 @@ class _WindowsPlatform:
             return (False, (proc.stderr or proc.stdout or "").strip()[:300])
         return (True, "")
 
+    def atomic_append_bytes(self, path: Path, data: bytes) -> None:
+        """Single-syscall atomic append. Opens the file for FILE_APPEND_DATA
+        access ONLY (no GENERIC_WRITE) -- the Win32 kernel documents this
+        access mode as giving each WriteFile call atomic append semantics
+        across concurrently-open handles/processes, so two writers appending
+        "at the same instant" (Stop hook + fleet-side tombstone, see the
+        outcome-store banner) never interleave or clobber each other's line.
+
+        Deliberately NOT `os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY)`
+        + `os.write`: on Windows that goes through the C runtime's O_APPEND
+        emulation, which lseek()s to EOF and write()s as two separate steps
+        per call -- a real TOCTOU race between handles that reproducibly
+        drops whole clean records under concurrent writers (confirmed
+        empirically: 4 threads x 250 records via os.open+O_APPEND lost ~17%
+        of records with zero JSON-decode errors, i.e. silent loss, not
+        corruption). The FILE_APPEND_DATA-only handle below is the actual
+        OS-level fix; verified to lose zero of 1000 records under the same
+        test. (The POSIX backend CAN use O_APPEND -- there the kernel
+        performs seek+write atomically; the CRT emulation race is
+        Windows-only.)"""
+        kernel32 = ctypes.windll.kernel32
+        from ctypes import wintypes
+
+        create_file_w = kernel32.CreateFileW
+        create_file_w.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+            wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+        ]
+        create_file_w.restype = wintypes.HANDLE
+
+        handle = create_file_w(
+            str(path), _FILE_APPEND_DATA, _FILE_SHARE_READ | _FILE_SHARE_WRITE,
+            None, _OPEN_ALWAYS, _FILE_ATTRIBUTE_NORMAL, None,
+        )
+        if handle in (0, wintypes.HANDLE(-1).value):
+            raise OSError(f"CreateFileW failed for {path}: {ctypes.WinError()}")
+        try:
+            written = wintypes.DWORD(0)
+            ok = kernel32.WriteFile(handle, data, len(data), ctypes.byref(written), None)
+            # Roll-up item 4: a partial write (ok=True, written.value <
+            # len(data)) produces a torn JSONL line that read_outcomes
+            # silently skips -- the exact silent-loss failure class T1's
+            # CRITICAL fix existed to kill. Treat it the same as a WriteFile
+            # failure: raise OSError.
+            if not ok or written.value != len(data):
+                raise OSError(f"WriteFile failed for {path}: {ctypes.WinError()}")
+        finally:
+            kernel32.CloseHandle(handle)
+
 
 class _PosixPlatform:
-    """Stub POSIX backend: every method raises UnsupportedPlatformError.
-    Phase 1.5 fills these in (docs/specs/portability.md); Phase 1 targets
-    Windows only (SPEC §14)."""
+    """POSIX backend (posix-port): macOS + Linux.
 
-    def _unsupported(self, what: str):
-        raise UnsupportedPlatformError(
-            f"{what} has no POSIX implementation yet (Phase 1.5, SPEC §14); "
-            "this build only supports Windows"
-        )
+    Autoclean scheduling uses the user crontab on both OSes -- macOS still
+    ships cron, and one crontab backend is strictly simpler than a
+    launchd-plist/cron split (launchd can become a refinement if cron's
+    macOS sandboxing ever bites; fleet's autoclean only touches user-owned
+    FLEET_HOME paths, which cron may). The fleet-owned entry is found by a
+    trailing `# <task_name>` tag, never by parsing schedules -- the same
+    "match our own marker, refuse to guess" doctrine as the schtasks
+    backend's task-name match."""
 
-    def autoclean_task_query(self, task_name: str, run=None):
-        self._unsupported("autoclean_task_query")
+    def _cron_tag(self, task_name: str) -> str:
+        return f"# {task_name}"
+
+    def _read_crontab(self, run):
+        """(lines, error). lines is None on failure; [] means 'user has no
+        crontab', a DEFINITIVE absence (crontab -l exits nonzero for it,
+        so it must be told apart from access failures by message -- cron
+        implementations do not localize 'no crontab', unlike schtasks'
+        locale-translated not-found error that forced the CSV dance on
+        Windows)."""
+        try:
+            proc = run(["crontab", "-l"], capture_output=True, text=True,
+                       timeout=30)
+        except Exception as exc:
+            return (None, f"crontab listing failed: {exc}")
+        if proc.returncode == 0:
+            return ((proc.stdout or "").splitlines(), "")
+        if "no crontab" in (proc.stderr or "").lower():
+            return ([], "")
+        return (None, f"crontab listing exit {proc.returncode}: "
+                      f"{(proc.stderr or '').strip()[:200]}")
+
+    def _write_crontab(self, lines, run):
+        """(ok, message). Installs the given lines as the user crontab."""
+        text = "\n".join(lines) + ("\n" if lines else "")
+        try:
+            proc = run(["crontab", "-"], input=text, capture_output=True,
+                       text=True, timeout=30)
+        except Exception as exc:
+            return (False, str(exc))
+        if proc.returncode != 0:
+            return (False, (proc.stderr or proc.stdout or "").strip()[:300])
+        return (True, "")
+
+    def autoclean_task_query(self, task_name: str, run=subprocess.run):
+        """None ONLY when the entry is definitively absent; its command
+        string when installed ("" if the line is unparseable); raises
+        AutocleanTaskQueryError when existence cannot be determined (F3:
+        callers must fail CLOSED, same contract as the schtasks backend)."""
+        lines, err = self._read_crontab(run)
+        if lines is None:
+            raise AutocleanTaskQueryError(err)
+        tag = self._cron_tag(task_name)
+        for line in lines:
+            if line.rstrip().endswith(tag):
+                body = line.rsplit(tag, 1)[0].strip()
+                # five schedule fields, then the command
+                parts = body.split(None, 5)
+                return parts[5] if len(parts) == 6 else ""
+        return None
 
     def autoclean_task_install(self, task_name: str, command: str,
-                               interval_hours: int, run=None):
-        self._unsupported("autoclean_task_install")
+                               interval_hours: int, run=subprocess.run):
+        """(ok, message). Idempotent re-install: any existing fleet-tagged
+        line is replaced -- the caller is responsible for the
+        refuse-foreign-task check BEFORE calling this (same split as the
+        schtasks backend's /F)."""
+        # % is a line separator inside a crontab command field; a command
+        # containing one would be silently mangled, not run.
+        if "%" in command or "\n" in command:
+            return (False, "command contains a character cron cannot "
+                           "carry literally (% or newline)")
+        lines, err = self._read_crontab(run)
+        if lines is None:
+            return (False, err)
+        tag = self._cron_tag(task_name)
+        kept = [ln for ln in lines if not ln.rstrip().endswith(tag)]
+        kept.append(f"0 */{int(interval_hours)} * * * {command} {tag}")
+        return self._write_crontab(kept, run)
 
-    def autoclean_task_remove(self, task_name: str, run=None):
-        self._unsupported("autoclean_task_remove")
+    def autoclean_task_remove(self, task_name: str, run=subprocess.run):
+        """(ok, message). Missing entry counts as failure -- the caller
+        reports it; nothing here raises."""
+        lines, err = self._read_crontab(run)
+        if lines is None:
+            return (False, err)
+        tag = self._cron_tag(task_name)
+        kept = [ln for ln in lines if not ln.rstrip().endswith(tag)]
+        if kept == lines:
+            return (False, f"no crontab entry tagged {tag!r}")
+        return self._write_crontab(kept, run)
+
+    def atomic_append_bytes(self, path: Path, data: bytes) -> None:
+        """Single-syscall atomic append via O_APPEND. POSIX specifies that
+        for a file opened with O_APPEND the seek-to-EOF and the write are
+        performed as one atomic step, so concurrent writers (Stop hook +
+        fleet-side tombstone) never interleave records this small -- the
+        same guarantee the Windows backend buys with a FILE_APPEND_DATA-only
+        handle (the CRT-emulation TOCTOU that forced ctypes there is a
+        Windows-only defect; see that docstring). A short write would tear
+        a JSONL line that read_outcomes silently skips, so it raises
+        exactly like the Windows partial-write check."""
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o666)
+        try:
+            written = os.write(fd, data)
+            if written != len(data):
+                raise OSError(
+                    f"short append to {path}: {written}/{len(data)} bytes")
+        finally:
+            os.close(fd)
 
 
 # The one and only os.name branch in this module: selects which adapter
@@ -5587,10 +5753,13 @@ def _fleet_task_is_ours(command: str, subcommand: str) -> bool:
     fleet's own argparse accepts, so a hand-edited task may carry it).
     Refused, deliberately: a command whose paths contain spaces and carry NO
     quotes at all -- that is genuinely undecidable, not merely unhandled -- and
-    sh-style single quotes, because there is no POSIX scheduler backend yet to
-    validate a quoting dialect against, and `'` is a legal Windows filename
-    character (`C:\\Users\\O'Brien\\...`) that a single-quote alternation would
-    mis-tokenize. Both refusals are the SAFE direction: the cost is one
+    sh-style single quotes. The POSIX scheduler backend now exists, so that
+    refusal no longer rests on "no dialect to validate against"; it rests on
+    what it always really meant. `_autoclean_task_command` renders DOUBLE
+    quotes on both backends and cron stores that command field verbatim, so a
+    single-quoted command is never one fleet wrote -- while `'` is a legal
+    Windows filename character (`C:\\Users\\O'Brien\\...`) that a single-quote
+    alternation would mis-tokenize. Both refusals are the SAFE direction: the cost is one
     `--force` on a task that is provably the operator's, where the opposite
     error is `/Create /F` over somebody else's scheduled task. Pinned by
     `TestOwnershipQuotingVariants`, which fixes each verdict as a decision.
@@ -5604,13 +5773,20 @@ def _fleet_task_is_ours(command: str, subcommand: str) -> bool:
     Portability (invariant 8): pure string work over a command string plus
     `Path(...).resolve()` -- platform-neutral, no OS branch of any kind, so it
     moves with the platform adapter unchanged. TWO Windows-shaped
-    normalizations to revisit when Phase 1.5 lands the launchd/cron backends
-    (D8): `.lower()` would conflate two paths differing only in case on a
+    normalizations, filed as D8 when the POSIX scheduler backend was still
+    hypothetical: `.lower()` would conflate two paths differing only in case on a
     case-SENSITIVE filesystem (a false MISS), and `replace("\\\\", "/")` rewrites
     a backslash that is a legal POSIX filename character and a shell escape
     inside a crontab line (a false MATCH -- the more dangerous direction).
-    Unreachable today: `_PosixPlatform.autoclean_task_query` raises
-    `UnsupportedPlatformError` before any command string exists.
+    REACHABLE as of the posix-port merge: `_PosixPlatform.autoclean_task_query`
+    no longer raises `UnsupportedPlatformError` -- it reads the user crontab and
+    returns the tagged line's command field verbatim, which lands here. The two
+    normalizations above are therefore live on macOS/Linux, not deferred; D8 is
+    an OPEN defect on the posix backend rather than a Phase-1.5 note. Neither
+    fires on the shape `_autoclean_task_command` emits (an absolute POSIX path
+    with no backslash and no case-variant sibling), so the posix install/refuse
+    path is correct for fleet's own command lines; a hand-written crontab entry
+    is what could still be misjudged.
     [UNVERIFIED -- no POSIX box; reasoned, not run]"""
     tokens = _task_command_tokens(command)
     try:
@@ -5677,18 +5853,17 @@ def _install_autoclean_task(interval_hours, force: bool) -> None:
             f"path above is yours.)")
     ok, msg = PLATFORM.autoclean_task_install(AUTOCLEAN_TASK_NAME, command, interval_hours)
     if not ok:
-        raise FleetCliError(f"schtasks create failed: {msg}")
+        raise FleetCliError(f"scheduler create failed: {msg}")
     print(f"fleet init: scheduled task {AUTOCLEAN_TASK_NAME!r} installed "
           f"(every {interval_hours}h)")
     print(f"  command:   {command}")
-    print(f"  uninstall: fleet init --autoclean-remove "
-          f"(or: schtasks /Delete /TN {AUTOCLEAN_TASK_NAME} /F)")
+    print(f"  uninstall: fleet init --autoclean-remove")
 
 
 def _remove_autoclean_task() -> None:
     ok, msg = PLATFORM.autoclean_task_remove(AUTOCLEAN_TASK_NAME)
     if not ok:
-        raise FleetCliError(f"schtasks delete failed: {msg}")
+        raise FleetCliError(f"scheduler delete failed: {msg}")
     print(f"fleet init: scheduled task {AUTOCLEAN_TASK_NAME!r} removed")
 
 
@@ -5788,7 +5963,7 @@ def _doctor_check_pin_version(which=shutil.which, run=subprocess.run):
     pin = read_pin_pass()
     if pin is None:
         return ("pin-version", True,
-                "no pin-test pass recorded -- run FLEET_LIVE=1 py -3.13 -m pytest "
+                "no pin-test pass recorded -- run FLEET_LIVE=1 python -m pytest "
                 "tests/integration/test_native_pin.py")
     try:
         exe = resolve_claude_executable(which=which)
@@ -6859,61 +7034,13 @@ OUTCOME_RESULT_TEXT_MAX = 20000
 TOMBSTONE_KINDS = ("killed", "interrupted", "stopped")
 
 
-_FILE_APPEND_DATA = 0x0004
-_FILE_SHARE_READ = 0x00000001
-_FILE_SHARE_WRITE = 0x00000002
-_OPEN_ALWAYS = 4
-_FILE_ATTRIBUTE_NORMAL = 0x80
-
-
 def _atomic_append_bytes(path: Path, data: bytes) -> None:
-    """Single-syscall atomic append. Opens the file for FILE_APPEND_DATA
-    access ONLY (no GENERIC_WRITE) -- the Win32 kernel documents this access
-    mode as giving each WriteFile call atomic append semantics across
-    concurrently-open handles/processes, so two writers appending "at the
-    same instant" (Stop hook + fleet-side tombstone, see module banner)
-    never interleave or clobber each other's line.
-
-    Deliberately NOT `os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY)`
-    + `os.write`: on Windows that goes through the C runtime's O_APPEND
-    emulation, which lseek()s to EOF and write()s as two separate steps per
-    call -- a real TOCTOU race between handles that reproducibly drops whole
-    clean records under concurrent writers (confirmed empirically: 4
-    threads x 250 records via os.open+O_APPEND lost ~17% of records with
-    zero JSON-decode errors, i.e. silent loss, not corruption -- the same
-    failure mode the CRITICAL finding this fixes originally reported). The
-    FILE_APPEND_DATA-only handle below is the actual OS-level fix; verified
-    to lose zero of 1000 records under the same test. ctypes/kernel32 only
-    -- no platform-detection branch of any kind (this build targets Windows
-    only, SPEC §14)."""
-    kernel32 = ctypes.windll.kernel32
-    from ctypes import wintypes
-
-    create_file_w = kernel32.CreateFileW
-    create_file_w.argtypes = [
-        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
-        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
-    ]
-    create_file_w.restype = wintypes.HANDLE
-
-    handle = create_file_w(
-        str(path), _FILE_APPEND_DATA, _FILE_SHARE_READ | _FILE_SHARE_WRITE,
-        None, _OPEN_ALWAYS, _FILE_ATTRIBUTE_NORMAL, None,
-    )
-    if handle in (0, wintypes.HANDLE(-1).value):
-        raise OSError(f"CreateFileW failed for {path}: {ctypes.WinError()}")
-    try:
-        written = wintypes.DWORD(0)
-        ok = kernel32.WriteFile(handle, data, len(data), ctypes.byref(written), None)
-        # Roll-up item 4: a partial write (ok=True, written.value < len(data))
-        # produces a torn JSONL line that read_outcomes silently skips --
-        # the exact silent-loss failure class T1's CRITICAL fix existed to
-        # kill. Treat it the same as a WriteFile failure: raise OSError
-        # (already inside this function's raise-OSError contract).
-        if not ok or written.value != len(data):
-            raise OSError(f"WriteFile failed for {path}: {ctypes.WinError()}")
-    finally:
-        kernel32.CloseHandle(handle)
+    """Single-syscall atomic append; the guarantee is per-backend
+    (FILE_APPEND_DATA-only handle on Windows, O_APPEND on POSIX -- see the
+    PLATFORM adapter block, SPEC §14). Module-level name kept: callers and
+    tests pin it, and the raise-OSError-on-partial-write contract is the
+    adapter's, unchanged."""
+    PLATFORM.atomic_append_bytes(path, data)
 
 
 def append_outcome(key: str, record: dict) -> None:
@@ -7377,6 +7504,12 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
     settings = Path(settings_path) if settings_path else instance_settings_path()
     try:
         tasks_dir().mkdir(parents=True, exist_ok=True)
+        # journals_dir() must exist BEFORE dispatch: it goes onto --add-dir
+        # below, and claude silently grants nothing for a nonexistent dir --
+        # the worker's protocol-mandated journal Write then hangs on a
+        # permission prompt on any fresh fleet home (posix-port live
+        # finding 2026-07-18, part 2).
+        journals_dir().mkdir(parents=True, exist_ok=True)
         task_path = task_file_path(name)
         task_path.write_text(prompt_body, encoding="utf-8")
     except OSError as exc:
@@ -7392,7 +7525,15 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
     # non-bypass mode the worker's first Read on it hangs forever on an
     # unapprovable headless permission prompt. --add-dir pre-authorizes
     # tasks_dir() specifically (least privilege -- never FLEET_HOME wholesale).
-    argv += ["--add-dir", tasks_dir().as_posix()]
+    # posix-port live finding 2026-07-18: journals_dir() needs the same
+    # pre-authorization -- compose_prompt's preamble ORDERS the worker to
+    # "create it early; update it at each milestone", so under acceptEdits
+    # every worker's first journal Write hung on the same unapprovable
+    # prompt (latent upstream: campaigns run bypass, and the pin tasks are
+    # reply-only). Same least-privilege doctrine: the two specific dirs
+    # the worker protocol requires, never state/ or FLEET_HOME wholesale.
+    argv += ["--add-dir", tasks_dir().as_posix(),
+             "--add-dir", journals_dir().as_posix()]
     # T4 fix wave (Important I1): additive param -- forwards the persisted
     # --setting-sources value onto the native --bg argv, which the frozen
     # T3 dispatch_bg signature never carried. UNOBSERVED under --bg at
@@ -7763,7 +7904,15 @@ def _roster_live_sids(entries: list) -> set:
     (docs/specs/native-substrate.md, roster contract): `status`/`pid` keys
     exist only while the process lives; a lingering `state:"done"` entry
     (observed surviving >=3h21m) must NOT count as live, or a finished
-    predecessor would block every successor claim for hours."""
+    predecessor would block every successor claim for hours.
+
+    posix-port live finding 2026-07-19 (macOS, claude 2.1.214): a finished
+    bg session's host process can LINGER after its turn ends -- the entry
+    keeps `pid` AND `status` ("idle") with `state:"done"`. The key-presence
+    heuristic alone therefore misreads it as live (observed blocking
+    `fleet respawn` on an idle worker). The documented terminal-state rule
+    must dominate key presence: `state:"done"` is never live, keys or not.
+    (On Windows the two conditions agree -- done entries lose pid/status.)"""
     # Same hostile-sessionId-value guard as dispatch_bg's pre-snapshot: a
     # dict-valued sessionId (CLI drift / hostile roster) must never raise
     # TypeError from an unhashable value landing in the set.
@@ -7771,6 +7920,7 @@ def _roster_live_sids(entries: list) -> set:
         e.get("sessionId") for e in entries
         if isinstance(e, dict) and isinstance(e.get("sessionId"), str)
         and e.get("sessionId") and ("status" in e or "pid" in e)
+        and e.get("state") != "done"
     }
 
 
@@ -8033,16 +8183,20 @@ def _render_successor_task(successor_inc: str, old_inc: str) -> str:
     """Successor bootstrap body (task-file bootstrap, contract G8 -- never
     argv for size-unbounded content). Paths rendered .as_posix()."""
     fleet_py = (FLEET_HOME / "bin" / "fleet.py").as_posix()
+    # The interpreter that is running fleet right now, not a hardcoded
+    # `py -3.13` (a Windows-only launcher): the successor must invoke the
+    # same Python this incarnation was launched with, on any platform.
+    py = Path(sys.executable).as_posix()
     return f"""You are the claude-fleet supervisor SUCCESSOR, incarnation {successor_inc}.
 Your predecessor ({old_inc}) dispatched you mid-handoff (spec docs/superpowers/specs/2026-07-13-native-agents-pivot-design.md §4).
 
 Do exactly this, in order:
-1. Run: py -3.13 {fleet_py} sup-boot --handoff-inc {successor_inc}
+1. Run: "{py}" {fleet_py} sup-boot --handoff-inc {successor_inc}
    This prints your boot bundle and writes supervisor/HANDSHAKE. You hold NO claim yet.
 2. Take NO spawn/respawn/send/kill/clean actions before claim transfer -- spec §4's double-spawn guard.
-3. Poll every ~30s (up to 10 minutes): py -3.13 {fleet_py} sup-status --json
+3. Poll every ~30s (up to 10 minutes): "{py}" {fleet_py} sup-status --json
    - When incarnation.incarnation_id == "{successor_inc}": the claim is yours. Run:
-     py -3.13 {fleet_py} sup-checkpoint "claim received via handoff from {old_inc}"
+     "{py}" {fleet_py} sup-checkpoint "claim received via handoff from {old_inc}"
      then read your boot bundle output and continue the supervisor duty per skills/fleet/supervisor.md.
    - If 10 minutes pass without transfer: the handoff was aborted. STOP -- take no actions,
      end your turn with the final message: HANDOFF-ORPHAN {successor_inc}

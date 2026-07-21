@@ -144,7 +144,7 @@ Receipt: path helpers `state_dir/logs_dir/mailbox_dir/journals_dir/ceilings_dir/
 
 ## 6. Dispatch contract (`dispatch_bg` @6167)
 
-Every native **worker** launch — spawn, fork-steer, resume-limited, respawn — funnels through one choke point. It is not the only `--bg` launch in the codebase: there are exactly **two** argv builders, and the second (`cmd_sup_handoff_begin`) is specified at the end of this section.
+Every native **worker** launch — spawn, fork-steer, resume-limited, respawn — funnels through one choke point. It is not the only `--bg` launch in the codebase: there are exactly **two** argv builders, and the second (the supervisor handoff successor, `cmd_sup_handoff_begin`, §12) is specified at the end of this section.
 
 ```
 claude --bg [--resume <old-sid>] -n "<cat>|<name>|<hint>" --settings state/worker-settings.json

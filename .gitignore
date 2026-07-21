@@ -6,3 +6,7 @@ __pycache__/
 .superpowers/
 supervisor/INCARNATION
 supervisor/HANDSHAKE
+
+# Scratch state from the `remember` tool: session-scoped notes plus a pid file.
+# Arrived as an untracked add on `feat/worker-providers`; nothing in this repo reads it.
+.remember/
