@@ -1116,12 +1116,29 @@ _LIMIT_RESET_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 # `zoneinfo.ZoneInfo` -- not this regex -- is the validator. Any name this
 # wider group admits, real or garbage ("(soon)", "(NotAZone)"), is handed
 # to `ZoneInfo` inside `_next_local_reset_utc`; a name it resolves yields a
-# correct horizon, a name it rejects raises into the existing blanket
+# horizon, a name it rejects raises into the existing blanket
 # `except Exception: return None` and null-parks, exactly as an unresolvable
-# multi-segment name already did. Widening can therefore only convert a
-# null-park into a *correct* horizon; it can never convert one into a
-# *wrong* one. The prior gap was YAGNI (no production message had been
-# observed in this shape), not a safety measure.
+# multi-segment name already did.
+#
+# ND-2 (ME-UL-REVIEW-2026-07-21.md re-review): "resolves -> correct" is
+# NOT quite right -- a THIRD case exists: a name `ZoneInfo` resolves to
+# something other than what the message meant. Widening admits 45
+# single-segment IANA keys, and a handful (`EST`, `MST`, `HST`, `GMT`,
+# `GMT0`, `Factory`, ...) are legacy FIXED-OFFSET zones that never observe
+# DST -- `EST` is a permanent UTC-5 zone, not "US Eastern time" -- so e.g.
+# `"resets 4:40am (EST)"` in July resolves to a horizon 1h off from what
+# `America/New_York` would give (verified below). Widening CAN convert a
+# null-park into a horizon that is wrong by the DST delta.
+#
+# The bar that actually matters survives: every such mismatch is a
+# never-DST reading of what would be a daylight-time hour, which always
+# resolves LATE, never early (verified across all 45 newly-admitted
+# single-segment keys, both DST phases). So the standing bias (a late
+# resume beats an early one) is intact -- widening can convert a null-park
+# into a correct horizon, or into one wrong by up to the DST delta, but
+# never into an EARLY one, which is the bar D4 actually set. The prior gap
+# was YAGNI (no production message had been observed in this shape), not a
+# safety measure.
 _LIMIT_RESET_LOCAL_RE = re.compile(
     r"resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*"
     r"\(([A-Za-z_][A-Za-z_+\-0-9]*(?:/[A-Za-z_+\-0-9]+)*)\)",
@@ -1207,7 +1224,7 @@ def _next_local_reset_utc(hour: int, minute: int, tz_name: str, *, now: datetime
         if candidate < moment:
             candidate += timedelta(days=1)
         later = max(candidate.replace(fold=0), candidate.replace(fold=1),
-                     key=lambda c: c.astimezone(timezone.utc))
+                    key=lambda c: c.astimezone(timezone.utc))
         return later.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     except Exception:
         return None

@@ -44,16 +44,47 @@ def _tzdata_available() -> bool:
     `tzdata` pip package. Tests that need a REAL named-zone resolution
     (as opposed to testing the null-park failure path, which mocks
     `zoneinfo.ZoneInfo` and needs no real data) skip rather than fail on a
-    box without it -- a clean box is a valid environment, not a broken one."""
+    box without it -- a clean box is a valid environment, not a broken one.
+
+    ND-4 (re-review): probes all three zones the gated test classes
+    actually need (`America/New_York` for the DST tests, `Asia/Qyzylorda`
+    for the local-format/hour-validation tests, `UTC` for the
+    single-segment-zone tests) rather than just the first -- on a full
+    tzdb these are equivalent, but a partial one (e.g. a slim container
+    image shipping a zone subset) could resolve one and not another, and
+    probing only one would then skip too little (a test that needs a
+    missing zone still runs and fails) or too much (a test whose zone is
+    actually present gets skipped anyway)."""
     import zoneinfo
     try:
-        zoneinfo.ZoneInfo("America/New_York")
+        for zone in ("America/New_York", "Asia/Qyzylorda", "UTC"):
+            zoneinfo.ZoneInfo(zone)
         return True
     except Exception:
         return False
 
 
 _TZDATA_SKIP_REASON = "requires real tz data (tzdata pip package or a system tz database)"
+
+
+class TestTzdataGuardCanary:
+    """ND-1 (ME-UL-REVIEW-2026-07-21.md, re-review, MAJOR): `_tzdata_available()`
+    gates 17 tests -- every exact-instant local-format/DST/single-segment-zone
+    assertion in this file. If it ever silently returns `False` on a box that
+    actually HAS tz data, those 17 vanish via `skipif` and the suite still
+    reads green (`1132 passed, 23 skipped`, no FAILED line) -- exactly the
+    "silently stops running" hazard the manager warned about, minted by the
+    manager's own M2 remedy. Deliberately NOT `skipif`-guarded itself: it
+    cross-checks `_tzdata_available()` against the independent
+    `_doctor_check_tzdata` probe (a different code path, real production
+    doctor logic rather than a test helper), so a guard that starts lying
+    fails loudly instead of quietly skipping its own canary too. On a
+    genuinely clean box both sides evaluate `False` and this still passes --
+    it does not reintroduce M2's environment-dependent-assertion problem."""
+
+    def test_guard_agrees_with_doctor_check(self):
+        _name, _ok, msg = fleet._doctor_check_tzdata()
+        assert _tzdata_available() == ("resolves named zones" in msg)
 
 
 ALIVE_CTIME = "2026-07-07T12:00:00Z"
@@ -758,6 +789,39 @@ class TestParseLimitSignalSingleSegmentZone:
             "session limit -- resets 4:40am (NotAZone)", now=self._NOW)
         assert reset_at is None
         assert kind == "session_5h"
+
+    def test_fixed_offset_legacy_key_resolves_but_known_late(self):
+        # ND-2 (re-review): "EST" is a permanent UTC-5 zone, not "US Eastern
+        # time" -- in July (DST in effect for America/New_York) reading the
+        # message through the legacy alias resolves 1h LATE relative to what
+        # the geographic zone would give. Documents the known mismatch
+        # rather than leaving it undiscovered; the standing bias (late,
+        # never early) holds either way.
+        reset_at, _ = fleet._parse_limit_signal(
+            "session limit -- resets 4:40am (EST)", now=self._NOW)
+        assert reset_at == "2026-07-16T09:40:00Z"
+        geographic, _ = fleet._parse_limit_signal(
+            "session limit -- resets 4:40am (America/New_York)", now=self._NOW)
+        assert geographic == "2026-07-16T08:40:00Z"
+        assert reset_at > geographic  # late, never early
+
+
+# ---------------------------------------------------------------------------
+# ND-3 (ME-UL-REVIEW-2026-07-21.md re-review, MINOR): DQ1's widening was
+# pinned only in two coarse directions (a real single-segment name
+# resolves, a garbage word null-parks) -- nothing pinned that the
+# widened `_LIMIT_RESET_LOCAL_RE` char class itself rejects
+# whitespace/punctuation-bearing bracketed text, as opposed to that text
+# reaching `ZoneInfo` and being rejected there. Asserts against the regex
+# directly (no `ZoneInfo` call, no tzdata needed) so a future widening that
+# walks through the char class boundary is caught here rather than relying
+# on `ZoneInfo` to keep saving it.
+# ---------------------------------------------------------------------------
+
+class TestLimitResetLocalRegexBoundary:
+    @pytest.mark.parametrize("brack", ["(local time)", "(see below)", "(4:40)", "( UTC)", "(UTC )"])
+    def test_regex_itself_rejects_non_zone_shapes(self, brack):
+        assert fleet._LIMIT_RESET_LOCAL_RE.search(f"resets 4:40am {brack}") is None
 
 
 # ---------------------------------------------------------------------------
