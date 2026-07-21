@@ -28,6 +28,30 @@ Blocks with no `$ ` line (quoted prose, journal entries) are skipped.
 green on a document it never checked; this one proves it can fail by mutating a
 single word of a pasted receipt in memory and requiring that the mutation is
 caught. Run it before trusting any green run.
+
+KNOWN GAPS -- read these before pointing this tool at a second document.
+
+1. **stderr is never captured or compared.** Only stdout is diffed. A receipt
+   whose pasted output came from stderr (or from a `2>&1` the paste dropped)
+   will read as an empty-output mismatch, and a command that succeeds on stdout
+   while screaming on stderr reads as clean. Deliberate for now -- every receipt
+   in `docs/specs/` is a `grep`/`sed`/`git` invocation whose evidence is on
+   stdout -- but it is an assumption, not a property.
+
+2. **A `$ ` line with neither expected output nor an exit assertion is
+   UNCLASSIFIED.** It cannot be checked: there is nothing to compare against.
+   Such a receipt is *reported* and, under `--strict` (which `tests/test_receipts.py`
+   uses), *fails the run*. It is never silently dropped. An earlier version of
+   this file filtered them out with a list comprehension, which is precisely the
+   green-while-blind hole the tool exists to close: a receipt that is neither
+   checked nor reported is worse than no tool at all.
+
+3. **Fence detection accepts language tags** (```` ```python ````) as block
+   boundaries. It did not always: matching only a bare ```` ``` ```` meant an
+   opening tagged fence was treated as prose and the *closing* fence toggled the
+   parser INTO a block, inverting every block boundary for the rest of the
+   document. No document in `docs/specs/` uses tagged fences today, which is
+   exactly why this could have sat unnoticed.
 """
 
 from __future__ import annotations
@@ -77,19 +101,29 @@ class Receipt:
 
 
 def parse(text):
-    """Extract receipts from fenced blocks. Returns (receipts, blocks_seen)."""
-    receipts, blocks = [], 0
+    """Extract receipts from fenced blocks.
+
+    Returns (checkable, unclassified, blocks_seen). `unclassified` holds
+    receipts with nothing to compare against -- see gap 2 in the module
+    docstring. They are returned, never dropped.
+    """
+    receipts, unclassified, blocks = [], [], 0
     in_block, block, block_start = False, [], 0
     for n, raw in enumerate(text.splitlines(), start=1):
-        if raw.strip() == "```":
+        # Gap 3: a fence may carry a language tag; treat any ``` prefix as a
+        # boundary, or a tagged opener is read as prose and the closer inverts
+        # every block boundary after it.
+        if raw.lstrip().startswith("```"):
             if in_block:
                 blocks += 1
-                receipts.extend(_parse_block(block, block_start))
+                ok, bad = _parse_block(block, block_start)
+                receipts.extend(ok)
+                unclassified.extend(bad)
             in_block, block, block_start = not in_block, [], n + 1
             continue
         if in_block:
             block.append((n, raw))
-    return receipts, blocks
+    return receipts, unclassified, blocks
 
 
 def _parse_block(lines, _start):
@@ -124,7 +158,11 @@ def _parse_block(lines, _start):
         r.volatile = r.volatile or volatile
         while r.expected and not r.expected[-1].strip():
             r.expected.pop()
-    return [r for r in out if r.expected or r.exit_code is not None]
+    # Gap 2: split rather than filter. A receipt with nothing to compare
+    # against is UNCLASSIFIED and is reported; it is never silently dropped.
+    checkable = [r for r in out if r.expected or r.exit_code is not None]
+    unclassified = [r for r in out if not (r.expected or r.exit_code is not None)]
+    return checkable, unclassified
 
 
 class _ExitCapture:
@@ -143,11 +181,27 @@ def run(receipt, root):
     return actual, proc.returncode
 
 
-def check(text, root, quiet=False):
-    """Returns (n_checked, failures, warnings). Prints a report unless quiet."""
-    receipts, blocks = parse(text)
-    failures, warnings = [], []
+def check(text, root, quiet=False, strict=False, skip_volatile=False):
+    """Returns (n_checked, failures, warnings). Prints a report unless quiet.
+
+    `strict` promotes UNCLASSIFIED receipts (gap 2) to failures.
+    `skip_volatile` does not *execute* receipts marked `# volatile` at all --
+    used by `tests/test_receipts.py`, which must stay hermetic. A volatile
+    receipt is one whose evidence lives outside the repo (this repo has one:
+    a count of session transcripts under ~/.claude). Marking it is how the
+    document stays honest about it; skipping it is how the test stays
+    machine-independent. Neither loosens what is checked about the rest.
+    """
+    receipts, unclassified, blocks = parse(text)
+    failures, warnings, skipped = [], [], 0
+    for r in unclassified:
+        entry = (r, ["UNCLASSIFIED: no expected output and no exit assertion -- "
+                     "nothing to verify against"])
+        (failures if strict else warnings).append(entry)
     for r in receipts:
+        if skip_volatile and r.volatile:
+            skipped += 1
+            continue
         actual, rc = run(r, root)
         problems = []
         if r.expected and actual != r.expected:
@@ -166,16 +220,18 @@ def check(text, root, quiet=False):
         (warnings if r.volatile else failures).append(entry)
     if not quiet:
         for r, problems in warnings:
-            print(f"WARN  (volatile) line {r.line}: {r.cmd}")
+            print(f"WARN  line {r.line}: {r.cmd}")
             for p in problems:
                 print(f"      {p}")
         for r, problems in failures:
             print(f"FAIL  line {r.line}: {r.cmd}")
             for p in problems:
                 print(f"      {p}")
-        print(f"\n{len(receipts) - len(failures) - len(warnings)}/{len(receipts)} "
+        total = len(receipts) + len(unclassified)
+        print(f"\n{total - len(failures) - len(warnings) - skipped}/{total} "
               f"receipts reproduce exactly "
-              f"({blocks} fenced blocks, {len(warnings)} volatile-drift, "
+              f"({blocks} fenced blocks, {len(unclassified)} unclassified, "
+              f"{skipped} volatile-skipped, {len(warnings)} warned, "
               f"{len(failures)} FAILED)")
     return len(receipts), failures, warnings
 
@@ -187,7 +243,7 @@ def self_test(text, root):
     non-volatile receipt that currently reproduces, and requires that exactly
     that receipt is then reported as a failure.
     """
-    receipts, _ = parse(text)
+    receipts, _unclassified, _blocks = parse(text)
     target = None
     for r in receipts:
         if r.volatile or not r.expected:
@@ -239,6 +295,10 @@ def main(argv=None):
     ap.add_argument("--root", default=".", help="cwd for the commands (default: .)")
     ap.add_argument("--self-test", action="store_true",
                     help="prove the harness can fail, then verify")
+    ap.add_argument("--strict", action="store_true",
+                    help="an unclassified receipt fails the run (see gap 2)")
+    ap.add_argument("--skip-volatile", action="store_true",
+                    help="do not execute receipts marked `# volatile`")
     args = ap.parse_args(argv)
     root = pathlib.Path(args.root).resolve()
     global BASH
@@ -250,7 +310,8 @@ def main(argv=None):
         print(f"=== {p} ===")
         if args.self_test and not self_test(text, root):
             rc = 1
-        _, failures, _ = check(text, root)
+        _, failures, _ = check(text, root, strict=args.strict,
+                               skip_volatile=args.skip_volatile)
         if failures:
             rc = 1
     return rc
