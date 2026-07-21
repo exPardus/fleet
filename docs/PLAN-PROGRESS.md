@@ -81,7 +81,7 @@ The mutable cursor against the immutable contract `docs/PLAN.md`. A resuming man
 | M-D | claim-nonce spec slice | pending-next | gated: adjudication item 1-3; build gated on operator ratification | 2026-07-18 |
 | M-D | shipped-code defects (handoff no-hooks, autoclean predicate) + ND-4/nits | pending-next | small reviewed fix tasks | 2026-07-18 |
 | M-E | vendor-bump gate: claude 2.1.214->2.1.216 pin re-run | done | RED at test_1 -> root-caused to a STALE ~/.claude/daemon.lock naming a REUSED pid (15740 -> WacomHost, StartTime unreadable) wedging every `--bg` dispatch machine-wide; `claude daemon stop --any` does NOT clear it; rm of the lock restored dispatch; pin 6/6 GREEN on 2.1.216, `record_pin_pass` stamped, doctor 21 PASS / 0 FAIL. 9th live catch. | 2026-07-21 |
-| M-E | me-daemon (daemon-wedge detection + ND-4 + n2/n3/n4) | pending | task file pending; branch me/daemon | 2026-07-21 |
-| M-E | me-defects (handoff dispatch no-hooks + autoclean ownership predicate) | pending | task file pending; branch me/defects | 2026-07-21 |
-| M-E | me-ul (ulparser D1-D4 follow-ups + vestigial wall-clock default) | pending | task file pending; branch me/ul | 2026-07-21 |
+| M-E | me-daemon (daemon-wedge detection + ND-4 + n2/n3/n4) | dispatched | worker 8bb5d590, opus, worktree fleet-me-daemon, branch me/daemon, ceiling 4M | 2026-07-21 |
+| M-E | me-defects (handoff dispatch no-hooks + autoclean ownership predicate) | dispatched | worker b460cf86, opus, worktree fleet-me-defects, branch me/defects, ceiling 4M | 2026-07-21 |
+| M-E | me-ul (ulparser D1-D4 follow-ups + vestigial wall-clock default) | dispatched | worker b53b80ec, sonnet, worktree fleet-me-ul, branch me/ul, ceiling 2.5M | 2026-07-21 |
 | M-E | SDD/drift-control design v3 | blocked | `docs/superpowers/specs/2026-07-18-sdd-drift-control-design.md` DRAFT v3 (2 review rounds folded). OPERATOR-GATED: not spec-of-record, no build until Altai ratifies. | 2026-07-21 |
