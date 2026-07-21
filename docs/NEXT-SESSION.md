@@ -8,6 +8,11 @@ Previous handoff (M-D) is superseded and closed. M-E campaign record: `knowledge
 
 Four campaigns of decisions are now queued behind the operator, and the queue is the bottleneck: the nonce slice blocks the three-tier re-draft, which blocks the supervisor tier, and eleven contract markers have been sitting `PENDING` since M-D. **Do this in your first turn, in one message, before spawning anything.**
 
+**The docket is now a live file, not prose in this handoff.** `docs/OPERATOR-GATES.md` is the queue, and
+`bin/hooks/sessionstart_fleet.py` leads every manager briefing with its open items — so you will have
+seen them before reading this. The copy below is the reasoning behind each; the file is the source of
+truth, and ticking a box there is the operator's act alone.
+
 Present the docket below and ask for a decision on each. Use `AskUserQuestion` where the choice is genuinely multiple-choice (items 2 and 3), plain prose for the rest. Give your recommendation on each — the operator's standing preference is a named recommendation with the alternative stated fairly, not a menu.
 
 **Rules that bind you while doing this:**
