@@ -3,6 +3,8 @@
 clean tiering split, scheduler install/remove/doctor."""
 import argparse
 import json
+import os
+import pathlib
 import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -14,6 +16,32 @@ import fleet
 
 def _iso(dt):
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# --- pathlib stand-ins for cross-dialect ownership fixtures ----------------
+#
+# `_fleet_task_is_ours` calls `Path(FLEET_HOME).resolve()`. Several ownership
+# fixtures are inherently one dialect's shape -- the live Windows scheduled
+# task is a real Windows artifact; the crontab false-MATCH cases are about
+# POSIX filesystem semantics -- and ambient `pathlib.Path` is whichever
+# flavour the HOST runs. That mismatch is what made the Windows-shaped
+# fixtures fail on Linux (a `C:\...` literal is a RELATIVE posix path, so
+# `.resolve()` prepended the cwd and no verdict could ever match).
+#
+# Pinning the dialect explicitly lets every one of those cases run on BOTH
+# operating systems instead of being skipped off its home platform. The
+# identity `resolve()` is exact for these fixtures specifically: every
+# literal is absolute, symlink-free and `..`-free, so real resolution would
+# be a no-op anyway. These stand in for pathlib, never for the filesystem --
+# no test that actually depends on resolution behaviour may use them.
+class _PurePosixPathStandIn(pathlib.PurePosixPath):
+    def resolve(self):
+        return self
+
+
+class _PureWindowsPathStandIn(pathlib.PureWindowsPath):
+    def resolve(self):
+        return self
 
 
 NOW = datetime.now(timezone.utc)
@@ -876,11 +904,24 @@ class TestSchedulerInstall:
         home the live task pins. Evaluating it from a worktree checkout
         answers False -- but so does the pre-fix path-only predicate, because
         the worktree's fleet.py is a different path; see this test's sibling
-        below."""
+        below.
+
+        posix-port campaign, Class 2 [TEST DEFECT]: the artifact is a Windows
+        artifact and always will be, but the test used ambient `pathlib.Path`
+        and the ambient PLATFORM, so on Linux `Path(r"C:\\proga\\claude-fleet")`
+        was a RELATIVE posix path and `.resolve()` prepended the cwd -- the
+        predicate could never match and the case failed for a reason that had
+        nothing to do with the predicate. Driving the Windows adapter and
+        Windows path semantics explicitly makes the receipt verifiable on
+        every host instead of skipped off Windows. The stand-in's identity
+        `resolve()` is exact for this fixture: the literals are absolute,
+        symlink-free and `..`-free."""
         live = (r'"C:\Users\Techn\AppData\Local\Programs\Python\Python313'
                 r'\python.exe" "C:\proga\claude-fleet\bin\fleet.py" autoclean '
                 r'--fleet-home "C:\proga\claude-fleet"')
-        canonical = Path(r"C:\proga\claude-fleet")
+        canonical = _PureWindowsPathStandIn(r"C:\proga\claude-fleet")
+        monkeypatch.setattr(fleet, "PLATFORM", fleet._WindowsPlatform())
+        monkeypatch.setattr(fleet, "Path", _PureWindowsPathStandIn)
         monkeypatch.setattr(fleet, "FLEET_HOME", canonical)
         monkeypatch.setattr(fleet, "_autoclean_script_path",
                             lambda: canonical / "bin" / "fleet.py", raising=False)
@@ -891,11 +932,18 @@ class TestSchedulerInstall:
         worktree checkout is a probe artifact, not a regression: the pre-fix
         path-only predicate refuses the same command for the same reason (the
         worktree's fleet.py is not the path the live task pins). Pinning this
-        keeps the next reviewer from re-filing it as a new defect."""
+        keeps the next reviewer from re-filing it as a new defect.
+
+        Windows adapter + Windows path semantics driven explicitly, for the
+        same reason as its sibling above: off Windows the case would
+        otherwise pass VACUOUSLY (every verdict is False when the fixture's
+        paths are nonsense on the host), proving nothing."""
         live = (r'"C:\Users\Techn\AppData\Local\Programs\Python\Python313'
                 r'\python.exe" "C:\proga\claude-fleet\bin\fleet.py" autoclean '
                 r'--fleet-home "C:\proga\claude-fleet"')
-        worktree = Path(r"C:\proga\fleet-me-defects")
+        worktree = _PureWindowsPathStandIn(r"C:\proga\fleet-me-defects")
+        monkeypatch.setattr(fleet, "PLATFORM", fleet._WindowsPlatform())
+        monkeypatch.setattr(fleet, "Path", _PureWindowsPathStandIn)
         monkeypatch.setattr(fleet, "FLEET_HOME", worktree)
         monkeypatch.setattr(fleet, "_autoclean_script_path",
                             lambda: worktree / "bin" / "fleet.py", raising=False)
@@ -904,9 +952,32 @@ class TestSchedulerInstall:
         assert fleet._autoclean_task_is_ours(live) is False          # post-fix: False
 
 
-SPACED_HOME = r"C:\Program Files\My Fleet"
-SPACED_SCRIPT = r"C:\Program Files\My Fleet\bin\fleet.py"
-SPACED_PY = r"C:\Program Files\Python313\python.exe"
+# posix-port campaign, Class 2 [TEST DEFECT]. These were Windows literals
+# (`C:\Program Files\My Fleet`), which made every case below fail on Linux:
+# a `C:\...` string is a RELATIVE path to posix `pathlib`, so
+# `Path(FLEET_HOME).resolve()` inside `_fleet_task_is_ours` prepended the
+# cwd and the home token could never match. The predicate itself was fine --
+# the fixtures were not portable. Native-shaped per host, so the SAME cases
+# exercise the SAME predicate on both, rather than being skipped off
+# Windows. `/opt` is used rather than `/tmp` because `/tmp` is a symlink on
+# macOS, which would make the identity assumption in `spaced_home` false.
+if os.name == "nt":
+    SPACED_HOME = r"C:\Program Files\My Fleet"
+    SPACED_SCRIPT = r"C:\Program Files\My Fleet\bin\fleet.py"
+    SPACED_PY = r"C:\Program Files\Python313\python.exe"
+    SPACED_FOREIGN_SCRIPT = r"C:\Program Files\Other\bin\fleet.py"
+else:
+    SPACED_HOME = "/opt/Application Support/My Fleet"
+    SPACED_SCRIPT = "/opt/Application Support/My Fleet/bin/fleet.py"
+    SPACED_PY = "/usr/local/bin/python 3.13/python3"
+    SPACED_FOREIGN_SCRIPT = "/opt/Application Support/Other/bin/fleet.py"
+
+# The separator this host does NOT treat as a path separator, used to build
+# the "spelled with the other separator" case in both directions.
+_OTHER_SEPARATOR = "/" if os.name == "nt" else "\\"
+
+FLEET_OWN_COMMAND = (
+    f'"{SPACED_PY}" "{SPACED_SCRIPT}" autoclean --fleet-home "{SPACED_HOME}"')
 
 
 @pytest.fixture
@@ -914,12 +985,20 @@ def spaced_home(monkeypatch):
     """B1: a FLEET_HOME whose path contains spaces -- the shape the quoted-run
     tokenizer exists for, and which no test fed it before (injection I13
     replaced `_TASK_ARG_RE` with a naive `\\S+` and the whole suite stayed
-    green). `tmp_path` on this machine never contains a space, so the fixture
+    green). `tmp_path` never contains a space on either host, so the fixture
     is literal."""
-    monkeypatch.setattr(fleet, "FLEET_HOME", Path(SPACED_HOME))
+    home = Path(SPACED_HOME)
+    # The cases below compare the command's home token against
+    # `Path(FLEET_HOME).resolve()`. Every fixture literal is absolute,
+    # symlink-free and `..`-free, so resolution must be an identity here --
+    # asserted rather than assumed, so an exotic host (a symlinked `/opt`)
+    # fails loudly instead of turning every verdict below into a mystery.
+    assert home.resolve() == home, (
+        f"fixture precondition: {home} must resolve to itself on this host")
+    monkeypatch.setattr(fleet, "FLEET_HOME", home)
     monkeypatch.setattr(fleet, "_autoclean_script_path",
                         lambda: Path(SPACED_SCRIPT), raising=False)
-    return Path(SPACED_HOME)
+    return home
 
 
 class TestOwnershipQuotingVariants:
@@ -933,30 +1012,54 @@ class TestOwnershipQuotingVariants:
     Refused (must be `False`, and safe): forms that cannot be tokenized
     unambiguously. Refusal costs an operator one `--force` on a task that is
     provably theirs; the opposite error is `/Create /F` over somebody else's
-    scheduled task. Both refusals are documented in `_fleet_task_is_ours`."""
+    scheduled task. Both refusals are documented in `_fleet_task_is_ours`.
+
+    posix-port campaign, Class 2 [TEST DEFECT]: every fixture here was a
+    Windows literal, so the whole class failed on Linux for a fixture reason
+    rather than a predicate reason. The literals are now native-shaped (see
+    `SPACED_HOME` above) and every case runs on both hosts. The two cases
+    that are genuinely about a FILESYSTEM property -- case folding and
+    separator folding -- became verdict-follows-the-adapter tests rather
+    than unconditional `True`s, because on posix the correct answer flipped
+    to `False`: see `TestTaskPathSemanticsFollowTheFilesystem`."""
 
     @pytest.mark.parametrize("label,command", [
         ("fleet's own rendering (both paths quoted)",
-         f'"{SPACED_PY}" "{SPACED_SCRIPT}" autoclean --fleet-home "{SPACED_HOME}"'),
-        ("schtasks XML split: <Command> unquoted, <Arguments> quoted",
-         f'{SPACED_PY} "{SPACED_SCRIPT}" autoclean --fleet-home "{SPACED_HOME}"'),
-        ("interpreter path unquoted, fleet paths quoted",
+         FLEET_OWN_COMMAND),
+        ("scheduler round-trip: interpreter unquoted, fleet paths quoted "
+         "(the schtasks <Command>/<Arguments> split shape)",
          f'{SPACED_PY} "{SPACED_SCRIPT}" autoclean --fleet-home "{SPACED_HOME}"'),
         ("--fleet-home=VALUE form (argparse accepts it, so must we)",
          f'"{SPACED_PY}" "{SPACED_SCRIPT}" autoclean --fleet-home="{SPACED_HOME}"'),
-        ("forward slashes throughout (schtasks XML round-trip variance)",
-         f'"{SPACED_PY}" "{SPACED_SCRIPT}" autoclean --fleet-home "{SPACED_HOME}"'
-         .replace("\\", "/")),
-        ("uppercased throughout (schtasks XML round-trip variance)",
-         f'"{SPACED_PY}" "{SPACED_SCRIPT}" autoclean --fleet-home "{SPACED_HOME}"'.upper()),
     ])
     def test_accepted_quoting_variants_are_ours(self, spaced_home, label, command):
         assert fleet._autoclean_task_is_ours(command) is True, label
 
+    def test_case_variance_verdict_follows_the_filesystem(self, spaced_home):
+        """On Windows a case-varied spelling is the SAME path (schtasks XML
+        round-trips produce it, and NTFS agrees), so it is ours. On a
+        case-sensitive filesystem it is a DIFFERENT path, and reading it as
+        ours would be the false MATCH that licenses overwriting somebody
+        else's scheduled job. One assertion, opposite verdicts, both hosts --
+        no skip on either."""
+        assert fleet._autoclean_task_is_ours(FLEET_OWN_COMMAND.upper()) is (
+            fleet.PLATFORM.task_paths_are_case_insensitive)
+
+    def test_separator_variance_verdict_follows_the_filesystem(self, spaced_home):
+        """Same shape for the other normalization. On Windows `/` and `\\`
+        spell one path. On POSIX `\\` is an ordinary filename character, so a
+        backslash-spelled command names something else entirely."""
+        flipped = FLEET_OWN_COMMAND.replace(os.sep, _OTHER_SEPARATOR)
+        assert flipped != FLEET_OWN_COMMAND, "fixture must actually differ"
+        assert fleet._autoclean_task_is_ours(flipped) is (
+            fleet.PLATFORM.task_paths_use_backslash_separator)
+
     @pytest.mark.parametrize("label,command", [
         ("everything unquoted -- a space-bearing path is undecidable",
          f'{SPACED_PY} {SPACED_SCRIPT} autoclean --fleet-home {SPACED_HOME}'),
-        ("sh-style single quotes -- no POSIX scheduler backend exists yet",
+        ("sh-style single quotes -- never a form fleet wrote, and `'` is a "
+         "legal Windows filename character a single-quote alternation would "
+         "mis-tokenize",
          f"'{SPACED_PY}' '{SPACED_SCRIPT}' autoclean --fleet-home '{SPACED_HOME}'"),
     ])
     def test_undecidable_quoting_variants_refuse(self, spaced_home, label, command):
@@ -967,7 +1070,7 @@ class TestOwnershipQuotingVariants:
         stopped working on spaced paths: a genuinely foreign task refuses too,
         and the accepted variants above prove the ours-direction still fires."""
         assert fleet._autoclean_task_is_ours(
-            f'"{SPACED_PY}" "C:\\Program Files\\Other\\bin\\fleet.py" autoclean '
+            f'"{SPACED_PY}" "{SPACED_FOREIGN_SCRIPT}" autoclean '
             f'--fleet-home "{SPACED_HOME}"') is False
 
     def test_spaced_path_wrong_subcommand_still_refused(self, spaced_home):
@@ -1002,16 +1105,28 @@ class TestOwnershipQuotingVariants:
         trailing-separator rule reaches it too."""
         assert fleet._autoclean_task_is_ours(
             f'"{SPACED_PY}" "{SPACED_SCRIPT}" autoclean '
-            f'--fleet-home="{SPACED_HOME}\\"') is True
+            f'--fleet-home="{SPACED_HOME}{os.sep}"') is True
 
-    @pytest.mark.parametrize("suffix", ["\\", "/", "\\\\"])
-    def test_trailing_separator_on_fleet_home_still_ours(self, spaced_home, suffix):
+    @pytest.mark.parametrize("suffix", ["/", "//"])
+    def test_trailing_slash_on_fleet_home_still_ours(self, spaced_home, suffix):
         """B2: `_normalize_task_token`'s `rstrip("/")` was unpinned -- injection
         I14 deleted it and the suite stayed green. A directory argument that
-        round-trips through schtasks XML can pick up a trailing separator."""
+        round-trips through a scheduler can pick up a trailing separator.
+        `/` is a separator on every platform, so this half is unconditional."""
         assert fleet._autoclean_task_is_ours(
             f'"{SPACED_PY}" "{SPACED_SCRIPT}" autoclean '
             f'--fleet-home "{SPACED_HOME}{suffix}"') is True
+
+    @pytest.mark.parametrize("suffix", ["\\", "\\\\"])
+    def test_trailing_backslash_verdict_follows_the_filesystem(self, spaced_home, suffix):
+        """The other half of B2, which is NOT unconditional: a trailing `\\`
+        is a stray separator on Windows (strip it, still ours) and a
+        one-character-longer DIRECTORY NAME on POSIX (not ours). Refusal is
+        the safe direction there and costs one `--force`."""
+        assert fleet._autoclean_task_is_ours(
+            f'"{SPACED_PY}" "{SPACED_SCRIPT}" autoclean '
+            f'--fleet-home "{SPACED_HOME}{suffix}"') is (
+            fleet.PLATFORM.task_paths_use_backslash_separator)
 
     @pytest.mark.parametrize("bad", [0, 24, -3])
     def test_interval_validated(self, home, canonical_install, platform_stub, bad):
@@ -1119,6 +1234,153 @@ class TestQueryFailClosed:
         monkeypatch.setattr(fleet.PLATFORM, "autoclean_task_query", raiser)
         _, ok, msg = fleet._doctor_check_autoclean()
         assert ok and "query failed" in msg
+
+
+class TestTaskPathSemanticsFollowTheFilesystem:
+    """posix-port campaign, Class 2 [PRODUCT DEFECT], D8 closed.
+
+    `_normalize_task_token` case-folded and backslash-rewrote EVERY token
+    unconditionally. Both are correct Windows normalizations (schtasks XML
+    round-trips carry both variances, NTFS is case-insensitive, `\\` is THE
+    separator) and both are wrong on a case-sensitive filesystem where `\\`
+    is an ordinary filename character:
+
+      - `.lower()`: `_fleet_task_is_ours`' own comment called this a "false
+        MISS" risk. On posix it is the exact opposite -- it makes two
+        GENUINELY DIFFERENT paths compare EQUAL, a false MATCH.
+      - `.replace("\\\\", "/")`: rewrites a backslash that is a legal POSIX
+        filename character into a separator, so `/opt/my\\fleet/bin/fleet.py`
+        and `/opt/my/fleet/bin/fleet.py` compare equal. Also a false MATCH.
+
+    Reachability, worked out rather than asserted: the crontab backend finds
+    the fleet-owned line by a trailing `# <task_name>` tag, and the tag is a
+    CONSTANT (`AUTOCLEAN_TASK_NAME`), not derived from the home. So two fleet
+    homes under one user account -- differing only in path case, or one
+    carrying a literal backslash -- write lines bearing the SAME tag. The
+    second home's `fleet init --autoclean` queries, finds the first home's
+    line, and asks `_fleet_task_is_ours` whether it may replace it. That
+    predicate is the only thing standing between the two installs, and under
+    the folding above it answered "ours" and silently overwrote the other
+    home's scheduled job. That is precisely the F4 failure the predicate was
+    written to prevent, reachable on posix through the front door.
+
+    The semantics are now declared by the platform adapter (SPEC §16.8: OS
+    branching lives in the adapter only) and both directions are exercised
+    on BOTH operating systems by driving the REAL adapter objects -- neither
+    verdict is a skip on either host."""
+
+    _CASES = [
+        # (token, windows-normalized, posix-normalized)
+        (r"C:\Program Files\My Fleet",
+         "c:/program files/my fleet", r"C:\Program Files\My Fleet"),
+        ("/opt/My Fleet/bin/fleet.py",
+         "/opt/my fleet/bin/fleet.py", "/opt/My Fleet/bin/fleet.py"),
+        # A backslash inside a POSIX path is a filename character, not a
+        # separator -- it must survive normalization there.
+        ("/opt/my\\fleet", "/opt/my/fleet", "/opt/my\\fleet"),
+        # B2's trailing-separator rule: `/` is a separator on both, so it is
+        # stripped on both. `\` is a separator only on Windows.
+        ("/opt/fleet/", "/opt/fleet", "/opt/fleet"),
+        ("/opt/fleet\\", "/opt/fleet", "/opt/fleet\\"),
+    ]
+
+    @pytest.mark.parametrize("token,win,posix", _CASES)
+    def test_windows_adapter_folds_case_and_backslashes(self, monkeypatch, token, win, posix):
+        monkeypatch.setattr(fleet, "PLATFORM", fleet._WindowsPlatform())
+        assert fleet._normalize_task_token(token) == win
+
+    @pytest.mark.parametrize("token,win,posix", _CASES)
+    def test_posix_adapter_preserves_case_and_backslashes(self, monkeypatch, token, win, posix):
+        monkeypatch.setattr(fleet, "PLATFORM", fleet._PosixPlatform())
+        assert fleet._normalize_task_token(token) == posix
+
+    @pytest.mark.parametrize("a,b", [
+        # Two homes differing only in case.
+        ("/home/op/Fleet/bin/fleet.py", "/home/op/fleet/bin/fleet.py"),
+        # A literal backslash in a directory name vs. a real subdirectory.
+        ("/home/op/my\\fleet/bin/fleet.py", "/home/op/my/fleet/bin/fleet.py"),
+    ])
+    def test_posix_never_conflates_two_genuinely_different_paths(self, monkeypatch, a, b):
+        """The false MATCH, stated as the thing it costs: these are two
+        different files on a case-sensitive filesystem, so the ownership
+        predicate must never read one as the other."""
+        monkeypatch.setattr(fleet, "PLATFORM", fleet._PosixPlatform())
+        assert fleet._normalize_task_token(a) != fleet._normalize_task_token(b)
+
+    @pytest.mark.parametrize("a,b", [
+        (r"C:\Program Files\My Fleet\bin\fleet.py",
+         "c:/program files/my fleet/bin/fleet.py"),
+        (r"C:\PROGRAM FILES\MY FLEET", r"c:\program files\my fleet"),
+    ])
+    def test_windows_still_conflates_what_windows_considers_equal(self, monkeypatch, a, b):
+        """The converse, so the fix cannot be over-read as "stop
+        normalizing". On Windows these ARE the same path, and schtasks XML
+        round-trips genuinely produce both spellings of it."""
+        monkeypatch.setattr(fleet, "PLATFORM", fleet._WindowsPlatform())
+        assert fleet._normalize_task_token(a) == fleet._normalize_task_token(b)
+
+    def test_windows_adapter_declares_windows_path_semantics(self):
+        win = fleet._WindowsPlatform()
+        assert win.task_paths_are_case_insensitive is True
+        assert win.task_paths_use_backslash_separator is True
+
+    def test_posix_adapter_declares_posix_path_semantics(self):
+        posix = fleet._PosixPlatform()
+        assert posix.task_paths_are_case_insensitive is False
+        assert posix.task_paths_use_backslash_separator is False
+
+    def test_live_adapter_declares_this_machines_semantics(self):
+        assert fleet.PLATFORM.task_paths_are_case_insensitive is (os.name == "nt")
+        assert fleet.PLATFORM.task_paths_use_backslash_separator is (os.name == "nt")
+
+    def test_crontab_round_trip_refuses_a_case_variant_sibling_home(self, monkeypatch):
+        """End-to-end through the REAL crontab backend, on both OSes: two
+        fleet homes differing only in case both tag their line
+        `# claude-fleet-autoclean`, so home B's install is handed home A's
+        command and must refuse it. Driven with `_PosixPlatform` explicitly
+        so the case runs on Windows too -- the string work is what is under
+        test, and it is platform-neutral once the adapter declares which
+        semantics apply."""
+        monkeypatch.setattr(fleet, "PLATFORM", fleet._PosixPlatform())
+        home_a = "/home/op/Fleet"
+        home_b = "/home/op/fleet"
+        listing = (f'0 */6 * * * "/usr/bin/python3" "{home_a}/bin/fleet.py" '
+                   f'autoclean --fleet-home "{home_a}" # claude-fleet-autoclean\n')
+
+        def run(argv, **kw):
+            assert argv == ["crontab", "-l"]
+            return types.SimpleNamespace(returncode=0, stdout=listing, stderr="")
+
+        existing = fleet._PosixPlatform().autoclean_task_query(
+            "claude-fleet-autoclean", run=run)
+        assert existing and home_a in existing
+
+        monkeypatch.setattr(fleet, "FLEET_HOME", pathlib.PurePosixPath(home_b))
+        monkeypatch.setattr(fleet, "_autoclean_script_path",
+                            lambda: pathlib.PurePosixPath(home_b) / "bin" / "fleet.py",
+                            raising=False)
+        monkeypatch.setattr(fleet, "Path", _PurePosixPathStandIn)
+        assert fleet._autoclean_task_is_ours(existing) is False
+
+    def test_crontab_round_trip_accepts_our_own_home(self, monkeypatch):
+        """The control for the case above: the refusal must not come from the
+        predicate having simply stopped working on posix command lines."""
+        monkeypatch.setattr(fleet, "PLATFORM", fleet._PosixPlatform())
+        home = "/home/op/fleet"
+        listing = (f'0 */6 * * * "/usr/bin/python3" "{home}/bin/fleet.py" '
+                   f'autoclean --fleet-home "{home}" # claude-fleet-autoclean\n')
+
+        def run(argv, **kw):
+            return types.SimpleNamespace(returncode=0, stdout=listing, stderr="")
+
+        existing = fleet._PosixPlatform().autoclean_task_query(
+            "claude-fleet-autoclean", run=run)
+        monkeypatch.setattr(fleet, "FLEET_HOME", pathlib.PurePosixPath(home))
+        monkeypatch.setattr(fleet, "_autoclean_script_path",
+                            lambda: pathlib.PurePosixPath(home) / "bin" / "fleet.py",
+                            raising=False)
+        monkeypatch.setattr(fleet, "Path", _PurePosixPathStandIn)
+        assert fleet._autoclean_task_is_ours(existing) is True
 
 
 class TestWindowsAdapterSchtasks:

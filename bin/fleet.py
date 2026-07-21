@@ -329,6 +329,14 @@ class UnsupportedPlatformError(NotImplementedError):
 class _WindowsPlatform:
     """Windows implementation of every OS-specific fleet operation."""
 
+    # Path-comparison semantics for scheduled-task ownership (D8, closed by
+    # the posix-port campaign). NTFS/ReFS compare paths case-insensitively
+    # and `\` is THE separator -- and schtasks XML round-trips genuinely
+    # emit both spellings of one path -- so folding both variances is
+    # required here for `_fleet_task_is_ours` to recognise fleet's own task.
+    task_paths_are_case_insensitive = True
+    task_paths_use_backslash_separator = True
+
     def autoclean_task_query(self, task_name: str, run=subprocess.run):
         """None ONLY when the task is definitively absent; its command
         string when installed ("" if the XML is unparseable); raises
@@ -460,6 +468,25 @@ class _PosixPlatform:
     trailing `# <task_name>` tag, never by parsing schedules -- the same
     "match our own marker, refuse to guess" doctrine as the schtasks
     backend's task-name match."""
+
+    # Path-comparison semantics for scheduled-task ownership (D8, closed by
+    # the posix-port campaign). The mirror image of the Windows declaration:
+    # ext4/APFS-case-sensitive compare paths byte-for-byte, and `\` is an
+    # ordinary filename character, not a separator. Folding either variance
+    # here would make two GENUINELY DIFFERENT paths compare equal -- a false
+    # MATCH on a predicate that decides whether a scheduled job may be
+    # overwritten. See `_normalize_task_token` and
+    # `TestTaskPathSemanticsFollowTheFilesystem`.
+    #
+    # macOS note: HFS+/APFS are usually case-INSENSITIVE, so this
+    # declaration is conservative there rather than exact -- it can only
+    # produce the safe error (refusing a task that is provably the
+    # operator's, recoverable with `--force`), never the dangerous one
+    # (adopting a task that is not ours). Case-sensitivity is a per-volume
+    # property on macOS, not a per-OS one, so no static declaration can be
+    # exact; erring toward refusal is the whole doctrine of this predicate.
+    task_paths_are_case_insensitive = False
+    task_paths_use_backslash_separator = False
 
     def _cron_tag(self, task_name: str) -> str:
         return f"# {task_name}"
@@ -5727,10 +5754,38 @@ _TASK_ARG_RE = re.compile(r'[^\s"]*"[^"]*"|\S+')
 
 
 def _normalize_task_token(value) -> str:
-    """Slash- and case-normalize one command-line token for comparison.
-    schtasks XML round-trips carry both variances (and a trailing separator
-    on a directory argument), so normalize all three."""
-    text = str(value).strip().replace("\\", "/").lower()
+    """Normalize one scheduled-task command-line token for comparison, under
+    the running filesystem's own path-equality rules.
+
+    Two of the three normalizations are PLATFORM-DECLARED, not universal
+    (D8, closed by the posix-port campaign -- previously applied
+    unconditionally and filed as a Phase-1.5 note while the POSIX scheduler
+    backend was still hypothetical):
+
+      - case folding: correct on Windows (schtasks XML round-trips emit
+        case-varied spellings of one path, and NTFS considers them the same
+        file); a false MATCH on a case-sensitive filesystem, where
+        `/opt/Fleet` and `/opt/fleet` are two different directories.
+      - backslash-to-slash: correct on Windows (`\\` is the separator, and
+        schtasks round-trips vary it against `/`); a false MATCH on POSIX,
+        where `\\` is an ordinary filename character, so `/opt/my\\fleet`
+        and `/opt/my/fleet` are two different directories.
+
+    Both wrong directions are the DANGEROUS one. `_fleet_task_is_ours` is
+    what decides whether a scheduled job belongs to this fleet and may
+    therefore be replaced; a false MATCH means overwriting somebody else's
+    job, where a false MISS costs one `--force`.
+
+    The third normalization is universal and stays unconditional: strip a
+    trailing separator (B2 -- a directory argument that round-trips through
+    schtasks XML can pick one up). `/` is a separator on every platform;
+    a trailing `\\` is stripped only where `\\` is a separator, which the
+    branch above has already converted."""
+    text = str(value).strip()
+    if PLATFORM.task_paths_use_backslash_separator:
+        text = text.replace("\\", "/")
+    if PLATFORM.task_paths_are_case_insensitive:
+        text = text.lower()
     return text.rstrip("/") or text
 
 
@@ -5819,23 +5874,23 @@ def _fleet_task_is_ours(command: str, subcommand: str) -> bool:
     every realistic shape answers correctly.
 
     Portability (invariant 8): pure string work over a command string plus
-    `Path(...).resolve()` -- platform-neutral, no OS branch of any kind, so it
-    moves with the platform adapter unchanged. TWO Windows-shaped
-    normalizations, filed as D8 when the POSIX scheduler backend was still
-    hypothetical: `.lower()` would conflate two paths differing only in case on a
-    case-SENSITIVE filesystem (a false MISS), and `replace("\\\\", "/")` rewrites
-    a backslash that is a legal POSIX filename character and a shell escape
-    inside a crontab line (a false MATCH -- the more dangerous direction).
-    REACHABLE as of the posix-port merge: `_PosixPlatform.autoclean_task_query`
-    no longer raises `UnsupportedPlatformError` -- it reads the user crontab and
-    returns the tagged line's command field verbatim, which lands here. The two
-    normalizations above are therefore live on macOS/Linux, not deferred; D8 is
-    an OPEN defect on the posix backend rather than a Phase-1.5 note. Neither
-    fires on the shape `_autoclean_task_command` emits (an absolute POSIX path
-    with no backslash and no case-variant sibling), so the posix install/refuse
-    path is correct for fleet's own command lines; a hand-written crontab entry
-    is what could still be misjudged.
-    [UNVERIFIED -- no POSIX box; reasoned, not run]"""
+    `Path(...).resolve()`, with the two filesystem-dependent path-equality
+    rules DECLARED BY THE ADAPTER rather than assumed -- see
+    `_normalize_task_token`. D8 (CLOSED, posix-port campaign): both
+    normalizations used to be applied unconditionally, which on a
+    case-sensitive filesystem made two genuinely different paths compare
+    EQUAL. The old note here called `.lower()` a "false MISS" risk; it is
+    the opposite, and a false MATCH is the dangerous direction for a
+    predicate that licenses replacing a scheduled job.
+
+    Reachable, not theoretical: the crontab backend finds fleet's line by a
+    CONSTANT `# claude-fleet-autoclean` tag, so two fleet homes under one
+    user account -- differing only in path case, or one carrying a literal
+    backslash -- write same-tagged lines, and this predicate is the only
+    thing stopping the second install from overwriting the first's job.
+    Pinned end-to-end through the real crontab backend by
+    `TestTaskPathSemanticsFollowTheFilesystem`, which drives both adapters
+    on both operating systems."""
     tokens = _task_command_tokens(command)
     try:
         script_at = tokens.index(_normalize_task_token(_autoclean_script_path()))
