@@ -9,17 +9,55 @@ was run is a fabrication that reads exactly like a receipt.
 
 This tool re-runs them. Read-only, stdlib-only, no network, no repo writes.
 
+A RECEIPT IS A CLAIM ABOUT A COMMIT, NOT ABOUT `HEAD`.
+
+That distinction is the whole design. An earlier version of this tool re-ran
+every receipt against the *working tree*, which meant any unrelated commit to
+`bin/fleet.py` rotted every line-anchored receipt in every spec and turned the
+shared suite red. That happened for real: two sibling branches landed ahead of
+this one, moved `bin/fleet.py` by ~620 lines, and the merge was reverted on red.
+The receipts were not wrong -- they were being checked against the wrong tree.
+
+So each fenced block declares `# at <sha>`, and this tool **materialises that
+commit** (`git archive <sha>` piped through `tarfile` into a temp dir -- no
+checkout, no `git worktree`, no mutation of the repo) and runs the block's
+commands there. A receipt pinned at `ccbbc02` stays true forever; re-pinning
+becomes a deliberate edit rather than merge-order roulette.
+
 Format it understands, inside ``` fenced blocks:
 
-    # at <sha>                 <- pin metadata, ignored
-    # volatile: <reason>       <- rest of block may drift; mismatches become WARN
-    $ <command>                <- executed with `bash -c` from --root
+    # at <sha>                 <- REQUIRED. commands run against this commit's tree
+    # volatile: <reason>       <- evidence lives outside the repo; drift is a WARN
+    # live: <reason>           <- deliberately about the working repo, not a commit
+    $ <command>                <- executed with `bash -c`
     <expected stdout line>     <- compared exactly
     ...
     $ echo "exit $?"           <- asserts the PREVIOUS command's exit code
     exit 1
 
 Blocks with no `$ ` line (quoted prose, journal entries) are skipped.
+
+Pin rules, all of which fail loudly rather than falling back:
+
+* **No pin** -- UNCLASSIFIED under `--strict` (see gap 2). Falling back to the
+  working tree is exactly the rot this design removes, so it is never done
+  silently; without `--strict` it runs at the repo root and WARNs.
+* **A pin that is not a hex sha** (`# at HEAD`, `# at main`) is an error. A
+  moving pin is not a pin -- it reintroduces the rot with extra steps.
+* **A pinned commit not present in the repo** is an error, never a skip. On a
+  shallow clone, or after a rebase/filter drops the object, the receipt *cannot
+  be verified*, and reporting green for an unverifiable receipt is the failure
+  this tool exists to prevent. Recovery is to fetch the object
+  (`git fetch --unshallow`, or fetch the specific sha) or to re-pin the block
+  deliberately against a commit that does exist -- both are decisions a human
+  makes, not defaults a tool picks.
+* **`# live`** is the escape for a receipt that is genuinely about the current
+  repo rather than about a commit -- `git check-ignore` is the real case here:
+  it asks git a question about the working repo's ignore rules, which an
+  exported tree has no `.git` to answer. A `# live` receipt is still executed
+  and diffed; it just runs against the working tree, so it rots if the thing it
+  describes changes -- which for `.gitignore` is a deliberate act that *should*
+  force the prose to be updated. `# live` requires a reason.
 
     py -3.13 tools/verify_receipts.py docs/specs/claim-nonce.md
     py -3.13 tools/verify_receipts.py --self-test docs/specs/claim-nonce.md
@@ -57,13 +95,80 @@ KNOWN GAPS -- read these before pointing this tool at a second document.
 from __future__ import annotations
 
 import argparse
+import atexit
+import io
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
+import tarfile
+import tempfile
 
 EXIT_ECHO = 'echo "exit $?"'
+SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
+
+
+class PinError(Exception):
+    """A pin that cannot be honoured. Never downgraded to a skip."""
+
+
+_TREES = {}
+
+
+def _git(root, *args, binary=False):
+    proc = subprocess.run(["git", *args], cwd=str(root), capture_output=True)
+    return proc.returncode, (proc.stdout if binary
+                             else proc.stdout.decode("utf-8", "replace"))
+
+
+def pinned_tree(sha, root):
+    """Path to a materialised copy of `sha`'s tree. Cached per process.
+
+    `git archive` + `tarfile` rather than `git worktree add`: exporting is a
+    pure read, so this tool never writes to the repo it is auditing.
+    """
+    if sha in _TREES:
+        return _TREES[sha].name
+    if not SHA_RE.match(sha):
+        raise PinError(
+            f"pin {sha!r} is not a hex sha. A moving pin (HEAD, a branch name) "
+            f"is not a pin -- it reintroduces exactly the working-tree rot that "
+            f"pinning removes.")
+    rc, _ = _git(root, "cat-file", "-e", f"{sha}^{{commit}}")
+    if rc != 0:
+        raise PinError(
+            f"pinned commit {sha} is not present in this repo, so its receipts "
+            f"cannot be verified. This is an error, not a skip: reporting green "
+            f"for an unverifiable receipt is the failure this tool prevents. "
+            f"Fetch the object (`git fetch --unshallow`, or fetch that sha), or "
+            f"re-pin the block deliberately.")
+    rc, data = _git(root, "archive", "--format=tar", sha, binary=True)
+    if rc != 0 or not data:
+        raise PinError(f"`git archive {sha}` produced nothing")
+    tmp = tempfile.TemporaryDirectory(prefix=f"receipts-{sha[:8]}-")
+    with tarfile.open(fileobj=io.BytesIO(data)) as tar:
+        try:
+            tar.extractall(tmp.name, filter="data")
+        except TypeError:
+            # `filter=` landed in 3.12; this repo's floor is 3.10. The archive
+            # comes from `git archive` on this repo, not from the network.
+            tar.extractall(tmp.name)
+    _TREES[sha] = tmp
+    return tmp.name
+
+
+def cleanup():
+    for tmp in _TREES.values():
+        try:
+            tmp.cleanup()
+        except OSError:
+            pass
+    _TREES.clear()
+
+
+atexit.register(cleanup)
 
 
 def resolve_bash():
@@ -90,14 +195,21 @@ BASH = None
 
 
 class Receipt:
-    __slots__ = ("cmd", "expected", "exit_code", "line", "volatile")
+    __slots__ = ("cmd", "expected", "exit_code", "line", "volatile", "pin", "live")
 
-    def __init__(self, cmd, line, volatile):
+    def __init__(self, cmd, line, volatile, pin=None, live=False):
         self.cmd = cmd
         self.line = line
         self.volatile = volatile
+        self.pin = pin
+        self.live = live
         self.expected = []
         self.exit_code = None
+
+    def where(self):
+        if self.live:
+            return "live working tree"
+        return f"pinned @ {self.pin}" if self.pin else "UNPINNED"
 
 
 def parse(text):
@@ -127,10 +239,18 @@ def parse(text):
 
 
 def _parse_block(lines, _start):
-    out, cur, volatile = [], None, False
+    out, cur, volatile, pin, live = [], None, False, None, False
     for n, raw in lines:
         if raw.startswith("# volatile"):
             volatile = True
+            continue
+        if raw.startswith("# live"):
+            live = True
+            continue
+        if raw.startswith("# at "):
+            # First token after `# at `; the rest of the line may carry prose.
+            rest = raw[len("# at "):].strip()
+            pin = rest.split()[0] if rest else None
             continue
         if raw.startswith("$ "):
             cmd = raw[2:]
@@ -156,6 +276,8 @@ def _parse_block(lines, _start):
         cur.expected.append(raw)
     for r in out:
         r.volatile = r.volatile or volatile
+        r.pin = r.pin or pin
+        r.live = r.live or live
         while r.expected and not r.expected[-1].strip():
             r.expected.pop()
     # Gap 2: split rather than filter. A receipt with nothing to compare
@@ -173,7 +295,16 @@ class _ExitCapture:
 
 
 def run(receipt, root):
-    proc = subprocess.run([BASH, "-c", receipt.cmd], cwd=str(root),
+    """Execute a receipt in the tree it is a claim about.
+
+    Pinned -> the materialised tree of that commit. `# live` or unpinned -> the
+    working tree. Raises PinError if the pin cannot be honoured; callers turn
+    that into a reported failure, never a skip.
+    """
+    cwd = root
+    if receipt.pin and not receipt.live:
+        cwd = pinned_tree(receipt.pin, root)
+    proc = subprocess.run([BASH, "-c", receipt.cmd], cwd=str(cwd),
                           capture_output=True)
     actual = proc.stdout.decode("utf-8", "replace").replace("\r\n", "\n").split("\n")
     while actual and not actual[-1].strip():
@@ -202,7 +333,20 @@ def check(text, root, quiet=False, strict=False, skip_volatile=False):
         if skip_volatile and r.volatile:
             skipped += 1
             continue
-        actual, rc = run(r, root)
+        # An unpinned receipt would be checked against the working tree, which
+        # is the rot this design removes. Report it; never fall through quietly.
+        if not r.pin and not r.live:
+            entry = (r, ["UNPINNED: no `# at <sha>` and not marked `# live` -- "
+                         "would be checked against the working tree, which any "
+                         "unrelated commit can rot"])
+            (failures if strict else warnings).append(entry)
+            if strict:
+                continue
+        try:
+            actual, rc = run(r, root)
+        except PinError as exc:
+            failures.append((r, [f"PIN ERROR: {exc}"]))
+            continue
         problems = []
         if r.expected and actual != r.expected:
             for i in range(max(len(actual), len(r.expected))):
@@ -220,13 +364,16 @@ def check(text, root, quiet=False, strict=False, skip_volatile=False):
         (warnings if r.volatile else failures).append(entry)
     if not quiet:
         for r, problems in warnings:
-            print(f"WARN  line {r.line}: {r.cmd}")
+            print(f"WARN  line {r.line} [{r.where()}]: {r.cmd}")
             for p in problems:
                 print(f"      {p}")
         for r, problems in failures:
-            print(f"FAIL  line {r.line}: {r.cmd}")
+            print(f"FAIL  line {r.line} [{r.where()}]: {r.cmd}")
             for p in problems:
                 print(f"      {p}")
+        pins = sorted({r.pin for r in receipts if r.pin and not r.live})
+        if pins:
+            print(f"\npins resolved: {', '.join(pins)}")
         total = len(receipts) + len(unclassified)
         print(f"\n{total - len(failures) - len(warnings) - skipped}/{total} "
               f"receipts reproduce exactly "

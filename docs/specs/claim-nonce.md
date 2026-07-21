@@ -1,6 +1,6 @@
 # Spec: Per-body supervisor claim nonce — divergence detection for the supervisor claim
 
-**Status:** drafting (`me-nonce`, v4 closeout 2026-07-21). **The author of a spec may never promote
+**Status:** drafting (`me-nonce`, v5 pin-resolution 2026-07-21). **The author of a spec may never promote
 it.** This document is input to a second dual-lens review; only the operator ratifies. Nothing here
 is approved, and nothing here changes the status of any other document.
 
@@ -41,24 +41,18 @@ one-live-session-per-name §16.7, platform-adapter-only OS branching §16.8, G9 
 `# at 091d5fa`. The v1/v2 receipts were pinned at `238b7ad`/`ccbbc02`; they remain valid verbatim because the
 non-docs tree is byte-identical across that range:
 
-```
-# at HEAD
-$ git diff --stat 238b7ad HEAD -- bin/ supervisor/ skills/ commands/ .gitignore tests/conftest.py
-$ echo "exit $?"
-exit 0
+**The pin-proof block that used to sit here is deleted, and its deletion is the point.** It asserted
+that the receipt-bearing tree was byte-identical to `238b7ad`, which is how earlier waves argued that
+receipts pinned at older commits were still valid. That argument died the moment `bin/fleet.py`
+legitimately changed: `me/ul` and `me/daemon` merged ahead of this branch and moved it by ~620 lines,
+every line-anchored receipt in this document reported `FAIL`, and the merge was reverted on red.
 
-$ git hash-object bin/fleet.py; git rev-parse 238b7ad:bin/fleet.py
-562e2848aab6d85e25ba053ee5ef410917c4d4b1
-562e2848aab6d85e25ba053ee5ef410917c4d4b1
-```
-
-*(**`git rev-parse HEAD` has been removed from this block, not corrected.** It was pasted wrong in
-v2 and again in v3, because the command is **self-referential**: any commit that fixes the pasted sha
-changes the sha. Two waves fixed the instance and neither killed the class. The two commands that
-remain carry the whole argument — the receipt-bearing tree is byte-identical to `238b7ad`, and
-`bin/fleet.py` is the same blob — and both are stable across commits that touch only `docs/` and
-`tools/` and `tests/test_receipts.py`. The path list is narrowed to the files receipts actually read:
-`tests/` as a whole is no longer in it, because this wave adds `tests/test_receipts.py`.)*
+The receipts were not wrong. **They were being checked against the wrong tree.** A receipt is a claim
+about *a specific commit*, and `tools/verify_receipts.py` now resolves each block's `# at <sha>` by
+materialising that commit (`git archive` → `tarfile` → temp dir, no checkout, no repo mutation) and
+running the block's commands there. With that in place no cross-commit invariance argument is needed
+at all, so the block that made one is gone rather than repaired — the third and last time this
+document had to stop fixing an instance and kill a class.
 
 **Disposition of the binding list is recorded in §14.** One item is **DISPUTED in part, with a
 receipt** (item 3); every other item is adopted.
@@ -1062,6 +1056,8 @@ covering them:
 
 ```
 # at 091d5fa
+# live: `git check-ignore` asks git about the WORKING repo's ignore rules; an
+# live: exported tree has no `.git` to answer with, so this one cannot be pinned.
 $ git check-ignore -v supervisor/INCARNATION.tmp
 $ echo "exit $?"
 exit 1
@@ -1070,6 +1066,11 @@ $ git check-ignore -v supervisor/HANDSHAKE.tmp
 $ echo "exit $?"
 exit 1
 ```
+
+*(This is the document's only `# live` block. It is still executed and diffed — `# live` says which
+tree the receipt is about, not that it is unchecked. It rots only if `.gitignore` changes, which is
+the deliberate act §13 asks for; when that lands, this receipt goes red and the prose above must be
+retired, which is the correct coupling.)*
 
 **HANDSHAKE is not the lesser target**: §6.4 puts `handoff_token_hash` *and* the successor's
 `nonce_hash` into it. v2 named only the INCARNATION half in both §4.13(f) and §13 while §8's
@@ -1333,10 +1334,10 @@ session transcript:
 # volatile: a live box mints sessions continuously; the count and the mtime drift by the minute
 $ ls -ld ~/.claude/projects && find ~/.claude/projects -maxdepth 2 -name '*.jsonl' | wc -l
 drwxr-xr-x 1 Techn 197609 0 Jul 21 20:54 /c/Users/Techn/.claude/projects
-754
+762
 ```
 
-*(The count drifted 732 → 735 → 743 → 754 across this document's four waves, and v2's paste additionally
+*(The count drifted 732 → 735 → 743 → 762 across this document's five waves, and v2's paste additionally
 carried a trailing slash the command does not emit. Both were caught by `tools/verify_receipts.py`,
 and the block is now marked `# volatile` so the harness reports future drift as a WARN instead of a
 FAIL. The load-bearing facts are **existence** and **same-user readability**, neither of which
@@ -2329,6 +2330,34 @@ Two findings from writing it, both recorded rather than papered over:
   spec is `[SUPERSEDED — native-substrate pivot 2026-07-13]` and is outside this slice's write set, so
   it is **declared** in `UNENFORCED` with that reason rather than silently globbed away, and
   **flagged to the manager** as a separate finding.
+
+### Wave 5 — receipts are verified at their pinned commit (merge-gate finding)
+
+The branch merged and was **reverted on red**, by this document's own harness doing its job. `me/ul`
+and `me/daemon` landed first and moved `bin/fleet.py` by ~620 lines; every line-anchored receipt
+reported `FAIL`. Not a defect in the receipts — a defect in **which tree they were checked against**.
+
+| Item | Disposition |
+|---|---|
+| Receipts must resolve at their pin | **DONE** — `tools/verify_receipts.py` materialises each block's `# at <sha>` (`git archive` → `tarfile` → temp dir; no checkout, no `git worktree`, no repo mutation) and runs that block's commands there |
+| Unpinned receipt | **error under `--strict`** — falling through to the working tree is the rot being removed, so it is never silent |
+| Moving pin (`# at HEAD`) | **error** — a moving pin is not a pin; it reintroduces the rot with extra steps |
+| Absent pinned commit | **error, never a skip** — on a shallow clone or after a rebase drops the sha the receipt *cannot be verified*, and green-for-unverifiable is the failure the tool exists to prevent. Recovery is to fetch the object or re-pin deliberately, both human decisions |
+| Genuinely unpinnable receipt | **`# live: <reason>`** — this document has exactly one, `git check-ignore`, which asks git about the *working* repo's ignore rules and has no `.git` to answer with in an exported tree. Still executed and diffed |
+| The pin-proof block | **deleted, not repaired** (§4) — pin resolution makes its cross-commit invariance argument unnecessary |
+| Seed tests | **6** — the one-word-paraphrase seed, plus the drift class: a receipt pinned at `091d5fa` still reproduces while the *same* receipt marked `# live` fails, proving the pin is what does the work; guarded by a non-vacuity check that HEAD's `bin/fleet.py` really has drifted from the pin |
+
+**Why pin-resolution rather than re-pasting on every unrelated commit.** The alternative is an
+unpinnable receipt set that must be re-pasted whenever anyone touches `bin/fleet.py` — which makes
+every receipt in every spec a merge-order hostage, turns the shared suite red for reasons unrelated
+to the change under review, and trains people to re-paste without re-reading. It also contradicts what
+a receipt *means*: `docs/SPEC.md:12` already says a claim must be *"verifiable by grep at a stated
+commit"*. Honouring the stated commit is the reading that makes the existing doctrine work.
+
+**`docs/specs/native-substrate.md` is now in the tree** (me/daemon's 2.1.216 daemon-lock row) and
+**pastes evidence without a `# at <sha>` pin**, so it stays declared-unenforced with that reason
+rather than silently globbed away. Adopting the convention there is that spec owner's call; flagged,
+not taken.
 
 ---
 
