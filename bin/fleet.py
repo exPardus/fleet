@@ -1334,7 +1334,28 @@ _LIMIT_RESET_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 # `zoneinfo.ZoneInfo` -- not this regex -- as their validator: a name it
 # resolves yields a horizon, a name it rejects null-parks via the existing
 # blanket `except Exception: return None`.
-_LOCAL_UTC_ALIASES = "UTC|UCT|Universal|Zulu|Greenwich|GMT0|GMT\\+0|GMT-0"
+#
+# posix-port campaign (Class 1): the closed set is DATA here, and the two
+# places that consume it -- the regex that ADMITS a name and
+# `_next_local_reset_utc`'s fixed-offset resolver that CONVERTS one -- are
+# both derived from this one tuple, so they cannot drift apart. A member the
+# regex admitted but the resolver did not recognise would silently fall
+# through to `zoneinfo` and reintroduce, for that member alone, exactly the
+# tz-database dependency the fixed-offset resolution exists to remove.
+# Pinned by `test_regex_alternation_and_resolver_share_one_source_of_truth`.
+_LOCAL_UTC_ALIAS_NAMES = ("UTC", "UCT", "Universal", "Zulu", "Greenwich",
+                          "GMT0", "GMT+0", "GMT-0")
+# Longest-first is defensive, not load-bearing: no member is a prefix of
+# another today, and the alternation is anchored by the `\)` that follows it,
+# so ordering cannot change a verdict. It keeps that true for a future member.
+_LOCAL_UTC_ALIASES = "|".join(
+    re.escape(name)
+    for name in sorted(_LOCAL_UTC_ALIAS_NAMES, key=len, reverse=True))
+# Case-folded membership set for the resolver. The regex is IGNORECASE (a
+# bare `(utc)` is admitted -- see `test_lowercase_single_segment_admitted`),
+# so the resolver must fold too or it would admit a name it then cannot
+# convert.
+_LOCAL_UTC_ALIAS_LOOKUP = frozenset(name.lower() for name in _LOCAL_UTC_ALIAS_NAMES)
 
 _LIMIT_RESET_LOCAL_RE = re.compile(
     r"resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*"
@@ -1346,6 +1367,13 @@ _LIMIT_RESET_LOCAL_RE = re.compile(
 def _next_local_reset_utc(hour: int, minute: int, tz_name: str, *, now: datetime):
     """UTC ISO-8601 instant of the next occurrence of `hour:minute` local wall-
     clock time in the named IANA tz, or None if the tz can't be resolved.
+
+    A member of `_LOCAL_UTC_ALIAS_NAMES` (ND-5's closed fixed-UTC set) is
+    resolved to `timezone.utc` DIRECTLY and never reaches `zoneinfo` at all
+    -- see the inline comment below for why routing a closed set through a
+    tz database made it not closed. Every other name (only multi-segment
+    `Area/City` shapes can reach here, per `_LIMIT_RESET_LOCAL_RE`) still
+    goes to `zoneinfo`, which remains their sole validator.
 
     `zoneinfo` is stdlib but its DATA is not guaranteed on Windows (no
     `tzdata` pip package -- this repo stays stdlib-only; `fleet doctor`'s
@@ -1410,11 +1438,31 @@ def _next_local_reset_utc(hour: int, minute: int, tz_name: str, *, now: datetime
     documented here because the helper is generic and the tz name comes
     from untrusted message text, so a DST zone can reach it. Pinned by
     `TestNextLocalResetUtcDst` (America/New_York fold + gap cases)."""
-    import zoneinfo
-    try:
-        tz = zoneinfo.ZoneInfo(tz_name)
-    except Exception:
-        return None
+    alias = tz_name.strip().lower() if isinstance(tz_name, str) else None
+    if alias in _LOCAL_UTC_ALIAS_LOOKUP:
+        # posix-port campaign, Class 1 [PRODUCT DEFECT]. ND-5's whole point
+        # was a CLOSED set: every member means UTC and only UTC, in every
+        # season, BY DEFINITION. Resolving them through `zoneinfo` made that
+        # supposedly-closed set depend on the host's tz database, which is
+        # the opposite of closed -- and seven of the eight members are tzdb
+        # "backward" LINK names (`UCT`, `Universal`, `Zulu`, `Greenwich`,
+        # `GMT0`, `GMT+0`, `GMT-0`) that a stock Debian/Ubuntu `tzdata`
+        # package does not ship. Windows resolved them only via the `tzdata`
+        # PyPI package, macOS via its full system tzdb; on Linux all seven
+        # raised `ZoneInfoNotFoundError` and null-parked. The failure was in
+        # the safe direction (D2: unresolvable -> conservative null horizon,
+        # never a guessed instant), so nothing was ever resumed at a wrong
+        # time -- but the guarantee ND-5 claimed to make structurally was in
+        # fact platform-dependent, which is a correctness-of-guarantee bug.
+        # Resolving to a fixed zero offset makes the enumeration actually
+        # closed, on every host, with or without a tz database installed.
+        tz = timezone.utc
+    else:
+        import zoneinfo
+        try:
+            tz = zoneinfo.ZoneInfo(tz_name)
+        except Exception:
+            return None
     try:
         moment = now.astimezone(tz)
         candidate = moment.replace(hour=hour, minute=minute, second=0, microsecond=0)
