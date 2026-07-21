@@ -69,3 +69,43 @@ Recorded first, because a restructure verdict is not a rejection:
 2. **Does the detection-only slice ship on its own, ahead of the rest?**
 3. **`sup-release --force`** — removed by item 6 until an authorization input exists. If you want the escape hatch anyway, that is a deliberate, documented acceptance of an unauthenticated seizure verb.
 4. **Ratification of `docs/specs/native-substrate.md`'s `[PENDING OPERATOR RATIFICATION]` rows** (2.1.212 set, plus the new 2.1.216 daemon-wedge row) remains open from M-D and is untouched by this gate.
+
+---
+
+# ADDENDUM — after the v2 re-gate (2026-07-21, same adjudicator)
+
+The re-draft (`091d5fa`) was re-gated by both lenses. **The root is fixed** and the escalation trigger did not fire: §2 (trust boundary) exists and is correct, all three v1 bypasses are gone with none replaced, and the two-generation rotation discharges both rotation MAJORs. Verdicts: break `fix-list(N1–N7)`, spec `fix-list(R1–R12)` with **49/49 receipts sound, 24/24 prior fix-list items fixed against the code, zero collateral**.
+
+Three corrections to *this document*, recorded because the rule that an enumeration is wrong until receipted binds the adjudicator too.
+
+## 1. My binding item 3 was an over-specification, and the author was right to dispute it
+
+Item 3 required "grant `resume` only when the recorded holder is roster-gone". The author disputed it with three receipts; the break-lens reviewer — whose own C2 the item came from — re-ran all three, found them exact, and **upheld the dispute**, recording: *"my strict parenthetical was an over-specification and genuinely does not fix incident 2."*
+
+The receipts: `_roster_live_sids` @6986-6999 counts any entry carrying `status`/`pid`, so a resumed *running* holder is in `live_sids`; `supervisor_claim_decision` @7023 refuses on that ahead of every later branch and takes no caller parameter; `knowledge/lessons.md:627` records the observed verdict as **refuse**. A roster-gone holder would have produced `seize` and left no wart to fix.
+
+**Item 3 as written is withdrawn.** What replaces it is N1 below — the narrow form the author shipped is *also* wrong, but for a different reason than the strict form was right.
+
+## 2. My sequencing item 3 ("ship detection first") rests on a false premise — N2
+
+I wrote that the detection-only slice "may be worth shipping ahead of any gate decision — both lenses independently say it stands alone."
+
+**That is false for the option the spec recommends.** N2 (CRITICAL): under §7 option (a), detection-only with no gate, **incident 1 produces no refusal at all** — the 2026-07-16 zombie ran only `fleet send`, and non-presenters are unaffected by a rotation they never participate in. The spec's own line that "whatever the operator chooses, incident 1 becomes a refusal" is false for its recommended option, and my sequencing item inherited it.
+
+The detection property is still real, but **it is conditional on the gate decision**, not independent of it. Operator question 2 ("does the detection-only slice ship on its own?") therefore cannot be answered "yes, cheaply" — answering it requires first deciding what participates in rotation. The re-draft owes that analysis before the question is put.
+
+## 3. The verification-harness claim is unverified — R2
+
+The v2 author reported a harness that re-executes every `$` command in the spec and diffs the pasted output, and that it caught four defects pre-commit including a word paraphrased *inside* a code receipt. I recorded that as a campaign-template candidate.
+
+The spec lens looked for it: **the artifact does not exist in the worktree and is not documented in the spec.** Its four asserted catches cannot be checked. The *technique* is nonetheless validated — the reviewer independently wrote its own extraction harness and used it to audit all 49 receipts — but with a caveat worth more than the original claim:
+
+> my own harness had two bugs that made it under-report on the first pass … **A receipt harness needs its own seed test before its output is trusted** — the same lesson as a test that cannot fail.
+
+So: adopt the technique, require the artifact to be committed, and require it to be seed-tested. An unseeded verifier is theater wearing a verifier's clothes.
+
+## Sequencing, revised
+
+1. **Fix wave 2 to `me-nonce`** — break N1–N7 + spec R1–R12, one wave. **This is the second wave; `ESCALATE` beats a third.**
+2. One more re-gate pass, then the operator's decision. Unchanged: nothing is ratified, `Status: drafting` holds, no build.
+3. Operator question 2 is **re-scoped** by §1.2 above and must not be put to the operator in its current form.
