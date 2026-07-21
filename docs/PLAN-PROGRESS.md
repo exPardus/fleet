@@ -85,3 +85,4 @@ The mutable cursor against the immutable contract `docs/PLAN.md`. A resuming man
 | M-E | me-defects (handoff dispatch no-hooks + autoclean ownership predicate) | dispatched | worker b460cf86, opus, worktree fleet-me-defects, branch me/defects, ceiling 4M | 2026-07-21 |
 | M-E | me-ul (ulparser D1-D4 follow-ups + vestigial wall-clock default) | dispatched | worker b53b80ec, sonnet, worktree fleet-me-ul, branch me/ul, ceiling 2.5M | 2026-07-21 |
 | M-E | SDD/drift-control design v3 | blocked | `docs/superpowers/specs/2026-07-18-sdd-drift-control-design.md` DRAFT v3 (2 review rounds folded). OPERATOR-GATED: not spec-of-record, no build until Altai ratifies. | 2026-07-21 |
+| M-E | me-nonce (claim-nonce SPEC DRAFT, adjudication items 1-3 + the 2 live claim warts) | dispatched | worker 4d95380b, opus, worktree fleet-me-nonce, branch me/nonce, ceiling 3M. DOCS-ONLY, `Status: drafting`; author never promotes; build stays operator-gated. | 2026-07-21 |
