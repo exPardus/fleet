@@ -11,11 +11,17 @@ functions.
 See docs/SPEC.md for the full design (this file implements SPEC sections
 2, 4, 5, 6, 8, 11, 14).
 
-Requires Python 3.10+ (dev machine: py -3.13). Stdlib only -- no pip deps
-(SPEC §14 / docs/specs/portability.md fixed constraints). Two PLATFORM
-backends are implemented -- Windows and POSIX (macOS + Linux), see the
-platform adapter block below; the module is held to the 3.10 floor so the
-POSIX side runs under distro pythons without a language-version bump.
+Requires Python 3.10+ -- declared once, as data, in `MIN_PYTHON_VERSION`
+below; every other statement of the floor (this docstring, `bin/hooks/
+run_py.sh`, SPEC §14, docs/specs/portability.md D9) is checked against that
+constant by `TestInterpreterFloor`. Stdlib only -- no pip deps (SPEC §14 /
+docs/specs/portability.md fixed constraints). Two PLATFORM backends are
+implemented -- Windows and POSIX (macOS + Linux), see the platform adapter
+block below; the module is held to the 3.10 floor so the POSIX side runs
+under distro pythons without a language-version bump.
+
+`py -3.13` in `bin/fleet.cmd` and CLAUDE.md is this dev machine's PREFERRED
+interpreter, not the floor -- a bare `python` there resolves to 3.10.1.
 """
 from __future__ import annotations
 
@@ -35,6 +41,25 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+# The interpreter floor, in ONE place (posix-port campaign, follow-up 2).
+# Everything else that states it -- this module's docstring, the
+# `sys.version_info >= (3, 10)` gate and the candidate list in
+# `bin/hooks/run_py.sh`, SPEC §14, docs/specs/portability.md D9 -- is checked
+# against this constant by `TestInterpreterFloor`, so the floor cannot drift
+# between the shim that SELECTS an interpreter and the docs that promise one.
+#
+# 3.10, not 3.13, because `run_py.sh` must keep working on distro pythons:
+# Ubuntu 22.04 LTS ships 3.10 as `python3` (portability.md D9), and the Linux
+# box this campaign verified against runs 3.12.3. Raising the floor to match
+# `bin/fleet.cmd`'s `py -3.13` would break both.
+#
+# Holding a floor means RUNNING at it. D9's original justification was a grep
+# for 3.11+/3.12+ APIs; that grep missed `datetime.fromisoformat("...Z")`
+# (caught later by the N2 fix wave) and `BaseException.add_note` (caught by
+# this campaign, by actually running the suite on 3.10.1 -- see
+# `_stash_short_id_note`). A grep is a claim; a floor run is evidence.
+MIN_PYTHON_VERSION = (3, 10)
 
 # ---------------------------------------------------------------------------
 # Paths (SPEC §3)
@@ -2355,12 +2380,57 @@ def _report_stranded_native_turn(name: str, sid: str, short_id: str) -> None:
 def _short_id_from_notes(exc: BaseException):
     """T4 fix wave (Ctrl-C short-id loss): dispatch_bg's join-phase wrapper
     stashes `fleet_short_id=<id>` onto an escaping exception's __notes__
-    (BaseException.add_note, 3.11+) when a short id is known at that
-    point. Pulls it back out, or returns None if absent/malformed."""
+    when a short id is known at that point. Pulls it back out, or returns
+    None if absent/malformed. See `_stash_short_id_note` for the writer."""
     for note in getattr(exc, "__notes__", None) or ():
         if isinstance(note, str) and note.startswith("fleet_short_id="):
             return note.partition("=")[2] or None
     return None
+
+
+def _stash_short_id_note(exc: BaseException, short_id: str) -> None:
+    """Attach `fleet_short_id=<id>` to an escaping exception, floor-safely.
+
+    posix-port campaign, follow-up 2: this used to be a bare
+    `exc.add_note(...)`, and `BaseException.add_note` is **3.11+** while this
+    repo's documented floor is `MIN_PYTHON_VERSION` = 3.10 (chosen so Ubuntu
+    22.04's system `python3` works -- docs/specs/portability.md D9). The call
+    sits inside `except BaseException: ... raise`, so on a 3.10 interpreter it
+    did not merely fail to attach the note: the AttributeError REPLACED the
+    exception being handled. Measured on 3.10.1, running that exact shape:
+
+        escaping exception type: AttributeError ->
+            'KeyboardInterrupt' object has no attribute 'add_note'
+        short id recoverable: None
+
+    So on the floor interpreter an operator's Ctrl-C surfaced as a confusing
+    AttributeError AND lost the short id -- which is the only handle left to
+    a live `--bg` session, i.e. exactly the loss T4 exists to prevent, made
+    worse rather than merely absent. `bin/hooks/run_py.sh` will happily
+    select python3.10, so this was reachable, not hypothetical.
+
+    `__notes__` is a plain list attribute that 3.11's `add_note` appends to,
+    and `_short_id_from_notes` reads it via `getattr` -- so populating it
+    directly is behaviourally identical for fleet's own recovery path on the
+    floor. The only thing 3.10 loses is the interpreter printing the note in
+    the traceback, which fleet never depended on.
+
+    Never raises. A failure to attach a diagnostic note must not replace the
+    exception it is annotating -- that is the whole defect being fixed here,
+    and a broad guard is the point rather than an oversight."""
+    note = f"fleet_short_id={short_id}"
+    try:
+        adder = getattr(exc, "add_note", None)
+        if adder is not None:
+            adder(note)
+            return
+        notes = getattr(exc, "__notes__", None)
+        if not isinstance(notes, list):
+            notes = []
+            exc.__notes__ = notes
+        notes.append(note)
+    except Exception:
+        pass
 
 
 def statusline_chain_path() -> Path:
@@ -7725,10 +7795,14 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
             # by the time this loop runs -- if Ctrl-C (or any other
             # exception) lands here, the short id is the only handle an
             # operator has left to find it again via `claude agents`.
-            # add_note survives re-raise through cmd_spawn's except
+            # The note survives re-raise through cmd_spawn's except
             # BaseException handler, which has no other way to recover it
             # (dispatch_bg stays opaque -- no message parsing per T4).
-            exc.add_note(f"fleet_short_id={short_id}")
+            # `_stash_short_id_note`, not a bare `exc.add_note(...)`:
+            # add_note is 3.11+ and this repo's floor is 3.10, where the
+            # bare call replaced the escaping exception with an
+            # AttributeError. See that helper.
+            _stash_short_id_note(exc, short_id)
             raise
         if sid is None:
             raise NativeDispatchError(
