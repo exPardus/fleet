@@ -5290,8 +5290,9 @@ def _marker_guard_problems() -> list:
 # A scheduled task's command line, as it comes back from the platform
 # adapter: `"<py>" "<script>" <verb> --fleet-home "<home>"`. Quoted runs are
 # single tokens (paths contain spaces); everything else splits on whitespace.
+# `--flag="quoted value"` is one token too, split on the `=` afterwards.
 # Platform-neutral by construction -- it only ever sees a string.
-_TASK_ARG_RE = re.compile(r'"[^"]*"|\S+')
+_TASK_ARG_RE = re.compile(r'[^\s"]*"[^"]*"|\S+')
 
 
 def _normalize_task_token(value) -> str:
@@ -5302,13 +5303,26 @@ def _normalize_task_token(value) -> str:
     return text.rstrip("/") or text
 
 
+def _strip_task_quotes(raw: str) -> str:
+    if len(raw) >= 2 and raw.startswith('"') and raw.endswith('"'):
+        return raw[1:-1]
+    return raw
+
+
 def _task_command_tokens(command: str) -> list:
-    """Normalized tokens of a scheduled task's command line, quotes stripped."""
+    """Normalized tokens of a scheduled task's command line, quotes stripped.
+
+    `--flag=value` is ONE shell token but TWO argparse arguments, and fleet's
+    own parser accepts either spelling -- so it is split here, and every
+    consumer below sees the same shape whichever way the task was written.
+    Only a token that starts with `-` is eligible, so a path containing an `=`
+    is never split."""
     out = []
     for raw in _TASK_ARG_RE.findall(command or ""):
-        if len(raw) >= 2 and raw.startswith('"') and raw.endswith('"'):
-            raw = raw[1:-1]
-        out.append(_normalize_task_token(raw))
+        if raw.startswith("-") and "=" in raw.split('"', 1)[0]:
+            flag, _, raw = raw.partition("=")
+            out.append(_normalize_task_token(flag))
+        out.append(_normalize_task_token(_strip_task_quotes(raw)))
     return out
 
 
@@ -5329,17 +5343,41 @@ def _fleet_task_is_ours(command: str, subcommand: str) -> bool:
     somewhere. Slash/case normalization is kept (schtasks XML round-trips
     carry both variances). An absent `--fleet-home` is NOT ours: `fleet`
     embeds it in every task it installs (F2), so a command without one was
-    installed by something else.
+    installed by something else. (B11: that includes a task installed by a
+    fleet build older than F2 -- it has no `--fleet-home` and is refused
+    rather than overwritten. Safe direction, `--force` recovers, and the
+    refusal message names all three identity components.)
+
+    QUOTING (B1 fix wave). Accepted: every form fleet itself renders, either
+    path quoted or bare, slash- or case-varied, and `--fleet-home=VALUE` (which
+    fleet's own argparse accepts, so a hand-edited task may carry it).
+    Refused, deliberately: a command whose paths contain spaces and carry NO
+    quotes at all -- that is genuinely undecidable, not merely unhandled -- and
+    sh-style single quotes, because there is no POSIX scheduler backend yet to
+    validate a quoting dialect against, and `'` is a legal Windows filename
+    character (`C:\\Users\\O'Brien\\...`) that a single-quote alternation would
+    mis-tokenize. Both refusals are the SAFE direction: the cost is one
+    `--force` on a task that is provably the operator's, where the opposite
+    error is `/Create /F` over somebody else's scheduled task. Pinned by
+    `TestOwnershipQuotingVariants`, which fixes each verdict as a decision.
+
+    NOT constrained: the interpreter (argv[0]). A contrived command that runs
+    a foreign wrapper but still names our fleet.py, the `autoclean` verb and
+    our `--fleet-home` reads as ours (B7). Recorded so it is not re-filed as
+    new; it is strictly narrower than the pre-fix substring predicate, and
+    every realistic shape answers correctly.
 
     Portability (invariant 8): pure string work over a command string plus
     `Path(...).resolve()` -- platform-neutral, no OS branch of any kind, so it
-    moves with the platform adapter unchanged. One caveat on a
-    case-SENSITIVE filesystem: the `.lower()`
-    normalization (inherited, and required by schtasks XML round-trips) would
-    conflate two paths differing only in case. Unreachable today --
-    `_PosixPlatform.autoclean_task_query` raises `UnsupportedPlatformError`
-    before any command string exists -- and it must be revisited when Phase 1.5
-    lands the launchd/cron backends. [UNVERIFIED -- no POSIX box]"""
+    moves with the platform adapter unchanged. TWO Windows-shaped
+    normalizations to revisit when Phase 1.5 lands the launchd/cron backends
+    (D8): `.lower()` would conflate two paths differing only in case on a
+    case-SENSITIVE filesystem (a false MISS), and `replace("\\\\", "/")` rewrites
+    a backslash that is a legal POSIX filename character and a shell escape
+    inside a crontab line (a false MATCH -- the more dangerous direction).
+    Unreachable today: `_PosixPlatform.autoclean_task_query` raises
+    `UnsupportedPlatformError` before any command string exists.
+    [UNVERIFIED -- no POSIX box; reasoned, not run]"""
     tokens = _task_command_tokens(command)
     try:
         script_at = tokens.index(_normalize_task_token(_autoclean_script_path()))
@@ -5403,7 +5441,10 @@ def _install_autoclean_task(interval_hours, force: bool) -> None:
             f"fleet-owned by THIS identity -- ownership is all three of: this "
             f"fleet.py ({_autoclean_script_path()}), the `autoclean` "
             f"subcommand, and --fleet-home {Path(FLEET_HOME).resolve()}. "
-            f"Found {existing[:120]!r} -- rerun with --force to overwrite")
+            f"Found {existing[:120]!r} -- rerun with --force to overwrite. "
+            f"(A task installed by a fleet build older than F2 carries no "
+            f"--fleet-home and lands here; --force is safe if the fleet.py "
+            f"path above is yours.)")
     ok, msg = PLATFORM.autoclean_task_install(AUTOCLEAN_TASK_NAME, command, interval_hours)
     if not ok:
         raise FleetCliError(f"schtasks create failed: {msg}")
@@ -6012,8 +6053,25 @@ def _doctor_check_autoclean(run=subprocess.run):
                 f"staleness sweeps are manual; {stamp_note}{suffix}")
     # F2: a task pinned to a deleted worktree's fleet.py fails silently on
     # every trigger -- flag it (note-only, but actionable).
-    for tok in re.findall(r'"([^"]+)"', existing):
-        if tok.lower().endswith("fleet.py") and not Path(tok).exists():
+    #
+    # B6/D9: tokenize through `_task_command_tokens`, the same splitter the
+    # ownership predicate uses. This scan previously required QUOTED tokens
+    # (`re.findall(r'"([^"]+)"', existing)`), so an unquoted script path --
+    # a shape a schtasks XML round-trip can produce, and one the predicate
+    # accepts -- made the check silently no-op and doctor read green on a
+    # task pinned to a deleted worktree. Two tokenizers over the same string
+    # is exactly the drift this branch exists to remove. Note the tokens come
+    # back slash/case-normalized; `Path.exists()` is fine with forward slashes
+    # on Windows, and this check is note-only either way.
+    # Only an ABSOLUTE token can be proven dead: a relative `fleet.py` resolves
+    # against the scheduler's working directory, which is not ours to know, so
+    # `Path(tok).exists()` would answer against the WRONG cwd. The old
+    # quoted-only scan excluded those by accident (fleet always quotes an
+    # absolute path); this makes the exclusion the stated rule, and keeps the
+    # check to claims it can actually support.
+    for tok in _task_command_tokens(existing):
+        if (tok.endswith("fleet.py") and Path(tok).is_absolute()
+                and not Path(tok).exists()):
             return ("autoclean", True,
                     f"task installed but pinned to a missing path ({tok}) -- "
                     f"reinstall from the canonical home: fleet init --autoclean{suffix}")
@@ -6896,6 +6954,15 @@ SUPERVISOR_CLAIM_STALE_SECONDS = 3600.0   # S: seizure/nag threshold, > beat per
 SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS = 300.0   # T: handoff wait before abort (spec §4)
 SUPERVISOR_ROSTER_VERIFY_SECONDS = 60.0   # dispatch -> roster-join window (contract G6 fallback); keep in sync with NATIVE_JOIN_VERIFY_SECONDS above (same window, independently defined -- Finding 3)
 
+# B4/D6: the fleet mode name the handoff successor is dispatched under when the
+# operator passes no --permission-mode. Deliberately the SAME default
+# `fleet spawn` uses (`p_spawn --mode`, MODE_FLAGS @949) rather than a bespoke
+# one: the successor's first act is a Bash call, and a headless --bg session
+# under claude's own default mode wedges on an unanswerable permission prompt
+# (the T12 hang class). Held as a named constant so the dispatch and its pin
+# read the same value.
+SUCCESSOR_DEFAULT_MODE = "dontask"
+
 SUPERVISOR_JOURNAL_KINDS = (
     "BOOT", "CHECKPOINT", "PROPOSAL", "SEIZED",
     "HANDOFF-BEGIN", "HANDOFF-COMPLETE", "HANDOFF-ABORT",
@@ -7403,8 +7470,36 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     `tasks_dir()` sits outside the worker's cwd; this dispatch runs with
     `cwd=FLEET_HOME` and its task file is `FLEET_HOME/state/...`, already
     inside the authorized root. `--setting-sources` likewise: it is a
-    per-worker persisted value and a successor has no registry record."""
+    per-worker persisted value and a successor has no registry record.
+
+    Mode flags ARE carried (B4/D6 fix wave). `dispatch_bg` ends every worker
+    argv with `mode_flags(mode)` and `fleet spawn` defaults that to `dontask`;
+    this path emitted a permission flag only when the operator typed
+    `--permission-mode`, so the default was claude's own. The successor's
+    bootstrap opens with a Bash call (`sup-boot --handoff-inc`), and a headless
+    `--bg` session cannot answer a permission prompt -- it wedges until the
+    300s handshake timeout. That is the T12 hang class. The default is
+    `SUCCESSOR_DEFAULT_MODE`, deliberately the SAME fleet mode name a worker
+    gets, not a bespoke one; an explicit `--permission-mode` still wins.
+
+    BOTH external pre-flights run before the lock (B5 fix wave).
+    `resolve_claude_executable` is the same class of check as
+    `_require_instance_settings` -- a missing external prerequisite -- but ran
+    after the journal write, the task-file write, and the prior abort flag's
+    deletion, with no `_abort_flag` guard on its raise. A `claude` that dropped
+    off PATH therefore left HANDOFF-BEGIN journaled forever, a stale task file
+    in `state/`, the previous handoff's abort flag deleted, no successor, and
+    nothing for doctor to see -- falsifying this docstring's own promise that
+    both failure paths raise the flag. Moving one pre-flight above the lock and
+    leaving its twin behind is this repo's named recurring class; the twin is
+    now beside it. (`_fetch_agents_roster`, the only other post-lock caller,
+    catches `ClaudeNotFoundError` and returns `(False, reason)` -- it cannot
+    raise through here.)"""
     _require_instance_settings()
+    try:
+        exe = resolve_claude_executable(which=which)
+    except ClaudeNotFoundError as exc:
+        raise FleetCliError(f"{exc} -- nothing dispatched; claim unchanged, duty continues")
     with fleet_lock():
         claim, caller = _require_claim_holder(getattr(args, "sid", None))
         successor_inc = mint_incarnation_id()
@@ -7432,7 +7527,6 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
         })
 
     roster_fetch = lambda: _fetch_agents_roster(which=which, run=run)  # noqa: E731
-    exe = resolve_claude_executable(which=which)
     pre_ok, pre_payload = roster_fetch()
     # Same unhashable-sessionId guard as dispatch_bg's pre-snapshot above.
     pre_sids = {e.get("sessionId") for e in (pre_payload if pre_ok else [])
@@ -7445,8 +7539,13 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
             "--settings", instance_settings_path().as_posix()]
     if getattr(args, "model", None):
         argv += ["--model", args.model]
+    # B4/D6: never leave the mode to claude's default -- see the docstring.
+    # An explicit --permission-mode is a raw claude mode string and wins;
+    # otherwise emit the same fleet mode a worker would get.
     if getattr(args, "permission_mode", None):
         argv += ["--permission-mode", args.permission_mode]
+    else:
+        argv += mode_flags(SUCCESSOR_DEFAULT_MODE)
     argv.append(f"Read {task_path.as_posix()} and follow it exactly.")
     try:
         proc = run(argv, cwd=str(FLEET_HOME), env=_worker_env(name),
