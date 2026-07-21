@@ -232,17 +232,17 @@ class TestStatuslineRender:
     def test_not_initialized(self, statusline):
         line = statusline.render_statusline(
             {"ok": False, "reason": "not_initialized", "workers": [], "totals": {}}, color=False)
-        assert line == "⚑ fleet: not initialized"
+        assert line == "[fleet]: not initialized"
 
     def test_unreadable_registry(self, statusline):
         line = statusline.render_statusline(
             {"ok": False, "reason": "unreadable", "workers": [], "totals": {}}, color=False)
-        assert line == "⚑ fleet: registry unreadable"
+        assert line == "[fleet]: registry unreadable"
 
     def test_no_workers(self, statusline):
         snap = {"ok": True, "reason": None, "workers": [],
                 "totals": {"workers": 0, "mail": 0, "cost_usd": 0.0, "by_status": {}}}
-        assert statusline.render_statusline(snap, color=False) == "⚑ fleet: no workers"
+        assert statusline.render_statusline(snap, color=False) == "[fleet]: no workers"
 
     def _snap(self, workers):
         by_status = {}
@@ -268,12 +268,13 @@ class TestStatuslineRender:
             self._w(name="c", status="dead", cost_usd=0.71),
         ])
         line = statusline.render_statusline(snap, color=False)
-        assert "1 working" in line.replace("●", " ").replace("○", " ").replace("✗", " ")
+        assert "work 1" in line
+        assert "idle 1" in line
         assert "$2.14" in line
 
-    def test_idle_with_mail_renders_as_idle_plus_mail(self, statusline):
+    def test_idle_with_mail_gets_its_own_bucket(self, statusline):
         snap = self._snap([self._w(name="b", status="idle", mail=1)])
-        assert "idle+mail" in statusline.render_statusline(snap, color=False)
+        assert "mail 1" in statusline.render_statusline(snap, color=False)
 
     def test_limited_shows_reset_time(self, statusline):
         snap = self._snap([self._w(status="limited", limit_reset_at="2026-07-09T14:20:00Z")])
@@ -291,19 +292,93 @@ class TestStatuslineRender:
 
     def test_stale_worker_gets_age_suffix(self, statusline):
         snap = self._snap([self._w(status="working", stale_seconds=2400.0)])
-        assert "~40m" in statusline.render_statusline(snap, color=False)
+        assert "work 1 40m" in statusline.render_statusline(snap, color=False)
 
     def test_fresh_worker_has_no_age_suffix(self, statusline):
         snap = self._snap([self._w(status="working", stale_seconds=299.0)])
-        assert "~" not in statusline.render_statusline(snap, color=False)
+        assert "work 1" in statusline.render_statusline(snap, color=False)
+        assert "m" not in statusline.render_statusline(snap, color=False).split("work 1")[1]
+
+    def test_a_stale_bucket_keeps_its_count_undimmed(self, statusline):
+        # The shipped bug: the whole chunk was wrapped in \x1b[2m, so a fleet of
+        # stale workers rendered grey-on-dark and the counts were unreadable.
+        # Only the age may be greyed.
+        snap = self._snap([self._w(status="working", stale_seconds=2400.0)])
+        line = statusline.render_statusline(snap, color=True)
+        assert "\x1b[2m" not in line
+        assert f"{statusline._STATUS_COLOR['working']}work" in line
+
+    def test_dead_collapses_into_a_tail_counter(self, statusline):
+        snap = self._snap([self._w(name="a", status="working")]
+                          + [self._w(name=f"d{i}", status="dead") for i in range(11)])
+        line = statusline.render_statusline(snap, color=False)
+        assert "+11 dead" in line
+        # live first, dead last: eleven corpses never outrank the live worker
+        assert line.index("work 1") < line.index("+11 dead")
+
+    def test_an_all_dead_fleet_says_so_instead_of_rendering_empty(self, statusline):
+        snap = self._snap([self._w(name=f"d{i}", status="dead") for i in range(3)])
+        line = statusline.render_statusline(snap, color=False)
+        assert "no live workers" in line and "+3 dead" in line
+
+    def test_bucket_order_is_fixed_not_count_sorted(self, statusline):
+        # A count-sorted line reshuffles on every refresh; the operator then has
+        # to re-read it each time to find the bucket they care about.
+        snap = self._snap([self._w(name="w", status="working")]
+                          + [self._w(name=f"i{i}", status="idle") for i in range(5)])
+        line = statusline.render_statusline(snap, color=False)
+        assert line.index("work 1") < line.index("idle 5")
+
+    def test_an_unknown_status_still_renders(self, statusline):
+        snap = self._snap([self._w(status="teleporting")])
+        assert "teleporting 1" in statusline.render_statusline(snap, color=False)
 
     def test_color_false_emits_no_escapes(self, statusline):
-        snap = self._snap([self._w(status="working", stale_seconds=2400.0)])
+        snap = self._snap([self._w(name="a", status="working", stale_seconds=2400.0),
+                           self._w(name="b", status="limited", mail=1),
+                           self._w(name="c", status="dead")])
         assert "\x1b" not in statusline.render_statusline(snap, color=False)
 
     def test_color_true_emits_escapes(self, statusline):
         snap = self._snap([self._w(status="working")])
         assert "\x1b" in statusline.render_statusline(snap, color=True)
+
+    def test_every_live_bucket_gets_a_distinct_colour(self, statusline):
+        codes = [statusline._STATUS_COLOR[b] for b in
+                 ("working", "idle+mail", "idle", "attached", "limited", "dead")]
+        assert len(set(codes)) == len(codes)
+
+    def test_age_and_cost_carry_their_own_colours(self, statusline):
+        # Every field is legible on its own; the age and the money are not
+        # allowed to share a hue with a status or with each other.
+        codes = [statusline._AGE, statusline._COST, statusline._NAME]
+        assert len(set(codes)) == 3
+        assert not set(codes) & set(statusline._STATUS_COLOR.values())
+
+    def test_grey_is_reserved_for_dead(self, statusline):
+        # "greyed out" must mean exactly one thing: inert. If any other field
+        # borrows grey, the operator has to read words to find the dead ones.
+        snap = self._snap([self._w(name="a", status="working", stale_seconds=2400.0),
+                           self._w(name="b", status="idle", mail=1),
+                           self._w(name="c", status="limited",
+                                   limit_reset_at="2026-07-09T14:20:00Z"),
+                           self._w(name="d", status="dead")])
+        line = statusline.render_statusline(snap, color=True)
+        assert line.count(statusline._GREY) == 1
+        assert statusline._GREY + "+1 dead" in line
+
+    def test_a_fleet_with_no_dead_workers_uses_no_grey_at_all(self, statusline):
+        snap = self._snap([self._w(status="working", stale_seconds=2400.0)])
+        assert statusline._GREY not in statusline.render_statusline(snap, color=True)
+
+    def test_the_name_is_a_bright_bracketed_nameplate(self, statusline):
+        snap = self._snap([self._w(status="working")])
+        line = statusline.render_statusline(snap, color=True)
+        assert line.startswith(statusline._NAME + "[fleet]")
+        # Foreground only -- no background/reverse-video block.
+        assert "[7m" not in line and ";4" not in statusline._NAME
+        # ...and degrades to a bare bracketed word when colour is off.
+        assert statusline.render_statusline(snap, color=False).startswith("[fleet]  ")
 
 
 class TestStatuslineMain:
@@ -312,7 +387,7 @@ class TestStatuslineMain:
         monkeypatch.setattr(statusline.sys, "stdin", io.StringIO('{"model":{}}'))
         monkeypatch.setenv("NO_COLOR", "1")
         assert statusline.main() == 0
-        assert "⚑" in capsys.readouterr().out
+        assert "fleet" in capsys.readouterr().out
 
     def test_main_swallows_every_exception_and_prints_nothing(self, home, statusline, capsys, monkeypatch):
         # `home` is load-bearing: without it this read the developer's REAL
@@ -340,43 +415,60 @@ class TestStatuslineMain:
         assert statusline.main() == 0
 
 
-class TestStatuslineAsciiFallback:
-    """A Windows console is cp1252 and cannot encode the fleet glyphs. Printing
-    them raises UnicodeEncodeError, the exit-0 guard swallows it, and the
-    operator sees a permanently BLANK statusline. Caught live during Task 3."""
+class TestStatuslinePureAscii:
+    """A Windows console is cp1252 and cannot encode geometric/block glyphs.
+    Printing them raises UnicodeEncodeError, the exit-0 guard swallows it, and
+    the operator sees a permanently BLANK statusline (caught live during Task 3;
+    an ascii_only fallback renderer was the first patch). The redesign removes
+    the failure mode instead of handling it: fleet's row is pure ASCII by
+    construction, colour and word carry the whole signal. These tests are the
+    fence -- any glyph reintroduced into the renderer fails here."""
 
-    def test_ascii_only_render_is_pure_ascii(self, statusline):
-        snap = {"ok": True, "reason": None,
-                "workers": [{"name": "a", "status": "working", "turns": 1, "cost_usd": 1.0,
-                             "mail": 0, "stale_seconds": 5.0, "limit_reset_at": None,
-                             "limit_kind": None, "resume_eligible": False,
-                             "attached_since": None}],
-                "totals": {"workers": 1, "mail": 0, "cost_usd": 1.0,
-                           "by_status": {"working": 1}}}
-        line = statusline.render_statusline(snap, color=False, ascii_only=True)
-        line.encode("ascii")  # raises if any glyph slipped through
-        assert "working" in line
+    def _snap(self, workers):
+        return {"ok": True, "reason": None, "workers": workers,
+                "totals": {"workers": len(workers), "mail": 0,
+                           "cost_usd": 9.5, "by_status": {}}}
 
-    def test_ascii_only_degrades_the_error_lines_too(self, statusline):
-        line = statusline.render_statusline(
-            {"ok": False, "reason": "unreadable", "workers": [], "totals": {}},
-            color=False, ascii_only=True)
-        line.encode("ascii")
-        assert "registry unreadable" in line
+    def _w(self, **over):
+        base = {"name": "w", "status": "working", "turns": 1, "cost_usd": 1.0,
+                "mail": 0, "stale_seconds": 5.0, "limit_reset_at": None,
+                "limit_kind": None, "resume_eligible": False, "attached_since": None}
+        base.update(over)
+        return base
 
-    def test_main_prints_ascii_when_stdout_cannot_encode_glyphs(
+    @pytest.mark.parametrize("color", [True, False])
+    def test_the_rendered_line_is_pure_ascii(self, statusline, color):
+        snap = self._snap([
+            self._w(name="a", status="working", stale_seconds=2400.0),
+            self._w(name="b", status="idle", mail=2),
+            self._w(name="c", status="limited", limit_reset_at="2026-07-09T14:20:00Z"),
+            self._w(name="d", status="attached"),
+            self._w(name="e", status="dead"),
+        ])
+        statusline.render_statusline(snap, color=color).encode("ascii")
+
+    @pytest.mark.parametrize("snap", [
+        {"ok": False, "reason": "unreadable", "workers": [], "totals": {}},
+        {"ok": False, "reason": "not_initialized", "workers": [], "totals": {}},
+        {"ok": True, "reason": None, "workers": [], "totals": {"cost_usd": 0.0}},
+    ])
+    def test_the_degraded_lines_are_pure_ascii_too(self, statusline, snap):
+        statusline.render_statusline(snap, color=False).encode("ascii")
+
+    def test_main_prints_on_a_console_that_rejects_non_ascii(
             self, home, statusline, monkeypatch, capsys):
         _write_registry(home, {"pmbot": _rec()})
         monkeypatch.setattr(statusline.sys, "stdin", io.StringIO("{}"))
         monkeypatch.setenv("NO_COLOR", "1")
-        # Simulate a cp1252 console: no reconfigure(), encoding that rejects glyphs.
+        # Simulate a cp1252 console: reconfigure() unavailable, encoder rejects
+        # anything non-ASCII. Fleet's row must survive it untouched.
         monkeypatch.setattr(statusline, "_stdout_can_encode", lambda text: False)
 
         assert statusline.main() == 0
         out = capsys.readouterr().out
         assert out.strip()  # the bug was: silently empty
         out.encode("ascii")
-        assert "working" in out
+        assert "work 1" in out
 
     def test_stdout_can_encode_rejects_cp1252(self, statusline, monkeypatch):
         class _Cp1252:
@@ -1021,7 +1113,7 @@ class TestStatuslineChainRender:
 
         lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
         assert lines[0] == "CAVEMAN ROW"
-        assert "working" in lines[1]
+        assert "work 1" in lines[1]
 
     def test_delegate_receives_the_session_json_on_stdin(self, home, statusline, capsys, monkeypatch):
         _write_registry(home, {})
@@ -1040,7 +1132,7 @@ class TestStatuslineChainRender:
 
         assert statusline.main() == 0
         out = capsys.readouterr().out
-        assert "working" in out
+        assert "work 1" in out
 
     def test_a_hanging_delegate_is_dropped_on_timeout(self, home, statusline, capsys, monkeypatch):
         _write_registry(home, {"pmbot": _rec()})
@@ -1050,7 +1142,7 @@ class TestStatuslineChainRender:
         monkeypatch.setenv("NO_COLOR", "1")
 
         assert statusline.main() == 0
-        assert "working" in capsys.readouterr().out
+        assert "work 1" in capsys.readouterr().out
 
     def test_no_chain_file_means_a_single_row(self, home, statusline, capsys, monkeypatch):
         _write_registry(home, {"pmbot": _rec()})
@@ -1065,7 +1157,7 @@ class TestStatuslineChainRender:
         monkeypatch.setattr(statusline.sys, "stdin", io.StringIO("{}"))
         monkeypatch.setenv("NO_COLOR", "1")
         assert statusline.main() == 0
-        assert "working" in capsys.readouterr().out
+        assert "work 1" in capsys.readouterr().out
 
     def test_chain_spawns_no_subprocess_when_unconfigured(self, home, statusline, monkeypatch):
         # D1 still holds for fleet's own row: zero subprocesses unless the

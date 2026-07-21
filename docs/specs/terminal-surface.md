@@ -48,7 +48,7 @@ These are the constraints the design is built on. A builder must not assume othe
 This is **not** a PowerShell-cost workaround. On Linux the probe is a `/proc/<pid>/stat` read costing microseconds and the design would be identical — the hazard is *mutation from a view* and *lock contention on a hot path*, both OS-independent. The Windows PowerShell probe is already correctly quarantined inside `_WindowsPlatform.get_process_info` (`bin/fleet.py`), enforced by `TestPlatformAdapterBoundary`; nothing here needs it moved.
 
 <!-- ts-stale-honesty -->
-**D2 — the statusline never asserts liveness it did not probe for.** `--stale-ok` returns each worker's **last-committed** status plus `stale_seconds` derived from `last_activity`. A `working` row untouched for 40 minutes renders `working~40m` dimmed. It is never silently relabelled, and never presented as freshly verified. `fleet status` (no flag) remains the authoritative, recomputing command — **[SUPERSEDED (mechanism only) — native-substrate pivot 2026-07-13]**: "probing" here names the PID-probe recompute that native dispatch replaces with a daemon-roster query; the D2 honesty rule (never assert unverified liveness) is unchanged.
+**D2 — the statusline never asserts liveness it did not probe for.** `--stale-ok` returns each worker's **last-committed** status plus `stale_seconds` derived from `last_activity`. A `working` row untouched for 40 minutes renders `work 1 40m`, the age in its own colour. It is never silently relabelled, and never presented as freshly verified. `fleet status` (no flag) remains the authoritative, recomputing command — **[SUPERSEDED (mechanism only) — native-substrate pivot 2026-07-13]**: "probing" here names the PID-probe recompute that native dispatch replaces with a daemon-roster query; the D2 honesty rule (never assert unverified liveness) is unchanged.
 
 <!-- ts-mutating-commands -->
 **D3 — read-only commands inline; mutating commands go through the model.** `` !`cmd` `` executes at prompt-expansion time with no permission prompt and no undo. `fleet kill` is terminal (only `respawn` exits `dead`) and `fleet clean` deletes logs, journals and mailboxes. A typo in an inline-exec `/fleet:kill` is unrecoverable.
@@ -61,7 +61,7 @@ Direct control is preserved — `/fleet:kill pmbot` still kills `pmbot` — it m
 **Enforced by test, not convention:** a lint asserts no mutating command file contains `` !` ``.
 
 <!-- ts-corrupt-registry -->
-**D4 — a view reports registry corruption; it does not quarantine.** SPEC §11 requires the single writer to quarantine an unparseable `fleet.json` to `fleet.json.corrupt.<ts>`, append a `registry_corrupt` event, and exit 1 loudly. A view must do **none** of that: quarantine is a write, and a statusline refiring every 10 s would quarantine in a loop, shredding operator evidence. Views print `⚑ fleet: registry unreadable` and exit 0. The next real `fleet` command performs the quarantine. Direct consequence of invariant 6.
+**D4 — a view reports registry corruption; it does not quarantine.** SPEC §11 requires the single writer to quarantine an unparseable `fleet.json` to `fleet.json.corrupt.<ts>`, append a `registry_corrupt` event, and exit 1 loudly. A view must do **none** of that: quarantine is a write, and a statusline refiring every 10 s would quarantine in a loop, shredding operator evidence. Views print `[fleet]: registry unreadable` and exit 0. The next real `fleet` command performs the quarantine. Direct consequence of invariant 6.
 
 <!-- ts-worker-suppression -->
 **D5 — the SessionStart hook suppresses itself inside workers.** A globally-enabled fleet plugin fires its SessionStart hook in **every** Claude Code session on the machine, including every worker turn — injecting a fleet briefing into worker context, wasting tokens and confusing the worker about its role. Guard: `launch_turn` stamps `FLEET_WORKER=<name>` into the child environment; the hook returns empty context when it sees that variable. This is the one `fleet.py` change outside the read path.
@@ -126,12 +126,15 @@ Bare `fleet status` behaviour — the human table, the recompute, the anomaly fl
 - Renders **one line**, ANSI-coloured:
 
 ```
-⚑ 3●working 1◐idle+mail 1⏸limited  $2.14
+[fleet]  work 3  mail 1  lim 1 resets 14:20  idle 1 15m  +4 dead  $2.14
 ```
 
 - Rows/states not present are omitted. `limited` workers append ` resets 14:20` from `limit_reset_at`, or ` reset?` when it is null. A worker whose `limit_reset_at` has passed renders `resume-eligible` — a **flag only**, never a launch (invariant 1: a view does not start turns; SPEC §5 `status` row states this same rule).
-- Any worker with `stale_seconds > 300` renders dimmed with a `~<age>` suffix (D2).
-- `NO_COLOR` env (or a non-tty) → plain ASCII, no escapes.
+- A bucket whose every worker has `stale_seconds > 300` appends the freshest ` <age>` (D2). The age is coloured, **not** dimmed: dimming the whole chunk rendered grey-on-dark counts that the operator could not read.
+- **Buckets appear in a fixed order** (`work · mail · att · lim · budget · ceiling · idle`), never count-sorted — a count-sorted line reshuffles between refreshes, forcing a re-read, and lets a pile of corpses outrank the one live worker. `dead` is not a bucket at all: it collapses into a `+N dead` tail counter.
+- **Colour is the second channel and it is exclusive.** One hue per status, plus a distinct hue each for the `[fleet]` nameplate, the age, and the cost. **Grey is reserved for `dead`** — nothing else on the line may use it, or "greyed out" stops meaning "inert".
+- **The line is pure ASCII by construction** — no glyphs, no box drawing. A cp1252 console cannot encode geometric glyphs; `print()` then raises `UnicodeEncodeError`, the exit-0 guard swallows it, and the operator gets a permanently **blank** statusline. Colour and word already carry the whole signal, so the glyphs bought nothing but width and that failure mode. Asserted by test, not convention.
+- `NO_COLOR` env (or a non-tty) → no escapes; the same words, unpainted.
 - **Exit 0 on every path.** On any exception: print nothing, exit 0. This is the statusline analogue of invariant 2 (exit-0 hooks) — a traceback in a statusline is rendered under the operator's input box on every keystroke-adjacent refresh.
 - Wall-clock budget: **< 20 ms**, zero subprocesses. Asserted by test.
 
@@ -209,8 +212,8 @@ Governing rule: **a view never fails loudly and never mutates to repair itself.*
 
 | Condition | statusline | `/fleet:*` | SessionStart hook |
 |---|---|---|---|
-| `fleet.json` missing | `⚑ fleet: not initialized` | CLI's own message | empty context, exit 0 |
-| `fleet.json` unparseable | `⚑ fleet: registry unreadable` | CLI quarantines + exits 1 (§11) | empty, exit 0 |
+| `fleet.json` missing | `[fleet]: not initialized` | CLI's own message | empty context, exit 0 |
+| `fleet.json` unparseable | `[fleet]: registry unreadable` | CLI quarantines + exits 1 (§11) | empty, exit 0 |
 | `FLEET_HOME` unresolvable | print nothing, exit 0 | CLI error | empty, exit 0 |
 | `mailbox/` missing | mail counts = 0 | idem | idem |
 | any unexpected exception | print nothing, exit 0 | CLI's own handling | empty, exit 0 |
