@@ -755,6 +755,73 @@ class TestSchedulerInstall:
         fleet._install_autoclean_task(None, force=False)
         assert len(platform_stub["installs"]) == 1
 
+    # --- F4 ownership is FULL identity, not just the interpreter target ---
+    #
+    # Pre-fix the predicate was `str(_autoclean_script_path()) in command`, so
+    # it said "ours" for ANY scheduled task running this fleet.py. The moment a
+    # second fleet-owned task exists -- the three-tier adjudication's
+    # `fleet init --supervisor-beat` is the concrete near-term case --
+    # `fleet init --autoclean` would silently overwrite it. Ownership is now
+    # script path AND subcommand AND --fleet-home value.
+
+    def test_same_fleet_py_different_subcommand_is_not_ours(self, home,
+                                                            canonical_install,
+                                                            platform_stub):
+        """THE defect: a second fleet-owned scheduled task running the very
+        same fleet.py with a DIFFERENT verb must not be overwritten."""
+        script = fleet._autoclean_script_path()
+        platform_stub["query"] = (
+            f'"C:/py.exe" "{script}" supervisor-beat --fleet-home '
+            f'"{Path(home).resolve()}"')
+        with pytest.raises(fleet.FleetCliError, match="fleet-owned"):
+            fleet._install_autoclean_task(None, force=False)
+        assert platform_stub["installs"] == []
+
+    def test_same_script_and_verb_different_fleet_home_is_not_ours(
+            self, home, canonical_install, platform_stub, tmp_path_factory):
+        """Two fleets on one machine share a fleet.py path only when one is a
+        checkout of the other, but they never share a --fleet-home. A task
+        pinned to a different home is somebody else's sweep."""
+        script = fleet._autoclean_script_path()
+        other = tmp_path_factory.mktemp("other-fleet-home")
+        platform_stub["query"] = (
+            f'"C:/py.exe" "{script}" autoclean --fleet-home "{other.resolve()}"')
+        with pytest.raises(fleet.FleetCliError, match="fleet-owned"):
+            fleet._install_autoclean_task(None, force=False)
+        assert platform_stub["installs"] == []
+
+    def test_ownership_predicate_all_four_directions(self, home, canonical_install,
+                                                     tmp_path_factory):
+        """The predicate itself, platform-neutral (it takes a command string):
+        ours / foreign / same-script-other-verb / same-verb-other-home."""
+        script = fleet._autoclean_script_path()
+        other = tmp_path_factory.mktemp("other-fleet-home").resolve()
+        me = Path(home).resolve()
+        assert fleet._autoclean_task_is_ours(fleet._autoclean_task_command()) is True
+        assert fleet._autoclean_task_is_ours(
+            '"C:/tools/autoclean.exe" nightly --quiet') is False
+        assert fleet._autoclean_task_is_ours(
+            f'"C:/py.exe" "{script}" supervisor-beat --fleet-home "{me}"') is False
+        assert fleet._autoclean_task_is_ours(
+            f'"C:/py.exe" "{script}" autoclean --fleet-home "{other}"') is False
+
+    def test_spec_states_full_identity_ownership(self):
+        """SPEC §11 used to promise "ownership by exact normalized path",
+        which described the defect. Keep the doc true about what ships."""
+        spec = (Path(__file__).resolve().parents[1] / "docs" / "SPEC.md"
+                ).read_text(encoding="utf-8")
+        section = spec.split("## 11. Archive + autoclean", 1)[1].split("\n## 12.", 1)[0]
+        assert "ownership by exact normalized path" not in section
+        assert "ownership by full identity" in section
+        assert "--fleet-home" in section and "subcommand" in section
+
+    def test_ownership_requires_an_explicit_fleet_home(self, home, canonical_install):
+        """F2 embeds --fleet-home in every task fleet installs; a command
+        without it was installed by something else (or by a pre-F2 fleet) and
+        cannot be proven ours."""
+        script = fleet._autoclean_script_path()
+        assert fleet._autoclean_task_is_ours(f'"C:/py.exe" "{script}" autoclean') is False
+
     @pytest.mark.parametrize("bad", [0, 24, -3])
     def test_interval_validated(self, home, canonical_install, platform_stub, bad):
         with pytest.raises(fleet.FleetCliError, match="1..23"):

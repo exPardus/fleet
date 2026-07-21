@@ -5287,13 +5287,82 @@ def _marker_guard_problems() -> list:
     return problems
 
 
+# A scheduled task's command line, as it comes back from the platform
+# adapter: `"<py>" "<script>" <verb> --fleet-home "<home>"`. Quoted runs are
+# single tokens (paths contain spaces); everything else splits on whitespace.
+# Platform-neutral by construction -- it only ever sees a string.
+_TASK_ARG_RE = re.compile(r'"[^"]*"|\S+')
+
+
+def _normalize_task_token(value) -> str:
+    """Slash- and case-normalize one command-line token for comparison.
+    schtasks XML round-trips carry both variances (and a trailing separator
+    on a directory argument), so normalize all three."""
+    text = str(value).strip().replace("\\", "/").lower()
+    return text.rstrip("/") or text
+
+
+def _task_command_tokens(command: str) -> list:
+    """Normalized tokens of a scheduled task's command line, quotes stripped."""
+    out = []
+    for raw in _TASK_ARG_RE.findall(command or ""):
+        if len(raw) >= 2 and raw.startswith('"') and raw.endswith('"'):
+            raw = raw[1:-1]
+        out.append(_normalize_task_token(raw))
+    return out
+
+
+def _fleet_task_is_ours(command: str, subcommand: str) -> bool:
+    """F4 ownership, by FULL identity: the task runs OUR resolved fleet.py,
+    with THIS subcommand, against THIS fleet home.
+
+    The predicate used to match the script path alone, which made it say
+    "ours" for every fleet-owned scheduled task regardless of verb or home --
+    so the moment a second one exists (the three-tier adjudication's
+    `fleet init --supervisor-beat` is the concrete near-term case),
+    `fleet init --autoclean` would silently /Create /F over it. Latent while
+    only one task exists; data loss the day a second lands.
+
+    F4 doctrine is intact and tightened: matching is on whole, quote-stripped
+    tokens, never a bare substring -- a foreign `C:/tools/autoclean.exe`
+    task still refuses, and now so does a task that merely mentions the word
+    somewhere. Slash/case normalization is kept (schtasks XML round-trips
+    carry both variances). An absent `--fleet-home` is NOT ours: `fleet`
+    embeds it in every task it installs (F2), so a command without one was
+    installed by something else.
+
+    Portability (invariant 8): pure string work over a command string plus
+    `Path(...).resolve()` -- platform-neutral, no OS branch of any kind, so it
+    moves with the platform adapter unchanged. One caveat on a
+    case-SENSITIVE filesystem: the `.lower()`
+    normalization (inherited, and required by schtasks XML round-trips) would
+    conflate two paths differing only in case. Unreachable today --
+    `_PosixPlatform.autoclean_task_query` raises `UnsupportedPlatformError`
+    before any command string exists -- and it must be revisited when Phase 1.5
+    lands the launchd/cron backends. [UNVERIFIED -- no POSIX box]"""
+    tokens = _task_command_tokens(command)
+    try:
+        script_at = tokens.index(_normalize_task_token(_autoclean_script_path()))
+    except ValueError:
+        return False
+    # The verb is the argument immediately after the script path -- fleet.py's
+    # own parser takes the subcommand first, so anything else is a different
+    # task even if the word appears later in the line.
+    if tokens[script_at + 1:script_at + 2] != [_normalize_task_token(subcommand)]:
+        return False
+    try:
+        home_at = tokens.index("--fleet-home")
+    except ValueError:
+        return False
+    return (tokens[home_at + 1:home_at + 2]
+            == [_normalize_task_token(Path(FLEET_HOME).resolve())])
+
+
 def _autoclean_task_is_ours(command: str) -> bool:
-    """F4: ownership = the existing task runs OUR fleet.py -- the exact
-    resolved script path, slash- and case-normalized (Windows paths carry
-    both variances through schtasks XML round-trips). Never a substring
-    like 'autoclean': a foreign C:/tools/autoclean.exe task must refuse."""
-    ours = str(_autoclean_script_path()).replace("\\", "/").lower()
-    return ours in (command or "").replace("\\", "/").lower()
+    """F4 for the autoclean task specifically -- see `_fleet_task_is_ours`.
+    Kept as a named seam so the sole consumer (`_install_autoclean_task`)
+    reads the same as before and a second fleet task gets its own one-liner."""
+    return _fleet_task_is_ours(command, "autoclean")
 
 
 def _install_autoclean_task(interval_hours, force: bool) -> None:
@@ -5331,8 +5400,10 @@ def _install_autoclean_task(interval_hours, force: bool) -> None:
     if existing is not None and not _autoclean_task_is_ours(existing) and not force:
         raise FleetCliError(
             f"scheduled task {AUTOCLEAN_TASK_NAME!r} exists and is not "
-            f"fleet-owned (does not run this fleet.py; found {existing[:120]!r}) "
-            f"-- rerun with --force to overwrite")
+            f"fleet-owned by THIS identity -- ownership is all three of: this "
+            f"fleet.py ({_autoclean_script_path()}), the `autoclean` "
+            f"subcommand, and --fleet-home {Path(FLEET_HOME).resolve()}. "
+            f"Found {existing[:120]!r} -- rerun with --force to overwrite")
     ok, msg = PLATFORM.autoclean_task_install(AUTOCLEAN_TASK_NAME, command, interval_hours)
     if not ok:
         raise FleetCliError(f"schtasks create failed: {msg}")
