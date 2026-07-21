@@ -1,6 +1,6 @@
 # Spec: Per-body supervisor claim nonce — divergence detection for the supervisor claim
 
-**Status:** drafting (`me-nonce`, v3 fix wave 2026-07-21). **The author of a spec may never promote
+**Status:** drafting (`me-nonce`, v4 closeout 2026-07-21). **The author of a spec may never promote
 it.** This document is input to a second dual-lens review; only the operator ratifies. Nothing here
 is approved, and nothing here changes the status of any other document.
 
@@ -42,11 +42,8 @@ one-live-session-per-name §16.7, platform-adapter-only OS branching §16.8, G9 
 non-docs tree is byte-identical across that range:
 
 ```
-# at 091d5fa
-$ git rev-parse HEAD
-091d5faff903bf30b8024baa5168c17ec17de504
-
-$ git diff --stat 238b7ad HEAD -- bin/ tests/ supervisor/ skills/ commands/ .gitignore
+# at HEAD
+$ git diff --stat 238b7ad HEAD -- bin/ supervisor/ skills/ commands/ .gitignore tests/conftest.py
 $ echo "exit $?"
 exit 0
 
@@ -55,8 +52,13 @@ $ git hash-object bin/fleet.py; git rev-parse 238b7ad:bin/fleet.py
 562e2848aab6d85e25ba053ee5ef410917c4d4b1
 ```
 
-*(This block itself was stale in v2 — it still asserted `ccbbc02` after the v2 commit moved HEAD.
-`tools/verify_receipts.py` caught it, which is the first thing that tool earned.)*
+*(**`git rev-parse HEAD` has been removed from this block, not corrected.** It was pasted wrong in
+v2 and again in v3, because the command is **self-referential**: any commit that fixes the pasted sha
+changes the sha. Two waves fixed the instance and neither killed the class. The two commands that
+remain carry the whole argument — the receipt-bearing tree is byte-identical to `238b7ad`, and
+`bin/fleet.py` is the same blob — and both are stable across commits that touch only `docs/` and
+`tools/` and `tests/test_receipts.py`. The path list is narrowed to the files receipts actually read:
+`tests/` as a whole is no longer in it, because this wave adds `tests/test_receipts.py`.)*
 
 **Disposition of the binding list is recorded in §14.** One item is **DISPUTED in part, with a
 receipt** (item 3); every other item is adopted.
@@ -751,7 +753,7 @@ redaction rule of §5.8 must cover **both**.
 
 ```
 # at 091d5fa
-$ grep -rn "supervisor\|INCARNATION\|sup-" bin/hooks/ bin/fleet_statusline.py
+$ grep -rIn "supervisor\|INCARNATION\|sup-" bin/hooks/ bin/fleet_statusline.py
 bin/hooks/sessionstart_fleet.py:126:        sup_line = fleet.supervisor_status_line()
 ```
 
@@ -759,7 +761,7 @@ That receipt supports a **code** conclusion only. The shipped operator contract 
 
 ```
 # at 091d5fa
-$ grep -rln "sup-status\|sup-boot\|INCARNATION\|supervisor" commands/ skills/
+$ grep -rIln "sup-status\|sup-boot\|INCARNATION\|supervisor" commands/ skills/
 skills/fleet/SKILL.md
 skills/fleet/supervisor.md
 ```
@@ -987,7 +989,7 @@ gap was enumeration, not exposure.
 
 ```
 # at 091d5fa
-$ grep -rn "return 4$\|sys.exit(4)\|exit code 4" bin/ docs/SPEC.md skills/
+$ grep -rIn "return 4$\|sys.exit(4)\|exit code 4" bin/ docs/SPEC.md skills/
 $ echo "exit $?"
 exit 1
 ```
@@ -1014,7 +1016,7 @@ three; §8 lists them.
 
 ```
 # at 091d5fa
-$ grep -rni "reserved" bin/ | head -4
+$ grep -rIni "reserved" bin/ | head -4
 bin/fleet.py:497:            f"invalid worker name {name!r}: uuid-shaped names are reserved "
 bin/fleet.py:926:            # registry invariant (6) is preserved.
 bin/fleet.py:5423:    to survive an update. FAIL is reserved for a confirmed mismatch against
@@ -1107,15 +1109,15 @@ $ sed -n '4184,4197p' bin/fleet.py
 
 ```
 # at 091d5fa
-$ grep -rn "nonce" bin/
+$ grep -rIn "nonce" bin/
 $ echo "exit $?"
 exit 1
 
-$ grep -rn "sup-release\|sup_release" bin/
+$ grep -rIn "sup-release\|sup_release" bin/
 $ echo "exit $?"
 exit 1
 
-$ grep -rn "body_id\|body_nonce\|claim_nonce" bin/
+$ grep -rIn "body_id\|body_nonce\|claim_nonce" bin/
 $ echo "exit $?"
 exit 1
 ```
@@ -1293,10 +1295,15 @@ fires on the legitimate body and the divergent one owns the chain. Worse, the TT
 winner *the body that acts most often inside the window*, which systematically favours an automated or
 looping body over a human-attached one that thinks. That is the wrong bias for this system.
 
-`prior_pending_hash` (§5.3 rule 3) removes the systematic bias: *P1* stays presentable for one more
-generation and its use is recorded quietly rather than as a two-body alarm. It does not make the
-mechanism able to prefer A over B — nothing can — but it stops the *timeout* from silently picking
-the faster body, and it makes the two cases separable in the log after the fact.
+`prior_pending_hash` (§5.3 rule 3) bounds the bias: *P1* stays presentable for one more generation,
+and its use is recorded quietly rather than as a two-body alarm. It does not make the mechanism able
+to prefer A over B — nothing can — and it does not *eliminate* the timeout's bias, it **bounds it to
+two TTL periods**: a body that stays silent past a second replacement loses *P1* to the one-slot
+budget and is refused after all. At the proposed 900 s that is a 30-minute window, which is longer
+than any turn this project has produced; beyond it, the refusal is correct in the sense that the body
+really has gone quiet, and §5.6's record carries `pending_at` so an operator can see which case it
+was. The claim is a bound, not a fix, and stating it as a fix would be the same overreach §7 was just
+corrected for.
 
 **(e) A body that never acknowledges — the silent miss.** Rule 1 accepts the live generation forever.
 If a body only ever presents `live` — because it read `NONCE: unchanged` in a batch (§5.4(a)
@@ -1326,10 +1333,10 @@ session transcript:
 # volatile: a live box mints sessions continuously; the count and the mtime drift by the minute
 $ ls -ld ~/.claude/projects && find ~/.claude/projects -maxdepth 2 -name '*.jsonl' | wc -l
 drwxr-xr-x 1 Techn 197609 0 Jul 21 20:54 /c/Users/Techn/.claude/projects
-747
+754
 ```
 
-*(The count drifted 732 → 735 → 743 across this document's three waves, and v2's paste additionally
+*(The count drifted 732 → 735 → 743 → 754 across this document's four waves, and v2's paste additionally
 carried a trailing slash the command does not emit. Both were caught by `tools/verify_receipts.py`,
 and the block is now marked `# volatile` so the harness reports future drift as a WARN instead of a
 FAIL. The load-bearing facts are **existence** and **same-user readability**, neither of which
@@ -1507,11 +1514,19 @@ Two further rules in the same family:
   writer truncates to the most recent 200 records"*; truncation is a read-modify-write needing
   `GENERIC_WRITE`, which is exactly the access mode `_atomic_append_bytes`'s docstring says forfeits
   the atomic-append guarantee — and the concurrent-writer case is the one this file exists to record
-  (§5.6). **The append stays atomic and unbounded-by-the-writer**; the cap is enforced out of band, by
-  a compaction under `fleet_lock` in a mutating verb (`fleet clean`'s existing sweep is the natural
-  home — it already holds the lock and already deletes), never by the refused caller, which holds no
-  lock and may be the untrusted body. `_doctor_check_supervisor_claim` reads only the tail regardless,
-  so the cap is hygiene, not correctness.
+  (§5.6). **The append stays atomic and unbounded-by-the-writer**; the cap is enforced out of band by
+  a compaction under `fleet_lock`, never by the refused caller, which holds no lock and may be the
+  untrusted body. `_doctor_check_supervisor_claim` reads only the tail regardless, so the cap is
+  hygiene, not correctness.
+
+  **The compaction site is `sup-boot`, and the bullet above is why it is not `fleet clean`.** v3
+  withdrew the handoff-file sweep from `fleet clean` on the receipt that its candidate list is
+  worker-keyed — and then proposed `fleet clean` for this file two paragraphs later. That was a double
+  standard: `state/supervisor-nonce-rejections.jsonl` is the same class as the handoff file, a fixed
+  supervisor-scoped path belonging to no worker record, which §4.13(g)'s receipt shows `cmd_clean`
+  cannot reach either. `sup-boot` is the right home — it already takes `fleet_lock`, it already writes
+  supervisor state, and it runs once per body rather than on any hot path. §8 authorizes that site and
+  no other.
 - **`supervisor/INCARNATION.tmp` and `supervisor/HANDSHAKE.tmp`** must be gitignored before any of
   this ships — §4.13(f), §13.
 
@@ -1591,6 +1606,16 @@ implication. **The builder adds `holder_sid not in live_sids` as an explicit pre
 `seize`/`freeze` branches**, because a `SEIZED` entry is append-only and git-tracked, and an audit
 record asserting a precondition nobody tested is a durable corruption of the only artifact a future
 incident review will have.
+
+**And the precondition states its `else`: `refuse`.** A guard with no else-branch is the same defect
+one layer down — rules 4– are unreachable with `holder_sid in live_sids` *today*, but "unreachable
+today" is exactly what `roster-gone` was before N1, and this one fails harder: `cmd_sup_boot` maps the
+verdict through `rc = {"claim": 0, "seize": 0, "refuse": 2, "freeze": 3}[verdict]` (@7166, §4.13(b)),
+so any verdict outside that set — or a fall-through returning `None` — is a **`KeyError` in the boot
+ritual**, not a safe stop. So: if the precondition is ever violated, return
+**`refuse`**, reason *"holder is roster-live — the guard should have caught this; refusing rather than
+deciding"*. Fail-closed, in the map, matching what the unconditional guard does today. T14b asserts
+it.
 
 **Binding-item history, recorded because the process is the point.** Item 3 originally required
 *"grant `resume` only when the recorded holder is roster-gone"*. This spec disputed that with three
@@ -1913,6 +1938,7 @@ which is where v1's error lived.
 | **`supervisor_status_line`** @7503-7530 | a released-claim branch ahead of the heartbeat read (§6.3). Without it a clean `sup-release` reports as corruption in `fleet doctor`, `sup-status`, **and the SessionStart hook of every Claude Code session on this box**. v2's table omitted this function entirely | this slice |
 | **`supervisor/JOURNAL.md:6`** | the live, git-tracked kinds line — never regenerated (§4.7), so `RELEASED` must be added there as well as to the seed | this slice |
 | `_doctor_check_supervisor_handoff` | a NOTE for orphaned `state/supervisor-handoff-*.md` (§5.9) | this slice |
+| `cmd_sup_boot` | out-of-band compaction of `state/supervisor-nonce-rejections.jsonl` under the `fleet_lock` it already holds (§5.9). **The only sweep site this spec authorizes** — `fleet clean` is not one, per §4.13(g) | this slice |
 | **`skills/fleet/SKILL.md`** | `:37` publishes `Exit 0=hold/handshake-written, 2=refuse, 3=freeze` — amended for the new code (§4.13(b)); `:38` publishes the `--kind` list (§4.7) | this slice |
 | **`skills/fleet/supervisor.md`** | the boot verdict table (`:13`, `:18`), the handoff sequence with its required `--expect-sid` (`:59`), the successor protocol (`:65`), and the *release-then-stop* doctrine plus the human-facing manual lever (§5.7, §6.3) | this slice |
 | **`_render_successor_task`** @7257-7274 | the successor's generated protocol (§4.6, §6.4) — amended in the same commit or the handoff fails only during a real handoff | this slice |
@@ -2269,6 +2295,40 @@ scratch version worth recording: it invoked bare `bash`, which on Windows can re
 launcher, whose `/mnt/c` view cannot read a git worktree's `.git` file — three receipts reported as
 unrunnable were the harness's fault, not the document's. The committed version resolves Git Bash
 explicitly and prints which shell it used.
+
+### Wave 4 — closeout (break `F1–F3`, spec `F1–F3`)
+
+Both lenses closed the design: break **`sound`**, spec **`fix-list(F1, F2)`**. Five named residuals,
+each with its fix already written; no re-draft.
+
+| # | Item | Disposition |
+|---|---|---|
+| 1 | spec-F1: the pin-proof block is stale again | **DONE — class killed, not the instance.** `git rev-parse HEAD` is *self-referential*: any commit that fixes the pasted sha changes the sha, which is why two waves fixed it and it was stale both times. The command is **removed**, not corrected; the two that carry the argument remain and are stable across docs-only commits. Path list narrowed to the files receipts actually read (`tests/` as a whole is out, since this wave adds `tests/test_receipts.py`) |
+| 2 | break-F2: the roster precondition states no `else` | **DONE** — §6.1: falls through to **`refuse`**. Unreachable today is what `roster-gone` was before N1, and this one lands as a `KeyError` on `7166`'s rc map rather than a safe stop |
+| 3 | break-F1: `fleet clean` double standard | **DONE** — §5.9: the rejection log is the same class as the handoff file (fixed, supervisor-scoped, worker-unkeyed), so the compaction site is `sup-boot`, authorized by §8, and `fleet clean` is not a sweep site for either |
+| 4 | break-F3: §5.4(d) says "stops" | **DONE** — restated as a **bound of two TTL periods**, with the residual named |
+| 5 | spec-F3: the harness's three latent gaps | **DONE** — documented in the module docstring and **closed**: stderr non-capture is stated as an assumption; an unclassifiable receipt is now reported and, under `--strict`, fails; a language-tagged fence is a boundary (it previously inverted every block after it) |
+| 6 | spec-F2: the harness is bound to nothing | **DONE** — `tests/test_receipts.py` + a `CLAUDE.md` doctrine line. See below |
+
+**On item 6 — the binding, and what it immediately caught.** `tools/verify_receipts.py` was a tool
+nobody ran, so the class it exists to prevent stayed *detected* rather than *prevented*; item 1 is the
+standing proof. `tests/test_receipts.py` runs it over the enforced spec set with `strict=True` and
+`skip_volatile=True` (hermetic: no network, no `~/.claude`, no daemon), and additionally fails on the
+green-while-blind shapes — an unclassifiable receipt, an empty enforced set, and a spec that is
+neither receipt-enforced nor explicitly declared unenforced with a reason.
+
+Two findings from writing it, both recorded rather than papered over:
+
+- **The `[UNBUILT]` proofs were not hermetic.** `grep -rn "nonce" bin/` returns **exit 0** whenever
+  `__pycache__` is present, because stale bytecode matches as a binary hit — so the proof that no
+  nonce exists in `bin/` *inverted* after any pytest run. Every recursive-grep receipt now passes
+  `-I`; outputs are unchanged, and the proofs no longer depend on machine state.
+- **`docs/specs/portability.md` carries a receipt that never reproduced.** Its block is a
+  hand-summarised roll-up (`tests/test_core.py:371,377,… # 10x fleet.pid_alive(...)`) rather than
+  literal output, and it greps for `probe_liveness`/`pid_alive`, which the native pivot deleted. That
+  spec is `[SUPERSEDED — native-substrate pivot 2026-07-13]` and is outside this slice's write set, so
+  it is **declared** in `UNENFORCED` with that reason rather than silently globbed away, and
+  **flagged to the manager** as a separate finding.
 
 ---
 
