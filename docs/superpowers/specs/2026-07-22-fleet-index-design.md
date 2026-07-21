@@ -283,6 +283,47 @@ Per SPEC §12 — pytest for unit and hook tests.
 
 Live tier: spawn a haiku worker in a temp repo with an index present; confirm it reaches for `fleet q` over `Read`. Per the M-D lesson on probe context, uncontrolled-context checks belong in the manager's interactive run, not a `--bg` worker.
 
+## 10a. Graveyard answer — IDEA-FORGE §5 entry 5
+
+ROADMAP's speccing discipline requires checking `docs/IDEA-FORGE-REPORT.md` §5 before proposing anything adjacent to a dead idea. **This design has a direct ancestor there**, and it must answer each cause of death or it is a re-proposal of a rejected idea.
+
+> **5. Knowledge-Aware Context Assembly at Spawn/Respawn (3.0)** — right moat, wrong build: grep-isn't-ranking, silently-rotting tag schema as load-bearing element, stale cross-project lore injected ahead of grounded journal replay is a fleet-wide prompt-poisoning vector, duplicates CLAUDE.md/MEMORY.md and sits in first-party's path.
+
+| Cause of death | Answer |
+|---|---|
+| **grep-isn't-ranking** | Mostly avoided by construction: `fleet q` is exact symbol lookup, and `map.md`/digests are deterministic structure. Nothing is ranked or scored. **Except `degrade = "relevance"` (§7), which is ranking and re-imports the exact flaw.** Resolution: `tree` is the default; `relevance` is opt-in, documented as carrying the ancestor's failure mode, and a candidate for deletion if it does not prove itself. |
+| **silently-rotting tag schema as load-bearing element** | This design *is* a tag file, so this is the load-bearing objection. The answer is §8: every entry is content-hash keyed and re-checked per query, so the index cannot rot silently — it detects and repairs. The ancestor had no staleness detection; that is the difference, and it is the single most important property in this document. |
+| **stale cross-project lore ahead of journal replay = prompt poisoning** | Three structural differences. (a) **Not cross-project** — the index lives inside the project it describes and never crosses repo boundaries. (b) **Not lore** — derived structural facts (signatures, line numbers) that the worker can verify against the file, not prose assertions about how things work. (c) **Not ahead of the journal** — §6.3 keeps the journal in final position, the strongest recency slot; index material sits ahead of the task, never displacing grounded predecessor experience. |
+| **duplicates CLAUDE.md/MEMORY.md** | Those are hand-written prose doctrine ("Python is `py -3.13`"); this is generated structural fact ("`compose_prompt` is at `bin/fleet.py:887`"). Different content, different lifecycle, different failure mode. No overlap in what they assert. |
+| **sits in first-party's path** | Conceded — Anthropic may ship code indexing in Claude Code. Mitigations: the artifact is a plain text file usable by anything, and the two halves are separable. If first-party ships equivalent search, `fleet q` is deleted and the spawn-injection half (which first-party cannot do — it requires knowing what fleet is spawning) survives intact. Sizing the tool half small is deliberate for exactly this reason. |
+
+## 10b. Flag, not subsystem
+
+ROADMAP requires re-vetting every proposed subsystem for a flag-sized alternative delivering 80% of the value.
+
+The flag-sized alternative is **`fleet spawn --context <files>` that inlines raw file contents, with no index at all.** It is genuinely cheaper, and it delivers a real share of the value — a worker that gets the two files it needs does skip its orientation reads.
+
+Why the subsystem is still justified, and where the line falls:
+
+- Raw inlining does not scale to orientation. A worker that needs to know *where* things are cannot be handed `bin/fleet.py` (7832 lines) — that costs more than the exploration it replaces. Digesting is what makes injection affordable, and digesting requires a parser.
+- `fleet q --src` has no flag-sized equivalent: slicing a symbol out of a file requires knowing its line range, which requires the index.
+
+**Honest scope reduction this implies:** if the milestone must shrink, the order to cut is `relevance` degradation first, then `map.md`, then `fleet q`, keeping digest injection last — it is the piece with the clearest ratio and no flag-sized substitute.
+
+## 10c. Invariants touched
+
+Per ROADMAP, citing `docs/SPEC.md` §16's numbered nine.
+
+| # | Invariant | Status |
+|---|---|---|
+| 1 | daemonless launch | **Preserved.** `fleet index` and `fleet q` are short-lived CLI invocations. No resident process, no scheduled task. |
+| 2 | exit-0 hooks | **Preserved, deliberately.** §6.4 rejects `PostToolUse` and `post-merge` hooks for the gated update. No hook is added or modified. |
+| 4 | journal-injection-at-respawn | **Touched.** `compose_prompt` gains a source. The journal is still composed into every respawn and retains final position; index material is inserted ahead of the task, never between the journal and the turn. |
+| 8 | platform-adapter-only OS branching | **Preserved.** All index paths go through `pathlib`; no OS branch is introduced. No new adapter methods, so the POSIX-parity obligation is not engaged. |
+| 9 | one-state-many-views | **Touched, argued preserved.** The index is *not* fleet state — it derives from a target repo's source code, not from the registry, and no fleet decision reads it. The registry remains the single state with `status_snapshot()` its one derivation. The index is a cache of somebody else's files, closer to `logs/` than to `fleet.json`. |
+
+Invariants 3 (mailbox), 5 (cwd-scoped dispatch), 6 (single-writer registry), and 7 (one live session per name) are untouched — this milestone adds no registry write, no dispatch path, and no session lifecycle change.
+
 ## 11. Out of scope
 
 - **Call-graph / `callers()`** — a `refs.tsv` (caller → callee edges) is a natural phase-2 addition over the same store. Deferred to keep this milestone shippable.
