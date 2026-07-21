@@ -37,6 +37,25 @@ def _parse(ctime_iso):
     return datetime.strptime(ctime_iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 
 
+def _tzdata_available() -> bool:
+    """ME-UL-REVIEW-2026-07-21.md M2: `zoneinfo` is stdlib but its DATA is
+    not on Windows (no system tz database -- see D1/`_doctor_check_tzdata`);
+    on this host it resolves only by coincidence of an unrelated project's
+    `tzdata` pip package. Tests that need a REAL named-zone resolution
+    (as opposed to testing the null-park failure path, which mocks
+    `zoneinfo.ZoneInfo` and needs no real data) skip rather than fail on a
+    box without it -- a clean box is a valid environment, not a broken one."""
+    import zoneinfo
+    try:
+        zoneinfo.ZoneInfo("America/New_York")
+        return True
+    except Exception:
+        return False
+
+
+_TZDATA_SKIP_REASON = "requires real tz data (tzdata pip package or a system tz database)"
+
+
 ALIVE_CTIME = "2026-07-07T12:00:00Z"
 
 
@@ -176,7 +195,16 @@ class TestDoctorTzdata:
     """D1 / §5.1 follow-up (MD-ULPARSER-REVIEW-2026-07-17.md): tz-data
     availability was invisible -- a `fleet doctor` check now surfaces it."""
 
-    def test_zoneinfo_resolves_passes_plain(self, isolated_home):
+    def test_zoneinfo_resolves_passes_plain(self, isolated_home, monkeypatch):
+        # ME-UL-REVIEW-2026-07-21.md M2: this must NOT depend on the real
+        # host actually having tz data -- that's a coincidence (D1), and a
+        # test asserting "tz data is present" inverts on exactly the clean
+        # box this check exists to detect (was RED under a tzdata import
+        # block; see the review's §4 repro). Stub the seam deterministically
+        # instead, mirroring the existing failure-branch test below.
+        import zoneinfo
+
+        monkeypatch.setattr(zoneinfo, "ZoneInfo", lambda name: object())
         name, ok, msg = fleet._doctor_check_tzdata()
         assert name == "tzdata"
         assert ok is True
@@ -586,6 +614,7 @@ class TestSettingSourcesPassthrough:
 # knowledge/lessons.md:607.
 # ---------------------------------------------------------------------------
 
+@pytest.mark.skipif(not _tzdata_available(), reason=_TZDATA_SKIP_REASON)
 class TestParseLimitSignalLocalFormat:
     def test_iso_wins_verbatim_over_local_text(self):
         text = "resets 2026-07-18T04:40:00Z, but also resets 4:40am (Asia/Qyzylorda)"
@@ -689,6 +718,7 @@ class TestParseLimitSignalHourValidation:
             ("1am", "2026-07-16T20:00:00Z"),    # 01:00 local -> tomorrow (past)
         ],
     )
+    @pytest.mark.skipif(not _tzdata_available(), reason=_TZDATA_SKIP_REASON)
     def test_valid_boundary_hours_still_resolve(self, hour_text, expected):
         reset_at, _ = fleet._parse_limit_signal(
             f"session limit -- resets {hour_text} (Asia/Qyzylorda)", now=self._NOW)
@@ -707,6 +737,30 @@ class TestParseLimitSignalHourValidation:
 
 
 # ---------------------------------------------------------------------------
+# DQ1 (ME-UL-REVIEW-2026-07-21.md, m1): the tz-name regex now admits
+# single-segment IANA keys ("UTC", "Singapore", "EST5EDT", ...), not just
+# multi-segment ("Area/City") names. `zoneinfo.ZoneInfo` is the validator
+# in both directions -- a real key resolves, a garbage single-segment word
+# null-parks exactly like an unresolvable multi-segment name always did.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(not _tzdata_available(), reason=_TZDATA_SKIP_REASON)
+class TestParseLimitSignalSingleSegmentZone:
+    _NOW = datetime(2026, 7, 16, 1, 0, 0, tzinfo=timezone.utc)
+
+    def test_utc_single_segment_zone_resolves(self):
+        reset_at, _ = fleet._parse_limit_signal(
+            "session limit -- resets 4:40am (UTC)", now=self._NOW)
+        assert reset_at == "2026-07-16T04:40:00Z"
+
+    def test_garbage_single_segment_zone_null_parks(self):
+        reset_at, kind = fleet._parse_limit_signal(
+            "session limit -- resets 4:40am (NotAZone)", now=self._NOW)
+        assert reset_at is None
+        assert kind == "session_5h"
+
+
+# ---------------------------------------------------------------------------
 # §5.1 (MD-ULPARSER-REVIEW-2026-07-17.md): the wall-clock default on `now`
 # is vestigial -- every real caller already passes it explicitly. Made
 # required (keyword-only, no default) so a future direct caller that
@@ -716,12 +770,47 @@ class TestParseLimitSignalHourValidation:
 
 class TestNowParameterRequired:
     def test_parse_limit_signal_requires_now_kwarg(self):
-        with pytest.raises(TypeError):
+        # m5 (ME-UL-REVIEW-2026-07-21.md): match= so this stays pinned to
+        # the missing-keyword shape specifically, not any TypeError.
+        with pytest.raises(TypeError, match=r"missing 1 required keyword-only argument: 'now'"):
             fleet._parse_limit_signal("resets 4:40am (Asia/Qyzylorda)")
 
     def test_next_local_reset_utc_requires_now_kwarg(self):
-        with pytest.raises(TypeError):
+        with pytest.raises(TypeError, match=r"missing 1 required keyword-only argument: 'now'"):
             fleet._next_local_reset_utc(4, 40, "Asia/Qyzylorda")
+
+
+# ---------------------------------------------------------------------------
+# M1 (ME-UL-REVIEW-2026-07-21.md): DST fold/gap semantics for
+# _next_local_reset_utc. Prior docstring claimed both directions resolved
+# late, never early -- false for the ambiguous fall-back case (resolved up
+# to 1h EARLY). No DST test existed anywhere in the suite before this. Both
+# cases need real America/New_York tz data -- skip (not fail) on a box
+# without it, same doctrine as the local-format tests above (M2).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(not _tzdata_available(), reason=_TZDATA_SKIP_REASON)
+class TestNextLocalResetUtcDst:
+    def test_ambiguous_fallback_resolves_late_not_early(self):
+        # 2025-11-02 01:30 America/New_York occurs twice (EDT then EST) as
+        # the clocks fall back. Anchor a day earlier -- far from the fold,
+        # so its own fold=0 carries no information -- and require rolling
+        # into the ambiguous day. Pre-fix this returned the FIRST (EDT,
+        # earlier) occurrence, 2025-11-02T05:30:00Z -- 1h early.
+        now = datetime(2025, 11, 1, 6, 0, 0, tzinfo=timezone.utc)
+        reset_at, _ = fleet._parse_limit_signal(
+            "session limit -- resets 1:30am (America/New_York)", now=now)
+        assert reset_at == "2025-11-02T06:30:00Z"  # second (EST) occurrence -- late
+
+    def test_gap_still_resolves_late_unaffected_by_fold_fix(self):
+        # 2025-03-09 02:30 America/New_York does not exist (spring-forward
+        # skips 2am-3am). This direction was already correct (pre-transition
+        # offset, the later reading) and must stay that way -- the fold fix
+        # must not trade a fold-case bug for a new gap-case one.
+        now = datetime(2025, 3, 9, 1, 0, 0, tzinfo=timezone.utc)
+        reset_at, _ = fleet._parse_limit_signal(
+            "session limit -- resets 2:30am (America/New_York)", now=now)
+        assert reset_at == "2025-03-09T07:30:00Z"
 
 
 # ---------------------------------------------------------------------------
