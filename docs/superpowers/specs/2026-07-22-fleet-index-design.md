@@ -126,7 +126,14 @@ Repo-wide orientation: directory tree plus one line per file. Budget-capped (§7
 
 ### 6.1 Indexer
 
-`fleet index build [--path DIR] [--force]`
+```
+fleet index init   [--path DIR]           # opt in: create .fleet-index/, first build
+fleet index build  [--path DIR] [--force] # rebuild an existing index
+fleet index update [--paths P,...]        # refresh named files (post-review gate)
+fleet index status [--path DIR]           # counts, stale files, map token estimate
+```
+
+**Indexing is opt-in per project.** `fleet index init` is the only command that creates `.fleet-index/`; nothing else does, ever. `build`, `update`, and `q` all fail with "no index — run `fleet index init`" if the directory is absent. A project that never runs `init` is untouched by this feature, and `fleet spawn` there behaves exactly as it does today.
 
 Deterministic parse only. Per language:
 
@@ -188,6 +195,38 @@ The preamble addition is load-bearing and easy to forget: **a worker cannot use 
 
 `--context` accepts paths or globs. Unknown paths warn and are skipped; they never fail the spawn.
 
+### 6.4 Index lifecycle — who updates it, and when
+
+The index is a **build artifact committed alongside the code it describes**, so its git history matches the code's. That forces a rule about when it may be written.
+
+Two writes exist, and conflating them is the failure this section prevents:
+
+| Write | Trigger | Scope | Committed? |
+|---|---|---|---|
+| **Staleness refresh** | `fleet q` sees a hash mismatch (§8) | The one queried file | No — working-tree only |
+| **Gated update** | Worker's change passes its review gate and merges | All files in the merge | Yes — same commit as the code |
+
+**Staleness refresh exists purely for correctness.** A worker mid-task has edited files; a query against one of them must not return a stale line number. The refresh keeps the answer honest. It does *not* mean the index now describes reviewed code — it describes the working tree, which is exactly what that worker needs.
+
+**The gated update is what lands in git.** A worker's edits reach the shared index only after the change passes review and merges. Index churn is then reviewable in the same diff as the code that caused it, which is the reason the format is plain text.
+
+Ordering in the campaign flow:
+
+```
+worker edits code
+  → review gate
+  → PASS
+  → merge
+  → fleet index update --paths <files touched by the merge>
+  → commit index alongside (or amend into) the merge
+```
+
+The manager owns this step, consistent with it owning merges today. It goes into the campaign template as a standing post-merge action alongside the existing post-merge checks.
+
+**Why not a git hook or a `PostToolUse` hook.** A `post-merge` hook fires on every merge including ones that bypassed review, and `PostToolUse` fires on every file write — both would index unreviewed code into the shared artifact, defeating the gate. The manager-side step is the only place that knows a review actually passed.
+
+**Failure is non-blocking.** If `fleet index update` fails, the merge stands and the index is stale until the next update. A stale index degrades to today's behaviour (§9); it never blocks a landing.
+
 ## 7. Configuration
 
 Optional `<project>/.fleet-index.toml`, read with stdlib `tomllib`. Absent = defaults, zero setup.
@@ -223,7 +262,8 @@ Cost is one file hash per query, and a single-file reparse only on actual change
 | Failure | Behaviour |
 |---|---|
 | Unparseable file | Recorded in `files.tsv` with path + line count, no symbols. Never aborts the build. |
-| Index missing | `fleet q` prints the build command, exits non-zero. Spawn injects nothing and proceeds normally. |
+| No index (never `init`ed) | `fleet q` prints "run `fleet index init`", exits non-zero. Spawn injects nothing and proceeds normally. Expected state for most projects. |
+| `fleet index update` fails post-merge | Merge stands, index goes stale, next update repairs it. Never blocks a landing. |
 | Index corrupt | Same as missing — malformed lines are skipped, not fatal. |
 | Symbol not found | Exit non-zero with a message suggesting `grep`. |
 | Ambiguous symbol | All matches printed; `--path` narrows. |
