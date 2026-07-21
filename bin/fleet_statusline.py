@@ -10,8 +10,8 @@ Contract, all four points load-bearing:
   * imports fleet.status_snapshot() rather than shelling out, so registry
     schema knowledge lives in exactly one module (invariant 9);
   * no lock, no PID probe, no subprocess, no write (D1);
-  * never asserts liveness it did not probe for -- stale rows carry an age
-    suffix and are dimmed (D2);
+  * never asserts liveness it did not probe for -- a stale bucket carries a
+    greyed age suffix (D2);
   * exits 0 on every path, printing nothing on error. This is the statusline
     analogue of invariant 2 (exit-0 hooks): a traceback here would render
     under the input box on every refresh.
@@ -30,33 +30,48 @@ sys.path.insert(0, str(_FLEET_HOME / "bin"))
 
 import fleet  # noqa: E402
 
-FLAG = "⚑"
-ASCII_FLAG = "#"
+PREFIX = "[fleet]"
 STALE_AFTER_SECONDS = 300
 
-_DIM = "\x1b[2m"
+# The rendered line is PURE ASCII by construction -- no glyphs, no box drawing.
+# A Windows console defaults to cp1252 and cannot encode the block/geometric
+# glyphs an earlier design used; print() then raised UnicodeEncodeError, the
+# exit-0 guard swallowed it, and the operator got a permanently BLANK
+# statusline with no way to tell why. A fallback renderer only papered over
+# that: colour and word are already the whole signal, so the glyphs bought
+# nothing but width and a failure mode. `test_the_rendered_line_is_pure_ascii`
+# is the invariant.
 _RESET = "\x1b[0m"
+_BOLD = "\x1b[1m"
+# Grey is RESERVED for `dead`. Nothing else on the line may use it: the moment a
+# second field is grey, "greyed out" stops meaning "inert" and the operator has
+# to read the words to find out what is going on.
+_GREY = "\x1b[90m"
+_NAME = "\x1b[1;94m"       # bold bright blue -- the fleet nameplate
+_AGE = "\x1b[33m"          # yellow: a clock, distinct from every status hue
+_COST = "\x1b[1;37m"       # bold white: money
+# Distinct hue per status, bright variants so they separate on a dark terminal.
 _STATUS_COLOR = {
-    "working": "\x1b[32m",      # green
-    "idle": "\x1b[36m",         # cyan
-    "attached": "\x1b[35m",     # magenta
-    "limited": "\x1b[33m",      # yellow
-    "over_budget": "\x1b[33m",
-    "over_ceiling": "\x1b[33m",
-    "dead": "\x1b[31m",         # red
+    "working": "\x1b[92m",       # bright green  -- burning tokens
+    "idle+mail": "\x1b[95m",     # bright magenta -- waiting on its mail
+    "idle": "\x1b[96m",          # bright cyan   -- alive, unengaged
+    "attached": "\x1b[35m",      # magenta       -- an operator holds it
+    "limited": "\x1b[93m",       # bright yellow -- parked on a plan limit
+    # Spend exhausted, not merely parked -- red, which `dead` gave up for grey.
+    "over_budget": "\x1b[91m",   # bright red
+    "over_ceiling": "\x1b[31m",  # red
+    "dead": _GREY,               # inert: never competes with a live bucket
 }
-_STATUS_GLYPH = {
-    "working": "●", "idle": "○", "idle+mail": "◐",
-    "attached": "◆", "limited": "⏸", "dead": "✗",
+_LABEL = {
+    "working": "work", "idle+mail": "mail", "idle": "idle",
+    "attached": "att", "limited": "lim", "over_budget": "budget",
+    "over_ceiling": "ceiling", "dead": "dead",
 }
-# A Windows console defaults to cp1252, which cannot encode any glyph above.
-# print() then raises UnicodeEncodeError, the exit-0 guard swallows it, and the
-# operator gets a permanently BLANK statusline with no way to tell why. Render
-# ASCII whenever stdout cannot carry the real glyphs.
-_ASCII_GLYPH = {
-    "working": "*", "idle": "o", "idle+mail": "@",
-    "attached": "+", "limited": "=", "dead": "x",
-}
+# Fixed reading order, loudest first. Deliberately NOT sorted by count: a
+# count-sorted line reshuffles between refreshes, so the operator has to re-read
+# it every time, and a pile of dead workers outranks the one that is working.
+_ORDER = ["working", "idle+mail", "attached", "limited",
+          "over_budget", "over_ceiling", "idle"]
 
 
 def _fmt_age(seconds) -> str:
@@ -84,51 +99,77 @@ def _bucket(worker: dict) -> str:
     return worker["status"]
 
 
-def render_statusline(snap: dict, color: bool = True, stale_after: int = STALE_AFTER_SECONDS,
-                      ascii_only: bool = False) -> str:
-    flag = ASCII_FLAG if ascii_only else FLAG
-    glyphs = _ASCII_GLYPH if ascii_only else _STATUS_GLYPH
+def _bucket_order(buckets) -> list:
+    """Fixed order for the buckets present, unknown statuses last, `dead` never
+    among them -- it is collapsed into the tail counter by the caller."""
+    known = [b for b in _ORDER if b in buckets]
+    unknown = sorted(b for b in buckets if b not in _ORDER and b != "dead")
+    return known + unknown
+
+
+def render_statusline(snap: dict, color: bool = True,
+                      stale_after: int = STALE_AFTER_SECONDS) -> str:
+    def paint(text, code):
+        return f"{code}{text}{_RESET}" if color and code else text
+
+    # A bracketed, brightly-coloured nameplate -- the operator's eye lands on
+    # the row's owner before reading a single word of it. Foreground only: a
+    # reverse-video block reads as a hard UI chrome element next to Claude
+    # Code's own rows, which are all plain bracketed labels.
+    head = paint(PREFIX, _NAME)
 
     if not snap.get("ok"):
         if snap.get("reason") == "not_initialized":
-            return f"{flag} fleet: not initialized"
-        return f"{flag} fleet: registry unreadable"
+            return f"{head}: not initialized"
+        return f"{head}: registry unreadable"
 
     workers = snap["workers"]
     if not workers:
-        return f"{flag} fleet: no workers"
-
-    def paint(text, code):
-        return f"{code}{text}{_RESET}" if color and code else text
+        return f"{head}: no workers"
 
     buckets: dict = {}
     for w in workers:
         buckets.setdefault(_bucket(w), []).append(w)
 
     parts = []
-    for bucket in sorted(buckets, key=lambda b: (-len(buckets[b]), b)):
+    for bucket in _bucket_order(buckets):
         group = buckets[bucket]
-        glyph = glyphs.get(bucket, "o" if ascii_only else "○")
-        chunk = f"{len(group)}{glyph}{bucket}"
+        label = _LABEL.get(bucket, bucket)
+        count = f"{_BOLD}{len(group)}" if color else str(len(group))
+        chunk = paint(f"{label} {count}", _STATUS_COLOR.get(bucket, ""))
 
-        # D2: a bucket where every worker is stale is rendered dimmed with the
-        # freshest age, never silently presented as live.
+        # D2: a bucket where every worker is stale carries the freshest age, so
+        # the line never presents an unverified status as freshly observed. The
+        # age gets its own hue -- dimming it (the old behaviour dimmed the whole
+        # chunk) put grey-on-dark text on the operator's screen, and grey now
+        # means dead.
         stalest = [w["stale_seconds"] for w in group if w["stale_seconds"] is not None]
         if stalest and min(stalest) > stale_after:
-            chunk = paint(f"{chunk}~{_fmt_age(min(stalest))}", _DIM)
-        else:
-            chunk = paint(chunk, _STATUS_COLOR.get(bucket.split("+")[0], ""))
+            chunk += paint(f" {_fmt_age(min(stalest))}", _AGE)
 
         if bucket == "limited":
             resets = {_reset_clock(w["limit_reset_at"]) for w in group}
-            chunk += f" resets {sorted(resets)[0]}" if all(resets) else " reset?"
+            clock = f"resets {sorted(resets)[0]}" if all(resets) else "reset?"
             if any(w["resume_eligible"] for w in group):
                 # invariant 1: a view flags resume-eligibility, it never launches.
-                chunk += " resume-eligible"
+                clock = "resume-eligible"
+            chunk += paint(f" {clock}", _STATUS_COLOR["limited"])
         parts.append(chunk)
 
+    # `dead` is inert -- it cannot be steered, only respawned or cleaned. It gets
+    # a grey tail counter rather than a bucket of its own, so eleven dead workers
+    # never outshout the one that is actually running.
+    dead = len(buckets.get("dead", ()))
+    if not parts:
+        parts = [paint("no live workers", _STATUS_COLOR["dead"])]
+    if dead:
+        parts.append(paint(f"+{dead} dead", _STATUS_COLOR["dead"]))
+
     cost = snap["totals"].get("cost_usd", 0.0)
-    return f"{flag} " + " ".join(parts) + f"  ${cost:.2f}"
+    parts.append(paint(f"${cost:.2f}", _COST))
+    # Two spaces between fields: wide enough to group `label count age` as one
+    # unit without a separator glyph, which would cost width and ASCII purity.
+    return "  ".join([head] + parts)
 
 
 def _want_color() -> bool:
@@ -233,12 +274,9 @@ def main() -> int:
         except BaseException:  # noqa: BLE001
             pass
 
-        snap = fleet.status_snapshot()
-        color = _want_color()
-        line = render_statusline(snap, color=color)
-        if not _stdout_can_encode(line):
-            line = render_statusline(snap, color=color, ascii_only=True)
-        print(line)
+        # Fleet's own row is pure ASCII, so no console encoding can reject it
+        # and there is no fallback renderer to get wrong.
+        print(render_statusline(fleet.status_snapshot(), color=_want_color()))
     except BaseException:  # noqa: BLE001 -- a statusline never surfaces a traceback
         return 0
     return 0
