@@ -5312,18 +5312,35 @@ def _strip_task_quotes(raw: str) -> str:
 def _task_command_tokens(command: str) -> list:
     """Normalized tokens of a scheduled task's command line, quotes stripped.
 
-    `--flag=value` is ONE shell token but TWO argparse arguments, and fleet's
-    own parser accepts either spelling -- so it is split here, and every
-    consumer below sees the same shape whichever way the task was written.
-    Only a token that starts with `-` is eligible, so a path containing an `=`
-    is never split."""
-    out = []
-    for raw in _TASK_ARG_RE.findall(command or ""):
-        if raw.startswith("-") and "=" in raw.split('"', 1)[0]:
-            flag, _, raw = raw.partition("=")
-            out.append(_normalize_task_token(flag))
-        out.append(_normalize_task_token(_strip_task_quotes(raw)))
-    return out
+    One token in, one token out -- this never SYNTHESIZES a token (G2). An
+    earlier revision split `--flag=value` into two tokens here so that
+    index-based lookup saw one shape either way; the cost was that
+    `--exclude=--fleet-home <home>` manufactured a `--fleet-home` token the
+    command never carried, and the ownership predicate read it as ours. A
+    predicate that can be *fed* an argument it was never given is the same
+    shape as the untested-parser defect that preceded it. The `=` spelling is
+    resolved where it is consumed instead -- see `_task_flag_value`."""
+    return [_normalize_task_token(_strip_task_quotes(raw))
+            for raw in _TASK_ARG_RE.findall(command or "")]
+
+
+def _task_flag_value(tokens: list, flag: str):
+    """Value of `flag` in a tokenized task command, or None if absent.
+
+    Accepts both spellings fleet's own argparse accepts: `--flag value` (two
+    tokens) and `--flag=value` (one). Only a token that IS the flag, or that
+    starts with `flag=`, can supply a value -- so no other argument's value can
+    stand in for it. The `=` value is re-normalized after its quotes come off,
+    because the enclosing token ended in a quote and so escaped the trailing-
+    separator rule the first time through."""
+    want = _normalize_task_token(flag)
+    prefix = want + "="
+    for i, tok in enumerate(tokens):
+        if tok == want:
+            return tokens[i + 1] if i + 1 < len(tokens) else None
+        if tok.startswith(prefix):
+            return _normalize_task_token(_strip_task_quotes(tok[len(prefix):]))
+    return None
 
 
 def _fleet_task_is_ours(command: str, subcommand: str) -> bool:
@@ -5388,12 +5405,8 @@ def _fleet_task_is_ours(command: str, subcommand: str) -> bool:
     # task even if the word appears later in the line.
     if tokens[script_at + 1:script_at + 2] != [_normalize_task_token(subcommand)]:
         return False
-    try:
-        home_at = tokens.index("--fleet-home")
-    except ValueError:
-        return False
-    return (tokens[home_at + 1:home_at + 2]
-            == [_normalize_task_token(Path(FLEET_HOME).resolve())])
+    home = _task_flag_value(tokens, "--fleet-home")
+    return home is not None and home == _normalize_task_token(Path(FLEET_HOME).resolve())
 
 
 def _autoclean_task_is_ours(command: str) -> bool:
@@ -7483,6 +7496,15 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     `SUCCESSOR_DEFAULT_MODE`, deliberately the SAME fleet mode name a worker
     gets, not a bespoke one; an explicit `--permission-mode` still wins.
 
+    ONE mode vocabulary (G3 fix wave). `--permission-mode` takes a FLEET mode
+    name -- argparse-constrained to `MODE_FLAGS`, the same keyspace `fleet
+    spawn --mode` uses -- and BOTH the explicit and default branches render it
+    through `mode_flags()`. Previously the explicit branch forwarded a raw
+    claude mode string while the default branch mapped a fleet name, so one
+    argument meant two different things depending on which branch produced it,
+    and a raw spelling like `acceptEdits` parsed cleanly and then died inside
+    `mode_flags` at dispatch time. It is now refused at the parser.
+
     BOTH external pre-flights run before the lock (B5 fix wave).
     `resolve_claude_executable` is the same class of check as
     `_require_instance_settings` -- a missing external prerequisite -- but ran
@@ -7541,12 +7563,13 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     if getattr(args, "model", None):
         argv += ["--model", args.model]
     # B4/D6: never leave the mode to claude's default -- see the docstring.
-    # An explicit --permission-mode is a raw claude mode string and wins;
-    # otherwise emit the same fleet mode a worker would get.
-    if getattr(args, "permission_mode", None):
-        argv += ["--permission-mode", args.permission_mode]
-    else:
-        argv += mode_flags(SUCCESSOR_DEFAULT_MODE)
+    # G3: ONE vocabulary. `--permission-mode` takes a FLEET mode name
+    # (argparse-constrained to MODE_FLAGS, same keyspace `fleet spawn --mode`
+    # uses) and both the explicit and default branches render it through
+    # `mode_flags`, so exactly one mode opinion reaches the argv and a raw
+    # claude spelling is refused at the parser instead of raising ValueError
+    # from inside the dispatch.
+    argv += mode_flags(getattr(args, "permission_mode", None) or SUCCESSOR_DEFAULT_MODE)
     argv.append(f"Read {task_path.as_posix()} and follow it exactly.")
     try:
         proc = run(argv, cwd=str(FLEET_HOME), env=_worker_env(name),
@@ -7962,7 +7985,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_suphb = sub.add_parser("sup-handoff-begin", help="dispatch a handoff successor (claim holder only)")
     p_suphb.add_argument("--model", help="model for the successor session")
-    p_suphb.add_argument("--permission-mode", dest="permission_mode", help="permission mode for the successor session")
+    p_suphb.add_argument("--permission-mode", dest="permission_mode",
+                         choices=list(MODE_FLAGS),
+                         help="fleet mode name for the successor session "
+                              f"(default: {SUCCESSOR_DEFAULT_MODE})")
     p_suphb.add_argument("--sid", help="override caller session id")
 
     p_suphc = sub.add_parser("sup-handoff-complete", help="verify HANDSHAKE and transfer the claim")

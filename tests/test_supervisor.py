@@ -511,6 +511,34 @@ class TestHandoff:
         assert dispatch.count("--permission-mode") == 1
         assert "--dangerously-skip-permissions" not in dispatch
 
+    def test_successor_mode_uses_one_vocabulary_everywhere(self, sup_home):
+        """G3: the explicit branch took a RAW CLAUDE mode string while the
+        default branch took a FLEET mode name through `mode_flags()` -- two
+        vocabularies for one argument. Both branches now speak fleet mode
+        names, so `--permission-mode bypass` reaches the argv as
+        `--dangerously-skip-permissions`, exactly as `fleet spawn --mode
+        bypass` does. A raw claude spelling is refused by argparse rather than
+        silently forwarded."""
+        self._hold()
+        run = self._dispatch_then_roster()
+        args = SimpleNamespace(sid="sid-old", model=None, permission_mode="bypass")
+        assert fleet.cmd_sup_handoff_begin(args, which=_fake_which, run=run,
+                                           sleep=lambda s: None) == 0
+        dispatch = next(c for c in run.calls if "--bg" in c)
+        assert dispatch[-2:] != ["--permission-mode", "bypass"]
+        assert "--dangerously-skip-permissions" in dispatch
+        assert "--permission-mode" not in dispatch
+
+    def test_successor_permission_mode_is_constrained_to_fleet_mode_names(self):
+        """G3, the enforcement half: the parser must reject a vocabulary the
+        dispatch cannot speak. Without `choices`, `--permission-mode acceptEdits`
+        parsed fine and then raised ValueError deep inside `mode_flags`."""
+        parser = fleet.build_parser()
+        args = parser.parse_args(["sup-handoff-begin", "--permission-mode", "accept"])
+        assert args.permission_mode == "accept"
+        with pytest.raises(SystemExit):
+            parser.parse_args(["sup-handoff-begin", "--permission-mode", "acceptEdits"])
+
     def test_missing_claude_refuses_before_journal_and_taskfile(self, sup_home):
         """B5: `resolve_claude_executable` is the same class of pre-flight as
         `_require_instance_settings` -- a missing external prerequisite. It ran
@@ -974,14 +1002,15 @@ class TestDispatchPathsAreDocumented:
     correction."""
 
     REPO = Path(__file__).resolve().parents[1]
-    # B3: the guard SPEC §6.1 leans on used to be `r'^\s*argv = \[exe, "--bg"'`,
-    # which caught exactly one spelling. Injection I16 added a real third
-    # builder as `cmd = [claude_exe, "--bg", ...]` and walked straight past it,
-    # leaving the suite green -- a guard against this very defect recurring,
-    # evadable by one identifier rename. This matches `"--bg"` inside ANY
-    # same-line list literal, so `argv = [exe, ...]`, `cmd = [claude_exe, ...]`
-    # and `argv += ["--bg", ...]` are all caught.
-    ARGV_BUILDER_RE = re.compile(r'\[[^\]\n]*"--bg"')
+    # B3 + G1: the guard SPEC §6.1 leans on has been evaded twice. It began as
+    # `r'^\s*argv = \[exe, "--bg"'` -- one spelling -- and injection I16 walked
+    # past it with `cmd = [claude_exe, "--bg", ...]`. The B3 widening to
+    # `r'\[[^\]\n]*"--bg"'` still could not cross a newline, so a builder whose
+    # list literal wraps (`argv = [\n    exe, "--bg", ...`) walked past that.
+    # Dropping the newline exclusion catches every spelling; verified still
+    # exactly 2 on the real source, and 3 under each evasion in
+    # `test_shape_guard_catches_every_third_builder_spelling`.
+    ARGV_BUILDER_RE = re.compile(r'\[[^\]]*"--bg"')
     # Every builder that legitimately exists, by the function that owns it.
     KNOWN_BUILDERS = ("dispatch_bg", "cmd_sup_handoff_begin")
 
@@ -1008,6 +1037,23 @@ class TestDispatchPathsAreDocumented:
         """Not a fix pin -- a shape guard. A THIRD argv builder means the
         SPEC's enumeration is stale again and must be extended."""
         assert len(self.ARGV_BUILDER_RE.findall(self._source())) == 2
+
+    @pytest.mark.parametrize("label,builder", [
+        ("plain", '\ndef _third(exe):\n    argv = [exe, "--bg", "-n", "p"]\n    return argv\n'),
+        ("renamed", '\ndef _third(x):\n    cmd = [x, "--bg", "-n", "p"]\n    return cmd\n'),
+        ("augmented", '\ndef _third(exe):\n    argv = [exe]\n    argv += ["--bg", "-n", "p"]\n    return argv\n'),
+        ("multiline", '\ndef _third(exe):\n    argv = [\n        exe, "--bg",\n        "-n", "p",\n    ]\n    return argv\n'),
+    ])
+    def test_shape_guard_catches_every_third_builder_spelling(self, label, builder):
+        """G1: this guard has now been evaded twice -- B3 (`cmd = [claude_exe,`
+        walked past the `argv = [exe,` spelling) and G1 (a builder whose list
+        literal wraps across a newline walked past `[^\\]\\n]*`). It is the guard
+        SPEC §6.1 leans on to keep the dispatch enumeration from going stale a
+        second time, so every spelling a real third builder could take is
+        pinned here rather than discovered by the next reviewer."""
+        source = self._source()
+        assert len(self.ARGV_BUILDER_RE.findall(source)) == 2, "baseline"
+        assert len(self.ARGV_BUILDER_RE.findall(source + builder)) == 3, label
 
     def test_both_bg_argv_builders_live_in_the_documented_functions(self):
         """B3, the other half: two builders is only reassuring if they are the

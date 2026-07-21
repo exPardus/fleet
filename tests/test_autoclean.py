@@ -975,6 +975,35 @@ class TestOwnershipQuotingVariants:
             f'"{SPACED_PY}" "{SPACED_SCRIPT}" supervisor-beat '
             f'--fleet-home "{SPACED_HOME}"') is False
 
+    @pytest.mark.parametrize("attack", [
+        # G2: the `=`-split used to MANUFACTURE a `--fleet-home` token out of
+        # another flag's value, so a command that never passed `--fleet-home`
+        # could be read as if it had. Inside the documented B7 envelope (the
+        # interpreter is unconstrained), but a predicate that can be FED a
+        # token it was never given is the shape B1 was -- and B1 reached
+        # production. The value of a `--flag=value` token is never a flag.
+        '--exclude=--fleet-home',
+        '--note=--fleet-home',
+        '-x=--fleet-home',
+    ])
+    def test_flag_value_can_never_manufacture_a_fleet_home_token(self, spaced_home, attack):
+        assert fleet._autoclean_task_is_ours(
+            f'"{SPACED_PY}" "{SPACED_SCRIPT}" autoclean '
+            f'{attack} "{SPACED_HOME}"') is False
+
+    def test_genuine_fleet_home_equals_form_still_ours(self, spaced_home):
+        """The G2 fix must not cost the `--fleet-home=VALUE` support B1 added."""
+        assert fleet._autoclean_task_is_ours(
+            f'"{SPACED_PY}" "{SPACED_SCRIPT}" autoclean '
+            f'--fleet-home="{SPACED_HOME}"') is True
+
+    def test_equals_form_tolerates_a_trailing_separator(self, spaced_home):
+        """The `=` value is re-normalized after its quotes come off, so B2's
+        trailing-separator rule reaches it too."""
+        assert fleet._autoclean_task_is_ours(
+            f'"{SPACED_PY}" "{SPACED_SCRIPT}" autoclean '
+            f'--fleet-home="{SPACED_HOME}\\"') is True
+
     @pytest.mark.parametrize("suffix", ["\\", "/", "\\\\"])
     def test_trailing_separator_on_fleet_home_still_ours(self, spaced_home, suffix):
         """B2: `_normalize_task_token`'s `rstrip("/")` was unpinned -- injection
