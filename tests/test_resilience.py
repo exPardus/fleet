@@ -866,8 +866,16 @@ class TestParseLimitSignalHourValidation:
 # that mean UTC and nothing else, in every season.
 # ---------------------------------------------------------------------------
 
-@pytest.mark.skipif(not _tzdata_available(), reason=_TZDATA_SKIP_REASON)
 class TestParseLimitSignalSingleSegmentZone:
+    """DELIBERATELY NOT `_tzdata_available()`-gated (posix-port campaign,
+    Class 1). The class carried that skipif while the allowlist was still
+    resolved through `zoneinfo`; once a closed fixed-UTC set is resolved to
+    a fixed zero offset directly, tz data is irrelevant to every case here
+    -- the allowlist branch never calls `ZoneInfo`, and the rejected
+    single-segment names are refused by the regex before it would. Keeping
+    the gate would have re-hidden the exact portability hole this class
+    exists to pin."""
+
     _NOW = datetime(2026, 7, 16, 1, 0, 0, tzinfo=timezone.utc)
 
     @pytest.mark.parametrize(
@@ -876,6 +884,64 @@ class TestParseLimitSignalSingleSegmentZone:
         reset_at, _ = fleet._parse_limit_signal(
             f"session limit -- resets 4:40am ({zone})", now=self._NOW)
         assert reset_at == "2026-07-16T04:40:00Z"
+
+    @pytest.mark.parametrize(
+        "zone", ["UTC", "UCT", "Universal", "Zulu", "Greenwich", "GMT0", "GMT+0", "GMT-0"])
+    def test_closed_set_resolves_with_no_tz_database_at_all(self, zone, monkeypatch):
+        """ND-5 called the single-segment branch a CLOSED set. A closed set
+        whose members are resolved by asking the platform's tz database is
+        not closed -- it is as open as whatever tzdb the host happens to
+        ship. Seven of the eight members (`UCT`, `Universal`, `Zulu`,
+        `Greenwich`, `GMT0`, `GMT+0`, `GMT-0`) are tzdb "backward" LINK
+        names: present in the `tzdata` PyPI package Windows falls back to
+        and in macOS's system tzdb, ABSENT from a stock Debian/Ubuntu
+        `tzdata` package. On such a box those seven null-parked -- a
+        degraded (safe, per D2) but wrong outcome for names that mean UTC
+        by definition and cannot mean anything else in any season.
+
+        This test removes the tz database from the question entirely: with
+        `zoneinfo.ZoneInfo` unconditionally raising, every allowlist member
+        must still resolve. It fails on ANY platform (Windows included)
+        against a build that routes the allowlist through `zoneinfo`, so
+        the fix is pinned by construction rather than by which host runs
+        the suite."""
+        import zoneinfo
+
+        def no_tz_database_whatsoever(key, *a, **k):
+            raise zoneinfo.ZoneInfoNotFoundError(f"No time zone found with key {key}")
+
+        monkeypatch.setattr(zoneinfo, "ZoneInfo", no_tz_database_whatsoever)
+        reset_at, _ = fleet._parse_limit_signal(
+            f"session limit -- resets 4:40am ({zone})", now=self._NOW)
+        assert reset_at == "2026-07-16T04:40:00Z"
+
+    def test_multi_segment_zone_still_needs_the_tz_database(self, monkeypatch):
+        """The converse of the case above, so the fix cannot be over-read as
+        "stop consulting zoneinfo". Multi-segment `Area/City` names stay
+        fully open and `ZoneInfo` remains their only validator -- with no tz
+        database they null-park, exactly as before."""
+        import zoneinfo
+
+        def no_tz_database_whatsoever(key, *a, **k):
+            raise zoneinfo.ZoneInfoNotFoundError(f"No time zone found with key {key}")
+
+        monkeypatch.setattr(zoneinfo, "ZoneInfo", no_tz_database_whatsoever)
+        reset_at, kind = fleet._parse_limit_signal(
+            "session limit -- resets 4:40am (Asia/Qyzylorda)", now=self._NOW)
+        assert reset_at is None
+        assert kind == "session_5h"
+
+    def test_regex_alternation_and_resolver_share_one_source_of_truth(self):
+        """The allowlist exists in two places by necessity -- the regex that
+        ADMITS a name and the resolver that CONVERTS it. Derived from one
+        tuple so they cannot drift: a name the regex admits but the resolver
+        does not know would fall through to `ZoneInfo` and reintroduce the
+        tzdb dependency for that member only, silently."""
+        for name in fleet._LOCAL_UTC_ALIAS_NAMES:
+            assert fleet._LIMIT_RESET_LOCAL_RE.search(
+                f"resets 4:40am ({name})") is not None, name
+            assert name.lower() in fleet._LOCAL_UTC_ALIAS_LOOKUP, name
+        assert len(fleet._LOCAL_UTC_ALIAS_LOOKUP) == len(fleet._LOCAL_UTC_ALIAS_NAMES)
 
     @pytest.mark.parametrize("zone", ["EST", "PST", "CET", "Singapore", "NotAZone"])
     def test_non_allowlisted_single_segment_null_parks(self, zone):
