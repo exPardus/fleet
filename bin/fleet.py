@@ -1101,30 +1101,71 @@ _LIMIT_RESET_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 # "resets 4:40am (Asia/Qyzylorda)" or "resets 12am (Asia/Qyzylorda)" (the
 # hour-only form is the production gap this fallback closes). Only
 # consulted when the ISO regex above finds nothing (ISO keeps precedence).
+#
+# D4 (MD-ULPARSER-REVIEW-2026-07-17.md): the tz group requires >=1 `/`
+# (`[A-Za-z_]+(?:/[A-Za-z_+\-0-9]+)+`), so a single-segment zone name --
+# "(UTC)", "(Singapore)", "(EST5EDT)" -- can never match; the whole regex
+# misses and the caller null-parks (safe: no horizon, never a fabricated
+# one). This is an INTENTIONAL gap, not an oversight: admitting those
+# shapes would mean either a curated alias table (UTC -> Etc/UTC, etc.)
+# whose coverage is inherently incomplete, or accepting an ambiguous
+# abbreviation (which IANA zone is "EST5EDT" really pinned to for a given
+# message?) -- both are ways to convert today's safe null-park into a
+# *wrong* horizon, which this parser treats as strictly worse than no
+# horizon at all. Kept as-is until a real production message is observed
+# in one of these shapes AND a mapping can be shown never to produce a
+# wrong instant.
 _LIMIT_RESET_LOCAL_RE = re.compile(
     r"resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([A-Za-z_]+(?:/[A-Za-z_+\-0-9]+)+)\)",
     re.IGNORECASE,
 )
 
 
-def _next_local_reset_utc(hour: int, minute: int, tz_name: str, *, now: "datetime | None" = None):
+def _next_local_reset_utc(hour: int, minute: int, tz_name: str, *, now: datetime):
     """UTC ISO-8601 instant of the next occurrence of `hour:minute` local wall-
     clock time in the named IANA tz, or None if the tz can't be resolved.
 
     `zoneinfo` is stdlib but its DATA is not guaranteed on Windows (no
-    `tzdata` pip package -- this repo stays stdlib-only). The module is
-    imported here (inside the helper, not at module scope) so a plain
-    `import fleet` never gains a hard dependency on tz-data being present;
-    any lookup failure (unknown zone, missing data, whatever shape the
-    stdlib raises) falls back to None -- a conservative null-horizon park,
-    never a guessed UTC time or approximated offset."""
+    `tzdata` pip package -- this repo stays stdlib-only; `fleet doctor`'s
+    `tzdata` check reports its absence). The module is imported here
+    (inside the helper, not at module scope) so a plain `import fleet`
+    never gains a hard dependency on tz-data being present; any lookup
+    failure (unknown zone, missing data, whatever shape the stdlib raises)
+    falls back to None -- a conservative null-horizon park, never a
+    guessed UTC time or approximated offset.
+
+    `now` is required, keyword-only, with no default (MD-ULPARSER-REVIEW-
+    2026-07-17.md §5.1): this helper's sole caller (`_parse_limit_signal`)
+    only ever reaches it from inside an `elif now is not None:` guard, so a
+    wall-clock fallback here was unreachable in production -- but it was a
+    *latent* footgun, reachable the moment any future caller invoked this
+    directly without `now=`, silently reproducing the exact wrong-instant
+    bug (C1) the N3 fix wave closed elsewhere. Removing the default makes
+    that invariant structural (a `TypeError` at the call site) rather than
+    a convention a future caller could forget.
+
+    D3 (same review) -- DST fold/gap semantics: `moment.replace(...)`
+    inherits `moment`'s `fold` rather than choosing one explicitly, so:
+      - a nonexistent spring-forward local time (e.g. 2:30am on a
+        spring-forward day) resolves via the PRE-transition (standard)
+        offset instead of being rejected -- errs late by the DST delta
+        (typically ≤1h), never crashes;
+      - an ambiguous fall-back local time resolves according to whichever
+        fold `now` (the anchor) itself carries, which is correct as long
+        as the anchor's fold reflects when the signal actually fired.
+    Both directions are bounded and late-erring, never early -- consistent
+    with this module's standing bias (a late resume beats an early one,
+    and either beats a fabricated horizon). The host zone observed in
+    production (Asia/Qyzylorda) has no DST, so this path is dormant today;
+    documented here because the helper is generic and the tz name comes
+    from untrusted message text, so a DST zone can reach it."""
     import zoneinfo
     try:
         tz = zoneinfo.ZoneInfo(tz_name)
     except Exception:
         return None
     try:
-        moment = (now if now is not None else datetime.now(timezone.utc)).astimezone(tz)
+        moment = now.astimezone(tz)
         candidate = moment.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if candidate < moment:
             candidate += timedelta(days=1)
@@ -1133,7 +1174,7 @@ def _next_local_reset_utc(hour: int, minute: int, tz_name: str, *, now: "datetim
         return None
 
 
-def _parse_limit_signal(text: str, *, now: "datetime | None" = None):
+def _parse_limit_signal(text: str, *, now: "datetime | None"):
     """Best-effort (reset_at, kind) from a limit-shaped stderr tail. reset_at is
     an ISO-8601 UTC string if one is present, else None (park with an unknown
     horizon -- never auto-resumed blind); kind is 'weekly' | 'session_5h' | None
@@ -1146,10 +1187,26 @@ def _parse_limit_signal(text: str, *, now: "datetime | None" = None):
     (M-D item 3) -- 12am/12pm are normalized to 00:00/12:00 (the classic
     12-o'clock bug), and the next occurrence at-or-after `now` of that
     wall-clock time is converted to UTC via `_next_local_reset_utc`. `now`
-    is keyword-only; its sole production caller (`transcript_limit_scan`)
-    passes the transcript record's own timestamp (C1 fix wave) so the
-    horizon anchors to when the signal actually fired, not to whenever the
-    scan happens to run.
+    is keyword-only and REQUIRED (no default -- MD-ULPARSER-REVIEW-2026-
+    07-17.md §5.1): its sole production caller (`transcript_limit_scan`)
+    already passes the transcript record's own timestamp on every call
+    (C1 fix wave), possibly `None` when that timestamp is absent or
+    unparseable, so requiring the keyword costs production nothing and
+    removes a wall-clock default that was reachable only by a future
+    caller forgetting `now=` -- the exact shape C1 itself took. Passing
+    `now=None` explicitly is still how a caller opts into "no anchor
+    available"; it is the *default* that is gone, not the `None` value.
+
+    D2 fix (MD-ULPARSER-REVIEW-2026-07-17.md): the local-format hour is
+    validated to the 1..12 range a 12-hour clock actually has before any
+    am/pm arithmetic runs. Without this, `"resets 13am"` silently computed
+    `hour24 = 13` (the am-branch only special-cases `hour == 12`) and
+    produced a well-formed but WRONG horizon (1pm) -- worse than no
+    horizon, since a park then resumes at the wrong instant and can burn a
+    second limit hit. An out-of-range hour takes the same null-park branch
+    as an unresolvable tz or missing tz-data (`reset_at` stays `None`);
+    `kind` keyword-detection is unaffected, since it reads the raw text
+    independently of the hour parse.
 
     N3 fix wave (MD-ULPARSER-REVIEW-2026-07-17.md re-review): `now=None`
     (record timestamp absent or unparseable -- see `_record_time`) no
@@ -1172,11 +1229,16 @@ def _parse_limit_signal(text: str, *, now: "datetime | None" = None):
             hour = int(hour_s)
             minute = int(minute_s) if minute_s else 0
             ampm = ampm.lower()
-            if ampm == "am":
+            if not 1 <= hour <= 12:
+                # D2: a 12-hour clock has no valid hour outside 1..12 --
+                # e.g. "13am" -- so this stays a null-park, not a guess.
+                reset_at = None
+            elif ampm == "am":
                 hour24 = 0 if hour == 12 else hour
+                reset_at = _next_local_reset_utc(hour24, minute, tz_name, now=now)
             else:
                 hour24 = 12 if hour == 12 else hour + 12
-            reset_at = _next_local_reset_utc(hour24, minute, tz_name, now=now)
+                reset_at = _next_local_reset_utc(hour24, minute, tz_name, now=now)
     kind = None
     low = (text or "").lower()
     if "week" in low:
@@ -6087,6 +6149,7 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
         functools.partial(_doctor_check_hook_errors),
         functools.partial(_doctor_check_supervisor_claim),
         functools.partial(_doctor_check_supervisor_handoff),
+        functools.partial(_doctor_check_tzdata),
     ]
 
     # M-B T11 fix wave: each check runs in isolation -- a raising check
@@ -7564,6 +7627,36 @@ def _doctor_check_supervisor_handoff():
     if not parts:
         parts.append("no handoff in flight, no aborted-handoff flag")
     return ("supervisor-handoff", ok, " | ".join(parts))
+
+
+def _doctor_check_tzdata():
+    """D1 (MD-ULPARSER-REVIEW-2026-07-17.md §3): `zoneinfo` is stdlib but its
+    DATA is not guaranteed on Windows -- there is no system tz database, so
+    every named-zone lookup depends entirely on the `tzdata` pip package
+    being importable. On the review's own host that only held **by
+    coincidence** of an unrelated project's transitive dependency
+    (`pandas`); a clean box, a venv, or that dependency going away all
+    silently break it. Absent tz data, `_next_local_reset_utc` returns
+    `None` for every lookup, so every LOCAL-format limit signal
+    ("resets 4:40am (Asia/Qyzylorda)") null-parks instead of resolving --
+    correctly conservative (never a guessed horizon), but previously
+    invisible: nothing told an operator *why* parsing had gone quiet.
+
+    PASS-note, never FAIL -- same doctrine as `_doctor_check_autoclean`.
+    Missing tz data does not break dispatch, spawn, or any daemon
+    contract; it narrows limit-signal parsing back to horizons already in
+    ISO-8601/UTC form (`_LIMIT_RESET_RE`), which need no tz lookup at all.
+    Failing doctor over a parsing-precision gap would teach an operator to
+    treat a cosmetic degradation as fleet-breaking, which it is not."""
+    import zoneinfo
+    try:
+        zoneinfo.ZoneInfo("Asia/Qyzylorda")
+    except Exception as exc:
+        return ("tzdata", True,
+                f"zoneinfo cannot resolve a named zone ({type(exc).__name__}: {exc}) -- "
+                f"local-format limit-signal parsing (\"resets 4:40am (Zone/City)\") will "
+                f"null-park until tz data is installed: py -3.13 -m pip install tzdata")
+    return ("tzdata", True, "zoneinfo resolves named zones (tz data present)")
 
 
 # ---------------------------------------------------------------------------

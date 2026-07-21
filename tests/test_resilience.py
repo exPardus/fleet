@@ -172,6 +172,29 @@ class TestDoctorClaudeVersion:
         assert ok is False
 
 
+class TestDoctorTzdata:
+    """D1 / §5.1 follow-up (MD-ULPARSER-REVIEW-2026-07-17.md): tz-data
+    availability was invisible -- a `fleet doctor` check now surfaces it."""
+
+    def test_zoneinfo_resolves_passes_plain(self, isolated_home):
+        name, ok, msg = fleet._doctor_check_tzdata()
+        assert name == "tzdata"
+        assert ok is True
+        assert "resolves named zones" in msg
+
+    def test_zoneinfo_lookup_failure_is_pass_note_not_fail(self, isolated_home, monkeypatch):
+        import zoneinfo
+
+        def boom(name):
+            raise zoneinfo.ZoneInfoNotFoundError(name)
+
+        monkeypatch.setattr(zoneinfo, "ZoneInfo", boom)
+        name, ok, msg = fleet._doctor_check_tzdata()
+        assert name == "tzdata"
+        assert ok is True  # PASS-note, never FAIL -- absent tz data narrows, doesn't break
+        assert "pip install tzdata" in msg
+
+
 class TestDoctorInstanceSettings:
     def test_missing_instance_fails(self, isolated_home):
         fleet.instance_settings_path().unlink()
@@ -566,11 +589,11 @@ class TestSettingSourcesPassthrough:
 class TestParseLimitSignalLocalFormat:
     def test_iso_wins_verbatim_over_local_text(self):
         text = "resets 2026-07-18T04:40:00Z, but also resets 4:40am (Asia/Qyzylorda)"
-        reset_at, kind = fleet._parse_limit_signal(text)
+        reset_at, kind = fleet._parse_limit_signal(text, now=None)
         assert reset_at == "2026-07-18T04:40:00Z"
 
     def test_no_signal_returns_none_none(self):
-        assert fleet._parse_limit_signal("nothing to see here") == (None, None)
+        assert fleet._parse_limit_signal("nothing to see here", now=None) == (None, None)
 
     def test_unknown_timezone_returns_none_horizon(self):
         now = datetime(2026, 7, 17, 10, 0, 0, tzinfo=timezone.utc)
@@ -642,9 +665,63 @@ class TestParseLimitSignalLocalFormat:
         # local-format branch -- it stays unresolved (None), a
         # conservative null-horizon park, never a possibly-wrong guess.
         reset_at, kind = fleet._parse_limit_signal(
-            "session limit -- resets 4:40am (Asia/Qyzylorda)")
+            "session limit -- resets 4:40am (Asia/Qyzylorda)", now=None)
         assert reset_at is None
         assert kind == "session_5h"  # kind detection is independent of the anchor
+
+
+# ---------------------------------------------------------------------------
+# D2 (MD-ULPARSER-REVIEW-2026-07-17.md): 1..12 hour validation on the
+# 12-hour-clock local-format branch. Boundary on both sides of the valid
+# range -- 12am/12pm/1am are legitimate 12-hour-clock hours and must still
+# resolve; 13am/0pm are outside 1..12 and must null-park rather than
+# silently wrapping (the pre-fix bug: "13am" parsed as 1pm).
+# ---------------------------------------------------------------------------
+
+class TestParseLimitSignalHourValidation:
+    _NOW = datetime(2026, 7, 16, 1, 0, 0, tzinfo=timezone.utc)  # 06:00 Qyzylorda
+
+    @pytest.mark.parametrize(
+        "hour_text,expected",
+        [
+            ("12am", "2026-07-16T19:00:00Z"),  # 00:00 local -> tomorrow (past)
+            ("12pm", "2026-07-16T07:00:00Z"),   # 12:00 local -> today (ahead)
+            ("1am", "2026-07-16T20:00:00Z"),    # 01:00 local -> tomorrow (past)
+        ],
+    )
+    def test_valid_boundary_hours_still_resolve(self, hour_text, expected):
+        reset_at, _ = fleet._parse_limit_signal(
+            f"session limit -- resets {hour_text} (Asia/Qyzylorda)", now=self._NOW)
+        assert reset_at == expected
+
+    @pytest.mark.parametrize("hour_text", ["13am", "0pm"])
+    def test_out_of_range_hours_null_park_not_wrong_horizon(self, hour_text):
+        # Pre-fix: "13am" silently computed hour24=13 (only hour==12 is
+        # special-cased in the am branch) -> a well-formed but WRONG
+        # horizon (1pm). Post-fix: out-of-range hours take the null-park
+        # branch, same as an unresolvable tz.
+        reset_at, kind = fleet._parse_limit_signal(
+            f"session limit -- resets {hour_text} (Asia/Qyzylorda)", now=self._NOW)
+        assert reset_at is None
+        assert kind == "session_5h"  # kind detection is independent of the hour parse
+
+
+# ---------------------------------------------------------------------------
+# §5.1 (MD-ULPARSER-REVIEW-2026-07-17.md): the wall-clock default on `now`
+# is vestigial -- every real caller already passes it explicitly. Made
+# required (keyword-only, no default) so a future direct caller that
+# forgets `now=` gets a structural TypeError instead of silently
+# resolving against the wall clock (the exact shape C1 took).
+# ---------------------------------------------------------------------------
+
+class TestNowParameterRequired:
+    def test_parse_limit_signal_requires_now_kwarg(self):
+        with pytest.raises(TypeError):
+            fleet._parse_limit_signal("resets 4:40am (Asia/Qyzylorda)")
+
+    def test_next_local_reset_utc_requires_now_kwarg(self):
+        with pytest.raises(TypeError):
+            fleet._next_local_reset_utc(4, 40, "Asia/Qyzylorda")
 
 
 # ---------------------------------------------------------------------------
