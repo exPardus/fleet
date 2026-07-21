@@ -6121,13 +6121,12 @@ _DAEMON_LOCK_RACE_RE = re.compile(
 # the lock milliseconds earlier. So one late refusal is enough.
 DAEMON_WEDGE_MIN_REFUSALS = 1
 DAEMON_WEDGE_MIN_LOCK_AGE_SECONDS = 300.0
-# Applied ONLY when there are >= 2 refusals (see the check). With a single
-# refusal max()-min() is 0 by construction, so an unguarded span gate re-creates
-# the M1 miss no matter what MIN_REFUSALS says. Retained for >= 2 as
-# belt-and-braces against a burst of late refusals arriving together; that shape
-# is CONSTRUCTED, NOT OBSERVED -- every real burst in the log sits inside the
-# ~1.1s between a daemon's start and its socket bind, which the age gate already
-# excludes.
+# ND-1: consumed by the F6 DEGRADED path ONLY (_daemon_wedge_degraded_verdict),
+# where `startedAt` is unusable so no age gate can run and this is the only
+# discriminator left. It is deliberately NOT consulted on the primary path: there
+# it made adding evidence weaken the verdict (1 refusal FAIL, 2 refusals 29s
+# apart PASS), i.e. the verdict tracked the operator's retry cadence instead of
+# the evidence. Full table and reasoning at the primary path's own comment.
 DAEMON_WEDGE_MIN_SPAN_SECONDS = 300.0
 
 
@@ -6180,9 +6179,12 @@ def _doctor_check_daemon_wedge(lock_path=None, log_path=None):
       * >= DAEMON_WEDGE_MIN_REFUSALS (= 1) of them. See the constant: refusals
         are demand-driven, so requiring several requires the operator to fail
         several dispatches first, and the real incident only ever produced one.
-      * spanning >= DAEMON_WEDGE_MIN_SPAN_SECONDS -- applied ONLY at >= 2
-        refusals, since a single refusal spans 0 by construction. Defensive
-        only; the shape it excludes is constructed, not observed.
+      * and NOTHING ELSE. There is no span/burst gate on this path (ND-1): one
+        used to sit here and it made adding evidence weaken the verdict -- one
+        refusal FAILed, two 29s apart PASSed. A rule whose answer depends on how
+        fast the operator retried is not reading the evidence. The age gate
+        needs no help; DAEMON_WEDGE_MIN_SPAN_SECONDS survives for the F6
+        degraded path alone.
     Refusals naming a pid other than the lock's current holder are ignored, so
     the check self-clears the moment an operator replaces the lock.
 
@@ -6318,14 +6320,33 @@ def _doctor_check_daemon_wedge(lock_path=None, log_path=None):
                 f"daemon.lock held by pid {pid} since {held_since}; "
                 f"{len(late)} late lock-race refusal(s) in the daemon.log "
                 f"tail (< {DAEMON_WEDGE_MIN_REFUSALS}) -- no wedge signature")
-    span = (max(late) - min(late)).total_seconds()
-    # Guarded at >= 2: with one refusal the span is 0 by construction, and an
-    # unguarded gate here re-creates the M1 miss on the founding incident.
-    if len(late) >= 2 and span < DAEMON_WEDGE_MIN_SPAN_SECONDS:
-        return ("daemon-wedge", True,
-                f"daemon.lock held by pid {pid} since {held_since}; "
-                f"{len(late)} lock-race refusals but they span only "
-                f"{span:.0f}s -- one burst, not a wedge")
+    # ND-1 (final gate, review ME-DAEMON-REVIEW-2026-07-21.md): there is NO span
+    # gate on this path, deliberately. It used to sit here, guarded at >= 2, and
+    # it made ADDING EVIDENCE WEAKEN THE VERDICT:
+    #
+    #   1 late refusal (the REAL incident)            -> FAIL (detected)
+    #   2 late refusals 29s apart (operator retried)  -> PASS (MISSED)
+    #   2 late refusals 2min apart                    -> PASS (MISSED)
+    #   2 late refusals 6min apart                    -> FAIL (detected)
+    #   3 late refusals 30s apart                     -> PASS (MISSED)
+    #
+    # i.e. the verdict tracked the OPERATOR'S RETRY CADENCE, not the evidence --
+    # and on the founding incident that is reachable, not exotic: the outage's
+    # evidence window was 161s, so any second dispatch attempt inside it (a
+    # retried `fleet spawn`, a sibling worktree, a plain interactive `claude`)
+    # minted a second refusal and flipped FAIL to PASS. Seven worktrees were
+    # live. The only reason the real log holds one refusal is that the operator
+    # diagnosed it in under three minutes.
+    #
+    # The age gate does not need the help: it separates the wedge from every
+    # real benign race by 4.9 orders of magnitude, and by this check's own model
+    # a refusal only happens after a client found no daemon reachable -- so two
+    # such events >= 300s after the lock was written mean the holder is not
+    # serving, burst or not. Pinned both ways by
+    # test_real_benign_races_pass_with_the_span_gate_disabled (all three real
+    # races still PASS at MIN_SPAN=0) and by the cadence table above, now a test.
+    # The span gate REMAINS in _daemon_wedge_degraded_verdict, where no age gate
+    # exists and it is the only discriminator there is.
     newest = max(late)
     age_h = (newest - started).total_seconds() / 3600.0
     return ("daemon-wedge", False,

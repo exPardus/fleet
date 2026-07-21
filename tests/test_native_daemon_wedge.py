@@ -176,7 +176,10 @@ class TestTheFoundingIncident:
         """Explicitly isolates the age gate: with MIN_SPAN forced to 0 the
         benign races must STILL pass. Before the M1 wave three tests named for
         other properties were in fact held up by the span gate, and the age gate
-        -- the only gate that discriminates -- was untested in magnitude (F7 I2)."""
+        -- the only gate that discriminates -- was untested in magnitude (F7 I2).
+        Since ND-1 the primary path has no span gate at all, so this now also
+        asserts that the constant is irrelevant here; it survives as the receipt
+        that made dropping the gate safe."""
         monkeypatch.setattr(fleet, "DAEMON_WEDGE_MIN_SPAN_SECONDS", 0.0)
         lock = _derived_benign_lock(start_iso, pid)
         _n, ok, msg = _check(tmp_path, lock, log)
@@ -187,6 +190,23 @@ class TestTheFoundingIncident:
         gate's."""
         monkeypatch.setattr(fleet, "DAEMON_WEDGE_MIN_SPAN_SECONDS", 0.0)
         _n, ok, msg = _check(tmp_path, INCIDENT_LOCK, INCIDENT_LOG_TAIL)
+        assert ok is False, msg
+
+    @pytest.mark.parametrize("stamps", [
+        ["2026-07-21T15:07:01.868Z"],
+        ["2026-07-21T15:07:01.868Z", "2026-07-21T15:07:30.868Z"],
+        ["2026-07-21T15:07:01.100Z", "2026-07-21T15:07:01.480Z",
+         "2026-07-21T15:07:01.868Z"],
+    ], ids=["one", "two-29s", "burst-768ms"])
+    def test_the_primary_path_consults_no_span_gate_at_all(
+            self, tmp_path, monkeypatch, stamps):
+        """ND-1, the stronger direction. MIN_SPAN forced to a WEEK: if the
+        primary path still read it, every one of these would flip to PASS. It
+        must not, at any count or cadence. The constant stays in the module
+        because the F6 degraded path is its only remaining consumer."""
+        monkeypatch.setattr(fleet, "DAEMON_WEDGE_MIN_SPAN_SECONDS", 604800.0)
+        log = "".join(_refusal(ts, 15740) for ts in stamps)
+        _n, ok, msg = _check(tmp_path, INCIDENT_LOCK, log)
         assert ok is False, msg
 
 
@@ -224,6 +244,51 @@ class TestAgeGate:
             "2026-07-20T09:00:00.000Z"))
         _n, ok, msg = _check(tmp_path, INCIDENT_LOCK, log)
         assert ok is True, msg
+
+    # ND-1: the verdict must depend on the EVIDENCE, not on how fast the
+    # operator happened to retry. Every row below is >= 1 late refusal against a
+    # 15.7h-old lock, so every row is a wedge. Before this wave, rows 2, 3 and 5
+    # returned `ok is True` -- adding evidence made the verdict WEAKER -- and the
+    # cadence in those rows is not exotic: the founding incident's whole evidence
+    # window was 161s, so a second dispatch attempt inside it (a retried spawn, a
+    # sibling worktree, an interactive `claude`) produced exactly row 2 or 3 and
+    # flipped FAIL to PASS. Seven worktrees were live at the time.
+    CADENCES = [
+        ("1 refusal -- the real incident", ["2026-07-21T15:07:01.868Z"]),
+        ("2 refusals 29s apart -- operator retried",
+         ["2026-07-21T15:07:01.868Z", "2026-07-21T15:07:30.868Z"]),
+        ("2 refusals 2min apart",
+         ["2026-07-21T15:07:01.868Z", "2026-07-21T15:09:01.868Z"]),
+        ("2 refusals 6min apart",
+         ["2026-07-21T15:07:01.868Z", "2026-07-21T15:13:01.868Z"]),
+        ("3 refusals 30s apart",
+         ["2026-07-21T15:07:01.868Z", "2026-07-21T15:07:31.868Z",
+          "2026-07-21T15:08:01.868Z"]),
+    ]
+
+    @pytest.mark.parametrize("label,stamps", CADENCES,
+                             ids=[c[0] for c in CADENCES])
+    def test_the_verdict_does_not_depend_on_retry_cadence(self, tmp_path, label, stamps):
+        log = "".join(_refusal(ts, 15740) for ts in stamps)
+        _n, ok, msg = _check(tmp_path, INCIDENT_LOCK, log)
+        assert ok is False, f"{label}: adding evidence must never weaken the verdict -- {msg}"
+
+    def test_a_late_burst_of_refusals_fails(self, tmp_path):
+        """Replaces `test_a_late_burst_of_refusals_passes`, which asserted
+        `ok is True` for three LATE refusals and conceded in its own docstring
+        that the shape was imaginary ("no burst of this shape has ever been
+        observed"). Structurally identical to
+        `test_two_late_refusals_are_under_threshold`, which this same wave
+        rightly inverted: the honesty was real, the conclusion drawn from it was
+        wrong. Every real burst sits inside the ~1.1s between a daemon's start
+        and its socket bind, which the AGE gate already excludes -- so a burst
+        that is nonetheless 15.7h older than its lock is a wedge, not a race."""
+        log = "".join(_refusal(ts, 15740) for ts in (
+            "2026-07-21T15:07:01.100Z",
+            "2026-07-21T15:07:01.480Z",
+            "2026-07-21T15:07:01.868Z"))
+        _n, ok, msg = _check(tmp_path, INCIDENT_LOCK, log)
+        assert ok is False, msg
 
     def test_two_late_refusals_spanning_hours_fail(self, tmp_path):
         """Replaces `test_two_late_refusals_are_under_threshold`, which asserted
@@ -276,19 +341,6 @@ class TestDaemonWedgePasses:
     def test_healthy_log_with_no_refusals_passes(self, tmp_path):
         log = ("[2026-07-20T23:25:27.750Z] [supervisor] ─── daemon start ─── "
                "version=2.1.216 pid=15740 origin=transient\n")
-        _n, ok, msg = _check(tmp_path, INCIDENT_LOCK, log)
-        assert ok is True, msg
-
-    def test_a_late_burst_of_refusals_passes(self, tmp_path):
-        """CONSTRUCTED, and labelled as such: no burst of this shape has ever
-        been observed. Every real burst sits inside the ~1.1s between a daemon's
-        start and its socket bind, which the age gate already excludes. The span
-        gate is retained as belt-and-braces for >= 2 refusals only; this test
-        pins that it is still wired, not that the scenario is real."""
-        log = "".join(_refusal(ts, 15740) for ts in (
-            "2026-07-21T15:07:01.100Z",
-            "2026-07-21T15:07:01.480Z",
-            "2026-07-21T15:07:01.868Z"))
         _n, ok, msg = _check(tmp_path, INCIDENT_LOCK, log)
         assert ok is True, msg
 
@@ -372,8 +424,39 @@ class TestStartedAtDrift:
         assert ok is True, msg
 
     def test_a_burst_is_not_enough_without_the_age_gate(self, tmp_path):
+        """ND-1 removed the span gate from the PRIMARY path; this pins that it
+        is still wired HERE, where no age gate exists and it is the only
+        discriminator between a wedge and an ordinary startup race."""
         log = "".join(_refusal(ts, 15740) for ts in (
             "2026-07-21T15:07:01.100Z", "2026-07-21T15:07:01.868Z"))
+        _n, ok, msg = _check(tmp_path, {"pid": 15740}, log)
+        assert ok is True, msg
+
+    def test_the_degraded_span_gate_reads_the_live_constant(self, tmp_path, monkeypatch):
+        """The other half: forcing MIN_SPAN to 0 turns that same burst into a
+        degraded FAIL, so the gate is genuinely consulted here rather than
+        vestigial."""
+        monkeypatch.setattr(fleet, "DAEMON_WEDGE_MIN_SPAN_SECONDS", 0.0)
+        log = "".join(_refusal(ts, 15740) for ts in (
+            "2026-07-21T15:07:01.100Z", "2026-07-21T15:07:01.868Z"))
+        _n, ok, msg = _check(tmp_path, {"pid": 15740}, log)
+        assert ok is False, msg
+
+    @pytest.mark.parametrize("log", [
+        "[supervisor] another daemon won the lock race (pid=15740) - exiting\n"
+        "[supervisor] another daemon won the lock race (pid=15740) - exiting\n",
+        "[supervisor] another daemon won the lock race (pid=15740) - exiting\n"
+        + _refusal("2026-07-21T15:07:01.868Z", 15740),
+    ], ids=["all-undated", "mixed"])
+    def test_undated_refusals_on_the_degraded_path_pass(self, tmp_path, log):
+        """The input the closeout gate named, and which this suite did not have.
+        My I11 dispute claimed `ts = started` was an equivalent mutant; the gate
+        rejected it because on THIS path `started` is None, so the mutant appends
+        None to `refusals` and `max()` raises TypeError. It was right, and the
+        reason the injection stayed green is that no fixture combined an unusable
+        `startedAt` with an undateable line. It does now: undateable is
+        INDETERMINATE on the degraded path too, never evidence and never a
+        crash."""
         _n, ok, msg = _check(tmp_path, {"pid": 15740}, log)
         assert ok is True, msg
 
