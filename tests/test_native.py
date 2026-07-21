@@ -4922,6 +4922,11 @@ class TestCmdDoctorRegistersNewChecks:
         assert "dead-suspected" in out
         # pin-version registered right after claude-on-path, per the T11 brief.
         assert out.index("claude-on-path") < out.index("pin-version") < out.index("worker-settings-instance")
+        # ME-UL-REVIEW-2026-07-21.md C1: U3's tzdata check is registered
+        # last in cmd_doctor's check_calls -- unpinned before this, deletable
+        # with the full suite still green (injection I8).
+        assert "tzdata" in out
+        assert out.index("supervisor-handoff") < out.index("tzdata")
 
 
 # ---------------------------------------------------------------------------
