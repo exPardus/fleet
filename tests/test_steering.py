@@ -6,6 +6,7 @@ native counterparts are covered in test_native.py.
 
 Every test monkeypatches fleet.FLEET_HOME to a pytest tmp_path.
 """
+import ast
 import json
 import os
 import uuid
@@ -16,6 +17,27 @@ from pathlib import Path
 import pytest
 
 import fleet
+
+
+def _blank_out_function(source: str, func_name: str) -> str:
+    """`source` with the body of top-level `func_name` replaced by blank
+    lines. Used by the platform-adapter lint to excise its ONE sanctioned
+    exemption without exempting the whole file.
+
+    Parsed with `ast` rather than matched with a regex: an indentation-based
+    text scan would mis-slice on a decorator, a multi-line signature or a
+    docstring containing `def `, and this excision is what decides whether a
+    real OS branch is reported. Raises if the function is absent, so a
+    renamed exemption is a loud failure, not a silent no-op."""
+    tree = ast.parse(source)
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func_name:
+            lines = source.splitlines(keepends=True)
+            # ast line numbers are 1-based and inclusive on both ends.
+            for i in range(node.lineno - 1, node.end_lineno):
+                lines[i] = "\n"
+            return "".join(lines)
+    raise AssertionError(f"no top-level def {func_name}() to exempt")
 
 
 @pytest.fixture(autouse=True)
@@ -121,17 +143,90 @@ class TestPlatformAdapterBoundary:
         ):
             assert needle not in outside, f"found {needle!r} outside the platform adapter block"
 
-    def test_new_surface_scripts_have_no_os_branches(self):
-        # Phase 1.6: invariant 8 stays lint-enforced as the file set grows.
-        root = Path(fleet.__file__).resolve().parent.parent
-        for rel in ("bin/fleet_statusline.py", "bin/hooks/sessionstart_fleet.py"):
-            path = root / rel
-            if not path.exists():
-                continue  # added by a later task in the terminal-surface plan
+    # Invariant 8 (SPEC §16.8): OS branching lives in the platform adapter,
+    # and nowhere else.
+    #
+    # posix-port campaign, follow-up 1: this lint used to name TWO files by
+    # hand (`bin/fleet_statusline.py`, `bin/hooks/sessionstart_fleet.py`) and
+    # `continue` past a missing one. It therefore did not scan `bin/hooks/`
+    # as a directory at all, nor `tools/`. `bin/hooks/stop_outcome.py`
+    # already carries its own `os.name` branch -- legitimately: a hook may
+    # not import `fleet.py` (standalone doctrine), so it cannot reach
+    # `PLATFORM` and must duplicate the two-branch atomic append. That makes
+    # it a SANCTIONED SECOND SITE, but nothing stopped a THIRD from
+    # appearing in any hook the list did not happen to name.
+    #
+    # Now every product `.py` under `bin/` and `tools/` is scanned by glob,
+    # so a new file is covered the moment it lands. `bin/fleet.py` is
+    # excluded here only because the fence-based test above covers it more
+    # precisely. `tests/` is deliberately out of scope: a test may branch on
+    # the host it runs on -- that is how the adapter's two declarations get
+    # exercised on both platforms.
+
+    _OS_BRANCH_NEEDLES = ("os.name", "sys.platform", "platform.system",
+                          "sys.getwindowsversion", "os.uname", "os.sep")
+
+    # The single named exemption. Scoped to ONE function in ONE file, not to
+    # the whole file, so a second branch elsewhere in stop_outcome.py still
+    # fails.
+    _SANCTIONED_SECOND_SITE = ("bin/hooks/stop_outcome.py", "_atomic_append_bytes")
+
+    @staticmethod
+    def _repo_root():
+        return Path(fleet.__file__).resolve().parent.parent
+
+    @classmethod
+    def _scanned_files(cls):
+        root = cls._repo_root()
+        paths = sorted(set(root.glob("bin/**/*.py")) | set(root.glob("tools/**/*.py")))
+        return [p for p in paths if p != (root / "bin" / "fleet.py")]
+
+    def test_lint_actually_covers_the_hook_and_tool_directories(self):
+        """A lint that silently scans nothing passes. Pin the file set, so
+        deleting the glob (or moving the hooks) fails here rather than
+        quietly disarming every assertion below."""
+        root = self._repo_root()
+        scanned = {p.relative_to(root).as_posix() for p in self._scanned_files()}
+        assert {"bin/fleet_statusline.py",
+                "bin/hooks/sessionstart_fleet.py",
+                "bin/hooks/stop_outcome.py",
+                "bin/hooks/stop_mailbox.py",
+                "bin/hooks/posttooluse_mailbox.py",
+                "bin/hooks/postcompact_journal.py",
+                "tools/verify_receipts.py"} <= scanned, scanned
+
+    def test_no_os_branches_in_bin_or_tools_outside_the_one_exemption(self):
+        root = self._repo_root()
+        exempt_rel, exempt_func = self._SANCTIONED_SECOND_SITE
+        for path in self._scanned_files():
+            rel = path.relative_to(root).as_posix()
             source = path.read_text(encoding="utf-8")
-            for needle in ("os.name", "sys.platform", "platform.system",
-                           "sys.getwindowsversion", "os.uname", "os.sep"):
-                assert needle not in source, f"found {needle!r} in {rel}"
+            if rel == exempt_rel:
+                source = _blank_out_function(source, exempt_func)
+            for needle in self._OS_BRANCH_NEEDLES:
+                assert needle not in source, (
+                    f"found {needle!r} in {rel} -- OS branching belongs in "
+                    f"bin/fleet.py's PLATFORM adapter (SPEC §16.8). The only "
+                    f"sanctioned second site is {exempt_rel}::{exempt_func}, "
+                    f"which cannot import fleet.py.")
+
+    def test_the_exemption_is_still_a_real_function_that_still_branches(self):
+        """An exemption that no longer matches anything is dead weight that
+        reads as coverage. Three ways it can go stale, all caught here:
+        `_atomic_append_bytes` is renamed or removed (`_blank_out_function`
+        raises), the file stops branching at all (first assert -- the
+        exemption should then be DELETED, not left standing), or the branch
+        moves out of the exempted function (second assert)."""
+        root = self._repo_root()
+        exempt_rel, exempt_func = self._SANCTIONED_SECOND_SITE
+        source = (root / exempt_rel).read_text(encoding="utf-8")
+        blanked = _blank_out_function(source, exempt_func)
+        assert "os.name" in source, (
+            f"{exempt_rel} no longer branches on os.name at all -- delete the "
+            f"exemption rather than leaving it to exempt nothing")
+        assert "os.name" not in blanked, (
+            f"{exempt_rel} branches on os.name OUTSIDE {exempt_func} -- the "
+            f"exemption covers that one function only, by design")
 
     def test_correct_adapter_selected_on_this_machine(self):
         expected = (fleet._WindowsPlatform if os.name == "nt"
