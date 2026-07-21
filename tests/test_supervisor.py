@@ -1110,3 +1110,74 @@ class TestDispatchPathsAreDocumented:
         section12 = spec.split("## 12. Supervisor protocol", 1)[1].split("\n## 13.", 1)[0]
         assert "via `dispatch_bg`" not in section12
         assert "§6.1" in section12
+
+
+class TestOperatorGatesBriefing:
+    """The operator asked (2026-07-21) that ratification decisions be put to
+    them BEFORE a session starts any work. A doc paragraph cannot enforce
+    that; the SessionStart hook can, because it injects context into every
+    manager session automatically. These pin the mechanism.
+
+    Read-only, tolerate-and-ignore, exit 0 -- the hook's standing invariants.
+    A gate that fails to surface is a missed prompt; a hook that raises is a
+    broken session start."""
+
+    def _hook(self, monkeypatch):
+        import importlib.util
+        hook_path = (fleet.Path(fleet.__file__).resolve().parent / "hooks"
+                     / "sessionstart_fleet.py")
+        spec = importlib.util.spec_from_file_location("sessionstart_fleet", hook_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        monkeypatch.setattr(mod, "fleet", fleet)
+        return mod
+
+    def _seed(self, sup_home):
+        (sup_home / "state" / "fleet.json").write_text(
+            json.dumps({"workers": {}}), encoding="utf-8")
+        docs = sup_home / "docs"
+        docs.mkdir(parents=True, exist_ok=True)
+        return docs / "OPERATOR-GATES.md"
+
+    def test_open_gates_lead_the_briefing(self, sup_home, monkeypatch):
+        gates = self._seed(sup_home)
+        gates.write_text(
+            "# Operator gates\n\n## Open\n\n"
+            "- [ ] **Ratify the contract rows** — ratify, reject, or ask for evidence?\n"
+            "- [x] **Already settled** — answered 2026-01-01.\n",
+            encoding="utf-8")
+        ctx = self._hook(monkeypatch)._build_context()
+        assert ctx.startswith("OPERATOR GATES: 1 decision(s)"), ctx[:200]
+        assert "ASK THESE FIRST" in ctx
+        assert "Ratify the contract rows" in ctx
+        # a ticked gate is history, never re-surfaced
+        assert "Already settled" not in ctx
+        # and the rest of the briefing still lands, below them
+        assert ctx.index("OPERATOR GATES") < ctx.index("FLEET:")
+
+    def test_no_open_gates_means_no_banner(self, sup_home, monkeypatch):
+        gates = self._seed(sup_home)
+        gates.write_text("# Operator gates\n\n## Settled\n\n- [x] done — 2026-01-01.\n",
+                         encoding="utf-8")
+        ctx = self._hook(monkeypatch)._build_context()
+        assert "OPERATOR GATES" not in ctx
+        assert "FLEET:" in ctx
+
+    def test_missing_or_unreadable_file_degrades_silently(self, sup_home, monkeypatch):
+        self._seed(sup_home)  # no OPERATOR-GATES.md written at all
+        mod = self._hook(monkeypatch)
+        assert mod._operator_gate_lines() == []
+        ctx = mod._build_context()
+        assert "OPERATOR GATES" not in ctx
+        assert "FLEET:" in ctx
+
+    def test_the_shipped_gates_file_parses_and_has_open_items(self):
+        """The real docs/OPERATOR-GATES.md must actually drive the hook -- a
+        format drift here silently empties the ask-first queue, which is the
+        one failure mode the operator would never see."""
+        repo = Path(__file__).resolve().parents[1]
+        text = (repo / "docs" / "OPERATOR-GATES.md").read_text(encoding="utf-8")
+        open_gates = [ln for ln in text.splitlines() if ln.strip().startswith("- [ ]")]
+        assert open_gates, "no open gates parse out of the shipped file"
+        for ln in open_gates:
+            assert ln.strip().endswith("?"), f"a gate must be a question: {ln[:80]}"
