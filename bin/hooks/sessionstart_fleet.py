@@ -80,6 +80,33 @@ def _worker_line(w: dict) -> str:
     return f"  {w['name']}: {w['status']}, {w['turns']} turns, ${w['cost_usd']:.2f}{suffix}"
 
 
+def _operator_gate_lines(limit: int = 12) -> list:
+    """Open operator gates from `docs/OPERATOR-GATES.md`, in file order.
+
+    A gate is a markdown task line: `- [ ]` is open, `- [x]` is settled and
+    is NEVER re-surfaced (an answered question asked twice teaches the
+    operator to skim the banner). Returns [] on a missing or unreadable
+    file -- an absent gates file means no gates, never a broken briefing.
+
+    Why this lives in the hook and not only in a handoff doc: the operator's
+    ask (2026-07-21) was that ratification decisions be put to them BEFORE a
+    session starts work. Prose in NEXT-SESSION.md is advisory and gets read
+    after the first tool call; SessionStart context arrives before it."""
+    path = _fleet_home() / "docs" / "OPERATOR-GATES.md"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, ValueError):
+        return []
+    out = []
+    for ln in lines:
+        stripped = ln.strip()
+        if stripped.startswith("- [ ]"):
+            out.append(stripped[len("- [ ]"):].strip())
+            if len(out) >= limit:
+                break
+    return out
+
+
 def _index_lines(limit: int = 20) -> list:
     path = _fleet_home() / "knowledge" / "INDEX.md"
     try:
@@ -103,13 +130,23 @@ def _build_context() -> str:
         return ""
 
     out = []
+    # Operator gates LEAD the briefing: they are the only item a session must
+    # act on before doing anything else, and a decision queued behind four
+    # campaigns is the fleet's real bottleneck.
+    gates = _operator_gate_lines()
+    if gates:
+        out.append(f"OPERATOR GATES: {len(gates)} decision(s) waiting on the operator "
+                   f"-- ASK THESE FIRST, in one message, before spawning anything:")
+        out.extend(f"  - {gate}" for gate in gates)
+        out.append("")
+
     totals = snap["totals"]
     if totals["workers"]:
         out.append(f"FLEET: {totals['workers']} worker(s), ${totals['cost_usd']:.2f} lifetime spend.")
-        # Budget: worker rows are truncated FIRST (spec §4.6), so a large
-        # fleet never crowds out the knowledge index.
+        # Budget: worker rows are truncated FIRST (spec §4.6), so neither the
+        # gates above nor the knowledge index below is ever crowded out.
         rows = [_worker_line(w) for w in snap["workers"]]
-        room = MAX_CONTEXT_CHARS - 1_500
+        room = MAX_CONTEXT_CHARS - 1_500 - sum(len(ln) + 1 for ln in out)
         kept = []
         used = 0
         for row in rows:

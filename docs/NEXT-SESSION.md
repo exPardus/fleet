@@ -2,10 +2,44 @@
 
 Previous handoff (M-D) is superseded and closed. M-E campaign record: `knowledge/lessons.md#2026-07-21-me`. Supervisor journal has the blow-by-blow; the ledger (`docs/PLAN-PROGRESS.md`) has every wave and verdict.
 
+---
+
+# FIRST ACTION — put the ratification docket to Altai, before any work
+
+Four campaigns of decisions are now queued behind the operator, and the queue is the bottleneck: the nonce slice blocks the three-tier re-draft, which blocks the supervisor tier, and eleven contract markers have been sitting `PENDING` since M-D. **Do this in your first turn, in one message, before spawning anything.**
+
+Present the docket below and ask for a decision on each. Use `AskUserQuestion` where the choice is genuinely multiple-choice (items 2 and 3), plain prose for the rest. Give your recommendation on each — the operator's standing preference is a named recommendation with the alternative stated fairly, not a menu.
+
+**Rules that bind you while doing this:**
+- **You may not ratify any of it yourself, and neither may a worker.** An author never promotes its own spec; a reviewer may not ratify one either. Record each answer as a dated line in `knowledge/lessons.md` — never session memory.
+- If the operator defers an item, mark it deferred **in this file** with the date, and carry on with the work that is not gated on it (§"The job" below has ungated items).
+- If the operator ratifies, the follow-through is a *commit*, not a claim: flip the markers, promote the `Status:` line, and say which commit did it.
+
+## The docket
+
+**1. `docs/specs/native-substrate.md` — 11 `[PENDING OPERATOR RATIFICATION]` markers across 8 rows.** Ten are the 2.1.212 set from M-D (transient daemon and its idle-exit; `claude daemon stop`'s machine-wide blast radius; the `gone`→success precondition; `stop` firing no Stop hook; the 3-way `rm`/`stop` ambiguity). One is M-E's new 2.1.216 row: the `daemon.lock` PID-reuse wedge. Ratifying makes them contract-of-record — the thing every future spec and pin test is written against. **Recommendation: ratify all eleven.** Each carries executed receipts, and the 2.1.216 row additionally has a shipped detector and a live green pin behind it. The one honest caveat, stated in the rows themselves: three dead-daemon claims remain manager-report-only, because a `--bg` worker is a live daemon client and structurally cannot observe that path.
+
+**2. `docs/specs/claim-nonce.md` — `Status: drafting`, and five open questions.** Two full dual-lens design gates; final verdicts `sound` (break lens, which verified the env-var spoof by *executing* the pure decision function against shipped code, v3's rules and v2's clause) and `fix-list(F1,F2) → closed` (spec lens, 49/49 receipts sound, harness seeded by the reviewer). Adjudication + the manager's own three corrections: `docs/reviews/ME-NONCE-ADJUDICATION-2026-07-21.md`.
+
+  **The load-bearing question, which the others hang off:** on this box there is **no authorization input that is neither view-derivable nor an environment variable**. Every worker can read `FLEET_HOME`; `sup-status` publishes the holder's identity. So:
+  - **(a) detection-only, no gate** — cheap, ships alone, and **does not close the dual-supervisor incident** (the 2026-07-16 zombie ran only `fleet send`, and non-presenters never enter the mechanism);
+  - **(b) a gate that is knowingly bypassable** — the only option that *does* close it, at the cost of documenting a bypass in the design;
+  - **(c) build an authorization input first** — new scope, new slice, and nothing ships until it exists.
+  **Recommendation: (b), explicitly documented as bypassable.** Its honest failure mode is a determined actor with shell access — who already has everything. Option (a)'s failure mode is the incident that motivated the whole slice recurring silently.
+
+  Then: promote the spec to spec-of-record, or send it back. **Do not build until this is answered.**
+
+**3. `docs/superpowers/specs/2026-07-18-sdd-drift-control-design.md` — DRAFT v3, untouched since 2026-07-18.** Two review rounds folded (four lenses, then a new-defect hunt that found a CRITICAL RCE the first fold had introduced). It is a large subsystem — spec artifact, verifier, binding, a Stop-hook fence. Ask: **M-F candidate, shelved, or narrowed to its Phase-1 gate only?** **Recommendation: narrow to Phase 1 (the deterministic `spec verify` gate) and defer the live Stop-fence** — the fence is the defect-dense half and the gate delivers most of the value alone.
+
+**4. `docs/specs/three-tier-command.md` — still `PROPOSAL`.** Restructure ratified by review, never by the operator. Gated on item 2: the nonce is its hard prerequisite. Nothing to decide today beyond confirming it stays queued behind the nonce.
+
+**5. Confirm the standing budget envelope for M-F**, and whether the dogfood-outward run (§"The job" item 5) should preempt the queue. It has been overdue since 2026-07-09 and is the highest-value defect report available.
+
+---
+
 ## State (all verified at close)
 
-- **M-E shipped and pushed.** `main` = `fleet-impl` = `2dfdfe3`. Four branches merged (`me/ul`, `me/daemon`, `me/defects`, `me/nonce`; the last one merged → reverted on red → fixed → re-merged). **1302 unit tests + 6-pin FLEET_LIVE tier green on claude 2.1.216; doctor 23 PASS / 0 FAIL; pin-gate stamped 2.1.216.** Workers retired, worktrees removed, branches deleted.
-- **All six review documents are on `fleet-impl`** (`docs/reviews/ME-*.md`, 7336 lines) — two full dual-lens design gates on the claim-nonce spec, the hostile review that found the daemon check could not fire on its founding incident, the final gate that found *adding evidence made its verdict weaker*, and the pair that cleared the two shipped-code defects. **They were nearly lost:** the manager deleted the reviewer branches as "merged cleanup" when they had never been merged, and every review lived only on its own branch. Recovered from the object store at the tips (`de9c62f`). **Standing rule now: a review branch is EVIDENCE, not scratch — merge or copy the review documents BEFORE deleting any branch.**
+- **M-E shipped and pushed.** `main` = `fleet-impl` = `6cd4fa7`. Four branches merged (`me/ul`, `me/daemon`, `me/defects`, `me/nonce`). **1302 unit tests + 6-pin FLEET_LIVE tier green on claude 2.1.216; doctor 23 PASS / 0 FAIL; pin-gate stamped 2.1.216.**
 - **The 9th live catch was a SUBSTRATE failure, not a contract break.** A stale `~/.claude/daemon.lock` naming a **recycled pid** (Windows gave 15740 to `WacomHost`, whose start time is unreadable to a normal-token probe) killed every `--bg` dispatch machine-wide for ~16h while `fleet doctor` read all-PASS. `claude daemon stop --any` does **not** clear it; removing the lock does. Fleet now has `_doctor_check_daemon_wedge` (file-only signal, starts no daemon) and a dispatch-error classifier that names the cause and a precondition-first remedy. Receipts in `docs/specs/native-substrate.md`.
 - **New standing tooling: `tools/verify_receipts.py` + `tests/test_receipts.py`.** Every pasted receipt in `docs/specs/**` is re-executed and diffed, resolved at its `# at <sha>` pin via `git archive`. Unpinned receipts, moving pins (`# at HEAD`) and absent commits are errors under `--strict`, never skips. `CLAUDE.md` carries the doctrine line. **Run `--self-test` before trusting a green run.**
 - **Campaign template → v1.8** (vantage gate, founding-incident gate, demand-driven-evidence rule, reviewer-remedies-are-fix-waves, receipts-as-executable-claims, merge-target testing, commit-only, RESULT-line exemption).
@@ -36,11 +70,3 @@ Priority-ordered:
 - **Disputes carry receipts, in both directions.** A builder overturned a manager ruling with PEP 495 and an 8784-sample sweep and was ratified; a reviewer withdrew its own CRITICAL's remedy on an author's three receipts. Both outcomes are the process working.
 - `git log` is the only truth a turn landed. A Monitor until-loop survives session teardown better than `fleet wait ... run_in_background` — but re-arm it after any conflicted merge, since it parses a broken `fleet.py` as garbage and exits.
 - Push `fleet-impl` + ff `main` at every green milestone. Supervisor `GOALS.md` binds the manager (frugality, long beats, 300–500k handoff band). **Claim wart, still live until the nonce ships:** after a >60m heartbeat gap `sup-boot` refuses the same-sid holder — recover with `sup-heartbeat`, not `sup-boot`.
-- **Close-out order matters.** Reviews first (merge or copy the documents), then merge branches, then retire workers, then remove worktrees, then delete branches — and only then `fleet clean`. Deleting a branch whose artifacts are not on `fleet-impl` destroys evidence; `git fsck`/reflog recovery works but only until gc.
-
-## Turn-one shortcuts for the next manager
-
-- `py -3.13 bin/fleet.py sup-boot` (a fresh incarnation; the predecessor's heartbeat will be stale — that is expected, and `sup-boot` from a *different* sid seizes cleanly).
-- `fleet doctor` should read **23 PASS / 0 FAIL**. If `pin-version` FAILs, `claude` has bumped: run `FLEET_LIVE=1 py -3.13 -m pytest tests/integration/test_native_pin.py -q` from **this interactive session on a quiet machine** before anything else, then `fleet.record_pin_pass("<version>")`.
-- If a dispatch fails with *"background service did not become reachable"*, fleet now tells you what to do — but the short version is: `claude daemon status`, and if it says `not running` while `~/.claude/daemon.lock` exists, back the lock up and remove it. `claude daemon stop --any` will not.
-- Read `docs/PLAN-PROGRESS.md` bottom-up for the last campaign's waves; read `knowledge/INDEX.md` and this file; then pick from "The job" above.
