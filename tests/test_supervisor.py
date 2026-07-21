@@ -477,6 +477,78 @@ class TestHandoff:
         assert [e["kind"] for e in fleet.supervisor_journal_entries()] == []
         assert list((sup_home / "state").glob("supervisor-handoff-*.md")) == []
 
+    def test_successor_dispatch_always_carries_a_permission_mode(self, sup_home):
+        """B4/D6: `dispatch_bg` ends every worker argv with `mode_flags(mode)`
+        and every worker defaults to `dontask`. The successor emitted a
+        permission flag ONLY when the operator typed `--permission-mode`
+        (argparse default None), so the default path ran under claude's own
+        default mode -- and the successor's bootstrap opens with a Bash call,
+        which in a headless `--bg` session hangs forever on an unanswerable
+        permission prompt. That is the T12 wedge class this repo already paid
+        for once."""
+        self._hold()
+        run = self._dispatch_then_roster()
+        args = SimpleNamespace(sid="sid-old", model=None, permission_mode=None)
+        assert fleet.cmd_sup_handoff_begin(args, which=_fake_which, run=run,
+                                           sleep=lambda s: None) == 0
+        dispatch = next(c for c in run.calls if "--bg" in c)
+        expected = fleet.mode_flags(fleet.SUCCESSOR_DEFAULT_MODE)
+        assert expected, "the successor default mode must emit at least one flag"
+        for flag in expected:
+            assert flag in dispatch
+        # same default the worker choke point uses -- not a bespoke one
+        assert fleet.SUCCESSOR_DEFAULT_MODE in fleet.MODE_FLAGS
+
+    def test_explicit_permission_mode_overrides_the_successor_default(self, sup_home):
+        self._hold()
+        run = self._dispatch_then_roster()
+        args = SimpleNamespace(sid="sid-old", model=None, permission_mode="plan")
+        assert fleet.cmd_sup_handoff_begin(args, which=_fake_which, run=run,
+                                           sleep=lambda s: None) == 0
+        dispatch = next(c for c in run.calls if "--bg" in c)
+        assert dispatch[dispatch.index("--permission-mode") + 1] == "plan"
+        # exactly one mode opinion on the argv, never the default alongside it
+        assert dispatch.count("--permission-mode") == 1
+        assert "--dangerously-skip-permissions" not in dispatch
+
+    def test_missing_claude_refuses_before_journal_and_taskfile(self, sup_home):
+        """B5: `resolve_claude_executable` is the same class of pre-flight as
+        `_require_instance_settings` -- a missing external prerequisite. It ran
+        AFTER the journal write, the task-file write and the prior abort flag's
+        deletion, and raises `ClaudeNotFoundError` with no `_abort_flag` guard,
+        so a `claude` that dropped off PATH left HANDOFF-BEGIN journaled with no
+        successor and nothing for doctor to see -- contradicting the docstring's
+        promise that both failure paths raise the flag."""
+        self._hold()
+        calls = []
+        def run(argv, **kw):
+            calls.append(argv)
+            return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+        with pytest.raises(fleet.FleetCliError, match="claude executable not found"):
+            fleet.cmd_sup_handoff_begin(SimpleNamespace(sid="sid-old", model=None,
+                                                        permission_mode=None),
+                                        which=lambda _n: None, run=run,
+                                        sleep=lambda s: None)
+        assert fleet.supervisor_journal_entries() == []
+        assert list((sup_home / "state").glob("supervisor-handoff-*.md")) == []
+        assert calls == []
+
+    def test_missing_claude_leaves_a_prior_abort_flag_intact(self, sup_home):
+        """The refusal must not consume the previous handoff's evidence: the
+        `unlink()` of the abort flag sits inside the lock, after the pre-flights."""
+        self._hold()
+        fleet._write_json_atomic(fleet.handoff_abort_flag_path(),
+                                 {"reason": "successor-doa", "holder": "inc-older"})
+        with pytest.raises(fleet.FleetCliError, match="claude executable not found"):
+            fleet.cmd_sup_handoff_begin(SimpleNamespace(sid="sid-old", model=None,
+                                                        permission_mode=None),
+                                        which=lambda _n: None,
+                                        run=lambda *a, **k: SimpleNamespace(
+                                            returncode=0, stdout="[]", stderr=""),
+                                        sleep=lambda s: None)
+        flag = json.loads(fleet.handoff_abort_flag_path().read_text(encoding="utf-8"))
+        assert flag["reason"] == "successor-doa"
+
     def test_successor_dispatch_uses_worker_env(self, sup_home, monkeypatch):
         """§5.1 provenance: without `env=_worker_env(name)` the successor
         inherits the OLD supervisor's CLAUDE_CODE_SESSION_ID. `cmd_sup_boot`
