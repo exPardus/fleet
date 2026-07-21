@@ -483,10 +483,22 @@ class TestDeferralStreakThreshold:
         streak, husks, since = fleet._autoclean_deferral_streak()
         assert (streak, husks) == (3, 2) and since
 
-    def test_a_successful_sweep_resets_the_streak(self, home):
+    def test_a_pass_that_deferred_nothing_resets_the_streak(self, home):
+        # n3: the rule is "deferred nothing", NOT "removed a husk" -- see
+        # _autoclean_deferral_streak's docstring. `removed=1` here is
+        # incidental; test_a_nothing_to_do_pass_also_resets pins the other half.
         self._run_event(5)
         self._run_event(5)
-        self._run_event(0, removed=1)   # daemon was reachable -> not starving
+        self._run_event(0, removed=1)
+        assert fleet._autoclean_deferral_streak()[0] == 0
+
+    def test_a_nothing_to_do_pass_also_resets_the_streak(self, home):
+        # n3: a pass that removed nothing AND deferred nothing proves nothing
+        # about daemon reachability, and still resets. Documented behavior,
+        # previously described wrongly in three of four places.
+        self._run_event(5)
+        self._run_event(5)
+        self._run_event(0, removed=0)
         assert fleet._autoclean_deferral_streak()[0] == 0
 
     def test_streak_only_counts_the_most_recent_consecutive_run(self, home):
