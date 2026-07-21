@@ -17,6 +17,7 @@ is NUL, a character device, so `fleet kill x < /dev/null` reports a tty.
 import argparse
 import json
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -155,16 +156,53 @@ class TestCliIntegration:
         (home / "state" / "fleet.json").write_text(
             json.dumps({"workers": workers}), encoding="utf-8")
 
+    # posix-port campaign, Class 3 [TEST DEFECT -- stale seam].
+    #
+    # These three cases monkeypatched `fleet._stop_native_session`. That seam
+    # has been DEAD since the M5/T12 fix wave taught `_cmd_kill_native` to
+    # call `_stop_native_session_status` directly (it needs the outcome
+    # string, not just the bool). The patch bound a name nothing under test
+    # calls, so `cmd_kill` ran with `run=subprocess.run` and
+    # `which=shutil.which` defaults and REALLY SHELLED OUT to the operator's
+    # `claude` binary. Verified on Windows: `_stop_native_session_status`
+    # executed `['C:\\Users\\...\\claude.EXE', 'stop', 'sess']`. It passed
+    # only because a real `claude` happened to be on PATH and answered `No
+    # job matching 'sess'`, which `_classify_native_cli_result` reads as
+    # "gone" -> success. On a box without the CLI (the Linux box this
+    # campaign ran on) it resolved to `(False, "no-claude")` and `cmd_kill`
+    # returned 1.
+    #
+    # So this is NOT a posix gap and NOT an environment problem to guard
+    # around: it is a unit test that silently depended on a live external
+    # binary, on every platform, and the missing `claude` merely made the
+    # dependency visible. Fixed at the root -- `run` and `which` are injected
+    # through `cmd_kill`'s own parameters, which is the real seam, so nothing
+    # here can reach a subprocess at all. Strictly more coverage than before:
+    # the stop is now asserted to have HAPPENED (and the foreign-refusal
+    # tripwire, which could never have fired, now can).
+
+    @staticmethod
+    def _stop_ok_run(stops):
+        """A `subprocess.run` stand-in that answers every `claude stop` with a
+        clean exit (which `_classify_native_cli_result` reads as "ok")."""
+        def run(argv, **kw):
+            stops.append(argv)
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        return run
+
+    @staticmethod
+    def _tripwire_run(*a, **k):
+        raise AssertionError("kill must be refused before any session is stopped")
+
+    _WHICH = staticmethod(lambda _name: "/usr/bin/claude")
+
     def test_kill_refuses_a_foreign_worker_non_interactively(self, home, monkeypatch):
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-A")
         self._write(home, {"victim": _rec(spawned_by="sess-B", status="idle")})
 
-        def no_kill(*a, **k):
-            raise AssertionError("kill must be refused before any session is stopped")
-        monkeypatch.setattr(fleet, "_stop_native_session", no_kill)
-
         with pytest.raises(fleet.DestructiveActionRefused):
-            fleet.cmd_kill(argparse.Namespace(name="victim", yes=False))
+            fleet.cmd_kill(argparse.Namespace(name="victim", yes=False),
+                           run=self._tripwire_run, which=self._WHICH)
 
         # Untouched.
         data = json.loads((home / "state" / "fleet.json").read_text(encoding="utf-8"))
@@ -172,22 +210,45 @@ class TestCliIntegration:
 
     def test_kill_proceeds_on_your_own_worker(self, home, monkeypatch):
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-A")
-        monkeypatch.setattr(fleet, "_stop_native_session", lambda *a, **k: True)
         self._write(home, {"mine": _rec(spawned_by="sess-A", status="idle")})
 
-        rc = fleet.cmd_kill(argparse.Namespace(name="mine", yes=False))
+        stops = []
+        rc = fleet.cmd_kill(argparse.Namespace(name="mine", yes=False),
+                            run=self._stop_ok_run(stops), which=self._WHICH)
 
         assert rc == 0
+        assert [argv[1] for argv in stops] == ["stop"], stops
         data = json.loads((home / "state" / "fleet.json").read_text(encoding="utf-8"))
         assert data["workers"]["mine"]["status"] == "dead"
 
     def test_kill_foreign_with_yes_proceeds(self, home, monkeypatch):
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-A")
-        monkeypatch.setattr(fleet, "_stop_native_session", lambda *a, **k: True)
         self._write(home, {"victim": _rec(spawned_by="sess-B", status="idle")})
 
-        rc = fleet.cmd_kill(argparse.Namespace(name="victim", yes=True))
+        stops = []
+        rc = fleet.cmd_kill(argparse.Namespace(name="victim", yes=True),
+                            run=self._stop_ok_run(stops), which=self._WHICH)
         assert rc == 0
+        assert [argv[1] for argv in stops] == ["stop"], stops
+
+    def test_kill_never_resolves_a_claude_executable_off_path(self, home, monkeypatch):
+        """The regression guard for the stale seam itself. `cmd_kill` must
+        route its stop through the `run`/`which` it was GIVEN -- if a future
+        refactor moves the call to another helper that ignores them, this
+        test goes red instead of quietly shelling out to a real `claude`
+        again. `which` returning None is the shape of a box with no CLI: the
+        stop cannot be verified, so kill still marks the worker dead (kill is
+        terminal) and reports 1 -- which is the correct behaviour there, and
+        was the actual Linux symptom."""
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-A")
+        self._write(home, {"mine": _rec(spawned_by="sess-A", status="idle")})
+
+        rc = fleet.cmd_kill(argparse.Namespace(name="mine", yes=False),
+                            run=self._tripwire_run, which=lambda _name: None)
+
+        assert rc == 1
+        data = json.loads((home / "state" / "fleet.json").read_text(encoding="utf-8"))
+        assert data["workers"]["mine"]["status"] == "dead"
 
     def test_clean_refuses_to_sweep_foreign_dead_workers(self, home, monkeypatch, capsys):
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-A")
