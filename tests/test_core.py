@@ -576,6 +576,11 @@ class TestRenderWorkerSettingsTemplate:
 }
 """
 
+    @pytest.mark.skipif(os.name != "nt",
+                        reason="Windows path semantics under test: a "
+                               "backslashed C:\\ input path cannot exist on "
+                               "POSIX (test_renders_using_sys_executable "
+                               "covers the portable path)")
     def test_renders_python_and_fleet_home_with_forward_slashes(self, tmp_path):
         python_exe = r"C:\Python313\python.exe"
         rendered = fleet.render_worker_settings_template(self._TEMPLATE, python_exe, tmp_path)

@@ -27,7 +27,10 @@ POSTCOMPACT = HOOKS_DIR / "postcompact_journal.py"
 STOP_OUTCOME = HOOKS_DIR / "stop_outcome.py"
 TEMPLATE = REPO_ROOT / "worker-settings.template.json"
 
-PY_CMD = ["py", "-3.13"]
+# The running interpreter, not a hardcoded `py -3.13` launcher: the hooks
+# under test are stdlib-only and version-agnostic, and `py` exists only on
+# Windows -- sys.executable keeps this tier green on every platform.
+PY_CMD = [sys.executable]
 
 
 def run_hook(script, stdin_text, fleet_home):
