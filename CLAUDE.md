@@ -5,7 +5,7 @@ System-wide tool: one Claude Code manager session spawns, monitors, steers, and 
 **Start here: `docs/SPEC.md`** — the approved v2 design (post adversarial review; the appendix records every finding and its fix — do not re-litigate them). Build against it milestone by milestone (M1–M5, §13).
 
 Rules:
-- Python is `py -3.13` (bare `python` resolves to 3.10). `bin/fleet.py` is stdlib-only, single file.
+- Python is `py -3.13` (bare `python` resolves to 3.10) — that is this machine's *preference*, not the floor. The floor is `fleet.MIN_PYTHON_VERSION` (3.10), declared once and checked everywhere by `TestInterpreterFloor`; `bin/hooks/run_py.sh` may select any interpreter at or above it, so **changes must run on 3.10** (`py -3.10 -m pytest -q`), not only on 3.13. `bin/fleet.py` is stdlib-only, single file.
 - Hook commands in `worker-settings.json` use FORWARD slashes (Git Bash `sh -c` eats backslashes).
 - Never launch background processes via Git-Bash `&` — detached Popen flags or Start-Process only.
 - Runtime dirs `state/`, `logs/`, `mailbox/` are gitignored; `knowledge/` is git-tracked.

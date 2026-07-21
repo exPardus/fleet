@@ -14,6 +14,19 @@ script="$1"
 shift || true
 
 if [ -n "$FLEET_PYTHON" ]; then
+    # Two legitimate override shapes, and they need opposite quoting:
+    #   * a PATH to an interpreter, which on Windows very often contains a
+    #     space (`C:\Program Files\Python310\python.exe`) and must be quoted;
+    #   * a multi-word COMMAND (`py -3.13`), which must be word-split.
+    # Unquoted-always was the old behaviour: it word-split the spaced path
+    # into `C:\Program`, `exec` failed, and under `set -e` the shim exited
+    # NONZERO with no output -- a hook breaking the session, invariant 2,
+    # and silently. `-x` discriminates exactly: a real executable file takes
+    # the quoted branch, anything else (including `py -3.13`) keeps the
+    # word-split one.
+    if [ -x "$FLEET_PYTHON" ]; then
+        exec "$FLEET_PYTHON" "$script" "$@"
+    fi
     exec $FLEET_PYTHON "$script" "$@"
 fi
 
