@@ -1265,16 +1265,20 @@ def _worker_env(name: str) -> dict:
     `fleet kill` look exactly like the manager that spawned it -- so a worker
     could quietly retire its siblings with no confirmation.
 
-    The re-stamp is MEASURED, not assumed. From inside a live `--bg` worker:
+    The re-stamp is MEASURED, not assumed -- twice, independently, in two
+    different live `--bg` workers:
 
         py -3.13 -c "import os; print(repr(os.environ.get('CLAUDE_CODE_SESSION_ID')))"
-          -> '820762d0-5298-4b1b-9471-4048ea27e278'
+          -> '820762d0-5298-4b1b-9471-4048ea27e278'    (worker mf-fix)
+          -> '1a9374bd-df92-42ad-972a-06693aeef272'    (a later worker)
 
-    which is exactly that worker's own `session_id` in the registry (not the
-    manager's, which is what `spawned_by` holds). So the strip below does not
-    leave a worker session-id-less: it leaves it with its OWN id, and the
-    `caller is None` early-out in `_confirm_destructive` is unreachable from a
-    worker. Pinned by tests/test_destructive_guard.py::TestAWorkerIsNotExempt."""
+    Each read back as exactly that worker's own `session_id` in the registry,
+    not the manager's (the manager's is what `spawned_by` holds). So the strip
+    below does not leave a worker session-id-less: it leaves it carrying its
+    OWN id, and the `caller is None` early-out in `_confirm_destructive` is
+    unreachable from a worker. Pinned at both levels --
+    tests/test_destructive_guard.py::TestAWorkerIsNotExempt (unit) and
+    ::TestAWorkerCallerIsNotExempt (end-to-end, real CLI, real worker env)."""
     env = dict(os.environ)
     env.pop("CLAUDE_CODE_SESSION_ID", None)
     env["FLEET_WORKER"] = name
@@ -2539,15 +2543,29 @@ def _confirm_destructive(action: str, names: list, records: dict, assume_yes: bo
     `fleet kill x < /dev/null`. An agent must pass --yes; there is nothing to
     prompt.
 
-    The `caller is None` early-out does NOT exempt fleet workers -- filed once
-    as a defect, disproved by MEASUREMENT inside a live `--bg` worker, whose
-    CLAUDE_CODE_SESSION_ID read back as its own registry `session_id` (see
-    `_worker_env` for the receipt). `_worker_env` strips the inherited id and
-    the child `claude` re-stamps its own, so `caller` is always a real value in
-    a worker: a worker killing a sibling is foreign (owner = the manager's sid)
-    and is refused. Pinned by
-    tests/test_destructive_guard.py::TestAWorkerIsNotExempt -- reintroduce an
-    exemption here and it goes red."""
+    The `caller is None` early-out does NOT exempt fleet workers. That was
+    filed once as a defect -- "`_worker_env` strips the sid, so every worker
+    presents as the exempted human" -- and disproved by measuring inside a live
+    worker, whose CLAUDE_CODE_SESSION_ID read back as its OWN registry
+    session_id (receipt in `_worker_env`). `caller` is a real value inside a
+    worker, so a worker killing a sibling compares against the MANAGER's sid in
+    `spawned_by`, comes out foreign, and is refused.
+
+    What this raises is the COST of an unacknowledged kill, not its
+    possibility: a worker runs as the same OS user with shell access, so it can
+    set CLAUDE_CODE_SESSION_ID to whatever it likes and no env-or-registry
+    signal here is a security boundary. The guard is aimed at the over-helpful
+    agent that would never think to forge one -- the actual 2026-07-09
+    incident -- and it makes the destructive path explicit rather than
+    incidental. Do not read it as authorization. (Same conclusion the
+    claim-nonce design reached independently: a bearer signal cannot authorize
+    on a substrate with no privilege separation.)
+
+    Pinned at both levels, in both directions:
+    tests/test_destructive_guard.py::TestAWorkerIsNotExempt (unit) and
+    ::TestAWorkerCallerIsNotExempt (end-to-end, real CLI, real worker env) --
+    re-introduce a worker exemption and they go red; delete the human-shell
+    exemption and they also go red."""
     caller = current_caller_session()
     if caller is None:
         return

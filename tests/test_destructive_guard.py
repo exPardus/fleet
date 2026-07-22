@@ -415,6 +415,119 @@ class TestRealCliRefusesCleanly:
         assert data["workers"]["victim"]["status"] == "dead"
 
 
+class TestAWorkerCallerIsNotExempt:
+    """A fleet worker running the CLI is a Claude session like any other.
+
+    Filed once as a defect: "`_confirm_destructive` early-outs on
+    `caller is None`, a worker has no CLAUDE_CODE_SESSION_ID because
+    `_worker_env` strips it, so every worker presents as the exempted human and
+    the guard never challenges the caller class that most needs it."
+
+    It was MEASURED from inside a live `--bg` worker rather than reasoned about,
+    and it is false. In worker `mf-fix`:
+
+        py -3.13 -c "import os; print(repr(os.environ.get('CLAUDE_CODE_SESSION_ID')))"
+          -> '1a9374bd-df92-42ad-972a-06693aeef272'
+
+    which is that worker's own `session_id` in the registry -- not the
+    manager's, which is what `spawned_by` holds. `_worker_env` strips the
+    INHERITED id and the child `claude` then stamps its OWN, so `caller` is a
+    real value inside a worker and the `None` early-out is unreachable there.
+
+    These pin that outcome at the level it was proved at -- the real CLI in a
+    subprocess, with the env a worker actually has -- so a future edit that
+    re-introduces a worker exemption (in the early-out, or by blanking the
+    session id when FLEET_WORKER is set) goes red instead of quietly shipping.
+    """
+
+    # The measured pair, kept verbatim so the receipt above stays checkable.
+    WORKER_SID = "1a9374bd-df92-42ad-972a-06693aeef272"
+    MANAGER_SID = "20fee653-f07e-4208-8c0e-1c737f9119f7"
+
+    def _seed(self, tmp_path, spawned_by, session_id="sid-1"):
+        for sub in ("state", "mailbox", "logs"):
+            (tmp_path / sub).mkdir(exist_ok=True)
+        (tmp_path / "state" / "fleet.json").write_text(json.dumps(
+            {"workers": {"victim": _rec(spawned_by=spawned_by, status="idle",
+                                        session_id=session_id)}}), encoding="utf-8")
+
+    def _run(self, tmp_path, *argv, session, worker=None):
+        """Drive the real CLI with a chosen caller identity.
+
+        `session=None` means a human shell: the variable is ABSENT, not empty.
+        `worker` sets FLEET_WORKER, the marker a launched worker carries."""
+        import os
+        import subprocess
+        env = {**os.environ, "FLEET_HOME": str(tmp_path)}
+        env.pop("CLAUDE_CODE_SESSION_ID", None)
+        env.pop("FLEET_WORKER", None)
+        if session is not None:
+            env["CLAUDE_CODE_SESSION_ID"] = session
+        if worker is not None:
+            env["FLEET_WORKER"] = worker
+        return subprocess.run(
+            [sys.executable, str(Path(fleet.__file__)), *argv],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL, env=env)
+
+    def _status(self, tmp_path):
+        data = json.loads((tmp_path / "state" / "fleet.json").read_text(encoding="utf-8"))
+        return data["workers"]["victim"]["status"]
+
+    def test_a_worker_killing_a_sibling_is_refused(self, tmp_path):
+        # The case the defect claimed was exempt: worker sid as caller, the
+        # manager as the sibling's owner.
+        self._seed(tmp_path, spawned_by=self.MANAGER_SID)
+        out = self._run(tmp_path, "kill", "victim",
+                        session=self.WORKER_SID, worker="mf-fix")
+        assert out.returncode == 1
+        assert "Traceback" not in out.stderr, out.stderr
+        assert "--yes" in (out.stdout + out.stderr)
+        assert self._status(tmp_path) == "idle"
+
+    def test_a_worker_killing_an_unknown_owner_worker_is_refused(self, tmp_path):
+        # `spawned_by` absent -> foreign, never "mine": the guard fails toward
+        # asking, so records written before provenance existed are covered too.
+        self._seed(tmp_path, spawned_by=None)
+        out = self._run(tmp_path, "kill", "victim",
+                        session=self.WORKER_SID, worker="mf-fix")
+        assert out.returncode == 1
+        assert "unknown owner" in (out.stdout + out.stderr)
+        assert self._status(tmp_path) == "idle"
+
+    def test_a_worker_killing_the_worker_it_spawned_proceeds(self, tmp_path):
+        # session_id=None: no live session to `claude stop`, so the CLI goes
+        # straight to the terminal dead mark.
+        self._seed(tmp_path, spawned_by=self.WORKER_SID, session_id=None)
+        out = self._run(tmp_path, "kill", "victim",
+                        session=self.WORKER_SID, worker="mf-fix")
+        assert out.returncode == 0, out.stderr
+        assert self._status(tmp_path) == "dead"
+
+    def test_a_human_shell_keeps_its_exemption(self, tmp_path):
+        # The other direction. fleet has always been a human-driven CLI;
+        # interposing a refusal here breaks every existing script for no gain.
+        self._seed(tmp_path, spawned_by=self.MANAGER_SID, session_id=None)
+        out = self._run(tmp_path, "kill", "victim", session=None)
+        assert out.returncode == 0, out.stderr
+        assert self._status(tmp_path) == "dead"
+
+    def test_the_fleet_worker_marker_alone_does_not_decide_the_verdict(self, tmp_path):
+        """FLEET_WORKER must never be the key (SPEC §6.1).
+
+        The supervisor successor carries FLEET_WORKER and is the one session
+        whose whole purpose is to receive the claim, so a guard keyed on it
+        refuses exactly the wrong caller. It is also an ordinary env var any
+        shell can set or unset. Observed in the field: this file's measurement
+        was taken in a process whose FLEET_WORKER named a DIFFERENT worker than
+        its own registry record -- the marker is not even a reliable identity
+        signal. Ownership is decided by `spawned_by` vs the caller sid, and by
+        nothing else: no sid, no guard, marker or no marker."""
+        self._seed(tmp_path, spawned_by=self.MANAGER_SID, session_id=None)
+        out = self._run(tmp_path, "kill", "victim", session=None, worker="mf-fix")
+        assert out.returncode == 0, out.stderr
+        assert self._status(tmp_path) == "dead"
+
+
 class TestParserFlags:
     @pytest.mark.parametrize("argv", [
         ["kill", "w", "--yes"],
