@@ -1,6 +1,6 @@
 # Spec: Portability (Phase 1.5) — Win/Linux/macOS
 
-**Status:** ready-for-build (C4, 3 reviews + 3 fix waves + boot-identity re-scope, 2026-07-10) — BUILD WAVES REMAIN GATED on the SOAK GATE 1 signature
+**Status:** **SUPERSEDED (native-substrate pivot, 2026-07-13) — do not build against it.** Historical only; see the banner below and `docs/specs/native-substrate.md`. Was `ready-for-build` (C4, 3 reviews + 3 fix waves + boot-identity re-scope, 2026-07-10), gated on a SOAK GATE 1 signature that was never given. The *portability directive* it served survives as a `[PRESCRIPTIVE]` clause in `docs/SPEC.md`'s header and invariant 8; this document's probe-matrix mechanics do not.
 **Inherits:** SPEC.md architecture, ROADMAP.md principles (esp. #5: one platform-adapter module).
 
 **[SUPERSEDED — native-substrate pivot 2026-07-13]** This whole spec's probe-matrix / `boot_identity` / `killpg` liveness design is superseded: process hosting and liveness are now owned by the native daemon (`claude agents`), not PID probing over a detached `Popen`. See `docs/superpowers/specs/2026-07-13-native-agents-pivot-design.md` §3 and `docs/specs/native-substrate.md`. MOVED, not deleted — kept below for history; do not build against it.
