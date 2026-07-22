@@ -626,25 +626,6 @@ class TestInstallHomeGuards:
         fleet._install_autoclean_task(None, force=False)
         assert len(platform_stub["installs"]) == 1
 
-    def test_install_refuses_marker_mismatch(self, home, platform_stub,
-                                             canonical_install, tmp_path_factory):
-        marker = fleet.fleet_home_marker_path()
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(str(tmp_path_factory.mktemp("real-home")), encoding="utf-8")
-        # exact guard phrase, not bare "marker" -- tmp_path embeds the test
-        # name into interpolated paths (see the F2-guard test's comment)
-        with pytest.raises(fleet.FleetCliError, match="marker points at"):
-            fleet._install_autoclean_task(None, force=False)
-        assert platform_stub["installs"] == []
-
-    def test_install_passes_matching_marker(self, home, platform_stub,
-                                            canonical_install):
-        marker = fleet.fleet_home_marker_path()
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(Path(home).resolve().as_posix() + "\n", encoding="utf-8")
-        fleet._install_autoclean_task(None, force=False)
-        assert len(platform_stub["installs"]) == 1
-
     def test_force_overrides_home_guards(self, home, platform_stub):
         fleet._install_autoclean_task(None, force=True)
         assert len(platform_stub["installs"]) == 1
@@ -696,72 +677,56 @@ def init_home(home):
     return home
 
 
-def _seed_canonical_marker():
-    marker = fleet.fleet_home_marker_path()
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(_CANONICAL + "\n", encoding="utf-8")
-    return marker
+class TestInitHomeGuard:
+    """N1 (re-review, MED): `cmd_init --autoclean` evaluates the home guard
+    BEFORE anything is written, so a worktree never gets a scheduled task
+    pinned to it -- the task would outlive `git worktree remove`.
 
+    This class used to be TestInitMarkerGuards and covered a second guard
+    condition: `cmd_init` stamped the global `~/.claude/fleet-home` marker,
+    a worktree init repointed it, and the F2 mismatch guard then compared
+    against a marker that very invocation had just written. Marker and guard
+    were both removed on 2026-07-22 with their only reader (the SessionStart
+    hook). What survives is the worktree half, which was always the real
+    hazard -- plus a new first test pinning that plain `fleet init` writes
+    nothing outside the fleet home at all."""
 
-class TestInitMarkerGuards:
-    """N1 (re-review, MED): cmd_init stamped ~/.claude/fleet-home BEFORE the
-    autoclean home-guards ran -- a worktree `fleet init` repointed the
-    marker (SessionStart/statusline then read the worktree's empty
-    registry), and the F2 marker-mismatch guard compared against a marker
-    the worktree itself had just written, so it could never fire on the
-    real init path."""
+    def test_plain_init_writes_nothing_outside_the_fleet_home(self, init_home):
+        """Why the marker went rather than being kept as a curio: plain
+        `fleet init` used to stamp `~/.claude/` unconditionally, on an
+        invocation that asked for nothing outside the repo. `--statusline`
+        is the one flag that may touch the user's home."""
+        fake_home = fleet.user_settings_path().parent   # conftest's sandbox
+        before = sorted(q.name for q in fake_home.iterdir())
+        rc = fleet.cmd_init(fleet.build_parser().parse_args(["init"]))
+        assert rc == 0
+        assert fleet.instance_settings_path().exists()
+        assert sorted(q.name for q in fake_home.iterdir()) == before
 
-    def test_worktree_plain_init_leaves_marker_untouched(self, init_home):
-        marker = _seed_canonical_marker()
+    def test_worktree_plain_init_still_renders_local_settings(self, init_home):
         (init_home / ".git").write_text("gitdir: C:/x/.git/worktrees/y",
                                         encoding="utf-8")
         rc = fleet.cmd_init(fleet.build_parser().parse_args(["init"]))
-        assert rc == 0  # plain init still renders the worktree's own settings
+        assert rc == 0  # legitimate for testing: settings stay worktree-local
         assert fleet.instance_settings_path().exists()
-        assert marker.read_text(encoding="utf-8").strip() == _CANONICAL
 
     def test_worktree_init_autoclean_refuses_before_any_write(self, init_home,
                                                               platform_stub):
-        marker = _seed_canonical_marker()
         (init_home / ".git").write_text("gitdir: C:/x/.git/worktrees/y",
                                         encoding="utf-8")
         fleet.instance_settings_path().unlink()  # prove nothing gets written
         with pytest.raises(fleet.FleetCliError, match="N1"):
             fleet.cmd_init(fleet.build_parser().parse_args(["init", "--autoclean"]))
-        assert marker.read_text(encoding="utf-8").strip() == _CANONICAL
         assert not fleet.instance_settings_path().exists()
         assert platform_stub["installs"] == []
 
-    def test_canonical_home_init_still_stamps(self, init_home):
-        rc = fleet.cmd_init(fleet.build_parser().parse_args(["init"]))
-        assert rc == 0
-        stamped = fleet.fleet_home_marker_path().read_text(encoding="utf-8").strip()
-        assert stamped == Path(init_home).resolve().as_posix()
-
-    def test_force_restamps_from_worktree(self, init_home):
-        _seed_canonical_marker()
+    def test_force_overrides_the_worktree_guard(self, init_home, platform_stub):
         (init_home / ".git").write_text("gitdir: C:/x/.git/worktrees/y",
                                         encoding="utf-8")
-        rc = fleet.cmd_init(fleet.build_parser().parse_args(["init", "--force"]))
+        rc = fleet.cmd_init(fleet.build_parser().parse_args(
+            ["init", "--autoclean", "--force"]))
         assert rc == 0
-        stamped = fleet.fleet_home_marker_path().read_text(encoding="utf-8").strip()
-        assert stamped == Path(init_home).resolve().as_posix()
-
-    def test_f2_marker_guard_fires_after_attempted_worktree_init(
-            self, init_home, canonical_install, platform_stub):
-        _seed_canonical_marker()
-        (init_home / ".git").write_text("gitdir: C:/x/.git/worktrees/y",
-                                        encoding="utf-8")
-        fleet.cmd_init(fleet.build_parser().parse_args(["init"]))
-        # the marker survived plain init, so the install guard now sees the
-        # mismatch instead of a marker the worktree just wrote. Match the
-        # guard's exact phrase, not the bare word "marker" -- pytest's
-        # tmp_path embeds this TEST'S OWN NAME in the refusal message's
-        # interpolated home path, which made a bare-word match vacuously
-        # green pre-fix.
-        with pytest.raises(fleet.FleetCliError, match="marker points at"):
-            fleet._install_autoclean_task(None, force=False)
-        assert platform_stub["installs"] == []
+        assert len(platform_stub["installs"]) == 1
 
 
 class TestSchedulerInstall:

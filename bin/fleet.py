@@ -274,25 +274,25 @@ def statusline_script_path() -> Path:
     return FLEET_HOME / "bin" / "fleet_statusline.py"
 
 
-def fleet_home_marker_path() -> Path:
-    """~/.claude/fleet-home -- one line: the absolute FLEET_HOME.
-
-    Written by `fleet init`. Exists because the plugin's SessionStart hook may
-    run from a MARKETPLACE CACHE COPY of this repo, whose own location is not
-    the operator's real fleet home; resolving FLEET_HOME from the script's
-    location would make the hook read an empty registry inside the cache while
-    the operator's `fleet` CLI writes somewhere else entirely."""
-    return Path.home() / ".claude" / "fleet-home"
-
-
-def _write_fleet_home_marker() -> None:
-    """Best-effort: a missing marker degrades the hook, never breaks fleet."""
-    path = fleet_home_marker_path()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(Path(FLEET_HOME).resolve().as_posix() + "\n", encoding="utf-8")
-    except OSError:
-        pass
+# The `~/.claude/fleet-home` marker lived here until 2026-07-22. It recorded
+# the absolute FLEET_HOME for ONE reader: the plugin's SessionStart hook,
+# which under a marketplace install runs from a cache copy of this repo whose
+# own `state/` is gitignored and empty, so it could not resolve the real home
+# from its own location. That hook is gone (terminal-surface D7) and the
+# marker had no other reader -- `fleet.py`, `fleet_statusline.py` and both
+# shell shims resolve $FLEET_HOME, else their own location, and the autoclean
+# scheduled task carries an explicit `--fleet-home <path>`.
+#
+# It is deleted rather than kept, because it was fleet's only unconditional
+# write to global machine state: plain `fleet init` stamped `~/.claude/`
+# whether or not the operator had asked for anything outside the repo. That is
+# the same instinct D7 removed from the plugin manifest. `fleet init
+# --statusline` still writes `~/.claude/settings.json`, and that is fine --
+# it is what the flag is for.
+#
+# Do not reintroduce it as a resolution input. A stale marker would silently
+# redirect the CLI -- `fleet clean` and `fleet kill` included -- at a
+# different fleet's registry.
 
 
 def now_iso() -> str:
@@ -2696,22 +2696,24 @@ def cmd_init(args) -> int:
     (hooks run outside fleet.py, spawned by `claude`, so they cannot fall
     back to a bare `py`/`python3` on PATH).
 
-    N1 (re-review, MED): the home guards are evaluated BEFORE anything is
-    written. Previously the marker (and settings) were stamped first and
-    `_install_autoclean_task`'s marker-mismatch guard then compared against
-    a marker this very invocation had just repointed -- it could never fire
-    on the real init path, and a worktree `fleet init` left the machine's
-    SessionStart/statusline reading the worktree's empty registry (a
-    dangling marker once the worktree was deleted). Now: with --autoclean,
-    a guard problem refuses the WHOLE init before any write; without it,
-    the worktree-local settings render (legitimate for testing) but the
-    GLOBAL marker stamp is skipped, loudly. --force overrides both."""
-    marker_problems = _marker_guard_problems()
+    N1 (re-review, MED): the home guard is evaluated BEFORE anything is
+    written. With --autoclean, a guard problem refuses the WHOLE init before
+    any write, so a worktree never gets a scheduled task pinned to it;
+    --force overrides. Plain `fleet init` writes only inside the fleet home
+    and needs no guard.
+
+    Since 2026-07-22 plain `fleet init` writes NOTHING outside the repo. It
+    used to also stamp the global `~/.claude/fleet-home` marker, which is why
+    this guard once had a second condition and this docstring once described
+    a marker-repointing hazard; both went with the marker's only reader (see
+    the note above `_home_guard_problems`). `--statusline` remains the one
+    flag that touches `~/.claude/`, which is what it is for."""
     force = getattr(args, "force", False)
-    if getattr(args, "autoclean", False) and marker_problems and not force:
+    guard_problems = _home_guard_problems()
+    if getattr(args, "autoclean", False) and guard_problems and not force:
         raise FleetCliError(
             "fleet init --autoclean refused before writing anything (N1): "
-            + "; ".join(marker_problems)
+            + "; ".join(guard_problems)
             + " -- run from the canonical fleet home, or rerun with --force")
 
     template_path = template_settings_path()
@@ -2726,16 +2728,9 @@ def cmd_init(args) -> int:
     instance_path.parent.mkdir(parents=True, exist_ok=True)
     instance_path.write_text(rendered, encoding="utf-8")
 
-    if marker_problems and not force:
-        marker_line = "NOT stamped (N1): " + "; ".join(marker_problems) + " (--force to override)"
-    else:
-        _write_fleet_home_marker()
-        marker_line = str(fleet_home_marker_path())
-
     print(f"fleet init: wrote {instance_path}")
     print(f"  python:      {Path(sys.executable).resolve().as_posix()}")
     print(f"  fleet home:  {Path(FLEET_HOME).resolve().as_posix()}")
-    print(f"  marker:      {marker_line}")
 
     if getattr(args, "statusline", False):
         _install_statusline(force=getattr(args, "force", False),
@@ -5841,31 +5836,26 @@ def _autoclean_task_command() -> str:
     return f'"{py}" "{script}" autoclean --fleet-home "{home}"'
 
 
-def _marker_guard_problems() -> list:
-    """N1: the home-guard subset that protects GLOBAL machine state (the
-    ~/.claude/fleet-home marker): the resolved home being a linked git
-    worktree, or an existing marker that already points elsewhere. Shared
-    by `cmd_init`'s marker stamp -- which must evaluate these BEFORE
-    writing anything, or a worktree init repoints the marker and thereby
-    defeats the very marker-mismatch guard the autoclean install relies
-    on -- and by `_install_autoclean_task` (which adds its own
-    script-location check on top). Deliberately EXCLUDES that script
-    check: a sandboxed/relocated home with no .git file and no
-    conflicting marker is a legitimate marker target."""
+def _home_guard_problems() -> list:
+    """N1: the home-guard subset that protects state OUTLIVING this shell --
+    now exactly one condition, the resolved home being a linked git worktree.
+    A scheduled task pinned at a worktree keeps running after `git worktree
+    remove` deletes the tree out from under it.
+
+    Used by `_install_autoclean_task` (which adds its own script-location
+    check on top) and by `cmd_init --autoclean`, which must evaluate it
+    BEFORE writing anything. Deliberately EXCLUDES the script check: a
+    sandboxed or relocated home with no `.git` file is a legitimate target.
+
+    Was `_marker_guard_problems` and carried a second condition -- an existing
+    `~/.claude/fleet-home` marker pointing elsewhere. Both the marker and that
+    check were removed on 2026-07-22 with their only reader (see the note
+    where the marker helpers used to live, above)."""
     home = Path(FLEET_HOME).resolve()
     problems = []
     if (home / ".git").is_file():
         problems.append(f"{home} is a linked git worktree (.git is a file) -- "
                         "a task pinned here dies with the worktree")
-    marker_home = None
-    try:
-        marker = fleet_home_marker_path()
-        if marker.exists():
-            marker_home = Path(marker.read_text(encoding="utf-8").strip()).resolve()
-    except (OSError, ValueError):
-        marker_home = None
-    if marker_home is not None and marker_home != home:
-        problems.append(f"machine fleet-home marker points at {marker_home}, not {home}")
     return problems
 
 
@@ -6044,15 +6034,16 @@ def _install_autoclean_task(interval_hours, force: bool) -> None:
         raise FleetCliError("--autoclean-interval-hours must be 1..23 (schtasks /SC HOURLY /MO)")
 
     # F2 home guards: a scheduled task outlives this shell -- refuse to pin
-    # it to a fleet.py that is not the target home's own copy, to a linked
-    # git worktree (dies with the worktree), or to a home that contradicts
-    # the machine's fleet-home marker. --force overrides all three.
+    # it to a fleet.py that is not the target home's own copy, or to a linked
+    # git worktree (dies with the worktree). --force overrides both. A third
+    # guard (a home contradicting the machine's fleet-home marker) went with
+    # the marker on 2026-07-22.
     home = Path(FLEET_HOME).resolve()
     script = _autoclean_script_path()
     problems = []
     if script.parent.parent != home:
         problems.append(f"this fleet.py ({script}) is not the target home's copy ({home})")
-    problems += _marker_guard_problems()
+    problems += _home_guard_problems()
     if problems and not force:
         raise FleetCliError(
             "autoclean install refused (F2): " + "; ".join(problems) +
@@ -7086,37 +7077,6 @@ def _daemon_wedge_degraded_verdict(pid, refusals):
             f"`claude daemon status` before acting. {NATIVE_DAEMON_WEDGE_REMEDY}")
 
 
-def _doctor_check_fleet_home_marker():
-    """The `~/.claude/fleet-home` marker must exist and point at THIS fleet.
-
-    `_write_fleet_home_marker` is best-effort and swallows OSError, so a failed
-    write leaves no trace. A plugin installed from a marketplace cache then
-    resolves FLEET_HOME to its own cache copy -- whose `state/` is gitignored
-    and empty -- and the SessionStart briefing silently reports a fleet of ZERO
-    workers while the real one is running. This check makes that visible."""
-    marker = fleet_home_marker_path()
-    expected = Path(FLEET_HOME).resolve()
-    if not marker.exists():
-        return ("fleet-home marker", False,
-                f"{marker} is missing -- run `fleet init` (the plugin's SessionStart "
-                f"hook cannot find this fleet without it)")
-    try:
-        recorded = marker.read_text(encoding="utf-8").strip()
-    except OSError as exc:
-        return ("fleet-home marker", False, f"{marker} unreadable: {exc}")
-    if not recorded:
-        return ("fleet-home marker", False, f"{marker} is empty -- run `fleet init`")
-    recorded_path = Path(recorded)
-    if not recorded_path.is_dir():
-        return ("fleet-home marker", False,
-                f"{marker} points at {recorded}, which does not exist -- run `fleet init`")
-    if recorded_path.resolve() != expected:
-        return ("fleet-home marker", False,
-                f"{marker} points at {recorded_path.resolve().as_posix()}, but this fleet is "
-                f"{expected.as_posix()} -- run `fleet init` here to claim it")
-    return ("fleet-home marker", True, f"{marker} -> {expected.as_posix()}")
-
-
 def _doctor_check_hook_errors():
     """Phase1 kernel 1: surface the TAIL of state/hook-errors.log when it is
     nonempty (the swallowed-hook-exception log). Never a hard failure -- a
@@ -7217,7 +7177,6 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
         functools.partial(_doctor_check_claude_agents, workers, which=which, run=run),
         functools.partial(_doctor_check_daemon_wedge),
         functools.partial(_doctor_check_autoclean, run=run),
-        functools.partial(_doctor_check_fleet_home_marker),
         functools.partial(_doctor_check_hook_errors),
         functools.partial(_doctor_check_supervisor_claim),
         functools.partial(_doctor_check_supervisor_handoff),

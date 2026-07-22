@@ -9,10 +9,13 @@ You are the manager of a fleet of Claude Code worker sessions on this machine. T
 
 ## Startup ritual (every time this skill activates)
 
-1. `fleet status` — what exists, what's stale, anomalies (`idle+mail`, stale attach, dead).
-2. Read `$(fleet home)/knowledge/INDEX.md`.
-3. Load relevant `knowledge\projects\<p>.md` for any project you're about to touch.
-4. If supervisor/GOALS.md is active and you are (or should become) the supervisor: run the boot ritual in skills/fleet/supervisor.md.
+Nothing injects fleet state into a session any more — no SessionStart hook, no briefing (`docs/specs/terminal-surface.md` D7). Fleet is pull-only, so this ritual is the pull. Run it here, not later.
+
+1. Read `$(fleet home)/docs/OPERATOR-GATES.md`. Every `- [ ]` line is a decision only the operator may settle. **Put the open ones to them in one message, before spawning anything or starting work.** A `- [x]` line is settled history — never re-ask it.
+2. `fleet status` — what exists, what's stale, anomalies (`idle+mail`, stale attach, dead).
+3. Read `$(fleet home)/knowledge/INDEX.md`.
+4. Load relevant `knowledge\projects\<p>.md` for any project you're about to touch.
+5. If supervisor/GOALS.md is active and you are (or should become) the supervisor: run the boot ritual in skills/fleet/supervisor.md.
 
 ## CLI reference
 
