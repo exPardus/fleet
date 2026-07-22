@@ -2,9 +2,9 @@
 
 **Run a whole team of Claude Code sessions from one seat.** One manager session spawns, steers, and hands off many headless worker sessions across every project on your machine — days-long, multi-project campaigns without babysitting a terminal.
 
-![tests](https://img.shields.io/badge/tests-1406%20passing-brightgreen) ![python](https://img.shields.io/badge/python-3.10%2B%20stdlib--only-blue) ![deps](https://img.shields.io/badge/dependencies-zero-blueviolet) ![platform](https://img.shields.io/badge/platform-Windows%20%2B%20Linux%20verified%20%7C%20macOS%20unreceipted-lightgrey) ![license](https://img.shields.io/badge/license-MIT-lightgrey)
+![tests](https://img.shields.io/badge/tests-1383%20passing-brightgreen) ![python](https://img.shields.io/badge/python-3.10%2B%20stdlib--only-blue) ![deps](https://img.shields.io/badge/dependencies-zero-blueviolet) ![platform](https://img.shields.io/badge/platform-Windows%20%2B%20Linux%20verified%20%7C%20macOS%20unreceipted-lightgrey) ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 
-Workers aren't fire-and-forget processes — they're **durable Claude Code sessions on disk**. They survive crashes, reboots, and the manager's own death. You can steer one mid-turn, drop into any of them for a live interactive hand-off, reset one's context while keeping its work journal, or park one that hit a usage limit and resume it later. It's a single-file, stdlib-only Python CLI plus a few hooks — no daemon of its own, no framework, no dependencies.
+Workers aren't fire-and-forget processes — they're **durable Claude Code sessions on disk**. They survive crashes, reboots, and the manager's own death. You can steer one mid-turn, drop into any of them interactively through Claude Code's agents menu, reset one's context while keeping its work journal, or park one that hit a usage limit and resume it later. It's a single-file, stdlib-only Python CLI plus a few hooks — no daemon of its own, no framework, no dependencies.
 
 📖 **[How it works](docs/concepts.md)** · 🚀 **[Getting started](docs/getting-started.md)** · 🗺️ **[Roadmap](docs/ROADMAP.md)** · 📚 **[All docs](docs/README.md)** · 📐 **[Spec](docs/SPEC.md)**
 
@@ -56,7 +56,7 @@ Claude Code ships its own background agents (`claude --bg`, `claude agents`) —
 
 **State is plain files + a CLI. Every surface is a disposable view.**
 
-The registry, mailboxes, journals, and knowledge live on disk. The statusline, the `/fleet:*` slash commands, the manager session, the SessionStart briefing — all just *read the same files*. Add or drop a surface without touching the core. No surface owns data; no view ever probes a PID, takes a lock, or writes.
+The registry, mailboxes, journals, and knowledge live on disk. The statusline, the `/fleet:*` slash commands, the manager session — all just *read the same files*. Add or drop a surface without touching the core. No surface owns data; no view ever probes a PID, takes a lock, or writes. And nothing is pushed: fleet injects no context into any session, so installing it does not change how a session in an unrelated project starts.
 
 ```mermaid
 flowchart TB
@@ -84,14 +84,14 @@ Every `fleet` command is a short-lived CLI invocation. The registry is the singl
 | **Usage-limit park/resume** | A worker that hits a Claude plan usage limit parks itself (`limited` status, recorded reset horizon) instead of dying silently; `fleet resume-limited` relaunches it once the window passes. |
 | **Durable manager identity** | A boot-claim + heartbeat + hand-off protocol (`fleet sup-boot` / `sup-handoff-*`) so exactly one manager owns the fleet across restarts — and can pass the baton to a successor without dropping a campaign. |
 | **Knowledge loop** | `knowledge/` is git-tracked: an index, playbooks, per-project quirks, and append-only lessons that every manager session reads at startup and writes back to after every campaign. The fleet gets better at running the fleet. |
-| **`fleet doctor`** | 21 health checks in one command — hook wiring, stale sessions, orphaned mailboxes, stale attaches, version pins, autoclean scheduler state, supervisor claim, and more. |
-| **Terminal surface** | Statusline + `/fleet:*` slash commands + SessionStart briefing, shipped as a normal Claude Code plugin. Fleet state visible without typing a command. |
-| **Interactive hand-off** | `fleet attach` opens a worker's actual session in its own terminal; `fleet release` hands it back to headless operation. |
+| **`fleet doctor`** | 22 health checks in one command — hook wiring, stale sessions, orphaned mailboxes, stale attaches, version pins, autoclean scheduler state, supervisor claim, and more. |
+| **Terminal surface** | Statusline + `/fleet:*` slash commands, shipped as a normal Claude Code plugin. The statusline is opt-in (`fleet init --statusline`) and is the only ambient surface; the plugin itself registers no hooks and injects nothing. |
+| **Interactive hand-off** | A worker is a real Claude Code session, so you drop into it through Claude Code — the agents menu (Ctrl+T) or `claude attach <session-id>`. `fleet release` hands a stale `attached` record back to headless. *(`fleet attach` itself currently refuses and redirects there; native attach integration is a later milestone.)* |
 | **Crash-safe by design** | A worker is a durable Claude Code session addressed by `--session-id`/`--resume`, not a process fleet has to keep alive. Fleet runs no persistent process of its own — every `fleet` command is a short-lived CLI invocation. |
 
 ## Quickstart
 
-**Runs today on:** Windows 10+, PowerShell, Git Bash, Python via `py -3.13`, Claude Code CLI `2.1.202+`. Cross-platform (Linux/macOS) is fully specced and `ready-for-build` ([`docs/specs/portability.md`](docs/specs/portability.md)) — not yet shipped.
+**Runs today on:** Windows 10+ (PowerShell + Git Bash) and Linux, both verified by the test suite; macOS shares the POSIX backend but has no receipt yet. Python **3.10+** — this repo's reference box uses `py -3.13`, but the floor is declared once as `fleet.MIN_PYTHON_VERSION` and the suite runs green at it. Claude Code CLI `2.1.202+` (pin-tested at `2.1.217`).
 
 ```powershell
 # 1. Clone, add bin\ to PATH  (bin\ holds fleet.cmd)
@@ -100,7 +100,7 @@ git clone https://github.com/exPardus/fleet.git
 # 2. Render machine-local hook wiring
 fleet init
 
-# 3. Install the plugin (manager skill, /fleet:* commands, SessionStart briefing)
+# 3. Install the plugin (manager skill + /fleet:* commands; registers no hooks)
 claude plugin marketplace add <path-or-github-repo-of-this-clone>
 claude plugin install fleet@claude-fleet
 #    restart Claude Code, verify: claude plugin details fleet
@@ -118,12 +118,12 @@ Then open a Claude Code session, say *"become the fleet manager"*, and spawn you
 | `fleet init` | Render machine-local `worker-settings.json` from the template |
 | `fleet spawn` | Spawn a new worker session |
 | `fleet status` | Show the worker status table |
-| `fleet peek` | Digest of recent stream events (works mid-turn) |
+| `fleet peek` | Digest of the last few substantive transcript records (works mid-turn) |
 | `fleet result` | Final result text of the last completed turn |
 | `fleet wait` | Block until turn(s) end |
 | `fleet send` | Steer a worker (mailbox mid-turn, or a new turn if idle) |
 | `fleet interrupt` | Stop a worker's running turn |
-| `fleet attach` / `release` | Attach an interactive terminal / hand it back to idle |
+| `fleet attach` / `release` | `attach` refuses and points at `claude attach` / the agents menu; `release` returns a stale `attached` record to idle |
 | `fleet respawn` | Fresh session for a worker (the context-reset lever) |
 | `fleet resume-limited` | Relaunch workers parked on a usage limit past their reset horizon |
 | `fleet kill` | Interrupt (if running) and mark a worker dead |
@@ -133,7 +133,7 @@ Then open a Claude Code session, say *"become the fleet manager"*, and spawn you
 
 ## Roadmap
 
-Shipped: core lifecycle (spawn/steer/attach/respawn/knowledge), the terminal surface (statusline, slash commands, plugin), native background-agent dispatch, and a durable supervisor identity with hand-off. Specced and ready-for-build: cross-platform portability. Ahead: a watchtower for continuous monitoring, a Telegram bridge, a local web UI, and a "trust ledger" intelligence layer. Every phase is gated behind a real-usage soak, not a calendar date. Full detail: [`docs/ROADMAP.md`](docs/ROADMAP.md).
+Shipped: core lifecycle (spawn/steer/respawn/knowledge), the terminal surface (statusline, slash commands, plugin), native background-agent dispatch, a durable supervisor identity with hand-off, and a POSIX platform backend (Linux verified, macOS unreceipted). Specced and unbuilt: SDD drift-control (`M-F`) and the fleet index. Ahead: a watchtower for continuous monitoring, a Telegram bridge, a local web UI, and a "trust ledger" intelligence layer. Full detail: [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Why you can trust it
 

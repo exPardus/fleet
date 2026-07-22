@@ -4985,7 +4985,7 @@ class TestCmdDoctorCheckIsolation:
                "'int' object is not iterable" in out
         # checks registered AFTER the crashing one still ran and printed.
         assert "autoclean" in out
-        assert "fleet-home marker" in out
+        assert "hook-errors" in out
         assert "supervisor" in out
         assert rc == 1
 

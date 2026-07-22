@@ -22,12 +22,15 @@ if str(BIN_DIR) not in sys.path:
 def _never_touch_the_real_home(tmp_path_factory, monkeypatch):
     """Redirect every path fleet resolves from `Path.home()` into a tmp dir.
 
-    `cmd_init` stamps `~/.claude/fleet-home` (the marker the SessionStart hook
-    reads to find the real FLEET_HOME) and `fleet init --statusline` writes
-    `~/.claude/settings.json`. Tests that exercise those paths monkeypatched
-    the settings path but not the marker -- so running the SUITE overwrote the
-    developer's real marker with a pytest tmp dir, silently repointing their
-    fleet hook at a directory that no longer exists. Caught 2026-07-09.
+    `fleet init --statusline` writes `~/.claude/settings.json`, and doctor
+    reads `~/.claude/daemon.{lock,log}`. Historically `cmd_init` also stamped
+    `~/.claude/fleet-home` unconditionally: tests monkeypatched the settings
+    path but not the marker, so running the SUITE overwrote the developer's
+    real marker with a pytest tmp dir, silently repointing it at a directory
+    that no longer exists (caught 2026-07-09). That marker was deleted on
+    2026-07-22 along with its only reader, so the specific hazard is gone --
+    but the sandbox is what makes it a class rather than an incident, and any
+    new `Path.home()` path added to fleet lands here by default.
 
     M-E adds the two READ-only daemon paths for a different reason: fleet never
     writes them, but `_doctor_check_daemon_wedge` reads them, and a check whose
@@ -39,8 +42,6 @@ def _never_touch_the_real_home(tmp_path_factory, monkeypatch):
     import fleet
     sandbox = tmp_path_factory.mktemp("fake-home")
     (sandbox / ".claude").mkdir()
-    monkeypatch.setattr(fleet, "fleet_home_marker_path",
-                        lambda: sandbox / ".claude" / "fleet-home")
     monkeypatch.setattr(fleet, "user_settings_path",
                         lambda: sandbox / ".claude" / "settings.json")
     monkeypatch.setattr(fleet, "claude_daemon_lock_path",

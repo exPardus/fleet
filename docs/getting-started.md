@@ -8,13 +8,13 @@ From zero to a running worker in a few minutes. If you haven't yet, skim **[How 
 
 Fleet runs today on:
 
-- **Windows 10+** with **PowerShell** and **Git Bash** present
-- **Python** via `py -3.13` (bare `python` on Windows often resolves to 3.10 — fleet needs 3.13)
-- **Claude Code CLI** `2.1.202+`
+- **Windows 10+** with **PowerShell** and **Git Bash** present, **or Linux**
+- **Python 3.10+** — the reference box uses `py -3.13`, but the floor is `fleet.MIN_PYTHON_VERSION` and the suite runs green at it
+- **Claude Code CLI** `2.1.202+` (pin-tested at `2.1.217`)
 
 Zero third-party dependencies — `bin/fleet.py` is a single stdlib-only file.
 
-> Linux/macOS support is fully specced and `ready-for-build` ([`specs/portability.md`](specs/portability.md)) but not yet shipped. Known gaps are enumerated at the top of [`SPEC.md`](SPEC.md).
+> Windows and Linux are both verified by the test suite. macOS runs the same POSIX backend as Linux but has no receipt yet — treat it as untested, not unsupported. Remaining platform gaps are enumerated at the top of [`SPEC.md`](SPEC.md).
 
 ## Install
 
@@ -27,7 +27,8 @@ git clone https://github.com/exPardus/fleet.git
 #    (fills in this machine's Python path + FLEET_HOME; nothing machine-specific is committed)
 fleet init
 
-# 3. Install the plugin — manager skill, /fleet:* slash commands, SessionStart briefing
+# 3. Install the plugin — manager skill + /fleet:* slash commands
+#    (no hooks: installing fleet does not change how any other session starts)
 claude plugin marketplace add <path-or-github-repo-of-this-clone>
 claude plugin install fleet@claude-fleet
 #    restart Claude Code, then verify:
@@ -44,7 +45,7 @@ Confirm the wiring is healthy any time:
 fleet doctor
 ```
 
-`fleet doctor` runs 21 checks — hook registration, version pins, orphaned mailboxes, stale attaches, the autoclean scheduler, the supervisor claim, and more. A clean run means you're ready.
+`fleet doctor` runs 22 checks — hook registration, version pins, orphaned mailboxes, stale attaches, the autoclean scheduler, the supervisor claim, and more. A clean run means you're ready.
 
 ## Become the manager
 
@@ -102,12 +103,16 @@ fleet send migrate "also add a down-migration, I forgot to ask"
 - If the worker is **working**, the message lands in its mailbox and is injected at the next tool boundary — no attach needed.
 - If it's **idle**, the same command resumes it on a fresh turn with your message as the input.
 
-Need the full interactive experience? Hand off:
+Need the full interactive experience? A worker is a real Claude Code session, so you attach to it **through Claude Code**, not through fleet:
 
 ```powershell
-fleet attach migrate      # drop into the actual session (or use the agents menu / claude attach)
-fleet release migrate     # hand it back to headless operation
+# Ctrl+T in claude opens the agents menu, or address the session directly:
+claude attach <session-id>        # fleet status --json shows the session_id
+
+fleet release migrate             # flip a stale `attached` record back to idle
 ```
+
+> `fleet attach` currently **refuses and redirects** to the above — a `--bg` worker has no fleet-owned terminal to spawn. Native attach integration is a later milestone (`SPEC.md` §7).
 
 ## Reset context without losing the work
 
@@ -165,12 +170,12 @@ For dependent or review-style work (one worker builds, another attacks the diff)
 | `fleet wait` | Block until turn(s) end |
 | `fleet send` | Steer a worker (mailbox mid-turn, or a new turn if idle) |
 | `fleet interrupt` | Stop a worker's running turn |
-| `fleet attach` / `release` | Interactive hand-off / return to headless |
+| `fleet attach` / `release` | `attach` refuses and points at `claude attach` / the agents menu; `release` returns a stale `attached` record to idle |
 | `fleet respawn` | Fresh session, journal carried forward |
 | `fleet resume-limited` | Relaunch usage-limit-parked workers past their reset |
 | `fleet kill` | Interrupt (if running) and mark dead |
 | `fleet clean` / `archive` / `autoclean` | Tiered cleanup and staleness sweeps |
-| `fleet doctor` | Run the 21 health checks |
+| `fleet doctor` | Run the 22 health checks |
 | `fleet sup-*` | Supervisor identity: boot, heartbeat, checkpoint, status, handoff |
 
 Every command's exact contract lives in [`SPEC.md`](SPEC.md) §7.

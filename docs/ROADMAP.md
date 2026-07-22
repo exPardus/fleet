@@ -1,6 +1,18 @@
 # claude-fleet roadmap — the ultimate multi-session programming tool
 
-**Status:** vision v1 (2026-07-07). SPEC.md M1–M5 = Phase 1 here; this doc layers the rest. Nothing in later phases changes Phase-1 architecture — that's the point.
+**Status:** vision v1 (2026-07-07) — **the thesis and design principles below still bind; the phase *sequencing* no longer describes how this project is run.** See the reality banner immediately below before using this as a plan.
+
+> ### ⚠ Reality check (2026-07-23) — this doc and the build record have diverged
+>
+> This roadmap references "SPEC.md M1–M5". **`SPEC.md` is v3 and has no M1–M5** — its §18 milestone list is `M-0 / M-A / M-B / M-C / M-D / M-E / Reconcile / M-F / M-G`, the track the native-substrate pivot started on 2026-07-13. Everything built since then ran on that track, not on the phases below.
+>
+> What that means concretely:
+> - **Phase 1.5 (Portability) is partly shipped and its spec is superseded.** `docs/specs/portability.md` is `SUPERSEDED` — the daemon owns liveness now, so the probe-matrix design it specced is dead. But the *goal* shipped anyway: `_PosixPlatform` is a real backend, Linux is verified by the suite, macOS is unreceipted. The `FLEET_HOME` / `fleet init` moves shipped long ago.
+> - **Phase 1.6 (Terminal surface) shipped**, 2026-07-09.
+> - **The soak gates below are not being enforced.** `SOAK GATE 1 SIGNED` appears nowhere in `knowledge/lessons.md`, yet `docs/PLAN-PROGRESS.md` marks every C3+ row GATED on that signature — while four milestones shipped around it.
+> - Phases 2 through 6 (watchtower, providers, telegram, web UI, intelligence, reach) are **untouched and still accurate as intent.**
+>
+> **Which framing governs is an open operator gate** (`docs/OPERATOR-GATES.md`). Until it is settled, treat the design principles and the Phase 2–6 stubs as live, and the sequencing/soak machinery as history.
 
 ## Why ours wins (thesis)
 
@@ -13,13 +25,15 @@ Design principles (all phases):
 4. **Steal shamelessly, stay small.** Each phase ships a usable increment; no framework-building.
 5. **Runs everywhere.** Windows, Linux, macOS are all first-class. All OS-specific behavior (launch, kill, attach, notify, service install, liveness) lives in ONE platform-adapter module; everything else is pure pathlib/stdlib. No surface or phase may add an OS-specific dependency outside the adapter.
 
-## Phase 1 — Core (= SPEC.md M1–M5, in progress)
+## Phase 1 — Core — **SHIPPED**
 
-Spawn/steer/attach/respawn, mailbox+hooks, journals, doctor, skill, knowledge loop. Done when: first real multi-worker campaign completes and writes lessons.
+Spawn/steer/attach/respawn, mailbox+hooks, journals, doctor, skill, knowledge loop. Done-criterion ("first real multi-worker campaign completes and writes lessons") was met by Campaign 2, 2026-07-09; many campaigns have run since. The v2 "M1–M5" numbering this section used to cite died with the SPEC v3 rewrite — see `SPEC.md` §18 for the live milestone list.
 
-## Phase 1.5 — Portability (Win/Linux/macOS)
+## Phase 1.5 — Portability (Win/Linux/macOS) — **GOAL SHIPPED, SPEC SUPERSEDED**
 
-Ship before Phase 2 (watchtower multiplies OS surface). Spec: `docs/specs/portability.md`. Core moves:
+**Status 2026-07-23:** `_PosixPlatform` is a real backend (crontab autoclean, POSIX atomic append), `grep -c "raise UnsupportedPlatformError" bin/fleet.py` → 0, the interpreter floor is 3.10 and the suite runs green at it, and **Linux is verified — 200 Ubuntu failures went to 0** in the reconcile campaign. macOS shares that backend but is **unreceipted**. The *spec* below is `SUPERSEDED`: the native daemon owns liveness now, so its probe-matrix / `boot_identity` / `killpg` design is dead — the bullets survive as intent, not as a build plan. Remaining: a macOS receipt, and CI matrix (never built).
+
+Ship before Phase 2 (watchtower multiplies OS surface). Spec: `docs/specs/portability.md` *(superseded — read its banner)*. Core moves:
 
 - `fleet init` command generates machine-local artifacts (worker-settings.json with correct python path + FLEET_HOME, shims, PATH help) — nothing machine-specific committed to git.
 - `FLEET_HOME` env var (default: resolved from fleet.py location) replaces every hardcoded `C:/proga/claude-fleet`.
@@ -27,16 +41,16 @@ Ship before Phase 2 (watchtower multiplies OS surface). Spec: `docs/specs/portab
 - Python invocation via `sys.executable` / `python3`, never `py -3.13` outside Windows shims.
 - CI: GitHub Actions matrix (windows/ubuntu/macos) running unit tests + hook smoke tests.
 
-## Phase 1.6 — Terminal surface (fleet inside the Claude Code TUI)
+## Phase 1.6 — Terminal surface (fleet inside the Claude Code TUI) — **SHIPPED** (2026-07-09)
 
-Spec: `docs/specs/terminal-surface.md`. Independent of watchtower; buildable any time after Phase 1.
+Spec: `docs/specs/terminal-surface.md`. Independent of watchtower; buildable any time after Phase 1. Statusline, `/fleet:*` commands and the plugin package all shipped; its binding view rules (no lock, no probe, no write) are now enforced by `tests/test_terminal_surface.py` and restated in `CLAUDE.md`. The SessionStart briefing also shipped here and was **removed on 2026-07-22** (D7) — see below.
 
-Pure UX and packaging — no new capability, no new state, no daemon. One read-only derivation (`fleet.status_snapshot()`: reads `fleet.json` + `mailbox/`, takes no lock, spawns no probe, writes nothing) feeds four views:
+Pure UX and packaging — no new capability, no new state, no daemon. One read-only derivation (`fleet.status_snapshot()`: reads `fleet.json` + `mailbox/`, takes no lock, spawns no probe, writes nothing) fed four views, of which three survive:
 
 - **statusline** — always-on one-line fleet readout under the input box. Dims stale rows rather than asserting liveness it never probed for.
 - **`/fleet:*` slash commands** — read-only commands inline their CLI output; mutating ones route through the model so the permission prompt applies (`fleet kill` is terminal, `fleet clean` deletes journals).
-- **SessionStart briefing** — the SPEC §10 startup ritual, automated. Suppresses itself inside workers via a `FLEET_WORKER` env stamp.
-- **plugin package** — commands + skill + hook. Cannot ship the statusline (Claude Code forbids it); `fleet init --statusline` installs that separately, refusing to clobber a foreign one.
+- ~~**SessionStart briefing** — the SPEC §10 startup ritual, automated. Suppresses itself inside workers via a `FLEET_WORKER` env stamp.~~ **REMOVED 2026-07-22 (D7).** It suppressed itself inside workers but not inside *other projects*: a globally-enabled plugin fires its SessionStart hook in every session on the machine, so opening any unrelated repo injected this fleet's open operator gates, whole worker table and knowledge index into that session. The ritual moved back into the `fleet` skill, where it runs when someone has actually chosen to manage a fleet.
+- **plugin package** — commands + skill, and (since D7) no hooks. Cannot ship the statusline (Claude Code forbids it); `fleet init --statusline` installs that separately, refusing to clobber a foreign one.
 
 Done when: fleet state is visible without typing a command, and `/fleet:overview` answers "where am I" in one screen.
 

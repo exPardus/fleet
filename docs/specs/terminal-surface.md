@@ -10,7 +10,7 @@ Fleet is visible and operable from inside the manager's Claude Code session with
 
 ## Scope
 
-**In:** a read-only snapshot function + `--json`/`--stale-ok` flags on `fleet status`; a statusline script; a `commands/` set; a SessionStart hook; a `.claude-plugin/plugin.json`; `fleet init --statusline`.
+**In:** a read-only snapshot function + `--json`/`--stale-ok` flags on `fleet status`; a statusline script; a `commands/` set; a SessionStart hook *(shipped, then removed — D7)*; a `.claude-plugin/plugin.json`; `fleet init --statusline`.
 
 **Also in (doc deliverables):** ROADMAP gains **Phase 1.6 — Terminal surface** (after Portability, independent of Watchtower); SPEC §3's repo-layout block gains the new paths; SPEC gains a short §15 pointing at this stub. No SPEC body rewrite, no M1–M5 change.
 
@@ -31,7 +31,7 @@ These are the constraints the design is built on. A builder must not assume othe
 
 ### Architectural constraints
 
-- **stdlib only, no pip deps** (SPEC §14). `fleet_statusline.py` and the SessionStart hook obey the same rule as `fleet.py`.
+- **stdlib only, no pip deps** (SPEC §14). `fleet_statusline.py` obeys the same rule as `fleet.py` (as did the SessionStart hook, while it existed).
 - **No view writes.** Nothing in this phase writes `state/fleet.json`, `state/events.jsonl`, or takes `state/fleet.lock`. The single exception in the whole phase is `fleet init --statusline` writing `~/.claude/settings.json` — outside `state/`, once, explicitly, with a backup.
 - **No view probes.** No surface here calls `PLATFORM.get_process_info` or spawns any subprocess on a refresh path.
 - **One derivation, many entry points.** All four surfaces read `fleet.status_snapshot()`. The statusline **imports** it rather than shelling out, so registry-schema knowledge stays inside `fleet.py` and the additive-schema rule (SPEC §4) binds exactly one reader.
@@ -64,7 +64,24 @@ Direct control is preserved — `/fleet:kill pmbot` still kills `pmbot` — it m
 **D4 — a view reports registry corruption; it does not quarantine.** SPEC §11 requires the single writer to quarantine an unparseable `fleet.json` to `fleet.json.corrupt.<ts>`, append a `registry_corrupt` event, and exit 1 loudly. A view must do **none** of that: quarantine is a write, and a statusline refiring every 10 s would quarantine in a loop, shredding operator evidence. Views print `[fleet]: registry unreadable` and exit 0. The next real `fleet` command performs the quarantine. Direct consequence of invariant 6.
 
 <!-- ts-worker-suppression -->
-**D5 — the SessionStart hook suppresses itself inside workers.** A globally-enabled fleet plugin fires its SessionStart hook in **every** Claude Code session on the machine, including every worker turn — injecting a fleet briefing into worker context, wasting tokens and confusing the worker about its role. Guard: `launch_turn` stamps `FLEET_WORKER=<name>` into the child environment; the hook returns empty context when it sees that variable. This is the one `fleet.py` change outside the read path.
+**D5 — the SessionStart hook suppresses itself inside workers.** **[SUPERSEDED — D7, 2026-07-22: the hook is gone, so there is nothing left to suppress. The `FLEET_WORKER` stamp D5 introduced stays, for the reasons in D7.]** A globally-enabled fleet plugin fires its SessionStart hook in **every** Claude Code session on the machine, including every worker turn — injecting a fleet briefing into worker context, wasting tokens and confusing the worker about its role. Guard: `launch_turn` stamps `FLEET_WORKER=<name>` into the child environment; the hook returns empty context when it sees that variable. This is the one `fleet.py` change outside the read path.
+
+<!-- ts-no-sessionstart -->
+**D7 — fleet injects nothing into any session; every fleet surface is pull-only.** *(Operator decision, 2026-07-22. Supersedes D5 and §4.6.)*
+
+D5 got the diagnosis right and the remedy half-right. It saw that a globally-enabled plugin fires its SessionStart hook in **every** session on the machine, and guarded the one case where that was obviously wrong (workers). It did not follow the same reasoning to the case that matters more: **every unrelated project on the machine.** Opening a session in any other repo injected the fleet's whole internal state into that session's context — open operator gates verbatim from `docs/OPERATOR-GATES.md`, every worker in the registry with its name and status regardless of which project it belongs to, and 20 lines of `knowledge/INDEX.md`. Roughly 7,000 characters of one project's governance, delivered into an unrelated project's context window, on every startup, for as long as the plugin stayed installed.
+
+That is cross-project data leakage, and it is a property of the *distribution model*, not of this machine's setup. Fleet is built to be installed the way any other Claude Code plugin is installed. A plugin that is enabled once and then narrates its own internals into every session on the machine is not shippable, and no amount of filtering fixes the shape — a briefing scoped to the current repo is still an injection nobody asked for, and still costs tokens in a session that will never touch the fleet.
+
+Therefore: **no SessionStart hook, and no other injection surface.** `.claude-plugin/plugin.json` declares no `hooks` key at all. Fleet state reaches a session exactly one way — the session asks for it: `fleet status`, the `/fleet:*` commands, or the `fleet` skill's startup ritual, all of which run only when the operator has already chosen to do fleet work.
+
+What the removal costs, stated plainly rather than waved away:
+
+- **The SPEC §10 startup ritual is no longer automated.** It moves back into `skills/fleet/SKILL.md`, where it runs when the skill activates. This is strictly later than a hook, and that is the point: it fires when someone is managing a fleet, not when someone opens an unrelated repo.
+- **Open operator gates no longer arrive before the first tool call.** The 2026-07-21 ask that ratification decisions be put to the operator *before* a session starts work is now met by the skill's startup ritual reading `docs/OPERATOR-GATES.md` as step 1, not by the hook's `_operator_gate_lines`, which is deleted along with it. A manager session still cannot start work without meeting the gates; a session in someone else's repo is no longer told the fleet has any.
+- **A session no longer learns unprompted that a worker is idle with mail.** The statusline (`fleet init --statusline`, D6) remains the ambient surface for that, and unlike the hook it is opt-in, operator-installed, one line, and carries no gate text or knowledge index.
+
+`FLEET_WORKER` survives the hook that motivated it. It is now load-bearing for the supervisor claim guard and the destructive-command guard (`tests/test_destructive_guard.py`, `tests/test_supervisor.py`), which is why `_worker_env` keeps stamping it. The caveat recorded in `docs/SPEC.md` §6.1 still binds: `FLEET_WORKER` means "not the manager session", never "is a registry worker".
 
 <!-- ts-statusline-install -->
 **D6 — `fleet init --statusline` is opt-in and refuses conflicts.** Because a plugin cannot ship a `statusLine` (platform fact above), installation is an explicit, separate step: back up `~/.claude/settings.json`, merge the `statusLine` key without disturbing siblings, and **refuse if a different statusline is already configured** unless `--force`. Plain `fleet init` never touches user settings. Operators commonly run `ccusage` or similar; silently overwriting it is unacceptable.
@@ -79,9 +96,10 @@ state/fleet.json ──┐
 mailbox/*.md ──────┘             │
                                  ├──▶ bin/fleet_statusline.py     (import; every ~10 s)
                                  ├──▶ fleet status --json          (/fleet:* inline exec)
-                                 ├──▶ bin/hooks/sessionstart_fleet.py  (once per manager session)
                                  └──▶ [future] watchtower, web UI
 ```
+
+Every consumer on this diagram is **pulled** by the operator or by a surface they installed on purpose (D7). Nothing here is pushed into a session that did not ask.
 
 Mutating `/fleet:*` commands bypass this path entirely: they invoke the ordinary CLI, which takes `fleet.lock` and recomputes exactly as before. The read surface and the write surface never contend for a lock, because the read surface never takes one.
 
@@ -156,19 +174,19 @@ Mutating (prompt template → model runs the CLI via Bash → permission prompt 
 
 ### 4.5 `.claude-plugin/plugin.json`
 
-Bundles `commands/` and `skills/fleet/SKILL.md` (moved from `skill/SKILL.md`) by convention discovery, and inlines the SessionStart hook registration. Worker hooks stay in `state/worker-settings.json` — unrelated wiring. Ships **no** statusline.
+Bundles `commands/` and `skills/fleet/SKILL.md` (moved from `skill/SKILL.md`) by convention discovery. Worker hooks stay in `state/worker-settings.json` — unrelated wiring. Ships **no** statusline and, since D7, **no hooks at all**: the manifest has no `hooks` key, so installing the plugin adds slash commands and a skill and changes nothing about how any session starts.
 
 **Plugin name is `fleet`, not `claude-fleet`** — the slash-command namespace derives from the plugin name, so `claude-fleet` would yield `/claude-fleet:status`.
 
 **Build findings (verified live 2026-07-09, claude 2.1.204), corrections to the original design:**
 - Declaring `"commands": "./commands"` / `"skills": "./skills"` / `"hooks": "./hooks/hooks.json"` path keys did not work; the reference plugin that does work on this machine (caveman) declares none of them and inlines its hooks object. The manifest now matches that shape. Do not re-add the path keys without evidence. `claude plugin validate .` is the check; it also rejects a string `author` (must be an object) and unquoted YAML frontmatter beginning with `[`.
-- `claude --plugin-dir <path>` loads the plugin for a session but **does not register its SessionStart hook** — the briefing never fires. Testing plugin hooks requires a real install (`claude plugin marketplace add` + `claude plugin install`), not `--plugin-dir`.
+- `claude --plugin-dir <path>` loads the plugin for a session but **does not register its SessionStart hook** — the briefing never fired. Testing plugin hooks requires a real install (`claude plugin marketplace add` + `claude plugin install`), not `--plugin-dir`. *(Historical: the plugin registers no hooks since D7. Kept because it is the only recorded evidence of this platform behaviour, and the next builder who adds any plugin hook will need it.)*
 
 ### 4.5.1 Making it installable for someone else
 
 Three defects surfaced only when the plugin was actually installed and driven. Each was silent.
 
-- **`FLEET_HOME` cannot be resolved from the script's own location.** A marketplace-installed plugin runs from a **cache copy** of this repo, whose `state/` is gitignored and empty. The hook would report a fleet of zero workers while the operator's real fleet is running. Fix: `fleet init` stamps `~/.claude/fleet-home` with the absolute home; the hook resolves `$FLEET_HOME` → marker → own location, and ignores a marker pointing at a missing directory. Verified against a real clone with an empty `state/`.
+- **`FLEET_HOME` cannot be resolved from the script's own location.** A marketplace-installed plugin runs from a **cache copy** of this repo, whose `state/` is gitignored and empty. The hook would report a fleet of zero workers while the operator's real fleet is running. Fix: `fleet init` stamps `~/.claude/fleet-home` with the absolute home; the hook resolves `$FLEET_HOME` → marker → own location, and ignores a marker pointing at a missing directory. Verified against a real clone with an empty `state/`. **[RESOLVED BY DELETION — D7 follow-up, 2026-07-22.]** The hook was the marker's only reader; `fleet.py`, `fleet_statusline.py` and both shell shims resolve `$FLEET_HOME` → own location and never consulted it, and the autoclean scheduled task carries an explicit `--fleet-home`. With the reader gone the marker was removed rather than kept, because stamping it was fleet's only *unconditional* write to global machine state — plain `fleet init` wrote into `~/.claude/` on an invocation that had asked for nothing outside the repo, which is the same instinct D7 removed from the manifest. `fleet init --statusline` remains the one flag that may touch the user's home. **Do not reintroduce the marker as a resolution input:** a stale one would silently redirect the CLI — `fleet clean` and `fleet kill` included — at a different fleet's registry, which is a worse failure than the one it solved.
 - **`py -3.13` is Windows-only.** A plugin hook command is one string run through a shell and cannot branch on OS. Fix: `bin/hooks/run_py.sh` resolves an interpreter (`$FLEET_PYTHON` → `py -3.13` → `python3.x` → `python`, requiring ≥ 3.10) and exits 0 when none exists, preserving invariant 2.
 - **`fleet` did not resolve from bash.** `bin/fleet.cmd` only works from cmd.exe/PowerShell; bash ignores `PATHEXT`. Every read-only slash command inlines `` !`fleet status` ``, which runs under a shell — so `/fleet:status` produced **silent empty output**. Fix: `bin/fleet`, an extensionless POSIX shim, committed mode 755.
 
@@ -176,15 +194,15 @@ Both shell scripts are pinned to LF in `.gitattributes`: a CRLF checkout on Linu
 
 The SPEC §3 repo-layout block gains the new paths.
 
-### 4.6 `bin/hooks/sessionstart_fleet.py`
+### 4.6 `bin/hooks/sessionstart_fleet.py` — **REMOVED (D7, 2026-07-22)**
 
-- Matcher: `startup` and `resume`.
-- Emits `additionalContext`: the snapshot rendered as a compact table, plus doctor-visible anomalies already derivable without probing (`idle+mail`, stale attach, `limited` past reset), plus `knowledge/INDEX.md` lines. Automates the SPEC §10 startup ritual.
-- **Suppressed when `FLEET_WORKER` is set in the environment** (D5) — returns `{}` and exits 0.
-- Exit 0 on every failure path (invariant 2). Read-only (SPEC §4 hook write boundary: this hook writes nothing at all, not even `hook-errors.log`, since it is a manager-side hook and its failures are invisible-by-design).
-- Hard-capped at 10,000 chars; truncates worker rows first, then INDEX lines.
+The hook shipped in Phase 1.6 and was deleted on 2026-07-22 along with the `hooks` key of `.claude-plugin/plugin.json`. It emitted a briefing (open operator gates, the worker table, `knowledge/INDEX.md`) into every session on the machine that was not a worker — including every session in every unrelated project. See D7 for why filtering it was rejected in favour of deleting it.
 
-**Required `fleet.py` change:** `launch_turn` adds `FLEET_WORKER=<name>` to the child env passed to `Popen`. Nothing else in the launch-sequence contract (SPEC §6) moves — the env stamp happens where the child env is already constructed, before the pre-claim is released.
+Nothing replaces it. The startup ritual it automated lives in `skills/fleet/SKILL.md`; the gates it surfaced are read by that ritual's first step.
+
+**The `fleet.py` change it required is retained:** `launch_turn` still stamps `FLEET_WORKER=<name>` into the child env, now for the supervisor and destructive-command guards rather than for hook suppression (D7).
+
+A future injection surface is not forbidden by fiat, but it inherits D7's bar: it must not fire in a session that has not opted into fleet work.
 
 ### 4.7 `fleet init --statusline [--chain | --force]`
 
@@ -210,13 +228,15 @@ This is the **one** place fleet's statusline spawns a subprocess, and a delibera
 
 Governing rule: **a view never fails loudly and never mutates to repair itself.**
 
-| Condition | statusline | `/fleet:*` | SessionStart hook |
-|---|---|---|---|
-| `fleet.json` missing | `[fleet]: not initialized` | CLI's own message | empty context, exit 0 |
-| `fleet.json` unparseable | `[fleet]: registry unreadable` | CLI quarantines + exits 1 (§11) | empty, exit 0 |
-| `FLEET_HOME` unresolvable | print nothing, exit 0 | CLI error | empty, exit 0 |
-| `mailbox/` missing | mail counts = 0 | idem | idem |
-| any unexpected exception | print nothing, exit 0 | CLI's own handling | empty, exit 0 |
+The SessionStart-hook column is dropped here with the hook itself (D7).
+
+| Condition | statusline | `/fleet:*` |
+|---|---|---|
+| `fleet.json` missing | `[fleet]: not initialized` | CLI's own message |
+| `fleet.json` unparseable | `[fleet]: registry unreadable` | CLI quarantines + exits 1 (§11) |
+| `FLEET_HOME` unresolvable | print nothing, exit 0 | CLI error |
+| `mailbox/` missing | mail counts = 0 | idem |
+| any unexpected exception | print nothing, exit 0 | CLI's own handling |
 
 The corrupt-registry row is D4: views report, the writer quarantines.
 
@@ -226,11 +246,11 @@ Unit tier (no claude binary, no OS calls, runs in the CI matrix):
 
 - `status_snapshot()` — golden rows across all five statuses; **monkeypatch `PLATFORM.get_process_info` to raise and assert it is never called** [SUPERSEDED (mechanism only) — native-substrate pivot 2026-07-13: `PLATFORM.get_process_info` is going away with PID-liveness; the assertion this test encodes (the read-only path calls nothing live) still applies to whatever the daemon-roster equivalent is]; assert `state/fleet.lock` is never created; assert `fleet.json` mtime is unchanged after the call; missing-registry and corrupt-registry paths return `ok=False` with the right `reason` and raise nothing.
 - Statusline render — empty registry, missing registry, corrupt registry, all five statuses, `limited` with and without `limit_reset_at`, `limited` past reset (renders `resume-eligible`, launches nothing), stale dimming above/below the 300 s boundary, `NO_COLOR`. Assert **zero subprocesses spawned** and exit 0 on every path including a forced exception.
-- `sessionstart_fleet.py` — exit 0 on every failure path; emits `{}` when `FLEET_WORKER` is set (D5); truncates at 10,000 chars.
+- Plugin manifest — asserts the manifest declares **no** `hooks` key and that no `SessionStart` wiring returns (D7). The leak this removes is invisible from inside the fleet repo, where the briefing looks useful; only a test states that installing the plugin must not change how an unrelated session starts.
 - `launch_turn` — asserts `FLEET_WORKER=<name>` present in the child env; asserts no other launch-sequence step reordered (SPEC §6).
 - `fleet init --statusline` — creates a backup; merges without clobbering sibling keys; refuses a foreign statusline and exits 1; `--force` overwrites; idempotent re-run; plain `fleet init` leaves user settings untouched.
 - Command-file lint — every `commands/*.md` has a `description`; every inline-exec command declares `allowed-tools`; **no mutating command file contains `` !` ``** (D3 enforced, not merely documented).
-- `TestPlatformAdapterBoundary` extended to scan `bin/fleet_statusline.py` and `bin/hooks/sessionstart_fleet.py` — invariant 8 stays lint-enforced as the file set grows.
+- `TestPlatformAdapterBoundary` extended to scan `bin/fleet_statusline.py` — invariant 8 stays lint-enforced as the file set grows. (The lint now globs `bin/**/*.py` and `tools/**/*.py` rather than naming files, so removing one does not shrink its coverage.)
 
 Tier-3 live suite (`FLEET_LIVE=1`): **unaffected.** This phase adds no claude invocation anywhere.
 
@@ -241,13 +261,13 @@ Cites the numbered "Architectural invariants" section of `docs/SPEC.md`. All fou
 - **1 daemonless launch** — every surface here is optional and additive. The CLI works fully with the statusline uninstalled, the plugin absent, and the hook unregistered. The statusline *flags* a resume-eligible `limited` worker; it never launches the resume turn (that stays the explicit `fleet resume-limited` sweep, SPEC §5).
 - **6 single-writer registry** — no surface in this phase writes `fleet.json` or `events.jsonl`, and none takes `fleet.lock`. D4 is this invariant made literal: even registry *corruption* is not repaired from a view.
 - **8 platform-adapter-only OS branching** — the new files add no `os.name`/`sys.platform` branch; the boundary lint is extended to cover them. The Windows PowerShell probe stays where it already is, inside the adapter, untouched. [SUPERSEDED (mechanism only) — native-substrate pivot 2026-07-13: that probe is going away with PID-liveness (`docs/SPEC.md` §6); the invariant itself — no OS branching outside the adapter — is unaffected and stays binding.]
-- **9 one-state-many-views** — `status_snapshot()` is the single derivation; the statusline, the slash commands, the SessionStart hook, and (later) watchtower and the web UI are four views of it holding no independent state. The statusline importing `fleet.py` rather than re-parsing `fleet.json` is this invariant applied to code, not just to data.
+- **9 one-state-many-views** — `status_snapshot()` is the single derivation; the statusline, the slash commands, and (later) watchtower and the web UI are views of it holding no independent state. Removing a view (the SessionStart hook, D7) cost nothing elsewhere, which is the invariant paying out. The statusline importing `fleet.py` rather than re-parsing `fleet.json` is this invariant applied to code, not just to data.
 
 ## Done criteria
 
 - A manager session shows live fleet state under the input box without any command being typed, and the statusline survives a missing, empty, and corrupt registry without ever printing a traceback.
 - `/fleet:overview` answers "where am I" in one screen; `/fleet:kill` still requires a permission prompt.
-- A worker session, spawned while the plugin is globally enabled, receives **no** fleet SessionStart briefing (D5 verified against a real spawn).
+- **No** session — worker, manager, or a session in an unrelated project — receives any fleet-injected context. The plugin manifest declares no hooks (D7). *(Originally: a worker receives no briefing, D5 verified against a real spawn. Widened to every session when the leak into unrelated projects was found, 2026-07-22.)*
 - `fleet init --statusline` refuses to clobber a pre-existing foreign statusline.
 - Unit tier green on all three OSes in CI; `TestPlatformAdapterBoundary` green unmodified in spirit (extended file list only).
 

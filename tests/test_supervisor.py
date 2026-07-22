@@ -1047,23 +1047,16 @@ class TestSupervisorDoctorChecks:
         assert ok is True
 
 
-class TestSessionStartLine:
-    def test_build_context_includes_supervisor_nag(self, sup_home, monkeypatch):
-        import importlib.util
-        # _build_context() short-circuits to "" when status_snapshot() reports
-        # a missing registry ("not_initialized") -- seed an empty-but-valid one
-        # HERE, not in sup_home: the shared fixture must keep the registry
-        # absent so TestSupBoot still covers the registry-unreadable branch.
-        (sup_home / "state" / "fleet.json").write_text(
-            json.dumps({"workers": {}}), encoding="utf-8")
-        hook_path = (fleet.Path(fleet.__file__).resolve().parent / "hooks"
-                     / "sessionstart_fleet.py")
-        spec = importlib.util.spec_from_file_location("sessionstart_fleet", hook_path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        monkeypatch.setattr(mod, "fleet", fleet)   # hook resolves its own fleet import
-        ctx = mod._build_context()
-        assert "SUPERVISOR:" in ctx
+class TestSupervisorStatusLine:
+    """`supervisor_status_line()` was only ever asserted through the
+    SessionStart hook's `_build_context()`. The hook is gone (D7,
+    docs/specs/terminal-surface.md) and the function is not: the statusline
+    and `sup-status` still render it. Tested directly, so its one remaining
+    consumer-independent behaviour keeps a pin."""
+
+    def test_returns_a_supervisor_line_when_a_claim_is_stale(self, sup_home):
+        line = fleet.supervisor_status_line()
+        assert line and line.startswith("SUPERVISOR:")
 
 
 class TestDispatchPathsAreDocumented:
@@ -1184,72 +1177,33 @@ class TestDispatchPathsAreDocumented:
         assert "§6.1" in section12
 
 
-class TestOperatorGatesBriefing:
+class TestOperatorGatesFile:
     """The operator asked (2026-07-21) that ratification decisions be put to
-    them BEFORE a session starts any work. A doc paragraph cannot enforce
-    that; the SessionStart hook can, because it injects context into every
-    manager session automatically. These pin the mechanism.
+    them BEFORE a session starts any work. That used to be enforced by the
+    SessionStart hook, which injected the open gates into every session --
+    including every session in every unrelated project on the machine, which
+    is why the hook is gone (D7, docs/specs/terminal-surface.md, 2026-07-22).
 
-    Read-only, tolerate-and-ignore, exit 0 -- the hook's standing invariants.
-    A gate that fails to surface is a missed prompt; a hook that raises is a
-    broken session start."""
-
-    def _hook(self, monkeypatch):
-        import importlib.util
-        hook_path = (fleet.Path(fleet.__file__).resolve().parent / "hooks"
-                     / "sessionstart_fleet.py")
-        spec = importlib.util.spec_from_file_location("sessionstart_fleet", hook_path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        monkeypatch.setattr(mod, "fleet", fleet)
-        return mod
-
-    def _seed(self, sup_home):
-        (sup_home / "state" / "fleet.json").write_text(
-            json.dumps({"workers": {}}), encoding="utf-8")
-        docs = sup_home / "docs"
-        docs.mkdir(parents=True, exist_ok=True)
-        return docs / "OPERATOR-GATES.md"
-
-    def test_open_gates_lead_the_briefing(self, sup_home, monkeypatch):
-        gates = self._seed(sup_home)
-        gates.write_text(
-            "# Operator gates\n\n## Open\n\n"
-            "- [ ] **Ratify the contract rows** — ratify, reject, or ask for evidence?\n"
-            "- [x] **Already settled** — answered 2026-01-01.\n",
-            encoding="utf-8")
-        ctx = self._hook(monkeypatch)._build_context()
-        assert ctx.startswith("OPERATOR GATES: 1 decision(s)"), ctx[:200]
-        assert "ASK THESE FIRST" in ctx
-        assert "Ratify the contract rows" in ctx
-        # a ticked gate is history, never re-surfaced
-        assert "Already settled" not in ctx
-        # and the rest of the briefing still lands, below them
-        assert ctx.index("OPERATOR GATES") < ctx.index("FLEET:")
-
-    def test_no_open_gates_means_no_banner(self, sup_home, monkeypatch):
-        gates = self._seed(sup_home)
-        gates.write_text("# Operator gates\n\n## Settled\n\n- [x] done — 2026-01-01.\n",
-                         encoding="utf-8")
-        ctx = self._hook(monkeypatch)._build_context()
-        assert "OPERATOR GATES" not in ctx
-        assert "FLEET:" in ctx
-
-    def test_missing_or_unreadable_file_degrades_silently(self, sup_home, monkeypatch):
-        self._seed(sup_home)  # no OPERATOR-GATES.md written at all
-        mod = self._hook(monkeypatch)
-        assert mod._operator_gate_lines() == []
-        ctx = mod._build_context()
-        assert "OPERATOR GATES" not in ctx
-        assert "FLEET:" in ctx
+    The ask now lands one step later: step 1 of the `fleet` skill's startup
+    ritual reads this file, so a session that has chosen to manage the fleet
+    still meets the gates before doing anything. Nothing machine-parses the
+    file any more, so what survives here is the FORMAT pin -- a reader (human
+    or model) following the ritual needs the open/settled distinction to be
+    unambiguous, and a drift that blurs it is invisible from any one gate."""
 
     def test_the_shipped_gates_file_parses_and_has_open_items(self):
-        """The real docs/OPERATOR-GATES.md must actually drive the hook -- a
-        format drift here silently empties the ask-first queue, which is the
-        one failure mode the operator would never see."""
         repo = Path(__file__).resolve().parents[1]
         text = (repo / "docs" / "OPERATOR-GATES.md").read_text(encoding="utf-8")
         open_gates = [ln for ln in text.splitlines() if ln.strip().startswith("- [ ]")]
         assert open_gates, "no open gates parse out of the shipped file"
         for ln in open_gates:
             assert ln.strip().endswith("?"), f"a gate must be a question: {ln[:80]}"
+
+    def test_the_skill_startup_ritual_still_routes_the_operator_to_the_gates(self):
+        """The hook was the enforcement; the skill is now the only one. If the
+        ritual stops naming the gates file, the 2026-07-21 ask is silently
+        unmet and no other test notices."""
+        repo = Path(__file__).resolve().parents[1]
+        skill = (repo / "skills" / "fleet" / "SKILL.md").read_text(encoding="utf-8")
+        ritual = skill.split("## Startup ritual", 1)[1].split("\n## ", 1)[0]
+        assert "OPERATOR-GATES.md" in ritual

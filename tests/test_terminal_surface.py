@@ -495,82 +495,6 @@ class TestWorkerEnvStamp:
         assert "CLAUDE_CODE_SESSION_ID" not in env
 
 
-@pytest.fixture
-def sshook():
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin" / "hooks"))
-    import sessionstart_fleet
-    return sessionstart_fleet
-
-
-class TestSessionStartHook:
-    def test_suppressed_inside_a_worker(self, home, sshook, capsys, monkeypatch):
-        _write_registry(home, {"pmbot": _rec()})
-        monkeypatch.setenv("FLEET_WORKER", "pmbot")
-        monkeypatch.setattr(sshook.sys, "stdin", io.StringIO('{"source":"startup"}'))
-        assert sshook.main() == 0
-        assert capsys.readouterr().out.strip() == "{}"
-
-    def test_emits_briefing_in_a_manager_session(self, home, sshook, capsys, monkeypatch):
-        _write_registry(home, {"pmbot": _rec()})
-        monkeypatch.delenv("FLEET_WORKER", raising=False)
-        monkeypatch.setattr(sshook.sys, "stdin", io.StringIO('{"source":"startup"}'))
-        assert sshook.main() == 0
-        payload = json.loads(capsys.readouterr().out)
-        ctx = payload["hookSpecificOutput"]["additionalContext"]
-        assert payload["hookSpecificOutput"]["hookEventName"] == "SessionStart"
-        assert "pmbot" in ctx and "working" in ctx
-
-    def test_includes_knowledge_index_lines(self, home, sshook, capsys, monkeypatch):
-        _write_registry(home, {})
-        (home / "knowledge").mkdir()
-        (home / "knowledge" / "INDEX.md").write_text("- pmbot.md — quirks\n", encoding="utf-8")
-        monkeypatch.delenv("FLEET_WORKER", raising=False)
-        monkeypatch.setattr(sshook.sys, "stdin", io.StringIO("{}"))
-        sshook.main()
-        assert "pmbot.md" in capsys.readouterr().out
-
-    def test_flags_idle_plus_mail(self, home, sshook, capsys, monkeypatch):
-        _write_registry(home, {"expardus": _rec(status="idle", session_id="s-e")})
-        (home / "mailbox" / "s-e.md").write_text("do the thing", encoding="utf-8")
-        monkeypatch.delenv("FLEET_WORKER", raising=False)
-        monkeypatch.setattr(sshook.sys, "stdin", io.StringIO("{}"))
-        sshook.main()
-        assert "idle+mail" in capsys.readouterr().out
-
-    def test_missing_registry_emits_empty_object_and_exits_zero(self, home, sshook, capsys, monkeypatch):
-        monkeypatch.delenv("FLEET_WORKER", raising=False)
-        monkeypatch.setattr(sshook.sys, "stdin", io.StringIO("{}"))
-        assert sshook.main() == 0
-        assert capsys.readouterr().out.strip() == "{}"
-
-    def test_any_exception_exits_zero_with_empty_object(self, home, sshook, capsys, monkeypatch):
-        def boom():
-            raise RuntimeError("kaboom")
-        monkeypatch.setattr(sshook.fleet, "status_snapshot", boom)
-        monkeypatch.delenv("FLEET_WORKER", raising=False)
-        monkeypatch.setattr(sshook.sys, "stdin", io.StringIO("{}"))
-        assert sshook.main() == 0
-        assert capsys.readouterr().out.strip() == "{}"
-
-    def test_context_truncated_to_ten_thousand_chars(self, home, sshook, capsys, monkeypatch):
-        _write_registry(home, {
-            f"worker-{i:03d}": _rec(session_id=f"s-{i}") for i in range(400)})
-        monkeypatch.delenv("FLEET_WORKER", raising=False)
-        monkeypatch.setattr(sshook.sys, "stdin", io.StringIO("{}"))
-        sshook.main()
-        ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
-        assert len(ctx) <= 10_000
-
-    def test_writes_nothing_at_all(self, home, sshook, capsys, monkeypatch):
-        _write_registry(home, {"pmbot": _rec()})
-        monkeypatch.delenv("FLEET_WORKER", raising=False)
-        monkeypatch.setattr(sshook.sys, "stdin", io.StringIO("{}"))
-        before = sorted(p.name for p in (home / "state").iterdir())
-        sshook.main()
-        assert sorted(p.name for p in (home / "state").iterdir()) == before
-        assert not (home / "state" / "hook-errors.log").exists()
-
-
 COMMANDS_DIR = Path(__file__).resolve().parent.parent / "commands"
 
 READ_ONLY_COMMANDS = {"overview", "status", "peek", "result", "doctor"}
@@ -689,13 +613,27 @@ class TestPluginPackaging:
         assert "commands" not in self.manifest
         assert "skills" not in self.manifest
 
-    def test_manifest_registers_the_sessionstart_hook_inline(self):
-        # Hooks are inlined in plugin.json (caveman's working shape), not
-        # referenced as a separate hooks/hooks.json path.
-        entries = self.manifest["hooks"]["SessionStart"]
-        commands = [h["command"] for e in entries for h in e["hooks"]]
-        assert any("sessionstart_fleet.py" in c for c in commands)
+    def test_manifest_registers_no_hooks_at_all(self):
+        # D7 (docs/specs/terminal-surface.md, 2026-07-22). The plugin shipped a
+        # SessionStart hook that fired in EVERY session on the machine -- so
+        # opening any unrelated project injected this fleet's open operator
+        # gates, its whole worker table, and 20 lines of knowledge/INDEX.md
+        # into that project's context. Installing fleet must not change how a
+        # session that never touches the fleet starts.
+        #
+        # This assertion is the whole guard. The leak is invisible from inside
+        # the fleet repo (where the briefing reads as useful), and a future
+        # hook would be added by someone who never saw the incident.
+        assert "hooks" not in self.manifest
         assert not (REPO / "hooks" / "hooks.json").exists()
+        assert not (REPO / "bin" / "hooks" / "sessionstart_fleet.py").exists()
+
+    def test_no_shipped_file_reintroduces_a_sessionstart_registration(self):
+        # A hook can also arrive via marketplace.json or a settings fragment,
+        # not only via plugin.json's `hooks` key.
+        for rel in (".claude-plugin/plugin.json", ".claude-plugin/marketplace.json"):
+            text = (REPO / rel).read_text(encoding="utf-8")
+            assert "SessionStart" not in text, rel
 
     def test_hook_command_uses_forward_slashes(self):
         # Git Bash sh -c eats backslashes in unquoted strings.
@@ -706,13 +644,13 @@ class TestPluginPackaging:
         # `claude plugin validate` rejects a string author.
         assert isinstance(self.manifest["author"], dict)
 
-    def test_hook_command_goes_through_the_interpreter_shim(self):
-        # A bare `py -3.13` breaks every non-Windows collaborator; the shim is
-        # the one place that resolves an interpreter.
-        entries = self.manifest["hooks"]["SessionStart"]
-        commands = [h["command"] for e in entries for h in e["hooks"]]
-        assert all("run_py.sh" in c for c in commands)
-        assert not any("py -3.13" in c for c in commands)
+    def test_no_manifest_command_hardcodes_an_interpreter(self):
+        # A bare `py -3.13` breaks every non-Windows collaborator; `run_py.sh`
+        # is the one place that resolves an interpreter. The manifest carries
+        # no commands at all since D7, so this asserts the invariant against
+        # the whole file rather than against a hook list that no longer exists.
+        raw = (REPO / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
+        assert "py -3.13" not in raw
 
 
 class TestCollaboratorInstall:
@@ -831,7 +769,6 @@ class TestCollaboratorInstall:
     @pytest.mark.parametrize("rel", [
         "commands", "skills", ".claude-plugin", "bin/fleet",
         "bin/hooks/run_py.sh", "bin/fleet_statusline.py",
-        "bin/hooks/sessionstart_fleet.py",
     ])
     def test_shipped_surfaces_hardcode_no_absolute_fleet_home(self, rel):
         # SPEC §14: FLEET_HOME is resolved (env -> ~/.claude/fleet-home marker
@@ -983,98 +920,47 @@ class TestInterpreterFloor:
         fleet._stash_short_id_note(Hostile(), "ghi789")   # must not raise
 
 
-class TestFleetHomeMarker:
-    """A marketplace-installed plugin runs from a CACHE COPY of this repo whose
-    state/ is gitignored and empty. Resolving FLEET_HOME from the script's own
-    location would make the hook read that empty cache while the operator's CLI
-    writes elsewhere. `fleet init` stamps ~/.claude/fleet-home with the truth."""
+class TestHomeResolution:
+    """The `~/.claude/fleet-home` marker was deleted on 2026-07-22.
 
-    def test_init_writes_the_marker(self, home, monkeypatch, tmp_path, capsys):
-        marker = tmp_path / "dot-claude" / "fleet-home"
-        monkeypatch.setattr(fleet, "fleet_home_marker_path", lambda: marker)
-        (home / "worker-settings.template.json").write_text('{"hooks":{}}', encoding="utf-8")
+    It recorded the absolute FLEET_HOME for exactly ONE reader: the plugin's
+    SessionStart hook, which under a marketplace install runs from a cache
+    copy of this repo whose `state/` is gitignored and empty, so it could not
+    resolve the real home from its own location. The hook went with
+    terminal-surface D7; nothing else ever read the marker, and `fleet init`
+    kept stamping global machine state for it.
 
-        fleet.cmd_init(argparse.Namespace(statusline=False, force=False))
+    What these pin now is the resolution rule that remains, and the fact that
+    no reader has crept back."""
 
-        assert marker.read_text(encoding="utf-8").strip() == home.resolve().as_posix()
+    def test_shipped_scripts_resolve_the_home_the_same_way(self):
+        """Both entry points: $FLEET_HOME, else the script's own repo root.
+        One rule, so a collaborator's clone behaves the same at both."""
+        for rel in ("bin/fleet.py", "bin/fleet_statusline.py"):
+            src = (REPO / rel).read_text(encoding="utf-8")
+            assert 'Path(os.environ["FLEET_HOME"]) if os.environ.get("FLEET_HOME")' in src, rel
+            assert "Path(__file__).resolve().parent.parent" in src, rel
 
-    def test_marker_write_failure_never_breaks_init(self, home, monkeypatch, capsys):
-        def boom():
-            raise OSError("read-only home")
-        monkeypatch.setattr(fleet, "fleet_home_marker_path", boom)
-        (home / "worker-settings.template.json").write_text('{"hooks":{}}', encoding="utf-8")
-        # Best-effort: init still succeeds.
-        with pytest.raises(OSError):
-            fleet.cmd_init(argparse.Namespace(statusline=False, force=False))
+    def test_no_shipped_code_references_the_marker(self):
+        """Reintroducing it as a resolution input would let a stale marker
+        silently redirect the CLI -- `fleet clean` and `fleet kill` included
+        -- at a different fleet's registry. The only surviving mentions are
+        the explanatory notes that say so."""
+        # Match the CONSTRUCTION of the marker path, not the words -- the
+        # explanatory notes and the unrelated "fleet-home root" phrasing for
+        # the worker-settings template both legitimately say "fleet-home".
+        signatures = ('".claude" / "fleet-home"', ".claude/fleet-home'",
+                      'fleet_home_marker_path', '_write_fleet_home_marker')
+        for rel in ("bin/fleet.py", "bin/fleet_statusline.py",
+                    "bin/fleet", "bin/fleet.cmd", "bin/hooks/run_py.sh"):
+            text = (REPO / rel).read_text(encoding="utf-8")
+            for sig in signatures:
+                assert sig not in text, f"{rel} reintroduced {sig}"
 
-    def test_init_never_writes_to_the_real_home(self, home, monkeypatch, tmp_path):
-        # Running the suite once overwrote the developer's real
-        # ~/.claude/fleet-home with a pytest tmp dir, silently repointing their
-        # SessionStart hook at a directory that no longer existed. The autouse
-        # conftest fixture sandboxes it; this test proves nothing reaches
-        # Path.home() directly.
-        real_home = tmp_path / "pretend-real-home"
-        real_home.mkdir()
-        monkeypatch.setattr(fleet.Path, "home", staticmethod(lambda: real_home))
-        (home / "worker-settings.template.json").write_text('{"hooks":{}}', encoding="utf-8")
-
-        fleet.cmd_init(argparse.Namespace(statusline=False, force=False, chain=False))
-
-        assert not (real_home / ".claude").exists(), (
-            "fleet init wrote into the real home despite the conftest sandbox"
-        )
-
-    def test_hook_resolution_order_env_then_marker_then_own_location(self, sshook, tmp_path, monkeypatch):
-        real = tmp_path / "real-fleet"
-        real.mkdir()
-        marker = tmp_path / "fleet-home"
-        marker.write_text(real.as_posix(), encoding="utf-8")
-
-        monkeypatch.setenv("FLEET_HOME", str(tmp_path / "from-env"))
-        assert sshook._resolve_fleet_home() == tmp_path / "from-env"
-
-        monkeypatch.delenv("FLEET_HOME")
-        monkeypatch.setattr(sshook.Path, "home", staticmethod(lambda: tmp_path))
-        (tmp_path / ".claude").mkdir()
-        (tmp_path / ".claude" / "fleet-home").write_text(real.as_posix(), encoding="utf-8")
-        assert sshook._resolve_fleet_home() == real
-
-    def test_doctor_passes_when_the_marker_points_here(self, home, monkeypatch, tmp_path):
-        marker = tmp_path / "fleet-home"
-        marker.write_text(home.resolve().as_posix(), encoding="utf-8")
-        monkeypatch.setattr(fleet, "fleet_home_marker_path", lambda: marker)
-        name, ok, _msg = fleet._doctor_check_fleet_home_marker()
-        assert (name, ok) == ("fleet-home marker", True)
-
-    def test_doctor_flags_a_missing_marker(self, home, monkeypatch, tmp_path):
-        monkeypatch.setattr(fleet, "fleet_home_marker_path", lambda: tmp_path / "absent")
-        _name, ok, msg = fleet._doctor_check_fleet_home_marker()
-        assert ok is False and "fleet init" in msg
-
-    def test_doctor_flags_a_marker_pointing_at_a_missing_dir(self, home, monkeypatch, tmp_path):
-        marker = tmp_path / "fleet-home"
-        marker.write_text(str(tmp_path / "gone"), encoding="utf-8")
-        monkeypatch.setattr(fleet, "fleet_home_marker_path", lambda: marker)
-        _name, ok, msg = fleet._doctor_check_fleet_home_marker()
-        assert ok is False and "does not exist" in msg
-
-    def test_doctor_flags_a_marker_claimed_by_another_fleet(self, home, monkeypatch, tmp_path):
-        # The marketplace-cache failure: the marker points at some OTHER fleet,
-        # so the hook briefs from a registry this CLI never writes.
-        other = tmp_path / "other-fleet"
-        other.mkdir()
-        marker = tmp_path / "fleet-home"
-        marker.write_text(other.as_posix(), encoding="utf-8")
-        monkeypatch.setattr(fleet, "fleet_home_marker_path", lambda: marker)
-        _name, ok, msg = fleet._doctor_check_fleet_home_marker()
-        assert ok is False and "claim it" in msg
-
-    def test_doctor_flags_an_empty_marker(self, home, monkeypatch, tmp_path):
-        marker = tmp_path / "fleet-home"
-        marker.write_text("   \n", encoding="utf-8")
-        monkeypatch.setattr(fleet, "fleet_home_marker_path", lambda: marker)
-        _name, ok, _msg = fleet._doctor_check_fleet_home_marker()
-        assert ok is False
+    def test_fleet_init_is_gone_from_the_marker_business(self):
+        assert not hasattr(fleet, "fleet_home_marker_path")
+        assert not hasattr(fleet, "_write_fleet_home_marker")
+        assert not hasattr(fleet, "_doctor_check_fleet_home_marker")
 
 
 class TestKnowledgeCommand:
@@ -1121,14 +1007,6 @@ class TestKnowledgeCommand:
         assert "!`fleet knowledge`" in body
         assert "${FLEET_HOME" not in body, "shell parameter expansion is not portable across inline shells"
         assert "cat " not in body
-
-    def test_hook_ignores_a_marker_pointing_at_a_missing_dir(self, sshook, tmp_path, monkeypatch):
-        monkeypatch.delenv("FLEET_HOME", raising=False)
-        monkeypatch.setattr(sshook.Path, "home", staticmethod(lambda: tmp_path))
-        (tmp_path / ".claude").mkdir()
-        (tmp_path / ".claude" / "fleet-home").write_text("/nope/not/here", encoding="utf-8")
-        # Falls back to the script's own repo root rather than trusting it.
-        assert sshook._resolve_fleet_home().name != "not"
 
 
 class TestInitStatusline:

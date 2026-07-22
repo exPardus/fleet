@@ -188,7 +188,6 @@ class TestPlatformAdapterBoundary:
         root = self._repo_root()
         scanned = {p.relative_to(root).as_posix() for p in self._scanned_files()}
         assert {"bin/fleet_statusline.py",
-                "bin/hooks/sessionstart_fleet.py",
                 "bin/hooks/stop_outcome.py",
                 "bin/hooks/stop_mailbox.py",
                 "bin/hooks/posttooluse_mailbox.py",
