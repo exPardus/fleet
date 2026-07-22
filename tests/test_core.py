@@ -405,6 +405,47 @@ class TestEvents:
         lines = (isolated_home / "state" / "events.jsonl").read_text(encoding="utf-8").splitlines()
         assert len(lines) == 2
 
+    def test_concurrent_appends_lose_no_records(self, isolated_home):
+        """4 threads x 250 records each -> exactly 1000 parseable records.
+
+        events.jsonl has genuinely concurrent writers (the manager, the
+        scheduled autoclean task, and any worker invoking the CLI), and a
+        plain buffered `open(..., "a")` does NOT append atomically on
+        Windows: the CRT's O_APPEND emulation seeks-then-writes, so whole
+        clean records are dropped with zero JSON-decode errors -- silent
+        loss, not corruption. This is the same 4x250 shape that already
+        pins `append_outcome` (tests/test_native.py::TestOutcomeConcurrency).
+        """
+        n_writers = 4
+        n_per_writer = 250
+
+        def writer(tag):
+            for i in range(n_per_writer):
+                fleet.append_event("turn_started", "probe-1", session_id=tag, seq=i)
+
+        threads = [threading.Thread(target=writer, args=(f"tag{t}",))
+                   for t in range(n_writers)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        text = (isolated_home / "state" / "events.jsonl").read_text(encoding="utf-8")
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        parsed = []
+        bad = 0
+        for ln in lines:
+            try:
+                parsed.append(json.loads(ln))
+            except json.JSONDecodeError:
+                bad += 1
+
+        assert bad == 0
+        assert len(parsed) == n_writers * n_per_writer
+        seen = {(rec["session_id"], rec["seq"]) for rec in parsed}
+        assert seen == {(f"tag{t}", i)
+                        for t in range(n_writers) for i in range(n_per_writer)}
+
 
 # ---------------------------------------------------------------------------
 # Prompt composition + mailbox drain
