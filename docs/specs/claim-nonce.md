@@ -1,8 +1,12 @@
 # Spec: Per-body supervisor claim nonce — divergence detection for the supervisor claim
 
-**Status:** drafting (`me-nonce`, v5 pin-resolution 2026-07-21). **The author of a spec may never promote
-it.** This document is input to a second dual-lens review; only the operator ratifies. Nothing here
-is approved, and nothing here changes the status of any other document.
+**Status:** **spec-of-record — ratified by Altai 2026-07-23.** §7's open question is decided:
+**option (b), a knowingly-bypassable gate**, chosen with §7's accounting read as the price. The
+corrected verb taxonomy (§7) is therefore binding for the build slice, and the three MINOR residuals
+from the final break gate (`a0bd194`) close in that slice before any code ships. Decision record:
+`docs/OPERATOR-GATES.md` §Settled + `knowledge/lessons.md#2026-07-23-operator-decisions`. (History:
+drafted as `me-nonce`, v5 pin-resolution 2026-07-21; the author never promoted it — ratification was
+the operator's act, recorded and committed by the interface session.)
 
 **Mandate:** `docs/reviews/THREE-TIER-ADJUDICATION-2026-07-17.md` §Sequencing item 2 (the slice), and
 `docs/reviews/ME-NONCE-ADJUDICATION-2026-07-21.md` binding re-draft items 1–12 (this wave).
@@ -1784,9 +1788,15 @@ what this spec relies on, and it is unaffected.
 
 ---
 
-## 7. What the claim gates — OPEN, for the operator
+## 7. What the claim gates — DECIDED: option (b) (Altai, 2026-07-23)
 
-**This spec does not decide this.** v1 did, and the gate unwound it. Three-tier adjudication item 2 is
+> **Decision.** The operator chose **(b) — a knowingly-bypassable gate** — with the accounting below
+> read as the price: it is the only option that closes incident 1; the bypass (shell access) is
+> documented, the gate is armed only while the heartbeat is fresh, `autoclean` is structurally
+> exempt, and the corrected verb taxonomy below becomes binding. The section's analysis is preserved
+> unchanged as the record the decision was made against.
+
+**This spec did not decide this.** v1 did, and the gate unwound it. Three-tier adjudication item 2 is
 re-put here with the cost statement corrected.
 
 **What each option does to incident 1 — stated first, because the recommendation has to follow from

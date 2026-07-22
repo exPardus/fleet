@@ -24,6 +24,16 @@ Present the docket below and ask for a decision on each. Use `AskUserQuestion` w
 
 ## The docket
 
+> **Docket outcome, 2026-07-23 (put to Altai in-session):** item 2 **decided — (b), a
+> knowingly-bypassable gate**; the nonce spec is **promoted to spec-of-record**; three-tier (item 4)
+> is **unblocked — re-draft now**, folding in two new operator requirements (tier-model assignment:
+> highest-tier model on the interface session, second-tier on the supervisor; ~200k supervisor swap
+> band, down from 300–500k). Items 1 and 5 **deferred by the operator 2026-07-23** (item 3 was
+> already settled 2026-07-20; deferral quote: "wait on all
+> operator gates, they will be closed in a short amount of time") — as were fleet-index M1, the
+> worker-providers contradiction and the two-roadmaps question from `docs/OPERATOR-GATES.md`.
+> Record: `knowledge/lessons.md#2026-07-23-operator-decisions`; ticks in `docs/OPERATOR-GATES.md`.
+
 **1. `docs/specs/native-substrate.md` — 11 `[PENDING OPERATOR RATIFICATION]` markers across 8 rows.** Ten are the 2.1.212 set from M-D (transient daemon and its idle-exit; `claude daemon stop`'s machine-wide blast radius; the `gone`→success precondition; `stop` firing no Stop hook; the 3-way `rm`/`stop` ambiguity). One is M-E's new 2.1.216 row: the `daemon.lock` PID-reuse wedge. Ratifying makes them contract-of-record — the thing every future spec and pin test is written against. **Recommendation: ratify all eleven.** Each carries executed receipts, and the 2.1.216 row additionally has a shipped detector and a live green pin behind it. The one honest caveat, stated in the rows themselves: three dead-daemon claims remain manager-report-only, because a `--bg` worker is a live daemon client and structurally cannot observe that path.
 
 **2. `docs/specs/claim-nonce.md` — `Status: drafting`, and five open questions.** Two full dual-lens design gates; final verdicts `sound` (break lens, which verified the env-var spoof by *executing* the pure decision function against shipped code, v3's rules and v2's clause) and `fix-list(F1,F2) → closed` (spec lens, 49/49 receipts sound, harness seeded by the reviewer). Adjudication + the manager's own three corrections: `docs/reviews/ME-NONCE-ADJUDICATION-2026-07-21.md`.
