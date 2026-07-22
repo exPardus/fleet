@@ -1,6 +1,6 @@
-# SDD / drift-control subsystem — design (M-E candidate)
+# SDD / drift-control subsystem — design (M-F candidate)
 
-**Status:** DRAFT v3 — folded round-1 (4 lenses: correctness, doctrine, simplicity, feasibility) + round-2 new-defect-hunt (8 findings incl. 1 CRITICAL RCE the round-1 fold introduced; 2026-07-18). Not spec-of-record until the operator ratifies.
+**Status:** v4 — operator-ratified 2026-07-20 (R1–R4, §2/§14); build-ready pending the M-F slot. Folded round-1 (4 lenses: correctness, doctrine, simplicity, feasibility) + round-2 new-defect-hunt (8 findings incl. 1 CRITICAL RCE the round-1 fold introduced; 2026-07-18). Decisions ratified; folds into `docs/SPEC.md` as a first-class § when built (R4).
 **Author:** manager session (supervisor claim-holder). Promotion is operator-gated — the author never self-promotes.
 **Parent spec:** `docs/SPEC.md` v3 (§4 registry, §5 verdict engine, §6 dispatch choke point / `compose_prompt`, §8 hook boundary, §12 supervisor, §14 views, §16 invariants, §17 tests).
 **Prior art scanned:** spec-kit, AWS Kiro, OpenSpec, Tessl, BMAD, Cline/Cursor; EARS, Gherkin, design-by-contract, ADR; Claude Code compaction surfaces, LangGraph/CrewAI/Swarm/AutoGen, OpenHands/Devin, arXiv 2601.04170 "Agent Drift". Summary in §11.
@@ -25,20 +25,27 @@ Today the fleet's anti-drift discipline lives in the campaign-template + knowled
 
 ## 2. Decisions
 
-Locked by operator brainstorming (2026-07-18): (1) built subsystem + doctrine, ships as M-E; (2) drift detection = deterministic tier decides, judge tier advisory-only; (3) one campaign spec, per-worker slices; (4) hybrid enforcement (cheap scope-fence blocks in a hook; full verify at the gate); (5) spec is gated `proposed → review → accepted`, workers refuse a non-accepted spec.
+Locked by operator brainstorming (2026-07-18): (1) built subsystem + doctrine (M-E has since shipped; this is now the M-F candidate); (2) drift detection = deterministic tier decides, judge tier advisory-only; (3) one campaign spec, per-worker slices; (4) hybrid enforcement (cheap scope-fence blocks in a hook; full verify at the gate); (5) spec is gated `proposed → review → accepted`, workers refuse a non-accepted spec.
+
+**Ratified by the operator 2026-07-20** (closing the §14 residuals; these are now binding, not recommendations):
+
+- **(R1) Phase-1 gate ships first, behind an on/off feature flag.** `sdd.enabled` (default **off**) gates the whole subsystem so it can be tested without touching existing campaigns; Phase-2's live fence lands behind the same flag once Phase-1 is proven in a real campaign. A flagged-off fleet behaves exactly as today — no spec fields consulted, no verb effects, no hook.
+- **(R2) Both scopes: a whole-spec scope AND per-worker slices.** Not either/or — the spec always carries a minor whole-spec `scope_allow`/`scope_deny` (the campaign-wide floor every worker is bound by) and slices layer a narrower per-worker fence on top. Effective scope = slice ∩ whole-spec; a slice can only *narrow*, never widen (a slice glob escaping the whole-spec scope → exit 2).
+- **(R3) Both judge paths.** Keep the doctrine step (manager spawns its adversarial reviewer) **and** build `spec verify --judge` to auto-dispatch a reviewer subagent. Still advisory in both forms — the judge never changes the exit code (decision 2 stands).
+- **(R4) Specs are git-tracked from birth** in `docs/specs/campaigns/<campaign>.md`, not runtime `state/`. Once SDD ships, **it folds into `docs/SPEC.md` fully** as a first-class section, not a pointer.
 
 Resolved after review (were sub-decisions / open questions; rationale inline in the sections):
 
 - **Format = fenced ```json block** (not TOML). `tomllib` is read-only stdlib — the mutating verbs need a writer; `json` round-trips in stdlib. (doctrine-1)
 - **Two criteria kinds: `files` + `pytest`.** `grep` dropped — a grep assertion *is* a pytest node, and §17 already mandates a unit test per feature. (simplicity-4)
-- **Enforcement is staged inside M-E: Phase 1 = gate-first (no hook); Phase 2 = the live Stop-hook fence.** The fence is the riskiest, most-defect-dense piece and catches over-reach only; the gate catches the same over-reach plus under-delivery with zero hook-boundary risk. Phase 2 ships once its speced-out fixes (§6a) are built and pinned. This honors decision (4) while sequencing risk. (adversarial-1/3/6/7/10, simplicity-1/5)
-- **Slices are optional.** Default = one whole-spec scope; named per-worker slices when a campaign runs >1 worker — the coordination-drift mechanism ("between workers"). `verify` errors if two slices' `scope_allow` globs intersect. (simplicity-6, open-Q6, the operator's "between workers" ask)
-- **Judge tier-2 = pure doctrine, zero new code.** No `--judge` flag in fleet.py; tier-2 is a campaign-template step — the manager spawns its existing adversarial reviewer against the diff + spec body. (decision-2 kept as advisory; simplicity-2 satisfied — no code)
-- **No author-supplied executable input** (round-2 F1, CRITICAL). The machine block carries only *data* the verifier interprets — criteria `nodes`, scope globs. The runner (`sys.executable -m pytest`) and the tree (`project_root` = the bound worker's `cwd`) are **derived, never author-set**, and `spec accept` signs an `accepted_digest` over the executable fields that `verify` re-checks — because a bound worker has write access to `state/specs` (`--add-dir`) and could otherwise rewrite the contract that gates it into an RCE at the manager's gate.
+- **Enforcement is staged: Phase 1 = gate-first (no hook); Phase 2 = the live Stop-hook fence** — both behind `sdd.enabled` (R1). The fence is the riskiest, most-defect-dense piece and catches over-reach only; the gate catches the same over-reach plus under-delivery with zero hook-boundary risk. Phase 2 ships once Phase-1 is proven in a real campaign and the §6a fixes are built and pinned. This honors decision (4) while sequencing risk. (adversarial-1/3/6/7/10, simplicity-1/5)
+- **Both scopes (R2).** Whole-spec `scope_allow`/`scope_deny` is always present (the campaign floor); per-worker slices narrow it. Effective scope = slice ∩ whole-spec; a slice glob escaping the whole-spec scope → exit 2, as does a pattern-domain intersection between two slices' `scope_allow`. (simplicity-6, open-Q6, the operator's "between workers" ask)
+- **Both judge paths (R3).** `spec verify --judge` auto-dispatches a reviewer subagent **and** the campaign-template doctrine step stands. Advisory in both forms — the judge never moves the exit code. (decision-2)
+- **No author-supplied executable input** (round-2 F1, CRITICAL). The machine block carries only *data* the verifier interprets — criteria `nodes`, scope globs. The runner (`sys.executable -m pytest`) and the tree (`project_root` = the bound worker's `cwd`) are **derived, never author-set**, and `spec accept` signs an `accepted_digest` over the executable fields that `verify` re-checks — because a bound worker has write access to the spec dir (`--add-dir`) and could otherwise rewrite the contract that gates it into an RCE at the manager's gate. **Git-tracking the spec (R4) adds a second, independent tamper surface: a worker edit dirties the fleet worktree and shows up in `git diff`.**
 
 ## 3. Spec artifact
 
-`state/specs/<campaign>.md` — one file per campaign. Runtime dir (gitignored, like `tasks/`/`journals/`/`outcomes/`); moved to `logs/archive/<campaign>/` on close by `archive`/`autoclean` with the other evidence. Two halves.
+`docs/specs/campaigns/<campaign>.md` — one file per campaign, **git-tracked from birth** (R4). Not a runtime artifact: a campaign contract is durable history worth versioning, its edits are reviewable in `git diff` (a second tamper surface over `accepted_digest`, §5), and it survives machine loss and supervisor handoff without an archive step. No `logs/archive/` move on close — git *is* the archive; `spec supersede` marks the lifecycle transition and the file stays. Two halves.
 
 ### 3a. Machine block — a fenced ```json block
 
@@ -100,14 +107,14 @@ Executable fields carry **no free prose** — that keeps the verdict determinist
 
 `fleet spec verify <campaign> [--worker <name>]` (`cmd_spec_verify`):
 
-1. Load + parse the machine block (`json.loads` of the first ```json fence). Malformed → exit 2, loud. If `accepted_digest` is set, recompute the sha256 over the canonicalized executable fields (criteria `nodes`, `scope_allow`/`scope_deny`, slice scopes) and refuse on mismatch (exit 2, tamper) — a bound worker has write access to `state/specs`, so verify must catch a spec whose executable fields were edited after `accept` signed them (round-2 F1).
+1. Load + parse the machine block (`json.loads` of the first ```json fence). Malformed → exit 2, loud. If `accepted_digest` is set, recompute the sha256 over the canonicalized executable fields (criteria `nodes`, `scope_allow`/`scope_deny`, slice scopes) and refuse on mismatch (exit 2, tamper) — a bound worker has write access to the spec dir, so verify must catch a spec whose executable fields were edited after `accept` signed them (round-2 F1).
 2. **Anchor to the bound worker's registered `cwd`** (`before['cwd']` @3794 / `new_worker_record` cwd @608) — **never an author-supplied path.** All `scope`/`nodes`/globs resolve against it, the same tree the Phase-2 hook fences with `git -C <cwd>`, so the two enforcement halves provably resolve identically (round-2 F3). A spec whose fields try to escape `cwd` is rejected (round-2 F1).
 3. Criteria set: all `criteria`, or — with `--worker` — only that slice's ids + its `files` scope check. Slice-overlap guard: reject (exit 2) if two slices' `scope_allow` patterns intersect in the **glob-pattern domain** (prefix / `**` containment reasoning over the pattern strings) — never a filesystem match, which is blind to not-yet-created files that could later collide (round-2 F5, open-Q6).
 4. Run each by kind; unknown kind → FAIL. Collect `{id: PASS|FAIL, detail}`.
-5. **Atomic stamp** to `state/specs/<campaign>.verify.json` via `_write_json_atomic` (@6879 — temp + `os.replace`, atomic on NTFS): `{ts, spec_status, per_criterion, per_slice, overall}`. Includes the spec's current `status` so the view/doctor read it here and never parse the spec file. Concurrent verifies last-writer-win atomically; a torn read is impossible. (doctrine-5, adversarial-8)
+5. **Atomic stamp** to `state/spec-verify/<campaign>.json` (the stamp stays runtime/gitignored — it is derived, regenerated by every verify) via `_write_json_atomic` (@6879 — temp + `os.replace`, atomic on NTFS): `{ts, spec_status, per_criterion, per_slice, overall}`. Includes the spec's current `status` so the view/doctor read it here and never parse the spec file. Concurrent verifies last-writer-win atomically; a torn read is impossible. (doctrine-5, adversarial-8)
 6. Print per-criterion table; **exit 0 all-pass; exit 1 on any criterion FAIL (incl. zero-collect / missing target = under-delivery); exit 2 only on genuine harness failure (runner/interpreter absent, tamper-digest mismatch, malformed spec). Ambiguity resolves toward exit 1** — drift must never hide as infra (round-2 F4). No lock held across the pytest subprocess (F4 lock shape). `verify` is an authoritative command, never a view.
 
-Tier-2 judge is not a flag here — it is the campaign-template step where the manager spawns its existing adversarial reviewer against the diff + spec body (advisory; never gates). (decision-2, simplicity-2)
+**Tier-2 judge, both paths (R3):** `--judge` auto-dispatches a reviewer subagent over the diff + spec body and prints its NOTES; the campaign-template doctrine step (manager spawns its own adversarial reviewer) stands alongside it. Both are **advisory — neither moves the exit code**, and a judge failure/timeout is never a gate failure. (decision-2)
 
 ## 6. Enforcement — staged
 
@@ -132,16 +139,16 @@ A new `stop_specfence.py`, wired **`[stop_outcome, stop_specfence, stop_mailbox]
 ## 7. Binding + durability
 
 - **Registry additions (additive, tolerate-and-ignore on old records, round-tripped by `save_registry` @562/@569):** `spec` (campaign | null), `spec_slice` (slice name | null; only meaningful when slices used), `spec_baseline_sha` (Phase-2; the fence diff base). Added to `new_worker_record`'s returned dict (@606) so they persist; pre-SDD records get them via reader `.get()` defaults. (feasibility-6 verified)
-- **Composition is in `compose_prompt` (@887), not `dispatch_bg`.** `compose_prompt` gains a `spec_section=None` param, threaded from each caller (spawn @2321, respawn @3875, steer, resume). When set, it injects `## BINDING SPEC` into `state/tasks/<name>.md`: the spec path + the worker's scope + owned criteria `ears` lines + an explicit **"re-read your BINDING SPEC (state/specs/<campaign>.md) at the start of every turn"** instruction. `dispatch_bg` still only writes the finished body (@6645). (feasibility-1)
-- **`--add-dir state/specs` is conditional** — added (via a new `specs_dir()` helper) only when the worker is spec-bound, alongside the unconditional `tasks_dir()` `--add-dir` @6659 (least privilege; a spec flag threads to `dispatch_bg`). The bound worker re-reads the whole contract under any mode. `--add-dir` grants **read+write**, so a bound worker can edit its own spec file; the `accepted_digest` re-check at verify (§5/§8) is the defense — a tampered executable field fails the gate loudly rather than silently re-scoping the worker or injecting a malicious runner (round-2 F1). (feasibility-6)
+- **Composition is in `compose_prompt` (@887), not `dispatch_bg`.** `compose_prompt` gains a `spec_section=None` param, threaded from each caller (spawn @2321, respawn @3875, steer, resume). When set, it injects `## BINDING SPEC` into `state/tasks/<name>.md`: the spec path + the worker's scope + owned criteria `ears` lines + an explicit **"re-read your BINDING SPEC (docs/specs/campaigns/<campaign>.md) at the start of every turn"** instruction. `dispatch_bg` still only writes the finished body (@6645). (feasibility-1)
+- **`--add-dir <FLEET_HOME>/docs/specs/campaigns` is conditional** — added (via a new `specs_dir()` helper) only when the worker is spec-bound, alongside the unconditional `tasks_dir()` `--add-dir` @6659 (least privilege; a spec flag threads to `dispatch_bg`). The bound worker re-reads the whole contract under any mode. `--add-dir` grants **read+write**, so a bound worker can edit its own spec file; the `accepted_digest` re-check at verify (§5/§8) is the defense — a tampered executable field fails the gate loudly rather than silently re-scoping the worker or injecting a malicious runner (round-2 F1). (feasibility-6)
 - **Respawn explicitly carries the binding.** `_cmd_respawn_native` copies `spec`/`spec_slice` from `before` (like it hand-copies cost/retired_sids @3858-3860) and **re-stamps** `spec_baseline_sha = HEAD`. Without this, respawn — the reset lever §9 names — silently unbinds the worker. A unit test asserts a spec-bound worker is still bound after a plain `respawn`. (adversarial-2, feasibility-5)
-- **Compaction: no re-injection hook in v1.** Durability rests on `--add-dir state/specs` (the contract is a file the worker re-reads) + the per-turn re-read instruction, mirroring how the journal/task-file already survive as on-disk state. `postcompact_journal.py` emits no context today (@176-179, disk-append only), PostCompact `additionalContext` support is unverified, and adding a context-injecting emission is net-new hook capability. Deferred to a v2 investigation gated on empirically confirming PostCompact stdout injection. (adversarial-6, feasibility-2, simplicity-5)
+- **Compaction: no re-injection hook in v1.** Durability rests on `--add-dir` of the git-tracked spec dir (the contract is a file the worker re-reads) + the per-turn re-read instruction, mirroring how the journal/task-file already survive as on-disk state. `postcompact_journal.py` emits no context today (@176-179, disk-append only), PostCompact `additionalContext` support is unverified, and adding a context-injecting emission is net-new hook capability. Deferred to a v2 investigation gated on empirically confirming PostCompact stdout injection. (adversarial-6, feasibility-2, simplicity-5)
 
 ## 8. Lifecycle verbs
 
 | verb | behavior |
 |---|---|
-| `spec new <campaign> [--from-goals]` | scaffold `state/specs/<campaign>.md`, `status="proposed"`, `author=<durable actor>`. `--from-goals` seeds Context from `supervisor/GOALS.md`. No `--project-root`: the verify/fence tree is always the bound worker's registered `cwd` (round-2 F1/F3), resolved at verify time, not stored in the spec. |
+| `spec new <campaign> [--from-goals]` | scaffold `docs/specs/campaigns/<campaign>.md` (git-tracked, R4), `status="proposed"`, `author=<durable actor>`. `--from-goals` seeds Context from `supervisor/GOALS.md`. No `--project-root`: the verify/fence tree is always the bound worker's registered `cwd` (round-2 F1/F3), resolved at verify time, not stored in the spec. |
 | `spec accept <campaign>` | `proposed → accepted`, single-writer under `fleet.lock`. **Refuses if `accepted_by == author`** where identity is the **durable actor** (claim-holder / operator), not a per-session incarnation, **and** if `reviewed_by` is empty or names the author. `reviewed_by` must reference a review doc whose reviewer ≠ author. On accept, stamps `accepted_digest` = sha256 of the canonicalized executable fields, so post-accept tampering by a bound worker is caught at verify (round-2 F1). (doctrine-2) |
 | `spec verify <campaign> [--worker N]` | §5. |
 | `spec supersede <old> <new>` | mark `<old>` `superseded`, set `superseded_by`; **emits a `spec_superseded` event and surfaces every worker still bound to `<old>` loudly** (status flag + doctor), so a bound worker isn't left fencing a dead contract (Phase-2 fence re-reads live status each turn → superseded injects "halt, await re-bind"). (adversarial-9) |
@@ -153,7 +160,7 @@ A new `stop_specfence.py`, wired **`[stop_outcome, stop_specfence, stop_mailbox]
 
 ## 9. Supervisor ↔ worker sync (the core ask)
 
-One shared spec authored from `GOALS.md` → every worker sees the same contract; optional slices partition scope so >1 worker cannot collide (coordination-drift). The stamp + status flag are the supervisor's at-a-glance "who is on contract." The spec is a file → survives supervisor handoff/seizure (soul-is-files, SPEC §12); the successor reads `state/specs/` + the stamp like the journal. When a worker drifts past self-correction, `respawn --spec <same>` is the DAR-style hard reset onto the unchanged contract — **and now actually stays bound** (§7).
+One shared spec authored from `GOALS.md` → every worker sees the same contract; optional slices partition scope so >1 worker cannot collide (coordination-drift). The stamp + status flag are the supervisor's at-a-glance "who is on contract." The spec is a file → survives supervisor handoff/seizure (soul-is-files, SPEC §12); the successor reads `docs/specs/campaigns/` + the stamp like the journal — and because it is git-tracked, it survives machine loss too. When a worker drifts past self-correction, `respawn --spec <same>` is the DAR-style hard reset onto the unchanged contract — **and now actually stays bound** (§7).
 
 ## 10. Testing
 
@@ -171,23 +178,37 @@ One shared spec authored from `GOALS.md` → every worker sees the same contract
 ## 12. Invariant + doctrine additions
 
 - **SPEC.md new § "Spec-driven development / drift control"** (prescriptive), plus **10th invariant:** *every campaign worker binds to an accepted spec; drift is deterministically verified at a gate (scope + criteria), judged advisorily (intent), and reset by respawn (DAR); the live Stop-fence is advisory self-correction, never the acceptance stop.*
-- **Campaign-template:** a campaign opens `spec new → dual-lens review → spec accept` before workers spawn; `spec verify` at the merge gate; the tier-2 judge is the manager's existing adversarial reviewer; the spec archives with the campaign evidence.
+- **Campaign-template:** a campaign opens `spec new → dual-lens review → spec accept` before workers spawn; `spec verify` at the merge gate; the tier-2 judge runs both ways (`--judge` + the manager's own reviewer); the spec is git-tracked, so it needs no archive step.
 - **Hook boundary (SPEC §8):** the Phase-2 scope-fence hook is added to the sanctioned Stop-chain writers (writes only `hook-errors.log`; reads registry+spec read-only; ordering `[stop_outcome, stop_specfence, stop_mailbox]`).
 
 ## 13. Milestone
 
-**M-E: SDD / drift-control**, built in dependency order:
-1. **Artifact + verifier + criteria kinds** (`spec new/accept/verify/supersede`, JSON block, `files`+`pytest`, project-root anchoring, atomic stamp, durable-actor promotion guard). — the deterministic gate, the core value.
+**M-F: SDD / drift-control** (M-E shipped 2026-07-21 — daemon-wedge detection, shipped-defect fixes, claim-nonce spec). Built in dependency order, **all of it behind `sdd.enabled` (default off, R1)**:
+
+0. **Feature flag** (`sdd.enabled`) + its off-path test: a flagged-off fleet consults no spec field, changes no verb behavior, wires no hook — byte-identical dispatch to today. This lands *first* so every later slice is testable in isolation without risking live campaigns.
+1. **Artifact + verifier + criteria kinds** (`spec new/accept/verify/supersede`, JSON block, `files`+`pytest`, worker-cwd anchoring, atomic stamp, durable-actor promotion guard, `accepted_digest`). — the deterministic gate, the core value.
 2. **Binding + carry-forward** (`spawn/respawn --spec`, `compose_prompt` spec_section, conditional `--add-dir`, `specs_dir()`, respawn carry + baseline re-stamp, refuse-proposed).
 3. **Surfacing** (`status` flags + `_doctor_check_spec_drift`, all stamp-read).
-4. **Phase-2 live Stop-fence** (`stop_specfence.py`, touched-path union, baseline lifecycle, fail-open surfacing, blocked-outcome tagging) — after 1–3 are green and pinned.
-5. **Docs + 10th invariant + campaign-template + terminal-surface lint.**
+4. **`--judge` auto-dispatch** (R3) — advisory NOTES only, never moves the exit code; a judge failure/timeout is not a gate failure.
+5. **Phase-2 live Stop-fence** (`stop_specfence.py`, touched-path union incl. the ignored query, baseline lifecycle, fail-open surfacing, blocked-outcome tagging) — only after 1–3 are green, pinned, **and proven in one real flagged-on campaign**.
+6. **Fold into `docs/SPEC.md` fully** (R4): a first-class § plus the 10th invariant, campaign-template, and terminal-surface lint — not a pointer to this file. This design doc becomes history once folded, like the v2 body.
 
-Path: this spec-task → dual-lens review (adversarial + doctrine) → operator ratification → build. Gated on operator ratification like every fleet milestone.
+Path: this spec-task → dual-lens review (done, 2 rounds) → operator ratification (R1–R4 given 2026-07-20) → build. The flag is what makes "gate it first in order to test it" real: SDD ships dark, is exercised on one campaign, and only then earns default-on.
 
-## 14. Residual operator decisions (surfaced by review; author's rec in bold)
+## 14. Operator decisions — RESOLVED 2026-07-20
 
-1. **Enforcement staging:** **Phase-1 gate ships first; Phase-2 live fence as fast-follow *within* M-E** — the fence is the defect-dense piece; staging de-risks it. Alternative: build both together within M-E. Either way both halves land in M-E — decision (4) is hybrid, so deferring the fence *out* of M-E is out of scope (round-2 F7).
-2. **Slices default:** **whole-spec by default, named slices only for >1-worker campaigns.** (Alternative: always require a slice per worker.)
-3. **Judge tier-2:** **doctrine-only, no fleet.py code** (manager spawns its existing reviewer). (Alternative: build a `--judge` auto-dispatch.)
-4. **Spec file home:** **`state/specs/` runtime, archived on close.** (Alternative: `docs/specs/` git-tracked from birth — a campaign contract is arguably worth versioning; costs a git-write path and loses the runtime-hygiene story.)
+All four §14 residuals are closed; see §2 R1–R4 for the binding text.
+
+| # | Question | Ruling |
+|---|---|---|
+| 1 | Enforcement staging | **Phase-1 gate first, behind an on/off feature flag** (`sdd.enabled`, default off) so it can be tested before it binds anything. Phase-2 fence follows once Phase-1 is proven. |
+| 2 | Slices | **Both** — a minor whole-spec scope *and* per-worker slices layered on it (slice ∩ whole-spec; a slice may only narrow). |
+| 3 | Judge tier-2 | **Both** — build `--judge` auto-dispatch *and* keep the doctrine step. Advisory either way. |
+| 4 | Spec home | **Git-tracked** (`docs/specs/campaigns/`) from birth; once SDD ships it folds into `docs/SPEC.md` fully. |
+
+## 15. Out of scope for M-F — raised 2026-07-20, needs its own spec
+
+Two asks arrived from a teammate after ratification. Neither is folded here; both are recorded so they are not lost, and both are **milestone-sized, not M-F amendments**.
+
+- **Cross-platform agent runtimes** (Hermes, OpenCode, Claude Code, Codex, Cursor). Fleet is `claude --bg` all the way down — the native-substrate contract (`docs/specs/native-substrate.md`, G1–G13), the roster join, the outcome store, and every hook are Claude-Code-shaped. Supporting other runtimes is an **agent-runtime adapter layer**, a peer of the platform adapter (invariant 8), and a larger change than the native pivot itself. **Relevant to SDD:** the split already in this design is the portable seam — the **Phase-1 gate is runtime-agnostic** (markdown + git + a test runner; nothing Claude-specific), while the **Phase-2 Stop-hook fence is Claude-Code-only**. A cross-runtime fleet would keep the gate and re-implement the fence per runtime, or ship gate-only on runtimes without a hook boundary. Building SDD gate-first (R1) therefore *helps* this later work rather than blocking it.
+- **Agent↔agent verification / an isolated oracle.** The concern: with no human in the loop, an agent's only evidence about another agent's work is that agent's own claim — so a compromised or merely deranged worker can propagate bad state, and workers can spiral passing tasks to each other. This is the same threat model this design already answers in three places — the deterministic tier *decides* and the judge is only advisory (decision 2), `accepted_digest` catches a worker rewriting the contract that gates it (round-2 F1), and git-tracking adds a second tamper surface (R4). What is **not** yet designed is a *standalone oracle process* that independently re-derives task + output + context and is not itself an agent in the chain. That is a real gap and a good candidate for the milestone after M-F; the SDD verifier is its natural substrate (it is already non-agentic and deterministic), but the isolation, the trust boundary, and the loop-detection are unspeced.
