@@ -1045,7 +1045,20 @@ def _worker_env(name: str) -> dict:
     CLAUDE_CODE_SESSION_ID is STRIPPED (§5.1 provenance): the child `claude`
     stamps its own, and an inherited one would make a worker running
     `fleet kill` look exactly like the manager that spawned it -- so a worker
-    could quietly retire its siblings with no confirmation."""
+    could quietly retire its siblings with no confirmation.
+
+    That the child re-stamps is MEASURED, not assumed. From inside live worker
+    `mf-fix`:
+
+        py -3.13 -c "import os; print(repr(os.environ.get('CLAUDE_CODE_SESSION_ID')))"
+          -> '1a9374bd-df92-42ad-972a-06693aeef272'
+
+    which is that worker's own registry `session_id`, not the manager's (the
+    manager's is what `spawned_by` holds). So this strip does not leave a
+    worker session-id-less: it leaves it carrying its OWN id, which is why the
+    `caller is None` early-out in `_confirm_destructive` is unreachable from a
+    worker. Pinned end-to-end by
+    tests/test_destructive_guard.py::TestAWorkerCallerIsNotExempt."""
     env = dict(os.environ)
     env.pop("CLAUDE_CODE_SESSION_ID", None)
     env["FLEET_WORKER"] = name
@@ -2215,7 +2228,28 @@ def _confirm_destructive(action: str, names: list, records: dict, assume_yes: bo
     the two apart on Windows anyway: Git Bash's `/dev/null` is `NUL`, a
     CHARACTER DEVICE, so `sys.stdin.isatty()` returns True under
     `fleet kill x < /dev/null`. An agent must pass --yes; there is nothing to
-    prompt."""
+    prompt.
+
+    The `caller is None` early-out does NOT exempt fleet workers. That was
+    filed once as a defect -- "`_worker_env` strips the sid, so every worker
+    presents as the exempted human" -- and disproved by measuring inside a live
+    worker, whose CLAUDE_CODE_SESSION_ID read back as its OWN registry
+    session_id (receipt in `_worker_env`). `caller` is a real value inside a
+    worker, so a worker killing a sibling compares against the MANAGER's sid in
+    `spawned_by`, comes out foreign, and is refused.
+
+    What this raises is the COST of an unacknowledged kill, not its
+    possibility: a worker runs as the same OS user with shell access, so it can
+    set CLAUDE_CODE_SESSION_ID to whatever it likes and no env-or-registry
+    signal here is a security boundary. The guard is aimed at the over-helpful
+    agent that would never think to forge one -- the actual 2026-07-09
+    incident -- and it makes the destructive path explicit rather than
+    incidental. Do not read it as authorization.
+
+    Pinned end-to-end by
+    tests/test_destructive_guard.py::TestAWorkerCallerIsNotExempt (real CLI,
+    real worker env), in both directions: re-introduce a worker exemption and
+    it goes red; delete the human-shell exemption and it also goes red."""
     caller = current_caller_session()
     if caller is None:
         return
