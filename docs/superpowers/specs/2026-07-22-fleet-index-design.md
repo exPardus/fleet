@@ -16,7 +16,7 @@ Fleet's dominant cost is workers re-reading the same code. Five surfaces contrib
 4. **Respawn** — `fleet respawn` resets context, so the fresh session re-learns what it already knew.
 5. **Incidental reads** — reading files for reasons other than orientation.
 
-`bin/fleet.py` is 7832 lines. A worker that Reads it to find one function pays for all of it.
+`bin/fleet.py` is 8706 lines. A worker that Reads it to find one function pays for all of it.
 
 ## 2. What is not achievable
 
@@ -25,7 +25,7 @@ Fleet's dominant cost is workers re-reading the same code. Five surfaces contrib
 This was checked before design, and it rules out the intuitive framing ("let workers share what they've read"). The achievable levers are exactly two:
 
 - **Fewer reads** — the worker already knows the thing, so it never issues the call.
-- **Smaller reads** — the worker gets 40 lines instead of 7832.
+- **Smaller reads** — the worker gets 40 lines instead of 8706.
 
 Every component below serves one of those. Anything claiming cross-session dedup is wrong.
 
@@ -51,7 +51,7 @@ This design does not contradict that finding — it applies it:
 - The index stores **exact derived facts** — real signatures, real line numbers — never summaries treated as truth.
 - Grep on the raw repo keeps working, untouched. The index is strictly additive.
 
-Plain grep's weakness was never accuracy; it is that grepping a 7832-line file returns heavy surrounding context and workers do many rounds. The fix is to **give grep a denser corpus**, not to replace it. `symbols.tsv` is that corpus, and it is itself a grep target.
+Plain grep's weakness was never accuracy; it is that grepping a 8706-line file returns heavy surrounding context and workers do many rounds. The fix is to **give grep a denser corpus**, not to replace it. `symbols.tsv` is that corpus, and it is itself a grep target.
 
 Prior art: this is a `tags` file. Line-oriented, plain-text, portable, ~40 years of use across every OS.
 
@@ -81,7 +81,7 @@ One line per indexed file. Tab-separated, no header, sorted by path.
 
 ```
 path	hash	lines	lang
-bin/fleet.py	a3f21c8e	7832	python
+bin/fleet.py	a3f21c8e	8706	python
 docs/SPEC.md	91b4de07	275	markdown
 ```
 
@@ -110,7 +110,7 @@ Density is the point: no repeated field names, so a grep hit is nearly all signa
 Per-file outline, mirroring source directory structure (`digests/bin/fleet.py.md`). Generated, but hand-editable — an edited digest survives until its source file's hash changes.
 
 ```markdown
-## bin/fleet.py (7832 lines, python)
+## bin/fleet.py (8706 lines, python)
 
 - L69 `mailbox_dir() -> Path`
 - L887 `compose_prompt(name, task, sid) -> str`
@@ -305,7 +305,7 @@ The flag-sized alternative is **`fleet spawn --context <files>` that inlines raw
 
 Why the subsystem is still justified, and where the line falls:
 
-- Raw inlining does not scale to orientation. A worker that needs to know *where* things are cannot be handed `bin/fleet.py` (7832 lines) — that costs more than the exploration it replaces. Digesting is what makes injection affordable, and digesting requires a parser.
+- Raw inlining does not scale to orientation. A worker that needs to know *where* things are cannot be handed `bin/fleet.py` (8706 lines) — that costs more than the exploration it replaces. Digesting is what makes injection affordable, and digesting requires a parser.
 - `fleet q --src` has no flag-sized equivalent: slicing a symbol out of a file requires knowing its line range, which requires the index.
 
 **Honest scope reduction this implies:** if the milestone must shrink, the order to cut is `relevance` degradation first, then `map.md`, then `fleet q`, keeping digest injection last — it is the piece with the clearest ratio and no flag-sized substitute.

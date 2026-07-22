@@ -131,7 +131,7 @@ fleet resume-limited migrate    # …or just one
 
 ```powershell
 fleet kill hello                # stop the turn (if running) and mark it dead
-fleet clean --dead-only         # remove dead workers + their logs/mailboxes/journals
+fleet clean --dead-only         # remove dead workers + their outcomes/mailboxes/journals
 fleet clean                     # broader sweep (see fleet clean --help for tiers)
 ```
 
@@ -160,7 +160,7 @@ For dependent or review-style work (one worker builds, another attacks the diff)
 | `fleet init` | Render machine-local `worker-settings.json` (add `--statusline`, `--autoclean`) |
 | `fleet spawn` | Spawn a new worker session |
 | `fleet status` | Worker status table |
-| `fleet peek` | Digest of recent stream events (works mid-turn) |
+| `fleet peek` | Digest of the last few substantive transcript records (works mid-turn) |
 | `fleet result` | Final result text of the last completed turn |
 | `fleet wait` | Block until turn(s) end |
 | `fleet send` | Steer a worker (mailbox mid-turn, or a new turn if idle) |

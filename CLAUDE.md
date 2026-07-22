@@ -2,7 +2,7 @@
 
 System-wide tool: one Claude Code manager session spawns, monitors, steers, and hands off multiple worker sessions across projects on this machine.
 
-**Start here: `docs/SPEC.md`** — the approved v2 design (post adversarial review; the appendix records every finding and its fix — do not re-litigate them). Build against it milestone by milestone (M1–M5, §13).
+**Start here: `docs/SPEC.md`** — the v3 spec of record, descriptive of the post-pivot `bin/fleet.py` (the v1→v2.3 body, including the F1–F33 finding record, is moved verbatim to `docs/SPEC-v2-history.md` — do not re-litigate it). Milestones are §18: M-0/M-A/M-B/M-C shipped there; M-D and M-E shipped after and are **not yet folded into §18** — read `docs/PLAN-PROGRESS.md` and `docs/NEXT-SESSION.md` for anything past M-C. Open operator decisions live in `docs/OPERATOR-GATES.md`.
 
 Rules:
 - Python is `py -3.13` (bare `python` resolves to 3.10) — that is this machine's *preference*, not the floor. The floor is `fleet.MIN_PYTHON_VERSION` (3.10), declared once and checked everywhere by `TestInterpreterFloor`; `bin/hooks/run_py.sh` may select any interpreter at or above it, so **changes must run on 3.10** (`py -3.10 -m pytest -q`), not only on 3.13. `bin/fleet.py` is stdlib-only, single file.

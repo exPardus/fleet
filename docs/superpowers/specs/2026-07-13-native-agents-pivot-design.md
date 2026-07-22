@@ -1,7 +1,7 @@
 # Native Agents Pivot — Design
 
 **Date:** 2026-07-13
-**Status:** v2.3 — v2 per adversarial review (`docs/reviews/NATIVE-PIVOT-REVIEW-2026-07-13.md`); v2.1 fixed re-review N1–N11; v2.2 fixed promotion-review F1–F4 (ratified ready-for-plan); v2.3 adds operator-directed features (§5.1: usage-limit continuity, auto-archival, agents-menu categories) + G11–G13 — **v2.3 delta needs re-ratification at the M-0 gate review (author may not promote own amendment)**
+**Status:** v2.3 — v2 per adversarial review (`docs/reviews/NATIVE-PIVOT-REVIEW-2026-07-13.md`); v2.1 fixed re-review N1–N11; v2.2 fixed promotion-review F1–F4 (ratified ready-for-plan); v2.3 adds operator-directed features (§5.1: usage-limit continuity, auto-archival, agents-menu categories) + G11–G13. **SHIPPED AND CLOSED** — the v2.3 delta was re-ratified at the M-0 gate review; M-0/M-A/M-B/M-C all shipped (`docs/SPEC.md` §18), and `docs/SPEC.md` v3 is the spec of record for the result. This document is the pivot's design rationale, not buildable surface.
 **Approach:** B — native substrate, fleet sidecar (chosen over pure-native replacement and agent-teams bet)
 
 ## 1. Problem and decision
