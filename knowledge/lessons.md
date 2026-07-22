@@ -735,3 +735,12 @@ Docket put to Altai in-session (interface session, `AskUserQuestion`), answers v
 - **`docs/specs/claim-nonce.md`: PROMOTED to spec-of-record.** Ratified 2026-07-23 by Altai. The three MINOR residuals from the final break gate (`a0bd194`) close in the build slice before any code ships. Status line flipped and §7 header updated in the same commit as the `OPERATOR-GATES.md` ticks — the dated line here is the record, the `Status:` line is its consequence (per the 2026-07-22 process-defect lesson).
 - **`docs/specs/three-tier-command.md`: re-draft NOW, not queued.** The nonce prerequisite is discharged at the design level. Two new operator requirements to fold into the re-draft, from the same conversation: **tier-model assignment** — the human-facing interface session runs the highest-tier model, the supervisor runs the second tier (today: Fable 5 interface / Opus 4.8 supervisor) — and a **~200k-token supervisor swap band**, tightened from the drafted 300–500k, because the swap exists to save usage: the supervisor is respawned/handed off before its context gets expensive. Build still waits on the re-drafted spec's own dual-lens design gate.
 - **Everything else deferred by the operator** ("wait on all operator gates, they will be closed in a short amount of time"): native-substrate's 11 ratification markers, fleet-index M1, the worker-providers doc contradiction, the two-roadmaps question, M-F shape/budget. Deferral noted in `docs/NEXT-SESSION.md` with this date.
+
+## 2026-07-23 — three-tier re-draft: operator design inputs {#2026-07-23-three-tier-inputs}
+
+Refinements from the same docket session, binding on the re-draft brief:
+
+- **Swap**: supervisor self-monitors context; band **150–200k tokens**. Entering the band → hand off at the next wave/task boundary. Past 200k → strongest directive to hand off, but it finishes the current *urgent* task first — no new work. Handoff ritual = existing sup-handoff machinery: write the successor document, hand control back to the interface session.
+- **Tier models by role, configurable, never hardcoded ids**: interface session = highest tier (today Fable 5), supervisor = second tier (today Opus 4.8).
+- **Worker models**: supervisor's call, **Opus and Sonnet only**. Haiku is never a worker — subagent inside worker sessions only.
+- **Beats**: event-driven only in v1; scheduled heartbeat deferred until a campaign demonstrably stalls for want of one.
