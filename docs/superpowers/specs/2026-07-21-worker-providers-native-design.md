@@ -1,6 +1,6 @@
 # Design: External provider support for fleet workers (native `--bg` era)
 
-**Status:** approved design — ready for implementation plan
+**Status:** spike-negative — §4 dead as written (its own §4.2 gating spike returned NEGATIVE: "Do not implement §4 as written"). Re-statused 2026-07-23 by Altai (operator gate; the header previously contradicted §4.2). Working alternative of record: `docs/longcat-fleet-usage.md` (per-`CLAUDE_CONFIG_DIR` isolated daemon namespace, verified end-to-end 2026-07-21). The `docs/specs/providers.md` re-base-or-park decision remains open.
 **Date:** 2026-07-21
 **Branch:** `feat/worker-providers`
 **Re-bases:** `docs/specs/providers.md` (the reviewed "Provider profiles" stub). That stub predates the native `--bg` pivot (M-B); its central env-delivery mechanism — a per-attach env script sourced by a launched terminal (wt/tmux/osascript) — is **obsolete** now that workers are `claude --bg` daemon sessions with no fleet-launched shell. This design supersedes the delivery section and simplifies the storage model. The stub's open questions that still bind v1 are carried forward in §7.
