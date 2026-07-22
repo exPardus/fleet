@@ -1,5 +1,17 @@
 # claude-fleet — roadmap implementation plan
 **Status:** ready-for-execution (2026-07-08) — produced by spec-review-and-plan workflow; spec review: docs/reviews/SPEC-REVIEW-2026-07-08.md
+
+> ### ⚠ Reality check (2026-07-23) — the doctrine binds, the mechanics have drifted
+>
+> The §0 operating protocol below (worktree isolation, task-file convention, quality-gate pipeline, RESULT contract, demand-check valves, W-V verification discipline) **is live and still binds every campaign.** What has drifted is the campaign *scaffolding* around it:
+>
+> - **`fleet-impl` no longer exists.** §0.1.3 and §0.1.6 name it as the merge target; `61d63a2` collapsed it onto `main`, which is now the only working branch. Read every `fleet-impl` below as `main`.
+> - **The C1→C8 campaign sequence stopped being the plan of record on 2026-07-13**, when the native-substrate pivot started the M-track (`SPEC.md` §18: M-0…M-G). C1/C2/C4 ran; C3 and C5+ never did.
+> - **The soak gates are not being enforced.** §0.2.1 makes every next-phase task file grep for a dated `SOAK GATE <n> SIGNED` line in `knowledge/lessons.md`. **No such line has ever been written** — so that precondition would block every gated task, and four milestones shipped without one being attempted.
+> - **`py -3.13` is not the floor.** §0.1.9 and the repo-rules block say `py -3.13`; the floor is `fleet.MIN_PYTHON_VERSION` (3.10) and changes must run at it.
+> - **`--max-budget-usd` (§0.4 "every task carries") no longer exists** — no USD figure is available under `--bg` (`SPEC.md` §9, G3). The fleet-side cap is `--token-ceiling`.
+>
+> **Reconciling this file against the M-track is an open operator gate** (`docs/OPERATOR-GATES.md`) — retire the C/soak framing as history, or re-anchor the M-track inside it. Until it is settled, follow §0's doctrine and ignore its campaign bookkeeping.
 **Consumer:** fleet manager session (fleet skill). This plan is the campaign contract for the self-build.
 
 ---
