@@ -694,13 +694,28 @@ def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
 # ---------------------------------------------------------------------------
 
 def append_event(kind: str, name: str, **fields) -> None:
-    """Append one JSON line {"ts", "kind", "name", **fields} to events.jsonl."""
+    """Append one JSON line {"ts", "kind", "name", **fields} to events.jsonl.
+
+    Written through `_atomic_append_bytes` for the same reason
+    `append_outcome` is (T1's CRITICAL finding): events.jsonl has genuinely
+    concurrent writers -- the manager, the scheduled autoclean task, and any
+    worker invoking the CLI -- and a plain buffered `open(..., "a")` does NOT
+    append atomically on Windows. The CRT's O_APPEND emulation seeks to EOF
+    and writes as two separate steps, so concurrent writers drop whole clean
+    records with ZERO JSON-decode errors: silent loss, not corruption, which
+    is the failure mode nothing downstream can detect. Measured on this file
+    before the fix: 4 threads x 250 records lost 9-12 of 1000 every run.
+
+    `_atomic_append_bytes` raises OSError on a short write as well as on
+    CreateFileW/WriteFile failure; the plain open()+write() it replaces also
+    raised OSError, so `_append_event_quiet`'s deliberate swallow still
+    covers every failure this can produce."""
     d = state_dir()
     d.mkdir(parents=True, exist_ok=True)
     record = {"ts": now_iso(), "kind": kind, "name": name}
     record.update(fields)
-    with open(events_path(), "a", encoding="utf-8") as f:
-        f.write(json.dumps(record) + "\n")
+    line = json.dumps(record)
+    _atomic_append_bytes(events_path(), (line + "\n").encode("utf-8"))
 
 
 def _append_event_quiet(kind: str, name: str, **fields) -> None:
