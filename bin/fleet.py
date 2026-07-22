@@ -1045,7 +1045,18 @@ def _worker_env(name: str) -> dict:
     CLAUDE_CODE_SESSION_ID is STRIPPED (§5.1 provenance): the child `claude`
     stamps its own, and an inherited one would make a worker running
     `fleet kill` look exactly like the manager that spawned it -- so a worker
-    could quietly retire its siblings with no confirmation."""
+    could quietly retire its siblings with no confirmation.
+
+    The re-stamp is MEASURED, not assumed. From inside a live `--bg` worker:
+
+        py -3.13 -c "import os; print(repr(os.environ.get('CLAUDE_CODE_SESSION_ID')))"
+          -> '820762d0-5298-4b1b-9471-4048ea27e278'
+
+    which is exactly that worker's own `session_id` in the registry (not the
+    manager's, which is what `spawned_by` holds). So the strip below does not
+    leave a worker session-id-less: it leaves it with its OWN id, and the
+    `caller is None` early-out in `_confirm_destructive` is unreachable from a
+    worker. Pinned by tests/test_destructive_guard.py::TestAWorkerIsNotExempt."""
     env = dict(os.environ)
     env.pop("CLAUDE_CODE_SESSION_ID", None)
     env["FLEET_WORKER"] = name
@@ -2215,7 +2226,17 @@ def _confirm_destructive(action: str, names: list, records: dict, assume_yes: bo
     the two apart on Windows anyway: Git Bash's `/dev/null` is `NUL`, a
     CHARACTER DEVICE, so `sys.stdin.isatty()` returns True under
     `fleet kill x < /dev/null`. An agent must pass --yes; there is nothing to
-    prompt."""
+    prompt.
+
+    The `caller is None` early-out does NOT exempt fleet workers -- filed once
+    as a defect, disproved by MEASUREMENT inside a live `--bg` worker, whose
+    CLAUDE_CODE_SESSION_ID read back as its own registry `session_id` (see
+    `_worker_env` for the receipt). `_worker_env` strips the inherited id and
+    the child `claude` re-stamps its own, so `caller` is always a real value in
+    a worker: a worker killing a sibling is foreign (owner = the manager's sid)
+    and is refused. Pinned by
+    tests/test_destructive_guard.py::TestAWorkerIsNotExempt -- reintroduce an
+    exemption here and it goes red."""
     caller = current_caller_session()
     if caller is None:
         return
