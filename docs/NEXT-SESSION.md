@@ -34,7 +34,7 @@ Present the docket below and ask for a decision on each. Use `AskUserQuestion` w
 
   Then: promote the spec to spec-of-record, or send it back. **Do not build until this is answered.**
 
-**3. `docs/superpowers/specs/2026-07-18-sdd-drift-control-design.md` — DRAFT v3, untouched since 2026-07-18.** Two review rounds folded (four lenses, then a new-defect hunt that found a CRITICAL RCE the first fold had introduced). It is a large subsystem — spec artifact, verifier, binding, a Stop-hook fence. Ask: **M-F candidate, shelved, or narrowed to its Phase-1 gate only?** **Recommendation: narrow to Phase 1 (the deterministic `spec verify` gate) and defer the live Stop-fence** — the fence is the defect-dense half and the gate delivers most of the value alone.
+**3. `docs/superpowers/specs/2026-07-18-sdd-drift-control-design.md` — SETTLED, nothing to ask.** Altai ratified R1–R4 on **2026-07-20**; the spec is `v4`, build-ready pending the M-F slot. R1 already sequences the Phase-1 `spec verify` gate first behind `sdd.enabled` (default off), with the live Stop-fence following once Phase 1 is proven — so the old "narrow to Phase 1" recommendation is discharged, not pending. Record: `docs/OPERATOR-GATES.md` §Settled + `knowledge/lessons.md#2026-07-22-operator-decisions`.
 
 **4. `docs/specs/three-tier-command.md` — still `PROPOSAL`.** Restructure ratified by review, never by the operator. Gated on item 2: the nonce is its hard prerequisite. Nothing to decide today beyond confirming it stays queued behind the nonce.
 
@@ -44,7 +44,9 @@ Present the docket below and ask for a decision on each. Use `AskUserQuestion` w
 
 ## State (all verified at close)
 
-- **M-E shipped and pushed.** `main` = `fleet-impl` = `6cd4fa7`. Four branches merged (`me/ul`, `me/daemon`, `me/defects`, `me/nonce`). **1302 unit tests + 6-pin FLEET_LIVE tier green on claude 2.1.216; doctor 23 PASS / 0 FAIL; pin-gate stamped 2.1.216.**
+- **M-E shipped and pushed** at `6cd4fa7`. Four branches merged (`me/ul`, `me/daemon`, `me/defects`, `me/nonce`). **6-pin FLEET_LIVE tier green; doctor 23 PASS / 0 FAIL.**
+- **Branch state (re-measured 2026-07-22):** `main` = `origin/main` = `origin/fleet-impl` = `56308cd`; local `fleet-impl` = `52b7432`, i.e. **two doc commits ahead and unpushed** (`a5b9820` SDD v4, `52b7432` fleet-index). Push `fleet-impl` and fast-forward `main` at the next green.
+- **Numbers, re-measured 2026-07-22:** unit suite **1306 passed / 6 skipped**; `claude` **2.1.217** with `state/pin-pass.json` stamped 2.1.217 (bumped 2.1.216→2.1.217 during close-out, FLEET_LIVE 6/6 re-run); `bin/fleet.py` **8706 lines**; `fleet doctor` 23 PASS / 0 FAIL.
 - **The 9th live catch was a SUBSTRATE failure, not a contract break.** A stale `~/.claude/daemon.lock` naming a **recycled pid** (Windows gave 15740 to `WacomHost`, whose start time is unreadable to a normal-token probe) killed every `--bg` dispatch machine-wide for ~16h while `fleet doctor` read all-PASS. `claude daemon stop --any` does **not** clear it; removing the lock does. Fleet now has `_doctor_check_daemon_wedge` (file-only signal, starts no daemon) and a dispatch-error classifier that names the cause and a precondition-first remedy. Receipts in `docs/specs/native-substrate.md`.
 - **New standing tooling: `tools/verify_receipts.py` + `tests/test_receipts.py`.** Every pasted receipt in `docs/specs/**` is re-executed and diffed, resolved at its `# at <sha>` pin via `git archive`. Unpinned receipts, moving pins (`# at HEAD`) and absent commits are errors under `--strict`, never skips. `CLAUDE.md` carries the doctrine line. **Run `--self-test` before trusting a green run.**
 - **Campaign template → v1.8** (vantage gate, founding-incident gate, demand-driven-evidence rule, reviewer-remedies-are-fix-waves, receipts-as-executable-claims, merge-target testing, commit-only, RESULT-line exemption).
@@ -53,7 +55,7 @@ Present the docket below and ask for a decision on each. Use `AskUserQuestion` w
 
 1. **Ratify or reject the `native-substrate.md` rows.** The 2.1.212 set from M-D is still `[PENDING OPERATOR RATIFICATION]`, and M-E added a 2.1.216 row for the daemon-wedge hazard. Eight markers total, all untouched by the merges.
 2. **Claim-nonce spec — `docs/specs/claim-nonce.md`, `Status: drafting`.** Two full dual-lens design gates; final verdicts **`sound`** (break) and **`fix-list(F1,F2)` → closed** (spec, 49/49 receipts sound, harness seeded by the reviewer). Not spec-of-record, no build has started. Adjudication + addendum: `docs/reviews/ME-NONCE-ADJUDICATION-2026-07-21.md`. **Five questions are waiting on you**, the load-bearing one being: on this box there is **no authorization input that is neither view-derivable nor an environment variable**, so the honest options are (a) detection-only with no gate — which *does not close* the dual-supervisor incident, (b) a gate that is knowingly bypassable — the only option that does close it, or (c) build an authorization input first, as separate scope.
-3. **SDD / drift-control design v3** (`docs/superpowers/specs/2026-07-18-sdd-drift-control-design.md`) — still DRAFT, untouched this campaign, still operator-gated.
+3. ~~SDD / drift-control design~~ — **CLOSED 2026-07-20**, R1–R4 ratified; spec is `v4`, build-ready pending the M-F slot. Not a gate any more.
 4. **Three-tier command** — `PROPOSAL`, restructure ratified by review only. The nonce slice it depends on is now gated-and-sound; a re-draft is the next step *after* decision 2.
 
 ## The job: pick and run M-F
