@@ -912,13 +912,28 @@ def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
 # ---------------------------------------------------------------------------
 
 def append_event(kind: str, name: str, **fields) -> None:
-    """Append one JSON line {"ts", "kind", "name", **fields} to events.jsonl."""
+    """Append one JSON line {"ts", "kind", "name", **fields} to events.jsonl.
+
+    Written through `_atomic_append_bytes` for the same reason
+    `append_outcome` is (T1's CRITICAL finding): events.jsonl has genuinely
+    concurrent writers -- the manager, the scheduled autoclean task, and any
+    worker invoking the CLI -- and a plain buffered `open(..., "a")` does NOT
+    append atomically on Windows. The CRT's O_APPEND emulation seeks to EOF
+    and writes as two separate steps, so concurrent writers drop whole clean
+    records with ZERO JSON-decode errors: silent loss, not corruption, which
+    is the failure mode nothing downstream can detect. Measured on this file
+    before the fix: 4 threads x 250 records lost 9-12 of 1000 every run.
+
+    `_atomic_append_bytes` raises OSError on a short write as well as on
+    CreateFileW/WriteFile failure; the plain open()+write() it replaces also
+    raised OSError, so `_append_event_quiet`'s deliberate swallow still
+    covers every failure this can produce."""
     d = state_dir()
     d.mkdir(parents=True, exist_ok=True)
     record = {"ts": now_iso(), "kind": kind, "name": name}
     record.update(fields)
-    with open(events_path(), "a", encoding="utf-8") as f:
-        f.write(json.dumps(record) + "\n")
+    line = json.dumps(record)
+    _atomic_append_bytes(events_path(), (line + "\n").encode("utf-8"))
 
 
 def _append_event_quiet(kind: str, name: str, **fields) -> None:
@@ -1248,7 +1263,18 @@ def _worker_env(name: str) -> dict:
     CLAUDE_CODE_SESSION_ID is STRIPPED (§5.1 provenance): the child `claude`
     stamps its own, and an inherited one would make a worker running
     `fleet kill` look exactly like the manager that spawned it -- so a worker
-    could quietly retire its siblings with no confirmation."""
+    could quietly retire its siblings with no confirmation.
+
+    The re-stamp is MEASURED, not assumed. From inside a live `--bg` worker:
+
+        py -3.13 -c "import os; print(repr(os.environ.get('CLAUDE_CODE_SESSION_ID')))"
+          -> '820762d0-5298-4b1b-9471-4048ea27e278'
+
+    which is exactly that worker's own `session_id` in the registry (not the
+    manager's, which is what `spawned_by` holds). So the strip below does not
+    leave a worker session-id-less: it leaves it with its OWN id, and the
+    `caller is None` early-out in `_confirm_destructive` is unreachable from a
+    worker. Pinned by tests/test_destructive_guard.py::TestAWorkerIsNotExempt."""
     env = dict(os.environ)
     env.pop("CLAUDE_CODE_SESSION_ID", None)
     env["FLEET_WORKER"] = name
@@ -2511,7 +2537,17 @@ def _confirm_destructive(action: str, names: list, records: dict, assume_yes: bo
     the two apart on Windows anyway: Git Bash's `/dev/null` is `NUL`, a
     CHARACTER DEVICE, so `sys.stdin.isatty()` returns True under
     `fleet kill x < /dev/null`. An agent must pass --yes; there is nothing to
-    prompt."""
+    prompt.
+
+    The `caller is None` early-out does NOT exempt fleet workers -- filed once
+    as a defect, disproved by MEASUREMENT inside a live `--bg` worker, whose
+    CLAUDE_CODE_SESSION_ID read back as its own registry `session_id` (see
+    `_worker_env` for the receipt). `_worker_env` strips the inherited id and
+    the child `claude` re-stamps its own, so `caller` is always a real value in
+    a worker: a worker killing a sibling is foreign (owner = the manager's sid)
+    and is refused. Pinned by
+    tests/test_destructive_guard.py::TestAWorkerIsNotExempt -- reintroduce an
+    exemption here and it goes red."""
     caller = current_caller_session()
     if caller is None:
         return

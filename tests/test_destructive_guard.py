@@ -132,6 +132,56 @@ class TestConfirmDestructive:
         assert "unknown owner" in str(exc.value)
 
 
+class TestAWorkerIsNotExempt:
+    """A fleet worker is a Claude session like any other -- the guard applies.
+
+    Filed once as a defect: "`_confirm_destructive`'s `caller is None` early-out
+    exempts fleet workers, so a worker can kill a sibling unguarded". It was
+    MEASURED from inside a live `--bg` worker and disproved:
+
+        py -3.13 -c "import os; print(repr(os.environ.get('CLAUDE_CODE_SESSION_ID')))"
+          -> '820762d0-5298-4b1b-9471-4048ea27e278'
+
+    which was exactly worker `mf-fix`'s own `session_id` in the registry, with
+    `FLEET_WORKER=mf-fix` set alongside it. `_worker_env` strips the manager's
+    id and the child `claude` re-stamps its OWN -- so `caller` is a real value
+    inside a worker, the `None` early-out is unreachable there, and a worker
+    killing a sibling (owner = the manager's sid) is foreign and refused.
+
+    These pin the disproof: reintroduce a worker exemption -- in the early-out
+    or by blanking the session id when FLEET_WORKER is set -- and they go red.
+    """
+
+    MANAGER = "manager-sid"
+    WORKER_SID = "820762d0-5298-4b1b-9471-4048ea27e278"
+
+    def _in_worker(self, monkeypatch):
+        # A worker's real environment, as measured: its own session id (stamped
+        # by the child `claude`, not inherited) plus the FLEET_WORKER marker.
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", self.WORKER_SID)
+        monkeypatch.setenv("FLEET_WORKER", "mf-fix")
+
+    def test_a_worker_has_a_real_caller_session_id(self, monkeypatch):
+        self._in_worker(monkeypatch)
+        assert fleet.current_caller_session() == self.WORKER_SID
+
+    def test_a_worker_killing_a_sibling_is_refused(self, monkeypatch):
+        self._in_worker(monkeypatch)
+        sibling = _rec(spawned_by=self.MANAGER, session_id="sib-sid", status="idle")
+        with pytest.raises(fleet.DestructiveActionRefused) as exc:
+            fleet._confirm_destructive("kill", ["sibling"], {"sibling": sibling},
+                                       assume_yes=False)
+        assert "--yes" in str(exc.value)
+
+    def test_a_worker_sweeping_its_own_registry_entry_is_refused(self, monkeypatch):
+        # Not even itself: the manager spawned it, so the manager owns it.
+        self._in_worker(monkeypatch)
+        me = _rec(spawned_by=self.MANAGER, session_id=self.WORKER_SID, status="dead")
+        with pytest.raises(fleet.DestructiveActionRefused):
+            fleet._confirm_destructive("clean", ["mf-fix"], {"mf-fix": me},
+                                       assume_yes=False)
+
+
 class TestProvenanceRecorded:
     def test_spawn_records_the_calling_session(self, monkeypatch):
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-A")
