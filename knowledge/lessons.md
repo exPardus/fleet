@@ -744,3 +744,9 @@ Refinements from the same docket session, binding on the re-draft brief:
 - **Tier models by role, configurable, never hardcoded ids**: interface session = highest tier (today Fable 5), supervisor = second tier (today Opus 4.8).
 - **Worker models**: supervisor's call, **Opus and Sonnet only**. Haiku is never a worker — subagent inside worker sessions only.
 - **Beats**: event-driven only in v1; scheduled heartbeat deferred until a campaign demonstrably stalls for want of one.
+
+**Addendum (2026-07-23, manager refinement during the re-draft, binding — supersedes the "today Fable 5 / Opus 4.8" framing where it reads as the config itself):**
+
+- **Tier-based, never model-id-based.** Roles (interface / supervisor / worker) bind to abstract tiers (highest / second / third); a resolver maps tier → concrete model at dispatch time from the models *currently available*. Concrete ids (Fable 5, Opus 4.8) are illustrative of today's Anthropic resolution only, never normative.
+- **Provider-agnostic; must work with a non-Anthropic provider.** `docs/longcat-fleet-usage.md` is the working alternative of record (per-`CLAUDE_CONFIG_DIR` isolated daemon namespace). The tier→model table lives in that namespace's **daemon env** (`ANTHROPIC_DEFAULT_OPUS_MODEL` etc.), set by the launcher, not by fleet. Cross-provider fleet = separate namespaces (one daemon each); a role resolves per namespace. Provider-lacks-a-tier ⇒ omit `--model` (let the namespace default govern) or accept the CLI `model_not_found` refusal; a fleet pre-flight tier-resolution check is `[UNBUILT]`.
+- **Receipted (at `235421e5`):** `bin/fleet.py` has ZERO model-id / `CLAUDE_CONFIG_DIR` / `ANTHROPIC_` / `--provider` surface (grep 0/0). The only shipped model surface is `--model <tier-alias>` at spawn/handoff; resolution is entirely the daemon env. Role→tier policy is routed to `supervisor/GOALS.md`; a machine-read of it is `[UNBUILT]`. Full analysis: `docs/specs/three-tier-command.md` §3.

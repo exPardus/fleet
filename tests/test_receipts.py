@@ -63,7 +63,6 @@ UNENFORCED = {
         "('tests/test_core.py:371,377,... # 10x fleet.pid_alive(...)'), never "
         "literal grep output, and it greps for probe_liveness/pid_alive which the "
         "pivot deleted. Pre-existing; flagged to the manager, not fixed here."),
-    "three-tier-command.md": "PROPOSAL - RESTRUCTURE REQUIRED; carries no receipts.",
     # me/daemon added a 2.1.216 daemon-lock row here carrying pasted evidence.
     # It carries no `# at <sha>` pin, so it stays out of the enforced set -- and
     # that is a real gap, not a clean exclusion: its evidence is a manager report
