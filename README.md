@@ -2,7 +2,7 @@
 
 **Run a whole team of Claude Code sessions from one seat.** One manager session spawns, steers, and hands off many headless worker sessions across every project on your machine — days-long, multi-project campaigns without babysitting a terminal.
 
-![tests](https://img.shields.io/badge/tests-1142%20passing-brightgreen) ![python](https://img.shields.io/badge/python-3.13%20stdlib--only-blue) ![deps](https://img.shields.io/badge/dependencies-zero-blueviolet) ![platform](https://img.shields.io/badge/platform-Windows%20(Linux%2FmacOS%20specced)-lightgrey) ![license](https://img.shields.io/badge/license-MIT-lightgrey)
+![tests](https://img.shields.io/badge/tests-1406%20passing-brightgreen) ![python](https://img.shields.io/badge/python-3.10%2B%20stdlib--only-blue) ![deps](https://img.shields.io/badge/dependencies-zero-blueviolet) ![platform](https://img.shields.io/badge/platform-Windows%20%2B%20Linux%20verified%20%7C%20macOS%20unreceipted-lightgrey) ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 
 Workers aren't fire-and-forget processes — they're **durable Claude Code sessions on disk**. They survive crashes, reboots, and the manager's own death. You can steer one mid-turn, drop into any of them for a live interactive hand-off, reset one's context while keeping its work journal, or park one that hit a usage limit and resume it later. It's a single-file, stdlib-only Python CLI plus a few hooks — no daemon of its own, no framework, no dependencies.
 
