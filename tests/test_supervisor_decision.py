@@ -138,6 +138,70 @@ class TestAnswer:
         with pytest.raises(fleet.FleetCliError, match="no open decision"):
             fleet.cmd_sup_decision(args)
 
+    def test_answer_over_corrupt_file_refuses_never_fabricates(
+            self, dec_home, monkeypatch):
+        # micro-fold-2 (2): a corrupt pending-decision reads as `_unreadable`
+        # (never None), and the old --answer path would ADD `answer` to that
+        # sentinel and write it back -- fabricating an ANSWERED record over
+        # unreadable state, which the doctor/sup-status then present as a real
+        # operator answer. --answer must REFUSE with a named error and leave the
+        # corrupt file untouched.
+        fleet.pending_decision_path().write_text("{not json", encoding="utf-8")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-interface")
+        args = SimpleNamespace(question=None, context_ref=None, answer="yes, do it",
+                               clear=False, json=False, sid=None, nonce=None)
+        with pytest.raises(fleet.FleetCliError, match="corrupt"):
+            fleet.cmd_sup_decision(args)
+        # The file is untouched: still the raw garbage, no fabricated answer.
+        assert fleet.pending_decision_path().read_text(encoding="utf-8") == "{not json"
+        rec = fleet.read_pending_decision()
+        assert rec.get("_unreadable") is True and "answer" not in rec
+
+
+class TestAnswerClearTakeTheLock:
+    """micro-fold-2 (1): --answer and --clear did a read-modify-write with NO
+    lock while --raise holds `fleet_lock`, a lost-update window. They must take
+    the SAME lock so the mutation serializes against a concurrent --raise."""
+
+    def _rec_lock(self, events):
+        import contextlib
+
+        @contextlib.contextmanager
+        def rec_lock(*a, **k):
+            events.append("enter")
+            try:
+                yield
+            finally:
+                events.append("exit")
+        return rec_lock
+
+    def test_answer_writes_under_the_lock(self, dec_home, monkeypatch):
+        fleet.write_pending_decision({"question": "q", "raised_by_inc": "inc-me",
+                                      "raised_at": fleet.now_iso(), "answer": None})
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-interface")
+        events = []
+        monkeypatch.setattr(fleet, "fleet_lock", self._rec_lock(events))
+        real_write = fleet.write_pending_decision
+        monkeypatch.setattr(fleet, "write_pending_decision",
+                            lambda o: (events.append("write"), real_write(o))[-1])
+        args = SimpleNamespace(question=None, context_ref=None, answer="ok",
+                               clear=False, json=False, sid=None, nonce=None)
+        assert fleet.cmd_sup_decision(args) == 0
+        assert events == ["enter", "write", "exit"]   # RMW is inside the lock
+
+    def test_clear_removes_under_the_lock(self, dec_home, monkeypatch):
+        fleet.write_pending_decision({"question": "q", "answer": "done"})
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-interface")
+        events = []
+        monkeypatch.setattr(fleet, "fleet_lock", self._rec_lock(events))
+        real_clear = fleet.clear_pending_decision
+        monkeypatch.setattr(fleet, "clear_pending_decision",
+                            lambda: (events.append("clear"), real_clear())[-1])
+        args = SimpleNamespace(question=None, context_ref=None, answer=None,
+                               clear=True, json=False, sid=None, nonce=None)
+        assert fleet.cmd_sup_decision(args) == 0
+        assert events == ["enter", "clear", "exit"]
+
     def test_clear_via_verb(self, dec_home, monkeypatch):
         fleet.write_pending_decision({"question": "q", "answer": "done"})
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-interface")

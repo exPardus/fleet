@@ -10126,18 +10126,37 @@ def cmd_sup_decision(args) -> int:
         return 0
 
     if answering:
-        rec = read_pending_decision()
-        if rec is None:
-            raise FleetCliError("sup-decision: no open decision to answer")
-        rec["answer"] = args.answer
-        rec["answered_at"] = now_iso()
-        rec["answered_by_sid"] = current_caller_session()
-        write_pending_decision(rec)
+        # micro-fold-2 (1): the read-modify-write takes the SAME lock `--raise`
+        # holds -- without it, an interface `--answer` and a supervisor
+        # `--raise` could interleave and lose one write.
+        with fleet_lock():
+            rec = read_pending_decision()
+            if rec is None:
+                raise FleetCliError("sup-decision: no open decision to answer")
+            # micro-fold-2 (2): a corrupt file reads as `_unreadable` (never
+            # None). Answering over it would ADD `answer` to the sentinel and
+            # write it back -- fabricating an ANSWERED record over unreadable
+            # state. Refuse and leave the file untouched for the operator.
+            if rec.get("_unreadable"):
+                raise FleetCliError(
+                    "sup-decision: the pending-decision file is present but "
+                    f"corrupt ({pending_decision_path().name}) -- refusing to "
+                    "answer over it (an answer written now would fabricate a "
+                    "record over unreadable state). Inspect and remove the file, "
+                    "then re-raise the decision.")
+            rec["answer"] = args.answer
+            rec["answered_at"] = now_iso()
+            rec["answered_by_sid"] = current_caller_session()
+            write_pending_decision(rec)
         print(f"pending-decision answered: {args.answer!r}")
         return 0
 
     if clearing:
-        clear_pending_decision()
+        # micro-fold-2 (1): same lock as --raise/--answer. Clearing a corrupt
+        # file is the sanctioned recovery, so --clear needs no `_unreadable`
+        # refusal -- removing the garbage is exactly the point.
+        with fleet_lock():
+            clear_pending_decision()
         print("pending-decision cleared")
         return 0
 

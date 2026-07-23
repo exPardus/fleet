@@ -61,3 +61,18 @@ Nothing here changes the daemon-level tier→model resolution (§3.3): a
 cross-provider fleet still needs separate `CLAUDE_CONFIG_DIR` namespaces, one
 daemon each, and each namespace's daemon resolves the same alias to its own
 model.
+
+## Operator follow-ups
+
+- **§7.2 verbatim (`holder AND roster-live`) should be amended to `holder-alone`**
+  per the accepted build judgment + oracle rationale — operator edit. The
+  ratified three-tier-command.md §7.2 text still reads "holder AND roster-live",
+  but the archive/husk exemption was BUILT on `holder-alone` (commit `5a8860b`):
+  the `roster-live` conjunct makes the archive gate a no-op against
+  `_archive_eligible` gate 3 (which already refuses every roster-live record)
+  AND fails to close §7.2's own stated disaster — an idle/roster-gone supervisor
+  that still holds the claim crossing the 24h TTL. `holder-alone` is a strict
+  superset that closes the disaster and still satisfies B9 (a non-holder husk is
+  unprotected). This is a spec-text edit only (the built behaviour already
+  matches the amendment); the build disclosed the divergence rather than editing
+  ratified text.
