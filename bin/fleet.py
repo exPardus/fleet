@@ -2342,6 +2342,17 @@ class SupervisorContinuityError(FleetCliError):
     the only thing a caller can script against."""
 
 
+class SupervisorClaimGateError(SupervisorContinuityError):
+    """claim-nonce §7 -- a mutating lifecycle verb refused by THE GATE because
+    a supervisor claim is held with a fresh heartbeat and the caller could not
+    prove continuity on it.
+
+    A subclass of `SupervisorContinuityError` (hence of `FleetCliError`): a
+    gate refusal IS a failed continuity proof, so it inherits the distinct exit
+    code (§4.13(b)) and every `except FleetCliError` keeps catching it. Distinct
+    only so a reader can tell a gated-verb refusal from a `sup-*` refusal."""
+
+
 def _read_task_arg(task: str) -> str:
     """`@file` task syntax (SPEC §5): a task string starting with `@` names
     a file whose contents are the task text."""
@@ -2800,7 +2811,14 @@ def cmd_init(args) -> int:
     this guard once had a second condition and this docstring once described
     a marker-repointing hazard; both went with the marker's only reader (see
     the note above `_home_guard_problems`). `--statusline` remains the one
-    flag that touches `~/.claude/`, which is what it is for."""
+    flag that touches `~/.claude/`, which is what it is for.
+
+    §7 THE GATE: `init` is a mutating lifecycle verb, so a supervisor-shaped
+    caller must prove continuity while a fresh claim is held (bypassable, see
+    `_supervisor_gate`). This narrows the old "never refuses" only for a caller
+    with a session id acting against a live supervisor -- a human at a plain
+    shell (no sid) is unaffected, which is how init is run at setup."""
+    _supervisor_gate("init", nonce=getattr(args, "nonce", None))
     force = getattr(args, "force", False)
     guard_problems = _home_guard_problems()
     if getattr(args, "autoclean", False) and guard_problems and not force:
@@ -2890,6 +2908,7 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
     session exists; popping would orphan it beyond even the stranded-turn
     recovery instructions) and does NOT raise raw.
     """
+    _supervisor_gate("spawn", nonce=getattr(args, "nonce", None))
     _require_instance_settings()
 
     cwd = Path(args.dir)
@@ -3956,7 +3975,12 @@ def cmd_send(args, which=shutil.which, sleep=time.sleep, run=subprocess.run) -> 
     SPEC §14: refuses up front (_require_instance_settings) if the
     worker-settings instance is missing -- the fork-steer branch dispatches
     a turn, and `fleet spawn` (the only way a worker could exist at all)
-    already requires the instance."""
+    already requires the instance.
+
+    §7 THE GATE: `send` is the incident-1 verb -- a divergent supervisor body
+    dispatching workers -- so it is the gate's headline case (bypassable, see
+    `_supervisor_gate`)."""
+    _supervisor_gate("send", nonce=getattr(args, "nonce", None))
     _require_instance_settings()
 
     message = _read_task_arg(args.message)
@@ -4131,7 +4155,11 @@ def cmd_resume_limited(args, which=shutil.which, sleep=time.sleep,
     (unknown horizon -- needs operator confirmation) UNLESS --force-now
     overrides for that named worker. Named worker -> that worker only; no name
     -> sweep every eligible worker. status/doctor only FLAG resume-eligibility;
-    this command is the one lever that actually relaunches."""
+    this command is the one lever that actually relaunches.
+
+    §7 THE GATE: a mutating lifecycle verb (it relaunches turns), gated for a
+    supervisor-shaped caller while a fresh claim is held."""
+    _supervisor_gate("resume-limited", nonce=getattr(args, "nonce", None))
     _require_instance_settings()
     force_now = bool(getattr(args, "force_now", False))
 
@@ -4285,7 +4313,11 @@ def cmd_interrupt(args, run=subprocess.run, which=shutil.which) -> int:
     `_cmd_interrupt_native`, guarded to only actually fire on a `working`
     verdict (T8 fix wave, adv C1) -- every other status refuses or
     friendly-no-ops rather than un-terminaling a sticky status via a
-    silent overwrite."""
+    silent overwrite.
+
+    §7 THE GATE: a mutating lifecycle verb, gated for a supervisor-shaped
+    caller while a fresh claim is held (bypassable, see `_supervisor_gate`)."""
+    _supervisor_gate("interrupt", nonce=getattr(args, "nonce", None))
     with fleet_lock():
         data = load_registry()
         if args.name not in data["workers"]:
@@ -4314,7 +4346,12 @@ def cmd_attach(args) -> int:
 
 def cmd_release(args) -> int:
     """`fleet release <name>` (SPEC §5 release row): attached -> idle,
-    clearing attached_since; a friendly no-op warning if not attached."""
+    clearing attached_since; a friendly no-op warning if not attached.
+
+    §7 THE GATE: `release` is one of the two registry-mutating verbs v1's
+    partition missed; it is a mutating lifecycle verb and is gated for a
+    supervisor-shaped caller while a fresh claim is held."""
+    _supervisor_gate("release", nonce=getattr(args, "nonce", None))
     with fleet_lock():
         data = load_registry()
         if args.name not in data["workers"]:
@@ -4584,7 +4621,13 @@ def cmd_respawn(args, run=subprocess.run, which=shutil.which,
     worker's journal (state/journals/<name>.md, labeled, if it exists) +
     the OLD session's drained mailbox. See `_cmd_respawn_native` for the
     full dispatch/rollback contract (liveness gate, --force stop +
-    tombstone, fast-completion race, carried-forward fields)."""
+    tombstone, fast-completion race, carried-forward fields).
+
+    §7 THE GATE: a mutating lifecycle verb (it retires a session and launches a
+    fresh one), gated for a supervisor-shaped caller while a fresh claim is
+    held. Ahead of the destructive-guard prompt: the gate is the outer policy,
+    the ownership prompt the inner one."""
+    _supervisor_gate("respawn", nonce=getattr(args, "nonce", None))
     _require_instance_settings()
 
     # §5.1: respawn retires the old session id. Ask before doing that to a
@@ -4752,7 +4795,12 @@ def cmd_kill(args, run=subprocess.run, which=shutil.which) -> int:
     Launch-in-flight guard: a pre-claim with `session_id is None` (dispatch
     still in flight, not yet expired per `_launch_claim_expired`) refuses
     loudly -- there is no real session to stop yet, and marking it dead
-    would race the in-flight dispatch's own commit."""
+    would race the in-flight dispatch's own commit.
+
+    §7 THE GATE: a mutating lifecycle verb, gated for a supervisor-shaped
+    caller while a fresh claim is held -- ahead of the destructive-ownership
+    prompt (the gate is the outer policy)."""
+    _supervisor_gate("kill", nonce=getattr(args, "nonce", None))
     with fleet_lock():
         data = load_registry()
         if args.name not in data["workers"]:
@@ -4890,7 +4938,11 @@ def cmd_clean(args, run=subprocess.run, which=shutil.which) -> int:
     Autoclean tiering split (docs/specs/autoclean.md D2): `--dead-only`
     spares every tombstone (sweep only confirmed-dead workers);
     `--tombstones` sweeps ONLY archived tombstones -- no recompute,
-    nothing else touched. Default remains both."""
+    nothing else touched. Default remains both.
+
+    §7 THE GATE: a mutating lifecycle verb (irreversible deletion), gated for a
+    supervisor-shaped caller while a fresh claim is held."""
+    _supervisor_gate("clean", nonce=getattr(args, "nonce", None))
     _NATIVE_CLEAN_DELETABLE = {"dead"}
     dead_only = bool(getattr(args, "dead_only", False))
     tombstones_only = bool(getattr(args, "tombstones", False))
@@ -5461,7 +5513,14 @@ def cmd_archive(args, run=subprocess.run, which=shutil.which) -> int:
     verdict computed against a suspicious roster is not trustworthy to
     even preview. A resumable already-archived record still reports
     "already-archived" under `--dry-run` (resume is an execution-time-only
-    concept)."""
+    concept).
+
+    §7 THE GATE: a mutating lifecycle verb, gated for a supervisor-shaped
+    caller while a fresh claim is held. `--dry-run` mutates nothing, but the
+    gate is a policy on the CALLER, not on the effect, so it applies uniformly
+    (a divergent body previewing is still a divergent body); the bypass is the
+    same `--nonce` / no-session route."""
+    _supervisor_gate("archive", nonce=getattr(args, "nonce", None))
     name = getattr(args, "name", None)
     ttl_hours = getattr(args, "ttl_hours", None)
     if ttl_hours is None:
@@ -8046,6 +8105,15 @@ PENDING_NONCE_TTL_SECONDS = 900.0
 NONCE_ARG_HELP = ("the generation this body was last given (claim-nonce §5.3); "
                   "the ONLY presentation channel -- there is no env-var fallback")
 
+# The same generation, presented on a MUTATING LIFECYCLE verb. It does two
+# jobs: it clears §7's gate (a fresh held claim demands continuity from a
+# supervisor-shaped caller), and it lets §6.2's lineage rule own the workers a
+# rotated body's lineage spawned. Both are bypassable speed-bumps, not
+# authorization; both are inert when no fresh claim is held.
+GATE_NONCE_ARG_HELP = ("the current supervisor generation (claim-nonce §5.3): clears §7's "
+                       "claim gate for a mutating verb while a fresh claim is held, and "
+                       "proves the lineage that owns a rotated body's workers (§6.2)")
+
 # §5.6: a `refused` record inside this window is the ONE condition that flips
 # `_doctor_check_supervisor_claim` off `ok=True`. 24 h is long enough that a
 # refusal survives an overnight gap between an incident and the operator
@@ -8784,6 +8852,83 @@ def _claim_is_legacy(claim: dict) -> bool:
     through a verb, which is the only way a shadowed guard can be proven to
     carry its own weight."""
     return "nonce_hash" not in claim and "state" not in claim
+
+
+def _supervisor_gate(verb, nonce=None, now=None):
+    """claim-nonce §7 -- THE GATE (option (b), ratified 2026-07-23). Raises
+    `SupervisorClaimGateError` when a mutating lifecycle verb is run by a
+    supervisor-shaped caller while a supervisor claim is HELD with a FRESH
+    heartbeat and the caller cannot prove continuity on it. Returns silently
+    otherwise. READ-ONLY: no lock, no mint, no write.
+
+    Called at the top of every mutating lifecycle verb (§7's taxonomy: spawn,
+    send, respawn, kill, clean, interrupt, archive, resume-limited, release,
+    init). It is NEVER called from a view or an authoritative-read path -- a
+    gate on `sup-status` or `status --stale-ok` would make the SessionStart
+    hook of every session on this box refuse while a supervisor is live.
+
+    WHAT IT IS, stated exactly because §7 was corrected for pretending
+    otherwise: a speed-bump against an over-helpful SECOND body, not an
+    authorization boundary. Everything it refuses, the refused caller reaches
+    by another documented route -- present the generation with `--nonce`, or
+    run the verb from a shell with no `CLAUDE_CODE_SESSION_ID`. A substrate
+    with no privilege separation (§2.1) cannot host authorization, and calling
+    this one would mislead a future reader.
+
+    THE ARMING CONDITIONS, and why each disarms:
+      * no `CLAUDE_CODE_SESSION_ID` -> not armed. A caller with no sid cannot
+        be the divergent supervisor body a fork produced. This is also the
+        STRUCTURAL exemption for `autoclean`'s scheduled task (no operator env)
+        and for a human shell; `autoclean` additionally is not wired to call
+        this at all (§7).
+      * no held claim / a released claim -> nothing to gate against.
+      * heartbeat older than `SUPERVISOR_CLAIM_STALE_SECONDS` -> DISARMED. This
+        slice ships no automatic beat (§4.13(e)), so protection is present only
+        in the hour after a human last acted and absent in the quiet stretches
+        an unattended second body would exploit. A DISCLOSED weakness of option
+        (b), not a bug: arming it against a stale claim would fire on a body
+        that has already aged into being seizable, which is the wrong target.
+      * an unreadable heartbeat -> fail OPEN (a speed-bump must not brick every
+        mutating verb; the corrupt claim is reported by its own doctor row).
+      * a legacy claim (§9) -> no generation exists to demand; the mixed-code
+        shape must not brick a body.
+
+    When armed, the caller must present a generation that VALIDATES against the
+    claim (§5.3, via `_nonce_presentation`) -- and validation here mints
+    NOTHING (§5.3: rotation is a supervisor ritual, not a side effect of
+    dispatching a worker). A divergent fork holding a retired generation
+    presents a value that is neither live nor pending nor prior-pending and is
+    refused; this is what makes the 2026-07-16 dual-supervisor class a refusal
+    instead of ~100 silent minutes."""
+    caller = current_caller_session()
+    if caller is None:
+        return
+    try:
+        claim = read_incarnation()
+    except Exception:  # noqa: BLE001 -- speed-bump: never crash a verb on this
+        return
+    if not isinstance(claim, dict) or claim.get("state") == "released":
+        return
+    if now is None:
+        now = datetime.now(timezone.utc)
+    try:
+        age = (now - _parse_iso(claim["heartbeat_at"])).total_seconds()
+    except (KeyError, TypeError, ValueError):
+        return                      # unreadable beat: fail open
+    if age > SUPERVISOR_CLAIM_STALE_SECONDS:
+        return                      # stale: disarmed (§4.13(e))
+    if _claim_is_legacy(claim):
+        return                      # no generation to demand (§9)
+    if _nonce_presentation(claim, nonce) is not None:
+        return                      # continuity proved -- validate without minting
+    raise SupervisorClaimGateError(
+        f"{verb}: refusing -- a supervisor claim ({claim.get('incarnation_id', '?')}) "
+        f"is held and fresh, and this call did not prove continuity on it "
+        f"(claim-nonce §7). Present the current generation with `--nonce <value>` "
+        f"(the value the last `sup-*` verb printed), or escalate to the supervisor "
+        f"session. This is a SPEED-BUMP, not a security boundary: it is bypassable "
+        f"by anyone who can run this command without a session id, and it is armed "
+        f"only while the claim's heartbeat is fresh.")
 
 
 def _caller_proven_lineage(caller, nonce):
@@ -10006,6 +10151,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("knowledge", help="print knowledge/INDEX.md")
 
     p_init = sub.add_parser("init", help="render the machine-local worker-settings.json instance from the template")
+    p_init.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
     p_init.add_argument("--statusline", action="store_true",
                         help="also install fleet's statusline into ~/.claude/settings.json")
     p_init.add_argument("--chain", action="store_true",
@@ -10039,6 +10185,7 @@ def build_parser() -> argparse.ArgumentParser:
     # settings sources merge into the worker turn (see SKILL.md doctrine:
     # use this when a repo's own Stop hook fights fleet's turn-end model).
     p_spawn.add_argument("--setting-sources", dest="setting_sources", default=None)
+    p_spawn.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
     # Kernel 10 (F12=M24): a cumulative TOKEN ceiling (int) enforced
     # fleet-side before each resume launch, and written to the sid-keyed
     # ceiling file the Stop hook reads to allow-stop despite pending mail. NOT
@@ -10076,9 +10223,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_send = sub.add_parser("send", help="send a message to a worker (mailbox or resume)")
     p_send.add_argument("name")
     p_send.add_argument("message")
+    p_send.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
 
     p_interrupt = sub.add_parser("interrupt", help="kill a worker's running turn")
     p_interrupt.add_argument("name")
+    p_interrupt.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
 
     p_attach = sub.add_parser("attach", help="attach an interactive terminal to a worker")
     p_attach.add_argument("name")
@@ -10086,6 +10235,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_release = sub.add_parser("release", help="release an attached worker back to idle")
     p_release.add_argument("name")
+    p_release.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
 
     p_respawn = sub.add_parser("respawn", help="fresh session for a worker (context-reset lever)")
     p_respawn.add_argument("name")
@@ -10093,8 +10243,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_respawn.add_argument("--force", action="store_true")
     p_respawn.add_argument("--yes", action="store_true",
                            help="confirm respawning a worker this session did not spawn")
-    p_respawn.add_argument("--nonce", help="prove supervisor-claim continuity so a later body "
-                                           "of the spawning lineage owns its workers (§6.2)")
+    p_respawn.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
     # F13/M5: respawn carries the persisted max_budget_usd/setting_sources
     # forward by default; these optional overrides replace them (default None
     # -> carry forward, mirroring the immutable-at-spawn rule for a reset).
@@ -10109,19 +10258,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_resume.add_argument("name", nargs="?", default=None)
     p_resume.add_argument("--force-now", action="store_true", dest="force_now",
                           help="resume a named worker even before its horizon / with an unknown horizon")
+    p_resume.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
 
     p_kill = sub.add_parser("kill", help="interrupt (if running) and mark a worker dead")
     p_kill.add_argument("--yes", action="store_true",
                         help="confirm killing a worker this session did not spawn")
-    p_kill.add_argument("--nonce", help="prove supervisor-claim continuity so a later body "
-                                        "of the spawning lineage owns its workers (§6.2)")
+    p_kill.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
     p_kill.add_argument("name")
 
     p_clean = sub.add_parser("clean", help="remove dead workers and their logs/mailboxes/journals")
     p_clean.add_argument("--yes", action="store_true",
                          help="confirm deleting workers this session did not spawn")
-    p_clean.add_argument("--nonce", help="prove supervisor-claim continuity so a later body "
-                                         "of the spawning lineage owns its workers (§6.2)")
+    p_clean.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
     clean_tier = p_clean.add_mutually_exclusive_group()
     clean_tier.add_argument("--dead-only", action="store_true", dest="dead_only",
                             help="sweep only confirmed-dead workers; spare archived tombstones")
@@ -10132,6 +10280,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_archive.add_argument("name", nargs="?", default=None)
     p_archive.add_argument("--ttl-hours", type=float, default=None, dest="ttl_hours")
     p_archive.add_argument("--dry-run", action="store_true", dest="dry_run")
+    p_archive.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
 
     p_autoclean = sub.add_parser(
         "autoclean",
