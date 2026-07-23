@@ -151,13 +151,19 @@ def _resolve_name(home: Path, sid: str):
 
 
 def _transcript_result(transcript_path):
-    """(text, input_tokens, output_tokens, model) from the LAST assistant
-    record -- the tail is bookkeeping, never 'read last line' (contract)."""
-    text = tokens_in = tokens_out = model = None
+    """(text, input_tokens, output_tokens, cache_creation, cache_read, model)
+    from the LAST assistant record -- the tail is bookkeeping, never 'read last
+    line' (contract).
+
+    three-tier §11.2 (B2): context occupancy is the SUM of the three prompt
+    summands input_tokens + cache_creation_input_tokens + cache_read_input_tokens.
+    Recording all three (belt-and-braces, additive schema) lets a third party
+    read the supervisor's occupancy without being the supervisor."""
+    text = tokens_in = tokens_out = cache_creation = cache_read = model = None
     try:
         raw = Path(transcript_path).read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return text, tokens_in, tokens_out, model
+        return text, tokens_in, tokens_out, cache_creation, cache_read, model
     for line in raw.splitlines():
         line = line.strip()
         if not line:
@@ -179,9 +185,11 @@ def _transcript_result(transcript_path):
         if isinstance(usage, dict):
             tokens_in = usage.get("input_tokens")
             tokens_out = usage.get("output_tokens")
+            cache_creation = usage.get("cache_creation_input_tokens")
+            cache_read = usage.get("cache_read_input_tokens")
         if msg.get("model"):
             model = msg.get("model")
-    return text, tokens_in, tokens_out, model
+    return text, tokens_in, tokens_out, cache_creation, cache_read, model
 
 
 def main() -> int:
@@ -199,9 +207,10 @@ def main() -> int:
         text = payload.get("last_assistant_message")
         if not isinstance(text, str):
             text = None
-        tokens_in = tokens_out = model = None
+        tokens_in = tokens_out = cache_creation = cache_read = model = None
         if transcript_path:
-            t_text, tokens_in, tokens_out, model = _transcript_result(transcript_path)
+            (t_text, tokens_in, tokens_out,
+             cache_creation, cache_read, model) = _transcript_result(transcript_path)
             if text is None:
                 text = t_text
         if isinstance(text, str) and len(text) > RESULT_TEXT_MAX:
@@ -220,6 +229,8 @@ def main() -> int:
         record = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                   "session_id": sid, "kind": "result", "result_text": text,
                   "input_tokens": tokens_in, "output_tokens": tokens_out,
+                  "cache_creation_input_tokens": cache_creation,
+                  "cache_read_input_tokens": cache_read,
                   "model": model, "transcript_path": transcript_path}
         line = json.dumps(record, ensure_ascii=False)
         _atomic_append_bytes(out_dir / f"{key}.jsonl", (line + "\n").encode("utf-8"))
