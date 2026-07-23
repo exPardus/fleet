@@ -7929,9 +7929,19 @@ SUPERVISOR_ROSTER_VERIFY_SECONDS = 60.0   # dispatch -> roster-join window (cont
 SUCCESSOR_DEFAULT_MODE = "dontask"
 
 SUPERVISOR_JOURNAL_KINDS = (
-    "BOOT", "CHECKPOINT", "PROPOSAL", "SEIZED",
+    "BOOT", "CHECKPOINT", "PROPOSAL", "SEIZED", "RELEASED",
     "HANDOFF-BEGIN", "HANDOFF-COMPLETE", "HANDOFF-ABORT",
 )
+
+# The published `sup-boot` exit-code contract (skills/fleet/SKILL.md:37).
+# Held as a named constant rather than a dict literal inside cmd_sup_boot so
+# that a verdict outside the set is a KeyError at ONE site a test can name --
+# break-gate residual F2's failure mode is a verdict the map does not carry.
+# `resume` (claim-nonce §6.1 rule 3) joins the 0-row: it is the holder keeping
+# a claim it already had, which is not an event an exit code should distinguish
+# from claiming one.
+SUPERVISOR_BOOT_RC = {"claim": 0, "resume": 0, "seize": 0, "refuse": 2, "freeze": 3}
+SUPERVISOR_BOOT_VERDICTS = tuple(SUPERVISOR_BOOT_RC) + ("handshake-written",)
 
 _SUPERVISOR_JOURNAL_SEED = """# Supervisor Journal
 
@@ -8126,18 +8136,79 @@ def supervisor_epoch_check(roster_ok: bool, payload):
     return (True, f"roster holds {len(payload)} entr{'y' if len(payload) == 1 else 'ies'}")
 
 
+def _claim_resume_allowed(nonce_valid: bool, holder_sid, caller_sid, live_sids: set) -> bool:
+    """§6.1 rule 3's premise, named so rules 4-'s precondition can be tested
+    against a WEAKENED version of it (T14b). A caller that proved continuity
+    resumes iff the recorded holder is roster-gone, or is the caller itself.
+
+    Held as a function rather than inlined because the whole lesson of N1 is
+    that an implication nobody can reach is an implication nobody can test:
+    the roster precondition below is unreachable while this returns True for
+    the live-holder case, so the test that proves the precondition has a
+    stated `else` has to be able to make this False."""
+    return bool(nonce_valid) and (holder_sid not in live_sids or holder_sid == caller_sid)
+
+
 def supervisor_claim_decision(claim, live_sids: set, latest_entry, now=None,
-                              stale_seconds: float = SUPERVISOR_CLAIM_STALE_SECONDS):
-    """Claim rules at boot (spec §4, verbatim order). Returns (verdict, reason);
-    verdict in {"claim","refuse","seize","freeze"}. Pure function -- no IO."""
+                              stale_seconds: float = SUPERVISOR_CLAIM_STALE_SECONDS,
+                              caller_sid=None, nonce_valid: bool = False):
+    """Claim rules at boot (claim-nonce §6.1, verbatim order). Returns
+    (verdict, reason); verdict in SUPERVISOR_BOOT_VERDICTS. Pure -- no IO.
+
+    Rule order, and why it is this order:
+
+      0. no claim                       -> claim   (fresh)
+      1. state == "released"            -> claim   (fresh, §6.3) -- ahead of
+         everything, because a released claim has neither session_id nor
+         heartbeat_at and every later rule would misread its absence
+      2. holder roster-live, UNLESS the caller is that holder AND proved
+         continuity                     -> refuse  (the two-supervisor guard)
+      3. continuity proved, holder roster-gone or holder is the caller
+                                        -> resume  (incident 2's fix: no
+         seize, no new incarnation, no SEIZED entry, no page)
+      4- holder roster-gone             -> freeze / refuse / seize / freeze
+         else                           -> refuse  (fail-closed)
+
+    Rule 2's exception is keyed on CONTINUITY, never on the sid alone.
+    `caller_sid` reaches this function from `current_caller_session()`, which
+    is one `os.environ.get` -- so a rule written as `holder_sid != caller_sid`
+    would let a settable environment variable DE-AUTHORIZE the only
+    body-discriminating check in the program. Concretely: read the holder's
+    sid from the lock-free `sup-status` view, export it, boot holding no
+    generation, and rules 4- reach `seize` against a live healthy supervisor
+    as soon as its heartbeat ages past the threshold -- which, with no
+    automatic beat in this slice, is the ordinary state of a busy supervisor.
+    That would be strictly less safe than shipped code, which refuses a
+    roster-live holder unconditionally. T14(iii) pins the attack."""
     if now is None:
         now = datetime.now(timezone.utc)
     if claim is None:
         return ("claim", "no existing claim -- fresh claim")
+    if claim.get("state") == "released":
+        return ("claim", f"predecessor {claim.get('incarnation_id', '?')} released cleanly "
+                         f"-- fresh claim, no seizure")
     holder_sid = claim.get("session_id")
-    if holder_sid in live_sids:
+    holder_live = holder_sid in live_sids
+    resume_ok = _claim_resume_allowed(nonce_valid, holder_sid, caller_sid, live_sids)
+    if holder_live and not (holder_sid == caller_sid and nonce_valid):
         return ("refuse", f"claim holder {claim.get('incarnation_id', '?')} "
                           f"(sid {holder_sid}) is live in the roster")
+    if resume_ok:
+        age_txt = "unknown age"
+        try:
+            age_txt = f"{(now - _parse_iso(claim['heartbeat_at'])).total_seconds():.0f}s"
+        except (KeyError, TypeError, ValueError):
+            pass
+        return ("resume", f"resumed own claim after {age_txt} -- continuity proved, "
+                          f"no seizure")
+    # Rules 4- assert "holder roster-gone" in strings they write into the
+    # append-only, git-tracked journal. Break-gate residual F2: that
+    # precondition must be an explicit branch with a stated `else`, because an
+    # audit record asserting a premise nobody tested is a durable corruption
+    # of the only artifact a future incident review will have.
+    if holder_live:
+        return ("refuse", "holder is roster-live -- the guard should have caught this; "
+                          "refusing rather than deciding")
     try:
         beat = _parse_iso(claim["heartbeat_at"])
     except (KeyError, TypeError, ValueError):
@@ -8278,7 +8349,7 @@ def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
                                           f"seized from {dead}: {reason}")
                 inc_line = inc
             # refuse / freeze: strictly read-only.
-        rc = {"claim": 0, "seize": 0, "refuse": 2, "freeze": 3}[verdict]
+        rc = SUPERVISOR_BOOT_RC[verdict]
 
     bundle = _render_boot_bundle(entries, status_snapshot(), supervisor_journal_entries())
     lines = [bundle, "", f"EPOCH: {'ok' if epoch_ok else 'FAIL'} -- {epoch_reason}"]

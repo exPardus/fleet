@@ -172,6 +172,149 @@ class TestClaimDecision:
         assert v == "seize"
 
 
+class TestClaimDecisionVerdictOrder:
+    """T14 (claim-nonce §6.1): the boot verdict order, table-driven over the
+    spec's own four-case table, plus the released row of §6.3.
+
+    The load-bearing row is (iii), the N1 attack: `caller_sid` is a settable
+    environment variable (`current_caller_session()` is one `os.environ.get`),
+    so a rule keyed on `holder_sid != caller_sid` lets a spoofer DE-AUTHORIZE
+    the only body-discriminating guard in the program. The corrected rule keys
+    the exception on continuity (`nonce_valid`), never on the sid alone."""
+
+    def test_i_distinct_live_holder_refuses_even_with_a_valid_generation(self):
+        # Incident 1's fork: distinct sid, holds a copied generation.
+        v, reason = fleet.supervisor_claim_decision(
+            _claim(), {"sid-old"}, None, now=NOW,
+            caller_sid="sid-fork", nonce_valid=True)
+        assert v == "refuse"
+        assert "live in the roster" in reason
+
+    def test_ii_incident_2_same_sid_resumed_with_generation_resumes(self):
+        # The wart this slice exists to fix: the holder IS the caller, is
+        # roster-live, its heartbeat has aged past the seizure threshold, and
+        # it holds its generation. Shipped code refuses this unconditionally.
+        c = _claim(beat=NOW - timedelta(seconds=7200))
+        v, reason = fleet.supervisor_claim_decision(
+            c, {"sid-old"}, None, now=NOW,
+            caller_sid="sid-old", nonce_valid=True)
+        assert v == "resume"
+        assert "resumed own claim" in reason
+
+    def test_iii_n1_attack_spoofed_sid_without_a_generation_refuses(self):
+        # THE regression guard. Caller reads the holder's sid from the
+        # lock-free `sup-status` view, exports it as CLAUDE_CODE_SESSION_ID,
+        # and boots holding no generation against a live, healthy holder whose
+        # heartbeat has merely aged (the ordinary state of a busy supervisor:
+        # this slice ships no automatic beat). Must be `refuse`, NEVER `seize`.
+        c = _claim(beat=NOW - timedelta(seconds=7200))
+        v, reason = fleet.supervisor_claim_decision(
+            c, {"sid-old"}, None, now=NOW,
+            caller_sid="sid-old", nonce_valid=False)
+        assert v == "refuse"
+        # And it must be RULE 2 that refuses, not the fail-closed `else` on
+        # rules 4-. The two are belt-and-braces: with v2's sid-keyed clause
+        # (`holder_sid != caller_sid`) rule 2 does not fire, the caller falls
+        # through, and the F2 backstop refuses it anyway -- so an assertion on
+        # the verdict alone passes against the exact regression this row
+        # exists to pin. Naming the guard is what makes the row load-bearing.
+        assert "live in the roster" in reason
+        assert "should have caught this" not in reason
+
+    def test_iv_holder_roster_gone_with_generation_resumes_without_seizing(self):
+        c = _claim(beat=NOW - timedelta(seconds=7200))
+        v, reason = fleet.supervisor_claim_decision(
+            c, set(), None, now=NOW, caller_sid="sid-new", nonce_valid=True)
+        assert v == "resume"
+        assert "resumed own claim" in reason
+
+    def test_holder_roster_gone_without_generation_still_seizes(self):
+        c = _claim(beat=NOW - timedelta(seconds=7200))
+        v, _ = fleet.supervisor_claim_decision(
+            c, set(), None, now=NOW, caller_sid="sid-new", nonce_valid=False)
+        assert v == "seize"
+
+    def test_released_claim_is_a_fresh_claim_not_a_seizure(self):
+        # §6.3: a released claim has no session_id and no heartbeat_at, so it
+        # must be decided by `state` alone, ahead of every other rule.
+        released = {"incarnation_id": "inc-old", "lineage_id": "lin-x",
+                    "claimed_via": "fresh", "released_at": _iso(NOW),
+                    "released_by_sid": "sid-old", "state": "released"}
+        v, reason = fleet.supervisor_claim_decision(
+            released, set(), None, now=NOW, caller_sid="sid-new")
+        assert v == "claim"
+        assert "released cleanly" in reason
+
+    def test_released_claim_wins_even_when_the_recorded_sid_is_roster_live(self):
+        # The released row runs AHEAD of the roster guard: a released claim
+        # carries no session_id at all, so `None in live_sids` must not be
+        # able to steer the decision, and a stale roster must not resurrect it.
+        released = {"incarnation_id": "inc-old", "lineage_id": "lin-x",
+                    "claimed_via": "fresh", "released_at": _iso(NOW),
+                    "released_by_sid": "sid-old", "state": "released"}
+        v, _ = fleet.supervisor_claim_decision(
+            released, {"sid-old", None}, None, now=NOW, caller_sid="sid-old")
+        assert v == "claim"
+
+    def test_legacy_call_signature_still_decides(self):
+        # Migration: every existing caller passes neither caller_sid nor
+        # nonce_valid. Without a generation nothing can resume, so the shipped
+        # verdicts must be byte-identical to today's.
+        assert fleet.supervisor_claim_decision(
+            _claim(), {"sid-old"}, None, now=NOW)[0] == "refuse"
+        assert fleet.supervisor_claim_decision(
+            _claim(beat=NOW - timedelta(seconds=7200)), set(), None, now=NOW)[0] == "seize"
+
+
+class TestClaimDecisionRosterPrecondition:
+    """T14b (claim-nonce §6.1, break-gate residual F2): rules 4- assert
+    `holder roster-gone` in strings they write into the append-only,
+    git-tracked journal. That precondition must be an explicit BRANCH with a
+    stated `else`, not an inherited implication.
+
+    "Unreachable today" is exactly what `roster-gone` was before N1 -- and
+    this one fails harder than N1 did: `cmd_sup_boot` maps the verdict through
+    `{"claim": 0, "resume": 0, "seize": 0, "refuse": 2, "freeze": 3}[verdict]`,
+    so a fall-through returning `None` is a KeyError traceback out of the boot
+    ritual rather than a safe stop."""
+
+    @pytest.mark.parametrize("nonce_valid", [True, False])
+    @pytest.mark.parametrize("caller_sid", ["sid-old", "sid-other", None])
+    @pytest.mark.parametrize("beat_age", [60, 3601, 86400])
+    @pytest.mark.parametrize("latest_inc", [None, "inc-old", "inc-newer"])
+    def test_no_seize_or_freeze_while_the_holder_is_roster_live(
+            self, nonce_valid, caller_sid, beat_age, latest_inc):
+        c = _claim(beat=NOW - timedelta(seconds=beat_age))
+        latest = None if latest_inc is None else {
+            "ts": _iso(NOW - timedelta(seconds=1)), "kind": "CHECKPOINT",
+            "inc": latest_inc, "sid": "sid-x", "body": ""}
+        v, reason = fleet.supervisor_claim_decision(
+            c, {"sid-old"}, latest, now=NOW,
+            caller_sid=caller_sid, nonce_valid=nonce_valid)
+        assert v not in ("seize", "freeze"), reason
+        assert "roster-gone" not in reason
+
+    def test_the_precondition_states_its_else_and_it_is_refuse(self, monkeypatch):
+        """Fault injection for the F2 guard.
+
+        The `else` is unreachable through the shipped rules -- that is the
+        whole hazard, and it is why the test has to WEAKEN rule 3's premise to
+        reach it, which is precisely the future edit the guard exists to
+        survive. With `_claim_resume_allowed` forced False, a roster-live
+        holder falls past rules 2 and 3; absent the `else` the function drops
+        off the end and returns None, and the assertion below goes red."""
+        monkeypatch.setattr(fleet, "_claim_resume_allowed",
+                            lambda *a, **k: False)
+        c = _claim(beat=NOW - timedelta(seconds=7200))
+        v, reason = fleet.supervisor_claim_decision(
+            c, {"sid-old"}, None, now=NOW,
+            caller_sid="sid-old", nonce_valid=True)
+        assert v == "refuse"
+        assert "roster-live" in reason
+        # Fail-closed AND in the rc map -- the half a `None` fall-through loses.
+        assert v in fleet.SUPERVISOR_BOOT_RC
+
+
 class TestEpochCheck:
     def test_roster_fetch_failure_freezes(self):
         ok, reason = fleet.supervisor_epoch_check(False, "claude not on PATH")
