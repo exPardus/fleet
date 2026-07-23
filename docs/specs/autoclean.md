@@ -49,6 +49,14 @@ Scheduler mechanics live in the platform adapter (`autoclean_task_install/query/
 - `fleet init --autoclean-remove` — uninstall (`schtasks /Delete /TN claude-fleet-autoclean /F`). Manual equivalent documented for operators without fleet at hand.
 - `fleet clean [--dead-only | --tombstones]` — manual tiering split.
 
+## Three-tier interactions (doc-sync 2026-07-23, per `docs/specs/three-tier-command.md` §12)
+
+The ratified three-tier spec (2026-07-23) touches this spec in three places:
+
+- **The scheduler adapter now serves a second task family** (three-tier §6.1). The adapter methods (`autoclean_task_install/query/remove`) are already generic over `task_name`/`command`/`interval_hours`, and the planned supervisor-beat task installs through the same seam (`task_name="claude-fleet-supervisor-beat"`). The `autoclean_task_*` naming is now a misnomer for a generic scheduler seam; a rename to `scheduled_task_*` is `[UNBUILT]` cosmetic cleanup, not a blocker.
+- **Per-task ownership, exactly as the F4 doctrine above demands** (three-tier §6.2). The beat task's ownership predicate is `_fleet_task_is_ours(command, "beat")` — the full-identity match, never a fresh path-only predicate — so the beat and autoclean tasks coexist without either `/Create /F`-ing the other. The multi-flag `fleet init` wiring (`--autoclean` + `--supervisor-beat` in one invocation) is `[UNBUILT]`.
+- **The supervisor record becomes exempt from tier 1 and tier 2, keyed on the live claim-holder, never a static name** (three-tier §7.2, `[UNBUILT — three-tier build slice]`). The archive TTL (24 h) vs the schtasks interval clamp (≤23 h) means an idle supervisor record would otherwise be archived/rm'd out from under a running campaign. The predicate: a record is protected iff its `session_id` (or a member of its `retired_sids`) is the current `supervisor/INCARNATION` claim-holder's **and** that body is roster-live — which protects a successor under any name (`sup|<inc>|successor`) and never protects a dead husk (three-tier B1/B9).
+
 ## Testing
 
 Unit: ownership discriminator table incl. **fault-inject** (a foreign roster sid must never be selected — the test seeds a foreign session alongside a genuine husk and fails if the owned-set filter is bypassed); protected sids of live records spared; tombstone/events/archive-dir sid sources each recognized; live-entry and pending-mail gates; tier isolation (tier-1 crash ⇒ tier 2 still sweeps); tier-3 default-off (ancient tombstone untouched without the flag) + pending-move tombstone never expired + files untouched; dry-run mutates nothing; clean `--dead-only`/`--tombstones` semantics; init install/refuse-foreign/force/idempotent/remove via injected fake `run`; doctor check note-only on every path.
