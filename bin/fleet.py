@@ -1252,6 +1252,37 @@ def resolve_claude_executable(which=shutil.which) -> str:
     return exe
 
 
+# claim-nonce §6.5 / §13 item 1, council option (i) -- the NARROW arm.
+#
+# The handoff successor is dispatched as a fleet worker under this exact name
+# shape (see `_successor_worker_name`, used by `cmd_sup_handoff_begin`), so it
+# carries `FLEET_WORKER` like any other worker -- and its first act after
+# claim transfer is `sup-checkpoint`, a `_require_claim_holder` caller. A
+# BLANKET `FLEET_WORKER` refusal would therefore break the one session the
+# handoff exists to serve, and would break three-tier's `sup-spawn`, which
+# spawns the supervisor itself as a fleet worker.
+#
+# The shape is unforgeable through `fleet spawn`: `NAME_RE` is `^[a-z0-9-]+$`,
+# so `|` is forbidden in every spawnable worker name and no worker can be
+# named into the exemption. Held here, beside `_worker_env`, so the dispatch
+# and the refusal arm read ONE shape -- two copies of a security-relevant
+# literal drift silently, with the dispatch still working while the exemption
+# quietly stops matching it.
+_SUPERVISOR_SHAPED_WORKER_RE = re.compile(r"^sup\|[^|]+\|successor$")
+
+
+def _successor_worker_name(successor_inc: str) -> str:
+    """The `--bg -n` name `cmd_sup_handoff_begin` dispatches a successor under."""
+    return f"sup|{successor_inc}|successor"
+
+
+def _is_supervisor_shaped(name) -> bool:
+    """True iff `name` is a handoff-successor worker name. Never raises on a
+    non-string: `os.environ.get` can only return `str | None` today, but this
+    is also called on registry-sourced values."""
+    return isinstance(name, str) and _SUPERVISOR_SHAPED_WORKER_RE.match(name) is not None
+
+
 def _worker_env(name: str) -> dict:
     """Child environment for a worker turn: the parent's, plus FLEET_WORKER.
 
@@ -8898,6 +8929,28 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
     Still the enforcement point for spec §4's journal single-writer rule; the
     question it asks has changed from "are you the recorded sid" to "are you
     the actor the last generation was delivered to"."""
+    # §6.5 / §13 item 1: "a worker turn can hold the supervisor claim, and is
+    # prevented only by accident." Adjudicated to the NARROW arm -- refuse when
+    # FLEET_WORKER is set and its value is not supervisor-shaped. See
+    # `_SUPERVISOR_SHAPED_WORKER_RE` for why a blanket refusal is wrong and why
+    # the exempt shape cannot be forged through `fleet spawn`.
+    #
+    # Ahead of the claim read on purpose: the ROLE answer does not depend on
+    # whether a claim exists, and a worker turn should be told it is a worker
+    # rather than that a claim is missing.
+    #
+    # This keys on the worker NAME because that is what `_worker_env` stamps
+    # (`env["FLEET_WORKER"] = name`). three-tier-command.md ~L1078 describes it
+    # as `FLEET_WORKER=1`; that text is wrong and its own receipt at :1402-1408
+    # pastes the correct line. An arm keyed on the value "1" would be a no-op.
+    worker = os.environ.get("FLEET_WORKER")
+    if worker and worker.strip() and not _is_supervisor_shaped(worker):
+        raise FleetCliError(
+            f"{verb}: refusing -- this is a worker turn (FLEET_WORKER={worker!r}) and "
+            f"the supervisor claim is not a worker's to hold (claim-nonce §6.5). "
+            f"Escalate to the supervisor session. (A speed-bump, not a security "
+            f"boundary: an environment variable is settable by anyone who can run "
+            f"this command.)")
     claim = read_incarnation()
     if claim is None:
         raise FleetCliError("no supervisor claim exists -- run `fleet sup-boot` first")
@@ -9237,7 +9290,7 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     # Same unhashable-sessionId guard as dispatch_bg's pre-snapshot above.
     pre_sids = {e.get("sessionId") for e in (pre_payload if pre_ok else [])
                 if isinstance(e, dict) and isinstance(e.get("sessionId"), str)}
-    name = f"sup|{successor_inc}|successor"
+    name = _successor_worker_name(successor_inc)
     # Same value dispatch_bg's --settings default resolves to (the RENDERED
     # instance, never the template): the successor gets fleet's hooks. See
     # this function's docstring for why this path is not dispatch_bg.
