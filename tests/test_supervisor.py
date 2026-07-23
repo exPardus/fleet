@@ -1509,6 +1509,22 @@ class TestWorkerTurnsCannotHoldTheClaim:
         assert fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=live)) == 0
         capsys.readouterr()
 
+    def test_a_nonsuccessor_supervisor_shaped_body_holds_its_own_claim(
+            self, sup_home, monkeypatch, capsys):
+        # three-tier §10.1 sup-spawn (manager ruling, extension-not-reversal):
+        # sup-spawn dispatches its bodies under the family `sup|<inc>|<role>`,
+        # not only the handoff `sup|<inc>|successor`. A gen-0 supervisor body
+        # under such a name carries FLEET_WORKER=that-name and its first act is
+        # sup-checkpoint. Before the shape extension this body was REFUSED ITS
+        # OWN CLAIM (the shape only accepted `successor`); the extension turns
+        # this green. Council E(2) grounding: the exempt shape must be
+        # unforgeable via `fleet spawn`, and ANY `|`-bearing name satisfies that
+        # (NAME_RE forbids `|`), so the whole family is exempt-safe.
+        live = self._hold()
+        monkeypatch.setenv("FLEET_WORKER", "sup|inc-me|boot")
+        assert fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=live)) == 0
+        capsys.readouterr()
+
     def test_the_successor_still_faces_the_continuity_check(self, sup_home, monkeypatch):
         # "Passes through" means exactly that: exempt from the ROLE arm, not
         # exempt from §5.3. An exemption that skipped the claim check would
@@ -1521,13 +1537,17 @@ class TestWorkerTurnsCannotHoldTheClaim:
 
     @pytest.mark.parametrize("value", [
         "sup|inc-x|successor|extra",     # a third separator
-        "sup|inc-x|worker",              # right prefix, wrong role
         "SUP|inc-x|successor",           # case
         "sup||successor",                # empty incarnation segment
         " sup|inc-x|successor",          # leading space
         "sup|inc-x|successor ",          # trailing space
         "xsup|inc-x|successor",          # unanchored prefix
-        "sup|inc-x|successorx",          # unanchored suffix
+        # Note: `sup|inc-x|worker` and `sup|inc-x|successorx` are NO LONGER
+        # near-misses -- the §10.1 manager ruling widened the exempt shape to the
+        # whole `sup|<inc>|<role>` family, so both are now valid members (covered
+        # by test_the_family_is_supervisor_shaped). Only shapes that leave the
+        # family entirely (extra separator, wrong prefix/case, empty segment,
+        # surrounding whitespace) remain refused here.
     ])
     def test_near_miss_shapes_are_refused(self, sup_home, monkeypatch, value):
         live = self._hold()
@@ -1579,6 +1599,29 @@ class TestWorkerTurnsCannotHoldTheClaim:
     @pytest.mark.parametrize("value", [None, 0, b"sup|x|successor", ["sup|x|successor"]])
     def test_the_shape_test_never_raises_on_a_non_string(self, value):
         assert fleet._is_supervisor_shaped(value) is False
+
+    # (e) the family -- three-tier §10.1 sup-spawn (manager ruling): the exempt
+    # shape is the WHOLE family `sup|<inc>|<role>`, not only `successor`.
+    @pytest.mark.parametrize("name", [
+        "sup|inc-x|successor",                 # the handoff shape STILL matches
+        "sup|inc-x|boot",                      # a gen-0 sup-spawn role
+        "sup|inc-20260723T101112Z-abcd|primary",
+        "sup|inc-x|role-with-dashes",
+    ])
+    def test_the_family_is_supervisor_shaped(self, name):
+        assert fleet._is_supervisor_shaped(name) is True
+
+    @pytest.mark.parametrize("name", [
+        "supervisor",              # the reserved gen-0 NAME is not pipe-shaped
+        "sup|inc-x|",              # empty role
+        "sup||successor",          # empty incarnation segment
+        "sup|inc-x|successor|extra",   # a third separator
+        "sup|inc-x|Boot",          # role must start lower-case [a-z]
+        "sup|inc-x|1role",         # role must start with a letter
+        "SUP|inc-x|boot",          # case on the prefix
+    ])
+    def test_family_near_misses_are_not_supervisor_shaped(self, name):
+        assert fleet._is_supervisor_shaped(name) is False
 
 
 class TestRefusalMessageIsAgentSafe:
