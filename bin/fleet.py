@@ -9042,6 +9042,63 @@ def cmd_sup_heartbeat(args) -> int:
     return 0
 
 
+def cmd_sup_release(args) -> int:
+    """`fleet sup-release [--reason TEXT] [--nonce N] [--sid S]` -- claim-nonce
+    §6.3 / D3. The verb that produces a RELEASED claim.
+
+    It does NOT delete `supervisor/INCARNATION`; it rewrites it. Deleting
+    would leave the absent-claim shape, which says "nobody ever claimed" --
+    the released record says "a body held this and gave it up cleanly", and
+    that distinction is the whole of incident 3: an operator-authorized stop
+    must be distinguishable from a daemon restart. §6.1 rule 1 then reads the
+    record and returns `claim` with no seizure and no `SEIZED` entry.
+
+    THE KEY SET IS ENUMERATED BY §6.3 AND WRITTEN AS A LITERAL, never as a
+    filtered copy of the live claim. v1 left it open and the gap made a
+    released claim indistinguishable from a legacy one (§9): both lack
+    `nonce_hash`, so a leftover `session_id` would let the legacy branch honor
+    it by sid equality and upgrade it in place -- "released" would stop being
+    terminal and whoever matched the recorded sid would resurrect the claim.
+    A literal cannot carry a field a future spec adds to the live claim by
+    accident; a filtered copy can.
+
+    No mint, and notices discarded, for the reason `sup-handoff-complete`
+    already carries one layer over: the claim this call validates ceases to
+    exist inside this same lock section, so a generation minted for it would
+    be dead on delivery -- and it would be the only `NONCE:` line a supervisor
+    ever reads that it must not present.
+
+    Doctrine (`skills/fleet/supervisor.md`): release, THEN stop. The window
+    between the two commands is real, which is why §6.1 rule 1 refuses to
+    consume a released record whose releaser is still roster-live (B6)."""
+    with fleet_lock():
+        claim, caller, _ = _require_claim_holder(
+            getattr(args, "sid", None), nonce=getattr(args, "nonce", None),
+            verb="sup-release", mint=False)
+        inc = claim["incarnation_id"]
+        reason = (getattr(args, "reason", None) or "").strip()
+        # Journal FIRST, checkpoint-then-act: the releasing body is still the
+        # holder here, and the entry is written under ITS incarnation id --
+        # there is no successor to attribute it to. A crash between the two
+        # writes leaves the entry without the release, which reads as "a
+        # release was attempted"; the reverse would lose the record entirely.
+        supervisor_journal_append("RELEASED", inc, caller,
+                                  f"released cleanly: {reason or '(no reason given)'}")
+        released = {"incarnation_id": inc,
+                    "lineage_id": claim.get("lineage_id"),
+                    "claimed_via": claim.get("claimed_via"),
+                    "released_at": now_iso(),
+                    "released_by_sid": caller,
+                    "state": "released"}
+        if reason:
+            released["reason"] = reason
+        write_incarnation(released)
+    print(f"claim {inc} released. Nothing holds the supervisor claim now -- this "
+          f"incarnation must EXIT: take no further fleet actions. The next body "
+          f"claims fresh via `fleet sup-boot` (no seizure, no page).")
+    return 0
+
+
 def _project_claim(claim, now=None):
     """claim-nonce §5.8's binding build rule: what a VIEW may publish.
 
@@ -9120,6 +9177,17 @@ def cmd_sup_status(args) -> int:
     if claim is None:
         print("supervisor: no claim" + (" (GOALS active -- start one: `fleet sup-boot`)"
                                         if info["goals_active"] else ""))
+    elif claim.get("state") == "released":
+        # The same §6.3 defect as `supervisor_status_line`'s, one surface over
+        # and operator-facing: a released claim has no `heartbeat_at`, so the
+        # human line below would print "heartbeat unreadable" for a clean,
+        # planned release. §5.8 scoped its redaction rule away from this
+        # f-string; that is a different question and does not exempt it from
+        # this one.
+        print(f"supervisor: {claim.get('incarnation_id', '?')} RELEASED at "
+              f"{claim.get('released_at', '?')} by sid={claim.get('released_by_sid')}"
+              + (f" ({claim['reason']})" if claim.get("reason") else "")
+              + " -- no holder; `fleet sup-boot` claims fresh")
     else:
         age = f"{beat_age:.0f}s ago" if beat_age is not None else "unreadable"
         print(f"supervisor: {claim.get('incarnation_id', '?')} sid={claim.get('session_id')} "
@@ -9530,6 +9598,27 @@ def supervisor_status_line(now=None):
             return ("SUPERVISOR: GOALS active, no claim -- boot one "
                     "(`fleet sup-boot`; see skills/fleet/supervisor.md).")
         inc = claim.get("incarnation_id", "?")
+        if claim.get("state") == "released":
+            # claim-nonce §6.3's BINDING BUILD RULE, and it is binding because
+            # of who reads this line. §6.3 removes `heartbeat_at` from a
+            # released claim -- correct for the claim -- and a released claim
+            # is not None, so without this branch the no-claim branch above is
+            # skipped and the KeyError arm below fires. Per §4.8 that arm's
+            # text reaches `fleet doctor`, `sup-status`, and
+            # `bin/hooks/sessionstart_fleet.py`, which runs in EVERY Claude
+            # Code session on this machine: the NORMAL outcome of a correct,
+            # planned `fleet sup-release` would be a persistent machine-wide
+            # "inspect supervisor/INCARNATION" corruption warning.
+            #
+            # The age is best-effort and its failure must not fall through to
+            # that same arm -- a branch that re-introduces the defect it fixes
+            # is worse than no branch, because it fixes the tested case only.
+            try:
+                age_txt = f"{(now - _parse_iso(claim['released_at'])).total_seconds() / 60:.0f}m ago"
+            except (KeyError, TypeError, ValueError):
+                age_txt = "at an unrecorded time"
+            return (f"SUPERVISOR: claim {inc} released {age_txt} -- no body holds "
+                    f"the claim; boot one (`fleet sup-boot`).")
         try:
             age = (now - _parse_iso(claim["heartbeat_at"])).total_seconds()
         except (KeyError, TypeError, ValueError):
@@ -9823,6 +9912,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_supbeat.add_argument("--sid", help="override caller session id")
     p_supbeat.add_argument("--nonce", help=NONCE_ARG_HELP)
 
+    # claim-nonce §6.3. PLAIN FORM ONLY -- there is deliberately no `--force`
+    # / `--confirm-inc` pair here. v1 added one for the case incident 3
+    # presented (a body already `claude stop`ped, unable to release itself) and
+    # thereby created a fully-sanctioned seizure of a LIVE claim whose only
+    # input is printed by a read-only view. The unplanned case resolves itself
+    # instead: roster-gone plus a heartbeat aged past
+    # SUPERVISOR_CLAIM_STALE_SECONDS becomes `seize` with a `SEIZED` entry.
+    # §12 O2 keeps that removal in front of the operator.
+    p_suprel = sub.add_parser("sup-release",
+                              help="release the supervisor claim cleanly (claim holder only); "
+                                   "the next sup-boot claims fresh with no seizure")
+    p_suprel.add_argument("--reason", help="short note recorded in the journal and the claim")
+    p_suprel.add_argument("--sid", help="override caller session id")
+    p_suprel.add_argument("--nonce", help=NONCE_ARG_HELP)
+
     p_supstat = sub.add_parser("sup-status", help="read-only supervisor claim/handshake status")
     p_supstat.add_argument("--json", action="store_true")
 
@@ -9908,6 +10012,8 @@ def main(argv=None) -> int:
             return cmd_sup_checkpoint(args)
         if args.command == "sup-heartbeat":
             return cmd_sup_heartbeat(args)
+        if args.command == "sup-release":
+            return cmd_sup_release(args)
         if args.command == "sup-status":
             return cmd_sup_status(args)
         if args.command == "sup-handoff-begin":
