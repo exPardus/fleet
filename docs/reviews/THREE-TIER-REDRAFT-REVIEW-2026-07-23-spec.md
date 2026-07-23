@@ -210,3 +210,129 @@ claim-nonce / native-substrate / SPEC v3 / terminal-surface. The sole defect is 
 in §12's doc-sync list (S1).
 
 **`fix-list(S1)`**
+
+---
+---
+
+# Re-review — r2 (fix wave 1)
+
+**Trigger:** manager re-review of fix wave 1, commit **`1a3d4e5`** on `mf/three-tier` ("close B1–B10 + S1"),
+merged into `mf/tt-spec` fast-forward (docs-only: `three-tier-command.md` +337, and the merged break
+verdict file). **Vantage:** worktree `C:\proga\fleet-mf-tt-spec`, branch `mf/tt-spec`, HEAD `1a3d4e5`.
+Reviewer commit for this section = the r2 commit below. Receipts still pinned `235421e5`; `bin/fleet.py`
+byte-identical pin→HEAD, so every line receipt is valid at both.
+
+**r2 VERDICT: `sound`** — all eleven findings (break B1–B10 + spec S1) are substantively closed, no
+spurious fix, no receipt broken, and the one question the manager flagged (does §10.4 quietly redefine
+claim-nonce boot rule 1?) resolves **NO — it stays descriptive and files the guard as a claim-nonce
+prerequisite**. One nit-grade residual (R1) recorded below; it is below the fix-list bar and does not
+block the gate.
+
+## r2.1 Receipts — 34/34, two independent verifiers, both provably able to fail
+
+```
+$ py -3.13 tools/verify_receipts.py --self-test --strict docs/specs/three-tier-command.md
+pins resolved: 235421e56bfd328a7e913e519a1459ccf55918dc
+34/34 receipts reproduce exactly (37 fenced blocks, 0 unclassified, 0 volatile-skipped, 0 warned, 0 FAILED)
+
+$ py -3.13 indep_receipts.py docs/specs/three-tier-command.md        # my own extractor, no shared code
+34/34 blocks reproduce; 0 FAILED                                      (exit 0)
+
+$ py -3.13 indep_receipts.py docs/specs/three-tier-command.md --seed 20   # new B1 receipt @8522
+  [FAIL] block 20 @ 235421e5: sed -n '8526,8531p' bin/fleet.py
+33/34 blocks reproduce; 1 FAILED                                      (exit 1 — harness can fail)
+
+$ py -3.10 -m pytest tests/test_receipts.py -q
+13 passed
+```
+The +2 receipts (32→34) are the wave's new evidence: `@8522` (`name = f"sup|{successor_inc}|successor"`,
+the B1 successor-name proof), `@826-827` (`CLAUDE_CODE_SESSION_ID` read, the B3 rotation-safe source),
+and the `mail_sent` provenance triad `@3654/3710/3767` (B7) — net +2 after the pre-existing blocks. All
+reproduce under both verifiers.
+
+## r2.2 Per-finding disposition — 11 FIXED, 0 SPURIOUS
+
+| # | Sev | Section rewritten | Disposition | Evidence I re-checked |
+|---|---|---|---|---|
+| **B1** | CRIT | §7.2 | **FIXED** | Exemption re-keyed from `name == "supervisor"` to *current live claim-holder under any name*. New receipt `@8522` proves the successor runs `sup\|<inc>\|successor` — a name-equality protected only gen-0. Predicate: roster-live **and** holds the claim. |
+| **B2** | MAJOR | §11.2 | **FIXED** | Occupancy = `input_tokens + cache_creation_input_tokens + cache_read_input_tokens` (correct Anthropic three-way prompt split; all three fields present per native-substrate:129). The mis-cited `cache_read` "continuity" line is now correctly labelled a *continuity* signal, not occupancy. |
+| **B3** | MAJOR | §11.2 | **FIXED** | Transcript resolved from the running process's own `CLAUDE_CODE_SESSION_ID` (receipt `@826-827`; daemon-set per native-substrate G4) — not stale `INCARNATION.session_id` (claim-nonce §4.5: sid writers are registry-only, never touch INCARNATION — verified), not an absent-mid-turn outcome record. Absent/stale ⇒ fail toward the band. |
+| **B4** | MAJOR | §11.3 | **FIXED** | "Urgent" replaced by a fleet-readable predicate (*dispatched-not-yet-reconciled*); 200k is a **hard fleet refusal** (`spawn`/`send` decline new worker turns for a supervisor caller above `H`), not self-discretion. Reuses B3's rotation-safe read. |
+| **B5** | MAJOR | §10.4 | **FIXED** | `kill` cannot self-release (claim-nonce §6.3 requires continuity, `--force` deleted — both verified). Two honest arms: graceful steer-self-release-then-stop, else documented bounded-freeze-then-seize + G10 tombstone. |
+| **B6** | MAJOR | §10.4 | **FIXED — and stays descriptive (manager's question)** | See r2.3. |
+| **B7** | MAJOR | §5.3 (new) | **FIXED** | Fork-divergence relocated to interface tier is stated; mitigation = caller-provenance warn on `send` (receipt: `mail_sent` records the *target* sid, not the caller); full prevention a scoped §13 non-goal (the human tier is claimless by design). |
+| **B8** | MINOR | §3.3 | **FIXED** (see R1) | Pre-flight recommendation dropped — it needed the provider-env read §3.2 disclaims (`CLAUDE_CONFIG_DIR\|ANTHROPIC_` = 0). §13 adds the non-goal. |
+| **B9** | MINOR | §7.2 | **FIXED** | Same live-claim-holder predicate adds a liveness term ⇒ a dead husk is no longer protected forever. B1/B9 = one fix, opposite directions. |
+| **B10** | MINOR | §5.3 | **FIXED** | Send-only worker churn recorded as option-(b)'s accepted blind spot, priced upstream; §8 routing (not the nonce) bounds a zombie's blast radius. |
+| **S1** | MINOR | §11.1 / §12 | **FIXED — not spurious** | Both surfaces I named in r1 now listed: `skills/fleet/SKILL.md:44` and `docs/SPEC.md:261`; §11.1 names all three band surfaces. Tree re-grep confirms **§12 is now exhaustive** for the live 300–500k surfaces (`supervisor.md:51`, `SKILL.md:44`, `SPEC.md:261`); historical artifacts (superpowers/plans, superpowers/specs, reviews/) correctly excluded. |
+
+**No spurious fix.** Every fix is honestly scoped: each `[UNBUILT]` prescriptive claim still has a
+no-match receipt at the pin (re-ran all seven Appendix-A greps + `stop_outcome cache_read` → **all 0**),
+and no fix over-claims a shipped behaviour. No fix broke a receipt (34/34).
+
+## r2.3 The B6 question, answered: §10.4 does NOT redefine claim-nonce boot rule 1
+
+claim-nonce §6.1 rule 1 (`state == "released" ⇒ claim` fresh) is checked **ahead of** rule 2
+(roster-liveness refuse) with **no roster-liveness precondition** — verified exact against the spec of
+record. So a `release → stop` window leaves INCARNATION `released` while the old body is still
+roster-live, and a `sup-boot` in that window takes a fresh claim beside a live predecessor: the
+dual-live-body class. The manager's concern is whether the wave papers over this by rewriting the
+claim-nonce boot order inside the three-tier spec (forbidden — three-tier is a *consumer*).
+
+**It does not.** §10.4's B6 block:
+1. States the window and the new automated occupants (v2 scheduled beat, `sup-spawn`, in-flight handoff
+   successor) — analysis the earlier draft lacked.
+2. Explicitly says *"This spec does not own the boot verdict order (claim-nonce does)"* and files the real
+   fix as a **claim-nonce build-slice prerequisite** — *"`sup-boot` must not consume a `released` record
+   whose `released_by_sid` is still roster-live — either rule 1 gains a roster-liveness precondition, or
+   release+stop is made atomic"* — **exactly mirroring how §10.2 files the `FLEET_WORKER` refusal** as a
+   claim-nonce prerequisite rather than building it here.
+3. Adds only a **three-tier-caller-side interim gate** it legitimately owns: its own automated callers
+   "must gate their own `sup-boot` on `released_by_sid not in live_sids`". This changes no shared
+   function; it constrains three-tier's own call sites. `released_by_sid` is a real field of the released
+   record (claim-nonce §6.3 post-release key set — verified), so the gate is implementable against
+   claim-nonce's own schema, inventing nothing.
+
+That is the correct disposition for a consumer spec: state the constraint, file the shared-function fix
+upstream, guard your own callers in the interim. **No redefinition of claim-nonce.**
+
+## r2.4 Contradiction sweep — re-run against the rewritten sections, clean
+
+Every load-bearing claim-nonce / native-substrate / SPEC-v3 citation the wave *added* re-verified exact:
+claim-nonce §4.2 five `_require_claim_holder` callers all `sup-*` (B7); §4.5 sid writers registry-only,
+never touch INCARNATION (B3); §6.1 rule-1-ahead-of-rule-2, no liveness precondition (B6); §6.3
+continuity-required + `--force` deleted + `released_by_sid` field (B5/B6); native-substrate G4
+daemon-set sid (B3), :129 three cache fields (B2). SPEC §16.7 `one-live-session-per-name` correctly
+noted as blocking a second `supervisor`-named spawn **but not** a differently-named `sup-boot` (B6) —
+accurate. No contradiction introduced by the wave; §13 non-goals now fence B7 (interface-fork
+prevention) and B8 (provider-env read) explicitly.
+
+## r2.5 Residual (nit-grade, non-blocking)
+
+**R1 — nit — §12:998 still frames the tier-resolution pre-flight as a live `[UNBUILT]` deliverable the
+B8 fix demoted.** §12 line 998: *"if `sup-spawn` gains a namespace-aware pre-flight (§3.3 `[UNBUILT]`),
+that how-to gains a supervisor row."* The B8 fix (§3.3:162–170) **dropped** the pre-flight recommendation
+and §13:1015–1017 records *"No tier-resolution pre-flight in v1"*, arguing the boundary *against* it. The
+`(§3.3 [UNBUILT])` cross-ref still resolves (§3.3:169 keeps the string, framed "argues against, not
+for"), and 998's *"if … gains"* is conditional, so this is not a false claim — but it carries none of
+§3.3's "argued-against / own-scope" caveat and reads as a live roadmap item. The B8 fix propagated to
+§3.3 and §13 but not to §12's conditional note. **Fix:** soften 998 to match §13 (e.g. *"should a
+future, separately-scoped pre-flight be built (§3.3 argues against it for v1) …"*). Strictly weaker than
+r1's S1 (which was a concrete stale-surface omission); below the fix-list bar.
+
+## r2.6 Standing checks, re-confirmed
+
+Status still `drafting` (line 3); *"An author never promotes its own spec"* intact; write-set is the
+spec only (the wave's `--stat` shows `three-tier-command.md` + the merged break verdict, no code edit);
+WITHHELD-reliance sweep still clean (no `WITHHELD` repo-wide; native-substrate rows still PENDING; §4.1
+accurate). B-dep (break lens) and my r1 substrate note agree: the beat backstop inherits the unratified
+2.1.212/2.1.216 rows — an operator-ratification sequencing flag, not a spec defect.
+
+## r2.7 Verdict
+
+Fix wave 1 closes all eleven findings correctly, introduces no spurious fix, breaks no receipt, and —
+the point the manager singled out — keeps §10.4 a faithful *consumer* of claim-nonce rather than a
+redefiner of its boot order. The lone residual R1 is a nit-grade cross-reference the B8 fix left
+un-propagated into §12, below the fix-list threshold.
+
+**r2: `sound`** (disposition: B1–B10 + S1 all FIXED, 0 SPURIOUS; nit R1 recorded).
