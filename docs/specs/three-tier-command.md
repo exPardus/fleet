@@ -233,12 +233,14 @@ $ sed -n '4367,4368p' bin/fleet.py
             None, cwd, task_for_record, mode, model=model,
 ```
 
-This is not a limitation to work around — it is what makes §3.5.3's band interaction clean.
+This is not a limitation to work around — it is what makes §3.5.4's band interaction clean.
 
 #### 3.5.2 The mechanism, on the shipped usage-limit machinery
 
-Every input the chain needs already exists. Limit detection is the G11 transcript-tail scan (limit walls
-are silent — no Stop hook, no roster change, §4.1), and the park records a **reset horizon**:
+**Detection and parking already exist; the return logic does not** (ND7 — the earlier draft's *"every
+input the chain needs already exists"* overstated the receipts, and the overstatement is corrected below
+rather than trimmed). Limit detection is the G11 transcript-tail scan (limit walls are silent — no Stop
+hook, no roster change, §4.1), and the park records a **reset horizon**:
 
 ```
 # at 235421e56bfd328a7e913e519a1459ccf55918dc
@@ -263,16 +265,24 @@ $ sed -n '1635,1640p' bin/fleet.py
         return False
 ```
 
-The chain, `[UNBUILT — owned by the three-tier build slice]`, adds exactly one decision on top of that:
+**Detection is per-session, and that bounds what the chain can know.** The scan is a per-session
+transcript read (`scan(sid, transcript_path=path)` in the receipt above), so fleet learns *"**this
+session** hit a wall"* — never *"the top tier is exhausted."* **A tier limit and an account-wide limit
+are therefore indistinguishable to fleet.** If the wall was account-wide, the fallback dispatches a
+fresh second-tier body that limits immediately; that costs one body change to discover, after which
+step 4 handles it correctly. No shipped surface reports remaining usage per tier, so this is a real
+limit of the substrate, not an omission to be designed around.
+
+The chain, `[UNBUILT — owned by the three-tier build slice]`:
 
 1. **Detect.** The supervisor's body hits the top tier's limit → existing detection parks it
    `status="limited"` with `limit_reset_at` (above). No new detection is needed; the supervisor is a
    fleet worker record (§10.2), so this fires for it exactly as for any worker.
-2. **Fall back.** Instead of waiting for the horizon, the chain **re-dispatches the supervisor at the
-   next tier down** — a body change through the handoff/respawn path (§3.5.1), carrying the claim per
-   claim-nonce §5.10(b) (`sup-boot` → `resume` on proven continuity, else the release/seize path). The
-   new body records **which tier it is on** and **the horizon it is waiting out**
-   (`tier_preferred`, `tier_current`, and the inherited `limit_reset_at` — additive registry fields).
+2. **Fall back — driven from OUTSIDE the parked body (ND6).** See §3.5.3: the trigger is precisely the
+   state that disables the predecessor, so the successor at the fallback tier is dispatched by the
+   **interface tier**, not by the supervisor handing itself off. The new body records **which tier it is
+   on** and **the horizon it is waiting out** (`tier_preferred`, `tier_current`, and the inherited
+   `limit_reset_at` — additive registry fields).
 3. **Return.** Once `limit_reset_at` passes, the supervisor's *next* body change (§3.5.3) is dispatched
    at the preferred tier again. **The return is not itself a trigger for a body change** — it is a
    preference consulted at the next boundary that was going to happen anyway. This is deliberate: a
@@ -282,12 +292,112 @@ The chain, `[UNBUILT — owned by the three-tier build slice]`, adds exactly one
    machinery and the interface tier is nagged (§8's routing surface is the natural place). The chain
    never invents a tier below the policy list, and never silently downgrades to a worker-only tier.
 
+**The return logic is NEW code, not existing input (ND7).** The earlier draft said *"every input the
+chain needs already exists"* — that **overstates the receipts**. `limit_reset_at` exists, but shipped
+code consults it only for records whose status *is* `limited`:
+
+```
+# at 235421e56bfd328a7e913e519a1459ccf55918dc
+$ sed -n '2162p' bin/fleet.py
+            "resume_eligible": status == "limited" and _limit_reset_passed(rec),
+```
+
+The chain puts an **inherited** horizon on a *running* second-tier body — a record whose status is
+`working`/`idle`, which this machinery never examines. So detection and parking are existing input;
+**the return is entirely new logic.** Related and also unhandled by the earlier draft: a **null horizon**.
+`_limit_reset_passed` returns `False` forever when `limit_reset_at` is absent (*"never auto-eligible —
+needs an operator-set reset or `--force-now"*, receipt above), so a top-tier limit parked **without** a
+horizon would strand the supervisor on the second tier permanently with nothing nagging. **Binding:** a
+null inherited horizon must raise the §8 operator-gate routing surface rather than silently becoming a
+permanent demotion.
+
 **Failure direction:** if the tier cannot be resolved (§3.3's provider-lacks-a-tier case) the fallback
 **omits `--model`** and lets the namespace default govern, rather than refusing — a supervisor that
 cannot dispatch is worse than one on an unexpected model, and the daemon's own refusal (§3.3) still
 bounds the wrong-model case loudly.
 
-#### 3.5.3 Interaction with the swap band — a fallback respawn IS a band handoff
+#### 3.5.3 ND6 — the fallback cannot be performed BY the parked body, so it is driven from outside
+
+**The defect this section exists to fix.** The earlier draft bound the fallback to the handoff ritual.
+That ritual must be run **by the claim-holding body** — `cmd_sup_handoff_begin` is one of the five
+`_require_claim_holder` callers:
+
+```
+# at 235421e56bfd328a7e913e519a1459ccf55918dc
+$ sed -n '8492p' bin/fleet.py
+        claim, caller = _require_claim_holder(getattr(args, "sid", None))
+```
+
+But the chain's only trigger is the usage limit, and hitting it parks the body `limited` — after which
+fleet refuses to give it a turn at all:
+
+```
+# at 235421e56bfd328a7e913e519a1459ccf55918dc
+$ sed -n '3681,3687p' bin/fleet.py
+        if status == "limited":
+            data["workers"][name] = after
+            save_registry(data)
+            raise FleetCliError(
+                f"{name}: parked (limited) -- use `fleet resume-limited {name}` "
+                "instead (never steer a parked worker)"
+            )
+```
+
+**So at the exact moment the fallback fires, the predecessor cannot be steered, cannot run
+`sup-handoff-begin`, and cannot write a successor document or mint a handoff token.** The other routes
+are shut too: a **bare respawn** mints a body that holds no generation (claim-nonce §5.10(b)), so its
+`sup-boot` finds the holder either roster-live (⇒ `refuse`) or roster-gone with a *fresh* heartbeat — the
+limited body was working seconds ago — which is `freeze`, not `seize`, and seizure waits out
+`SUPERVISOR_CLAIM_STALE_SECONDS` (3600s). **`sup-release` by the holder** hits the same wall, and
+claim-nonce §6.3 deleted the non-continuity escape, so no other actor may release for it (B5, on a new
+path). A ritual that cannot run is not a design.
+
+**The redesign, in three parts:**
+
+**(a) The fallback is dispatched by the interface tier, not by the supervisor.** The interface is the
+one actor that is never parked (it holds no claim, is outside fleet's launch surface, §3.1) and it
+already observes the supervisor's state through `fleet status` / `sup-status`. On seeing the supervisor
+parked `limited` with a horizon, the interface dispatches the successor at the fallback tier
+(`sup-spawn --model <second-tier>`). This keeps v1 consistent with the rest of the design — beats are
+interface-originated (§5.1), fleet is pull-only — and it is honest about what "automatic" means here:
+**the tier *selection* is automatic; the *dispatch* needs the interface tier to act**, because the party
+that would otherwise act is disabled by the very condition being handled. A `fleet sup-fallback` verb
+that performs the same sequence in one step is the natural v2 automation, `[UNBUILT]`.
+
+**(b) The successor is seeded from what survives the body — and the working plan is what is lost.**
+Because the predecessor cannot write a successor document, the successor boots from the durable
+artifacts only: `supervisor/GOALS.md`, the append-only `supervisor/JOURNAL.md`, its last checkpoint, and
+the worker journals. **Stated plainly, as the worst case: the in-flight working plan — everything the
+parked body had reasoned out since its last checkpoint but not written down — is LOST.** No mechanism
+recovers it, because the body that holds it cannot be given a turn to write it out.
+**Mitigation, and it is doctrine rather than machinery:** the supervisor checkpoints its plan to the
+journal at each wave boundary (`sup-checkpoint`, which also refreshes the heartbeat), so the loss window
+is bounded to **one wave** rather than to the whole campaign. That is the real reason the checkpoint
+cadence matters, and it belongs in `supervisor/GOALS.md` (§12).
+
+**(c) The claim transfer needs a claim-nonce change, filed as a prerequisite — not invented here.**
+Even interface-driven, the successor still meets `sup-boot`'s verdict order, which today offers only
+`refuse` or an hour-long `freeze` against a parked predecessor. The clean fix is to make **holder parked
+`limited` with a recorded horizon** an authorized claim-transfer state: unlike roster-gone — which is
+G9-ambiguous, and is exactly why the freeze exists — `limited` is a **fleet-observed, unambiguous** state
+that fleet itself wrote. A successor should be able to take the claim immediately, with a distinct
+journal kind recording that it was a limit transfer rather than a seizure.
+
+> **Prerequisite (owned by the claim-nonce build slice, not this one):** add a `limited`-holder branch to
+> the `sup-boot` verdict order authorizing immediate transfer when the recorded holder's registry status
+> is `limited` with a horizon. This is a boot-order change, and **this spec does not own the boot verdict
+> order** — filed exactly as B6's rule-1 guard and §10.2's `FLEET_WORKER` refusal already are.
+
+**Until that prerequisite ships, the arm degrades — and the spec says which cost is paid rather than
+mandating an unrunnable ritual.** The interface chooses, per incident: (i) **bare respawn now**, losing
+the in-flight plan (bounded to one wave by (b)'s checkpoint doctrine) and accepting the `freeze` window
+unless the predecessor's heartbeat has aged out; or (ii) **wait out the horizon** and `resume-limited`
+the original body, which keeps the plan and the tier but stalls the campaign until reset. Neither is
+free. (i) is right when the horizon is long and the plan is cheap to rebuild; (ii) when the reverse.
+**The operator asked for an automatic fallback; what v1 can honestly deliver without the claim-nonce
+prerequisite is an automatic tier *choice* with an operator-visible cost at the moment of the fall.**
+
+#### 3.5.4 Interaction with the swap band — a fallback body change IS a band handoff
 
 The question the operator asked to have answered explicitly: *a fallback respawn is also a context
 reset — does it count as the band handoff?* **Yes, and the two must be treated as one event.**
@@ -298,13 +408,23 @@ reset — does it count as the band handoff?* **Yes, and the two must be treated
 - **So: a tier fallback discharges any outstanding band obligation**, and conversely a band handoff that
   happens while the top tier is limited is dispatched at the fallback tier. Whichever trigger fires
   first, **one** body change satisfies both.
-- **It must go through the handoff ritual, not a bare respawn**, whenever a plan is in flight: the
-  successor document is what carries the plan across the context reset (§11.3). A bare `respawn` carries
-  the journal and drained mailbox but not the working plan — acceptable only when nothing is in flight.
-- **The band's ceiling (§11.3) does not block the fallback**: the handoff verbs are exempt above `H`, and
-  the handoff dispatch hand-rolls its own argv (§10.1), so a limited-and-over-band supervisor can always
-  still hand off. This is the deadlock the two mechanisms could otherwise have created, and it is closed
-  by the same exemption that closes ND2.
+- **Which ritual it uses depends on which trigger fired — and only one of the two can choose (ND6).**
+  - **Band-triggered** (occupancy crossed the band while the body is *healthy*): the predecessor can
+    act, so it runs the **full handoff ritual** — the successor document carries the working plan across
+    the reset. This is the good case and it is unchanged.
+  - **Limit-triggered** (the fallback): the predecessor is parked and **cannot act at all** (§3.5.3), so
+    the handoff ritual is unavailable and the successor is seeded from the durable artifacts only, with
+    the in-flight plan lost back to the last checkpoint. The earlier draft's *"it must go through the
+    handoff ritual, not a bare respawn"* is **withdrawn for this arm**: it mandated the one thing the
+    trigger makes impossible.
+  - **Consequence worth acting on:** when both are approaching, **hand off on the band before the limit
+    arrives** — a band handoff is a clean transfer, a limit fallback is a lossy one. That is a real
+    argument for treating the 150k soft trigger as a deadline rather than a suggestion.
+- **The band's ceiling (§11.3) does not block a band-triggered handoff**: the handoff verbs are exempt
+  above `H`, and the handoff dispatch hand-rolls its own argv (§10.1), so a supervisor that is both
+  over-band and still healthy can always hand off. (The limit-triggered arm never reaches the ceiling
+  question — a parked body issues no dispatches.) This is the deadlock the two mechanisms could otherwise
+  have created, and it is closed by the same exemption that closes ND2.
 
 ---
 
@@ -1242,13 +1362,27 @@ plan's own usage limits as the cap for every session alike, fleet's limit-park/r
 path, and cost/token *counting* demoted to a flag, default off
 (`docs/OPERATOR-GATES.md` §Settled, M-F budget envelope tick; `knowledge/lessons.md#2026-07-23-operator-decisions-caps`).
 
-**This is decided, not pending.** The manager's reading was put to the operator and **confirmed**
-(`knowledge/lessons.md#2026-07-23-three-tier-inputs`, third addendum, 2026-07-23):
+**This is decided, not pending** — and the decision is witnessed in-tree, not by this document. The
+manager's reading was put to the operator and **confirmed**; the ruling is recorded as the **third
+addendum** to `knowledge/lessons.md#2026-07-23-three-tier-inputs` (the same anchor whose earlier text
+said the operator *"rules on it at ratification"* — this addendum is that ruling):
+
+```
+# live: a claim about the working tree's recorded operator decisions, not about this spec's pinned commit
+$ grep -c "Third addendum (2026-07-23, operator ruling on the cap-doctrine reading)" knowledge/lessons.md
+1
+```
 
 > **Third addendum (2026-07-23, operator ruling on the cap-doctrine reading):** confirmed — **cost/spend
 > ceilings are gone unless the counting flag puts them back** (flag default off; enabling it may re-arm
 > spend caps). The context band (150–200k, supervisors AND workers) is a freshness mechanism, not a
-> budget, and its enforcement stays.
+> budget, and its enforcement stays. **Resolves the `[OPERATOR RULES AT RATIFICATION]` flag before
+> ratification.**
+
+*(Wave-4 note, recorded because the process is the point: wave 3 wrote this section SETTLED while the
+addendum existed only on `main`, so for one wave this spec was the sole witness to a ruling that binds
+it — correctly caught as ND5/W1. The ruling was genuine and has since merged; the citation above is now
+self-verifying, which is what it should have been before the framing changed.)*
 
 So the doctrine reads, as settled: a token/USD ceiling answers *"has this session cost too much?"* — and
 the plan's own usage limit already answers that, for everyone, so fleet adds no second budget authority.
@@ -1308,6 +1442,15 @@ them** — listed for the build slice / a doc-sync pass:
 - **`docs/PLAN.md` §0.4 (ceiling denomination) / the queued C-soak retirement** — §11.5 records that the
   third-docket cap doctrine retires the **`--token-ceiling` spend** denomination but **not** §11.3's
   context band. Whoever executes that retirement must not sweep the context band up with it.
+- **`docs/specs/claim-nonce.md` (prerequisite, wave 4)** — §3.5.3(c) files a **third** claim-nonce
+  build-slice prerequisite alongside B6's rule-1 guard and §10.2's `FLEET_WORKER` refusal: a
+  `limited`-holder branch in the `sup-boot` verdict order, authorizing immediate claim transfer when the
+  recorded holder's registry status is `limited` with a horizon. Without it the UL fallback is lossy or
+  slow by construction (§3.5.3). Filed, not built here — this spec does not own the boot verdict order.
+- **`supervisor/GOALS.md` (wave-4 addition)** — the **checkpoint-cadence doctrine** of §3.5.3(b): the
+  supervisor checkpoints its plan to the journal at each wave boundary, because that cadence is exactly
+  what bounds the plan loss when a usage-limit fallback fires. It is the only mitigation available for
+  that loss, so it belongs in policy rather than in a reviewer's memory.
 - **`docs/SPEC.md`** — the **Handoff row (`:261`) carries the obsoleted 300–500k band** (S1) and must
   become 150–200k; §4 registry (a `supervisor`-named worker record + reserved-name rule); §6 the new
   `sup-spawn` choke-point; a new scheduled-task family beyond autoclean (§6); the operator-gate state
