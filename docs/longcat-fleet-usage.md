@@ -81,7 +81,8 @@ Because workers inherit the daemon's backend, boot the daemon **fresh under Long
 
 ## What does NOT work
 
-- **Mixing** LongCat + Anthropic workers simultaneously — one daemon, one backend. Impossible without a CLI change.
+- **Mixing** LongCat + Anthropic workers **inside one `CLAUDE_CONFIG_DIR`** — one daemon, one backend. Impossible without a CLI change.
+  > **Correction (verified 2026-07-23):** mixing *across* config dirs **does** work. Fleet's registry is shared (`fleet home` is `~/fleet` regardless of `CLAUDE_CONFIG_DIR`) while the daemons are not, so a worker spawned from `~/.claude-longcat` and one spawned from the default namespace run concurrently on different backends and appear in one `fleet status` (`model=LongCat-2.0` vs `model=claude-haiku-4-5-…`). See [`any-provider-fleet-usage.md`](any-provider-fleet-usage.md#mixing-providers-verified).
 - **Spawning LongCat workers while an Anthropic daemon is already up** — workers get the Anthropic backend and fail `model_not_found` on the LongCat model name. This is the original failure you hit.
 - **Passing a fleet model alias** (`--model haiku`, plan-mode's default subagents, etc.) to LongCat — the alias isn't a real LongCat model. Plan-mode / built-in subagents that pick their own model tier will fail; stick to explicit fleet workers with no `--model`.
 
