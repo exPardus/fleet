@@ -1647,6 +1647,85 @@ class TestRefusalMessageIsAgentSafe:
         assert len(fleet.supervisor_journal_entries()) == 1
 
 
+class TestLineageProof:
+    """claim-nonce §6.2: the destructive guard learns the caller's lineage
+    only from a PROVEN claim, and the resolution validates without minting
+    (§7's "gated verbs validate without minting" -- the guard is not a sup
+    verb and must not rotate the generation)."""
+
+    def _hold(self, sid="sid-me", inc="inc-me", lineage="lin-20260101T000000Z-aaaa"):
+        beat = (datetime.now(timezone.utc) - timedelta(seconds=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        value = fleet.mint_nonce()
+        fleet.write_incarnation({"incarnation_id": inc, "session_id": sid,
+                                 "claimed_at": beat, "heartbeat_at": beat,
+                                 "claimed_via": "fresh", "nonce_hash": fleet.nonce_digest(value),
+                                 "nonce_seq": 3, "lineage_id": lineage})
+        return value
+
+    def test_a_proven_generation_yields_the_claims_lineage(self, sup_home):
+        value = self._hold(lineage="lin-L")
+        assert fleet._caller_proven_lineage("any-sid", value) == "lin-L"
+
+    def test_a_wrong_generation_yields_none(self, sup_home):
+        self._hold(lineage="lin-L")
+        assert fleet._caller_proven_lineage("any-sid", fleet.mint_nonce()) is None
+
+    def test_no_generation_yields_none(self, sup_home):
+        self._hold(lineage="lin-L")
+        assert fleet._caller_proven_lineage("any-sid", None) is None
+
+    def test_a_legacy_claim_yields_none(self, sup_home):
+        # A legacy claim has no generation to prove; §6.2 falls back to the
+        # spawned_by-only answer, so the resolver returns None.
+        fleet.write_incarnation({"incarnation_id": "inc-old", "session_id": "sid-me",
+                                 "claimed_at": _iso(NOW), "heartbeat_at": _iso(NOW),
+                                 "claimed_via": "fresh"})
+        assert fleet._caller_proven_lineage("sid-me", None) is None
+
+    def test_a_released_claim_yields_none(self, sup_home):
+        fleet.write_incarnation({"incarnation_id": "inc-old", "lineage_id": "lin-L",
+                                 "claimed_via": "fresh", "released_at": fleet.now_iso(),
+                                 "released_by_sid": "sid-me", "state": "released"})
+        assert fleet._caller_proven_lineage("sid-me", None) is None
+
+    def test_no_claim_yields_none(self, sup_home):
+        assert fleet._caller_proven_lineage("sid-me", None) is None
+
+    def test_a_malformed_released_claim_retaining_a_nonce_hash_still_yields_none(self, sup_home):
+        # §6.3 removes `nonce_hash` from a released claim, so on the happy path
+        # the presentation check already returns None for one. This pins the
+        # released guard's OWN weight: a released claim that anomalously kept a
+        # nonce_hash (corruption, or a future writer that forgets to strip it)
+        # must not let whoever presents that stale value prove the dead
+        # lineage. Without the `state == "released"` conjunct this returns
+        # lin-L; with it, None.
+        value = fleet.mint_nonce()
+        fleet.write_incarnation({"incarnation_id": "inc-old", "lineage_id": "lin-L",
+                                 "claimed_via": "fresh", "released_at": fleet.now_iso(),
+                                 "released_by_sid": "sid-me", "state": "released",
+                                 "nonce_hash": fleet.nonce_digest(value), "nonce_seq": 2})
+        assert fleet._caller_proven_lineage("sid-me", value) is None
+
+    def test_resolving_the_lineage_mints_nothing(self, sup_home):
+        # The guard validates without minting: a pending must not appear, and
+        # the generation must not rotate.
+        value = self._hold(lineage="lin-L")
+        before = fleet.read_incarnation()
+        assert fleet._caller_proven_lineage("any-sid", value) == "lin-L"
+        assert fleet.read_incarnation() == before
+
+    def test_spawning_lineage_is_the_holders_when_the_sid_matches(self, sup_home):
+        self._hold(sid="sid-sup", lineage="lin-L")
+        assert fleet._spawning_claim_lineage("sid-sup") == "lin-L"
+
+    def test_spawning_lineage_is_none_for_a_non_holder_sid(self, sup_home):
+        self._hold(sid="sid-sup", lineage="lin-L")
+        assert fleet._spawning_claim_lineage("sid-other") is None
+
+    def test_spawning_lineage_is_none_with_no_claim(self, sup_home):
+        assert fleet._spawning_claim_lineage("sid-sup") is None
+
+
 class TestSupRelease:
     """claim-nonce §6.3 / D3 -- the verb that PRODUCES a released claim.
 
