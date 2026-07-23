@@ -90,6 +90,57 @@ KNOWN GAPS -- read these before pointing this tool at a second document.
    parser INTO a block, inverting every block boundary for the rest of the
    document. No document in `docs/specs/` uses tagged fences today, which is
    exactly why this could have sat unnoticed.
+
+4. **stdout only, exit codes only.** See gap 1. Unchanged by H1.
+
+THE PARSER-EVASION CLASS (H1, closed 2026-07-23).
+
+Everything above assumes the parser SEES the receipt. Until H1 it often did not.
+`_parse_block` matched `# at `/`$ ` on **raw** lines, and fence detection used
+`lstrip()`, which does not strip `>`. So a receipt block behind a Markdown gutter
+was invisible: a blockquoted fence was not a fence at all, and an indented block
+was counted as a block that yielded zero receipts. Four such blocks sat in
+`docs/specs/three-tier-command.md` through two full review waves while the tool
+printed `34/34 receipts reproduce exactly (37 fenced blocks ... 0 FAILED)` and
+exited 0 -- with 38 blocks really present. Two independent reviewers quoted that
+`34/34 ... (37 fenced blocks)` line and neither reconciled it. A second,
+independently written extractor agreed, because both shared the same *unstated*
+assumption that receipts live at column 0: independence of implementation is not
+independence of assumption.
+
+The fix REJECTS the shapes rather than absorbing them. The canonical form of a
+receipt is a **column-0 backtick fence**, and any receipt-shaped text that is not
+inside one is an EVASION -- an error under `--strict`, a warning otherwise, never
+a silent skip. Rejecting rather than quietly parsing is deliberate, on three
+grounds:
+
+* A gutter changes what a Markdown *reader* is told. `> ` means "I am quoting
+  this", not "I ran this"; executing quoted text and reporting it as a verified
+  receipt asserts something the document does not.
+* Absorbing the shapes would leave the founding artifact reporting green. A
+  detector that cannot go red on its own founding incident proves nothing, and
+  `tests/test_receipts.py::test_founding_artifact_goes_red` replays that exact
+  tree out of git history to hold this property.
+* Stripping a gutter from *expected output* would change what is diffed, which
+  is a new correctness surface on the one thing this tool exists to protect.
+  Rejecting has no such surface.
+
+Shapes detected (each after stripping indentation, `>` markers and one list
+bullet -- `_GUTTER_RE`):
+
+    gutter-fence   a ``` fence that is not at column 0
+    tilde-fence    a ~~~ fence anywhere; not a fence to this tool
+    command        a `$ <cmd>` line outside any classified block
+    pin            a `# at <sha>` line outside any classified block
+    marker         a `# volatile`/`# live` line outside any classified block
+    inline-command a `` `$ <cmd>` `` span in prose
+    stray-directive a gutter-hidden directive inside a block, before any `$ `
+    unterminated-fence  a fence opened and never closed
+
+Inside a block that *did* classify, nothing is scanned: its lines are pasted
+output, which may legitimately look like anything, and every one of them is
+already diffed byte-for-byte. A block that classifies NOTHING is scanned, so a
+prose block is fine and a block full of hidden receipts is not.
 """
 
 from __future__ import annotations
@@ -108,6 +159,51 @@ import tempfile
 
 EXIT_ECHO = 'echo "exit $?"'
 SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
+
+# --- shape recognition (H1) ------------------------------------------------
+# A Markdown gutter: indentation, any depth of blockquote marker, and at most one
+# list bullet. Stripping this is how receipt-shaped text is RECOGNISED; it is
+# never how a block is PARSED (see the module docstring: shapes are rejected, not
+# absorbed). `tests/test_receipts.py` keeps its collection-time copy in sync.
+_GUTTER_RE = re.compile(r"^[ \t]*(?:>[ \t]*)*(?:[-*+][ \t]+|\d+[.)][ \t]+)?[ \t]*")
+_FENCE_MARK_RE = re.compile(r"^(?:`{3,}|~{3,})")
+# `$ ` followed by something: a bare `$ ` (the marker itself, which both enforced
+# specs name in prose) is not a command.
+_CMD_SHAPE_RE = re.compile(r"^\$ +\S")
+# Deliberately narrow: the pin token must look like a pin. "Look at line 40" and
+# "a commit at 235421e" in prose do not start a line with `# at`, and requiring a
+# sha-or-moving-ref keeps a stray `# at the top` from tripping the check.
+_PIN_SHAPE_RE = re.compile(r"^# +at +(?:[0-9a-fA-F]{7,40}|HEAD|head|main|master)\b")
+_MARK_SHAPE_RE = re.compile(r"^# +(?:volatile|live)\b")
+_INLINE_CMD_RE = re.compile(r"`\$ +[^`\s][^`]*`")
+
+_EVASION_DETAIL = {
+    "gutter-fence": (
+        "fence marker is not at column 0 (blockquote or list/indent gutter), so "
+        "this is not a fenced block to the harness and everything in it is "
+        "unverified. Move the block to column 0."),
+    "tilde-fence": (
+        "`~~~` is not a fence to this harness, so this block is unverified. Use a "
+        "column-0 ``` fence."),
+    "command": (
+        "`$ ` command outside any classified block -- it reads as a receipt and is "
+        "executed by nothing. Put it in a column-0 ``` fence with its output."),
+    "pin": (
+        "`# at <sha>` pin outside any classified block -- it pins nothing. Put it "
+        "in a column-0 ``` fence with the receipt it pins."),
+    "marker": (
+        "`# volatile`/`# live` marker outside any classified block -- it marks "
+        "nothing, and a receipt it was meant to cover is unmarked."),
+    "inline-command": (
+        "a `$ ` command in an inline backtick span reads as a receipt and is "
+        "executed by nothing. Promote it to a fenced block, or drop the `$ `."),
+    "stray-directive": (
+        "gutter-hidden receipt directive inside a fenced block, before any `$ ` "
+        "line, so it is neither a directive nor pasted output -- it is dropped."),
+    "unterminated-fence": (
+        "unterminated fence -- the block opened here is never closed, so "
+        "everything after it is swallowed and parsed as neither block nor prose."),
+}
 
 
 class PinError(Exception):
@@ -212,6 +308,98 @@ class Receipt:
         return f"pinned @ {self.pin}" if self.pin else "UNPINNED"
 
 
+class Evasion:
+    """Receipt-shaped text the parser never sees. Never a skip -- see H1.
+
+    Carries the same surface as `Receipt` (`line`, `cmd`, `where()`, `volatile`,
+    `pin`, `live`) so the report printer, `check()` and `tests/test_receipts.py`
+    handle it without special-casing.
+    """
+
+    __slots__ = ("line", "shape", "cmd", "detail", "volatile", "pin", "live")
+
+    def __init__(self, line, shape, text):
+        self.line = line
+        self.shape = shape
+        self.cmd = text.strip()[:120]
+        self.detail = _EVASION_DETAIL[shape]
+        self.volatile = False
+        self.pin = None
+        self.live = False
+
+    def where(self):
+        return f"EVASION {self.shape}"
+
+
+# The shapes that make a line a receipt DIRECTIVE rather than a fence marker.
+# A fence is only evidence of evasion when it wraps one of these -- an indented
+# ```python snippet inside a bullet is ordinary Markdown, not a hidden receipt,
+# and flagging it would teach authors to route around the check.
+_DIRECTIVE_SHAPES = frozenset({"command", "pin", "marker"})
+_FENCE_SHAPES = frozenset({"gutter-fence", "tilde-fence"})
+
+
+def _shape_of(degutterred):
+    """The receipt shape of a gutter-stripped line, or None for prose."""
+    if _FENCE_MARK_RE.match(degutterred):
+        return "tilde-fence" if degutterred[0] == "~" else "gutter-fence"
+    if _CMD_SHAPE_RE.match(degutterred):
+        return "command"
+    if _PIN_SHAPE_RE.match(degutterred):
+        return "pin"
+    if _MARK_SHAPE_RE.match(degutterred):
+        return "marker"
+    return None
+
+
+class _Doc:
+    """Everything one pass over a document yields. `parse()` is the 3-tuple view."""
+
+    __slots__ = ("lines", "receipts", "unclassified", "blocks", "spans",
+                 "strays", "unterminated")
+
+    def __init__(self, lines):
+        self.lines = lines
+        self.receipts, self.unclassified, self.strays = [], [], []
+        self.blocks = 0
+        self.spans = []          # (open_line, close_line, classified)
+        self.unterminated = None
+
+
+def parse_doc(text):
+    """One pass: fenced blocks, their receipts, and where every block sat.
+
+    A fence is a **column-0** ``` marker (gap 3: any language tag allowed). It is
+    deliberately NOT `lstrip()`ed: an indented or blockquoted fence is not a
+    fence, it is an evasion, and `scan_evasions` reports it as one. Treating it
+    as a boundary here is what let four blocks be counted-but-empty in the
+    founding incident.
+    """
+    doc = _Doc(text.splitlines())
+    in_block, block, open_line = False, [], 0
+    for n, raw in enumerate(doc.lines, start=1):
+        if raw.startswith("```"):
+            if in_block:
+                doc.blocks += 1
+                ok, bad, stray = _parse_block(block)
+                doc.receipts.extend(ok)
+                doc.unclassified.extend(bad)
+                doc.strays.extend(stray)
+                doc.spans.append((open_line, n, bool(ok or bad)))
+                in_block, block = False, []
+            else:
+                in_block, block, open_line = True, [], n
+            continue
+        if in_block:
+            block.append((n, raw))
+    if in_block:
+        # Not parsed: an unterminated fence has no block. Its contents fall
+        # outside every span and are scanned as loose text, which is the loud
+        # outcome -- silently swallowing the tail is the failure mode here.
+        doc.unterminated = open_line
+    return doc
+
+
 def parse(text):
     """Extract receipts from fenced blocks.
 
@@ -219,27 +407,101 @@ def parse(text):
     receipts with nothing to compare against -- see gap 2 in the module
     docstring. They are returned, never dropped.
     """
-    receipts, unclassified, blocks = [], [], 0
-    in_block, block, block_start = False, [], 0
-    for n, raw in enumerate(text.splitlines(), start=1):
-        # Gap 3: a fence may carry a language tag; treat any ``` prefix as a
-        # boundary, or a tagged opener is read as prose and the closer inverts
-        # every block boundary after it.
-        if raw.lstrip().startswith("```"):
-            if in_block:
-                blocks += 1
-                ok, bad = _parse_block(block, block_start)
-                receipts.extend(ok)
-                unclassified.extend(bad)
-            in_block, block, block_start = not in_block, [], n + 1
+    doc = parse_doc(text)
+    return doc.receipts, doc.unclassified, doc.blocks
+
+
+def _evading_fences(doc, shapes, fenced):
+    """Non-column-0 / tilde fence markers that wrap actual receipt directives.
+
+    Paired the way a Markdown reader pairs them, then judged by contents: a
+    gutter-fenced ```python snippet in a bullet is not a receipt and must not be
+    reported, or the check becomes noise and authors route around it. All four
+    blocks of the founding incident carry a `# at` pin and a `$ ` command, so
+    every one of them is still caught.
+    """
+    markers = [n for n in sorted(shapes)
+               if shapes[n] in _FENCE_SHAPES and n not in fenced]
+    out = []
+    for i in range(0, len(markers) - 1, 2):
+        open_n, close_n = markers[i], markers[i + 1]
+        if any(shapes.get(n) in _DIRECTIVE_SHAPES
+               for n in range(open_n + 1, close_n)):
+            out.append(Evasion(open_n, shapes[open_n], doc.lines[open_n - 1]))
+            out.append(Evasion(close_n, shapes[close_n], doc.lines[close_n - 1]))
+    if len(markers) % 2:
+        # An unpaired gutter fence: it hides whatever follows it just as well.
+        last = markers[-1]
+        if any(shapes.get(n) in _DIRECTIVE_SHAPES
+               for n in range(last + 1, len(doc.lines) + 1)):
+            out.append(Evasion(last, shapes[last], doc.lines[last - 1]))
+    return out
+
+
+def scan_evasions(text):
+    """Every receipt shape the parser did not classify. See H1 in the docstring.
+
+    Independent of `_parse_block`'s matching by construction: it re-reads the
+    document through `_GUTTER_RE`, so a gutter form one of them handles and the
+    other does not turns the suite red instead of reporting green.
+    """
+    doc = parse_doc(text)
+    classified, orphaned, fenced = set(), set(), set()
+    for start, end, ok in doc.spans:
+        (classified if ok else orphaned).update(range(start, end + 1))
+        fenced.update(range(start, end + 1))
+    shapes = {n: _shape_of(_GUTTER_RE.sub("", raw))
+              for n, raw in enumerate(doc.lines, start=1)
+              if not raw.startswith("```")}     # a real fence is not a shape
+    out = []
+    if doc.unterminated is not None:
+        out.append(Evasion(doc.unterminated, "unterminated-fence", "```"))
+    for n, raw in enumerate(doc.lines, start=1):
+        if n in classified:
+            # Pasted output inside a classified block may look like anything,
+            # and every line of it is already diffed byte-for-byte.
             continue
-        if in_block:
-            block.append((n, raw))
-    return receipts, unclassified, blocks
+        shape = shapes.get(n)
+        if shape in _DIRECTIVE_SHAPES:
+            out.append(Evasion(n, shape, raw))
+            continue
+        if shape or n in orphaned:
+            continue                      # a fence marker, or prose in a prose block
+        m = _INLINE_CMD_RE.search(raw)
+        if m:
+            out.append(Evasion(n, "inline-command", m.group(0)))
+    out.extend(_evading_fences(doc, shapes, fenced))
+    seen = {e.line for e in out}
+    for n, raw in doc.strays:
+        if n not in seen:
+            out.append(Evasion(n, "stray-directive", raw))
+    out.sort(key=lambda e: e.line)
+    return out
 
 
-def _parse_block(lines, _start):
+def blocks_yielding_nothing(text):
+    """Fenced blocks that hold receipt-shaped text but classified nothing.
+
+    The reconciliation `blocks == receipts + unclassified` does not hold in
+    general (one block may carry several receipts), so this is the checkable form
+    of it: a block is either receipt-bearing or shape-free. The founding incident
+    printed `(37 fenced blocks)` against 34 receipts and nobody reconciled it.
+    """
+    doc = parse_doc(text)
+    out = []
+    for start, end, ok in doc.spans:
+        if ok:
+            continue
+        for n in range(start + 1, end):
+            if _shape_of(_GUTTER_RE.sub("", doc.lines[n - 1])) in _DIRECTIVE_SHAPES:
+                out.append((start, end))
+                break
+    return out
+
+
+def _parse_block(lines):
     out, cur, volatile, pin, live = [], None, False, None, False
+    stray = []
     for n, raw in lines:
         if raw.startswith("# volatile"):
             volatile = True
@@ -264,6 +526,11 @@ def _parse_block(lines, _start):
             out.append(cur)
             continue
         if cur is None:
+            # Nothing to attach this line to. If it is receipt-SHAPED behind a
+            # gutter, it is a directive the block dropped -- report it (H1)
+            # rather than let a hidden `# at`/`$ ` vanish inside a real fence.
+            if _shape_of(_GUTTER_RE.sub("", raw)) in _DIRECTIVE_SHAPES:
+                stray.append((n, raw))
             continue
         if isinstance(cur, _ExitCapture):
             s = raw.strip()
@@ -284,7 +551,7 @@ def _parse_block(lines, _start):
     # against is UNCLASSIFIED and is reported; it is never silently dropped.
     checkable = [r for r in out if r.expected or r.exit_code is not None]
     unclassified = [r for r in out if not (r.expected or r.exit_code is not None)]
-    return checkable, unclassified
+    return checkable, unclassified, stray
 
 
 class _ExitCapture:
@@ -312,10 +579,14 @@ def run(receipt, root):
     return actual, proc.returncode
 
 
-def check(text, root, quiet=False, strict=False, skip_volatile=False):
+def check(text, root, quiet=False, strict=False, skip_volatile=False,
+          execute=True):
     """Returns (n_checked, failures, warnings). Prints a report unless quiet.
 
-    `strict` promotes UNCLASSIFIED receipts (gap 2) to failures.
+    `strict` promotes UNCLASSIFIED receipts (gap 2) and EVASIONS (H1) to
+    failures. `execute=False` reports structure only -- extraction, pins and
+    evasions -- without running any command; it is how the founding-artifact
+    replay stays fast, and it never suppresses a finding, only the diffing.
     `skip_volatile` does not *execute* receipts marked `# volatile` at all --
     used by `tests/test_receipts.py`, which must stay hermetic. A volatile
     receipt is one whose evidence lives outside the repo (this repo has one:
@@ -324,7 +595,10 @@ def check(text, root, quiet=False, strict=False, skip_volatile=False):
     machine-independent. Neither loosens what is checked about the rest.
     """
     receipts, unclassified, blocks = parse(text)
+    evasions = scan_evasions(text)
     failures, warnings, skipped = [], [], 0
+    for e in evasions:
+        (failures if strict else warnings).append((e, [f"EVASION: {e.detail}"]))
     for r in unclassified:
         entry = (r, ["UNCLASSIFIED: no expected output and no exit assertion -- "
                      "nothing to verify against"])
@@ -342,6 +616,10 @@ def check(text, root, quiet=False, strict=False, skip_volatile=False):
             (failures if strict else warnings).append(entry)
             if strict:
                 continue
+        if not execute:
+            # Structure only. Pin and extraction findings above are already
+            # recorded; the diff is what is being skipped, not a finding.
+            continue
         try:
             actual, rc = run(r, root)
         except PinError as exc:
@@ -375,11 +653,18 @@ def check(text, root, quiet=False, strict=False, skip_volatile=False):
         if pins:
             print(f"\npins resolved: {', '.join(pins)}")
         total = len(receipts) + len(unclassified)
-        print(f"\n{total - len(failures) - len(warnings) - skipped}/{total} "
-              f"receipts reproduce exactly "
+        # Evasions are counted apart from the receipt fraction: they are not
+        # receipts that failed, they are receipts that were never extracted, and
+        # folding them in drove the numerator negative.
+        bad = sum(1 for r, _ in failures + warnings if not isinstance(r, Evasion))
+        print(f"\n{total - bad - skipped}/{total} parsed receipts reproduce exactly "
               f"({blocks} fenced blocks, {len(unclassified)} unclassified, "
               f"{skipped} volatile-skipped, {len(warnings)} warned, "
               f"{len(failures)} FAILED)")
+        if evasions:
+            print(f"{len(evasions)} EVASION(S): receipt-shaped text the parser "
+                  f"never classified -- see the lines above. A document can have "
+                  f"every parsed receipt reproduce and still be unverified.")
     return len(receipts), failures, warnings
 
 
@@ -433,7 +718,58 @@ def self_test(text, root):
         print("SELF-TEST FAILED: the seeded receipt also fails unmutated")
         return False
     print("SELF-TEST PASSED: a one-word paraphrase inside a pasted receipt is caught.")
+    return self_test_extraction(text, root)
+
+
+def _extraction_seed(name, seeded, before):
+    doc = parse_doc(seeded)
+    after = len(doc.receipts) + len(doc.unclassified)
+    evasions = scan_evasions(seeded)
+    print(f"  seed [{name}]: receipts {before} -> {after}, "
+          f"{len(evasions)} evasion(s) reported")
+    if after >= before:
+        print(f"EXTRACTION SELF-TEST INCONCLUSIVE [{name}]: the seed removed no receipt")
+        return False
+    if not evasions:
+        print(f"EXTRACTION SELF-TEST FAILED [{name}]: {before - after} receipt(s) "
+              f"stopped being parsed and NOTHING was reported. Green runs mean "
+              f"nothing until this passes.")
+        return False
     return True
+
+
+def self_test_extraction(text, root):
+    """Prove the harness notices a receipt that stopped being PARSED.
+
+    The paraphrase seed above proves a *parsed* receipt can fail, which is silent
+    about everything unparsed -- the entire H1 class. This seeds the two shapes
+    that produced the founding incident: a block whose fences are removed, and a
+    block pushed behind a `> ` gutter. Both must drop the receipt count AND be
+    reported. Structure only; nothing is executed.
+    """
+    doc = parse_doc(text)
+    before = len(doc.receipts) + len(doc.unclassified)
+    target = next(((s, e) for s, e, ok in doc.spans if ok), None)
+    if target is None or before == 0:
+        print("EXTRACTION SELF-TEST INCONCLUSIVE: no classified fenced block to seed")
+        return False
+    if scan_evasions(text):
+        print("EXTRACTION SELF-TEST INCONCLUSIVE: the document already carries an "
+              "evasion, so a seeded one proves nothing")
+        return False
+    start, end = target
+    lines = text.splitlines()
+    print(f"seeding an extraction failure into the block at lines {start}-{end}")
+    unfenced = "\n".join(l for n, l in enumerate(lines, start=1)
+                         if n not in (start, end)) + "\n"
+    quoted = "\n".join("> " + l if start <= n <= end else l
+                       for n, l in enumerate(lines, start=1)) + "\n"
+    ok = _extraction_seed("fences removed", unfenced, before)
+    ok = _extraction_seed("blockquote gutter", quoted, before) and ok
+    if ok:
+        print("EXTRACTION SELF-TEST PASSED: a receipt that stops being parsed is "
+              "reported, not silently dropped.")
+    return ok
 
 
 def main(argv=None):

@@ -35,10 +35,45 @@ from __future__ import annotations
 
 import importlib.util
 import pathlib
+import re
 
 import pytest
 
+# Markdown gutter: indentation, blockquote markers, one list bullet. Kept in sync
+# with `verify_receipts._GUTTER_RE` by `test_gutter_regex_matches_the_harness` --
+# this module needs it at COLLECTION time (`_is_enforced` drives the
+# parametrisation), before the `vr` fixture can load the harness.
+_GUTTER_RE = re.compile(r"^[ \t]*(?:>[ \t]*)*(?:[-*+][ \t]+|\d+[.)][ \t]+)?[ \t]*")
+
 REPO = pathlib.Path(__file__).resolve().parents[1]
+
+# THE FOUNDING ARTIFACT of the parser-evasion class (H1, break-lens FINAL GATE r3,
+# `docs/reviews/THREE-TIER-REDRAFT-REVIEW-2026-07-23-break.md` §2.4-§2.5).
+#
+# `4e540f8` is "three-tier fix-wave 2"; its parent is the tree in which four
+# receipt blocks sat behind `> ` blockquote and 2-space list gutters. The old
+# parser matched `$ `/`# at ` on RAW lines, so those blocks were never parsed:
+# it printed `34/34 receipts reproduce exactly (37 fenced blocks ...)` and exited
+# 0 on a document holding 38 blocks. Four unverified claims shaped like receipts.
+#
+# The fixture IS the artifact -- it is read out of git history at test time, never
+# hand-transcribed, so it cannot be tuned to the detector.
+FOUNDING_ARTIFACT = "4e540f8~1:docs/specs/three-tier-command.md"
+
+# The eight gutter-hidden fence markers in that artifact, by line number, as
+# reconstructed independently by the r3 census (blockquote §7.2 B1; 2-space list
+# indent §10.4 B5, §11.2 B3, §11.3 B4).
+FOUNDING_GUTTER_FENCES = {519, 523, 783, 787, 909, 914, 954, 958}
+
+# Per-spec receipt floor. A spec may GAIN receipts freely; losing them below the
+# floor fails here. Without this, a whole spec's receipts could stop being
+# extracted -- exactly what H1 did -- with the suite still green, because
+# `test_receipts_reproduce` only asserts that whatever WAS extracted reproduces.
+# `test_every_enforced_spec_has_a_receipt_floor` keeps this dict exhaustive.
+RECEIPT_FLOOR = {
+    "claim-nonce.md": 59,
+    "three-tier-command.md": 39,
+}
 
 # A commit whose bin/fleet.py predates the me/ul + me/daemon merges, used by the
 # drift tests below. Any commit reachable from this branch works.
@@ -98,7 +133,15 @@ def _all_specs():
 
 
 def _is_enforced(path):
-    return any(line.startswith("# at ")
+    """A spec is enforced iff it carries a `# at <sha>` pin ANYWHERE in it.
+
+    Deliberately gutter-blind: a pin hidden behind `> ` or list indentation still
+    puts the spec in the enforced set. Matching `startswith("# at ")` here would
+    let a spec whose every receipt was indented drop OUT of the enforced set --
+    the H1 evasion one level up, where the whole document goes unscanned rather
+    than four blocks. Such a spec is enforced and then FAILS on the evasion.
+    """
+    return any(_GUTTER_RE.sub("", line).startswith("# at ")
                for line in path.read_text(encoding="utf-8").splitlines())
 
 
@@ -311,3 +354,262 @@ def test_volatile_marker_is_honoured(vr):
 
     _n, failures, _w = vr.check(doc, REPO, quiet=True, skip_volatile=True)
     assert len(failures) == 1, "skip_volatile must not suppress the unmarked failure"
+
+
+# ---------------------------------------------------------------------------
+# H1 -- the parser-evasion class.
+#
+# Doctrine (CLAUDE.md): "A receipt the harness cannot classify is a failure,
+# never a skip." Until H1 that covered unclassifiable *fenced blocks* only. A
+# receipt-shaped block behind a `> ` or an indent was never classified at all --
+# the parser never saw it -- so it was not even eligible to be a failure. These
+# tests extend the doctrine to receipt-shaped text the parser never sees.
+#
+# The canonical form is a COLUMN-0 backtick fence. The fix is to REJECT every
+# other shape, not to quietly start parsing it: a gutter changes what a Markdown
+# reader is being told (`> ` means "I am quoting this", not "I ran this"), and
+# silently absorbing the shapes would leave the founding artifact reporting green
+# -- a detector that cannot go red on its own founding incident is theater.
+# ---------------------------------------------------------------------------
+
+def _founding_artifact(vr):
+    """The artifact, read out of git history. Absent object = failure, not skip."""
+    rc, text = vr._git(REPO, "show", FOUNDING_ARTIFACT)
+    assert rc == 0 and text.strip(), (
+        f"cannot read the founding artifact {FOUNDING_ARTIFACT}. It is the fixture; "
+        f"without it this suite proves nothing about H1. Fetch the object rather "
+        f"than skipping.")
+    return text
+
+
+def test_gutter_regex_matches_the_harness(vr):
+    """This module's collection-time copy must not drift from the harness's."""
+    assert _GUTTER_RE.pattern == vr._GUTTER_RE.pattern
+
+
+def test_founding_artifact_is_the_real_thing(vr):
+    """Non-vacuity guard: the fixture IS the artifact, unmodified.
+
+    If this ever passes on a hand-written stand-in, the RED proof below is
+    theater. So the artifact is checked for the exact evasion geometry the r3
+    census reconstructed independently from the committed trees.
+    """
+    text = _founding_artifact(vr)
+    lines = text.splitlines()
+    gutter_fences = {
+        n for n, raw in enumerate(lines, start=1)
+        if _GUTTER_RE.sub("", raw).startswith("```") and not raw.startswith("```")}
+    assert gutter_fences == FOUNDING_GUTTER_FENCES, (
+        f"the founding artifact does not carry the 8 gutter-hidden fence markers "
+        f"the r3 census found; got {sorted(gutter_fences)}")
+    assert 'name = f"sup|{successor_inc}|successor"' in text
+
+
+def test_founding_artifact_goes_red(vr):
+    """THE regression this slice exists for.
+
+    Pre-fix, the old parser reported this document as
+    `34/34 receipts reproduce exactly (37 fenced blocks, 0 unclassified, ... 0 FAILED)`
+    and exited 0 -- while four receipt blocks (38 blocks really present) were
+    never parsed. It must now fail, naming every hidden line.
+    """
+    text = _founding_artifact(vr)
+    evasions = vr.scan_evasions(text)
+    assert evasions, (
+        "the founding artifact reports clean -- the detector cannot go red on "
+        "its own founding incident")
+    lines = {e.line for e in evasions}
+    assert FOUNDING_GUTTER_FENCES <= lines, (
+        f"gutter-hidden fence markers not reported: "
+        f"{sorted(FOUNDING_GUTTER_FENCES - lines)}")
+    # The four `# at` pins and four `$ ` commands inside them are hidden too.
+    assert len(evasions) >= 16, (
+        f"expected the 8 fence markers plus the 4 pins and 4 commands they hide, "
+        f"got {len(evasions)}: {[(e.line, e.shape) for e in evasions]}")
+
+
+def test_founding_artifact_fails_strict_check(vr):
+    """...and the evasion must reach the caller through `check()`, not just `scan_evasions()`."""
+    text = _founding_artifact(vr)
+    _n, failures, warnings = vr.check(
+        text, REPO, quiet=True, strict=True, skip_volatile=True, execute=False)
+    assert failures, "strict check() on the founding artifact must fail"
+    _n, failures, warnings = vr.check(
+        text, REPO, quiet=True, strict=False, skip_volatile=True, execute=False)
+    assert warnings and not failures, "without --strict an evasion must WARN, never vanish"
+
+
+# The r3 probe, replayed: four shapes that all exited 0 with `0 FAILED` on a
+# receipt whose expected output is flatly false. Plus the two §2.4 also checked
+# by hand -- an inline backtick command, and a bare unfenced receipt.
+EVASION_SHAPES = {
+    "blockquoted": "> ```\n> # live: probe\n> $ echo ok\n> WRONG\n> ```\n",
+    "indent2": "  ```\n  # live: probe\n  $ echo ok\n  WRONG\n  ```\n",
+    "indent4-unfenced": "    # live: probe\n    $ echo ok\n    WRONG\n",
+    "tildefence": "~~~\n# live: probe\n$ echo ok\nWRONG\n~~~\n",
+    "list-item": "- some prose\n\n  ```\n  # live: probe\n  $ echo ok\n  WRONG\n  ```\n",
+    "inline-span": "Run `$ echo ok` and you get `ok`.\n",
+    "unfenced": "# live: probe\n$ echo ok\nWRONG\n",
+}
+
+
+@pytest.mark.parametrize("shape", sorted(EVASION_SHAPES), ids=lambda s: s)
+def test_every_evasion_shape_is_caught(vr, shape):
+    """A flatly false receipt in any of these shapes must not pass.
+
+    Every one of these exits 0 with `0 FAILED` on the pre-H1 harness.
+    """
+    doc = EVASION_SHAPES[shape]
+    _n, failures, _w = vr.check(doc, REPO, quiet=True, strict=True)
+    assert failures, f"{shape}: a false receipt in this shape still passes"
+
+    _n, _f, warnings = vr.check(doc, REPO, quiet=True, strict=False)
+    assert warnings, f"{shape}: nothing reported at all without --strict"
+
+
+def test_clean_prose_is_not_flagged(vr):
+    """False-positive discipline: mentioning `$` or `at` is not a receipt.
+
+    The detector is worth nothing if authors learn to route around it, and they
+    will if ordinary prose trips it.
+    """
+    doc = (
+        "# Costs\n"
+        "\n"
+        "It runs at $5 per month, or $0.02 per turn. Look at line 40.\n"
+        "The `$` sigil, a bare `$ ` marker, and $HOME are all fine.\n"
+        "> Quoted prose about a commit at 235421e is still prose.\n"
+        "\n"
+        "- a list item mentioning shell variables like $PATH\n"
+        "  - and a nested one, indented, about `git log` at HEAD\n"
+        "\n"
+        "```\n"
+        "# at 235421e56bfd328a7e913e519a1459ccf55918dc\n"
+        "$ echo clean\n"
+        "clean\n"
+        "```\n"
+    )
+    evasions = vr.scan_evasions(doc)
+    assert evasions == [], f"false positives on clean prose: " \
+        f"{[(e.line, e.shape, e.cmd) for e in evasions]}"
+    _n, failures, warnings = vr.check(doc, REPO, quiet=True, strict=True)
+    assert not failures and not warnings
+
+
+def test_indented_code_snippet_is_not_an_evasion(vr):
+    """A gutter fence is only an evasion if it wraps a receipt DIRECTIVE.
+
+    The shape of `docs/specs/portability.md:315-325`: an illustrative ```python
+    block nested under a bullet. Flagging it caught nothing and would have taught
+    authors to route around the check -- so a fence is judged by its contents.
+    """
+    doc = (
+        "- make the expected value OS-conditional:\n"
+        "\n"
+        "  ```python\n"
+        "  def test_detached_popen_kwargs(self):\n"
+        "      assert kwargs == {\"start_new_session\": True}\n"
+        "  ```\n"
+        "\n"
+        "- and a `~~~`-fenced diagram with no commands in it:\n"
+        "\n"
+        "~~~\n"
+        "manager -> worker\n"
+        "~~~\n"
+    )
+    assert vr.scan_evasions(doc) == [], \
+        [(e.line, e.shape) for e in vr.scan_evasions(doc)]
+    assert vr.blocks_yielding_nothing(doc) == []
+
+
+def test_expected_output_is_never_mistaken_for_an_evasion(vr):
+    """Pasted output inside a classified block may look like anything."""
+    doc = (
+        "```\n"
+        "# at " + PIN + "\n"
+        "$ printf '  $ not a receipt\\n> quoted\\n- $ bullet\\n'\n"
+        "  $ not a receipt\n"
+        "> quoted\n"
+        "- $ bullet\n"
+        "```\n"
+    )
+    assert vr.scan_evasions(doc) == []
+    _n, failures, _w = vr.check(doc, REPO, quiet=True, strict=True)
+    assert not failures, [p for _r, p in failures]
+
+
+def test_unterminated_fence_is_an_error(vr):
+    """A fence that never closes swallows the rest of the document silently."""
+    doc = "```\n# at " + PIN + "\n$ echo hi\nhi\n"
+    _n, failures, _w = vr.check(doc, REPO, quiet=True, strict=True)
+    assert failures and any("unterminated" in p.lower()
+                            for _r, ps in failures for p in ps), failures
+
+
+def test_enforced_specs_carry_no_evasion(vr):
+    """The corpus as it stands is clean -- and stays clean."""
+    dirty = {}
+    for path in _specs():
+        evasions = vr.scan_evasions(path.read_text(encoding="utf-8"))
+        if evasions:
+            dirty[path.name] = [(e.line, e.shape) for e in evasions]
+    assert not dirty, (
+        f"receipt-shaped text the parser never sees: {dirty}. Move it to a "
+        f"column-0 ``` fence; do not loosen the detector.")
+
+
+@pytest.mark.parametrize("path", _specs(), ids=lambda p: p.name)
+def test_every_fenced_block_is_accounted_for(vr, path):
+    """No fenced block may hold receipt-shaped text and yield nothing.
+
+    The only tell that H1 was live was the printed `34/34 ... (37 fenced blocks)`
+    mismatch, which two independent reviewers quoted and neither reconciled. This
+    reconciles it mechanically.
+    """
+    text = path.read_text(encoding="utf-8")
+    orphans = vr.blocks_yielding_nothing(text)
+    assert not orphans, (
+        f"{path.name}: fenced block(s) containing receipt shapes but yielding no "
+        f"receipt: {orphans}")
+
+
+def test_every_enforced_spec_has_a_receipt_floor():
+    """RECEIPT_FLOOR must cover the enforced set exactly -- no silent omission."""
+    enforced = {p.name for p in _specs()}
+    missing = sorted(enforced - set(RECEIPT_FLOOR))
+    assert not missing, (
+        f"enforced spec(s) with no entry in RECEIPT_FLOOR: {missing}. Add the "
+        f"count the harness extracts today; a spec with no floor can drop to "
+        f"zero extracted receipts with this suite green.")
+    stale = sorted(set(RECEIPT_FLOOR) - enforced)
+    assert not stale, f"RECEIPT_FLOOR names a spec that is not enforced: {stale}"
+
+
+@pytest.mark.parametrize("path", _specs(), ids=lambda p: p.name)
+def test_receipt_floor_holds(vr, path):
+    """A spec may gain receipts; dropping below its floor is a regression."""
+    receipts, unclassified, _blocks = vr.parse(path.read_text(encoding="utf-8"))
+    floor = RECEIPT_FLOOR[path.name]
+    total = len(receipts) + len(unclassified)
+    assert total >= floor, (
+        f"{path.name}: {total} receipts extracted, floor is {floor}. Either "
+        f"receipts were deleted, or extraction silently stopped seeing them.")
+
+
+def test_self_test_proves_extraction_completeness(vr):
+    """`--self-test` must seed an UNPARSED receipt, not only a paraphrased one.
+
+    The old seed test mutated a word inside an already-parsed receipt, which is
+    silent about everything the parser never parsed -- the entire H1 class. The
+    extraction seed strips the fences off a real block and requires the harness
+    to report the now-loose receipt.
+    """
+    doc = (
+        "```\n"
+        "# at " + PIN + "\n"
+        "$ echo seeded\n"
+        "seeded\n"
+        "```\n"
+    )
+    assert vr.self_test_extraction(doc, REPO), \
+        "the harness did not notice a receipt that stopped being parsed"
