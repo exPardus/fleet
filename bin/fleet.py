@@ -1759,6 +1759,84 @@ def find_transcript_path(name: str, sid: str):
     return candidates[0]
 
 
+# three-tier-command.md §11 -- the self-monitored context band (150-200k),
+# supervisor AND workers (§11.4). 150k soft trigger (hand off at the next
+# wave/task boundary); 200k hard ceiling H (finish in-flight, no new work; the
+# fleet-side dispatch refusal, §11.3). Denominated in CONTEXT OCCUPANCY, never
+# spend (§11.5): its only consequence is HAND OFF, never stop/kill/refuse-until-
+# cheaper. Not a code constant the operator tunes -- an operator-stated band.
+BAND_SOFT_TOKENS = 150_000
+BAND_HARD_TOKENS = 200_000
+
+# The three per-turn prompt summands whose SUM is context occupancy (B2). A
+# turn's usage may carry any subset; occupancy sums whatever is present.
+_OCCUPANCY_USAGE_FIELDS = (
+    "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+
+
+def _transcript_occupancy(transcript_path):
+    """Context-window occupancy from sid's transcript tail: the B2-correct SUM
+    of input_tokens + cache_creation_input_tokens + cache_read_input_tokens from
+    the LAST assistant `message.usage`. None when the transcript is
+    missing/unreadable or carries no usage at all -- callers FAIL TOWARD THE
+    BAND on None (§11.2), never treat it as room.
+
+    Reads only the bounded 64KB tail (`_read_tail_lines`) -- the last usage
+    record lives at the very end, and a supervisor transcript can be large.
+    Never raises: this runs at a checkpoint/beat boundary and must not crash a
+    turn on a torn or locked transcript."""
+    if not transcript_path:
+        return None
+    occupancy = None
+    for line in _read_tail_lines(transcript_path):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict) or rec.get("type") != "assistant":
+            continue
+        msg = rec.get("message")
+        if not isinstance(msg, dict):
+            continue
+        usage = msg.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        summands = [usage.get(f) for f in _OCCUPANCY_USAGE_FIELDS
+                    if isinstance(usage.get(f), int)]
+        if summands:
+            occupancy = sum(summands)   # newest-wins: keep scanning to the tail
+    return occupancy
+
+
+def supervisor_band_verdict(occupancy):
+    """Map an occupancy (or None) to the band verdict (§11.3). `hand_off` is the
+    single decision a caller acts on:
+
+      occupancy < 150k          -> below-band       (hand_off False)
+      150k <= occupancy < 200k  -> in-band          (hand_off True: soft trigger)
+      occupancy >= 200k         -> over-band        (hand_off True: hard ceiling)
+      occupancy is None         -> assume-near-band (hand_off True: §11.2 fails
+                                   toward the band -- NEVER below-band on missing
+                                   data, for a ceiling nobody else enforces)"""
+    if occupancy is None:
+        return {"verdict": "assume-near-band", "hand_off": True,
+                "reason": "occupancy unreadable -- assume near-band, hand off at "
+                          "the next boundary (§11.2 fails toward the band)"}
+    if occupancy >= BAND_HARD_TOKENS:
+        return {"verdict": "over-band", "hand_off": True,
+                "reason": f"occupancy {occupancy} >= hard ceiling {BAND_HARD_TOKENS}: "
+                          "finish in-flight work only, no new dispatches (§11.3)"}
+    if occupancy >= BAND_SOFT_TOKENS:
+        return {"verdict": "in-band", "hand_off": True,
+                "reason": f"occupancy {occupancy} >= soft trigger {BAND_SOFT_TOKENS}: "
+                          "hand off at the next wave/task boundary (§11.3)"}
+    return {"verdict": "below-band", "hand_off": False,
+            "reason": f"occupancy {occupancy} < soft trigger {BAND_SOFT_TOKENS}"}
+
+
 def _record_time(rec: dict):
     """Aware UTC datetime from a transcript record's own `timestamp` field,
     or None on absence/garbage. Records carry fractional-second ISO-8601
@@ -9565,6 +9643,44 @@ def cmd_sup_status(args) -> int:
     return 0
 
 
+def cmd_sup_context(args) -> int:
+    """`fleet sup-context [--sid S] [--json]` -- three-tier §11.2 band
+    measurement. READ-ONLY: no lock, no write. Run BY the body observing itself
+    (the supervisor, or a worker, §11.4).
+
+    Rotation-safe by construction: it resolves the transcript from the running
+    process's OWN CLAUDE_CODE_SESSION_ID (G4 -- the one key guaranteed fresh for
+    the acting body, immune to the fork-steer that staled INCARNATION.session_id,
+    B3), not via the claim or an outcome record. `--sid` overrides only for
+    out-of-band inspection.
+
+    Fails toward the band (§11.2): an unresolvable sid or a missing/unreadable
+    transcript yields `assume-near-band` (hand_off True), never `below-band`."""
+    sid = getattr(args, "sid", None) or current_caller_session()
+    transcript = find_transcript_path(None, sid) if sid else None
+    occupancy = _transcript_occupancy(transcript)
+    verdict = supervisor_band_verdict(occupancy)
+    info = {
+        "sid": sid,
+        "occupancy": occupancy,
+        "soft_threshold": BAND_SOFT_TOKENS,
+        "hard_threshold": BAND_HARD_TOKENS,
+        "transcript": transcript.as_posix() if transcript else None,
+        **verdict,
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(info, indent=2))
+        return 0
+    occ = f"{occupancy:,} tokens" if occupancy is not None else "unreadable"
+    print(f"context occupancy: {occ}  ->  {verdict['verdict'].upper()}"
+          f"  (band {BAND_SOFT_TOKENS:,}-{BAND_HARD_TOKENS:,})")
+    print(verdict["reason"])
+    if sid is None:
+        print("NOTE: no CLAUDE_CODE_SESSION_ID -- run this from the session you "
+              "are measuring (it reads its OWN transcript, §11.2)")
+    return 0
+
+
 def cmd_sup_decision(args) -> int:
     """`fleet sup-decision` -- three-tier §8 operator-gate routing.
 
@@ -10519,6 +10635,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_supstat = sub.add_parser("sup-status", help="read-only supervisor claim/handshake status")
     p_supstat.add_argument("--json", action="store_true")
 
+    # three-tier §11.2: self-monitored context band measurement (read-only).
+    p_supctx = sub.add_parser(
+        "sup-context",
+        help="read this session's own context occupancy vs the 150-200k band (§11.2)")
+    p_supctx.add_argument("--sid", help="override caller session id (out-of-band inspection)")
+    p_supctx.add_argument("--json", action="store_true")
+
     # three-tier §8: operator-gate routing state file.
     p_supdec = sub.add_parser(
         "sup-decision",
@@ -10626,6 +10749,8 @@ def main(argv=None) -> int:
             return cmd_sup_release(args)
         if args.command == "sup-status":
             return cmd_sup_status(args)
+        if args.command == "sup-context":
+            return cmd_sup_context(args)
         if args.command == "sup-decision":
             return cmd_sup_decision(args)
         if args.command == "sup-handoff-begin":
