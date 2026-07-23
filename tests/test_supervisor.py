@@ -317,15 +317,69 @@ class TestClaimDecisionVerdictOrder:
         assert v == "claim"
         assert "released cleanly" in reason
 
-    def test_released_claim_wins_even_when_the_recorded_sid_is_roster_live(self):
-        # The released row runs AHEAD of the roster guard: a released claim
-        # carries no session_id at all, so `None in live_sids` must not be
-        # able to steer the decision, and a stale roster must not resurrect it.
+    def test_released_claim_is_NOT_consumed_while_its_releaser_is_roster_live(self):
+        """B6 (three-tier-command.md :1184-1190), INVERTED from the test this
+        class shipped in `d13af83`.
+
+        That test asserted `claim` here and pinned the PRE-B6 semantics --
+        deliberately, and flagged loudly at the time, because a future reader
+        would otherwise have read a passing test as the decided answer. The
+        prerequisite has since been ruled in:
+
+          > `sup-boot` must not consume a `released` record whose
+          > `released_by_sid` is still roster-live -- either rule 1 gains a
+          > roster-liveness precondition, or release+stop is made atomic from
+          > the claim's perspective (the record is never left
+          > `released`-and-live).
+
+        `fleet sup-release` followed by `claude stop` is two commands, and the
+        window between them is real: three-tier adds AUTOMATED occupants of it
+        (a scheduled beat, `sup-spawn`, a handoff successor polling
+        `sup-boot`), and SPEC §16.7's one-live-session-per-name blocks a second
+        `supervisor`-named spawn but not a `sup-boot` from an already-live
+        differently-named session. Rule 1 gains the precondition."""
+        released = {"incarnation_id": "inc-old", "lineage_id": "lin-x",
+                    "claimed_via": "fresh", "released_at": _iso(NOW),
+                    "released_by_sid": "sid-old", "state": "released"}
+        v, reason = fleet.supervisor_claim_decision(
+            released, {"sid-old"}, None, now=NOW, caller_sid="sid-new")
+        assert v == "refuse"
+        assert "sid-old" in reason
+        assert v in fleet.SUPERVISOR_BOOT_RC
+
+    def test_the_releaser_going_roster_gone_is_what_opens_the_claim(self):
+        released = {"incarnation_id": "inc-old", "lineage_id": "lin-x",
+                    "claimed_via": "fresh", "released_at": _iso(NOW),
+                    "released_by_sid": "sid-old", "state": "released"}
+        v, reason = fleet.supervisor_claim_decision(
+            released, {"sid-new"}, None, now=NOW, caller_sid="sid-new")
+        assert v == "claim"
+        assert "released cleanly" in reason
+
+    @pytest.mark.parametrize("released_by", [None, "", 0])
+    def test_a_released_record_naming_no_releaser_is_not_gated_by_a_None_in_the_roster(
+            self, released_by):
+        # A released claim carries no `session_id` at all (§6.3), so nothing
+        # here may be steerable by a `None` that a hostile or drifted roster
+        # put in the live set. The precondition keys on `released_by_sid`
+        # ONLY when it is a non-empty string -- otherwise a record that names
+        # no releaser would be gated forever by a value nobody wrote.
+        released = {"incarnation_id": "inc-old", "lineage_id": "lin-x",
+                    "claimed_via": "fresh", "released_at": _iso(NOW),
+                    "released_by_sid": released_by, "state": "released"}
+        v, _ = fleet.supervisor_claim_decision(
+            released, {"sid-old", None, ""}, None, now=NOW, caller_sid="sid-old")
+        assert v == "claim"
+
+    def test_the_releaser_may_reboot_its_own_released_claim_once_it_is_gone(self):
+        # Not a special case -- just the ordinary shape after `claude stop`.
+        # Recorded because "the releaser is the caller" is the row an
+        # implementation keyed on `caller_sid` would get wrong.
         released = {"incarnation_id": "inc-old", "lineage_id": "lin-x",
                     "claimed_via": "fresh", "released_at": _iso(NOW),
                     "released_by_sid": "sid-old", "state": "released"}
         v, _ = fleet.supervisor_claim_decision(
-            released, {"sid-old", None}, None, now=NOW, caller_sid="sid-old")
+            released, set(), None, now=NOW, caller_sid="sid-old")
         assert v == "claim"
 
     def test_legacy_call_signature_still_decides(self):
@@ -711,6 +765,36 @@ class TestSupBootContinuity:
         assert claim["lineage_id"] == "lin-20260101T000000Z-aaaa"
 
     # --- §5.8's second publisher ------------------------------------------
+
+    def test_B6_boot_refuses_a_released_record_whose_releaser_is_still_live(
+            self, sup_home, capsys):
+        # The guard where an operator meets it. `fleet sup-release` then
+        # `claude stop` is TWO commands; between them the record is
+        # `released`-and-live and a second body booting into it produces
+        # exactly the two-live-supervisors shape §6.6 exists to prevent.
+        released = {"incarnation_id": "inc-old", "lineage_id": "lin-x",
+                    "claimed_via": "fresh", "released_at": fleet.now_iso(),
+                    "released_by_sid": "sid-releaser", "state": "released"}
+        fleet.write_incarnation(released)
+        rc = self._boot([{"sessionId": "sid-releaser", "status": "idle"},
+                         {"sessionId": "sid-me", "status": "busy"}])
+        assert rc == 2
+        assert "VERDICT: refuse" in capsys.readouterr().out
+        assert fleet.read_incarnation() == released, "refuse is strictly read-only"
+        assert fleet.supervisor_journal_entries() == []
+
+    def test_B6_once_the_releaser_is_gone_the_boot_proceeds(self, sup_home, capsys):
+        released = {"incarnation_id": "inc-old", "lineage_id": "lin-x",
+                    "claimed_via": "fresh", "released_at": fleet.now_iso(),
+                    "released_by_sid": "sid-releaser", "state": "released"}
+        fleet.write_incarnation(released)
+        assert self._boot([{"sessionId": "sid-me", "status": "busy"}]) == 0
+        out = capsys.readouterr().out
+        assert "VERDICT: claim" in out
+        claim = fleet.read_incarnation()
+        assert claim["incarnation_id"] != "inc-old"
+        assert claim["nonce_hash"] == fleet.nonce_digest(_nonce_of(out))
+        assert fleet.supervisor_journal_latest()["kind"] == "BOOT"
 
     def test_no_stored_hash_reaches_sup_boots_stdout(self, sup_home, capsys):
         # §5.8 enumerates TWO publishers and v2 wrote the rule against one.
