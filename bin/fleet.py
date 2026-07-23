@@ -1297,7 +1297,20 @@ def resolve_claude_executable(which=shutil.which) -> str:
 # and the refusal arm read ONE shape -- two copies of a security-relevant
 # literal drift silently, with the dispatch still working while the exemption
 # quietly stops matching it.
-_SUPERVISOR_SHAPED_WORKER_RE = re.compile(r"^sup\|[^|]+\|successor$")
+# three-tier §10.1 sup-spawn (manager ruling, 2026-07-24 -- extension, NOT
+# reversal). Widened from `^sup\|[^|]+\|successor$` to the whole FAMILY
+# `sup|<inc>|<role>`. The council's E(2) grounding for the exemption was "the
+# exempt shape must be unforgeable via `fleet spawn`" -- and ANY `|`-bearing
+# name satisfies that, because `NAME_RE` (`^[a-z0-9-]+$`) forbids `|` in every
+# spawnable worker name. So widening `successor` to `[a-z][a-z0-9-]*` keeps the
+# grounding intact: `sup-spawn` dispatches its gen-0 body under `sup|<inc>|boot`
+# (a role other than `successor`), that body carries FLEET_WORKER=that-name, and
+# it must not be refused its own claim. `<role>` is anchored `[a-z][a-z0-9-]*`
+# (a real role, never empty), `<inc>` is `[^|]+` (never empty), and the two
+# pipes are literal -- so `supervisor`, `sup|x|`, `sup||role` and a third
+# separator all stay OUT of the family (unit-tested). Held here beside
+# `_worker_env` so the dispatch and the refusal arm read ONE shape.
+_SUPERVISOR_SHAPED_WORKER_RE = re.compile(r"^sup\|[^|]+\|[a-z][a-z0-9-]*$")
 
 
 def _successor_worker_name(successor_inc: str) -> str:
@@ -1306,9 +1319,11 @@ def _successor_worker_name(successor_inc: str) -> str:
 
 
 def _is_supervisor_shaped(name) -> bool:
-    """True iff `name` is a handoff-successor worker name. Never raises on a
-    non-string: `os.environ.get` can only return `str | None` today, but this
-    is also called on registry-sourced values."""
+    """True iff `name` is a supervisor BODY name of the family `sup|<inc>|<role>`
+    (§10.1 manager ruling) -- the handoff successor `sup|<inc>|successor` and any
+    sup-spawn gen-0 role (`sup|<inc>|boot`, ...). Never raises on a non-string:
+    `os.environ.get` can only return `str | None` today, but this is also called
+    on registry-sourced values."""
     return isinstance(name, str) and _SUPERVISOR_SHAPED_WORKER_RE.match(name) is not None
 
 
