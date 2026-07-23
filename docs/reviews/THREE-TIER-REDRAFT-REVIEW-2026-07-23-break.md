@@ -658,3 +658,428 @@ Neither item is a design defect and neither warrants a third review wave or an e
 model, the claim-nonce foundation it consumes, and the mechanisms this gate stress-tested all stand.
 
 sound
+
+---
+
+# RE-GATE r4 — wave 3, the operator-amendment wave (`8a089bf`)
+
+**Date:** 2026-07-23. **Wave:** `8a089bf` "three-tier wave 3 — operator amendments (top tier, fallback
+chain, worker band, cap doctrine)", merged fast-forward into `mf/tt-break`. **Vantage:** worktree
+`C:\proga\fleet-mf-tt-break`, HEAD `8a089bf`, `FLEET_HOME` unset. Pin still `235421e`; `bin/fleet.py`
+still byte-identical to it (the only code-tree change in the whole range is `tests/test_receipts.py`
+−1 line, dispositioned in r1). **Scope: the four amended items only**, per the re-gate brief.
+
+**Receipts: 46/46 reproduce, self-test PASS** (was 39/39; +7 blocks). I hand-executed all seven new
+ones — `sed 3909,3912p` (resume-limited carries `resume_sid`+`model`), `sed 4367,4368p`
+(`new_worker_record(... model=model)`), `sed 1920,1924p` (limit park writes `status="limited"` +
+`limit_reset_at`), `sed 1635,1640p` (horizon gate; null ⇒ never auto-eligible), `sed 858p`
+(`"token_ceiling"` is a shipped field), `sed 1284p` (`FLEET_WORKER`), and the `# live` substrate-status
+grep — **all reproduce**. Independent fence census: 92 markers, **all column 0**, 46 blocks = 46
+receipts, no block/receipt mismatch (the H1 evasion class that bit wave 1 has not recurred in the
+document; the tool gap itself is still open — H1 stands as filed).
+
+**Substrate status re-check (§4.1's wave-3 correction is accurate):** `PENDING OPERATOR RATIFICATION`
+→ **0**; `RATIFIED 2026-07-23` → **8**; `RATIFICATION WITHHELD 2026-07-23` → **3**. The three withheld
+claims are the dead-daemon `rm` string, its `stop` twin, and *"rm/stop do not revive the daemon"* —
+and §4.1 leans on none of them (its wedge consequence rests on the 2.1.216 row, ratified). The
+correction is honest maintenance, not a scope grab.
+
+## 1. Per-item disposition
+
+### Item 1 — supervisor promoted to top tier (§3.1) — **FOLDED CORRECTLY**
+
+The role table is rebuilt to the operator's second addendum: tiers renamed `highest`→`top`; supervisor
+binding is *"top, falling back to second"*; worker is *"second **or** third"*; and the ownership column
+records the operator's actual reasoning — interface owns *"the long-term goals"*, supervisor owns
+*"solid plans, details, and splitting tasks"*. The promotion is justified as division of labour, not
+budget, matching the addendum verbatim. Consequential edits are consistent: §3.4's allowlist re-scoped
+from *"third-tier ∈ {opus, sonnet}"* to *"worker tier ∈ {second, third}"*. No spurious change.
+
+### Item 2 — preference chain + UL fallback vs the swap band (§3.5) — **FOLDED, with DEFECTS (ND6, ND7)**
+
+Well-constructed on shipped machinery, and it answers the brief's band question head-on and correctly.
+§3.5.1's constraint chain is right: the model is spawn-immutable, and `resume-limited` re-dispatches the
+*same* sid (receipt @3909-3912), so it can neither change tier nor reset context — therefore a fallback
+is necessarily a **body change**. §3.5.3 then states *"a fallback respawn **IS** a band handoff … one
+body change satisfies both"*, which is the right answer to *"does a fallback respawn count as the band
+handoff?"* and avoids burning two context resets for one need.
+
+**But the mechanism is unperformable in its own trigger condition — ND6 below.**
+
+### Item 3 — worker band sweep (§11, §11.4, §11.3 restatement) — **FOLDED CORRECTLY, and notably well**
+
+§11's title and preamble now cover *"supervisor AND workers"*; §11.4 gives three worker-specific
+differences that each follow from what a worker is (task boundary not wave; `respawn` not claim handoff,
+since a worker holds no claim; enforcement by the supervisor, since a worker calls neither `spawn` nor
+`send` and so has nothing to refuse). The operator's *coherence, not spend* rationale is recorded
+explicitly — which matters, because reading it as a spend argument is exactly what would justify
+dropping it under the cap doctrine.
+
+**The good catch, and the reason this is not a spurious edit:** my ND1 exemption in wave 2 rested partly
+on *"the operator set the band for the **second tier only**."* Wave 3 retires that scoping — so the
+author noticed the load-bearing premise had been knocked out from under an accepted fix and **re-based
+the exemption** on *recourse and dispatch* instead: the interface is exempt because it is outside
+fleet's launch surface and a refusal it cannot escape has no remedy; workers are not refused because
+they never call the gated verbs. That reasoning survives the extension where the old one would not.
+Sweep verified complete — `grep` for surviving `"second tier only"` / `"supervisor only"` scoping
+returns only the two retirement statements themselves and one unrelated §7.2 line about the registry
+footprint.
+
+### Item 4 — cap-doctrine B4 reshape (§11.5) — **DEFECT (ND5, CRITICAL)**
+
+The *substance* of the reading is defensible and I do not dispute it: a spend ceiling answers *"has this
+cost too much?"* (already answered by the plan's own limits, for everyone), a context band answers *"is
+this session still sharp?"*, and its only remedy is a handoff, never a stop — which is why the same
+docket that retired spend caps *extended* the band to workers. The §11.5 negative is genuinely valuable
+too: §11.3's ceiling *"must not be implemented by reusing, extending, or re-denominating the spend
+machinery, or it would silently inherit the flag's off-by-default state and stop firing."*
+
+**The problem is the authority it claims, not the reasoning.** See ND5.
+
+## 2. New-defect hunt (aimed at the fallback chain, per the brief)
+
+### ND5 — CRITICAL — §11.5 declares an operator ruling the record does not contain, and withdraws the contingency on the strength of it
+
+§11.5 is titled *"SETTLED (operator ruling, 2026-07-23)"*, states *"**This is decided, not pending.** The
+manager's reading was put to the operator and **confirmed**"*, cites
+`knowledge/lessons.md#2026-07-23-three-tier-inputs`, **third addendum**, and block-quotes it:
+
+> **Third addendum (2026-07-23, operator ruling on the cap-doctrine reading):** confirmed — **cost/spend
+> ceilings are gone unless the counting flag puts them back** … The context band … is a freshness
+> mechanism, not a budget, and its enforcement stays.
+
+**That addendum does not exist.**
+
+```
+# live: a claim about the working tree's recorded operator decisions
+$ grep -c "Third addendum" knowledge/lessons.md
+0
+```
+
+`git log -S "Third addendum" -- knowledge/lessons.md` returns no commit, and a repo-wide search for the
+quoted phrases finds them **only inside `three-tier-command.md` itself** and at one place in
+`lessons.md` — which says the **opposite about status**:
+
+> `lessons.md:781` — **Manager reading of the cap doctrine vs the spec's B4 hard arm:** … a context band
+> is a freshness mechanism, not a budget. Wave 3 states this reading in-spec; **the operator rules on it
+> at ratification.**
+
+So the record holds a *manager reading*, expressly **pending the operator's ruling at ratification**;
+the spec upgrades it to a *quoted operator ruling*, marks the section SETTLED, and — the damaging part —
+**withdraws the safety valve**: *"the earlier draft's contingency branch ('if the operator rules the
+other way, the band becomes advisory') is **withdrawn**, since the operator ruled."* `OPERATOR-GATES.md`
+records the cap doctrine itself in broad terms (*"no fleet-enforced token or USD ceilings for anyone;
+the plan's own usage limits cap workers and managers alike"*) and contains no carve-out for a context
+band — so the tension §11.5 resolves is real and, on the record, unresolved.
+
+This violates the spec's own governing rule, stated in its header: *"An author never promotes its own
+spec … every operator gate stays open until Altai ticks it"* — and it does so in the one section that
+decides whether B4's enforcement, the mechanism three waves were spent shaping, survives at all.
+
+**Fairness, stated plainly:** the re-gate brief itself says *"per the operator's third-addendum ruling,"*
+so a verbal ruling may well have occurred and simply never been written down. I cannot distinguish an
+unrecorded ruling from an anticipated one from the tree, and I am **not** asserting fabrication. But the
+distinction does not change the disposition: **a binding operator ruling whose only witness is the
+document it authorizes is not established**, on this repo's own doctrine that a pasted claim is a claim
+until something independent bears it out.
+
+**Fix (cheap, mechanical, but blocking):** either (a) record the third addendum in `lessons.md` and tick
+`OPERATOR-GATES.md`, then re-cite — one commit, and §11.5 stands as written; or (b) revert §11.5 to
+`PENDING`, restore the withdrawn contingency branch, and let the operator rule at ratification as
+`lessons.md:781` says they will. Not (c): leave the spec as the sole witness.
+
+### ND6 — MAJOR — the fallback chain cannot perform the ritual it mandates, because its trigger is what disables the predecessor
+
+§3.5.3 binds the fallback to the handoff ritual: *"**It must go through the handoff ritual, not a bare
+respawn**, whenever a plan is in flight: the successor document is what carries the plan across the
+context reset."* The handoff ritual must be run **by the claim-holding body** — `cmd_sup_handoff_begin`
+is one of the five `_require_claim_holder` callers:
+
+```
+# at 235421e56bfd328a7e913e519a1459ccf55918dc
+$ sed -n '8492p' bin/fleet.py
+        claim, caller = _require_claim_holder(getattr(args, "sid", None))
+```
+
+But the chain's **only** trigger is the top tier's usage limit, and hitting it parks the body
+`status="limited"` (receipt @1920-1924) — after which fleet **refuses to give it a turn at all**:
+
+```
+# at 235421e56bfd328a7e913e519a1459ccf55918dc
+$ sed -n '3681,3687p' bin/fleet.py
+        if status == "limited":
+            data["workers"][name] = after
+            save_registry(data)
+            raise FleetCliError(
+                f"{name}: parked (limited) -- use `fleet resume-limited {name}` "
+                "instead (never steer a parked worker)"
+            )
+```
+
+**So at the exact moment the fallback fires, the predecessor cannot be steered, therefore cannot run
+`sup-handoff-begin`, therefore cannot write the successor document or mint the handoff token.** Every
+alternative route is also shut:
+
+- **Bare respawn** — §3.5.3 permits it only *"when nothing is in flight,"* which is not the fallback's
+  normal case; and claim-nonce §5.10(b) is explicit that *"a respawned body holds no generation and
+  cannot present one,"* so the fresh body cannot `resume`. It reaches `sup-boot` and finds the holder
+  either roster-**live** (⇒ rule 2 `refuse`) or roster-gone with a **fresh** heartbeat — the limited body
+  was working seconds earlier — which is `freeze`, not `seize`. Seizure waits out
+  `SUPERVISOR_CLAIM_STALE_SECONDS = 3600s`.
+- **`sup-release` by the holder** — same blocker: the holder cannot act. And claim-nonce §6.3 deleted the
+  non-continuity escape, so no other actor can release for it (this is B5 again, on a new path).
+
+Net: the "automatic fallback" the operator asked for either **loses the in-flight plan** or **stalls the
+campaign for up to an hour** — and it does so every time the top tier limits, which the operator says is
+roughly **twice as often** as the standard limit. The mechanism is at its weakest precisely where it was
+introduced to help. §3.5.2 step 2 passes over this in a parenthetical.
+
+**Fix direction:** `limited` is a *fleet-observed, unambiguous* state — unlike roster-gone, which is
+G9-ambiguous and is the reason the freeze exists. The clean answer is to make *holder parked `limited`
+with a recorded horizon* an authorized claim-transfer state, so a successor may take the claim
+immediately without waiting out staleness. That is a **claim-nonce boot-order change**, which this spec
+does not own — so it should be filed as a claim-nonce build-slice prerequisite, exactly as B6 and the
+`FLEET_WORKER` refusal already are. Failing that, the honest alternative is to state that a UL fallback
+**loses the working plan** (bare respawn, journal + task file only) and accept it in the spec rather
+than mandate a ritual that cannot run.
+
+### ND7 — MINOR — two smaller wrong notes in §3.5.2
+
+- **`resume` is cited first for a path where it is unreachable.** Step 2 says the claim carries *"per
+  claim-nonce §5.10(b) (`sup-boot` → `resume` on proven continuity, else the release/seize path)"*. For a
+  **respawned** body §5.10(b) itself forecloses `resume` (*"holds no generation and cannot present
+  one"*), so the only live branches are seize-on-stale-heartbeat or explicit release. Leading with the
+  dead branch makes the path read safer than it is — and is part of how ND6 stayed hidden.
+- **"Every input the chain needs already exists" overstates the receipts.** `limit_reset_at` exists, but
+  shipped code consults it only for records whose status *is* `limited` (`"resume_eligible": status ==
+  "limited" and _limit_reset_passed(rec)`, @2162). The chain's design puts an **inherited** horizon on a
+  *running* second-tier body, where that machinery never looks — so the return logic is entirely new, not
+  existing input. Relatedly, the null-horizon case is unhandled by the chain: @1635-1640 returns False
+  forever (*"never auto-eligible — needs an operator-set reset or `--force-now`"*), so a top-tier limit
+  parked without a horizon would strand the supervisor on the second tier permanently with nothing
+  nagging. State it.
+
+**UL detection is per-session — confirmed, with the consequence the brief asked for.** The scan is a
+per-session transcript read (`scan(sid, transcript_path=path)`, @1920), so fleet learns *"this session
+hit a wall,"* never *"the top tier is exhausted."* It therefore cannot distinguish a **tier** limit from
+an **account-wide** one: if the wall is account-wide, the fallback spawns a fresh second-tier body that
+limits immediately, costing a body change to discover what §3.5.2 step 4 then handles correctly
+(*"both tiers limited ⇒ stays parked"*). Worth one sentence; not a defect on its own.
+
+**SPURIOUS-FIX check: none.** Every wave-3 edit traces to the operator addendum or to a consequence of
+it. The two edits that could have looked like scope creep are both justified: §4.1's substrate-status
+correction is required maintenance (the partial ratification landed on `main`) and is receipted `# live`;
+§11.3's ND1 re-basing was *forced* by this wave retiring its old premise, and re-derives the same
+conclusion from a durable basis rather than quietly leaving a fix resting on a retired fact.
+
+## 3. r4 verdict and merge decision
+
+Three of the four amended items fold correctly, and the worker-band item folds better than asked — the
+author caught that wave 3 had knocked out the premise under an accepted wave-2 fix and re-based it
+rather than leaving it dangling. Receipts are clean at 46/46 with no recurrence of the H1 evasion class.
+
+**But `mf/three-tier` is not, at this commit, fit to go to the operator for ratification** — a reversal
+of my r3 position, on one ground: **the document now tells the operator they already ruled on the one
+question the record says they will rule on at ratification (ND5), and has deleted the branch that
+handles them ruling the other way.** Handing an operator a spec that pre-declares their decision
+corrupts the ratification act itself, and it is the exact failure mode this spec's own header rule and
+this whole four-wave gate exist to prevent. The fix is one commit in either direction and is not mine to
+choose — it is a provenance question for the manager and the operator, not a spec-authoring one.
+
+ND6 is a real design hole in the wave's headline mechanism and should close before the build slice, but
+it does not block ratification the way ND5 does: it is a bounded fix with an obvious shape (file the
+`limited`-as-authorized-transfer-state guard as a claim-nonce prerequisite, or state the plan loss
+honestly), and the build slice reviews it again. ND7 is two sentences.
+
+Once ND5 is resolved — by recording the ruling or by restoring `PENDING` and the contingency — the
+document returns to the r3 position: sound, and fit, with H1 and ND6 disclosed alongside it.
+
+fix-list(ND5,ND6,ND7)
+
+---
+
+# FINAL CONFIRMATION r5 — wave 4 (`d9c4a6f`)
+
+**Date:** 2026-07-23. **Wave:** `d9c4a6f` "three-tier wave 4 — close ND5/W1, ND6, ND7", merged
+fast-forward into `mf/tt-break`. **Vantage:** worktree `C:\proga\fleet-mf-tt-break`, HEAD `d9c4a6f`,
+`FLEET_HOME` unset. Pin `235421e`; `bin/fleet.py` still byte-identical to it (`git diff 8a089bf d9c4a6f
+-- bin/ tools/ tests/` is empty). **Receipts 50/50, self-test PASS**; fence census **100 markers → 50
+blocks, 0 non-column-0** (no H1-class recurrence); `tests/test_receipts.py` **13/13 on the 3.10 floor**.
+All new wave-4 receipts hand-executed and reproduce (`sed 2162p`, `sed 8492p`, `sed 3681,3687p`, and the
+`# live` third-addendum grep).
+
+## 1. Disposition
+
+### ND5 / W1 — **FIXED** (route (a)), with the provenance actually checked
+
+The third addendum is now in the record, and — the part that matters — **it is witnessed independently
+of the spec branch**:
+
+```
+$ git log -1 --format="%H %an %ad" --date=iso 7d68b43
+7d68b4307df59333aa88e0adbcc35c0fafd1682f Techn0Ninja27 2026-07-23 06:32:47 +0500
+   docs(knowledge): operator ruling — spend caps flag-gated off, context band stays
+   Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+$ git merge-base --is-ancestor 7d68b43 main && echo "on main"
+on main
+```
+
+Authored under the operator's own git identity, co-authored by **Claude Fable 5** — the *interface*
+tier (§3.1) — landing on `main` and reaching `mf/three-tier` through the `main` merge, touching only
+`knowledge/lessons.md`. That is precisely the claim-nonce ratification pattern (*"the author never
+promoted it — ratification was the operator's act, recorded and committed by the interface session"*).
+§11.5's citation is now self-verifying via a `# live` receipt, which is what it should have been.
+
+**I verified the wave-4 note's account of what went wrong, rather than accepting it.** The note says the
+addendum *"existed only on `main`"* during wave 3. True — by three minutes:
+
+| commit | timestamp | |
+|---|---|---|
+| `7d68b43` | 06:32:47 | operator ruling lands **on `main`** |
+| `8a089bf` | 06:35:23 | wave 3 written on `mf/three-tier`, which had not merged `main` |
+| `a2b9dec` | 07:03:11 | my r4 — citation unverifiable in the tree under review |
+
+So the ruling was **genuine**; the defect was declaring a section SETTLED on a witness that had not
+merged into the branch asserting it. My r4 finding was correct about the tree I was given, and my
+explicit refusal to allege fabrication was the right call — the record now shows why. Wave 4 records
+this against itself rather than quietly re-citing, which is the correct handling.
+
+### ND6 — **FIXED in structure** (the split is right and receipted), **but the lossy arm carries ND8/ND9**
+
+**The split is drawn on the correct axis and both sides are proved against shipped machinery** — which
+is what the brief asked me to verify. The discriminator is *can the predecessor be given a turn?*:
+
+- **Band arm — predecessor healthy ⇒ full ritual, unchanged.** The ritual needs the claim holder to act,
+  and `cmd_sup_handoff_begin` is one of the five `_require_claim_holder` callers (`sed 8492p`,
+  re-executed). A healthy body satisfies that, so the successor document carries the plan. Correct.
+- **Limit arm — predecessor parked ⇒ ritual withdrawn.** `_cmd_send_native` refuses outright
+  (`sed 3681,3687p`, re-executed: *"parked (limited) … never steer a parked worker"*), so the ritual is
+  genuinely unavailable, not merely awkward. The mandate is withdrawn **for this arm only**, the arm is
+  driven from outside by the interface tier (the one actor that is never parked), and the residual claim
+  transfer is **filed as a third claim-nonce prerequisite** rather than invented here — consistent with
+  how B6's rule-1 guard and §10.2's `FLEET_WORKER` refusal are already handled.
+
+The derived consequence is a genuine insight the brief did not ask for: *"when both are approaching,
+**hand off on the band before the limit arrives** — a band handoff is a clean transfer, a limit fallback
+is a lossy one,"* which converts the 150k soft trigger from a suggestion into a deadline.
+
+**Loss-statement completeness — checked item by item.** Named as surviving: `supervisor/GOALS.md`, the
+append-only `supervisor/JOURNAL.md`, the last checkpoint, the worker journals. Named as lost: *"the
+in-flight working plan — everything the parked body had reasoned out since its last checkpoint but not
+written down"*, with the checkpoint cadence bounding the loss to one wave and routed to `GOALS.md` via
+§12. I checked the obvious omission candidates:
+
+- **Mailbox — not a gap.** `_cmd_respawn_native`'s docstring records *"journal + old-sid mailbox carry
+  via `compose_prompt(..., journal_path=...)`"*, so mail survives a respawn. (It would **not** survive a
+  fresh-name spawn — which ties into ND8.)
+- **The claim itself — not a gap**, addressed squarely in (c).
+- **Two real gaps: ND8 and ND9 below.**
+
+### ND7 — **FIXED**
+
+Both notes corrected, and corrected rather than trimmed. The `resume`-first mis-citation is gone (step 2
+now points at §3.5.3). The overstatement is replaced by an explicit heading — *"Detection and parking
+already exist; the return logic does not"* — carrying a **new receipt** that proves it:
+
+```
+$ sed -n '2162p' bin/fleet.py
+            "resume_eligible": status == "limited" and _limit_reset_passed(rec),
+```
+
+i.e. the horizon is consulted only for records whose status *is* `limited`, so an inherited horizon on a
+running second-tier body is never examined. The null-horizon case I flagged also gained a **binding**:
+it *"must raise the §8 operator-gate routing surface rather than silently becoming a permanent
+demotion."* Stronger than what I asked for.
+
+**SPURIOUS-FIX check: none.** Every wave-4 edit traces to ND5/ND6/ND7 or is a direct consequence (§12's
+two additions: the third claim-nonce prerequisite, and the checkpoint-cadence doctrine that is the only
+mitigation for the ND6 loss). The §11.5 self-critical note is process recording, and its factual claim
+checks out.
+
+## 2. New defects in the wave-4 arm
+
+### ND8 — MAJOR — the lossy arm's offered remedy cannot change tier, so it pays the plan loss and gains no fallback
+
+§3.5.3's degradation menu offers, until the claim-nonce prerequisite ships: *"(i) **bare respawn now**,
+losing the in-flight plan … or (ii) **wait out the horizon**."* **Option (i) does not fall back.**
+`fleet respawn` has no `--model`, and its model is unconditionally inherited:
+
+```
+# at 235421e56bfd328a7e913e519a1459ccf55918dc
+$ sed -n '4309p' bin/fleet.py
+    model = before.get("model")
+```
+
+The parser carries `--task`, `--force`, `--yes`, `--max-budget-usd`, `--setting-sources`,
+`--token-ceiling` — and **no `--model`** (`sed -n '8878,8891p' | grep -c -- '--model'` → `0`). Note the
+contrast: `setting_sources` and `token_ceiling` *do* get override ternaries at @4312/@4314; `model` gets
+none. So `fleet respawn supervisor` mints a fresh body **on the same tier that is limited** — it burns
+the in-flight plan and lands right back on the exhausted tier. That is strictly worse than doing
+nothing, which makes it a trap rather than a trade-off.
+
+The other reading — a fresh spawn at the fallback tier — hits the reserved name, because the parked
+record still holds it:
+
+```
+# at 235421e56bfd328a7e913e519a1459ccf55918dc
+$ sed -n '2815p' bin/fleet.py
+        validate_name(args.name, existing=data["workers"].keys())
+```
+
+**So there is no shipped path from "parked on the top tier" to "running on the second tier."**
+
+**Receipt-vs-claim gap, and it is the load-bearing one.** §3.5.1 introduces its @4367 receipt as the
+respawn path *"taking `model` as a **dispatch-time argument**"*. It does not: @4367 passes a `model`
+that @4309 read from the **prior record**. The receipt proves the field is *carried*, not that a respawn
+can *set* it — and it is the receipt underwriting the whole claim that a tier fallback is achievable
+through the respawn path.
+
+**Fix (small, because `sup-spawn` is `[UNBUILT]` anyway):** give `sup-spawn` — and, if option (i) is to
+survive, `respawn` — an explicit `--model` override, and state how the fallback dispatch takes the
+reserved name from a parked predecessor record (replace it, or rename the parked record to a husk).
+Then re-word §3.5.1's framing to say the *record* carries a model and the *dispatch* must be able to
+override it. Until that is stated, §3.5.3 offers an operator a remedy that cannot work.
+
+### ND9 — MINOR — a limit landing *mid-handoff* is unenumerated
+
+If the usage limit hits while a handoff is in flight, the predecessor is parked holding an open
+`supervisor/HANDSHAKE` — and `cmd_sup_handoff_abort` is *also* a `_require_claim_holder` caller (@8654),
+so the parked body can neither complete nor abort the ritual it started. §3.5.3(b)'s survivor list does
+not mention `HANDSHAKE` or the abort flag among the artifacts the successor inherits or must clear, and
+§3.5.4's "one body change satisfies both" assumes the two triggers arrive sequentially, not overlapped.
+Narrow window, but it is exactly the kind of stranded state a loss statement is supposed to enumerate.
+**Fix:** one clause — the interface-driven fallback clears a stale `HANDSHAKE`/abort flag as part of
+seeding the successor, and the claim-nonce prerequisite's `limited`-holder branch should cover a holder
+parked mid-handoff.
+
+## 3. r5 verdict and merge decision
+
+**The r4 blocker is cleared.** ND5 was my sole ground for withholding ratification, and it is fixed by
+the right route: the ruling is real, recorded by the operator's own interface session on `main`,
+independent of the spec that relies on it, and cited with a self-verifying receipt. Wave 4 also records
+the process failure against itself instead of quietly re-citing — which is the behaviour that makes the
+rest of this document's claims credible.
+
+**`mf/three-tier` is fit to go to the operator for ratification.** Across five gates and four waves,
+every finding either closed or is a named, bounded, disclosed carry-item; the receipts are clean at
+50/50 with no evasion; and the two answers that belong to another slice are filed as prerequisites
+rather than absorbed. ND6's split is the right shape and, unusually, the wave was honest about what its
+own mechanism cannot deliver: *"the operator asked for an automatic fallback; what v1 can honestly
+deliver without the claim-nonce prerequisite is an automatic tier choice with an operator-visible cost
+at the moment of the fall."* A spec that says that is more trustworthy than one that claims the
+mechanism works.
+
+**Carry-items to disclose alongside ratification** — none of them corrupts the ratification act, which
+is the bar ND5 failed:
+
+1. **ND8 (MAJOR)** — the fallback has no shipped tier-change path; the degradation menu currently offers
+   a remedy that cannot work. Must close before the build slice; one clause plus a `--model` override on
+   an already-`[UNBUILT]` verb.
+2. **H1 (MAJOR, harness, own slice)** — `verify_receipts.py` still silently accepts indented, blockquoted,
+   4-space and tilde-fenced receipts (proved in r3); the document is clean but the class is alive.
+3. **ND9 (MINOR)** — limit-during-handoff unenumerated.
+4. **Three standing claim-nonce build-slice prerequisites** — B6's rule-1 roster-liveness guard, §10.2's
+   `FLEET_WORKER` refusal, and now §3.5.3(c)'s `limited`-holder transfer branch. The three-tier build
+   cannot start before these land in the claim-nonce slice.
+
+fix-list(ND8,ND9)
