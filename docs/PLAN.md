@@ -1,3 +1,16 @@
+> # ⛔ SUPERSEDED — 2026-07-24 — retained as history, do not execute
+>
+> This plan (the **C1→C8 campaign contract**) was **retired as superseded history** on 2026-07-24 by the settled operator gate *"Two roadmaps, no crosswalk"* (`docs/OPERATOR-GATES.md` — settled 2026-07-23, unanimous, with condition). **The plan of record is the M-track — `docs/SPEC.md` §18 (M-0…M-G).** The C1→C8 sequencing, the soak gates, and the `fleet-impl` merge target stopped describing how the project is actually run on 2026-07-13 (native-substrate pivot).
+>
+> **The load-bearing condition was met before this banner landed: §0's still-binding doctrine was already re-homed to live surfaces, confirmed by grep receipt — retiring this file retired no live law.** Where §0 now lives:
+> - (a)–(h) quality-gate pipeline, W-V discipline, dual-lens gates, RESULT contract, merge gate + revert-on-red, chain-link truth gate, task-file convention, permission mechanisms, soak-gate & demand-check checklists → **`knowledge/playbooks/campaign-template.md`** (the live campaign instrument, and now the declared doctrine home).
+> - Worktree/bootstrap isolation, one-writer-fleet-wide, disjoint-file parallelism → **`knowledge/projects/claude-fleet.md`** "Bootstrap hazard".
+> - Respawn doctrine, permission modes, token-ceiling → **`skills/fleet/SKILL.md`** + **`knowledge/playbooks/spawn-etiquette.md`**.
+> - Nine architectural invariants, testing tiers, spec-drift discipline → **`docs/SPEC.md` §16/§17/§17a**.
+> - Dated-decision rule (record answers in `lessons.md`, never session memory) → **`docs/OPERATOR-GATES.md`** + campaign-template §1.
+>
+> **Nothing below is deleted or softened** — it is the historical record; where its text conflicts with the live surfaces above, the live surfaces win. §0.4's budget/ceiling denomination is additionally annotated as **retired** at its own section (M-F cap-doctrine gate, 2026-07-23) — with the 150–200k context band expressly **guarded as surviving**.
+
 # claude-fleet — roadmap implementation plan
 **Status:** ready-for-execution (2026-07-08) — produced by spec-review-and-plan workflow; spec review: docs/reviews/SPEC-REVIEW-2026-07-08.md
 
@@ -11,7 +24,7 @@
 > - **`py -3.13` is not the floor.** §0.1.9 and the repo-rules block say `py -3.13`; the floor is `fleet.MIN_PYTHON_VERSION` (3.10) and changes must run at it.
 > - **`--max-budget-usd` (§0.4 "every task carries") no longer exists** — no USD figure is available under `--bg` (`SPEC.md` §9, G3). The fleet-side cap is `--token-ceiling` — and its spend denomination is itself queued for retirement (third-docket cap doctrine, 2026-07-23: no fleet-enforced token/USD ceilings; cost/token counting behind a flag, default off). **Whoever executes that retirement must not sweep up the 150–200k context band** — the band is a freshness mechanism, not a budget, and its enforcement stays (`docs/specs/three-tier-command.md` §11.5, §12).
 >
-> **Reconciling this file against the M-track is an open operator gate** (`docs/OPERATOR-GATES.md`) — retire the C/soak framing as history, or re-anchor the M-track inside it. Until it is settled, follow §0's doctrine and ignore its campaign bookkeeping.
+> **This was an open operator gate — SETTLED 2026-07-24: retire (see the ⛔ SUPERSEDED banner at the top of this file).** §0's doctrine is re-homed to the live surfaces named there and this file is history; its campaign bookkeeping (C1→C8, soak gates, `fleet-impl`) never described the post-pivot build.
 **Consumer:** fleet manager session (fleet skill). This plan is the campaign contract for the self-build.
 
 ---
@@ -71,6 +84,10 @@ Every `--task` is written to `state/tasks/<name>.md` (runtime dir, gitignored) w
   - **`accept+allowlist`** — mode `accept` PLUS a manager-provisioned scoped `permissions.allow` block written to `<worktree>/.claude/settings.json` **before spawn** (an explicit manager step; the exact entries are quoted in the task file and the settings file is excluded from the merge). Used where network/secrets argue for narrow capability: `port-ci` (`Bash(git push*)`, `Bash(gh *)`, `Bash(py -3.13 -m pytest*)`), `tg-live` (`Bash(curl https://api.telegram.org*)`, `Bash(py -3.13*)`), `web-live-check` (`mcp__plugin_playwright_playwright__*`, `Bash(py -3.13*)`).
   - `plan` first turn for genuinely unfamiliar territory, as before.
 - **Budgets (revised):** every task carries `--max-budget-usd`; treat as circuit breaker (~3× overshoot possible, spawn-etiquette lesson), so caps are set at ~⅓ of true tolerance. **Class defaults for any task not given an explicit cap in its table:** review $10, adversarial review $12, knowledge $5, fix task $8, re-review $10, smoke/checklist task $4–6, `*-ci-fix` $6. These defaults are what the §0.1.8 2×-cap kill rule keys on — no task is ever dispatched without a number. **Iteration loops are capped in count as well as dollars** (e.g. `port-ci-fix-N`: $6 each, max 5, then Altai escalation per touchpoint 8). Campaign envelopes presented to Altai are **sum-of-caps including maximum fix/re-review loops** (the true dispatchable ceiling), with expected spend noted separately — the approval number is never below what the plan can dispatch. Interim cost-watch rule (§0.1.8) applies until budget persistence lands.
+
+  > **⛔ RETIRED 2026-07-24 — the budget/ceiling denomination in this bullet is dead law.** Per the **M-F cap-doctrine gate** (2026-07-23, `docs/OPERATOR-GATES.md`): **no fleet-enforced token or USD ceilings for anyone** — the operator's Claude plan usage limits cap workers and managers alike, and fleet's limit-park/resume machinery is the recovery path. Cost/token *counting* becomes an on/off flag, **default off**. `--max-budget-usd` no longer exists (native `--bg` dispatch carries no cost field; it is refused at spawn — SPEC v3 §9 G3); its fleet-side successor `--token-ceiling` is itself retired by this gate. M-F discipline is structural, not monetary: keep the worker count small.
+  >
+  > **GUARD (load-bearing — do NOT sweep into the retirement): the 150–200k context band survives.** It is a **freshness mechanism, not a budget** — it binds supervisors and workers alike (enter the band → hand off / respawn at the next task boundary), specced in `docs/specs/three-tier-command.md` §11.4/§11.5 and stated live in `skills/fleet/SKILL.md` (worker context band, ratified 2026-07-23). Its enforcement stays.
 - **Respawn doctrine:** any worker past ~30 turns or confused → `fleet respawn`; journals make it lossless.
 - **Demand-check pressure valves:** before the **providers build (C5b)** and before **each of the C7/C8 build waves**, the manager asks Altai one question: *"Do you feel the friction this phase removes, today?"* **The demand check gates the BUILD only.** The spec task (and its review) always runs on schedule — specs are cheap and perishable-context work — so a later "yes" finds a ready-for-build spec; **only the build waves park in the backlog** if there is no felt demand. Recorded as a dated line in lessons.md either way. This is the part-time-human realism lever: nothing before Phase 6 is built on schedule-momentum alone. (C5b's campaign text mirrors this rule verbatim — one rule, both places.)
 
