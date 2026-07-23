@@ -2946,6 +2946,88 @@ class TestHandoff:
         assert flag["reason"] == "successor-doa"
         assert flag["successor_short_id"] is None
 
+    def test_begin_roster_blackout_is_indeterminate_not_doa(self, sup_home, capsys):
+        """Residual 3b (LOW): a full-window roster blackout on the short-id
+        join is CANNOT-VERIFY -- the successor may be live. Declaring
+        `successor-doa` + returning here could strand a real handoff. The
+        abort reason must name the indeterminacy, not assert death."""
+        self._hold()
+        def run(argv, **kw):
+            if "--bg" in argv:
+                return SimpleNamespace(returncode=0,
+                                       stdout="backgrounded · abc999 · sup\n", stderr="")
+            # every roster fetch fails -> _fetch_agents_roster returns (False, ..)
+            return SimpleNamespace(returncode=1, stdout="", stderr="roster down")
+        rc = self._begin(run, clock=self._Clock())
+        assert rc != 0
+        out = capsys.readouterr().out
+        assert "successor DOA:" not in out   # not the DOA verdict line
+        assert "INDETERMINATE" in out
+        flag = json.loads(fleet.handoff_abort_flag_path().read_text(encoding="utf-8"))
+        assert flag["reason"] == "successor-indeterminate"
+        assert flag["successor_short_id"] == "abc999"
+
+    def test_begin_name_fallback_blackout_is_indeterminate_not_doa(self, sup_home, capsys):
+        """Same blackout distinction on the G6 name-join fallback path
+        (short-id unparseable): a full-window blackout is indeterminate."""
+        self._hold()
+        def run(argv, **kw):
+            if "--bg" in argv:
+                return SimpleNamespace(returncode=0,
+                                       stdout="launched (no short id token)\n", stderr="")
+            return SimpleNamespace(returncode=1, stdout="", stderr="roster down")
+        rc = self._begin(run, clock=self._Clock())
+        assert rc != 0
+        flag = json.loads(fleet.handoff_abort_flag_path().read_text(encoding="utf-8"))
+        assert flag["reason"] == "successor-indeterminate"
+
+    def test_name_fallback_never_binds_a_husk_without_life_signal(self, sup_home, capsys):
+        """Reconcile husk-binding (LOW): a name match is a WEAKER identity
+        proof than the sid-prefix join (name reuse / ai-title collision), so
+        the G6 name-join fallback must require a life signal before binding.
+        A husk -- name matches but no status/pid, non-terminal state, no
+        outcome -- must NOT be adopted as the successor; that reads as DOA."""
+        self._hold()
+        state = {"name": None}
+        def run(argv, **kw):
+            if "--bg" in argv:
+                state["name"] = next(a for a in argv if a.startswith("sup|"))
+                return SimpleNamespace(returncode=0,
+                                       stdout="launched (no short id token)\n", stderr="")
+            entries = [{"sessionId": "sid-old", "status": "busy"}]
+            if state["name"]:
+                # husk: name matches, but status/pid OMITTED and state working
+                entries.append({"sessionId": "sid-husk", "state": "working",
+                                "name": state["name"]})
+            return SimpleNamespace(returncode=0, stdout=json.dumps(entries), stderr="")
+        rc = self._begin(run, clock=self._Clock())
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert "SUCCESSOR-SID: sid-husk" not in out
+        flag = json.loads(fleet.handoff_abort_flag_path().read_text(encoding="utf-8"))
+        assert flag["reason"] == "successor-doa"
+
+    def test_name_fallback_binds_live_entry_over_husk(self, sup_home, capsys):
+        """The life-signal requirement must still bind a genuinely live
+        name-matching entry even when a husk of the same name is present."""
+        self._hold()
+        state = {"name": None}
+        def run(argv, **kw):
+            if "--bg" in argv:
+                state["name"] = next(a for a in argv if a.startswith("sup|"))
+                return SimpleNamespace(returncode=0,
+                                       stdout="launched (no short id token)\n", stderr="")
+            entries = [{"sessionId": "sid-old", "status": "busy"}]
+            if state["name"]:
+                entries += [
+                    {"sessionId": "sid-husk", "state": "working", "name": state["name"]},
+                    {"sessionId": "sid-live", "status": "busy", "name": state["name"]},
+                ]
+            return SimpleNamespace(returncode=0, stdout=json.dumps(entries), stderr="")
+        rc = self._begin(run, clock=self._Clock())
+        assert rc == 0
+        assert "SUCCESSOR-SID: sid-live" in capsys.readouterr().out
+
     def test_handoff_begin_dispatch_failure_writes_abort_flag(self, sup_home):
         self._hold()
         def run(argv, **kw):

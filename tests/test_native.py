@@ -601,6 +601,43 @@ class TestJoinRosterByShortId:
                                              exclude_sids={foreign}, clock=clock)
         assert sid is None
 
+    def test_full_window_blackout_raises_indeterminate_not_none(self):
+        """Residual 3a: a full-window roster blackout (every fetch fails) is
+        CANNOT-VERIFY, never a join failure. Returning None let the caller
+        declare a possibly-live worker DOA. Mirrors _await_attach's H1: an
+        unobserved session is never treated as dead."""
+        clock = _FakeClock()
+
+        def fetch(**_):
+            return False, "roster unavailable"
+
+        def sleep(s):
+            clock.advance(s)
+
+        with pytest.raises(fleet.NativeDispatchError) as exc:
+            fleet._join_roster_by_short_id("aaaabbbb", fetch, sleep, clock=clock)
+        assert "aaaabbbb" in exc.value.short_id
+        assert "indeterminate" in str(exc.value).lower()
+
+    def test_one_good_fetch_then_blackout_is_not_found_returns_none(self):
+        """A single successful fetch (empty roster) proves the roster was
+        observed -- absence there is a genuine not-found (None), NOT the
+        blackout raise. Guards the verified_once boundary."""
+        clock = _FakeClock()
+        calls = {"n": 0}
+
+        def fetch(**_):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return True, []          # observed, empty
+            return False, "then dark"    # subsequent fetches fail
+
+        def sleep(s):
+            clock.advance(s)
+
+        sid = fleet._join_roster_by_short_id("aaaabbbb", fetch, sleep, clock=clock)
+        assert sid is None
+
 
 class TestFastCompletionSid:
     """T4 fix wave (Critical C1): _fast_completion_sid must locate the Stop
