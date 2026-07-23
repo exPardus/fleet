@@ -10,14 +10,26 @@ Soul = `supervisor/GOALS.md` (operator-owned) + `supervisor/JOURNAL.md`
 1. Run `fleet sup-boot`. Read the ENTIRE bundle it prints (GOALS, journal
    tail, knowledge index, roster, fleet status).
 2. Act on the VERDICT line:
-   - `claim` / `seize` (exit 0): you hold the claim. Continue the duty.
-     (A claim-pending successor booted via `--handoff-inc` also exits 0
-     without holding a claim yet — it has only written HANDSHAKE; see the
-     "Successor" note below.)
+   - `claim` / `seize` / `resume` / `limit-transfer` (exit 0): you hold the
+     claim. Continue the duty. `claim` also covers a **cleanly released**
+     predecessor (claim-nonce §6.3) and a fresh box; `resume` is your OWN
+     aged claim after a fork-steer/respawn — no seizure, no `SEIZED` entry
+     (incident 2's fix); `limit-transfer` takes over a predecessor parked on
+     a plan limit. (A claim-pending successor booted via `--handoff-inc` also
+     exits 0 without holding a claim yet — it has only written HANDSHAKE; see
+     the "Successor" note below.)
    - `refuse` (exit 2): another supervisor is live. Report read-only and STOP.
    - `freeze` (exit 3): ambiguity (daemon restart? G9). PAGE THE OPERATOR.
      Never seize, never mass-respawn.
-3. Reconcile workers from the bundle's fleet-status section (M-A interim:
+   - exit 4 (a continuity/gate refusal): a second body of your lineage may be
+     acting, or you did not present your current generation. STOP and escalate;
+     do not seize.
+3. Whenever a `sup-*` verb prints a `NONCE: <value>` line, that is **your
+   current generation** — keep it. You present it as `--nonce <value>` on your
+   next supervisor verb AND on every mutating lifecycle verb (§7's gate), and
+   the presenter obligation binds you: **present the most recent generation you
+   were given.** `NONCE: unchanged` means the outstanding one still stands.
+4. Reconcile workers from the bundle's fleet-status section (M-A interim:
    registry verdicts; the outcome discriminator arrives in M-B).
 
 ## Watchtower beat
@@ -76,20 +88,45 @@ fleet-enforced dispatch refusal for the supervisor claim-holder
 `[UNBUILT — three-tier build slice]`; until built, treat it as binding
 doctrine.
 
+Handoff verifies a one-shot **token**, not a sid (claim-nonce §6.4): a
+successor that forks between HANDSHAKE and complete still holds the token, so
+the transfer no longer breaks on a rotated sid.
+
 Old incarnation:
-1. `fleet sup-checkpoint "handoff prep: <state summary for successor>"`
-2. `fleet sup-handoff-begin` — note the `SUCCESSOR-INC:` / `SUCCESSOR-SID:` lines.
+1. `fleet sup-checkpoint "handoff prep: <state summary for successor>"` (present `--nonce`).
+2. `fleet sup-handoff-begin` — mints the token into the successor's task file
+   and stamps its hash into your own claim; note the `SUCCESSOR-INC:` /
+   `SUCCESSOR-SID:` lines.
 3. Wait for `supervisor/HANDSHAKE` (successor writes it via its own
-   `sup-boot --handoff-inc`). Timeout T = 300s.
-4. On handshake: `fleet sup-handoff-complete --expect-inc <INC> --expect-sid <SID>`,
-   then EXIT the session. No further fleet actions.
+   `sup-boot --handoff-inc <INC> --handoff-token <TOK>`). Timeout T = 300s.
+4. On handshake: `fleet sup-handoff-complete --expect-inc <INC> [--expect-sid <SID>]`,
+   then EXIT the session. `--expect-sid` is OPTIONAL — the token verifies the
+   successor; a sid mismatch is a warning naming the fork, not a refusal.
 5. On timeout / dispatch failure: `fleet sup-handoff-abort --successor-sid <SID>`
    — you resume duty; doctor flags the abort until the operator clears
-   `state/supervisor-handoff-aborted.json`.
+   `state/supervisor-handoff-aborted.json`. Both complete and abort unlink the
+   successor's plaintext-token task file (§5.9).
 
 Successor: driven entirely by the task file `sup-handoff-begin` wrote — it
-boots claim-pending, writes HANDSHAKE, polls `fleet sup-status --json`, and
-takes NO fleet actions until the claim shows its incarnation id.
+boots claim-pending with `--handoff-token`, writes HANDSHAKE (carrying the
+token hash and its OWN freshly minted generation, printed as its `NONCE:`
+line), polls `fleet sup-status --json`, and takes NO fleet actions until the
+claim shows its incarnation id. Its first verb after transfer presents that
+generation — the transferred claim is live, not a legacy upgrade.
+
+## Standing down: release, then stop (claim-nonce §6.3)
+
+When you are done — an operator-authorized stop, not a crash — **release the
+claim before the session ends**: `fleet sup-release --nonce <value>
+[--reason "…"]`, then stop. A released claim reads unambiguously at the next
+boot (`claim`, no seizure, no page), which is what distinguishes an authorized
+stop from a daemon restart. There is deliberately no `--force` release.
+
+If a body is *already* gone and could not release itself, the shape resolves
+on its own: roster-gone plus a heartbeat aged past one hour becomes `seize`.
+Below that hour it is `freeze` — page the operator. **The only manual lever is
+the operator's**: remove `supervisor/INCARNATION` by hand. That lever is for a
+human at a shell; a refused agent must escalate, never reach for it (§5.7).
 
 ## Rules that bind every incarnation
 

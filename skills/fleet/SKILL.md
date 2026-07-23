@@ -40,8 +40,13 @@ Nothing injects fleet state into a session any more — no SessionStart hook, no
 | `fleet sup-boot [--nonce <value>] [--handoff-inc <id>]` | Supervisor boot ritual: epoch check → claim/resume/seize/limit-transfer/refuse/freeze + boot bundle. Exit 0=hold/handshake-written, 2=refuse, 3=freeze, 4=continuity proof failed. See `skills/fleet/supervisor.md`. |
 | `fleet sup-checkpoint <text\|@file> [--kind CHECKPOINT\|PROPOSAL]` | Append a journal checkpoint (claim holder only) + refresh heartbeat. |
 | `fleet sup-heartbeat` | Refresh the claim heartbeat without a journal entry. |
-| `fleet sup-status [--json]` | Read-only supervisor claim/handshake/nag view. |
-| `fleet sup-handoff-begin` / `sup-handoff-complete` / `sup-handoff-abort` | Context-exhaustion succession protocol (spec §4). Trigger band (ratified 2026-07-23, three-tier §11): enter at 150k context occupancy, hard ceiling 200k — binds supervisors and workers. |
+| `fleet sup-release [--reason TEXT] [--nonce N]` | Release the supervisor claim cleanly (claim holder only): rewrites INCARNATION as `released`, journals `RELEASED`, then the body EXITS. The next `sup-boot` claims fresh — no seizure, no page (claim-nonce §6.3). The **release-then-stop** doctrine; there is no `--force` form. |
+| `fleet sup-status [--json]` | Read-only supervisor claim/handshake/nag view. Projects the claim (never a hash); reports `nonce_present`/`pending_present`/`state`. |
+| `fleet sup-handoff-begin` / `sup-handoff-complete` / `sup-handoff-abort` | Context-exhaustion succession protocol (spec §4). Handoff verifies a one-shot **token**, not a sid (claim-nonce §6.4): begin mints it into the successor's task file; the successor's `sup-boot --handoff-inc <id> --handoff-token <tok>` hashes it into HANDSHAKE and mints its own generation; `sup-handoff-complete --expect-inc <id> [--expect-sid <sid>]` verifies the token (`--expect-sid` now OPTIONAL — a mismatch warns, does not refuse). Trigger band (ratified 2026-07-23, three-tier §11): enter at 150k context occupancy, hard ceiling 200k — binds supervisors and workers. |
+
+**Journal kinds** (`supervisor/JOURNAL.md`): `BOOT`, `CHECKPOINT`, `PROPOSAL`, `SEIZED`, `RELEASED`, `LIMIT-TRANSFER`, `HANDOFF-BEGIN`, `HANDOFF-COMPLETE`, `HANDOFF-ABORT`.
+
+**The claim gate (claim-nonce §7).** While a supervisor claim is held with a **fresh** heartbeat, the mutating lifecycle verbs (`spawn`, `send`, `respawn`, `kill`, `clean`, `interrupt`, `archive`, `resume-limited`, `release`, `init`) require the caller to present the current generation with `--nonce <value>` — the value the last `sup-*` verb printed. Without it a session-bearing caller is refused (exit 4). It is a **speed-bump against a divergent second body, not authorization**: bypassable by running without a session id, and armed only while the heartbeat is fresh (`autoclean` is structurally exempt). The generation does not rotate on a mutating verb — only `sup-*` verbs mint.
 
 ## Doctrine
 
