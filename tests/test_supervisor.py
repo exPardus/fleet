@@ -1629,6 +1629,85 @@ class TestRejectionLog:
         assert "escalate" in str(exc.value)
 
 
+class TestContinuityExitCode:
+    """claim-nonce §4.13(b)/§8/§11: a failed continuity proof needs a DISTINCT
+    exit code, delivered by a `FleetCliError` subclass plus a `main()` branch
+    ordered AHEAD of the generic handler.
+
+    Without the ordering the code is unreachable: `main`'s generic arm
+    collapses every `FleetCliError` to exit 1, which is indistinguishable from
+    a corrupt registry, a lock timeout, an unknown worker, or a bad flag. "A
+    second body of your lineage may be acting" and "you typed the wrong worker
+    name" are not the same event, and a caller scripting against `fleet` has
+    nothing else to key on -- the refusal message is prose."""
+
+    def _v2_claim(self, sup_home, seq=2):
+        value = fleet.mint_nonce()
+        beat = fleet.now_iso()
+        fleet.write_incarnation({"incarnation_id": "inc-me", "session_id": "sid-me",
+                                 "claimed_at": beat, "heartbeat_at": beat,
+                                 "claimed_via": "fresh", "nonce_seq": seq,
+                                 "lineage_id": "lin-x",
+                                 "nonce_hash": fleet.nonce_digest(value)})
+        return value
+
+    def test_the_error_is_a_FleetCliError_subclass(self):
+        # Every `except FleetCliError` already in the tree keeps catching it.
+        # A sibling class would silently escape five handlers and surface as a
+        # traceback, which is the opposite of what the distinct code is for.
+        assert issubclass(fleet.SupervisorContinuityError, fleet.FleetCliError)
+
+    def test_the_code_is_distinct_from_every_other_boot_outcome(self):
+        assert fleet.SUPERVISOR_CONTINUITY_RC not in (0, 1)
+        assert fleet.SUPERVISOR_CONTINUITY_RC not in fleet.SUPERVISOR_BOOT_RC.values()
+
+    def test_a_failed_continuity_proof_exits_with_that_code(self, sup_home, capsys):
+        self._v2_claim(sup_home)
+        rc = fleet.main(["sup-checkpoint", "body", "--sid", "sid-me",
+                         "--nonce", fleet.mint_nonce()])
+        assert rc == fleet.SUPERVISOR_CONTINUITY_RC
+        assert "escalate" in capsys.readouterr().err
+
+    def test_a_valid_proof_still_exits_0(self, sup_home, capsys):
+        live = self._v2_claim(sup_home)
+        assert fleet.main(["sup-checkpoint", "body", "--sid", "sid-me",
+                           "--nonce", live]) == 0
+
+    def test_an_ORDINARY_cli_error_still_exits_1(self, sup_home, capsys):
+        # The other half of the contract: the new branch must narrow nothing.
+        # `no supervisor claim exists` is a plain FleetCliError from the very
+        # same function.
+        assert fleet.main(["sup-checkpoint", "body", "--sid", "sid-me"]) == 1
+        assert "no supervisor claim" in capsys.readouterr().err
+
+    def test_a_released_claim_is_an_ordinary_error_not_a_continuity_failure(
+            self, sup_home, capsys):
+        # A cleanly released claim is not evidence of a second body, and the
+        # exit code is operator-facing evidence exactly like the message is.
+        fleet.write_incarnation({"incarnation_id": "inc-old", "lineage_id": "lin-x",
+                                 "claimed_via": "fresh", "released_at": fleet.now_iso(),
+                                 "released_by_sid": "sid-me", "state": "released"})
+        assert fleet.main(["sup-checkpoint", "body", "--sid", "sid-me"]) == 1
+
+    def test_the_boot_refusal_verdicts_keep_their_own_codes(self, sup_home, capsys, monkeypatch):
+        # §4.13(b)'s codes 2 and 3 are a different contract, published at
+        # skills/fleet/SKILL.md:37, and this slice must not perturb them.
+        fleet.write_incarnation(_claim(sid="sid-holder"))
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            lambda **kw: (True, [{"sessionId": "sid-holder", "status": "idle"},
+                                                 {"sessionId": "sid-me", "status": "busy"}]))
+        assert fleet.main(["sup-boot", "--sid", "sid-me"]) == 2
+
+    def test_SKILL_md_publishes_the_new_code(self):
+        # §8 lists `skills/fleet/SKILL.md:37` as this slice's edit, and §11
+        # says the value is a builder detail but "that it needs a seam and a
+        # published-contract amendment is not". An exit code nobody documents
+        # is an exit code nobody can script against.
+        text = (Path(fleet.__file__).resolve().parents[1]
+                / "skills" / "fleet" / "SKILL.md").read_text(encoding="utf-8")
+        assert f"{fleet.SUPERVISOR_CONTINUITY_RC}=continuity" in text
+
+
 class TestDoctorSeesTheRejections:
     """§5.6 item 3. `_doctor_check_supervisor_claim` hard-codes `ok=True` on
     both returns today, with the docstring *"ALWAYS ok=True -- the nag is

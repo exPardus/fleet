@@ -2278,6 +2278,29 @@ class FleetCliError(Exception):
     a raw traceback."""
 
 
+# claim-nonce §4.13(b)/§11: the distinct exit code for a failed continuity
+# proof. `sup-boot` already publishes 0/2/3 (skills/fleet/SKILL.md:37) and
+# main()'s generic arm returns 1, so 4 is the first free value.
+SUPERVISOR_CONTINUITY_RC = 4
+
+
+class SupervisorContinuityError(FleetCliError):
+    """A `sup-*` verb refused because the caller could not prove continuity
+    (claim-nonce §5.3 rule 5).
+
+    A SUBCLASS, deliberately: every `except FleetCliError` already in the tree
+    keeps catching it, so the new code narrows nothing. A sibling class would
+    silently escape those handlers and surface as a traceback -- the opposite
+    of what a distinct exit code is for.
+
+    The code exists because main()'s generic arm collapses every
+    `FleetCliError` to exit 1, which is indistinguishable from a corrupt
+    registry, a lock timeout, an unknown worker or a bad flag. "A second body
+    of your lineage may be acting" and "you typed the wrong worker name" are
+    not the same event, and the refusal message is prose -- the exit code is
+    the only thing a caller can script against."""
+
+
 def _read_task_arg(task: str) -> str:
     """`@file` task syntax (SPEC §5): a task string starting with `@` names
     a file whose contents are the task text."""
@@ -8746,7 +8769,7 @@ def _continuity_refusal(verb, claim: dict) -> FleetCliError:
 
     The human-facing runbook (`skills/fleet/supervisor.md`) is the far side of
     this audience boundary. It is a convention, not a mechanism."""
-    return FleetCliError(
+    return SupervisorContinuityError(
         f"{verb}: continuity proof failed (expected generation "
         f"{claim.get('nonce_seq', '?')}) -- a second body of your lineage may be "
         f"acting. STOP: take no further supervisor actions and escalate to the "
@@ -9781,6 +9804,13 @@ def main(argv=None) -> int:
     except RegistryCorruptError as exc:
         print(f"fleet: registry error: {exc}", file=sys.stderr)
         return 1
+    except SupervisorContinuityError as exc:
+        # claim-nonce §4.13(b): AHEAD of the generic arm below, which collapses
+        # every FleetCliError to exit 1. Ordering is the whole seam -- behind
+        # it, the subclass is caught by its parent and the distinct code is
+        # unreachable.
+        print(f"fleet: {exc}", file=sys.stderr)
+        return SUPERVISOR_CONTINUITY_RC
     except (FleetCliError, ClaudeNotFoundError, ValueError, FleetLockTimeout,
             UnsupportedPlatformError) as exc:
         print(f"fleet: {exc}", file=sys.stderr)
