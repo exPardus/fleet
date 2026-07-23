@@ -494,3 +494,180 @@ a defect. The spec file is now fully parsed: 39 fenced blocks, 39 receipts, zero
 reproducible red case, so the follow-up code task inherits an executable claim rather than a description.
 
 **r3: `sound`** (spec). **H1 filed** (harness, follow-up code task).
+
+---
+---
+
+# Re-gate — r4 (wave 3: operator amendments), narrow scope
+
+**Trigger:** manager re-gate of wave 3, commit **`8a089bf`** on `mf/three-tier` ("operator amendments —
+top tier, fallback chain, worker band, cap doctrine"), merged into `mf/tt-spec` fast-forward.
+**Vantage:** worktree `C:\proga\fleet-mf-tt-spec`, branch `mf/tt-spec`, HEAD `8a089bf`. Pinned receipts
+still `235421e5`; one receipt is deliberately `# live:`.
+
+**r4 VERDICT: `fix-list(W1)`** — 46/46 receipts (all 7 new ones hand-executed), the worker-band sweep is
+complete, every `[UNBUILT]` absence proof still holds, Status discipline intact, and the §3.1/§3.5/§11.4
+amendments quote-match their in-tree authority. **One MAJOR finding (W1): §11.5's load-bearing operator
+ruling is cited to a record that has not landed in this branch, and the anchor it cites still carries
+the contradicting predecessor text.** The ruling is genuine — it exists on `main` — so W1 is a
+merge-ordering defect, mechanically fixable, not a fabrication.
+
+## r4.1 Receipts — 46/46, and all 7 new ones hand-executed
+
+```
+$ py -3.13 tools/verify_receipts.py --self-test --strict docs/specs/three-tier-command.md
+46/46 receipts reproduce exactly (46 fenced blocks, 0 unclassified, 0 volatile-skipped, 0 warned, 0 FAILED)
+
+$ py -3.13 indep_receipts.py docs/specs/three-tier-command.md     # 45 pinned; `# live:` is outside its grammar
+45/45 blocks reproduce; 0 FAILED                                   (exit 0)
+$ … --seed 40  → 44/45, 1 FAILED (exit 1)
+$ … --seed 12  → 44/45, 1 FAILED (exit 1)
+
+$ py -3.10 -m pytest tests/test_receipts.py -q
+13 passed
+```
+Receipt-command set diffed r3→r4: **exactly 7 added, 0 removed.** Each hand-executed by me — six against
+the materialised pinned tree, one against the working tree — and **all seven match the pasted text
+byte-for-byte**:
+
+| # | Receipt | Hand-executed result | Match |
+|---|---|---|---|
+| 1 | `sed -n '858p' bin/fleet.py` | `        "token_ceiling": token_ceiling,` | ✓ |
+| 2 | `sed -n '1284p' bin/fleet.py` | `    env["FLEET_WORKER"] = name` | ✓ |
+| 3 | `sed -n '1635,1640p' bin/fleet.py` | 6 lines, `_limit_horizon_passed` docstring + null-horizon guard | ✓ |
+| 4 | `sed -n '1920,1924p' bin/fleet.py` | 5 lines, limit scan → `status="limited"`, `limit_reset_at`, `limit_kind` | ✓ |
+| 5 | `sed -n '3909,3912p' bin/fleet.py` | 4 lines, `dispatch_bg(... resume_sid=old_sid ...)` | ✓ |
+| 6 | `sed -n '4367,4368p' bin/fleet.py` | 2 lines, `new_worker_record(None, cwd, …, model=model,` | ✓ |
+| 7 | `grep -c "PENDING OPERATOR RATIFICATION" docs/specs/native-substrate.md` (`# live:`) | `0` | ✓ |
+
+Receipt 7 is correctly classified `# live:` — *"ratification status is a property of the working tree,
+not of this spec's pinned commit."* That is the right call, and it is the yardstick W1 fails.
+No H1-class indented/quoted receipt blocks remain (`grep` for them returns none).
+
+## r4.2 Amended-section contradiction sweep
+
+- **§3.1 — supervisor promoted to TOP tier.** Quote-matches the in-tree Second addendum
+  (`lessons.md:776`): the interface holds the *long-term goals*; the supervisor owns *solid plans,
+  details, and splitting tasks*. No drift. The table's worker row moving from `third` to **`second or
+  third`** is not a scope change but a forced re-derivation: the operator constraint is *"Opus and
+  Sonnet only, never Haiku"*, and once the supervisor vacates second (Opus), `{Opus, Sonnet}` **is**
+  `{second, third}`. Coherent.
+- **§3.5 — preference chain.** Quote-matches: *"the top tier's usage limit is roughly **half** the
+  standard limit"*, chain `[top, second]`, falls back when the top tier's limit is hit, returns once the
+  reset horizon passes, built on the shipped G11/`limited`/`resume-limited` machinery. The addendum
+  reserved the mechanism to the spec (*"the exact mechanism is the spec's call and goes through the
+  gate"*), and §3.5 supplies it with receipts 3–6 rather than asserting it.
+- **§11.4 + ND1 rebase — sound, and it closes a dependency the worker extension would have broken.**
+  ND1's interface exemption was previously justified by *"the operator set the band for the second tier
+  only"*. Extending the band to workers invalidates that basis, and §11.3's restatement retires it
+  explicitly, rebasing onto **recourse and dispatch**: (a) the interface is outside fleet's launch
+  surface so a refusal it cannot escape has no remedy; (b) workers observe the band but never call
+  `spawn`/`send`, so there is nothing to refuse — their arm is respawn-at-task-boundary. The exemption
+  survives on a durable basis rather than a retired one.
+- **§4.1 — ratification correction is accurate.** Live tree: `RATIFIED 2026-07-23` ×8,
+  `RATIFICATION WITHHELD` ×5, `PENDING OPERATOR RATIFICATION` ×0. The 5 WITHHELD hits are **3 inline
+  claim markers** (G12's dead-daemon `rm` message `:46`, the `stop` twin `:151`, the
+  rm/stop-do-not-revive sentence `:146`) plus 2 prose references (`:3`, `:170`) — so **8 ratified + 3
+  withheld = 11 markers**, exactly the operator record. §4.1 names those three correctly and shows none
+  is load-bearing (it leans on the transient-daemon idle-exit, `cause=upgrade`, G7, the 2.1.216 wedge,
+  G10 — all ratified). My r1 vantage note is hereby superseded: the WITHHELD state I recorded as absent
+  has since genuinely landed.
+- **§11.5 — cap doctrine: see W1.**
+
+## r4.3 Worker-band sweep — COMPLETE
+
+`grep -niE "second tier only|supervisors only|only the supervisor|second tier"` over the whole file
+returns four hits, **all legitimate**, none a residual scoping:
+
+| Line | Text | Verdict |
+|---|---|---|
+| 87 | *"The earlier draft put the supervisor **on the second tier**"* | historical contrast for the promotion |
+| 196 | *"prefers the top tier and automatically falls back to the **second tier**"* | fallback-chain semantics |
+| 1007 | *"every 'supervisor only' / '**second tier only**' scoping in the earlier draft [is retired]"* | the sweep statement itself |
+| 1136 | quotes *"the operator set the band for the **second tier only**"* and marks it **retired** | the ND1 rebase |
+
+No surviving second-tier-only band scoping anywhere in the file. Sweep verified complete.
+
+## r4.4 `[UNBUILT]` tags and Status discipline
+
+All eight Appendix-A absence greps re-executed at the pin — `sup-spawn|cmd_sup_spawn`,
+`add_parser("beat")`, `RESERVED`, `NEEDS-OPERATOR|…|pending_decision`,
+`_doctor_check_supervisor_beat|supervisor-beat.jsonl|sup-context|sup-decision`,
+`CLAUDE_CONFIG_DIR|ANTHROPIC_`, `sup-release|cmd_sup_release`, `SUPERVISOR_BODY_NAME` — **all `0`**.
+Every `[UNBUILT]` tag still has a live absence proof. Status line still `**Status: `drafting`.**`;
+*"An author never promotes its own spec"* intact.
+
+## r4.5 W1 — MAJOR — §11.5 cites an operator ruling that has not landed in this branch, while the cited anchor asserts the opposite
+
+**The claim.** §11.5 is titled *"Reconciliation with the third-docket cap doctrine — **SETTLED**
+(operator ruling, 2026-07-23)"*, states *"**This is decided, not pending.** The manager's reading was put
+to the operator and **confirmed** (`knowledge/lessons.md#2026-07-23-three-tier-inputs`, third addendum,
+2026-07-23)"*, and block-quotes a **Third addendum**.
+
+**At this commit, that citation does not resolve — and the anchor contradicts it.**
+```
+$ git grep -n "Third addendum"
+docs/specs/three-tier-command.md:1248:> **Third addendum (2026-07-23, operator ruling on the cap-doctrine reading):** …
+```
+The only occurrence in the tracked tree is **the spec quoting itself**. `knowledge/lessons.md` is 781
+lines and the cited entry ends at the **Second addendum**, whose final bullet reads, verbatim:
+
+> **Manager reading of the cap doctrine vs the spec's B4 hard arm:** … Wave 3 states this reading
+> in-spec; **the operator rules on it at ratification.**
+
+So the tree says *pending an operator ruling at ratification* exactly where the spec says *settled*.
+
+**The ruling is genuine — this is not a fabrication.** It exists on `main`:
+```
+$ git log -1 --format='%h %ci %s' 7d68b43
+7d68b43 2026-07-23 06:32:47 +0500 docs(knowledge): operator ruling — spend caps flag-gated off, context band stays
+$ git show 7d68b43:knowledge/lessons.md | sed -n '783p'
+**Third addendum (2026-07-23, operator ruling on the cap-doctrine reading):** confirmed — … Resolves the `[OPERATOR RULES AT RATIFICATION]` flag before ratification.
+```
+The spec's quote is **faithful**, eliding only that closing sentence. The defect is purely that the
+record was never merged:
+```
+$ git merge-base --is-ancestor 7d68b43 HEAD   → false (not an ancestor)
+$ git log --oneline HEAD..main
+f97fdc7  docs: ledger — wave 3 + H1 landed, re-gate + H1 review dispatched
+7d68b43  docs(knowledge): operator ruling — spend caps flag-gated off, context band stays
+ba5b415  docs: ledger — final gate sound, merge landed, wave 3 + H1 dispatched
+```
+The ruling (06:32:47) predates the wave-3 spec commit `8a089bf` (06:35:23) by under three minutes; the
+author quoted it accurately but did not merge `main` to bring it into the branch.
+
+**Why this is MAJOR rather than cosmetic.** On the strength of this citation the wave **deleted the
+spec's own fallback**: *"the earlier draft's contingency branch ('if the operator rules the other way,
+the band becomes advisory') is **withdrawn**, since the operator ruled."* A claims audit performed at
+this commit — which is what a design gate is — finds a load-bearing status flip and a withdrawn
+contingency resting on evidence that is absent from the tree and contradicted by the anchor cited. That
+is precisely the failure mode this repo's receipt doctrine exists to prevent: *a pasted claim is a claim
+until something re-runs it.*
+
+**And this wave already knew the right discipline for this exact class.** §4.1's ratification status is
+receipted `# live:` **because** *"ratification status is a property of the working tree, not of this
+spec's pinned commit."* An operator ruling recorded in `lessons.md` is the same class of claim — a
+working-tree property, not a pinned-commit property — and it received neither a `# live:` receipt nor a
+landed record. The wave applied the correct standard to one such claim and not to the other.
+
+**Fix (mechanical, no rewrite):** merge `main` into `mf/three-tier` so `7d68b43` lands alongside the
+spec that depends on it, and re-run the gate. Optionally restore the elided closing sentence
+(*"Resolves the `[OPERATOR RULES AT RATIFICATION]` flag before ratification"*), since that is the clause
+tying the ruling to the flag it discharges. Once merged, §11.5's "SETTLED" framing is fully supported
+and no other text needs to change — a `# live:` receipt on the addendum's presence would make it
+self-verifying.
+
+## r4.6 Verdict
+
+Wave 3 folds four operator amendments cleanly: the top-tier promotion and preference chain quote-match
+their authority, the worker-band extension is swept through the whole file with no residual second-tier
+scoping, ND1's exemption is rebased onto a basis that survives that extension, §4.1's ratification
+correction is accurate to the marker counts, and the receipt base grew by exactly seven blocks — every
+one of which I hand-executed and matched. Nothing regressed.
+
+The single defect is W1: the wave's most consequential status change — *pending operator ruling* →
+*settled doctrine*, with a contingency branch withdrawn on the strength of it — is cited to a record
+sitting three commits away on `main` and absent from the branch, whose in-tree anchor still says the
+opposite. The ruling is real; the merge is missing. One `git merge` closes it.
+
+**r4: `fix-list(W1)`.**
