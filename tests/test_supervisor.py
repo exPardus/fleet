@@ -3,6 +3,7 @@ claim/seizure/handshake state machine, boot ritual, handoff, nag."""
 import json
 import os
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -898,13 +899,17 @@ class TestSupBootContinuity:
 
     def test_the_handoff_complete_literal_carries_the_predecessors_lineage(
             self, sup_home, capsys):
-        # §6.2: carried across handoff. The successor's own generation is
-        # §6.4's work (it reaches the claim through HANDSHAKE, which does not
-        # carry it yet), so the transferred claim is deliberately a LEGACY
-        # claim in this slice -- §9's documented mixed-code shape, which the
-        # successor's first call upgrades in place.
-        live = self._held(sid="sid-old", inc="inc-old", age_seconds=10)
-        fleet.write_handshake("inc-new", "sid-new")
+        # §6.2: lineage is CARRIED across a handoff. §6.4: the successor's own
+        # generation reaches the claim through HANDSHAKE, so the transferred
+        # claim is NOT a legacy claim -- it carries the successor's nonce and
+        # its first call proves continuity on it, no in-place upgrade.
+        token = "tok-lineage"
+        live = self._held(sid="sid-old", inc="inc-old", age_seconds=10,
+                          handoff_token_hash=fleet.nonce_digest(token))
+        succ_nonce = fleet.mint_nonce()
+        fleet.write_handshake("inc-new", "sid-new",
+                              handoff_token_hash=fleet.nonce_digest(token),
+                              nonce_hash=fleet.nonce_digest(succ_nonce))
         args = SimpleNamespace(expect_inc="inc-new", expect_sid="sid-new",
                                sid="sid-old", nonce=live)
         assert fleet.cmd_sup_handoff_complete(args) == 0
@@ -912,6 +917,9 @@ class TestSupBootContinuity:
         claim = fleet.read_incarnation()
         assert claim["incarnation_id"] == "inc-new"
         assert claim["lineage_id"] == "lin-20260101T000000Z-aaaa"
+        assert claim["nonce_hash"] == fleet.nonce_digest(succ_nonce)
+        assert claim["nonce_seq"] == 1
+        assert "handoff_token_hash" not in claim   # the predecessor's, not carried
 
     # --- §5.8's second publisher ------------------------------------------
 
@@ -2895,30 +2903,131 @@ class TestHandoff:
         with pytest.raises(fleet.FleetCliError):
             self._begin(self._dispatch_then_roster(), sid="sid-imposter")
 
-    def test_complete_transfers_on_dual_match(self, sup_home):
-        self._hold()
-        fleet.write_handshake("inc-succ", "sid-new")
-        args = SimpleNamespace(sid="sid-old", expect_inc="inc-succ", expect_sid="sid-new")
+    def _hold_with_token(self, token, sid="sid-old", inc="inc-old"):
+        """A predecessor mid-handoff: `sup-handoff-begin` has stamped the
+        token hash into its OWN claim (§6.4), so the complete call can verify
+        the successor without the predecessor having to remember the token
+        across its own fork-steer."""
+        beat = (datetime.now(timezone.utc) - timedelta(seconds=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        value = fleet.mint_nonce()
+        fleet.write_incarnation({"incarnation_id": inc, "session_id": sid,
+                                 "claimed_at": beat, "heartbeat_at": beat,
+                                 "claimed_via": "fresh", "nonce_hash": fleet.nonce_digest(value),
+                                 "nonce_seq": 2, "lineage_id": "lin-20260101T000000Z-aaaa",
+                                 "handoff_token_hash": fleet.nonce_digest(token)})
+        return value
+
+    def test_complete_transfers_on_token_match(self, sup_home):
+        token = "tok-good"
+        live = self._hold_with_token(token)
+        succ_nonce = fleet.mint_nonce()
+        fleet.write_handshake("inc-succ", "sid-new",
+                              handoff_token_hash=fleet.nonce_digest(token),
+                              nonce_hash=fleet.nonce_digest(succ_nonce))
+        args = SimpleNamespace(sid="sid-old", expect_inc="inc-succ",
+                               expect_sid="sid-new", nonce=live)
         assert fleet.cmd_sup_handoff_complete(args) == 0
         claim = fleet.read_incarnation()
         assert claim["incarnation_id"] == "inc-succ" and claim["session_id"] == "sid-new"
         assert claim["claimed_via"] == "handoff"
+        assert claim["nonce_hash"] == fleet.nonce_digest(succ_nonce)  # NOT a legacy claim
+        assert claim["lineage_id"] == "lin-20260101T000000Z-aaaa"     # carried
         assert fleet.read_handshake() is None
         latest = fleet.supervisor_journal_latest()
         assert latest["kind"] == "HANDOFF-COMPLETE" and latest["inc"] == "inc-old"
 
+    def test_complete_refuses_on_token_mismatch_and_transfers_nothing(self, sup_home):
+        """§6.4 / T3: a wrong token refuses with the claim UNTRANSFERRED. This
+        is the fork case -- a successor that forked between HANDSHAKE and
+        complete presents a token that does not hash to the predecessor's
+        recorded value. The OLD code turned on `session_id` equality, which is
+        the third instance of the sid-fragility root cause this slice exists to
+        remove; a fork survived the sid check whenever the fork kept the sid,
+        and failed it whenever a legitimate fork-steer rotated the sid."""
+        live = self._hold_with_token("tok-good")
+        succ_nonce = fleet.mint_nonce()
+        fleet.write_handshake("inc-succ", "sid-new",
+                              handoff_token_hash=fleet.nonce_digest("tok-WRONG"),
+                              nonce_hash=fleet.nonce_digest(succ_nonce))
+        args = SimpleNamespace(sid="sid-old", expect_inc="inc-succ",
+                               expect_sid="sid-new", nonce=live)
+        with pytest.raises(fleet.FleetCliError, match="token"):
+            fleet.cmd_sup_handoff_complete(args)
+        assert fleet.read_incarnation()["incarnation_id"] == "inc-old"
+        assert fleet.read_handshake() is not None
+
+    def test_complete_is_fail_closed_when_the_claim_carries_no_token(self, sup_home):
+        """§6.4's `not expected_hash` half: a predecessor claim that never went
+        through a token-minting begin (an old-code holder) has no
+        `handoff_token_hash`. A HANDSHAKE with no token hash then compares
+        None == None -- a trivially-true equality that would transfer the claim
+        on NO proof at all. It must refuse instead: with nothing to verify
+        against, fail closed rather than transfer on an absent equality."""
+        beat = (datetime.now(timezone.utc) - timedelta(seconds=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        value = fleet.mint_nonce()
+        fleet.write_incarnation({"incarnation_id": "inc-old", "session_id": "sid-old",
+                                 "claimed_at": beat, "heartbeat_at": beat,
+                                 "claimed_via": "fresh", "nonce_hash": fleet.nonce_digest(value),
+                                 "nonce_seq": 2, "lineage_id": "lin-x"})  # NO token hash
+        fleet.write_handshake("inc-succ", "sid-new",
+                              nonce_hash=fleet.nonce_digest(fleet.mint_nonce()))  # NO token hash
+        args = SimpleNamespace(sid="sid-old", expect_inc="inc-succ",
+                               expect_sid="sid-new", nonce=value)
+        with pytest.raises(fleet.FleetCliError, match="token"):
+            fleet.cmd_sup_handoff_complete(args)
+        assert fleet.read_incarnation()["incarnation_id"] == "inc-old"
+
+    def test_expect_sid_is_optional_and_a_mismatch_only_warns(self, sup_home, capsys):
+        """§6.4: `--expect-sid` becomes optional; when passed and mismatched it
+        is a LOUD WARNING naming the fork, not a refusal. The token already
+        proved the successor; the sid is observability. A successor that forked
+        between the SUCCESSOR-SID print and complete still holds the token, so
+        refusing on the sid would wedge a legitimate handoff on the exact
+        failure this redesign removes."""
+        token = "tok-good"
+        live = self._hold_with_token(token)
+        succ_nonce = fleet.mint_nonce()
+        fleet.write_handshake("inc-succ", "sid-actual",
+                              handoff_token_hash=fleet.nonce_digest(token),
+                              nonce_hash=fleet.nonce_digest(succ_nonce))
+        # --expect-sid points at a sid the successor no longer has.
+        args = SimpleNamespace(sid="sid-old", expect_inc="inc-succ",
+                               expect_sid="sid-STALE", nonce=live)
+        assert fleet.cmd_sup_handoff_complete(args) == 0
+        out = capsys.readouterr().out.lower()
+        assert "warn" in out or "fork" in out
+        claim = fleet.read_incarnation()
+        assert claim["incarnation_id"] == "inc-succ"
+        assert claim["session_id"] == "sid-actual"  # the HANDSHAKE's sid wins
+
+    def test_complete_transfers_with_no_expect_sid_at_all(self, sup_home):
+        token = "tok-good"
+        live = self._hold_with_token(token)
+        succ_nonce = fleet.mint_nonce()
+        fleet.write_handshake("inc-succ", "sid-new",
+                              handoff_token_hash=fleet.nonce_digest(token),
+                              nonce_hash=fleet.nonce_digest(succ_nonce))
+        args = SimpleNamespace(sid="sid-old", expect_inc="inc-succ",
+                               expect_sid=None, nonce=live)
+        assert fleet.cmd_sup_handoff_complete(args) == 0
+        assert fleet.read_incarnation()["session_id"] == "sid-new"
+
     def test_complete_refuses_on_inc_mismatch(self, sup_home):
-        self._hold()
-        fleet.write_handshake("inc-WRONG", "sid-new")
-        args = SimpleNamespace(sid="sid-old", expect_inc="inc-succ", expect_sid="sid-new")
+        live = self._hold_with_token("tok-good")
+        fleet.write_handshake("inc-WRONG", "sid-new",
+                              handoff_token_hash=fleet.nonce_digest("tok-good"),
+                              nonce_hash=fleet.nonce_digest(fleet.mint_nonce()))
+        args = SimpleNamespace(sid="sid-old", expect_inc="inc-succ",
+                               expect_sid="sid-new", nonce=live)
         with pytest.raises(fleet.FleetCliError):
             fleet.cmd_sup_handoff_complete(args)
         assert fleet.read_incarnation()["incarnation_id"] == "inc-old"
         assert fleet.read_handshake() is not None
 
     def test_complete_refuses_when_no_handshake(self, sup_home):
-        self._hold()
-        args = SimpleNamespace(sid="sid-old", expect_inc="inc-succ", expect_sid="sid-new")
+        self._hold_with_token("tok-good")
+        args = SimpleNamespace(sid="sid-old", expect_inc="inc-succ",
+                               expect_sid="sid-new", nonce=None)
         with pytest.raises(fleet.FleetCliError):
             fleet.cmd_sup_handoff_complete(args)
 
@@ -3041,7 +3150,7 @@ class TestHandoff:
         self._begin(self._dispatch_then_roster())
         assert not fleet.handoff_abort_flag_path().exists()
 
-    def test_handoff_timeout_drill_end_to_end(self, sup_home):
+    def test_handoff_timeout_drill_end_to_end(self, sup_home, capsys):
         """Spec §4 failure branch: begin -> successor never handshakes ->
         complete refuses -> abort stops the limbo successor and old resumes.
 
@@ -3056,7 +3165,12 @@ class TestHandoff:
         self._hold()
         rc = self._begin(self._dispatch_then_roster())
         assert rc == 0
-        args = SimpleNamespace(sid="sid-old",
+        # §6.4: begin now persists the token hash, so a legacy `_hold()` claim
+        # is upgraded and its generation is delivered on begin's stdout. A
+        # resuming predecessor presents it -- capture it exactly where a real
+        # body reads it.
+        gen = _nonce_of(capsys.readouterr().out)
+        args = SimpleNamespace(sid="sid-old", nonce=gen,
                                expect_inc="inc-whatever", expect_sid="sid-new")
         with pytest.raises(fleet.FleetCliError):   # no HANDSHAKE was written
             fleet.cmd_sup_handoff_complete(args)
@@ -3066,9 +3180,181 @@ class TestHandoff:
             "holder": "inc-old"})
         def stop_run(argv, **kw):
             return SimpleNamespace(returncode=0, stdout="", stderr="")
-        abort = SimpleNamespace(sid="sid-old", successor_sid="sid-new")
+        abort = SimpleNamespace(sid="sid-old", successor_sid="sid-new", nonce=gen)
         assert fleet.cmd_sup_handoff_abort(abort, which=_fake_which, run=stop_run) == 0
         assert fleet.read_incarnation()["session_id"] == "sid-old"
+
+
+class TestHandoffToken:
+    """claim-nonce §6.4 / D4 -- the handoff verifies a TOKEN, not a sid.
+
+    §4.6 showed the old handoff turning on `hs["session_id"] != args.expect_sid`,
+    with the predecessor learning that sid only by watching the roster. A
+    successor that forks between HANDSHAKE and complete fails the equality --
+    the same fork-steer root cause, third instance. The token is minted by
+    begin, its hash stamped into the predecessor's OWN claim (so a predecessor
+    fork-steer mid-handoff does not lose it), carried to the successor through
+    the task file, hashed into HANDSHAKE by the successor's own boot, and
+    verified at complete. This class is that whole path."""
+
+    def _hold(self, sid="sid-old", inc="inc-old"):
+        beat = (datetime.now(timezone.utc) - timedelta(seconds=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        value = fleet.mint_nonce()
+        fleet.write_incarnation({"incarnation_id": inc, "session_id": sid,
+                                 "claimed_at": beat, "heartbeat_at": beat,
+                                 "claimed_via": "fresh", "nonce_hash": fleet.nonce_digest(value),
+                                 "nonce_seq": 2, "lineage_id": "lin-20260101T000000Z-aaaa"})
+        return value
+
+    @staticmethod
+    def _token_from_task_file(sup_home):
+        files = list((sup_home / "state").glob("supervisor-handoff-*.md"))
+        assert len(files) == 1, files
+        body = files[0].read_text(encoding="utf-8")
+        m = re.search(r"--handoff-token (\S+)", body)
+        assert m, f"no --handoff-token in the successor task file:\n{body}"
+        return m.group(1)
+
+    def test_begin_stamps_the_token_hash_into_its_own_claim_never_the_plaintext(
+            self, sup_home, capsys):
+        """§6.4 step 1 + §5.8: the predecessor stores sha256(token), not the
+        token, in its own INCARNATION -- so it survives its own fork-steer and
+        so the file never becomes a place a token can be read from. The
+        plaintext lives ONLY in the successor's task file (§5.9, unlinked on
+        complete/abort)."""
+        live = self._hold()
+        run = TestHandoff()._dispatch_then_roster()
+        assert fleet.cmd_sup_handoff_begin(
+            SimpleNamespace(sid="sid-old", model=None, permission_mode=None, nonce=live),
+            which=_fake_which, run=run, sleep=lambda s: None) == 0
+        token = self._token_from_task_file(sup_home)
+        claim = fleet.read_incarnation()
+        assert claim["handoff_token_hash"] == fleet.nonce_digest(token)
+        # the plaintext token is nowhere but the task file
+        assert token not in fleet.incarnation_path().read_text(encoding="utf-8")
+        assert token not in capsys.readouterr().out
+        assert token not in fleet.supervisor_journal_path().read_text(encoding="utf-8")
+
+    def test_successor_boot_hashes_the_token_and_mints_its_own_generation(
+            self, sup_home, capsys):
+        """§6.4 step 2: `sup-boot --handoff-inc I --handoff-token T` writes
+        HANDSHAKE carrying sha256(T) and the successor's OWN freshly minted
+        nonce hash, and delivers that generation's plaintext on the
+        successor's own stdout -- the one body that is allowed to hold it."""
+        self._hold()
+        token = "tok-successor"
+        rc = fleet.cmd_sup_boot(
+            SimpleNamespace(sid="sid-succ", handoff_inc="inc-new", handoff_token=token,
+                            nonce=None),
+            which=_fake_which,
+            run=_fake_run_roster([{"sessionId": "sid-succ", "status": "busy"}]))
+        assert rc == 0
+        hs = fleet.read_handshake()
+        assert hs["incarnation_id"] == "inc-new" and hs["session_id"] == "sid-succ"
+        assert hs["handoff_token_hash"] == fleet.nonce_digest(token)
+        delivered = _nonce_of(capsys.readouterr().out)
+        assert hs["nonce_hash"] == fleet.nonce_digest(delivered)
+
+    def test_full_token_handoff_end_to_end_no_legacy_upgrade(self, sup_home, capsys):
+        """begin -> successor boot -> complete, driven by the real task file,
+        and the successor's FIRST post-transfer checkpoint proves continuity on
+        the generation its own boot delivered -- there is no legacy upgrade
+        step anywhere on this path (the defect item 2 removes)."""
+        live = self._hold(sid="sid-old", inc="inc-old")
+        run = TestHandoff()._dispatch_then_roster(successor_sid="succ0001-full",
+                                                  short_id="succ0001")
+        assert fleet.cmd_sup_handoff_begin(
+            SimpleNamespace(sid="sid-old", model=None, permission_mode=None, nonce=live),
+            which=_fake_which, run=run, sleep=lambda s: None) == 0
+        successor_inc = next(
+            e["body"].split("successor=")[1].split(" ")[0]
+            for e in fleet.supervisor_journal_entries() if e["kind"] == "HANDOFF-BEGIN")
+        token = self._token_from_task_file(sup_home)
+        capsys.readouterr()
+        # successor boots (its own sid), driven by the task file
+        assert fleet.cmd_sup_boot(
+            SimpleNamespace(sid="succ0001-full", handoff_inc=successor_inc,
+                            handoff_token=token, nonce=None),
+            which=_fake_which,
+            run=_fake_run_roster([{"sessionId": "succ0001-full", "status": "busy"}])) == 0
+        succ_gen = _nonce_of(capsys.readouterr().out)
+        # predecessor completes
+        assert fleet.cmd_sup_handoff_complete(
+            SimpleNamespace(sid="sid-old", expect_inc=successor_inc,
+                            expect_sid="succ0001-full", nonce=live)) == 0
+        capsys.readouterr()
+        claim = fleet.read_incarnation()
+        assert claim["incarnation_id"] == successor_inc
+        assert claim["nonce_hash"] == fleet.nonce_digest(succ_gen)   # NOT legacy
+        assert claim["lineage_id"] == "lin-20260101T000000Z-aaaa"    # carried
+        # the successor's own first checkpoint proves continuity on succ_gen,
+        # with NO legacy sid-equality fallback and NO wrong-value acceptance
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_sup_checkpoint(_ckpt(sid="succ0001-full", nonce=fleet.mint_nonce()))
+        assert fleet.cmd_sup_checkpoint(
+            _ckpt(sid="succ0001-full", nonce=succ_gen)) == 0
+
+    def test_complete_unlinks_the_plaintext_task_file(self, sup_home, capsys):
+        """§5.9: the task file carries the plaintext token; complete unlinks
+        it. Gitignored is not a retention policy."""
+        live = self._hold()
+        run = TestHandoff()._dispatch_then_roster()
+        assert fleet.cmd_sup_handoff_begin(
+            SimpleNamespace(sid="sid-old", model=None, permission_mode=None, nonce=live),
+            which=_fake_which, run=run, sleep=lambda s: None) == 0
+        successor_inc = next(
+            e["body"].split("successor=")[1].split(" ")[0]
+            for e in fleet.supervisor_journal_entries() if e["kind"] == "HANDOFF-BEGIN")
+        token = self._token_from_task_file(sup_home)
+        capsys.readouterr()
+        assert fleet.cmd_sup_boot(
+            SimpleNamespace(sid="succ0001-full", handoff_inc=successor_inc,
+                            handoff_token=token, nonce=None),
+            which=_fake_which,
+            run=_fake_run_roster([{"sessionId": "succ0001-full", "status": "busy"}])) == 0
+        capsys.readouterr()
+        assert fleet.cmd_sup_handoff_complete(
+            SimpleNamespace(sid="sid-old", expect_inc=successor_inc,
+                            expect_sid="succ0001-full", nonce=live)) == 0
+        assert list((sup_home / "state").glob("supervisor-handoff-*.md")) == []
+
+    def test_abort_unlinks_the_plaintext_task_file(self, sup_home, capsys):
+        live = self._hold()
+        run = TestHandoff()._dispatch_then_roster()
+        assert fleet.cmd_sup_handoff_begin(
+            SimpleNamespace(sid="sid-old", model=None, permission_mode=None, nonce=live),
+            which=_fake_which, run=run, sleep=lambda s: None) == 0
+        capsys.readouterr()
+        hs_sid = "succ0001-full"
+        fleet.write_handshake(
+            next(e["body"].split("successor=")[1].split(" ")[0]
+                 for e in fleet.supervisor_journal_entries() if e["kind"] == "HANDOFF-BEGIN"),
+            hs_sid)
+        def stop_run(argv, **kw):
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        assert fleet.cmd_sup_handoff_abort(
+            SimpleNamespace(sid="sid-old", successor_sid=hs_sid, nonce=live),
+            which=_fake_which, run=stop_run) == 0
+        assert list((sup_home / "state").glob("supervisor-handoff-*.md")) == []
+
+    def test_doctor_notes_an_orphaned_task_file_past_the_timeout(self, sup_home):
+        """§5.9 backstop: unlink is the mechanism, the NOTE is for the paths
+        that crash before it. A `supervisor-handoff-*.md` older than the
+        handoff timeout is orphan residue and doctor says so."""
+        stale = sup_home / "state" / "supervisor-handoff-inc-stale.md"
+        stale.parent.mkdir(parents=True, exist_ok=True)
+        stale.write_text("--handoff-token tok-orphan\n", encoding="utf-8")
+        old = time.time() - (fleet.SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS + 60)
+        os.utime(stale, (old, old))
+        name, ok, detail = fleet._doctor_check_supervisor_handoff()
+        assert "supervisor-handoff-inc-stale.md" in detail or "orphan" in detail.lower()
+
+    def test_a_fresh_task_file_is_not_noted(self, sup_home):
+        fresh = sup_home / "state" / "supervisor-handoff-inc-fresh.md"
+        fresh.parent.mkdir(parents=True, exist_ok=True)
+        fresh.write_text("--handoff-token tok\n", encoding="utf-8")
+        _, _, detail = fleet._doctor_check_supervisor_handoff()
+        assert "inc-fresh" not in detail
 
 
 class TestSuccessorInterpreterIsPortable:
@@ -3082,7 +3368,7 @@ class TestSuccessorInterpreterIsPortable:
 
     def test_body_uses_this_interpreter_not_the_windows_launcher(self, sup_home):
         import sys
-        body = fleet._render_successor_task("inc-new", "inc-old")
+        body = fleet._render_successor_task("inc-new", "inc-old", "tok-x")
         assert Path(sys.executable).as_posix() in body
         assert "py -3.13" not in body
 
@@ -3091,7 +3377,7 @@ class TestSuccessorInterpreterIsPortable:
         # partial fix that portably renders only the first one still leaves
         # the successor wedged at step 3 on a non-Windows host.
         import sys
-        body = fleet._render_successor_task("inc-new", "inc-old")
+        body = fleet._render_successor_task("inc-new", "inc-old", "tok-x")
         py = Path(sys.executable).as_posix()
         invocations = re.findall(r'"([^"]*)"\s+\S*fleet\.py', body)
         assert invocations, "no rendered fleet.py invocation found"
