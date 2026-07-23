@@ -2850,7 +2850,7 @@ def cmd_init(args) -> int:
         _install_autoclean_task(getattr(args, "autoclean_interval_hours", None),
                                 force=getattr(args, "force", False))
     if getattr(args, "autoclean_remove", False):
-        _remove_autoclean_task()
+        _remove_autoclean_task(force=getattr(args, "force", False))
     return 0
 
 
@@ -6240,7 +6240,29 @@ def _install_autoclean_task(interval_hours, force: bool) -> None:
     print(f"  uninstall: fleet init --autoclean-remove")
 
 
-def _remove_autoclean_task() -> None:
+def _remove_autoclean_task(force: bool = False) -> None:
+    # Residual 4 (carried): removal is guarded by the SAME ownership predicate
+    # the install runs. Deleting purely by task name would silently remove a
+    # FOREIGN scheduled task that happens to carry our name -- the exact
+    # asymmetry the create side already refuses. F3 fail-closed too: an
+    # indeterminate query must refuse, never blind-delete, unless --force.
+    try:
+        existing = PLATFORM.autoclean_task_query(AUTOCLEAN_TASK_NAME)
+    except AutocleanTaskQueryError as exc:
+        if not force:
+            raise FleetCliError(
+                f"cannot determine whether task {AUTOCLEAN_TASK_NAME!r} is "
+                f"fleet-owned ({exc}) -- retry, or rerun with --force to remove "
+                f"anyway")
+        existing = None
+    if existing is not None and not _autoclean_task_is_ours(existing) and not force:
+        raise FleetCliError(
+            f"scheduled task {AUTOCLEAN_TASK_NAME!r} exists and is not "
+            f"fleet-owned by THIS identity -- ownership is all three of: this "
+            f"fleet.py ({_autoclean_script_path()}), the `autoclean` "
+            f"subcommand, and --fleet-home {Path(FLEET_HOME).resolve()}. "
+            f"Found {existing[:120]!r} -- refusing to delete a foreign task of "
+            f"the same name; rerun with --force to remove anyway.")
     ok, msg = PLATFORM.autoclean_task_remove(AUTOCLEAN_TASK_NAME)
     if not ok:
         raise FleetCliError(f"scheduler delete failed: {msg}")
@@ -7751,6 +7773,22 @@ def _roster_entry_for(entries, sid):
     return None
 
 
+def _roster_entry_has_life_signal(entry) -> bool:
+    """True iff a roster entry proves the session actually ATTACHED (a
+    process, or a run that reached a state) rather than being a never-attach
+    husk. Same cheapest-reliable-first signals `_await_attach` documents,
+    minus the vanished/outcome cases: an entry present enough to be matched
+    here is by definition not vanished. Used by the handoff name-join
+    fallback, where a name match alone is a weaker identity proof than the
+    sid-prefix join and so must be backed by a life signal (reconcile
+    husk-binding LOW)."""
+    if not isinstance(entry, dict):
+        return False
+    if "status" in entry or "pid" in entry:
+        return True
+    return entry.get("state") in ("done", "failed", "stopped", "blocked")
+
+
 def _join_roster_by_short_id(short_id, roster_fetch, sleep,
                              verify_seconds=NATIVE_JOIN_VERIFY_SECONDS,
                              exclude_sids=frozenset(), clock=time.monotonic):
@@ -7761,17 +7799,36 @@ def _join_roster_by_short_id(short_id, roster_fetch, sleep,
     dispatch began (belt-and-braces against joining a foreign, pre-existing
     session that happens to share the short-id prefix -- adversarial trap 1).
     `clock` is injectable so tests never pay the real verify-window wall time.
+
+    Residual 3a (LOW, carried): a FULL-WINDOW roster blackout -- zero
+    successful fetches before the deadline -- is CANNOT-VERIFY, not a join
+    failure. Returning None there let the caller declare a possibly-live
+    session DOA (dispatch) or a false `successor-doa` (handoff). Same H1
+    doctrine `_await_attach` already applies: an unobserved session is never
+    treated as dead. Raises NativeDispatchError so the caller distinguishes
+    "roster unavailable" (indeterminate) from "observed, not in roster"
+    (a genuine None). One successful fetch -- even of an empty roster -- is
+    proof the roster was observed, so absence there stays None.
     """
     deadline = clock() + verify_seconds
+    verified_once = False
     while True:
         ok, payload = roster_fetch()
         if ok:
+            verified_once = True
             for e in payload:
                 sid = e.get("sessionId") if isinstance(e, dict) else None
                 if (isinstance(sid, str) and sid.startswith(short_id)
                         and sid not in exclude_sids):
                     return sid
         if clock() >= deadline:
+            if not verified_once:
+                raise NativeDispatchError(
+                    f"cannot verify roster join for short id {short_id}: every "
+                    f"roster fetch failed for {verify_seconds:.0f}s -- the roster "
+                    f"is unavailable, so the join is INDETERMINATE, not failed "
+                    f"(an unobserved session is never declared dead)",
+                    short_id=short_id)
             return None
         sleep(NATIVE_JOIN_POLL_SECONDS)
 
@@ -9721,29 +9778,62 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     # fallback, M-B T10 fix 4).
     short_id = _parse_bg_short_id(proc.stdout or "")
     successor_sid = None
+    # Residual 3b (LOW): a full-window roster blackout is CANNOT-VERIFY, not a
+    # dead successor. `_join_roster_by_short_id` raises on blackout; the
+    # name-join fallback tracks `verified_once` for the same distinction. Both
+    # land here, and the branch below issues `successor-indeterminate` -- never
+    # a false `successor-doa` -- when the roster was never once observed.
+    join_indeterminate = False
     if short_id:
-        successor_sid = _join_roster_by_short_id(
-            short_id, roster_fetch, sleep,
-            verify_seconds=SUPERVISOR_ROSTER_VERIFY_SECONDS,
-            exclude_sids=pre_sids, clock=clock)
+        try:
+            successor_sid = _join_roster_by_short_id(
+                short_id, roster_fetch, sleep,
+                verify_seconds=SUPERVISOR_ROSTER_VERIFY_SECONDS,
+                exclude_sids=pre_sids, clock=clock)
+        except NativeDispatchError:
+            join_indeterminate = True
     else:
         print("short-id parse failed -- falling back to name join (G6 fallback)")
         deadline = clock() + SUPERVISOR_ROSTER_VERIFY_SECONDS
+        verified_once = False
         while clock() < deadline:
             ok, payload = roster_fetch()
             if ok:
+                verified_once = True
                 # Same hostile-sessionId-value guard as pre_sids above: a
                 # dict-valued sessionId would raise TypeError from the
                 # unhashable membership test against the set.
+                #
+                # Reconcile husk-binding (LOW): a name match is a WEAKER
+                # identity proof than the sid-prefix join (name reuse /
+                # ai-title collision), so the fallback must ALSO require a
+                # life signal -- `_roster_entry_has_life_signal` -- before
+                # binding. Binding a never-attach husk here would print it as
+                # the successor sid and wait out the whole handshake timeout.
                 fresh = [e for e in payload if isinstance(e, dict)
                          and e.get("name") == name
                          and isinstance(e.get("sessionId"), str)
                          and e.get("sessionId")
-                         and e.get("sessionId") not in pre_sids]
+                         and e.get("sessionId") not in pre_sids
+                         and _roster_entry_has_life_signal(e)]
                 if fresh:
                     successor_sid = fresh[0]["sessionId"]
                     break
             sleep(3)
+        else:
+            # Loop ran to the deadline without binding. If NOT ONE fetch
+            # succeeded, that is a blackout (indeterminate), not a DOA.
+            if not verified_once:
+                join_indeterminate = True
+    if join_indeterminate:
+        _abort_flag("successor-indeterminate", successor_short_id=short_id)
+        print(f"successor INDETERMINATE: the roster was unavailable for the "
+              f"whole {SUPERVISOR_ROSTER_VERIFY_SECONDS:.0f}s join window, so "
+              f"whether the dispatched successor joined CANNOT be verified -- "
+              f"NOT declaring it DOA (a live successor must not be stranded). "
+              f"Claim unchanged -- duty continues; recover via `claude agents`, "
+              f"then re-run sup-handoff-begin only once the roster is back.")
+        return 1
     if successor_sid is None:
         _abort_flag("successor-doa", successor_short_id=short_id)
         print(f"successor DOA: no roster entry named {name!r} appeared within "
