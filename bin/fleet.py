@@ -28,10 +28,13 @@ from __future__ import annotations
 import argparse
 import ctypes
 import functools
+import hashlib
+import hmac
 import json
 import math
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -7918,6 +7921,62 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
 SUPERVISOR_CLAIM_STALE_SECONDS = 3600.0   # S: seizure/nag threshold, > beat period + margin (spec §4)
 SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS = 300.0   # T: handoff wait before abort (spec §4)
 SUPERVISOR_ROSTER_VERIFY_SECONDS = 60.0   # dispatch -> roster-join window (contract G6 fallback); keep in sync with NATIVE_JOIN_VERIFY_SECONDS above (same window, independently defined -- Finding 3)
+
+# claim-nonce §5.3: how long a minted-but-unacknowledged generation blocks a
+# replacement mint. Proposed at 900 s and NOT 300 s, and the asymmetry is the
+# part that must not be re-derived backwards: §5.4(b) wants it short (a pending
+# lost to a verb that died after committing is replaced sooner) and §5.4(d)
+# wants it long (a delivered pending is not stolen from a body that is merely
+# thinking). The two costs are NOT symmetric -- a long TTL only delays the
+# REPLACEMENT of a lost pending, during which the body keeps working on `live`
+# and nothing is refused, whereas a short TTL actively invalidates a value a
+# legitimate body is holding. 900 s is above a routine supervisor turn here;
+# the exact number is the operator's to tune.
+PENDING_NONCE_TTL_SECONDS = 900.0
+
+
+# ---------------------------------------------------------------------------
+# Supervisor claim nonce -- the continuity primitives (claim-nonce §5.1, §5.2)
+#
+# The nonce is a CONTINUITY token, not an authorization one. Presenting the
+# current generation proves exactly one thing: the actor presenting this value
+# is the same actor to which the last generation was delivered. §2.1 of that
+# spec explains why nothing on this box can prove more than that.
+#
+# Stdlib-only and inside the 3.10 floor: `secrets.token_urlsafe` (3.6+),
+# `hashlib.sha256`, `hmac.compare_digest` (3.3+).
+# ---------------------------------------------------------------------------
+
+def mint_nonce() -> str:
+    """A fresh generation. Entropy only -- never derived from the incarnation
+    id, the sid or the clock, all three of which a lock-free view publishes."""
+    return secrets.token_urlsafe(32)
+
+
+def nonce_digest(value: str) -> str:
+    """The stored form. INCARNATION holds this, never the value (§5.2).
+
+    Hash-only storage protects the copy in `supervisor/`; §5.5 is explicit
+    that this is NOT what makes the nonce unforgeable -- the real store is the
+    session transcript, which `--fork-session` duplicates by design."""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def nonce_matches(presented, stored) -> bool:
+    """Constant-time comparison of a presented value against a stored digest.
+
+    Both operands of `hmac.compare_digest` are HEX STRINGS -- §5.2 names
+    "comparing a digest object to a hex string" as the shape to avoid, and
+    `compare_digest` raises TypeError on a str/bytes pair rather than
+    returning False. Every non-string input is therefore a REFUSAL here, never
+    an exception: an absent `nonce_hash` (a legacy claim §9, a released claim
+    §6.3) reaches this function routinely, and deciding what that absence
+    means is §5.3's job one layer up, not this primitive's."""
+    if not isinstance(presented, str) or not presented:
+        return False
+    if not isinstance(stored, str) or not stored:
+        return False
+    return hmac.compare_digest(nonce_digest(presented), stored)
 
 # B4/D6: the fleet mode name the handoff successor is dispatched under when the
 # operator passes no --permission-mode. Deliberately the SAME default

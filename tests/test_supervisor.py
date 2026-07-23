@@ -111,6 +111,78 @@ def _claim(inc="inc-old", sid="sid-old", beat=None):
             "heartbeat_at": _iso(beat), "claimed_via": "fresh"}
 
 
+class TestNoncePrimitives:
+    """claim-nonce §5.2: the three stdlib primitives the continuity proof is
+    built from, and the one comparison SHAPE the spec names as the thing to
+    avoid ("comparing a digest object to a hex string").
+
+    These are deliberately tested apart from the claim machinery: every later
+    rule in §5.3 is a composition of `nonce_digest` + `nonce_matches`, so a
+    silent weakening here (a truncated digest, an `==` that short-circuits, a
+    stored value that is bytes and compares False against everything) would
+    show up as a subtle acceptance/refusal bug three layers away."""
+
+    def test_mint_nonce_is_urlsafe_and_never_repeats(self):
+        values = {fleet.mint_nonce() for _ in range(50)}
+        assert len(values) == 50, "mint_nonce must not repeat"
+        for v in values:
+            # secrets.token_urlsafe(32) -> 43 chars of [A-Za-z0-9_-].
+            assert len(v) >= 43
+            assert re.fullmatch(r"[A-Za-z0-9_-]+", v), v
+
+    def test_mint_nonce_is_not_derived_from_anything_the_claim_publishes(self):
+        # A generation minted twice in the same second, for the same claim,
+        # must still differ: the value is entropy, never a function of the
+        # incarnation id / sid / clock (all three are published by views).
+        assert fleet.mint_nonce() != fleet.mint_nonce()
+
+    def test_nonce_digest_is_sha256_hex_of_utf8(self):
+        import hashlib
+        v = "a-nonce-with-é-in-it"
+        assert fleet.nonce_digest(v) == hashlib.sha256(v.encode("utf-8")).hexdigest()
+        assert len(fleet.nonce_digest(v)) == 64
+        assert re.fullmatch(r"[0-9a-f]{64}", fleet.nonce_digest(v))
+
+    def test_nonce_matches_accepts_the_value_behind_the_stored_digest(self):
+        v = fleet.mint_nonce()
+        assert fleet.nonce_matches(v, fleet.nonce_digest(v)) is True
+
+    def test_nonce_matches_refuses_a_different_value(self):
+        v, other = fleet.mint_nonce(), fleet.mint_nonce()
+        assert fleet.nonce_matches(other, fleet.nonce_digest(v)) is False
+
+    @pytest.mark.parametrize("presented", [None, "", 0, b"bytes"])
+    def test_nonce_matches_refuses_a_missing_or_non_string_presentation(self, presented):
+        v = fleet.mint_nonce()
+        assert fleet.nonce_matches(presented, fleet.nonce_digest(v)) is False
+
+    @pytest.mark.parametrize("stored", [None, "", 0, b"deadbeef", {"h": "x"}])
+    def test_nonce_matches_refuses_a_missing_or_non_string_store(self, stored):
+        # An absent `nonce_hash` (legacy claim, released claim) must be a
+        # REFUSAL from this primitive, never a crash and never a match --
+        # §5.3's legacy branch is a decision made one layer up, not here.
+        assert fleet.nonce_matches(fleet.mint_nonce(), stored) is False
+
+    def test_nonce_matches_refuses_the_raw_digest_shape_the_spec_warns_about(self):
+        # §5.2: "comparing a digest object to a hex string is the shape to
+        # avoid". `hmac.compare_digest` raises TypeError on a str/bytes pair,
+        # so a store holding raw digest BYTES must be refused, not raised.
+        import hashlib
+        v = fleet.mint_nonce()
+        assert fleet.nonce_matches(v, hashlib.sha256(v.encode("utf-8")).digest()) is False
+
+    def test_pending_nonce_ttl_is_the_long_value_and_the_asymmetry_is_pinned(self):
+        # §5.3: proposed at 900 s, NOT 300 s. The tension between §5.4(b)
+        # (short: a pending lost to a failed verb is replaced sooner) and
+        # §5.4(d) (long: a delivered pending is not stolen from a body that is
+        # merely thinking) resolves toward LONG, because a long TTL only
+        # delays the replacement of a lost pending while a short one actively
+        # invalidates a value a legitimate body is holding. Pinned so the
+        # asymmetry is not re-derived backwards.
+        assert fleet.PENDING_NONCE_TTL_SECONDS == 900.0
+        assert fleet.PENDING_NONCE_TTL_SECONDS > fleet.SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS
+
+
 class TestClaimDecision:
     def test_no_claim_file_claims(self):
         v, _ = fleet.supervisor_claim_decision(None, set(), None, now=NOW)
