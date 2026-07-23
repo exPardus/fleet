@@ -565,6 +565,422 @@ class TestCheckpointHeartbeat:
         assert fleet.read_incarnation()["heartbeat_at"] is not None
 
 
+def _ckpt(sid="sid-me", nonce=None, body="did a thing", kind="CHECKPOINT"):
+    return SimpleNamespace(body=body, kind=kind, sid=sid, nonce=nonce)
+
+
+def _nonce_of(out: str) -> str:
+    """The one plaintext generation a verb delivers, parsed off its stdout.
+
+    §5.3: the plaintext of a newly minted pending is printed once, on the
+    verb's own stdout, after the commit -- there is no other copy anywhere, so
+    a test that wants the next generation has to read it exactly where a real
+    supervisor body reads it."""
+    values = re.findall(r"^NONCE: (?!unchanged)(\S+)$", out, re.M)
+    assert len(values) == 1, f"expected exactly one delivered generation, got {values!r}"
+    return values[0]
+
+
+class TestLegacyClaimUpgrade:
+    """T11 / §9: the path EVERY existing installation takes on first contact.
+
+    A shipped five-key INCARNATION has no `nonce_hash`. §5.3 rule 4 honors
+    today's sid equality ONCE and upgrades the claim in place. §9's predicate
+    is `nonce_hash` absent AND `state` absent, precisely so a released claim
+    (§6.3, which also has no `nonce_hash`) cannot be misread as legacy and
+    resurrected by whoever matches a sid the release already deleted."""
+
+    def _legacy(self, sid="sid-me", inc="inc-me"):
+        beat = (datetime.now(timezone.utc) - timedelta(seconds=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        fleet.write_incarnation({"incarnation_id": inc, "session_id": sid,
+                                 "claimed_at": beat, "heartbeat_at": beat,
+                                 "claimed_via": "fresh"})
+
+    def test_legacy_claim_is_honored_once_by_sid_and_upgraded_in_place(self, sup_home, capsys):
+        self._legacy()
+        assert fleet.cmd_sup_checkpoint(_ckpt()) == 0
+        value = _nonce_of(capsys.readouterr().out)
+        claim = fleet.read_incarnation()
+        assert claim["nonce_seq"] == 1
+        assert claim["nonce_hash"] == fleet.nonce_digest(value)
+        assert claim["incarnation_id"] == "inc-me", "an upgrade is not a new incarnation"
+
+    def test_the_upgrade_delivers_a_LIVE_generation_not_a_pending_one(self, sup_home, capsys):
+        # §5.3 rule 4 mints a LIVE generation and sets nonce_seq = 1. Minting a
+        # pending in the same breath would deliver two values on one output and
+        # make "the most recent generation it was given" ambiguous on the very
+        # first contact -- the presenter-obligation hazard of §5.4(e), at the
+        # one moment every installation passes through.
+        self._legacy()
+        fleet.cmd_sup_checkpoint(_ckpt())
+        capsys.readouterr()
+        claim = fleet.read_incarnation()
+        assert "pending_nonce_hash" not in claim
+        assert "pending_at" not in claim
+
+    def test_after_the_upgrade_the_sid_alone_no_longer_suffices(self, sup_home, capsys):
+        self._legacy()
+        fleet.cmd_sup_checkpoint(_ckpt())
+        capsys.readouterr()
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_sup_checkpoint(_ckpt())
+
+    def test_after_the_upgrade_the_delivered_generation_does_suffice(self, sup_home, capsys):
+        self._legacy()
+        fleet.cmd_sup_checkpoint(_ckpt())
+        value = _nonce_of(capsys.readouterr().out)
+        assert fleet.cmd_sup_checkpoint(_ckpt(nonce=value)) == 0
+
+    def test_legacy_sid_mismatch_still_refuses_exactly_as_shipped_code_does(self, sup_home):
+        self._legacy(sid="sid-holder")
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_sup_checkpoint(_ckpt(sid="sid-intruder"))
+        assert "nonce_hash" not in fleet.read_incarnation(), "a refusal upgrades nothing"
+
+    def test_a_released_claim_is_NOT_legacy_and_is_not_resurrected_by_a_sid(self, sup_home):
+        # T12. The released claim keeps `released_by_sid` (§6.3), so the
+        # tempting-but-wrong implementation -- "no nonce_hash means legacy,
+        # compare the sid" -- has a sid sitting right there to match.
+        released = {"incarnation_id": "inc-old", "lineage_id": "lin-x",
+                    "claimed_via": "fresh", "released_at": fleet.now_iso(),
+                    "released_by_sid": "sid-me", "state": "released"}
+        fleet.write_incarnation(released)
+        with pytest.raises(fleet.FleetCliError) as exc:
+            fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me"))
+        assert fleet.read_incarnation() == released, "a released claim is terminal"
+        # The released state is decided by its own branch, not reached by
+        # falling through the continuity rules to the generic refusal: a body
+        # facing a cleanly released claim is not facing a possible second body,
+        # and telling it so would send it to the operator for nothing. §6.1
+        # rule 1 is the route forward and the message says exactly that.
+        assert "released" in str(exc.value)
+        assert "sup-boot" in str(exc.value)
+        assert "second body" not in str(exc.value)
+
+    def test_a_released_claim_carrying_a_STRAY_session_id_is_still_not_legacy(self, sup_home):
+        """Fault injection for §9's second conjunct.
+
+        §6.3 removes `session_id` on release, so with a correctly-written
+        released claim the weakened predicate (`nonce_hash` absent alone)
+        still refuses -- by accident, on the sid comparison, because there is
+        no sid to match. That accident is exactly what makes the conjunct look
+        droppable. §9 names the hazard directly: "with no recorded sid there is
+        nothing for a sid comparison to match EVEN IF a future reader
+        re-introduces one". This is that reader. Written by an older release
+        path, a hand-edited file, or a merge of the two shapes, the sid is
+        present -- and under the weakened predicate the claim is upgraded in
+        place, `state: released` survives beside a live generation, and
+        "released" has stopped being terminal."""
+        released = {"incarnation_id": "inc-old", "lineage_id": "lin-x",
+                    "claimed_via": "fresh", "released_at": fleet.now_iso(),
+                    "released_by_sid": "sid-me", "session_id": "sid-me",
+                    "state": "released"}
+        fleet.write_incarnation(released)
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me"))
+        assert fleet.read_incarnation() == released
+        assert "nonce_hash" not in fleet.read_incarnation()
+
+
+class TestLegacyPredicateDirectly:
+    """§9's predicate, pinned as a UNIT.
+
+    `_claim_is_legacy` is SHADOWED at its only call site: `_require_claim_holder`
+    raises on `state == "released"` before ever consulting it, so dropping the
+    `state` conjunct leaves every verb-level test green. A guard that cannot be
+    made to go red through the surface has to be pinned at its own level or it
+    is decorative -- and this one is not decorative, because §9 wrote it down
+    precisely as belt-and-braces for the day a future reader re-introduces a
+    `session_id` onto a released claim."""
+
+    def test_a_five_key_claim_is_legacy(self):
+        assert fleet._claim_is_legacy(
+            {"incarnation_id": "i", "session_id": "s", "claimed_at": "t",
+             "heartbeat_at": "t", "claimed_via": "fresh"}) is True
+
+    def test_a_claim_with_a_generation_is_not_legacy(self):
+        assert fleet._claim_is_legacy({"nonce_hash": "ab" * 32}) is False
+
+    def test_a_released_claim_is_not_legacy_even_though_it_has_no_generation(self):
+        assert fleet._claim_is_legacy(
+            {"incarnation_id": "i", "released_by_sid": "s", "state": "released"}) is False
+
+    def test_a_released_claim_with_a_stray_session_id_is_still_not_legacy(self):
+        assert fleet._claim_is_legacy(
+            {"incarnation_id": "i", "session_id": "s", "released_by_sid": "s",
+             "state": "released"}) is False
+
+
+class TestClaimContinuity:
+    """§5.3's validation rules, driven through a real verb rather than the
+    helper, because the rules only mean anything in company with the single
+    `write_incarnation` inside the single `fleet_lock` that §5.3 mandates."""
+
+    def _hold(self, sid="sid-me", inc="inc-me", **extra):
+        beat = (datetime.now(timezone.utc) - timedelta(seconds=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        value = fleet.mint_nonce()
+        claim = {"incarnation_id": inc, "session_id": sid, "claimed_at": beat,
+                 "heartbeat_at": beat, "claimed_via": "fresh",
+                 "nonce_hash": fleet.nonce_digest(value), "nonce_seq": 1,
+                 "lineage_id": "lin-20260723-abcd"}
+        claim.update(extra)
+        fleet.write_incarnation(claim)
+        return value
+
+    def test_rule_1_the_live_generation_is_accepted_and_promotes_nothing(self, sup_home, capsys):
+        live = self._hold()
+        assert fleet.cmd_sup_checkpoint(_ckpt(nonce=live)) == 0
+        capsys.readouterr()
+        claim = fleet.read_incarnation()
+        assert claim["nonce_hash"] == fleet.nonce_digest(live)
+        assert claim["nonce_seq"] == 1, "rule 1 promotes nothing"
+
+    def test_T5_a_batch_of_calls_from_one_body_all_validate_and_mint_ONE_pending(
+            self, sup_home, capsys):
+        # The false-positive regression test. A Claude Code session batches
+        # independent tool calls by instruction; fleet_lock serialises them.
+        # All present `live`, all validate, exactly one pending is minted and
+        # calls 2..N are told so. v1's rotate-on-every-call design turned a
+        # healthy body following its own skill into a two-body alarm.
+        live = self._hold()
+        outs = []
+        for i in range(4):
+            assert fleet.cmd_sup_checkpoint(_ckpt(nonce=live, body=f"call {i}")) == 0
+            outs.append(capsys.readouterr().out)
+        assert len(re.findall(r"^NONCE: (?!unchanged)", "".join(outs), re.M)) == 1
+        assert "NONCE: unchanged" in outs[1]
+        assert outs.count(outs[1]) == 3 or all("unchanged" in o for o in outs[1:])
+        claim = fleet.read_incarnation()
+        assert claim["nonce_seq"] == 1, "nothing was acknowledged, so nothing advanced"
+
+    def test_the_unchanged_notice_names_the_outstanding_generation(self, sup_home, capsys):
+        live = self._hold()
+        fleet.cmd_sup_checkpoint(_ckpt(nonce=live))
+        capsys.readouterr()
+        fleet.cmd_sup_checkpoint(_ckpt(nonce=live))
+        assert "NONCE: unchanged (generation 2 already outstanding)" in capsys.readouterr().out
+
+    def test_T4_presenting_the_pending_generation_acknowledges_and_promotes(
+            self, sup_home, capsys):
+        live = self._hold()
+        fleet.cmd_sup_checkpoint(_ckpt(nonce=live))
+        pending = _nonce_of(capsys.readouterr().out)
+        assert fleet.cmd_sup_checkpoint(_ckpt(nonce=pending)) == 0
+        acked_out = capsys.readouterr().out
+        claim = fleet.read_incarnation()
+        assert claim["nonce_hash"] == fleet.nonce_digest(pending)
+        assert claim["nonce_seq"] == 2
+        # Rule 2 clears all three pending slots; the SAME call then mints
+        # generation 3, so `pending_nonce_hash` is repopulated -- with a
+        # different value, and `prior_pending_hash` stays cleared because that
+        # mint replaced nothing.
+        assert claim["pending_nonce_hash"] != claim["nonce_hash"]
+        assert claim["pending_nonce_hash"] == fleet.nonce_digest(_nonce_of(acked_out))
+        assert "prior_pending_hash" not in claim
+
+    def test_T4_the_old_live_generation_dies_only_once_its_successor_is_proven_received(
+            self, sup_home, capsys):
+        live = self._hold()
+        fleet.cmd_sup_checkpoint(_ckpt(nonce=live))
+        pending = _nonce_of(capsys.readouterr().out)
+        fleet.cmd_sup_checkpoint(_ckpt(nonce=pending))       # the acknowledgment
+        capsys.readouterr()
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_sup_checkpoint(_ckpt(nonce=live))
+
+    def test_T7_a_FRESH_pending_is_not_replaced(self, sup_home, capsys):
+        live = self._hold()
+        fleet.cmd_sup_checkpoint(_ckpt(nonce=live))
+        capsys.readouterr()
+        before = fleet.read_incarnation()["pending_nonce_hash"]
+        fleet.cmd_sup_checkpoint(_ckpt(nonce=live))
+        capsys.readouterr()
+        assert fleet.read_incarnation()["pending_nonce_hash"] == before
+
+    def _expire_pending(self):
+        claim = fleet.read_incarnation()
+        old = datetime.now(timezone.utc) - timedelta(
+            seconds=fleet.PENDING_NONCE_TTL_SECONDS + 60)
+        claim["pending_at"] = old.strftime("%Y-%m-%dT%H:%M:%SZ")
+        fleet.write_incarnation(claim)
+        return claim["pending_nonce_hash"]
+
+    def test_T7_an_EXPIRED_pending_is_replaced_and_the_old_hash_moves_to_prior(
+            self, sup_home, capsys):
+        live = self._hold()
+        fleet.cmd_sup_checkpoint(_ckpt(nonce=live))
+        capsys.readouterr()
+        p1_hash = self._expire_pending()
+        fleet.cmd_sup_checkpoint(_ckpt(nonce=live))
+        p2 = _nonce_of(capsys.readouterr().out)
+        claim = fleet.read_incarnation()
+        assert claim["pending_nonce_hash"] == fleet.nonce_digest(p2) != p1_hash
+        assert claim["prior_pending_hash"] == p1_hash
+
+    def test_T7_the_body_holding_the_REPLACED_pending_is_accepted_not_refused(
+            self, sup_home, capsys):
+        # §5.4(d): without the third slot the alarm fires on the LEGITIMATE
+        # body -- the one that spent longer than the TTL thinking -- while the
+        # body that acts most often inside the window owns the chain. That is
+        # the wrong bias for this system. Rule 3 bounds it to two TTL periods.
+        live = self._hold()
+        fleet.cmd_sup_checkpoint(_ckpt(nonce=live))
+        p1 = _nonce_of(capsys.readouterr().out)
+        self._expire_pending()
+        fleet.cmd_sup_checkpoint(_ckpt(nonce=live))          # mints P2, P1 -> prior
+        capsys.readouterr()
+        assert fleet.cmd_sup_checkpoint(_ckpt(nonce=p1)) == 0
+        capsys.readouterr()
+        assert fleet.read_incarnation()["nonce_seq"] == 1, "rule 3 promotes nothing"
+
+    def test_the_prior_slot_is_ONE_slot_not_a_chain(self, sup_home, capsys):
+        # §5.3: "One slot, not a chain: a second replacement drops the oldest."
+        live = self._hold()
+        fleet.cmd_sup_checkpoint(_ckpt(nonce=live))
+        p1 = _nonce_of(capsys.readouterr().out)
+        self._expire_pending()
+        fleet.cmd_sup_checkpoint(_ckpt(nonce=live))
+        capsys.readouterr()
+        self._expire_pending()
+        fleet.cmd_sup_checkpoint(_ckpt(nonce=live))
+        capsys.readouterr()
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_sup_checkpoint(_ckpt(nonce=p1))
+
+    def test_an_acknowledgment_clears_the_prior_slot_too(self, sup_home, capsys):
+        # §5.3 rule 2 clears `pending_nonce_hash`, `pending_at` AND
+        # `prior_pending_hash`. Dropping the third from the clear list leaves a
+        # superseded generation presentable across an acknowledgment that was
+        # supposed to retire everything before it -- a third live value, which
+        # is precisely the budget §5.4(d) bounded to one.
+        live = self._hold()
+        fleet.cmd_sup_checkpoint(_ckpt(nonce=live))
+        p1 = _nonce_of(capsys.readouterr().out)
+        self._expire_pending()
+        fleet.cmd_sup_checkpoint(_ckpt(nonce=live))          # P1 -> prior, mints P2
+        p2 = _nonce_of(capsys.readouterr().out)
+        assert fleet.read_incarnation()["prior_pending_hash"] == fleet.nonce_digest(p1)
+        fleet.cmd_sup_checkpoint(_ckpt(nonce=p2))            # the acknowledgment
+        capsys.readouterr()
+        assert "prior_pending_hash" not in fleet.read_incarnation()
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_sup_checkpoint(_ckpt(nonce=p1))
+
+    def test_rule_5_an_unknown_value_is_refused(self, sup_home):
+        self._hold()
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_sup_checkpoint(_ckpt(nonce=fleet.mint_nonce()))
+
+    def test_rule_5_a_missing_value_against_a_v2_claim_is_refused(self, sup_home):
+        self._hold()
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_sup_checkpoint(_ckpt(nonce=None))
+
+    def test_a_refusal_writes_neither_the_journal_nor_the_claim(self, sup_home):
+        self._hold()
+        before = fleet.read_incarnation()
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_sup_checkpoint(_ckpt(nonce=fleet.mint_nonce()))
+        assert fleet.supervisor_journal_entries() == []
+        assert fleet.read_incarnation() == before
+
+    def test_T1_fork_steer_the_sid_may_rotate_under_a_held_generation(self, sup_home, capsys):
+        # §5.1: the nonce REPLACES the sid as the continuity key. §5.10(a): at
+        # rotation time there is nothing to do -- the body keeps presenting its
+        # generation and `session_id` is restamped by the next validated write.
+        live = self._hold(sid="sid-before")
+        assert fleet.cmd_sup_checkpoint(_ckpt(sid="sid-after", nonce=live)) == 0
+        capsys.readouterr()
+        claim = fleet.read_incarnation()
+        assert claim["session_id"] == "sid-after", "§6.6: the roster join tracks the acting body"
+        assert claim["incarnation_id"] == "inc-me", "no new incarnation"
+        assert [e["kind"] for e in fleet.supervisor_journal_entries()] == ["CHECKPOINT"], \
+            "no SEIZED"
+
+    def test_a_valid_generation_from_an_unknown_sid_beats_a_matching_sid_without_one(
+            self, sup_home, capsys):
+        # The two halves of the same sentence, asserted together so neither can
+        # be quietly dropped: continuity is sufficient, and the sid is not.
+        live = self._hold(sid="sid-holder")
+        assert fleet.cmd_sup_checkpoint(_ckpt(sid="sid-stranger", nonce=live)) == 0
+        capsys.readouterr()
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_sup_checkpoint(_ckpt(sid="sid-holder", nonce=None))
+
+    def test_heartbeat_carries_the_same_continuity_rules_as_checkpoint(self, sup_home, capsys):
+        live = self._hold()
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_sup_heartbeat(SimpleNamespace(sid="sid-me", nonce=None))
+        assert fleet.cmd_sup_heartbeat(SimpleNamespace(sid="sid-me", nonce=live)) == 0
+        assert "NONCE: " in capsys.readouterr().out
+
+
+class TestRefusalMessageIsAgentSafe:
+    """§5.7's binding constraint on agent-facing output: it must name the
+    ambiguity and the escalation, and must NOT name a lever that resolves it
+    unilaterally. v1's refusal instructed the refused caller to run a
+    read-only view and then act on what it printed -- the refused body may be
+    the DIVERGENT one (§5.4(c) cannot prefer either), so naming a lever hands
+    it to whichever body reads the message first.
+
+    The human-facing runbook (`skills/fleet/supervisor.md`) is the far side of
+    that audience boundary, and it is a convention, not a mechanism."""
+
+    def _refusal(self, sup_home):
+        value = fleet.mint_nonce()
+        beat = fleet.now_iso()
+        fleet.write_incarnation({"incarnation_id": "inc-me", "session_id": "sid-me",
+                                 "claimed_at": beat, "heartbeat_at": beat,
+                                 "claimed_via": "fresh", "nonce_seq": 4,
+                                 "nonce_hash": fleet.nonce_digest(value)})
+        with pytest.raises(fleet.FleetCliError) as exc:
+            fleet.cmd_sup_checkpoint(_ckpt(nonce=fleet.mint_nonce()))
+        return str(exc.value)
+
+    def test_it_names_the_ambiguity_and_the_escalation(self, sup_home):
+        msg = self._refusal(sup_home)
+        assert "second body" in msg
+        assert "escalate" in msg
+
+    def test_it_names_the_expected_generation_and_the_verb(self, sup_home):
+        msg = self._refusal(sup_home)
+        assert "4" in msg            # §5.6: the refusal names the expected nonce_seq
+        assert "sup-checkpoint" in msg
+
+    @pytest.mark.parametrize("lever", ["sup-status", "INCARNATION", "--force", "rm ", "delete"])
+    def test_it_names_no_unilateral_lever(self, sup_home, lever):
+        assert lever not in self._refusal(sup_home)
+
+    def test_no_generation_plaintext_reaches_the_error_or_the_stored_state(self, sup_home):
+        # T16: the plaintext appears in no error message and in no file.
+        value = fleet.mint_nonce()
+        beat = fleet.now_iso()
+        fleet.write_incarnation({"incarnation_id": "inc-me", "session_id": "sid-me",
+                                 "claimed_at": beat, "heartbeat_at": beat,
+                                 "claimed_via": "fresh", "nonce_seq": 1,
+                                 "nonce_hash": fleet.nonce_digest(value)})
+        presented = fleet.mint_nonce()
+        with pytest.raises(fleet.FleetCliError) as exc:
+            fleet.cmd_sup_checkpoint(_ckpt(nonce=presented))
+        assert presented not in str(exc.value) and value not in str(exc.value)
+        assert value not in fleet.incarnation_path().read_text(encoding="utf-8")
+
+    def test_a_delivered_generation_never_reaches_the_git_tracked_journal(self, sup_home, capsys):
+        value = fleet.mint_nonce()
+        beat = fleet.now_iso()
+        fleet.write_incarnation({"incarnation_id": "inc-me", "session_id": "sid-me",
+                                 "claimed_at": beat, "heartbeat_at": beat,
+                                 "claimed_via": "fresh", "nonce_seq": 1,
+                                 "nonce_hash": fleet.nonce_digest(value)})
+        fleet.cmd_sup_checkpoint(_ckpt(nonce=value))
+        pending = _nonce_of(capsys.readouterr().out)
+        journal = fleet.supervisor_journal_path().read_text(encoding="utf-8")
+        assert pending not in journal and value not in journal
+        assert fleet.incarnation_path().read_text(encoding="utf-8").count(pending) == 0
+        # And the anchored entry regex still matches every header written.
+        assert len(fleet.supervisor_journal_entries()) == 1
+
+
 class TestSupStatus:
     def test_json_shape(self, sup_home, capsys):
         fleet.write_incarnation({"incarnation_id": "inc-me", "session_id": "sid-me",
