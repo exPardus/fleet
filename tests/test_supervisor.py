@@ -1639,6 +1639,274 @@ class TestRefusalMessageIsAgentSafe:
         assert len(fleet.supervisor_journal_entries()) == 1
 
 
+class TestSupRelease:
+    """claim-nonce §6.3 / D3 -- the verb that PRODUCES a released claim.
+
+    Everything that READS a released claim shipped before this: §6.1 rule 1
+    with its B6 roster precondition, `_require_claim_holder`'s released branch,
+    `_claim_is_legacy`'s second conjunct, `_project_claim`'s `state`. None of
+    it was reachable, because no code path could write `state: "released"`.
+    This class is the producer half, and it is written against §6.3's
+    ENUMERATED key set rather than against "some released-looking dict": the
+    enumeration is the fix for v1's gap that made a released claim
+    indistinguishable from a legacy one (§9), so a test that accepts any
+    superset re-opens exactly that hole."""
+
+    def _hold(self, sid="sid-me", inc="inc-me", **extra):
+        beat = (datetime.now(timezone.utc)
+                - timedelta(seconds=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        value = fleet.mint_nonce()
+        claim = {"incarnation_id": inc, "session_id": sid, "claimed_at": beat,
+                 "heartbeat_at": beat, "claimed_via": "fresh",
+                 "nonce_hash": fleet.nonce_digest(value), "nonce_seq": 4,
+                 "lineage_id": "lin-20260101T000000Z-aaaa"}
+        claim.update(extra)
+        fleet.write_incarnation(claim)
+        return value
+
+    @staticmethod
+    def _release(sid="sid-me", nonce=None, reason=None):
+        return fleet.cmd_sup_release(SimpleNamespace(sid=sid, nonce=nonce, reason=reason))
+
+    def test_release_rewrites_the_claim_with_exactly_the_enumerated_key_set(
+            self, sup_home, capsys):
+        """§6.3 enumerates the post-release key set and the removals. Asserted
+        as SET EQUALITY, not as "the keys I care about are present": the whole
+        reason §6.3 enumerates it is that v1 left it open, and an unenumerated
+        leftover `session_id` or `nonce_hash` is what makes a released claim
+        resurrectable (§9)."""
+        value = self._hold()
+        assert self._release(nonce=value, reason="handing the box back") == 0
+        claim = fleet.read_incarnation()
+        assert set(claim) == {"incarnation_id", "lineage_id", "claimed_via",
+                              "released_at", "released_by_sid", "reason", "state"}
+        assert claim["state"] == "released"
+        assert claim["incarnation_id"] == "inc-me"
+        assert claim["lineage_id"] == "lin-20260101T000000Z-aaaa"
+        assert claim["claimed_via"] == "fresh"
+        assert claim["released_by_sid"] == "sid-me"
+        assert claim["reason"] == "handing the box back"
+        # The removals, named individually so a failure says WHICH one leaked.
+        for gone in ("nonce_hash", "pending_nonce_hash", "prior_pending_hash",
+                     "pending_at", "nonce_seq", "session_id", "heartbeat_at"):
+            assert gone not in claim, f"{gone} survived the release"
+
+    def test_release_without_a_reason_omits_the_key_entirely(self, sup_home, capsys):
+        value = self._hold()
+        assert self._release(nonce=value) == 0
+        claim = fleet.read_incarnation()
+        assert "reason" not in claim
+        assert set(claim) == {"incarnation_id", "lineage_id", "claimed_via",
+                              "released_at", "released_by_sid", "state"}
+
+    def test_release_journals_RELEASED_under_the_OUTGOING_incarnation(
+            self, sup_home, capsys):
+        """Checkpoint-then-act, and the same single-writer rule every other
+        journal write obeys: the entry is written while the releasing body is
+        still the holder, under ITS incarnation id -- there is no successor to
+        attribute it to."""
+        value = self._hold(inc="inc-outgoing")
+        assert self._release(nonce=value, reason="done") == 0
+        latest = fleet.supervisor_journal_latest()
+        assert latest["kind"] == "RELEASED"
+        assert latest["inc"] == "inc-outgoing" and latest["sid"] == "sid-me"
+        assert "done" in latest["body"]
+
+    def test_release_requires_a_continuity_proof_and_changes_nothing_without_one(
+            self, sup_home, capsys):
+        self._hold()
+        before = fleet.read_incarnation()
+        with pytest.raises(fleet.SupervisorContinuityError):
+            self._release(nonce=fleet.mint_nonce())
+        assert fleet.read_incarnation() == before        # not released, not touched
+        assert fleet.supervisor_journal_entries() == []  # and nothing journaled
+
+    def test_release_is_refused_for_a_body_that_cannot_prove_continuity(
+            self, sup_home, capsys):
+        """"Not the holder" is a CONTINUITY question, not a sid question
+        (§5.1) -- a body presenting the live generation *is* the holder even
+        after a fork-steer rotated its sid, and a body that cannot present one
+        is not, whatever sid it claims. So the refusal is exercised with the
+        recorded holder's own sid and no generation, which is the shape a
+        sid-keyed guard would have waved through."""
+        self._hold(sid="sid-holder")
+        with pytest.raises(fleet.SupervisorContinuityError):
+            self._release(sid="sid-holder", nonce=None)
+        assert "state" not in fleet.read_incarnation()
+
+    def test_release_delivers_no_generation_on_its_own_stdout(self, sup_home, capsys):
+        """§5.3's delivery rule, read against a claim that is about to stop
+        existing: the released record has no `nonce_hash`, so a generation
+        minted here would be delivered to a body that can never present it and
+        would be the only `NONCE:` line in the transcript that means nothing.
+        Same argument `sup-handoff-complete` already carries."""
+        value = self._hold()
+        assert self._release(nonce=value, reason="r") == 0
+        out = capsys.readouterr().out
+        assert "NONCE:" not in out
+
+    def test_a_released_claim_is_terminal_for_every_holder_verb(self, sup_home, capsys):
+        """The point of releasing. Not merely "checkpoint fails" -- it fails
+        with the released message rather than the continuity refusal, because
+        a body facing a cleanly released claim is not facing a possible second
+        body and §5.7's escalation wording would send it to the operator for
+        nothing."""
+        value = self._hold()
+        assert self._release(nonce=value) == 0
+        capsys.readouterr()
+        with pytest.raises(fleet.FleetCliError, match="was released") as exc:
+            fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=value))
+        assert not isinstance(exc.value, fleet.SupervisorContinuityError)
+        with pytest.raises(fleet.FleetCliError, match="was released"):
+            fleet.cmd_sup_heartbeat(SimpleNamespace(sid="sid-me", nonce=value))
+        with pytest.raises(fleet.FleetCliError, match="was released"):
+            self._release(nonce=value)
+
+    def test_the_released_claim_cannot_be_resurrected_by_the_old_sid(
+            self, sup_home, capsys):
+        """§9's second half, end to end for the first time: the legacy branch
+        would honor a claim with no `nonce_hash` by sid equality -- and a
+        released claim has no `nonce_hash`. It is excluded by the `state`
+        conjunct AND by the absence of any recorded sid to match. Both halves
+        are exercised here by presenting NO generation from the releaser's own
+        sid, which is exactly the shape the legacy branch accepts."""
+        value = self._hold(sid="sid-me")
+        assert self._release(nonce=value) == 0
+        capsys.readouterr()
+        with pytest.raises(fleet.FleetCliError, match="was released"):
+            fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=None))
+        assert fleet.read_incarnation()["state"] == "released"
+
+    def test_release_then_boot_is_a_fresh_claim_and_never_a_seizure(
+            self, sup_home, capsys):
+        """§6.3's fourth unambiguous shape at boot, end to end through both
+        verbs -- the row of the table that had no producer until now."""
+        value = self._hold(sid="sid-old", inc="inc-old")
+        assert self._release(sid="sid-old", nonce=value, reason="planned stop") == 0
+        capsys.readouterr()
+        rc = fleet.cmd_sup_boot(
+            SimpleNamespace(sid="sid-new", handoff_inc=None, nonce=None),
+            which=_fake_which, run=_fake_run_roster([{"sessionId": "sid-new",
+                                                      "status": "busy"}]))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "VERDICT: claim" in out and "released cleanly" in out
+        kinds = [e["kind"] for e in fleet.supervisor_journal_entries()]
+        assert kinds == ["RELEASED", "BOOT"]
+        assert "SEIZED" not in kinds
+        claim = fleet.read_incarnation()
+        assert claim["claimed_via"] == "fresh" and claim["session_id"] == "sid-new"
+        # A fresh claim, so a fresh lineage -- the released body's workers do
+        # not follow it (§6.2: lineage is carried only across a handoff).
+        assert claim["lineage_id"] != "lin-20260101T000000Z-aaaa"
+
+    def test_release_publishes_no_lever_and_no_hash_anywhere(self, sup_home, capsys):
+        """§5.8 + §5.7 for the new verb: its stdout and its journal entry are
+        publishers like any other."""
+        value = self._hold()
+        assert self._release(nonce=value, reason="r") == 0
+        out = capsys.readouterr().out
+        journal = fleet.supervisor_journal_path().read_text(encoding="utf-8")
+        for text in (out, journal):
+            assert value not in text
+            assert fleet.nonce_digest(value) not in text
+
+    def test_the_parser_exposes_release_without_any_force_form(self):
+        """§6.3: `--force --confirm-inc` is DELETED. It was a two-command,
+        fully-sanctioned seizure of a live claim whose only input is printed by
+        a read-only view -- a larger disease than the one it cured (§12 O2
+        leaves it removed). A test, because "we did not add it" is the kind of
+        fact that gets re-added by the next author reading incident 3."""
+        parser = fleet.build_parser()
+        args = parser.parse_args(["sup-release", "--reason", "r", "--nonce", "n",
+                                  "--sid", "s"])
+        assert args.command == "sup-release"
+        assert (args.reason, args.nonce, args.sid) == ("r", "n", "s")
+        assert parser.parse_args(["sup-release"]).reason is None
+        for banned in (["sup-release", "--force"],
+                       ["sup-release", "--confirm-inc", "inc-x"]):
+            with pytest.raises(SystemExit):
+                parser.parse_args(banned)
+
+
+class TestReleasedClaimIsNotCorruption:
+    """T19 / §6.3's binding build rule.
+
+    Removing `heartbeat_at` is correct for the claim and it breaks the one
+    supervisor consumer that reads it outside the claim machinery.
+    `supervisor_status_line` reads `claim["heartbeat_at"]` inside a
+    try/except whose arm says *"heartbeat unreadable -- inspect
+    supervisor/INCARNATION"*, and a released claim is not `None`, so the
+    no-claim branch is skipped and the KeyError arm fires. Per §4.8 that line
+    is consumed by `fleet doctor`, `sup-status`, and
+    `bin/hooks/sessionstart_fleet.py`, which runs in EVERY Claude Code session
+    on this machine -- so without the branch below, the normal outcome of the
+    doctrine §6.3 introduces is a persistent machine-wide false corruption
+    warning."""
+
+    RELEASED = {"incarnation_id": "inc-old", "lineage_id": "lin-x",
+                "claimed_via": "fresh", "released_by_sid": "sid-old",
+                "state": "released"}
+
+    def _released(self, sup_home, released_at=None, **extra):
+        claim = dict(self.RELEASED, released_at=released_at or fleet.now_iso())
+        claim.update(extra)
+        fleet.write_incarnation(claim)
+        return claim
+
+    def test_status_line_reports_a_release_not_corruption(self, sup_home):
+        self._released(sup_home)
+        line = fleet.supervisor_status_line()
+        assert line is not None
+        assert "heartbeat unreadable" not in line
+        assert "released" in line and "inc-old" in line
+        assert "fleet sup-boot" in line
+
+    def test_the_released_line_carries_the_age_of_the_release(self, sup_home):
+        now = datetime.now(timezone.utc)
+        self._released(sup_home, released_at=_iso(now - timedelta(minutes=42)))
+        assert "42m" in fleet.supervisor_status_line(now=now)
+
+    def test_an_unreadable_released_at_still_is_not_reported_as_corruption(self, sup_home):
+        """The released branch must not re-introduce the defect it fixes by
+        raising a KeyError of its own into the same arm."""
+        self._released(sup_home, released_at="not-a-timestamp")
+        line = fleet.supervisor_status_line()
+        assert "released" in line and "heartbeat unreadable" not in line
+
+    def test_doctor_supervisor_claim_row_is_healthy_after_a_clean_release(self, sup_home):
+        """The surface an operator actually looks at. The row reports the
+        released claim and stays ok=True: a planned release is not a fault."""
+        self._released(sup_home)
+        name, ok, detail = fleet._doctor_check_supervisor_claim()
+        assert name == "supervisor-claim"
+        assert ok is True
+        assert "released" in detail and "heartbeat unreadable" not in detail
+
+    def test_sup_status_human_line_does_not_call_a_clean_release_unreadable(
+            self, sup_home, capsys):
+        """`cmd_sup_status`'s human branch is the OTHER reader of the removed
+        `heartbeat_at`, and it is the operator-facing one. §5.8 scoped the
+        redaction rule away from this f-string; the released-state defect is a
+        different question and lands here too."""
+        self._released(sup_home)
+        assert fleet.cmd_sup_status(SimpleNamespace(json=False)) == 0
+        out = capsys.readouterr().out
+        assert "released" in out.lower()
+        assert "unreadable" not in out
+
+    def test_sup_status_json_publishes_the_released_state_and_no_hash(
+            self, sup_home, capsys):
+        self._released(sup_home, reason="planned stop")
+        assert fleet.cmd_sup_status(SimpleNamespace(json=True)) == 0
+        data = json.loads(capsys.readouterr().out)
+        inc = data["incarnation"]
+        assert inc["state"] == "released" and inc["released_by_sid"] == "sid-old"
+        assert inc["reason"] == "planned stop" and inc["released_at"]
+        assert inc["nonce_present"] is False and inc["pending_present"] is False
+        assert "released" in data["nag"]
+
+
 class TestSupStatus:
     def test_json_shape(self, sup_home, capsys):
         fleet.write_incarnation({"incarnation_id": "inc-me", "session_id": "sid-me",
