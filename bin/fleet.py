@@ -8285,6 +8285,30 @@ def supervisor_claim_decision(claim, live_sids: set, latest_entry, now=None,
     if claim is None:
         return ("claim", "no existing claim -- fresh claim")
     if claim.get("state") == "released":
+        # B6 (three-tier-command.md :1184-1190), the prerequisite that spec
+        # filed against this one: "sup-boot must not consume a `released`
+        # record whose `released_by_sid` is still roster-live -- either rule 1
+        # gains a roster-liveness precondition, or release+stop is made atomic
+        # from the claim's perspective". Rule 1 gains the precondition.
+        #
+        # `fleet sup-release` then `claude stop` is TWO commands and the window
+        # between them is real. three-tier adds AUTOMATED occupants of it (a
+        # scheduled beat, `sup-spawn`, a handoff successor polling `sup-boot`),
+        # and SPEC §16.7's one-live-session-per-name blocks a second
+        # `supervisor`-named spawn but not a `sup-boot` from an already-live
+        # differently-named session. Consuming the record inside that window
+        # produces exactly the two-live-supervisors shape §6.6 exists for.
+        #
+        # Keyed on a non-empty STRING only: a released claim carries no
+        # `session_id` at all (§6.3), so a `None` that a drifted or hostile
+        # roster put in the live set must not be able to gate a record that
+        # names no releaser -- that would strand the claim forever on a value
+        # nobody wrote.
+        released_by = claim.get("released_by_sid")
+        if isinstance(released_by, str) and released_by and released_by in live_sids:
+            return ("refuse", f"claim {claim.get('incarnation_id', '?')} is released but its "
+                              f"releaser (sid {released_by}) is still live in the roster -- "
+                              f"release+stop is not complete; wait for that body to exit")
         return ("claim", f"predecessor {claim.get('incarnation_id', '?')} released cleanly "
                          f"-- fresh claim, no seizure")
     holder_sid = claim.get("session_id")
