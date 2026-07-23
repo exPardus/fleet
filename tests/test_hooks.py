@@ -856,6 +856,28 @@ class TestStopOutcome:
         assert rec["output_tokens"] == 7 and rec["input_tokens"] == 11
         assert rec["model"] == "claude-haiku-4-5-20251001"
 
+    def test_records_both_cache_token_summands(self, tmp_path):
+        # three-tier §11.2 (B2): context-window occupancy is the SUM of three
+        # prompt summands -- input_tokens + cache_creation_input_tokens +
+        # cache_read_input_tokens. The belt-and-braces half of §11.2 adds the
+        # two cache fields to the outcome record so a THIRD party (the interface
+        # via sup-status, or the fleet-side ceiling) can read occupancy without
+        # being the supervisor. Dropping cache_creation understates occupancy on
+        # exactly the supervisor's characteristic large-read turn.
+        make_registry(tmp_path, {"w1": {"session_id": "sid-1"}})
+        t = make_transcript(tmp_path, [
+            {"type": "assistant",
+             "message": {"usage": {"input_tokens": 11, "output_tokens": 7,
+                                   "cache_creation_input_tokens": 40000,
+                                   "cache_read_input_tokens": 90000},
+                         "content": [{"type": "text", "text": "done"}]}},
+        ])
+        run_hook(STOP_OUTCOME, self._payload(tmp_path, transcript=t), tmp_path)
+        rec = json.loads((tmp_path / "state" / "outcomes" / "w1.jsonl")
+                         .read_text(encoding="utf-8").strip())
+        assert rec["cache_creation_input_tokens"] == 40000
+        assert rec["cache_read_input_tokens"] == 90000
+
     def test_missing_last_assistant_message_falls_back_to_transcript(self, tmp_path):
         make_registry(tmp_path, {"w1": {"session_id": "sid-1"}})
         t = make_transcript(tmp_path, [
