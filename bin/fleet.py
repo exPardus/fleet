@@ -9048,7 +9048,11 @@ def _compact_nonce_rejection_log(limit=NONCE_REJECTION_LOG_MAX_RECORDS) -> None:
     path = nonce_rejection_log_path()
     try:
         if not path.exists():
-            return          # early-out only; the OSError arm below covers it too
+            # early-out, not a guard -- absence is behavior-identical: the
+            # `except OSError` arm below already swallows the FileNotFoundError
+            # a missing file raises from read_text. Removing this line stays
+            # green by design; it exists only to skip a doomed read.
+            return
         lines = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
         if len(lines) <= limit:
             return
