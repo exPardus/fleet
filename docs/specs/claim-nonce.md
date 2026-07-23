@@ -1054,27 +1054,35 @@ by heartbeat freshness is armed only in the hour after a human last typed a comm
 during exactly the quiet stretches when an unattended second body does damage. Incident 1's phantom
 steers spanned ~100 minutes — longer than the window.
 
-**(f) Neither `supervisor/INCARNATION.tmp` nor `supervisor/HANDSHAKE.tmp` is gitignored.** Filed as a
-shipped-code defect (§13), not built here, but §4.1's `.gitignore` receipt must not be read as
-covering them:
+**(f) `supervisor/*.tmp` is gitignored — CLOSED by the build slice, 2026-07-23.** As drafted this
+subsection recorded a shipped-code defect: neither `supervisor/INCARNATION.tmp` nor
+`supervisor/HANDSHAKE.tmp` was ignored, and §4.1's `.gitignore` receipt must not be read as covering
+them. §13 filed it as a prerequisite. The build slice closed it with one glob line, and **the
+receipt below is the same receipt, re-executed after the fix** — its exit codes inverted, which is
+exactly the coupling the original block predicted:
 
 ```
 # at 091d5fa
 # live: `git check-ignore` asks git about the WORKING repo's ignore rules; an
 # live: exported tree has no `.git` to answer with, so this one cannot be pinned.
 $ git check-ignore -v supervisor/INCARNATION.tmp
+.gitignore:15:supervisor/*.tmp	supervisor/INCARNATION.tmp
 $ echo "exit $?"
-exit 1
+exit 0
 
 $ git check-ignore -v supervisor/HANDSHAKE.tmp
+.gitignore:15:supervisor/*.tmp	supervisor/HANDSHAKE.tmp
 $ echo "exit $?"
-exit 1
+exit 0
 ```
 
-*(This is the document's only `# live` block. It is still executed and diffed — `# live` says which
-tree the receipt is about, not that it is unchecked. It rots only if `.gitignore` changes, which is
-the deliberate act §13 asks for; when that lands, this receipt goes red and the prose above must be
-retired, which is the correct coupling.)*
+*(This is the document's only `# live` block, and it is the one receipt in this spec that is a claim
+about the working repo rather than about `091d5fa` — `# live` says which tree the receipt is about,
+not that it is unchecked. It is still executed and diffed on every run. Note what it now pins: not
+merely that the two files are ignored, but that **one glob rule** does it. A future edit that
+replaced the glob with two literals would keep both files ignored and still turn this receipt red,
+which is correct — the glob is the part that covers the third supervisor store nobody has written
+yet.)*
 
 **HANDSHAKE is not the lesser target**: §6.4 puts `handoff_token_hash` *and* the successor's
 `nonce_hash` into it. v2 named only the INCARNATION half in both §4.13(f) and §13 while §8's
@@ -1533,7 +1541,7 @@ Two further rules in the same family:
   supervisor state, and it runs once per body rather than on any hot path. §8 authorizes that site and
   no other.
 - **`supervisor/INCARNATION.tmp` and `supervisor/HANDSHAKE.tmp`** must be gitignored before any of
-  this ships — §4.13(f), §13.
+  this ships — §4.13(f), §13. **Done in this slice** (`supervisor/*.tmp`, one glob).
 
 ### 5.10 The three continuity problems
 
@@ -1954,7 +1962,7 @@ which is where v1's error lived.
 | **`skills/fleet/supervisor.md`** | the boot verdict table (`:13`, `:18`), the handoff sequence with its required `--expect-sid` (`:59`), the successor protocol (`:65`), and the *release-then-stop* doctrine plus the human-facing manual lever (§5.7, §6.3) | this slice |
 | **`_render_successor_task`** @7257-7274 | the successor's generated protocol (§4.6, §6.4) — amended in the same commit or the handoff fails only during a real handoff | this slice |
 | `bin/fleet.py` exception + `main()` | a `FleetCliError` subclass and a `main()` branch ahead of the generic handler, for the distinct exit code (§4.13(b)) | this slice |
-| `.gitignore` | `supervisor/*.tmp` — covers **both** `INCARNATION.tmp` and `HANDSHAKE.tmp` (§4.13(f)); **prerequisite, filed separately** (§13) | not this slice |
+| `.gitignore` | `supervisor/*.tmp` — covers **both** `INCARNATION.tmp` and `HANDSHAKE.tmp` (§4.13(f)) | ~~not this slice~~ **this slice** — reassigned by the operator's build backlog (`docs/NEXT-SESSION.md` §Residuals 1(b)); §4.13(f)'s `# live` receipt re-executed post-fix |
 | `docs/README.md` | the specs index already lists `claim-nonce.md`; the v1 commit also restored three specs the index had been missing (`native-substrate.md`, `autoclean.md`, `three-tier-command.md`). Recorded here because the v1 table omitted it | done |
 | `docs/specs/native-substrate.md` | **unchanged, including every `[PENDING OPERATOR RATIFICATION]` row** | — |
 | `docs/specs/three-tier-command.md` | **unchanged; stays `PROPOSAL — RESTRUCTURE REQUIRED`** | three-tier slice |
@@ -2219,12 +2227,15 @@ depend on them, so they are prerequisites, not nice-to-haves.
 1. **A worker turn can hold the supervisor claim, and is prevented only by accident.**
    `_require_claim_holder` has no `FLEET_WORKER` refusal (§4.10 shows `_worker_env` stamps it).
    Prerequisite for §6.5.
-2. **`supervisor/*.tmp` is not gitignored — `INCARNATION.tmp` *and* `HANDSHAKE.tmp`** (§4.13(f)).
-   `_write_json_atomic` writes the sibling inside a git-tracked directory, and §6.4 puts
-   `handoff_token_hash` plus the successor's `nonce_hash` into HANDSHAKE, so the second half is not
-   the lesser one. Prerequisite for §5.8. *(v2 filed only the INCARNATION half here while §8's row
-   already said `supervisor/*.tmp`; §13 is what a separate slice gets handed, so the narrow version is
-   the one that would have shipped.)*
+2. ~~**`supervisor/*.tmp` is not gitignored — `INCARNATION.tmp` *and* `HANDSHAKE.tmp`** (§4.13(f)).~~
+   **CLOSED IN THIS SLICE, 2026-07-23.** `_write_json_atomic` writes the sibling inside a git-tracked
+   directory, and §6.4 puts `handoff_token_hash` plus the successor's `nonce_hash` into HANDSHAKE, so
+   the second half is not the lesser one. Prerequisite for §5.8. *(v2 filed only the INCARNATION half
+   here while §8's row already said `supervisor/*.tmp`; §13 is what a separate slice gets handed, so
+   the narrow version is the one that would have shipped.)* **Disposition:** the build slice took it
+   rather than handing a one-line `.gitignore` edit to a separate slice, on the operator's build
+   backlog (`docs/NEXT-SESSION.md` §Residuals item 1(b)) which assigns it here. §4.13(f)'s `# live`
+   receipt is re-executed post-fix and now pins the glob.
 
 **Withdrawn from this list: the "published exit-code contract mismatch."** There is no mismatch at
 `091d5fa` — `SKILL.md:37` publishes `0=hold/handshake-written, 2=refuse, 3=freeze` and `7166` implements
