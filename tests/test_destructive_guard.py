@@ -201,6 +201,66 @@ class TestProvenanceRecorded:
         assert env["FLEET_WORKER"] == "pmbot"
 
 
+class TestLineageOwnership:
+    """claim-nonce §6.2 / D2: a worker spawned under lineage L is not-foreign
+    to a LATER body of L that proved continuity -- across a sid rotation and a
+    handoff -- and IS foreign after a seize (which re-mints the lineage). The
+    third parameter of `_worker_is_foreign` is the whole of it; the guard's
+    existing `spawned_by == caller` arm is unchanged."""
+
+    def test_todays_sid_arm_is_byte_for_byte_unchanged(self, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-A")
+        caller = fleet.current_caller_session()
+        assert fleet._worker_is_foreign(_rec(spawned_by="sess-A"), caller) is False
+        assert fleet._worker_is_foreign(_rec(spawned_by="sess-B"), caller) is True
+
+    def test_a_proven_later_body_of_the_lineage_owns_the_worker(self, monkeypatch):
+        # The worker was spawned by sid sess-A under lineage lin-L. The caller
+        # is a LATER body -- its sid rotated to sess-Z (fork-steer/handoff) --
+        # and it proved continuity, so claim_lineage is lin-L. The sid arm
+        # would call this foreign; the lineage arm owns it.
+        rec = _rec(spawned_by="sess-A", spawned_by_lineage="lin-L")
+        assert fleet._worker_is_foreign(rec, "sess-Z", claim_lineage="lin-L") is False
+
+    def test_a_different_lineage_is_still_foreign(self, monkeypatch):
+        rec = _rec(spawned_by="sess-A", spawned_by_lineage="lin-L")
+        # after a SEIZE the lineage is re-minted, so the seizing body proves a
+        # DIFFERENT lineage and the predecessor's workers are foreign to it.
+        assert fleet._worker_is_foreign(rec, "sess-Z", claim_lineage="lin-OTHER") is True
+
+    def test_an_unproven_caller_gets_todays_answer_even_when_lineage_would_match(
+            self, monkeypatch):
+        # claim_lineage=None is what an UNPROVEN caller yields (§6.2). It must
+        # NOT fall through to a lineage match -- otherwise a body that never
+        # proved continuity would inherit ownership by a field it can read from
+        # the registry.
+        rec = _rec(spawned_by="sess-A", spawned_by_lineage="lin-L")
+        assert fleet._worker_is_foreign(rec, "sess-Z", claim_lineage=None) is True
+
+    def test_a_worker_with_no_recorded_lineage_is_not_claimed_by_lineage(self, monkeypatch):
+        rec = _rec(spawned_by="sess-A", spawned_by_lineage=None)
+        assert fleet._worker_is_foreign(rec, "sess-Z", claim_lineage="lin-L") is True
+
+    def test_a_null_lineage_on_both_sides_never_matches(self, monkeypatch):
+        # belt-and-braces against the None==None trap the handoff-token check
+        # had: an unproven caller (None) and a legacy worker (None) must not
+        # come out as a lineage match.
+        rec = _rec(spawned_by="sess-A", spawned_by_lineage=None)
+        assert fleet._worker_is_foreign(rec, "sess-Z", claim_lineage=None) is True
+
+    def test_the_record_defaults_to_no_lineage(self):
+        assert fleet.new_worker_record("sid", "C:/p", "t", "dontask")["spawned_by_lineage"] is None
+
+    def test_the_record_carries_a_provided_lineage(self, monkeypatch):
+        rec = fleet.new_worker_record("sid", "C:/p", "t", "dontask",
+                                      spawned_by="sess-A", spawned_by_lineage="lin-L")
+        assert rec["spawned_by_lineage"] == "lin-L"
+
+    def test_describe_owner_names_the_lineage_when_present(self):
+        rec = _rec(spawned_by="sess-AAAAAAAA", spawned_by_lineage="lin-L")
+        assert "lin-L" in fleet._describe_owner(rec)
+
+
 class TestCliIntegration:
     def _write(self, home, workers):
         (home / "state" / "fleet.json").write_text(
@@ -280,6 +340,61 @@ class TestCliIntegration:
                             run=self._stop_ok_run(stops), which=self._WHICH)
         assert rc == 0
         assert [argv[1] for argv in stops] == ["stop"], stops
+
+    def _seed_claim(self, home, sid, lineage):
+        """A held supervisor claim with a known live generation. Returns the
+        plaintext to present as --nonce."""
+        (home / "supervisor").mkdir(exist_ok=True)
+        value = fleet.mint_nonce()
+        fleet.write_incarnation({"incarnation_id": "inc-me", "session_id": sid,
+                                 "claimed_at": "2026-07-23T00:00:00Z",
+                                 "heartbeat_at": "2026-07-23T00:00:00Z", "claimed_via": "fresh",
+                                 "nonce_hash": fleet.nonce_digest(value), "nonce_seq": 3,
+                                 "lineage_id": lineage})
+        return value
+
+    def test_a_rotated_body_proving_lineage_kills_its_workers_without_yes(
+            self, home, monkeypatch):
+        """§6.2 / T18, end to end: the worker was spawned by sid `sess-old`
+        under lineage `lin-L`. The caller's sid rotated to `sess-Z` (fork-steer
+        / handoff), so the spawned_by arm calls the worker foreign. Presenting
+        the claim's live generation proves lineage `lin-L`, and the worker is
+        owned -- no --yes."""
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-Z")
+        value = self._seed_claim(home, "sess-Z", "lin-L")
+        self._write(home, {"w": _rec(spawned_by="sess-old", spawned_by_lineage="lin-L",
+                                     status="idle")})
+        stops = []
+        rc = fleet.cmd_kill(argparse.Namespace(name="w", yes=False, nonce=value),
+                            run=self._stop_ok_run(stops), which=self._WHICH)
+        assert rc == 0
+        data = json.loads((home / "state" / "fleet.json").read_text(encoding="utf-8"))
+        assert data["workers"]["w"]["status"] == "dead"
+
+    def test_the_same_rotated_body_without_the_nonce_is_still_refused(
+            self, home, monkeypatch):
+        """The proof is load-bearing: the identical situation, minus the
+        generation, gets today's answer and refuses. Otherwise ownership would
+        leak from a registry-readable field."""
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-Z")
+        self._seed_claim(home, "sess-Z", "lin-L")
+        self._write(home, {"w": _rec(spawned_by="sess-old", spawned_by_lineage="lin-L",
+                                     status="idle")})
+        with pytest.raises(fleet.DestructiveActionRefused):
+            fleet.cmd_kill(argparse.Namespace(name="w", yes=False, nonce=None),
+                           run=self._tripwire_run, which=self._WHICH)
+
+    def test_a_seized_lineage_does_not_own_the_old_bodys_workers(self, home, monkeypatch):
+        """A seize re-mints the lineage (§6.2), so the seizing body proves a
+        DIFFERENT lineage and the predecessor's workers stay foreign -- even
+        with a valid generation."""
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-Z")
+        value = self._seed_claim(home, "sess-Z", "lin-NEW-after-seize")
+        self._write(home, {"w": _rec(spawned_by="sess-old", spawned_by_lineage="lin-OLD",
+                                     status="idle")})
+        with pytest.raises(fleet.DestructiveActionRefused):
+            fleet.cmd_kill(argparse.Namespace(name="w", yes=False, nonce=value),
+                           run=self._tripwire_run, which=self._WHICH)
 
     def test_kill_never_resolves_a_claude_executable_off_path(self, home, monkeypatch):
         """The regression guard for the stale seam itself. `cmd_kill` must

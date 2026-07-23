@@ -2943,6 +2943,37 @@ class TestCmdRespawnNative:
         assert rec["status"] == "working"
         assert rec["turns"] == 1
 
+    def test_respawn_carries_spawned_by_lineage_forward(self, native_home, monkeypatch):
+        """claim-nonce §6.2: provenance is carried across respawn exactly as
+        `spawned_by` is. A respawn is a context reset, not a new spawn, so it
+        must not re-resolve (and thereby launder) the lineage onto whoever ran
+        the respawn."""
+        old_sid = "deadbeef-0000-1111-2222-333344445555"
+        seed_native_worker(native_home, sid=old_sid, status="idle",
+                           spawned_by="sess-original", spawned_by_lineage="lin-ORIG")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_sequence(
+            (True, []), (True, []),
+            (True, [make_roster_entry(SID, status="idle")]),
+        ))
+        # A DIFFERENT holder claim is live -- if respawn re-resolved instead of
+        # carrying, it would stamp this lineage and launder ownership.
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-respawner")
+        (native_home / "supervisor").mkdir(parents=True, exist_ok=True)
+        fleet.write_incarnation({"incarnation_id": "inc-r", "session_id": "sess-respawner",
+                                 "claimed_at": "2026-07-23T00:00:00Z",
+                                 "heartbeat_at": "2026-07-23T00:00:00Z", "claimed_via": "fresh",
+                                 "nonce_hash": fleet.nonce_digest(fleet.mint_nonce()),
+                                 "nonce_seq": 1, "lineage_id": "lin-DIFFERENT"})
+        rc = fleet.cmd_respawn(
+            _respawn_args(),
+            run=_fake_run_factory(stdout="backgrounded · aaaabbbb · fleet|w1|t\n"),
+            which=lambda _: "claude", sleep=lambda s: None,
+        )
+        assert rc == 0
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["spawned_by"] == "sess-original"
+        assert rec["spawned_by_lineage"] == "lin-ORIG"
+
     def test_live_native_without_force_refuses(self, native_home, monkeypatch):
         old_sid = SID
         seed_native_worker(native_home, sid=old_sid, status="working")

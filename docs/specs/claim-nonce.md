@@ -237,12 +237,22 @@ option (c) in §7, priced honestly rather than assumed away.
 
 - **Not `sup-spawn`, not `fleet beat`, not the scheduler bridge.** Three-tier adjudication items
   4–10 belong to the re-drafted three-tier spec, sequenced after this one.
-- **Not the claim gate.** v1 decided it; the gate lens unwound that decision. §7 puts it to the
-  operator with three options and a recommendation, and decides nothing.
+- **Not the claim gate *as this section was first written*** — corrected, because §7 no longer holds
+  what this bullet says it holds. v1 decided the gate; the gate lens unwound that decision; §7 then
+  put it to the operator with three options and a recommendation and decided nothing. **The operator
+  has since answered it: option (b), a knowingly-bypassable gate (Altai, 2026-07-23), and §7's
+  corrected verb taxonomy is binding.** The gate is therefore IN scope for this slice, and the
+  original bullet is left visible rather than deleted so that the sequence — proposed, unwound,
+  re-put, decided — stays readable. What remains a non-goal here is the *authorization input* of
+  option (c): §2.3 prices it as a separate slice and §2.1 is why no gate this spec can ship is a
+  privilege boundary.
 - **Not body-fencing.** v1 attached a `claude stop` of a superseded body to `sup-handoff-complete`
-  as belt-and-braces for the gate. With the gate deferred its justification is gone, and it would
-  add process control to a verb with no subprocess seam (§4.12). Dropped; noted for the three-tier
-  slice.
+  as belt-and-braces for the gate. It is dropped, and — second correction in the same family — **the
+  reason is not "the gate is deferred"**, which was true when this bullet was written and is not
+  true now. The standing reasons are independent of the gate decision: it would add process control
+  to a verb with no subprocess seam (§4.12), and §8's portability paragraph resolves v1's own
+  contradiction by *removing the process control* rather than by weakening the invariant. Dropped;
+  noted for the three-tier slice.
 - **Not a change to `spawned_by`'s spawn-immutability.** §6.2 adds fields and renames nothing.
 - **Not a ratification.** `docs/specs/three-tier-command.md` stays **`PROPOSAL — RESTRUCTURE
   REQUIRED (dual-lens design gate, 2026-07-17)`** — its full status, per its own header line 3;
@@ -1054,27 +1064,35 @@ by heartbeat freshness is armed only in the hour after a human last typed a comm
 during exactly the quiet stretches when an unattended second body does damage. Incident 1's phantom
 steers spanned ~100 minutes — longer than the window.
 
-**(f) Neither `supervisor/INCARNATION.tmp` nor `supervisor/HANDSHAKE.tmp` is gitignored.** Filed as a
-shipped-code defect (§13), not built here, but §4.1's `.gitignore` receipt must not be read as
-covering them:
+**(f) `supervisor/*.tmp` is gitignored — CLOSED by the build slice, 2026-07-23.** As drafted this
+subsection recorded a shipped-code defect: neither `supervisor/INCARNATION.tmp` nor
+`supervisor/HANDSHAKE.tmp` was ignored, and §4.1's `.gitignore` receipt must not be read as covering
+them. §13 filed it as a prerequisite. The build slice closed it with one glob line, and **the
+receipt below is the same receipt, re-executed after the fix** — its exit codes inverted, which is
+exactly the coupling the original block predicted:
 
 ```
 # at 091d5fa
 # live: `git check-ignore` asks git about the WORKING repo's ignore rules; an
 # live: exported tree has no `.git` to answer with, so this one cannot be pinned.
 $ git check-ignore -v supervisor/INCARNATION.tmp
+.gitignore:15:supervisor/*.tmp	supervisor/INCARNATION.tmp
 $ echo "exit $?"
-exit 1
+exit 0
 
 $ git check-ignore -v supervisor/HANDSHAKE.tmp
+.gitignore:15:supervisor/*.tmp	supervisor/HANDSHAKE.tmp
 $ echo "exit $?"
-exit 1
+exit 0
 ```
 
-*(This is the document's only `# live` block. It is still executed and diffed — `# live` says which
-tree the receipt is about, not that it is unchecked. It rots only if `.gitignore` changes, which is
-the deliberate act §13 asks for; when that lands, this receipt goes red and the prose above must be
-retired, which is the correct coupling.)*
+*(This is the document's only `# live` block, and it is the one receipt in this spec that is a claim
+about the working repo rather than about `091d5fa` — `# live` says which tree the receipt is about,
+not that it is unchecked. It is still executed and diffed on every run. Note what it now pins: not
+merely that the two files are ignored, but that **one glob rule** does it. A future edit that
+replaced the glob with two literals would keep both files ignored and still turn this receipt red,
+which is correct — the glob is the part that covers the third supervisor store nobody has written
+yet.)*
 
 **HANDSHAKE is not the lesser target**: §6.4 puts `handoff_token_hash` *and* the successor's
 `nonce_hash` into it. v2 named only the INCARNATION half in both §4.13(f) and §13 while §8's
@@ -1533,7 +1551,7 @@ Two further rules in the same family:
   supervisor state, and it runs once per body rather than on any hot path. §8 authorizes that site and
   no other.
 - **`supervisor/INCARNATION.tmp` and `supervisor/HANDSHAKE.tmp`** must be gitignored before any of
-  this ships — §4.13(f), §13.
+  this ships — §4.13(f), §13. **Done in this slice** (`supervisor/*.tmp`, one glob).
 
 ### 5.10 The three continuity problems
 
@@ -1562,15 +1580,19 @@ offered, because nothing a fresh body could present would be unavailable to a wr
 ### 6.1 D1 — the boot verdict order
 
 New signature: `supervisor_claim_decision(claim, live_sids, latest_entry, now=None,
-stale_seconds=..., caller_sid=None, nonce_valid=False)`. Order:
+stale_seconds=..., caller_sid=None, nonce_valid=False, holder_limited=False)`. Order:
 
 | # | Condition | Verdict |
 |---|---|---|
 | 0 | `claim is None` | `claim` (fresh) |
-| 1 | `claim.get("state") == "released"` | `claim` (fresh), reason *predecessor released cleanly* — §6.3 |
+| 1 | `state == "released"` **and** `released_by_sid in live_sids` | **`refuse`** — B6 (three-tier `:1184-1190`, filed against this slice under three-tier authority): `sup-boot` must not consume a `released` record while its releaser is still roster-live — the release+stop window is real |
+| 1b | `state == "released"` (releaser gone or unnamed) | `claim` (fresh), reason *predecessor released cleanly* — §6.3 |
+| 1c | `holder_limited` **and not** resumable (holder parked `limited` with a recorded horizon, and the caller is not that holder proving continuity) | **`limit-transfer`** — three-tier `:432-437`, filed against this slice under three-tier authority: a fleet-observed park authorizes an immediate transfer (re-mints lineage), unlike a G9-ambiguous roster-gone. Runs **ahead of rule 2** because a parked body is still roster-live. Journal kind `LIMIT-TRANSFER`, never `SEIZED` |
 | 2 | `holder_sid in live_sids` **and not** (`holder_sid == caller_sid` **and** `nonce_valid`) | **`refuse`** — the roster-liveness two-supervisor guard |
 | 3 | `nonce_valid` **and** (`holder_sid not in live_sids` **or** `holder_sid == caller_sid`) | **`resume`** — no seize, no new incarnation, no `SEIZED`, no page. Restamp `session_id`, refresh `heartbeat_at`, journal `BOOT` bodied *resumed own claim after \<age\>* |
 | 4– | otherwise, **and only when `holder_sid not in live_sids`** (see below): heartbeat unreadable ⇒ `freeze`; journal names a fresher incarnation ⇒ `refuse`; heartbeat stale ⇒ `seize`; heartbeat fresh ⇒ `freeze` | |
+
+*(Rows 1/1b are the two arms of the released-claim check; row 1c is resolved with `holder_limited` supplied by the lock-holding caller — the pure function has no registry access. Both the B6 refuse and the limit-transfer ship under `docs/specs/three-tier-command.md`'s authority, and `skills/fleet/SKILL.md` / `skills/fleet/supervisor.md` document them the same way — as `sup-boot` verdicts a supervisor acts on.)*
 
 **Rule 0b (`re-issue`) is deleted.** v1 granted a fresh nonce to any caller matching the recorded sid,
 which §2.1 shows is an environment-variable assignment away — a documented, permanent bypass of the
@@ -1954,7 +1976,7 @@ which is where v1's error lived.
 | **`skills/fleet/supervisor.md`** | the boot verdict table (`:13`, `:18`), the handoff sequence with its required `--expect-sid` (`:59`), the successor protocol (`:65`), and the *release-then-stop* doctrine plus the human-facing manual lever (§5.7, §6.3) | this slice |
 | **`_render_successor_task`** @7257-7274 | the successor's generated protocol (§4.6, §6.4) — amended in the same commit or the handoff fails only during a real handoff | this slice |
 | `bin/fleet.py` exception + `main()` | a `FleetCliError` subclass and a `main()` branch ahead of the generic handler, for the distinct exit code (§4.13(b)) | this slice |
-| `.gitignore` | `supervisor/*.tmp` — covers **both** `INCARNATION.tmp` and `HANDSHAKE.tmp` (§4.13(f)); **prerequisite, filed separately** (§13) | not this slice |
+| `.gitignore` | `supervisor/*.tmp` — covers **both** `INCARNATION.tmp` and `HANDSHAKE.tmp` (§4.13(f)) | ~~not this slice~~ **this slice** — reassigned by the operator's build backlog (`docs/NEXT-SESSION.md` §Residuals 1(b)); §4.13(f)'s `# live` receipt re-executed post-fix |
 | `docs/README.md` | the specs index already lists `claim-nonce.md`; the v1 commit also restored three specs the index had been missing (`native-substrate.md`, `autoclean.md`, `three-tier-command.md`). Recorded here because the v1 table omitted it | done |
 | `docs/specs/native-substrate.md` | **unchanged, including every `[PENDING OPERATOR RATIFICATION]` row** | — |
 | `docs/specs/three-tier-command.md` | **unchanged; stays `PROPOSAL — RESTRUCTURE REQUIRED`** | three-tier slice |
@@ -2213,18 +2235,39 @@ probe, at the cost of a quiet-machine window.
 
 ## 13. Filed elsewhere — referenced, not built here
 
-**Two** shipped-code defects this gate surfaced. **They are not this slice's to fix**; §6.5 and §5.8
-depend on them, so they are prerequisites, not nice-to-haves.
+**Two** shipped-code defects this gate surfaced. They were filed as *"not this slice's to fix"*;
+§6.5 and §5.8 depend on them, so they are prerequisites, not nice-to-haves. **Both have since been
+assigned to this slice by the operator and are closed here** — the strikethroughs below record the
+reassignment rather than hiding it, because "filed elsewhere" was the disposition a separate slice
+would have been handed.
 
-1. **A worker turn can hold the supervisor claim, and is prevented only by accident.**
-   `_require_claim_holder` has no `FLEET_WORKER` refusal (§4.10 shows `_worker_env` stamps it).
-   Prerequisite for §6.5.
-2. **`supervisor/*.tmp` is not gitignored — `INCARNATION.tmp` *and* `HANDSHAKE.tmp`** (§4.13(f)).
-   `_write_json_atomic` writes the sibling inside a git-tracked directory, and §6.4 puts
-   `handoff_token_hash` plus the successor's `nonce_hash` into HANDSHAKE, so the second half is not
-   the lesser one. Prerequisite for §5.8. *(v2 filed only the INCARNATION half here while §8's row
-   already said `supervisor/*.tmp`; §13 is what a separate slice gets handed, so the narrow version is
-   the one that would have shipped.)*
+1. ~~**A worker turn can hold the supervisor claim, and is prevented only by accident.**~~
+   `_require_claim_holder` had no `FLEET_WORKER` refusal (§4.10 shows `_worker_env` stamps it).
+   Prerequisite for §6.5. **CLOSED IN THIS SLICE, 2026-07-23**, by operator/council ruling —
+   option (i), the **narrow** arm: refuse when `FLEET_WORKER` is set and its value is not
+   supervisor-shaped (`sup|<inc>|successor`). A *blanket* refusal is refuted by the code — the
+   handoff successor is dispatched through `_worker_env` under exactly that name and its first act
+   after claim transfer is `sup-checkpoint`, a `_require_claim_holder` caller — so it would break
+   the one session the handoff exists to serve, and three-tier's `sup-spawn` besides. The exempt
+   shape is unforgeable through `fleet spawn`: `NAME_RE` is `^[a-z0-9-]+$` and forbids `|`. It is a
+   **speed-bump, not a boundary** (`env -u FLEET_WORKER` defeats it, §2.1), and the refusal message
+   says so in those words.
+
+   > **Spec defect owed elsewhere, disclosed not fixed:** `docs/specs/three-tier-command.md` ~L1078
+   > says `FLEET_WORKER` is stamped `=1`; the code of record (`_worker_env`, `bin/fleet.py:1284`)
+   > stamps the worker **NAME**, and three-tier's own receipt at `:1402-1408` pastes the correct
+   > line. This slice's arm keys on the name, per the code — an arm keyed on the value `"1"` would
+   > be a no-op. The three-tier text correction is owed in the three-tier build slice; that spec is
+   > ratified and this slice does not edit it.
+2. ~~**`supervisor/*.tmp` is not gitignored — `INCARNATION.tmp` *and* `HANDSHAKE.tmp`** (§4.13(f)).~~
+   **CLOSED IN THIS SLICE, 2026-07-23.** `_write_json_atomic` writes the sibling inside a git-tracked
+   directory, and §6.4 puts `handoff_token_hash` plus the successor's `nonce_hash` into HANDSHAKE, so
+   the second half is not the lesser one. Prerequisite for §5.8. *(v2 filed only the INCARNATION half
+   here while §8's row already said `supervisor/*.tmp`; §13 is what a separate slice gets handed, so
+   the narrow version is the one that would have shipped.)* **Disposition:** the build slice took it
+   rather than handing a one-line `.gitignore` edit to a separate slice, on the operator's build
+   backlog (`docs/NEXT-SESSION.md` §Residuals item 1(b)) which assigns it here. §4.13(f)'s `# live`
+   receipt is re-executed post-fix and now pins the glob.
 
 **Withdrawn from this list: the "published exit-code contract mismatch."** There is no mismatch at
 `091d5fa` — `SKILL.md:37` publishes `0=hold/handshake-written, 2=refuse, 3=freeze` and `7166` implements

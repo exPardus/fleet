@@ -59,8 +59,17 @@ def _no_inherited_claude_session(monkeypatch):
     When pytest itself is launched from a Claude Code session, that variable is
     inherited, every fixture worker looks foreign, and `fleet kill`/`clean`
     tests get refused -- a test outcome that depends on who ran the tests.
-    Tests that exercise the guard set the variable explicitly."""
+    Tests that exercise the guard set the variable explicitly.
+
+    FLEET_WORKER is stripped for exactly the same reason, and it became
+    load-bearing with claim-nonce §6.5's worker refusal in
+    `_require_claim_holder`: `_worker_env` stamps it on every fleet-launched
+    session, so a suite run FROM a fleet worker (which is how this repo is
+    routinely developed) would see every `sup-*` test refused, while the same
+    suite run from a human shell or CI passed. Tests that exercise the arm set
+    it explicitly."""
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.delenv("FLEET_WORKER", raising=False)
 
 
 def pytest_collection_modifyitems(config, items):
