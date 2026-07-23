@@ -1203,6 +1203,125 @@ class TestSupStatus:
         assert "no claim" in capsys.readouterr().out.lower()
 
 
+class TestViewRedaction:
+    """T15 (§5.8), the binding build rule.
+
+    §4.8's receipt showed `sup-status --json` emitting `"incarnation": claim`
+    and `"handshake": hs` VERBATIM, so every field this spec adds is published
+    by a lock-free view unless a redaction step is specified. v1 asserted the
+    opposite and its own test would have passed on an implementation that
+    published both hashes -- because it asserted only that the NONCE STRING
+    was absent, and the nonce string was never in the file.
+
+    So these assert the HASH STRINGS. And they are scoped to the dict-dumping
+    paths: `sup-status --json` and `sup-boot`'s stdout. The human line is a
+    hand-written f-string over four named fields and has never held a hash;
+    asserting there is a test that cannot fail dressed as a regression guard,
+    which is the same defect one layer out."""
+
+    def _v2_claim(self):
+        live, pending, prior = fleet.mint_nonce(), fleet.mint_nonce(), fleet.mint_nonce()
+        claim = {"incarnation_id": "inc-me", "session_id": "sid-me",
+                 "claimed_at": fleet.now_iso(), "heartbeat_at": fleet.now_iso(),
+                 "claimed_via": "fresh", "nonce_seq": 7,
+                 "lineage_id": "lin-20260101T000000Z-aaaa",
+                 "nonce_hash": fleet.nonce_digest(live),
+                 "pending_nonce_hash": fleet.nonce_digest(pending),
+                 "pending_at": fleet.now_iso(),
+                 "prior_pending_hash": fleet.nonce_digest(prior)}
+        fleet.write_incarnation(claim)
+        return claim
+
+    def test_no_stored_hash_survives_into_the_json_view(self, sup_home, capsys):
+        claim = self._v2_claim()
+        fleet.write_handshake("inc-next", "sid-next")
+        hs = fleet.read_handshake()
+        hs["handoff_token_hash"] = fleet.nonce_digest(fleet.mint_nonce())
+        fleet._write_json_atomic(fleet.handshake_path(), hs)
+        assert fleet.cmd_sup_status(SimpleNamespace(json=True)) == 0
+        raw = capsys.readouterr().out
+        hashes = [claim["nonce_hash"], claim["pending_nonce_hash"],
+                  claim["prior_pending_hash"], hs["handoff_token_hash"]]
+        assert len(set(hashes)) == 4, "guard the guard: four distinct hashes were seeded"
+        for h in hashes:
+            assert h not in raw
+        for key in ("nonce_hash", "pending_nonce_hash", "prior_pending_hash",
+                    "handoff_token_hash"):
+            assert key not in raw
+
+    def test_the_projection_publishes_the_observables_that_replace_them(
+            self, sup_home, capsys):
+        self._v2_claim()
+        assert fleet.cmd_sup_status(SimpleNamespace(json=True)) == 0
+        inc = json.loads(capsys.readouterr().out)["incarnation"]
+        assert inc["nonce_present"] is True
+        assert inc["pending_present"] is True
+        assert isinstance(inc["pending_age_seconds"], int)
+        assert inc["nonce_seq"] == 7
+        assert inc["lineage_id"] == "lin-20260101T000000Z-aaaa"
+        assert inc["state"] is None
+        assert inc["incarnation_id"] == "inc-me" and inc["session_id"] == "sid-me"
+
+    def test_pending_age_is_null_when_nothing_is_outstanding(self, sup_home, capsys):
+        claim = self._v2_claim()
+        for k in ("pending_nonce_hash", "pending_at", "prior_pending_hash"):
+            claim.pop(k)
+        fleet.write_incarnation(claim)
+        assert fleet.cmd_sup_status(SimpleNamespace(json=True)) == 0
+        inc = json.loads(capsys.readouterr().out)["incarnation"]
+        assert inc["pending_present"] is False and inc["pending_age_seconds"] is None
+
+    def test_a_released_claim_projects_its_state(self, sup_home, capsys):
+        fleet.write_incarnation({"incarnation_id": "inc-old", "lineage_id": "lin-x",
+                                 "claimed_via": "fresh", "released_at": fleet.now_iso(),
+                                 "released_by_sid": "sid-old", "state": "released"})
+        assert fleet.cmd_sup_status(SimpleNamespace(json=True)) == 0
+        inc = json.loads(capsys.readouterr().out)["incarnation"]
+        assert inc["state"] == "released" and inc["nonce_present"] is False
+
+    def test_the_projection_is_an_ALLOWLIST_so_a_future_field_is_not_auto_published(
+            self, sup_home, capsys):
+        # A denylist republishes every field a future spec adds, which is
+        # exactly how §5.8 came to be written: the view emitted the raw dict
+        # and every new field rode along for free. The cost is real and
+        # accepted -- a hand-added debugging key stops showing up in
+        # `sup-status --json` -- and it is the right side to fail on for a
+        # surface whose whole job is to publish supervisor identity.
+        claim = self._v2_claim()
+        claim["some_future_secret"] = "SHOULD-NOT-BE-PUBLISHED"
+        fleet.write_incarnation(claim)
+        assert fleet.cmd_sup_status(SimpleNamespace(json=True)) == 0
+        assert "SHOULD-NOT-BE-PUBLISHED" not in capsys.readouterr().out
+
+    def test_the_handshake_projection_reports_the_token_without_publishing_it(
+            self, sup_home, capsys):
+        self._v2_claim()
+        fleet.write_handshake("inc-next", "sid-next")
+        hs = fleet.read_handshake()
+        hs["handoff_token_hash"] = fleet.nonce_digest(fleet.mint_nonce())
+        fleet._write_json_atomic(fleet.handshake_path(), hs)
+        assert fleet.cmd_sup_status(SimpleNamespace(json=True)) == 0
+        got = json.loads(capsys.readouterr().out)["handshake"]
+        assert got["incarnation_id"] == "inc-next" and got["session_id"] == "sid-next"
+        assert got["handoff_token_present"] is True
+
+    def test_the_view_stays_a_view(self, sup_home, capsys):
+        # terminal-surface doctrine, unchanged by §5.8: no lock, no probe, no
+        # write. A projection is a filter on the way out, not a migration.
+        claim = self._v2_claim()
+        before = fleet.incarnation_path().read_text(encoding="utf-8")
+        assert fleet.cmd_sup_status(SimpleNamespace(json=True)) == 0
+        capsys.readouterr()
+        assert fleet.incarnation_path().read_text(encoding="utf-8") == before
+        assert fleet.read_incarnation() == claim
+
+    def test_the_human_form_still_reports_the_claim(self, sup_home, capsys):
+        self._v2_claim()
+        assert fleet.cmd_sup_status(SimpleNamespace(json=False)) == 0
+        out = capsys.readouterr().out
+        assert "inc-me" in out and "sid-me" in out
+
+
 class TestHandoff:
     def _hold(self, sid="sid-old", inc="inc-old"):
         fleet.write_incarnation({"incarnation_id": inc, "session_id": sid,
