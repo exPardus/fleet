@@ -117,6 +117,16 @@ $ grep -c "claude-opus\|claude-sonnet\|claude-haiku\|claude-fable" bin/fleet.py
 0
 ```
 
+The invariant is **machine-checked at the built commit, not only at the pin**: the three-tier build
+slice added a tier resolver, band/ceiling/archive/provenance surfaces, and the supervisor-shaped name
+family — none of it a model id. Re-verified after that work:
+
+```
+# at 99bb0d6e101f91f30ce9f3b58e8206952fe3591f
+$ grep -c "claude-opus\|claude-sonnet\|claude-haiku\|claude-fable" bin/fleet.py
+0
+```
+
 The model reaches a session exactly one way — `--model <value>` on the dispatch argv, defaulting to
 absent (the CLI/daemon's own default):
 
@@ -435,6 +445,23 @@ journal kind recording that it was a limit transfer rather than a seizure.
 > still open (ND9), since that body can neither complete nor abort the ritual it started. This is a
 > boot-order change, and **this spec does not own the boot verdict order** — filed exactly as B6's rule-1
 > guard and §10.2's `FLEET_WORKER` refusal already are.
+
+**STATUS — BUILT (verified by the three-tier build slice, 2026-07-24).** The claim-nonce slice shipped
+this prerequisite: `supervisor_claim_decision` gained verdict `1b`, a `limited`-holder branch that
+authorizes immediate transfer (`limit-transfer`, RC 0) when the holder is parked `limited` **with a
+horizon** and is not itself resumable, ordered **ahead of** the roster-liveness refuse (rule 2) so a
+still-roster-live parked body is reached at all. The behaviour matches this section verbatim, the
+`HANDSHAKE`-agnostic mid-handoff clause included (the branch consults only the fleet-observed `limited`
+status via `_holder_is_limited`, never the handshake, so a body parked mid-handoff transfers too — the
+stale-`HANDSHAKE` *seeding* cleanup remains the interface-driven fallback's job, `[UNBUILT]` v2, §3.5.3a).
+Pinned to the build slice's base commit, where the merged branch is present:
+
+```
+# at 31a21f871e643e20f784048b7e80460986eaefce
+$ sed -n '8506p;8563p' bin/fleet.py
+      1b. holder parked `limited` with a horizon, and not resumable
+    if holder_limited and not resume_ok:
+```
 
 **(d) The dispatch needs a `--model` override and the reserved name — neither exists today (ND8).**
 There is **no shipped path from "parked on the top tier" to "running on the second tier."** `respawn`
@@ -1077,10 +1104,18 @@ applies the same `--settings`/`_worker_env` guarantees. `sup-spawn`, having no s
   doctrine) — stated explicitly in GOALS before it ever runs unattended.
 - **`_worker_env`:** copies the parent environment (so the supervisor inherits the interface session's
   `CLAUDE_CONFIG_DIR` namespace → the same provider daemon, §3.3), strips `CLAUDE_CODE_SESSION_ID`,
-  stamps `FLEET_WORKER=1`. The `FLEET_WORKER` stamp matters: claim-nonce §6.5 requires a `FLEET_WORKER`
-  refusal in `_require_claim_holder` (a worker turn must not hold the supervisor claim), filed there as
-  a separate shipped-code prerequisite — the supervisor is spawned as a fleet worker, so this spec
-  depends on that refusal existing before `sup-spawn` is safe.
+  stamps `FLEET_WORKER=<name>` — the worker's **name**, not the value `1`. *(Corrected by the three-tier
+  build slice per the claim-nonce §13 disclosure: earlier drafts of this line read `FLEET_WORKER=1`; the
+  code of record `_worker_env` (`bin/fleet.py`) writes `env["FLEET_WORKER"] = name`, and the shipped
+  refusal keys on that name — an arm keyed on the value `1` would be a no-op. The receipt at §11.4
+  (`env["FLEET_WORKER"] = name`) already pasted the correct line.)* The `FLEET_WORKER` stamp matters:
+  claim-nonce §6.5 requires a `FLEET_WORKER` refusal in `_require_claim_holder` (a worker turn must not
+  hold the supervisor claim), filed there as a separate shipped-code prerequisite — and because that
+  refusal keys on the **name** and exempts only a **supervisor-shaped** value, `sup-spawn` must dispatch
+  the supervisor body under a name the shipped `_is_supervisor_shaped` predicate accepts (today only the
+  handoff-successor shape `sup|<inc>|successor`), or the supervisor would be refused its own claim. The
+  supervisor is spawned as a fleet worker, so this spec depends on that refusal existing — and on that
+  name/shape reconciliation — before `sup-spawn` is safe.
 
 ### 10.3 Reserve the body name mechanically — at `validate_name`
 

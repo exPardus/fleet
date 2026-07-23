@@ -277,6 +277,25 @@ class TestNameValidation:
     def test_unique_name_ok(self):
         fleet.validate_name("probe-2", existing={"probe-1"})  # must not raise
 
+    def test_reserved_supervisor_name_refused_by_ordinary_path(self):
+        # three-tier-command.md §10.3: the body name `supervisor` is minted
+        # ONLY by `sup-spawn`; the ordinary worker creation path (spawn/respawn)
+        # must refuse it at the single choke point.
+        assert fleet.SUPERVISOR_BODY_NAME == "supervisor"
+        with pytest.raises(ValueError, match="reserved"):
+            fleet.validate_name(fleet.SUPERVISOR_BODY_NAME, existing=set())
+
+    def test_reserved_name_refused_even_when_absent_from_existing(self):
+        # The reservation is a name-SHAPE refusal (like the F6 uuid rule), not a
+        # duplicate check: it must fire whether or not a record already holds it.
+        with pytest.raises(ValueError, match="reserved"):
+            fleet.validate_name(fleet.SUPERVISOR_BODY_NAME, existing={"other"})
+
+    def test_sup_spawn_path_may_mint_the_reserved_name(self):
+        # `sup-spawn` is the one authorized minter -- it passes allow_reserved.
+        fleet.validate_name(fleet.SUPERVISOR_BODY_NAME, existing=set(),
+                            allow_reserved=True)  # must not raise
+
 
 class TestLockContention:
     def test_second_acquirer_blocks_then_succeeds_after_release(self, isolated_home):

@@ -721,8 +721,23 @@ _SID_SHAPE_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
 
-def validate_name(name: str, existing=()) -> None:
+# three-tier-command.md §10.3: the first-generation supervisor body is spawned
+# under this name, and it is minted ONLY by `sup-spawn`. Reserving it at the one
+# creation choke point (`validate_name`) makes an ordinary `spawn`/`respawn` of
+# the name mechanically impossible -- the same technique as the F6 uuid-shape
+# refusal, one more reserved shape. (Successor bodies run under the pipe-shaped
+# `sup|<inc>|successor` name, which NAME_RE already refuses on the worker path
+# and `_is_supervisor_shaped` recognises; only the gen-0 name needs reserving.)
+SUPERVISOR_BODY_NAME = "supervisor"
+RESERVED_NAMES = frozenset({SUPERVISOR_BODY_NAME})
+
+
+def validate_name(name: str, existing=(), allow_reserved: bool = False) -> None:
     """Raise ValueError unless name matches [a-z0-9-]+ and isn't in `existing`.
+
+    `allow_reserved` is the single authorized bypass of the RESERVED_NAMES set
+    (§10.3): `sup-spawn` passes it True to mint `supervisor`; every ordinary
+    creation path leaves it False, so the reserved name is refused there.
 
     F6 (adversarial review): uuid-shaped names are refused outright. Names
     and session ids share keyspaces in several stores (name-keyed AND
@@ -738,6 +753,10 @@ def validate_name(name: str, existing=()) -> None:
         raise ValueError(
             f"invalid worker name {name!r}: uuid-shaped names are reserved "
             f"for session ids (F6)")
+    if not allow_reserved and name in RESERVED_NAMES:
+        raise ValueError(
+            f"invalid worker name {name!r}: reserved for the supervisor body "
+            f"(three-tier §10.3) -- minted only by `sup-spawn`")
     if name in existing:
         raise ValueError(f"worker name already exists: {name!r}")
 
@@ -1278,7 +1297,20 @@ def resolve_claude_executable(which=shutil.which) -> str:
 # and the refusal arm read ONE shape -- two copies of a security-relevant
 # literal drift silently, with the dispatch still working while the exemption
 # quietly stops matching it.
-_SUPERVISOR_SHAPED_WORKER_RE = re.compile(r"^sup\|[^|]+\|successor$")
+# three-tier §10.1 sup-spawn (manager ruling, 2026-07-24 -- extension, NOT
+# reversal). Widened from `^sup\|[^|]+\|successor$` to the whole FAMILY
+# `sup|<inc>|<role>`. The council's E(2) grounding for the exemption was "the
+# exempt shape must be unforgeable via `fleet spawn`" -- and ANY `|`-bearing
+# name satisfies that, because `NAME_RE` (`^[a-z0-9-]+$`) forbids `|` in every
+# spawnable worker name. So widening `successor` to `[a-z][a-z0-9-]*` keeps the
+# grounding intact: `sup-spawn` dispatches its gen-0 body under `sup|<inc>|boot`
+# (a role other than `successor`), that body carries FLEET_WORKER=that-name, and
+# it must not be refused its own claim. `<role>` is anchored `[a-z][a-z0-9-]*`
+# (a real role, never empty), `<inc>` is `[^|]+` (never empty), and the two
+# pipes are literal -- so `supervisor`, `sup|x|`, `sup||role` and a third
+# separator all stay OUT of the family (unit-tested). Held here beside
+# `_worker_env` so the dispatch and the refusal arm read ONE shape.
+_SUPERVISOR_SHAPED_WORKER_RE = re.compile(r"^sup\|[^|]+\|[a-z][a-z0-9-]*$")
 
 
 def _successor_worker_name(successor_inc: str) -> str:
@@ -1287,9 +1319,11 @@ def _successor_worker_name(successor_inc: str) -> str:
 
 
 def _is_supervisor_shaped(name) -> bool:
-    """True iff `name` is a handoff-successor worker name. Never raises on a
-    non-string: `os.environ.get` can only return `str | None` today, but this
-    is also called on registry-sourced values."""
+    """True iff `name` is a supervisor BODY name of the family `sup|<inc>|<role>`
+    (§10.1 manager ruling) -- the handoff successor `sup|<inc>|successor` and any
+    sup-spawn gen-0 role (`sup|<inc>|boot`, ...). Never raises on a non-string:
+    `os.environ.get` can only return `str | None` today, but this is also called
+    on registry-sourced values."""
     return isinstance(name, str) and _SUPERVISOR_SHAPED_WORKER_RE.match(name) is not None
 
 
@@ -1738,6 +1772,246 @@ def find_transcript_path(name: str, sid: str):
     if statable:
         return max(statable, key=lambda pair: pair[0])[1]
     return candidates[0]
+
+
+# three-tier-command.md §11 -- the self-monitored context band (150-200k),
+# supervisor AND workers (§11.4). 150k soft trigger (hand off at the next
+# wave/task boundary); 200k hard ceiling H (finish in-flight, no new work; the
+# fleet-side dispatch refusal, §11.3). Denominated in CONTEXT OCCUPANCY, never
+# spend (§11.5): its only consequence is HAND OFF, never stop/kill/refuse-until-
+# cheaper. Not a code constant the operator tunes -- an operator-stated band.
+BAND_SOFT_TOKENS = 150_000
+BAND_HARD_TOKENS = 200_000
+
+# The three per-turn prompt summands whose SUM is context occupancy (B2). A
+# turn's usage may carry any subset; occupancy sums whatever is present.
+_OCCUPANCY_USAGE_FIELDS = (
+    "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+
+
+def _transcript_occupancy(transcript_path):
+    """Context-window occupancy from sid's transcript tail: the B2-correct SUM
+    of input_tokens + cache_creation_input_tokens + cache_read_input_tokens from
+    the LAST assistant `message.usage`. None when the transcript is
+    missing/unreadable or carries no usage at all -- callers FAIL TOWARD THE
+    BAND on None (§11.2), never treat it as room.
+
+    Reads only the bounded 64KB tail (`_read_tail_lines`) -- the last usage
+    record lives at the very end, and a supervisor transcript can be large.
+    Never raises: this runs at a checkpoint/beat boundary and must not crash a
+    turn on a torn or locked transcript."""
+    if not transcript_path:
+        return None
+    occupancy = None
+    for line in _read_tail_lines(transcript_path):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict) or rec.get("type") != "assistant":
+            continue
+        msg = rec.get("message")
+        if not isinstance(msg, dict):
+            continue
+        usage = msg.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        summands = [usage.get(f) for f in _OCCUPANCY_USAGE_FIELDS
+                    if isinstance(usage.get(f), int)]
+        if summands:
+            occupancy = sum(summands)   # newest-wins: keep scanning to the tail
+    return occupancy
+
+
+def supervisor_band_verdict(occupancy):
+    """Map an occupancy (or None) to the band verdict (§11.3). `hand_off` is the
+    single decision a caller acts on:
+
+      occupancy < 150k          -> below-band       (hand_off False)
+      150k <= occupancy < 200k  -> in-band          (hand_off True: soft trigger)
+      occupancy >= 200k         -> over-band        (hand_off True: hard ceiling)
+      occupancy is None         -> assume-near-band (hand_off True: §11.2 fails
+                                   toward the band -- NEVER below-band on missing
+                                   data, for a ceiling nobody else enforces)"""
+    if occupancy is None:
+        return {"verdict": "assume-near-band", "hand_off": True,
+                "reason": "occupancy unreadable -- assume near-band, hand off at "
+                          "the next boundary (§11.2 fails toward the band)"}
+    if occupancy >= BAND_HARD_TOKENS:
+        return {"verdict": "over-band", "hand_off": True,
+                "reason": f"occupancy {occupancy} >= hard ceiling {BAND_HARD_TOKENS}: "
+                          "finish in-flight work only, no new dispatches (§11.3)"}
+    if occupancy >= BAND_SOFT_TOKENS:
+        return {"verdict": "in-band", "hand_off": True,
+                "reason": f"occupancy {occupancy} >= soft trigger {BAND_SOFT_TOKENS}: "
+                          "hand off at the next wave/task boundary (§11.3)"}
+    return {"verdict": "below-band", "hand_off": False,
+            "reason": f"occupancy {occupancy} < soft trigger {BAND_SOFT_TOKENS}"}
+
+
+def _record_sids(rec) -> set:
+    """Every session id this registry record has ever been: its current
+    `session_id` plus every `retired_sids` member.
+
+    The band ceiling (§11.3) and the archive exemption (§7.2) both identify a
+    body through this UNION, not through `session_id` alone, because a
+    fork-steer or respawn pushes the prior sid into `retired_sids` EAGERLY (at
+    steer time, `_restamp_after_steer`) while other artifacts -- notably
+    `INCARNATION.session_id` -- restamp only PULL, on the next validated write
+    (claim-nonce §5.10a), and therefore lag. Matching against the union bridges
+    that window; matching against `session_id` alone fails open on it (ND4a)."""
+    sids = set()
+    if not isinstance(rec, dict):
+        return sids
+    cur = rec.get("session_id")
+    if isinstance(cur, str) and cur:
+        sids.add(cur)
+    retired = rec.get("retired_sids")
+    if isinstance(retired, list):
+        sids.update(s for s in retired if isinstance(s, str) and s)
+    return sids
+
+
+def _caller_holds_supervisor_claim(caller_sid, claim=None, registry=None):
+    """Tri-state: is `caller_sid` the current supervisor CLAIM-HOLDER body?
+
+      True  -- the caller IS the holder.
+      False -- a claim is held (or none exists) and the caller is DEFINITELY
+               NOT its holder -- so it is never subject to the ceiling.
+      None  -- indeterminate: a claim is held but its holder sid is unreadable,
+               the registry is corrupt, or the holder sid matches no live
+               record. §11.3 callers FAIL TOWARD THE BAND on None (ND4b).
+
+    THE ONE IDENTITY CONCEPT with three consumers (§7.2 archive exemption,
+    §11.2 occupancy read, §11.3 ceiling gate). Resolution runs through the
+    REGISTRY, not the claim alone (ND4a): find the record whose sid union
+    (`_record_sids`) carries the claim's holder sid, then ask whether the caller
+    is in that SAME record's union. After a fork-steer the caller runs under a
+    NEW sid and `INCARNATION.session_id` still holds the OLD one, but the record
+    was eagerly restamped (session_id=new, old in retired_sids), so both the
+    caller and the stale claim sid resolve to the one record -- the ceiling does
+    not fail open on the path every supervisor turn starts with.
+
+    Read-only, never raises: it runs on the dispatch hot path and a corrupt
+    registry must degrade to `None` (fail toward band), not crash a spawn."""
+    if not caller_sid:
+        return None
+    if claim is None:
+        claim = read_incarnation()
+    if not isinstance(claim, dict) or claim.get("state") == "released":
+        return False                    # no held claim -- never subject
+    holder_sid = claim.get("session_id")
+    if not isinstance(holder_sid, str) or not holder_sid:
+        return None                     # a claim with no readable holder sid
+    if caller_sid == holder_sid:
+        return True                     # direct: claim not yet staled by a fork-steer
+    try:
+        if registry is None:
+            registry = load_registry()
+    except RegistryCorruptError:
+        return None                     # registry gone -- indeterminate
+    caller_rec_sids = None              # the sid union of the record the CALLER is in
+    holder_seen = False                 # the holder sid was found in SOME record
+    for rec in registry.get("workers", {}).values():
+        sids = _record_sids(rec)
+        if caller_sid in sids:
+            caller_rec_sids = sids
+        if holder_sid in sids:
+            holder_seen = True
+    if caller_rec_sids is not None:
+        # The caller is a KNOWN body: it is the holder iff its own record also
+        # carries the holder sid (the fork-steer union bridges the stale claim).
+        return holder_sid in caller_rec_sids
+    if holder_seen:
+        # The holder record exists and does not carry the caller's sid -- the
+        # caller is provably a DIFFERENT body, so it is not the holder.
+        return False
+    return None                         # neither sid placed -- indeterminate
+
+
+def _record_is_supervisor_claim_holder(record, claim=None):
+    """Tri-state: is this REGISTRY `record` the body currently holding the
+    supervisor claim? The record-oriented sibling of
+    `_caller_holds_supervisor_claim` (§7.2 archive/husk exemption vs §11.3
+    ceiling -- one identity concept, a record question here rather than a caller
+    question).
+
+      True  -- the record IS the current claim-holder body.
+      False -- there is no active claim (absent or released), or the record is
+               provably a different body. A released/absent claim yields False
+               so a released-away husk (B9) stays archivable.
+      None  -- a claim is HELD but its holder sid is unreadable: indeterminate.
+               The archive gate fails TOWARD protection on None, but only for
+               supervisor-shaped names, so a briefly unreadable INCARNATION
+               cannot freeze all autoclean archiving.
+
+    Matches on the record's sid UNION (`_record_sids` = session_id ∪
+    retired_sids), not `session_id` alone: after a fork-steer the claim still
+    carries the OLD sid (pull-restamp lag) while the record was eagerly
+    restamped and carries the old sid in `retired_sids` -- the union bridges
+    that window (ND4a). Never raises: it runs on the archive/sweep path."""
+    if claim is None:
+        claim = read_incarnation()
+    if not isinstance(claim, dict) or claim.get("state") == "released":
+        return False
+    holder_sid = claim.get("session_id")
+    if not isinstance(holder_sid, str) or not holder_sid:
+        return None
+    return holder_sid in _record_sids(record)
+
+
+def _ceiling_refuses_dispatch(verb, now=None):
+    """three-tier §11.3 (B4) -- the 200k hard ceiling. Returns a refusal reason
+    string when `verb` (`spawn`/`send`) MUST be refused because the caller is
+    the supervisor claim-holder and its OWN live context occupancy is at or
+    above `BAND_HARD_TOKENS`; returns None when the dispatch may proceed.
+
+    Applies to EXACTLY ONE caller -- the supervisor claim-holder (ND1). Three
+    exemptions, in this order so they compose (ND4's closing note):
+
+      (c) STRUCTURAL interface exemption, FIRST, before any sid work: the
+          interface is not a fleet-launched child, so `FLEET_WORKER` is absent
+          from its environment. That absence exempts it unconditionally -- a
+          refusal it could never escape (it is outside fleet's launch surface,
+          §3.1) must never be raisable against it. This runs ahead of (b) so
+          the fail-toward-the-band default can never catch the human channel.
+      * a caller that holds no claim (`_caller_holds_supervisor_claim` -> False)
+        is never subject -- a worker calls neither verb, but if it did, it is
+        not the holder and is not refused.
+      (b) an UNRESOLVABLE identity (-> None) is treated AS the supervisor and
+          the ceiling applies: an unresolvable identity must never be the reason
+          a ceiling stays dormant (ND4b), mirroring §11.2's fail-toward-band.
+
+    Occupancy is the caller's OWN transcript, resolved from its OWN
+    `CLAUDE_CODE_SESSION_ID` (B2/B3, the sid guaranteed fresh for the acting
+    body). An unreadable occupancy fails TOWARD the band (§11.2): None refuses,
+    never "plenty of room". Between 150k and 200k the ceiling does NOT refuse --
+    that band is a standing directive (§5.2), enforced only at the hard top."""
+    # (c) structural interface exemption -- ahead of any sid resolution.
+    if not (os.environ.get("FLEET_WORKER") or "").strip():
+        return None
+    caller = current_caller_session()
+    if caller is None:
+        return None                     # no sid -> cannot be the claim-holder body
+    if _caller_holds_supervisor_claim(caller) is False:
+        return None                     # a claim is held, this is not its holder
+    # holder (True) or indeterminate (None, ND4b fail-toward-band): apply the
+    # ceiling. Occupancy is the caller's own transcript (never the claim's sid).
+    occupancy = _transcript_occupancy(find_transcript_path(None, caller))
+    if occupancy is not None and occupancy < BAND_HARD_TOKENS:
+        return None                     # below the hard ceiling -- dispatch allowed
+    occ_txt = f"{occupancy:,} tokens" if occupancy is not None else "unreadable"
+    return (
+        f"{verb}: refusing -- the supervisor claim-holder's context occupancy "
+        f"({occ_txt}) is at or above the {BAND_HARD_TOKENS:,}-token hard ceiling "
+        f"(three-tier §11.3). Past the ceiling, start NO new worker turns: let "
+        f"the in-flight wave finish and READ its outcomes (`fleet status`/"
+        f"`result`/`peek`/`wait`), then hand off (`fleet sup-handoff-begin`). "
+        f"The handoff verbs are exempt from this refusal. (Fleet-enforced, not "
+        f"discretion; the interface tier is never subject to it.)")
 
 
 def _record_time(rec: dict):
@@ -2909,6 +3183,9 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
     recovery instructions) and does NOT raise raw.
     """
     _supervisor_gate("spawn", nonce=getattr(args, "nonce", None))
+    _ceiling_refusal = _ceiling_refuses_dispatch("spawn")
+    if _ceiling_refusal is not None:
+        raise FleetCliError(_ceiling_refusal)
     _require_instance_settings()
 
     cwd = Path(args.dir)
@@ -3698,6 +3975,15 @@ def _cmd_send_native(name: str, message: str,
       - anything else reached here (over_ceiling/over_budget/attached --
         native sticky statuses this task's contract does not otherwise
         enumerate) refuses generically rather than silently mis-steering."""
+    # three-tier §5.3 (B7): stamp interface-caller provenance -- the caller's
+    # own CLAUDE_CODE_SESSION_ID -- onto every `mail_sent` event this send
+    # emits. The split moves the fork-divergence class up to the (claimless)
+    # interface tier; `send` is not claim-gated, so two forked interface bodies
+    # steering the same supervisor are indistinguishable at the verb. This is
+    # DETECTION not prevention: the sid rides the event so the supervisor can
+    # surface a divergence warning (sup-status), never a refusal. None for a
+    # human shell with no session id -- the detector ignores those.
+    caller_sid = current_caller_session()
     roster_ok, payload = _fetch_agents_roster(which=which, run=run)
     roster_entries = payload if roster_ok else []
 
@@ -3768,7 +4054,8 @@ def _cmd_send_native(name: str, message: str,
             )
             if in_flight:
                 append_mailbox(raw_sid, message)
-                append_event("mail_sent", name, sid=raw_sid, status="working")
+                append_event("mail_sent", name, sid=raw_sid, status="working",
+                             caller_sid=caller_sid)
                 print(f"{name}: turn running -- message queued to mailbox")
                 return 0
             # Not actually in flight: the raw "working" label is stale
@@ -3824,7 +4111,8 @@ def _cmd_send_native(name: str, message: str,
                     f"{name}: dispatch in flight -- retry in a few seconds"
                 )
             append_mailbox(sid, message)
-            append_event("mail_sent", name, sid=sid, status=status)
+            append_event("mail_sent", name, sid=sid, status=status,
+                         caller_sid=caller_sid)
             print(f"{name}: turn running -- message queued to mailbox")
             return 0
 
@@ -3881,7 +4169,8 @@ def _cmd_send_native(name: str, message: str,
     # the mailbox drain uniformly with any prior mail (never doubled, never
     # silently dropped).
     append_mailbox(old_sid, message)
-    append_event("mail_sent", name, sid=old_sid, status="idle")
+    append_event("mail_sent", name, sid=old_sid, status="idle",
+                 caller_sid=caller_sid)
     prompt, claim = compose_prompt(name, cwd, "", old_sid)
     try:
         result = dispatch_bg(
@@ -3981,6 +4270,9 @@ def cmd_send(args, which=shutil.which, sleep=time.sleep, run=subprocess.run) -> 
     dispatching workers -- so it is the gate's headline case (bypassable, see
     `_supervisor_gate`)."""
     _supervisor_gate("send", nonce=getattr(args, "nonce", None))
+    _ceiling_refusal = _ceiling_refuses_dispatch("send")
+    if _ceiling_refusal is not None:
+        raise FleetCliError(_ceiling_refusal)
     _require_instance_settings()
 
     message = _read_task_arg(args.message)
@@ -5086,7 +5378,24 @@ def _archive_eligible(name: str, record: dict, roster_entries: list, now,
 
     Gate 6 (status not limited/dead-suspected/working) is implied by gate
     2's allowed set -- never reachable as its own branch, asserted by
-    tests instead."""
+    tests instead.
+
+    Gate 0 (three-tier §7.2, B1/B9) runs FIRST: the current live supervisor
+    claim-holder is protected under ANY name -- keyed on the claim, not the
+    static "supervisor" name (a successor runs as sup|<inc>|successor). Protects
+    the running manager (B1); a released-away/roster-gone non-holder husk is NOT
+    protected and stays archivable (B9). Keyed on HOLDER ALONE, not
+    "holder AND roster-live": gate 3 already refuses every roster-live record,
+    so a roster-live conjunct would make this a no-op AND would fail to close
+    §7.2's own disaster -- an idle/roster-gone supervisor that still holds the
+    claim crossing the 24h TTL. On an indeterminate identity (claim held, holder
+    sid unreadable) it fails TOWARD protection, but only for supervisor-shaped
+    NAMES, so a briefly unreadable INCARNATION cannot freeze archiving of every
+    ordinary worker."""
+    holder = _record_is_supervisor_claim_holder(record)
+    if holder is True or (holder is None and
+                          (name == SUPERVISOR_BODY_NAME or _is_supervisor_shaped(name))):
+        return (False, "supervisor claim-holder -- protected while live (§7.2)")
     if not is_native(record):
         return (False, "not-native")
     if record.get("archived_at") is not None:
@@ -5794,6 +6103,17 @@ def _sweep_husks(dry_run: bool, run=subprocess.run, which=shutil.which) -> tuple
     owned, protected = _registry_owned_and_protected_sids(workers)
     owned |= _archive_dir_sids()
     owned |= _events_sids()
+
+    # three-tier §7.2 (B1/B9), belt-and-braces: every sid of the current live
+    # supervisor claim-holder record is protected, under any name. Non-archived
+    # records are already protected above, so this only matters if that
+    # protection ever regressed (e.g. the holder record acquired an archived_at
+    # from an older code path) -- but the spec mandates the explicit gate, and
+    # keyed on holder-alone it stays parity with `_archive_eligible`'s gate 0.
+    claim = read_incarnation()
+    for rec in workers.values():
+        if isinstance(rec, dict) and _record_is_supervisor_claim_holder(rec, claim=claim) is True:
+            protected |= _record_sids(rec)
 
     removed = []
     deferred = []
@@ -7364,6 +7684,7 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
         functools.partial(_doctor_check_hook_errors),
         functools.partial(_doctor_check_supervisor_claim),
         functools.partial(_doctor_check_supervisor_handoff),
+        functools.partial(_doctor_check_pending_decision),
         functools.partial(_doctor_check_tzdata),
     ]
 
@@ -8283,6 +8604,118 @@ def goals_path() -> Path:
     return supervisor_dir() / "GOALS.md"
 
 
+# three-tier-command.md §3.1/§3.3/§3.5 -- the role->tier->model resolver.
+# Roles bind to ABSTRACT tiers; the tier->concrete-model step lives BELOW fleet
+# (the daemon env, §3.3). fleet reads the OPERATOR-OWNED policy from GOALS.md and
+# emits a tier alias as `--model`; it never hardcodes a model id (§3.2 receipt).
+# Defaults are documented, applied when GOALS is silent; the operator sets the
+# concrete tier->alias map (see docs/proposals/GOALS-tier-chain-proposal.md).
+_TIER_POLICY_DEFAULTS = {
+    "supervisor_chain": ["top", "second"],   # §3.5 preference chain
+    "worker_tiers": ["second", "third"],     # §3.4 (Opus/Sonnet, never Haiku)
+    "tier_model": {},                        # §3.3(d): unset -> omit --model
+}
+_TIER_POLICY_BLOCK_OPEN = "<!-- fleet-tier-policy"
+_TIER_POLICY_BLOCK_CLOSE = "-->"
+
+
+def _parse_tier_policy_block(text: str) -> dict:
+    """Parse the `fleet-tier-policy` HTML-comment block out of GOALS.md prose
+    (invisible in rendered markdown, greppable in source). Recognised keys:
+    `supervisor-tier-chain`, `worker-tiers` (comma lists), `tier-model`
+    (`tier=alias` pairs). Unknown keys and empty values are ignored -- an empty
+    value keeps the default rather than an empty list. Returns only the keys it
+    actually found; the caller merges over defaults."""
+    lines = text.splitlines()
+    inside = False
+    found = {}
+    for raw in lines:
+        line = raw.strip()
+        if not inside:
+            if line.startswith(_TIER_POLICY_BLOCK_OPEN):
+                inside = True
+            continue
+        if line.startswith(_TIER_POLICY_BLOCK_CLOSE):
+            break
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key, value = key.strip(), value.strip()
+        if not value:
+            continue
+        if key in ("supervisor-tier-chain", "worker-tiers"):
+            tiers = [t.strip() for t in value.split(",") if t.strip()]
+            if tiers:
+                found["supervisor_chain" if key == "supervisor-tier-chain"
+                      else "worker_tiers"] = tiers
+        elif key == "tier-model":
+            mapping = {}
+            for pair in value.split(","):
+                tier, _, alias = pair.partition("=")
+                tier, alias = tier.strip(), alias.strip()
+                if tier and alias:
+                    mapping[tier] = alias
+            if mapping:
+                found["tier_model"] = mapping
+    return found
+
+
+def read_tier_policy() -> dict:
+    """The role->tier policy, read from supervisor/GOALS.md over documented
+    defaults (§3.3: fleet READS the operator-owned policy, never a code
+    constant). `_source` is "goals" iff the block supplied at least one key.
+    Never raises: a missing/undecodable GOALS.md yields pure defaults."""
+    policy = {"supervisor_chain": list(_TIER_POLICY_DEFAULTS["supervisor_chain"]),
+              "worker_tiers": list(_TIER_POLICY_DEFAULTS["worker_tiers"]),
+              "tier_model": dict(_TIER_POLICY_DEFAULTS["tier_model"]),
+              "_source": "default"}
+    try:
+        text = goals_path().read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return policy
+    found = _parse_tier_policy_block(text)
+    if found:
+        policy.update(found)
+        policy["_source"] = "goals"
+    return policy
+
+
+def resolve_model_for_role(role: str, policy: dict = None):
+    """The `--model` tier alias for `role`, or None to OMIT --model (§3.3(d),
+    the honest provider-agnostic default). Resolves role -> the first tier it
+    binds to -> the operator's tier->alias mapping:
+
+      supervisor -> supervisor_chain[0]   (the preferred tier, §3.5)
+      worker     -> worker_tiers[0]        (the supervisor overrides per-spawn)
+      interface  -> "top"                  (advisory: fleet never launches it, §3.1)
+
+    None when the tier has no operator-set alias -- fleet does not invent one."""
+    if policy is None:
+        policy = read_tier_policy()
+    if role == "supervisor":
+        tiers = policy.get("supervisor_chain") or []
+    elif role == "worker":
+        tiers = policy.get("worker_tiers") or []
+    elif role == "interface":
+        tiers = ["top"]
+    else:
+        tiers = []
+    if not tiers:
+        return None
+    return policy.get("tier_model", {}).get(tiers[0])
+
+
+def proposed_goals_tier_block() -> str:
+    """The tier-policy block this build proposes the operator add to
+    supervisor/GOALS.md (§3.3: the resolver READS this; the operator APPLIES
+    it). Kept in code so the proposal doc and the parser never drift."""
+    return (f"{_TIER_POLICY_BLOCK_OPEN}\n"
+            "supervisor-tier-chain: top, second\n"
+            "worker-tiers: second, third\n"
+            "tier-model: top=opus, second=opus, third=sonnet\n"
+            f"{_TIER_POLICY_BLOCK_CLOSE}\n")
+
+
 def incarnation_path() -> Path:
     return supervisor_dir() / "INCARNATION"
 
@@ -8311,6 +8744,50 @@ def read_handoff_abort_flag() -> dict | None:
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def pending_decision_path() -> Path:
+    """three-tier §8: the operator-gate routing STATE FILE. One open decision at
+    a time; its PRESENCE is the "open" state, so it lives in state/ (gitignored
+    runtime) and is CLEARABLE -- the property the rejected `NEEDS-OPERATOR`
+    journal kind could not provide."""
+    return state_dir() / "supervisor-pending-decision.json"
+
+
+def read_pending_decision() -> dict | None:
+    """The open operator decision, or None when absent. A corrupt file reads as
+    `{"_unreadable": True, ...}` -- NEVER None -- so a garbled gate stays
+    nag-visible rather than silently dropping an operator decision (§8: the file
+    is the routing surface for "operator gates stay human" under an unattended
+    supervisor)."""
+    path = pending_decision_path()
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"_unreadable": True,
+                "question": "(pending-decision file present but unreadable)"}
+    if not isinstance(data, dict):
+        return {"_unreadable": True,
+                "question": "(pending-decision file is not a JSON object)"}
+    return data
+
+
+def write_pending_decision(obj: dict) -> None:
+    _write_json_atomic(pending_decision_path(), obj)
+
+
+def clear_pending_decision() -> None:
+    """Remove the open decision (§8: answering may write the answer OR remove
+    the file; consuming the answer removes it). Idempotent -- a missing file is
+    not an error."""
+    try:
+        pending_decision_path().unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
 
 
 def _write_json_atomic(path: Path, obj: dict) -> None:
@@ -9496,6 +9973,61 @@ def _project_handshake(hs):
     return out
 
 
+INTERFACE_DIVERGENCE_WINDOW_SECONDS = SUPERVISOR_CLAIM_STALE_SECONDS
+
+
+def _interface_divergence(now=None, window_seconds=None):
+    """three-tier §5.3 (B7) -- DETECTION, never a refusal. Scan recent
+    `mail_sent` events targeting the supervisor body (under ANY name -- gen-0
+    "supervisor" or a `sup|<inc>|successor`) and return a warning dict when
+    steers arrived from TWO OR MORE distinct interface caller sids within the
+    window; None otherwise.
+
+    Two distinct caller sids steering one supervisor is the signature of a
+    forked/divergent INTERFACE body re-deriving and re-issuing steers -- the
+    2026-07-16 incident-1 class, which the tier split moved UP to the interface
+    tier (§5.3). The interface holds no claim by design (the human owns that
+    tier), so this is deliberately weaker than the supervisor nonce: it SURFACES
+    divergence, it never blocks a send.
+
+    Reads the bounded transcript tail (`_read_tail_lines`): recent sends live at
+    the end, and concurrent divergence means both bodies are sending recently,
+    so the tail is the right bound for a detection surface. Never raises -- it
+    runs inside a read-only view."""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if window_seconds is None:
+        window_seconds = INTERFACE_DIVERGENCE_WINDOW_SECONDS
+    callers = {}     # caller_sid -> latest ts string seen (for reporting)
+    for line in _read_tail_lines(events_path()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict) or ev.get("kind") != "mail_sent":
+            continue
+        target = ev.get("name")
+        if not (target == SUPERVISOR_BODY_NAME or _is_supervisor_shaped(target)):
+            continue
+        cs = ev.get("caller_sid")
+        if not isinstance(cs, str) or not cs:
+            continue      # no provenance (human shell / pre-§5.3 event): ignore
+        try:
+            ts = _parse_iso(ev["ts"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if (now - ts).total_seconds() > window_seconds:
+            continue      # outside the window
+        callers[cs] = ev["ts"]
+    if len(callers) < 2:
+        return None
+    return {"caller_sids": sorted(callers), "count": len(callers),
+            "window_seconds": window_seconds}
+
+
 def cmd_sup_status(args) -> int:
     """`fleet sup-status [--json]` -- READ-ONLY VIEW (terminal-surface
     doctrine: no lock, no probe, no write). Safe lock-free reads: all
@@ -9518,6 +10050,8 @@ def cmd_sup_status(args) -> int:
         "heartbeat_age_seconds": beat_age,
         "handshake": _project_handshake(hs),
         "abort_flag": handoff_abort_flag_path().exists(),
+        "pending_decision": read_pending_decision(),   # §8: routing surface
+        "interface_divergence": _interface_divergence(),  # §5.3: B7 detection
         "nag": supervisor_status_line(),
     }
     if getattr(args, "json", False):
@@ -9545,7 +10079,181 @@ def cmd_sup_status(args) -> int:
         print(f"handshake: {hs.get('incarnation_id')} sid={hs.get('session_id')} (handoff in flight)")
     if info["abort_flag"]:
         print(f"WARNING: aborted-handoff flag present ({handoff_abort_flag_path()})")
+    pd = info["pending_decision"]
+    if pd is not None:
+        if pd.get("answer"):
+            print(f"pending-decision: ANSWERED ({pd.get('answer')!r}) -- supervisor "
+                  f"should consume and `fleet sup-decision --clear`")
+        else:
+            print(f"pending-decision OPEN (needs operator): {pd.get('question')!r}"
+                  + (f" [ctx {pd['context_ref']}]" if pd.get("context_ref") else "")
+                  + " -- answer with `fleet sup-decision --answer <text>`")
+    div = info["interface_divergence"]
+    if div is not None:
+        print(f"WARNING: interface divergence -- {div['count']} distinct caller sids "
+              f"steered the supervisor within {div['window_seconds']:.0f}s "
+              f"({', '.join(div['caller_sids'])}). A forked interface body may be "
+              f"re-deriving steers (§5.3). Detection only; confirm the human owns "
+              f"every session before trusting recent briefs.")
     return 0
+
+
+def cmd_sup_context(args) -> int:
+    """`fleet sup-context [--sid S] [--json]` -- three-tier §11.2 band
+    measurement. READ-ONLY: no lock, no write. Run BY the body observing itself
+    (the supervisor, or a worker, §11.4).
+
+    Rotation-safe by construction: it resolves the transcript from the running
+    process's OWN CLAUDE_CODE_SESSION_ID (G4 -- the one key guaranteed fresh for
+    the acting body, immune to the fork-steer that staled INCARNATION.session_id,
+    B3), not via the claim or an outcome record. `--sid` overrides only for
+    out-of-band inspection.
+
+    Fails toward the band (§11.2): an unresolvable sid or a missing/unreadable
+    transcript yields `assume-near-band` (hand_off True), never `below-band`."""
+    sid = getattr(args, "sid", None) or current_caller_session()
+    transcript = find_transcript_path(None, sid) if sid else None
+    occupancy = _transcript_occupancy(transcript)
+    verdict = supervisor_band_verdict(occupancy)
+    info = {
+        "sid": sid,
+        "occupancy": occupancy,
+        "soft_threshold": BAND_SOFT_TOKENS,
+        "hard_threshold": BAND_HARD_TOKENS,
+        "transcript": transcript.as_posix() if transcript else None,
+        **verdict,
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(info, indent=2))
+        return 0
+    occ = f"{occupancy:,} tokens" if occupancy is not None else "unreadable"
+    print(f"context occupancy: {occ}  ->  {verdict['verdict'].upper()}"
+          f"  (band {BAND_SOFT_TOKENS:,}-{BAND_HARD_TOKENS:,})")
+    print(verdict["reason"])
+    if sid is None:
+        print("NOTE: no CLAUDE_CODE_SESSION_ID -- run this from the session you "
+              "are measuring (it reads its OWN transcript, §11.2)")
+    return 0
+
+
+def cmd_sup_decision(args) -> int:
+    """`fleet sup-decision` -- three-tier §8 operator-gate routing.
+
+      --raise QUESTION [--context-ref REF]   supervisor routes a decision (the
+          claim-holder only) and PARKS. Refuses if one is already open: one
+          decision at a time.
+      --answer TEXT                          the interface tier writes the
+          operator's decision. NOT claim-gated -- the interface holds no claim
+          by design (§3.1), so requiring continuity here would be wrong.
+      --clear                                remove the open decision (consumed).
+      (no flag)                              show the current decision.
+
+    The supervisor never writes its own answer (§8): `--raise` sets `answer` to
+    None and `--answer` is the interface's verb. This file is ROUTING, not
+    authorization -- it never lets the supervisor act on the operator's behalf;
+    it is how "operator gates stay human" survives an unattended supervisor."""
+    raising = getattr(args, "question", None) is not None
+    answering = getattr(args, "answer", None) is not None
+    clearing = bool(getattr(args, "clear", False))
+    if sum((raising, answering, clearing)) > 1:
+        raise FleetCliError("sup-decision: pass at most one of --raise / --answer / --clear")
+
+    if raising:
+        with fleet_lock():
+            claim, caller, notices = _require_claim_holder(
+                getattr(args, "sid", None), nonce=getattr(args, "nonce", None),
+                verb="sup-decision")
+            existing = read_pending_decision()
+            if existing is not None and not existing.get("answer"):
+                raise FleetCliError(
+                    "sup-decision: a decision is already open -- one at a time. "
+                    "Answer or clear it first "
+                    f"(question: {existing.get('question')!r})")
+            write_pending_decision({
+                "question": args.question,
+                "raised_by_inc": claim.get("incarnation_id"),
+                "raised_at": now_iso(),
+                "context_ref": getattr(args, "context_ref", None),
+                "answer": None,
+            })
+            write_incarnation(claim)   # §5.3: acknowledge + commit together
+        print(f"pending-decision raised: {args.question!r} -- routed to the "
+              f"interface tier; supervisor parks until answered")
+        _deliver_notices(notices)
+        return 0
+
+    if answering:
+        # micro-fold-2 (1): the read-modify-write takes the SAME lock `--raise`
+        # holds -- without it, an interface `--answer` and a supervisor
+        # `--raise` could interleave and lose one write.
+        with fleet_lock():
+            rec = read_pending_decision()
+            if rec is None:
+                raise FleetCliError("sup-decision: no open decision to answer")
+            # micro-fold-2 (2): a corrupt file reads as `_unreadable` (never
+            # None). Answering over it would ADD `answer` to the sentinel and
+            # write it back -- fabricating an ANSWERED record over unreadable
+            # state. Refuse and leave the file untouched for the operator.
+            if rec.get("_unreadable"):
+                raise FleetCliError(
+                    "sup-decision: the pending-decision file is present but "
+                    f"corrupt ({pending_decision_path().name}) -- refusing to "
+                    "answer over it (an answer written now would fabricate a "
+                    "record over unreadable state). Inspect and remove the file, "
+                    "then re-raise the decision.")
+            rec["answer"] = args.answer
+            rec["answered_at"] = now_iso()
+            rec["answered_by_sid"] = current_caller_session()
+            write_pending_decision(rec)
+        print(f"pending-decision answered: {args.answer!r}")
+        return 0
+
+    if clearing:
+        # micro-fold-2 (1): same lock as --raise/--answer. Clearing a corrupt
+        # file is the sanctioned recovery, so --clear needs no `_unreadable`
+        # refusal -- removing the garbage is exactly the point.
+        with fleet_lock():
+            clear_pending_decision()
+        print("pending-decision cleared")
+        return 0
+
+    rec = read_pending_decision()
+    if getattr(args, "json", False):
+        print(json.dumps(rec, indent=2))
+        return 0
+    if rec is None:
+        print("pending-decision: none open")
+    elif rec.get("answer"):
+        print(f"pending-decision ANSWERED: {rec.get('question')!r} -> {rec.get('answer')!r}")
+    else:
+        print(f"pending-decision OPEN: {rec.get('question')!r}"
+              + (f" [ctx {rec['context_ref']}]" if rec.get("context_ref") else ""))
+    return 0
+
+
+def _doctor_check_pending_decision():
+    """three-tier §8 nag surface: FAIL while an operator decision is OPEN and
+    unanswered (it needs a human), and on a corrupt file. An answered-but-not-
+    yet-consumed decision is a NOTE (ok=True) -- the supervisor owes the clear,
+    not the operator. Never raises: a doctor row must not crash on evidence."""
+    try:
+        rec = read_pending_decision()
+    except Exception:  # noqa: BLE001 -- doctor row: evidence must not break health
+        return ("supervisor-pending-decision", False, "pending-decision unreadable")
+    if rec is None:
+        return ("supervisor-pending-decision", True, "no operator decision pending")
+    if rec.get("_unreadable"):
+        return ("supervisor-pending-decision", False,
+                "pending-decision file present but unreadable -- inspect "
+                f"{pending_decision_path().name}")
+    if rec.get("answer"):
+        return ("supervisor-pending-decision", True,
+                f"ANSWERED ({rec.get('answer')!r}) -- supervisor should consume and "
+                f"`fleet sup-decision --clear`")
+    return ("supervisor-pending-decision", False,
+            f"OPEN, needs operator: {rec.get('question')!r} (raised by "
+            f"{rec.get('raised_by_inc')} at {rec.get('raised_at')}) -- answer with "
+            f"`fleet sup-decision --answer <text>`")
 
 
 def _render_successor_task(successor_inc: str, old_inc: str, handoff_token: str) -> str:
@@ -10434,6 +11142,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_supstat = sub.add_parser("sup-status", help="read-only supervisor claim/handshake status")
     p_supstat.add_argument("--json", action="store_true")
 
+    # three-tier §11.2: self-monitored context band measurement (read-only).
+    p_supctx = sub.add_parser(
+        "sup-context",
+        help="read this session's own context occupancy vs the 150-200k band (§11.2)")
+    p_supctx.add_argument("--sid", help="override caller session id (out-of-band inspection)")
+    p_supctx.add_argument("--json", action="store_true")
+
+    # three-tier §8: operator-gate routing state file.
+    p_supdec = sub.add_parser(
+        "sup-decision",
+        help="operator-gate routing (§8): --raise (supervisor parks a decision), "
+             "--answer (interface answers), --clear, or show")
+    p_supdec.add_argument("--raise", dest="question", metavar="QUESTION",
+                          help="supervisor routes an operator-only decision and parks "
+                               "(claim holder only; one open at a time)")
+    p_supdec.add_argument("--context-ref", dest="context_ref",
+                          help="a pointer (file#L, journal ref) the interface reads for context")
+    p_supdec.add_argument("--answer", metavar="TEXT",
+                          help="the interface tier writes the operator's decision")
+    p_supdec.add_argument("--clear", action="store_true",
+                          help="remove the open decision (consumed)")
+    p_supdec.add_argument("--json", action="store_true")
+    p_supdec.add_argument("--sid", help="override caller session id (for --raise)")
+    p_supdec.add_argument("--nonce", help=NONCE_ARG_HELP)
+
     p_suphb = sub.add_parser("sup-handoff-begin", help="dispatch a handoff successor (claim holder only)")
     p_suphb.add_argument("--model", help="model for the successor session")
     p_suphb.add_argument("--permission-mode", dest="permission_mode",
@@ -10523,6 +11256,10 @@ def main(argv=None) -> int:
             return cmd_sup_release(args)
         if args.command == "sup-status":
             return cmd_sup_status(args)
+        if args.command == "sup-context":
+            return cmd_sup_context(args)
+        if args.command == "sup-decision":
+            return cmd_sup_decision(args)
         if args.command == "sup-handoff-begin":
             return cmd_sup_handoff_begin(args)
         if args.command == "sup-handoff-complete":
