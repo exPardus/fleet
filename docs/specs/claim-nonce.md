@@ -237,12 +237,22 @@ option (c) in §7, priced honestly rather than assumed away.
 
 - **Not `sup-spawn`, not `fleet beat`, not the scheduler bridge.** Three-tier adjudication items
   4–10 belong to the re-drafted three-tier spec, sequenced after this one.
-- **Not the claim gate.** v1 decided it; the gate lens unwound that decision. §7 puts it to the
-  operator with three options and a recommendation, and decides nothing.
+- **Not the claim gate *as this section was first written*** — corrected, because §7 no longer holds
+  what this bullet says it holds. v1 decided the gate; the gate lens unwound that decision; §7 then
+  put it to the operator with three options and a recommendation and decided nothing. **The operator
+  has since answered it: option (b), a knowingly-bypassable gate (Altai, 2026-07-23), and §7's
+  corrected verb taxonomy is binding.** The gate is therefore IN scope for this slice, and the
+  original bullet is left visible rather than deleted so that the sequence — proposed, unwound,
+  re-put, decided — stays readable. What remains a non-goal here is the *authorization input* of
+  option (c): §2.3 prices it as a separate slice and §2.1 is why no gate this spec can ship is a
+  privilege boundary.
 - **Not body-fencing.** v1 attached a `claude stop` of a superseded body to `sup-handoff-complete`
-  as belt-and-braces for the gate. With the gate deferred its justification is gone, and it would
-  add process control to a verb with no subprocess seam (§4.12). Dropped; noted for the three-tier
-  slice.
+  as belt-and-braces for the gate. It is dropped, and — second correction in the same family — **the
+  reason is not "the gate is deferred"**, which was true when this bullet was written and is not
+  true now. The standing reasons are independent of the gate decision: it would add process control
+  to a verb with no subprocess seam (§4.12), and §8's portability paragraph resolves v1's own
+  contradiction by *removing the process control* rather than by weakening the invariant. Dropped;
+  noted for the three-tier slice.
 - **Not a change to `spawned_by`'s spawn-immutability.** §6.2 adds fields and renames nothing.
 - **Not a ratification.** `docs/specs/three-tier-command.md` stays **`PROPOSAL — RESTRUCTURE
   REQUIRED (dual-lens design gate, 2026-07-17)`** — its full status, per its own header line 3;
