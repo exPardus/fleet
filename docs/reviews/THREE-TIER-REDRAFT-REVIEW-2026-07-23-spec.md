@@ -336,3 +336,161 @@ redefiner of its boot order. The lone residual R1 is a nit-grade cross-reference
 un-propagated into §12, below the fix-list threshold.
 
 **r2: `sound`** (disposition: B1–B10 + S1 all FIXED, 0 SPURIOUS; nit R1 recorded).
+
+---
+---
+
+# Final gate — r3 (fix wave 2), narrow scope
+
+**Trigger:** manager final gate on wave 2, commit **`4e540f8`** on `mf/three-tier` ("close ND1–ND3 + R1"),
+merged into `mf/tt-spec` fast-forward (docs-only). **Vantage:** worktree `C:\proga\fleet-mf-tt-spec`,
+branch `mf/tt-spec`, HEAD `4e540f8`. Receipts pinned `235421e5`; `bin/fleet.py` byte-identical pin→HEAD.
+
+**r3 VERDICT: `sound`** — 39/39 receipts under two verifiers, zero regression, R1 closed as recommended,
+ND1–ND3 sound and contradiction-free. Three of the four resurrected blocks moved **byte-identical**; the
+fourth had its command **extended** (a verified strengthening, flagged below). One residual is filed —
+**H1, against `tools/verify_receipts.py`, not against the spec** — with an executable claim so the
+follow-up code task inherits a reproducible failure.
+
+## r3.1 Receipts — 39/39
+
+```
+$ py -3.13 tools/verify_receipts.py --self-test --strict docs/specs/three-tier-command.md
+39/39 receipts reproduce exactly (39 fenced blocks, 0 unclassified, 0 volatile-skipped, 0 warned, 0 FAILED)
+
+$ py -3.13 indep_receipts.py docs/specs/three-tier-command.md          # my own extractor
+39/39 blocks reproduce; 0 FAILED                                        (exit 0)
+
+$ py -3.13 indep_receipts.py docs/specs/three-tier-command.md --seed 5    → 38/39, 1 FAILED (exit 1)
+$ py -3.13 indep_receipts.py docs/specs/three-tier-command.md --seed 33   → 38/39, 1 FAILED (exit 1)
+
+$ py -3.10 -m pytest tests/test_receipts.py -q
+13 passed
+```
+Fenced blocks now equal receipts (39 = 39): every fenced block in the file is a parsed, verified receipt.
+
+## r3.2 Zero-regression confirmation
+
+- **Appendix-A no-match greps, all re-executed at the pin — all `0`:** `sup-spawn|cmd_sup_spawn`,
+  `add_parser("beat")`, `RESERVED`, `NEEDS-OPERATOR|needs_operator|pending-decision|pending_decision`,
+  `_doctor_check_supervisor_beat|supervisor-beat.jsonl|sup-context|sup-decision`,
+  `CLAUDE_CONFIG_DIR|ANTHROPIC_`, `sup-release|cmd_sup_release`, `SUPERVISOR_BODY_NAME`, and
+  `cache_read` in `stop_outcome.py`. Every `[UNBUILT]` tag still has a live absence proof.
+- **Status discipline:** line 3 still `**Status: `drafting`.**`; *"An author never promotes its own
+  spec"* intact. No self-promotion.
+- **Change surface is exactly the declared one.** The `1a3d4e5..4e540f8` spec diff is five hunks —
+  §7.2, §10.4, §11.2, §11.3, §12. **§3.3 is untouched** (correct: R1 was a §12-side wording fix, and the
+  B8 decision it defers to was already final).
+- **Contradiction sweep on the deltas — clean.**
+  - **ND1** (§11.3, the ceiling's supervisor-identity gate): the interface exemption is *required*, not
+    a loosening. It follows from §3.1 (the interface tier is outside fleet's launch surface — fleet
+    cannot hand it off, respawn or reset it) and from the operator record, which bands **the second tier
+    only** (`lessons.md#2026-07-23-three-tier-inputs`: *"supervisor self-monitors context; band
+    150–200k"*). A caller-agnostic refusal would have blocked the human's only steering verb with no
+    recourse. It also **unifies** identity: one `CLAUDE_CODE_SESSION_ID` vs `INCARNATION` resolution now
+    serves B1 (archive exemption), B3 (occupancy read) and ND1 (ceiling gate) — three consumers, one
+    concept, no divergence to contradict.
+  - **ND2** (§11.3, past-`H` reconcile is read-only): decidable, and its escape-hatch claim is accurate —
+    *"the handoff dispatch hand-rolls its own argv and routes through neither `cmd_spawn` nor
+    `dispatch_bg`"* matches §10.1's shipped-code finding (verified in r1), so a `spawn`/`send`-scoped
+    ceiling cannot deadlock the handoff it exists to force.
+  - **ND3** (§10.4, bounded `T_release`): the precedent receipt `@7919`
+    (`SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS = 300.0`) reproduces; arm 1 always falls through to arm 2 on
+    timeout or immediate `send` refusal, announcing which arm — so §10.4's kill can no longer hang. Arm 2's
+    header correctly gained *"/ arm-1 timed out"*. Consistent with §4.3's G9 `send` refusal.
+  - **R1** (§12): closed exactly as r2.5 recommended — the longcat bullet now reads *"only if … ever
+    built as **separate scope** — which §3.3 argues *against* for v1 … and §13 records as a non-goal …
+    **not** a live `[UNBUILT]` deliverable of this slice."* Matches §13:1068. Residual discharged.
+  - **B6 disposition unchanged and re-confirmed:** §10.4 still files the boot-rule-1 guard as a
+    claim-nonce build-slice prerequisite and still redefines nothing.
+
+## r3.3 The four resurrected blocks — content audit vs `1a3d4e5`
+
+Method: extracted every receipt-shaped fenced block from **both** revisions with an *lstrip-aware*
+parser (strips `> ` blockquote markers and list indentation), then compared command→expected pairs.
+Wave-1 lstrip-aware census = **38** receipt-shaped blocks against the 34 `verify_receipts` reported ⇒
+**exactly 4 hidden**, matching the commit's claim. Located at wave-1 lines **520** (§7.2, `> `
+blockquoted), **784** (§10.4), **910** (§11.2), **955** (§11.3) — the last three list-indented.
+
+| # | Block | Verdict |
+|---|---|---|
+| §7.2 | `sed -n '8522p'` → `    name = f"sup\|{successor_inc}\|successor"` | **Byte-identical.** Diff is a pure dedent: every line matches modulo the `> ` prefix. No semantic change. |
+| §10.4 | `grep -c "sup-release\|cmd_sup_release"` → `0` | **Byte-identical.** |
+| §11.2 | `sed -n '826,827p'` → `    sid = os.environ.get(...)` | **Byte-identical to source.** Wave 1 carried 2-space list indent + the code's own 4 spaces (6 total); wave 2 at column 0 carries 4 — which is exactly `bin/fleet.py`'s real indentation at the pin (verified directly). *(My first-pass comparator flagged this; the flag was my own normaliser's blanket 2-space strip, not a content edit. Recorded because a false positive I raised is mine to retract explicitly.)* |
+| §11.3 | `grep -c "sup-context\|supervisor-beat.jsonl\|_doctor_check_supervisor_beat"` **→ extended with** `\|SUPERVISOR_BODY_NAME` | **CONTENT CHANGED — a verified strengthening, not a weakening.** The alternation is a strict superset and the extended form independently returns `0` at the pin (re-executed). It is *purposeful*: ND1 introduced the caller-identity concept, and the block's own lead-in now reads *"neither the ceiling **nor the identity concept it must be gated on** exists today"* — the receipt was widened to prove that second claim. **Flagged for the record:** the commit message describes this operation as *"All moved to column 0"* and does not disclose that one command was also edited. Benign here (superset, still `0`, justified by adjacent prose), but a move-and-edit in one step is the shape under which a weakening would hide. |
+
+**Net:** wave-1 38 → wave-2 39 receipt-shaped blocks = +1, the new ND3 `@7919`. No block was removed,
+none weakened, none silently fixed-up to make a failing claim pass.
+
+## r3.4 H1 — FILED RESIDUAL (against `tools/verify_receipts.py`) — the class is real, and worse than stated
+
+**Claim:** `verify_receipts.py` cannot see receipt-shaped blocks that are indented or blockquoted, and
+**fails open** — they are silently skipped, so an unverified claim shaped like a receipt reads as
+verified. Line receipts at HEAD:
+
+```
+$ grep -n 'startswith' tools/verify_receipts.py
+228:        if raw.lstrip().startswith("```")     <- fence detection DOES lstrip
+250:        if raw.startswith("# at ")            <- pin match does NOT lstrip
+255:        if raw.startswith("$ ")               <- command match does NOT lstrip
+```
+plus the docstring at `:38` — *"Blocks with no `$ ` line (quoted prose, journal entries) are skipped."*
+
+**That asymmetry produces two distinct failure modes, not one:**
+- **(a) List-indented block** — the fence *is* detected (`:228` lstrips) but `# at`/`$ ` are not
+  (`:250`/`:255`), so the block is counted in the fenced-block census yet skipped as prose.
+- **(b) Blockquoted block** — `"> ```".lstrip()` is still `"> ```"`, which does **not**
+  `startswith("```")`, so **the fence is never detected at all**: the block is invisible, absent even
+  from the census.
+
+**Executable proof** (run at HEAD, on a document holding one TRUE column-0 receipt plus **two
+deliberately FALSE** receipts — one list-indented `99999-THIS-IS-FALSE`, one blockquoted
+`88888-ALSO-FALSE`):
+
+```
+$ py -3.13 tools/verify_receipts.py --strict gapdemo.md
+pins resolved: 235421e56bfd328a7e913e519a1459ccf55918dc
+1/1 receipts reproduce exactly (2 fenced blocks, 0 unclassified, 0 volatile-skipped, 0 warned, 0 FAILED)
+EXIT: 0
+```
+Both false receipts pass. Exit 0. `0 unclassified, 0 FAILED`. And the census reports **2** fenced blocks
+where **3** exist — mode (b) erasing the blockquoted one.
+
+**Corroborated by the real document's own arithmetic:** wave 1 reported *"37 fenced blocks, 34
+receipts"*; the lstrip-aware census is 38. `34` column-0 + `3` list-indented (counted as fences, skipped
+— mode (a)) = **37** ✓, plus `1` blockquoted (invisible — mode (b)) = **38** ✓. The live document
+exercised both modes simultaneously.
+
+**Why it matters:** the tool's own green line is the false assurance — `0 unclassified` is precisely the
+signal an operator reads as "nothing escaped". `tests/test_receipts.py` inherits the same blindness, so
+the enforced test cannot catch it either. **And the repo rule is already being violated:** CLAUDE.md
+binds *"A receipt the harness cannot classify is a failure, never a skip."* An indented receipt is a
+receipt the harness cannot classify, and it is skipped — so the fix has a standing rule behind it, not
+just a preference.
+
+**Fix direction for the follow-up code task:** dedent (strip leading `> ` markers and whitespace) before
+the `# at ` / `$ ` matches so they agree with `:228`'s fence handling; **and** fail closed — any fenced
+block whose *dedented* first line matches `# at ` but which is not parsed must be reported
+**unclassified**, never skipped. Ship it with a seed test asserting that an indented **and** a
+blockquoted false receipt each turn the run red.
+
+**Honest disclosure — my own harness shares the blind spot.** `indep_receipts.py` matches
+```` ```\n# at ```` at column 0, so it also reported 34/34 in r2 and did **not** independently catch the
+four hidden blocks; the wave-2 author self-found them. Two independently-written verifiers agreeing
+proved nothing here, because independence of *implementation* did not buy independence of *parsing
+assumption*. That is the sharper lesson for the follow-up task than the parser bug itself, and it is why
+H1 is worth fixing in the shared tool rather than worked around per-document.
+
+## r3.5 Verdict
+
+Wave 2 closes ND1–ND3 and R1 correctly, regresses nothing (39/39 receipts, all absence proofs still `0`,
+Status intact, change surface exactly as declared), and the contradiction sweep on the four touched
+sections is clean — ND1's interface exemption in particular is required by §3.1 and the operator record
+rather than a loosening. Three of four resurrected blocks moved byte-identical; the fourth's command was
+extended into a verified superset, which I flag as a process note (move-and-edit in one step) rather than
+a defect. The spec file is now fully parsed: 39 fenced blocks, 39 receipts, zero unclassified.
+
+**The one open item is tooling, not the spec:** H1 is filed against `tools/verify_receipts.py` with a
+reproducible red case, so the follow-up code task inherits an executable claim rather than a description.
+
+**r3: `sound`** (spec). **H1 filed** (harness, follow-up code task).
