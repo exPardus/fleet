@@ -318,3 +318,152 @@ architecture — each is a correction to a named section (§7.2 exemption key, �
 a restructure, but **B1 is CRITICAL and must close before any build starts.**
 
 fix-list(B1,B2,B3,B4,B5,B6,B7,B8,B9,B10)
+
+---
+
+# Re-review r2 — fix wave 1 (`1a3d4e5` on `mf/three-tier`, merged clean into `mf/tt-break`)
+
+**Date:** 2026-07-23. **Wave under review:** `1a3d4e5` "docs(review): three-tier re-draft fix-wave 1 —
+close B1-B10 + S1". **Vantage:** worktree `C:\proga\fleet-mf-tt-break`, HEAD after fast-forward merge
+`1a3d4e5`, `FLEET_HOME` unset. Receipt pin still `235421e`; **`bin/fleet.py` /
+`bin/hooks/stop_outcome.py` remain byte-identical to `235421e`** (the wave is docs-only:
+`three-tier-command.md` +337 lines, plus the spec-lens verdict file), so every line-anchored receipt —
+old and new — is valid at HEAD.
+
+## Receipts — clean, including the 2 new blocks
+
+- `py -3.13 tools/verify_receipts.py --self-test --strict docs/specs/three-tier-command.md` →
+  **34/34 reproduce, self-test PASS** (was 32/32; +2 blocks). Plain `--strict` run exits 0.
+- The 4 new/added fix-wave receipts hand-executed at HEAD, all reproduce:
+  `sed -n '8522p'` → `name = f"sup|{successor_inc}|successor"` (B1);
+  `sed -n '826,827p'` → `sid = os.environ.get("CLAUDE_CODE_SESSION_ID")` (B3/B4);
+  `grep -n 'append_event("mail_sent"'` → 3 sites, all target-sid (B7);
+  `grep -c "sup-release\|cmd_sup_release"` → 0 (B5).
+- Out-of-write-set: none new in the wave beyond the already-dispositioned test/lessons edits.
+
+## Per-finding disposition (B1–B10)
+
+| ID | Sev | Disposition | Basis |
+|---|---|---|---|
+| **B1** | CRIT | **FIXED** | Exemption re-keyed from `name == "supervisor"` to *is-this-the-current-live-claim-holder, under any name*: protected iff the record's `session_id` **or a member of `retired_sids`** equals `INCARNATION`'s body **and** roster-live. The `retired_sids` clause is load-bearing and correct — it covers the post-fork-steer gap where `_restamp_after_steer` has moved the old sid into `retired_sids` and `INCARNATION.session_id` is still the old sid (claim-nonce §4.5, registry-only rotation). **Verified no transient-roster regression** (see ND-cleared below). |
+| **B2** | MAJOR | **FIXED** | Occupancy corrected to the 3-way sum `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`; the mis-cited "continuity" line is now explicitly labelled a continuity signal, not an occupancy figure. Arithmetic correct against Anthropic per-turn usage accounting. |
+| **B3** | MAJOR | **FIXED** | Resolution moved to the running process's own `CLAUDE_CODE_SESSION_ID` (fresh for the acting body; receipt `sed 826,827p`), read the transcript by sid directly (not via an outcome record), and the absent/stale return is specified to **fail toward the band** ("assume near-band, hand off"). Closes the rotation/mid-turn holes I raised. |
+| **B4** | MAJOR | **FIXED (design), but the new mechanism introduces ND1+ND2** | "urgent" replaced by a decidable, fleet-readable predicate (*work dispatched-and-not-yet-reconciled*); 200k made a hard fleet-enforced refusal, not a directive. Direction is exactly right; the **new refusal surface** has two gaps — see ND1 (MAJOR), ND2 (MINOR). |
+| **B5** | MAJOR | **FIXED** (ND3 minor gap) | Two-arm kill: body-responsive → steer body to self-release then stop; body-unresponsive → documented bounded-freeze-then-seize. The killer-side release the earlier draft wrongly asserted is gone; receipt confirms `sup-release` unbuilt + continuity-required. Arm-1 lacks a timeout/fallback — ND3 (MINOR). |
+| **B6** | MAJOR | **FIXED — correctly scoped as a claim-nonce prerequisite** | The spec does not own the boot verdict order, so it states the rule-1-vs-release-window constraint and **files the guard to the claim-nonce build slice** (rule 1 gains a roster-liveness precondition, or release+stop made atomic), with an **interim self-gate** for three-tier's automated callers (`sup-boot` only when `released_by_sid not in live_sids`). Honest ownership. *Residual (not a regression):* the interim gate binds automated callers only — a **manual** `sup-boot` inside the graceful-kill window is unprotected until claim-nonce ships the rule-1 guard. Carry into the claim-nonce slice. |
+| **B7** | MAJOR | **FIXED (detect + surface + scoped non-goal)** | New §5.3: interface-caller provenance on `send` (receipt shows all 3 `mail_sent` events carry only the target sid today) + supervisor divergence-warn; full *prevention* scoped out in §13 with its reason (would need a claim on the tier the operator keeps human/claimless). Appropriate — the substrate cannot prevent an unregistered fork (claim-nonce §1.2), and the mitigation matches the 2026-07-17 same-milestone candidate. |
+| **B8** | MINOR | **FIXED** | Pre-flight recommendation **dropped**; the §3.2/§3.3 boundary tension is resolved on the page; §13 non-goal "Not a fleet provider-env read surface." Accepted the finding rather than papering it. |
+| **B9** | MINOR | **FIXED** (same fix as B1, opposite direction) | The live-claim-holder predicate's roster-live conjunct stops protecting a dead husk: a roster-gone record no longer holding the claim is an ordinary husk and the sweep removes it. Verified the conjunct is safe (below). |
+| **B10** | MINOR | **FIXED** (recorded, priced upstream) | §5.3 records that the supervisor's dominant verb (`send`) is exactly option-(b)'s accepted blind spot, and points to §8 operator-gate routing as what bounds a send-only zombie's damage. Correct framing. |
+
+**No SPURIOUS-FIX and no REGRESSED.** The author engaged each finding with receipts rather than
+rubber-stamping (B1/B9 unified into one predicate; B6 correctly disclaimed as another slice's; B8
+accepted-and-removed). The one regression candidate I hunted — B1's new `roster-live` conjunct being
+fooled by a false-empty roster — is **cleared**: both and only callers of the predicate epoch-freeze
+*upstream* of it —
+
+```
+$ sed -n '5407,5410p' bin/fleet.py          # cmd_archive, at 0846d1c == 235421e for bin/fleet.py
+    if epoch_frozen:
+        print("EPOCH: roster suspicious -- archival refused (G9); zero mutations", file=sys.stderr)
+        return 1
+$ sed -n '5629,5630p' bin/fleet.py          # _sweep_husks
+    if native_epoch_suspicious(roster_ok, payload, workers):
+        raise FleetCliError("husk sweep refused: roster suspicious (G9)")
+```
+
+— so a daemon-idle-exit empty roster (the state the autoclean sweep is *most* likely to meet) refuses
+the whole pass before `_archive_eligible`/the liveness predicate ever runs. The predicate is never
+asked "is this live?" against a blind roster.
+
+## Mandated new-defect hunt
+
+### Aim 1 — B4's fleet-enforced hard ceiling (a NEW refusal surface)
+
+**ND1 — MAJOR — the ceiling's trigger population is under-specified and, taken literally, throttles the
+interface tier the operator's model must keep long-lived.** §11.3 says the refusal is *"for a supervisor
+caller,"* but the mechanism it specifies has **no supervisor-identity gate**:
+
+> the dispatch verb reads the **caller's** own `CLAUDE_CODE_SESSION_ID` … resolves the caller's live
+> transcript, computes the B2-correct occupancy, and refuses above `H`.
+
+That fires for **any** `fleet spawn`/`fleet send` caller whose own context exceeds 200k. The **interface
+session** issues `fleet send supervisor …` (the v1 beat, §5.1) and, per the operator's model, *"saves its
+context for talking, interpreting, and long-term ideas"* — it is the tier deliberately **not**
+respawned, and it is **outside fleet's launch surface** (§3.1), so fleet cannot hand it off or reset it.
+A caller-agnostic occupancy ceiling therefore refuses the interface's only steering verb once the
+interface's own context passes 200k, and the human has **no recourse** (no fleet handoff for tier 1).
+The operator set the 150–200k band for the **second** tier only; nothing bands the highest tier.
+
+```
+$ grep -c "sup-context\|supervisor-beat.jsonl\|_doctor_check_supervisor_beat\|SUPERVISOR_BODY_NAME" bin/fleet.py
+0                                                        # ceiling + identity concept entirely unbuilt — nothing constrains the build to scope it
+```
+
+**Fix:** gate the ceiling on *caller-is-the-supervisor-claim-holder* (reuse B1/B3's
+`CLAUDE_CODE_SESSION_ID` vs `INCARNATION` resolution), and state explicitly that the interface tier is
+exempt — it has no fleet-enforced band. Without this the build is free to ship a caller-agnostic refusal
+that silences the human's control channel.
+
+**ND2 — MINOR — the "reconcile-of-in-flight-work" carve-out is mechanically undefined against the
+blanket `send` refusal.** §11.3 leaves *"only the handoff verbs … and reconcile-of-in-flight-work"* above
+`H`. If reconciling an in-flight worker requires a `fleet send` (steer it to wrap up), that send is
+caught by the very refusal §11.3 imposes; if reconcile is read-only (`result`/`peek`/`wait`), it is fine
+but the spec never says so. The band explicitly permits *finishing* the in-flight urgent task, so the
+carve-out must be decidable. **Fix:** state that past `H`, reconcile is read-only (outcome reads), or
+name the exact send shape exempted.
+
+*(B4 deadlock hunt — cleared. I checked whether the ceiling could also refuse the handoff-successor
+dispatch and self-lock a supervisor at `H`: `sup-handoff-begin` **hand-rolls its own argv** with its own
+roster pre-snapshot (`sed -n '8515,8522p'`), routing through neither `cmd_spawn` nor `dispatch_bg`, so a
+ceiling scoped to `fleet spawn`/`fleet send` cannot catch it. No deadlock.)*
+
+*(Limited-park / nonce-rc-map hunt — cleared. The ceiling is an occupancy refusal on `spawn`/`send`; it
+does not pass through `supervisor_claim_decision`'s `{claim:0,seize:0,refuse:2,freeze:3}` rc map, so no
+collision there. The autoclean scheduled caller neither spawns nor sends, so the scheduler-eats-exit-code
+hazard (§4.3) does not reach it. Limited-park restamps registry sids inline and is orthogonal to an
+occupancy read — no interaction beyond ND1's shared identity question.)*
+
+### Aim 2 — B5's two-arm kill, 2026-07-16 incident class replayed through both arms
+
+**ND3 — MINOR — the graceful arm has no timeout/fallback.** Arm 1 *"steers the body to release itself …
+waits for the record to read `released`, then stops."* If the self-release steer never lands — `send`
+refuses under a suspicious roster (§4.3), or the body accepts it and errors — the wait has no specified
+bound, so `kill supervisor` can hang instead of falling through to arm 2. **Fix:** arm 1 needs a bounded
+wait → fall to arm-2 bounded-freeze on timeout.
+
+**Incident-class replay — no new defect, one limit worth recording (not a regression).** Replaying the
+2026-07-16 dual-body fork through both arms: `kill supervisor` operates on the **registered** body (send
+targets the registry record's current sid; arm 2 freezes on the registered claim). The incident-1 zombie
+was an **unregistered** `--fork-session` that *"fleet never had a handle on"* (claim-nonce §1.2(2)) — so
+**neither arm reaches it**: arm 1 releases only the registered body (and, via boot rule 1, a successor
+could then claim while the zombie still runs — this is B6/B7 territory, already filed), arm 2 freezes the
+registered claim while the zombie keeps issuing `send`s. This is the **substrate limit** claim-nonce
+already records (no fleet verb can reach a fork minted outside every fleet code path), **not** a defect
+introduced by B5's fix — recorded so the operator does not read "kill supervisor" as a remedy for an
+incident-1 zombie. Detection of such a body remains §8 operator-gate routing + B7's provenance-warn, not
+`kill`.
+
+### Aim 3 — B1's live-claim-holder predicate: can a dead-but-claim-holding husk still be protected?
+
+**Cleared — the predicate's `roster-live` conjunct closes the inverse-B9 hole, and its callers close the
+transient-roster hole.** A body that holds the claim but is roster-gone (the incident-3 freeze state:
+roster-gone + fresh heartbeat) fails the `roster-live` conjunct and is **not** protected — an ordinary
+husk the sweep removes. And because both callers epoch-freeze upstream (receipts above), the conjunct is
+never evaluated against a *false*-empty roster, so a live-but-idle supervisor during a daemon idle-exit is
+not mis-classified dead-and-swept: the pass refuses wholesale first. Both the "protect a live successor
+under any name" (B1) and "don't protect a dead husk" (B9) directions hold, and the dangerous middle
+(false-empty roster) is unreachable. No new defect.
+
+## r2 verdict
+
+Fix wave 1 **closes all ten findings** (B1–B10 FIXED; B6 correctly re-homed to the claim-nonce slice
+with an interim gate; no spurious fixes, no regressions — the one regression candidate is provably closed
+by upstream epoch-freeze). The wave's own riskiest change — B4's new fleet-enforced ceiling — introduces
+one MAJOR and one MINOR gap in an `[UNBUILT]` mechanism (**ND1** interface-tier over-application, **ND2**
+reconcile carve-out), and B5's graceful arm leaves one MINOR gap (**ND3** no timeout). All three are
+bounded corrections to unbuilt mechanisms with clear fix directions — not architecture rework, and not
+grounds for a third full review wave. The tier model and the claim-nonce foundation stand; **escalation
+is not warranted.**
+
+fix-list(ND1,ND2,ND3)
