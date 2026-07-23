@@ -1136,6 +1136,56 @@ class TestOwnershipQuotingVariants:
             fleet._remove_autoclean_task()
 
 
+class TestSchedulerRemoveOwnership:
+    """Residual 4 (carried): the CREATE side refuses to overwrite a task of
+    the same name that is not fleet-owned by THIS identity, but the REMOVE
+    side deleted by task name with NO ownership predicate -- so `fleet init
+    --autoclean-remove` would silently delete a FOREIGN scheduled task that
+    happened to be named `claude-fleet-autoclean`. The removal now runs the
+    SAME `_autoclean_task_is_ours` guard the install runs."""
+
+    def test_foreign_named_task_is_not_removed(self, home, canonical_install,
+                                               platform_stub):
+        """Fault injection: a foreign task carrying our task name (but not our
+        command shape) must NOT be deleted by the unguarded path. Without the
+        guard, this deletes someone else's scheduled task."""
+        platform_stub["query"] = '"C:/other/backup.exe" nightly'
+        with pytest.raises(fleet.FleetCliError, match="fleet-owned"):
+            fleet._remove_autoclean_task(force=False)
+        assert platform_stub["removes"] == []   # guard's absence goes red here
+
+    def test_force_removes_foreign_named_task(self, home, canonical_install,
+                                              platform_stub):
+        platform_stub["query"] = '"C:/other/backup.exe" nightly'
+        fleet._remove_autoclean_task(force=True)
+        assert platform_stub["removes"] == [fleet.AUTOCLEAN_TASK_NAME]
+
+    def test_own_task_is_removed(self, home, canonical_install, platform_stub):
+        platform_stub["query"] = fleet._autoclean_task_command()
+        fleet._remove_autoclean_task(force=False)
+        assert platform_stub["removes"] == [fleet.AUTOCLEAN_TASK_NAME]
+
+    def test_indeterminate_query_fails_closed(self, home, canonical_install,
+                                              platform_stub, monkeypatch):
+        """F3 doctrine, mirror of the install side: if existence/ownership
+        cannot be determined, removal must fail CLOSED (refuse) rather than
+        proceed to a blind delete -- unless --force."""
+        def boom(task_name, run=None):
+            raise fleet.AutocleanTaskQueryError("schtasks listing failed")
+        monkeypatch.setattr(fleet.PLATFORM, "autoclean_task_query", boom)
+        with pytest.raises(fleet.FleetCliError, match="determine"):
+            fleet._remove_autoclean_task(force=False)
+        assert platform_stub["removes"] == []
+
+    def test_indeterminate_query_force_removes_anyway(self, home, canonical_install,
+                                                      platform_stub, monkeypatch):
+        def boom(task_name, run=None):
+            raise fleet.AutocleanTaskQueryError("schtasks listing failed")
+        monkeypatch.setattr(fleet.PLATFORM, "autoclean_task_query", boom)
+        fleet._remove_autoclean_task(force=True)
+        assert platform_stub["removes"] == [fleet.AUTOCLEAN_TASK_NAME]
+
+
 class TestOwnershipPredicate:
     """Adjudicated F4 defect (path-only ownership): `_autoclean_task_is_ours`
     must discriminate the actual autoclean task's command shape -- our
