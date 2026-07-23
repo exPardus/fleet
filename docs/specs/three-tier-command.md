@@ -223,8 +223,7 @@ G2, CONFIRMED) — so the resumed body keeps its context *and* its model. `resum
 right recovery for *"the same tier is available again"*; it is **not** a tier-change mechanism.
 
 **Therefore a tier fallback is a body change**: a fresh session dispatched at the other tier, i.e. the
-respawn/handoff path — which mints a fresh record (and so a fresh context), taking `model` as a
-dispatch-time argument:
+respawn/handoff path, which mints a fresh record and so a fresh context:
 
 ```
 # at 235421e56bfd328a7e913e519a1459ccf55918dc
@@ -232,6 +231,30 @@ $ sed -n '4367,4368p' bin/fleet.py
         new_record = new_worker_record(
             None, cwd, task_for_record, mode, model=model,
 ```
+
+**Read that receipt precisely (ND8 correction).** An earlier draft introduced it as the respawn path
+*"taking `model` as a dispatch-time argument"*. **It does not.** The `model` passed at @4367 was read
+out of the *prior* record a few lines above, unconditionally:
+
+```
+# at 235421e56bfd328a7e913e519a1459ccf55918dc
+$ sed -n '4309p' bin/fleet.py
+    model = before.get("model")
+```
+
+and `respawn`'s parser offers no `--model` to override it — note the contrast with its two neighbours,
+which *do* get carry-forward-or-override treatment:
+
+```
+# at 235421e56bfd328a7e913e519a1459ccf55918dc
+$ sed -n '8878,8891p' bin/fleet.py | grep -c -- "--model"
+0
+```
+
+So the receipt proves the model is **carried**, never that a respawn can **set** it. Stated correctly:
+**the record carries a model; a tier fallback needs the *dispatch* to override it, and no shipped verb
+does.** That gap is what §3.5.3 must design against rather than assume away — and it is why the third
+body change (a fresh spawn at the fallback tier) is the shape the fallback actually needs.
 
 This is not a limitation to work around — it is what makes §3.5.4's band interaction clean.
 
@@ -283,7 +306,7 @@ The chain, `[UNBUILT — owned by the three-tier build slice]`:
    **interface tier**, not by the supervisor handing itself off. The new body records **which tier it is
    on** and **the horizon it is waiting out** (`tier_preferred`, `tier_current`, and the inherited
    `limit_reset_at` — additive registry fields).
-3. **Return.** Once `limit_reset_at` passes, the supervisor's *next* body change (§3.5.3) is dispatched
+3. **Return.** Once `limit_reset_at` passes, the supervisor's *next* body change (§3.5.4) is dispatched
    at the preferred tier again. **The return is not itself a trigger for a body change** — it is a
    preference consulted at the next boundary that was going to happen anyway. This is deliberate: a
    forced respawn purely to climb back a tier would throw away a live plan's context to buy model
@@ -375,6 +398,25 @@ journal at each wave boundary (`sup-checkpoint`, which also refreshes the heartb
 is bounded to **one wave** rather than to the whole campaign. That is the real reason the checkpoint
 cadence matters, and it belongs in `supervisor/GOALS.md` (§12).
 
+**A limit landing *mid-handoff* leaves stranded state the seeding must clear (ND9).** If the wall hits
+while a handoff is already in flight, the predecessor is parked holding an **open
+`supervisor/HANDSHAKE`** — and it can neither finish nor undo the ritual, because `sup-handoff-abort` is
+*also* a `_require_claim_holder` caller:
+
+```
+# at 235421e56bfd328a7e913e519a1459ccf55918dc
+$ sed -n '8654p' bin/fleet.py
+        claim, caller = _require_claim_holder(getattr(args, "sid", None))
+```
+
+So the artifacts the interface-driven fallback must handle are not only the ones it *reads*: the seeding
+step **clears a stale `HANDSHAKE` and the doctor-visible abort flag**, and stops the orphaned successor
+that the interrupted handoff may already have dispatched (it will otherwise sit out its poll window and
+end `HANDOFF-ORPHAN`). The claim-nonce prerequisite in (c) must therefore cover a holder parked
+**mid-handoff**, not merely a holder parked idle. Narrow window — but it is exactly the stranded state a
+loss statement exists to enumerate, and §3.5.4's *"one body change satisfies both"* assumes the two
+triggers arrive sequentially rather than overlapped.
+
 **(c) The claim transfer needs a claim-nonce change, filed as a prerequisite — not invented here.**
 Even interface-driven, the successor still meets `sup-boot`'s verdict order, which today offers only
 `refuse` or an hour-long `freeze` against a parked predecessor. The clean fix is to make **holder parked
@@ -385,17 +427,52 @@ journal kind recording that it was a limit transfer rather than a seizure.
 
 > **Prerequisite (owned by the claim-nonce build slice, not this one):** add a `limited`-holder branch to
 > the `sup-boot` verdict order authorizing immediate transfer when the recorded holder's registry status
-> is `limited` with a horizon. This is a boot-order change, and **this spec does not own the boot verdict
-> order** — filed exactly as B6's rule-1 guard and §10.2's `FLEET_WORKER` refusal already are.
+> is `limited` with a horizon — **including a holder parked mid-handoff**, i.e. one whose `HANDSHAKE` is
+> still open (ND9), since that body can neither complete nor abort the ritual it started. This is a
+> boot-order change, and **this spec does not own the boot verdict order** — filed exactly as B6's rule-1
+> guard and §10.2's `FLEET_WORKER` refusal already are.
 
-**Until that prerequisite ships, the arm degrades — and the spec says which cost is paid rather than
-mandating an unrunnable ritual.** The interface chooses, per incident: (i) **bare respawn now**, losing
-the in-flight plan (bounded to one wave by (b)'s checkpoint doctrine) and accepting the `freeze` window
-unless the predecessor's heartbeat has aged out; or (ii) **wait out the horizon** and `resume-limited`
-the original body, which keeps the plan and the tier but stalls the campaign until reset. Neither is
+**(d) The dispatch needs a `--model` override and the reserved name — neither exists today (ND8).**
+There is **no shipped path from "parked on the top tier" to "running on the second tier."** `respawn`
+inherits the model unconditionally and offers no override (§3.5.1's receipts), so
+`fleet respawn supervisor` would mint a fresh body **on the same tier that is limited** — burning the
+in-flight plan *and* landing back on the exhausted tier. That is strictly worse than doing nothing, so
+it is **withdrawn as a remedy**: a bare respawn is a context-reset lever, never a fallback. The other
+route — a fresh spawn at the fallback tier — collides with the reserved name (§10.3), because the parked
+predecessor's record still holds it:
+
+```
+# at 235421e56bfd328a7e913e519a1459ccf55918dc
+$ sed -n '2815p' bin/fleet.py
+        validate_name(args.name, existing=data["workers"].keys())
+```
+
+**Binding, and cheap because `sup-spawn` is `[UNBUILT]` anyway:**
+
+- **`sup-spawn` takes an explicit `--model <tier-alias>`.** It is the fallback's dispatch verb, so the
+  tier must be settable at dispatch, not inherited. (`dispatch_bg` already accepts `model` — §10.1 — so
+  this is a parser-and-pass-through, not new plumbing.)
+- **The parked predecessor's record must yield the reserved name before the successor takes it.** Two
+  admissible shapes, and the build picks one: *replace* the record in place (the successor becomes the
+  `supervisor` record, the parked sid moving to `retired_sids`), or *rename the parked record to a husk*
+  and let the sweep collect it once it is no longer the live claim-holder (§7.2's predicate already
+  stops protecting it at that point). Either way the reserved-name check must see the name free, and
+  the parked body's own tombstone obligation (§10.4) still applies.
+- **If option (i) is ever to be usable at all, `respawn` needs the same `--model` carry-forward-or-
+  override treatment its `--setting-sources` / `--token-ceiling` neighbours already have.** Recorded as
+  the smaller alternative; the `sup-spawn` route above is the one this spec specifies.
+
+**Until the claim-nonce prerequisite and (d) ship, the arm degrades — and the spec says which cost is
+paid rather than mandating an unrunnable ritual.** The honest v1 menu is now **two** options, not three:
+**(i) fall back via a fresh `sup-spawn` at the second tier** — available only once (d) ships — losing the
+in-flight plan (bounded to one wave by (b)'s checkpoint doctrine) and accepting the `freeze` window
+unless the predecessor's heartbeat has aged out; or **(ii) wait out the horizon** and `resume-limited`
+the original body, which keeps the plan *and* the tier but stalls the campaign until reset. Neither is
 free. (i) is right when the horizon is long and the plan is cheap to rebuild; (ii) when the reverse.
-**The operator asked for an automatic fallback; what v1 can honestly deliver without the claim-nonce
-prerequisite is an automatic tier *choice* with an operator-visible cost at the moment of the fall.**
+**With neither (d) nor the prerequisite built, (ii) is the ONLY working option** — which is worth stating
+plainly, because it means today's honest answer to a top-tier limit is *wait*, not *fall back*.
+**The operator asked for an automatic fallback; what v1 can honestly deliver without those two pieces is
+an automatic tier *choice* with an operator-visible cost at the moment of the fall.**
 
 #### 3.5.4 Interaction with the swap band — a fallback body change IS a band handoff
 
@@ -1445,8 +1522,13 @@ them** — listed for the build slice / a doc-sync pass:
 - **`docs/specs/claim-nonce.md` (prerequisite, wave 4)** — §3.5.3(c) files a **third** claim-nonce
   build-slice prerequisite alongside B6's rule-1 guard and §10.2's `FLEET_WORKER` refusal: a
   `limited`-holder branch in the `sup-boot` verdict order, authorizing immediate claim transfer when the
-  recorded holder's registry status is `limited` with a horizon. Without it the UL fallback is lossy or
-  slow by construction (§3.5.3). Filed, not built here — this spec does not own the boot verdict order.
+  recorded holder's registry status is `limited` with a horizon — **including a holder parked
+  mid-handoff** (ND9). Without it the UL fallback is lossy or slow by construction (§3.5.3). Filed, not
+  built here — this spec does not own the boot verdict order.
+- **`docs/SPEC.md` §5 spawn/respawn rows (wave 5, ND8)** — `sup-spawn` gains an explicit `--model`
+  override (§3.5.3(d)); the reserved name must be yielded by a parked predecessor before a fallback
+  successor can take it. If `respawn` also gains `--model`, its carry-forward-or-override note joins
+  the existing `--setting-sources` / `--token-ceiling` ones.
 - **`supervisor/GOALS.md` (wave-4 addition)** — the **checkpoint-cadence doctrine** of §3.5.3(b): the
   supervisor checkpoints its plan to the journal at each wave boundary, because that cadence is exactly
   what bounds the plan loss when a usage-limit fallback fires. It is the only mitigation available for
