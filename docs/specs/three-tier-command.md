@@ -509,24 +509,24 @@ registry record goes idle, it crosses the 24h archive threshold and an autoclean
 archives/rm's it — deleting the running campaign's manager. **Resolution, by construction:** the
 supervisor record is **exempt from both the archive TTL pass and the daemon-husk sweep**.
 
-> **B1 fix (CRITICAL — the exemption must not be keyed on a static name).** The first-generation
-> supervisor is spawned by `sup-spawn` under the name `supervisor` (§10.3), but the operator's model
-> respawns and hands it off "constantly" (§1), and the shipped handoff dispatches its successor under a
-> **pipe-delimited** name, `f"sup|{successor_inc}|successor"`, which nothing renames back to
-> `supervisor` — `sup-handoff-complete` transfers the INCARNATION claim only, and registry records are
-> independent:
->
-> ```
-> # at 235421e56bfd328a7e913e519a1459ccf55918dc
-> $ sed -n '8522p' bin/fleet.py
->     name = f"sup|{successor_inc}|successor"
-> ```
->
-> So a `name == "supervisor"` equality protects generation 0 and **no successor** — after the first
-> swap (which §11's 150–200k band makes routine, not exceptional) the live claim-holder runs under
-> `sup|<inc>|successor`, the exemption misses it, and the 24h-vs-23h collision is live again against the
-> actual running manager. **The exemption is therefore keyed on *is this record the current live
-> supervisor claim-holder*, under any name, not on a static registry name.**
+**B1 fix (CRITICAL — the exemption must not be keyed on a static name).** The first-generation
+supervisor is spawned by `sup-spawn` under the name `supervisor` (§10.3), but the operator's model
+respawns and hands it off "constantly" (§1), and the shipped handoff dispatches its successor under a
+**pipe-delimited** name, `f"sup|{successor_inc}|successor"`, which nothing renames back to
+`supervisor` — `sup-handoff-complete` transfers the INCARNATION claim only, and registry records are
+independent:
+
+```
+# at 235421e56bfd328a7e913e519a1459ccf55918dc
+$ sed -n '8522p' bin/fleet.py
+    name = f"sup|{successor_inc}|successor"
+```
+
+So a `name == "supervisor"` equality protects generation 0 and **no successor** — after the first
+swap (which §11's 150–200k band makes routine, not exceptional) the live claim-holder runs under
+`sup|<inc>|successor`, the exemption misses it, and the 24h-vs-23h collision is live again against the
+actual running manager. **The exemption is therefore keyed on *is this record the current live
+supervisor claim-holder*, under any name, not on a static registry name.**
 
 **The predicate**, `[UNBUILT — owned by the three-tier build slice]`: a record is protected iff its
 `session_id` (or a member of its `retired_sids`) equals `supervisor/INCARNATION`'s
@@ -780,19 +780,39 @@ does not. The rule (`[UNBUILT]`):
   not have, and claim-nonce §6.3 **deleted** the non-continuity escape (`--force --confirm-inc`).
   `sup-release` does not exist yet and, when built, needs continuity:
 
-  ```
-  # at 235421e56bfd328a7e913e519a1459ccf55918dc
-  $ grep -c "sup-release\|cmd_sup_release" bin/fleet.py
-  0
-  ```
+```
+# at 235421e56bfd328a7e913e519a1459ccf55918dc
+$ grep -c "sup-release\|cmd_sup_release" bin/fleet.py
+0
+```
 
-  So the honest design rule (`[UNBUILT]`), in two arms:
+So the honest design rule (`[UNBUILT]`), in two arms **with a bounded transition between them**:
   - **Body responsive:** `kill supervisor` **steers the body to release itself** — it delivers a
-    `sup-release` turn to the supervisor (which holds its own nonce), waits for the record to read
-    `released`, then stops the body. This is a *graceful stop*, not an unattended kill, and the successor
-    boots clean off the `released` record.
+    `sup-release` turn to the supervisor (which holds its own nonce), waits **at most `T_release`** for
+    `supervisor/INCARNATION` to read `released`, then stops the body. This is a *graceful stop*, not an
+    unattended kill, and the successor boots clean off the `released` record.
     ⚠ but see the B6 window below — the stop must complete before any successor consumes the record.
-  - **Body unresponsive / already gone:** self-release is impossible, so `kill supervisor` falls to the
+
+**ND3 fix (MINOR) — arm 1 is bounded and always falls through; it never hangs.** The self-release
+steer can fail to land in ways `kill` cannot distinguish from a slow turn: `send` **refuses under a
+suspicious roster** (§4.3's receipt — the G9 refusal is a `FleetCliError`, not a delivered steer), the
+body can accept the steer and error inside the turn, or it can be wedged. An unbounded *"waits for the
+record to read `released`"* therefore lets `kill supervisor` hang instead of falling to arm 2.
+**Binding:** arm 1 takes a bounded wait `T_release`, and the shipped handoff bound is the precedent for
+its shape — "how long a supervisor-protocol turn may take before the caller gives up":
+
+```
+# at 235421e56bfd328a7e913e519a1459ccf55918dc
+$ sed -n '7919p' bin/fleet.py
+SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS = 300.0   # T: handoff wait before abort (spec §4)
+```
+
+An immediate `send` refusal fails over at once, without waiting out `T_release`. On timeout **or**
+immediate refusal, `kill` **stops the body anyway and falls through to arm 2** — announcing which arm
+it took, because the two have materially different recovery costs (clean successor boot vs.
+up-to-one-hour freeze). `kill` never blocks indefinitely on a supervisor that cannot answer.
+
+  - **Body unresponsive / already gone / arm-1 timed out:** self-release is impossible, so `kill supervisor` falls to the
     **bounded-freeze-then-seize** recovery — claim-nonce incident 3 exactly (roster-gone + fresh
     heartbeat ⇒ `freeze`) until the heartbeat ages past `SUPERVISOR_CLAIM_STALE_SECONDS = 3600s`, then a
     successor `seize`s. This is a real up-to-one-hour recovery hole, and the design **accepts and
@@ -906,12 +926,12 @@ built to be rotation-safe:
   guaranteed fresh for the actor doing the reading: the daemon sets it to the child's *own* sid
   (native-substrate G4), and `current_caller_session()` is exactly that read:
 
-  ```
-  # at 235421e56bfd328a7e913e519a1459ccf55918dc
-  $ sed -n '826,827p' bin/fleet.py
-      sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
-      return sid or None
-  ```
+```
+# at 235421e56bfd328a7e913e519a1459ccf55918dc
+$ sed -n '826,827p' bin/fleet.py
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    return sid or None
+```
 
   So a `[UNBUILT]` `fleet sup-context` helper, **run by the supervisor itself**, reads its own sid from
   the environment, locates its transcript file directly (by sid, not via an outcome record), and returns
@@ -942,20 +962,49 @@ every next task "the current urgent task" and never cross into hand-off. The fix
   reconciled* — i.e. a wave whose worker turns are in flight (roster-live or awaiting an outcome record).
   Finishing that is bounded (the workers were already spawned); it is a state fleet reads, not a
   self-asserted importance label. Nothing else qualifies as "the current urgent task."
-- **200k is a hard, enforced ceiling, not a directive.** At and above a fixed `H` (the 200k band top),
-  `fleet spawn`/`fleet send` **refuse to start new worker turns** for a supervisor caller — leaving only
-  the handoff verbs (`sup-handoff-begin/complete/abort`) and reconcile-of-in-flight-work. The enforcement
-  reuses B3's rotation-safe resolution: the dispatch verb reads the **caller's** own
+- **200k is a hard, enforced ceiling, not a directive** — **and it applies to exactly one caller.** At
+  and above a fixed `H` (the 200k band top), `fleet spawn`/`fleet send` **refuse to start new worker
+  turns** when — and only when — the caller **is the current supervisor claim-holder**. The enforcement
+  reuses B3's rotation-safe resolution: the dispatch verb reads the caller's own
   `CLAUDE_CODE_SESSION_ID` (fresh for the acting body, §11.2 receipt), resolves the caller's live
   transcript, computes the B2-correct occupancy, and refuses above `H`. So "zero new dispatches past
-  200k" is a fleet refusal, not supervisor good behaviour. `[UNBUILT — owned by the three-tier build
-  slice]` — no such ceiling exists today:
+  200k" is a fleet refusal, not supervisor good behaviour.
 
-  ```
-  # at 235421e56bfd328a7e913e519a1459ccf55918dc
-  $ grep -c "sup-context\|supervisor-beat.jsonl\|_doctor_check_supervisor_beat" bin/fleet.py
-  0
-  ```
+  > **ND1 fix (MAJOR) — the ceiling MUST carry a supervisor-identity gate; a caller-agnostic occupancy
+  > refusal would silence the human's control channel.** An occupancy ceiling keyed on *"any caller above
+  > `H`"* fires on the **interface session** too: the interface issues `fleet send supervisor …` (the v1
+  > beat, §5.1), it is the tier the operator's model deliberately keeps long-lived (*"saves its context
+  > for talking, interpreting, and long-term ideas"*, §1), and it is **outside fleet's launch surface**
+  > (§3.1) — fleet cannot hand it off, respawn it, or reset it. A caller-agnostic refusal would therefore
+  > block the human's only steering verb once the interface's own context passed 200k, **with no
+  > recourse**. The operator set the 150–200k band for the **second tier only**.
+  >
+  > **Binding for the build:** the refusal predicate is *caller-is-the-supervisor-claim-holder* — the
+  > same `CLAUDE_CODE_SESSION_ID` vs `supervisor/INCARNATION` resolution B1 uses for the archive
+  > exemption and B3 uses for the occupancy read (one identity concept, three consumers). **The interface
+  > tier is explicitly exempt: it has no fleet-enforced band, and no fleet verb may refuse it on
+  > occupancy.** A caller that holds no claim is never subject to the ceiling. Workers are likewise
+  > unaffected — they do not dispatch.
+
+- **Past `H`, what remains is deliberately narrow, and reconcile is READ-ONLY (ND2 fix).** Above the
+  ceiling the supervisor may run: the handoff verbs (`sup-handoff-begin` / `-complete` / `-abort`), and
+  **read-only** reconciliation of already-dispatched work — `fleet status`, `wait`, `result`, `peek`
+  (outcome/roster reads). It may **not** issue a `fleet send` to "steer an in-flight worker to wrap up":
+  that send is a new worker turn and is caught by the very refusal above, so leaving it implicitly
+  permitted would have made the carve-out undecidable. Finishing the in-flight wave therefore means
+  *letting it finish and reading its outcomes*, not steering it further. (The handoff dispatch itself is
+  not caught: `sup-handoff-begin` hand-rolls its own argv and routes through neither `cmd_spawn` nor
+  `dispatch_bg` (§10.1), so a ceiling scoped to `spawn`/`send` cannot deadlock the handoff it exists to
+  force.)
+
+  `[UNBUILT — owned by the three-tier build slice]` — neither the ceiling nor the identity concept it
+  must be gated on exists today:
+
+```
+# at 235421e56bfd328a7e913e519a1459ccf55918dc
+$ grep -c "sup-context\|supervisor-beat.jsonl\|_doctor_check_supervisor_beat\|SUPERVISOR_BODY_NAME" bin/fleet.py
+0
+```
 
 - **150k is the soft trigger** (hand off at the next wave/task boundary): the `[UNBUILT]` `fleet beat` /
   checkpoint check (§5.2) emits the hand-off directive when occupancy first crosses 150k, and the
@@ -994,8 +1043,11 @@ them** — listed for the build slice / a doc-sync pass:
   budget`); this spec's own design gate is the next step.
 - **`knowledge/lessons.md#2026-07-23-three-tier-inputs`** — the manager's tier-based / provider-agnostic
   refinement is recorded as an addendum (done alongside this draft, per manager instruction).
-- **`docs/longcat-fleet-usage.md`** — the reference for §3.3's provider resolution; if `sup-spawn`
-  gains a namespace-aware pre-flight (§3.3 `[UNBUILT]`), that how-to gains a supervisor row.
+- **`docs/longcat-fleet-usage.md`** — the reference for §3.3's provider resolution. It gains a supervisor
+  row only if a namespace-aware tier-resolution pre-flight is ever built as **separate scope** — which
+  §3.3 argues *against* for v1 (it would need the provider-env read fleet disclaims) and §13 records as a
+  non-goal. Listed as a conditional consequence of a decision already made the other way, **not** a live
+  `[UNBUILT]` deliverable of this slice.
 
 ---
 
