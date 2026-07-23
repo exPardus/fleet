@@ -8015,7 +8015,7 @@ def nonce_matches(presented, stored) -> bool:
 SUCCESSOR_DEFAULT_MODE = "dontask"
 
 SUPERVISOR_JOURNAL_KINDS = (
-    "BOOT", "CHECKPOINT", "PROPOSAL", "SEIZED", "RELEASED",
+    "BOOT", "CHECKPOINT", "PROPOSAL", "SEIZED", "RELEASED", "LIMIT-TRANSFER",
     "HANDOFF-BEGIN", "HANDOFF-COMPLETE", "HANDOFF-ABORT",
 )
 
@@ -8026,7 +8026,8 @@ SUPERVISOR_JOURNAL_KINDS = (
 # `resume` (claim-nonce §6.1 rule 3) joins the 0-row: it is the holder keeping
 # a claim it already had, which is not an event an exit code should distinguish
 # from claiming one.
-SUPERVISOR_BOOT_RC = {"claim": 0, "resume": 0, "seize": 0, "refuse": 2, "freeze": 3}
+SUPERVISOR_BOOT_RC = {"claim": 0, "resume": 0, "seize": 0, "limit-transfer": 0,
+                      "refuse": 2, "freeze": 3}
 SUPERVISOR_BOOT_VERDICTS = tuple(SUPERVISOR_BOOT_RC) + ("handshake-written",)
 
 _SUPERVISOR_JOURNAL_SEED = """# Supervisor Journal
@@ -8034,7 +8035,7 @@ _SUPERVISOR_JOURNAL_SEED = """# Supervisor Journal
 Append-only checkpoint log (spec §4). Single writer: the current claim
 holder, via `fleet sup-*` commands only. Never edit or delete entries.
 Entry header format: `## <utc-iso> <KIND> inc=<incarnation-id> sid=<session-id>`
-Kinds: BOOT, CHECKPOINT, PROPOSAL, SEIZED, HANDOFF-BEGIN, HANDOFF-COMPLETE, HANDOFF-ABORT.
+Kinds: BOOT, CHECKPOINT, PROPOSAL, SEIZED, RELEASED, LIMIT-TRANSFER, HANDOFF-BEGIN, HANDOFF-COMPLETE, HANDOFF-ABORT.
 
 <!-- entries below -->
 """
@@ -8249,9 +8250,46 @@ def _claim_resume_allowed(nonce_valid: bool, holder_sid, caller_sid, live_sids: 
     return bool(nonce_valid) and (holder_sid not in live_sids or holder_sid == caller_sid)
 
 
+def _holder_is_limited(holder_sid) -> bool:
+    """True iff the registry records `holder_sid` as `limited` WITH a horizon.
+
+    three-tier-command.md `:432-437`, filed against this slice: the parked
+    holder's status is what authorizes an immediate claim transfer. Resolved
+    HERE, by a caller that already holds `fleet_lock`, and passed into
+    `supervisor_claim_decision` -- that function is pure and has no registry
+    access, which is precisely the hole the prerequisite targets.
+
+    "With a horizon" is load-bearing. `_limit_reset_passed`'s own docstring
+    says a null `limit_reset_at` is "never auto-eligible": fleet does not know
+    when that body comes back, so it is NOT the unambiguous fleet-observed
+    state the prerequisite rests on -- and ambiguity is exactly what the
+    freeze exists for.
+
+    Never raises. `load_registry` quarantines a corrupt file and raises
+    `RegistryCorruptError`, and the callers it documents "must abort" -- the
+    boot ritual must not. A corrupt registry is already reported by its own
+    doctor row and by `_render_boot_bundle`'s "(registry unreadable)" line,
+    and turning it into an aborted claim decision would take the supervisor
+    down for a fault in a different subsystem. False is also the fail-closed
+    answer: it declines the transfer."""
+    if not isinstance(holder_sid, str) or not holder_sid:
+        return False
+    try:
+        data = load_registry()
+    except Exception:  # noqa: BLE001 -- see the docstring: never abort a boot on this
+        return False
+    for rec in data.get("workers", {}).values():
+        if not isinstance(rec, dict) or rec.get("session_id") != holder_sid:
+            continue
+        if rec.get("status") == "limited" and rec.get("limit_reset_at"):
+            return True
+    return False
+
+
 def supervisor_claim_decision(claim, live_sids: set, latest_entry, now=None,
                               stale_seconds: float = SUPERVISOR_CLAIM_STALE_SECONDS,
-                              caller_sid=None, nonce_valid: bool = False):
+                              caller_sid=None, nonce_valid: bool = False,
+                              holder_limited: bool = False):
     """Claim rules at boot (claim-nonce §6.1, verbatim order). Returns
     (verdict, reason); verdict in SUPERVISOR_BOOT_VERDICTS. Pure -- no IO.
 
@@ -8260,7 +8298,12 @@ def supervisor_claim_decision(claim, live_sids: set, latest_entry, now=None,
       0. no claim                       -> claim   (fresh)
       1. state == "released"            -> claim   (fresh, §6.3) -- ahead of
          everything, because a released claim has neither session_id nor
-         heartbeat_at and every later rule would misread its absence
+         heartbeat_at and every later rule would misread its absence;
+         `refuse` while its releaser is still roster-live (B6)
+      1b. holder parked `limited` with a horizon, and not resumable
+                                        -> limit-transfer (three-tier
+         `:432-437`) -- ahead of rule 2, because a parked body is still
+         roster-live and rule 2 would refuse before anything looked at it
       2. holder roster-live, UNLESS the caller is that holder AND proved
          continuity                     -> refuse  (the two-supervisor guard)
       3. continuity proved, holder roster-gone or holder is the caller
@@ -8314,6 +8357,30 @@ def supervisor_claim_decision(claim, live_sids: set, latest_entry, now=None,
     holder_sid = claim.get("session_id")
     holder_live = holder_sid in live_sids
     resume_ok = _claim_resume_allowed(nonce_valid, holder_sid, caller_sid, live_sids)
+    if holder_limited and not resume_ok:
+        # three-tier-command.md `:432-437`, filed against this slice: a holder
+        # parked `limited` with a recorded horizon authorizes IMMEDIATE
+        # transfer. Unlike roster-gone -- which is G9-ambiguous, and is exactly
+        # why the freeze exists -- `limited` is a fleet-observed, unambiguous
+        # state that fleet itself wrote. Today a successor meets only `refuse`
+        # or an hour-long `freeze` against a parked predecessor.
+        #
+        # It runs AHEAD of the roster-liveness guard, and that ordering is the
+        # branch: a parked body is still roster-live, so rule 2 would refuse
+        # before anything could look at it. This is a narrow, deliberate
+        # carve-out of §6.6 -- that guard exists to stop two ACTING bodies,
+        # and a body parked on a plan limit is not an acting body; the
+        # prerequisite's own "including a holder parked mid-handoff" clause is
+        # the extreme case, since such a body can neither complete nor abort
+        # the ritual it started.
+        #
+        # `not resume_ok` is the exception to the exception: a parked body
+        # that came back and can PROVE continuity is not a transfer candidate,
+        # it is the holder. Without this, fleet would take the claim away from
+        # the one body that just demonstrated it still has it.
+        return ("limit-transfer", f"claim holder {claim.get('incarnation_id', '?')} "
+                                  f"(sid {holder_sid}) is parked limited with a recorded "
+                                  f"horizon -- immediate transfer, not a seizure")
     if holder_live and not (holder_sid == caller_sid and nonce_valid):
         return ("refuse", f"claim holder {claim.get('incarnation_id', '?')} "
                           f"(sid {holder_sid}) is live in the roster")
@@ -8458,7 +8525,12 @@ def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
             else:
                 verdict, reason = supervisor_claim_decision(
                     claim, live_sids, latest, caller_sid=caller_sid,
-                    nonce_valid=presented is not None)
+                    nonce_valid=presented is not None,
+                    # Resolved here rather than inside the pure function --
+                    # this block already holds `fleet_lock`, and the decision
+                    # function has no registry access by design.
+                    holder_limited=claim is not None and _holder_is_limited(
+                        claim.get("session_id")))
             if verdict == "claim":
                 inc = mint_incarnation_id()
                 value = mint_nonce()
@@ -8488,10 +8560,19 @@ def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
                 supervisor_journal_append("BOOT", claim["incarnation_id"], caller_sid,
                                           f"resumed own claim: {reason}")
                 inc_line = claim["incarnation_id"]
-            elif verdict == "seize":
+            elif verdict in ("seize", "limit-transfer"):
                 inc = mint_incarnation_id()
                 value = mint_nonce()
                 dead = claim.get("incarnation_id", "?")
+                # A limit transfer is NOT a seizure and the append-only,
+                # git-tracked audit record must not say it was: three-tier
+                # `:429` asks for "a distinct journal kind recording that it
+                # was a limit transfer rather than a seizure", and an entry
+                # asserting a seizure that did not happen is a durable
+                # corruption of the only artifact a future incident review
+                # will have (the F2 lesson, one layer out).
+                kind = "SEIZED" if verdict == "seize" else "LIMIT-TRANSFER"
+                took = "seized from" if verdict == "seize" else "limit-transfer from"
                 try:
                     # Stale-HANDSHAKE hygiene (spec §4): an orphan from a crash
                     # mid-handoff must never receive a claim transfer.
@@ -8500,13 +8581,18 @@ def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
                     pass
                 # Second dict-literal writer (§9). `lineage_id` is RE-MINTED
                 # here, never carried: see mint_lineage_id's docstring.
+                # `lineage_id` is re-minted on BOTH arms. A limit transfer is
+                # like a seize and unlike a handoff: the parked predecessor is
+                # not alive to vouch for anything, and it may yet come back
+                # when its horizon passes -- carrying its lineage would hand
+                # every worker it spawned to the taking body (§6.2).
                 write_incarnation({"incarnation_id": inc, "session_id": caller_sid,
                                    "claimed_at": now_iso(), "heartbeat_at": now_iso(),
-                                   "claimed_via": "seize",
+                                   "claimed_via": verdict if verdict != "seize" else "seize",
                                    "nonce_hash": nonce_digest(value), "nonce_seq": 1,
                                    "lineage_id": mint_lineage_id()})
-                supervisor_journal_append("SEIZED", inc, caller_sid,
-                                          f"seized from {dead}: {reason}")
+                supervisor_journal_append(kind, inc, caller_sid,
+                                          f"{took} {dead}: {reason}")
                 inc_line = inc
                 notices.append(f"NONCE: {value}")
             # refuse / freeze: strictly read-only.
