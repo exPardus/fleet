@@ -8174,12 +8174,38 @@ def read_handshake() -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def write_handshake(incarnation_id: str, session_id: str) -> None:
-    _write_json_atomic(handshake_path(), {
+def write_handshake(incarnation_id: str, session_id: str,
+                    handoff_token_hash=None, nonce_hash=None) -> None:
+    """claim-nonce §6.4: HANDSHAKE is
+    `{incarnation_id, session_id, handoff_token_hash, nonce_hash, written_at}`.
+
+    `handoff_token_hash` is sha256 of the one-shot token begin minted and the
+    successor was handed through its task file -- it is what complete verifies,
+    replacing the old `session_id` equality that a fork-steer between HANDSHAKE
+    and complete would break (the fork-steer root cause, third instance).
+    `nonce_hash` is the successor's OWN freshly minted generation, so the
+    transferred claim carries a live generation and needs no legacy upgrade.
+    Both are optional so the older 2-arg call sites (bystander/refuse-path
+    tests, and a mixed-code successor) still produce a valid HANDSHAKE;
+    `session_id` stays for observability, `written_at` is write-only (the
+    doctor check uses file mtime)."""
+    data = {
         "incarnation_id": incarnation_id,
         "session_id": session_id,
         "written_at": now_iso(),
-    })
+    }
+    if handoff_token_hash is not None:
+        data["handoff_token_hash"] = handoff_token_hash
+    if nonce_hash is not None:
+        data["nonce_hash"] = nonce_hash
+    _write_json_atomic(handshake_path(), data)
+
+
+def handoff_task_file_path(successor_inc: str) -> Path:
+    """§5.9: the successor's bootstrap task file, which carries the plaintext
+    handoff token. Written by `sup-handoff-begin`, unlinked by complete/abort,
+    and NOTE-backstopped by the doctor for the crash-before-unlink paths."""
+    return state_dir() / f"supervisor-handoff-{successor_inc}.md"
 
 
 def mint_incarnation_id() -> str:
@@ -8567,8 +8593,22 @@ def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
     if getattr(args, "handoff_inc", None):
         # Successor mode: claim-pending, holds NO claim, takes no actions
         # (spec §4). Writes HANDSHAKE only -- never the journal.
+        #
+        # §6.4: the successor mints its OWN generation here and stores its hash
+        # in HANDSHAKE, so the claim complete transfers carries a live
+        # generation and needs no legacy upgrade. The plaintext is delivered on
+        # THIS body's own stdout -- the successor is the one body allowed to
+        # hold it, which is exactly why it is minted here and not at complete
+        # (that would print it on the predecessor's stream). The token hash
+        # travels alongside so the predecessor can verify the body it
+        # dispatched without a sid comparison a fork-steer would break.
+        token = getattr(args, "handoff_token", None)
+        succ_value = mint_nonce()
         with fleet_lock():
-            write_handshake(args.handoff_inc, caller_sid)
+            write_handshake(args.handoff_inc, caller_sid,
+                            handoff_token_hash=nonce_digest(token) if token else None,
+                            nonce_hash=nonce_digest(succ_value))
+        notices.append(f"NONCE: {succ_value}")
         verdict = "handshake-written"
         reason = (f"successor {args.handoff_inc} awaiting claim transfer; "
                   f"take NO fleet actions until sup-status shows your incarnation")
@@ -9199,9 +9239,16 @@ def cmd_sup_status(args) -> int:
     return 0
 
 
-def _render_successor_task(successor_inc: str, old_inc: str) -> str:
+def _render_successor_task(successor_inc: str, old_inc: str, handoff_token: str) -> str:
     """Successor bootstrap body (task-file bootstrap, contract G8 -- never
-    argv for size-unbounded content). Paths rendered .as_posix()."""
+    argv for size-unbounded content). Paths rendered .as_posix().
+
+    §6.4: the plaintext `handoff_token` is rendered into step 1's `sup-boot`
+    invocation. This file is the ONLY channel that carries it -- the
+    predecessor stores only its hash (§5.8), and the file is unlinked on
+    complete/abort (§5.9). The successor hashes the token into HANDSHAKE so the
+    predecessor can verify the body it dispatched without a sid comparison a
+    fork-steer would break."""
     fleet_py = (FLEET_HOME / "bin" / "fleet.py").as_posix()
     # The interpreter that is running fleet right now, not a hardcoded
     # `py -3.13` (a Windows-only launcher): the successor must invoke the
@@ -9211,8 +9258,11 @@ def _render_successor_task(successor_inc: str, old_inc: str) -> str:
 Your predecessor ({old_inc}) dispatched you mid-handoff (spec docs/superpowers/specs/2026-07-13-native-agents-pivot-design.md §4).
 
 Do exactly this, in order:
-1. Run: "{py}" {fleet_py} sup-boot --handoff-inc {successor_inc}
-   This prints your boot bundle and writes supervisor/HANDSHAKE. You hold NO claim yet.
+1. Run: "{py}" {fleet_py} sup-boot --handoff-inc {successor_inc} --handoff-token {handoff_token}
+   This prints your boot bundle and writes supervisor/HANDSHAKE (carrying the
+   token hash and your own freshly minted generation). It also prints a
+   `NONCE:` line -- that is YOUR generation; keep it, you present it on your
+   first supervisor verb after the claim transfers. You hold NO claim yet.
 2. Take NO spawn/respawn/send/kill/clean actions before claim transfer -- spec §4's double-spawn guard.
 3. Poll every ~30s (up to 10 minutes): "{py}" {fleet_py} sup-status --json
    - When incarnation.incarnation_id == "{successor_inc}": the claim is yours. Run:
@@ -9319,21 +9369,40 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     except ClaudeNotFoundError as exc:
         raise FleetCliError(f"{exc} -- nothing dispatched; claim unchanged, duty continues")
     with fleet_lock():
-        # §5.3: `sup-handoff-begin` does NOT mint. Its dispatch runs outside
-        # the lock by F4 doctrine, so a mint in this critical section would be
-        # exposed to exactly the failure §5.4(b) exists to prevent -- and it is
-        # handing the claim over regardless. This verb also writes no claim
-        # state, so notices are discarded rather than delivered: nothing here
-        # commits, and a `NONCE:` line for an uncommitted generation would be a
-        # value the body could present and then be refused on.
-        claim, caller, _ = _require_claim_holder(
+        # §5.3: `sup-handoff-begin` does NOT mint a continuity PENDING. Its
+        # dispatch runs outside the lock by F4 doctrine, so a pending minted in
+        # this critical section would be exposed to exactly the failure §5.4(b)
+        # exists to prevent -- and it is handing the claim over regardless. So
+        # `mint=False`.
+        #
+        # The validator's `notices` are NOT discarded here, unlike the old
+        # begin. §6.4 makes this a claim WRITE (the token hash below), so
+        # whatever generation the validator settled on is now committed -- and
+        # for a legacy predecessor whose first new-code contact is this verb,
+        # that generation is its first-contact upgrade (§9), which belongs to
+        # the predecessor and it must hold until complete/abort. Discarding it
+        # once it is persisted would lock the resuming predecessor out. In the
+        # common case -- a healthy predecessor presenting its live generation
+        # -- rule 1 leaves `notices` empty and nothing is printed.
+        claim, caller, notices = _require_claim_holder(
             getattr(args, "sid", None), nonce=getattr(args, "nonce", None),
             verb="sup-handoff-begin", mint=False)
         successor_inc = mint_incarnation_id()
-        task_path = state_dir() / f"supervisor-handoff-{successor_inc}.md"
+        # §6.4: mint the one-shot handoff token, stamp only its HASH into this
+        # body's own claim (so a predecessor fork-steer mid-handoff does not
+        # lose it, and so INCARNATION never becomes a place the token can be
+        # read from -- §5.8), and render the PLAINTEXT into the successor's
+        # task file, which is the only channel that carries it and is unlinked
+        # on complete/abort (§5.9). This is a claim write, unlike the old
+        # begin: it adds exactly one field and commits it here under the lock.
+        handoff_token = mint_nonce()
+        claim["handoff_token_hash"] = nonce_digest(handoff_token)
+        write_incarnation(claim)
+        task_path = handoff_task_file_path(successor_inc)
         task_path.parent.mkdir(parents=True, exist_ok=True)
-        task_path.write_text(_render_successor_task(successor_inc, claim["incarnation_id"]),
-                             encoding="utf-8")
+        task_path.write_text(
+            _render_successor_task(successor_inc, claim["incarnation_id"], handoff_token),
+            encoding="utf-8")
         supervisor_journal_append("HANDOFF-BEGIN", claim["incarnation_id"], caller,
                                   f"successor={successor_inc} task={task_path.as_posix()}")
         try:
@@ -9342,6 +9411,10 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
         except FileNotFoundError:
             pass
 
+    # After the commit and on every subsequent path (success, DOA, dispatch
+    # failure): the generation the validator settled on is committed, so the
+    # predecessor must learn it. Empty for the common live-claim case.
+    _deliver_notices(notices)
     holder_inc = claim["incarnation_id"]
 
     def _abort_flag(reason, successor_sid=None, successor_short_id=None):
@@ -9437,15 +9510,23 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
 
 
 def cmd_sup_handoff_complete(args) -> int:
-    """`fleet sup-handoff-complete --expect-inc I --expect-sid S [--sid ...]`.
-    Dual verification (spec §4): the HANDSHAKE must carry EXACTLY the
-    incarnation id the old side minted AND the sid it dispatched. Journal
+    """`fleet sup-handoff-complete --expect-inc I [--expect-sid S] [--sid ...]`.
+
+    §6.4 / D4: verification turns on the TOKEN, not the sid. The HANDSHAKE must
+    carry the incarnation id the old side minted AND a `handoff_token_hash`
+    equal to the one begin stamped into this claim. `--expect-sid` becomes
+    OPTIONAL: when passed it is checked, and a mismatch is a loud warning
+    naming the fork, not a refusal -- a successor that fork-steered between the
+    SUCCESSOR-SID print and this call still holds the token, so refusing on the
+    sid would wedge a legitimate handoff on the exact failure this redesign
+    removes (the fork-steer root cause, third instance). Journal
     HANDOFF-COMPLETE first (old is still holder), then transfer."""
     with fleet_lock():
-        # No mint, and notices discarded: the claim this call validates ceases
-        # to exist inside this same lock section (the literal below replaces
-        # it), so a generation minted for it would be dead on delivery. §6.4
-        # gives the successor its own.
+        # No mint, and continuity notices discarded: the claim this call
+        # validates ceases to exist inside this same lock section (the literal
+        # below replaces it), so a generation minted for it would be dead on
+        # delivery. The successor already minted ITS generation at its own
+        # sup-boot (§6.4) and it rides in on the HANDSHAKE.
         claim, caller, _ = _require_claim_holder(
             getattr(args, "sid", None), nonce=getattr(args, "nonce", None),
             verb="sup-handoff-complete", mint=False)
@@ -9453,36 +9534,65 @@ def cmd_sup_handoff_complete(args) -> int:
         if hs is None:
             raise FleetCliError("no supervisor/HANDSHAKE -- successor not ready; wait, "
                                 "or sup-handoff-abort past the timeout")
-        if (hs.get("incarnation_id") != args.expect_inc
-                or hs.get("session_id") != args.expect_sid):
+        if hs.get("incarnation_id") != args.expect_inc:
             raise FleetCliError(
-                f"HANDSHAKE mismatch: found inc={hs.get('incarnation_id')} "
-                f"sid={hs.get('session_id')}, expected inc={args.expect_inc} "
-                f"sid={args.expect_sid} -- NOT transferring (spec §4 id verification)")
+                f"HANDSHAKE mismatch: found inc={hs.get('incarnation_id')}, "
+                f"expected inc={args.expect_inc} -- NOT transferring (spec §4 id "
+                f"verification)")
+        expected_hash = claim.get("handoff_token_hash")
+        if not expected_hash or hs.get("handoff_token_hash") != expected_hash:
+            # The fork case, and the whole point of the token: a successor that
+            # is not the body begin dispatched cannot produce the token, so it
+            # cannot forge a matching HANDSHAKE hash. `not expected_hash` is
+            # fail-closed for a claim that never went through a token-minting
+            # begin (an old-code predecessor): with nothing to verify against,
+            # refuse rather than transfer on an absent equality.
+            raise FleetCliError(
+                f"HANDSHAKE token mismatch for inc={args.expect_inc} -- the body that "
+                f"wrote HANDSHAKE is not the successor this claim dispatched, or the "
+                f"predecessor claim carries no handoff token. NOT transferring (§6.4).")
+        successor_sid = hs.get("session_id")
+        sid_warning = None
+        if getattr(args, "expect_sid", None) and successor_sid != args.expect_sid:
+            sid_warning = (
+                f"WARNING: --expect-sid {args.expect_sid} does not match the HANDSHAKE "
+                f"sid {successor_sid} -- the successor forked after it was dispatched. "
+                f"The token verified, so transferring anyway to the body that holds it "
+                f"(§6.4); recorded for observability.")
         supervisor_journal_append("HANDOFF-COMPLETE", claim["incarnation_id"], caller,
-                                  f"claim -> {args.expect_inc} sid={args.expect_sid}")
+                                  f"claim -> {args.expect_inc} sid={successor_sid}")
         # Third dict-literal writer (§9). `lineage_id` is CARRIED, never
         # re-minted: a handoff is a planned succession with the predecessor
         # alive to vouch, so provenance continues across it (§6.2), and every
         # worker the predecessor spawned stays not-foreign to the successor.
         #
-        # The successor's own generation is NOT written here: it reaches the
-        # claim through HANDSHAKE, which does not carry it until §6.4's token
-        # work lands. Until then the transferred claim is deliberately a
-        # LEGACY claim -- §9's documented mixed-code shape -- which the
-        # successor's first call honors by sid equality once and upgrades in
-        # place. Recorded rather than papered over: minting a generation here
-        # would deliver it on the PREDECESSOR's stdout, to the one body that
-        # must never present it again.
-        write_incarnation({"incarnation_id": args.expect_inc,
-                           "session_id": args.expect_sid,
-                           "claimed_at": now_iso(), "heartbeat_at": now_iso(),
-                           "claimed_via": "handoff",
-                           "lineage_id": claim.get("lineage_id")})
+        # §6.4: the successor's OWN generation reaches the claim through
+        # HANDSHAKE (`nonce_hash`, minted at the successor's sup-boot). Carrying
+        # it here is what makes the transferred claim a live claim rather than a
+        # legacy one -- the successor's first supervisor verb proves continuity
+        # on the value its own boot delivered, with no in-place upgrade. The
+        # token hash is the PREDECESSOR's and is deliberately not carried.
+        new_claim = {"incarnation_id": args.expect_inc,
+                     "session_id": successor_sid,
+                     "claimed_at": now_iso(), "heartbeat_at": now_iso(),
+                     "claimed_via": "handoff",
+                     "lineage_id": claim.get("lineage_id")}
+        succ_nonce_hash = hs.get("nonce_hash")
+        if succ_nonce_hash:
+            new_claim["nonce_hash"] = succ_nonce_hash
+            new_claim["nonce_seq"] = 1
+        write_incarnation(new_claim)
         try:
             handshake_path().unlink()
         except FileNotFoundError:
             pass
+        # §5.9: the task file carries the plaintext token; unlink it here.
+        try:
+            handoff_task_file_path(args.expect_inc).unlink()
+        except FileNotFoundError:
+            pass
+    if sid_warning:
+        print(sid_warning)
     print(f"claim transferred to {args.expect_inc}. This (old) incarnation must now "
           f"EXIT: end the session, take no further fleet actions.")
     return 0
@@ -9517,11 +9627,13 @@ def cmd_sup_handoff_abort(args, which=shutil.which, run=subprocess.run) -> int:
             getattr(args, "sid", None), nonce=getattr(args, "nonce", None),
             verb="sup-handoff-abort")
         hs = read_handshake()
+        aborted_inc = None
         if hs is not None:
             if hs.get("session_id") != args.successor_sid:
                 raise FleetCliError(
                     f"--successor-sid does not match HANDSHAKE sid {hs.get('session_id')} -- "
                     f"refusing to stop an unrelated session")
+            aborted_inc = hs.get("incarnation_id")
         else:
             flag = read_handoff_abort_flag()
             recorded_sid = flag.get("successor_sid") if flag is not None else None
@@ -9541,6 +9653,15 @@ def cmd_sup_handoff_abort(args, which=shutil.which, run=subprocess.run) -> int:
             handshake_path().unlink()
         except FileNotFoundError:
             pass
+        # §5.9: the aborted successor's task file carries the plaintext token;
+        # unlink it here too (best-effort, keyed on the HANDSHAKE's inc when we
+        # have one -- an abort taken off the flag alone does not know the
+        # successor inc, and the doctor NOTE is the backstop for that path).
+        if aborted_inc:
+            try:
+                handoff_task_file_path(aborted_inc).unlink()
+            except FileNotFoundError:
+                pass
         supervisor_journal_append("HANDOFF-ABORT", claim["incarnation_id"], caller,
                                   f"stopping limbo successor sid={args.successor_sid}")
         _write_json_atomic(handoff_abort_flag_path(), {
@@ -9549,6 +9670,10 @@ def cmd_sup_handoff_abort(args, which=shutil.which, run=subprocess.run) -> int:
             "holder": claim["incarnation_id"],
         })
         claim["heartbeat_at"] = now_iso()   # old resumes duty
+        # The handoff this body started is over; its token hash is spent. Drop
+        # it so a later verb never re-reads a stale token (§6.4). A fresh begin
+        # overwrites it regardless; clearing it keeps the resumed claim clean.
+        claim.pop("handoff_token_hash", None)
         write_incarnation(claim)
     # S1 fix (final wave): route through _stop_native_session -- the ONLY
     # sanctioned stop primitive -- instead of an inline full-sid `run(...)`.
@@ -9740,6 +9865,29 @@ def _doctor_check_supervisor_handoff():
                          "orphan from a crashed handoff; safe to delete manually")
         else:
             parts.append("HANDSHAKE present (handoff in flight)")
+    # §5.9 backstop: a `supervisor-handoff-*.md` carries the plaintext handoff
+    # token and is unlinked by complete/abort. Unlink is the mechanism; this
+    # NOTE catches the crash-before-unlink paths. A NOTE, not a health
+    # failure -- an orphan token file is a hygiene residue, not a broken
+    # supervisor; and it is best-effort, since a view/doctor row must never
+    # raise on a stat.
+    try:
+        orphans = []
+        for f in state_dir().glob("supervisor-handoff-*.md"):
+            try:
+                fage = time.time() - f.stat().st_mtime
+            except OSError:
+                continue
+            if fage > SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS:
+                orphans.append(f.name)
+        if orphans:
+            parts.append(
+                f"NOTE: {len(orphans)} orphaned successor task file(s) past the handoff "
+                f"timeout ({', '.join(sorted(orphans))}) -- residue from a handoff that "
+                f"crashed before unlinking; each carries a spent handoff token, safe to "
+                f"delete manually (claim-nonce §5.9)")
+    except OSError:
+        pass
     if not parts:
         parts.append("no handoff in flight, no aborted-handoff flag")
     return ("supervisor-handoff", ok, " | ".join(parts))
@@ -9901,6 +10049,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_supboot.add_argument("--nonce", help=NONCE_ARG_HELP)
     p_supboot.add_argument("--handoff-inc", dest="handoff_inc",
                            help="handoff-successor mode: write HANDSHAKE with this incarnation id; no claim action")
+    p_supboot.add_argument("--handoff-token", dest="handoff_token",
+                           help="handoff-successor mode: the one-shot token from the "
+                                "predecessor's task file; its hash is written into HANDSHAKE "
+                                "so complete can verify this body without a sid comparison (§6.4)")
 
     p_supckpt = sub.add_parser("sup-checkpoint", help="append a supervisor journal checkpoint (claim holder only) + refresh heartbeat")
     p_supckpt.add_argument("body", help="checkpoint text, or @file")
@@ -9941,7 +10093,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_suphc = sub.add_parser("sup-handoff-complete", help="verify HANDSHAKE and transfer the claim")
     p_suphc.add_argument("--expect-inc", dest="expect_inc", required=True)
-    p_suphc.add_argument("--expect-sid", dest="expect_sid", required=True)
+    # §6.4: optional. The token verifies the successor; --expect-sid is
+    # observability, and a mismatch is a warning naming the fork, not a refusal.
+    p_suphc.add_argument("--expect-sid", dest="expect_sid",
+                         help="optional: warn (do not refuse) if the HANDSHAKE sid differs")
     p_suphc.add_argument("--sid", help="override caller session id")
     p_suphc.add_argument("--nonce", help=NONCE_ARG_HELP)
 
