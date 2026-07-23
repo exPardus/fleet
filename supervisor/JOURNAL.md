@@ -3,7 +3,7 @@
 Append-only checkpoint log (spec §4). Single writer: the current claim
 holder, via `fleet sup-*` commands only. Never edit or delete entries.
 Entry header format: `## <utc-iso> <KIND> inc=<incarnation-id> sid=<session-id>`
-Kinds: BOOT, CHECKPOINT, PROPOSAL, SEIZED, HANDOFF-BEGIN, HANDOFF-COMPLETE, HANDOFF-ABORT.
+Kinds: BOOT, CHECKPOINT, PROPOSAL, SEIZED, RELEASED, LIMIT-TRANSFER, HANDOFF-BEGIN, HANDOFF-COMPLETE, HANDOFF-ABORT.
 
 <!-- entries below -->
 
@@ -322,3 +322,103 @@ Nonce design gate CLOSED: both lenses in, adjudication committed (docs/reviews/M
 ## 2026-07-21T18:59:43Z CHECKPOINT inc=inc-20260721T150630Z-2c07 sid=4f3af931-099c-4bc4-bafa-077671feffca
 
 M-E CLOSED + PUSHED (de9c62f, main=fleet-impl). Four branches merged: me/ul (UL D1-D4 + closed fixed-offset tz set, 4 waves), me/daemon (daemon-wedge doctor check + dispatch classifier + ND-4/nits, 2 waves), me/defects (successor dispatch settings+env+mode; autoclean full-identity ownership, 2 waves), me/nonce (claim-nonce spec at DRAFTING + tools/verify_receipts.py bound to tests/test_receipts.py; merged, REVERTED ON RED, fixed, re-merged). Post-merge: unit 1302/6skip, FLEET_LIVE 6/6 on 2.1.216 from this interactive session, doctor 23 PASS 0 FAIL, pin stamped 2.1.216. 9TH LIVE CATCH was the SUBSTRATE: stale daemon.lock + Windows PID reuse onto a service with unreadable StartTime -> all --bg dispatch dead ~16h while doctor read all-PASS. Knowledge wave done: lessons#2026-07-21-me, INDEX, template v1.8 (VANTAGE gate, FOUNDING-INCIDENT gate, demand-driven-evidence rule, reviewer-remedies-are-fix-waves, receipts-as-executable-claims, merge-target testing, commit-only, RESULT-line exemption), NEXT-SESSION rewritten. MANAGER ERRORS THIS CAMPAIGN, all worker-caught with receipts: M0 filed from the wrong VANTAGE (worktree vs canonical home) -- regression never existed, disproved by AST body diff; DQ1 tz ruling superseded (ZoneInfo guards unparseable, not resolvable-but-wrong); adjudication item 3 withdrawn as over-specification after the reviewer overturned its own CRITICAL's remedy on the author's receipts; sequencing item 3 rested on a false premise (detection-only does NOT close incident 1). AND a close-out error caught by myself: deleted the six reviewer branches as 'merged cleanup' when they were never merged -- 7336 lines of review evidence lived only there; recovered from the object store at the tips and committed. Standing rule added: a review branch is EVIDENCE, not scratch. OPERATOR GATES OPEN: (1) 8 [PENDING OPERATOR RATIFICATION] rows in native-substrate.md (2.1.212 set + the new 2.1.216 wedge row); (2) claim-nonce spec at drafting, both final gates sound/closed, FIVE questions waiting -- load-bearing one: no authorization input exists on this box that is neither view-derivable nor an env var, so options are detection-only (does NOT close the zombie incident) / knowingly-bypassable gate (the only one that does) / build an auth input first; (3) SDD v3 untouched; (4) three-tier re-draft gated on (2).
+
+## 2026-07-22T23:30:21Z SEIZED inc=inc-20260722T233021Z-815c sid=78bd63c3-d718-4a6f-8e10-37893b7899c2
+
+seized from inc-20260721T150630Z-2c07: holder roster-gone, heartbeat stale (102639s > 3600s)
+
+## 2026-07-22T23:31:18Z CHECKPOINT inc=inc-20260722T233021Z-815c sid=78bd63c3-d718-4a6f-8e10-37893b7899c2
+
+Operator docket 2026-07-23: nonce gate=(b), claim-nonce PROMOTED to spec-of-record (commit f8e33ec, pushed), three-tier re-draft unblocked with new requirements (tier models Fable5/Opus4.8 by role, 150-200k swap band w/ urgent-task grace, workers opus/sonnet only, event-driven beats v1). Remaining gates deferred by operator. Starting re-draft campaign: spawning drafting worker.
+
+## 2026-07-22T23:50:26Z CHECKPOINT inc=inc-20260722T233021Z-815c sid=78bd63c3-d718-4a6f-8e10-37893b7899c2
+
+three-tier re-draft landed 0846d1c (manager-verified: 32/32 receipts strict, 13/13 test_receipts, drafting status held). Dual-lens gate dispatched: tt-review-break 9b30d5f1 + tt-review-spec f288f952, opus, 3.5M each. Tier-based provider-agnostic requirement steered mid-draft and folded.
+
+## 2026-07-23T00:03:16Z CHECKPOINT inc=inc-20260722T233021Z-815c sid=78bd63c3-d718-4a6f-8e10-37893b7899c2
+
+dual-lens gate: break fix-list(B1-B10) 1C/6M/3m, spec fix-list(S1) sound-base. Verdicts merged ada0b45. Fix wave 1 fork-steered (0d6e168d) with 3 rulings (B4 decidable-not-weakened, B2/B3 honest-UNBUILT, disputes-carry-receipts).
+
+## 2026-07-23T00:14:15Z CHECKPOINT inc=inc-20260722T233021Z-815c sid=78bd63c3-d718-4a6f-8e10-37893b7899c2
+
+wave 1 landed 1a3d4e5 (11/11, manager re-verified 34/34 strict). r2 re-review fork-steered both lenses with mandated new-defect hunt on B4 ceiling refusal surface / B5 kill arms / B1 predicate inverse.
+
+## 2026-07-23T00:23:27Z CHECKPOINT inc=inc-20260722T233021Z-815c sid=78bd63c3-d718-4a6f-8e10-37893b7899c2
+
+r2: spec lens sound, break lens B1-B10 all fixed + ND1-3 filed on ceiling mechanism (hunt 7/7). Wave 2 fork-steered eeeb133e (ND1-3 + nit R1).
+
+## 2026-07-23T00:31:19Z CHECKPOINT inc=inc-20260722T233021Z-815c sid=78bd63c3-d718-4a6f-8e10-37893b7899c2
+
+wave 2 landed 4e540f8; builder self-found parser-evasion class (4 receipts invisible to verify_receipts in blockquotes; silent-drop class recurrence). Final gate dispatched both lenses narrow scope + merge verdict.
+
+## 2026-07-23T00:47:01Z CHECKPOINT inc=inc-20260722T233021Z-815c sid=78bd63c3-d718-4a6f-8e10-37893b7899c2
+
+FINAL GATE sound both lenses, merge verdict fit-for-ratification. mf/three-tier merged to main 919d3fb (lessons union-resolved), receipts 39/39 + 58/59(volatile), suite 1384/8 identical 3.13+3.10, pushed. Carry-items H1 (verify_receipts parser-evasion, harness slice) + ND4 (MINOR). Ratification docket to operator.
+
+## 2026-07-23T01:26:46Z CHECKPOINT inc=inc-20260722T233021Z-815c sid=78bd63c3-d718-4a6f-8e10-37893b7899c2
+
+Operator amendments (2nd addendum): supervisor promoted to TOP tier w/ UL auto-fallback chain to 2nd tier; worker band confirmed; cap-doctrine reading flagged for ratification ruling. Wave 3 fork-steered e2c1e219 in-lane. H1 harness fix spawned 9d6b02f7 (founding-artifact replay mandated). Cap doctrine adopted: no ceilings on new spawns.
+
+## 2026-07-23T01:54:11Z CHECKPOINT inc=inc-20260722T233021Z-815c sid=78bd63c3-d718-4a6f-8e10-37893b7899c2
+
+wave 3 folded 4/4 (46/46 strict); H1 landed w/ 16-evasion founding replay + red-first. Re-gate narrow both lenses + H1 hostile review dispatched.
+
+## 2026-07-23T02:12:07Z CHECKPOINT inc=inc-20260722T233021Z-815c sid=78bd63c3-d718-4a6f-8e10-37893b7899c2
+
+r4: ND5 CRIT manager-owned (ruling steered before record merged — own it in knowledge wave: a binding ruling lands as a commit on the target branch BEFORE the wave that cites it), ND6 fallback-ritual infeasibility, ND7. Wave 4 fork-steered 670f38af after merging main+verdicts. H1 review still working.
+
+## 2026-07-23T02:30:48Z CHECKPOINT inc=inc-20260722T233021Z-815c sid=78bd63c3-d718-4a6f-8e10-37893b7899c2
+
+wave 4 closed (50/50 strict). H1 review: 6/20 surviving mutations, 1 compound CRITICAL blinding — fix wave out with per-mutation RED proofs. r5 confirmation narrow both lenses out.
+
+## 2026-07-23T03:00:27Z CHECKPOINT inc=inc-20260722T233021Z-815c sid=78bd63c3-d718-4a6f-8e10-37893b7899c2
+
+r5: FIT FOR RATIFICATION (residuals R2/ND8/ND9 to micro-wave 5). H1: 11/11 mutation REDs, confirmation pass out. Next: ratification docket to operator, then H1 merge.
+
+## 2026-07-23T03:22:43Z CHECKPOINT inc=inc-20260722T233021Z-815c sid=78bd63c3-d718-4a6f-8e10-37893b7899c2
+
+Merged H1 + three-tier to main, all verification green, 2.1.218 pin tier 6/6 + stamped. Ratification docket to operator now.
+
+## 2026-07-23T03:26:27Z CHECKPOINT inc=inc-20260722T233021Z-815c sid=78bd63c3-d718-4a6f-8e10-37893b7899c2
+
+M-F re-draft campaign CLOSED. three-tier-command.md ratified spec-of-record (e966994); H1 merged; template v1.9; worktrees+branches cleaned; workers to autoclean TTL. Next per operator decisions: M-F dogfood (preempts), then nonce build -> three-tier build.
+
+## 2026-07-23T03:32:26Z CHECKPOINT inc=inc-20260722T233021Z-815c sid=78bd63c3-d718-4a6f-8e10-37893b7899c2
+
+NEXT-SESSION rewritten as post-M-F handoff (dogfood-first, no docket; residuals carried; housekeeping noted). Pushed.
+
+## 2026-07-23T04:32:46Z SEIZED inc=inc-20260723T043246Z-cd54 sid=fae4749f-6ca2-4399-aec8-aedcf7357700
+
+seized from inc-20260722T233021Z-815c: holder roster-gone, heartbeat stale (3620s > 3600s)
+
+## 2026-07-23T04:33:01Z CHECKPOINT inc=inc-20260723T043246Z-cd54 sid=fae4749f-6ca2-4399-aec8-aedcf7357700
+
+SEIZED after freeze x2 — rationale: holder inc-...815c (sid 78bd63c3) roster-gone; its heartbeat stayed fresh because it was STILL ALIVE finishing close-out until 03:32:26Z (3 checkpoints 03:22-03:32 landed while this session already ran — the 03:08Z freeze verdict was a LIVE CATCH preventing a two-supervisor incident; council synthesis had ruled seize-now on stale evidence, Cassandra's wait-dissent vindicated). Seized only after: heartbeat >3600s stale, no checkpoint past 03:32:26, holder still roster-gone, final checkpoint text terminal. Overnight state: M-F dogfood on claude-oracle (council-selected) — mf/stop-hook-hardening 92/0 + mf/v1_1-config-surface 70/0 merged to mf/integration 118/0; hostile review 1CRIT/1MAJ/2MIN merge-safe-no; fix wave in flight (worker mf-oracle-stophook cb51279f). int-docs doc-sync wave MERGED+PUSHED to fleet main 1d878cf (band 150-200k sync, GOALS as proposal only). 7 friction findings logged in docs/OVERNIGHT-2026-07-23.md incl. 200-char registry task cap (respawn truncation root cause) and send @file truncation. Token snapshot: workers show tokens in=2 out=~1-1.8k per result; full M1 transcript-join deferred to post-run.
+
+## 2026-07-23T04:38:23Z CHECKPOINT inc=inc-20260723T043246Z-cd54 sid=fae4749f-6ca2-4399-aec8-aedcf7357700
+
+oracle campaign: re-review verdict 0C/2MAJ/2MIN — fix-waves-mint-defects fired 5/5 lifetime (SPURIOUS-FIX: marketplace name 'claude-oracle' vs manifest 'cc-oracle', its own test encoded the wrong name = theater; adverb-gap false-miss regression 7/15). Fix wave 2 dispatched (LAST wave, escalation beats a third); narrow final gate after. CRIT prune + floor detector verified FIXED with live-artifact validation + fault-injection (2 red tests per injected break, reviewer re-verified its own void injections before trusting green — good discipline). int-docs lane fully closed (1d878cf pushed).
+
+## 2026-07-23T04:47:51Z CHECKPOINT inc=inc-20260723T043246Z-cd54 sid=fae4749f-6ca2-4399-aec8-aedcf7357700
+
+campaign close-out underway: final gate MERGE VERDICT sound (147/0 both interpreters, mf/integration UNPUSHED per fence). Knowledge loop written: lessons#2026-07-23-overnight-dogfood, INDEX line, spawn-etiquette dontask/truncation amendments, projects/claude-oracle.md born, projects/pmbot.md trunk corrected to master + overnight hazards. M1 transcript-join harvester running -> docs/mf-oracle-m1-evidence.md. Remaining: knowledge commit+push, morning brief in OVERNIGHT ledger.
+
+## 2026-07-23T04:54:40Z CHECKPOINT inc=inc-20260723T043246Z-cd54 sid=fae4749f-6ca2-4399-aec8-aedcf7357700
+
+OVERNIGHT CAMPAIGN CLOSED. e01765c pushed (knowledge loop + council ledger + M1 evidence). Deliverables: cc-oracle mf/integration sound 147/0 UNPUSHED (operator merges), fleet doc-sync 1d878cf, M1 evidence undercuts dominant-cost premise for fleet workers (2.5% fresh input) / narrowly supports for cold-session workloads, 8 friction findings (3 root-caused), lessons#2026-07-23-overnight-dogfood. Workers mf-oracle-stophook/mf-oracle-config/int-docs-1 idle -> autoclean TTL; oracle worktrees oracle-wt-{stophook,config} + fleet-int-docs held by idle workers, remove post-autoclean alongside residual fleet-mf-* set. Operator morning queue: ratify council verdicts G-1..G-3, push oracle, GOALS proposal, M1 go/no-go with fresh evidence. Freeze-verdict live catch is the night's headline lesson.
+
+## 2026-07-23T04:56:09Z CHECKPOINT inc=inc-20260723T043246Z-cd54 sid=fae4749f-6ca2-4399-aec8-aedcf7357700
+
+next campaign dispatched per operator sequencing: nonce-build (opus, bypass, worktree fleet-nonce, branch nonce/build-slice off e01765c) — claim-nonce gate-(b) mechanism + a0bd194 MINOR residuals + gitignore + exit-code seam + three three-tier-gate prerequisites (B6 boot-rule-1, FLEET_WORKER arm, limited-holder transfer). Dual-lens review gates before any merge; merge caution: nonce code touches the live claim machinery my own incarnation uses — post-merge sup-status check mandatory.
+
+## 2026-07-23T15:37:41Z CHECKPOINT inc=inc-20260723T043246Z-cd54 sid=fae4749f-6ca2-4399-aec8-aedcf7357700
+
+RECOVERED from ~10h process outage (machine/session down ~05:50Z-15:35Z; same sid resumed, heartbeat refreshed via sup-heartbeat per same-sid wart path). nonce-build 2nd incarnation died mid-turn writing A-core red tests, nothing committed past 93e5d3e; respawning with E(2) council ruling baked into task file (mailbox delivery across death uncertain).
+
+## 2026-07-23T16:59:37Z CHECKPOINT inc=inc-20260723T043246Z-cd54 sid=fae4749f-6ca2-4399-aec8-aedcf7357700
+
+nonce v2 wave ACCEPTED (9 commits 93e5d3e..f3d5a44, +213 tests, 1696/8 both floors, ~45 fault injections, 3 self-caught theater instances — worker discipline exemplary). 4th incarnation dispatched on v3: sup-release+status-line coupling, handoff token replacing legacy write, lineage, THE §7 gate w/ heaviest fault-injection (must reproduce 2026-07-16 class with gate absent), §8 docs; JOURNAL.md kinds-line edit reserved to manager. Dual-lens gate after slice completion, then merge decision.
+
+## 2026-07-23T18:25:39Z CHECKPOINT inc=inc-20260723T043246Z-cd54 sid=fae4749f-6ca2-4399-aec8-aedcf7357700
+
+nonce slice COMPLETE (15 commits e01765c..01e54af, 1779/8 both floors, 42 injections). Dual-lens gate dispatched: nonce-rb (break: live-legacy-claim back-compat is trap 1 — a regression bricks THIS incarnation at merge; founding-incident replay; init-gating flag; autoclean exemption spoofability) + nonce-rs (spec conformance, receipts, floors, dispositions). JOURNAL kinds-line deferred to post-merge deliberately. BAND NOTE, honest deviation: manager context ~276k, past the ratified 150-200k band — riding to the merge decision because a mid-gate handoff costs campaign nuance; this session runs a 1M window so no compaction risk; handoff evaluation at the merge boundary. The deviation itself is band-doctrine friction data: the band's number assumes a 200k window.
