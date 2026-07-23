@@ -4158,7 +4158,7 @@ def cmd_resume_limited(args, which=shutil.which, sleep=time.sleep,
     this command is the one lever that actually relaunches.
 
     §7 THE GATE: a mutating lifecycle verb (it relaunches turns), gated for a
-    supervisor-shaped caller while a fresh claim is held."""
+    sid-bearing caller while a fresh claim is held."""
     _supervisor_gate("resume-limited", nonce=getattr(args, "nonce", None))
     _require_instance_settings()
     force_now = bool(getattr(args, "force_now", False))
@@ -4350,7 +4350,7 @@ def cmd_release(args) -> int:
 
     §7 THE GATE: `release` is one of the two registry-mutating verbs v1's
     partition missed; it is a mutating lifecycle verb and is gated for a
-    supervisor-shaped caller while a fresh claim is held."""
+    sid-bearing caller while a fresh claim is held."""
     _supervisor_gate("release", nonce=getattr(args, "nonce", None))
     with fleet_lock():
         data = load_registry()
@@ -4624,7 +4624,7 @@ def cmd_respawn(args, run=subprocess.run, which=shutil.which,
     tombstone, fast-completion race, carried-forward fields).
 
     §7 THE GATE: a mutating lifecycle verb (it retires a session and launches a
-    fresh one), gated for a supervisor-shaped caller while a fresh claim is
+    fresh one), gated for a sid-bearing caller while a fresh claim is
     held. Ahead of the destructive-guard prompt: the gate is the outer policy,
     the ownership prompt the inner one."""
     _supervisor_gate("respawn", nonce=getattr(args, "nonce", None))
@@ -4941,7 +4941,7 @@ def cmd_clean(args, run=subprocess.run, which=shutil.which) -> int:
     nothing else touched. Default remains both.
 
     §7 THE GATE: a mutating lifecycle verb (irreversible deletion), gated for a
-    supervisor-shaped caller while a fresh claim is held."""
+    sid-bearing caller while a fresh claim is held."""
     _supervisor_gate("clean", nonce=getattr(args, "nonce", None))
     _NATIVE_CLEAN_DELETABLE = {"dead"}
     dead_only = bool(getattr(args, "dead_only", False))
@@ -8107,7 +8107,7 @@ NONCE_ARG_HELP = ("the generation this body was last given (claim-nonce §5.3); 
 
 # The same generation, presented on a MUTATING LIFECYCLE verb. It does two
 # jobs: it clears §7's gate (a fresh held claim demands continuity from a
-# supervisor-shaped caller), and it lets §6.2's lineage rule own the workers a
+# sid-bearing caller), and it lets §6.2's lineage rule own the workers a
 # rotated body's lineage spawned. Both are bypassable speed-bumps, not
 # authorization; both are inert when no fresh claim is held.
 GATE_NONCE_ARG_HELP = ("the current supervisor generation (claim-nonce §5.3): clears §7's "
@@ -8856,10 +8856,13 @@ def _claim_is_legacy(claim: dict) -> bool:
 
 def _supervisor_gate(verb, nonce=None, now=None):
     """claim-nonce §7 -- THE GATE (option (b), ratified 2026-07-23). Raises
-    `SupervisorClaimGateError` when a mutating lifecycle verb is run by a
-    supervisor-shaped caller while a supervisor claim is HELD with a FRESH
-    heartbeat and the caller cannot prove continuity on it. Returns silently
-    otherwise. READ-ONLY: no lock, no mint, no write.
+    `SupervisorClaimGateError` when a mutating lifecycle verb is run by ANY
+    sid-bearing caller (any `CLAUDE_CODE_SESSION_ID`, not only a
+    supervisor-shaped one -- the arming test below keys on the sid's PRESENCE,
+    so the code is more protective than "supervisor-shaped" would suggest)
+    while a supervisor claim is HELD with a FRESH heartbeat and the caller
+    cannot prove continuity on it. Returns silently otherwise. READ-ONLY: no
+    lock, no mint, no write.
 
     Called at the top of every mutating lifecycle verb (§7's taxonomy: spawn,
     send, respawn, kill, clean, interrupt, archive, resume-limited, release,

@@ -94,14 +94,16 @@ the transfer no longer breaks on a rotated sid.
 
 Old incarnation:
 1. `fleet sup-checkpoint "handoff prep: <state summary for successor>"` (present `--nonce`).
-2. `fleet sup-handoff-begin` — mints the token into the successor's task file
-   and stamps its hash into your own claim; note the `SUCCESSOR-INC:` /
-   `SUCCESSOR-SID:` lines.
+2. `fleet sup-handoff-begin --nonce <value>` — mints the token into the
+   successor's task file and stamps its hash into your own claim; note the
+   `SUCCESSOR-INC:` / `SUCCESSOR-SID:` lines.
 3. Wait for `supervisor/HANDSHAKE` (successor writes it via its own
    `sup-boot --handoff-inc <INC> --handoff-token <TOK>`). Timeout T = 300s.
-4. On handshake: `fleet sup-handoff-complete --expect-inc <INC> [--expect-sid <SID>]`,
-   then EXIT the session. `--expect-sid` is OPTIONAL — the token verifies the
-   successor; a sid mismatch is a warning naming the fork, not a refusal.
+4. On handshake: `fleet sup-handoff-complete --expect-inc <INC> [--expect-sid <SID>] --nonce <value>`,
+   then EXIT the session. `--nonce` is your continuity proof — like every
+   `sup-*` verb, complete refuses without it. `--expect-sid` is OPTIONAL — the
+   token verifies the successor; a sid mismatch is a warning naming the fork,
+   not a refusal.
 5. On timeout / dispatch failure: `fleet sup-handoff-abort --successor-sid <SID>`
    — you resume duty; doctor flags the abort until the operator clears
    `state/supervisor-handoff-aborted.json`. Both complete and abort unlink the
