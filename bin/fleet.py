@@ -7934,6 +7934,18 @@ SUPERVISOR_ROSTER_VERIFY_SECONDS = 60.0   # dispatch -> roster-join window (cont
 # the exact number is the operator's to tune.
 PENDING_NONCE_TTL_SECONDS = 900.0
 
+# §6.5 D5: `--nonce <value>` is the ONLY presentation channel. There is no
+# `FLEET_SUP_NONCE`, and adding one would be a design error rather than a
+# convenience: `_worker_env` copies the entire parent environment and strips
+# exactly one key, so any env-var channel is inherited by every worker fleet
+# spawns and by every subagent those workers spawn. A command-line argument
+# does not propagate to children; on this substrate both are readable by a
+# same-user process, so propagation is the whole difference -- and it is
+# decisive. (Belt-and-braces if a future env channel is ever added anyway:
+# strip it in `_worker_env` alongside CLAUDE_CODE_SESSION_ID.)
+NONCE_ARG_HELP = ("the generation this body was last given (claim-nonce §5.3); "
+                  "the ONLY presentation channel -- there is no env-var fallback")
+
 
 # ---------------------------------------------------------------------------
 # Supervisor claim nonce -- the continuity primitives (claim-nonce §5.1, §5.2)
@@ -8419,22 +8431,170 @@ def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
     return rc
 
 
-def _require_claim_holder(sid_override=None):
-    """(claim, caller_sid) iff the caller holds the claim; FleetCliError
-    otherwise. Enforces spec §4's journal single-writer rule at the only
-    write chokepoint. Caller MUST already hold fleet_lock."""
+def _claim_is_legacy(claim: dict) -> bool:
+    """claim-nonce §9's predicate, verbatim: legacy <=> `nonce_hash` absent
+    AND `state` absent.
+
+    The second conjunct is the whole point. A RELEASED claim (§6.3) also has
+    no `nonce_hash`, and it keeps `released_by_sid` -- so a predicate written
+    as "no nonce_hash means legacy, compare the sid" has a sid sitting right
+    there to match, and "released" would stop being terminal: whoever matched
+    the recorded sid would resurrect the claim in place.
+
+    §6.3's enumerated post-release key set (which drops `session_id`) is the
+    other half of that fix, and the two are deliberately belt-and-braces: this
+    predicate is shadowed at its only call site by the released branch in
+    `_require_claim_holder`, so it is pinned by direct unit tests rather than
+    through a verb, which is the only way a shadowed guard can be proven to
+    carry its own weight."""
+    return "nonce_hash" not in claim and "state" not in claim
+
+
+def _continuity_refusal(verb, claim: dict) -> FleetCliError:
+    """§5.6's loud refusal, worded under §5.7's binding constraint.
+
+    Agent-facing output must name the ambiguity and the escalation, and must
+    NOT name a lever that resolves it unilaterally. §5.4(c) is explicit that
+    the mechanism cannot prefer either body -- both present byte-identical
+    values from byte-identical contexts -- so the refused body may be the
+    legitimate one, and a message naming a lever hands that lever to whichever
+    body reads it first. v1's refusal instructed the refused caller to run a
+    read-only view and act on what it printed; that is the reversal.
+
+    The human-facing runbook (`skills/fleet/supervisor.md`) is the far side of
+    this audience boundary. It is a convention, not a mechanism."""
+    return FleetCliError(
+        f"{verb}: continuity proof failed (expected generation "
+        f"{claim.get('nonce_seq', '?')}) -- a second body of your lineage may be "
+        f"acting. STOP: take no further supervisor actions and escalate to the "
+        f"operator.")
+
+
+def _mint_pending_nonce(claim: dict, now=None) -> str:
+    """§5.3's mint step, in-memory. Returns the stdout notice the verb emits
+    AFTER its commit; the caller performs the single `write_incarnation`.
+
+    Mint iff no pending is outstanding, or the outstanding one has aged past
+    `PENDING_NONCE_TTL_SECONDS`. A mint that REPLACES an outstanding pending
+    moves the old hash to `prior_pending_hash` rather than discarding it
+    (§5.4(d): otherwise the TTL makes the winner the body that acts most often
+    inside the window, which systematically favours a looping body over a
+    human-attached one that thinks). One slot, not a chain -- a second
+    replacement drops the oldest.
+
+    An unreadable `pending_at` counts as expired: the replacement is the safe
+    direction, because the value being replaced stays presentable for one more
+    generation via `prior_pending_hash` and nobody is locked out."""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    seq = claim.get("nonce_seq", 1)
+    outstanding = claim.get("pending_nonce_hash")
+    if outstanding:
+        try:
+            age = (now - _parse_iso(claim["pending_at"])).total_seconds()
+        except (KeyError, TypeError, ValueError):
+            age = None
+        if age is not None and age <= PENDING_NONCE_TTL_SECONDS:
+            return f"NONCE: unchanged (generation {seq + 1} already outstanding)"
+        claim["prior_pending_hash"] = outstanding
+    value = mint_nonce()
+    claim["pending_nonce_hash"] = nonce_digest(value)
+    claim["pending_at"] = now_iso()
+    return f"NONCE: {value}"
+
+
+def _deliver_notices(notices) -> None:
+    """§5.3's delivery step: the plaintext of a newly minted generation is
+    printed ONCE, on the minting verb's own stdout, AFTER the commit, and
+    nowhere else. Routed through the console-encoding-tolerant writer every
+    other supervisor output uses, so no supervisor path prints through a raw
+    `print` a legacy code page could crash on."""
+    for line in notices:
+        _write_text_tolerating_console_encoding(line + "\n")
+
+
+def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, now=None):
+    """(claim, caller_sid, notices) iff the caller proves CONTINUITY on the
+    claim; FleetCliError otherwise. Caller MUST already hold fleet_lock, and
+    MUST perform exactly one `write_incarnation(claim)` afterwards -- §5.3
+    requires the acknowledgment, the mint and the verb's own state change to
+    commit together, so a verb that fails before that write rotates nothing.
+
+    `notices` is the list of stdout lines the verb emits AFTER its commit:
+    delivery is "printed once, on the verb's own stdout" (§5.3) and there is
+    no other copy anywhere. Returning them rather than printing here is what
+    keeps the print outside the committed state change.
+
+    §5.1: the nonce REPLACES the sid as the continuity key here -- a strictly
+    better key, because it survives fork-steer and respawn and because a stale
+    one is evidence rather than noise. Validation rules, in §5.3's order:
+
+      1. presented == live          -> valid; nothing is promoted
+      2. presented == pending       -> valid, AND this is the acknowledgment:
+         the old generation dies only once its successor is proven received
+      3. presented == prior_pending -> valid, NOT an alarm (§5.4(d)); promote
+         nothing and record it quietly
+      4. legacy claim (§9)          -> today's exact sid equality, honored
+         ONCE, then upgraded in place
+      5. otherwise                  -> refuse (§5.6)
+
+    Still the enforcement point for spec §4's journal single-writer rule; the
+    question it asks has changed from "are you the recorded sid" to "are you
+    the actor the last generation was delivered to"."""
     claim = read_incarnation()
     if claim is None:
         raise FleetCliError("no supervisor claim exists -- run `fleet sup-boot` first")
     caller = sid_override or current_caller_session()
     if not caller:
         raise FleetCliError("caller session unknown -- pass --sid or run from a Claude session")
-    if caller != claim.get("session_id"):
+
+    notices = []
+    if claim.get("state") == "released":
+        # A released claim is terminal for every verb but `sup-boot` (§6.1
+        # rule 1). Decided by its own branch rather than left to fall through
+        # to the continuity refusal: a body facing a cleanly released claim is
+        # not facing a possible second body, and §5.7's escalation wording
+        # would send it to the operator for nothing.
         raise FleetCliError(
-            f"caller sid {caller} does not hold the claim (holder: "
-            f"{claim.get('incarnation_id', '?')} sid {claim.get('session_id')}) -- "
-            f"the journal is single-writer, claim-holder-only (spec §4)")
-    return claim, caller
+            f"{verb}: claim {claim.get('incarnation_id', '?')} was released "
+            f"{claim.get('released_at', '?')} -- there is no holder to be. "
+            f"Run `fleet sup-boot` to claim afresh.")
+    if _claim_is_legacy(claim):
+        # §5.3 rule 4 / §9: the path every shipped five-key INCARNATION takes
+        # on first contact. Honor today's comparison once, then upgrade.
+        if caller != claim.get("session_id"):
+            raise FleetCliError(
+                f"caller sid {caller} does not hold the claim (holder: "
+                f"{claim.get('incarnation_id', '?')} sid {claim.get('session_id')}) -- "
+                f"the journal is single-writer, claim-holder-only (spec §4)")
+        value = mint_nonce()
+        claim["nonce_hash"] = nonce_digest(value)
+        claim["nonce_seq"] = 1
+        notices.append(f"NONCE: {value}")
+        # No pending is minted on the upgrade call: the LIVE generation just
+        # delivered is this call's delivery, and minting a pending in the same
+        # breath would put two values on one output and make "the most recent
+        # generation it was given" ambiguous at the one moment every
+        # installation passes through (§5.4(e)'s hazard, at first contact).
+        mint = False
+    elif nonce_matches(nonce, claim.get("nonce_hash")):
+        pass                                              # rule 1
+    elif nonce_matches(nonce, claim.get("pending_nonce_hash")):
+        claim["nonce_hash"] = claim["pending_nonce_hash"]  # rule 2
+        claim["nonce_seq"] = claim.get("nonce_seq", 1) + 1
+        for key in ("pending_nonce_hash", "pending_at", "prior_pending_hash"):
+            claim.pop(key, None)
+    elif nonce_matches(nonce, claim.get("prior_pending_hash")):
+        pass                                              # rule 3 -- quiet, not an alarm
+    else:
+        raise _continuity_refusal(verb, claim)            # rule 5
+
+    # §6.6: restamp on every validated write, so the roster join tracks the
+    # body that is actually acting rather than a sid retired by a fork-steer.
+    claim["session_id"] = caller
+    if mint:
+        notices.append(_mint_pending_nonce(claim, now=now))
+    return claim, caller, notices
 
 
 def cmd_sup_checkpoint(args) -> int:
@@ -8443,11 +8603,14 @@ def cmd_sup_checkpoint(args) -> int:
     at every checkpoint/beat')."""
     body = _read_task_arg(args.body)
     with fleet_lock():
-        claim, caller = _require_claim_holder(getattr(args, "sid", None))
+        claim, caller, notices = _require_claim_holder(
+            getattr(args, "sid", None), nonce=getattr(args, "nonce", None),
+            verb="sup-checkpoint")
         supervisor_journal_append(args.kind, claim["incarnation_id"], caller, body)
         claim["heartbeat_at"] = now_iso()
         write_incarnation(claim)
     print(f"checkpointed ({args.kind}) as {claim['incarnation_id']}; heartbeat refreshed")
+    _deliver_notices(notices)
     return 0
 
 
@@ -8455,10 +8618,13 @@ def cmd_sup_heartbeat(args) -> int:
     """`fleet sup-heartbeat [--sid S]` -- beat without journal spam (GOALS
     frugality: a beat is not an event worth a checkpoint)."""
     with fleet_lock():
-        claim, _ = _require_claim_holder(getattr(args, "sid", None))
+        claim, _, notices = _require_claim_holder(
+            getattr(args, "sid", None), nonce=getattr(args, "nonce", None),
+            verb="sup-heartbeat")
         claim["heartbeat_at"] = now_iso()
         write_incarnation(claim)
     print(f"heartbeat refreshed for {claim['incarnation_id']}")
+    _deliver_notices(notices)
     return 0
 
 
@@ -8619,7 +8785,16 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     except ClaudeNotFoundError as exc:
         raise FleetCliError(f"{exc} -- nothing dispatched; claim unchanged, duty continues")
     with fleet_lock():
-        claim, caller = _require_claim_holder(getattr(args, "sid", None))
+        # §5.3: `sup-handoff-begin` does NOT mint. Its dispatch runs outside
+        # the lock by F4 doctrine, so a mint in this critical section would be
+        # exposed to exactly the failure §5.4(b) exists to prevent -- and it is
+        # handing the claim over regardless. This verb also writes no claim
+        # state, so notices are discarded rather than delivered: nothing here
+        # commits, and a `NONCE:` line for an uncommitted generation would be a
+        # value the body could present and then be refused on.
+        claim, caller, _ = _require_claim_holder(
+            getattr(args, "sid", None), nonce=getattr(args, "nonce", None),
+            verb="sup-handoff-begin", mint=False)
         successor_inc = mint_incarnation_id()
         task_path = state_dir() / f"supervisor-handoff-{successor_inc}.md"
         task_path.parent.mkdir(parents=True, exist_ok=True)
@@ -8733,7 +8908,13 @@ def cmd_sup_handoff_complete(args) -> int:
     incarnation id the old side minted AND the sid it dispatched. Journal
     HANDOFF-COMPLETE first (old is still holder), then transfer."""
     with fleet_lock():
-        claim, caller = _require_claim_holder(getattr(args, "sid", None))
+        # No mint, and notices discarded: the claim this call validates ceases
+        # to exist inside this same lock section (the literal below replaces
+        # it), so a generation minted for it would be dead on delivery. §6.4
+        # gives the successor its own.
+        claim, caller, _ = _require_claim_holder(
+            getattr(args, "sid", None), nonce=getattr(args, "nonce", None),
+            verb="sup-handoff-complete", mint=False)
         hs = read_handshake()
         if hs is None:
             raise FleetCliError("no supervisor/HANDSHAKE -- successor not ready; wait, "
@@ -8781,7 +8962,12 @@ def cmd_sup_handoff_abort(args, which=shutil.which, run=subprocess.run) -> int:
     is no longer a path where an arbitrary --successor-sid is stopped with
     zero verification."""
     with fleet_lock():
-        claim, caller = _require_claim_holder(getattr(args, "sid", None))
+        # The old side RESUMES duty here (it rewrites its own heartbeat
+        # below), so it mints and is delivered a fresh generation like any
+        # other continuing verb.
+        claim, caller, notices = _require_claim_holder(
+            getattr(args, "sid", None), nonce=getattr(args, "nonce", None),
+            verb="sup-handoff-abort")
         hs = read_handshake()
         if hs is not None:
             if hs.get("session_id") != args.successor_sid:
@@ -8830,6 +9016,7 @@ def cmd_sup_handoff_abort(args, which=shutil.which, run=subprocess.run) -> int:
     else:
         print(f"limbo successor {args.successor_sid} stopped; duty resumed by "
               f"{claim['incarnation_id']}. Doctor will flag until the abort flag is cleared.")
+    _deliver_notices(notices)
     return 0
 
 
@@ -9071,9 +9258,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_supckpt.add_argument("body", help="checkpoint text, or @file")
     p_supckpt.add_argument("--kind", choices=["CHECKPOINT", "PROPOSAL"], default="CHECKPOINT")
     p_supckpt.add_argument("--sid", help="override caller session id")
+    p_supckpt.add_argument("--nonce", help=NONCE_ARG_HELP)
 
     p_supbeat = sub.add_parser("sup-heartbeat", help="refresh the supervisor claim heartbeat (no journal write)")
     p_supbeat.add_argument("--sid", help="override caller session id")
+    p_supbeat.add_argument("--nonce", help=NONCE_ARG_HELP)
 
     p_supstat = sub.add_parser("sup-status", help="read-only supervisor claim/handshake status")
     p_supstat.add_argument("--json", action="store_true")
@@ -9085,15 +9274,18 @@ def build_parser() -> argparse.ArgumentParser:
                          help="fleet mode name for the successor session "
                               f"(default: {SUCCESSOR_DEFAULT_MODE})")
     p_suphb.add_argument("--sid", help="override caller session id")
+    p_suphb.add_argument("--nonce", help=NONCE_ARG_HELP)
 
     p_suphc = sub.add_parser("sup-handoff-complete", help="verify HANDSHAKE and transfer the claim")
     p_suphc.add_argument("--expect-inc", dest="expect_inc", required=True)
     p_suphc.add_argument("--expect-sid", dest="expect_sid", required=True)
     p_suphc.add_argument("--sid", help="override caller session id")
+    p_suphc.add_argument("--nonce", help=NONCE_ARG_HELP)
 
     p_supha = sub.add_parser("sup-handoff-abort", help="abort a handoff: stop the limbo successor, resume duty")
     p_supha.add_argument("--successor-sid", dest="successor_sid", required=True)
     p_supha.add_argument("--sid", help="override caller session id")
+    p_supha.add_argument("--nonce", help=NONCE_ARG_HELP)
 
     return parser
 
