@@ -1837,6 +1837,137 @@ def supervisor_band_verdict(occupancy):
             "reason": f"occupancy {occupancy} < soft trigger {BAND_SOFT_TOKENS}"}
 
 
+def _record_sids(rec) -> set:
+    """Every session id this registry record has ever been: its current
+    `session_id` plus every `retired_sids` member.
+
+    The band ceiling (§11.3) and the archive exemption (§7.2) both identify a
+    body through this UNION, not through `session_id` alone, because a
+    fork-steer or respawn pushes the prior sid into `retired_sids` EAGERLY (at
+    steer time, `_restamp_after_steer`) while other artifacts -- notably
+    `INCARNATION.session_id` -- restamp only PULL, on the next validated write
+    (claim-nonce §5.10a), and therefore lag. Matching against the union bridges
+    that window; matching against `session_id` alone fails open on it (ND4a)."""
+    sids = set()
+    if not isinstance(rec, dict):
+        return sids
+    cur = rec.get("session_id")
+    if isinstance(cur, str) and cur:
+        sids.add(cur)
+    retired = rec.get("retired_sids")
+    if isinstance(retired, list):
+        sids.update(s for s in retired if isinstance(s, str) and s)
+    return sids
+
+
+def _caller_holds_supervisor_claim(caller_sid, claim=None, registry=None):
+    """Tri-state: is `caller_sid` the current supervisor CLAIM-HOLDER body?
+
+      True  -- the caller IS the holder.
+      False -- a claim is held (or none exists) and the caller is DEFINITELY
+               NOT its holder -- so it is never subject to the ceiling.
+      None  -- indeterminate: a claim is held but its holder sid is unreadable,
+               the registry is corrupt, or the holder sid matches no live
+               record. §11.3 callers FAIL TOWARD THE BAND on None (ND4b).
+
+    THE ONE IDENTITY CONCEPT with three consumers (§7.2 archive exemption,
+    §11.2 occupancy read, §11.3 ceiling gate). Resolution runs through the
+    REGISTRY, not the claim alone (ND4a): find the record whose sid union
+    (`_record_sids`) carries the claim's holder sid, then ask whether the caller
+    is in that SAME record's union. After a fork-steer the caller runs under a
+    NEW sid and `INCARNATION.session_id` still holds the OLD one, but the record
+    was eagerly restamped (session_id=new, old in retired_sids), so both the
+    caller and the stale claim sid resolve to the one record -- the ceiling does
+    not fail open on the path every supervisor turn starts with.
+
+    Read-only, never raises: it runs on the dispatch hot path and a corrupt
+    registry must degrade to `None` (fail toward band), not crash a spawn."""
+    if not caller_sid:
+        return None
+    if claim is None:
+        claim = read_incarnation()
+    if not isinstance(claim, dict) or claim.get("state") == "released":
+        return False                    # no held claim -- never subject
+    holder_sid = claim.get("session_id")
+    if not isinstance(holder_sid, str) or not holder_sid:
+        return None                     # a claim with no readable holder sid
+    if caller_sid == holder_sid:
+        return True                     # direct: claim not yet staled by a fork-steer
+    try:
+        if registry is None:
+            registry = load_registry()
+    except RegistryCorruptError:
+        return None                     # registry gone -- indeterminate
+    caller_rec_sids = None              # the sid union of the record the CALLER is in
+    holder_seen = False                 # the holder sid was found in SOME record
+    for rec in registry.get("workers", {}).values():
+        sids = _record_sids(rec)
+        if caller_sid in sids:
+            caller_rec_sids = sids
+        if holder_sid in sids:
+            holder_seen = True
+    if caller_rec_sids is not None:
+        # The caller is a KNOWN body: it is the holder iff its own record also
+        # carries the holder sid (the fork-steer union bridges the stale claim).
+        return holder_sid in caller_rec_sids
+    if holder_seen:
+        # The holder record exists and does not carry the caller's sid -- the
+        # caller is provably a DIFFERENT body, so it is not the holder.
+        return False
+    return None                         # neither sid placed -- indeterminate
+
+
+def _ceiling_refuses_dispatch(verb, now=None):
+    """three-tier §11.3 (B4) -- the 200k hard ceiling. Returns a refusal reason
+    string when `verb` (`spawn`/`send`) MUST be refused because the caller is
+    the supervisor claim-holder and its OWN live context occupancy is at or
+    above `BAND_HARD_TOKENS`; returns None when the dispatch may proceed.
+
+    Applies to EXACTLY ONE caller -- the supervisor claim-holder (ND1). Three
+    exemptions, in this order so they compose (ND4's closing note):
+
+      (c) STRUCTURAL interface exemption, FIRST, before any sid work: the
+          interface is not a fleet-launched child, so `FLEET_WORKER` is absent
+          from its environment. That absence exempts it unconditionally -- a
+          refusal it could never escape (it is outside fleet's launch surface,
+          §3.1) must never be raisable against it. This runs ahead of (b) so
+          the fail-toward-the-band default can never catch the human channel.
+      * a caller that holds no claim (`_caller_holds_supervisor_claim` -> False)
+        is never subject -- a worker calls neither verb, but if it did, it is
+        not the holder and is not refused.
+      (b) an UNRESOLVABLE identity (-> None) is treated AS the supervisor and
+          the ceiling applies: an unresolvable identity must never be the reason
+          a ceiling stays dormant (ND4b), mirroring §11.2's fail-toward-band.
+
+    Occupancy is the caller's OWN transcript, resolved from its OWN
+    `CLAUDE_CODE_SESSION_ID` (B2/B3, the sid guaranteed fresh for the acting
+    body). An unreadable occupancy fails TOWARD the band (§11.2): None refuses,
+    never "plenty of room". Between 150k and 200k the ceiling does NOT refuse --
+    that band is a standing directive (§5.2), enforced only at the hard top."""
+    # (c) structural interface exemption -- ahead of any sid resolution.
+    if not (os.environ.get("FLEET_WORKER") or "").strip():
+        return None
+    caller = current_caller_session()
+    if caller is None:
+        return None                     # no sid -> cannot be the claim-holder body
+    if _caller_holds_supervisor_claim(caller) is False:
+        return None                     # a claim is held, this is not its holder
+    # holder (True) or indeterminate (None, ND4b fail-toward-band): apply the
+    # ceiling. Occupancy is the caller's own transcript (never the claim's sid).
+    occupancy = _transcript_occupancy(find_transcript_path(None, caller))
+    if occupancy is not None and occupancy < BAND_HARD_TOKENS:
+        return None                     # below the hard ceiling -- dispatch allowed
+    occ_txt = f"{occupancy:,} tokens" if occupancy is not None else "unreadable"
+    return (
+        f"{verb}: refusing -- the supervisor claim-holder's context occupancy "
+        f"({occ_txt}) is at or above the {BAND_HARD_TOKENS:,}-token hard ceiling "
+        f"(three-tier §11.3). Past the ceiling, start NO new worker turns: let "
+        f"the in-flight wave finish and READ its outcomes (`fleet status`/"
+        f"`result`/`peek`/`wait`), then hand off (`fleet sup-handoff-begin`). "
+        f"The handoff verbs are exempt from this refusal. (Fleet-enforced, not "
+        f"discretion; the interface tier is never subject to it.)")
+
+
 def _record_time(rec: dict):
     """Aware UTC datetime from a transcript record's own `timestamp` field,
     or None on absence/garbage. Records carry fractional-second ISO-8601
@@ -3006,6 +3137,9 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
     recovery instructions) and does NOT raise raw.
     """
     _supervisor_gate("spawn", nonce=getattr(args, "nonce", None))
+    _ceiling_refusal = _ceiling_refuses_dispatch("spawn")
+    if _ceiling_refusal is not None:
+        raise FleetCliError(_ceiling_refusal)
     _require_instance_settings()
 
     cwd = Path(args.dir)
@@ -4078,6 +4212,9 @@ def cmd_send(args, which=shutil.which, sleep=time.sleep, run=subprocess.run) -> 
     dispatching workers -- so it is the gate's headline case (bypassable, see
     `_supervisor_gate`)."""
     _supervisor_gate("send", nonce=getattr(args, "nonce", None))
+    _ceiling_refusal = _ceiling_refuses_dispatch("send")
+    if _ceiling_refusal is not None:
+        raise FleetCliError(_ceiling_refusal)
     _require_instance_settings()
 
     message = _read_task_arg(args.message)
