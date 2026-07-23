@@ -1917,6 +1917,37 @@ def _caller_holds_supervisor_claim(caller_sid, claim=None, registry=None):
     return None                         # neither sid placed -- indeterminate
 
 
+def _record_is_supervisor_claim_holder(record, claim=None):
+    """Tri-state: is this REGISTRY `record` the body currently holding the
+    supervisor claim? The record-oriented sibling of
+    `_caller_holds_supervisor_claim` (§7.2 archive/husk exemption vs §11.3
+    ceiling -- one identity concept, a record question here rather than a caller
+    question).
+
+      True  -- the record IS the current claim-holder body.
+      False -- there is no active claim (absent or released), or the record is
+               provably a different body. A released/absent claim yields False
+               so a released-away husk (B9) stays archivable.
+      None  -- a claim is HELD but its holder sid is unreadable: indeterminate.
+               The archive gate fails TOWARD protection on None, but only for
+               supervisor-shaped names, so a briefly unreadable INCARNATION
+               cannot freeze all autoclean archiving.
+
+    Matches on the record's sid UNION (`_record_sids` = session_id ∪
+    retired_sids), not `session_id` alone: after a fork-steer the claim still
+    carries the OLD sid (pull-restamp lag) while the record was eagerly
+    restamped and carries the old sid in `retired_sids` -- the union bridges
+    that window (ND4a). Never raises: it runs on the archive/sweep path."""
+    if claim is None:
+        claim = read_incarnation()
+    if not isinstance(claim, dict) or claim.get("state") == "released":
+        return False
+    holder_sid = claim.get("session_id")
+    if not isinstance(holder_sid, str) or not holder_sid:
+        return None
+    return holder_sid in _record_sids(record)
+
+
 def _ceiling_refuses_dispatch(verb, now=None):
     """three-tier §11.3 (B4) -- the 200k hard ceiling. Returns a refusal reason
     string when `verb` (`spawn`/`send`) MUST be refused because the caller is
@@ -5320,7 +5351,24 @@ def _archive_eligible(name: str, record: dict, roster_entries: list, now,
 
     Gate 6 (status not limited/dead-suspected/working) is implied by gate
     2's allowed set -- never reachable as its own branch, asserted by
-    tests instead."""
+    tests instead.
+
+    Gate 0 (three-tier §7.2, B1/B9) runs FIRST: the current live supervisor
+    claim-holder is protected under ANY name -- keyed on the claim, not the
+    static "supervisor" name (a successor runs as sup|<inc>|successor). Protects
+    the running manager (B1); a released-away/roster-gone non-holder husk is NOT
+    protected and stays archivable (B9). Keyed on HOLDER ALONE, not
+    "holder AND roster-live": gate 3 already refuses every roster-live record,
+    so a roster-live conjunct would make this a no-op AND would fail to close
+    §7.2's own disaster -- an idle/roster-gone supervisor that still holds the
+    claim crossing the 24h TTL. On an indeterminate identity (claim held, holder
+    sid unreadable) it fails TOWARD protection, but only for supervisor-shaped
+    NAMES, so a briefly unreadable INCARNATION cannot freeze archiving of every
+    ordinary worker."""
+    holder = _record_is_supervisor_claim_holder(record)
+    if holder is True or (holder is None and
+                          (name == SUPERVISOR_BODY_NAME or _is_supervisor_shaped(name))):
+        return (False, "supervisor claim-holder -- protected while live (§7.2)")
     if not is_native(record):
         return (False, "not-native")
     if record.get("archived_at") is not None:
@@ -6028,6 +6076,17 @@ def _sweep_husks(dry_run: bool, run=subprocess.run, which=shutil.which) -> tuple
     owned, protected = _registry_owned_and_protected_sids(workers)
     owned |= _archive_dir_sids()
     owned |= _events_sids()
+
+    # three-tier §7.2 (B1/B9), belt-and-braces: every sid of the current live
+    # supervisor claim-holder record is protected, under any name. Non-archived
+    # records are already protected above, so this only matters if that
+    # protection ever regressed (e.g. the holder record acquired an archived_at
+    # from an older code path) -- but the spec mandates the explicit gate, and
+    # keyed on holder-alone it stays parity with `_archive_eligible`'s gate 0.
+    claim = read_incarnation()
+    for rec in workers.values():
+        if isinstance(rec, dict) and _record_is_supervisor_claim_holder(rec, claim=claim) is True:
+            protected |= _record_sids(rec)
 
     removed = []
     deferred = []
