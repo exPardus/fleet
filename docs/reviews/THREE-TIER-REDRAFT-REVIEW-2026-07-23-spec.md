@@ -671,3 +671,154 @@ sitting three commits away on `main` and absent from the branch, whose in-tree a
 opposite. The ruling is real; the merge is missing. One `git merge` closes it.
 
 **r4: `fix-list(W1)`.**
+
+---
+---
+
+# Final confirmation — r5 (wave 4), very narrow scope
+
+**Trigger:** manager final confirmation on wave 4, commit **`d9c4a6f`** on `mf/three-tier` ("close
+ND5/W1, ND6, ND7"), merged into `mf/tt-spec` fast-forward. **Vantage:** worktree
+`C:\proga\fleet-mf-tt-spec`, branch `mf/tt-spec`, HEAD `d9c4a6f`. Pinned receipts `235421e5`; two
+receipts deliberately `# live:`.
+
+**r5 VERDICT: `fix-list(R2)`** — **W1 is FIXED** and fixed at the root; 50/50 receipts with all four new
+ones hand-executed; Status discipline intact. The renumber audit the manager asked for surfaced one
+MINOR stale cross-reference (R2). Nothing else regressed.
+
+## r5.1 W1 — FIXED, at the root, and self-verifying
+
+The r4 defect was that §11.5 declared the cap-doctrine ruling SETTLED while the third addendum recording
+it existed only on `main`. Both halves are now closed:
+
+**The record landed.**
+```
+$ git merge-base --is-ancestor 7d68b43 HEAD   → true (ancestor)
+$ grep -n "Third addendum" knowledge/lessons.md
+783:**Third addendum (2026-07-23, operator ruling on the cap-doctrine reading):** confirmed — …
+```
+`HEAD..main` now holds only two ledger commits (`8999905`, `c2b7853`) — no outstanding authority.
+
+**Quote-match against the in-tree anchor — exact.** I diffed §11.5's block quote against
+`knowledge/lessons.md:783` word for word:
+
+| | Text |
+|---|---|
+| **In-tree `lessons.md:783`** | *"confirmed — **cost/spend ceilings are gone unless the counting flag puts them back** (flag default off; enabling it may re-arm spend caps). The context band (150–200k, supervisors AND workers) is a freshness mechanism, not a budget, and its enforcement stays. Resolves the `[OPERATOR RULES AT RATIFICATION]` flag before ratification."* |
+| **§11.5 block quote** | identical, verbatim — **including the closing sentence** that r4 flagged as elided |
+
+The only divergence is markdown emphasis (the spec bolds the final sentence); **no word differs, nothing
+is added, nothing omitted**. The clause tying the ruling to the flag it discharges is restored, which was
+r4's specific fix suggestion.
+
+**The citation is now self-verifying**, and correctly classified — the receipt greps the addendum's exact
+string out of the working tree, with a `# live:` reason that names the right class:
+```
+# live: a claim about the working tree's recorded operator decisions, not about this spec's pinned commit
+$ grep -c "Third addendum (2026-07-23, operator ruling on the cap-doctrine reading)" knowledge/lessons.md
+1
+```
+Hand-executed by me: `1`. This is precisely the discipline r4 said was owed — the same standard §4.1
+already applied to ratification status, now applied to the operator ruling.
+
+**And the sequence is recorded rather than repaired away.** §11.5 carries a wave-4 note stating that
+wave 3 wrote the section SETTLED while the addendum existed only on `main`, *"so for one wave this spec
+was the sole witness to a ruling that binds it — correctly caught as ND5/W1."* The spec keeps the
+history instead of presenting a clean face. That is the right disposition: the defect was real, the
+ruling was genuine, and both facts survive in the document. **W1 closed.**
+
+## r5.2 Receipts — 50/50, all four new ones hand-executed
+
+```
+$ py -3.13 tools/verify_receipts.py --self-test --strict docs/specs/three-tier-command.md
+50/50 receipts reproduce exactly (50 fenced blocks, 0 unclassified, 0 volatile-skipped, 0 warned, 0 FAILED)
+
+$ py -3.13 indep_receipts.py docs/specs/three-tier-command.md      # 48 pinned; the two `# live:` are outside its grammar
+48/48 blocks reproduce; 0 FAILED                                    (exit 0)
+$ … --seed 22  → 47/48, 1 FAILED (exit 1)
+
+$ py -3.10 -m pytest tests/test_receipts.py -q
+13 passed
+```
+Command-set diff r4→r5: **exactly 4 added, 0 removed** (46→50; 48 pinned + 2 `# live:`). All four
+hand-executed by me, all matching the pasted text byte-for-byte:
+
+| # | Receipt | Hand-executed result | Match |
+|---|---|---|---|
+| 1 | `sed -n '2162p' bin/fleet.py` | `            "resume_eligible": status == "limited" and _limit_reset_passed(rec),` | ✓ |
+| 2 | `sed -n '3681,3687p' bin/fleet.py` | 7 lines — the `limited` park refusal, *"never steer a parked worker"* | ✓ |
+| 3 | `sed -n '8492p' bin/fleet.py` | `        claim, caller = _require_claim_holder(getattr(args, "sid", None))` | ✓ |
+| 4 | `grep -c "Third addendum (…)" knowledge/lessons.md` (`# live:`) | `1` | ✓ |
+
+Receipts 2 and 3 are the pair that makes ND6 a *receipted* design defect rather than an assertion: the
+handoff ritual requires the claim holder (`@8492`), while the chain's only trigger parks the body
+`limited`, after which `send` refuses it a turn outright (`@3681-3687`). The two together prove the
+earlier draft mandated a ritual its own trigger makes impossible. No `[UNBUILT]` absence proof
+regressed — all nine greps still `0` at the pin, including the new `tier_preferred|tier_current`.
+
+## r5.3 §3.5.3 / §3.5.4 renumber cross-ref audit
+
+Wave 4 inserted a new **§3.5.3** (ND6, outside-driven fallback) and pushed the band-interaction section
+to **§3.5.4**. Every `§3.5.x` reference in the file, checked against its r4 referent:
+
+| Line | Ref | r4 referent | Correct at HEAD? |
+|---|---|---|---|
+| 236 | `§3.5.4's band interaction` | was `§3.5.3` (band) | ✓ **correctly renumbered** |
+| 281 | `See §3.5.3` (outside-driven dispatch) | new text | ✓ |
+| **286** | `next body change (§3.5.3) is dispatched` | was `§3.5.3` = **band interaction** | ✗ **R2 — see below** |
+| 405 | `§3.5.1` fresh context | unchanged | ✓ |
+| 415 | `cannot act at all (§3.5.3)` | new text | ✓ |
+| 1345 | `§3.5.1's receipt` | unchanged | ✓ |
+| 1445 / 1449 / 1450 | `§3.5.3(c)`, `(§3.5.3)`, `§3.5.3(b)` | new text; §3.5.3 does carry (a)/(b)/(c) | ✓ |
+
+Eight of nine resolve correctly, and the one that had to move (`:236`) was moved.
+
+### R2 — MINOR — §3.5.2 step 3's "Return" cross-ref was not renumbered, and now points at a section whose scope excludes the case
+
+**Quote (§3.5.2, step 3, line 286):**
+> **Return.** Once `limit_reset_at` passes, the supervisor's *next* body change **(§3.5.3)** is
+> dispatched at the preferred tier again.
+
+At r4 this same sentence read `(§3.5.3)` when §3.5.3 was *"Interaction with the swap band"* — so it
+pointed at the band/tier coordination that governs which body change happens and at which tier. The
+sentence is byte-identical at HEAD, but §3.5.3 is now *"ND6 — the fallback cannot be performed BY the
+parked body, so it is driven from outside"*. The referent changed silently under an untouched reference.
+
+**Why the new target is wrong for this case.** §3.5.3 is scoped strictly to the **parked** body — its
+whole premise is that the predecessor *"cannot act at all"*, which is why dispatch moves to the interface
+tier. But step 3 describes the moment **after** `limit_reset_at` passes, when the body is by definition
+**no longer parked**; and step 3 itself says the return *"is not itself a trigger for a body change — it
+is a preference consulted at the next boundary that was going to happen anyway."* That boundary is the
+band-triggered case, which §3.5.4 governs and explicitly handles both directions: *"a band handoff that
+happens while the top tier is limited is dispatched at the fallback tier"* — the exact mirror of step 3's
+return. A reader following `(§3.5.3)` lands on the outside-driven mechanism and finds a precondition
+(parked predecessor) that cannot hold at return time.
+
+**Severity MINOR:** no factual claim, receipt, or binding rule is affected — the sentence still reads
+plausibly because §3.5.3 also concerns dispatch. It is a misdirected pointer, and precisely the hazard a
+renumber audit exists to catch: the refs that *changed* were fixed, the ref that *stayed the same* was
+not re-examined.
+
+**Fix:** point step 3 at **§3.5.4** (its r4 meaning), or split the reference — tier selection §3.5.2,
+ritual/coordination §3.5.4 — since §3.5.3 governs only the limit-triggered, parked-predecessor arm.
+
+## r5.4 Standing checks
+
+Status line still `**Status: `drafting`.**`; *"An author never promotes its own spec"* present (×1). No
+H1-class indented or blockquoted receipt blocks (`grep` returns none) — wave 4 added receipts at column 0
+throughout. All nine `[UNBUILT]` absence greps `0` at the pin. Write-set remains the spec file plus the
+break-lens verdict and ledger docs; no code touched.
+
+## r5.5 Verdict
+
+Wave 4 closes W1 the right way: the missing authority was merged rather than argued around, the quote now
+matches the in-tree anchor word for word with the previously-elided clause restored, the citation carries
+a `# live:` receipt that makes it self-verifying, and a wave-4 note preserves the sequence instead of
+erasing it. ND6's redesign is receipted at both ends (`@8492` and `@3681-3687`), which is what turns it
+from an assertion into a demonstrated defect. Receipts grew by exactly four, every one hand-executed and
+exact; nothing was removed and no absence proof regressed.
+
+The single open item is R2, a stale `§3.5.3` pointer in §3.5.2's "Return" step that the renumber left
+behind — one reference to repoint, no substantive text change.
+
+**r5: `fix-list(R2)`.**
