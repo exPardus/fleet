@@ -467,3 +467,194 @@ grounds for a third full review wave. The tier model and the claim-nonce foundat
 is not warranted.**
 
 fix-list(ND1,ND2,ND3)
+
+---
+
+# FINAL GATE (r3) — fix wave 2 (`4e540f8`), receipt-parser audit, and merge verdict
+
+**Date:** 2026-07-23. **Wave under review:** `4e540f8` "docs(review): three-tier fix-wave 2 — close
+ND1-ND3 + R1". **Vantage:** worktree `C:\proga\fleet-mf-tt-break`, HEAD after fast-forward merge of
+`mf/three-tier` = `4e540f8`, `FLEET_HOME` unset. Pin still `235421e`; **`bin/fleet.py` byte-identical
+to the pin across the entire review range** (`git log 0846d1c..4e540f8 -- bin/fleet.py` empty), so every
+line-anchored receipt is valid at pin and HEAD alike.
+
+## 1. Disposition — ND1, ND2, ND3, R1
+
+| ID | Sev | Disposition | Basis (re-verified) |
+|---|---|---|---|
+| **ND1** | MAJOR | **FIXED** | §11.3 now scopes the ceiling to *"exactly one caller"*: it fires *"when — and only when — the caller **is the current supervisor claim-holder**."* The interface tier is **explicitly exempt** — *"it has no fleet-enforced band, and no fleet verb may refuse it on occupancy"* — with my whole argument (interface is fleet-unlaunchable §3.1, operator banded only tier 2, no recourse) carried into the spec as binding text. Workers named as unaffected. Exactly the fix I asked for, not a narrower one. |
+| **ND2** | MINOR | **FIXED** | Reconcile past `H` is now **explicitly read-only** — `fleet status`/`wait`/`result`/`peek` — and *"It may **not** issue a `fleet send` to 'steer an in-flight worker to wrap up': that send is a new worker turn and is caught by the very refusal above, so leaving it implicitly permitted would have made the carve-out undecidable."* The undecidability I flagged is named and closed in the safe direction. Spot-checked `cmd_wait` (@3398) — no dispatch/spawn/send in its body, so the read-only carve-out is genuinely read-only. |
+| **ND3** | MINOR | **FIXED** | Arm 1 now takes a bounded wait `T_release`, with a **new receipt** for the precedent — hand-executed at HEAD: `sed -n '7919p'` → `SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS = 300.0`. An immediate `send` refusal fails over at once without waiting out the bound; on timeout **or** refusal `kill` *"stops the body anyway and falls through to arm 2 — announcing which arm it took."* The hang I raised is gone, and the arm-announcement (which I did not ask for) is a genuine improvement, since the two arms differ by an hour of recovery cost. |
+| **R1** (spec lens) | nit | **FIXED** | §12's `longcat-fleet-usage.md` bullet no longer reads as a live roadmap item: it now says the supervisor row lands *"only if a namespace-aware tier-resolution pre-flight is ever built as **separate scope** — which §3.3 argues *against* for v1 … Listed as a conditional consequence of a decision already made the other way, **not** a live `[UNBUILT]` deliverable of this slice."* Matches §13's non-goal; the B8 fix now propagates to all three sites. |
+
+**No SPURIOUS-FIX, no REGRESSED.** Every wave-2 edit traces to a finding; none over-reaches; no
+previously-passing receipt broke (39/39, below).
+
+## 2. Audit of the resurrected receipts — and a correction to the gate's premise
+
+### 2.1 What actually evaded, and when
+
+I reconstructed the evasion from the committed trees rather than accepting the summary. Fence-marker
+census (every line whose stripped form opens a fence, allowing indent, `>`, and `~~~`):
+
+| commit | fence markers | blocks | harness reported | non-column-0 markers |
+|---|---|---|---|---|
+| `0846d1c` (r1) | 64 | 32 | `32/32 … (32 fenced blocks)` | **none** |
+| `1a3d4e5` (wave 1, my r2) | 76 | 38 | `34/34 … (37 fenced blocks)` | **8** (4 blocks) |
+| `4e540f8` (wave 2, now) | 78 | 39 | `39/39 … (39 fenced blocks)` | **none** |
+
+**Correction to the task's premise, on receipt: no block rode through r1.** At `0846d1c` every one of
+the 32 fenced blocks sat at column 0 and 32/32 were parsed and verified — r1's coverage claim was
+complete. **All four evading blocks were introduced by fix wave 1**, so they evaded **r2 only**, not
+"r1 AND r2". The four, in their wave-1 form:
+
+- `> ```…` (blockquote, §7.2 B1) — `sed -n '8522p'`
+- `  ```…` (2-space list indent, §10.4 B5) — `grep -c "sup-release\|cmd_sup_release"`
+- `  ```…` (§11.2 B3) — `sed -n '826,827p'`
+- `  ```…` (§11.3 B4) — `grep -c "sup-context\|supervisor-beat.jsonl\|_doctor_check_supervisor_beat"`
+
+The blockquoted one is invisible to the parser entirely (38 real blocks → 37 counted); the three
+indented ones are counted but yield zero receipts (37 counted → 34 receipts).
+
+### 2.2 The four, re-executed by hand at HEAD — all reproduce, prose checked
+
+| # | Receipt | Output at HEAD | Prose claim it is offered for | Match? |
+|---|---|---|---|---|
+| R-a | `sed -n '8522p' bin/fleet.py` | `    name = f"sup|{successor_inc}|successor"` | successor runs under a pipe-delimited name, so a `name == "supervisor"` equality protects gen-0 only | **yes** — with one nit, §2.3 |
+| R-b | `grep -c "sup-release\|cmd_sup_release" bin/fleet.py` | `0` | `sup-release` does not exist yet | **yes** (the "needs continuity" half is attributed to claim-nonce §6.3, not to this grep — correctly) |
+| R-c | `sed -n '826,827p' bin/fleet.py` | `sid = os.environ.get("CLAUDE_CODE_SESSION_ID")` / `return sid or None` | `current_caller_session()` is exactly that env read | **yes** (the "daemon sets it to the child's own sid" half is attributed to native-substrate G4, not to this receipt) |
+| R-d | `grep -c "sup-context\|supervisor-beat.jsonl\|_doctor_check_supervisor_beat\|SUPERVISOR_BODY_NAME" bin/fleet.py` (5-term; wave 1 had 3) | `0` | neither the ceiling nor the identity concept exists today | **yes** in aggregate (see §2.3) |
+
+### 2.3 Two prose-vs-proof nits (recorded, non-blocking)
+
+- **R-a proves the name, not the negative.** The sentence it serves also asserts *"which nothing renames
+  back to `supervisor`"* — a negative this receipt cannot establish. I independently confirmed it true in
+  r1 by reading `cmd_sup_handoff_complete` (it transfers the INCARNATION claim; registry records are
+  untouched), so the claim is **correct but under-receipted**.
+- **R-d's grep is a proxy for "no identity concept exists."** Four string spellings absent ≠ the concept
+  absent. Adequately supported *in aggregate* by §10.3 (`RESERVED` → 0), §10.1 (`sup-spawn` → 0) and
+  Appendix A, so not a false claim — just a grep carrying more weight than its terms.
+
+### 2.4 Hunt for other receipt-shaped text still evading — the document is clean, **the tool is not**
+
+**Document: clean.** In `4e540f8` all 78 fence markers are column-0 backtick fences; **zero**
+receipt-shaped lines (`$ `, `# at `, 4-space-indented `$ `) live outside a fenced block; **zero** inline
+backtick spans carry a `$ ` command. No residual evasion of any shape.
+
+**Tool: the class is alive.** `tools/verify_receipts.py` and `tests/test_receipts.py` were **never
+touched** in the entire review range — the remedy was to move four blocks in the document. I probed all
+four evasion shapes with a deliberately **false** expectation (`999999` for `grep -c "RESERVED"
+bin/fleet.py`, true answer `0`). A column-0 control is caught (`1 FAILED`). Every evasion shape passes:
+
+```
+# live: probes the working tool, not a pinned tree
+$ for s in blockquoted indent2 indent4 tildefence; do printf '%-12s ' $s; py -3.13 tools/verify_receipts.py --strict $CLAUDE_JOB_DIR/tmp/e-$s.md 2>&1 | grep -o '[0-9]*/[0-9]* receipts.*FAILED)'; done
+blockquoted  0/0 receipts reproduce exactly (0 fenced blocks, 0 unclassified, 0 volatile-skipped, 0 warned, 0 FAILED)
+indent2      0/0 receipts reproduce exactly (1 fenced blocks, 0 unclassified, 0 volatile-skipped, 0 warned, 0 FAILED)
+indent4      0/0 receipts reproduce exactly (0 fenced blocks, 0 unclassified, 0 volatile-skipped, 0 warned, 0 FAILED)
+tildefence   0/0 receipts reproduce exactly (0 fenced blocks, 0 unclassified, 0 volatile-skipped, 0 warned, 0 FAILED)
+```
+
+All four exit **0** with **0 FAILED** on a receipt that is flatly false. Mechanism: `parse()` lstrips
+before the fence test (@228) but `_parse_block()` matches `# at `/`$ ` on **raw** lines (@244-255), so an
+indented block parses to nothing; and `lstrip()` does not strip `>`, so a blockquoted fence is not a
+fence at all. `~~~` is not a fence to this tool either.
+
+### 2.5 H1 — MAJOR, filed against the harness (outside this spec's write-set)
+
+**The evidentiary guarantee the operator is asked to rely on has a silent bypass, and it was live during
+two of this gate's three waves.** Four compounding facts:
+
+1. Four shapes of receipt silently verify-as-nothing (§2.4), with **no error, no warning, exit 0**.
+2. `tests/test_receipts.py` never reconciles blocks against receipts and sets **no per-spec receipt
+   floor**; `test_harness_can_fail` seeds *"the first spec with any non-volatile receipt"* (@182-190), a
+   **global** non-vacuity guard. A spec whose receipts were all indented would fall to zero verified
+   receipts with the entire suite green.
+3. The only tell is the printed `blocks` vs `receipts` mismatch — `34/34 … (37 fenced blocks)`. That line
+   appeared in wave-1 output that **both** lenses quoted and **neither** reconciled, mine included.
+4. **"Two independent verifiers" gave false assurance.** The spec lens ran its own extractor sharing no
+   code with `verify_receipts.py`, and it also reported `34/34` — because both implementations share the
+   same *unstated assumption* that receipts live at column 0. Independence of implementation is not
+   independence of assumption; two verifiers with one blind spot are one verifier.
+
+This contradicts the repo's own doctrine (`CLAUDE.md`: *"A pasted command+output block is a claim until
+something re-runs it"*; `claim-nonce.md`'s *"stop fixing an instance and kill a class"*). **Fix (own
+slice, not this spec's):** `lstrip()` — and strip a leading `> ` — in `_parse_block`; accept `~~~`;
+**fail** on any fenced block that yields zero receipts and zero unclassified; assert
+`blocks == receipts + unclassified` per spec; add a per-spec receipt floor to `tests/test_receipts.py`;
+and extend the seed test to prove **extraction completeness**, not only paraphrase detection — the
+current seed test validates that a *parsed* receipt can fail, which is silent about everything unparsed.
+
+**Own-conduct note.** My r2 conclusions were not affected: I hand-executed all four evading receipts
+independently in r2, which is why the substance held. But I reported *"34/34 reproduce"* as harness
+coverage without reconciling the printed `37 fenced blocks`, so my characterisation of what the harness
+had checked was wrong even though my findings were not.
+
+## 3. Final new-defect hunt
+
+**ND4 — MINOR — the ND1 identity gate can fail OPEN after a fork-steer, which is how every supervisor
+turn starts.** §11.3 specifies the ceiling's gate as *"the same `CLAUDE_CODE_SESSION_ID` vs
+`supervisor/INCARNATION` resolution B1 uses."* Read literally as `caller_sid == INCARNATION.session_id`,
+it fails, because claim-nonce §5.10(a) is explicit that the restamp is **pull, not push**:
+
+> `session_id` is restamped to the caller as part of the **next validated `sup-*` write** … a steer that
+> never leads to a supervisor action never touches supervisor state.
+
+Sequence: the interface fork-steers the supervisor (the v1 beat, §5.1) → the body has a **new** sid while
+`INCARNATION.session_id` still holds the **old** one → the supervisor, above `H`, runs `fleet spawn`
+*before* any `sup-checkpoint` → the gate finds `caller_sid != INCARNATION.session_id`, concludes *"not the
+claim-holder,"* and **does not fire**. The hard ceiling is dormant for that turn's dispatches — the exact
+outcome B4 exists to prevent, failing in the unsafe direction.
+
+The fix is already on the page one section away and just needs restating at the ceiling: §7.2's predicate
+matches on *`session_id` **or a member of `retired_sids`***, and `_restamp_after_steer` pushes the old sid
+into the registry record's `retired_sids` at steer time — so resolving *caller → registry record →
+claim* bridges the gap. Two additions worth binding: (a) name the fail direction (unresolvable identity ⇒
+treat the caller as the supervisor, mirroring §11.2's *"fail toward the band"*), and (b) use the
+**structural** discriminator that needs no sid at all for the half that matters most — the interface is
+not a fleet worker, and the supervisor is (§10.2), so `FLEET_WORKER` alone exempts the interface
+unconditionally:
+
+```
+# at 235421e56bfd328a7e913e519a1459ccf55918dc
+$ sed -n '1284p' bin/fleet.py
+    env["FLEET_WORKER"] = name
+```
+
+Rated MINOR, not MAJOR, because the correct predicate is cross-referenced rather than absent and the
+build slice gets its own review — but it must be stated explicitly, since the failure is silent and
+unsafe-directional.
+
+*(Also cleared in this hunt: the de-indentation changed no receipt semantics — R-d's grep gained a 5th
+term and still returns `0`, prose still matches; the wave introduced no new `[UNBUILT]` claim without a
+no-match receipt; status is still `drafting`; the write-set is still the spec plus review files, no code
+edit.)*
+
+## 4. Merge verdict — is `mf/three-tier` fit to go to the operator for ratification?
+
+**Yes, with two disclosed carry-items.**
+
+**The spec is sound.** Across three waves and two independent lenses, **fifteen findings** (break
+B1–B10, spec S1, ND1–ND3, R1) are closed with no spurious fix and no regression. Every design hole I
+raised — the self-defeating archive exemption, the mis-measured and unenforceable swap band, the
+infeasible kill-release, the two-live-bodies release window, the unguarded interface boundary — is
+answered in the design rather than deferred by wording, and the two answers that genuinely belong to
+another slice (B6's boot-order guard, and the `FLEET_WORKER` refusal) are **filed as claim-nonce
+prerequisites rather than absorbed**, which is the correct behaviour for a consumer spec. All 39 receipts
+now parse and reproduce; the document carries no evasion of any shape; status discipline and the
+never-promote-your-own-spec rule are intact.
+
+**Carry-item 1 — H1 (MAJOR, harness, own slice).** The operator is being asked to ratify a document whose
+credibility rests on *"every receipt is re-executed."* That guarantee currently has a silent bypass which
+was live during two of three waves and remains live in the tool today. This is **not** a defect in the
+spec and does not block its ratification — but it is material to an informed ratification and should be
+disclosed alongside it, and fixed before the next spec leans on the same harness.
+
+**Carry-item 2 — ND4 (MINOR, spec).** One sentence in §11.3 must name the `retired_sids` bridge, the
+fail direction, and the `FLEET_WORKER` exemption, or the build can ship a ceiling that quietly does not
+fire. Bounded, and the build slice reviews it again.
+
+Neither item is a design defect and neither warrants a third review wave or an escalation. The tier
+model, the claim-nonce foundation it consumes, and the mechanisms this gate stress-tested all stand.
+
+sound
