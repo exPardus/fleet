@@ -1203,6 +1203,249 @@ class TestSupStatus:
         assert "no claim" in capsys.readouterr().out.lower()
 
 
+def _rejection_records():
+    try:
+        text = fleet.nonce_rejection_log_path().read_text(encoding="utf-8")
+    except OSError:
+        return []
+    return [json.loads(ln) for ln in text.splitlines() if ln.strip()]
+
+
+class TestRejectionLog:
+    """§5.6: "the refusal is the whole product, so it is loud."
+
+    Three things happen on a refused presentation -- a distinct exit code
+    (item D), an atomic append to `state/supervisor-nonce-rejections.jsonl`,
+    and a doctor flip. This class is the second and third.
+
+    The file's whole purpose is to record the case where TWO BODIES ARE BEING
+    REFUSED CONCURRENTLY (§5.9), which is why the append must stay a
+    single-syscall `_atomic_append_bytes` and must never degrade to a
+    read-modify-write -- the shape that loses exactly the records proving a
+    two-body incident."""
+
+    def _hold(self, sid="sid-me", seq=3):
+        value = fleet.mint_nonce()
+        beat = fleet.now_iso()
+        fleet.write_incarnation({"incarnation_id": "inc-me", "session_id": sid,
+                                 "claimed_at": beat, "heartbeat_at": beat,
+                                 "claimed_via": "fresh", "nonce_seq": seq,
+                                 "lineage_id": "lin-x",
+                                 "nonce_hash": fleet.nonce_digest(value)})
+        return value
+
+    def test_a_refusal_appends_one_record_naming_the_case(self, sup_home):
+        self._hold(seq=3)
+        presented = fleet.mint_nonce()
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=presented))
+        recs = _rejection_records()
+        assert len(recs) == 1
+        r = recs[0]
+        assert r["kind"] == "refused"
+        assert r["verb"] == "sup-checkpoint"
+        assert r["caller_sid"] == "sid-me"
+        assert r["expected_seq"] == 3
+        assert "ts" in r and "pending_at" in r
+
+    def test_the_record_carries_a_PREFIX_of_the_presented_value_never_the_value(
+            self, sup_home):
+        # §5.6: `presented_prefix` = first 8 hex of the presented value's
+        # sha256. A log that is readable by anything on this box must not be
+        # the place a presented generation goes to be recovered -- and the
+        # prefix is enough to tell "the same wrong value twice" from "two
+        # different wrong values", which is what an operator actually asks.
+        live = self._hold()
+        presented = fleet.mint_nonce()
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=presented))
+        r = _rejection_records()[0]
+        assert r["presented_prefix"] == fleet.nonce_digest(presented)[:8]
+        raw = fleet.nonce_rejection_log_path().read_text(encoding="utf-8")
+        assert presented not in raw and live not in raw
+        assert fleet.nonce_digest(presented) not in raw, "the full digest is not the prefix"
+
+    def test_a_missing_presentation_records_a_null_prefix_rather_than_crashing(
+            self, sup_home):
+        self._hold()
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=None))
+        assert _rejection_records()[0]["presented_prefix"] is None
+
+    def test_T7_the_superseded_pending_record_is_a_DIFFERENT_KIND_not_a_refusal(
+            self, sup_home, capsys):
+        # §5.4(d)/§5.6: `kind` and `pending_at` are what let an operator
+        # separate "a TTL fired under a slow body" from "a stale or forged
+        # value". Without them the log's two most important cases are
+        # indistinguishable -- and the slow body would be read as an attack.
+        live = self._hold()
+        fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=live))
+        p1 = _nonce_of(capsys.readouterr().out)
+        claim = fleet.read_incarnation()
+        claim["pending_at"] = (datetime.now(timezone.utc) - timedelta(
+            seconds=fleet.PENDING_NONCE_TTL_SECONDS + 60)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        fleet.write_incarnation(claim)
+        fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=live))     # P1 -> prior
+        capsys.readouterr()
+        assert fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=p1)) == 0
+        capsys.readouterr()
+        recs = _rejection_records()
+        assert [r["kind"] for r in recs] == ["superseded-pending"]
+        assert recs[0]["verb"] == "sup-checkpoint"
+
+    def test_T17_the_append_is_atomic_and_never_a_read_modify_write(self, sup_home, monkeypatch):
+        seen = []
+        real = fleet._atomic_append_bytes
+        monkeypatch.setattr(fleet, "_atomic_append_bytes",
+                            lambda path, data: (seen.append(path), real(path, data))[1])
+        # A record already on disk, as a concurrent writer would have left it.
+        fleet.nonce_rejection_log_path().parent.mkdir(parents=True, exist_ok=True)
+        fleet.nonce_rejection_log_path().write_text(
+            json.dumps({"kind": "refused", "ts": fleet.now_iso(), "verb": "other"}) + "\n",
+            encoding="utf-8")
+        self._hold()
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=fleet.mint_nonce()))
+        assert fleet.nonce_rejection_log_path() in seen
+        recs = _rejection_records()
+        assert len(recs) == 2, "the pre-existing record was not clobbered"
+        assert recs[0]["verb"] == "other"
+
+    def test_T17_the_writer_does_NOT_bound_the_file(self, sup_home):
+        # §5.9: v2 said "the writer truncates to the most recent 200 records".
+        # Truncation is a read-modify-write needing GENERIC_WRITE, which is the
+        # access mode `_atomic_append_bytes`'s own docstring says forfeits the
+        # atomic-append guarantee -- and the concurrent-writer case is the one
+        # this file exists to record. The cap is enforced out of band, under
+        # `fleet_lock`, never by the refused caller (which may be the
+        # untrusted body and holds no lock of its own).
+        fleet.nonce_rejection_log_path().parent.mkdir(parents=True, exist_ok=True)
+        fleet.nonce_rejection_log_path().write_text(
+            "".join(json.dumps({"kind": "refused", "ts": fleet.now_iso(),
+                                "verb": f"v{i}"}) + "\n" for i in range(250)),
+            encoding="utf-8")
+        self._hold()
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=fleet.mint_nonce()))
+        assert len(_rejection_records()) == 251
+
+    def test_an_unreadable_log_directory_never_turns_a_refusal_into_a_crash(
+            self, sup_home, monkeypatch):
+        # The record is evidence, not the refusal. If recording fails the
+        # caller must still be refused: a body that learns "I could not be
+        # logged" instead of "stop and escalate" is the worst of both.
+        def boom(path, data):
+            raise OSError("disk full")
+        monkeypatch.setattr(fleet, "_atomic_append_bytes", boom)
+        self._hold()
+        with pytest.raises(fleet.FleetCliError) as exc:
+            fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=fleet.mint_nonce()))
+        assert "escalate" in str(exc.value)
+
+
+class TestDoctorSeesTheRejections:
+    """§5.6 item 3. `_doctor_check_supervisor_claim` hard-codes `ok=True` on
+    both returns today, with the docstring *"ALWAYS ok=True -- the nag is
+    advisory"*. A rejection is not a nag: it is evidence of a second body, and
+    it is the ONE condition that changes. `superseded-pending` is not one --
+    it is surfaced as a NOTE."""
+
+    def _log(self, *records):
+        fleet.nonce_rejection_log_path().parent.mkdir(parents=True, exist_ok=True)
+        fleet.nonce_rejection_log_path().write_text(
+            "".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+
+    def _claim(self, **extra):
+        claim = {"incarnation_id": "inc-me", "session_id": "sid-me",
+                 "claimed_at": fleet.now_iso(), "heartbeat_at": fleet.now_iso(),
+                 "claimed_via": "fresh", "nonce_seq": 1, "lineage_id": "lin-x",
+                 "nonce_hash": fleet.nonce_digest(fleet.mint_nonce())}
+        claim.update(extra)
+        fleet.write_incarnation(claim)
+
+    def _ago(self, seconds):
+        return (datetime.now(timezone.utc)
+                - timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def test_a_refused_record_in_the_window_flips_ok_to_False(self, sup_home):
+        self._claim()
+        self._log({"kind": "refused", "ts": self._ago(60), "verb": "sup-checkpoint",
+                   "expected_seq": 1})
+        name, ok, detail = fleet._doctor_check_supervisor_claim()
+        assert name == "supervisor-claim"
+        assert ok is False
+        assert "refus" in detail.lower()
+
+    def test_a_refused_record_OUTSIDE_the_window_does_not(self, sup_home):
+        self._claim()
+        self._log({"kind": "refused", "ts": self._ago(25 * 3600), "verb": "sup-checkpoint"})
+        _, ok, _ = fleet._doctor_check_supervisor_claim()
+        assert ok is True
+
+    def test_a_superseded_pending_record_is_a_NOTE_never_a_failure(self, sup_home):
+        # §5.4(d): the slow body is the legitimate one. Flipping the health
+        # check on it would train an operator to ignore the one signal that
+        # actually means "two bodies".
+        self._claim()
+        self._log({"kind": "superseded-pending", "ts": self._ago(60), "verb": "sup-heartbeat"})
+        _, ok, detail = fleet._doctor_check_supervisor_claim()
+        assert ok is True
+        assert "superseded-pending" in detail
+
+    def test_a_superseded_note_does_not_mask_a_real_refusal(self, sup_home):
+        self._claim()
+        self._log({"kind": "superseded-pending", "ts": self._ago(90), "verb": "sup-heartbeat"},
+                  {"kind": "refused", "ts": self._ago(60), "verb": "sup-checkpoint"})
+        _, ok, detail = fleet._doctor_check_supervisor_claim()
+        assert ok is False
+        assert "superseded-pending" in detail
+
+    def test_the_unacknowledged_pending_age_is_surfaced(self, sup_home):
+        # §5.4(e)'s silent miss produces NO refusal: a body that only ever
+        # presents `live` validates forever, `nonce_seq` never advances, and
+        # two bodies of one lineage both validate indefinitely with doctor
+        # green. That is strictly worse than a false alarm. This observable is
+        # the only thing that distinguishes "nothing is wrong" from "the
+        # mechanism has quietly stopped working".
+        stale = fleet.PENDING_NONCE_TTL_SECONDS * fleet.NONCE_PENDING_STALE_MULTIPLE + 60
+        self._claim(pending_nonce_hash=fleet.nonce_digest(fleet.mint_nonce()),
+                    pending_at=self._ago(stale))
+        _, ok, detail = fleet._doctor_check_supervisor_claim()
+        assert "unacknowledged" in detail.lower()
+        assert ok is True, "a degraded detection property is a NOTE, not a health failure"
+
+    def test_a_fresh_pending_is_not_surfaced(self, sup_home):
+        self._claim(pending_nonce_hash=fleet.nonce_digest(fleet.mint_nonce()),
+                    pending_at=self._ago(30))
+        _, _, detail = fleet._doctor_check_supervisor_claim()
+        assert "unacknowledged" not in detail.lower()
+
+    def test_the_check_never_raises_on_a_corrupt_log(self, sup_home):
+        self._claim()
+        fleet.nonce_rejection_log_path().parent.mkdir(parents=True, exist_ok=True)
+        fleet.nonce_rejection_log_path().write_text(
+            "{not json\n[]\n" + json.dumps({"kind": "refused", "ts": "nonsense"}) + "\n",
+            encoding="utf-8")
+        name, ok, detail = fleet._doctor_check_supervisor_claim()
+        assert name == "supervisor-claim" and isinstance(detail, str)
+
+    def test_goals_dormant_still_short_circuits_to_ok(self, sup_home):
+        (sup_home / "supervisor" / "GOALS.md").write_text("SUPERVISOR-DORMANT", encoding="utf-8")
+        self._claim()
+        self._log({"kind": "refused", "ts": self._ago(60), "verb": "sup-checkpoint"})
+        _, ok, detail = fleet._doctor_check_supervisor_claim()
+        assert ok is True and "dormant" in detail.lower()
+
+    def test_the_doctor_row_publishes_no_hash(self, sup_home):
+        # §5.8's family rule: the check's detail string is operator-facing
+        # output on the same surface as the view.
+        claim_hash = fleet.nonce_digest(fleet.mint_nonce())
+        self._claim(nonce_hash=claim_hash)
+        self._log({"kind": "refused", "ts": self._ago(60), "verb": "sup-checkpoint"})
+        _, _, detail = fleet._doctor_check_supervisor_claim()
+        assert claim_hash not in detail
+
+
 class TestViewRedaction:
     """T15 (§5.8), the binding build rule.
 

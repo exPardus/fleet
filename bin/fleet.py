@@ -7946,6 +7946,21 @@ PENDING_NONCE_TTL_SECONDS = 900.0
 NONCE_ARG_HELP = ("the generation this body was last given (claim-nonce §5.3); "
                   "the ONLY presentation channel -- there is no env-var fallback")
 
+# §5.6: a `refused` record inside this window is the ONE condition that flips
+# `_doctor_check_supervisor_claim` off `ok=True`. 24 h is long enough that a
+# refusal survives an overnight gap between an incident and the operator
+# looking, and short enough that a resolved one stops shouting.
+NONCE_REJECTION_WINDOW_SECONDS = 24 * 3600
+
+# §5.6's "a stated multiple of the TTL". Stated as 2, and the choice is
+# §5.4(d)'s: `prior_pending_hash` keeps a delivered pending presentable for
+# exactly one more generation, so two TTL periods is precisely the point past
+# which the third slot has stopped protecting the quiet body. A pending
+# outstanding longer than that means the presenter obligation (§5.3) is being
+# violated and the detection property is degraded -- the §5.4(e) silent miss,
+# which produces no refusal at all and would otherwise leave doctor green.
+NONCE_PENDING_STALE_MULTIPLE = 2
+
 
 # ---------------------------------------------------------------------------
 # Supervisor claim nonce -- the continuity primitives (claim-nonce §5.1, §5.2)
@@ -8505,6 +8520,72 @@ def _claim_is_legacy(claim: dict) -> bool:
     return "nonce_hash" not in claim and "state" not in claim
 
 
+def nonce_rejection_log_path() -> Path:
+    """§5.6's evidence file. Under `state/` (gitignored runtime)."""
+    return state_dir() / "supervisor-nonce-rejections.jsonl"
+
+
+def _append_nonce_rejection(kind, verb, caller_sid, claim: dict, presented) -> None:
+    """One JSON record, appended ATOMICALLY (§5.6).
+
+    `_atomic_append_bytes` is the single-syscall FILE_APPEND_DATA/O_APPEND
+    primitive this codebase already carries precisely so that two writers
+    appending in the same instant never clobber each other -- and THIS FILE'S
+    WHOLE PURPOSE is to record the case where two bodies are being refused
+    concurrently. So the append must never degrade to a read-modify-write, and
+    the file is left unbounded by the writer; §5.9 puts the cap out of band,
+    under `fleet_lock`, never on the refused caller.
+
+    `presented_prefix` is the first 8 hex of the presented value's sha256 and
+    never the value: enough to tell "the same wrong value twice" from "two
+    different wrong values", which is the question an operator actually asks,
+    without making the log a place a generation can be recovered from.
+
+    Best-effort. The record is EVIDENCE, not the refusal -- if it cannot be
+    written the caller must still be refused, because a body that learns "I
+    could not be logged" instead of "stop and escalate" is the worst of
+    both."""
+    record = {
+        "ts": now_iso(),
+        "kind": kind,
+        "verb": verb,
+        "caller_sid": caller_sid,
+        "expected_seq": claim.get("nonce_seq"),
+        "pending_at": claim.get("pending_at"),
+        "presented_prefix": nonce_digest(presented)[:8] if isinstance(presented, str)
+                            and presented else None,
+    }
+    try:
+        nonce_rejection_log_path().parent.mkdir(parents=True, exist_ok=True)
+        _atomic_append_bytes(nonce_rejection_log_path(),
+                             (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8"))
+    except (OSError, ValueError):
+        pass
+
+
+def _recent_nonce_rejections(now=None, window=NONCE_REJECTION_WINDOW_SECONDS) -> list:
+    """Records inside the window, newest-biased. Reads only the TAIL (§5.9:
+    the cap is hygiene, not correctness, precisely because this reader never
+    needs the whole file). Never raises -- every caller is a view or the
+    doctor."""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    out = []
+    for line in _read_tail_lines(nonce_rejection_log_path()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+            if not isinstance(rec, dict):
+                continue
+            if (now - _parse_iso(rec["ts"])).total_seconds() <= window:
+                out.append(rec)
+        except (ValueError, TypeError, KeyError):
+            continue
+    return out
+
+
 def _nonce_presentation(claim: dict, nonce):
     """Which generation the caller presented: "live", "pending", "prior", or
     None. PURE -- it decides nothing and mutates nothing.
@@ -8671,10 +8752,18 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         mint = False
     elif _nonce_presentation(claim, nonce) == "pending":
         _acknowledge_pending(claim)                       # rule 2
+    elif _nonce_presentation(claim, nonce) == "prior":
+        # Rule 3. Valid, and NOT an alarm: the caller holds a pending that a
+        # later mint replaced (§5.4(d)). The record is QUIET and distinct in
+        # kind from a refusal, so an operator reading the log can tell "the TTL
+        # fired under a slow body" from "a second body presented a stale
+        # value" -- without `kind` those two are indistinguishable, and the
+        # slow body reads as an attack.
+        _append_nonce_rejection("superseded-pending", verb, caller, claim, nonce)
     elif _nonce_presentation(claim, nonce) is not None:
-        pass  # rule 1 (live) and rule 3 (prior) -- both valid, both promote
-              # nothing; rule 3 is a QUIET record, not an alarm (§5.4(d))
+        pass                                              # rule 1 (live)
     else:
+        _append_nonce_rejection("refused", verb, caller, claim, nonce)
         raise _continuity_refusal(verb, claim)            # rule 5
 
     # §6.6: restamp on every validated write, so the roster join tracks the
@@ -9216,13 +9305,78 @@ def supervisor_status_line(now=None):
         return None
 
 
+def _nonce_pending_age_note(claim, now=None):
+    """§5.6's other observable: `unacknowledged pending age`.
+
+    §5.4(e)'s silent miss produces NO refusal at all. Rule 1 accepts the live
+    generation forever, so a body that only ever presents `live` -- because it
+    read `NONCE: unchanged` in a batch, because a verb's output was truncated,
+    or because a compaction dropped the newest line and kept an older one --
+    never acknowledges, `nonce_seq` never advances, and two bodies of one
+    lineage both validate indefinitely with no refusal, no record, and doctor
+    green. That is strictly worse than a false alarm.
+
+    A pending outstanding past NONCE_PENDING_STALE_MULTIPLE TTLs is the signal
+    that the presenter obligation is being violated and the detection property
+    has degraded. It is a NOTE, not a health failure: nothing is broken, the
+    mechanism has merely stopped detecting."""
+    if not isinstance(claim, dict) or not claim.get("pending_at"):
+        return None
+    if now is None:
+        now = datetime.now(timezone.utc)
+    try:
+        age = (now - _parse_iso(claim["pending_at"])).total_seconds()
+    except (TypeError, ValueError):
+        return None
+    limit = PENDING_NONCE_TTL_SECONDS * NONCE_PENDING_STALE_MULTIPLE
+    if age <= limit:
+        return None
+    return (f"NOTE: unacknowledged pending generation for {age / 60:.0f}m "
+            f"(> {limit / 60:.0f}m) -- the presenter obligation is being violated "
+            f"and divergence detection is degraded (claim-nonce §5.4(e))")
+
+
 def _doctor_check_supervisor_claim():
-    """Spec §4 nag, doctor surface. ALWAYS ok=True -- the nag is advisory
-    (an absent supervisor is a prompt, not a health failure)."""
+    """Spec §4 nag, doctor surface.
+
+    Was ALWAYS ok=True ("the nag is advisory"). claim-nonce §5.6 changes
+    exactly ONE condition: a `refused` record in the last 24 h. A rejection is
+    not a nag -- it is evidence of a second body. Everything else here stays
+    advisory, `superseded-pending` included: §5.4(d) says the body holding a
+    superseded pending is most likely the LEGITIMATE one that spent longer
+    than a TTL thinking, and flipping the health check on it would train an
+    operator to ignore the one signal that does mean two bodies.
+
+    Never raises: this is a doctor row, and a corrupt evidence file must not
+    take the health check out with it."""
     line = supervisor_status_line()
     if line is None:
         return ("supervisor-claim", True, "GOALS absent or dormant -- no supervisor expected")
-    return ("supervisor-claim", True, line)
+    parts = [line]
+    ok = True
+    try:
+        recent = _recent_nonce_rejections()
+        refused = [r for r in recent if r.get("kind") == "refused"]
+        superseded = [r for r in recent if r.get("kind") == "superseded-pending"]
+        if refused:
+            ok = False
+            last = refused[-1]
+            parts.append(
+                f"{len(refused)} continuity refusal(s) in the last "
+                f"{NONCE_REJECTION_WINDOW_SECONDS // 3600}h (latest: {last.get('verb')} "
+                f"at {last.get('ts')}, expected generation {last.get('expected_seq')}) -- "
+                f"a second body of this lineage may be acting; census the sessions "
+                f"(state/{nonce_rejection_log_path().name})")
+        if superseded:
+            parts.append(f"NOTE: {len(superseded)} superseded-pending acceptance(s) -- "
+                         f"a delivered generation was replaced under a slow body "
+                         f"(claim-nonce §5.4(d)), not a refusal")
+        note = _nonce_pending_age_note(read_incarnation())
+        if note:
+            parts.append(note)
+    except Exception:  # noqa: BLE001 -- doctor row: evidence must not break health
+        pass
+    return ("supervisor-claim", ok, " | ".join(parts))
 
 
 def _doctor_check_supervisor_handoff():
