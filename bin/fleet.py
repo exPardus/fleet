@@ -7361,6 +7361,7 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
         functools.partial(_doctor_check_hook_errors),
         functools.partial(_doctor_check_supervisor_claim),
         functools.partial(_doctor_check_supervisor_handoff),
+        functools.partial(_doctor_check_pending_decision),
         functools.partial(_doctor_check_tzdata),
     ]
 
@@ -8273,6 +8274,50 @@ def read_handoff_abort_flag() -> dict | None:
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def pending_decision_path() -> Path:
+    """three-tier §8: the operator-gate routing STATE FILE. One open decision at
+    a time; its PRESENCE is the "open" state, so it lives in state/ (gitignored
+    runtime) and is CLEARABLE -- the property the rejected `NEEDS-OPERATOR`
+    journal kind could not provide."""
+    return state_dir() / "supervisor-pending-decision.json"
+
+
+def read_pending_decision() -> dict | None:
+    """The open operator decision, or None when absent. A corrupt file reads as
+    `{"_unreadable": True, ...}` -- NEVER None -- so a garbled gate stays
+    nag-visible rather than silently dropping an operator decision (§8: the file
+    is the routing surface for "operator gates stay human" under an unattended
+    supervisor)."""
+    path = pending_decision_path()
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"_unreadable": True,
+                "question": "(pending-decision file present but unreadable)"}
+    if not isinstance(data, dict):
+        return {"_unreadable": True,
+                "question": "(pending-decision file is not a JSON object)"}
+    return data
+
+
+def write_pending_decision(obj: dict) -> None:
+    _write_json_atomic(pending_decision_path(), obj)
+
+
+def clear_pending_decision() -> None:
+    """Remove the open decision (§8: answering may write the answer OR remove
+    the file; consuming the answer removes it). Idempotent -- a missing file is
+    not an error."""
+    try:
+        pending_decision_path().unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
 
 
 def _write_json_atomic(path: Path, obj: dict) -> None:
@@ -9480,6 +9525,7 @@ def cmd_sup_status(args) -> int:
         "heartbeat_age_seconds": beat_age,
         "handshake": _project_handshake(hs),
         "abort_flag": handoff_abort_flag_path().exists(),
+        "pending_decision": read_pending_decision(),   # §8: routing surface
         "nag": supervisor_status_line(),
     }
     if getattr(args, "json", False):
@@ -9507,7 +9553,117 @@ def cmd_sup_status(args) -> int:
         print(f"handshake: {hs.get('incarnation_id')} sid={hs.get('session_id')} (handoff in flight)")
     if info["abort_flag"]:
         print(f"WARNING: aborted-handoff flag present ({handoff_abort_flag_path()})")
+    pd = info["pending_decision"]
+    if pd is not None:
+        if pd.get("answer"):
+            print(f"pending-decision: ANSWERED ({pd.get('answer')!r}) -- supervisor "
+                  f"should consume and `fleet sup-decision --clear`")
+        else:
+            print(f"pending-decision OPEN (needs operator): {pd.get('question')!r}"
+                  + (f" [ctx {pd['context_ref']}]" if pd.get("context_ref") else "")
+                  + " -- answer with `fleet sup-decision --answer <text>`")
     return 0
+
+
+def cmd_sup_decision(args) -> int:
+    """`fleet sup-decision` -- three-tier §8 operator-gate routing.
+
+      --raise QUESTION [--context-ref REF]   supervisor routes a decision (the
+          claim-holder only) and PARKS. Refuses if one is already open: one
+          decision at a time.
+      --answer TEXT                          the interface tier writes the
+          operator's decision. NOT claim-gated -- the interface holds no claim
+          by design (§3.1), so requiring continuity here would be wrong.
+      --clear                                remove the open decision (consumed).
+      (no flag)                              show the current decision.
+
+    The supervisor never writes its own answer (§8): `--raise` sets `answer` to
+    None and `--answer` is the interface's verb. This file is ROUTING, not
+    authorization -- it never lets the supervisor act on the operator's behalf;
+    it is how "operator gates stay human" survives an unattended supervisor."""
+    raising = getattr(args, "question", None) is not None
+    answering = getattr(args, "answer", None) is not None
+    clearing = bool(getattr(args, "clear", False))
+    if sum((raising, answering, clearing)) > 1:
+        raise FleetCliError("sup-decision: pass at most one of --raise / --answer / --clear")
+
+    if raising:
+        with fleet_lock():
+            claim, caller, notices = _require_claim_holder(
+                getattr(args, "sid", None), nonce=getattr(args, "nonce", None),
+                verb="sup-decision")
+            existing = read_pending_decision()
+            if existing is not None and not existing.get("answer"):
+                raise FleetCliError(
+                    "sup-decision: a decision is already open -- one at a time. "
+                    "Answer or clear it first "
+                    f"(question: {existing.get('question')!r})")
+            write_pending_decision({
+                "question": args.question,
+                "raised_by_inc": claim.get("incarnation_id"),
+                "raised_at": now_iso(),
+                "context_ref": getattr(args, "context_ref", None),
+                "answer": None,
+            })
+            write_incarnation(claim)   # §5.3: acknowledge + commit together
+        print(f"pending-decision raised: {args.question!r} -- routed to the "
+              f"interface tier; supervisor parks until answered")
+        _deliver_notices(notices)
+        return 0
+
+    if answering:
+        rec = read_pending_decision()
+        if rec is None:
+            raise FleetCliError("sup-decision: no open decision to answer")
+        rec["answer"] = args.answer
+        rec["answered_at"] = now_iso()
+        rec["answered_by_sid"] = current_caller_session()
+        write_pending_decision(rec)
+        print(f"pending-decision answered: {args.answer!r}")
+        return 0
+
+    if clearing:
+        clear_pending_decision()
+        print("pending-decision cleared")
+        return 0
+
+    rec = read_pending_decision()
+    if getattr(args, "json", False):
+        print(json.dumps(rec, indent=2))
+        return 0
+    if rec is None:
+        print("pending-decision: none open")
+    elif rec.get("answer"):
+        print(f"pending-decision ANSWERED: {rec.get('question')!r} -> {rec.get('answer')!r}")
+    else:
+        print(f"pending-decision OPEN: {rec.get('question')!r}"
+              + (f" [ctx {rec['context_ref']}]" if rec.get("context_ref") else ""))
+    return 0
+
+
+def _doctor_check_pending_decision():
+    """three-tier §8 nag surface: FAIL while an operator decision is OPEN and
+    unanswered (it needs a human), and on a corrupt file. An answered-but-not-
+    yet-consumed decision is a NOTE (ok=True) -- the supervisor owes the clear,
+    not the operator. Never raises: a doctor row must not crash on evidence."""
+    try:
+        rec = read_pending_decision()
+    except Exception:  # noqa: BLE001 -- doctor row: evidence must not break health
+        return ("supervisor-pending-decision", False, "pending-decision unreadable")
+    if rec is None:
+        return ("supervisor-pending-decision", True, "no operator decision pending")
+    if rec.get("_unreadable"):
+        return ("supervisor-pending-decision", False,
+                "pending-decision file present but unreadable -- inspect "
+                f"{pending_decision_path().name}")
+    if rec.get("answer"):
+        return ("supervisor-pending-decision", True,
+                f"ANSWERED ({rec.get('answer')!r}) -- supervisor should consume and "
+                f"`fleet sup-decision --clear`")
+    return ("supervisor-pending-decision", False,
+            f"OPEN, needs operator: {rec.get('question')!r} (raised by "
+            f"{rec.get('raised_by_inc')} at {rec.get('raised_at')}) -- answer with "
+            f"`fleet sup-decision --answer <text>`")
 
 
 def _render_successor_task(successor_inc: str, old_inc: str, handoff_token: str) -> str:
@@ -10363,6 +10519,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_supstat = sub.add_parser("sup-status", help="read-only supervisor claim/handshake status")
     p_supstat.add_argument("--json", action="store_true")
 
+    # three-tier §8: operator-gate routing state file.
+    p_supdec = sub.add_parser(
+        "sup-decision",
+        help="operator-gate routing (§8): --raise (supervisor parks a decision), "
+             "--answer (interface answers), --clear, or show")
+    p_supdec.add_argument("--raise", dest="question", metavar="QUESTION",
+                          help="supervisor routes an operator-only decision and parks "
+                               "(claim holder only; one open at a time)")
+    p_supdec.add_argument("--context-ref", dest="context_ref",
+                          help="a pointer (file#L, journal ref) the interface reads for context")
+    p_supdec.add_argument("--answer", metavar="TEXT",
+                          help="the interface tier writes the operator's decision")
+    p_supdec.add_argument("--clear", action="store_true",
+                          help="remove the open decision (consumed)")
+    p_supdec.add_argument("--json", action="store_true")
+    p_supdec.add_argument("--sid", help="override caller session id (for --raise)")
+    p_supdec.add_argument("--nonce", help=NONCE_ARG_HELP)
+
     p_suphb = sub.add_parser("sup-handoff-begin", help="dispatch a handoff successor (claim holder only)")
     p_suphb.add_argument("--model", help="model for the successor session")
     p_suphb.add_argument("--permission-mode", dest="permission_mode",
@@ -10452,6 +10626,8 @@ def main(argv=None) -> int:
             return cmd_sup_release(args)
         if args.command == "sup-status":
             return cmd_sup_status(args)
+        if args.command == "sup-decision":
+            return cmd_sup_decision(args)
         if args.command == "sup-handoff-begin":
             return cmd_sup_handoff_begin(args)
         if args.command == "sup-handoff-complete":
