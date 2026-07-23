@@ -151,6 +151,44 @@ class TestTokenCeilingRecordAndSum:
         assert loaded.get("token_ceiling") is None
 
 
+class TestSpawnStampsLineage:
+    """claim-nonce §6.2: cmd_spawn stamps the spawning claim's lineage onto the
+    worker record, so a later body of that lineage owns it. The wiring, not
+    just the `_spawning_claim_lineage` helper -- a one-liner is exactly the
+    kind of call an edit drops."""
+
+    def test_spawn_under_a_held_claim_records_its_lineage(
+            self, isolated_home, tmp_path, monkeypatch):
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _native_roster_with())
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-sup")
+        (isolated_home / "supervisor").mkdir(parents=True, exist_ok=True)
+        fleet.write_incarnation({"incarnation_id": "inc-me", "session_id": "sid-sup",
+                                 "claimed_at": "2026-07-23T00:00:00Z",
+                                 "heartbeat_at": "2026-07-23T00:00:00Z", "claimed_via": "fresh",
+                                 "nonce_hash": fleet.nonce_digest(fleet.mint_nonce()),
+                                 "nonce_seq": 1, "lineage_id": "lin-L"})
+        worker_dir = tmp_path / "proj"
+        worker_dir.mkdir()
+        fleet.cmd_spawn(_spawn_args("probe-1", worker_dir, "go"),
+                        run=_fake_run_factory(), which=lambda n: "claude.cmd",
+                        sleep=lambda s: None)
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["spawned_by"] == "sid-sup"
+        assert rec["spawned_by_lineage"] == "lin-L"
+
+    def test_spawn_with_no_claim_records_a_null_lineage(
+            self, isolated_home, tmp_path, monkeypatch):
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _native_roster_with())
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-human")
+        worker_dir = tmp_path / "proj"
+        worker_dir.mkdir()
+        fleet.cmd_spawn(_spawn_args("probe-1", worker_dir, "go"),
+                        run=_fake_run_factory(), which=lambda n: "claude.cmd",
+                        sleep=lambda s: None)
+        rec = fleet.load_registry()["workers"]["probe-1"]
+        assert rec["spawned_by_lineage"] is None
+
+
 class TestSpawnWritesCeilingFile:
     def test_spawn_writes_sid_keyed_ceiling_file_when_configured(self, isolated_home, tmp_path, monkeypatch):
         # Kernel 10 fleet half: cmd_spawn persists the token ceiling at

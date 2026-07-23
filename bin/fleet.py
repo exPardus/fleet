@@ -832,7 +832,8 @@ def current_caller_session() -> str | None:
 
 def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
                        max_budget_usd=None, setting_sources=None, token_ceiling=None,
-                       spawned_by=None, dispatch_kind=None, category=None) -> dict:
+                       spawned_by=None, dispatch_kind=None, category=None,
+                       spawned_by_lineage=None) -> dict:
     """Build a fresh registry record matching the SPEC §4 schema exactly.
 
     Phase1 kernel item 7 (F13/M5): max_budget_usd and setting_sources are
@@ -865,6 +866,15 @@ def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
         # readers default it to None -- and an UNKNOWN owner is treated as
         # FOREIGN, never as "mine", so pre-existing records are protected too.
         "spawned_by": spawned_by,
+        # claim-nonce §6.2 (D2): the spawning claim's `lineage_id`, or None.
+        # Additive/nullable, written where `spawned_by` is written and carried
+        # across respawn exactly as it is. It lets a LATER body of the same
+        # lineage -- one whose sid rotated through a fork-steer or a handoff --
+        # own the workers that lineage spawned, but ONLY when that body proved
+        # continuity in the same invocation (`_worker_is_foreign`'s third arg).
+        # A record without it (pre-field, or a human-shell spawn) reads as
+        # None and gets today's spawned_by-only ownership answer.
+        "spawned_by_lineage": spawned_by_lineage,
         "created": created,
         "status": "working",
         "attached_since": None,
@@ -2563,25 +2573,45 @@ class DestructiveActionRefused(FleetCliError):
     """A destructive action against a foreign worker was not acknowledged."""
 
 
-def _worker_is_foreign(record: dict, caller: str | None) -> bool:
+def _worker_is_foreign(record: dict, caller: str | None, claim_lineage=None) -> bool:
     """True when this session did not spawn the worker.
 
-    An UNKNOWN owner (`spawned_by` absent -- every record written before this
-    field existed) counts as foreign: the guard fails toward asking."""
+    Two ways to own it (claim-nonce §6.2):
+      * `record["spawned_by"] == caller` -- today's rule, byte-for-byte
+        unchanged; or
+      * `record["spawned_by_lineage"] == claim_lineage`, where `claim_lineage`
+        is the lineage the caller PROVED continuity on in this same invocation
+        (`_caller_proven_lineage`). This is what lets a later body of the same
+        lineage -- sid rotated by a fork-steer or a handoff -- keep ownership,
+        and what a seize deliberately breaks by re-minting the lineage.
+
+    An UNKNOWN owner (`spawned_by` absent -- every record written before that
+    field existed) still counts as foreign: the guard fails toward asking. And
+    `claim_lineage` defaults to None (an UNPROVEN caller), so the lineage arm
+    is inert unless the caller actually proved a claim -- a body must not
+    inherit ownership from a field it can simply read out of the registry.
+    Both-None never matches, so a legacy worker and an unproven caller do not
+    collide on the null."""
     owner = record.get("spawned_by")
-    if not owner:
-        return True
-    return owner != caller
+    if owner and owner == caller:
+        return False
+    lin = record.get("spawned_by_lineage")
+    if claim_lineage and lin and lin == claim_lineage:
+        return False
+    return True
 
 
 def _describe_owner(record: dict) -> str:
     owner = record.get("spawned_by")
+    lin = record.get("spawned_by_lineage")
     if not owner:
-        return "unknown owner (spawned before provenance was recorded, or by a human shell)"
-    return f"session {owner[:8]}"
+        base = "unknown owner (spawned before provenance was recorded, or by a human shell)"
+        return f"{base}, lineage {lin}" if lin else base
+    return f"session {owner[:8]}" + (f", lineage {lin}" if lin else "")
 
 
-def _confirm_destructive(action: str, names: list, records: dict, assume_yes: bool) -> None:
+def _confirm_destructive(action: str, names: list, records: dict, assume_yes: bool,
+                         nonce=None) -> None:
     """Raise DestructiveActionRefused unless a foreign-worker action is
     acknowledged with --yes. Silent no-op when every named worker belongs to
     this caller.
@@ -2626,7 +2656,13 @@ def _confirm_destructive(action: str, names: list, records: dict, assume_yes: bo
     caller = current_caller_session()
     if caller is None:
         return
-    foreign = [n for n in names if _worker_is_foreign(records.get(n, {}), caller)]
+    # §6.2: a caller that proves continuity on the supervisor claim owns the
+    # workers its lineage spawned, even after its sid rotated. Unproven (no
+    # `--nonce`, or a wrong one) yields None and the guard keeps today's
+    # spawned_by-only answer.
+    claim_lineage = _caller_proven_lineage(caller, nonce)
+    foreign = [n for n in names
+               if _worker_is_foreign(records.get(n, {}), caller, claim_lineage)]
     if not foreign or assume_yes:
         return
 
@@ -2870,10 +2906,15 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
     with fleet_lock():
         data = load_registry()
         validate_name(args.name, existing=data["workers"].keys())
+        _spawner = current_caller_session()
         record = new_worker_record(
             None, cwd, task, args.mode, model=args.model,
             setting_sources=args.setting_sources, token_ceiling=args.token_ceiling,
-            spawned_by=current_caller_session(),
+            spawned_by=_spawner,
+            # §6.2: stamp the spawning claim's lineage so a later body of it
+            # keeps ownership across a sid rotation. Under the lock we already
+            # hold; read-only, never raises.
+            spawned_by_lineage=_spawning_claim_lineage(_spawner),
             dispatch_kind="bg", category=args.category)
         record["last_dispatch_at"] = now_iso()
         data["workers"][args.name] = record
@@ -4374,6 +4415,10 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
     task_for_record = task_override if task_override is not None else before.get("task", "")
     prior_retired = list(before.get("retired_sids", []))
     spawned_by = before.get("spawned_by")
+    # §6.2: provenance is carried across respawn exactly as `spawned_by` is --
+    # a respawn is not a new spawn and must not launder ownership onto the
+    # respawning body (TestRespawnDoesNotLaunderOwnership).
+    spawned_by_lineage = before.get("spawned_by_lineage")
 
     roster_ok, entries = _fetch_agents_roster(which=which, run=run)
     if not roster_ok:
@@ -4424,7 +4469,8 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
         new_record = new_worker_record(
             None, cwd, task_for_record, mode, model=model,
             setting_sources=setting_sources, token_ceiling=token_ceiling,
-            spawned_by=spawned_by, dispatch_kind="bg", category=category)
+            spawned_by=spawned_by, spawned_by_lineage=spawned_by_lineage,
+            dispatch_kind="bg", category=category)
         new_record["cost_usd"] = cost_usd
         new_record["cost_baseline"] = cost_usd
         new_record["retired_sids"] = prior_retired + [old_sid]
@@ -4548,7 +4594,7 @@ def cmd_respawn(args, run=subprocess.run, which=shutil.which,
     _ok, _reason, _snap = _read_registry_readonly()
     if _ok and args.name in _snap["workers"]:
         _confirm_destructive("respawn (retire the session of)", [args.name], _snap["workers"],
-                             assume_yes=getattr(args, "yes", False))
+                             assume_yes=getattr(args, "yes", False), nonce=getattr(args, "nonce", None))
         before = dict(_snap["workers"][args.name])
     else:
         # Unknown name or unreadable registry: resolve under the lock so a
@@ -4560,7 +4606,7 @@ def cmd_respawn(args, run=subprocess.run, which=shutil.which,
                 raise FleetCliError(f"unknown worker: {args.name!r}")
             before = dict(data["workers"][args.name])
         _confirm_destructive("respawn (retire the session of)", [args.name],
-                             {args.name: before}, assume_yes=getattr(args, "yes", False))
+                             {args.name: before}, assume_yes=getattr(args, "yes", False), nonce=getattr(args, "nonce", None))
 
     refuse_if_archived(args.name, before, "respawn")
     return _cmd_respawn_native(args, before, run=run, which=which, sleep=sleep, clock=clock)
@@ -4723,7 +4769,7 @@ def cmd_kill(args, run=subprocess.run, which=shutil.which) -> int:
     # OUTSIDE fleet_lock (an interactive prompt must never block every other
     # fleet command on a human's keystroke).
     _confirm_destructive("kill", [args.name], workers_snapshot,
-                         assume_yes=getattr(args, "yes", False))
+                         assume_yes=getattr(args, "yes", False), nonce=getattr(args, "nonce", None))
 
     return _cmd_kill_native(args.name, workers_snapshot[args.name], run=run, which=which)
 
@@ -4930,7 +4976,7 @@ def cmd_clean(args, run=subprocess.run, which=shutil.which) -> int:
         action = ("clean (delete logs + journal + archived history of)" if any_archived
                   else "clean (delete logs + journal of)")
         _confirm_destructive(action, sorted(doomed), doomed,
-                             assume_yes=getattr(args, "yes", False))
+                             assume_yes=getattr(args, "yes", False), nonce=getattr(args, "nonce", None))
 
     changed = False
     with fleet_lock():
@@ -8740,6 +8786,60 @@ def _claim_is_legacy(claim: dict) -> bool:
     return "nonce_hash" not in claim and "state" not in claim
 
 
+def _caller_proven_lineage(caller, nonce):
+    """claim-nonce §6.2: the `lineage_id` of a claim the caller proved
+    continuity on in THIS invocation, or None. Consumed by the destructive
+    guard (`_confirm_destructive`) so a later body of a lineage owns the
+    workers that lineage spawned.
+
+    VALIDATES WITHOUT MINTING (§7's rule for gated verbs): the destructive
+    verbs are not sup verbs and must not rotate the generation or write the
+    claim. So this reads only -- no `write_incarnation`, no `_mint_pending`.
+    Never raises: it runs on the kill/clean/respawn path and a corrupt or
+    absent claim must degrade to "unproven" (today's spawned_by-only answer),
+    not crash a kill.
+
+    Proof is a presented GENERATION (§5.3). A legacy claim has none, so it
+    yields None -- a legacy-era supervisor gets today's answer, which is the
+    conservative direction. A released claim yields None too: it has no holder
+    and no live lineage to speak for."""
+    try:
+        claim = read_incarnation()
+    except Exception:  # noqa: BLE001 -- guard path: never crash a kill on this
+        return None
+    if not isinstance(claim, dict) or claim.get("state") == "released":
+        return None
+    if _claim_is_legacy(claim):
+        return None
+    if _nonce_presentation(claim, nonce) is None:
+        return None
+    return claim.get("lineage_id")
+
+
+def _spawning_claim_lineage(caller):
+    """claim-nonce §6.2: the `lineage_id` to stamp into a worker spawned by
+    this caller, or None. The spawning body is the supervisor holding the
+    claim, so this is the current claim's lineage when the caller is its
+    recorded holder.
+
+    Keyed on the holder sid rather than on a presented generation because
+    `fleet spawn` is not a continuity-gated verb -- stamping provenance is a
+    record, not a guarded action, and requiring a nonce on every spawn would
+    be a large surface for a field that only ever HELPS ownership. A
+    fork-steered supervisor that spawns before its next sup verb simply stamps
+    None and the worker falls back to `spawned_by == caller` (its current sid),
+    which still owns it. Never raises."""
+    try:
+        claim = read_incarnation()
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(claim, dict) or claim.get("state") == "released":
+        return None
+    if claim.get("session_id") == caller:
+        return claim.get("lineage_id")
+    return None
+
+
 def nonce_rejection_log_path() -> Path:
     """§5.6's evidence file. Under `state/` (gitignored runtime)."""
     return state_dir() / "supervisor-nonce-rejections.jsonl"
@@ -9993,6 +10093,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_respawn.add_argument("--force", action="store_true")
     p_respawn.add_argument("--yes", action="store_true",
                            help="confirm respawning a worker this session did not spawn")
+    p_respawn.add_argument("--nonce", help="prove supervisor-claim continuity so a later body "
+                                           "of the spawning lineage owns its workers (§6.2)")
     # F13/M5: respawn carries the persisted max_budget_usd/setting_sources
     # forward by default; these optional overrides replace them (default None
     # -> carry forward, mirroring the immutable-at-spawn rule for a reset).
@@ -10011,11 +10113,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_kill = sub.add_parser("kill", help="interrupt (if running) and mark a worker dead")
     p_kill.add_argument("--yes", action="store_true",
                         help="confirm killing a worker this session did not spawn")
+    p_kill.add_argument("--nonce", help="prove supervisor-claim continuity so a later body "
+                                        "of the spawning lineage owns its workers (§6.2)")
     p_kill.add_argument("name")
 
     p_clean = sub.add_parser("clean", help="remove dead workers and their logs/mailboxes/journals")
     p_clean.add_argument("--yes", action="store_true",
                          help="confirm deleting workers this session did not spawn")
+    p_clean.add_argument("--nonce", help="prove supervisor-claim continuity so a later body "
+                                         "of the spawning lineage owns its workers (§6.2)")
     clean_tier = p_clean.add_mutually_exclusive_group()
     clean_tier.add_argument("--dead-only", action="store_true", dest="dead_only",
                             help="sweep only confirmed-dead workers; spare archived tombstones")
