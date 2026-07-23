@@ -1708,6 +1708,94 @@ class TestContinuityExitCode:
         assert f"{fleet.SUPERVISOR_CONTINUITY_RC}=continuity" in text
 
 
+class TestRejectionLogCompaction:
+    """Break-gate residual F1 + §5.9. §5.9 withdrew the writer-side truncation
+    (a read-modify-write forfeits `_atomic_append_bytes`'s guarantee, and the
+    concurrent-writer case is the one this file exists to record) and put the
+    cap out of band instead. §8 authorizes exactly ONE sweep site:
+
+      > `cmd_sup_boot` -- out-of-band compaction of
+      > `state/supervisor-nonce-rejections.jsonl` under the `fleet_lock` it
+      > already holds. **The only sweep site this spec authorizes** --
+      > `fleet clean` is not one, per §4.13(g)
+
+    F1's finding was that §5.9 applied two different standards to
+    `fleet clean` in adjacent bullets: it withdrew the handoff-file sweep on
+    the receipt that `_remove_worker_files`'s candidate list is worker-keyed,
+    then proposed `fleet clean` for this file two paragraphs later. Same
+    class, same receipt -- a fixed supervisor-scoped path belonging to no
+    worker record. `sup-boot` already takes the lock, already writes
+    supervisor state, and runs once per body rather than on any hot path."""
+
+    def _boot(self, entries, sid="sid-me"):
+        args = SimpleNamespace(sid=sid, handoff_inc=None, nonce=None)
+        return fleet.cmd_sup_boot(args, which=_fake_which, run=_fake_run_roster(entries))
+
+    def _seed(self, count):
+        fleet.nonce_rejection_log_path().parent.mkdir(parents=True, exist_ok=True)
+        fleet.nonce_rejection_log_path().write_text(
+            "".join(json.dumps({"kind": "refused", "ts": fleet.now_iso(),
+                                "verb": f"v{i}"}) + "\n" for i in range(count)),
+            encoding="utf-8")
+
+    def test_an_oversized_log_is_compacted_at_boot(self, sup_home, capsys):
+        self._seed(fleet.NONCE_REJECTION_LOG_MAX_RECORDS + 60)
+        assert self._boot([{"sessionId": "sid-me", "status": "busy"}]) == 0
+        capsys.readouterr()
+        assert len(_rejection_records()) == fleet.NONCE_REJECTION_LOG_MAX_RECORDS
+
+    def test_compaction_keeps_the_NEWEST_records(self, sup_home, capsys):
+        # Dropping the newest would throw away the evidence of the incident an
+        # operator is most likely in the middle of.
+        n = fleet.NONCE_REJECTION_LOG_MAX_RECORDS
+        self._seed(n + 60)
+        assert self._boot([{"sessionId": "sid-me", "status": "busy"}]) == 0
+        capsys.readouterr()
+        recs = _rejection_records()
+        assert recs[0]["verb"] == "v60"
+        assert recs[-1]["verb"] == f"v{n + 59}"
+
+    def test_a_log_under_the_cap_is_left_byte_for_byte_alone(self, sup_home, capsys):
+        # Seeded with a blank separator line and NO trailing newline, on
+        # purpose: a compaction that rewrites unconditionally would normalise
+        # both away, and against a canonically-formatted seed the "untouched"
+        # assertion passes on a rewrite. The file is appended to by callers
+        # holding no lock, so an unnecessary rewrite is a real (if narrow)
+        # window, not a cosmetic one.
+        fleet.nonce_rejection_log_path().parent.mkdir(parents=True, exist_ok=True)
+        fleet.nonce_rejection_log_path().write_text(
+            "\n\n".join(json.dumps({"kind": "refused", "ts": fleet.now_iso(),
+                                    "verb": f"v{i}"}) for i in range(10)),
+            encoding="utf-8")
+        before = fleet.nonce_rejection_log_path().read_bytes()
+        assert self._boot([{"sessionId": "sid-me", "status": "busy"}]) == 0
+        capsys.readouterr()
+        assert fleet.nonce_rejection_log_path().read_bytes() == before
+
+    def test_an_absent_log_is_not_created_by_the_sweep(self, sup_home, capsys):
+        assert self._boot([{"sessionId": "sid-me", "status": "busy"}]) == 0
+        capsys.readouterr()
+        assert not fleet.nonce_rejection_log_path().exists()
+
+    def test_a_corrupt_line_does_not_stop_the_boot(self, sup_home, capsys):
+        self._seed(fleet.NONCE_REJECTION_LOG_MAX_RECORDS + 10)
+        with open(fleet.nonce_rejection_log_path(), "a", encoding="utf-8") as f:
+            f.write("{not json\n")
+        assert self._boot([{"sessionId": "sid-me", "status": "busy"}]) == 0
+        assert "VERDICT: claim" in capsys.readouterr().out
+
+    def test_the_compaction_is_NOT_wired_into_fleet_clean(self, sup_home):
+        # §8: "the only sweep site this spec authorizes". `fleet clean` cannot
+        # reach this path anyway (§4.13(g): every candidate `_remove_worker_files`
+        # builds is keyed on a worker name or sid, and this is a fixed
+        # supervisor-scoped path belonging to no worker record) -- so wiring it
+        # there would be inventing a seam the spec declined to authorize.
+        src = Path(fleet.__file__).read_text(encoding="utf-8")
+        clean = src[src.index("def cmd_clean("):src.index("def cmd_archive(")]
+        assert "nonce_rejection_log_path" not in clean
+        assert "_compact_nonce_rejection_log" not in clean
+
+
 class TestDoctorSeesTheRejections:
     """§5.6 item 3. `_doctor_check_supervisor_claim` hard-codes `ok=True` on
     both returns today, with the docstring *"ALWAYS ok=True -- the nag is
@@ -1756,6 +1844,29 @@ class TestDoctorSeesTheRejections:
         _, ok, detail = fleet._doctor_check_supervisor_claim()
         assert ok is True
         assert "superseded-pending" in detail
+
+    def test_the_superseded_NOTE_does_not_read_as_benign(self, sup_home):
+        """Break-gate residual F3's second half, verbatim:
+
+          > a `superseded-pending` record cannot be produced by a
+          > protocol-conforming single body — that body would have to present
+          > an older value after a newer one, which the §5.3 presenter
+          > obligation forbids. So the record implies **either a second
+          > presenter or a violated obligation**, and both are conditions the
+          > design wants seen. Classifying it as a NOTE rather than `ok=False`
+          > is right (it is not proof of a second body), but "quiet" should not
+          > read as "benign".
+
+        So the classification is asserted above and the WORDING is asserted
+        here. A NOTE that says only "a slow body was replaced, not a refusal"
+        satisfies the classification and defeats the point: an operator reads
+        it, files it under noise, and the second presenter goes unlooked-for."""
+        self._claim()
+        self._log({"kind": "superseded-pending", "ts": self._ago(60), "verb": "sup-heartbeat"})
+        _, _, detail = fleet._doctor_check_supervisor_claim()
+        assert "second presenter" in detail
+        assert "presenter obligation" in detail
+        assert "not benign" in detail
 
     def test_a_superseded_note_does_not_mask_a_real_refusal(self, sup_home):
         self._claim()

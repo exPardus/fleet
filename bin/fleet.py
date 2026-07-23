@@ -7984,6 +7984,15 @@ NONCE_REJECTION_WINDOW_SECONDS = 24 * 3600
 # which produces no refusal at all and would otherwise leave doctor green.
 NONCE_PENDING_STALE_MULTIPLE = 2
 
+# §5.9's cap on `state/supervisor-nonce-rejections.jsonl`. Enforced OUT OF
+# BAND (see `_compact_nonce_rejection_log`), never by the writer: truncation
+# is a read-modify-write needing GENERIC_WRITE, which is exactly the access
+# mode `_atomic_append_bytes`'s docstring says forfeits the atomic-append
+# guarantee -- and the concurrent-writer case is the one this file exists to
+# record. `_doctor_check_supervisor_claim` reads only the tail regardless, so
+# the cap is hygiene, not correctness.
+NONCE_REJECTION_LOG_MAX_RECORDS = 200
+
 
 # ---------------------------------------------------------------------------
 # Supervisor claim nonce -- the continuity primitives (claim-nonce §5.1, §5.2)
@@ -8535,6 +8544,13 @@ def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
         rc = 0
     else:
         with fleet_lock():
+            # §5.9 / break-gate residual F1: the ONE authorized site for the
+            # rejection log's out-of-band cap. Under the lock this block
+            # already holds, on a path that runs once per body -- never on the
+            # refused caller, which holds no lock and may be the untrusted
+            # body. Ahead of the decision so an oversized log is bounded even
+            # on a boot that goes on to refuse.
+            _compact_nonce_rejection_log()
             claim = read_incarnation()
             latest = supervisor_journal_latest()
             # §6.1 rules 2 and 3 both key on CONTINUITY, so the decision needs
@@ -8693,6 +8709,41 @@ def _append_nonce_rejection(kind, verb, caller_sid, claim: dict, presented) -> N
         _atomic_append_bytes(nonce_rejection_log_path(),
                              (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8"))
     except (OSError, ValueError):
+        pass
+
+
+def _compact_nonce_rejection_log(limit=NONCE_REJECTION_LOG_MAX_RECORDS) -> None:
+    """§5.9's out-of-band cap, and break-gate residual F1's resolution.
+
+    CALLER MUST HOLD `fleet_lock`. The one authorized site is `cmd_sup_boot`
+    (§8): it already takes the lock, it already writes supervisor state, and
+    it runs once per body rather than on any hot path. `fleet clean` is NOT a
+    site -- F1's finding was that §5.9 applied two different standards to it
+    in adjacent bullets, withdrawing the handoff-file sweep on the receipt
+    that every candidate `_remove_worker_files` builds is keyed on a worker
+    name or sid, and then proposing `fleet clean` for this file two paragraphs
+    later. Same class, same receipt: a fixed supervisor-scoped path belonging
+    to no worker record, which §4.13(g) shows `cmd_clean` cannot reach.
+
+    The rewrite keeps the NEWEST records -- dropping those would throw away
+    the evidence of the incident an operator is most likely in the middle of.
+    Best-effort and silent: a hygiene sweep must never be able to fail a boot,
+    and a log at 260 records is not a problem worth refusing a claim over."""
+    path = nonce_rejection_log_path()
+    try:
+        if not path.exists():
+            return          # early-out only; the OSError arm below covers it too
+        lines = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        if len(lines) <= limit:
+            return
+        # temp + os.replace, the same shape `_write_json_atomic` uses: a
+        # concurrent refused caller appending through _atomic_append_bytes must
+        # never observe a half-rewritten file, and `state/` is gitignored so
+        # the sibling leaves no repo residue.
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text("\n".join(lines[-limit:]) + "\n", encoding="utf-8")
+        os.replace(str(tmp), str(path))
+    except OSError:
         pass
 
 
@@ -9501,9 +9552,22 @@ def _doctor_check_supervisor_claim():
                 f"a second body of this lineage may be acting; census the sessions "
                 f"(state/{nonce_rejection_log_path().name})")
         if superseded:
-            parts.append(f"NOTE: {len(superseded)} superseded-pending acceptance(s) -- "
-                         f"a delivered generation was replaced under a slow body "
-                         f"(claim-nonce §5.4(d)), not a refusal")
+            # Break-gate residual F3: a `superseded-pending` record CANNOT be
+            # produced by a protocol-conforming single body -- that body would
+            # have to present an older value after a newer one, which §5.3's
+            # presenter obligation forbids. So the record implies EITHER a
+            # second presenter OR a violated obligation, and both are
+            # conditions this design wants seen. NOTE rather than `ok=False`
+            # is right (it is not proof of a second body, and §5.4(d) says the
+            # body holding a superseded pending is most likely the legitimate
+            # slow one) -- but "quiet" must not read as "benign", so the
+            # wording names both possibilities rather than only the benign one.
+            parts.append(
+                f"NOTE: {len(superseded)} superseded-pending acceptance(s) -- a body "
+                f"presented a generation that a later mint had already replaced. A "
+                f"protocol-conforming single body cannot do that (claim-nonce §5.3), "
+                f"so this implies EITHER a second presenter OR a violated presenter "
+                f"obligation. Not proof of either, and not a refusal -- but not benign")
         note = _nonce_pending_age_note(read_incarnation())
         if note:
             parts.append(note)
