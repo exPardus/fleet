@@ -708,11 +708,21 @@ def test_extraction_seed_rejects_a_seed_that_removes_nothing(vr):
     receipt. That is the vacuous-pass class this campaign has shipped three
     times; it gets an assertion of its own.
     """
-    doc = "```\n# at " + PIN + "\n$ echo seeded\nseeded\n```\n"
-    assert vr._extraction_seed("no-op", doc, before=1) is False, \
-        "a seed that removes no receipt must be INCONCLUSIVE, not a pass"
-    assert vr._extraction_seed("no-op", doc, before=99) is False, \
+    clean = "```\n# at " + PIN + "\n$ echo seeded\nseeded\n```\n"
+    assert vr._extraction_seed("no-evasion", clean, before=99) is False, \
         "a seed reporting no evasion must fail, not pass"
+
+    # The guard must be what rejects this one. The doc DOES report an evasion
+    # (the loose command), so the `if not evasions` arm returns True here and
+    # only the `after >= before` arm can catch it -- without that arm the seed
+    # "passes" while having removed no receipt at all.
+    removes_nothing = clean + "$ loose command outside any fence\n"
+    receipts, unclassified, _blocks = vr.parse(removes_nothing)
+    before = len(receipts) + len(unclassified)
+    assert before == 1 and vr.scan_evasions(removes_nothing), \
+        "fixture must keep its receipt AND report an evasion, or this is vacuous"
+    assert vr._extraction_seed("no-op", removes_nothing, before=before) is False, \
+        "a seed that removes no receipt must be INCONCLUSIVE, not a pass"
 
 
 def test_self_test_chains_into_extraction(vr, monkeypatch):
