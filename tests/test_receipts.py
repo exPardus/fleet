@@ -43,7 +43,8 @@ import pytest
 # with `verify_receipts._GUTTER_RE` by `test_gutter_regex_matches_the_harness` --
 # this module needs it at COLLECTION time (`_is_enforced` drives the
 # parametrisation), before the `vr` fixture can load the harness.
-_GUTTER_RE = re.compile(r"^[ \t]*(?:>[ \t]*)*(?:[-*+][ \t]+|\d+[.)][ \t]+)?[ \t]*")
+_GUTTER_RE = re.compile(
+    r"^[ \t]*(?:>[ \t]*)*(?:[-*+][ \t]+|\d+[.)][ \t]+)?[ \t]*(?:\*\*|__)?")
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
@@ -450,6 +451,20 @@ EVASION_SHAPES = {
     "list-item": "- some prose\n\n  ```\n  # live: probe\n  $ echo ok\n  WRONG\n  ```\n",
     "inline-span": "Run `$ echo ok` and you get `ok`.\n",
     "unfenced": "# live: probe\n$ echo ok\nWRONG\n",
+    # H1-m1 / mutation M14: every other fixture carrying a marker also carries a
+    # `$ ` command, so the command shape was doing all the work and killing
+    # `_MARK_SHAPE_RE` left the suite green. A marker with nothing to lean on.
+    "marker-only": "# volatile: evidence lives elsewhere\n",
+    # H1-M1 / review check 3: a TAB after `$`, `# at` or `# volatile` renders
+    # identically to a space and was neither parsed nor reported -- exit 0,
+    # genuinely green-while-blind.
+    "tab-command": "$\techo ok\nWRONG\n",
+    "tab-pin": "# at 235421e56bfd328a7e913e519a1459ccf55918dc\n$\techo ok\nWRONG\n",
+    "tab-gutter": "  > $\techo ok\n  > WRONG\n",
+    "tab-marker": "#\tvolatile: evidence lives elsewhere\n",
+    # H1-m5: bold-wrapped, so `_GUTTER_RE`'s bullet arm (which requires
+    # whitespace after `-*+`) does not strip it.
+    "bold-command": "**$ echo ok**\n",
 }
 
 
@@ -594,6 +609,171 @@ def test_receipt_floor_holds(vr, path):
     assert total >= floor, (
         f"{path.name}: {total} receipts extracted, floor is {floor}. Either "
         f"receipts were deleted, or extraction silently stopped seeing them.")
+
+
+# ---------------------------------------------------------------------------
+# H1-C1 (CRITICAL, hostile review 2026-07-23) -- the ORPHAN-BLOCK geometry.
+#
+# Fault injection found that mutations M10 (`_parse_block` stops reporting
+# strays) and M18 (`scan_evasions` skips every fenced line, not only classified
+# ones) each SURVIVED the 35-test suite -- not because either path is
+# unnecessary, but because they are mutually redundant. Applied together they
+# blind the harness to a column-0 fence whose every directive sits behind a
+# gutter: `check(strict)` reported 0 failures on a receipt with flatly false
+# pasted output, with the suite green. That is the founding incident, reachable
+# again.
+#
+# The founding artifact cannot catch it: all four of its blocks are
+# GUTTER-fenced, so `_evading_fences` -- a third path -- carries them. The
+# orphan geometry (column-0 fence, gutter-hidden contents) appeared in no test.
+#
+# So each path is asserted by the SHAPE only it can produce, never by "some
+# failure happened": the redundancy is exactly what let a single-path kill hide.
+# ---------------------------------------------------------------------------
+
+ORPHAN_BLOCK = (
+    "```\n"
+    "  # at 235421e56bfd328a7e913e519a1459ccf55918dc\n"
+    "  $ echo hidden\n"
+    "  999999\n"
+    "```\n"
+)
+
+
+def test_orphan_block_is_reported_by_the_scan_path(vr):
+    """Kills M18. The `orphaned` arm of `scan_evasions` is the only source of
+    `pin`/`command` here -- if it stops scanning unclassified fenced blocks,
+    these shapes disappear and only `stray-directive` remains."""
+    shapes = {(e.line, e.shape) for e in vr.scan_evasions(ORPHAN_BLOCK)}
+    assert (2, "pin") in shapes, shapes
+    assert (3, "command") in shapes, shapes
+
+
+def test_orphan_block_is_reported_by_the_block_path(vr):
+    """Kills M9. `blocks_yielding_nothing` had no positive assertion anywhere:
+    every test asserted `== []`, so a function returning `[]` unconditionally
+    satisfied the whole suite while the docstring called it the reconciliation
+    the founding incident failed to make."""
+    assert vr.blocks_yielding_nothing(ORPHAN_BLOCK) == [(1, 5)]
+
+
+def test_orphan_block_fails_strict_check(vr):
+    """Kills the M10+M18 compound end to end.
+
+    The pasted output is flatly false (`999999` for `echo hidden`). Under the
+    compound this reported `0 failure(s), 0 warning(s)` and would have exited 0.
+    """
+    _n, failures, _w = vr.check(ORPHAN_BLOCK, REPO, quiet=True, strict=True)
+    assert failures, "a receipt with false output inside an orphan block passed"
+    _n, _f, warnings = vr.check(ORPHAN_BLOCK, REPO, quiet=True, strict=False)
+    assert warnings, "nothing reported at all without --strict"
+
+
+def test_stray_directive_is_reported(vr):
+    """Kills M10. The only geometry where the stray path is the sole reporter.
+
+    The block DOES classify (it has a column-0 `$ ` receipt), so `scan_evasions`
+    trusts its interior and the `orphaned` arm never looks -- but the gutter-
+    hidden `# at` before the receipt is a directive `_parse_block` dropped, and
+    dropping it silently is how a pinned receipt becomes an unpinned one.
+    """
+    doc = (
+        "```\n"
+        "  # at 235421e56bfd328a7e913e519a1459ccf55918dc\n"
+        "$ echo ok\n"
+        "ok\n"
+        "```\n"
+    )
+    shapes = {(e.line, e.shape) for e in vr.scan_evasions(doc)}
+    assert (2, "stray-directive") in shapes, shapes
+    _n, failures, _w = vr.check(doc, REPO, quiet=True, strict=True)
+    assert failures, "a dropped pin directive must not pass"
+
+
+def test_blocks_yielding_nothing_reaches_check(vr):
+    """M9's second arm: the reconciliation must be enforced at runtime.
+
+    Before this it was called by nothing but the tests, so it could not fail a
+    real run no matter what it found.
+    """
+    shapes = {e.shape for e in vr.scan_evasions(ORPHAN_BLOCK)}
+    assert "unclassified-block" in shapes, shapes
+
+
+def test_extraction_seed_rejects_a_seed_that_removes_nothing(vr):
+    """Kills M5 -- the non-vacuity arm of `_extraction_seed`.
+
+    Deleting `if after >= before: ... INCONCLUSIVE` left the suite green, so the
+    extraction self-test could have "passed" on a seed that never removed a
+    receipt. That is the vacuous-pass class this campaign has shipped three
+    times; it gets an assertion of its own.
+    """
+    doc = "```\n# at " + PIN + "\n$ echo seeded\nseeded\n```\n"
+    assert vr._extraction_seed("no-op", doc, before=1) is False, \
+        "a seed that removes no receipt must be INCONCLUSIVE, not a pass"
+    assert vr._extraction_seed("no-op", doc, before=99) is False, \
+        "a seed reporting no evasion must fail, not pass"
+
+
+def test_self_test_chains_into_extraction(vr, monkeypatch):
+    """Kills M12. `self_test()` ends `return self_test_extraction(...)`.
+
+    Replacing that with `return True` left the suite green, because the
+    extraction test called `self_test_extraction` directly and
+    `test_harness_can_fail` only asserted `self_test` was truthy. `--self-test`
+    is what CLAUDE.md tells operators to run before trusting a green run; it
+    could have silently lost its entire H1 half.
+    """
+    doc = "```\n# at " + PIN + "\n$ echo one two\none two\n```\n"
+    called = []
+
+    def spy(text, root):
+        called.append(text)
+        return False
+
+    monkeypatch.setattr(vr, "self_test_extraction", spy)
+    result = vr.self_test(doc, REPO)
+    assert called, "self_test() did not chain into self_test_extraction()"
+    assert result is False, \
+        "self_test() must return the extraction seed's verdict, not its own"
+
+
+def test_four_backtick_inline_span_is_not_a_fence(vr):
+    """H1-M2. CommonMark: a backtick fence's info string may not contain a backtick.
+
+    ```` ```x``` ```` is a four-backtick INLINE code span -- the standard way to
+    write literal triple backticks in prose -- and `raw.startswith("```")` opened
+    a phantom block on it. A live instance is in
+    `docs/reviews/THREE-TIER-REDRAFT-REVIEW-2026-07-23-spec.md:478`. It cost a
+    real receipt: the second block stopped being parsed. It failed CLOSED
+    (`unterminated-fence`), so it was never green-while-blind -- but rejecting
+    legal Markdown with the wrong diagnosis is how authors learn to route around
+    a check.
+    """
+    tick4 = "`" * 4
+    doc = (
+        "```\n"
+        "# at " + PIN + "\n"
+        "$ echo one\n"
+        "one\n"
+        "```\n"
+        # The live instance is at COLUMN 0, which is what makes it look like a
+        # fence: the sibling review quotes the offending line verbatim.
+        + tick4 + "```\\n# at " + tick4 + " at column 0, so it also reported 34/34.\n"
+        "```\n"
+        "# at " + PIN + "\n"
+        "$ echo two\n"
+        "two\n"
+        "```\n"
+    )
+    receipts, unclassified, blocks = vr.parse(doc)
+    assert blocks == 2, f"parsed {blocks} blocks, expected 2"
+    assert [r.cmd for r in receipts] == ["echo one", "echo two"]
+    assert unclassified == []
+    assert vr.scan_evasions(doc) == [], \
+        [(e.line, e.shape) for e in vr.scan_evasions(doc)]
+    _n, failures, warnings = vr.check(doc, REPO, quiet=True, strict=True)
+    assert not failures and not warnings
 
 
 def test_self_test_proves_extraction_completeness(vr):

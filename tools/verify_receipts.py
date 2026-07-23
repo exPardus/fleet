@@ -165,17 +165,27 @@ SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
 # list bullet. Stripping this is how receipt-shaped text is RECOGNISED; it is
 # never how a block is PARSED (see the module docstring: shapes are rejected, not
 # absorbed). `tests/test_receipts.py` keeps its collection-time copy in sync.
-_GUTTER_RE = re.compile(r"^[ \t]*(?:>[ \t]*)*(?:[-*+][ \t]+|\d+[.)][ \t]+)?[ \t]*")
+# The trailing `(?:\*\*|__)?` strips one bold wrapper: `**$ cmd**` renders as a
+# command to a reader, and the bullet alternative does not catch it because that
+# arm requires whitespace after `-*+` (H1-m5).
+_GUTTER_RE = re.compile(
+    r"^[ \t]*(?:>[ \t]*)*(?:[-*+][ \t]+|\d+[.)][ \t]+)?[ \t]*(?:\*\*|__)?")
 _FENCE_MARK_RE = re.compile(r"^(?:`{3,}|~{3,})")
+# HORIZONTAL WHITESPACE, not literal spaces (H1-M1). `$<TAB>grep …` renders
+# identically to `$ grep …` in every Markdown renderer, and matching only ` `
+# meant such a line was neither parsed nor reported -- a silent skip, exit 0.
+# That is the H1 class again with a different whitespace byte.
+#
 # `$ ` followed by something: a bare `$ ` (the marker itself, which both enforced
 # specs name in prose) is not a command.
-_CMD_SHAPE_RE = re.compile(r"^\$ +\S")
+_CMD_SHAPE_RE = re.compile(r"^\$[ \t]+\S")
 # Deliberately narrow: the pin token must look like a pin. "Look at line 40" and
 # "a commit at 235421e" in prose do not start a line with `# at`, and requiring a
 # sha-or-moving-ref keeps a stray `# at the top` from tripping the check.
-_PIN_SHAPE_RE = re.compile(r"^# +at +(?:[0-9a-fA-F]{7,40}|HEAD|head|main|master)\b")
-_MARK_SHAPE_RE = re.compile(r"^# +(?:volatile|live)\b")
-_INLINE_CMD_RE = re.compile(r"`\$ +[^`\s][^`]*`")
+_PIN_SHAPE_RE = re.compile(
+    r"^#[ \t]+at[ \t]+(?:[0-9a-fA-F]{7,40}|HEAD|head|main|master)\b")
+_MARK_SHAPE_RE = re.compile(r"^#[ \t]+(?:volatile|live)\b")
+_INLINE_CMD_RE = re.compile(r"`\$[ \t]+[^`\s][^`]*`")
 
 _EVASION_DETAIL = {
     "gutter-fence": (
@@ -203,6 +213,10 @@ _EVASION_DETAIL = {
     "unterminated-fence": (
         "unterminated fence -- the block opened here is never closed, so "
         "everything after it is swallowed and parsed as neither block nor prose."),
+    "unclassified-block": (
+        "this fenced block holds receipt directives but yielded no receipt at "
+        "all. The founding incident's only tell was exactly this arithmetic -- "
+        "`34/34 receipts ... (37 fenced blocks)` -- and nobody reconciled it."),
 }
 
 
@@ -339,10 +353,31 @@ _DIRECTIVE_SHAPES = frozenset({"command", "pin", "marker"})
 _FENCE_SHAPES = frozenset({"gutter-fence", "tilde-fence"})
 
 
+def _is_fence(raw):
+    """Is this line a real column-0 backtick fence?
+
+    CommonMark: **a backtick fence's info string may not contain a backtick.**
+    That rule is what distinguishes an opening fence from a four-backtick INLINE
+    code span -- the standard way to write a literal ``` in prose. Testing only
+    `startswith("```")` opened a phantom block on such a span, which cost a real
+    receipt in `docs/reviews/THREE-TIER-REDRAFT-REVIEW-2026-07-23-spec.md:478`
+    (H1-M2). It failed closed (`unterminated-fence`), so it was never
+    green-while-blind -- but rejecting legal Markdown with the wrong diagnosis is
+    how authors learn to route around a check.
+    """
+    if not raw.startswith("```"):
+        return False
+    return "`" not in raw.lstrip("`")
+
+
 def _shape_of(degutterred):
     """The receipt shape of a gutter-stripped line, or None for prose."""
     if _FENCE_MARK_RE.match(degutterred):
-        return "tilde-fence" if degutterred[0] == "~" else "gutter-fence"
+        if degutterred[0] == "~":
+            return "tilde-fence"
+        # Same CommonMark rule as `_is_fence`: an inline span is not a fence,
+        # gutter or no gutter.
+        return "gutter-fence" if "`" not in degutterred.lstrip("`") else None
     if _CMD_SHAPE_RE.match(degutterred):
         return "command"
     if _PIN_SHAPE_RE.match(degutterred):
@@ -378,7 +413,7 @@ def parse_doc(text):
     doc = _Doc(text.splitlines())
     in_block, block, open_line = False, [], 0
     for n, raw in enumerate(doc.lines, start=1):
-        if raw.startswith("```"):
+        if _is_fence(raw):
             if in_block:
                 doc.blocks += 1
                 ok, bad, stray = _parse_block(block)
@@ -452,7 +487,7 @@ def scan_evasions(text):
         fenced.update(range(start, end + 1))
     shapes = {n: _shape_of(_GUTTER_RE.sub("", raw))
               for n, raw in enumerate(doc.lines, start=1)
-              if not raw.startswith("```")}     # a real fence is not a shape
+              if not _is_fence(raw)}            # a real fence is not a shape
     out = []
     if doc.unterminated is not None:
         out.append(Evasion(doc.unterminated, "unterminated-fence", "```"))
@@ -471,6 +506,13 @@ def scan_evasions(text):
         if m:
             out.append(Evasion(n, "inline-command", m.group(0)))
     out.extend(_evading_fences(doc, shapes, fenced))
+    # The block-level reconciliation, reported rather than merely computed. It
+    # was previously called by nothing but the tests, so it could not fail a real
+    # run no matter what it found (H1-M3). It deliberately overlaps the
+    # `orphaned` arm above: killing either path alone must still leave the
+    # geometry visible, which is the lesson of the M10+M18 compound.
+    for start, _end in blocks_yielding_nothing(text):
+        out.append(Evasion(start, "unclassified-block", doc.lines[start - 1]))
     seen = {e.line for e in out}
     for n, raw in doc.strays:
         if n not in seen:
@@ -656,15 +698,22 @@ def check(text, root, quiet=False, strict=False, skip_volatile=False,
         # Evasions are counted apart from the receipt fraction: they are not
         # receipts that failed, they are receipts that were never extracted, and
         # folding them in drove the numerator negative.
+        #
+        # The verdict gets its own line and never shares a sentence with the
+        # `N/N reproduce exactly` fraction (H1-m6). The old one-liner could read
+        # `34/34 parsed receipts reproduce exactly (… 16 FAILED)` -- a sentence
+        # that says green and red at once, which is precisely the shape of
+        # reassuring arithmetic nobody reconciled during the founding incident.
         bad = sum(1 for r, _ in failures + warnings if not isinstance(r, Evasion))
-        print(f"\n{total - bad - skipped}/{total} parsed receipts reproduce exactly "
+        print(f"\nparsed receipts: {total - bad - skipped}/{total} reproduce exactly "
               f"({blocks} fenced blocks, {len(unclassified)} unclassified, "
-              f"{skipped} volatile-skipped, {len(warnings)} warned, "
-              f"{len(failures)} FAILED)")
+              f"{skipped} volatile-skipped)")
         if evasions:
-            print(f"{len(evasions)} EVASION(S): receipt-shaped text the parser "
-                  f"never classified -- see the lines above. A document can have "
-                  f"every parsed receipt reproduce and still be unverified.")
+            print(f"NOT PARSED:      {len(evasions)} evasion(s) -- receipt-shaped "
+                  f"text the harness never classified. Every parsed receipt can "
+                  f"reproduce and the document still be unverified.")
+        print(f"VERDICT:         {'FAILED' if failures else 'pass'} -- "
+              f"{len(failures)} failure(s), {len(warnings)} warning(s)")
     return len(receipts), failures, warnings
 
 
@@ -698,7 +747,20 @@ def self_test(text, root):
             words[i] = w + "X" if w.isalpha() else "PARAPHRASED"
             break
     mutated_line = " ".join(words)
-    mutated_text = text.replace(line, mutated_line, 1)
+    # Seed the EXPECTED-OUTPUT line by index, not `text.replace(...)`. A receipt
+    # like `$ echo one two` / `one two` contains its own expected text inside the
+    # command, so a first-occurrence replace mutated the COMMAND instead -- the
+    # seed then failed for the wrong reason and the self-test reported that it
+    # could not catch a paraphrase it had never actually planted. Expected lines
+    # always follow their `$ ` line, so the search starts there.
+    doc_lines = text.splitlines()
+    idx = next((i for i in range(r.line, len(doc_lines))
+                if doc_lines[i] == line), None)
+    if idx is None:
+        print("SELF-TEST INCONCLUSIVE: could not locate the expected line to seed")
+        return False
+    doc_lines[idx] = mutated_line
+    mutated_text = "\n".join(doc_lines) + "\n"
     if mutated_text == text:
         print("SELF-TEST INCONCLUSIVE: mutation did not change the document")
         return False
