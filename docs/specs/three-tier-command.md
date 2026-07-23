@@ -156,13 +156,18 @@ This fixes where each piece lives:
   work"), and the shelved `--provider` flag (`docs/specs/providers.md`) does not change it.
 - **When a provider lacks a tier** (e.g. LongCat exposes one model, so `--model opus` has nothing to
   resolve to): the honest options are (a) **omit `--model`** and let the namespace's `ANTHROPIC_MODEL`
-  default govern — the LongCat doc's explicit instruction — or (b) **pass the alias and accept the
-  CLI's `model_not_found` refusal** at dispatch. This draft specifies **refusal is the safe default,
-  and fleet should pre-flight it**: a `[UNBUILT]` tier-resolution check that, before `sup-spawn`/`spawn`
-  dispatches with a tier alias, confirms the alias is resolvable in the active namespace and refuses
-  with a fleet-owned message rather than emitting a worker that dies `model_not_found` mid-turn. Absent
-  that check, the failure still surfaces (loudly, at the daemon) — it is degraded diagnosis, never
-  silent wrong-model execution. Tag: `[UNBUILT — owned by the three-tier build slice]`.
+  default govern — the LongCat doc's explicit instruction, and the **specified v1 behaviour** — or (b)
+  **pass the alias and accept the CLI's `model_not_found` refusal** at dispatch. Either way the failure
+  is loud (the daemon refuses at dispatch), never silent wrong-model execution.
+  **B8 reconciliation:** the earlier draft also recommended fleet *pre-flight* the tier-resolution, which
+  is in direct tension with this section's own boundary — to "confirm the alias is resolvable in the
+  active namespace" fleet would have to read that namespace's `ANTHROPIC_DEFAULT_*_MODEL`, the exact
+  provider-env surface §3.2 shows fleet does not have and this section argues it should not acquire (`grep
+  -c "CLAUDE_CONFIG_DIR\|ANTHROPIC_" bin/fleet.py` → 0, §3.2). So the pre-flight recommendation is
+  **dropped**: v1 relies on the daemon's own loud refusal, and fleet is **not** given a provider-env read
+  surface. A fleet-owned pre-flight would be a *deliberate new provider-env read surface*, priced as its
+  own scope (a `[UNBUILT]` that the boundary of this section argues against, not for) — recorded here so
+  the tension is resolved on the page rather than left for the reader to notice.
 
 ### 3.4 Worker-model policy: Opus or Sonnet, never Haiku
 
@@ -320,6 +325,56 @@ $ sed -n '8865,8866p' bin/fleet.py
   human-originated and scheduled beats deferred, **beat cost is not yet a problem to solve** — the
   split is recorded as the v2 answer (§9), not built.
 
+### 5.3 The split moves the fork-divergence class up to the interface tier — stated, mitigated, residual owned (B7, B10)
+
+**B7 (MAJOR).** claim-nonce protects the *supervisor* claim. The **interface** tier holds no claim by
+construction (§11.3: *"it never held the claim, so nothing transfers to it"*) and steers the supervisor
+with `fleet send`, which is **not** claim-gated — claim-nonce §4.2 enumerates the five
+`_require_claim_holder` callers and they are all `sup-*`; `send` is unguarded. So the 2026-07-16 incident
+1 class — a host-restart `--fork-session` of the manager conversation *"independently re-deriving and
+dispatching my decisions in paraphrase"* (claim-nonce §1.2) — is not removed by the split; it **moves up
+a tier**: a fork-resumed *interface* body carrying campaign context can re-derive and issue
+`fleet send supervisor …` steers, and the supervisor cannot tell two interface bodies apart (no claim,
+no nonce, `send` accepts either). The exposure is worst in the scenario the tiers exist for — the
+supervisor running unattended while the human is away, so no human notices the second interface body.
+
+`send` today records the *target's* sid in its event, **not** any caller/interface provenance:
+
+```
+# at 235421e56bfd328a7e913e519a1459ccf55918dc
+$ grep -n 'append_event("mail_sent"' bin/fleet.py
+3654:                append_event("mail_sent", name, sid=raw_sid, status="working")
+3710:            append_event("mail_sent", name, sid=sid, status=status)
+3767:    append_event("mail_sent", name, sid=old_sid, status="idle")
+```
+
+(All three `mail_sent` events carry the *target/worker* `sid`; none records the caller's — the
+interface-tier provenance B7's mitigation would add.)
+
+**Mitigation (`[UNBUILT — owned by the three-tier build slice]`), and its honest limit:** record
+**interface-caller provenance** on `send` — the caller's `CLAUDE_CODE_SESSION_ID` — into `events.jsonl`
+(`append_event` already takes `**fields`, so this is one keyword), and have the supervisor **surface a
+divergence warning** when briefs/steers for its campaign arrive from two distinct interface sids within
+a window. This is the interface-tier analog of the supervisor nonce, and it is deliberately *weaker*: the
+interface tier holds no claim **by design** (the human owns that tier), so this is *detection and
+surfacing*, never a refusal — the same shape as the 2026-07-17 adjudication's same-milestone candidate
+(*"caller provenance in `events.jsonl` + foreign-claim warn on `send`"*). **Residual, stated not
+buried:** full interface-fork *prevention* is out of v1 scope, because the tier that would need a claim
+is the one the operator's model keeps human and claimless; the v1 mitigations are the provenance warn
+above plus the operator-gate routing (§8, which keeps a divergent body from self-approving anything
+irreversible) plus the doctrine that a human talks only to the interface tier. §13 records this as a
+scoped non-goal rather than leaving the new top boundary silently unguarded.
+
+**B10 (MINOR) — the supervisor's dominant verb is exactly option-(b)'s accepted blind spot.** claim-nonce
+§2.2/§7 accept, as option (b)'s stated price, that a divergent body confining itself to **ungated** verbs
+(`send`, `spawn`, `kill`) is undetected. §5.1 makes the supervisor's core loop precisely that —
+dispatching workers via `fleet send`. So the design concentrates the supervisor's activity in the
+ratified gate's blind spot rather than in the `sup-*` verbs the nonce guards. This is **priced upstream**
+(claim-nonce's ratified option (b), not a new defect here), but it is recorded so the operator reads
+option (b)'s residual against the tier that *maximises* it: a zombie supervisor's most likely behaviour
+is send-only worker churn, which the gate does not catch — and the §8 operator-gate routing, not the
+nonce, is what bounds the damage such a body can do.
+
 ---
 
 ## 6. Item 6 — scheduler bridge through the platform adapter, generalized (largely SHIPPED)
@@ -449,12 +504,46 @@ $ sed -n '6033,6034p' bin/fleet.py
         raise FleetCliError("--autoclean-interval-hours must be 1..23 (schtasks /SC HOURLY /MO)")
 ```
 
-The autoclean scheduled task runs at most every 23h; the archive TTL is 24h. If the supervisor is a
-registry worker named `supervisor` and goes idle, its record crosses the 24h archive threshold and an
-autoclean pass (cadence ≤23h) archives/rm's it — deleting the running campaign's manager. **Resolution,
-by construction:** the supervisor record is **exempt from both the archive TTL pass and the daemon-husk
-sweep**, keyed on its reserved name. This is `[UNBUILT — owned by the three-tier build slice]`: today's
-archive is registry-worker-only with no name exemption —
+The autoclean scheduled task runs at most every 23h; the archive TTL is 24h. If the supervisor's
+registry record goes idle, it crosses the 24h archive threshold and an autoclean pass (cadence ≤23h)
+archives/rm's it — deleting the running campaign's manager. **Resolution, by construction:** the
+supervisor record is **exempt from both the archive TTL pass and the daemon-husk sweep**.
+
+> **B1 fix (CRITICAL — the exemption must not be keyed on a static name).** The first-generation
+> supervisor is spawned by `sup-spawn` under the name `supervisor` (§10.3), but the operator's model
+> respawns and hands it off "constantly" (§1), and the shipped handoff dispatches its successor under a
+> **pipe-delimited** name, `f"sup|{successor_inc}|successor"`, which nothing renames back to
+> `supervisor` — `sup-handoff-complete` transfers the INCARNATION claim only, and registry records are
+> independent:
+>
+> ```
+> # at 235421e56bfd328a7e913e519a1459ccf55918dc
+> $ sed -n '8522p' bin/fleet.py
+>     name = f"sup|{successor_inc}|successor"
+> ```
+>
+> So a `name == "supervisor"` equality protects generation 0 and **no successor** — after the first
+> swap (which §11's 150–200k band makes routine, not exceptional) the live claim-holder runs under
+> `sup|<inc>|successor`, the exemption misses it, and the 24h-vs-23h collision is live again against the
+> actual running manager. **The exemption is therefore keyed on *is this record the current live
+> supervisor claim-holder*, under any name, not on a static registry name.**
+
+**The predicate**, `[UNBUILT — owned by the three-tier build slice]`: a record is protected iff its
+`session_id` (or a member of its `retired_sids`) equals `supervisor/INCARNATION`'s
+`incarnation_id`-body — i.e. the record is the body that currently holds the claim — **and that body is
+roster-live**. Concretely: read `read_incarnation()`; protect the registry record whose live sid is the
+claim's restamped `session_id` (claim-nonce restamps `session_id` on every validated `sup-*` write, so
+the claim tracks the acting body). Two directions, both mandatory:
+
+- **Protects the running manager under any name** (closes B1): a successor named `sup|<inc>|successor`
+  that holds the claim and is roster-live is exempt.
+- **Stops protecting a dead husk** (closes B9, MINOR): a supervisor record that is roster-gone and whose
+  body no longer holds the claim (seized/released away) is **not** exempt — it is an ordinary husk and
+  the sweep removes it. A static-name exemption would have protected dead husks forever; the
+  live-claim-holder predicate does not. B1 and B9 are the same fix in opposite directions.
+
+Today's archive is registry-worker-only with **no** exemption of either kind, and the reserved name it
+would key on does not exist:
 
 ```
 # at 235421e56bfd328a7e913e519a1459ccf55918dc
@@ -465,13 +554,13 @@ def _archive_eligible(name: str, record: dict, roster_entries: list, now,
     naming the FIRST failed gate (binding order, task-9-brief.md):
 ```
 
-— so the build adds a first gate to `_archive_eligible` **and** to `_sweep_husks` (@5568):
-`name == SUPERVISOR_BODY_NAME ⇒ (False, "supervisor record is protected by construction")`. Note the
-supervisor's *claim* (`supervisor/INCARNATION`) and its `supervisor/JOURNAL.md` already live outside the
-archive path (archive moves `state/outcomes|journals|tasks/<name>` and the roster entry, not the
-top-level `supervisor/` dir), so only the supervisor's **registry/outcome** footprint needs the
-exemption — but that footprint is exactly what a husk sweep would rm, so the exemption is mandatory, not
-belt-and-braces.
+So the build adds a first gate to `_archive_eligible` **and** to `_sweep_husks` (@5568):
+*the record is the current live claim-holder ⇒ `(False, "supervisor claim-holder — protected while
+live")`*. Note the supervisor's *claim* (`supervisor/INCARNATION`) and its `supervisor/JOURNAL.md`
+already live outside the archive path (archive moves `state/outcomes|journals|tasks/<name>` and the
+roster entry, not the top-level `supervisor/` dir), so only the supervisor's **registry/outcome**
+footprint needs the exemption — but that footprint is exactly what a husk sweep would rm, so the
+exemption is mandatory, not belt-and-braces.
 
 ### 7.3 Heartbeat decoupled from beat period — stated
 
@@ -684,15 +773,58 @@ does not. The rule (`[UNBUILT]`):
   `respawn` that silently re-claimed would reintroduce the two-bodies hole. The old body gets a
   tombstone (native-substrate G10: `claude stop` fires no Stop hook, so the verb writes its own outcome
   record) **and** the claim transition is journaled.
-- **`kill supervisor`** = terminate the body **and release the claim**. A `kill` that stopped the body
-  but left `supervisor/INCARNATION` held would freeze every successor (claim-nonce incident 3 exactly:
-  roster-gone + fresh heartbeat = `freeze`, and the manual `rm INCARNATION` was the only lever). So
-  `kill supervisor` must either `sup-release` first (rewriting INCARNATION as `released`, claim-nonce
-  §6.3, so the successor boots clean) or the operator accepts the bounded-freeze-then-seize recovery.
-  Design rule: `kill supervisor` performs the release-then-stop sequence, and owes a tombstone like any
-  stop-shaped verb.
-- Both reuse the existing native tombstone obligation (native-substrate G10) — this spec adds the claim
-  half (release/transition), not a new stop mechanism.
+- **`kill supervisor`** = terminate the body **and release the claim** — but the release cannot be
+  performed *by the killer*, and B5 (MAJOR) is the correction of the earlier draft's rule that said it
+  could. `kill supervisor` is an interface/operator verb; the killer is **not** the supervisor body, and
+  `sup-release` requires continuity proof — the holder's current nonce — which a different session does
+  not have, and claim-nonce §6.3 **deleted** the non-continuity escape (`--force --confirm-inc`).
+  `sup-release` does not exist yet and, when built, needs continuity:
+
+  ```
+  # at 235421e56bfd328a7e913e519a1459ccf55918dc
+  $ grep -c "sup-release\|cmd_sup_release" bin/fleet.py
+  0
+  ```
+
+  So the honest design rule (`[UNBUILT]`), in two arms:
+  - **Body responsive:** `kill supervisor` **steers the body to release itself** — it delivers a
+    `sup-release` turn to the supervisor (which holds its own nonce), waits for the record to read
+    `released`, then stops the body. This is a *graceful stop*, not an unattended kill, and the successor
+    boots clean off the `released` record.
+    ⚠ but see the B6 window below — the stop must complete before any successor consumes the record.
+  - **Body unresponsive / already gone:** self-release is impossible, so `kill supervisor` falls to the
+    **bounded-freeze-then-seize** recovery — claim-nonce incident 3 exactly (roster-gone + fresh
+    heartbeat ⇒ `freeze`) until the heartbeat ages past `SUPERVISOR_CLAIM_STALE_SECONDS = 3600s`, then a
+    successor `seize`s. This is a real up-to-one-hour recovery hole, and the design **accepts and
+    documents it** for this arm rather than pretending the killer can release. `kill` writes the G10
+    tombstone for this path (a `claude stop` on a not-yet-ended session fires no Stop hook, §4.1).
+  - Both arms reuse the native tombstone obligation (G10); this spec adds the claim half (self-release
+    steer, or documented bounded-freeze), not a new stop mechanism, and never a killer-side release the
+    caller cannot perform.
+
+**B6 (MAJOR) — the release→stop window and claim-nonce boot rule 1.** claim-nonce §6.1 checks rule 1
+(`state == "released" ⇒ claim` fresh) **ahead of** rule 2 (roster-liveness refuse) and with **no
+roster-liveness precondition**. So during any `release → stop` window — the planned `sup-release`
+doctrine (claim-nonce §6.3) *and* the graceful-`kill` arm above — INCARNATION reads `released` while the
+old body is still roster-**live**, and any session that runs `sup-boot` in that window is granted a
+fresh claim while the predecessor is still executing: the 2026-07-16 dual-live-body class reappears.
+claim-nonce blesses this ordering only for the *manual, single-operator, serial* case; three-tier adds
+**automated** occupants of the window — the v2 scheduled `fleet beat`, a `sup-spawn`, an in-flight
+handoff successor polling `sup-boot`. `one-live-session-per-name` (SPEC §16.7) blocks a second
+`supervisor`-named spawn but **not** a `sup-boot` from an already-live differently-named session (the
+interface, a successor). **This spec does not own the boot verdict order** (claim-nonce does), so it
+states the constraint and files the guard as a **claim-nonce build-slice prerequisite**, exactly as
+§10.2 files the `FLEET_WORKER` refusal:
+
+> **Prerequisite (owned by the claim-nonce build slice, not this one):** `sup-boot` must not consume a
+> `released` record whose `released_by_sid` is still roster-live — either rule 1 gains a roster-liveness
+> precondition, or release+stop is made atomic from the claim's perspective (the record is never left
+> `released`-and-live). Until that guard exists, three-tier's automated callers (`sup-spawn`, the v2
+> scheduled beat, the handoff successor) **must gate their own `sup-boot` on `released_by_sid not in
+> live_sids`** — the graceful-`kill` arm above is only safe once the old body is confirmed roster-gone.
+
+This is why the graceful-`kill` arm's ⚠ is load-bearing: "stop the body, *then* let a successor boot"
+is the ordering that keeps the window shut.
 
 ---
 
@@ -706,8 +838,16 @@ the current *urgent* task first (no new work). Handoff ritual = the existing sup
 ### 11.1 The band replaces the drafted 300–500k band
 
 The drafted band was 300–500k; the operator's is **150–200k**. This spec adopts 150–200k everywhere.
-`skills/fleet/supervisor.md` still quotes the old 300–500k band — that is a **doc-sync collision**
-(§12), not a change this write-set makes.
+**Three** live user-facing surfaces still quote the old 300–500k band — `skills/fleet/supervisor.md`,
+`skills/fleet/SKILL.md` (the `sup-handoff` command row), and `docs/SPEC.md §6` (the Handoff row) — all
+**doc-sync collisions** (§12), not changes this write-set makes:
+
+```
+# at 235421e56bfd328a7e913e519a1459ccf55918dc
+$ grep -c "500k" skills/fleet/SKILL.md docs/SPEC.md
+skills/fleet/SKILL.md:1
+docs/SPEC.md:1
+```
 
 ### 11.2 Measurement source — stated with a receipt, and it is inadequate
 
@@ -725,9 +865,17 @@ $ sed -n '220,223p' bin/hooks/stop_outcome.py
                   "model": model, "transcript_path": transcript_path}
 ```
 
-It records neither the cumulative context occupancy nor `cache_read_input_tokens` (the field that
-actually tracks how full a session's context window is — native-substrate: *"session context
-(`cache_read_input_tokens`) provably continuous across beats"*):
+It records neither the cumulative context occupancy nor any of the three per-turn prompt-token
+summands. **B2 correction:** context-window occupancy is not a single field — Anthropic per-turn usage
+splits the prompt three ways, `input_tokens` (uncached) **+** `cache_creation_input_tokens` **+**
+`cache_read_input_tokens`, and occupancy is the **sum of all three**. `cache_read_input_tokens` alone is
+the substrate's *continuity* signal (does the cached prefix persist across a beat —
+native-substrate: *"session context (`cache_read_input_tokens`) provably continuous across beats"*),
+**not** an occupancy figure; the earlier draft mis-cited that continuity line as if it justified an
+occupancy formula, and dropped `cache_creation_input_tokens` — the one term that grows on exactly the
+supervisor's characteristic turn (a large read, a fresh worker digest folded in). On a single 40–60k
+creation turn that omission understates occupancy enough to skip the band-entry trigger. The stop hook
+records none of the three cache fields:
 
 ```
 # at 235421e56bfd328a7e913e519a1459ccf55918dc
@@ -743,33 +891,82 @@ $ grep -c "cache_read\|context_tokens\|context_window" bin/fleet_statusline.py
 0
 ```
 
-**So there is no adequate shipped source for a supervisor to read its own context occupancy.**
-`[UNBUILT — owned by the three-tier build slice]`, smallest additive mechanism:
+**So there is no adequate shipped source for a supervisor to read its own context occupancy**, and (B3)
+no rotation-safe way for it to even *find its own current transcript* — every candidate key is unsafe in
+exactly the conditions the band matters. `INCARNATION.session_id` is **stale after any fork-steer**
+(claim-nonce §4.5: the three sid-rotation writers are registry-only and *"none touches
+`supervisor/INCARNATION`"*, and §5.10(a) keeps it so), and a v1 beat *is* an interface fork-steer (§5.1)
+— so resolving through it reads the **retired** body's context. The current turn's outcome record
+**does not exist yet** (it is written by the Stop hook, which has not fired mid-turn), and immediately
+after a fork-steer there is no record for the new sid at all. The registry record has a fresh sid but an
+unstable *name* (B1). `[UNBUILT — owned by the three-tier build slice]`, smallest additive mechanism —
+built to be rotation-safe:
 
-- The supervisor reads **its own** transcript tail's `message.usage.cache_read_input_tokens +
-  input_tokens` — the live context-occupancy figure — at each `fleet beat` / checkpoint boundary. The
-  transcript path is already in every outcome record (`transcript_path`, receipt above), so no new
-  capture channel is needed; the additive part is a `fleet sup-context` helper (or a field on
-  `sup-status --json`) that parses that one number, plus the two thresholds (150k → hand off at next
-  boundary; 200k → hand off after the current urgent task, no new work).
-- This is a **read**, not a hook: the supervisor is the actor that must decide, and it decides at a
-  checkpoint boundary, so a pull at that boundary is the right shape (consistent with poll-on-beat,
-  §9). No always-on cost.
-- Adding `cache_read_input_tokens` to the Stop-hook outcome record is the belt-and-braces version (so a
-  *third party* — the interface tier via `sup-status` — can also see the supervisor approaching the
-  band), and is the same one-line additive-schema change; recorded so the build does both reads from one
-  source.
+- **Resolve the transcript from the running process's own `CLAUDE_CODE_SESSION_ID`**, the one key
+  guaranteed fresh for the actor doing the reading: the daemon sets it to the child's *own* sid
+  (native-substrate G4), and `current_caller_session()` is exactly that read:
 
-### 11.3 The band drives the existing handoff, unchanged
+  ```
+  # at 235421e56bfd328a7e913e519a1459ccf55918dc
+  $ sed -n '826,827p' bin/fleet.py
+      sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
+      return sid or None
+  ```
 
-Entering 150k → the supervisor hands off *at the next wave/task boundary*; past 200k → hand off after
-the current urgent task, no new work. Both use the shipped sup-handoff machinery (claim-nonce §6.4:
-`sup-handoff-begin` mints a token, the successor boots via `sup-boot --handoff-inc --handoff-token`,
-`sup-handoff-complete` verifies the token). This spec adds **when** to trigger it (the band), not a new
-handoff. The successor document + hand-control-back-to-interface is the existing ritual; the interface
-session is the tier that receives control (it never held the claim, so nothing transfers to it — it
-resumes steering the fresh supervisor body). No new mechanism; a `[UNBUILT]` threshold check in
-`fleet beat` / checkpoint that emits the hand-off directive when occupancy crosses each threshold.
+  So a `[UNBUILT]` `fleet sup-context` helper, **run by the supervisor itself**, reads its own sid from
+  the environment, locates its transcript file directly (by sid, not via an outcome record), and returns
+  **occupancy = `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`** from the last
+  assistant `message.usage` (the B2-correct sum), plus the two thresholds (150k / 200k).
+- **Specify the absent/stale return: fail toward the band.** If the transcript is missing, unpariseable,
+  or the last usage record is older than the current turn, the helper returns **"assume near-band, hand
+  off at the next boundary"** — the safe direction for a ceiling nobody else enforces (this composes with
+  B4's hard ceiling below). Never returns "plenty of room" on missing data.
+- This is a **read**, not a hook, run at a `fleet beat` / checkpoint boundary (consistent with
+  poll-on-beat, §9) — no always-on cost.
+- **Belt-and-braces:** add `cache_creation_input_tokens` **and** `cache_read_input_tokens` to the
+  Stop-hook outcome record (additive schema) so a *third party* — the interface tier via `sup-status`,
+  or B4's fleet-side ceiling — can also read the supervisor's occupancy without being the supervisor.
+  This is the same one additive-schema change; the outcome record then carries all three summands, not
+  the `cache_read`-only half the earlier draft named.
+
+### 11.3 The band drives the existing handoff — with a decidable, fleet-enforced ceiling (B4)
+
+The operator requirement **stands and is not weakened** (manager ruling, 2026-07-23): 150k → hand off at
+the next wave/task boundary; 200k → finish the current urgent task, no new work. B4's defect is that the
+earlier draft made this *self-enforced discretion* over an *undefined* "urgent" — a supervisor whose
+judgement is degrading under context pressure (the exact condition the band exists to catch) could label
+every next task "the current urgent task" and never cross into hand-off. The fix makes the ceiling
+**decidable** and **fleet-enforced**, not a directive the pressured actor may ignore:
+
+- **"Urgent" is replaced by a decidable predicate fleet can read**: *work already dispatched and not yet
+  reconciled* — i.e. a wave whose worker turns are in flight (roster-live or awaiting an outcome record).
+  Finishing that is bounded (the workers were already spawned); it is a state fleet reads, not a
+  self-asserted importance label. Nothing else qualifies as "the current urgent task."
+- **200k is a hard, enforced ceiling, not a directive.** At and above a fixed `H` (the 200k band top),
+  `fleet spawn`/`fleet send` **refuse to start new worker turns** for a supervisor caller — leaving only
+  the handoff verbs (`sup-handoff-begin/complete/abort`) and reconcile-of-in-flight-work. The enforcement
+  reuses B3's rotation-safe resolution: the dispatch verb reads the **caller's** own
+  `CLAUDE_CODE_SESSION_ID` (fresh for the acting body, §11.2 receipt), resolves the caller's live
+  transcript, computes the B2-correct occupancy, and refuses above `H`. So "zero new dispatches past
+  200k" is a fleet refusal, not supervisor good behaviour. `[UNBUILT — owned by the three-tier build
+  slice]` — no such ceiling exists today:
+
+  ```
+  # at 235421e56bfd328a7e913e519a1459ccf55918dc
+  $ grep -c "sup-context\|supervisor-beat.jsonl\|_doctor_check_supervisor_beat" bin/fleet.py
+  0
+  ```
+
+- **150k is the soft trigger** (hand off at the next wave/task boundary): the `[UNBUILT]` `fleet beat` /
+  checkpoint check (§5.2) emits the hand-off directive when occupancy first crosses 150k, and the
+  supervisor completes the current wave, then hands off. Between 150k and `H` the supervisor may finish
+  in-flight work but the directive is standing; at `H` the refusal makes it unconditional.
+- **The handoff itself is unchanged** — the shipped sup-handoff machinery (claim-nonce §6.4:
+  `sup-handoff-begin` mints a token, the successor boots via `sup-boot --handoff-inc --handoff-token`,
+  `sup-handoff-complete` verifies the token). This spec adds only **when** to trigger it (the decidable
+  band) and the **fleet-side refusal** that enforces the ceiling. The successor document +
+  hand-control-back-to-interface is the existing ritual; the interface session receives control (it never
+  held the claim, so nothing transfers to it — it resumes steering the fresh supervisor body).
 
 ---
 
@@ -778,12 +975,16 @@ resumes steering the fresh supervisor body). No new mechanism; a `[UNBUILT]` thr
 Every file below carries text this spec obsoletes or must be reconciled with; **this task edits none of
 them** — listed for the build slice / a doc-sync pass:
 
-- **`skills/fleet/supervisor.md`** — quotes the drafted **300–500k** swap band; must become **150–200k**
-  (§11.1). Also gains the tier-model doctrine (§3) and the swap-trigger rule (§11.3).
+- **`skills/fleet/supervisor.md`** — quotes the drafted **300–500k** swap band (`:51`); must become
+  **150–200k** (§11.1). Also gains the tier-model doctrine (§3) and the swap-trigger rule (§11.3).
+- **`skills/fleet/SKILL.md`** (S1) — the `sup-handoff` command row (`:44`) states *"Trigger band: begin
+  ~300k tokens, hard-latest 500k"*; a user-facing skill table (sibling of `supervisor.md`) that a
+  literal §12 pass would otherwise leave stale. Must become 150–200k.
 - **`supervisor/GOALS.md`** — must carry the role→tier table (§3.1), the worker-model allowlist
   (Opus/Sonnet-only, §3.4), the bypass-permission acknowledgement (§10.2), and the swap band. It is the
   operator-owned policy surface this spec routes configurability to.
-- **`docs/SPEC.md`** — §4 registry (a `supervisor`-named worker record + reserved-name rule); §6 the new
+- **`docs/SPEC.md`** — the **Handoff row (`:261`) carries the obsoleted 300–500k band** (S1) and must
+  become 150–200k; §4 registry (a `supervisor`-named worker record + reserved-name rule); §6 the new
   `sup-spawn` choke-point; a new scheduled-task family beyond autoclean (§6); the operator-gate state
   file (§8). Fold in when built.
 - **`docs/specs/autoclean.md`** — the generic scheduler adapter now serves a second task family
@@ -806,6 +1007,14 @@ them** — listed for the build slice / a doc-sync pass:
   — all owned by `claim-nonce.md`; this spec consumes them and must not redefine them.
 - **Not per-worker provider mixing.** A shared-daemon architecture limit (§3.3), not a fleet choice.
 - **Not the scheduled beat.** Deferred to v2 by the 2026-07-23 operator decision (§9.1).
+- **Not interface-fork *prevention* in v1 (B7).** The split moves the 2026-07-16 fork-divergence class up
+  to the interface tier (§5.3), and preventing it would require a claim on the tier the operator's model
+  keeps human and claimless. v1 *detects and surfaces* interface-body divergence (provenance warn on
+  `send`, §5.3) and bounds its blast radius (operator-gate routing, §8); full prevention is out of scope
+  and stated here so the new top boundary is not silently unguarded.
+- **Not a fleet provider-env read surface (B8).** Fleet emits a tier alias and lets the daemon resolve
+  it; it does not read `ANTHROPIC_DEFAULT_*_MODEL` / `CLAUDE_CONFIG_DIR` (§3.3). No tier-resolution
+  pre-flight in v1.
 - **Not building during the design gate.** This is a `drafting` spec; the build slice starts only after
   a fresh dual-lens gate and operator ratification.
 
