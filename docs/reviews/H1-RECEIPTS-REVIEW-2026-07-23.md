@@ -513,3 +513,290 @@ than 35 tests implies, and two regexes are imprecise.
 ---
 
 **`fix-list(H1-C1, H1-M1, H1-M2, H1-M3, H1-m1, H1-m2, H1-m3, H1-m4)`**
+
+---
+---
+
+# r2 — confirmation pass
+
+**Under review:** `07d965d` "fix: close H1 fix-list — orphan-block geometry, tabs, inline spans
+(H1-C1..m6)" and `a9e1e4e` "test: isolate the _extraction_seed non-vacuity guard (H1-m3 / M5)",
+merged up into `mf/h1-review` (fast-forward from `aed88b0`).
+
+**Vantage.** Same worktree and interpreters as r1. Fresh scratch detached worktree at `a9e1e4e`
+for all fault injection; removed at the end; review worktree clean throughout.
+
+**Every RED proof below was re-executed by me.** No result is carried over from the builder's
+report, and none of r1's own numbers were reused — the founding artifact was re-extracted from
+git and re-run, and the false-positive sweep was re-run from scratch.
+
+## r2 verdict — **fit for main**
+
+The wave closes every item on the r1 fix-list. All six mutations that survived r1 now go RED,
+**and the M10+M18 compound that was the critical finding is dead.** No test was weakened or
+deleted; both interpreters are green; the founding artifact still goes red at 16; the enforced
+corpus still has zero false positives — and three pre-existing false positives elsewhere in the
+repo are now gone.
+
+The residue is three MINOR items and two INFO notes, none blocking: two regexes whose tab support
+is real but untested (one because a fixture is misnamed), and one narrow *new* false positive
+bought by the lowest-priority fix on the list.
+
+**`sound`**
+
+---
+
+## Disposition of H1-C1 … H1-m6
+
+| id | r1 severity | disposition | evidence |
+|----|-------------|-------------|----------|
+| **H1-C1** | CRITICAL | **FIXED** | M10 RED, M18 RED, **compound MC RED** |
+| **H1-M1** | MAJOR | **FIXED** (coverage incomplete — see R2-1/R2-2) | M24 RED, M26 RED; M25 + M27 survive |
+| **H1-M2** | MAJOR | **FIXED** | M21 RED, M22 RED; 3 live FPs cleared repo-wide |
+| **H1-M3** | MAJOR | **FIXED**, beyond what I asked | M9 RED (2 tests), M23 RED |
+| **H1-m1** | MINOR | **FIXED** | M14 RED |
+| **H1-m2** | MINOR | **FIXED** | M10 RED |
+| **H1-m3** | MINOR | **FIXED** | M5 RED |
+| **H1-m4** | MINOR | **FIXED** | M12 RED |
+| **H1-m5** | MINOR | **FIXED**, at the cost of R2-3 | M29 RED |
+| **H1-m6** | INFO | **FIXED** (untested — R2-4) | M30 survives |
+| **H1-i1** | INFO | **NOT ADDRESSED** — `portability.md` untouched by this wave | diffstat: tests + tool only |
+
+No **NOT-FIXED**, no **REGRESSED**, no **SPURIOUS-FIX**. H1-i1 was a recommendation about a
+`[SUPERSEDED]` spec, explicitly the spec owner's call, and I do not hold the merge on it.
+
+### H1-C1 — fixed, and fixed for the right reason
+
+The critical finding was not "a path is missing" but "two paths are mutually redundant, so
+killing either alone hides nothing." The wave's tests assert **each path by the shape only that
+path can produce**, rather than by "some failure happened" — which is the one construction that
+survives the redundancy:
+
+```
+RED      M10: _parse_block stops reporting stray gutter-hidden directives
+         FAILED test_stray_directive_is_reported - AssertionError: set()
+RED      M18: scan_evasions skips every fenced line, not just classified
+         FAILED test_orphan_block_is_reported_by_the_scan_path - AssertionError: {(1, 'unclassified-block'), (2, 'stray-directive'), (3, 'st…
+RED      MC: COMPOUND M10+M18 (r1's critical blinding)
+         FAILED test_orphan_block_is_reported_by_the_scan_path - AssertionError: {(1, 'unclassified-block')}
+         FAILED test_stray_directive_is_reported - AssertionError: set()
+```
+
+Note the compound's failure output: with both paths dead, `unclassified-block` — the third,
+newly-wired path from the H1-M3 fix — is the only shape left standing. The wave did not merely
+add a test for the geometry; it added a **third independent reporter**, so the compound now needs
+three simultaneous kills instead of two. That is a better answer than the one I asked for.
+
+### H1-M2 — verified against live data, not just fixtures
+
+The repo-wide sweep is the real check, and it moved in exactly the right direction:
+
+| file | r1 | r2 |
+|------|----|----|
+| `THREE-TIER-REDRAFT-REVIEW-2026-07-23-spec.md` | 1 (`unterminated-fence`) | **0** |
+| `H1-RECEIPTS-REVIEW-2026-07-23.md` (this file) | 4 | **2** |
+| other three review files | 15 | 15 (unchanged, all correctly classified) |
+
+Three false positives on legal Markdown cleared, none introduced. The two remaining hits in this
+file are the `inline-command` class — prose quoting the receipt grammar — which is a known
+unenforced-scope cost, not a regression.
+
+### H1-M3 — fixed harder than filed
+
+I asked for a positive assertion. The wave added that *and* wired `blocks_yielding_nothing` into
+`scan_evasions` as a new `unclassified-block` evasion shape, so the reconciliation now fails a
+real run rather than only a test. That is the correct reading of the finding.
+
+---
+
+## New findings against the wave's own changes
+
+Four fixes are four new places to mint a defect. Ten new mutations (M21–M30) plus targeted probes.
+**14 RED / 3 SURVIVED** across all 17 mutations run this pass.
+
+### R2-1 (MINOR) — the `tab-pin` fixture contains no tab in its pin
+
+`M25` (revert `_PIN_SHAPE_RE` to literal spaces) **survives the 49-test suite.** The cause is a
+mislabeled fixture:
+
+```
+=== M25: does the 'tab-pin' fixture actually contain a tab in the PIN? ===
+fixture repr: '# at 235421e56bfd328a7e913e519a1459ccf55918dc'
+  -> tab in the pin line? False
+REAL tab pin repr: '#\tat 235421e56bfd328a7e913e519a1459ccf55918dc'
+  shapes: [(1, 'pin'), (2, 'command')]
+  -> capability EXISTS; question is whether any test holds it
+```
+
+`EVASION_SHAPES["tab-pin"]` pins with **spaces**; only its command carries a tab. So it is a
+second `tab-command` test wearing the pin's name, and `_PIN_SHAPE_RE`'s `[ \t]+` is unheld. The
+behaviour is correct — a real tab-separated pin is detected — only the coverage is absent. This is
+the thinnest kind of coverage gap: a test that reads as protecting something it does not touch.
+
+**Fix:** make the fixture's first line a genuine tab-separated pin.
+
+### R2-2 (MINOR) — inline-command tab support is untested
+
+`M27` (revert `_INLINE_CMD_RE` to literal spaces) **survives.** The capability is real — an inline
+span with a tab after the sigil reports `[(1, 'inline-command')]` — but no fixture exercises it.
+**Fix:** one more entry in `EVASION_SHAPES`.
+
+### R2-3 (MINOR) — H1-m5's bold strip buys a new false positive
+
+The bold arm added to `_GUTTER_RE` applies at line start, and it makes ordinary prose trip:
+
+```
+=== line STARTING with bold (where the new strip applies) ===
+  '**$ 5 per month** is the cost.' -> [(1, 'command')]
+  '**$5 per month** is the cost.'  -> []
+  '**$ echo ok**'                  -> [(1, 'command')]
+  '__$ echo ok__'                  -> [(1, 'command')]
+```
+
+A line beginning with a bolded dollar amount written with a space after the sigil is now an
+evasion. The pre-wave code did not do this. The surface is narrow — it needs line-start bold,
+sigil, whitespace, then a non-space, and the common no-space form is safe — and there is no live
+instance anywhere in the repo. But H1-m5 was the lowest-priority item I filed (a bold-wrapped
+command is an unusual way to write a receipt), and it has now bought a false-positive class in
+exchange. **By my own r1 standard — a false positive on legitimate text trains people to weaken
+the check — this trade is roughly neutral at best.** I would accept either keeping it or reverting
+H1-m5; what I would not accept is leaving it untested, and `M29` confirms it is tested.
+
+### R2-4 (INFO) — the report format has no test
+
+`M30` (delete the `VERDICT:` line entirely) **survives.** The H1-m6 fix is real and is a genuine
+improvement — the old one-liner could say `34/34 … reproduce exactly (… 16 FAILED)`, a sentence
+that reads green and red at once; the new report separates them onto three lines with the verdict
+on its own. But nothing asserts it, so the operator-facing summary can silently regress to the
+shape that caused the founding incident's misreading. Low severity — the exit code and the API
+return are both tested — and I note it rather than press it.
+
+### R2-5 (INFO, forward-looking) — `unclassified-block` widens what fails a run
+
+Wiring `blocks_yielding_nothing` into `scan_evasions` (the H1-M3 fix, which I asked for) converts
+a test-only reconciliation into a runtime failure. That is correct, and there is no live instance
+— zero evasions across all 18 files in the enforced directories. But it does widen the failure
+surface, so it is worth knowing where the edge sits. It is narrower than it first looks:
+
+```
+=== placeholder pin inside an illustrative fence (does it trip?) ===
+  '# at <sha>'            -> []
+  '# at YOUR_SHA_HERE'    -> []
+  '# at 235421e…18dc'     -> [(1, 'unclassified-block'), (2, 'pin')]
+```
+
+Only a **real hex sha** in a fence with no command line trips it; placeholder syntax in
+documentation is safe. A block carrying a real pin and no command genuinely is the
+founding-incident tell, so this is correct by design — recorded so nobody is surprised when a
+future spec that illustrates the format with a real sha goes red.
+
+### Bonus: a real bug the builder self-found
+
+Not on my fix-list. `self_test` seeded its paraphrase with a first-occurrence `str.replace`; for a
+receipt whose expected output also occurs **inside its own command** (`$ echo one two` / `one
+two`), that mutated the command instead of the output — the self-test then failed for the wrong
+reason and reported it could not catch a paraphrase it had never planted. Now seeded by line index
+from the command forward. `M28` (revert to the replace form) goes RED, so it is held. Good catch,
+and the failure mode — a seed test that lies about *what* it seeded — is squarely in this
+campaign's recurring class.
+
+---
+
+## r2 mutation table — 17 run, 14 RED, 3 SURVIVED
+
+| id | mutation | r1 | r2 |
+|----|----------|----|----|
+| M5 | neuter non-vacuity assert in `_extraction_seed` | SURVIVED | **RED** `test_extraction_seed_rejects_a_seed_that_removes_nothing` |
+| M9 | `blocks_yielding_nothing` always empty | SURVIVED | **RED** ×2 |
+| M10 | `_parse_block` stops reporting strays | SURVIVED | **RED** `test_stray_directive_is_reported` |
+| M12 | `self_test` no longer chains | SURVIVED | **RED** `test_self_test_chains_into_extraction` |
+| M14 | `_MARK_SHAPE_RE` never matches | SURVIVED | **RED** ×2 (`marker-only`, `tab-marker`) |
+| M18 | `scan_evasions` skips all fenced lines | SURVIVED | **RED** `…_reported_by_the_scan_path` |
+| **MC** | **compound M10+M18** | **SURVIVED (critical)** | **RED ×2** |
+| M21 | `_is_fence` drops the CommonMark rule | new | **RED** |
+| M22 | `_shape_of` inline-span guard removed | new | **RED** |
+| M23 | `blocks_yielding_nothing` no longer reaches `check()` | new | **RED** |
+| M24 | `_CMD_SHAPE_RE` back to literal spaces | new | **RED** ×2 |
+| M25 | `_PIN_SHAPE_RE` back to literal spaces | new | **SURVIVED → R2-1** |
+| M26 | `_MARK_SHAPE_RE` back to literal spaces | new | **RED** |
+| M27 | `_INLINE_CMD_RE` back to literal spaces | new | **SURVIVED → R2-2** |
+| M28 | `self_test` seeds by first-occurrence replace again | new | **RED** |
+| M29 | bold strip removed from **both** copies | new | **RED** |
+| M30 | `VERDICT:` line dropped from the report | new | **SURVIVED → R2-4** |
+
+M29 is worth a note on method: the bold arm lives in both `verify_receipts._GUTTER_RE` and the
+test module's collection-time copy, and `test_gutter_regex_matches_the_harness` compares the two
+patterns. Mutating the tool alone would go RED on that sync test regardless of behaviour, proving
+nothing. So I mutated **both copies**, keeping the sync test satisfied, and asked whether any
+*behavioural* test noticed. One did (`test_every_evasion_shape_is_caught[bold-command]`).
+
+---
+
+## r2 regression checks — all re-executed
+
+**Founding artifact, re-extracted from git and re-run:**
+
+```
+$ git show 4e540f8~1:docs/specs/three-tier-command.md > founding.md
+$ py -3.13 tools/verify_receipts.py --strict founding.md
+parsed receipts: 34/34 reproduce exactly (34 fenced blocks, 0 unclassified, 0 volatile-skipped)
+NOT PARSED:      16 evasion(s) -- receipt-shaped text the harness never classified. …
+VERDICT:         FAILED -- 16 failure(s), 0 warning(s)
+exit=1
+```
+
+Still red, still exactly 16, still exit 1.
+
+**False positives — enforced corpus:** 18 files (13 `docs/specs/**` + 5
+`docs/superpowers/specs/**`), **0 evasions, 0 orphan blocks.** Repo-wide: 21 hits in 5 files, all
+in unenforced `docs/reviews/`, all adjudicated in r1 or above.
+
+**No test weakened or deleted:** 0 test functions removed, 8 added, plus 6 new `EVASION_SHAPES`
+fixtures (`marker-only`, `tab-command`, `tab-pin`, `tab-gutter`, `tab-marker`, `bold-command`)
+= 35 → **49** collected. The only deleted line is the `_GUTTER_RE` copy, replaced by the
+bold-strip version — a widening, not a weakening.
+
+**Both interpreters, full suite:**
+
+```
+$ py -3.13 -m pytest -q
+1420 passed, 8 skipped in 68.34s (0:01:08)
+
+$ py -3.10 -m pytest -q
+1420 passed, 8 skipped in 69.95s (0:01:09)
+```
+
+Identical (r1: 1406 + 14 new = 1420). The 3.10 floor holds.
+
+**The CLAUDE.md ritual — `--self-test --strict` on both enforced specs, both seeds:**
+
+```
+##### docs/specs/claim-nonce.md
+SELF-TEST PASSED: a one-word paraphrase inside a pasted receipt is caught.
+  seed [fences removed]: receipts 59 -> 58, 2 evasion(s) reported
+  seed [blockquote gutter]: receipts 59 -> 58, 4 evasion(s) reported
+EXTRACTION SELF-TEST PASSED: a receipt that stops being parsed is reported, not silently dropped.
+VERDICT:         pass -- 0 failure(s), 0 warning(s)
+exit=0
+
+##### docs/specs/three-tier-command.md
+SELF-TEST PASSED: a one-word paraphrase inside a pasted receipt is caught.
+  seed [fences removed]: receipts 39 -> 38, 2 evasion(s) reported
+  seed [blockquote gutter]: receipts 39 -> 38, 4 evasion(s) reported
+EXTRACTION SELF-TEST PASSED: a receipt that stops being parsed is reported, not silently dropped.
+VERDICT:         pass -- 0 failure(s), 0 warning(s)
+exit=0
+```
+
+---
+
+## Merge recommendation
+
+**Fit for main.** Merge `mf/h1-receipts` up.
+
+Non-blocking follow-ups, in order: **R2-1** (fix the `tab-pin` fixture — it is the only one that
+misrepresents its own coverage), **R2-2** (one fixture), **R2-3** (decide whether H1-m5 is worth
+its false-positive surface; either answer is defensible). **R2-4** and **R2-5** are notes, not
+work. **H1-i1** (`portability.md:333-339`) remains open and is the spec owner's call.
+
+**`sound`**
