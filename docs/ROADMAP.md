@@ -1,3 +1,7 @@
+> # ⛔ SUPERSEDED — 2026-07-24 — thesis + design principles live, phase sequencing is history
+>
+> The **Phase 1→6 sequencing and the soak gates below were retired as superseded history** on 2026-07-24 by the settled operator gate *"Two roadmaps, no crosswalk"* (`docs/OPERATOR-GATES.md`). **The plan of record is the M-track — `docs/SPEC.md` §18.** Still live as intent: the **thesis** (one state, many views) and the **five design principles** — they bind every surface, and the Phase 2–6 stubs remain accurate as *intent*. History: the phase *ordering*, the soak-gate machinery, and the `SOAK GATE 1 SIGNED` precondition that was never signed while M-0→M-E shipped around it. The still-binding campaign doctrine that used to live in the companion `docs/PLAN.md` §0 is re-homed to `knowledge/playbooks/campaign-template.md`, `knowledge/projects/claude-fleet.md`, `skills/fleet/SKILL.md`, and `docs/SPEC.md` §16/§17/§17a (see PLAN.md's SUPERSEDED banner for the full map). **Nothing below is deleted or softened.**
+
 # claude-fleet roadmap — the ultimate multi-session programming tool
 
 **Status:** vision v1 (2026-07-07) — **the thesis and design principles below still bind; the phase *sequencing* no longer describes how this project is run.** See the reality banner immediately below before using this as a plan.
@@ -12,7 +16,7 @@
 > - **The soak gates below are not being enforced.** `SOAK GATE 1 SIGNED` appears nowhere in `knowledge/lessons.md`, yet `docs/PLAN-PROGRESS.md` marks every C3+ row GATED on that signature — while four milestones shipped around it.
 > - Phases 2 through 6 (watchtower, providers, telegram, web UI, intelligence, reach) are **untouched and still accurate as intent.**
 >
-> **Which framing governs is an open operator gate** (`docs/OPERATOR-GATES.md`). Until it is settled, treat the design principles and the Phase 2–6 stubs as live, and the sequencing/soak machinery as history.
+> **This gate is SETTLED — 2026-07-24: retire (see the ⛔ SUPERSEDED banner at the top of this file).** Treat the thesis + five design principles + Phase 2–6 stubs as live intent; the sequencing and soak machinery are history.
 
 ## Why ours wins (thesis)
 
