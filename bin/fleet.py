@@ -8324,6 +8324,118 @@ def goals_path() -> Path:
     return supervisor_dir() / "GOALS.md"
 
 
+# three-tier-command.md §3.1/§3.3/§3.5 -- the role->tier->model resolver.
+# Roles bind to ABSTRACT tiers; the tier->concrete-model step lives BELOW fleet
+# (the daemon env, §3.3). fleet reads the OPERATOR-OWNED policy from GOALS.md and
+# emits a tier alias as `--model`; it never hardcodes a model id (§3.2 receipt).
+# Defaults are documented, applied when GOALS is silent; the operator sets the
+# concrete tier->alias map (see docs/proposals/GOALS-tier-chain-proposal.md).
+_TIER_POLICY_DEFAULTS = {
+    "supervisor_chain": ["top", "second"],   # §3.5 preference chain
+    "worker_tiers": ["second", "third"],     # §3.4 (Opus/Sonnet, never Haiku)
+    "tier_model": {},                        # §3.3(d): unset -> omit --model
+}
+_TIER_POLICY_BLOCK_OPEN = "<!-- fleet-tier-policy"
+_TIER_POLICY_BLOCK_CLOSE = "-->"
+
+
+def _parse_tier_policy_block(text: str) -> dict:
+    """Parse the `fleet-tier-policy` HTML-comment block out of GOALS.md prose
+    (invisible in rendered markdown, greppable in source). Recognised keys:
+    `supervisor-tier-chain`, `worker-tiers` (comma lists), `tier-model`
+    (`tier=alias` pairs). Unknown keys and empty values are ignored -- an empty
+    value keeps the default rather than an empty list. Returns only the keys it
+    actually found; the caller merges over defaults."""
+    lines = text.splitlines()
+    inside = False
+    found = {}
+    for raw in lines:
+        line = raw.strip()
+        if not inside:
+            if line.startswith(_TIER_POLICY_BLOCK_OPEN):
+                inside = True
+            continue
+        if line.startswith(_TIER_POLICY_BLOCK_CLOSE):
+            break
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key, value = key.strip(), value.strip()
+        if not value:
+            continue
+        if key in ("supervisor-tier-chain", "worker-tiers"):
+            tiers = [t.strip() for t in value.split(",") if t.strip()]
+            if tiers:
+                found["supervisor_chain" if key == "supervisor-tier-chain"
+                      else "worker_tiers"] = tiers
+        elif key == "tier-model":
+            mapping = {}
+            for pair in value.split(","):
+                tier, _, alias = pair.partition("=")
+                tier, alias = tier.strip(), alias.strip()
+                if tier and alias:
+                    mapping[tier] = alias
+            if mapping:
+                found["tier_model"] = mapping
+    return found
+
+
+def read_tier_policy() -> dict:
+    """The role->tier policy, read from supervisor/GOALS.md over documented
+    defaults (§3.3: fleet READS the operator-owned policy, never a code
+    constant). `_source` is "goals" iff the block supplied at least one key.
+    Never raises: a missing/undecodable GOALS.md yields pure defaults."""
+    policy = {"supervisor_chain": list(_TIER_POLICY_DEFAULTS["supervisor_chain"]),
+              "worker_tiers": list(_TIER_POLICY_DEFAULTS["worker_tiers"]),
+              "tier_model": dict(_TIER_POLICY_DEFAULTS["tier_model"]),
+              "_source": "default"}
+    try:
+        text = goals_path().read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return policy
+    found = _parse_tier_policy_block(text)
+    if found:
+        policy.update(found)
+        policy["_source"] = "goals"
+    return policy
+
+
+def resolve_model_for_role(role: str, policy: dict = None):
+    """The `--model` tier alias for `role`, or None to OMIT --model (§3.3(d),
+    the honest provider-agnostic default). Resolves role -> the first tier it
+    binds to -> the operator's tier->alias mapping:
+
+      supervisor -> supervisor_chain[0]   (the preferred tier, §3.5)
+      worker     -> worker_tiers[0]        (the supervisor overrides per-spawn)
+      interface  -> "top"                  (advisory: fleet never launches it, §3.1)
+
+    None when the tier has no operator-set alias -- fleet does not invent one."""
+    if policy is None:
+        policy = read_tier_policy()
+    if role == "supervisor":
+        tiers = policy.get("supervisor_chain") or []
+    elif role == "worker":
+        tiers = policy.get("worker_tiers") or []
+    elif role == "interface":
+        tiers = ["top"]
+    else:
+        tiers = []
+    if not tiers:
+        return None
+    return policy.get("tier_model", {}).get(tiers[0])
+
+
+def proposed_goals_tier_block() -> str:
+    """The tier-policy block this build proposes the operator add to
+    supervisor/GOALS.md (§3.3: the resolver READS this; the operator APPLIES
+    it). Kept in code so the proposal doc and the parser never drift."""
+    return (f"{_TIER_POLICY_BLOCK_OPEN}\n"
+            "supervisor-tier-chain: top, second\n"
+            "worker-tiers: second, third\n"
+            "tier-model: top=opus, second=opus, third=sonnet\n"
+            f"{_TIER_POLICY_BLOCK_CLOSE}\n")
+
+
 def incarnation_path() -> Path:
     return supervisor_dir() / "INCARNATION"
 
