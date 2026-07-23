@@ -41,7 +41,7 @@ Nothing injects fleet state into a session any more — no SessionStart hook, no
 | `fleet sup-checkpoint <text\|@file> [--kind CHECKPOINT\|PROPOSAL]` | Append a journal checkpoint (claim holder only) + refresh heartbeat. |
 | `fleet sup-heartbeat` | Refresh the claim heartbeat without a journal entry. |
 | `fleet sup-status [--json]` | Read-only supervisor claim/handshake/nag view. |
-| `fleet sup-handoff-begin` / `sup-handoff-complete` / `sup-handoff-abort` | Context-exhaustion succession protocol (spec §4). Trigger band: begin ~300k tokens, hard-latest 500k. |
+| `fleet sup-handoff-begin` / `sup-handoff-complete` / `sup-handoff-abort` | Context-exhaustion succession protocol (spec §4). Trigger band (ratified 2026-07-23, three-tier §11): enter at 150k context occupancy, hard ceiling 200k — binds supervisors and workers. |
 
 ## Doctrine
 
@@ -49,6 +49,7 @@ Nothing injects fleet state into a session any more — no SessionStart hook, no
 - **Never read raw `logs\*.jsonl`.** `status`/`peek`/`result` exist to protect your context. Trust the compression.
 - **Never sleep-loop.** `fleet wait` in background Bash notifies you.
 - **Prefer respawn over marathon sessions.** Worker past ~30–40 turns or acting confused → `fleet respawn`. Journal makes it lossless.
+- **Worker context band (ratified 2026-07-23, three-tier §11.4).** Workers observe the same 150–200k context band as the supervisor: a worker entering the band hands off / respawns at its next task boundary. Enforcement is the supervisor's `fleet respawn` at that boundary — a worker calls no dispatch verb, so there is nothing for fleet to refuse.
 - **You may only retire your own workers.** `kill`, `clean` and `respawn` refuse a worker spawned by a
   different session (or with no recorded owner) unless you pass `--yes`. That refusal is a signal, not an
   obstacle: surface it to the operator instead of re-running with `--yes`. `fleet clean` deletes journals

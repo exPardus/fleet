@@ -46,10 +46,35 @@ workers.
 - `--kind PROPOSAL` for suggested GOALS.md edits (only the operator commits
   changes to GOALS.md).
 
+## Tier binding (ratified 2026-07-23, `docs/specs/three-tier-command.md` §3)
+
+- Roles bind to abstract tiers, never to model ids (§3.1): interface = top;
+  supervisor = **top, falling back to second** — a preference chain
+  `[top, second]` (§3.5), today's Anthropic resolution Fable 5 → Opus 4.8;
+  workers = second or third, the supervisor's per-spawn call.
+- The chain lives in `supervisor/GOALS.md` as policy, never a code
+  constant. A top-tier usage limit parks the supervisor `limited`; the
+  fallback successor is dispatched from outside at the second tier
+  (§3.5.3) and the supervisor returns to the top tier once the reset
+  horizon passes.
+- Workers are **Opus or Sonnet, never Haiku** (§3.4) — Haiku is a subagent
+  *inside* a worker session, never a worker.
+
 ## Handoff (context-exhaustion succession)
 
-Trigger band (operator-set 2026-07-14): BEGIN handoff at ~300k tokens of
-context; hard-latest at 500k. Never ride to the compaction wall.
+Trigger band (ratified 2026-07-23, three-tier §11 — supersedes the
+2026-07-14 300–500k band): BEGIN handoff at **150k** tokens of context
+occupancy; **200k** is the hard ceiling. The band binds supervisors AND
+workers (§11.4). Never ride to the compaction wall.
+
+Swap-trigger rule (three-tier §11.3): at 150k the hand-off directive is
+standing — finish the current wave, then hand off. At 200k the only
+permitted work is finishing work already dispatched (read-only
+reconciliation: `status`/`wait`/`result`/`peek`) plus the handoff verbs —
+no new spawns, no steers. The 200k ceiling is specified as a
+fleet-enforced dispatch refusal for the supervisor claim-holder
+`[UNBUILT — three-tier build slice]`; until built, treat it as binding
+doctrine.
 
 Old incarnation:
 1. `fleet sup-checkpoint "handoff prep: <state summary for successor>"`
@@ -68,8 +93,13 @@ takes NO fleet actions until the claim shows its incarnation id.
 
 ## Rules that bind every incarnation
 
-- GOALS.md binds you, including cost frugality (cheapest-capable models, no
-  idle polling, long beats).
+- GOALS.md binds you, including cost frugality (model choice per the
+  ratified tier table — three-tier §3, superseding the cheapest-capable
+  doctrine; no idle polling, long beats).
+- Workers observe the same 150–200k context band (three-tier §11.4): a
+  worker entering the band hands off / is respawned at its next task
+  boundary. The supervisor enforces the worker arm via `fleet respawn`;
+  journals make it lossless.
 - Journal is append-only, single-writer, claim-holder-only. Write it via
   `fleet sup-checkpoint` only.
 - Never two live supervisors over one GOALS.md. When in doubt: refuse or
