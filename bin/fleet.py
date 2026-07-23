@@ -3960,6 +3960,15 @@ def _cmd_send_native(name: str, message: str,
       - anything else reached here (over_ceiling/over_budget/attached --
         native sticky statuses this task's contract does not otherwise
         enumerate) refuses generically rather than silently mis-steering."""
+    # three-tier §5.3 (B7): stamp interface-caller provenance -- the caller's
+    # own CLAUDE_CODE_SESSION_ID -- onto every `mail_sent` event this send
+    # emits. The split moves the fork-divergence class up to the (claimless)
+    # interface tier; `send` is not claim-gated, so two forked interface bodies
+    # steering the same supervisor are indistinguishable at the verb. This is
+    # DETECTION not prevention: the sid rides the event so the supervisor can
+    # surface a divergence warning (sup-status), never a refusal. None for a
+    # human shell with no session id -- the detector ignores those.
+    caller_sid = current_caller_session()
     roster_ok, payload = _fetch_agents_roster(which=which, run=run)
     roster_entries = payload if roster_ok else []
 
@@ -4030,7 +4039,8 @@ def _cmd_send_native(name: str, message: str,
             )
             if in_flight:
                 append_mailbox(raw_sid, message)
-                append_event("mail_sent", name, sid=raw_sid, status="working")
+                append_event("mail_sent", name, sid=raw_sid, status="working",
+                             caller_sid=caller_sid)
                 print(f"{name}: turn running -- message queued to mailbox")
                 return 0
             # Not actually in flight: the raw "working" label is stale
@@ -4086,7 +4096,8 @@ def _cmd_send_native(name: str, message: str,
                     f"{name}: dispatch in flight -- retry in a few seconds"
                 )
             append_mailbox(sid, message)
-            append_event("mail_sent", name, sid=sid, status=status)
+            append_event("mail_sent", name, sid=sid, status=status,
+                         caller_sid=caller_sid)
             print(f"{name}: turn running -- message queued to mailbox")
             return 0
 
@@ -4143,7 +4154,8 @@ def _cmd_send_native(name: str, message: str,
     # the mailbox drain uniformly with any prior mail (never doubled, never
     # silently dropped).
     append_mailbox(old_sid, message)
-    append_event("mail_sent", name, sid=old_sid, status="idle")
+    append_event("mail_sent", name, sid=old_sid, status="idle",
+                 caller_sid=caller_sid)
     prompt, claim = compose_prompt(name, cwd, "", old_sid)
     try:
         result = dispatch_bg(
@@ -9889,6 +9901,61 @@ def _project_handshake(hs):
     return out
 
 
+INTERFACE_DIVERGENCE_WINDOW_SECONDS = SUPERVISOR_CLAIM_STALE_SECONDS
+
+
+def _interface_divergence(now=None, window_seconds=None):
+    """three-tier §5.3 (B7) -- DETECTION, never a refusal. Scan recent
+    `mail_sent` events targeting the supervisor body (under ANY name -- gen-0
+    "supervisor" or a `sup|<inc>|successor`) and return a warning dict when
+    steers arrived from TWO OR MORE distinct interface caller sids within the
+    window; None otherwise.
+
+    Two distinct caller sids steering one supervisor is the signature of a
+    forked/divergent INTERFACE body re-deriving and re-issuing steers -- the
+    2026-07-16 incident-1 class, which the tier split moved UP to the interface
+    tier (§5.3). The interface holds no claim by design (the human owns that
+    tier), so this is deliberately weaker than the supervisor nonce: it SURFACES
+    divergence, it never blocks a send.
+
+    Reads the bounded transcript tail (`_read_tail_lines`): recent sends live at
+    the end, and concurrent divergence means both bodies are sending recently,
+    so the tail is the right bound for a detection surface. Never raises -- it
+    runs inside a read-only view."""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if window_seconds is None:
+        window_seconds = INTERFACE_DIVERGENCE_WINDOW_SECONDS
+    callers = {}     # caller_sid -> latest ts string seen (for reporting)
+    for line in _read_tail_lines(events_path()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict) or ev.get("kind") != "mail_sent":
+            continue
+        target = ev.get("name")
+        if not (target == SUPERVISOR_BODY_NAME or _is_supervisor_shaped(target)):
+            continue
+        cs = ev.get("caller_sid")
+        if not isinstance(cs, str) or not cs:
+            continue      # no provenance (human shell / pre-§5.3 event): ignore
+        try:
+            ts = _parse_iso(ev["ts"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if (now - ts).total_seconds() > window_seconds:
+            continue      # outside the window
+        callers[cs] = ev["ts"]
+    if len(callers) < 2:
+        return None
+    return {"caller_sids": sorted(callers), "count": len(callers),
+            "window_seconds": window_seconds}
+
+
 def cmd_sup_status(args) -> int:
     """`fleet sup-status [--json]` -- READ-ONLY VIEW (terminal-surface
     doctrine: no lock, no probe, no write). Safe lock-free reads: all
@@ -9912,6 +9979,7 @@ def cmd_sup_status(args) -> int:
         "handshake": _project_handshake(hs),
         "abort_flag": handoff_abort_flag_path().exists(),
         "pending_decision": read_pending_decision(),   # §8: routing surface
+        "interface_divergence": _interface_divergence(),  # §5.3: B7 detection
         "nag": supervisor_status_line(),
     }
     if getattr(args, "json", False):
@@ -9948,6 +10016,13 @@ def cmd_sup_status(args) -> int:
             print(f"pending-decision OPEN (needs operator): {pd.get('question')!r}"
                   + (f" [ctx {pd['context_ref']}]" if pd.get("context_ref") else "")
                   + " -- answer with `fleet sup-decision --answer <text>`")
+    div = info["interface_divergence"]
+    if div is not None:
+        print(f"WARNING: interface divergence -- {div['count']} distinct caller sids "
+              f"steered the supervisor within {div['window_seconds']:.0f}s "
+              f"({', '.join(div['caller_sids'])}). A forked interface body may be "
+              f"re-deriving steers (§5.3). Detection only; confirm the human owns "
+              f"every session before trusting recent briefs.")
     return 0
 
 
