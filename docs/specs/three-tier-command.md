@@ -78,20 +78,30 @@ draft builds the three tiers on that fixed foundation.
 
 The operator's binding requirement: *tier models by role, configurable, never hardcoded ids*
 (`knowledge/lessons.md#2026-07-23-three-tier-inputs`), refined the same day to **tier-based**: roles
-bind to abstract tiers (`highest` / `second` / `third`); a resolver maps tier → concrete model at
+bind to abstract tiers (`top` / `second` / `third`); a resolver maps tier → concrete model at
 dispatch time from what the active provider currently offers. Concrete ids (Fable 5, Opus 4.8) are
 **illustrative of today's Anthropic resolution only**, never normative.
 
-| Role | Tier | Today's Anthropic example | Who sets the model |
-|---|---|---|---|
-| Interface session ("CEO") | highest | Fable 5 | the human, in their own foreground session — **fleet never launches it** |
-| Supervisor | second | Opus 4.8 | `fleet sup-spawn --model <tier-alias>` (§7) — resolved from policy, never a constant |
-| Worker | third | Opus **or** Sonnet (operator: **never Haiku**) | supervisor's call, per-spawn `--model` |
+**Amended 2026-07-23 (operator, second addendum — wave 3): the supervisor is promoted to the TOP tier,
+and its binding is a preference chain rather than a single tier.** The earlier draft put the supervisor
+on the second tier; the operator's reasoning for the promotion is a division of labour, not a budget:
+
+| Role | Tier binding | Today's Anthropic example | Owns | Who sets the model |
+|---|---|---|---|---|
+| Interface session ("CEO") | **top** | Fable 5 | the **long-term goals** — intent, interpretation, spec/brief authoring | the human, in their own foreground session — **fleet never launches it** |
+| Supervisor | **top, falling back to second** (§3.5 preference chain) | Fable 5 → Opus 4.8 | **solid plans, details, and splitting tasks** to workers | `fleet sup-spawn --model <tier-alias>` (§7) — resolved from policy, never a constant |
+| Worker | second **or** third | Opus **or** Sonnet (operator: **never Haiku**) | executing one bounded task | supervisor's call, per-spawn `--model` |
+
+**Why the supervisor earns the top tier:** planning quality is the scarce resource. The interface tier
+holds *what we are trying to achieve over the long run*; the supervisor turns that into *a plan that is
+actually correct at the level of detail a worker can execute* — slicing tasks, sequencing waves, judging
+whether a result discharges the brief. That is the reasoning-heaviest job in the system, so it gets the
+strongest available model, with §3.5's fallback covering the top tier's tighter usage limit.
 
 **The interface tier is outside fleet's launch surface entirely.** Fleet has no verb that starts the
-human's session; its "tier" is advisory (a note in policy that the human should run their highest
-tier). Only the supervisor and worker tiers are fleet-dispatched, and only those two get a
-fleet-resolved model.
+human's session; its tier is advisory (a note in policy that the human should run their top tier). Only
+the supervisor and worker tiers are fleet-dispatched, and only those two get a fleet-resolved model —
+which is also why §11.3's context ceiling can never apply to the interface (ND1).
 
 ### 3.2 The only model surface shipped today is `--model`, and it carries a tier alias
 
@@ -174,10 +184,127 @@ This fixes where each piece lives:
 Operator, binding: workers are the supervisor's call, **Opus and Sonnet only**; **Haiku is never a
 worker** — Haiku is a subagent *inside* a worker session. Nothing in shipped code enforces a
 worker-model allowlist (the only model surface is a free `--model` string, §3.2). Enforcing
-"third-tier ∈ {opus, sonnet}" at `spawn` is `[UNBUILT — owned by the three-tier build slice]`; until
+"worker tier ∈ {second, third}" at `spawn` is `[UNBUILT — owned by the three-tier build slice]`; until
 built it is doctrine in GOALS.md, not a guard. Note the interaction with §3.3(d): on a single-model
 provider the "Opus or Sonnet" rule is moot — the namespace has one model — so the allowlist is
 Anthropic-namespace policy, not a universal invariant.
+
+### 3.5 The supervisor's tier binding is a PREFERENCE CHAIN, not a single tier (operator, wave 3)
+
+**Operator, binding:** the top tier's usage limit is roughly **half** the standard limit, so binding the
+supervisor to it outright would park the campaign's manager twice as often. The binding is therefore a
+**chain**: the supervisor **prefers the top tier and automatically falls back to the second tier when
+the top tier's usage limit is hit, returning to the top tier once the reset horizon passes.**
+
+**Tier order (policy, in `supervisor/GOALS.md`, never a code constant):** `[top, second]`. Today's
+Anthropic resolution: `[Fable 5, Opus 4.8]`. A chain of length 1 is legal (no fallback); the chain is
+per-namespace, so a single-model provider (§3.3) collapses it to one entry and the mechanism is inert.
+
+#### 3.5.1 Why a fallback is necessarily a NEW session — the constraint that shapes everything else
+
+Two shipped facts decide the mechanism, and they point the same way:
+
+1. **The model is fixed at spawn.** `--model` is a dispatch-time argv flag (§3.2 receipt); `send` has no
+   `--model` (§5.2 receipt). No verb re-models a live session.
+2. **`resume-limited` resumes the *same* session and therefore cannot change tier — and, equally
+   important, is *not* a context reset.** Its native path dispatches with `resume_sid=old_sid`:
+
+```
+# at 235421e56bfd328a7e913e519a1459ccf55918dc
+$ sed -n '3909,3912p' bin/fleet.py
+        result = dispatch_bg(
+            name, cwd, body, mode, model=model, category=category,
+            hint="resume past limit", resume_sid=old_sid,
+            setting_sources=setting_sources, run=run, which=which, sleep=sleep,
+```
+
+A `--bg --resume` dispatch **forks and carries the entire prior transcript forward** (native-substrate
+G2, CONFIRMED) — so the resumed body keeps its context *and* its model. `resume-limited` is the
+right recovery for *"the same tier is available again"*; it is **not** a tier-change mechanism.
+
+**Therefore a tier fallback is a body change**: a fresh session dispatched at the other tier, i.e. the
+respawn/handoff path — which mints a fresh record (and so a fresh context), taking `model` as a
+dispatch-time argument:
+
+```
+# at 235421e56bfd328a7e913e519a1459ccf55918dc
+$ sed -n '4367,4368p' bin/fleet.py
+        new_record = new_worker_record(
+            None, cwd, task_for_record, mode, model=model,
+```
+
+This is not a limitation to work around — it is what makes §3.5.3's band interaction clean.
+
+#### 3.5.2 The mechanism, on the shipped usage-limit machinery
+
+Every input the chain needs already exists. Limit detection is the G11 transcript-tail scan (limit walls
+are silent — no Stop hook, no roster change, §4.1), and the park records a **reset horizon**:
+
+```
+# at 235421e56bfd328a7e913e519a1459ccf55918dc
+$ sed -n '1920,1924p' bin/fleet.py
+        is_limit, reset_at, kind = scan(sid, transcript_path=path)
+        if is_limit:
+            updated["status"] = "limited"
+            updated["limit_reset_at"] = reset_at
+            updated["limit_kind"] = kind
+```
+
+and the horizon gate that decides when a parked body may return:
+
+```
+# at 235421e56bfd328a7e913e519a1459ccf55918dc
+$ sed -n '1635,1640p' bin/fleet.py
+    """True iff a `limited` record's limit_reset_at is set AND now >= it. A null
+    horizon returns False (never auto-eligible -- needs an operator-set reset or
+    --force-now)."""
+    reset = record.get("limit_reset_at")
+    if not reset:
+        return False
+```
+
+The chain, `[UNBUILT — owned by the three-tier build slice]`, adds exactly one decision on top of that:
+
+1. **Detect.** The supervisor's body hits the top tier's limit → existing detection parks it
+   `status="limited"` with `limit_reset_at` (above). No new detection is needed; the supervisor is a
+   fleet worker record (§10.2), so this fires for it exactly as for any worker.
+2. **Fall back.** Instead of waiting for the horizon, the chain **re-dispatches the supervisor at the
+   next tier down** — a body change through the handoff/respawn path (§3.5.1), carrying the claim per
+   claim-nonce §5.10(b) (`sup-boot` → `resume` on proven continuity, else the release/seize path). The
+   new body records **which tier it is on** and **the horizon it is waiting out**
+   (`tier_preferred`, `tier_current`, and the inherited `limit_reset_at` — additive registry fields).
+3. **Return.** Once `limit_reset_at` passes, the supervisor's *next* body change (§3.5.3) is dispatched
+   at the preferred tier again. **The return is not itself a trigger for a body change** — it is a
+   preference consulted at the next boundary that was going to happen anyway. This is deliberate: a
+   forced respawn purely to climb back a tier would throw away a live plan's context to buy model
+   quality it does not yet need.
+4. **Both tiers limited** ⇒ no fallback remains; the supervisor stays parked `limited` on the existing
+   machinery and the interface tier is nagged (§8's routing surface is the natural place). The chain
+   never invents a tier below the policy list, and never silently downgrades to a worker-only tier.
+
+**Failure direction:** if the tier cannot be resolved (§3.3's provider-lacks-a-tier case) the fallback
+**omits `--model`** and lets the namespace default govern, rather than refusing — a supervisor that
+cannot dispatch is worse than one on an unexpected model, and the daemon's own refusal (§3.3) still
+bounds the wrong-model case loudly.
+
+#### 3.5.3 Interaction with the swap band — a fallback respawn IS a band handoff
+
+The question the operator asked to have answered explicitly: *a fallback respawn is also a context
+reset — does it count as the band handoff?* **Yes, and the two must be treated as one event.**
+
+- A tier fallback is a body change with a **fresh context** (§3.5.1). That is precisely what the
+  150–200k band's handoff exists to produce. Performing a fallback and then *also* demanding a separate
+  band handoff would burn two context resets for one need.
+- **So: a tier fallback discharges any outstanding band obligation**, and conversely a band handoff that
+  happens while the top tier is limited is dispatched at the fallback tier. Whichever trigger fires
+  first, **one** body change satisfies both.
+- **It must go through the handoff ritual, not a bare respawn**, whenever a plan is in flight: the
+  successor document is what carries the plan across the context reset (§11.3). A bare `respawn` carries
+  the journal and drained mailbox but not the working plan — acceptable only when nothing is in flight.
+- **The band's ceiling (§11.3) does not block the fallback**: the handoff verbs are exempt above `H`, and
+  the handoff dispatch hand-rolls its own argv (§10.1), so a limited-and-over-band supervisor can always
+  still hand off. This is the deadlock the two mechanisms could otherwise have created, and it is closed
+  by the same exemption that closes ND2.
 
 ---
 
@@ -190,8 +317,25 @@ scheduler ignores exit codes ⇒ silently dropped beats.*
 
 ### 4.1 Daemon-lifecycle assumptions, stated against the contract rows
 
-This spec assumes the substrate exactly as `native-substrate.md` observes it (all
-`[PENDING OPERATOR RATIFICATION]`; this spec changes no verdict there):
+This spec assumes the substrate exactly as `native-substrate.md` observes it, and **changes no verdict
+there**. *(Status corrected in wave 3: when this section was written every row read
+`[PENDING OPERATOR RATIFICATION]`. `main` has since merged the second docket's* ***partial ratification***
+*— the rows are now `RATIFIED 2026-07-23`* ***except*** *three dead-daemon manager-report-only claims
+carrying `RATIFICATION WITHHELD 2026-07-23` pending a quiet-machine capture. The correction matters in
+this spec's favour and is stated rather than silently inherited:)*
+
+```
+# live: ratification status is a property of the working tree, not of this spec's pinned commit
+$ grep -c "PENDING OPERATOR RATIFICATION" docs/specs/native-substrate.md
+0
+```
+
+**None of the three withheld claims is load-bearing here.** They are the dead-daemon `rm` message, its
+`stop` twin, and *"rm/stop do not revive the daemon"*. This section leans on the **ratified** halves —
+the transient daemon's idle-exit (`live_workers=0`, 15/15), the residual `cause=upgrade` vector, G7's
+`ScheduleWakeup` behaviour, the 2.1.216 wedge, and G10's tombstone obligation. Where §4.1 says a wedged
+daemon means beats silently do not run, that rests on the wedge row (ratified), not on any withheld
+dead-daemon string:
 
 - **The daemon is transient** (2.1.212 hazard row): started on demand by a dispatch, idle-exits ~5s
   after the last client disconnects **and** live-worker count reaches 0. A live supervisor `--bg`
@@ -848,12 +992,21 @@ is the ordering that keeps the window shut.
 
 ---
 
-## 11. Supervisor self-monitored swap band (operator req 2026-07-23)
+## 11. The self-monitored context band — supervisor AND workers (operator req 2026-07-23, extended wave 3)
 
 **Operator, binding:** the supervisor self-monitors its context; band **150–200k tokens**. Entering the
 band → hand off at the next wave/task boundary. Past 200k → strongest directive to hand off, but finish
 the current *urgent* task first (no new work). Handoff ritual = the existing sup-handoff machinery
 (write the successor document, hand control back to the interface session).
+
+**Extended 2026-07-23 (operator, third docket + second addendum — wave 3): the same 150–200k band
+applies to WORKERS.** A worker self-monitors its context; entering the band → hand off / respawn at the
+next **task** boundary. The operator's rationale is not spend but drift: *unbounded worker counts and
+contexts drift the parts apart and the waste reappears as reconciliation effort* — keep worker counts
+small and respawn before a context gets expensive. §11.4 states the worker arm; the mechanism is shared
+with the supervisor arm, and **every "supervisor only" / "second tier only" scoping in the earlier draft
+is retired by this extension** (§11.3's ND1 gate is re-stated accordingly — it scopes *the fleet-enforced
+refusal*, which is a different question from *who observes the band*; see §11.4).
 
 ### 11.1 The band replaces the drafted 300–500k band
 
@@ -977,7 +1130,15 @@ every next task "the current urgent task" and never cross into hand-off. The fix
   > for talking, interpreting, and long-term ideas"*, §1), and it is **outside fleet's launch surface**
   > (§3.1) — fleet cannot hand it off, respawn it, or reset it. A caller-agnostic refusal would therefore
   > block the human's only steering verb once the interface's own context passed 200k, **with no
-  > recourse**. The operator set the 150–200k band for the **second tier only**.
+  > recourse**.
+  >
+  > **Wave-3 restatement (the earlier basis is retired).** The first version of this paragraph justified
+  > the exemption with *"the operator set the band for the second tier only"* — that scoping is **retired**:
+  > the band now applies to the supervisor **and** to workers (§11, §11.4). The exemption's real and
+  > durable basis is **recourse and dispatch**, not tier: (a) the interface is outside fleet's launch
+  > surface, so a refusal it cannot escape has no remedy; and (b) workers, who *do* observe the band, are
+  > not refused here either — they do not call `spawn`/`send`, so there is nothing to refuse. Their band is
+  > enforced by respawn at a task boundary (§11.4), not by a dispatch ceiling.
   >
   > **Binding for the build:** the refusal predicate is *caller-is-the-supervisor-claim-holder* — the
   > same `CLAUDE_CODE_SESSION_ID` vs `supervisor/INCARNATION` resolution B1 uses for the archive
@@ -1017,6 +1178,112 @@ $ grep -c "sup-context\|supervisor-beat.jsonl\|_doctor_check_supervisor_beat\|SU
   hand-control-back-to-interface is the existing ritual; the interface session receives control (it never
   held the claim, so nothing transfers to it — it resumes steering the fresh supervisor body).
 
+**ND4 fix (MINOR, r3 carry-item) — the identity gate must resolve through `retired_sids`, must fail
+toward the band, and gets a structural interface exemption.** Read literally as
+`caller_sid == INCARNATION.session_id`, the gate **fails open on exactly the path every supervisor turn
+starts with.** claim-nonce §5.10(a) makes the restamp *pull, not push*: `session_id` is restamped only
+*"as part of the next validated `sup-*` write"*. So after the interface fork-steers the supervisor (the
+v1 beat, §5.1) the body has a **new** sid while `INCARNATION.session_id` still holds the **old** one; if
+the supervisor then runs `fleet spawn` above `H` before any `sup-checkpoint`, the gate concludes *"not
+the claim-holder"* and **the hard ceiling silently does not fire** — the exact outcome B4 exists to
+prevent, failing unsafe. Three bindings close it:
+
+- **(a) Resolve through the registry, not the claim alone.** Use §7.2's predicate shape — match the
+  caller's sid against the record's `session_id` **or a member of its `retired_sids`** — because
+  `_restamp_after_steer` pushes the old sid into `retired_sids` at steer time, which bridges
+  *caller → registry record → claim* across the un-restamped window. Same predicate as B1: one identity
+  concept, now three consumers (archive exemption, occupancy read, ceiling gate).
+- **(b) Fail toward the band.** If identity is unresolvable, **treat the caller as the supervisor** and
+  apply the ceiling — mirroring §11.2's *"assume near-band"* direction. An unresolvable identity must
+  never be the reason a ceiling stays dormant.
+- **(c) Exempt the interface structurally, with no sid at all.** The interface is not a fleet worker;
+  the supervisor is (§10.2). `FLEET_WORKER` is stamped into every fleet-launched child's environment, so
+  its **absence** exempts the interface unconditionally — independent of any sid resolution, and
+  therefore immune to (a)'s window:
+
+```
+# at 235421e56bfd328a7e913e519a1459ccf55918dc
+$ sed -n '1284p' bin/fleet.py
+    env["FLEET_WORKER"] = name
+```
+
+Note (b) and (c) compose safely rather than fighting: (c) exempts the interface *before* (b)'s
+fail-toward-the-band default can catch it, so failing closed for the supervisor does not silence the
+human's control channel (ND1).
+
+### 11.4 The worker arm of the band (operator, wave 3)
+
+Workers observe the same 150–200k band: a worker self-monitors its context and, **on entering the band,
+hands off / respawns at the next task boundary.** Three differences from the supervisor arm, each
+following from what a worker is:
+
+- **The boundary is a task, not a wave.** A worker owns one bounded task; its natural reset point is
+  that task's completion, not a wave's.
+- **The reset is a `respawn`, not a claim handoff.** A worker holds no claim, so none of the
+  claim-nonce ritual applies — `fleet respawn` already does exactly this ("same name, cwd, mode; journal
+  and drained mailbox carried over" — the shipped context-reset lever) and mints a fresh record
+  (§3.5.1's receipt). The worker's continuity lives in its journal and task file, which respawn carries.
+- **Enforcement is by the supervisor, not by a dispatch refusal.** §11.3's ceiling refuses `spawn`/`send`
+  *for the supervisor caller*; a worker calls neither, so there is nothing to refuse. The worker arm is
+  therefore: the worker self-reports occupancy (the same §11.2 `sup-context`-shaped read, which is not
+  supervisor-specific — it reads the caller's own transcript), and the **supervisor respawns an
+  over-band worker at its next task boundary**. `[UNBUILT — owned by the three-tier build slice]`.
+
+**Why the operator asked for this** (recorded because it is not a spend argument, and reading it as one
+would justify dropping it under §11.5's cap doctrine): unbounded worker contexts *drift the parts apart*,
+and that waste returns as reconciliation effort on the supervisor. The worker band is a **coherence**
+control — small worker counts, fresh contexts — of a piece with the supervisor band, not a budget cap.
+
+### 11.5 Reconciliation with the third-docket cap doctrine — SETTLED (operator ruling, 2026-07-23)
+
+The third docket established a standing doctrine that appears, on its face, to collide with §11.3's
+fleet-enforced ceiling: **"no fleet-enforced token or USD ceilings — for workers or managers"**, with the
+plan's own usage limits as the cap for every session alike, fleet's limit-park/resume as the recovery
+path, and cost/token *counting* demoted to a flag, default off
+(`docs/OPERATOR-GATES.md` §Settled, M-F budget envelope tick; `knowledge/lessons.md#2026-07-23-operator-decisions-caps`).
+
+**This is decided, not pending.** The manager's reading was put to the operator and **confirmed**
+(`knowledge/lessons.md#2026-07-23-three-tier-inputs`, third addendum, 2026-07-23):
+
+> **Third addendum (2026-07-23, operator ruling on the cap-doctrine reading):** confirmed — **cost/spend
+> ceilings are gone unless the counting flag puts them back** (flag default off; enabling it may re-arm
+> spend caps). The context band (150–200k, supervisors AND workers) is a freshness mechanism, not a
+> budget, and its enforcement stays.
+
+So the doctrine reads, as settled: a token/USD ceiling answers *"has this session cost too much?"* — and
+the plan's own usage limit already answers that, for everyone, so fleet adds no second budget authority.
+A context band answers a different question, *"is this session still sharp?"*, and its remedy is a
+handoff to a fresh body, never a stop. That is why the same operator extended the band to workers
+(§11.4) in the very docket that retired the spend caps: the two decisions are consistent because they
+are about different things.
+
+**What this settles for B4's arm — retained, with one boundary made explicit:**
+
+- **§11.3's context ceiling STAYS**, supervisors and workers alike (§11.4 for the worker arm's different
+  enforcement shape). It is denominated in **context occupancy** and its only consequence is **hand off**
+  — never *stop*, *kill*, or *refuse-until-cheaper*. Nothing structural changes; the earlier draft's
+  contingency branch ("if the operator rules the other way, the band becomes advisory") is **withdrawn**,
+  since the operator ruled.
+- **Any spend-denominated refusal surface may exist ONLY behind the counting flag, default off.** With
+  the flag off there is no fleet-enforced token or USD cap for any tier; enabling it is what may re-arm
+  one. This spec therefore specifies **no** spend-denominated refusal at all — an important negative:
+  §11.3's ceiling must not be implemented by reusing, extending, or re-denominating the spend machinery,
+  or it would silently inherit the flag's off-by-default state and stop firing.
+
+What the doctrine *does* retire is the **`--token-ceiling` spend denomination** as an always-on
+fleet-enforced cap — a real, shipped registry field today:
+
+```
+# at 235421e56bfd328a7e913e519a1459ccf55918dc
+$ sed -n '858p' bin/fleet.py
+        "token_ceiling": token_ceiling,
+```
+
+That field's retirement / flag-gating is **not** this spec's slice (it belongs to the queued PLAN §0.4
+ceiling-denomination retirement); this spec records only that §11.3 is **not** an instance of it and must
+not be swept up with it when that retirement is executed — which is why §12 lists that retirement as
+doc-sync owed.
+
 ---
 
 ## 12. Doc-sync owed (write-set is this file only)
@@ -1029,9 +1296,18 @@ them** — listed for the build slice / a doc-sync pass:
 - **`skills/fleet/SKILL.md`** (S1) — the `sup-handoff` command row (`:44`) states *"Trigger band: begin
   ~300k tokens, hard-latest 500k"*; a user-facing skill table (sibling of `supervisor.md`) that a
   literal §12 pass would otherwise leave stale. Must become 150–200k.
-- **`supervisor/GOALS.md`** — must carry the role→tier table (§3.1), the worker-model allowlist
-  (Opus/Sonnet-only, §3.4), the bypass-permission acknowledgement (§10.2), and the swap band. It is the
-  operator-owned policy surface this spec routes configurability to.
+- **`supervisor/GOALS.md`** — must carry the role→tier table (§3.1), the **supervisor tier preference
+  chain `[top, second]`** (§3.5 — the policy surface the chain is read from, never a code constant), the
+  worker-model allowlist (Opus/Sonnet-only, §3.4), the bypass-permission acknowledgement (§10.2), and
+  the context band **for both supervisor and workers** (§11, §11.4). It is the operator-owned policy
+  surface this spec routes configurability to.
+- **`skills/fleet/SKILL.md` + `skills/fleet/supervisor.md` (wave-3 additions)** — beyond the band number:
+  the supervisor is now **top tier** with a fallback chain (§3.1, §3.5), and the **worker** band (§11.4)
+  needs a home in the worker-facing spawn etiquette, which today says nothing about a worker watching its
+  own context.
+- **`docs/PLAN.md` §0.4 (ceiling denomination) / the queued C-soak retirement** — §11.5 records that the
+  third-docket cap doctrine retires the **`--token-ceiling` spend** denomination but **not** §11.3's
+  context band. Whoever executes that retirement must not sweep the context band up with it.
 - **`docs/SPEC.md`** — the **Handoff row (`:261`) carries the obsoleted 300–500k band** (S1) and must
   become 150–200k; §4 registry (a `supervisor`-named worker record + reserved-name rule); §6 the new
   `sup-spawn` choke-point; a new scheduled-task family beyond autoclean (§6); the operator-gate state
