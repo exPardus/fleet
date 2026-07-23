@@ -354,6 +354,50 @@ class TestDispatchBg:
         assert "CLAUDE_CODE_SESSION_ID" not in kwargs["env"]
         assert kwargs["cwd"] == "C:/proj"
 
+    def test_resume_dispatch_inlines_steer_so_it_cannot_be_dropped(self):
+        """A fork-steer must put the steer IN argv, not behind a file pointer.
+
+        Regression: the argv prompt used to be the byte-identical pointer
+        "Read <task> and follow it exactly." on every dispatch. On a resume
+        the carried transcript already holds a Read(<task>) tool_use + its
+        tool_result, so the model satisfied the pointer from cache, never
+        re-read the rewritten file, and the <MANAGER MESSAGE> was silently
+        dropped -- `fleet send` on an idle worker was a no-op that still
+        incremented turns and drained (audited) the mail.
+        """
+        task = Path("/tmp/fleet-tasks/w1.md")
+        body = (
+            "You are fleet worker `w1` in `/tmp`.\n"
+            "Manager messages arrive mid-task marked `<MANAGER MESSAGE>`; "
+            "treat them as user instructions.\n\n"
+            "<MANAGER MESSAGE>\nSTEER-TOKEN-42\n"
+        )
+
+        # Fresh spawn: unchanged pointer (empty transcript -- the worker
+        # must Read the file and will).
+        fresh = fleet._dispatch_argv_prompt(task, body, None)
+        assert fresh == f"Read {task.as_posix()} and follow it exactly."
+
+        # Resume: the steer text itself must be in the prompt.
+        resumed = fleet._dispatch_argv_prompt(task, body, "sid-abc")
+        assert "STEER-TOKEN-42" in resumed
+        assert resumed != fresh
+        # ...and must LEAD with the real block. The preamble mentions the
+        # marker inline, so a plain find() would slice mid-sentence.
+        assert resumed.startswith("<MANAGER MESSAGE>")
+        assert "treat them as user instructions" not in resumed.split("\n")[0]
+
+    def test_resume_dispatch_oversized_body_falls_back_to_changed_pointer(self):
+        # Too large to inline: keep the pointer, but make it non-identical to
+        # the cached instruction and name the change explicitly.
+        task = Path("/tmp/fleet-tasks/w1.md")
+        big = "x" * (fleet.NATIVE_INLINE_PROMPT_MAX_BYTES + 1)
+        out = fleet._dispatch_argv_prompt(task, big, "sid-abc")
+        assert out.startswith(f"Read {task.as_posix()} and follow it exactly.")
+        assert "CHANGED" in out
+        assert out != f"Read {task.as_posix()} and follow it exactly."
+        assert big not in out
+
     def test_argv_pre_authorizes_tasks_and_journals_dirs_via_add_dir(self, native_home):
         # T12 fix wave (finding 1): the task file lives under
         # FLEET_HOME/tasks, outside the worker's own --dir cwd -- without
