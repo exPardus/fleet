@@ -721,8 +721,23 @@ _SID_SHAPE_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
 
-def validate_name(name: str, existing=()) -> None:
+# three-tier-command.md §10.3: the first-generation supervisor body is spawned
+# under this name, and it is minted ONLY by `sup-spawn`. Reserving it at the one
+# creation choke point (`validate_name`) makes an ordinary `spawn`/`respawn` of
+# the name mechanically impossible -- the same technique as the F6 uuid-shape
+# refusal, one more reserved shape. (Successor bodies run under the pipe-shaped
+# `sup|<inc>|successor` name, which NAME_RE already refuses on the worker path
+# and `_is_supervisor_shaped` recognises; only the gen-0 name needs reserving.)
+SUPERVISOR_BODY_NAME = "supervisor"
+RESERVED_NAMES = frozenset({SUPERVISOR_BODY_NAME})
+
+
+def validate_name(name: str, existing=(), allow_reserved: bool = False) -> None:
     """Raise ValueError unless name matches [a-z0-9-]+ and isn't in `existing`.
+
+    `allow_reserved` is the single authorized bypass of the RESERVED_NAMES set
+    (§10.3): `sup-spawn` passes it True to mint `supervisor`; every ordinary
+    creation path leaves it False, so the reserved name is refused there.
 
     F6 (adversarial review): uuid-shaped names are refused outright. Names
     and session ids share keyspaces in several stores (name-keyed AND
@@ -738,6 +753,10 @@ def validate_name(name: str, existing=()) -> None:
         raise ValueError(
             f"invalid worker name {name!r}: uuid-shaped names are reserved "
             f"for session ids (F6)")
+    if not allow_reserved and name in RESERVED_NAMES:
+        raise ValueError(
+            f"invalid worker name {name!r}: reserved for the supervisor body "
+            f"(three-tier §10.3) -- minted only by `sup-spawn`")
     if name in existing:
         raise ValueError(f"worker name already exists: {name!r}")
 
