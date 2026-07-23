@@ -117,6 +117,16 @@ $ grep -c "claude-opus\|claude-sonnet\|claude-haiku\|claude-fable" bin/fleet.py
 0
 ```
 
+The invariant is **machine-checked at the built commit, not only at the pin**: the three-tier build
+slice added a tier resolver, band/ceiling/archive/provenance surfaces, and the supervisor-shaped name
+family — none of it a model id. Re-verified after that work:
+
+```
+# at 99bb0d6e101f91f30ce9f3b58e8206952fe3591f
+$ grep -c "claude-opus\|claude-sonnet\|claude-haiku\|claude-fable" bin/fleet.py
+0
+```
+
 The model reaches a session exactly one way — `--model <value>` on the dispatch argv, defaulting to
 absent (the CLI/daemon's own default):
 
