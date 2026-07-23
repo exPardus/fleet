@@ -525,6 +525,209 @@ class TestSupBoot:
             fleet.cmd_sup_boot(args, which=_fake_which, run=_fake_run_roster([]))
 
 
+class TestSupBootContinuity:
+    """The boot half of the continuity proof.
+
+    `d13af83` gave `supervisor_claim_decision` its `caller_sid`/`nonce_valid`
+    parameters and its `resume` rule; `cmd_sup_boot` passed NEITHER and had no
+    `resume` branch, so the rule was unreachable from the command that owns
+    it. Everything here is about closing that gap, end to end, through the
+    real verb rather than the pure function -- which is the only level at
+    which "incident 2 is fixed" is a true statement."""
+
+    def _boot(self, entries, sid="sid-me", handoff=None, nonce=None):
+        args = SimpleNamespace(sid=sid, handoff_inc=handoff, nonce=nonce)
+        return fleet.cmd_sup_boot(args, which=_fake_which, run=_fake_run_roster(entries))
+
+    def _held(self, sid="sid-old", inc="inc-old", age_seconds=7200, **extra):
+        value = fleet.mint_nonce()
+        beat = (datetime.now(timezone.utc)
+                - timedelta(seconds=age_seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        claim = {"incarnation_id": inc, "session_id": sid, "claimed_at": beat,
+                 "heartbeat_at": beat, "claimed_via": "fresh",
+                 "nonce_hash": fleet.nonce_digest(value), "nonce_seq": 3,
+                 "lineage_id": "lin-20260101T000000Z-aaaa"}
+        claim.update(extra)
+        fleet.write_incarnation(claim)
+        return value
+
+    # --- incident 2, end to end ------------------------------------------
+
+    def test_incident_2_the_holder_resumes_its_own_aged_claim(self, sup_home, capsys):
+        # The wart this slice exists to fix: same body, roster-live, heartbeat
+        # aged past the seizure threshold, holding its generation. Shipped code
+        # refuses this unconditionally, and the refusal is what drove operators
+        # to seize their own live claim.
+        live = self._held(sid="sid-me", age_seconds=7200)
+        rc = self._boot([{"sessionId": "sid-me", "status": "busy"}],
+                        sid="sid-me", nonce=live)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "VERDICT: resume" in out
+        claim = fleet.read_incarnation()
+        assert claim["incarnation_id"] == "inc-old", "a resume mints no incarnation"
+        assert [e["kind"] for e in fleet.supervisor_journal_entries()] == ["BOOT"]
+        assert "resumed own claim" in fleet.supervisor_journal_latest()["body"]
+        assert fleet.supervisor_journal_latest()["kind"] != "SEIZED"
+
+    def test_a_resume_refreshes_the_heartbeat_and_restamps_the_sid(self, sup_home, capsys):
+        # Fork-steer as it actually presents at boot: the recorded sid was
+        # RETIRED by the steer, so it is roster-gone, and the body that still
+        # holds the generation carries a new one. §6.1 rule 2 does not fire (no
+        # distinct LIVE holder to protect), rule 3 does. Had the retired sid
+        # still been roster-live, rule 2 would refuse -- correctly: a
+        # continuity proof is not a body-discriminator, and two live sids on
+        # one claim is the exact shape the guard exists for.
+        live = self._held(sid="sid-before", age_seconds=7200)
+        before = fleet.read_incarnation()["heartbeat_at"]
+        assert self._boot([{"sessionId": "sid-after", "status": "busy"}],
+                          sid="sid-after", nonce=live) == 0
+        capsys.readouterr()
+        claim = fleet.read_incarnation()
+        assert claim["heartbeat_at"] > before
+        assert claim["session_id"] == "sid-after"
+
+    def test_the_N1_attack_end_to_end_a_spoofed_sid_without_a_generation_refuses(
+            self, sup_home, capsys):
+        # T14(iii) at the command level. The pure-function test pins the rule;
+        # this pins that `cmd_sup_boot` actually HANDS the rule its inputs --
+        # the exact wiring whose absence made the rule unreachable.
+        self._held(sid="sid-holder", age_seconds=7200)
+        before = fleet.read_incarnation()
+        rc = self._boot([{"sessionId": "sid-holder", "status": "idle"}],
+                        sid="sid-holder", nonce=None)
+        assert rc == 2
+        assert "VERDICT: refuse" in capsys.readouterr().out
+        assert fleet.read_incarnation() == before
+        assert fleet.supervisor_journal_entries() == []
+
+    def test_a_forked_body_presenting_a_copied_generation_still_refuses(self, sup_home, capsys):
+        # T14(i) / incident 1's fork: DISTINCT sid, valid generation, holder
+        # roster-live. Rule 2 runs ahead of the continuity check for exactly
+        # this case -- a continuity proof is not a body-discriminator.
+        live = self._held(sid="sid-holder", age_seconds=60)
+        rc = self._boot([{"sessionId": "sid-holder", "status": "idle"},
+                         {"sessionId": "sid-fork", "status": "busy"}],
+                        sid="sid-fork", nonce=live)
+        assert rc == 2
+        assert "VERDICT: refuse" in capsys.readouterr().out
+
+    def test_a_resume_that_presents_the_PENDING_generation_acknowledges_it(
+            self, sup_home, capsys):
+        # Boot is a `sup-*` verb like any other: it must run the same
+        # three-slot rules, or a body whose last delivery was a pending is
+        # refused by the one command whose job is to re-establish continuity.
+        live = self._held(sid="sid-me", age_seconds=7200)
+        pending = fleet.mint_nonce()
+        claim = fleet.read_incarnation()
+        claim["pending_nonce_hash"] = fleet.nonce_digest(pending)
+        claim["pending_at"] = fleet.now_iso()
+        fleet.write_incarnation(claim)
+        assert self._boot([{"sessionId": "sid-me", "status": "busy"}],
+                          sid="sid-me", nonce=pending) == 0
+        capsys.readouterr()
+        after = fleet.read_incarnation()
+        assert after["nonce_seq"] == 4, "the acknowledgment advanced the generation"
+        assert after["nonce_hash"] == fleet.nonce_digest(pending)
+        assert fleet.nonce_matches(live, after["nonce_hash"]) is False
+
+    # --- §9's binding dict-literal rule -----------------------------------
+
+    def test_a_fresh_claim_carries_the_v2_fields_and_delivers_its_generation(
+            self, sup_home, capsys):
+        assert self._boot([{"sessionId": "sid-me", "status": "busy"}]) == 0
+        value = _nonce_of(capsys.readouterr().out)
+        claim = fleet.read_incarnation()
+        assert claim["nonce_hash"] == fleet.nonce_digest(value)
+        assert claim["nonce_seq"] == 1
+        assert re.fullmatch(r"lin-\d{8}T\d{6}Z-[0-9a-f]{4}", claim["lineage_id"])
+
+    def test_a_seize_carries_the_v2_fields_and_RE_MINTS_the_lineage(self, sup_home, capsys):
+        # §6.2: lineage is minted at the first fresh claim, CARRIED across
+        # handoff, RE-MINTED on seize -- a seize is a recovery, and being asked
+        # once at a recovery is correct. Carrying it would launder the dead
+        # body's provenance onto the seizing one.
+        self._held(sid="sid-dead", age_seconds=3 * 3600)
+        old_lineage = fleet.read_incarnation()["lineage_id"]
+        assert self._boot([{"sessionId": "sid-me", "status": "busy"}]) == 0
+        value = _nonce_of(capsys.readouterr().out)
+        claim = fleet.read_incarnation()
+        assert claim["claimed_via"] == "seize"
+        assert claim["nonce_hash"] == fleet.nonce_digest(value)
+        assert claim["nonce_seq"] == 1
+        assert claim["lineage_id"] != old_lineage
+
+    def test_a_resume_neither_re_mints_nor_drops_the_lineage(self, sup_home, capsys):
+        live = self._held(sid="sid-me", age_seconds=7200)
+        before = fleet.read_incarnation()["lineage_id"]
+        assert self._boot([{"sessionId": "sid-me", "status": "busy"}],
+                          sid="sid-me", nonce=live) == 0
+        capsys.readouterr()
+        assert fleet.read_incarnation()["lineage_id"] == before
+
+    @pytest.mark.parametrize("writer", ["fresh", "seize"])
+    def test_T10_every_dict_literal_writer_produces_a_claim_that_still_validates(
+            self, sup_home, capsys, writer):
+        """The test §9 says exists solely to fail if a literal is missed.
+
+        Three writers build an INCARNATION from a dict LITERAL and three
+        round-trip the dict they read. Fields added only to the round-trip
+        writers survive checkpoints and heartbeats and are then silently
+        destroyed by the next seize or handoff -- a claim that works for days
+        and fails at the worst moment. So the assertion is not "the key is
+        present": it is that the very next continuity-proving call SUCCEEDS."""
+        if writer == "seize":
+            self._held(sid="sid-dead", age_seconds=3 * 3600)
+        assert self._boot([{"sessionId": "sid-me", "status": "busy"}]) == 0
+        value = _nonce_of(capsys.readouterr().out)
+        # FIRST, and load-bearing: a claim whose literal dropped the nonce
+        # fields is a five-key claim, i.e. a LEGACY claim -- and §5.3 rule 4
+        # then honors it by sid equality, so the "next call succeeds"
+        # assertion below passes on exactly the bug this test exists to catch.
+        # A wrong value under a MATCHING sid is what separates the two: the
+        # legacy path ignores the value, the continuity path refuses it.
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=fleet.mint_nonce()))
+        assert fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=value)) == 0
+        capsys.readouterr()
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=None))
+
+    def test_the_handoff_complete_literal_carries_the_predecessors_lineage(
+            self, sup_home, capsys):
+        # §6.2: carried across handoff. The successor's own generation is
+        # §6.4's work (it reaches the claim through HANDSHAKE, which does not
+        # carry it yet), so the transferred claim is deliberately a LEGACY
+        # claim in this slice -- §9's documented mixed-code shape, which the
+        # successor's first call upgrades in place.
+        live = self._held(sid="sid-old", inc="inc-old", age_seconds=10)
+        fleet.write_handshake("inc-new", "sid-new")
+        args = SimpleNamespace(expect_inc="inc-new", expect_sid="sid-new",
+                               sid="sid-old", nonce=live)
+        assert fleet.cmd_sup_handoff_complete(args) == 0
+        capsys.readouterr()
+        claim = fleet.read_incarnation()
+        assert claim["incarnation_id"] == "inc-new"
+        assert claim["lineage_id"] == "lin-20260101T000000Z-aaaa"
+
+    # --- §5.8's second publisher ------------------------------------------
+
+    def test_no_stored_hash_reaches_sup_boots_stdout(self, sup_home, capsys):
+        # §5.8 enumerates TWO publishers and v2 wrote the rule against one.
+        # `cmd_sup_boot` prints claim identity on the same run and §11 adds the
+        # `NONCE:` line to that same stream, so the rule extends here: the one
+        # plaintext this design prints is the newly minted generation, printed
+        # exactly once, and no HASH may appear at all.
+        self._held(sid="sid-dead", age_seconds=3 * 3600)
+        hashes = [v for k, v in fleet.read_incarnation().items() if k.endswith("_hash")]
+        assert hashes, "guard the guard: the seeded claim must actually hold a hash"
+        assert self._boot([{"sessionId": "sid-me", "status": "busy"}]) == 0
+        out = capsys.readouterr().out
+        for h in hashes + [v for k, v in fleet.read_incarnation().items()
+                           if k.endswith("_hash")]:
+            assert h not in out
+
+
 class TestCheckpointHeartbeat:
     def _hold(self, sid="sid-me", inc="inc-me"):
         # Seed the heartbeat strictly in the past: now_iso() truncates to

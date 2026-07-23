@@ -8108,6 +8108,20 @@ def mint_incarnation_id() -> str:
     return f"inc-{stamp}-{uuid.uuid4().hex[:4]}"
 
 
+def mint_lineage_id() -> str:
+    """claim-nonce §5.2: `lin-<utc>-<4 hex>`. Minted at the first fresh claim,
+    CARRIED across handoff, RE-MINTED on seize.
+
+    The re-mint is the load-bearing asymmetry (§6.2): a handoff is a planned
+    succession with the predecessor alive to vouch, so provenance continues; a
+    seize is a recovery from a body that could not vouch for anything, so
+    carrying the lineage would launder the dead body's provenance onto the
+    seizing one and make every worker it spawned look like the new body's own.
+    Being asked once, at a recovery, is correct."""
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"lin-{stamp}-{uuid.uuid4().hex[:4]}"
+
+
 _SUPERVISOR_ENTRY_RE = re.compile(
     r"^## (?P<ts>\S+) (?P<kind>[A-Z][A-Z-]*) inc=(?P<inc>\S+) sid=(?P<sid>\S+)\s*$")
 
@@ -8380,6 +8394,7 @@ def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
     live_sids = _roster_live_sids(entries)
 
     inc_line = None
+    notices = []
     if getattr(args, "handoff_inc", None):
         # Successor mode: claim-pending, holds NO claim, takes no actions
         # (spec §4). Writes HANDSHAKE only -- never the journal.
@@ -8393,19 +8408,50 @@ def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
         with fleet_lock():
             claim = read_incarnation()
             latest = supervisor_journal_latest()
+            # §6.1 rules 2 and 3 both key on CONTINUITY, so the decision needs
+            # both of these -- and until this wiring existed the rule the
+            # verdict order was rewritten around was unreachable from the one
+            # command that owns it.
+            presented = None if claim is None else _nonce_presentation(
+                claim, getattr(args, "nonce", None))
             if not epoch_ok:
                 verdict, reason = "freeze", f"epoch check failed: {epoch_reason}"
             else:
-                verdict, reason = supervisor_claim_decision(claim, live_sids, latest)
+                verdict, reason = supervisor_claim_decision(
+                    claim, live_sids, latest, caller_sid=caller_sid,
+                    nonce_valid=presented is not None)
             if verdict == "claim":
                 inc = mint_incarnation_id()
+                value = mint_nonce()
+                # §9's binding rule: this is one of the three DICT-LITERAL
+                # writers, and a field added only to the round-trip writers
+                # survives checkpoints and heartbeats and is then silently
+                # destroyed here -- a claim that works for days and fails at
+                # the worst moment. T10 exists solely to catch a missed one.
                 write_incarnation({"incarnation_id": inc, "session_id": caller_sid,
                                    "claimed_at": now_iso(), "heartbeat_at": now_iso(),
-                                   "claimed_via": "fresh"})
+                                   "claimed_via": "fresh",
+                                   "nonce_hash": nonce_digest(value), "nonce_seq": 1,
+                                   "lineage_id": mint_lineage_id()})
                 supervisor_journal_append("BOOT", inc, caller_sid, f"fresh claim: {reason}")
                 inc_line = inc
+                notices.append(f"NONCE: {value}")
+            elif verdict == "resume":
+                # §6.1 rule 3: NO seize, NO new incarnation, NO `SEIZED`, no
+                # page. The body already holds the claim; this is it proving
+                # so. Restamp, beat, and journal a BOOT that says which.
+                if presented == "pending":
+                    _acknowledge_pending(claim)
+                claim["session_id"] = caller_sid
+                claim["heartbeat_at"] = now_iso()
+                notices.append(_mint_pending_nonce(claim))
+                write_incarnation(claim)
+                supervisor_journal_append("BOOT", claim["incarnation_id"], caller_sid,
+                                          f"resumed own claim: {reason}")
+                inc_line = claim["incarnation_id"]
             elif verdict == "seize":
                 inc = mint_incarnation_id()
+                value = mint_nonce()
                 dead = claim.get("incarnation_id", "?")
                 try:
                     # Stale-HANDSHAKE hygiene (spec §4): an orphan from a crash
@@ -8413,12 +8459,17 @@ def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
                     handshake_path().unlink()
                 except FileNotFoundError:
                     pass
+                # Second dict-literal writer (§9). `lineage_id` is RE-MINTED
+                # here, never carried: see mint_lineage_id's docstring.
                 write_incarnation({"incarnation_id": inc, "session_id": caller_sid,
                                    "claimed_at": now_iso(), "heartbeat_at": now_iso(),
-                                   "claimed_via": "seize"})
+                                   "claimed_via": "seize",
+                                   "nonce_hash": nonce_digest(value), "nonce_seq": 1,
+                                   "lineage_id": mint_lineage_id()})
                 supervisor_journal_append("SEIZED", inc, caller_sid,
                                           f"seized from {dead}: {reason}")
                 inc_line = inc
+                notices.append(f"NONCE: {value}")
             # refuse / freeze: strictly read-only.
         rc = SUPERVISOR_BOOT_RC[verdict]
 
@@ -8428,6 +8479,10 @@ def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
         lines.append(f"INCARNATION: {inc_line}")
     lines.append(f"VERDICT: {verdict} -- {reason}")
     _write_text_tolerating_console_encoding("\n".join(lines) + "\n")
+    # §5.8's second publisher: the ONE plaintext this design prints is the
+    # newly minted generation, printed exactly once, on the minting verb's own
+    # stdout. No hash reaches this stream at all.
+    _deliver_notices(notices)
     return rc
 
 
@@ -8448,6 +8503,43 @@ def _claim_is_legacy(claim: dict) -> bool:
     through a verb, which is the only way a shadowed guard can be proven to
     carry its own weight."""
     return "nonce_hash" not in claim and "state" not in claim
+
+
+def _nonce_presentation(claim: dict, nonce):
+    """Which generation the caller presented: "live", "pending", "prior", or
+    None. PURE -- it decides nothing and mutates nothing.
+
+    Up to three generations are presentable at once (§5.3): the live one, an
+    optional pending that has been minted and committed but not yet proven
+    received, and an optional superseded pending -- a pending that was replaced
+    before anyone acknowledged it (§5.4(d) is why the third slot exists).
+
+    Held as one function because it has TWO callers that must agree:
+    `_require_claim_holder` (which acts on the answer) and `cmd_sup_boot`
+    (which feeds `nonce_valid` to §6.1's verdict order). Duplicating the slot
+    list across the two is the shape that lets `sup-boot` refuse a body whose
+    last delivery was a pending -- the one command whose job is to
+    re-establish continuity, failing the bodies with the least of it."""
+    if nonce_matches(nonce, claim.get("nonce_hash")):
+        return "live"
+    if nonce_matches(nonce, claim.get("pending_nonce_hash")):
+        return "pending"
+    if nonce_matches(nonce, claim.get("prior_pending_hash")):
+        return "prior"
+    return None
+
+
+def _acknowledge_pending(claim: dict) -> None:
+    """§5.3 rule 2's promotion, in-memory. The caller has proven it received
+    the pending value; ONLY THEN does the old generation die.
+
+    All three pending slots are cleared, `prior_pending_hash` included --
+    leaving it behind would keep a superseded generation presentable across an
+    acknowledgment that was supposed to retire everything before it."""
+    claim["nonce_hash"] = claim["pending_nonce_hash"]
+    claim["nonce_seq"] = claim.get("nonce_seq", 1) + 1
+    for key in ("pending_nonce_hash", "pending_at", "prior_pending_hash"):
+        claim.pop(key, None)
 
 
 def _continuity_refusal(verb, claim: dict) -> FleetCliError:
@@ -8577,15 +8669,11 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # generation it was given" ambiguous at the one moment every
         # installation passes through (§5.4(e)'s hazard, at first contact).
         mint = False
-    elif nonce_matches(nonce, claim.get("nonce_hash")):
-        pass                                              # rule 1
-    elif nonce_matches(nonce, claim.get("pending_nonce_hash")):
-        claim["nonce_hash"] = claim["pending_nonce_hash"]  # rule 2
-        claim["nonce_seq"] = claim.get("nonce_seq", 1) + 1
-        for key in ("pending_nonce_hash", "pending_at", "prior_pending_hash"):
-            claim.pop(key, None)
-    elif nonce_matches(nonce, claim.get("prior_pending_hash")):
-        pass                                              # rule 3 -- quiet, not an alarm
+    elif _nonce_presentation(claim, nonce) == "pending":
+        _acknowledge_pending(claim)                       # rule 2
+    elif _nonce_presentation(claim, nonce) is not None:
+        pass  # rule 1 (live) and rule 3 (prior) -- both valid, both promote
+              # nothing; rule 3 is a QUIET record, not an alarm (§5.4(d))
     else:
         raise _continuity_refusal(verb, claim)            # rule 5
 
@@ -8927,10 +9015,24 @@ def cmd_sup_handoff_complete(args) -> int:
                 f"sid={args.expect_sid} -- NOT transferring (spec §4 id verification)")
         supervisor_journal_append("HANDOFF-COMPLETE", claim["incarnation_id"], caller,
                                   f"claim -> {args.expect_inc} sid={args.expect_sid}")
+        # Third dict-literal writer (§9). `lineage_id` is CARRIED, never
+        # re-minted: a handoff is a planned succession with the predecessor
+        # alive to vouch, so provenance continues across it (§6.2), and every
+        # worker the predecessor spawned stays not-foreign to the successor.
+        #
+        # The successor's own generation is NOT written here: it reaches the
+        # claim through HANDSHAKE, which does not carry it until §6.4's token
+        # work lands. Until then the transferred claim is deliberately a
+        # LEGACY claim -- §9's documented mixed-code shape -- which the
+        # successor's first call honors by sid equality once and upgrades in
+        # place. Recorded rather than papered over: minting a generation here
+        # would deliver it on the PREDECESSOR's stdout, to the one body that
+        # must never present it again.
         write_incarnation({"incarnation_id": args.expect_inc,
                            "session_id": args.expect_sid,
                            "claimed_at": now_iso(), "heartbeat_at": now_iso(),
-                           "claimed_via": "handoff"})
+                           "claimed_via": "handoff",
+                           "lineage_id": claim.get("lineage_id")})
         try:
             handshake_path().unlink()
         except FileNotFoundError:
@@ -9251,6 +9353,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_supboot = sub.add_parser("sup-boot", help="supervisor boot ritual: epoch check, claim decision, boot bundle (spec §4)")
     p_supboot.add_argument("--sid", help="override caller session id (default: CLAUDE_CODE_SESSION_ID)")
+    p_supboot.add_argument("--nonce", help=NONCE_ARG_HELP)
     p_supboot.add_argument("--handoff-inc", dest="handoff_inc",
                            help="handoff-successor mode: write HANDSHAKE with this incarnation id; no claim action")
 
