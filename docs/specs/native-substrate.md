@@ -156,6 +156,99 @@ absolute paths for every path-bearing flag regardless of invoking shell.
 
 ---
 
+## Machine-checkable receipts
+
+This contract's claims split in two, and only one half can be re-executed here.
+
+The **vendor-substrate** half — the G1–G13 verdicts, the roster schema, the
+dispatch argv, every quoted `claude` CLI string — is evidence that lives OUTSIDE
+this repo: it is CLI output captured at a stated version on a stated machine, and
+a `--bg` worker cannot reproduce it (the daemon it sees is always live; the
+version drifts on every bump). That half stays prose. The one fact from it that a
+read-only command can still surface — that the vendor binary exists and reports a
+version — is pinned below as a `# volatile` receipt whose number is disclosed as a
+WARN, never a FAIL, because the observed 2.1.207 is already stale.
+
+The **fleet-adaptation** half is different: every claim this contract makes about
+fleet's OWN code — the helpers it added, the probes it deleted — is a grep against
+`bin/fleet.py` at a named commit, and those are re-executed by
+`tools/verify_receipts.py` against that commit's materialised tree. The blocks
+below add no verdict and change no claim; they bind the code claims to the tree so
+an unrelated edit to `bin/fleet.py` cannot quietly rot them.
+
+**Deliberately NOT receipted (claim-drift disclosure).** Three dead-daemon claims
+carry inline `RATIFICATION WITHHELD 2026-07-23` markers — the `claude rm`/`claude
+stop` "background service may be restarting" message strings (G12's dead-daemon
+bullet, the G10/stop dead-daemon sentence, and the Known-hazards transient-daemon
+row). They are manager-report-only, unreproduced by two `--bg` waves, and by this
+contract's own finding cannot be reached from any `--bg` session. There is no
+honest receipt for them: an executable vendor verb would emit the LIVE-daemon
+string (or side-effect), and a hand-echoed string would be fabricated evidence.
+They remain prose under their WITHHELD markers, pending the quiet-machine G9 probe.
+
+Classify-by-message helpers (G12 rm taxonomy, G10 stop taxonomy, the adaptation
+rows above):
+
+```
+# at 2d58eba
+$ grep -n "^def _classify_native_cli_result\|^def _rm_native_session_status\|^def _stop_native_session_status" bin/fleet.py
+5332:def _classify_native_cli_result(proc) -> str:
+5356:def _rm_native_session_status(sid: str, run=subprocess.run, which=shutil.which,
+7473:def _stop_native_session_status(sid: str, run=subprocess.run, which=shutil.which,
+```
+
+The transient-daemon matcher keys ONLY on the dash-free middle phrase (Known
+hazards, transient-daemon row; G12 dead-daemon bullet):
+
+```
+# at 2d58eba
+$ grep -n "^_NATIVE_CLI_TRANSIENT_RE\|^def _doctor_check_daemon_wedge" bin/fleet.py
+5268:_NATIVE_CLI_TRANSIENT_RE = re.compile(r"background service may be restarting", re.I)
+7005:def _doctor_check_daemon_wedge(lock_path=None, log_path=None):
+```
+
+The G9 epoch-freeze predicate (G9 row, "roster-epoch freeze rule ... mandatory
+regardless of G9's eventual answer"):
+
+```
+# at 2d58eba
+$ grep -n "^def native_epoch_suspicious" bin/fleet.py
+2046:def native_epoch_suspicious(roster_ok: bool, entries: list, workers: dict) -> bool:
+```
+
+The dispatch-grace window that makes a state-only startup entry read as launching,
+not dead (Roster contract, "Startup transient" amendment):
+
+```
+# at 2d58eba
+$ grep -n "^LAUNCH_CLAIM_MAX_AGE_SECONDS = \|^def _dispatch_grace_active" bin/fleet.py
+1054:LAUNCH_CLAIM_MAX_AGE_SECONDS = 600.0
+1912:def _dispatch_grace_active(record: dict) -> bool:
+```
+
+The three liveness probes the section-6 pivot DELETED — the prose already cites
+this grep as "@`ac3e34d`: zero matches", so it is pinned there and asserts the
+empty result via its exit code (a zero-match grep prints nothing and exits 1):
+
+```
+# at ac3e34d
+$ grep -nE "probe_liveness|get_process_info|boot_identity" bin/fleet.py
+$ echo "exit $?"
+exit 1
+```
+
+Vendor version — the one vendor fact a read-only command still surfaces, disclosed
+as drift (the contract was OBSERVED at 2.1.207; the live box is already past it):
+
+```
+# at 2d58eba
+# volatile: the vendor `claude` binary drifts on every bump; observed 2.1.207, load-bearing fact is that the binary exists and reports a version, the number is not pinnable — reported as a WARN, never a FAIL
+$ claude --version
+2.1.207 (Claude Code)
+```
+
+---
+
 ## Re-verification
 
 Per design spec §7 ("Risk and its gate"):

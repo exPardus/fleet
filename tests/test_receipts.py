@@ -74,6 +74,7 @@ FOUNDING_GUTTER_FENCES = {519, 523, 783, 787, 909, 914, 954, 958}
 RECEIPT_FLOOR = {
     "claim-nonce.md": 59,
     "three-tier-command.md": 39,
+    "native-substrate.md": 6,
 }
 
 # A commit whose bin/fleet.py predates the me/ul + me/daemon merges, used by the
@@ -99,15 +100,13 @@ UNENFORCED = {
         "('tests/test_core.py:371,377,... # 10x fleet.pid_alive(...)'), never "
         "literal grep output, and it greps for probe_liveness/pid_alive which the "
         "pivot deleted. Pre-existing; flagged to the manager, not fixed here."),
-    # me/daemon added a 2.1.216 daemon-lock row here carrying pasted evidence.
-    # It carries no `# at <sha>` pin, so it stays out of the enforced set -- and
-    # that is a real gap, not a clean exclusion: its evidence is a manager report
-    # of a machine-wide outage, exactly the kind of claim the harness exists to
-    # hold. Flagged to the manager; adopting the pin convention there is that
-    # spec owner's call, not this slice's.
-    "native-substrate.md": ("G-row contract; prose + quoted CLI output. The 2.1.216 "
-                            "row from me/daemon pastes evidence but carries no "
-                            "`# at <sha>` pin, so it cannot be resolved to a commit."),
+    # native-substrate.md was ENFORCED by the ns/receipts-enforce slice: its
+    # claims about fleet's OWN code (`bin/fleet.py` helpers added / probes deleted)
+    # are now pinned grep receipts, plus one volatile `claude --version`. Its
+    # vendor-substrate half (G1-G13, roster schema, quoted CLI strings) stays prose
+    # -- it lives outside the repo and a `--bg` worker cannot reproduce it -- and
+    # the three dead-daemon `RATIFICATION WITHHELD` strings are deliberately NOT
+    # receipted (no honest reproduction exists; see that spec's receipts section).
     "autoclean.md": "predates the convention; no fenced receipts.",
     "terminal-surface.md": "predates the convention; no fenced receipts.",
     "providers.md": "predates the convention; no fenced receipts.",
