@@ -2231,12 +2231,30 @@ probe, at the cost of a quiet-machine window.
 
 ## 13. Filed elsewhere — referenced, not built here
 
-**Two** shipped-code defects this gate surfaced. **They are not this slice's to fix**; §6.5 and §5.8
-depend on them, so they are prerequisites, not nice-to-haves.
+**Two** shipped-code defects this gate surfaced. They were filed as *"not this slice's to fix"*;
+§6.5 and §5.8 depend on them, so they are prerequisites, not nice-to-haves. **Both have since been
+assigned to this slice by the operator and are closed here** — the strikethroughs below record the
+reassignment rather than hiding it, because "filed elsewhere" was the disposition a separate slice
+would have been handed.
 
-1. **A worker turn can hold the supervisor claim, and is prevented only by accident.**
-   `_require_claim_holder` has no `FLEET_WORKER` refusal (§4.10 shows `_worker_env` stamps it).
-   Prerequisite for §6.5.
+1. ~~**A worker turn can hold the supervisor claim, and is prevented only by accident.**~~
+   `_require_claim_holder` had no `FLEET_WORKER` refusal (§4.10 shows `_worker_env` stamps it).
+   Prerequisite for §6.5. **CLOSED IN THIS SLICE, 2026-07-23**, by operator/council ruling —
+   option (i), the **narrow** arm: refuse when `FLEET_WORKER` is set and its value is not
+   supervisor-shaped (`sup|<inc>|successor`). A *blanket* refusal is refuted by the code — the
+   handoff successor is dispatched through `_worker_env` under exactly that name and its first act
+   after claim transfer is `sup-checkpoint`, a `_require_claim_holder` caller — so it would break
+   the one session the handoff exists to serve, and three-tier's `sup-spawn` besides. The exempt
+   shape is unforgeable through `fleet spawn`: `NAME_RE` is `^[a-z0-9-]+$` and forbids `|`. It is a
+   **speed-bump, not a boundary** (`env -u FLEET_WORKER` defeats it, §2.1), and the refusal message
+   says so in those words.
+
+   > **Spec defect owed elsewhere, disclosed not fixed:** `docs/specs/three-tier-command.md` ~L1078
+   > says `FLEET_WORKER` is stamped `=1`; the code of record (`_worker_env`, `bin/fleet.py:1284`)
+   > stamps the worker **NAME**, and three-tier's own receipt at `:1402-1408` pastes the correct
+   > line. This slice's arm keys on the name, per the code — an arm keyed on the value `"1"` would
+   > be a no-op. The three-tier text correction is owed in the three-tier build slice; that spec is
+   > ratified and this slice does not edit it.
 2. ~~**`supervisor/*.tmp` is not gitignored — `INCARNATION.tmp` *and* `HANDSHAKE.tmp`** (§4.13(f)).~~
    **CLOSED IN THIS SLICE, 2026-07-23.** `_write_json_atomic` writes the sibling inside a git-tracked
    directory, and §6.4 puts `handoff_token_hash` plus the successor's `nonce_hash` into HANDSHAKE, so

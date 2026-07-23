@@ -1404,6 +1404,175 @@ class TestClaimContinuity:
         assert "NONCE: " in capsys.readouterr().out
 
 
+class TestWorkerTurnsCannotHoldTheClaim:
+    """§6.5 / §13 item 1: *"a worker turn can hold the supervisor claim, and is
+    prevented only by accident."*
+
+    Adjudicated by council to option (i), the NARROW arm, because a BLANKET
+    refusal is refuted by the corpus and by the code: `_worker_env` stamps
+    `FLEET_WORKER` on every fleet-launched session, and the handoff SUCCESSOR
+    is dispatched through that very function -- its first act after claim
+    transfer is `sup-checkpoint`, a `_require_claim_holder` caller. A blanket
+    refusal breaks the one session the handoff exists to serve, and breaks
+    three-tier's `sup-spawn`, which spawns the supervisor itself as a worker.
+
+    So: refuse when `FLEET_WORKER` is set AND its value is not
+    supervisor-shaped. The exempt shape is `sup|<inc>|successor`, and it is
+    unforgeable through `fleet spawn` -- `NAME_RE` is `^[a-z0-9-]+$` and
+    forbids `|` in every spawnable worker name.
+
+    It is a SPEED-BUMP, not a control: `env -u FLEET_WORKER fleet …` defeats
+    it, and §2.1 is why nothing here can do better. That is consistent with
+    the operator's gate answer (option (b), knowingly bypassable) and must be
+    described that way rather than as a boundary."""
+
+    def _hold(self, sid="sid-me"):
+        value = fleet.mint_nonce()
+        beat = fleet.now_iso()
+        fleet.write_incarnation({"incarnation_id": "inc-me", "session_id": sid,
+                                 "claimed_at": beat, "heartbeat_at": beat,
+                                 "claimed_via": "fresh", "nonce_seq": 1,
+                                 "lineage_id": "lin-x",
+                                 "nonce_hash": fleet.nonce_digest(value)})
+        return value
+
+    # (a) an ordinary worker turn is refused at every caller
+
+    def test_a_worker_turn_is_refused_even_holding_the_live_generation(
+            self, sup_home, monkeypatch):
+        live = self._hold()
+        monkeypatch.setenv("FLEET_WORKER", "some-worker")
+        with pytest.raises(fleet.FleetCliError) as exc:
+            fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=live))
+        assert "some-worker" in str(exc.value)
+        assert "sup-checkpoint" in str(exc.value)
+        assert fleet.supervisor_journal_entries() == []
+
+    @pytest.mark.parametrize("verb", ["checkpoint", "heartbeat", "handoff-abort"])
+    def test_every_require_claim_holder_caller_refuses(self, sup_home, monkeypatch, verb):
+        live = self._hold()
+        monkeypatch.setenv("FLEET_WORKER", "some-worker")
+        calls = {
+            "checkpoint": lambda: fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=live)),
+            "heartbeat": lambda: fleet.cmd_sup_heartbeat(
+                SimpleNamespace(sid="sid-me", nonce=live)),
+            "handoff-abort": lambda: fleet.cmd_sup_handoff_abort(
+                SimpleNamespace(sid="sid-me", nonce=live, successor_sid="sid-x")),
+        }
+        with pytest.raises(fleet.FleetCliError) as exc:
+            calls[verb]()
+        assert "some-worker" in str(exc.value)
+
+    def test_the_refusal_lands_before_the_claim_is_even_read(self, sup_home, monkeypatch):
+        # No claim at all: a worker turn must be told it is a worker, not that
+        # a claim is missing. The role answer does not depend on the claim.
+        monkeypatch.setenv("FLEET_WORKER", "some-worker")
+        with pytest.raises(fleet.FleetCliError) as exc:
+            fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me"))
+        assert "some-worker" in str(exc.value)
+        assert "no supervisor claim" not in str(exc.value)
+
+    def test_it_is_an_ordinary_error_not_a_continuity_failure(self, sup_home, monkeypatch):
+        # Exit 4 means "a second body of your lineage may be acting" (§5.6).
+        # A worker turn reaching a supervisor verb is a ROLE error and is not
+        # evidence of a second body; conflating them would make the one code
+        # an operator scripts against mean two different incidents.
+        self._hold()
+        monkeypatch.setenv("FLEET_WORKER", "some-worker")
+        assert fleet.main(["sup-checkpoint", "body", "--sid", "sid-me"]) == 1
+
+    def test_the_refusal_is_described_as_a_speed_bump_not_a_boundary(
+            self, sup_home, monkeypatch):
+        # §2.1: nothing on this box can authorize. `env -u FLEET_WORKER`
+        # defeats this, and the message must not imply otherwise -- v1's whole
+        # class of error was describing a speed-bump as a control.
+        self._hold()
+        monkeypatch.setenv("FLEET_WORKER", "some-worker")
+        with pytest.raises(fleet.FleetCliError) as exc:
+            fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me"))
+        assert "not a security boundary" in str(exc.value)
+
+    # (b) the successor -- the one body the handoff exists to serve
+
+    def test_the_handoff_successor_passes_through_to_the_normal_claim_check(
+            self, sup_home, monkeypatch, capsys):
+        live = self._hold()
+        monkeypatch.setenv("FLEET_WORKER", "sup|inc-20260723T101112Z-abcd|successor")
+        assert fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=live)) == 0
+        capsys.readouterr()
+
+    def test_the_successor_still_faces_the_continuity_check(self, sup_home, monkeypatch):
+        # "Passes through" means exactly that: exempt from the ROLE arm, not
+        # exempt from §5.3. An exemption that skipped the claim check would
+        # hand the claim to anyone who can set one env var to a known shape.
+        self._hold()
+        monkeypatch.setenv("FLEET_WORKER", "sup|inc-20260723T101112Z-abcd|successor")
+        with pytest.raises(fleet.FleetCliError) as exc:
+            fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=fleet.mint_nonce()))
+        assert "continuity proof failed" in str(exc.value)
+
+    @pytest.mark.parametrize("value", [
+        "sup|inc-x|successor|extra",     # a third separator
+        "sup|inc-x|worker",              # right prefix, wrong role
+        "SUP|inc-x|successor",           # case
+        "sup||successor",                # empty incarnation segment
+        " sup|inc-x|successor",          # leading space
+        "sup|inc-x|successor ",          # trailing space
+        "xsup|inc-x|successor",          # unanchored prefix
+        "sup|inc-x|successorx",          # unanchored suffix
+    ])
+    def test_near_miss_shapes_are_refused(self, sup_home, monkeypatch, value):
+        live = self._hold()
+        monkeypatch.setenv("FLEET_WORKER", value)
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=live))
+
+    # (c) unset -- the manager's own session, and every human shell
+
+    def test_an_unset_FLEET_WORKER_is_unchanged(self, sup_home, monkeypatch, capsys):
+        live = self._hold()
+        monkeypatch.delenv("FLEET_WORKER", raising=False)
+        assert fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=live)) == 0
+        capsys.readouterr()
+
+    @pytest.mark.parametrize("value", ["", " "])
+    def test_an_empty_FLEET_WORKER_is_treated_as_unset(self, sup_home, monkeypatch,
+                                                       capsys, value):
+        # `_worker_env` never stamps an empty value; an empty one is a shell
+        # artifact, and refusing on it would break a plain human shell that
+        # happens to export it.
+        live = self._hold()
+        monkeypatch.setenv("FLEET_WORKER", value)
+        assert fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=live)) == 0
+        capsys.readouterr()
+
+    # (d) the shape lock
+
+    def test_the_exempt_shape_is_unforgeable_through_fleet_spawn(self):
+        """The grounding the whole arm rests on.
+
+        `NAME_RE` is `^[a-z0-9-]+$`, so `|` is forbidden in every spawnable
+        worker name -- a worker cannot be named into the exemption. If that
+        ever changes, this arm silently becomes forgeable, and this assertion
+        is what makes the change loud instead."""
+        assert fleet.NAME_RE.match("sup|inc-x|successor") is None
+        assert "|" not in fleet.NAME_RE.pattern
+        with pytest.raises(ValueError):
+            fleet.validate_name("sup|inc-x|successor")
+
+    def test_the_dispatch_and_the_arm_read_ONE_shape(self):
+        # The literal used to live only in `cmd_sup_handoff_begin`. Two copies
+        # of a security-relevant shape drift, and the drift is silent: the
+        # dispatch keeps working while the exemption stops matching it.
+        name = fleet._successor_worker_name("inc-20260723T101112Z-abcd")
+        assert name == "sup|inc-20260723T101112Z-abcd|successor"
+        assert fleet._is_supervisor_shaped(name) is True
+
+    @pytest.mark.parametrize("value", [None, 0, b"sup|x|successor", ["sup|x|successor"]])
+    def test_the_shape_test_never_raises_on_a_non_string(self, value):
+        assert fleet._is_supervisor_shaped(value) is False
+
+
 class TestRefusalMessageIsAgentSafe:
     """§5.7's binding constraint on agent-facing output: it must name the
     ambiguity and the escalation, and must NOT name a lever that resolves it
