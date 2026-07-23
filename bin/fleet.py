@@ -8716,6 +8716,54 @@ def cmd_sup_heartbeat(args) -> int:
     return 0
 
 
+def _project_claim(claim, now=None):
+    """claim-nonce §5.8's binding build rule: what a VIEW may publish.
+
+    §4.8's receipt showed `sup-status --json` emitting the raw claim dict, so
+    every field this spec adds is published by a lock-free view unless a
+    redaction step is specified. `nonce_hash`, `pending_nonce_hash` and
+    `prior_pending_hash` are omitted; the observables that replace them --
+    `nonce_present`, `pending_present`, `pending_age_seconds` (§5.6's
+    unacknowledged-pending signal), `nonce_seq`, `lineage_id`, `state` -- are
+    published instead.
+
+    An ALLOWLIST, not a denylist. A denylist republishes every field a future
+    spec adds, which is precisely how §5.8 came to be needed. The cost is real
+    and accepted: a key hand-added to INCARNATION stops appearing in
+    `sup-status --json`.
+
+    Pure and never raises: this runs on the view path (`sup-status`, and via
+    `supervisor_status_line` the SessionStart hook of every Claude Code
+    session on this box)."""
+    if claim is None:
+        return None
+    if now is None:
+        now = datetime.now(timezone.utc)
+    pending_age = None
+    if claim.get("pending_at"):
+        try:
+            pending_age = int((now - _parse_iso(claim["pending_at"])).total_seconds())
+        except (TypeError, ValueError):
+            pending_age = None
+    out = {key: claim.get(key) for key in (
+        "incarnation_id", "session_id", "claimed_at", "heartbeat_at", "claimed_via",
+        "lineage_id", "nonce_seq", "state", "released_at", "released_by_sid", "reason")}
+    out["nonce_present"] = bool(claim.get("nonce_hash"))
+    out["pending_present"] = bool(claim.get("pending_nonce_hash"))
+    out["pending_age_seconds"] = pending_age
+    return out
+
+
+def _project_handshake(hs):
+    """§5.8, same rule, the other dict this view dumps: `handoff_token_hash`
+    (§6.4) is reported as a presence bit and never published."""
+    if hs is None:
+        return None
+    out = {key: hs.get(key) for key in ("incarnation_id", "session_id", "written_at")}
+    out["handoff_token_present"] = bool(hs.get("handoff_token_hash"))
+    return out
+
+
 def cmd_sup_status(args) -> int:
     """`fleet sup-status [--json]` -- READ-ONLY VIEW (terminal-surface
     doctrine: no lock, no probe, no write). Safe lock-free reads: all
@@ -8730,9 +8778,13 @@ def cmd_sup_status(args) -> int:
             beat_age = None
     info = {
         "goals_active": supervisor_goals_active(),
-        "incarnation": claim,
+        # §5.8: a PROJECTION, never the raw dicts. The human branch below
+        # keeps reading `claim` directly -- it is a hand-written f-string over
+        # four named fields that has never held a hash, and §5.8's scope was
+        # corrected to exclude it.
+        "incarnation": _project_claim(claim),
         "heartbeat_age_seconds": beat_age,
-        "handshake": hs,
+        "handshake": _project_handshake(hs),
         "abort_flag": handoff_abort_flag_path().exists(),
         "nag": supervisor_status_line(),
     }
