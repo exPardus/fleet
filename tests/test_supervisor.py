@@ -392,6 +392,146 @@ class TestClaimDecisionVerdictOrder:
             _claim(beat=NOW - timedelta(seconds=7200)), set(), None, now=NOW)[0] == "seize"
 
 
+class TestLimitedHolderTransfer:
+    """three-tier-command.md `:432-437`, filed against this slice exactly as
+    B6 and the `FLEET_WORKER` refusal were:
+
+      > add a `limited`-holder branch to the `sup-boot` verdict order
+      > authorizing immediate transfer when the recorded holder's registry
+      > status is `limited` with a horizon — **including a holder parked
+      > mid-handoff**, i.e. one whose `HANDSHAKE` is still open (ND9), since
+      > that body can neither complete nor abort the ritual it started.
+
+    Its rationale (`:426-429`) is what fixes the verdict: unlike roster-gone,
+    which is G9-ambiguous and is exactly why the freeze exists, `limited` is a
+    **fleet-observed, unambiguous state that fleet itself wrote**. Today the
+    successor meets only `refuse` or an hour-long `freeze` against a parked
+    predecessor.
+
+    The branch runs AHEAD of the roster-liveness guard, and that is a
+    deliberate, narrow carve-out of §6.6: the guard exists to stop two ACTING
+    bodies, and a body parked on a plan limit is not an acting body -- it
+    cannot even finish the handoff it started."""
+
+    def _released_shape(self, **extra):
+        c = {"incarnation_id": "inc-parked", "session_id": "sid-parked",
+             "claimed_at": _iso(NOW - timedelta(hours=2)),
+             "heartbeat_at": _iso(NOW - timedelta(seconds=60)),
+             "claimed_via": "fresh"}
+        c.update(extra)
+        return c
+
+    def test_a_limited_holder_authorizes_immediate_transfer(self):
+        v, reason = fleet.supervisor_claim_decision(
+            self._released_shape(), {"sid-parked"}, None, now=NOW,
+            caller_sid="sid-new", holder_limited=True)
+        assert v == "limit-transfer"
+        assert "limited" in reason
+        assert v in fleet.SUPERVISOR_BOOT_RC
+
+    def test_the_transfer_is_rc_0_and_a_known_verdict(self):
+        # The exit-code contract published at skills/fleet/SKILL.md:37 is
+        # unchanged: this is a took-the-claim outcome, which is already the
+        # 0-row. A verdict outside SUPERVISOR_BOOT_RC is a KeyError in the
+        # boot ritual rather than a safe stop (break-gate residual F2).
+        assert fleet.SUPERVISOR_BOOT_RC["limit-transfer"] == 0
+        assert "limit-transfer" in fleet.SUPERVISOR_BOOT_VERDICTS
+
+    def test_it_runs_AHEAD_of_the_roster_liveness_guard(self):
+        # Without the ordering the branch is dead code: a parked body is still
+        # roster-live, so rule 2 refuses before anything can look at it.
+        v, _ = fleet.supervisor_claim_decision(
+            self._released_shape(), {"sid-parked", "sid-new"}, None, now=NOW,
+            caller_sid="sid-new", holder_limited=True)
+        assert v == "limit-transfer"
+
+    def test_it_runs_BEHIND_the_released_row(self):
+        # A released claim is released whatever the releasing body's registry
+        # status says; §6.3 already removed its session_id, so there is no
+        # holder for a limit to be about.
+        released = {"incarnation_id": "inc-old", "lineage_id": "lin-x",
+                    "claimed_via": "fresh", "released_at": _iso(NOW),
+                    "released_by_sid": "sid-old", "state": "released"}
+        v, _ = fleet.supervisor_claim_decision(
+            released, set(), None, now=NOW, caller_sid="sid-new", holder_limited=True)
+        assert v == "claim"
+
+    def test_a_holder_that_is_not_limited_is_unaffected(self):
+        v, _ = fleet.supervisor_claim_decision(
+            self._released_shape(), {"sid-parked"}, None, now=NOW,
+            caller_sid="sid-new", holder_limited=False)
+        assert v == "refuse"
+
+    def test_the_default_is_off_so_every_existing_caller_decides_as_before(self):
+        v, _ = fleet.supervisor_claim_decision(
+            self._released_shape(), {"sid-parked"}, None, now=NOW, caller_sid="sid-new")
+        assert v == "refuse"
+
+    def test_a_limited_holder_that_IS_the_caller_still_resumes_on_a_generation(self):
+        # A parked body that came back and can prove continuity is not a
+        # transfer candidate -- it is the holder. Ordering the branch ahead of
+        # rule 3 without this exception would let fleet take the claim away
+        # from the one body that just proved it still has it.
+        v, _ = fleet.supervisor_claim_decision(
+            self._released_shape(), {"sid-parked"}, None, now=NOW,
+            caller_sid="sid-parked", nonce_valid=True, holder_limited=True)
+        assert v == "resume"
+
+
+class TestLimitedHolderResolution:
+    """The caller half. `supervisor_claim_decision` is a PURE function with no
+    registry access -- which is precisely the hole this prerequisite targets --
+    so the holder's `limited` status is resolved by `cmd_sup_boot`, which
+    already holds `fleet_lock`, and passed in."""
+
+    def _registry(self, sup_home, **rec):
+        record = {"session_id": "sid-parked", "cwd": ".", "task": "t", "mode": "dontask",
+                  "status": "limited", "limit_reset_at": fleet.now_iso()}
+        record.update(rec)
+        (sup_home / "state" / "fleet.json").write_text(
+            json.dumps({"workers": {"supervisor": record}}), encoding="utf-8")
+
+    def test_a_limited_record_with_a_horizon_resolves_true(self, sup_home):
+        self._registry(sup_home)
+        assert fleet._holder_is_limited("sid-parked") is True
+
+    def test_a_limited_record_with_a_NULL_horizon_resolves_false(self, sup_home):
+        # `_limit_reset_passed`'s own docstring: a null horizon is "never
+        # auto-eligible". Fleet does not know when that body comes back, so it
+        # is NOT the unambiguous fleet-observed state the prerequisite rests
+        # on -- and ambiguity is what the freeze exists for.
+        self._registry(sup_home, limit_reset_at=None)
+        assert fleet._holder_is_limited("sid-parked") is False
+
+    @pytest.mark.parametrize("status", ["idle", "busy", "dead", "interrupted", "over_ceiling"])
+    def test_any_other_status_resolves_false(self, sup_home, status):
+        self._registry(sup_home, status=status)
+        assert fleet._holder_is_limited("sid-parked") is False
+
+    def test_a_sid_with_no_record_resolves_false(self, sup_home):
+        self._registry(sup_home)
+        assert fleet._holder_is_limited("sid-someone-else") is False
+
+    @pytest.mark.parametrize("holder", [None, "", 0])
+    def test_a_missing_holder_sid_resolves_false(self, sup_home, holder):
+        self._registry(sup_home, session_id=holder)
+        assert fleet._holder_is_limited(holder) is False
+
+    def test_an_absent_registry_resolves_false(self, sup_home):
+        assert fleet._holder_is_limited("sid-parked") is False
+
+    def test_a_corrupt_registry_resolves_false_rather_than_aborting_the_boot(self, sup_home):
+        # `load_registry` QUARANTINES a corrupt file and raises
+        # RegistryCorruptError, and the callers it documents "must abort". The
+        # boot ritual must not: a corrupt registry is already reported by its
+        # own doctor row and by `_render_boot_bundle`'s "(registry unreadable)"
+        # line, and turning it into an aborted claim decision would take the
+        # supervisor down for a fault in a different subsystem. False here is
+        # also the FAIL-CLOSED direction -- it declines the transfer.
+        (sup_home / "state" / "fleet.json").write_text("{not json", encoding="utf-8")
+        assert fleet._holder_is_limited("sid-parked") is False
+
+
 class TestClaimDecisionRosterPrecondition:
     """T14b (claim-nonce §6.1, break-gate residual F2): rules 4- assert
     `holder roster-gone` in strings they write into the append-only,
@@ -404,19 +544,28 @@ class TestClaimDecisionRosterPrecondition:
     so a fall-through returning `None` is a KeyError traceback out of the boot
     ritual rather than a safe stop."""
 
+    @pytest.mark.parametrize("holder_limited", [False, True])
     @pytest.mark.parametrize("nonce_valid", [True, False])
     @pytest.mark.parametrize("caller_sid", ["sid-old", "sid-other", None])
     @pytest.mark.parametrize("beat_age", [60, 3601, 86400])
     @pytest.mark.parametrize("latest_inc", [None, "inc-old", "inc-newer"])
     def test_no_seize_or_freeze_while_the_holder_is_roster_live(
-            self, nonce_valid, caller_sid, beat_age, latest_inc):
+            self, nonce_valid, caller_sid, beat_age, latest_inc, holder_limited):
+        # `holder_limited` is parameterized here deliberately. three-tier's
+        # limited-holder branch (`:432-437`) is a carve-out of the
+        # roster-liveness guard, and a carve-out is exactly how an invariant
+        # quietly erodes. It does NOT erode this one, because the branch
+        # returns a DISTINCT verdict rather than overloading `seize`: the
+        # journal still never receives a `SEIZED` entry asserting a
+        # `roster-gone` premise that was false.
         c = _claim(beat=NOW - timedelta(seconds=beat_age))
         latest = None if latest_inc is None else {
             "ts": _iso(NOW - timedelta(seconds=1)), "kind": "CHECKPOINT",
             "inc": latest_inc, "sid": "sid-x", "body": ""}
         v, reason = fleet.supervisor_claim_decision(
             c, {"sid-old"}, latest, now=NOW,
-            caller_sid=caller_sid, nonce_valid=nonce_valid)
+            caller_sid=caller_sid, nonce_valid=nonce_valid,
+            holder_limited=holder_limited)
         assert v not in ("seize", "freeze"), reason
         assert "roster-gone" not in reason
 
@@ -765,6 +914,59 @@ class TestSupBootContinuity:
         assert claim["lineage_id"] == "lin-20260101T000000Z-aaaa"
 
     # --- §5.8's second publisher ------------------------------------------
+
+    def test_a_parked_holder_hands_the_claim_over_end_to_end(self, sup_home, capsys):
+        # three-tier `:432-437` at the command level, including its
+        # "**including a holder parked mid-handoff**" clause: the parked body
+        # can neither complete nor abort the ritual it started, so its open
+        # HANDSHAKE is stale by definition and must not be able to receive a
+        # transfer afterwards.
+        self._held(sid="sid-parked", inc="inc-parked", age_seconds=60)
+        fleet.write_handshake("inc-orphan", "sid-orphan")
+        (sup_home / "state" / "fleet.json").write_text(json.dumps({"workers": {
+            "supervisor": {"session_id": "sid-parked", "cwd": ".", "task": "t",
+                           "mode": "dontask", "status": "limited",
+                           "limit_reset_at": fleet.now_iso()}}}), encoding="utf-8")
+        rc = self._boot([{"sessionId": "sid-parked", "status": "idle"},
+                         {"sessionId": "sid-me", "status": "busy"}])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "VERDICT: limit-transfer" in out
+        claim = fleet.read_incarnation()
+        assert claim["incarnation_id"] != "inc-parked"
+        assert claim["session_id"] == "sid-me"
+        assert claim["claimed_via"] == "limit-transfer"
+        assert claim["nonce_hash"] == fleet.nonce_digest(_nonce_of(out))
+        assert fleet.read_handshake() is None, "the parked body's ritual cannot be finished"
+        latest = fleet.supervisor_journal_latest()
+        assert latest["kind"] == "LIMIT-TRANSFER", \
+            "a limit transfer is not a seizure and the audit record must not say it was"
+        assert "inc-parked" in latest["body"]
+
+    def test_a_parked_holders_lineage_is_re_minted_not_carried(self, sup_home, capsys):
+        self._held(sid="sid-parked", inc="inc-parked", age_seconds=60)
+        old_lineage = fleet.read_incarnation()["lineage_id"]
+        (sup_home / "state" / "fleet.json").write_text(json.dumps({"workers": {
+            "supervisor": {"session_id": "sid-parked", "cwd": ".", "task": "t",
+                           "mode": "dontask", "status": "limited",
+                           "limit_reset_at": fleet.now_iso()}}}), encoding="utf-8")
+        assert self._boot([{"sessionId": "sid-parked", "status": "idle"},
+                           {"sessionId": "sid-me", "status": "busy"}]) == 0
+        capsys.readouterr()
+        # Like a seize and unlike a handoff: the parked predecessor is not
+        # alive to vouch for anything, so its provenance is not carried onto
+        # the taking body (§6.2). It is also still parked and may come back.
+        assert fleet.read_incarnation()["lineage_id"] != old_lineage
+
+    def test_without_the_registry_record_the_same_shape_merely_refuses(self, sup_home, capsys):
+        # Guard the guard: the two tests above differ from today's behavior
+        # ONLY by the registry record, so this pins that the record is what
+        # does the work rather than something incidental to the fixture.
+        self._held(sid="sid-parked", inc="inc-parked", age_seconds=60)
+        rc = self._boot([{"sessionId": "sid-parked", "status": "idle"},
+                         {"sessionId": "sid-me", "status": "busy"}])
+        assert rc == 2
+        assert "VERDICT: refuse" in capsys.readouterr().out
 
     def test_B6_boot_refuses_a_released_record_whose_releaser_is_still_live(
             self, sup_home, capsys):
