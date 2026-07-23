@@ -1,6 +1,10 @@
 # Three-tier command: interface / supervisor / workers — SPEC DRAFT
 
-**Status: `drafting`.** This document re-drafts the withdrawn PROPOSAL (its full prior text is
+**Status: spec-of-record — ratified by Altai 2026-07-23** (in-session docket; record
+`knowledge/lessons.md#2026-07-23-three-tier-ratified`, ticked in `docs/OPERATOR-GATES.md`; ratified
+at `c73ab84` after 5 waves, 3 dual-lens gate rounds + 2 confirmation passes, final break-lens merge
+verdict "fit for operator ratification"; the three claim-nonce build-slice prerequisites disclosed
+at ratification gate the build, not this status). This document re-drafts the withdrawn PROPOSAL (its full prior text is
 recoverable from git history at `235421e`^) on top of two things that did not exist when the PROPOSAL
 was frozen: `docs/specs/claim-nonce.md` (**spec-of-record, ratified by Altai 2026-07-23**, gate
 question decided **option (b)**) and the re-pinned `docs/specs/native-substrate.md` (2.1.212 transient
