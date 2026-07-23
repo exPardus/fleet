@@ -1,7 +1,14 @@
 # Project: polymarket_experimenting (pmbot)
 
 Dir: `C:\proga\polymarket_experimenting`. Rust latency-arb trading stack + Python data layer.
-Real trunk branch: `feat/skeleton-datalayer` (NOT `main`/`master` — those are stale stubs).
+**Trunk CORRECTED 2026-07-23 (council audit, per `docs/HANDOVER.md` git/ops §, updated 2026-07-18): `origin/master` is the single source of truth.** The old `feat/skeleton-datalayer` guidance was ruled "wrong and actively harmful" by the repo's own HANDOVER. Read HANDOVER.md's READ-FIRST banner before every campaign here — it also carries an ordered "Open items, buildable now" backlog.
+
+## Overnight/unattended hazards (2026-07-23 council audit — pmbot was VETOED for unattended work)
+- **Token files sit in the repo root** (`pmbot-setup-token.txt`, `swap-lab-agent-token.ps1`, `SWAP-TOKEN.cmd`) — a bypass-mode worker can cat one into a log/commit.
+- **The origin remote is shared with a LIVE VPS agent** that mints real Telegram-approved fence tokens and pushes `agent/*` branches (~40). Never push overnight; branch collisions hit an autonomous production system.
+- **`C:\proga\pmbot-kalshi-research` is a twin clone of the SAME remote** running a pre-registered study; its `data/` is an unbackfillable OOS tape and its collector can respawn anytime. Workers in either clone can clobber the other via the shared remote.
+- Untracked `docs/superpowers/specs/2026-07-21-trading-core-redesign-DRAFT.md` carries unresolved operator `[FIGHT]` decisions — building against it is redo-work; fence it in task files.
+- Deploys are gated (`master → push → receive-bundle → agent-build → agent-install`, Telegram fence tokens) — local branch commits deploy nothing, but see push hazard above.
 
 ## Spawning workers here — quirks
 
