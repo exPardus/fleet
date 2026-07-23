@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import functools
+import hashlib
 import json
 import math
 import os
@@ -7530,6 +7531,11 @@ NATIVE_ATTACH_POLL_SECONDS = 2.0
 NATIVE_WEDGE_CLEANUP_TIMEOUT_SECONDS = 10
 DEFAULT_CATEGORY = "fleet"
 NATIVE_NAME_HINT_MAX = 40
+# Ceiling for inlining a rewritten task body into argv on a RESUMED dispatch
+# (see _dispatch_argv_prompt). Well under the 32,767-char Windows
+# command-line limit (SPEC §6 G8) and POSIX MAX_ARG_STRLEN (128 KiB for a
+# single argv entry), leaving ample headroom for exe + flags + paths.
+NATIVE_INLINE_PROMPT_MAX_BYTES = 8192
 
 # · = MIDDLE DOT (the daemon's literal separator glyph). Previously a
 # duplicate-codepoint char class `[··]` (same character twice) -- collapsed
@@ -7574,6 +7580,56 @@ def render_native_name(category, name: str, hint: str) -> str:
     cat = " ".join(str(category or DEFAULT_CATEGORY).split()).replace("|", "/")
     clean = " ".join((hint or "").split()).replace("|", "/")[:NATIVE_NAME_HINT_MAX]
     return f"{cat}|{name}|{clean}"
+
+
+def _dispatch_argv_prompt(task_path, prompt_body: str, resume_sid) -> str:
+    """The prompt string that goes into argv for a `--bg` dispatch.
+
+    FRESH session (no resume_sid): keep the historical tiny pointer. The
+    transcript is empty, so the worker has to Read the task file and does.
+
+    RESUMED session: inline the body instead. A fork carries the prior
+    transcript, which already holds a `Read(task_path)` tool_use AND its
+    tool_result for this exact path -- the pointer is byte-identical every
+    dispatch, so the model can satisfy it from that cached result and never
+    re-read the rewritten file. That silently dropped the `<MANAGER
+    MESSAGE>`: `fleet send` on an idle worker incremented `turns` and
+    returned to idle having done nothing, while compose_prompt had already
+    drained (and audited) the mail. Delivery must not depend on the model
+    choosing to re-issue a tool call it believes it already made.
+
+    Oversized bodies fall back to a pointer carrying a content digest --
+    still volition-dependent, but at least not byte-identical to the cached
+    instruction, and it names the change explicitly.
+    """
+    pointer = f"Read {task_path.as_posix()} and follow it exactly."
+    if not resume_sid:
+        return pointer
+    body = prompt_body or ""
+    if len(body.encode("utf-8")) <= NATIVE_INLINE_PROMPT_MAX_BYTES:
+        # The resumed transcript already carries the preamble, so lead with
+        # everything from the steer onward -- otherwise the new instruction
+        # sits behind a wall of text the worker has already seen.
+        #
+        # Line-anchored on purpose: the PREAMBLE itself mentions the marker
+        # inline ("Manager messages arrive mid-task marked `<MANAGER
+        # MESSAGE>`"), so a plain find() matches that documentation instead
+        # of the real block and slices the preamble mid-sentence -- caught
+        # live, the worker got a prompt starting "`; treat them as user
+        # instructions." compose_prompt emits the real block as its own line.
+        match = re.search(r"^<MANAGER MESSAGE>$", body, re.M)
+        payload = body[match.start():] if match else body
+        return (
+            f"{payload}\n\n"
+            f"(Above is the current content of {task_path.as_posix()}, which "
+            f"has been rewritten. It supersedes any earlier read of that file.)"
+        )
+    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:8]
+    return (
+        f"{pointer}\nIt has CHANGED since you last read it (content "
+        f"{digest}). Re-read it now -- do NOT answer from an earlier Read "
+        f"result."
+    )
 
 
 def _parse_bg_short_id(stdout_text: str):
@@ -7701,7 +7757,7 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
     except OSError as exc:
         raise NativeDispatchError(f"task-file write failed: {exc}") from exc
     rendered = render_native_name(category, name, hint)
-    tiny_prompt = f"Read {task_path.as_posix()} and follow it exactly."
+    tiny_prompt = _dispatch_argv_prompt(task_path, prompt_body, resume_sid)
     argv = [exe, "--bg"]
     if resume_sid:
         argv += ["--resume", resume_sid]
@@ -8535,6 +8591,10 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     # claude spelling is refused at the parser instead of raising ValueError
     # from inside the dispatch.
     argv += mode_flags(getattr(args, "permission_mode", None) or SUCCESSOR_DEFAULT_MODE)
+    # EXEMPT from the _dispatch_argv_prompt inlining fix: this launches a
+    # FRESH session (no --resume, so no cached Read result to short-circuit
+    # on) and its task path is already per-incarnation unique
+    # (supervisor-handoff-{successor_inc}.md). The pointer is safe here.
     argv.append(f"Read {task_path.as_posix()} and follow it exactly.")
     try:
         proc = run(argv, cwd=str(FLEET_HOME), env=_worker_env(name),
