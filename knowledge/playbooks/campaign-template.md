@@ -184,6 +184,8 @@ Fleet workers are detached headless `claude -p` sessions — **there is no human
 
 ## 7. Soak-gate checklist (PLAN §0.2.1 + soak-gate definitions)
 
+> **Note (2026-07-24):** the **specific C-campaign soak gates** (Soak 1 / 1.5 / 2 / …) were **retired with the C/soak framing** (settled gate, `docs/OPERATOR-GATES.md`); the M-track (`docs/SPEC.md` §18) carries no soak gates, so **no live milestone gates on a `SOAK GATE <n> SIGNED` line today**. This section survives as **generic doctrine** for any *future* usage-denominated gate the operator may introduce — do not read it as an active blocker on current work.
+
 Soak gates are **usage-denominated, never calendar-denominated** — a slow week extends the gate, it never passes on elapsed time:
 
 - [ ] **Pass condition is a usage floor** (spawn count / pushed-commit count / workday count across ≥N distinct days) fed by the human's named workload queue — never "a week elapsed."
