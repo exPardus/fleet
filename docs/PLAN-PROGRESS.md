@@ -1,6 +1,8 @@
 # PLAN-PROGRESS — wave ledger (cross-session cursor)
 
-The mutable cursor against the immutable contract `docs/PLAN.md`. A resuming manager reads this **first** (runbook step 2). Status vocab: `pending | dispatched | done | blocked | deferred`. Updated at each task close + gate; committed in every campaign's knowledge-loop step (§0.3h).
+> **⛔ RETIRED CURSOR — 2026-07-24.** This is the cursor for the C1→C8 plan, which was **retired as superseded history** on 2026-07-24 (settled gate *"Two roadmaps, no crosswalk"*, `docs/OPERATOR-GATES.md`). **The plan of record is the M-track — `docs/SPEC.md` §18.** Every `GATED` row below (C3+, the Phase-1.5 build) blocks on a `SOAK GATE 1 SIGNED` line that was **never written and is now retired** — those rows are **historical, not live blockers**: no live milestone gates on the soak framing. Read this file for the C1→C2 record; do not resume against it.
+
+The mutable cursor against `docs/PLAN.md` (**both retired to history 2026-07-24 — see banner above**). A resuming manager reads this **first** (runbook step 2). Status vocab: `pending | dispatched | done | blocked | deferred`. Updated at each task close + gate; committed in every campaign's knowledge-loop step (§0.3h).
 
 **Readiness boundary (this manager's mandate):** execute through **C2 merge gate**, then STOP for Soak Gate 1 sign-off. Do NOT start C3+. C1 doc-only in main repo; C2 code in worktree `C:\proga\claude-fleet-wt\c2`.
 
