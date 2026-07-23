@@ -1,6 +1,6 @@
 # Project: claude-fleet (the self-build)
 
-Facts learned live while the fleet builds itself. Amended in each campaign's knowledge wave. See `knowledge/playbooks/campaign-template.md` for the campaign instrument; `docs/PLAN.md` for the contract; `docs/SPEC.md` for the design.
+Facts learned live while the fleet builds itself. Amended in each campaign's knowledge wave. See `knowledge/playbooks/campaign-template.md` for the campaign instrument **and the live home of PLAN §0 campaign doctrine**; `docs/SPEC.md` (§18 M-track) for the plan of record and design. `docs/PLAN.md` / `docs/ROADMAP.md` were **retired to superseded history (2026-07-24)** — read them for the C1→C8 record, not as a live contract. The "Bootstrap hazard" section below is the live home of the worktree-isolation doctrine.
 
 ## Interpreter & CLI invocation
 - Python is **`py -3.13`**. Bare `python` resolves to **3.10** — never use it.
