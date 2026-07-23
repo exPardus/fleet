@@ -186,3 +186,5 @@ The mutable cursor against the immutable contract `docs/PLAN.md`. A resuming man
 | M-F | micro-wave 5 (R2 + ND8/ND9 disposition) + H1 confirmation pass | dispatched | fork-steers 221799f9 / dab8bf28 | 2026-07-23 |
 | M-F | micro-wave 5 landed + H1 confirmed | done | c73ab84 (R2/ND8/ND9 closed in-spec, 54/54) / ac098be (H1 r2: fix-list closed, sound, fit for main) | 2026-07-23 |
 | M-F | H1 + three-tier MERGED to main, pin tier re-run | done | merges on main; 1420/8 both interpreters; both specs green under hardened harness; VENDOR BUMP 2.1.217->2.1.218 caught by doctor, FLEET_LIVE pin tier 6/6 green interactive-vantage, record_pin_pass stamped 2.1.218; doctor all-PASS; pushed | 2026-07-23 |
+| M-F | three-tier-command.md RATIFIED spec-of-record | done | e966994 (Status flip + gate tick); record lessons.md#2026-07-23-three-tier-ratified; ratified at c73ab84 | 2026-07-23 |
+| M-F | ✅ RE-DRAFT CAMPAIGN CLOSED — knowledge wave done, template v1.9 | done | lessons + INDEX + template committed; worktrees/branches cleaned; workers left to autoclean TTL | 2026-07-23 |
