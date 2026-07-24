@@ -1,6 +1,6 @@
 # fleet-index — cutting duplicate exploration cost
 
-**Status:** ready-for-build (M1 only). M2 and M3 are `[DRAFT — not ready]`.
+**Status:** ready-for-gate (M1+M2; M3 stays DRAFT). Author-flipped 2026-07-24 per the operator's full-M1+M2 build order; ratification is the operator's — an author never promotes its own spec.
 **Owner:** Altai
 **Design doc:** `docs/superpowers/specs/2026-07-22-fleet-index-design.md`
 **Adversarial review:** `docs/reviews/IDX-ADVERSARIAL-2026-07-22.md` (10 defects — 2 CRITICAL, 5 HIGH, 2 MED, 1 LOW). Disposition in §13.
