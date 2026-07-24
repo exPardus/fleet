@@ -144,6 +144,65 @@ queue); the interface's fuller brief sits undelivered at `state/tasks/sup-brief.
 supervisor should READ IT as its first act on seeing this ledger entry, then run the council on
 the two candidate resolutions above and queue the fix into the §10.4 build.
 
+### G-C. Seam #1 resolution — council **4–0 for candidate (a)** (2026-07-24, inc-...2eda)
+
+- **What**: seam #1 from G-B — the interface tier's `fleet send supervisor` is refused by the
+  claim-nonce §7 gate (`_supervisor_gate`), because the interface holds no nonce BY DESIGN.
+  Fork: **(a)** §7 taxonomy carve-out — ungate a `send` whose RESOLVED target record IS the
+  current claim-holder's own body; **(b)** keep the gate, bless the no-session route for
+  interface sends, have §5.3 warn on missing-sid; **(c)** interface credential (already rejected,
+  §5.8).
+- **Why gated**: the §7 taxonomy is OPERATOR-owned, and two ratified specs conflict at the seam
+  (§7 gate vs three-tier §5.3 divergence detection, which feeds on `caller_sid`).
+- **Council verdict**: **UNANIMOUS 4–0 for (a)** (Cassandra/risk med-high, Brick/delivery high,
+  Vista/strategy high, Mercer/incident-response high). Rationale: **(b) permanently blinds §5.3** —
+  its no-session route strips `caller_sid`, the exact field `_interface_divergence` drops events
+  without (fleet.py:10202-10204), so every interface steer becomes invisible to the one mechanism
+  that catches a dual-supervisor at 3am, and it normalizes sid-stripping (the very bypass §7
+  exists to speed-bump). **(a)** keeps full provenance and makes the canonical verb just work with
+  no env-var ritual an unattended operator can forget. (a)'s only risk — a future widening of the
+  carve-out — is fenceable by the load-bearing fault-injections below; (b)'s harm is standing.
+- **Binding build conditions (folded into the `sup-steer-seams` brief; ALL ratification-blocking)**:
+  1. Predicate = holder-sid **record-identity**: disarm the send gate ONLY when the resolved
+     target record satisfies `_record_is_supervisor_claim_holder(resolved_rec) is True`. Resolve
+     FIRST, gate SECOND. NEVER key on the literal name `supervisor`, `_is_supervisor_shaped`, or a
+     `sup|` prefix.
+  2. **send-ONLY**; every other mutating lifecycle verb keeps its unchanged §7 arming. The ungated
+     path is a plain upward mailbox append: zero nonce authority, steers no worker, moves no claim,
+     mutates no INCARNATION/registry/claim.
+  3. `caller_sid` preserved end-to-end and reaches §5.3 `_interface_divergence` — assert the
+     emitted `mail_sent` event carries it.
+  4. **Resolve-then-gate atomicity / no TOCTOU**: if the claim is not held by exactly that resolved
+     body at gate-eval (mid release / seize / handoff-pending / limited-park / ambiguous / no-claim),
+     the carve-out does NOT apply and the full §7 gate re-arms.
+  5. Loud failures survive: the no-claim / released / corrupt / stranded-sid arms of
+     `_resolve_worker_target` (fleet.py:2038-2061) still raise their named `FleetCliError`s —
+     resolve-then-check, never swallow a husk resolution into a silent pass.
+  6. Ratification-blocking fault-injections, each mutate→red→restore, BOTH floors (3.13 + 3.10):
+     **FI-husk-leak (LOAD-BEARING)** — send to a supervisor-SHAPED record that does NOT hold the
+     claim (dead gen-0 husk / post-transfer predecessor) stays GATED; rewriting the predicate to a
+     name/shape match MUST go red. **FI-worker** — send to a worker by real name from a
+     claimless-nonce sid-bearing caller under a fresh claim stays GATED. **FI-transition** — claim
+     moves between resolve and gate-eval → REFUSED. **FI-positive** — interface→live-holder send
+     DELIVERED with `caller_sid` intact + §5.3 observing; revert carve-out → red. **FI-record-identity**
+     — a test asserting the predicate is record-identity, tripping if anyone generalizes it to a
+     name/prefix.
+  7. Provisional-pending-ratification: **RATIFICATION-WITHHELD strings must not read as live
+     receipts** (ns-receipts ruling). Propose the `claim-nonce.md` §7 taxonomy-row amendment + a
+     three-tier §5.3 cross-ref so the two specs read coherent — but the §7 amendment itself is
+     OPERATOR-owned; the worker proposes, does not self-promote.
+- **Seam #2 (NOT operator-gated — straightforward resolver bug fix)**: handoff successors get no
+  registry record (`cmd_sup_handoff_begin` deliberately skips `new_worker_record`), so the
+  logical-name resolver dead-ends. **Live-reproduced**: `fleet send supervisor` with a VALID nonce
+  (clearing §7) still fails `holder sid 13a4816a… matches no registry record` — proving seam #2 is
+  an independent blocker beneath seam #1. Fix: register the successor as `sup|<inc>|successor` (the
+  sid is stamped when the daemon mints it, like the fast-completion path), which also brings §7.2
+  archive exemption + peek/result parity with gen-0 bodies.
+- **Status**: PROVISIONAL — acted on per directive #1 (council → synthesis → build → record).
+  The §7 taxonomy amendment is queued for operator ratification; do not read it as ratified.
+  Build dispatched to worker `sup-steer-seams` (seam #1 (a) + seam #2, scope disjoint from §10.4);
+  dual-lens gated before merge.
+
 ## Build queue (the launch-ready ordering, updated as it drains)
 
 1. Merge-gate the three in-flight branches (dual-lens where code/spec-bearing).

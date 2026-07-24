@@ -462,3 +462,23 @@ small-fixes MERGED (ef25a4a, 1909/8 both floors): G-1 freeze harden shipped; LIV
 ## 2026-07-24T02:52:38Z CHECKPOINT inc=inc-20260724T012109Z-6a4e sid=db7293dc-5855-4319-b4d2-2523472c5013
 
 Wave: fleet-index M1+M2 spec GATED SOUND (fix wave a63a9e7 -> re-gate 0C/0M, 6 MINs micro-folded 71602ed, merged 48ee2c8). sup-spawn build 4bb11ed gated: spec lens 0C/0M (4 deviations ACCEPT), break lens 3C/2M (pipe-name fs paths beyond task files; respawn-supervisor bare swap vs UNBUILT 10.4; resolver arm unpinned) -> fix wave dispatched (fail-closed kill/respawn until 10.4, central name mapping, FI-4 pin, class-4-compliant boot ritual). github-polish merged ad5e59a + repo settings live (desc, 15 topics, discussions). Oracle-for-workers verdict + cache 0.1.1->0.2.0. Next: sup-spawn re-gate -> merge -> FLEET_LIVE smoke -> live three-tier switch-over per operator directive.
+
+## 2026-07-24T03:46:59Z HANDOFF-BEGIN inc=inc-20260724T012109Z-6a4e sid=db7293dc-5855-4319-b4d2-2523472c5013
+
+successor=inc-20260724T034659Z-2eda task=C:/proga/claude-fleet/state/supervisor-handoff-inc-20260724T034659Z-2eda.md
+
+## 2026-07-24T03:47:38Z HANDOFF-COMPLETE inc=inc-20260724T012109Z-6a4e sid=db7293dc-5855-4319-b4d2-2523472c5013
+
+claim -> inc-20260724T034659Z-2eda sid=13a4816a-ddab-4b3a-ac7e-a426a13b323b
+
+## 2026-07-24T03:48:06Z CHECKPOINT inc=inc-20260724T034659Z-2eda sid=13a4816a-ddab-4b3a-ac7e-a426a13b323b
+
+claim received via handoff from inc-20260724T012109Z-6a4e
+
+## 2026-07-24T04:04:04Z CHECKPOINT inc=inc-20260724T034659Z-2eda sid=13a4816a-ddab-4b3a-ac7e-a426a13b323b
+
+BOOT-COMPLETE inc-2eda: claim received via handoff from 6a4e; three-tier switch-over ALREADY executed via the HANDOFF PATH (not sup-spawn) -- 6a4e is now the interface tier (claimless, my lineage lin-da0c), I am the live supervisor (opus). Verified on boot: main HEAD=d911c3b green 2022/8 both floors 3.13+3.10; doctor all PASS except the known pre-existing supervisor-claim FAIL (single refusal 2026-07-23T19:14, ages out ~19:15Z today; 0 rejections today; no epoch alarm). Read sup-brief.md (undelivered via seams). G-B live findings = 2 real seams: #1 interface send gated by claim-nonce 7 vs three-tier 5.3 (interface never holds nonce by design); #2 handoff successors get no registry record so logical-name resolver dead-ends. Ran a 4-councilor council on the (stale) switch decision: it independently rediscovered BOTH seams; convergence = seam#1 is the control-safety priority, 2 councilors explicitly favor candidate (a) (ungate a send whose RESOLVED TARGET is the claim-holder's own body -- upward mail, watched by 5.3, steers no worker). Note: 7 taxonomy amendment is OPERATOR-owned -> council+build+record for ratification, don't self-promote spec. Next: adjudicate seam#1 (a/b/c) + seam#2 fix, then build queue item 1 = 10.4 tombstone (bundling seam fixes per G-B) -> fleet-q M1+M2 -> doc-sync.
+
+## 2026-07-24T04:09:21Z CHECKPOINT inc=inc-20260724T034659Z-2eda sid=13a4816a-ddab-4b3a-ac7e-a426a13b323b
+
+COUNCIL 4-0 (a) on G-B seam #1. Sharpened question (switch already done; adjudicate seam#1 (a) vs (b)) sent to the 4 warm councilors; all 4 ruled (a) (Brick/Vista/Mercer high, Cassandra med-high). Decision: candidate (a) -- ungate a send whose RESOLVED target record IS the current claim-holder's own body from the claim-nonce 7 gate. Rejected (b) (no-session route strips caller_sid, the exact field _interface_divergence keys on fleet.py:10202-10204 -> permanently blinds 5.3; normalizes sid-stripping). PROVISIONAL: 7 taxonomy operator-owned -> queued for ratification, not self-promoted. Merged ratification-blocking conditions: predicate = holder-sid RECORD-IDENTITY (_record_is_supervisor_claim_holder(resolved_rec) is True), NEVER name/shape/'supervisor'/sup| prefix; resolve-THEN-gate, no TOCTOU (claim-transition/no-claim windows re-arm full gate); send-ONLY, upward-mail, zero authority, steers no worker/moves no claim; caller_sid preserved end-to-end -> 5.3; loud failure arms survive; FI husk-leak (LOAD-BEARING) + FI-worker + FI-transition + FI-positive(caller_sid asserted) + FI-record-identity, mutate->red->restore both floors. Seam #2 (NOT gated): register handoff successors as sup|<inc>|successor in cmd_sup_handoff_begin (also grants 7.2 archive exemption + peek/result); live-reproduced -- send supervisor w/ valid nonce still fails 'matches no registry record'. Next: write ledger G-C, dispatch worker sup-steer-seams (seam#1(a)+seam#2, disjoint from 10.4), dual-lens gate, then 10.4 tombstone, then fleet-q.
