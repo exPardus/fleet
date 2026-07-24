@@ -454,3 +454,7 @@ fresh claim: no existing claim -- fresh claim
 ## 2026-07-24T01:43:40Z CHECKPOINT inc=inc-20260724T012109Z-6a4e sid=db7293dc-5855-4319-b4d2-2523472c5013
 
 Day-3 autonomous run OPEN (operator directives: 4-councilor+synthesis council for gated questions; full spec build-out toward launch-ready; fleet q M1+M2 ordered). Morning queue cleared: G-1..G-4 ratified (G-1+harden), GOALS both proposals applied 3ccb2d5, three-tier 7.2 holder-alone amendment, cc-oracle v0.2.0 pushed public 8656f32, sup-spawn rulings 1+2 ratified. In flight: supspawn-design (spec prose amendments per ruling 1iii), fleetq-spec (M1+M2 re-ground to ready-for-gate), small-fixes (freeze-msg harden, flake, 3.3 verify). Next: oracle-for-workers investigation, sup-spawn build, 10.4.
+
+## 2026-07-24T02:05:32Z CHECKPOINT inc=inc-20260724T012109Z-6a4e sid=db7293dc-5855-4319-b4d2-2523472c5013
+
+small-fixes MERGED (ef25a4a, 1909/8 both floors): G-1 freeze harden shipped; LIVE CATCH — minted base64url nonce with leading dash broke argparse space-form (~1/64 handoffs would die at successor boot; also the flake root cause; fixed at parse seam, 500x soak). §3.3 confirmed descriptive w/ propagation pin. G-A council 4-0 abort/refuse rulings steered to tomb-design. In flight: supspawn-build, tomb-design (applying rulings), fleetq-rb/rs gate, github-polish. Retired: small-fixes, supspawn-design, fleetq-spec + merged worktrees/branches.
