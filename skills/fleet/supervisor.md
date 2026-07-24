@@ -125,10 +125,22 @@ Old incarnation:
    `sup-*` verb, complete refuses without it. `--expect-sid` is OPTIONAL — the
    token verifies the successor; a sid mismatch is a warning naming the fork,
    not a refusal.
-5. On timeout / dispatch failure: `fleet sup-handoff-abort --successor-sid <SID>`
-   — you resume duty; doctor flags the abort until the operator clears
+5. On timeout / dispatch failure:
+   `fleet sup-handoff-abort --successor-sid <SID> --nonce <value>`
+   — abort is NOT exempt from the continuity gate; without
+   `--nonce` it exits 4 like every other `sup-*` verb (a runbook copy that
+   omitted it cost two refusals mid-succession on 2026-07-24). You resume duty;
+   doctor flags the abort until the operator clears
    `state/supervisor-handoff-aborted.json`. Both complete and abort unlink the
    successor's plaintext-token task file (§5.9).
+
+   Abort works with **no HANDSHAKE**: `sup-handoff-begin` records the successor
+   it dispatched (inc + sid) in your own claim, and abort resolves the stillborn
+   successor from that marker. `fleet sup-status --json` publishes it as
+   `handoff_successor_inc` / `handoff_successor_sid` / `handoff_pending_since` —
+   which are about the pending SUCCESSOR, not `pending_present`, which is about
+   the pending GENERATION. Abort still refuses a `--successor-sid` that ties to
+   no recorded successor: that refusal is the safety property, not a bug.
 
 Successor: driven entirely by the task file `sup-handoff-begin` wrote — it
 boots claim-pending with `--handoff-token`, writes HANDSHAKE (carrying the
