@@ -11201,6 +11201,36 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# Flags whose values are minted by mint_nonce() (base64url): ~1/64 of minted
+# values begin with "-", which argparse's SPACE form reads as a missing
+# argument ("--nonce -Ab..." -> "expected one argument" -> SystemExit(2)).
+# That is the CLI refusing a value fleet itself minted, printed, and
+# instructed the holder to present -- and _render_successor_task renders
+# `--handoff-token <value>` space-form into the successor's own boot command,
+# so without this ~1/64 of handoffs died at successor boot on a usage error.
+# (Also the root cause of the test_a_valid_proof_still_exits_0 flake: every
+# test round-tripping a fresh mint through main() rolled that die.)
+_MINTED_VALUE_FLAGS = ("--nonce", "--handoff-token")
+
+
+def _absorb_minted_flag_values(argv: list) -> list:
+    """Rewrite ["--nonce", V] -> ["--nonce=V"] for the minted-value flags:
+    argparse's equals form accepts any value, leading dash included. Every
+    other token passes through byte-for-byte; a trailing valueless flag is
+    left for argparse to refuse with its ordinary usage error."""
+    out = []
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok in _MINTED_VALUE_FLAGS and i + 1 < len(argv):
+            out.append(f"{tok}={argv[i + 1]}")
+            i += 2
+        else:
+            out.append(tok)
+            i += 1
+    return out
+
+
 def main(argv=None) -> int:
     # M-B T8: the standing cp1252-crash fix (knowledge C2) -- a Windows
     # console's default code page cannot encode most native-worker output
@@ -11214,7 +11244,8 @@ def main(argv=None) -> int:
         except (AttributeError, ValueError, OSError):
             pass
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(_absorb_minted_flag_values(
+        sys.argv[1:] if argv is None else list(argv)))
     try:
         if args.command == "home":
             return cmd_home(args)
