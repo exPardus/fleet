@@ -204,6 +204,28 @@ class TestClaimDecision:
         assert v == "freeze"
         assert "G9" in reason or "daemon" in reason.lower()
 
+    def test_freeze_reason_names_the_closing_out_hazard(self):
+        # G-1 (overnight ledger 2026-07-24): a council seized on a stale
+        # snapshot of this very verdict -- the holder was still alive, closing
+        # out. The agent-facing freeze text must name the hazard (roster-gone
+        # does not imply dead; holder may be live and closing out) and demand
+        # re-verification at act time, and per claim-nonce §5.7 it must name
+        # the ambiguity and the escalation ONLY -- never a lever that resolves
+        # it unilaterally.
+        c = _claim(beat=NOW - timedelta(seconds=120))
+        v, reason = fleet.supervisor_claim_decision(c, set(), None, now=NOW)
+        assert v == "freeze"
+        low = reason.lower()
+        assert "closing out" in low
+        assert "roster-gone does not imply dead" in low
+        assert "re-verify" in low
+        assert "escalate to the operator" in low
+        # §5.7 negative pins: no unilateral lever named in agent-facing text.
+        assert "incarnation" not in low  # the manual lever file
+        assert "sup-status" not in low
+        assert "sup-release" not in low
+        assert "remove" not in low and "delete" not in low
+
     def test_fresher_foreign_checkpoint_refuses(self):
         # journal's latest entry is a DIFFERENT incarnation, newer than the
         # claim's heartbeat -> mid-transition, bystander must refuse (spec §4)
