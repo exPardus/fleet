@@ -1,6 +1,6 @@
 # Proposal: `sup-spawn` (§10.1) dispatch choreography
 
-Status: draft — awaiting manager review + operator rulings
+Status: ratified rulings applied — ready for build
 
 Decision record for the `sup-spawn` verb — the gen-0 supervisor dispatch that three-tier
 §10.1 leaves `[UNBUILT]` (SPEC:1059, Appendix-A `grep -c "sup-spawn|cmd_sup_spawn"` → 0 at
@@ -448,6 +448,18 @@ second sup-spawn body refused (exit 2) with terminal message.
 ---
 
 ## Operator rulings needed
+
+> **RULING OUTCOMES (2026-07-24, operator, in-session — both RATIFIED):**
+> **Ruling 1 — GRANTED, all three arms.** (i) gen-0 body is `sup|<launch-id>|boot`, no
+> `supervisor`-named record ever exists; (ii) `"supervisor"` in send/kill/respawn positions is a
+> logical name resolved at verb time via the claim to the holder's record; (iii) the contradicting
+> ratified prose in `docs/specs/three-tier-command.md` is amended, citing this ruling — applied on
+> this branch (10 dated amendment markers: §3.5.3(d) premise + name-yield bullet, §5.1 beat-contract
+> note, §5.2 scheduler line, §5.3 B7 line, §7.2 B1 line, §10.2 registry bullet, §10.2 name/shape
+> reconciliation line, §10.3 reserved-name prose, §11.3 ND1 blockquote). `[UNBUILT]` markers and all
+> pinned receipts untouched.
+> **Ruling 2 — WARN.** The §10.2 bypass-acknowledgement check warns when `supervisor/GOALS.md`
+> lacks the acknowledgement and proceeds; no refusal, no silence.
 
 1. **Ratify the pipe-named gen-0 + logical-name resolution, and amend the ratified prose
    that contradicts it.** The 2026-07-24 manager ruling (family regex widening,
