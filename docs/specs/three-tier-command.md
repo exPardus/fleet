@@ -1619,11 +1619,13 @@ them** — listed for the build slice / a doc-sync pass:
 
 *(Direction, not a v1/v2 commitment: recorded by operator directive so the v1 build does not paint
 it out.)* Eventually the top-tier interface session should be able to run **multiple fleet
-supervisors at once, as different teams working on different things** — one interface fanning out
-to N supervisors, each a team lead owning its own claim, worker set, and workstream (e.g. one team
-on a product repo, one on infrastructure, one on a research spike), with the interface
-coordinating across teams and arbitrating shared resources (usage limits, machine load, operator
-attention). Design consequences v1 should not foreclose:
+supervisors at once, as different teams** — one interface fanning out to N supervisors, each a
+team lead owning its own claim, worker set, and scope. Two modes, both intended: **independent
+teams on different things** (one team on a product repo, one on infrastructure, one on a research
+spike) and **coordinated teams on one large campaign** (a single goal decomposed into team-sized
+fronts, supervisors advancing them in parallel under interface arbitration). The interface
+coordinates across teams either way and arbitrates shared resources (usage limits, machine load,
+operator attention). Design consequences v1 should not foreclose:
 
 - The claim file, journal, and `sup-*` verb surface are singletons today (`supervisor/INCARNATION`,
   one claim per fleet home). Multi-supervisor needs either per-campaign fleet homes (works today —
