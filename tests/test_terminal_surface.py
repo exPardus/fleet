@@ -494,6 +494,20 @@ class TestWorkerEnvStamp:
         env = fleet._worker_env("pmbot")
         assert "CLAUDE_CODE_SESSION_ID" not in env
 
+    def test_child_env_propagates_claude_config_dir(self, monkeypatch):
+        # three-tier §3.3: fleet has NO CLAUDE_CONFIG_DIR handling on purpose
+        # (the §3.2 receipt greps 0 literals) -- the provider namespace
+        # reaches the child because _worker_env copies the parent environment
+        # wholesale, so a worker's `claude` lands on the SAME namespace daemon
+        # as its spawner. This pin makes that absence DESCRIPTIVE rather than
+        # accidental: a future "hygienic" env filter that drops the variable
+        # would silently re-home every worker to the default namespace's
+        # daemon -- wrong provider, wrong tier table -- with no failure at
+        # dispatch time.
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", "X:/ns/longcat")
+        env = fleet._worker_env("pmbot")
+        assert env["CLAUDE_CONFIG_DIR"] == "X:/ns/longcat"
+
 
 COMMANDS_DIR = Path(__file__).resolve().parent.parent / "commands"
 
