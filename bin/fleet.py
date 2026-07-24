@@ -4406,16 +4406,22 @@ def cmd_send(args, which=shutil.which, sleep=time.sleep, run=subprocess.run) -> 
     §7 THE GATE: `send` is the incident-1 verb -- a divergent supervisor body
     dispatching workers -- so it is the gate's headline case (bypassable, see
     `_supervisor_gate`)."""
-    _supervisor_gate("send", nonce=getattr(args, "nonce", None))
+    # Ruling 1(ii): `send supervisor` resolves via the claim to the holder's
+    # pipe-named record -- the v2 scheduled beat's stable spelling. Seam #1
+    # (G-C): resolve BEFORE the gate so the §7 send-gate can consult the
+    # RESOLVED record's identity (resolve-then-gate). The resolver raises its
+    # own named refusals (no/released/corrupt claim, stranded sid) here, so a
+    # husk resolution can never be swallowed into a silent gate pass.
+    resolved_name = _resolve_worker_target(args.name)
+    _supervisor_gate("send", nonce=getattr(args, "nonce", None),
+                     send_target=resolved_name)
     _ceiling_refusal = _ceiling_refuses_dispatch("send")
     if _ceiling_refusal is not None:
         raise FleetCliError(_ceiling_refusal)
     _require_instance_settings()
 
     message = _read_task_arg(args.message)
-    # Ruling 1(ii): `send supervisor` resolves via the claim to the holder's
-    # pipe-named record -- the v2 scheduled beat's stable spelling.
-    args.name = _resolve_worker_target(args.name)
+    args.name = resolved_name
 
     with fleet_lock():
         data = load_registry()
@@ -9575,7 +9581,7 @@ def _claim_is_legacy(claim: dict) -> bool:
     return "nonce_hash" not in claim and "state" not in claim
 
 
-def _supervisor_gate(verb, nonce=None, now=None):
+def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     """claim-nonce §7 -- THE GATE (option (b), ratified 2026-07-23). Raises
     `SupervisorClaimGateError` when a mutating lifecycle verb is run by ANY
     sid-bearing caller (any `CLAUDE_CODE_SESSION_ID`, not only a
@@ -9645,6 +9651,36 @@ def _supervisor_gate(verb, nonce=None, now=None):
         return                      # no generation to demand (§9)
     if _nonce_presentation(claim, nonce) is not None:
         return                      # continuity proved -- validate without minting
+    # Seam #1 (three-tier switch-over, docs/AUTONOMOUS-2026-07-24.md G-C;
+    # council 4-0 for candidate (a), PROVISIONAL pending operator ratification
+    # of the claim-nonce §7 taxonomy row): a `send` whose RESOLVED target record
+    # IS this claim's own holder body is UNGATED. The interface tier holds no
+    # nonce BY DESIGN, yet three-tier §5.3's divergence detection is built ON
+    # interface sends -- so the canonical `fleet send supervisor` must just work.
+    # The ungated path is a plain upward mailbox append: zero nonce authority,
+    # steers no worker, moves no claim, mutates no INCARNATION/registry/claim.
+    #
+    #   * RESOLVE-then-GATE: cmd_send resolves the logical target first and
+    #     passes the physical record NAME here; the resolver's own loud refusals
+    #     (no/released/corrupt claim, stranded sid) fire before this is reached.
+    #   * Predicate = holder-sid RECORD-IDENTITY (`_record_is_supervisor_claim_
+    #     holder`) against the SAME claim this gate armed on -- NEVER the literal
+    #     name 'supervisor', `_is_supervisor_shaped`, or a `sup|` prefix. A
+    #     supervisor-SHAPED husk that does not hold the claim stays gated.
+    #   * No TOCTOU: a claim that moved between resolve and here no longer holds
+    #     through this record, so the identity check is False and the full §7
+    #     gate re-arms.
+    #   * send-ONLY: every other mutating verb passes send_target=None and keeps
+    #     its unchanged arming.
+    if verb == "send" and send_target is not None:
+        try:
+            resolved_rec = load_registry().get("workers", {}).get(send_target)
+        except RegistryCorruptError:
+            resolved_rec = None     # fail toward the gate (a corrupt registry
+                                    # is reported by its own doctor row)
+        if (resolved_rec is not None
+                and _record_is_supervisor_claim_holder(resolved_rec, claim=claim) is True):
+            return
     raise SupervisorClaimGateError(
         f"{verb}: refusing -- a supervisor claim ({claim.get('incarnation_id', '?')}) "
         f"is held and fresh, and this call did not prove continuity on it "
@@ -10752,9 +10788,11 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
 
       * without `--settings`, the successor runs with NONE of fleet's hooks.
         All four (Stop outcome, Stop mailbox, PostToolUse mailbox,
-        PostCompact journal) degrade cleanly to SID-keyed writes for a
-        session with no registry record -- and the successor's sid is
-        exactly the handle `sup-handoff-complete --expect-sid` /
+        PostCompact journal) key on the successor's sid -- until
+        `sup-handoff-complete` stamps that sid onto the successor's registry
+        record (seam #2, G-B/G-C: a `sup|<inc>|successor` record is registered
+        on the success path below, sid-less until the transfer), which is also
+        the handle `sup-handoff-complete --expect-sid` /
         `sup-handoff-abort --successor-sid` already print and consume. The
         `_require_instance_settings()` pre-flight is the same doctrine
         cmd_spawn applies: `claude` silently IGNORES a --settings path that
@@ -10775,7 +10813,8 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     `tasks_dir()` sits outside the worker's cwd; this dispatch runs with
     `cwd=FLEET_HOME` and its task file is `FLEET_HOME/state/...`, already
     inside the authorized root. `--setting-sources` likewise: it is a
-    per-worker persisted value and a successor has no registry record.
+    per-worker persisted value not carried on this launch (the successor's
+    record, registered on the success path below, defaults it to None).
 
     Mode flags ARE carried (B4/D6 fix wave). `dispatch_bg` ends every worker
     argv with `mode_flags(mode)` and `fleet spawn` defaults that to `dontask`;
@@ -10978,6 +11017,34 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
               f"Claim unchanged -- duty continues; re-run sup-handoff-begin to retry.")
         return 1
 
+    # Seam #2 (three-tier switch-over, docs/AUTONOMOUS-2026-07-24.md G-B/G-C):
+    # register the successor as a supervisor-shaped BODY record, so the
+    # logical-name resolver (`_resolve_worker_target`) can walk claim -> holder
+    # sid -> record once the claim transfers -- the live-reproduced dead-end was
+    # `holder sid ... matches no registry record`. Created only on the success
+    # path (the successor is verified live), so the DOA/indeterminate/dispatch-
+    # failure returns above leave no orphan record and need no cleanup. The sid
+    # is deliberately NULL here: the daemon minted the successor's own, and the
+    # roster-joined `successor_sid` can still be superseded by a fork before
+    # HANDSHAKE -- so `sup-handoff-complete` stamps the AUTHORITATIVE HANDSHAKE
+    # sid, the same create-sid-less-then-stamp shape `cmd_sup_spawn` uses for a
+    # gen-0 body (:10596). This also grants the successor §7.2 archive exemption
+    # + peek/result parity with gen-0 bodies (a wanted side effect).
+    succ_mode = getattr(args, "permission_mode", None) or SUCCESSOR_DEFAULT_MODE
+    with fleet_lock():
+        data = load_registry()
+        if name not in data["workers"]:
+            succ_rec = new_worker_record(
+                None, FLEET_HOME,
+                f"supervisor successor {successor_inc} (handoff from {holder_inc})",
+                succ_mode, model=getattr(args, "model", None),
+                spawned_by=caller, spawned_by_lineage=claim.get("lineage_id"),
+                dispatch_kind="bg", category=None)
+            succ_rec["last_dispatch_at"] = now_iso()
+            data["workers"][name] = succ_rec
+            save_registry(data)
+            append_event("spawned", name, cwd=str(FLEET_HOME), mode=succ_mode)
+
     print(f"SUCCESSOR-INC: {successor_inc}")
     print(f"SUCCESSOR-SID: {successor_sid}")
     print(f"Next: wait for supervisor/HANDSHAKE (timeout "
@@ -11061,6 +11128,25 @@ def cmd_sup_handoff_complete(args) -> int:
             new_claim["nonce_hash"] = succ_nonce_hash
             new_claim["nonce_seq"] = 1
         write_incarnation(new_claim)
+        # Seam #2 (G-B/G-C): stamp the successor's registry record with the sid
+        # the claim just transferred to (the AUTHORITATIVE HANDSHAKE sid, which
+        # survives a successor fork-steer that `--expect-sid` only warns on), so
+        # `_resolve_worker_target("supervisor")` -- claim -> holder sid -> record
+        # -- lands on the successor body. Best-effort: an older handoff (or a
+        # cleaned record) leaves nothing to stamp and the transfer above stands.
+        succ_name = _successor_worker_name(args.expect_inc)
+        reg = load_registry()
+        succ_rec = reg["workers"].get(succ_name)
+        if succ_rec is not None and isinstance(successor_sid, str) and successor_sid:
+            prior = succ_rec.get("session_id")
+            if isinstance(prior, str) and prior and prior != successor_sid:
+                succ_rec["retired_sids"] = list(succ_rec.get("retired_sids", [])) + [prior]
+            succ_rec["session_id"] = successor_sid
+            succ_rec["native_short_id"] = successor_sid.partition("-")[0] or successor_sid[:8]
+            succ_rec["status"] = "working"
+            succ_rec["last_activity"] = now_iso()
+            save_registry(reg)
+            _append_event_quiet("turn_started", succ_name, session_id=successor_sid)
         try:
             handshake_path().unlink()
         except FileNotFoundError:
