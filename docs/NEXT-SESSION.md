@@ -22,6 +22,9 @@ Suite at close: **1897 passed / 13 skipped identical on 3.13 and 3.10** (skip co
 3. **Apply or reject three GOALS.md proposals**: `docs/proposals/GOALS-threetier-sync-proposal.md`, `docs/proposals/GOALS-tier-chain-proposal.md` (incl. its "Operator follow-ups": the §7.2 holder-alone one-line spec amendment).
 4. **fleet-index M1 go/no-go** with the fresh evidence (it undercuts; the queued decision wanted exactly this data).
 5. `docs/specs/providers.md` re-base-or-park: still parked by you, still not surfaced as a blocker.
+6. **Ratify or reject two DESCRIPTIVE spec amendments** on branch `fix/handoff-seams` (unmerged): `docs/specs/claim-nonce.md` **A1** (§6.4 — `sup-handoff-abort` now has three arms, and the abort-flag arm is deleted as unreachable) and **A2** (§5.9/§8 — a fail-closed age-gated sweep of `supervisor-handoff-*.md` at four sites, where §5.9 said "written once and never deleted" and §8 said `cmd_sup_boot` is the only authorized sweep site). Both describe **shipped** behaviour a live incident forced; neither is self-promoted. The code is merge-ready independently — the amendments are the paperwork, and the branch is where they live until you rule.
+
+   Context for the ruling: the 2026-07-24 succession (inc-651f → inc-7d7d, three attempts in sixteen minutes) hit a handoff that was **unabortable in exactly the window the abort verb exists for**, and the wave-1 fix for it reproduced the same failure one attempt later because it modelled the successors as a slot instead of a collection. Both amendments are consequences of that.
 
 ## The remaining build tail (design-open, deliberately not rushed)
 

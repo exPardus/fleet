@@ -1533,6 +1533,33 @@ Two further rules in the same family:
   gains a NOTE for any `state/supervisor-handoff-*.md` older than
   `SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS`. Unlink on completion is the mechanism; the NOTE is the
   backstop for the paths that crash before it.
+
+  > **AMENDMENT A2 — 2026-07-24, DESCRIPTIVE, REQUIRING OPERATOR RATIFICATION.** The shipped code
+  > diverges from the two bullets above, and this note reports the divergence rather than promoting
+  > it. Ratify or reject.
+  >
+  > **The observable was not enough, and the reason is empirical.** The 2026-07-24 succession took
+  > three attempts; neither `complete` nor `abort` ran for the first two, so three files sat in
+  > `state/` with the NOTE firing and nobody acting on it. A `supervisor-handoff-<inc>.md` is not
+  > merely residue: it carries a **plaintext one-shot bearer token that is still LIVE** — nothing
+  > invalidates it but the claim dropping `handoff_token_hash`, so `sup-boot --handoff-inc <inc>
+  > --handoff-token <tok>` still validates against a stranded file. (The wave-1 doctor NOTE called
+  > these tokens "spent"; that rationale was false and is corrected in the code.)
+  >
+  > As shipped there is a **fail-closed, age-gated sweep** (`handoff_task_files_to_sweep`, a pure
+  > predicate over `(name, age)` pairs) run at **four** sites: `sup-handoff-begin`,
+  > `sup-handoff-complete`, `sup-handoff-abort`, and `cmd_sup_boot`. It never deletes a file named by
+  > any pending entry or by the current holder, never one younger than
+  > `SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS` or of unreadable age, and **never anything at all when the
+  > claim is missing, unreadable, or holderless**. That last clause is the one the incident review
+  > demanded: a successor's entire prompt is `Read <task_path> and follow it exactly`, so deleting
+  > that file mid-boot silently strips the body of its only input — including the HANDOFF-ORPHAN
+  > self-termination the same file prescribes — and §5.7's own manual lever (remove
+  > `supervisor/INCARNATION` by hand) is one of the states that reaches it.
+  >
+  > `fleet clean` is still **not** a sweep site; §4.13(g)'s receipt is unaffected. Retirement is now
+  > additionally reachable by the operator through `sup-handoff-abort --successor-inc <inc>`, which
+  > drops the entry, the file, and — when it is the last entry — the token hash (§6.4 A1).
 - **`state/supervisor-nonce-rejections.jsonl`** is bounded, but **not by the writer.** v2 said *"the
   writer truncates to the most recent 200 records"*; truncation is a read-modify-write needing
   `GENERIC_WRITE`, which is exactly the access mode `_atomic_append_bytes`'s docstring says forfeits
@@ -1757,6 +1784,32 @@ equality — the same root cause, third instance.
 
 `sup-handoff-abort` is unchanged — **both** of its sid checks (the HANDSHAKE arm @7441-7445 and the
 abort-flag arm @7456, §4.13(a)) are genuinely sid questions: they choose which *session* to stop.
+
+> **AMENDMENT A1 — 2026-07-24, DESCRIPTIVE, REQUIRING OPERATOR RATIFICATION.** The paragraph above no
+> longer describes the shipped code, and this note is a *report* of what a live incident forced, not a
+> promotion of it (no author promotes its own spec). Ratify or reject; until then the paragraph stands
+> as the v3 text and this note as the divergence record.
+>
+> The 2026-07-24 succession (inc-651f → inc-7d7d, three attempts in sixteen minutes) found that a
+> successor which dispatched, joined the roster, and then died **before writing HANDSHAKE** matched
+> neither arm: no HANDSHAKE, and no abort flag either, because every `_abort_flag` call site in
+> `sup-handoff-begin` omits `successor_sid`. The handoff was **unabortable in exactly the window the
+> abort verb exists for**, and the operator hit the refusal twice live.
+>
+> As shipped, `sup-handoff-abort` decides through one pure function (`resolve_handoff_abort`) over
+> **three** arms, and the abort-flag arm is **deleted** — it was unreachable from any begin path and
+> could only fire on a repeat abort of an already-stopped sid:
+>
+> 1. **HANDSHAKE present** — cross-check whichever handle the caller passed (unchanged in substance).
+> 2. **No HANDSHAKE, a pending entry bearing a sid** — stop it. The claim now records every successor
+>    begin dispatches (`handoff_pending`, a LIST — three concurrent attempts is a real sequence).
+> 3. **No HANDSHAKE, a pending entry with NO sid, past the handoff timeout** — `--successor-inc`
+>    RETIRES it: entry cleared, task file unlinked, and the verb states plainly that **no session was
+>    stopped**, because none was ever recorded. Inside the window it refuses and says when.
+>
+> The refusal for a handle that ties to no recorded successor is **unchanged and load-bearing**: this
+> is not a "stop any sid" verb. `--successor-sid` is still a sid question; `--successor-inc` is an
+> *attempt* question, which is what an attempt that never produced a session requires.
 
 ### 6.5 D5 — no environment-variable channel
 
@@ -2018,7 +2071,7 @@ because `three-tier-command.md` is itself still `PROPOSAL — RESTRUCTURE REQUIR
 | **`supervisor_status_line`** @7503-7530 | a released-claim branch ahead of the heartbeat read (§6.3). Without it a clean `sup-release` reports as corruption in `fleet doctor`, `sup-status`, **and the SessionStart hook of every Claude Code session on this box**. v2's table omitted this function entirely | this slice |
 | **`supervisor/JOURNAL.md:6`** | the live, git-tracked kinds line — never regenerated (§4.7), so `RELEASED` must be added there as well as to the seed | this slice |
 | `_doctor_check_supervisor_handoff` | a NOTE for orphaned `state/supervisor-handoff-*.md` (§5.9) | this slice |
-| `cmd_sup_boot` | out-of-band compaction of `state/supervisor-nonce-rejections.jsonl` under the `fleet_lock` it already holds (§5.9). **The only sweep site this spec authorizes** — `fleet clean` is not one, per §4.13(g) | this slice |
+| `cmd_sup_boot` | out-of-band compaction of `state/supervisor-nonce-rejections.jsonl` under the `fleet_lock` it already holds (§5.9). **The only sweep site this spec authorizes** — `fleet clean` is not one, per §4.13(g). *Superseded for handoff task files by AMENDMENT A2 below (2026-07-24), which adds three more sites and is UNRATIFIED* | this slice |
 | **`skills/fleet/SKILL.md`** | `:37` publishes `Exit 0=hold/handshake-written, 2=refuse, 3=freeze` — amended for the new code (§4.13(b)); `:38` publishes the `--kind` list (§4.7) | this slice |
 | **`skills/fleet/supervisor.md`** | the boot verdict table (`:13`, `:18`), the handoff sequence with its required `--expect-sid` (`:59`), the successor protocol (`:65`), and the *release-then-stop* doctrine plus the human-facing manual lever (§5.7, §6.3) | this slice |
 | **`_render_successor_task`** @7257-7274 | the successor's generated protocol (§4.6, §6.4) — amended in the same commit or the handoff fails only during a real handoff | this slice |
