@@ -1615,6 +1615,26 @@ them** — listed for the build slice / a doc-sync pass:
 - **Not building during the design gate.** This is a `drafting` spec; the build slice starts only after
   a fresh dual-lens gate and operator ratification.
 
+## 13.1 Future design note — multi-supervisor campaigns (operator-added 2026-07-24, v-next)
+
+*(Direction, not a v1/v2 commitment: recorded by operator directive so the v1 build does not paint
+it out.)* Eventually the top-tier interface session should be able to run **multiple fleet
+supervisors at once** for larger campaigns — one interface fanning out to N supervisors, each
+owning its own claim, worker set, and campaign scope. Design consequences v1 should not foreclose:
+
+- The claim file, journal, and `sup-*` verb surface are singletons today (`supervisor/INCARNATION`,
+  one claim per fleet home). Multi-supervisor needs either per-campaign fleet homes (works today —
+  `--fleet-home` partitioning, zero new machinery, and the concurrent-manager name-prefix
+  discipline in `knowledge/` already rehearses it) or a claim namespace keyed by campaign — the
+  former is the presumptive v-next path, the latter is a real redesign.
+- `sup-spawn`'s gen-0 naming (`sup|<launch-id>|boot`) already mints unique supervisor bodies —
+  nothing in the name scheme assumes a singleton; keep it that way.
+- The interface-divergence detection (§5.3) and operator-gate routing (§8) are per-fleet-home;
+  N supervisors means N provenance streams the interface must keep distinct.
+- The 150–200k band binds each supervisor independently; the interface's own occupancy becomes the
+  new scarce resource and may need its own doctrine (today: interface is structurally exempt,
+  ND4c).
+
 ---
 
 ## Appendix A — `[UNBUILT]` proofs (no-match receipts at `235421e5`)
