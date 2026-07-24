@@ -1619,8 +1619,11 @@ them** — listed for the build slice / a doc-sync pass:
 
 *(Direction, not a v1/v2 commitment: recorded by operator directive so the v1 build does not paint
 it out.)* Eventually the top-tier interface session should be able to run **multiple fleet
-supervisors at once** for larger campaigns — one interface fanning out to N supervisors, each
-owning its own claim, worker set, and campaign scope. Design consequences v1 should not foreclose:
+supervisors at once, as different teams working on different things** — one interface fanning out
+to N supervisors, each a team lead owning its own claim, worker set, and workstream (e.g. one team
+on a product repo, one on infrastructure, one on a research spike), with the interface
+coordinating across teams and arbitrating shared resources (usage limits, machine load, operator
+attention). Design consequences v1 should not foreclose:
 
 - The claim file, journal, and `sup-*` verb surface are singletons today (`supervisor/INCARNATION`,
   one claim per fleet home). Multi-supervisor needs either per-campaign fleet homes (works today —
