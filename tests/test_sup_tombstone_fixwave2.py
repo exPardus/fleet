@@ -247,6 +247,42 @@ class TestConcurrentRestampTOCTOU:
         assert FORK_SID in stopped, stops
         assert HOLDER_SID in stopped, stops
 
+    def test_two_forks_after_the_refetch_leave_no_orphan(self, native_home,
+                                                         monkeypatch):
+        """A SECOND restamp is what actually distinguishes the under-lock read.
+
+        With one restamp the intermediate fork is still reachable from the
+        caller's snapshot (it is that record's `session_id`), so dropping the
+        under-lock `retired_sids` from the union changed nothing and the
+        injection came back GREEN. With two, the middle fork exists ONLY in the
+        under-lock record's `retired_sids` -- if the union does not read it,
+        that session is orphaned: live, and belonging to a record about to be
+        marked dead."""
+        _held_claim()
+        _seed_pipe_worker(status="idle")
+        _releasing_send(monkeypatch)             # fork 1: HOLDER -> FORK_SID
+        stops = _record_stops(monkeypatch)
+        fork3 = "77777777-3333-3333-3333-333333333333"
+
+        real_kill_native = fleet._cmd_kill_native
+
+        def restamp_twice_then_kill(name, rec, **kw):
+            with fleet.fleet_lock():
+                data = fleet.load_registry()
+                fleet._restamp_after_steer(data["workers"][name], FORK2_SID,
+                                           FORK2_SID[:8])
+                fleet._restamp_after_steer(data["workers"][name], fork3, fork3[:8])
+                fleet.save_registry(data)
+            return real_kill_native(name, rec, **kw)
+        monkeypatch.setattr(fleet, "_cmd_kill_native", restamp_twice_then_kill)
+
+        fleet.cmd_kill(_kill_args(), **_timed())
+        stopped = [s for s, _ in stops]
+        assert stopped[0] == fork3, stops          # the live one is primary
+        assert FORK2_SID in stopped, stops         # only the under-lock read has it
+        assert FORK_SID in stopped, stops
+        assert HOLDER_SID in stopped, stops
+
     def test_the_stop_set_comes_from_the_under_lock_read(self):
         src = inspect.getsource(fleet._cmd_kill_native)
         assert "_authoritative" in src

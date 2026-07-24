@@ -707,6 +707,68 @@ could not fail by construction. Both are now behavioural.
 
 ---
 
+## Fix wave 2 — re-gate findings (2026-07-24, re-gate of `206a648`)
+
+Spec lens: CONFORMS + 3 MIN. Break lens: CRIT-1 confirmed fixed, **2 MAJ + 3 MIN — every one of
+them inside fix-wave-1 code.** The pattern this repo tracks as *fix-waves-mint-defects* held again;
+that is now 7/7. All eight fixed, 10/10 fault injections RED.
+
+**rb MAJ-A/B — the wave-1 fix reintroduced its own bug's payload.** `_refetch_holder_record` fell
+back to the **pre-steer snapshot** — the exact value CRIT-1 had just proved dangerous — whenever the
+re-read failed. Two reachable ways: the registry is corrupt (`load_registry` *quarantines and
+reinitialises*, so the read succeeds against an **empty** registry and the record is simply absent),
+or the record was removed mid-choreography — and that one is a *consequence of a successful arm 1*,
+not an unrelated race: releasing the claim drops the §7.2 gate-0 protection, after which
+`autoclean`/`clean` may legitimately take the record.
+
+Kill then printed `SUP-KILL-RELEASED`, exited 0, and left the live fork running. Fail-open is bad;
+**fail-open-and-announce is worse**, because a clean terminal line ends the operator's
+investigation. The re-fetch now returns `(record, verified)`:
+
+- **kill** degrades loudly — stops the whole pre-steer snapshot union, prints `SUP-KILL-UNVERIFIED`
+  to stderr naming what could not be checked **and** that a fork minted after the last good read
+  would not be in that set, rc 1, and does *not* print the success line;
+- **respawn** halts with `SUP-RESPAWN-HALTED-UNVERIFIED` *before* the successor-dispatch decision.
+  The caller-side B6 gate cannot pass on state nobody can verify, and dispatching there is precisely
+  how two live supervisor bodies happen.
+
+**rb MIN-A — residual double-fork TOCTOU.** A restamp landing between the post-steer re-fetch and
+the stop left fork2 running under a record about to be marked dead. `_cmd_kill_native` now takes the
+stop sid set from **its own under-lock registry read** — the lock it already held for
+`other_current_sids`, which is the narrowest correct place — unioned with the caller's snapshot and
+any forced `extra_stop_sids`.
+
+**rb MIN-B — a docstring that lied.** `_replace_with_retry` claimed a wrong destination "must still
+fail fast". False on win32: a **directory** destination raises `PermissionError`, indistinguishable
+here from a sharing violation, so it is retried the full four times (~1.5s) before re-raising. Fixed
+by correcting the docstring rather than adding an `isdir` fast-fail — that would be a permanent
+`stat` on every registry and claim write to shave 1.5s off a programming error that does not occur
+in a running fleet. The other wrong-destination errors are not `PermissionError` and do fail on the
+first attempt.
+
+**rb MIN-C — supersedes wave 1's "left for the operator to scope".** Wave 1 fixed `save_registry`
+only and recorded `_write_json_atomic` as out of scope. The re-gate produced the harm path that
+settles it, so the earlier note is withdrawn on evidence, not on preference: `sup-release`'s
+`write_incarnation` collides with `_await_claim_released`'s poller → `os.replace` raises → the claim
+never reads `released` → `kill supervisor` falls through to arm 2. A millisecond file lock becomes an
+**up-to-3600s freeze of the whole supervisor tier**. This build engineers that collision (up to 60
+polls per verb against that exact writer), so it is this slice's to fix.
+
+**rs MIN-A/B/C — three tests that pinned less than they appeared to.** A refusal test asserted only
+the exception *class*, which respawn's steer-refused abort also raises, so it stayed green under the
+MAJ-B revert. Wave 1's unconditional nag print duplicated the hand-written line in the no-claim and
+released states; `sup-status` now prints the freeze note directly, inside the held-claim branch only.
+And an F5 assertion used a `("freeze", "refuse")` disjunction against a deterministic fixture, which
+pins neither doctrine — now the exact verdict.
+
+**One of this wave's own injections came back GREEN and produced a better test.** Dropping the
+under-lock `retired_sids` from the sweep union changed nothing, because with a *single* restamp the
+intermediate fork is still reachable as the snapshot's `session_id`. Only a **double** restamp puts a
+live sid exclusively in the under-lock record. The test was rewritten to that shape; the injection is
+now RED.
+
+---
+
 ## Ratification queue (operator)
 
 1. **Ruling 1** (respawn aborts on steer failure) and **ruling 2** (refuse kill of a limited-parked
