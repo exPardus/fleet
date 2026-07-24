@@ -129,7 +129,7 @@ Then open a Claude Code session, say *"become the fleet manager"*, and spawn you
 | `fleet kill` | Interrupt (if running) and mark a worker dead |
 | `fleet clean` / `archive` / `autoclean` | Tiered cleanup: remove dead workers, archive terminal ones, scheduled staleness sweep |
 | `fleet doctor` | Run the 21 fleet health checks |
-| `fleet sup-*` | Supervisor identity: `boot`, `heartbeat`, `checkpoint`, `status`, `handoff-{begin,complete,abort}` |
+| `fleet sup-*` | Supervisor identity: `boot`, `spawn`, `heartbeat`, `checkpoint`, `status`, `handoff-{begin,complete,abort}` |
 
 ## Roadmap
 
