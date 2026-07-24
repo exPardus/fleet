@@ -32,11 +32,33 @@ verdicts recorded here are provisional decisions acted on during the run, queued
 
 ## Operator-gated items encountered during the run
 
-*(none yet)*
+### G-A. §10.4 tombstone design — two rulings (2026-07-24)
+- **What**: tomb-design's decision record left 2 genuinely-unsettled choices: (1) respawn
+  steer-failure disposition — abort vs kill-style fall-through; (2) `kill supervisor` against a
+  limited-parked holder — refuse vs proceed-with-warning.
+- **Why gated**: both extend/interpret ratified contracts (SPEC never-block is kill-scoped; a
+  loud-warning destruction is the shape CN §6.3 deleted) — operator-owned per the designer.
+- **Council verdict**: **UNANIMOUS 4–0 (a)/(a)** — abort; refuse. Acted on: rulings + merged
+  conditions steered to tomb-design for folding into the design doc.
 
 ## Council record
 
-*(none yet — 4 councilors + synthesis per directive 1)*
+Four councilors (per directive 1), distinct personalities, each read the proposal + governing
+specs independently; synthesis by manager (recorded here), queued for operator ratification.
+
+| Docket | Cassandra (risk) | Brick (delivery) | Vista (strategy) | Mercer (incident-response) |
+|---|---|---|---|---|
+| 1. respawn steer-failure | (a) — ambiguity + irreversibility; (b)'s worst case destroys a healthy supervisor 3s from releasing | (a) — frozen claim is the ultimate blocked pipeline; fast honest failure beats slow guaranteed destruction | (a) — "failure disposition matches mandate"; never-block is kill-scoped on purpose | (a) — (b) yields a state indistinguishable from success from outside |
+| 2. kill limited-parked holder | (a) — strictly-worse-in-every-branch; warnings on destructive verbs get reflex-confirmed | (a) — refusal that prints the two runnable commands is a redirect, not a round-trip | (a) — (b) reintroduces the `--force` shape CN deleted one docket later | (a) — scroll-back warning invisible an hour later when every sup-boot freezes |
+
+**Synthesis (acted on)**: (a)/(a) with merged binding conditions — grep-able
+`SUP-RESPAWN-ABORTED <phase>` surface printing escalation commands verbatim + async-late-release
+warning; F1/F2 byte-identical-state fault-injections ratification-blocking; bounded abort at
+exactly `SUPERVISOR_RELEASE_TIMEOUT_SECONDS`; refusal message prints ALL escapes (limit-transfer,
+resume-limited, poisoned-park sequence w/ real-name kill + freeze cost) and asserts zero
+mutations; **no bypass flag ever without a new council ruling**; new build requirement — during
+any freeze window `sup-status`/statusline shows "claim held by dead sid, seizable in
+<remaining>s".
 
 ## Dispatch record
 
@@ -64,6 +86,17 @@ verdicts recorded here are provisional decisions acted on during the run, queued
   517-line one) → `claude plugin update oracle@cc-oracle` run, now 0.2.0; sessions spawned from
   now get the hardened detector. Manager live-verified the Stop hook fires interactively
   (deliberate marker-phrase test — blocked turn-end with the dispatch-oracle demand, correct).
+
+### Dispatch record additions (post-council)
+
+- `supspawn-build` (bypass, worktree `fleet-supspawn-build`, branch `build/sup-spawn` @ ea49545):
+  building the sup-spawn verb per the ratified design (merged to main in ea49545).
+- `fleetq-rb` / `fleetq-rs` (bypass, read-only fences, on worktree `fleet-q-spec`): dual-lens gate
+  on the fleet-index M1+M2 spec (`4011990`).
+- `tomb-design` fork-steered with the G-A rulings + conditions to fold into its design doc.
+- `github-polish` (bypass, worktree `fleet-gh-polish`, branch `docs/github-polish`):
+  operator-ordered discoverability pass — README/CONTRIBUTING/docs-index + repo-settings
+  PROPOSAL (no `gh repo edit` by the worker; manager applies).
 
 ## Build queue (the launch-ready ordering, updated as it drains)
 
