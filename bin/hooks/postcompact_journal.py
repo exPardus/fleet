@@ -24,7 +24,7 @@ import re
 import sys
 import time
 
-_SAFE_TOKEN_RE = re.compile(r"[A-Za-z0-9._-]+")
+_SAFE_TOKEN_RE = re.compile(r"[A-Za-z0-9._~-]+")
 
 
 def _valid_token(value):
@@ -94,7 +94,15 @@ def _resolve_name(session_id, fleet_home):
             return None
         for name, rec in workers.items():
             if isinstance(rec, dict) and rec.get("session_id") == session_id:
-                return name if _valid_token(name) else None
+                # Fix wave 1 (CRIT-1): map a pipe-delimited supervisor BODY
+                # name (`sup|<id>|boot`) onto the same `|` -> `~` on-disk
+                # stem fleet.name_fs_stem uses (duplicated by necessity:
+                # hooks never import fleet.py), BEFORE validation -- the
+                # landmark then lands in the journal fleet-side
+                # journal_file_path(name) reads. `~` joins _SAFE_TOKEN_RE's
+                # charset; the traversal guard still runs on the mapped value.
+                stem = name.replace("|", "~") if isinstance(name, str) else name
+                return stem if _valid_token(stem) else None
     except (OSError, ValueError):
         return None
     return None
