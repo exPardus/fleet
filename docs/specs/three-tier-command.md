@@ -469,8 +469,13 @@ inherits the model unconditionally and offers no override (§3.5.1's receipts), 
 `fleet respawn supervisor` would mint a fresh body **on the same tier that is limited** — burning the
 in-flight plan *and* landing back on the exhausted tier. That is strictly worse than doing nothing, so
 it is **withdrawn as a remedy**: a bare respawn is a context-reset lever, never a fallback. The other
-route — a fresh spawn at the fallback tier — collides with the reserved name (§10.3), because the parked
-predecessor's record still holds it:
+route — a fresh spawn at the fallback tier — is `sup-spawn` itself, whose per-launch name cannot collide
+with the parked predecessor's record. *(Amended 2026-07-24 by operator ruling — sup-spawn choreography,
+see docs/proposals/sup-spawn-choreography.md: this passage previously said the fresh spawn "collides
+with the reserved name (§10.3), because the parked predecessor's record still holds it". Under the
+ruling no record is ever named `supervisor`; every `sup-spawn` launch mints a fresh
+`sup|<launch-id>|boot` name. The `existing`-key check below remains the general name-uniqueness gate;
+it never fires on a freshly minted launch id.)*
 
 ```
 # at 235421e56bfd328a7e913e519a1459ccf55918dc
@@ -483,12 +488,13 @@ $ sed -n '2815p' bin/fleet.py
 - **`sup-spawn` takes an explicit `--model <tier-alias>`.** It is the fallback's dispatch verb, so the
   tier must be settable at dispatch, not inherited. (`dispatch_bg` already accepts `model` — §10.1 — so
   this is a parser-and-pass-through, not new plumbing.)
-- **The parked predecessor's record must yield the reserved name before the successor takes it.** Two
-  admissible shapes, and the build picks one: *replace* the record in place (the successor becomes the
-  `supervisor` record, the parked sid moving to `retired_sids`), or *rename the parked record to a husk*
-  and let the sweep collect it once it is no longer the live claim-holder (§7.2's predicate already
-  stops protecting it at that point). Either way the reserved-name check must see the name free, and
-  the parked body's own tombstone obligation (§10.4) still applies.
+- **No name-yield is required.** *(Amended 2026-07-24 by operator ruling — sup-spawn choreography, see
+  docs/proposals/sup-spawn-choreography.md: this bullet previously required the parked predecessor's
+  record to "yield the reserved name before the successor takes it", with two admissible shapes —
+  replace-in-place or rename-to-husk. Both are moot: the fallback successor is dispatched under its own
+  fresh `sup|<launch-id>|boot` name, no record is ever named `supervisor`, and the parked predecessor's
+  record simply stops being the claim-holder — §7.2's predicate stops protecting it and the sweep
+  collects it as an ordinary husk.)* The parked body's own tombstone obligation (§10.4) still applies.
 - **If option (i) is ever to be usable at all, `respawn` needs the same `--model` carry-forward-or-
   override treatment its `--setting-sources` / `--token-ceiling` neighbours already have.** Recorded as
   the smaller alternative; the `sup-spawn` route above is the one this spec specifies.
@@ -623,7 +629,9 @@ $ sed -n '3595,3599p' bin/fleet.py
 ```
 
 **The G9 hazard is real and this is where item 4 lands in the design:** if a beat is delivered by a
-scheduler that runs `fleet send supervisor "beat"`, and the roster is transiently suspicious, `send`
+scheduler that runs `fleet send supervisor "beat"` *(Amended 2026-07-24 by operator ruling — sup-spawn
+choreography: `supervisor` is the logical name per the §5.1 amendment note; see
+docs/proposals/sup-spawn-choreography.md)*, and the roster is transiently suspicious, `send`
 raises `FleetCliError`, exits non-zero, and **the scheduler ignores the exit code** — the beat is
 silently dropped with no record. This is the single strongest reason the beat is **not** a scheduled
 `send` in v1 (§5): v1 beats are interface-originated `fleet send` turns whose failure the human sees
@@ -650,7 +658,12 @@ In v1 the only beat is the interface session steering the supervisor: `fleet sen
 (or `fleet send supervisor "reconcile"`). This is a real, shipped mechanism (`cmd_send`), its failure
 is synchronous and human-visible (the interface session sees the `FleetCliError`), and it burns a model
 turn **only when the human intends one**. No scheduler, no run-stamp, no silent drop. This is the whole
-v1 beat surface.
+v1 beat surface. *(Amended 2026-07-24 by operator ruling — sup-spawn choreography, see
+docs/proposals/sup-spawn-choreography.md: `supervisor` in send/kill/respawn target position is a
+**logical name**, resolved at verb time via `supervisor/INCARNATION` to the current claim-holder's
+registry record. The physical record is pipe-named — `sup|<launch-id>|boot` at gen-0,
+`sup|<inc>|successor` after a handoff — and is never named `supervisor`. The beat contract's spelling
+is unchanged; with no live claim the resolution refuses loudly instead of mailing a husk.)*
 
 ### 5.2 The `fleet beat` verb — specified, `[UNBUILT]`, needed before any *scheduled* beat
 
@@ -706,7 +719,9 @@ with `fleet send`, which is **not** claim-gated — claim-nonce §4.2 enumerates
 1 class — a host-restart `--fork-session` of the manager conversation *"independently re-deriving and
 dispatching my decisions in paraphrase"* (claim-nonce §1.2) — is not removed by the split; it **moves up
 a tier**: a fork-resumed *interface* body carrying campaign context can re-derive and issue
-`fleet send supervisor …` steers, and the supervisor cannot tell two interface bodies apart (no claim,
+`fleet send supervisor …` steers *(Amended 2026-07-24 by operator ruling — sup-spawn choreography:
+`supervisor` is the logical name per the §5.1 amendment note; see
+docs/proposals/sup-spawn-choreography.md)*, and the supervisor cannot tell two interface bodies apart (no claim,
 no nonce, `send` accepts either). The exposure is worst in the scenario the tiers exist for — the
 supervisor running unattended while the human is away, so no human notices the second interface body.
 
@@ -882,7 +897,11 @@ archives/rm's it — deleting the running campaign's manager. **Resolution, by c
 supervisor record is **exempt from both the archive TTL pass and the daemon-husk sweep**.
 
 **B1 fix (CRITICAL — the exemption must not be keyed on a static name).** The first-generation
-supervisor is spawned by `sup-spawn` under the name `supervisor` (§10.3), but the operator's model
+supervisor is spawned by `sup-spawn` under a per-launch pipe-delimited name, `sup|<launch-id>|boot`
+*(Amended 2026-07-24 by operator ruling — sup-spawn choreography, see
+docs/proposals/sup-spawn-choreography.md: this line previously said gen-0 is spawned "under the name
+`supervisor` (§10.3)"; no record is ever named `supervisor`, which only strengthens this section's
+conclusion — a static-name exemption would now protect nothing at all)*, and the operator's model
 respawns and hands it off "constantly" (§1), and the shipped handoff dispatches its successor under a
 **pipe-delimited** name, `f"sup|{successor_inc}|successor"`, which nothing renames back to
 `supervisor` — `sup-handoff-complete` transfers the INCARNATION claim only, and registry records are
@@ -1101,8 +1120,12 @@ applies the same `--settings`/`_worker_env` guarantees. `sup-spawn`, having no s
   closed. Mandatory, inherited free from `dispatch_bg`.
 - **`--add-dir`:** the supervisor can read `state/tasks` and `state/journals` (its briefs and worker
   journals) without per-turn path wrangling. Inherited from `dispatch_bg`.
-- **Registry record:** the supervisor becomes a worker record named `supervisor`, which is what makes it
-  visible to `fleet status` — and what makes it archive/husk-eligible unless §7.2's exemption is built.
+- **Registry record:** the supervisor becomes a worker record under its per-launch pipe name
+  `sup|<launch-id>|boot`, which is what makes it visible to `fleet status` — and what makes it
+  archive/husk-eligible unless §7.2's exemption is built. *(Amended 2026-07-24 by operator ruling —
+  sup-spawn choreography, see docs/proposals/sup-spawn-choreography.md: previously "a worker record
+  named `supervisor`". No record is ever named `supervisor`; the literal name survives only as the
+  logical send/kill/respawn target resolved via the claim — §5.1 amendment note.)*
   Its `spawned_by` is the interface session's sid (or null if launched by a human shell); its
   `spawned_by_lineage` (claim-nonce §6.2) is null at first spawn (the supervisor is not spawned *by* a
   supervisor claim). It runs under **bypass** permission mode in the fleet repo (earned-privilege
@@ -1117,10 +1140,14 @@ applies the same `--settings`/`_worker_env` guarantees. `sup-spawn`, having no s
   claim-nonce §6.5 requires a `FLEET_WORKER` refusal in `_require_claim_holder` (a worker turn must not
   hold the supervisor claim), filed there as a separate shipped-code prerequisite — and because that
   refusal keys on the **name** and exempts only a **supervisor-shaped** value, `sup-spawn` must dispatch
-  the supervisor body under a name the shipped `_is_supervisor_shaped` predicate accepts (today only the
-  handoff-successor shape `sup|<inc>|successor`), or the supervisor would be refused its own claim. The
-  supervisor is spawned as a fleet worker, so this spec depends on that refusal existing — and on that
-  name/shape reconciliation — before `sup-spawn` is safe.
+  the supervisor body under a name the shipped `_is_supervisor_shaped` predicate accepts, or the
+  supervisor would be refused its own claim. *(Amended 2026-07-24 by operator ruling — sup-spawn
+  choreography, see docs/proposals/sup-spawn-choreography.md: this line previously read "today only the
+  handoff-successor shape `sup|<inc>|successor`". The predicate has since been widened to the whole
+  family `^sup\|[^|]+\|[a-z][a-z0-9-]*$` (build commit 49e2b89), and the ruling fixes gen-0's name as
+  `sup|<launch-id>|boot` — the name/shape reconciliation this paragraph demanded is resolved.)* The
+  supervisor is spawned as a fleet worker, so this spec depends on that refusal existing before
+  `sup-spawn` is safe.
 
 ### 10.3 Reserve the body name mechanically — at `validate_name`
 
@@ -1140,8 +1167,13 @@ def validate_name(name: str, existing=()) -> None:
 ```
 
 `[UNBUILT]` — a `RESERVED = {SUPERVISOR_BODY_NAME}` set checked in `validate_name`: `spawn`/`respawn`
-of the name `supervisor` by the ordinary worker path is **refused** (the name is minted only by
-`sup-spawn`). This mirrors the existing F6 uuid-shape refusal already in `validate_name` (a name-space
+of the name `supervisor` by the ordinary worker path is **refused**. *(Amended 2026-07-24 by operator
+ruling — sup-spawn choreography, see docs/proposals/sup-spawn-choreography.md: previously "the name is
+minted only by `sup-spawn`". No verb mints a record by this name — `sup-spawn` dispatches
+`sup|<launch-id>|boot`, whose `|` the ordinary path's `NAME_RE` already forbids. The reservation stays:
+`supervisor` is the supervisor's **logical** name — the send/kill/respawn resolution target, §5.1
+amendment note — and no ordinary worker may squat it.)* This mirrors the existing F6 uuid-shape refusal
+already in `validate_name` (a name-space
 conflation made unrepresentable at the one choke point rather than patched per reader) — the same
 technique, one more reserved shape. Because `validate_name` is the choke point every creation path
 already calls, the reservation is mechanical, not advisory.
@@ -1367,7 +1399,9 @@ every next task "the current urgent task" and never cross into hand-off. The fix
   > **ND1 fix (MAJOR) — the ceiling MUST carry a supervisor-identity gate; a caller-agnostic occupancy
   > refusal would silence the human's control channel.** An occupancy ceiling keyed on *"any caller above
   > `H`"* fires on the **interface session** too: the interface issues `fleet send supervisor …` (the v1
-  > beat, §5.1), it is the tier the operator's model deliberately keeps long-lived (*"saves its context
+  > beat, §5.1; *Amended 2026-07-24 by operator ruling — sup-spawn choreography: logical name per the
+  > §5.1 amendment note, see docs/proposals/sup-spawn-choreography.md*), it is the tier the operator's
+  > model deliberately keeps long-lived (*"saves its context
   > for talking, interpreting, and long-term ideas"*, §1), and it is **outside fleet's launch surface**
   > (§3.1) — fleet cannot hand it off, respawn it, or reset it. A caller-agnostic refusal would therefore
   > block the human's only steering verb once the interface's own context passed 200k, **with no
