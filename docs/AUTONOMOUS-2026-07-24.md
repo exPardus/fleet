@@ -8,6 +8,13 @@ Operator directives (verbatim intent, given in-session before going hands-off):
    and whether it has measurable useful effects.
 3. **Keep going through the spec** — when NEXT-SESSION runs dry, keep building: the target is a
    **full build of fleet, ready to launch properly**.
+4. **Switch over to three-tier in this session if it lands and works properly**: once `sup-spawn`
+   merges and smoke-tests green, this session releases its supervisor claim (`sup-release`, with
+   continuity), runs `sup-spawn` to launch a gen-0 supervisor body, and becomes the interface
+   tier — steering via `fleet send supervisor` (logical name), with the supervisor owning the
+   fleet from then on. The live switch IS the acceptance test.
+5. Multi-supervisor future note (§13.1): teams work on different things OR on one large campaign
+   as coordinated fronts — both modes intended.
 
 **Nothing in this file ticks a box in `docs/OPERATOR-GATES.md`** — only Altai ticks. Council
 verdicts recorded here are provisional decisions acted on during the run, queued for ratification.
