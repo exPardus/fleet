@@ -458,3 +458,7 @@ Day-3 autonomous run OPEN (operator directives: 4-councilor+synthesis council fo
 ## 2026-07-24T02:05:32Z CHECKPOINT inc=inc-20260724T012109Z-6a4e sid=db7293dc-5855-4319-b4d2-2523472c5013
 
 small-fixes MERGED (ef25a4a, 1909/8 both floors): G-1 freeze harden shipped; LIVE CATCH — minted base64url nonce with leading dash broke argparse space-form (~1/64 handoffs would die at successor boot; also the flake root cause; fixed at parse seam, 500x soak). §3.3 confirmed descriptive w/ propagation pin. G-A council 4-0 abort/refuse rulings steered to tomb-design. In flight: supspawn-build, tomb-design (applying rulings), fleetq-rb/rs gate, github-polish. Retired: small-fixes, supspawn-design, fleetq-spec + merged worktrees/branches.
+
+## 2026-07-24T02:52:38Z CHECKPOINT inc=inc-20260724T012109Z-6a4e sid=db7293dc-5855-4319-b4d2-2523472c5013
+
+Wave: fleet-index M1+M2 spec GATED SOUND (fix wave a63a9e7 -> re-gate 0C/0M, 6 MINs micro-folded 71602ed, merged 48ee2c8). sup-spawn build 4bb11ed gated: spec lens 0C/0M (4 deviations ACCEPT), break lens 3C/2M (pipe-name fs paths beyond task files; respawn-supervisor bare swap vs UNBUILT 10.4; resolver arm unpinned) -> fix wave dispatched (fail-closed kill/respawn until 10.4, central name mapping, FI-4 pin, class-4-compliant boot ritual). github-polish merged ad5e59a + repo settings live (desc, 15 topics, discussions). Oracle-for-workers verdict + cache 0.1.1->0.2.0. Next: sup-spawn re-gate -> merge -> FLEET_LIVE smoke -> live three-tier switch-over per operator directive.

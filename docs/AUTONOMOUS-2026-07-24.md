@@ -98,6 +98,26 @@ any freeze window `sup-status`/statusline shows "claim held by dead sid, seizabl
   operator-ordered discoverability pass — README/CONTRIBUTING/docs-index + repo-settings
   PROPOSAL (no `gh repo edit` by the worker; manager applies).
 
+### Gate ledger (running)
+
+- **fleet-index M1+M2 spec**: gate 1 = rb 1C/3M/5m + rs 1C/1M/7m (CRIT-1 walk-up crossed worktree
+  boundaries; CRIT-2 fresh-doc-born-stale citations, tree 11,288 vs spec's 8,706). Fix wave 1
+  (`a63a9e7`) → re-gate **0C/0M/4m** — first wave on record minting no CRIT/MAJ. Manager
+  micro-folded the 6 MINs (`71602ed`), merged to main `48ee2c8`. Status ready-for-gate; build
+  proceeds on the operator's standing order; OPERATOR-GATES settled row owed.
+- **sup-spawn build**: builder `4bb11ed` (1971/8 both floors, 69 tests). Gate: spec lens **0C/0M/5m**
+  (all 4 disclosed deviations ACCEPT; choreography replica verified verbatim); break lens
+  **3C/2M/4m** — CRIT-1 pipe-name crashes every name-keyed fs path beyond task files
+  (tombstone/archive/journal), CRIT-2 `respawn supervisor` = bare body swap violating [UNBUILT]
+  §10.4 (council 4-0 already rejected that shape), CRIT-3 resolver no-claim arm unpinned (1 of 7
+  fault-injections survived green). Fix wave 1 dispatched: central `name_fs_stem` mapping, kill/
+  respawn-of-holder FAIL CLOSED until §10.4 builds (interrupt stays, disclosed), FI-4 pin, boot
+  ritual re-rendered per nonce class-4 doctrine. Re-gate follows.
+- **github-polish**: merged `ad5e59a`; repo settings applied live (description, 15 topics,
+  discussions on). Owed to operator: none — settings were the ordered deliverable.
+- Doc item carried by manager: `claim-nonce.md` §7 taxonomy row for `sup-spawn`
+  (operator-owned spec amendment).
+
 ## Build queue (the launch-ready ordering, updated as it drains)
 
 1. Merge-gate the three in-flight branches (dual-lens where code/spec-bearing).
