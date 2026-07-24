@@ -119,8 +119,29 @@ def outcomes_dir() -> Path:
     return state_dir() / "outcomes"
 
 
+def name_fs_stem(name: str) -> str:
+    """THE one worker-name -> on-disk-stem mapping (fix wave 1, CRIT-1).
+
+    `|` is invalid in Windows filenames, and supervisor BODY names are
+    pipe-delimited (`sup|<launch-id>|boot`, three-tier §10.1) -- map the
+    delimiter to `~` for the on-disk stem. `~` is outside NAME_RE's
+    [a-z0-9-]+ charset, so no ordinary worker's file can collide with a
+    mapped supervisor-body one, and plain names pass through unchanged.
+
+    EVERY consumer that builds a path from a worker NAME routes through this
+    helper (task files, outcomes/tombstones, journals, logs, archive dest
+    dirs) -- the pre-wave build mapped only the task file, so
+    `write_tombstone_outcome` raised WinError 123 mid-kill/interrupt/
+    respawn --force and left the registry `working` for a stopped session.
+    Sid-keyed paths (mailbox, ceilings, sid outcome fallback) never carry a
+    `|` and take the identity mapping when routed through here."""
+    return name.replace("|", "~")
+
+
 def outcome_path(key: str) -> Path:
-    return outcomes_dir() / f"{key}.jsonl"
+    # `key` is a worker NAME or a sid (read_outcomes' dual-file shape); the
+    # stem mapping is the identity for sids.
+    return outcomes_dir() / f"{name_fs_stem(key)}.jsonl"
 
 
 def tasks_dir() -> Path:
@@ -128,12 +149,11 @@ def tasks_dir() -> Path:
 
 
 def task_file_path(name: str) -> Path:
-    # `|` is invalid in Windows filenames, and supervisor BODY names are
-    # pipe-delimited (`sup|<launch-id>|boot`, three-tier §10.1) -- map the
-    # delimiter to `~` for the on-disk stem. `~` is outside NAME_RE's
-    # [a-z0-9-]+ charset, so no ordinary worker's task file can collide with
-    # a mapped supervisor-body one, and plain names pass through unchanged.
-    return tasks_dir() / f"{name.replace('|', '~')}.md"
+    return tasks_dir() / f"{name_fs_stem(name)}.md"
+
+
+def journal_file_path(name: str) -> Path:
+    return journals_dir() / f"{name_fs_stem(name)}.md"
 
 
 def archive_root() -> Path:
@@ -1218,7 +1238,7 @@ def compose_prompt(name: str, cwd, task: str, sid: str | None, journal_path=None
     <name>.md could exist and that channel is not wired for pre-claim
     spawns -- and returns (prompt, None), matching the no-mail shape.
     """
-    journal_target = (journals_dir() / f"{name}.md").as_posix()
+    journal_target = journal_file_path(name).as_posix()
     parts = [_PREAMBLE_TEMPLATE.format(name=name, cwd=cwd, journal_target=journal_target)]
 
     claim = None
@@ -2000,10 +2020,22 @@ def _resolve_worker_target(name):
     if name != SUPERVISOR_BODY_NAME:
         return name
     claim = read_incarnation()
-    if not isinstance(claim, dict) or claim.get("state") == "released":
+    # Fix wave 1 CRIT-3: the two no-claim arms raise DISTINCT, named
+    # refusals (absent vs released), each pinned by a fault-injection test
+    # (tests/test_supspawn_fixwave1.py FI-6) that plants a squatting
+    # supervisor-shaped husk and proves no shape-guessing fallback can
+    # silently take this arm's place.
+    if not isinstance(claim, dict):
         raise FleetCliError(
-            "no supervisor claim is held -- nothing answers to 'supervisor'; "
+            "no supervisor claim exists -- nothing answers to 'supervisor'; "
             "run `fleet sup-status`")
+    if claim.get("state") == "released":
+        raise FleetCliError(
+            f"the supervisor claim ({claim.get('incarnation_id', '?')}) is "
+            f"released -- nothing answers to 'supervisor' (a released claim "
+            f"is terminal, and a supervisor-shaped record is never resolved "
+            f"by shape); a new body claims via `fleet sup-boot`; "
+            f"run `fleet sup-status`")
     holder_sid = claim.get("session_id")
     if not isinstance(holder_sid, str) or not holder_sid:
         raise FleetCliError(
@@ -2018,6 +2050,41 @@ def _resolve_worker_target(name):
         f"supervisor claim holder sid {holder_sid} matches no registry record "
         f"(stranded-stamp window? see the stranded-turn report) -- refusing to "
         f"resolve 'supervisor' by guesswork; run `fleet sup-status`")
+
+
+def _refuse_unbuilt_supervisor_lifecycle(verb, name):
+    """Fix wave 1 CRIT-2: three-tier §10.4 (supervisor kill/respawn
+    choreography) is [UNBUILT], and the sup-spawn council rejected the bare
+    body swap 4-0 -- so `kill`/`respawn` of the record that currently HOLDS
+    the supervisor claim FAIL CLOSED until §10.4 lands, however the target
+    was addressed (the logical `supervisor` name or the holder's real pipe
+    name -- FI-7 pins that a literal-name guard is not enough).
+
+    Scope, stated exactly:
+      * kill/respawn of the CLAIM-HOLDER record -> refuse (this function).
+      * `interrupt` stays allowed even for the holder: a turn-kill leaves
+        the transcript alive and moves no claim (rb MIN-2, disclosed scope
+        call) -- so this is deliberately NOT called from cmd_interrupt.
+      * a supervisor-shaped husk that does NOT hold the claim stays
+        killable by its real name (holder is False -> pass), so dead
+        gen-0 bodies remain cleanable.
+      * an INDETERMINATE holder verdict (claim held, holder sid unreadable)
+        fails TOWARD refusal, but only for supervisor-shaped names --
+        mirroring the §7.2 archive exemption's asymmetry, so a briefly
+        unreadable INCARNATION cannot freeze kills of ordinary workers."""
+    try:
+        rec = load_registry().get("workers", {}).get(name)
+    except RegistryCorruptError:
+        rec = None
+    if rec is None:
+        return
+    holder = _record_is_supervisor_claim_holder(rec)
+    if holder is True or (holder is None and
+                          (name == SUPERVISOR_BODY_NAME or _is_supervisor_shaped(name))):
+        raise FleetCliError(
+            f"{verb}: refusing -- supervisor kill/respawn choreography "
+            f"(three-tier §10.4) is not built; use sup-release/sup-boot for "
+            f"claim transitions, or address the body by task once §10.4 lands.")
 
 
 def _ceiling_refuses_dispatch(verb, now=None):
@@ -4379,7 +4446,7 @@ def _resume_one_limited_native(name: str, old_sid: str, cwd, mode, model, catego
     uses -- dispatch_bg is itself synchronous (it already blocks through the
     roster join), so the only remaining race is the registry commit lock,
     exactly like cmd_spawn's post-dispatch stamp."""
-    journal_path = journals_dir() / f"{name}.md"
+    journal_path = journal_file_path(name)
     prompt, claim = compose_prompt(name, cwd, "", old_sid, journal_path=journal_path)
     body = ("The usage-limit reset horizon has passed. Continue the task "
             "from where you left off.\n\n" + prompt)
@@ -4881,7 +4948,7 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
     except OSError:
         pass
 
-    journal_path = journals_dir() / f"{name}.md"
+    journal_path = journal_file_path(name)
     prompt, claim = compose_prompt(name, cwd, task_for_record, old_sid, journal_path=journal_path)
     try:
         result = dispatch_bg(
@@ -4987,6 +5054,7 @@ def cmd_respawn(args, run=subprocess.run, which=shutil.which,
     _supervisor_gate("respawn", nonce=getattr(args, "nonce", None))
     _require_instance_settings()
     args.name = _resolve_worker_target(args.name)   # ruling 1(ii)
+    _refuse_unbuilt_supervisor_lifecycle("respawn", args.name)   # CRIT-2 (§10.4 unbuilt)
 
     # §5.1: respawn retires the old session id. Ask before doing that to a
     # worker this session did not spawn. Reads the registry WITHOUT the lock
@@ -5160,6 +5228,7 @@ def cmd_kill(args, run=subprocess.run, which=shutil.which) -> int:
     prompt (the gate is the outer policy)."""
     _supervisor_gate("kill", nonce=getattr(args, "nonce", None))
     args.name = _resolve_worker_target(args.name)   # ruling 1(ii)
+    _refuse_unbuilt_supervisor_lifecycle("kill", args.name)   # CRIT-2 (§10.4 unbuilt)
     with fleet_lock():
         data = load_registry()
         if args.name not in data["workers"]:
@@ -5206,11 +5275,12 @@ def _remove_worker_files(name: str, sid: str, retired_sids: list = ()) -> list:
     of this function's best-effort/missing-is-fine contract. A no-op for
     a worker that was never archived (the dir simply doesn't exist)."""
     removed = []
+    stem = name_fs_stem(name)
     candidates = [
-        logs_dir() / f"{name}.jsonl", logs_dir() / f"{name}.jsonl.1",
-        logs_dir() / f"{name}.err", logs_dir() / f"{name}.err.1",
+        logs_dir() / f"{stem}.jsonl", logs_dir() / f"{stem}.jsonl.1",
+        logs_dir() / f"{stem}.err", logs_dir() / f"{stem}.err.1",
         mailbox_dir() / f"{sid}.md",
-        journals_dir() / f"{name}.md",
+        journal_file_path(name),
         # FIX-5 (F-4): the sid-keyed token-ceiling file (kernel 10) was never
         # cleaned -> a growing pile of orphaned state/ceilings/<sid> files.
         # Sweep it alongside the other per-worker artifacts.
@@ -5230,7 +5300,7 @@ def _remove_worker_files(name: str, sid: str, retired_sids: list = ()) -> list:
             pass
         except OSError:
             pass
-    archive_dir = archive_root() / name
+    archive_dir = archive_root() / stem
     if archive_dir.exists():
         try:
             shutil.rmtree(archive_dir)
@@ -5246,7 +5316,7 @@ def _remove_worker_files(name: str, sid: str, retired_sids: list = ()) -> list:
     # (not a loose glob) so a differently-named worker whose name happens
     # to start with this one (e.g. "w10" vs "w1") is never swept.
     if archive_root().exists():
-        suffix_re = re.compile(re.escape(name) + r"\.\d+$")
+        suffix_re = re.compile(re.escape(stem) + r"\.\d+$")
         for p in sorted(archive_root().iterdir()):
             if p.is_dir() and suffix_re.match(p.name):
                 try:
@@ -5502,13 +5572,14 @@ def _archive_dest_dir(name: str) -> Path:
     treating that as a "collision" would split the same worker's evidence
     across two dirs (finding 3a's failure mode, re-triggered by the resume
     path itself)."""
-    base = archive_root() / name
+    stem = name_fs_stem(name)
+    base = archive_root() / stem
     if not base.exists():
         return base
     i = 1
-    while (archive_root() / f"{name}.{i}").exists():
+    while (archive_root() / f"{stem}.{i}").exists():
         i += 1
-    return archive_root() / f"{name}.{i}"
+    return archive_root() / f"{stem}.{i}"
 
 
 def _archive_file_pairs(name: str, sid: str, retired: list) -> list:
@@ -5523,7 +5594,7 @@ def _archive_file_pairs(name: str, sid: str, retired: list) -> list:
     `_archive_resume_pending`'s crash-detection check (which only needs the
     src half), so the two can never drift apart."""
     pairs = [
-        (journals_dir() / f"{name}.md", "journal.md"),
+        (journal_file_path(name), "journal.md"),
         (outcome_path(name), outcome_path(name).name),
         (task_file_path(name), "task.md"),
     ]
@@ -6004,7 +6075,7 @@ def cmd_archive(args, run=subprocess.run, which=shutil.which) -> int:
         retired = list(rec.get("retired_sids", []) or [])
         print(f"fleet: {n}: resuming archive -- completing pending file moves",
               file=sys.stderr)
-        _archive_move_and_rm(n, sid, retired, archive_root() / n,
+        _archive_move_and_rm(n, sid, retired, archive_root() / name_fs_stem(n),
                              roster_entries, run, which)
 
     skipped_count = len(names) - archived_count
@@ -8073,9 +8144,10 @@ def _fast_completion_sid(name: str, since_iso: str, short_id: str | None = None)
 
 # --------------------------------------------------------------------------
 # Native dispatch (M-B, spec §6): the choke point for every --bg WORKER
-# launch (spawn / fork-steer / resume-limited / respawn). The supervisor
-# successor is dispatched by cmd_sup_handoff_begin's own argv -- spec §6.1
-# enumerates that second path and why it cannot route through here.
+# launch (spawn / fork-steer / resume-limited / respawn / sup-spawn's gen-0
+# supervisor body, three-tier §10.1). The supervisor successor is dispatched
+# by cmd_sup_handoff_begin's own argv -- spec §6.1 enumerates that second
+# path and why it cannot route through here.
 # Task-file bootstrap (G8), short-id capture + sid-prefix roster join (G6
 # fallback), fresh -n render per dispatch (G13 / spec §5.1.3).
 # --------------------------------------------------------------------------
@@ -9488,8 +9560,8 @@ def _supervisor_gate(verb, nonce=None, now=None):
     lock, no mint, no write.
 
     Called at the top of every mutating lifecycle verb (§7's taxonomy: spawn,
-    send, respawn, kill, clean, interrupt, archive, resume-limited, release,
-    init). It is NEVER called from a view or an authoritative-read path -- a
+    sup-spawn, send, respawn, kill, clean, interrupt, archive, resume-limited,
+    release, init). It is NEVER called from a view or an authoritative-read path -- a
     gate on `sup-status` or `status --stale-ok` would make the SessionStart
     hook of every session on this box refuse while a supervisor is live.
 
@@ -10383,29 +10455,47 @@ def _render_sup_spawn_task(name: str, launch_id: str, campaign: str) -> str:
     (GOALS + journal tail + INDEX + roster + status), so GOALS arrives fresh
     at boot time, not stale at compose time (design §4 option B). Unlike the
     successor task there is NO plaintext secret here -- the fresh claim mints
-    its nonce on the body's own stdout at boot (pinned by test)."""
+    its nonce at boot (pinned by test).
+
+    Fix wave 1 MAJ-2: the ritual follows the class-4 nonce doctrine
+    (lessons.md) -- sup-boot's output is REDIRECTED TO A FILE and the
+    NONCE/VERDICT lines are grepped from it, never read off the stream tail.
+    The redirect target uses the MAPPED (pipe-free) task stem: a `|` in the
+    rendered command would be a shell pipe. MIN-4: every verdict the exit-code
+    contract carries is enumerated with its required reaction."""
     fleet_py = (FLEET_HOME / "bin" / "fleet.py").as_posix()
     # The interpreter running fleet right now, not a hardcoded launcher --
     # same doctrine as `_render_successor_task`.
     py = Path(sys.executable).as_posix()
+    bundle = (tasks_dir() / f"{name_fs_stem(name)}.boot-bundle.txt").as_posix()
     return f"""You are the claude-fleet supervisor's GEN-0 body, fleet worker `{name}`, running in {FLEET_HOME.as_posix()} (three-tier §10.1).
 The `{launch_id}` segment of your worker name is a launch id, NOT your incarnation id -- your incarnation is minted at boot in step 1, and `fleet sup-status` reads supervisor/INCARNATION, never your worker name.
 
 Do exactly this, in order:
-1. FIRST ACT, before anything else: run "{py}" {fleet_py} sup-boot
-   Pass NO handoff flags -- this is the fresh-claim path.
-2. Expected outcome: verdict `claim`, exit 0. The output includes `INCARNATION: <inc>` and `NONCE: <value>`.
-   RECORD THE NONCE VALUE NOW -- it is the LAST line of the output and it is printed exactly once.
-   Every later `sup-*` verb requires it (present it with the --nonce flag); losing it costs up to
-   3600s of lockout.
-3. If the verdict is `refuse` (exit 2): a live supervisor claim exists -- a supervisor is already
-   running. Do NOT retry, do NOT spawn/send/kill anything. End your turn with the final message:
-   SUP-BOOT-REFUSED <reason>
-4. If the verdict is `freeze` (exit 3): the claim state is ambiguous (unreadable heartbeat or a
-   failed epoch check). Same stop discipline. End your turn with the final message:
-   SUP-BOOT-FROZEN <reason>
-5. After a successful claim: proceed per skills/fleet/supervisor.md -- read the boot bundle sup-boot
-   just printed (GOALS, journal tail, knowledge index, fleet status), run an early
+1. FIRST ACT, before anything else -- run sup-boot with its output redirected to a file (class-4
+   nonce doctrine: never read a secret off the stream tail):
+   "{py}" {fleet_py} sup-boot > {bundle} 2>&1
+   Pass NO handoff flags -- this is the fresh-claim path. Note the command's exit code.
+2. Read the verdict, and on success your incarnation and nonce, FROM THE FILE:
+   grep -E "^(VERDICT|INCARNATION|NONCE):" {bundle}
+   RECORD THE NONCE VALUE NOW -- it is printed exactly once. Every later `sup-*` verb requires it
+   (present it with the --nonce flag); losing it costs up to 3600s of lockout.
+3. React to the VERDICT line:
+   - `claim` (exit 0): fresh claim -- the expected gen-0 outcome. Proceed (step 4).
+   - `seize` (exit 0): a dead predecessor's stale claim was seized. Proceed, and record the
+     seizure in your first checkpoint note.
+   - `limit-transfer` (exit 0): a limit-parked predecessor's claim transferred to you. Proceed,
+     and record the transfer in your first checkpoint note.
+   (`resume` (exit 0) cannot occur on a fresh body -- it means a claim your own session already
+   holds; treat it as an anomaly worth a checkpoint note, then proceed.)
+   - `refuse` (exit 2): a live supervisor claim exists -- a supervisor is already running. Do NOT
+     retry, do NOT spawn/send/kill anything. End your turn with the final message:
+     SUP-BOOT-REFUSED <reason>
+   - `freeze` (exit 3): the claim state is ambiguous (unreadable heartbeat or a failed epoch
+     check). Same stop discipline. End your turn with the final message:
+     SUP-BOOT-FROZEN <reason>
+4. After a successful claim: proceed per skills/fleet/supervisor.md -- read the boot bundle the
+   file now holds (GOALS, journal tail, knowledge index, fleet status), run an early
    "{py}" {fleet_py} sup-checkpoint "<note>" presenting your nonce, then begin the campaign brief
    below.
 
@@ -10543,8 +10633,14 @@ def cmd_sup_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep
 
     # Echo the effective model + policy provenance up front (design §6):
     # a costly tier must be visible at launch, not discovered on the bill.
-    print(f"model: {model or '(claude default)'} "
-          f"(tier policy: {policy.get('_source', 'default')})")
+    # rb MIN-3: echo an inherited CLAUDE_CODE_SUBAGENT_MODEL exactly the way
+    # cmd_spawn does -- "print the resolution the way cmd_spawn does".
+    model_line = (f"model: {model or '(claude default)'} "
+                  f"(tier policy: {policy.get('_source', 'default')})")
+    subagent_model = os.environ.get("CLAUDE_CODE_SUBAGENT_MODEL")
+    if subagent_model:
+        model_line += f"; CLAUDE_CODE_SUBAGENT_MODEL={subagent_model}"
+    print(model_line)
     print(f"{name} {sid} (native bg, short id {short_id})")
     return 0
 

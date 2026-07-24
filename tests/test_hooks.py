@@ -1027,3 +1027,57 @@ class TestTemplate:
         # placeholders live inside string values, so the raw file still parses
         parsed = json.loads(TEMPLATE.read_text(encoding="utf-8"))
         assert "PostCompact" in parsed["hooks"]
+
+
+class TestPipeNameHookMapping:
+    """Fix wave 1 CRIT-1, hook consumer class: both name-keyed hook writers
+    (stop_outcome's outcome record, postcompact_journal's landmark) build a
+    path from a registry-resolved worker NAME. A supervisor body's
+    pipe-delimited name (`sup|<id>|boot`, three-tier SS10.1) failed
+    _valid_token pre-wave, so both hooks silently fell back to the sid key
+    and the name-keyed read side (read_outcomes(name), journal_file_path)
+    never saw the records. Post-wave the hooks apply the SAME `|` -> `~`
+    stem mapping fleet.name_fs_stem applies, so supervisor-body records
+    land name-keyed like every other worker's."""
+
+    def test_stop_outcome_maps_pipe_name_to_stem(self, tmp_path):
+        make_registry(tmp_path, {"sup|inc-1|boot": {"session_id": "sid-1"}})
+        proc = run_hook(
+            STOP_OUTCOME,
+            json.dumps({"session_id": "sid-1", "hook_event_name": "Stop",
+                        "last_assistant_message": "boot done"}),
+            tmp_path)
+        assert proc.returncode == 0
+        mapped = tmp_path / "state" / "outcomes" / "sup~inc-1~boot.jsonl"
+        assert mapped.exists()
+        rec = json.loads(mapped.read_text(encoding="utf-8").strip())
+        assert rec["kind"] == "result"
+        assert rec["session_id"] == "sid-1"
+        # and NOT the sid fallback -- the name resolved
+        assert not (tmp_path / "state" / "outcomes" / "sid-1.jsonl").exists()
+
+    def test_postcompact_maps_pipe_name_to_stem(self, tmp_path):
+        sid = "abc-123"
+        make_registry(tmp_path, {"sup|inc-1|boot": {"session_id": sid}})
+        proc = run_hook(
+            POSTCOMPACT,
+            json.dumps({"session_id": sid, "trigger": "auto"}),
+            tmp_path)
+        assert proc.returncode == 0
+        jpath = journal_path(tmp_path, "sup~inc-1~boot")
+        assert jpath.exists()
+        assert "context compacted here" in jpath.read_text(encoding="utf-8")
+        assert not journal_path(tmp_path, sid).exists()
+
+    def test_traversal_guard_untouched_by_mapping(self, tmp_path):
+        # The mapping must never widen the traversal guard: a malicious
+        # registry name is still rejected (sid fallback), mapped or not.
+        make_registry(tmp_path, {"..|..|pwn": {"session_id": "sid-1"}})
+        proc = run_hook(
+            STOP_OUTCOME,
+            json.dumps({"session_id": "sid-1", "hook_event_name": "Stop",
+                        "last_assistant_message": "x"}),
+            tmp_path)
+        assert proc.returncode == 0
+        assert (tmp_path / "state" / "outcomes" / "sid-1.jsonl").exists()
+        assert not (tmp_path / "pwn.jsonl").exists()

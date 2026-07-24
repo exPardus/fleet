@@ -11,6 +11,9 @@ Fault-injection targets (mutate -> confirm red -> restore, tt-build convention):
   FI-3 `_supervisor_gate("sup-spawn")`   (TestSupSpawnGateWiring)
   FI-4 resolver never guesses by shape   (TestSupervisorLogicalResolution)
   FI-5 bypass-ack WARN (ruling 2)        (TestBypassAckWarn)
+
+Fix wave 1 (dual-lens gate, 2026-07-24) adds FI-6/FI-7 -- see
+tests/test_supspawn_fixwave1.py.
 """
 import inspect
 import json
@@ -412,9 +415,12 @@ class TestSupSpawnTaskFileContract:
         assert "--handoff" not in text
 
     def test_nonce_record_instruction_and_terminal_contracts(self, native_home, monkeypatch):
+        # Fix wave 1 MAJ-2: the nonce is grepped from a redirected file, never
+        # read off the stream tail (class-4 doctrine) -- see
+        # tests/test_supspawn_fixwave1.py::TestBootRitualNonceDoctrine.
         _, text = self._task_text(native_home, monkeypatch)
         assert "NONCE" in text
-        assert "LAST line" in text
+        assert "grep" in text
         assert "SUP-BOOT-REFUSED" in text
         assert "SUP-BOOT-FROZEN" in text
 
