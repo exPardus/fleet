@@ -4,20 +4,30 @@
 **Owner:** Altai
 **Design doc:** `docs/superpowers/specs/2026-07-22-fleet-index-design.md`
 **Adversarial review:** `docs/reviews/IDX-ADVERSARIAL-2026-07-22.md` (10 defects — 2 CRITICAL, 5 HIGH, 2 MED, 1 LOW). Disposition in §13.
+**Economics evidence:** `docs/mf-oracle-m1-evidence.md` (2026-07-23 M-F dogfood read-duplication harvest). §1 is grounded on it.
+**Operator decisions folded:** `docs/OPERATOR-GATES.md` fleet-index sub-decisions (a) gitignored-only bundle and (b) tokens-primary acceptance (both 2026-07-23); full M1+M2 build ordered 2026-07-24 on the value case stated in §1.
 **Parent spec:** `docs/SPEC.md` v3 (§16 invariants).
 
 ---
 
 ## 1. Problem
 
-Fleet's dominant recurring cost is workers re-reading the same code. Contributing surfaces, in rough order of weight:
+An earlier draft of this section opened: *"Fleet's dominant recurring cost is workers re-reading the same code."* That claim has since been measured, and **for parallel fleet workers it is refuted** by the 2026-07-23 M-F dogfood harvest (`docs/mf-oracle-m1-evidence.md` — 3 workers, 27 transcripts, reads deduped across fork copies, token totals deduped by requestId):
 
-1. **Exploration reads** — workers Read/Grep the same files to orient before doing any work.
-2. **Subagent fan-out** — each worker's subagents repeat that orientation from scratch.
-3. **Manager-side review** — the manager re-reads specs, diffs and review docs across turns.
-4. **Respawn** — a reset session re-learns what it already knew.
+- Cross-worker duplicated Read payload: **≤41k tokens = 2.5% of the campaign's fresh input.**
+- All duplicated Read payload (cross-worker ∪ within-lineage rebuild, no double count): 55.7k–94.8k tokens = 3.5–5.9% of fresh input, and ~0.27% of total input processed.
+- The dominant recurring cost of that run was conversation-prefix re-transmission (33.9M cache-read tokens, 21× the entire fresh-input volume), driven by long fork lineages — not file re-reads.
 
-`bin/fleet.py` is 8706 lines. Orientation inside it is the single largest repeated cost in this repo.
+Evidence grade per the harvest's own limits: suggestive, not conclusive (n=3 workers, one night, small repos, deliberately overlapping tasks). But the burden has flipped: read-duplication is a **single-digit percentage of fresh input in the only run ever measured**, and this spec may not re-assert it as dominant without new measurement.
+
+**What drives the build instead — the operator's value case (2026-07-24).** The operator deferred the economics go/no-go on the evidence above, then ordered a full M1+M2 build on a different ground: **smaller reads for long-term, multi-session work on one codebase.** `fleet q` — symbol lookup plus source slicing — hands a worker the ~40 lines it asked about instead of a Read-and-page pass over a large file (`bin/fleet.py` is 8,706 lines; orientation inside it is this repo's canonical case). That is useful per query, on the first session and the hundredth, independent of whether any *other* worker ever duplicates the read. The real cost target is the accumulated read volume of many sessions over one codebase's lifetime, not cross-worker duplication inside one night's campaign.
+
+**Fewer-reads economics is demoted to a measured secondary.** Digest injection (`--context`, M1) stays in scope so its token effect can be A/B measured under §12's tokens-primary criterion — the operator chose the full M1+M2 build precisely so that measurement can happen — not because the duplication evidence supports it as a headline.
+
+Two patterns in the harvest *do* fit the index's shape, recorded here as secondary rationale with their limits:
+
+1. **Cold sessions over a stable file set.** The 16 cc-oracle probe sessions re-read one hook file 14×; 83% of probe Read payload was duplicate. Many short-lived cold sessions against stable files is where a digest pays; long-lived forked workers with warm caches are where it does not.
+2. **Within-lineage respawn rebuild** (72.6k tokens upper bound) exceeded cross-worker duplication (40.9k) — a reset session re-learning its own files is the larger of the two fleet-side effects, and it is exactly the multi-session shape the operator's value case names.
 
 ## 2. What is not achievable, and why
 
