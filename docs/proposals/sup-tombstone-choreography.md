@@ -1,6 +1,8 @@
 # Proposal: §10.4 `kill supervisor` / `respawn supervisor` tombstone choreography
 
-Status: council-ruled — ready for build (pending operator ratification)
+Status: **BUILT** 2026-07-24 on branch `build/sup-tombstone` (pending operator ratification of the
+two council rulings). Everything below is the design of record and was built as specified, with the
+build-time notes collected in the closing section "Build record".
 
 Citation prefixes (same convention as `docs/proposals/sup-spawn-choreography.md:8-9`):
 `SPEC:` = `docs/specs/three-tier-command.md`, `CN:` = `docs/specs/claim-nonce.md`,
@@ -560,3 +562,63 @@ Binding conditions:
      `sup-status` and the statusline must show "claim held by dead sid, seizable in
      `<remaining>`s" during any freeze window — diagnosable without scroll-back, not just
      the one-shot `SUP-KILL-FROZEN` line (§3 phase-2 item 5, §7 test 12).
+
+---
+
+## Build record — 2026-07-24, branch `build/sup-tombstone`
+
+Built red-first against §7. `tests/test_sup_tombstone.py` = 47 tests (§7's 12 + F1–F5 + the flagged
+gap below); `tests/integration/test_sup_tombstone_live.py` = the one end-to-end graceful kill,
+`FLEET_LIVE`-gated. Full suite green on **both** interpreters: `py -3.13` and the
+`fleet.MIN_PYTHON_VERSION` floor `py -3.10` — 2086 passed, 2 skipped on each.
+
+**Stale premises this proposal carried, corrected at build time.** Every `fleet.py:` line number in
+§1–§6 is from the design worktree's HEAD and had drifted by ~180 lines (the file is now ~11.9k lines;
+the claim constants live at `:8634-8635`, not `:8458-8460`). Two of the deltas §1 lists as *needed*
+were already shipped:
+
+- **(a) the §4 resolver already exists** as `_resolve_worker_target` (built for `send` by the
+  sup-spawn slice, pinned in `tests/test_sup_spawn.py`). §10.4 did **not** re-implement it. It adds a
+  *sibling* entry point, `_resolve_supervisor_lifecycle_target`, for one reason: the refusal **grades**
+  differ. `send` collapses everything to `FleetCliError` (rc 1), which is right for a message with
+  nowhere to go; a destructive verb owes the rc 2 / rc 3 split this proposal specifies, and a message
+  that names the next command *for that verb* ("kill it by its real name" is nonsense advice for
+  respawn). Implemented as a new `SupervisorLifecycleRefusal(FleetCliError)` carrying `.rc`, with a
+  `main()` arm ahead of the generic ones — fleet's existing taxonomy has no rc 2/3 for a verb error
+  (1 = generic, 4 = continuity), so re-grading the shared resolver would have changed `send`.
+- **(b) §5's protection ordering is already shipped** — the husk sweep's protected set and
+  `_archive_eligible`'s gate 0 both key on the live claim holder under any name. §7 test 8 is
+  therefore assertion-only, with **no code delta**.
+
+**Council condition 5, and the one honest substitution.** The condition names "holder **roster-gone**",
+but `supervisor_status_line` is file-only by mandate (no lock, no roster fetch, no subprocess — it runs
+in the SessionStart hook of every Claude Code session on this machine). The built branch
+(`_claim_holder_dead_note`) uses the registry's own `status == "dead"` as the liveness proxy, read
+lock-free and without quarantining. That is exactly what kill's arm 2 writes before printing
+`SUP-KILL-FROZEN`, so the persistent surface tracks the event that creates the freeze window. A body
+that died without fleet noticing keeps the pre-existing stale-heartbeat line: the branch **adds** a
+surface, it does not replace one. Recorded here rather than silently narrowed.
+
+**The flagged gap, ruled at build time (NOT a council ruling — operator sign-off wanted).** The
+sup-spawn fix wave flagged that `respawn` of a **non-holder supervisor-shaped husk** relaunched with
+`compose_prompt`'s journal/mailbox carry-over and **no boot ritual**, producing a supervisor-shaped
+body that never runs `sup-boot`, holds no claim, and answers to none of the supervisor contracts.
+Ruled fail-closed and consistent with §2: *every* supervisor-shaped respawn routes through the
+choreography. The husk arm skips the release-steer (there is no claim) but still dispatches a fresh
+`sup|<launch-id>|boot` under the sup-spawn boot ritual, so **`sup-boot` makes the claim decision** —
+`refuse` if a live claim exists, `claim` if none does. Fleet never infers holdership from a respawn
+flag. If the operator prefers "refuse husk respawn, point at `sup-spawn`", that is a one-branch delta
+plus two tests (`TestHuskRespawnGetsTheBootRitual`).
+
+**Superseded guard.** The fix wave's fail-closed stub `_refuse_unbuilt_supervisor_lifecycle` (CRIT-2)
+is **deleted** — it existed only to hold this door shut until §10.4 landed. Its two load-bearing
+properties are inherited verbatim by the new routing and still pinned by the same fault injections:
+FI-7 (the holder is caught however it is addressed, never only by the literal name) and FI-7b (an
+indeterminate holder verdict fails toward refusal, and only for supervisor-shaped names, so an
+unreadable INCARNATION cannot freeze kills of ordinary workers). Its test class was rewritten against
+the built behaviour rather than deleted (`TestSupervisorLifecycleRouting`).
+
+**Doc-sync done here:** SPEC §10.4's `[UNBUILT]` tags and its "sup-release does not exist yet"
+sentence. The pinned receipts in that section were **not** re-pinned — a receipt is a claim about a
+commit, not about `HEAD`. SPEC §13/§18 milestone rows and the `claim-nonce` §7 taxonomy row remain
+owed and are **out of this slice's scope** (the taxonomy row is operator-owned).

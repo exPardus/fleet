@@ -569,20 +569,32 @@ class TestSupervisorLogicalResolution:
         self._seed_holder(sid="new-sid", retired_sids=["old-sid"])
         assert fleet._resolve_worker_target("supervisor") == "sup|inc-A|boot"
 
-    @pytest.mark.parametrize("verb,args", [
-        ("cmd_send", dict(name="supervisor", message="hi", nonce=None)),
-        ("cmd_interrupt", dict(name="supervisor", nonce=None)),
-        ("cmd_kill", dict(name="supervisor", yes=True, nonce=None)),
+    # The DESTRUCTIVE pair carry their own refusal text since the §10.4 build:
+    # `_supervisor_lifecycle_target` runs ahead of `_resolve_worker_target` for
+    # kill/respawn and grades the arms (rc 2 refuse / rc 3 freeze) with a
+    # message that names the next command for THAT verb. Every verb still
+    # refuses loudly and none guesses a target -- which is what this test is
+    # for -- so the expectation is per-verb, not one shared string.
+    @pytest.mark.parametrize("verb,args,pattern", [
+        ("cmd_send", dict(name="supervisor", message="hi", nonce=None),
+         "nothing answers"),
+        ("cmd_interrupt", dict(name="supervisor", nonce=None), "nothing answers"),
+        ("cmd_kill", dict(name="supervisor", yes=True, nonce=None),
+         "no supervisor claim exists"),
         ("cmd_respawn", dict(name="supervisor", task=None, force=False, yes=True,
                              nonce=None, max_budget_usd=None, setting_sources=None,
-                             token_ceiling=None)),
-        ("cmd_peek", dict(name="supervisor", lines=20)),
-        ("cmd_result", dict(name="supervisor")),
-        ("cmd_status", dict(name="supervisor", json=False, stale_ok=False, all=False)),
-        ("cmd_status", dict(name="supervisor", json=False, stale_ok=True, all=False)),
+                             token_ceiling=None),
+         "no supervisor claim exists"),
+        ("cmd_peek", dict(name="supervisor", lines=20), "nothing answers"),
+        ("cmd_result", dict(name="supervisor"), "nothing answers"),
+        ("cmd_status", dict(name="supervisor", json=False, stale_ok=False, all=False),
+         "nothing answers"),
+        ("cmd_status", dict(name="supervisor", json=False, stale_ok=True, all=False),
+         "nothing answers"),
     ])
-    def test_verbs_resolve_supervisor_no_claim_refuses(self, native_home, verb, args):
-        with pytest.raises(fleet.FleetCliError, match="nothing answers"):
+    def test_verbs_resolve_supervisor_no_claim_refuses(self, native_home, verb,
+                                                       args, pattern):
+        with pytest.raises(fleet.FleetCliError, match=pattern):
             getattr(fleet, verb)(SimpleNamespace(**args))
 
     def test_send_lands_on_holder_record(self, native_home, monkeypatch):

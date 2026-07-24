@@ -1180,9 +1180,22 @@ already calls, the reservation is mechanical, not advisory.
 
 ### 10.4 `respawn supervisor` / `kill supervisor` — each stop-shaped verb owes a tombstone
 
+> **STATUS: `[BUILT]` 2026-07-24** (branch `build/sup-tombstone`), from the council-ruled decision
+> record `docs/proposals/sup-tombstone-choreography.md` (both dockets 4–0, pending operator
+> ratification). Contracts pinned by `tests/test_sup_tombstone.py` (§7's 12 unit tests + fault
+> injections F1–F5, of which **F1/F2 are ratification-blocking**) and
+> `tests/integration/test_sup_tombstone_live.py` (the one end-to-end graceful kill).
+> Two deltas the section below did not anticipate, both recorded in the decision record:
+> **(1)** `T_release` is its own constant `SUPERVISOR_RELEASE_TIMEOUT_SECONDS = 300.0`, not a reuse of
+> the handshake bound — the receipt below is cited as the precedent for its *shape*, and reusing the
+> knob itself was rejected 4–0; **(2)** `respawn supervisor` **aborts** on steer failure rather than
+> falling through kill-style (ruling 1) — SPEC's never-block contract is written for `kill` alone.
+> The pinned receipts in this section remain true claims **about their pinned commit** and are
+> deliberately not re-pinned: a receipt is a claim about a commit, not about `HEAD`.
+
 The supervisor is a lower tier: it gets respawned and killed for fresh context (the operator's intent,
 §1). But it holds the claim, so a stop-shaped verb against it has claim consequences a plain worker's
-does not. The rule (`[UNBUILT]`):
+does not. The rule:
 
 - **`respawn supervisor`** = a body change. It must go through the claim-nonce respawn path: the fresh
   body holds no generation and boots via `sup-boot`, which `resume`s if it can prove continuity, else
@@ -1195,7 +1208,9 @@ does not. The rule (`[UNBUILT]`):
   could. `kill supervisor` is an interface/operator verb; the killer is **not** the supervisor body, and
   `sup-release` requires continuity proof — the holder's current nonce — which a different session does
   not have, and claim-nonce §6.3 **deleted** the non-continuity escape (`--force --confirm-inc`).
-  `sup-release` does not exist yet and, when built, needs continuity:
+  `sup-release` did not exist when this was written and, when built, would need continuity — it
+  shipped with the claim-nonce build (`cmd_sup_release`) and does require the holder's nonce, which is
+  exactly why B5 stands and the kill arm must steer rather than release:
 
 ```
 # at 235421e56bfd328a7e913e519a1459ccf55918dc
@@ -1203,7 +1218,7 @@ $ grep -c "sup-release\|cmd_sup_release" bin/fleet.py
 0
 ```
 
-So the honest design rule (`[UNBUILT]`), in two arms **with a bounded transition between them**:
+So the honest design rule, in two arms **with a bounded transition between them**:
   - **Body responsive:** `kill supervisor` **steers the body to release itself** — it delivers a
     `sup-release` turn to the supervisor (which holds its own nonce), waits **at most `T_release`** for
     `supervisor/INCARNATION` to read `released`, then stops the body. This is a *graceful stop*, not an
