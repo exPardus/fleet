@@ -9672,6 +9672,10 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     gate re-arms.
     #   * send-ONLY: every other mutating verb passes send_target=None and keeps
     #     its unchanged arming.
+    #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
+    #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
+    #     writer appends that record's OWN prior sid alone (:4505, :4952, :8061,
+    #     :11147) -- so the sid union can never make one body answer for another.
     if verb == "send" and send_target is not None:
         try:
             resolved_rec = load_registry().get("workers", {}).get(send_target)

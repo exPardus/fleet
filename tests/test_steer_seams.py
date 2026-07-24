@@ -34,6 +34,10 @@ OTHER_SID = "11112222-3333-4444-5555-666677778888"
 IFACE_SID = "abcd0000-1111-2222-3333-444455556666"
 SUCC_NAME = "sup|inc-succ|successor"
 BOOT_HUSK = "sup|inc-dead|boot"
+# A DIFFERENT body that shares the holder's 8-char short id -- same
+# `native_short_id`, different FULL sid. The founding-incident shape.
+TWIN_PREFIX_SID = "99998888-7777-6666-5555-000000000000"
+TWIN_NAME = "sup|inc-twin|boot"
 
 
 def _iso(dt):
@@ -254,6 +258,25 @@ class TestSeam1GateCarveOut:
         _fresh_claim(sid=HOLDER_SID)
         _seed_record("ordinary-holder", HOLDER_SID, status="working")
         fleet._supervisor_gate("send", nonce=None, send_target="ordinary-holder")  # no raise
+
+    def test_FI_truncated_prefix_twin_stays_gated(self, seam_home):
+        # FI-truncated-prefix (the FOUNDING-INCIDENT pin): identity is the FULL
+        # sid, never an 8-char prefix. A DIFFERENT body that happens to share the
+        # holder's short id -- identical `native_short_id`, identical first 8
+        # characters, different full sid -- is NOT the holder and stays GATED.
+        # Fault injection (mutate -> red -> restore): rewriting
+        # `_record_is_supervisor_claim_holder`'s final comparison to the prefix
+        # form `holder_sid[:8] == record.get("native_short_id")` disarms the
+        # carve-out for this twin and THIS test goes red. Confirmed red
+        # 2026-07-24; restored.
+        assert TWIN_PREFIX_SID != HOLDER_SID
+        assert TWIN_PREFIX_SID[:8] == HOLDER_SID[:8]
+        _fresh_claim(sid=HOLDER_SID)
+        rec = _seed_record(TWIN_NAME, TWIN_PREFIX_SID, status="working")
+        assert rec["native_short_id"] == HOLDER_SID[:8]   # the collision is real
+        assert fleet._record_is_supervisor_claim_holder(rec) is False
+        with pytest.raises(fleet.SupervisorClaimGateError):
+            fleet._supervisor_gate("send", nonce=None, send_target=TWIN_NAME)
 
     def test_carve_out_is_send_only(self, seam_home):
         # send-ONLY: no other mutating verb receives a target-aware carve-out.
