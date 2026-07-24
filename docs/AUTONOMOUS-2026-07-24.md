@@ -118,6 +118,32 @@ any freeze window `sup-status`/statusline shows "claim held by dead sid, seizabl
 - Doc item carried by manager: `claim-nonce.md` §7 taxonomy row for `sup-spawn`
   (operator-owned spec amendment).
 
+### G-B. LIVE FINDINGS from the three-tier switch-over (2026-07-24 ~03:50Z) — for the supervisor's queue + operator ratification
+
+The switch-over executed cleanly (handoff-begin → HANDSHAKE in ~30s → complete → claim to
+`inc-20260724T034659Z-2eda`, opus body, bypass). The acceptance test then immediately caught two
+seams — the interface tier CANNOT steer the supervisor it just launched:
+
+1. **claim-nonce §7 gates interface sends.** `fleet send supervisor` from the claimless interface
+   is refused while the claim heartbeat is fresh — but the interface never holds the nonce BY
+   DESIGN, and three-tier §5.3's divergence detection is built ON interface sends (and feeds on
+   `caller_sid`, which the documented no-session bypass strips). Two ratified specs conflict at
+   the seam. Candidate resolutions for council/operator: (a) taxonomy amendment — `send` whose
+   RESOLVED TARGET is the current claim-holder's own body is ungated (upward mail, watched by
+   §5.3, steers no worker); (b) keep gate, bless the no-session route for interface sends and
+   have §5.3 warn on missing-sid instead; (c) interface credential (rejected shape — §5.8).
+2. **Handoff successors have no registry record.** `sup-handoff-begin`'s dispatch (deliberately
+   the one non-`dispatch_bg` launch) never registers the body, so the logical-name resolver
+   ("supervisor" → claim → holder's RECORD) dead-ends: `matches no registry record`. Even the
+   no-session bypass cannot deliver mail. `sup-spawn` gen-0 bodies DO get records; the two launch
+   paths disagree. Candidate: handoff-begin gains the same new_worker_record step (name
+   `sup|<inc>|successor`), which also brings §7.2 archive exemption + peek/result to successors.
+
+Interim: the supervisor runs autonomously off its boot bundle + journal tail (which carries the
+queue); the interface's fuller brief sits undelivered at `state/tasks/sup-brief.md` — the
+supervisor should READ IT as its first act on seeing this ledger entry, then run the council on
+the two candidate resolutions above and queue the fix into the §10.4 build.
+
 ## Build queue (the launch-ready ordering, updated as it drains)
 
 1. Merge-gate the three in-flight branches (dual-lens where code/spec-bearing).
