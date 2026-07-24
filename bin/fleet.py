@@ -128,7 +128,12 @@ def tasks_dir() -> Path:
 
 
 def task_file_path(name: str) -> Path:
-    return tasks_dir() / f"{name}.md"
+    # `|` is invalid in Windows filenames, and supervisor BODY names are
+    # pipe-delimited (`sup|<launch-id>|boot`, three-tier §10.1) -- map the
+    # delimiter to `~` for the on-disk stem. `~` is outside NAME_RE's
+    # [a-z0-9-]+ charset, so no ordinary worker's task file can collide with
+    # a mapped supervisor-body one, and plain names pass through unchanged.
+    return tasks_dir() / f"{name.replace('|', '~')}.md"
 
 
 def archive_root() -> Path:
@@ -721,23 +726,29 @@ _SID_SHAPE_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
 
-# three-tier-command.md §10.3: the first-generation supervisor body is spawned
-# under this name, and it is minted ONLY by `sup-spawn`. Reserving it at the one
-# creation choke point (`validate_name`) makes an ordinary `spawn`/`respawn` of
-# the name mechanically impossible -- the same technique as the F6 uuid-shape
-# refusal, one more reserved shape. (Successor bodies run under the pipe-shaped
-# `sup|<inc>|successor` name, which NAME_RE already refuses on the worker path
-# and `_is_supervisor_shaped` recognises; only the gen-0 name needs reserving.)
+# three-tier-command.md §10.3 (as amended by the 2026-07-24 operator ruling,
+# sup-spawn choreography): `supervisor` is the supervisor's LOGICAL name --
+# the send/kill/respawn resolution target (`_resolve_worker_target`) -- and NO
+# verb mints a record by it. `sup-spawn` dispatches the gen-0 body under the
+# pipe-shaped `sup|<launch-id>|boot`, which NAME_RE already refuses on the
+# worker path. Reserving the literal at the one creation choke point
+# (`validate_name`) is what keeps the logical resolution unambiguous: an
+# ordinary worker squatting the name would collide with the resolver's target.
+# Same technique as the F6 uuid-shape refusal, one more reserved shape.
 SUPERVISOR_BODY_NAME = "supervisor"
 RESERVED_NAMES = frozenset({SUPERVISOR_BODY_NAME})
 
 
-def validate_name(name: str, existing=(), allow_reserved: bool = False) -> None:
+def validate_name(name: str, existing=()) -> None:
     """Raise ValueError unless name matches [a-z0-9-]+ and isn't in `existing`.
 
-    `allow_reserved` is the single authorized bypass of the RESERVED_NAMES set
-    (§10.3): `sup-spawn` passes it True to mint `supervisor`; every ordinary
-    creation path leaves it False, so the reserved name is refused there.
+    RESERVED_NAMES (§10.3, 2026-07-24 ruling): `supervisor` is reserved as the
+    supervisor's logical name -- the claim-resolved send/kill/respawn target
+    -- and is refused unconditionally here. No verb mints a record by this
+    name (the former `allow_reserved` bypass was dead code: the gen-0 body's
+    pipe-shaped name fails NAME_RE before the reserved check could ever run,
+    and a body actually named `supervisor` would be refused every gated
+    `sup-*` verb by `_require_claim_holder`'s shape check).
 
     F6 (adversarial review): uuid-shaped names are refused outright. Names
     and session ids share keyspaces in several stores (name-keyed AND
@@ -753,10 +764,11 @@ def validate_name(name: str, existing=(), allow_reserved: bool = False) -> None:
         raise ValueError(
             f"invalid worker name {name!r}: uuid-shaped names are reserved "
             f"for session ids (F6)")
-    if not allow_reserved and name in RESERVED_NAMES:
+    if name in RESERVED_NAMES:
         raise ValueError(
-            f"invalid worker name {name!r}: reserved for the supervisor body "
-            f"(three-tier §10.3) -- minted only by `sup-spawn`")
+            f"invalid worker name {name!r}: reserved as the supervisor's "
+            f"logical name (three-tier §10.3) -- no verb mints a record by "
+            f"this name; `sup-spawn` dispatches `sup|<launch-id>|boot`")
     if name in existing:
         raise ValueError(f"worker name already exists: {name!r}")
 
@@ -1961,6 +1973,51 @@ def _record_is_supervisor_claim_holder(record, claim=None):
     if not isinstance(holder_sid, str) or not holder_sid:
         return None
     return holder_sid in _record_sids(record)
+
+
+def _resolve_worker_target(name):
+    """three-tier §5.1/§10.2-§10.3 amendments (operator ruling 1(ii),
+    2026-07-24, sup-spawn choreography design §2): the literal `supervisor`
+    in a verb's TARGET position is a LOGICAL name, resolved at verb time via
+    the claim to the current holder's registry record. No alias record ever
+    exists; the physical record is always the pipe-shaped body name
+    (`sup|<launch-id>|boot` gen-0, `sup|<inc>|successor` post-handoff), so
+    the beat contract's spelling (`fleet send supervisor`) stays stable
+    across generations.
+
+    Resolution runs claim -> holder sid -> the record whose sid union
+    (`_record_sids` = session_id ∪ retired_sids) carries it -- the same
+    identity concept every claim predicate uses (ND4a: the union bridges the
+    un-restamped fork-steer window). NEVER by shape: two supervisor-shaped
+    records legitimately coexist mid-handoff (predecessor + successor), and
+    only the claim disambiguates.
+
+    Failure modes are LOUD, never a guess: no/released/corrupt claim, an
+    unreadable holder sid, and a holder sid in no record (the stranded-stamp
+    window, design §7e) each raise a named FleetCliError -- with no live
+    claim, nothing answers to `supervisor`, and mailing a husk would be
+    worse than refusing. Every other name passes through untouched."""
+    if name != SUPERVISOR_BODY_NAME:
+        return name
+    claim = read_incarnation()
+    if not isinstance(claim, dict) or claim.get("state") == "released":
+        raise FleetCliError(
+            "no supervisor claim is held -- nothing answers to 'supervisor'; "
+            "run `fleet sup-status`")
+    holder_sid = claim.get("session_id")
+    if not isinstance(holder_sid, str) or not holder_sid:
+        raise FleetCliError(
+            "the supervisor claim carries no readable holder sid -- nothing "
+            "answers to 'supervisor'; inspect supervisor/INCARNATION "
+            "(`fleet sup-status`)")
+    data = load_registry()
+    for wname, rec in data.get("workers", {}).items():
+        if holder_sid in _record_sids(rec):
+            return wname
+    raise FleetCliError(
+        f"supervisor claim holder sid {holder_sid} matches no registry record "
+        f"(stranded-stamp window? see the stranded-turn report) -- refusing to "
+        f"resolve 'supervisor' by guesswork; run `fleet sup-status`")
 
 
 def _ceiling_refuses_dispatch(verb, now=None):
@@ -3386,6 +3443,8 @@ def cmd_status(args) -> int:
     # M-B T9 (spec §5.1.2): an explicit named query always finds its worker
     # (archived or not) -- the default-hides-archived rule only governs the
     # unfiltered bulk listing, matched via `--all`.
+    if args.name is not None:
+        args.name = _resolve_worker_target(args.name)   # ruling 1(ii)
     include_archived = getattr(args, "all", False) or args.name is not None
     if getattr(args, "stale_ok", False):
         snap = status_snapshot(include_archived=include_archived)
@@ -3666,6 +3725,7 @@ def cmd_peek(args) -> int:
     substantive transcript records via `_cmd_peek_native` -- the digest
     comes from the sid's own transcript tail (daemon-hosted sessions have
     no fleet-owned stdout log)."""
+    args.name = _resolve_worker_target(args.name)   # ruling 1(ii)
     with fleet_lock():
         data = load_registry()
         if args.name not in data["workers"]:
@@ -3715,6 +3775,7 @@ def cmd_result(args) -> int:
     """`fleet result <name>` (SPEC §5 result row): final result event text
     of the last completed turn, nothing else -- result text lives in the
     Stop-hook outcome store (`latest_outcome`)."""
+    args.name = _resolve_worker_target(args.name)   # ruling 1(ii)
     with fleet_lock():
         data = load_registry()
         if args.name not in data["workers"]:
@@ -4276,6 +4337,9 @@ def cmd_send(args, which=shutil.which, sleep=time.sleep, run=subprocess.run) -> 
     _require_instance_settings()
 
     message = _read_task_arg(args.message)
+    # Ruling 1(ii): `send supervisor` resolves via the claim to the holder's
+    # pipe-named record -- the v2 scheduled beat's stable spelling.
+    args.name = _resolve_worker_target(args.name)
 
     with fleet_lock():
         data = load_registry()
@@ -4610,6 +4674,7 @@ def cmd_interrupt(args, run=subprocess.run, which=shutil.which) -> int:
     §7 THE GATE: a mutating lifecycle verb, gated for a supervisor-shaped
     caller while a fresh claim is held (bypassable, see `_supervisor_gate`)."""
     _supervisor_gate("interrupt", nonce=getattr(args, "nonce", None))
+    args.name = _resolve_worker_target(args.name)   # ruling 1(ii)
     with fleet_lock():
         data = load_registry()
         if args.name not in data["workers"]:
@@ -4921,6 +4986,7 @@ def cmd_respawn(args, run=subprocess.run, which=shutil.which,
     the ownership prompt the inner one."""
     _supervisor_gate("respawn", nonce=getattr(args, "nonce", None))
     _require_instance_settings()
+    args.name = _resolve_worker_target(args.name)   # ruling 1(ii)
 
     # §5.1: respawn retires the old session id. Ask before doing that to a
     # worker this session did not spawn. Reads the registry WITHOUT the lock
@@ -5093,6 +5159,7 @@ def cmd_kill(args, run=subprocess.run, which=shutil.which) -> int:
     caller while a fresh claim is held -- ahead of the destructive-ownership
     prompt (the gate is the outer policy)."""
     _supervisor_gate("kill", nonce=getattr(args, "nonce", None))
+    args.name = _resolve_worker_target(args.name)   # ruling 1(ii)
     with fleet_lock():
         data = load_registry()
         if args.name not in data["workers"]:
@@ -8217,9 +8284,17 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
     # WORKER launch and `task_file_path(name)` is not traversal-safe on its
     # own -- guard here too so a future direct-call path can't escape
     # tasks_dir().
-    if not name or not NAME_RE.match(name) or _SID_SHAPE_RE.match(name):
+    # three-tier §10.1 (sup-spawn choreography design §3, the ONE enabling
+    # change): supervisor-shaped names (`sup|<inc>|<role>`) are admitted
+    # alongside NAME_RE names -- the spec's routing mandate ("no hand-rolled
+    # argv") sends `sup-spawn` through this choke point. The shape stays
+    # unforgeable from the worker path (`fleet spawn` -> `validate_name` ->
+    # NAME_RE forbids `|`), and the sid-shape refusal is unchanged.
+    if (not name or not (NAME_RE.match(name) or _is_supervisor_shaped(name))
+            or _SID_SHAPE_RE.match(name)):
         raise NativeDispatchError(
-            f"invalid worker name: {name!r} (must match {NAME_RE.pattern}; "
+            f"invalid worker name: {name!r} (must match {NAME_RE.pattern} or "
+            f"the supervisor family {_SUPERVISOR_SHAPED_WORKER_RE.pattern}; "
             f"uuid-shaped names are reserved for session ids, F6)")
     if roster_fetch is None:
         roster_fetch = lambda: _fetch_agents_roster(which=which, run=run)  # noqa: E731
@@ -8240,7 +8315,12 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
         task_path.write_text(prompt_body, encoding="utf-8")
     except OSError as exc:
         raise NativeDispatchError(f"task-file write failed: {exc}") from exc
-    rendered = render_native_name(category, name, hint)
+    # A supervisor-shaped name is NEVER wrapped in the `cat|name|hint`
+    # rendering: the name itself carries `|`, so any wrapping corrupts the
+    # split("|", 2) round-trip -- the `-n` value is the bare name (design §3,
+    # pinned by Q8-3; same bare `-n` the handoff successor dispatch uses).
+    rendered = (name if _is_supervisor_shaped(name)
+                else render_native_name(category, name, hint))
     tiny_prompt = f"Read {task_path.as_posix()} and follow it exactly."
     argv = [exe, "--bg"]
     if resume_sid:
@@ -8568,6 +8648,15 @@ def nonce_matches(presented, stored) -> bool:
 # (the T12 hang class). Held as a named constant so the dispatch and its pin
 # read the same value.
 SUCCESSOR_DEFAULT_MODE = "dontask"
+
+# three-tier §10.2: the gen-0 supervisor runs under BYPASS in the fleet repo
+# (earned-privilege doctrine, acknowledged in GOALS -- see
+# `_warn_missing_bypass_ack`). Deliberately asymmetric with
+# SUCCESSOR_DEFAULT_MODE ("dontask"): the successor inherits a running
+# campaign mid-handoff with the operator presumed absent; `sup-spawn` is an
+# operator-attended act and §10.2 names bypass for it. `--permission-mode`
+# overrides through the one MODE_FLAGS vocabulary (G3).
+SUP_SPAWN_DEFAULT_MODE = "bypass"
 
 SUPERVISOR_JOURNAL_KINDS = (
     "BOOT", "CHECKPOINT", "PROPOSAL", "SEIZED", "RELEASED", "LIMIT-TRANSFER",
@@ -10256,6 +10345,210 @@ def _doctor_check_pending_decision():
             f"`fleet sup-decision --answer <text>`")
 
 
+def _warn_missing_bypass_ack(mode: str) -> None:
+    """three-tier §10.2/§13: the supervisor "runs under bypass permission mode
+    in the fleet repo (earned-privilege doctrine) -- stated explicitly in
+    GOALS before it ever runs unattended". Operator ruling 2 (2026-07-24,
+    sup-spawn choreography): the check WARNS and proceeds when the
+    acknowledgement is absent -- never a refusal (a grep-shaped gate on an
+    operator-owned prose file is too brittle), never silence (that would drop
+    a ratified precondition on the floor).
+
+    The precondition attaches to bypass mode, so a `--permission-mode`
+    override to a non-bypass mode does not trip it. The match is
+    case-insensitive on the two words the shipped GOALS acknowledgement
+    carries ("Bypass acknowledgement (§10.2)"); a missing or unreadable
+    GOALS.md warns too -- an absent file cannot state anything."""
+    if mode != "bypass":
+        return
+    try:
+        text = goals_path().read_text(encoding="utf-8").lower()
+    except OSError:
+        text = ""
+    if "bypass" in text and "acknowledg" in text:
+        return
+    print("fleet: WARNING: supervisor/GOALS.md does not state the "
+          "bypass-permission acknowledgement (three-tier §10.2/§13) -- "
+          "proceeding per operator ruling 2 (2026-07-24). Add the "
+          "acknowledgement to GOALS before the supervisor runs unattended.",
+          file=sys.stderr)
+
+
+def _render_sup_spawn_task(name: str, launch_id: str, campaign: str) -> str:
+    """Gen-0 supervisor bootstrap body (sup-spawn choreography design §4,
+    modeled on `_render_successor_task`; task-file bootstrap per contract G8
+    -- never argv for size-unbounded content).
+
+    GOALS is deliberately NOT embedded: `cmd_sup_boot` prints the boot bundle
+    (GOALS + journal tail + INDEX + roster + status), so GOALS arrives fresh
+    at boot time, not stale at compose time (design §4 option B). Unlike the
+    successor task there is NO plaintext secret here -- the fresh claim mints
+    its nonce on the body's own stdout at boot (pinned by test)."""
+    fleet_py = (FLEET_HOME / "bin" / "fleet.py").as_posix()
+    # The interpreter running fleet right now, not a hardcoded launcher --
+    # same doctrine as `_render_successor_task`.
+    py = Path(sys.executable).as_posix()
+    return f"""You are the claude-fleet supervisor's GEN-0 body, fleet worker `{name}`, running in {FLEET_HOME.as_posix()} (three-tier §10.1).
+The `{launch_id}` segment of your worker name is a launch id, NOT your incarnation id -- your incarnation is minted at boot in step 1, and `fleet sup-status` reads supervisor/INCARNATION, never your worker name.
+
+Do exactly this, in order:
+1. FIRST ACT, before anything else: run "{py}" {fleet_py} sup-boot
+   Pass NO handoff flags -- this is the fresh-claim path.
+2. Expected outcome: verdict `claim`, exit 0. The output includes `INCARNATION: <inc>` and `NONCE: <value>`.
+   RECORD THE NONCE VALUE NOW -- it is the LAST line of the output and it is printed exactly once.
+   Every later `sup-*` verb requires it (present it with the --nonce flag); losing it costs up to
+   3600s of lockout.
+3. If the verdict is `refuse` (exit 2): a live supervisor claim exists -- a supervisor is already
+   running. Do NOT retry, do NOT spawn/send/kill anything. End your turn with the final message:
+   SUP-BOOT-REFUSED <reason>
+4. If the verdict is `freeze` (exit 3): the claim state is ambiguous (unreadable heartbeat or a
+   failed epoch check). Same stop discipline. End your turn with the final message:
+   SUP-BOOT-FROZEN <reason>
+5. After a successful claim: proceed per skills/fleet/supervisor.md -- read the boot bundle sup-boot
+   just printed (GOALS, journal tail, knowledge index, fleet status), run an early
+   "{py}" {fleet_py} sup-checkpoint "<note>" presenting your nonce, then begin the campaign brief
+   below.
+
+--- CAMPAIGN BRIEF ---
+{campaign}
+"""
+
+
+def cmd_sup_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
+                  clock=time.monotonic) -> int:
+    """`fleet sup-spawn --task <text|@file> [--model M] [--permission-mode P]
+    [--nonce N]` -- dispatch the gen-0 supervisor body (three-tier §10.1,
+    built from the ratified sup-spawn choreography decision record).
+
+    Replicates `cmd_spawn`'s pre-claim -> dispatch -> stamp choreography
+    verbatim (fast-completion, DOA rollback, `_commit_launched_turn` retry,
+    stranded report -- design §3 "do not innovate"), with the supervisor
+    deltas: minted name `sup|<launch-id>|boot` (launch-scoped id, decoupled
+    from the claim's incarnation id -- design §1), shape-validation instead
+    of `validate_name` (the pipe fails NAME_RE by design), forced
+    cwd=FLEET_HOME, mode default bypass (§10.2), model from
+    `resolve_model_for_role("supervisor")`, self-composed boot-ritual task
+    body, and forced category=None/hint="" (the `-n` value must be the bare
+    pipe name -- see dispatch_bg's supervisor-shaped rendering arm).
+
+    Gate + ceiling both apply (verb string "sup-spawn"): the gate disarms
+    with no held claim -- gen-0 passes -- and with a live fresh claim it
+    refuses a sid-bearing caller without the nonce, which is exactly the
+    accidental-second-supervisor guard. CN §7 classes sup-spawn as a
+    mutating lifecycle verb: it PRESENTS the nonce, never rotates it."""
+    _supervisor_gate("sup-spawn", nonce=getattr(args, "nonce", None))
+    _ceiling_refusal = _ceiling_refuses_dispatch("sup-spawn")
+    if _ceiling_refusal is not None:
+        raise FleetCliError(_ceiling_refusal)
+    _require_instance_settings()
+
+    campaign = _read_task_arg(args.task)
+    mode = getattr(args, "permission_mode", None) or SUP_SPAWN_DEFAULT_MODE
+    _warn_missing_bypass_ack(mode)
+    policy = read_tier_policy()
+    model = getattr(args, "model", None) or resolve_model_for_role("supervisor", policy)
+
+    launch_id = mint_incarnation_id()
+    name = f"sup|{launch_id}|boot"
+    if not _is_supervisor_shaped(name):
+        raise FleetCliError(
+            f"internal: minted gen-0 name {name!r} is not supervisor-shaped "
+            f"-- refusing to dispatch a body that would be denied its own claim")
+
+    cwd = FLEET_HOME
+    with fleet_lock():
+        data = load_registry()
+        if name in data["workers"]:
+            raise FleetCliError(f"minted gen-0 name already exists: {name!r} "
+                                f"-- re-run sup-spawn (per-launch ids collide "
+                                f"only on a same-second duplicate)")
+        _spawner = current_caller_session()
+        record = new_worker_record(
+            None, cwd, campaign, mode, model=model,
+            spawned_by=_spawner,
+            # §10.2: null at gen-0 falls out naturally -- the caller holds no
+            # claim, so `_spawning_claim_lineage` returns None (design §3).
+            spawned_by_lineage=_spawning_claim_lineage(_spawner),
+            dispatch_kind="bg", category=None)
+        record["last_dispatch_at"] = now_iso()
+        data["workers"][name] = record
+        save_registry(data)
+        append_event("spawned", name, cwd=str(cwd), mode=mode)
+
+    pre_claim_at = record["last_dispatch_at"]
+    prompt = _render_sup_spawn_task(name, launch_id, campaign)
+
+    try:
+        result = dispatch_bg(
+            name, cwd, prompt, mode, model=model,
+            category=None, hint="",
+            run=run, which=which, sleep=sleep, clock=clock,
+        )
+    except NativeDispatchError as exc:
+        fast_sid = _fast_completion_sid(name, pre_claim_at,
+                                        short_id=getattr(exc, "short_id", None))
+        if fast_sid is not None:
+            with fleet_lock():
+                data = load_registry()
+                rec = data["workers"].get(name)
+                if rec is not None and rec.get("session_id") is None:
+                    rec["session_id"] = fast_sid
+                    rec["native_short_id"] = fast_sid.partition("-")[0] or fast_sid[:8]
+                    rec["status"] = "idle"
+                    rec["turns"] = 1
+                    rec["last_activity"] = now_iso()
+                    save_registry(data)
+                    _append_event_quiet("turn_started", name, session_id=fast_sid)
+            print(f"{name} {fast_sid} (native bg, fast completion before join)")
+            return 0
+
+        with fleet_lock():
+            data = load_registry()
+            rec = data["workers"].get(name)
+            if rec is not None and rec.get("session_id") is None:
+                data["workers"].pop(name, None)
+                save_registry(data)
+                append_event("spawn_failed", name, error=str(exc))
+        raise FleetCliError(f"{name}: native spawn failed -- {exc}") from exc
+    except BaseException as exc:
+        with fleet_lock():
+            data = load_registry()
+            rec = data["workers"].get(name)
+            if rec is not None and rec.get("session_id") is None:
+                data["workers"].pop(name, None)
+                save_registry(data)
+                append_event("spawn_failed", name, error=str(exc),
+                             short_id=_short_id_from_notes(exc))
+        raise
+
+    sid = result["session_id"]
+    short_id = result["short_id"]
+
+    def _commit_native_stamp():
+        with fleet_lock():
+            data = load_registry()
+            rec = data["workers"].get(name)
+            if rec is not None:
+                rec["session_id"] = sid
+                rec["native_short_id"] = short_id
+                rec["status"] = "working"
+                rec["turns"] = 1
+                rec["last_activity"] = now_iso()
+                save_registry(data)
+                _append_event_quiet("turn_started", name, session_id=sid)
+
+    if not _commit_launched_turn(_commit_native_stamp, sleep=sleep):
+        _report_stranded_native_turn(name, sid, short_id)
+        return 1
+
+    # Echo the effective model + policy provenance up front (design §6):
+    # a costly tier must be visible at launch, not discovered on the bill.
+    print(f"model: {model or '(claude default)'} "
+          f"(tier policy: {policy.get('_source', 'default')})")
+    print(f"{name} {sid} (native bg, short id {short_id})")
+    return 0
+
+
 def _render_successor_task(successor_inc: str, old_inc: str, handoff_token: str) -> str:
     """Successor bootstrap body (task-file bootstrap, contract G8 -- never
     argv for size-unbounded content). Paths rendered .as_posix().
@@ -11114,6 +11407,27 @@ def build_parser() -> argparse.ArgumentParser:
                                 "predecessor's task file; its hash is written into HANDSHAKE "
                                 "so complete can verify this body without a sid comparison (§6.4)")
 
+    # three-tier §10.1: gen-0 supervisor dispatch. The body name is minted
+    # (`sup|<launch-id>|boot`), so unlike `spawn` there is no name argument.
+    p_supspawn = sub.add_parser(
+        "sup-spawn",
+        help="dispatch the gen-0 supervisor body under sup|<launch-id>|boot "
+             "(three-tier §10.1); its first act is `fleet sup-boot`")
+    p_supspawn.add_argument("--task", required=True,
+                            help="campaign brief, text or @file -- delivered "
+                                 "below the boot ritual in the task file")
+    p_supspawn.add_argument("--model", default=None,
+                            help="tier alias for the supervisor session "
+                                 "(default: resolve_model_for_role('supervisor') "
+                                 "from the GOALS tier policy; unset policy omits "
+                                 "--model, §3.3(d))")
+    p_supspawn.add_argument("--permission-mode", dest="permission_mode",
+                            choices=list(MODE_FLAGS),
+                            help=f"fleet mode name (default: "
+                                 f"{SUP_SPAWN_DEFAULT_MODE}, §10.2 "
+                                 f"earned-privilege)")
+    p_supspawn.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
+
     p_supckpt = sub.add_parser("sup-checkpoint", help="append a supervisor journal checkpoint (claim holder only) + refresh heartbeat")
     p_supckpt.add_argument("body", help="checkpoint text, or @file")
     p_supckpt.add_argument("--kind", choices=["CHECKPOINT", "PROPOSAL"], default="CHECKPOINT")
@@ -11248,6 +11562,8 @@ def main(argv=None) -> int:
             return cmd_doctor(args)
         if args.command == "sup-boot":
             return cmd_sup_boot(args)
+        if args.command == "sup-spawn":
+            return cmd_sup_spawn(args)
         if args.command == "sup-checkpoint":
             return cmd_sup_checkpoint(args)
         if args.command == "sup-heartbeat":

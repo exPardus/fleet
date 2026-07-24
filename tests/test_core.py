@@ -278,9 +278,10 @@ class TestNameValidation:
         fleet.validate_name("probe-2", existing={"probe-1"})  # must not raise
 
     def test_reserved_supervisor_name_refused_by_ordinary_path(self):
-        # three-tier-command.md §10.3: the body name `supervisor` is minted
-        # ONLY by `sup-spawn`; the ordinary worker creation path (spawn/respawn)
-        # must refuse it at the single choke point.
+        # three-tier-command.md §10.3 (2026-07-24 ruling): `supervisor` is the
+        # supervisor's LOGICAL name -- the claim-resolved send/kill/respawn
+        # target -- and no verb mints a record by it; the ordinary worker
+        # creation path (spawn/respawn) must refuse it at the choke point.
         assert fleet.SUPERVISOR_BODY_NAME == "supervisor"
         with pytest.raises(ValueError, match="reserved"):
             fleet.validate_name(fleet.SUPERVISOR_BODY_NAME, existing=set())
@@ -291,10 +292,13 @@ class TestNameValidation:
         with pytest.raises(ValueError, match="reserved"):
             fleet.validate_name(fleet.SUPERVISOR_BODY_NAME, existing={"other"})
 
-    def test_sup_spawn_path_may_mint_the_reserved_name(self):
-        # `sup-spawn` is the one authorized minter -- it passes allow_reserved.
-        fleet.validate_name(fleet.SUPERVISOR_BODY_NAME, existing=set(),
-                            allow_reserved=True)  # must not raise
+    def test_reservation_is_unconditional_no_bypass_parameter(self):
+        # sup-spawn choreography design §5: the old `allow_reserved` bypass was
+        # dead for sup-spawn (the pipe name fails NAME_RE before the reserved
+        # check) and had zero callers -- retired. The reservation itself stays:
+        # the logical-name resolver depends on no worker squatting the literal.
+        import inspect
+        assert "allow_reserved" not in inspect.signature(fleet.validate_name).parameters
 
 
 class TestLockContention:
