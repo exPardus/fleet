@@ -1956,6 +1956,53 @@ def cmd_release(args) -> int:
 Any gate must be stated against **this** partition, and must say what it does with the middle row —
 which is where v1's error lived.
 
+### 7.1 PROPOSED taxonomy carve-out — interface `send` to the claim-holder body
+
+> **STATUS: PROVISIONAL — RATIFICATION-WITHHELD.** This subsection is a worker's
+> PROPOSAL, acted on during the 2026-07-24 autonomous run (council 4–0 for
+> candidate (a), recorded in `docs/AUTONOMOUS-2026-07-24.md` G-C). The §7
+> taxonomy is OPERATOR-owned; only Altai ratifies. Nothing here is spec-of-record
+> until then, and no line in this subsection is a receipt — it asserts an intent,
+> not a reproduced fact.
+
+The three-tier switch-over (`docs/AUTONOMOUS-2026-07-24.md` G-B) found two ratified
+specs in conflict at one seam: the claimless **interface** tier cannot run
+`fleet send supervisor`, because the §7 gate arms on any sid-bearing caller under a
+fresh claim without a nonce — and the interface holds no nonce **by design**, while
+three-tier §5.3's divergence detection is *built on* interface sends and feeds on
+their `caller_sid`.
+
+**Proposed carve-out (candidate (a)):** the gate disarms for a **`send`** — and no
+other verb — **whose RESOLVED target record IS the current claim-holder's own body.**
+The ungated path is a plain upward mailbox append: zero nonce authority, it steers no
+worker, moves no claim, and mutates no INCARNATION/registry/claim.
+
+| Guard | Binding rule |
+|---|---|
+| Predicate | holder-sid **record-identity** (`_record_is_supervisor_claim_holder(resolved_rec) is True`), NEVER the literal name `supervisor`, `_is_supervisor_shaped`, or a `sup\|` prefix |
+| Ordering | **resolve-then-gate** — `cmd_send` resolves the logical target first; the resolver's own loud refusals (no/released/corrupt claim, stranded sid) still fire before the gate |
+| Scope | **`send`-only**; every other mutating lifecycle verb keeps its unchanged §7 arming |
+| Atomicity | keyed on the SAME claim the gate armed on — a claim that moved between resolve and gate-eval fails the identity check, and the full §7 gate re-arms (no TOCTOU) |
+| Provenance | `caller_sid` is preserved end-to-end and reaches §5.3 `_interface_divergence`, which drops events lacking it |
+
+Rejected alternative **(b)** — keep the gate, bless the no-session route for interface
+sends, have §5.3 warn on missing-sid — **permanently blinds §5.3**: its no-session
+route strips `caller_sid`, the exact field the divergence detector drops events
+without, so every interface steer becomes invisible to the one mechanism that catches
+a dual-supervisor. **(c)** (an interface credential) is already refuted (§2.3/§5.8).
+
+The predicate is fenced by five ratification-blocking fault-injections (G-C condition
+6; implemented in `tests/test_steer_seams.py`): a supervisor-**shaped** husk that does
+not hold the claim stays gated (LOAD-BEARING), a worker by real name stays gated, a
+claim moving between resolve and gate refuses, the interface→live-holder positive send
+delivers with `caller_sid` intact, and a record-identity assertion that trips if the
+predicate is ever generalized to a name/prefix.
+
+**Cross-ref owed on ratification:** `docs/specs/three-tier-command.md` §5.3 should gain
+a sentence noting that the interface's canonical steer (`fleet send supervisor`) passes
+the §7 gate via this carve-out, so the two specs read coherently. Left unwritten here
+because `three-tier-command.md` is itself still `PROPOSAL — RESTRUCTURE REQUIRED`.
+
 ---
 
 ## 8. Invariants, specs and shipped contracts touched
