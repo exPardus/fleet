@@ -1,6 +1,6 @@
 # Proposal: §10.4 `kill supervisor` / `respawn supervisor` tombstone choreography
 
-Status: draft — awaiting manager review
+Status: council-ruled — ready for build (pending operator ratification)
 
 Citation prefixes (same convention as `docs/proposals/sup-spawn-choreography.md:8-9`):
 `SPEC:` = `docs/specs/three-tier-command.md`, `CN:` = `docs/specs/claim-nonce.md`,
@@ -33,8 +33,10 @@ SPEC §16's **tombstone obligation**. They are cited separately below; the short
 | Q5 | Failure modes | ten enumerated, each with operator surface + recovery |
 | Q6 | Test plan | red-first list, five fault-injection targets |
 
-Operator rulings needed: **2** (respawn steer-failure disposition; kill of a limited-parked
-holder).
+Operator rulings: **2 requested — both RULED 4–0** (council 2026-07-24: Cassandra/risk,
+Brick/delivery, Vista/strategy, Mercer/incident-response) for the recommended options, with
+binding merged conditions folded into §2/§3/§5/§7 below; queued for operator ratification.
+See the final section for the full ruling record.
 
 ---
 
@@ -133,11 +135,25 @@ unavailable to a wrong one"; also CN §6.5 bans any env channel, CN:1761-1777)
    performs the release (SPEC:1175-1179 pattern, borrowed from the kill arm).
 4. **Bounded wait**: poll `supervisor/INCARNATION` for `state == "released"` for at most
    `SUPERVISOR_RELEASE_TIMEOUT_SECONDS` (§3 defines it). An immediate `send` refusal
-   (G9 `FleetCliError`, SPEC:1195-1196) or timeout ⇒ **abort** (ruling 1): print which
-   phase failed, leave the body running, rc ≠ 0. Unlike kill, respawn has no mandate to
-   destroy a body that won't cooperate — the operator asked for a context reset, not a
-   termination at any cost. (Kill's "never blocks indefinitely" contract, SPEC:1198, is
-   about kill.)
+   (G9 `FleetCliError`, SPEC:1195-1196) or timeout ⇒ **abort** (ruling 1, RULED 4–0):
+   leave the body running, rc ≠ 0. Unlike kill, respawn has no mandate to destroy a body
+   that won't cooperate — the operator asked for a context reset, not a termination at any
+   cost. (Kill's "never blocks indefinitely" contract, SPEC:1198, is about kill.)
+   **Ratified abort conditions (council, binding):**
+   - Distinct grep-able terminal line **`SUP-RESPAWN-ABORTED <phase>: <reason>`**, naming
+     the failed phase (steer-refused / T_release-expired / stop-precondition), and printing
+     the escalation commands verbatim: `fleet peek <holder>` / `fleet kill supervisor` then
+     `fleet sup-spawn`.
+   - The abort output **WARNS that the steer may still land asynchronously**: a slow body
+     may complete `sup-release` after the timeout. The operator must check `sup-status`
+     before acting on the abort. A re-run of `respawn supervisor` after such a late release
+     lands on the resolver's released-claim refusal arm (§4) — that landing spot is a
+     tested contract (§7 test 1/11).
+   - Abort is **proven side-effect-free**: registry, claim file, and the body's record are
+     byte-identical after abort; respawn's abort path shares **no fall-through branch**
+     with kill's arm-2 code. Fault-injections F1/F2 (§7) are RATIFICATION-BLOCKING.
+   - Abort fires at exactly `SUPERVISOR_RELEASE_TIMEOUT_SECONDS` — bounded, never an
+     unbounded hang.
 5. **Stop + tombstone**: stop the old body via the captured `native_short_id` (ND-1
    pattern, fleet.py:5003-5029), then `write_tombstone_outcome(name_old, old_sid,
    "stopped")` — same kind respawn `--force` already writes (fleet.py:4767-4771). SPEC §16
@@ -257,6 +273,13 @@ mandates and makes every kill cost up to an hour)
 4. Recovery is exactly incident 3 (CN:1727-1731): below the hour every `sup-boot` verdicts
    `freeze` ("never seize on ambiguity", fleet.py:9143, 9155-9156); past it, `seize` with a
    `SEIZED` entry and a re-minted lineage (CN:1666).
+5. **Ratified build requirement (council, Mercer — binding, general to any arm-2/freeze
+   window):** during any freeze window the *persistent* status surfaces — `sup-status` and
+   the statusline — must show **"claim held by dead sid, seizable in `<remaining>`s"**
+   (holder roster-gone, heartbeat age vs `SUPERVISOR_CLAIM_STALE_SECONDS`). The one-shot
+   `SUP-KILL-FROZEN` line is not sufficient: the state must be diagnosable without
+   scroll-back. This extends `supervisor_status_line` exactly as CN:1688-1701 already
+   obliges it to learn the released state — same function, one more branch (§7 test 12).
 
 **Claim transition journaling per arm**: arm 1 — `RELEASED` (by the holder) then the
 successor's `BOOT`; arm 2 — nothing at kill time (the claim did not transition), the
@@ -291,7 +314,7 @@ Resolution at verb time: `read_incarnation()` → claim; find the registry recor
 | Live claim, holder record found | Resolve to that record, whatever its name (`sup\|…\|boot`, `sup\|…\|successor`). Proceed. |
 | Live claim, **no matching record** | **Refuse**, rc 2, naming both sides ("claim `<inc>` holder sid `<sid>` matches no registry record — run `fleet doctor`"). Registry/claim divergence is never auto-repaired by a destructive verb. |
 | **Corrupt / unreadable claim** | **Refuse**, rc 3 (freeze-style): "never decide blind" — the `supervisor_epoch_check` doctrine (SPEC:587-609; fleet.py:9140-9143 same posture). Surface: run `fleet doctor`. |
-| **Released claim** | **Refuse**, rc 2: kill — "already released; any leftover body is an ordinary worker — kill it by its real name"; respawn — "no holder to respawn; `fleet sup-spawn`". Double-kill therefore idempotently refuses (§6.i). |
+| **Released claim** | **Refuse**, rc 2: kill — "already released; any leftover body is an ordinary worker — kill it by its real name"; respawn — "no holder to respawn; `fleet sup-spawn`". Double-kill therefore idempotently refuses (§6.i). **Ratified landing-spot contract (council, ruling-1 condition):** this arm is also where a re-run lands after a respawn abort whose steer released *late* (async completion post-timeout, §2 step 4) — tested explicitly (§7 test 11). |
 
 `"supervisor"` stays purely logical in these positions — consistent with the same resolver
 in `send` (SPAWN:340), one implementation, three call sites.
@@ -323,11 +346,19 @@ to `<inc>` in flight — `fleet sup-handoff-complete` or `sup-handoff-abort` fir
   (ND6 receipt, SPEC:373-380) — so kill degrades to arm 2, destroying the fast
   `limit-transfer` path (CN §6.1 row 1c runs ahead of the roster guard *because the parked
   body is roster-live*, fleet.py:9097-9120; kill makes it roster-gone-with-fresh-heartbeat
-  ⇒ plain freeze, fleet.py:9155-9156) and buying the hour hole for nothing. **REFUSE**,
-  pointing at the sanctioned paths: a successor `sup-boot` (verdict `limit-transfer`,
-  journal `LIMIT-TRANSFER`, no wait) or `fleet resume-limited` after the horizon.
-  B5-on-a-new-path (SPEC:390) — no other actor may release for a limited-parked holder —
-  reinforces refusal. Flagged as **ruling 2** because §10.4 itself is silent on this cross.
+  ⇒ plain freeze, fleet.py:9155-9156) and buying the hour hole for nothing. **REFUSE**
+  (ruling 2, RULED 4–0). B5-on-a-new-path (SPEC:390) — no other actor may release for a
+  limited-parked holder — reinforces refusal.
+  **Ratified refusal-message conditions (council, binding):** the refusal prints ALL
+  escapes verbatim and inline — it never reads as a dead end:
+  - `fleet sup-boot` — successor claims via `limit-transfer` immediately (no wait);
+  - `fleet resume-limited <name>` — after the recorded horizon passes;
+  - **poisoned-park sequence** — boot a successor via `limit-transfer` first; the demoted
+    body is then an ordinary worker, killable by its REAL registry name. The message
+    states the cost of killing *pre*-transfer: a plain freeze of up to
+    `SUPERVISOR_CLAIM_STALE_SECONDS` (3600 s).
+  The refusal performs **ZERO mutations** — no tombstone, no dead-marking, no heartbeat
+  touch — asserted with the message text in §7 test 7.
 - *Respawn*: **REFUSE** — SPEC:388: a bare respawn against a limited body yields `freeze`
   not `seize`; the fallback machinery is driven from outside by the interface tier
   (SPEC:356-507, ND6), and §3.5.4 already defines the limit-triggered body change. Respawn
@@ -366,13 +397,17 @@ Each: what breaks → operator surface → recovery.
 
 a. **Steer refused immediately** (G9 suspicious roster / send-path `FleetCliError`,
    SPEC:1195). Kill: instant arm-2 fall-through, `SUP-KILL-FROZEN` names the refusal.
-   Respawn: abort (ruling 1), body untouched. Recovery: investigate roster (`fleet
+   Respawn: abort (ruling 1) — `SUP-RESPAWN-ABORTED steer-refused: <reason>` with the
+   escalation commands (§2 step 4), body untouched. Recovery: investigate roster (`fleet
    doctor`), retry; or accept the freeze hole knowingly (kill again — resolver still sees
    the live claim).
 b. **Steer accepted, body never releases within `T_release`** (wedged, or errored inside
-   the turn — indistinguishable from slow, SPEC:1181-1189). Same surfaces as (a) with
-   "T_release expired". Recovery: kill's arm 2 self-documents the wait; respawn abort
-   leaves the operator to peek the body (`fleet peek`) and decide.
+   the turn — indistinguishable from slow, SPEC:1181-1189). Kill: arm 2 with "T_release
+   expired". Respawn: `SUP-RESPAWN-ABORTED T_release-expired: ...` + the async-late-release
+   warning — the body may still complete `sup-release` after the abort; check `sup-status`
+   before acting; a re-run then lands on the resolver's released-claim refusal (§4).
+   Recovery: kill's arm 2 self-documents the wait; respawn abort leaves the operator to
+   peek the body (`fleet peek <holder>`) and decide.
 c. **Release written but body fails to exit** (accepted turn, ran the verb, hung before
    stopping). The B6 window is open: INCARNATION reads `released` while the releaser is
    roster-live. Boot-side rule 1 refuses any consumer (fleet.py:9088-9091); kill proceeds
@@ -431,21 +466,39 @@ Unit (pure / registry-fixture; pytest per SPEC §12):
    no nonce material anywhere in the new body's env or prompt (CN §6.5).
 6. **Respawn journaling**: exactly `RELEASED` (holder) — no new journal kinds introduced;
    `--kind` choices list unchanged (CN §4.7 five-lists check).
-7. **Matrix refusals**: pending HANDSHAKE ⇒ kill and respawn refuse; `_holder_is_limited`
-   fixture ⇒ both refuse with the limit-transfer pointer (pending ruling 2).
+7. **Matrix refusals** (ruling-2 conditions, binding): pending HANDSHAKE ⇒ kill and
+   respawn refuse; `_holder_is_limited` fixture ⇒ both refuse, and the kill refusal:
+   (i) performs **zero mutations** — registry snapshot byte-identical, no tombstone
+   written, no dead-marking, no heartbeat touch; (ii) message text contains all three
+   escapes verbatim (`fleet sup-boot`, `fleet resume-limited <name>`, the poisoned-park
+   sequence) and the 3600 s pre-transfer cost.
 8. **Protection ordering**: arm-2 corpse survives `_sweep_husks` and `_archive_eligible`
    (gate 0) while the claim names it; after a fixture seize, both remove it (B1/B9 pair).
 9. **Tombstone kinds**: arm-1 and arm-2 ⇒ `"killed"`; respawn ⇒ `"stopped"`; kinds stay
    within `TOMBSTONE_KINDS` (fleet.py:7725).
 10. **Parser lint**: no `--force`-shaped release escape reappears on kill/respawn/sup-release
-    (CN:2176 "No `--force` form", CN §12 O2).
+    (CN:2176 "No `--force` form", CN §12 O2) — and no bypass flag on either ruled refusal
+    (council condition 4: flagless forms only, any bypass needs a NEW council ruling).
+11. **Abort landing spot** (ruling-1 condition): fixture where the steer's `sup-release`
+    completes *after* the abort (late async release) ⇒ re-run of `respawn supervisor`
+    lands on the resolver's released-claim refusal arm with the sup-spawn pointer; abort
+    output contains `SUP-RESPAWN-ABORTED <phase>:` and the `sup-status`-first warning.
+12. **Freeze-window status surface** (council condition 5): fixture claim with holder
+    roster-gone + fresh heartbeat ⇒ `supervisor_status_line` (and thus `sup-status` /
+    statusline) renders "claim held by dead sid, seizable in `<remaining>`s"; `<remaining>`
+    decreases with a stepped clock; branch coexists with the CN:1688-1701 released branch.
 
-Fault-injection targets (monkeypatch seams):
+Fault-injection targets (monkeypatch seams). **F1/F2 are RATIFICATION-BLOCKING (council,
+ruling-1 condition 2).**
 
 F1. `send` raises `FleetCliError` ⇒ kill falls through with **zero** wait (no sleep call);
-    respawn aborts, registry unchanged, body's record untouched.
-F2. Clock-stepped wait: INCARNATION never flips ⇒ fall-through fires at exactly
-    `T_release`, not before/after.
+    respawn aborts with registry, claim file, and the body's record **byte-identical**
+    (serialize-and-compare, not field-spot-checks). Structural assertion: respawn's abort
+    path shares no fall-through branch with kill's arm-2 (e.g. the arm-2 helper is never
+    reached from the respawn call graph in the abort fixture).
+F2. Clock-stepped wait: INCARNATION never flips ⇒ kill's fall-through and respawn's abort
+    each fire at exactly `SUPERVISOR_RELEASE_TIMEOUT_SECONDS`, not before/after; respawn
+    post-abort state byte-identical as in F1 — never an unbounded hang.
 F3. Stop reports success but roster still shows the sid (grace-loop seam,
     fleet.py:4772-4789) ⇒ successor dispatch is NOT reached (caller-side B6 gate); kill
     warns rc 1 with the B6 message.
@@ -460,31 +513,50 @@ a fixture holder, kill it, assert `SUP-KILL-RELEASED`, boot a successor, assert 
 
 ---
 
-## Operator rulings needed
+## Ruling record — council-ruled 2026-07-24, pending operator ratification
 
-> Both items below are genuinely unsettled by ratified text; everything else in this
-> proposal is grounded in SPEC §10.4/§7.2, CN §5.10(b)/§6.1/§6.3, or the 2026-07-24
-> ratified rulings (SPAWN:452-462) and needs no ruling.
+> Both dockets ruled **UNANIMOUS 4–0** for this proposal's recommended options (council:
+> Cassandra/risk, Brick/delivery, Vista/strategy, Mercer/incident-response; synthesis by
+> manager under the operator's standing 4-councilor directive; queued for operator
+> ratification). The merged conditions below are **part of the rulings, not suggestions**,
+> and are folded into §2 step 4, §3 phase-2 item 5, §4 (released row), §5
+> (limited-parked), and §7 (tests 7, 10-12, F1/F2). Everything else in this proposal is
+> grounded in SPEC §10.4/§7.2, CN §5.10(b)/§6.1/§6.3, or the 2026-07-24 ratified rulings
+> (SPAWN:452-462) and needed no ruling.
 
-**Ruling 1 — respawn steer-failure disposition.** When the release-steer fails (refusal or
-`T_release` expiry), does `respawn supervisor`:
-  (a) **abort** — leave the body alive, rc ≠ 0, operator investigates (RECOMMENDED: respawn
-      is a convenience reset, not a termination mandate; falling through would destroy a
-      live, possibly mid-turn supervisor and buy the 3600 s freeze hole for a
-      non-emergency); or
-  (b) fall through kill-style — stop + tombstone + fresh boot body that freezes until
-      seize (kill's "never blocks" contract extended to respawn).
-  Options considered: (b) rejected above; SPEC:1198's never-block contract is written for
-  `kill` only, so extending it is an operator call, not a derivation.
+**Ruling 1 — respawn steer-failure disposition: (a) ABORT (4–0).** Leave the body alive,
+rc ≠ 0, operator investigates. Falling through kill-style was rejected — SPEC:1198's
+never-block contract is written for `kill` only; a fall-through would destroy a live,
+possibly mid-turn supervisor and buy the 3600 s freeze hole for a non-emergency.
+Binding conditions:
+  1. Abort surface: grep-able `SUP-RESPAWN-ABORTED <phase>: <reason>`, names the failed
+     phase, prints escalation commands verbatim (`fleet peek <holder>` /
+     `fleet kill supervisor` then `fleet sup-spawn`), and warns the steer may still land
+     asynchronously post-timeout — operator checks `sup-status` before acting. The
+     resolver's released-claim refusal arm is the tested landing spot for a re-run after
+     such a late release (§4, §7 test 11).
+  2. Abort proven side-effect-free: F1/F2 are **RATIFICATION-BLOCKING** — registry, claim
+     file, and the body's record byte-identical after abort; respawn's abort path shares
+     no fall-through branch with kill; abort fires at exactly
+     `SUPERVISOR_RELEASE_TIMEOUT_SECONDS`, never an unbounded hang (§7 F1/F2).
 
-**Ruling 2 — `kill supervisor` against a limited-parked holder.** ND6 makes arm 1
-impossible (no steer to a `limited` worker, SPEC:373-380), so kill can only take arm 2 —
-which converts a roster-live parked holder with a fast `limit-transfer` path
-(fleet.py:9097-9120) into a roster-gone freeze of up to 3600 s. Does kill:
-  (a) **refuse**, pointing at `sup-boot` (limit-transfer) / `fleet resume-limited`
-      (RECOMMENDED: the park is recoverable state; destroying it strictly worsens every
-      recovery path); or
-  (b) proceed to arm 2 with a loud warning (operator may want the body gone regardless,
-      e.g. a poisoned park).
-  Options considered: a `--force`-style override for (a) was rejected — it reintroduces a
-  two-command destruction of supervisor state, the shape CN:1718-1734 deleted.
+**Ruling 2 — `kill supervisor` against a limited-parked holder: (a) REFUSE (4–0).** The
+park is recoverable state; ND6 makes arm 1 impossible (SPEC:373-380) and arm 2 converts a
+fast `limit-transfer` (fleet.py:9097-9120) into an up-to-3600 s freeze.
+Binding conditions:
+  3. The refusal prints ALL escapes verbatim and inline — `fleet sup-boot`
+     (limit-transfer), `fleet resume-limited <name>` (after horizon), and the
+     poisoned-park sequence (successor via limit-transfer, then the demoted body is an
+     ordinary worker killable by its REAL registry name), stating the 3600 s cost of
+     killing pre-transfer. Never a dead end. The refusal performs zero mutations — no
+     tombstone, no dead-marking, no heartbeat touch — asserted with message text
+     (§5, §7 test 7).
+
+**Cross-cutting conditions:**
+  4. **No bypass/`--force` flag on either refusal, ever, without a NEW council ruling** —
+     the 4–0 votes ratify the flagless forms only (§7 test 10; consistent with
+     CN:1718-1734 / CN §12 O2).
+  5. **Freeze-window persistent status surface (Mercer, general to any arm-2/freeze):**
+     `sup-status` and the statusline must show "claim held by dead sid, seizable in
+     `<remaining>`s" during any freeze window — diagnosable without scroll-back, not just
+     the one-shot `SUP-KILL-FROZEN` line (§3 phase-2 item 5, §7 test 12).
