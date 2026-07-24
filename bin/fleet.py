@@ -152,6 +152,15 @@ def task_file_path(name: str) -> Path:
     return tasks_dir() / f"{name_fs_stem(name)}.md"
 
 
+def boot_bundle_path(name: str) -> Path:
+    """The gen-0 boot ritual's redirect target (fix wave 2, NEW-1): the one
+    place `sup-boot`'s output -- including the minted nonce plaintext --
+    briefly lands on disk. Single source of truth shared by the ritual
+    renderer and both belt sweeps (`_remove_worker_files`,
+    `_archive_file_pairs`) so the deleter can never drift from the writer."""
+    return tasks_dir() / f"{name_fs_stem(name)}.boot-bundle.txt"
+
+
 def journal_file_path(name: str) -> Path:
     return journals_dir() / f"{name_fs_stem(name)}.md"
 
@@ -5288,6 +5297,10 @@ def _remove_worker_files(name: str, sid: str, retired_sids: list = ()) -> list:
         outcome_path(name),
         outcome_path(sid),
         task_file_path(name),
+        # Fix wave 2 NEW-1 belt: an abandoned boot bundle retains the minted
+        # nonce plaintext at rest (claim-nonce §5.8/§5.9) -- sweep it with the
+        # rest of the worker's task-file litter.
+        boot_bundle_path(name),
     ]
     candidates += [outcome_path(s) for s in retired_sids]
     candidates += [ceiling_file_path(s) for s in retired_sids]
@@ -5597,6 +5610,11 @@ def _archive_file_pairs(name: str, sid: str, retired: list) -> list:
         (journal_file_path(name), "journal.md"),
         (outcome_path(name), outcome_path(name).name),
         (task_file_path(name), "task.md"),
+        # Fix wave 2 NEW-1 belt: the boot ritual deletes its own bundle, but
+        # an interrupted body can abandon one -- and it holds the minted nonce
+        # plaintext (claim-nonce §5.8/§5.9), so archive must not strand it at
+        # its original path.
+        (boot_bundle_path(name), "boot-bundle.txt"),
     ]
     if sid:
         pairs.append((outcome_path(sid), outcome_path(sid).name))
@@ -10462,26 +10480,40 @@ def _render_sup_spawn_task(name: str, launch_id: str, campaign: str) -> str:
     NONCE/VERDICT lines are grepped from it, never read off the stream tail.
     The redirect target uses the MAPPED (pipe-free) task stem: a `|` in the
     rendered command would be a shell pipe. MIN-4: every verdict the exit-code
-    contract carries is enumerated with its required reaction."""
+    contract carries is enumerated with its required reaction.
+
+    Fix wave 2 NEW-1: the bundle file holds the minted nonce plaintext, so the
+    ritual reads it into working context and then DELETES it (claim-nonce
+    §5.8: printed exactly once and nowhere else; §5.9: gitignored is not a
+    retention policy) -- with the belt sweeps in `_remove_worker_files` /
+    `_archive_file_pairs` for a body that dies before its rm. NEW-2: every
+    rendered path is double-quoted -- a space under FLEET_HOME must not split
+    the command."""
     fleet_py = (FLEET_HOME / "bin" / "fleet.py").as_posix()
     # The interpreter running fleet right now, not a hardcoded launcher --
     # same doctrine as `_render_successor_task`.
     py = Path(sys.executable).as_posix()
-    bundle = (tasks_dir() / f"{name_fs_stem(name)}.boot-bundle.txt").as_posix()
+    bundle = boot_bundle_path(name).as_posix()
     return f"""You are the claude-fleet supervisor's GEN-0 body, fleet worker `{name}`, running in {FLEET_HOME.as_posix()} (three-tier §10.1).
 The `{launch_id}` segment of your worker name is a launch id, NOT your incarnation id -- your incarnation is minted at boot in step 1, and `fleet sup-status` reads supervisor/INCARNATION, never your worker name.
 
 Do exactly this, in order:
 1. FIRST ACT, before anything else -- run sup-boot with its output redirected to a file (class-4
    nonce doctrine: never read a secret off the stream tail):
-   "{py}" {fleet_py} sup-boot > {bundle} 2>&1
+   "{py}" "{fleet_py}" sup-boot > "{bundle}" 2>&1
    Pass NO handoff flags -- this is the fresh-claim path. Note the command's exit code.
 2. Read the verdict, and on success your incarnation and nonce, FROM THE FILE:
-   grep -E "^(VERDICT|INCARNATION|NONCE):" {bundle}
+   grep -E "^(VERDICT|INCARNATION|NONCE):" "{bundle}"
    RECORD THE NONCE VALUE NOW -- it is printed exactly once. Every later `sup-*` verb requires it
    (present it with the --nonce flag); losing it costs up to 3600s of lockout.
-3. React to the VERDICT line:
-   - `claim` (exit 0): fresh claim -- the expected gen-0 outcome. Proceed (step 4).
+3. Read the REST of the bundle file now (GOALS, journal tail, knowledge index, fleet status) so
+   its content is in your working context, then delete the file:
+   rm "{bundle}"
+   Carry the NONCE value in your working context ONLY -- never into the journal, never into any
+   file. Why: claim-nonce §5.8 -- the nonce is printed exactly once and retained nowhere else; a
+   bundle left on disk is a durable plaintext copy (gitignored is not a retention policy, §5.9).
+4. React to the VERDICT line:
+   - `claim` (exit 0): fresh claim -- the expected gen-0 outcome. Proceed (step 5).
    - `seize` (exit 0): a dead predecessor's stale claim was seized. Proceed, and record the
      seizure in your first checkpoint note.
    - `limit-transfer` (exit 0): a limit-parked predecessor's claim transferred to you. Proceed,
@@ -10494,10 +10526,10 @@ Do exactly this, in order:
    - `freeze` (exit 3): the claim state is ambiguous (unreadable heartbeat or a failed epoch
      check). Same stop discipline. End your turn with the final message:
      SUP-BOOT-FROZEN <reason>
-4. After a successful claim: proceed per skills/fleet/supervisor.md -- read the boot bundle the
-   file now holds (GOALS, journal tail, knowledge index, fleet status), run an early
-   "{py}" {fleet_py} sup-checkpoint "<note>" presenting your nonce, then begin the campaign brief
-   below.
+5. After a successful claim: proceed per skills/fleet/supervisor.md -- with the boot bundle
+   content you read in step 3 (GOALS, journal tail, knowledge index, fleet status), run an early
+   "{py}" "{fleet_py}" sup-checkpoint "<note>" presenting your nonce, then begin the campaign
+   brief below.
 
 --- CAMPAIGN BRIEF ---
 {campaign}
