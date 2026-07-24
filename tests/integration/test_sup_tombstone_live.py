@@ -117,8 +117,35 @@ class Sandbox:
             return None
 
     def journal(self) -> str:
+        """The RAW file -- header legend included. Safe for `diagnostics()`;
+        NEVER use it for a kind assertion (see `journal_kinds`)."""
         path = self.home / "supervisor" / "JOURNAL.md"
         return path.read_text(encoding="utf-8") if path.exists() else ""
+
+    def journal_entries(self) -> list:
+        """Parsed entries, via fleet's OWN parser.
+
+        LIVE-GATE FIX (2026-07-24). Every kind assertion in this file used to
+        run against `journal()`, the whole file -- and `_SUPERVISOR_JOURNAL_SEED`
+        writes a header legend into every fresh JOURNAL.md:
+
+            Kinds: BOOT, CHECKPOINT, PROPOSAL, SEIZED, RELEASED, LIMIT-TRANSFER, ...
+
+        So every kind token is present in every journal FROM BIRTH. That made
+        `assert "SEIZED" not in journal` impossible (it can never pass -- the
+        live gate's actual RED) and `assert "RELEASED" in journal` vacuous
+        (satisfied by the legend whether or not an entry was ever written --
+        it had been passing for free through three fix waves).
+
+        Calls `fleet.parse_supervisor_journal`, which is pure text -> entries
+        and carries no FLEET_HOME dependency, rather than re-implementing the
+        split here: a parser that drifts from production is the same class of
+        defect this file just tripped over."""
+        return fleet.parse_supervisor_journal(self.journal())
+
+    def journal_kinds(self) -> list:
+        """Entry KINDS, in order. The only surface a kind assertion may use."""
+        return [e["kind"] for e in self.journal_entries()]
 
     def outcomes(self, key: str) -> list:
         p = self.home / "state" / "outcomes" / f"{key}.jsonl"
@@ -221,7 +248,7 @@ class TestGracefulKillEndToEnd:
         assert "sup|" in out.stdout, out.stdout
         claim = _wait_for_claim(sandbox)
         assert claim["claimed_via"] == "fresh", sandbox.diagnostics()
-        assert "BOOT" in sandbox.journal(), sandbox.diagnostics()
+        assert "BOOT" in sandbox.journal_kinds(), sandbox.diagnostics()
 
     def test_2_kill_supervisor_takes_the_graceful_arm(self, sandbox):
         """The contract under test: fleet steers, the BODY releases (B5), and
@@ -245,7 +272,14 @@ class TestGracefulKillEndToEnd:
 
         claim = sandbox.claim()
         assert claim["state"] == "released", sandbox.diagnostics()
-        assert "RELEASED" in sandbox.journal(), sandbox.diagnostics()
+        # Against parsed KINDS, not the raw file: the header legend contains
+        # the word RELEASED, so the whole-file form was vacuous.
+        assert "RELEASED" in sandbox.journal_kinds(), sandbox.diagnostics()
+        # ...and it is the HOLDER's own release (B5), so it carries the
+        # incarnation that was killed.
+        released = [e for e in sandbox.journal_entries() if e["kind"] == "RELEASED"]
+        assert any(e["inc"] == sandbox.killed_incarnation for e in released), \
+            (released, sandbox.diagnostics())
 
         rec = sandbox.registry()["workers"][holder_name]
         assert rec["status"] == "dead", sandbox.diagnostics()
@@ -261,8 +295,12 @@ class TestGracefulKillEndToEnd:
         """A released record is the ONE non-pathological door a fresh body
         has: rule 1b claims fresh, journals `BOOT`, writes no `SEIZED`, and
         pays no freeze window."""
-        journal_before = sandbox.journal()
-        assert "SEIZED" not in journal_before, sandbox.diagnostics()
+        entries_before = sandbox.journal_entries()
+        # Parsed KINDS, never the raw file: the header legend names SEIZED, so
+        # the whole-file form was IMPOSSIBLE -- it is what took the live gate
+        # RED, and it had never once run green.
+        assert "SEIZED" not in [e["kind"] for e in entries_before], \
+            sandbox.diagnostics()
 
         _spawn_supervisor(sandbox)
         claim = _wait_for_claim(sandbox)
@@ -275,9 +313,18 @@ class TestGracefulKillEndToEnd:
             sandbox.diagnostics()
         # The successor's BOOT entry is APPENDED after the predecessor's
         # RELEASED -- the two-entry shape §2 step 10 promises, with zero new
-        # journal kinds.
-        journal_after = sandbox.journal()
-        assert len(journal_after) > len(journal_before), sandbox.diagnostics()
-        tail = journal_after[len(journal_before):]
-        assert "BOOT" in tail, sandbox.diagnostics()
-        assert "SEIZED" not in journal_after, sandbox.diagnostics()
+        # journal kinds. Compared by ENTRY COUNT, not file length: a longer
+        # file proves only that bytes were added.
+        entries_after = sandbox.journal_entries()
+        assert len(entries_after) > len(entries_before), sandbox.diagnostics()
+        new_entries = entries_after[len(entries_before):]
+        assert "BOOT" in [e["kind"] for e in new_entries], sandbox.diagnostics()
+        # rule 1b claims fresh off the released record: no seizure anywhere in
+        # this journal's history, and the successor's own BOOT names the new
+        # incarnation.
+        assert "SEIZED" not in [e["kind"] for e in entries_after], \
+            sandbox.diagnostics()
+        assert any(e["kind"] == "BOOT" and e["inc"] == claim["incarnation_id"]
+                   for e in new_entries), (new_entries, sandbox.diagnostics())
+        # Zero new journal kinds across the whole choreography (§2 step 10).
+        assert set(e["kind"] for e in entries_after) <= set(fleet.SUPERVISOR_JOURNAL_KINDS)
