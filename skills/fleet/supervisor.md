@@ -134,13 +134,21 @@ Old incarnation:
    `state/supervisor-handoff-aborted.json`. Both complete and abort unlink the
    successor's plaintext-token task file (§5.9).
 
-   Abort works with **no HANDSHAKE**: `sup-handoff-begin` records the successor
-   it dispatched (inc + sid) in your own claim, and abort resolves the stillborn
-   successor from that marker. `fleet sup-status --json` publishes it as
-   `handoff_successor_inc` / `handoff_successor_sid` / `handoff_pending_since` —
-   which are about the pending SUCCESSOR, not `pending_present`, which is about
-   the pending GENERATION. Abort still refuses a `--successor-sid` that ties to
-   no recorded successor: that refusal is the safety property, not a bug.
+   Abort works with **no HANDSHAKE**: `sup-handoff-begin` records every
+   successor it dispatches (inc + sid) in your own claim, and abort resolves a
+   stillborn successor from those entries. They are a **list** — three attempts
+   in one succession is a real sequence, and each stays abortable until it is
+   resolved. `fleet sup-status` prints one line per pending successor, and
+   `--json` publishes `handoff_pending[]` with a per-entry `state`; that is the
+   pending SUCCESSOR, not `pending_present`, which is the pending GENERATION.
+
+   An attempt that never recorded a sid (dispatch never joined the roster, or
+   the roster could not be read) cannot be stopped — there is nothing to stop.
+   Past the 300s join window it reads `resolvable-stale` and you retire it with
+   `fleet sup-handoff-abort --successor-inc <INC> --nonce <value>`, which clears
+   the entry, unlinks its plaintext-token task file, and tells you plainly that
+   no session was stopped. Abort still refuses a handle that ties to no recorded
+   successor: that refusal is the safety property, not a bug.
 
 Successor: driven entirely by the task file `sup-handoff-begin` wrote — it
 boots claim-pending with `--handoff-token`, writes HANDSHAKE (carrying the
