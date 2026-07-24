@@ -1,6 +1,6 @@
 # fleet-index — cutting duplicate exploration cost
 
-**Status:** ready-for-gate (M1+M2; M3 stays DRAFT). Author-flipped 2026-07-24 per the operator's full-M1+M2 build order (record of record: `knowledge/lessons.md#2026-07-24-day3`; the corresponding `docs/OPERATOR-GATES.md` settled row is still owed — §16); ratification is the operator's — an author never promotes its own spec.
+**Status:** ready-for-gate (M1+M2; M3 stays DRAFT). Author-flipped 2026-07-24 per the operator's full-M1+M2 build order (record of record: the `knowledge/lessons.md` day-3 entry ("2026-07-24 — operator morning queue cleared + autonomous day-3 opened", on `main`); the corresponding `docs/OPERATOR-GATES.md` settled row is still owed — §16); ratification is the operator's — an author never promotes its own spec.
 **Code citations:** every `bin/fleet.py` and `bin/hooks/stop_outcome.py` citation below is derived against merge-base `3ccb2d5` (`git merge-base main spec/fleet-q`, re-derived 2026-07-24); `bin/fleet.py` there is 11,288 lines. Line numbers rot, so each citation names the symbol it points at — re-grep the symbol before trusting the number.
 **Owner:** Altai
 **Design doc:** `docs/superpowers/specs/2026-07-22-fleet-index-design.md`
@@ -230,7 +230,7 @@ fleet q --outline <path> [--no-refresh]
 - `--kind KIND` — restrict to one of `func | class | method | const | section` (§5).
 - `--limit N` — cap printed hits (default 20). Truncation is reported on stderr with the count of suppressed hits and a hint to narrow with `--path`/`--kind`; a truncated result is still exit 0.
 - `--src` — slice source (§11.4).
-- `--outline <path>` — print the digest rendering (§7) of that one file's shard: the same bytes `--context` would inject at spawn, on demand mid-task.
+- `--outline <path>` — print the digest rendering (§7) of that one file's shard on demand mid-task — the same rendering `--context` injects at spawn, except that `--outline` output is additionally subject to §11.4's line cap (the spawn-time digest is not; the two outputs differ only when the cap truncates).
 - `--no-refresh` — never write anything (§11.3).
 
 ### 11.2 Query semantics
@@ -249,7 +249,7 @@ Within each form, hits sort by source path then line. Nothing ranks (§10): matc
 
 Before answering from any shard, `q` re-hashes that shard's source file and compares against the header — the §8 check, applied per query. The shards are consulted **only after** this verification, so a hit is always a claim about the file as it exists now:
 
-- **Stale, missing, corrupt, or truncated shard** → re-parse that one source file, atomically replace the shard (§6 discipline), then answer. Gitignored-only (§8) is what makes this unconditional: there is no tracked file to dirty, so the refuse-on-stale branch the old two-mode design needed does not exist.
+- **Stale, missing, corrupt, or truncated shard** → re-parse that one source file, atomically replace the shard (§6 discipline), then answer. If the replace fails after §6's bounded retries, the current invocation still answers from its own verified in-memory parse — only the on-disk shard stays stale, repaired by the next read. Gitignored-only (§8) is what makes this unconditional: there is no tracked file to dirty, so the refuse-on-stale branch the old two-mode design needed does not exist.
 - **Source file deleted but shard present** (orphan) → the shard's hits are suppressed with a stderr note, and the refresh prunes the orphan shard.
 - **`--no-refresh`** → suppress all writes. Stale or orphaned shards have their hits **withheld**, each with a stderr staleness note — never served. This is the flag for contexts where any write is unacceptable (read-only mounts, mid-`git bisect`); the §8 rule that no path serves an unverified coordinate binds it too.
 
@@ -323,7 +323,7 @@ An unauthorised tool call under a non-bypass headless worker hangs on a permissi
 
    Subcommand-scoped, **never `Bash(fleet:*)`**. The wide grant is a kill grant: `fleet kill` and `fleet clean` are irreversible (CLAUDE.md), and the recorded incident where a *read-only slash command* reached `fleet clean` is the standing proof that any surface granted `fleet` wholesale eventually exercises its destructive subcommands. `Bash(fleet q:*)` is the only fleet grant the template will ever carry for workers; it deliberately excludes `fleet index:*` — lifecycle (init/build/update) is manager-side (§8), least privilege for the worker.
 
-   **Execution status: `[UNVERIFIED — live receipt owed]`.** No receipt shows a `--settings`-file `allow` taking effect for a `--bg` `dontask` worker. The evidence points the other way so far: the 2026-07-23 overnight incident record shows working allowlists only via a per-worktree `.claude/settings.local.json`, and `dispatch_bg`'s own comment marks `--setting-sources`' runtime effect under `--bg` **UNOBSERVED** (`bin/fleet.py:8265-8268`). The template mechanism above is therefore a design claim, not an observed behaviour. **Hard M2 build-gate acceptance item:** before M2 ships, a live experiment proves a default-spawned `dontask` `--bg` worker executes `fleet q` via the template grant alone (no per-worktree allowlist present), and the receipt is recorded with the M2 build. If the experiment fails, the fallback channel is the per-worktree `settings.local.json` doctrine (item 3) and this section is re-specified before ship — §11.9's revert criterion is gated on this receipt existing first.
+   **Execution status: `[UNVERIFIED — live receipt owed]`.** No receipt shows a `--settings`-file `allow` taking effect for a `--bg` `dontask` worker. The evidence points the other way so far: the 2026-07-23 overnight incident record shows working allowlists only via a per-worktree `.claude/settings.local.json`, and `dispatch_bg`'s own comment marks `--setting-sources`' runtime effect under `--bg` **UNOBSERVED** (`bin/fleet.py:8265-8268`). The template mechanism above is therefore a design claim, not an observed behaviour. **Hard M2 build-gate acceptance item:** before M2 ships, a live experiment proves a default-spawned `dontask` `--bg` worker executes `fleet q` via the template grant alone (no per-worktree allowlist present), and the receipt is recorded with the M2 build. If the experiment fails, the fallback channel is the per-worktree `settings.local.json` doctrine (item 3) and this section is re-specified before ship — §11.9's revert criterion — BOTH prongs, adoption and token-reduction — is gated on this receipt existing first: no run recorded before the receipt counts toward either prong.
 
 2. **Reaching existing installs.** The template is git-tracked; the rendered `state/worker-settings.json` is instance state, and the `instance-freshness` doctor check already diffs the two. Migration is: pull, re-run `fleet init`, confirmed by `fleet doctor`. No new mechanism — the freshness gate exists precisely so template changes propagate this way. Workers already running keep their old settings until their next respawn (settings are read at session start); the migration needs no fleet-wide restart, it arrives with normal worker churn.
 
@@ -342,7 +342,7 @@ M2 is accepted or reverted on measurement, under the tokens-primary doctrine (op
 - **Primary metric:** `input_tokens` from Stop-hook outcome records, on a fixed task run as **≥3 paired A/B runs** — arm A: indexed project, teach lines present; arm B: same task, no index. Success = arm A's median total input tokens lower.
 - **Adoption check (diagnostic, volatile):** the §12 `tools/` transcript diagnostic additionally counts `fleet q` invocations per session. It is sunset-marked and decides nothing by itself — except one thing: **zero `fleet q` calls across all A-arm runs voids the token comparison** (whatever moved, it wasn't `q`) and is itself a revert trigger.
 - **Ordering gate:** adoption counts **only after §11.7's execution receipt exists** — the live proof that a default-spawned `dontask` `--bg` worker can execute `fleet q` via the template grant. A-arm runs made before that receipt are void for this criterion: zero adoption under an unproven grant would fire the revert against a permission bug, not against the tool.
-- **Revert criterion:** zero adoption across ≥3 A-arm runs, **or** no median input-token reduction across ≥3 pairs → revert M2's worker-facing surface: remove the preamble teach lines and the template `permissions` entry (one more `fleet init` propagation), and record the revert as a dated `knowledge/lessons.md` entry. The `fleet q` subcommand itself may stay as manager-side tooling — it costs nothing per worker once the teach lines and grant are gone.
+- **Revert criterion** (counting only runs recorded after §11.7's grant-execution receipt exists — both prongs): zero adoption across ≥3 A-arm runs, **or** no median input-token reduction across ≥3 pairs → revert M2's worker-facing surface: remove the preamble teach lines and the template `permissions` entry (one more `fleet init` propagation), and record the revert as a dated `knowledge/lessons.md` entry. The `fleet q` subcommand itself may stay as manager-side tooling — it costs nothing per worker once the teach lines and grant are gone.
 
 ## 12. Testing and acceptance
 
@@ -418,12 +418,12 @@ Invariants 3 (mailbox), 6 (single-writer registry) and 7 (one live session per n
 Edits this spec obligates in **other** documents. Enumerated so the gate can check them off; deliberately **not** made on this branch — this branch edits `docs/specs/fleet-index.md` only.
 
 1. `docs/SPEC.md` §18 — fleet-index milestone entry (§18 currently stops at M-C; the §16 fleet-index paragraph there also still cites the rotted `@8478` dontask default — now `:10985` at `3ccb2d5`).
-2. `docs/specs/spawn-etiquette.md` — the "template carries hooks only, no permissions" line rots when §11.7 lands its `permissions` key.
+2. `knowledge/playbooks/spawn-etiquette.md` — the "template carries hooks only, no permissions" line rots when §11.7 lands its `permissions` key.
 3. Campaign worktree recipe / campaign template — add the manager-side `fleet index init --path <worktree>` step (§8).
 4. `tests/test_receipts.py` — this file's `UNENFORCED` reason string still says "M1 ready-for-build"; the status is ready-for-gate (M1+M2), and the string rots again when anything builds.
 5. `docs/PLAN-PROGRESS.md` lines 147 and 156 — both fleet-index rows still say "design-approved / gate-row owed" and "ready-for-build (M1 only), operator-gated"; superseded by the 2026-07-24 full-M1+M2 order.
 6. `docs/NEXT-SESSION.md` items 4 and 8 — the "M1 go/no-go with the fresh evidence" decision item and the evidence note are resolved by the 2026-07-24 order (§1).
-7. `docs/OPERATOR-GATES.md` — settled row recording the 2026-07-24 full-M1+M2 build order (until it lands, `knowledge/lessons.md#2026-07-24-day3` is the record of record — header).
+7. `docs/OPERATOR-GATES.md` — settled row recording the 2026-07-24 full-M1+M2 build order (until it lands, the `knowledge/lessons.md` day-3 entry ("2026-07-24 — operator morning queue cleared + autonomous day-3 opened", on `main`) is the record of record — header).
 8. Root `CLAUDE.md` — "pytest for unit/hook tests (SPEC §12)": the testing tiers now live at SPEC §17.
 
 ## 17. Changelog
