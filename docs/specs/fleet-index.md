@@ -162,28 +162,25 @@ A digest is a rendering of the shard, not a stored artifact:
 
 **Journal ordering is preserved on the paths that carry one.** Digest material is inserted ahead of the task, never between journal and turn. Note the honest limit: the idle-send path (`bin/fleet.py:3408`) composes with no `journal_path` at all, so there is no journal to order against there — `--context` is a spawn-time flag and M1 injects digests on spawn only.
 
-## 8. Staleness and the two modes
+## 8. Staleness — gitignored-only
 
 Staleness is per shard: compare the source file's SHA-256 against the shard header.
 
-A project picks **one of two modes** in `.fleet-index.toml`. The key selects a coherent bundle, not two independent knobs — this is deliberate, to hold the cost of supporting both to two well-defined paths rather than a matrix.
+**`.fleet-index/` is always gitignored.** `init` writes the `.gitignore` entry unconditionally, and committing `.fleet-index/` is **documented-unsupported** (operator sub-decision (a), 2026-07-23, council round 2 — `docs/OPERATOR-GATES.md`). An earlier draft of this section offered a second, `tracked` mode whose refuse-on-stale behaviour defended a query path that did not exist in M1, and whose dirty-worktree hazard existed only because tracked mode did. Staleness detection is mode-independent, so re-adding a `tracked` mode later is an additive config key — out of scope for M1 and M2.
 
-| Mode | `.fleet-index/` in git | On stale shard | Rationale |
-|---|---|---|---|
-| **`ignored`** (default) | gitignored, added by `init` | refresh it, then answer | Nothing tracked, so nothing to dirty. Index simply tracks the working tree. |
-| **`tracked`** | committed | **refuse and exit non-zero**, telling the caller to run `fleet index update` | Queries never write, so no tracked file is dirtied and `git worktree remove` keeps working. Index churn is reviewable in PRs. |
+**On a stale shard: refresh it, then answer.** Nothing is tracked, so nothing is dirtied; the index simply tracks the working tree. Refreshes are per-shard atomic writes (§6), so the write is as safe as the build's.
 
 ```toml
-mode = "ignored"          # "ignored" | "tracked"
-
 [index]
 include = ["**/*.py", "**/*.md"]
 exclude = ["**/node_modules/**", "**/.venv/**", "**/target/**"]
 ```
 
-**Why `tracked` must fail loud rather than refresh.** Refreshing a *tracked* file at query time leaves it dirty, and `git worktree remove` refuses a worktree containing modified tracked files — which breaks the campaign-3/4 worktree recipe (`knowledge/lessons.md:251`) at teardown. Failing loud costs friction; refreshing costs the recipe.
+(No `mode` key. The key name is reserved for a future tracked-mode decision; an unknown key in `.fleet-index.toml` is a config error, so an old `mode = "tracked"` line fails loud rather than being silently ignored.)
 
-**Why staleness may never be answered by guessing.** A stale line number does not error — it silently slices the wrong code and the worker cannot tell. Both modes therefore either repair or refuse; neither serves an unverified coordinate.
+**A gitignored index does not travel through git.** A freshly created worktree has no `.fleet-index/` regardless of the parent checkout's state. The campaign worktree recipe therefore gains a manager-side step — `fleet index init --path <worktree>` before spawning into it — and a worker in an index-less worktree simply gets the §9 no-index behaviour and falls back to Read/Grep.
+
+**Why staleness may never be answered by guessing.** A stale line number does not error — it silently slices the wrong code and the worker cannot tell. Every read path therefore repairs before answering (or, under `fleet q --no-refresh`, §11.3, withholds); no path serves an unverified coordinate.
 
 ## 9. Failure modes
 
@@ -192,8 +189,8 @@ exclude = ["**/node_modules/**", "**/.venv/**", "**/target/**"]
 | No index (never `init`ed) | Exit non-zero, "run `fleet index init`". Spawn injects nothing and proceeds. Expected state for most projects. |
 | Unparseable source file | Header-only shard. Build continues. |
 | Shard missing for a `--context` file | Warn, skip that digest, spawn proceeds. |
-| Shard corrupt or truncated | Treated as stale: repaired (`ignored`) or refused (`tracked`). Never parsed optimistically. |
-| Stale shard | Per §8, by mode. |
+| Shard corrupt or truncated | Treated as stale: refreshed, then answered. Never parsed optimistically. |
+| Stale shard | Refreshed, then answered (§8). |
 | `--context` path unknown | Warn, skip, spawn proceeds. |
 
 **The safety property.** Grep and Read on the raw repo always still work. The index is strictly additive: delete `.fleet-index/` entirely and fleet degrades to today's behaviour with no errors. No fleet decision reads the index.
@@ -230,16 +227,18 @@ Per SPEC §17, pytest for unit tests.
 
 - Indexer: golden-file per language; unparseable handling; incremental skip; atomic-replace under an injected crash between write and rename.
 - Sharding: two disjoint source edits produce two disjoint shard writes and merge cleanly.
-- Staleness: both modes — `ignored` repairs, `tracked` refuses with a non-zero exit.
+- Staleness: a stale shard is refreshed then answered; corrupt and truncated shards take the same path; no path serves an unverified coordinate.
 - `compose_prompt`: composition order, `--context` resolution against `--dir`, unknown-path tolerance, and that absent `--context` changes the prompt not at all.
-- Config: absent config defaults to `ignored`; `init` writes the `.gitignore` entry only in that mode.
+- Config: absent config = defaults; `init` always writes the `.gitignore` entry; an unrecognised key (including the reserved `mode`) is a loud config error.
 
-**Acceptance for M1** — the headline claim needs an instrument that does not exist yet. Fleet's outcome record carries `input_tokens`/`output_tokens` and a `transcript_path` (`bin/hooks/stop_outcome.py:203-206`) but no tool-call data, so "fewer orientation reads" is not currently measurable by any fleet command. M1 ships with a small transcript-parsing script that counts Read/Grep calls per session, and the criterion is:
+**Acceptance for M1 — tokens-primary** (operator sub-decision (b), 2026-07-23, `docs/OPERATOR-GATES.md`). The metric is the `input_tokens` delta already recorded per turn by the Stop-hook outcome record (`bin/hooks/stop_outcome.py:203-206`) — zero new parsing of the unversioned transcript format, and the token delta is what M3's go/no-go economically turns on. The criterion is:
 
-1. On a fixed task run twice — once with `--context`, once without — the `--context` run issues strictly fewer Read/Grep calls, and its total input tokens are lower.
+1. On a fixed task run as **≥3 paired A/B runs** — each pair once with `--context`, once without (a single pair is swamped by run-to-run variance) — the `--context` arm's median total input tokens are lower.
 2. `fleet index build` is byte-reproducible: two runs on an unchanged tree produce identical shards.
 3. A mutated source file never yields a stale coordinate in either mode.
 4. Deleting `.fleet-index/` returns fleet to baseline behaviour with no errors.
+
+The transcript tool-call counter an earlier draft made criterion 1's instrument is **demoted to a diagnostic**: a volatile, sunset-marked script under `tools/` that counts Read/Grep (and, for M2, `fleet q`) calls per session by parsing transcripts. It carries no receipt pins, adds no `bin/fleet.py` surface, and is delete-eligible with a dated record after M3's go/no-go. It explains *why* a token delta moved; it never decides acceptance.
 
 Result (1) is the input to M3's go/no-go: without a measured saving from targeted digests, an always-on map cannot be justified.
 
@@ -251,7 +250,7 @@ All 10 findings from `docs/reviews/IDX-ADVERSARIAL-2026-07-22.md`. Manager spot-
 |---|---|---|---|
 | 1 | §2's prefix-keyed-cache mechanism false; composed prompt is delivered as a tool result | MED | **Accepted.** §2 rewritten to the mechanism provable from this repo (`bin/fleet.py:7381,7385`). The `CLAUDE.md` shared-channel question is recorded as open, not silently resolved. |
 | 2a | Name-sorted global `symbols.tsv` conflicts at N=2, retiring 7-wide parallelism | CRITICAL | **Accepted, restructured.** Sharded per source file; sorted by line. No global file exists, so the conflict cannot arise. `files.tsv` deleted (it had the same defect); digests and map became on-demand renderings. |
-| 2b | Query-time refresh dirties a tracked file, breaking `git worktree remove` | HIGH | **Accepted.** `tracked` mode refuses on stale instead of refreshing (§8); `ignored` is the default and has nothing tracked to dirty. |
+| 2b | Query-time refresh dirties a tracked file, breaking `git worktree remove` | HIGH | **Accepted; re-dispositioned 2026-07-23** (operator sub-decision (a), council round 2). Tracked mode is removed entirely: committing `.fleet-index/` is **documented-unsupported** (§8), so the dirty-tracked-file hazard cannot arise. The refuse-on-stale branch this finding originally produced is deleted with the mode; per the dissent's binding process note, this row — not deleted text — is the record. |
 | 3 | Always-on map has no net-positive task mix here; per-dispatch not per-spawn | HIGH | **Accepted.** Map removed from M1 entirely; M3 is opt-in and gated on M1's measurement. The per-dispatch correction is stated in §3. |
 | 4 | `fleet q` blocked — default mode `dontask`, template has no permissions block | CRITICAL | **Accepted.** Moved to M2 behind an explicit permissions-migration gate (§11). |
 | 5 | No lock or atomic write; §9's "corrupt = skip malformed lines" contradicts §8 | HIGH | **Accepted.** Atomic `os.replace` per shard (§6); corrupt shards are treated as stale, never parsed optimistically (§9). Sharding also shrinks each write to one small file. |
@@ -259,7 +258,7 @@ All 10 findings from `docs/reviews/IDX-ADVERSARIAL-2026-07-22.md`. Manager spot-
 | 7 | Two fenced blocks parse as executable receipts and fail | HIGH | **Accepted.** No `$ `-prefixed lines in this document, so it contains no receipts. Declared in `tests/test_receipts.py` `UNENFORCED` with the reason that it specs unbuilt behaviour. |
 | 8a | §5.4 "fixed per-spawn cost" false | MED | **Accepted** — corrected in §3, and moot for M1 since the map is gone. |
 | 8b | Invariant-4 argument does not hold on the idle-send path | MED | **Accepted.** §7 states the limit explicitly rather than generalising from respawn. |
-| 8c | Success criterion 1 not measurable with shipped telemetry | LOW | **Accepted.** §12 ships a transcript-parsing counter and defines the criterion against it. |
+| 8c | Success criterion 1 not measurable with shipped telemetry | LOW | **Accepted; re-dispositioned 2026-07-23** (operator sub-decision (b)). Criterion 1 is re-based onto the `input_tokens` delta the Stop-hook outcome record already ships, over ≥3 paired A/B runs; the transcript counter survives only as a volatile sunset-marked `tools/` diagnostic (§12). |
 | 8d | `--context` path resolution unspecified | — | **Accepted.** §7 fixes resolution to the worker's `--dir`. |
 | 8e | Section numbering | — | **Accepted** — renumbered in this document. |
 
