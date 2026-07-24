@@ -27,7 +27,7 @@ from pathlib import Path
 
 RESULT_TEXT_MAX = 20000
 
-_SAFE_TOKEN_RE = re.compile(r"[A-Za-z0-9._-]+")
+_SAFE_TOKEN_RE = re.compile(r"[A-Za-z0-9._~-]+")
 
 _FILE_APPEND_DATA = 0x0004
 _FILE_SHARE_READ = 0x00000001
@@ -134,7 +134,16 @@ def _resolve_name(home: Path, sid: str):
     outcome loss, worse than a wrong record). Also validates the resolved
     name as a safe path token (see _valid_token) before returning it, same
     as postcompact_journal.py::_resolve_name, so a malformed registry name
-    never reaches the outcome path -- callers fall back to sid instead."""
+    never reaches the outcome path -- callers fall back to sid instead.
+
+    Fix wave 1 (CRIT-1): a supervisor BODY name is pipe-delimited
+    (`sup|<id>|boot`, three-tier SS10.1) and `|` is invalid in Windows
+    filenames -- apply the SAME `|` -> `~` stem mapping fleet.name_fs_stem
+    applies (duplicated here by necessity: hooks never import fleet.py),
+    BEFORE the token validation, so the supervisor's outcome lands
+    name-keyed exactly where fleet-side read_outcomes(name) looks for it.
+    The mapping never widens the traversal guard -- _valid_token still runs
+    on the mapped value and `~` joins its charset."""
     try:
         data = json.loads((home / "state" / "fleet.json").read_text(encoding="utf-8"))
         if not isinstance(data, dict):
@@ -144,7 +153,8 @@ def _resolve_name(home: Path, sid: str):
             return None
         for name, rec in workers.items():
             if isinstance(rec, dict) and rec.get("session_id") == sid:
-                return name if _valid_token(name) else None
+                stem = name.replace("|", "~") if isinstance(name, str) else name
+                return stem if _valid_token(stem) else None
     except (OSError, ValueError):
         pass
     return None

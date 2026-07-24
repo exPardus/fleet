@@ -25,7 +25,7 @@ Suite at close: **1897 passed / 13 skipped identical on 3.13 and 3.10** (skip co
 
 ## The remaining build tail (design-open, deliberately not rushed)
 
-- **`sup-spawn` verb choreography** — name/inc decoupling, pre-claim dispatch, first-turn boot ritual. §10.1 family regex is built and unblocks it. Successor map with precise sites: `state/journals/tt-build.md`. Operator may want a say in the dispatch choreography (it operationalizes the interface/supervisor split).
+- **`sup-spawn` verb choreography** — BUILT this run (branch `build/sup-spawn`: gen-0 dispatch per the ratified choreography decision record, + fix wave 1: `name_fs_stem` pipe-name mapping across every name-keyed fs path, §10.4-unbuilt kill/respawn fail-closed guard, resolver no-claim/released-arm pins, file-redirect boot ritual). What remains from the old bullet is only §10.4 below.
 - **§10.4 kill/respawn tombstone + sup-release interaction** — same journal.
 - Appendix-A v2-deferred rows stay deferred (beat verb §9.1; never-Haiku lives as GOALS doctrine).
 - Claim-nonce F1/F3 build obligations landed; §6.3/§6.4/§6.2/§7 all built. M-E gate residual re-audit (item 5 of old handoff) — partially absorbed; re-audit which of spec-lens F3's harness gaps H1 left open remains owed.
