@@ -175,7 +175,7 @@ For dependent or review-style work (one worker builds, another attacks the diff)
 | `fleet resume-limited` | Relaunch usage-limit-parked workers past their reset |
 | `fleet kill` | Interrupt (if running) and mark dead |
 | `fleet clean` / `archive` / `autoclean` | Tiered cleanup and staleness sweeps |
-| `fleet doctor` | Run the 22 health checks |
+| `fleet doctor` | Run the 23 health checks |
 | `fleet sup-*` | Supervisor identity: boot, heartbeat, checkpoint, status, handoff |
 
 Every command's exact contract lives in [`SPEC.md`](SPEC.md) §7.

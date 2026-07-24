@@ -1,8 +1,8 @@
 # claude-fleet
 
-**Run a whole team of Claude Code sessions from one seat.** One manager session spawns, steers, and hands off many headless worker sessions across every project on your machine — days-long, multi-project campaigns without babysitting a terminal.
+**Run a whole team of Claude Code sessions from one seat.** claude-fleet is a multi-session manager and orchestration layer for Claude Code: one manager session spawns, steers, and hands off multiple Claude Code agents running in parallel across every project on your machine — an agent fleet for long-running autonomous coding work, without babysitting a terminal.
 
-![tests](https://img.shields.io/badge/tests-1383%20passing-brightgreen) ![python](https://img.shields.io/badge/python-3.10%2B%20stdlib--only-blue) ![deps](https://img.shields.io/badge/dependencies-zero-blueviolet) ![platform](https://img.shields.io/badge/platform-Windows%20%2B%20Linux%20verified%20%7C%20macOS%20unreceipted-lightgrey) ![license](https://img.shields.io/badge/license-MIT-lightgrey)
+![tests](https://img.shields.io/badge/tests-1902%20passing-brightgreen) ![python](https://img.shields.io/badge/python-3.10%2B%20stdlib--only-blue) ![deps](https://img.shields.io/badge/dependencies-zero-blueviolet) ![platform](https://img.shields.io/badge/platform-Windows%20%2B%20Linux%20verified%20%7C%20macOS%20unreceipted-lightgrey) ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 
 Workers aren't fire-and-forget processes — they're **durable Claude Code sessions on disk**. They survive crashes, reboots, and the manager's own death. You can steer one mid-turn, drop into any of them interactively through Claude Code's agents menu, reset one's context while keeping its work journal, or park one that hit a usage limit and resume it later. It's a single-file, stdlib-only Python CLI plus a few hooks — no daemon of its own, no framework, no dependencies.
 
@@ -39,7 +39,7 @@ Migrated 0042_users to raw SQL with a matching down-migration. Ran
 
 One task, one worker, one budget cap, mid-turn steering — and never once attached a terminal. That's the whole loop.
 
-## Why this exists
+## Why an orchestration layer for Claude Code
 
 Claude Code ships its own background agents (`claude --bg`, `claude agents`) — spawn, list, monitor. Great primitives. What they *don't* give you is the operator layer on top:
 
@@ -84,7 +84,7 @@ Every `fleet` command is a short-lived CLI invocation. The registry is the singl
 | **Usage-limit park/resume** | A worker that hits a Claude plan usage limit parks itself (`limited` status, recorded reset horizon) instead of dying silently; `fleet resume-limited` relaunches it once the window passes. |
 | **Durable manager identity** | A boot-claim + heartbeat + hand-off protocol (`fleet sup-boot` / `sup-handoff-*`) so exactly one manager owns the fleet across restarts — and can pass the baton to a successor without dropping a campaign. |
 | **Knowledge loop** | `knowledge/` is git-tracked: an index, playbooks, per-project quirks, and append-only lessons that every manager session reads at startup and writes back to after every campaign. The fleet gets better at running the fleet. |
-| **`fleet doctor`** | 22 health checks in one command — hook wiring, stale sessions, orphaned mailboxes, stale attaches, version pins, autoclean scheduler state, supervisor claim, and more. |
+| **`fleet doctor`** | 23 health checks in one command — hook wiring, stale sessions, orphaned mailboxes, stale attaches, version pins, autoclean scheduler state, supervisor claim, and more. |
 | **Terminal surface** | Statusline + `/fleet:*` slash commands, shipped as a normal Claude Code plugin. The statusline is opt-in (`fleet init --statusline`) and is the only ambient surface; the plugin itself registers no hooks and injects nothing. |
 | **Interactive hand-off** | A worker is a real Claude Code session, so you drop into it through Claude Code — the agents menu (Ctrl+T) or `claude attach <session-id>`. `fleet release` hands a stale `attached` record back to headless. *(`fleet attach` itself currently refuses and redirects there; native attach integration is a later milestone.)* |
 | **Crash-safe by design** | A worker is a durable Claude Code session addressed by `--session-id`/`--resume`, not a process fleet has to keep alive. Fleet runs no persistent process of its own — every `fleet` command is a short-lived CLI invocation. |
@@ -128,7 +128,7 @@ Then open a Claude Code session, say *"become the fleet manager"*, and spawn you
 | `fleet resume-limited` | Relaunch workers parked on a usage limit past their reset horizon |
 | `fleet kill` | Interrupt (if running) and mark a worker dead |
 | `fleet clean` / `archive` / `autoclean` | Tiered cleanup: remove dead workers, archive terminal ones, scheduled staleness sweep |
-| `fleet doctor` | Run the 21 fleet health checks |
+| `fleet doctor` | Run the 23 fleet health checks |
 | `fleet sup-*` | Supervisor identity: `boot`, `heartbeat`, `checkpoint`, `status`, `handoff-{begin,complete,abort}` |
 
 ## Roadmap
@@ -138,6 +138,8 @@ Shipped: core lifecycle (spawn/steer/respawn/knowledge), the terminal surface (s
 ## Why you can trust it
 
 This repo attacks its own work before it ships. Every spec and code change runs an adversarial-review pass with receipts — real bugs caught past green tests, five-hostile-pass spec reviews, live-repro authority. It's all public in [`docs/reviews/`](docs/reviews/) and the accumulated postmortems in [`knowledge/lessons.md`](knowledge/lessons.md). If you want to see the process actually work, start with `docs/reviews/c2-review-adversarial.md` (a HIGH-severity double-launch bug found behind a passing suite).
+
+It's also battle-proven on itself — fleet's own development runs on fleet. Mid-campaign, a ~10-hour host outage was absorbed with zero loss (durable sessions resumed by session id), and workers that hit Claude plan usage limits have parked and been resumed live in production, more than once. The receipts, failures included, are in [`knowledge/lessons.md`](knowledge/lessons.md).
 
 <details>
 <summary><b>Under the hood: the native-substrate pivot</b></summary>
