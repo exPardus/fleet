@@ -769,6 +769,51 @@ now RED.
 
 ---
 
+## Fix wave 3 — escalation-scoped (2026-07-24, confirmation gate on `c443ee1`)
+
+Spec lens **CONFIRM-CLEAN** (2 advisory MIN). Break lens **ESCALATE** on one new MAJ — minted by
+wave 2. That takes *fix-waves-mint-defects* to **8/8**: wave 1 minted the findings wave 2 fixed,
+and wave 2 minted **MAJ-NEW** below.
+
+**MAJ-NEW — wave 2's own fix made the sweep cap lexicographic.** Closing the rb MIN-A TOCTOU
+required unioning three sid sources, and the union was built as a `set`, then taken as
+`sorted(_sweep)[-20:]`. `retired_sids` is **oldest-first**, so `[-cap:]` is "the 20 MOST RECENT" —
+the contract stated in `_cmd_kill_native`'s own docstring and still written in the comment directly
+above the bug — *only while insertion order survives*. Sorting by sid **text** discards whichever
+sids happen to sort low, and the newest retired sid is the **fork-steer parent**, which the Steering
+contract explicitly leaves roster-live. Repro: 24 retired `f0000000-*` sids plus a newest
+`0aaaaaaa-*` → the one session that might still be running is exactly the one truncated out.
+
+Fixed in the reviewer-verified shape: ordered concatenation (authoritative retired → snapshot
+retired → snapshot session → `extra_stop_sids`), `dict.fromkeys` dedup preserving first position,
+then the cap. The cap stays a **wall-time bound, not a correctness guarantee** — a live retired sid
+past 20 is still not swept by that invocation — but it now discards the oldest, as advertised.
+
+**rb MIN-E — a test seam that could not be used.** `_replace_with_retry(sleep=time.sleep)` binds the
+function object at *import*, so `monkeypatch.setattr(fleet.time, "sleep", …)` intercepts nothing and
+any timing assertion written that way passes vacuously. Both internal callers pass nothing, so the
+late bind is their only seam; the default is now `None`, resolved at call time.
+
+**rs MIN-D / rs MIN-E — two operator-surface omissions.** `SUP-RESPAWN-HALTED-UNVERIFIED` never
+stated what did *not* happen, while its sibling `SUP-RESPAWN-HALTED-B6` fires **after** the stop and
+tombstone — so "HALTED" had already taught operators that the body is down, which is the opposite of
+the truth here. It now says: no stop attempted, no tombstone, record not marked dead, body very
+likely still alive. And `SUP-KILL-UNVERIFIED` was **stderr-only** while both benign outcomes go to
+stdout, so a stdout-redirecting grep for `SUP-KILL-` found every outcome *except* the one warning
+that a supervisor may still be running. Decided: print it to **both** streams; rc 1 unchanged.
+
+**rb MIN-D — accepted trade-off, NO code change, queued for operator awareness.** The bounded
+`os.replace` retry sleeps **inside `fleet_lock`**. Worst case is ~1.5s, which is **30% of
+`LOCK_TIMEOUT_SECONDS`**; two retrying writes in sequence reach ~60%. A writer stalling on a win32
+sharing violation can therefore convert into a `FleetLockTimeout` for *unrelated* verbs waiting on
+the same lock. Accepted because the alternative it replaced is worse (an unretried write fails the
+verb outright, and for `_write_json_atomic` that means the up-to-3600s freeze in rb MIN-C), and
+because the collision window is milliseconds in practice. Recorded rather than fixed: moving the
+sleeps outside the lock would mean releasing and re-acquiring mid-write, which is a larger change
+than this escalation-scoped wave is allowed to make.
+
+---
+
 ## Ratification queue (operator)
 
 1. **Ruling 1** (respawn aborts on steer failure) and **ruling 2** (refuse kill of a limited-parked
@@ -780,3 +825,19 @@ now RED.
    and gets the boot ritual, *including* the carve-out from `commands/respawn.md:2` / SPEC:1513's
    same-name carry-over text (rs MIN-5).
 4. **`claim-nonce` §7 taxonomy row** — operator-owned, deliberately not edited by this slice.
+5. **The terminal-contract token family** — sign-off on the surface itself. Ruling 1 enumerated
+   **three** abort phases; across three waves the family grew to **six** tokens, each added for a
+   defensible reason but none of them ratified as a set:
+
+   | Token | Meaning | Stream | rc |
+   |---|---|---|---|
+   | `SUP-KILL-RELEASED` | arm 1: claim released, body stopped, record dead | stdout | 0 |
+   | `SUP-KILL-FROZEN` | arm 2: body stopped, claim frozen up to 3600s | stdout | 0 |
+   | `SUP-KILL-UNVERIFIED` | steer landed, record unreadable — **body may be alive** | stdout **+** stderr | 1 |
+   | `SUP-RESPAWN-ABORTED <phase>` | ruling 1's three phases; body untouched (steer-refused) or steer-delivered-only (T_release-expired) | stderr | 2 |
+   | `SUP-RESPAWN-HALTED-B6` | claim released, body stopped+tombstoned, successor withheld | stderr | 2 |
+   | `SUP-RESPAWN-HALTED-UNVERIFIED` | steer landed, nothing else done, body likely alive | stderr | 2 |
+
+   The operator decision is whether this is the intended surface — in particular the
+   `ABORTED` / `HALTED` / `UNVERIFIED` split, which encodes *how much was already done* and is what
+   an operator must read correctly under time pressure.
