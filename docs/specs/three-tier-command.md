@@ -902,13 +902,18 @@ supervisor claim-holder*, under any name, not on a static registry name.**
 
 **The predicate**, `[UNBUILT — owned by the three-tier build slice]`: a record is protected iff its
 `session_id` (or a member of its `retired_sids`) equals `supervisor/INCARNATION`'s
-`incarnation_id`-body — i.e. the record is the body that currently holds the claim — **and that body is
-roster-live**. Concretely: read `read_incarnation()`; protect the registry record whose live sid is the
+`incarnation_id`-body — i.e. the record is the body that currently holds the claim — **holder alone**.
+*(Amended 2026-07-24 by operator: the ratified text read "and that body is roster-live". That conjunct
+made this gate a no-op — `_archive_eligible` gate 3 already refuses every roster-live record — and
+failed to close this section's own disaster case, an idle/roster-gone claim-holder crossing the 24h
+TTL. Built as holder-alone in `5a8860b`; the divergence was disclosed in
+`docs/proposals/GOALS-tier-chain-proposal.md` rather than edited unilaterally by the build.)*
+Concretely: read `read_incarnation()`; protect the registry record whose sid is the
 claim's restamped `session_id` (claim-nonce restamps `session_id` on every validated `sup-*` write, so
 the claim tracks the acting body). Two directions, both mandatory:
 
 - **Protects the running manager under any name** (closes B1): a successor named `sup|<inc>|successor`
-  that holds the claim and is roster-live is exempt.
+  that holds the claim is exempt — roster-live or not.
 - **Stops protecting a dead husk** (closes B9, MINOR): a supervisor record that is roster-gone and whose
   body no longer holds the claim (seized/released away) is **not** exempt — it is an ordinary husk and
   the sweep removes it. A static-name exemption would have protected dead husks forever; the

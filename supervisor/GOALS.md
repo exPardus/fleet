@@ -37,14 +37,64 @@ crashes, not to rate limits, not to context exhaustion, not to reboots.
    document-quality — continuously shrink the gap between "power-user
    plugin" and "shippable Claude Code feature."
 
+## Tier policy (ratified 2026-07-23, `docs/specs/three-tier-command.md` §3)
+
+Roles bind to abstract tiers, never to model ids (§3.1); the resolver is the
+active provider namespace's daemon env (§3.3). Concrete names below are
+today's Anthropic resolution, illustrative only.
+
+| Role | Tier binding | Today's example |
+|---|---|---|
+| Interface session ("CEO") | top (advisory — fleet never launches it) | Fable 5 |
+| Supervisor | **preference chain `[top, second]`** (§3.5) | Fable 5 → Opus 4.8 |
+| Worker | second or third, supervisor's per-spawn call | Opus or Sonnet |
+
+- **The supervisor prefers the top tier and falls back to the second when the
+  top tier's usage limit is hit, returning once the reset horizon passes**
+  (§3.5). This chain is read from this file — policy, never a code constant.
+  A chain of length 1 is legal; a single-model provider collapses it.
+- **Workers are Opus or Sonnet, never Haiku** (§3.4). Haiku is a subagent
+  *inside* a worker session, never a worker. Until the spawn-time allowlist
+  guard is built this is doctrine, not a mechanical guard.
+- **Bypass acknowledgement (§10.2):** the supervisor runs under bypass
+  permission mode in the fleet repo — earned-privilege doctrine, stated here
+  before it ever runs unattended.
+
+<!-- fleet-tier-policy
+supervisor-tier-chain: top, second
+worker-tiers: second, third
+tier-model: top=opus, second=opus, third=sonnet
+-->
+
+## Context band (150–200k, supervisor AND workers — spec §11, §11.4)
+
+A freshness mechanism, not a budget (§11.5; third-docket cap doctrine
+2026-07-23: no fleet-enforced token/USD ceilings for anyone).
+
+- Self-monitor context occupancy. Entering the band (150k) → hand off at the
+  next wave boundary (supervisor) / next task boundary (worker, via respawn).
+- 200k is the hard ceiling: no new work; finish only already-dispatched
+  work (read-only reconciliation) and hand off. Specified as a fleet-enforced
+  dispatch refusal for the supervisor claim-holder (§11.3, `[UNBUILT]`).
+- The supervisor enforces the worker arm: respawn an over-band worker at its
+  next task boundary (§11.4).
+
+## Checkpoint cadence (spec §3.5.3(b))
+
+Checkpoint the working plan to the journal at every wave boundary
+(`fleet sup-checkpoint`). A usage-limit park is silent and the parked body
+can never be given a turn to write its plan out — the checkpoint cadence is
+the only bound on that loss (one wave, not the campaign).
+
 ## Cost frugality (rate-limit avoidance)
 
 Limits are hit by spend rate; frugality is the first line of defense, ahead
 of park-and-resume (standing goal 2 is the safety net, not the plan):
 
-- **Cheapest model that can do the job**: haiku for probes/mechanical work,
-  mid-tier for judgment, top-tier only where design weight demands it. Model
-  choice is per-task, never per-habit.
+- **Model choice follows the tier policy above** — per-role, per-task within
+  the worker tiers; never per-habit. (Supersedes the earlier
+  "cheapest-capable model" doctrine: planning quality is the scarce
+  resource, so the supervisor is deliberately top-tier.)
 - **Right-size the beat**: heartbeats are model turns and every beat spends
   tokens. Idle fleet ⇒ long beats or event-driven silence; beat rate scales
   with how fast the watched state actually changes, never faster.
@@ -65,8 +115,9 @@ of park-and-resume (standing goal 2 is the safety net, not the plan):
 - Operator gates stay: destructive operations, HALT-grade fallback
   ratification, spec promotion (no author self-promotion), M-B deploys with
   live workers, and edits to The Target above.
-- Budget discipline applies to the supervisor itself: per-incarnation cap,
-  beat-rate bound (spec §4).
+- The context band above applies to the supervisor itself; beat-rate bound
+  (spec §4) stays. (Per-incarnation spend caps retired by the third-docket
+  cap doctrine, 2026-07-23 — the plan's own usage limits are the cap.)
 - Fleet self-modification is an earned privilege: revert-on-red, adversarial
   review, C2 doctrine — every time.
 - Never mass-respawn on a suspicious roster; freeze and page the operator
@@ -74,6 +125,9 @@ of park-and-resume (standing goal 2 is the safety net, not the plan):
 
 ## Status
 
-Written 2026-07-14 by operator directive, ahead of M-A. Becomes live when the
-first supervisor incarnation boots (spec §4 boot ritual). Until then the
-acting manager session treats this file as its campaign north star.
+Written 2026-07-14 by operator directive, ahead of M-A; tier policy, context
+band, bypass acknowledgement, and checkpoint cadence folded in per the
+ratified three-tier spec (applied 2026-07-24 by operator authorization,
+in-session). Becomes live when the first supervisor incarnation boots (spec
+§4 boot ritual). Until then the acting manager session treats this file as
+its campaign north star.
