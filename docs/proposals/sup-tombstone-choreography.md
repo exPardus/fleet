@@ -567,10 +567,15 @@ Binding conditions:
 
 ## Build record — 2026-07-24, branch `build/sup-tombstone`
 
-Built red-first against §7. `tests/test_sup_tombstone.py` = 47 tests (§7's 12 + F1–F5 + the flagged
-gap below); `tests/integration/test_sup_tombstone_live.py` = the one end-to-end graceful kill,
-`FLEET_LIVE`-gated. Full suite green on **both** interpreters: `py -3.13` and the
-`fleet.MIN_PYTHON_VERSION` floor `py -3.10` — 2086 passed, 2 skipped on each.
+Built red-first against §7. `tests/test_sup_tombstone.py` (§7's 12 + F1–F5 + the flagged gap below),
+`tests/test_sup_tombstone_fixwave1.py` (the gate findings), and
+`tests/integration/test_sup_tombstone_live.py` (the one end-to-end graceful kill,
+`FLEET_LIVE`-gated). Full suite green on **both** interpreters: `py -3.13` and the
+`fleet.MIN_PYTHON_VERSION` floor `py -3.10` — **2113 passed, 11 skipped** on each.
+
+*(rs MIN-4 / rb MIN-6: the build slice's first draft of this line said "2 skipped" and the task brief
+said 8. The observed figure is **11** on both floors — 6 `test_native_pin` + 3 this slice's live file
++ 2 platform-gated. Corrected rather than left as a number nobody re-ran.)*
 
 **Stale premises this proposal carried, corrected at build time.** Every `fleet.py:` line number in
 §1–§6 is from the design worktree's HEAD and had drifted by ~180 lines (the file is now ~11.9k lines;
@@ -622,3 +627,94 @@ the built behaviour rather than deleted (`TestSupervisorLifecycleRouting`).
 sentence. The pinned receipts in that section were **not** re-pinned — a receipt is a claim about a
 commit, not about `HEAD`. SPEC §13/§18 milestone rows and the `claim-nonce` §7 taxonomy row remain
 owed and are **out of this slice's scope** (the taxonomy row is operator-owned).
+
+**Husk-respawn carve-out vs. the ratified carry-over text (rs MIN-5).** `commands/respawn.md:2` and
+three-tier SPEC:1513 both describe `respawn` as relaunching **under the same name** with the worker's
+journal + drained mailbox carried forward. The husk ruling above deviates from that on exactly one
+class of target — supervisor-**shaped** records — which get a fresh `sup|<launch-id>|boot` name and
+the boot ritual instead of the carry-over. The deviation is deliberate (a supervisor-shaped body with
+no boot ritual holds no claim and answers to none of the supervisor contracts) but it is **not**
+covered by any ratified text, and the ratified bodies were **not edited here**. Recorded as a
+carve-out and attached to the operator sign-off item below.
+
+---
+
+## Fix wave 1 — dual-lens gate findings (2026-07-24, commit after `fb8e5ab`)
+
+Spec lens `tomb-rs`: CONFORMS-WITH-FINDINGS 0C/3M/5m. Break lens `tomb-rb`: 1C/3M/6m
+(`state/journals/tomb-rb.md`). All thirteen fixed; every fix carries a mutate → RED → restore proof
+(10/10 RED).
+
+**CRIT-1 — the stop acted on a STALE sid, and the tests could not have caught it.** Both verbs
+captured `session_id` *before* the release steer. A steer delivered to an **idle** holder — the
+primary intended case, a planned context reset — takes `_cmd_send_native`'s fork-steer branch
+(RATIFIED G2b): `_restamp_after_steer` moves `session_id` to a NEW session and retires the old sid.
+Everything downstream then used the retired one. `kill` printed `SUP-KILL-RELEASED`, exited 0 and
+marked the record dead **while the live fork kept running**; `respawn`'s caller-side B6 gate polled
+the retired sid, passed vacuously, and ended with a dead-marked record holding a live session **plus**
+a fresh gen-0 body — two live supervisor bodies, the one invariant §10.4 exists to hold. A
+dead-record-with-live-session is also the rogue-session class `_cmd_kill_native`'s own ND-1 comment
+calls "a C1 CRITICAL, reached through the front door".
+
+The reason 47 tests missed it is worth recording: **every one of them stubbed `_cmd_send_native` into
+a no-op and seeded `status="working"`**, so the entire fork-steer branch was untested. The fix
+re-fetches the record after the steer resolves (both outcomes) and acts on the current sid union; the
+test doubles now call the production `_restamp_after_steer` rather than modelling it, because a double
+that drifts from the code it stands in for is how this happened.
+
+**MAJ-D — a binding condition that is physically unsatisfiable, narrowed honestly.** Ruling 1's
+condition 2 requires registry, claim file and record **byte-identical after abort**. That holds for
+the `steer-refused` phase and cannot hold for `T_release-expired`: the timeout only exists *because* a
+steer was delivered, and delivery either queues mail or fork-steers the body. The build appeared to
+satisfy it only because the steer was stubbed. Now:
+
+- `steer-refused` — byte-identical guarantee **unchanged** (F1 stands as ratified);
+- `T_release-expired` — a **precisely scoped effect set**: steer-delivery effects only (mail/steer
+  events, restamped sid) and **nothing** from the destructive tail (no tombstone, no dead-marking, no
+  claim-file change, no dispatch), each asserted;
+- the abort text no longer claims the body was untouched — it states that the steer landed and the
+  body may have forked.
+
+> **This narrowing is QUEUED FOR OPERATOR RATIFICATION. It is a correction to a binding 4–0
+> condition and is NOT itself ratified.** Presenting it as ratified would be exactly the kind of
+> quiet scope-move the condition was written to prevent.
+
+**MAJ-A/MAJ-B — two guards that failed OPEN.** The launch-in-flight guard ordinary `kill`/`respawn`
+apply was lost on both §10.4 routes (a pre-claim got dead-marked; the husk arm dispatched a *second*
+body) — restored. Ruling 2's limited-parked refusal missed a **null-horizon park**, the exact poisoned
+park its own message teaches about, and the ND4a **sid-union lag**; root cause is that
+`_holder_is_limited` answers the limit-transfer *boot* question, so it is left untouched and the
+refusal got its own union-resolved predicate.
+
+**MAJ-C** — council condition 5 names `sup-status` **and** the statusline; the human branch never
+printed the freeze-window note, so the surface an operator actually types after `SUP-KILL-FROZEN` was
+the silent one.
+
+**MINs** — corrupt `INCARNATION` now freezes (rc 3) on the real-pipe-name route too; §7 test 8 drives
+the real `_sweep_husks` and the archive→sweep handoff instead of only asserting predicates; the B6
+halt gets its own token **`SUP-RESPAWN-HALTED-B6`** (it is not side-effect-free, and ruling 1
+enumerated exactly three abort phases); the wait clamp is pinned with a poll that does *not* divide
+the timeout; F5 feeds its own `RELEASED` entry through the real journal reader (it previously passed
+`latest_entry=None` and pinned nothing of its own scenario); the vacuous released-branch precedence
+test is now non-vacuous; every injected `sleep` is paired with the clock it advances, so a regression
+fails fast instead of hanging 300s; and `save_registry` retries `os.replace` on `PermissionError`
+(bounded, exponential) — a live WinError 5 class that this build's two new lock-free readers widen.
+
+**Two of the wave's own tests were themselves theater, caught by the injections and rewritten:** the
+`save_registry` retry test grepped `inspect.getsource` and stayed green when the call was swapped for
+a bare `os.replace` (the docstring still named the helper), and the released-branch precedence test
+could not fail by construction. Both are now behavioural.
+
+---
+
+## Ratification queue (operator)
+
+1. **Ruling 1** (respawn aborts on steer failure) and **ruling 2** (refuse kill of a limited-parked
+   holder) — council 4–0 each, still pending operator ratification.
+2. **MAJ-D narrowing** of ruling 1's condition 2 — the `T_release-expired` phase asserts a scoped
+   effect set rather than byte-identity, because byte-identity is unsatisfiable once a steer has been
+   delivered. **New; not ratified.**
+3. **Husk-respawn build-time call** — every supervisor-shaped respawn routes through the choreography
+   and gets the boot ritual, *including* the carve-out from `commands/respawn.md:2` / SPEC:1513's
+   same-name carry-over text (rs MIN-5).
+4. **`claim-nonce` §7 taxonomy row** — operator-owned, deliberately not edited by this slice.
