@@ -50,6 +50,20 @@ verdicts recorded here are provisional decisions acted on during the run, queued
   CLAUDE_CONFIG_DIR descriptive-vs-gap verification.
 - Oracle-for-workers investigation: read-only subagent over plugin cache + worker logs/transcripts
   (installed version vs 0.2.0, injection presence, consult count + outcomes, stop-hook effects).
+  **REPORTED + ACTED ON**: mechanically working as intended for headless workers (injection
+  confirmed via SessionStart hook output in tt-build's transcript; agent dispatch works at
+  `model: fable`; Stop hook runs silently, zero production blocks, no interference with fleet's
+  own Stop hooks). Adoption light: 2 worker consults (~18 post-install workers never consulted) —
+  tt-build §7.2 (CONFIRMATORY ruling, but the sid-union bridge + disclose-framing adopted verbatim)
+  and ns-receipts (CONFIRMATORY, with one LOAD-BEARING ruling: the RATIFICATION-WITHHELD strings
+  cannot be honest receipts). Zero negative effects found; both consults ran async without costing
+  the worker a turn. Verdict: **earns its cost as a decision-quality tool, unproven as a rescue
+  tool** (no worker has consulted from a stuck state; Stop-hook net never fired in production —
+  cannot distinguish too-narrow detection from no-hedged-turn-ends on this data). Actioned: plugin
+  cache was STALE (0.1.1 loaded vs 0.2.0 released — workers ran a 253-line hook vs the hardened
+  517-line one) → `claude plugin update oracle@cc-oracle` run, now 0.2.0; sessions spawned from
+  now get the hardened detector. Manager live-verified the Stop hook fires interactively
+  (deliberate marker-phrase test — blocked turn-end with the dispatch-oracle demand, correct).
 
 ## Build queue (the launch-ready ordering, updated as it drains)
 
