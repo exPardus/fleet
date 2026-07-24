@@ -32,6 +32,27 @@ Soul = `supervisor/GOALS.md` (operator-owned) + `supervisor/JOURNAL.md`
 4. Reconcile workers from the bundle's fleet-status section (M-A interim:
    registry verdicts; the outcome discriminator arrives in M-B).
 
+### Gen-0 body via `fleet sup-spawn` (three-tier §10.1)
+
+The interface tier dispatches a fresh gen-0 supervisor body with
+`fleet sup-spawn --task <campaign>`: a pre-claim record named
+`sup|<launch-id>|boot`, cwd forced to the fleet home, mode default bypass
+(§10.2, GOALS acknowledgement warned-on), model resolved from the tier
+policy. The rendered first-turn task IS the boot ritual above, with the
+class-4 nonce doctrine baked in: `sup-boot` output is redirected to
+`state/tasks/<mapped-stem>.boot-bundle.txt` and the VERDICT/INCARNATION/
+NONCE lines are grepped from the file, never read off the stream tail.
+
+**The name segment is a launch id, not your incarnation id** (choreography
+design §1(5)): the `<launch-id>` in your worker name was minted at dispatch
+time and never changes; your incarnation is minted at boot by `sup-boot`,
+and `fleet sup-status` reads `supervisor/INCARNATION`, never your worker
+name. Addressing: verbs aimed at `supervisor` resolve through the claim to
+the holder's record (ruling 1(ii)); `kill`/`respawn` of the claim-holder
+refuse until §10.4's choreography is built — use `sup-release`/`sup-boot`
+for claim transitions (`interrupt` stays available: it kills the turn, not
+the claim).
+
 ## Watchtower beat
 
 Each beat: `fleet status` (runs the outcome discriminator + the silent-limit

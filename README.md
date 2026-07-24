@@ -2,7 +2,7 @@
 
 **Run a whole team of Claude Code sessions from one seat.** claude-fleet is a multi-session manager and orchestration layer for Claude Code: one manager session spawns, steers, and hands off multiple Claude Code agents running in parallel across every project on your machine — an agent fleet for long-running autonomous coding work, without babysitting a terminal.
 
-![tests](https://img.shields.io/badge/tests-1909%20passing-brightgreen) ![python](https://img.shields.io/badge/python-3.10%2B%20stdlib--only-blue) ![deps](https://img.shields.io/badge/dependencies-zero-blueviolet) ![platform](https://img.shields.io/badge/platform-Windows%20%2B%20Linux%20verified%20%7C%20macOS%20unreceipted-lightgrey) ![license](https://img.shields.io/badge/license-MIT-lightgrey)
+![tests](https://img.shields.io/badge/tests-2022%20passing-brightgreen) ![python](https://img.shields.io/badge/python-3.10%2B%20stdlib--only-blue) ![deps](https://img.shields.io/badge/dependencies-zero-blueviolet) ![platform](https://img.shields.io/badge/platform-Windows%20%2B%20Linux%20verified%20%7C%20macOS%20unreceipted-lightgrey) ![license](https://img.shields.io/badge/license-MIT-lightgrey)
 
 Workers aren't fire-and-forget processes — they're **durable Claude Code sessions on disk**. They survive crashes, reboots, and the manager's own death. You can steer one mid-turn, drop into any of them interactively through Claude Code's agents menu, reset one's context while keeping its work journal, or park one that hit a usage limit and resume it later. It's a single-file, stdlib-only Python CLI plus a few hooks — no daemon of its own, no framework, no dependencies.
 
@@ -129,7 +129,7 @@ Then open a Claude Code session, say *"become the fleet manager"*, and spawn you
 | `fleet kill` | Interrupt (if running) and mark a worker dead |
 | `fleet clean` / `archive` / `autoclean` | Tiered cleanup: remove dead workers, archive terminal ones, scheduled staleness sweep |
 | `fleet doctor` | Run the 23 fleet health checks |
-| `fleet sup-*` | Supervisor identity: `boot`, `heartbeat`, `checkpoint`, `status`, `handoff-{begin,complete,abort}` |
+| `fleet sup-*` | Supervisor identity: `boot`, `spawn`, `heartbeat`, `checkpoint`, `status`, `handoff-{begin,complete,abort}` |
 
 ## Roadmap
 
