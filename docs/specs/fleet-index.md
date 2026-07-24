@@ -54,12 +54,12 @@ The review found the defensible component bundled with two undefensible ones. Th
 | | Scope | Gate |
 |---|---|---|
 | **M1** | Indexer + shards + `--context` digest injection | Ready for build |
-| **M2** | `fleet q` (query + source slicing) | Blocked: needs a `worker-settings.template.json` permissions migration (§11) |
+| **M2** | `fleet q` (query + source slicing) | Ready for gate — permissions migration specified (§11.7); ships with the §11.9 adoption measurement and its revert trigger. Full M1+M2 build ordered by the operator 2026-07-24 (§1). |
 | **M3** | `map.md` repo-wide orientation, opt-in per spawn | Blocked: needs the break-even measurement M1 produces |
 
 **Why M1 alone is defensible:** it is opt-in twice over (per project via `init`, per spawn via `--context`), it adds no always-on cost, it needs no permissions change, and its value is measurable against §12.
 
-**Why `fleet q` is not in M1:** it cannot execute for a default worker today (§11).
+**Why `fleet q` is not in M1:** it cannot execute for a default worker until §11.7's migration lands, and its acceptance is a separate measurement (§11.9). Same branch, separate gates.
 
 **Why `map.md` is not in M1:** its economics are unproven at this repo's shape. `map.md` is file-granular — it answers "what files exist", which `Glob` answers for ~0 tokens — and does not answer "where is the symbol". `compose_prompt` is called on four paths, three of which are not spawns (`bin/fleet.py:2470` spawn, `3408` idle-send, `3545` respawn, `4028` fork-steer), and the idle-send path resumes the *same* session, so an always-on map is re-paid per **dispatch**, not per spawn. A steered worker would pay it repeatedly for zero new information.
 
@@ -207,19 +207,124 @@ ROADMAP requires checking the graveyard before proposing anything adjacent to a 
 | duplicates CLAUDE.md/MEMORY.md | Those are hand-written prose doctrine; this is generated structural fact. Different content, lifecycle and failure mode. |
 | sits in first-party's path | Conceded. Mitigations: the artifact is plain text usable by anything, and the halves are separable — if first-party ships code search, M2 is deleted and M1 survives, since first-party cannot know what fleet is about to spawn. |
 
-## 11. M2 gate — the permissions migration
+## 11. M2 — `fleet q`: symbol lookup and source slicing
 
-`fleet q` cannot run for a default worker today, and this is why M2 is not in M1:
+M2 is the **smaller reads** lever (§2) and the load-bearing half of the operator's §1 value case: the worker gets a symbol, not a file. Everything below reads the M1 shards (§5); M2 adds no artifact type.
+
+### 11.1 CLI contract
+
+```
+fleet q <query> [--src] [--path GLOB] [--kind KIND] [--limit N] [--no-refresh]
+fleet q --outline <path> [--no-refresh]
+```
+
+- **Index discovery:** walk up from the process cwd to the nearest directory containing `.fleet-index/`; that directory is the index root and all shard paths are relative to it. No flag overrides this — a worker's cwd is its registered `--dir` by construction (invariant 5), and the walk-up covers a worker that has cd'd into a subdirectory. No `.fleet-index/` by the filesystem root → exit 3 (§11.5).
+- `--path GLOB` — restrict hits to source paths matching the glob (fnmatch against the shard's source-relative path). Note the deliberate asymmetry with the `fleet index` family, where `--path DIR` names the project root: `q` never takes a root argument, so the flag name is free for its filter role, which is what a querying worker actually needs.
+- `--kind KIND` — restrict to one of `func | class | method | const | section` (§5).
+- `--limit N` — cap printed hits (default 20). Truncation is reported on stderr with the count of suppressed hits and a hint to narrow with `--path`/`--kind`; a truncated result is still exit 0.
+- `--src` — slice source (§11.4).
+- `--outline <path>` — print the digest rendering (§7) of that one file's shard: the same bytes `--context` would inject at spawn, on demand mid-task.
+- `--no-refresh` — never write anything (§11.3).
+
+### 11.2 Query semantics
+
+Queries run against the `name` column of every shard under the index root, after `--path`/`--kind` filtering. Three forms, resolved in this order:
+
+1. **Exact** — `fleet q compose_prompt` matches `name == "compose_prompt"`, case-sensitive.
+2. **Dotted tail** — a query with no `.` also matches the segment after the final `.`: `fleet q run` finds `Beta.run`. Workers usually know the method name, not its class qualification. Exact matches sort before tail matches.
+3. **Glob** — a query containing `*` or `?` is an fnmatch pattern against the full name: `fleet q "Beta.*"`. Glob queries skip forms 1–2.
+
+Within each form, hits sort by source path then line. Nothing ranks (§10): matching is exact or literal-glob, never scored. Substring hunting stays where it belongs — `grep -r <text> .fleet-index/symbols/` works today and needs no flag (§5).
+
+### 11.3 Staleness on the read path
+
+Before answering from any shard, `q` re-hashes that shard's source file and compares against the header — the §8 check, applied per query. The shards are consulted **only after** this verification, so a hit is always a claim about the file as it exists now:
+
+- **Stale, missing, corrupt, or truncated shard** → re-parse that one source file, atomically replace the shard (§6 discipline), then answer. Gitignored-only (§8) is what makes this unconditional: there is no tracked file to dirty, so the refuse-on-stale branch the old two-mode design needed does not exist.
+- **Source file deleted but shard present** (orphan) → the shard's hits are suppressed with a stderr note, and the refresh prunes the orphan shard.
+- **`--no-refresh`** → suppress all writes. Stale or orphaned shards have their hits **withheld**, each with a stderr staleness note — never served. This is the flag for contexts where any write is unacceptable (read-only mounts, mid-`git bisect`); the §8 rule that no path serves an unverified coordinate binds it too.
+
+The residual race is the gap between the hash check and the read inside one invocation. A write landing in that window can still yield a wrong slice — the same window a bare `Read` has, and closing it would take file locking (out of scope). The check narrows the wrong-coordinate exposure from "any time since the last index build" to "microseconds inside one call," and the only plausible writer inside a worker's worktree is that worker itself.
+
+### 11.4 Output format
+
+Default output is one pointer line per hit, tab-separated:
+
+```
+<path>:<line>-<end>	<kind>	<name>	<sig>
+src/api.py:40-62	method	Beta.run	(self, y) -> bool
+```
+
+(Synthetic, continuing §5's placeholder file — per finding 6's disposition, no example in this spec makes a coordinate claim about any real file.)
+
+**Token-density rationale.** A hit line is ~15–25 tokens: no repeated field names (the TSV argument of §5, carried to the output), no JSON envelope (2–3× the tokens for identical content), and the leading `path:line-end` is directly reusable — it is the exact argument shape for a windowed `Read` if the worker wants surrounding context, and the clickable reference format the harness already renders. Hits go to stdout; diagnostics (truncation, staleness notes) go to stderr, so a worker's tool result carries signal only.
+
+With `--src`, the query must resolve to **exactly one** symbol after filters. Then `q` prints the pointer line followed by lines `line..end` read from the source file on disk, verbatim:
+
+- **Coordinates from the index, bytes from the file** — source never comes from the shard; the index supplies the range, the file supplies truth. This is the token win: pointer-only output still leaves the worker to Read the file; the slice means it never does.
+- **A multi-hit `--src` prints the pointer list instead and exits 1** with "ambiguous — narrow with `--path`/`--kind`" on stderr. Dumping N slices is a token blowout in the exact place this tool exists to prevent one, so ambiguity resolves to pointers, never to concatenated source.
+
+### 11.5 Exit codes and failure modes
+
+| Code | Meaning |
+|---|---|
+| 0 | ≥1 hit printed (including a `--limit`-truncated list, and `--outline` success). |
+| 1 | Query understood, nothing served: no match; all matches withheld under `--no-refresh`; or ambiguous `--src` (pointers printed instead). stderr says which, and suggests `grep -r <query> .fleet-index/symbols/` then repo grep for the no-match case. |
+| 2 | Usage error (argparse). |
+| 3 | No index — no `.fleet-index/` found from cwd upward. Message: `no index — run 'fleet index init'`. |
+
+| Failure | Behaviour |
+|---|---|
+| No index | Exit 3. Worker falls back to Read/Grep — the §9 safety property, unchanged: `q` degrades to today's behaviour, never blocks work. |
+| Stale / corrupt / missing shard | Refresh then answer; withhold under `--no-refresh` (§11.3). |
+| Orphan shard (source deleted) | Hits suppressed, shard pruned on refresh (§11.3). |
+| Symbol not found | Exit 1, grep suggestion on stderr. |
+| Ambiguous `--src` | Pointer list, exit 1 (§11.4). |
+| Unreadable source at slice time | That hit degrades to its pointer line plus a stderr note; exit stays 0 if any hit printed. |
+
+### 11.6 Concurrency posture
+
+Sharding is the safety story (§4), restated against `q`'s read path:
+
+- `q` reads only the shards its filters select, and writes only the single shard it found stale — via the same tmp-file-plus-`os.replace` the build uses (§6). A reader observes the old shard or the new shard, never a torn one.
+- Two concurrent `q`s refreshing the same stale shard both parse the same source bytes and produce byte-identical shards (§12 criterion 2, reproducibility); whichever `os.replace` lands second overwrites with identical content. No lock is needed because the merge function is "last write of identical bytes wins."
+- Two workers in two worktrees have two independent `.fleet-index/` directories (gitignored, per-worktree; §8) and cannot interact at all.
+- `q` never touches fleet state — no registry read or write, no `fleet.lock`, no mailbox, no PID probe (invariant 9, §14). It is a pure function of the target repo's working tree plus its gitignored index.
+
+### 11.7 The permissions migration
+
+`fleet q` cannot run for a default worker today, and this was the original reason M2 split from M1:
 
 - Default spawn mode is `dontask` (`bin/fleet.py:8478`), not bypass.
 - `worker-settings.template.json` ships **no `permissions` block at all**.
 
-An unauthorised tool call under a non-bypass headless worker hangs on a permission prompt nobody can answer — the documented failure that motivated `--add-dir` for task files (`bin/fleet.py:7390-7395`). M2 therefore requires:
+An unauthorised tool call under a non-bypass headless worker hangs on a permission prompt nobody can answer — the documented failure that motivated `--add-dir` for task files (`bin/fleet.py:7390-7395`). M2 therefore ships, in one slice:
 
-1. `worker-settings.template.json` gains `permissions.allow: ["Bash(fleet q:*)"]` — subcommand-scoped, never `Bash(fleet:*)`, per the CLAUDE.md rule and the incident where a read-only slash command reached `fleet clean`.
-2. A `fleet init` re-run for every existing install, since that template is git-tracked and gated by the `instance-freshness` doctor check.
+1. **The template gains its first non-hook key.** `worker-settings.template.json` adds:
 
-M2 also carries the adoption risk: the preamble reaches the worker inside a tool result, competing against `Read`/`Grep`, which are in the system region and need no learning. M2 should ship with a measurement of whether workers actually call `fleet q`, and be reverted if they do not.
+   ```json
+   "permissions": { "allow": ["Bash(fleet q:*)"] }
+   ```
+
+   Subcommand-scoped, **never `Bash(fleet:*)`**. The wide grant is a kill grant: `fleet kill` and `fleet clean` are irreversible (CLAUDE.md), and the recorded incident where a *read-only slash command* reached `fleet clean` is the standing proof that any surface granted `fleet` wholesale eventually exercises its destructive subcommands. `Bash(fleet q:*)` is the only fleet grant the template will ever carry for workers; it deliberately excludes `fleet index:*` — lifecycle (init/build/update) is manager-side (§8), least privilege for the worker.
+
+2. **Reaching existing installs.** The template is git-tracked; the rendered `state/worker-settings.json` is instance state, and the `instance-freshness` doctor check already diffs the two. Migration is: pull, re-run `fleet init`, confirmed by `fleet doctor`. No new mechanism — the freshness gate exists precisely so template changes propagate this way. Workers already running keep their old settings until their next respawn (settings are read at session start); the migration needs no fleet-wide restart, it arrives with normal worker churn.
+
+3. **Interaction with the per-worktree `.claude/settings.local.json` doctrine** (spawn-etiquette, 2026-07-23). Under `dontask` — auto-deny-everything-unlisted — task-specific allowlists live in a `settings.local.json` dropped into the worker's cwd, with **deny rules as hard fences** (`Bash(git push:*)`). Permission sources union their allows and deny always wins, so the split of responsibilities is clean: the fleet-owned template carries exactly the one fleet-owned grant (`fleet q` works in every indexed project with zero per-spawn setup), per-task grants stay in the worktree file, and a worktree deny rule can still fence `q` off for a specific task — the template grant cannot override a local fence. Nothing in the doctrine moves; the template just stops shipping permissions-empty.
+
+### 11.8 Teaching the worker the tool exists
+
+A worker cannot call a tool it has never heard of, and `compose_prompt`'s preamble is fleet's only worker-facing channel. M2 adds **at most 4 preamble lines** teaching `fleet q` (name, one-line contract, `--src`, `--outline`) — rendered **only when the spawn target's `--dir` contains `.fleet-index/`** at compose time. Non-indexed projects pay zero tokens and see no mention of a tool that would exit 3.
+
+The honest adoption risk, unchanged from the review: these lines arrive inside a tool result (the task-file Read), competing against `Read`/`Grep`, which sit in the system region and need no learning. That is why §11.9 exists and why it carries a revert trigger, not a hope.
+
+### 11.9 Adoption measurement and revert criterion
+
+M2 is accepted or reverted on measurement, under the tokens-primary doctrine (operator sub-decision (b), §12):
+
+- **Primary metric:** `input_tokens` from Stop-hook outcome records, on a fixed task run as **≥3 paired A/B runs** — arm A: indexed project, teach lines present; arm B: same task, no index. Success = arm A's median total input tokens lower.
+- **Adoption check (diagnostic, volatile):** the §12 `tools/` transcript diagnostic additionally counts `fleet q` invocations per session. It is sunset-marked and decides nothing by itself — except one thing: **zero `fleet q` calls across all A-arm runs voids the token comparison** (whatever moved, it wasn't `q`) and is itself a revert trigger.
+- **Revert criterion:** zero adoption across ≥3 A-arm runs, **or** no median input-token reduction across ≥3 pairs → revert M2's worker-facing surface: remove the preamble teach lines and the template `permissions` entry (one more `fleet init` propagation), and record the revert as a dated `knowledge/lessons.md` entry. The `fleet q` subcommand itself may stay as manager-side tooling — it costs nothing per worker once the teach lines and grant are gone.
 
 ## 12. Testing and acceptance
 
@@ -230,6 +335,7 @@ Per SPEC §17, pytest for unit tests.
 - Staleness: a stale shard is refreshed then answered; corrupt and truncated shards take the same path; no path serves an unverified coordinate.
 - `compose_prompt`: composition order, `--context` resolution against `--dir`, unknown-path tolerance, and that absent `--context` changes the prompt not at all.
 - Config: absent config = defaults; `init` always writes the `.gitignore` entry; an unrecognised key (including the reserved `mode`) is a loud config error.
+- `fleet q` (M2): golden tests for the three query forms and their ordering (§11.2); `--src` slice byte-exact against the source file; stale/corrupt/missing shard refreshed before answering; `--no-refresh` withholds and writes nothing (assert directory mtimes untouched); orphan-shard suppression and pruning; exit-code contract 0/1/2/3 including ambiguous `--src`; index-root walk-up from a subdirectory; truncation via `--limit` still exits 0 with a stderr count.
 
 **Acceptance for M1 — tokens-primary** (operator sub-decision (b), 2026-07-23, `docs/OPERATOR-GATES.md`). The metric is the `input_tokens` delta already recorded per turn by the Stop-hook outcome record (`bin/hooks/stop_outcome.py:203-206`) — zero new parsing of the unversioned transcript format, and the token delta is what M3's go/no-go economically turns on. The criterion is:
 
@@ -270,12 +376,12 @@ Per ROADMAP, citing `docs/SPEC.md` §16.
 
 | # | Invariant | Status |
 |---|---|---|
-| 1 | daemonless launch | **Preserved.** `fleet index` is a short-lived CLI invocation. No resident process, no scheduler. |
+| 1 | daemonless launch | **Preserved.** `fleet index` and `fleet q` are short-lived CLI invocations. No resident process, no scheduler. |
 | 2 | exit-0 hooks | **Preserved.** No hook added or modified. Index updates are explicit CLI calls, not hooks — a `PostToolUse` or `post-merge` hook would index on every write regardless of review state. |
 | 4 | journal-injection-at-respawn | **Touched, preserved.** `compose_prompt` gains a source; the journal is still composed and retains final position on every path that carries one (§7). |
 | 5 | cwd-scoped dispatch | **Preserved.** `--context` resolves against the worker's `--dir`, introducing no second cwd frame (§7). |
 | 8 | platform-adapter-only OS branching | **Preserved.** All index paths go through `pathlib`; no OS branch, no new adapter method. |
-| 9 | one-state-many-views | **Touched, argued preserved.** The index is not fleet state: it derives from a target repo's source, not from the registry, and no fleet decision reads it. The registry remains the single state with `status_snapshot()` its one derivation. |
+| 9 | one-state-many-views | **Touched, argued preserved.** The index is not fleet state: it derives from a target repo's source, not from the registry, and no fleet decision reads it. `fleet q` likewise reads no registry, takes no `fleet.lock`, and probes no PID (§11.6). The registry remains the single state with `status_snapshot()` its one derivation. |
 
 Invariants 3 (mailbox), 6 (single-writer registry) and 7 (one live session per name) are untouched — no registry write, no dispatch-path change, no session lifecycle change.
 
