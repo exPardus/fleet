@@ -271,5 +271,29 @@ class TestMin5RegistryReplaceRetry:
                                       sleep=slept.append)
         assert slept == []
 
-    def test_save_registry_routes_through_the_retry(self):
-        assert "_replace_with_retry" in inspect.getsource(fleet.save_registry)
+    def test_save_registry_survives_a_transient_sharing_violation(self, native_home,
+                                                                  monkeypatch):
+        """Behavioural, NOT a source-text check.
+
+        The first version of this test asserted `"_replace_with_retry" in
+        inspect.getsource(fleet.save_registry)` -- and the fault injection
+        proved it was THEATER: swapping the call back to a bare `os.replace`
+        left it GREEN, because the function's own DOCSTRING still names the
+        helper. A test that greps the source cannot tell a call from a
+        mention."""
+        real = os.replace
+        calls = {"n": 0}
+
+        def flaky(src, dst):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise PermissionError(5, "Access is denied")
+            return real(src, dst)
+        monkeypatch.setattr(os, "replace", flaky)
+
+        data = fleet.load_registry()
+        data["workers"]["w1"] = fleet.new_worker_record(
+            "s1", "C:/x", "t", "bypass", dispatch_kind="bg")
+        fleet.save_registry(data)                    # must NOT raise
+        assert calls["n"] == 2                       # failed once, then landed
+        assert "w1" in fleet.load_registry()["workers"]
