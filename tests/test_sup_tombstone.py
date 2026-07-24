@@ -1204,12 +1204,14 @@ class TestF5CrashBetweenWrites:
         assert latest["inc"] == claim["incarnation_id"]
 
         # Holder still roster-live, so the generic roster-gone arm cannot be
-        # what answers here.
+        # what answers here. FIX WAVE 2, rs MIN-C: the fixture is deterministic,
+        # so assert the EXACT verdict -- a disjunction pins neither doctrine.
         verdict, reason = fleet.supervisor_claim_decision(
             fleet.read_incarnation(), live_sids={HOLDER_SID},
             latest_entry=latest, now=datetime.now(timezone.utc),
             caller_sid="somebody-else")
-        assert verdict in ("freeze", "refuse"), (verdict, reason)
+        assert verdict == "refuse", (verdict, reason)
+        assert "live" in reason, reason
 
     def test_a_fresher_incarnation_in_the_journal_refuses_the_boot(self, native_home):
         """The transition-in-flight branch itself, pinned: the journal names
