@@ -2297,6 +2297,75 @@ class TestContinuityExitCode:
         assert f"{fleet.SUPERVISOR_CONTINUITY_RC}=continuity" in text
 
 
+class TestMintedValueCliPresentation:
+    """Root cause of the test_a_valid_proof_still_exits_0 flake (pre-existing
+    on 31a21f8, failed ~once per full run, passed isolated and on re-run).
+
+    `mint_nonce()` is `secrets.token_urlsafe(32)` -- base64url, so ~1/64 of
+    minted values begin with "-". argparse's SPACE form reads such a value as
+    a missing argument (`--nonce -Ab...` -> "expected one argument" ->
+    SystemExit(2)): the CLI refuses a value fleet itself minted, printed, and
+    instructed the holder to present. Every test that round-trips a fresh
+    mint through `fleet.main` rolled that 1/64 die; the valid-proof test was
+    simply the one that lost that day.
+
+    Not test-only: `_render_successor_task` renders `--handoff-token <value>`
+    space-form into the successor's own boot command, so ~1/64 of handoffs
+    would die at successor boot with a usage error.
+
+    Fix: `main()` rewrites ["--nonce", V] -> ["--nonce=V"] (equals form takes
+    any value) for the minted-value flags before parsing."""
+
+    DASH_NONCE = "-" + "A" * 42  # token_urlsafe(32) shape, worst-case first byte
+
+    def _claim_with_live(self, value):
+        beat = fleet.now_iso()
+        fleet.write_incarnation({"incarnation_id": "inc-me", "session_id": "sid-me",
+                                 "claimed_at": beat, "heartbeat_at": beat,
+                                 "claimed_via": "fresh", "nonce_seq": 2,
+                                 "lineage_id": "lin-x",
+                                 "nonce_hash": fleet.nonce_digest(value)})
+
+    def test_a_leading_dash_nonce_is_presentable_in_space_form(self, sup_home, capsys):
+        self._claim_with_live(self.DASH_NONCE)
+        rc = fleet.main(["sup-checkpoint", "body", "--sid", "sid-me",
+                         "--nonce", self.DASH_NONCE])
+        assert rc == 0
+
+    def test_the_equals_form_still_works(self, sup_home, capsys):
+        self._claim_with_live(self.DASH_NONCE)
+        rc = fleet.main(["sup-checkpoint", "body", "--sid", "sid-me",
+                         f"--nonce={self.DASH_NONCE}"])
+        assert rc == 0
+
+    def test_the_normalizer_touches_only_minted_value_flags(self):
+        # --handoff-token is the successor-boot member of the class; every
+        # other token (positionals, equals form, other flags) passes through
+        # byte-for-byte.
+        argv = ["sup-boot", "--handoff-inc", "inc-x",
+                "--handoff-token", "-tok", "--nonce", "-non",
+                "--sid", "sid-1", "body", "--nonce=already"]
+        assert fleet._absorb_minted_flag_values(argv) == [
+            "sup-boot", "--handoff-inc", "inc-x",
+            "--handoff-token=-tok", "--nonce=-non",
+            "--sid", "sid-1", "body", "--nonce=already"]
+
+    def test_a_trailing_valueless_flag_is_left_for_argparse_to_refuse(self):
+        assert fleet._absorb_minted_flag_values(["sup-heartbeat", "--nonce"]) == [
+            "sup-heartbeat", "--nonce"]
+
+    def test_a_wrong_nonce_still_gets_the_loud_refusal_not_a_usage_error(
+            self, sup_home, capsys):
+        # §5.6: the refusal is the whole product. A stale/foreign value that
+        # happens to start with "-" must reach the continuity refusal (distinct
+        # exit code, escalation wording), never argparse's exit-2 usage error.
+        self._claim_with_live(fleet.mint_nonce())
+        rc = fleet.main(["sup-checkpoint", "body", "--sid", "sid-me",
+                         "--nonce", self.DASH_NONCE])
+        assert rc == fleet.SUPERVISOR_CONTINUITY_RC
+        assert "escalate" in capsys.readouterr().err
+
+
 class TestRejectionLogCompaction:
     """Break-gate residual F1 + §5.9. §5.9 withdrew the writer-side truncation
     (a read-modify-write forfeits `_atomic_append_bytes`'s guarantee, and the
