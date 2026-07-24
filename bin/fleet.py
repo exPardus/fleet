@@ -865,7 +865,7 @@ REGISTRY_REPLACE_RETRIES = 5
 REGISTRY_REPLACE_BACKOFF_SECONDS = 0.1
 
 
-def _replace_with_retry(tmp_name: str, dest: str, sleep=time.sleep) -> None:
+def _replace_with_retry(tmp_name: str, dest: str, sleep=None) -> None:
     """`os.replace` with a bounded retry on `PermissionError` only.
 
     FIX WAVE 1, rb MIN-5 (Windows). `os.replace` onto a path another process
@@ -884,6 +884,14 @@ def _replace_with_retry(tmp_name: str, dest: str, sleep=time.sleep) -> None:
     `PermissionError` ONLY, and bounded. An exhausted retry re-raises the
     ORIGINAL error rather than inventing a new one.
 
+    FIX WAVE 3, rb MIN-E -- `sleep` defaults to None and resolves to
+    `time.sleep` AT CALL TIME, not at def time. A `sleep=time.sleep` default
+    binds the function object when this module is imported, so a test that
+    monkeypatches `fleet.time.sleep` intercepts NOTHING and any timing
+    assertion built that way passes vacuously. Every internal caller
+    (`save_registry`, `_write_json_atomic`) passes nothing, so the late bind is
+    the only seam they have.
+
     FIX WAVE 2, rb MIN-B -- what this does NOT do, stated accurately because
     the first version of this docstring claimed the opposite. A genuinely wrong
     destination does not always fail fast: on win32 `os.replace` onto a
@@ -898,6 +906,8 @@ def _replace_with_retry(tmp_name: str, dest: str, sleep=time.sleep) -> None:
     running fleet. The other wrong-destination errors (missing parent ->
     `FileNotFoundError`, read-only volume -> `OSError`) are not
     `PermissionError` and DO fail on the first attempt."""
+    if sleep is None:
+        sleep = time.sleep          # rb MIN-E: resolved here, not at def time
     delay = REGISTRY_REPLACE_BACKOFF_SECONDS
     for attempt in range(REGISTRY_REPLACE_RETRIES):
         try:
@@ -5283,13 +5293,30 @@ def _cmd_kill_native(name: str, rec: dict, run=subprocess.run, which=shutil.whic
     # caller forces in -- minus the primary, already stopped above. A fork
     # minted between the caller's re-fetch and this lock appears in the
     # under-lock read; a record deleted since appears only in the snapshot.
-    _sweep = set(_authoritative.get("retired_sids") or [])
-    _sweep |= set(rec.get("retired_sids") or [])
-    _sweep |= {rec.get("session_id")} if rec.get("session_id") else set()
-    _sweep |= set(extra_stop_sids or ())
-    _sweep.discard(sid)
-    _sweep.discard(None)
-    retired_sids = sorted(_sweep)[-_RETIRED_SID_SWEEP_CAP:]
+    #
+    # FIX WAVE 3, MAJ-NEW: ORDER IS LOAD-BEARING, and wave 2 destroyed it. It
+    # built the union as a `set` and then took `sorted(_sweep)[-cap:]`, which
+    # made the cap LEXICOGRAPHIC: `retired_sids` is oldest-first, so `[-cap:]`
+    # is only "the 20 MOST RECENT" (this function's stated contract) if
+    # insertion order survives. Sorting by sid text drops whichever sids happen
+    # to sort low -- and the newest retired sid is the FORK-STEER PARENT, which
+    # the Steering contract leaves roster-live. Repro: 24 retired `f0000000-*`
+    # sids plus a newest `0aaaaaaa-*` -> the one that might still be running is
+    # exactly the one truncated out.
+    #
+    # So: ordered concatenation, order-preserving dedup, then the cap. The
+    # cap remains a WALL-TIME bound, not a correctness guarantee (a live
+    # retired sid past 20 is still not swept by this invocation) -- but it now
+    # discards the oldest, which is what the comment above always claimed.
+    _ordered = list(_authoritative.get("retired_sids") or [])
+    _ordered += list(rec.get("retired_sids") or [])
+    if rec.get("session_id"):
+        _ordered.append(rec["session_id"])
+    _ordered += list(extra_stop_sids or ())
+    # dict.fromkeys dedups on FIRST occurrence, so a sid's oldest position wins
+    # -- the under-lock record's ordering is authoritative where the two agree.
+    retired_sids = [s for s in dict.fromkeys(_ordered)
+                    if s and s != sid][-_RETIRED_SID_SWEEP_CAP:]
     for retired in retired_sids:
         if retired in other_current_sids:
             print(
@@ -5797,21 +5824,31 @@ def _cmd_kill_supervisor(args, name, rec, claim, *, run, which, sleep, clock) ->
         # print a clean-success terminal line. `SUP-KILL-RELEASED` ends the
         # operator's investigation; that is precisely the wrong outcome when a
         # fork we never saw may still be running.
-        print(f"SUP-KILL-UNVERIFIED {inc} -- the release steer was delivered, but "
-              f"{name}'s registry record could not be re-read afterwards (registry "
-              f"unreadable/quarantined, or the record was removed mid-choreography: "
-              f"releasing the claim drops the §7.2 gate-0 protection, so "
-              f"`autoclean`/`clean` may legitimately have taken it).\n"
-              f"Stopped every session this verb knew about "
-              f"({', '.join(sorted(s for s in snapshot_sids if s)) or 'none'}) -- but a "
-              f"steer to an IDLE body FORK-STEERS, and a fork minted after the last "
-              f"good read would not be in that set. DO NOT assume the supervisor is "
-              f"gone.\n"
-              f"Verify before booting a successor:\n"
-              f"  fleet doctor                 -- registry health / quarantine\n"
-              f"  claude agents                -- any live session for {name}?\n"
-              f"  fleet sup-status             -- did the release land?",
-              file=sys.stderr)
+        _unverified = (
+            f"SUP-KILL-UNVERIFIED {inc} -- the release steer was delivered, but "
+            f"{name}'s registry record could not be re-read afterwards (registry "
+            f"unreadable/quarantined, or the record was removed mid-choreography: "
+            f"releasing the claim drops the §7.2 gate-0 protection, so "
+            f"`autoclean`/`clean` may legitimately have taken it).\n"
+            f"Stopped every session this verb knew about "
+            f"({', '.join(sorted(s for s in snapshot_sids if s)) or 'none'}) -- but a "
+            f"steer to an IDLE body FORK-STEERS, and a fork minted after the last "
+            f"good read would not be in that set. DO NOT assume the supervisor is "
+            f"gone.\n"
+            f"Verify before booting a successor:\n"
+            f"  fleet doctor                 -- registry health / quarantine\n"
+            f"  claude agents                -- any live session for {name}?\n"
+            f"  fleet sup-status             -- did the release land?")
+        # FIX WAVE 3, rs MIN-E (decided): BOTH streams. The two benign outcomes
+        # (`SUP-KILL-RELEASED`, `SUP-KILL-FROZEN`) go to stdout, so an operator
+        # or script that redirects stdout and greps `SUP-KILL-` finds every
+        # outcome EXCEPT the one that says "a supervisor may still be running".
+        # A terminal-contract family whose most dangerous member is the only
+        # one missing from the obvious search is worse than no family at all.
+        # Duplicated rather than moved: this is a warning, and stderr is where
+        # a human watching the terminal expects it. rc stays 1.
+        print(_unverified)
+        print(_unverified, file=sys.stderr)
         return 1
 
     if arm2_reason is None:
@@ -5949,6 +5986,15 @@ def _cmd_respawn_supervisor(args, name, rec, claim, *, run, which, sleep, clock)
                 f"NOT DISPATCHING a successor: the caller-side B6 gate cannot confirm "
                 f"the old body is roster-gone, and a successor booted over a live one "
                 f"is the two-bodies hole §10.4 exists to close.\n"
+                # FIX WAVE 3, rs MIN-D: say what did NOT happen. The sibling
+                # SUP-RESPAWN-HALTED-B6 fires AFTER the stop and tombstone, so
+                # by the time an operator has seen that one, "HALTED" has
+                # taught them the body is already down. Here nothing was
+                # touched past the steer, and an operator who assumes
+                # otherwise leaves a live supervisor running.
+                f"NOTHING was done past the steer: no stop was attempted, no tombstone "
+                f"was written, and the record was NOT marked dead. The body is very "
+                f"likely still alive.\n"
                 f"The claim may already read `released`. Check, in this order:\n"
                 f"  fleet doctor                 -- registry health / quarantine\n"
                 f"  fleet sup-status             -- did the release land?\n"
