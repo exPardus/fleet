@@ -429,7 +429,8 @@ class TestBootRitualNonceDoctrine:
     def test_sup_boot_redirected_to_file(self, native_home, monkeypatch):
         name, text = self._task_text(native_home, monkeypatch)
         assert "sup-boot > " in text
-        assert "boot-bundle.txt 2>&1" in text
+        # Fix wave 2 NEW-2 quoted the redirect target; the pin follows.
+        assert 'boot-bundle.txt" 2>&1' in text
         # The redirect target is the MAPPED (pipe-free) stem -- a `|` in the
         # rendered command would be a shell pipe, not a filename.
         assert fleet.name_fs_stem(name) in text
