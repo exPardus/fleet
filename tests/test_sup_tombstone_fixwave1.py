@@ -131,10 +131,16 @@ class TestMajBLimitedPredicate:
             fleet.cmd_kill(_kill_args(), **_timed())
 
     def test_respawn_refuses_the_null_horizon_park_too(self, native_home):
+        """FIX WAVE 2, rs MIN-A: this asserted only the EXCEPTION CLASS, and
+        respawn's steer-refused abort raises the same class -- so it stayed
+        green under the MAJ-B revert and pinned nothing. Assert the message,
+        like the kill-side sibling."""
         _held_claim()
         _seed_pipe_worker(status="limited", limit_reset_at=None)
-        with pytest.raises(fleet.SupervisorLifecycleRefusal):
+        with pytest.raises(fleet.SupervisorLifecycleRefusal) as exc:
             fleet.cmd_respawn(_respawn_args(), **_timed())
+        assert "usage limit" in str(exc.value)
+        assert "SUP-RESPAWN-ABORTED" not in str(exc.value)
 
     def test_boot_predicate_is_untouched(self):
         """`_holder_is_limited` keeps BOTH conditions -- correct for the
@@ -182,6 +188,32 @@ class TestMajCSupStatusSurface:
         assert fleet.cmd_sup_status(self._args(json=True)) == 0
         payload = json.loads(capsys.readouterr().out)
         assert "seizable in" in payload["nag"]
+
+    def test_no_claim_state_is_not_duplicated(self, native_home, monkeypatch, capsys):
+        """FIX WAVE 2, rs MIN-B: wave 1 printed the nag unconditionally, so the
+        no-claim and released states got the same fact twice -- once
+        hand-written, once from the nag -- and the duplication was unpinned.
+        The note now prints inside the held-claim branch only."""
+        monkeypatch.setattr(fleet, "supervisor_goals_active", lambda: True)
+        assert fleet.cmd_sup_status(self._args()) == 0
+        out = capsys.readouterr().out.strip().splitlines()
+        assert len([ln for ln in out if "no claim" in ln]) == 1, out
+
+    def test_released_state_is_not_duplicated(self, native_home, monkeypatch, capsys):
+        monkeypatch.setattr(fleet, "supervisor_goals_active", lambda: True)
+        fleet.write_incarnation({"incarnation_id": "inc-held", "state": "released",
+                                 "released_at": fleet.now_iso(),
+                                 "released_by_sid": HOLDER_SID})
+        assert fleet.cmd_sup_status(self._args()) == 0
+        out = capsys.readouterr().out.strip().splitlines()
+        assert len([ln for ln in out if "released" in ln.lower()]) == 1, out
+
+    def test_a_live_holder_gets_no_freeze_note(self, native_home, monkeypatch, capsys):
+        monkeypatch.setattr(fleet, "supervisor_goals_active", lambda: True)
+        _held_claim()
+        _seed_pipe_worker(status="working")
+        assert fleet.cmd_sup_status(self._args()) == 0
+        assert "seizable in" not in capsys.readouterr().out
 
 
 class TestMin1CorruptClaimByRealName:
