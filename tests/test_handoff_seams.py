@@ -273,34 +273,43 @@ class TestPendingSuccessorsAreACollection(_HandoffBase):
 class TestPostJoinStampTargetsItsOwnEntry(_HandoffBase):
     """R8 / M07 -- the concurrency guard nearest the CRIT, untested in wave 1."""
 
-    def test_M07_the_join_stamps_our_entry_and_leaves_a_rivals_alone(
-            self, sup_home, capsys):
-        """A rival `sup-handoff-begin` appends its own entry while we are in
-        the roster-join window. Stamping "the pending entry" positionally, or
-        writing back the claim dict captured before the dispatch, puts OUR
-        sid on the RIVAL's entry (aiming abort at the wrong live session) or
-        drops the rival's entry entirely."""
+    def test_M07_the_join_stamps_our_entry_and_no_other(self, sup_home, capsys):
+        """Our attempt is the SECOND of three entries: an earlier attempt that
+        already joined sits before it, and a rival begin appends a third while
+        we are still inside the roster-join window.
+
+        The arrangement is the point. Stamping "the pending entry"
+        positionally puts OUR sid on the FIRST entry (`[0]`, overwriting a
+        different live successor's sid) or on the RIVAL's (`[-1]`), either way
+        aiming a later abort at the wrong live session; writing back the claim
+        dict captured before the dispatch drops the rival's entry entirely.
+        Only an exact `successor_inc` match survives all three."""
         self._hold()
+        _rc, gen = self._begin(capsys)                     # attempt 1: joined
+        first = self._incs()[0]
         rival = {"successor_inc": DEAD_INC_B, "successor_sid": None,
                  "task_file": "rival.md", "minted_at": fleet.now_iso()}
-        inner = _dispatch_then_roster()
+        inner = _dispatch_then_roster("succ0002-full", "succ0002")
         def run(argv, **kw):
             out = inner(argv, **kw)
             if "--bg" in argv:
-                # Between the claim write and the join: a second body appends.
+                # Between our claim write and our join: a third body appends.
                 claim = fleet.read_incarnation()
                 claim["handoff_pending"] = fleet.handoff_pending_entries(claim) + [rival]
                 fleet.write_incarnation(claim)
             return out
-        rc, _gen = self._begin(capsys, run=run)
+        rc, _gen = self._begin(capsys, run=run, nonce=gen)  # attempt 2: ours
         assert rc == 0
         entries = {e["successor_inc"]: e for e in
                    fleet.handoff_pending_entries(fleet.read_incarnation())}
-        assert DEAD_INC_B in entries, "the rival's entry was dropped by our claim write"
+        assert set(entries) >= {first, DEAD_INC_B}, \
+            "an entry was dropped by our claim write"
+        assert entries[first]["successor_sid"] == "succ0001-full", \
+            "our joined sid was stamped onto an earlier attempt's entry"
         assert entries[DEAD_INC_B]["successor_sid"] is None, \
             "our joined sid was stamped onto the rival's entry"
-        ours = [i for i in entries if i != DEAD_INC_B]
-        assert len(ours) == 1 and entries[ours[0]]["successor_sid"] == "succ0001-full"
+        ours = [i for i in entries if i not in (first, DEAD_INC_B)]
+        assert len(ours) == 1 and entries[ours[0]]["successor_sid"] == "succ0002-full"
 
 
 class TestAbortResolution(_HandoffBase):
