@@ -9152,8 +9152,16 @@ def supervisor_claim_decision(claim, live_sids: set, latest_entry, now=None,
     age = (now - beat).total_seconds()
     if age > stale_seconds:
         return ("seize", f"holder roster-gone, heartbeat stale ({age:.0f}s > {stale_seconds:.0f}s)")
+    # G-1 (overnight ledger 2026-07-24, operator-ordered): a council once
+    # seized on a stale snapshot of this verdict while the holder was still
+    # alive and closing out. The text names the hazard and the escalation
+    # ONLY -- never a lever that resolves it unilaterally (claim-nonce §5.7).
     return ("freeze", f"holder roster-gone but heartbeat fresh ({age:.0f}s <= "
-                      f"{stale_seconds:.0f}s) -- daemon restart? (G9). Never seize on ambiguity.")
+                      f"{stale_seconds:.0f}s) -- daemon restart? (G9). The holder may "
+                      f"still be LIVE and closing out: roster-gone does not imply dead. "
+                      f"This verdict is a snapshot -- re-verify at act time; if still "
+                      f"ambiguous, stop and escalate to the operator. "
+                      f"Never seize on ambiguity.")
 
 
 def _fetch_agents_roster(which=shutil.which, run=subprocess.run):
