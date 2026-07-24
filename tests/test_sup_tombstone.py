@@ -50,6 +50,8 @@ NOW = datetime(2026, 7, 24, 12, 0, 0, tzinfo=timezone.utc)
 SID = "aaaabbbb-1111-2222-3333-444455556666"
 HOLDER_SID = "99998888-7777-6666-5555-444433332222"
 NEW_SID = "eeeeffff-1111-2222-3333-444455556666"
+# The sid a fork-steer mints when the release steer lands on an IDLE holder.
+FORK_SID = "12345678-aaaa-bbbb-cccc-ddddeeeeffff"
 SUP_PIPE = "sup|inc-1|boot"
 SUP_NAME_RE = re.compile(r"^sup\|inc-\d{8}T\d{6}Z-[0-9a-f]{4}\|boot$")
 
@@ -116,6 +118,22 @@ def _stepping_sleep(clock, log=None):
     return _sleep
 
 
+def _timed(**over):
+    """The standard injected I/O for a §10.4 verb call.
+
+    FIX WAVE 1, rb MIN-4: ALWAYS pairs `sleep` with the `clock` that same
+    sleep advances. Injecting `sleep` alone leaves `_await_claim_released`
+    measuring against the real `time.monotonic`, so a regression that never
+    releases busy-spins for the full 300s T_release -- the suite HANGS instead
+    of failing, which is how two of these were first mistaken for timeouts.
+    Values of None are dropped so `_timed(run=None)` keeps the default."""
+    clock = _Clock()
+    base = dict(run=_fake_run_factory(), which=lambda _: "claude",
+                sleep=_stepping_sleep(clock), clock=clock)
+    base.update({k: v for k, v in over.items() if v is not None})
+    return base
+
+
 def _held_claim(sid=HOLDER_SID, **extra):
     claim = {"incarnation_id": "inc-held", "session_id": sid,
              "claimed_at": fleet.now_iso(), "heartbeat_at": fleet.now_iso(),
@@ -141,7 +159,9 @@ def _seed_pipe_worker(sid=HOLDER_SID, name=SUP_PIPE, status="working", **over):
     rec = fleet.new_worker_record(sid, "C:/x", "campaign text", "bypass",
                                   dispatch_kind="bg")
     rec["status"] = status
-    rec["native_short_id"] = sid[:8]
+    # A pre-claim (sid=None, dispatch still in flight) carries no short id --
+    # the launch-in-flight fixtures depend on being able to seed that shape.
+    rec["native_short_id"] = sid[:8] if sid else None
     rec["last_dispatch_at"] = _iso(NOW - timedelta(minutes=5))
     rec.update(over)
     data = fleet.load_registry()
@@ -172,22 +192,49 @@ def _respawn_args(name="supervisor", **kw):
     return SimpleNamespace(**base)
 
 
-def _releasing_send(monkeypatch, calls=None):
-    """A steer that behaves like a cooperative holder: the body runs
-    `sup-release`, so the claim flips to `released` before the poll."""
+def _fork_steer(name):
+    """Apply the REAL idle-path steer semantics to `name`'s record.
+
+    FIX WAVE 1, CRIT-1. `_cmd_send_native`'s idle branch is a FORK-STEER
+    (RATIFIED G2b): it dispatches a NEW session and `_restamp_after_steer`
+    moves `session_id` to the fork, pushing the old sid into `retired_sids`.
+    Every §10.4 test in the build slice stubbed the steer into a no-op and
+    seeded `status="working"` (the mailbox path), so the whole fork-steer
+    branch -- the PRIMARY intended case, a planned reset of an idle supervisor
+    -- was untested, and both verbs shipped acting on the retired sid.
+
+    Calls the production restamp rather than reimplementing it: a fake that
+    drifts from `_restamp_after_steer` would re-open exactly this hole."""
+    with fleet.fleet_lock():
+        data = fleet.load_registry()
+        r = data["workers"][name]
+        fleet._restamp_after_steer(r, FORK_SID, FORK_SID[:8])
+        r["status"] = "working"
+        fleet.save_registry(data)
+
+
+def _releasing_send(monkeypatch, calls=None, fork=True):
+    """A cooperative holder: it runs `sup-release`, so the claim flips to
+    `released` before the poll. `fork=True` (the default) is the IDLE path;
+    `fork=False` is the mid-turn mailbox path, which restamps nothing."""
     def fake_send(name, message, **kw):
         if calls is not None:
             calls.append((name, message))
+        if fork:
+            _fork_steer(name)
         _released_claim()
         return 0
     monkeypatch.setattr(fleet, "_cmd_send_native", fake_send)
 
 
-def _silent_send(monkeypatch, calls=None):
-    """A steer that is accepted but never produces a release (wedged body)."""
+def _silent_send(monkeypatch, calls=None, fork=True):
+    """A steer that is accepted but never produces a release (wedged body).
+    Still fork-steers on the idle path -- the delivery happened."""
     def fake_send(name, message, **kw):
         if calls is not None:
             calls.append((name, message))
+        if fork:
+            _fork_steer(name)
         return 0
     monkeypatch.setattr(fleet, "_cmd_send_native", fake_send)
 
@@ -287,21 +334,30 @@ class TestReleaseTimeoutConstant:
 # ---------------------------------------------------------------------------
 # §7 test 3 -- arm-1 happy path.
 # ---------------------------------------------------------------------------
+def _record_stops(monkeypatch, result=(True, "gone")):
+    stops = []
+
+    def fake_stop(sid, run=None, which=None, ref=None, timeout=None):
+        stops.append((sid, ref))
+        return result
+    monkeypatch.setattr(fleet, "_stop_native_session_status", fake_stop)
+    return stops
+
+
 class TestKillArmOne:
     def test_released_then_stopped_tombstoned_dead(self, native_home, monkeypatch, capsys):
+        """Mid-turn (mailbox) delivery: no restamp, so the pre-steer sid IS
+        the current one."""
         _held_claim()
         _seed_pipe_worker()
         sends = []
-        _releasing_send(monkeypatch, sends)
-        stops = []
+        _releasing_send(monkeypatch, sends, fork=False)
+        stops = _record_stops(monkeypatch)
 
-        def fake_stop(sid, run=None, which=None, ref=None, timeout=None):
-            stops.append((sid, ref))
-            return (True, "gone")
-        monkeypatch.setattr(fleet, "_stop_native_session_status", fake_stop)
-
+        clock = _Clock()
         rc = fleet.cmd_kill(_kill_args(), run=_fake_run_factory(),
-                            which=lambda _: "claude", sleep=lambda s: None)
+                            which=lambda _: "claude",
+                            sleep=_stepping_sleep(clock), clock=clock)
         assert rc == 0
         out = capsys.readouterr().out
         assert "SUP-KILL-RELEASED" in out
@@ -318,15 +374,105 @@ class TestKillArmOne:
                                                                monkeypatch, capsys):
         _held_claim()
         _seed_pipe_worker()
-        _releasing_send(monkeypatch)
-        monkeypatch.setattr(fleet, "_stop_native_session_status",
-                            lambda *a, **k: (False, "timeout"))
+        _releasing_send(monkeypatch, fork=False)
+        _record_stops(monkeypatch, (False, "timeout"))
+        clock = _Clock()
         rc = fleet.cmd_kill(_kill_args(), run=_fake_run_factory(),
-                            which=lambda _: "claude", sleep=lambda s: None)
+                            which=lambda _: "claude",
+                            sleep=_stepping_sleep(clock), clock=clock)
         assert rc == 1
         err = capsys.readouterr().err
         assert "B6" in err
         assert "sup-boot" in err
+
+
+# ---------------------------------------------------------------------------
+# FIX WAVE 1, CRIT-1 -- the steer LANDS on an idle holder and fork-steers it.
+# Both verbs must act on the CURRENT sid set, never the pre-steer snapshot.
+#
+# FI (mutate -> red -> restore): make `_refetch_holder_record` return its
+# `fallback` argument (the pre-steer snapshot). Confirmed RED on both verbs
+# 2026-07-24; restored.
+# ---------------------------------------------------------------------------
+class TestCrit1StaleSidStop:
+    def test_kill_stops_the_fork_not_the_retired_sid(self, native_home, monkeypatch,
+                                                     capsys):
+        _held_claim()
+        _seed_pipe_worker(status="idle")
+        _releasing_send(monkeypatch)                 # idle path -> fork-steer
+        stops = _record_stops(monkeypatch)
+        clock = _Clock()
+        rc = fleet.cmd_kill(_kill_args(), run=_fake_run_factory(),
+                            which=lambda _: "claude",
+                            sleep=_stepping_sleep(clock), clock=clock)
+        assert rc == 0
+        stopped = [s for s, _ref in stops]
+        # The LIVE fork is stopped with the full timeout (primary), and the
+        # retired parent is swept too -- the Steering contract leaves its
+        # roster entry alive.
+        assert stopped[0] == FORK_SID, stops
+        assert HOLDER_SID in stopped, stops
+        # The tombstone names the sid that was actually killed.
+        assert any(r["kind"] == "killed"
+                   for r in fleet.read_outcomes(SUP_PIPE, sid=FORK_SID))
+        assert "SUP-KILL-RELEASED" in capsys.readouterr().out
+
+    def test_kill_arm2_also_refetches(self, native_home, monkeypatch):
+        """The steer landed but the body never released: still a fork."""
+        _held_claim()
+        _seed_pipe_worker(status="idle")
+        _silent_send(monkeypatch)
+        stops = _record_stops(monkeypatch)
+        clock = _Clock()
+        fleet.cmd_kill(_kill_args(), run=_fake_run_factory(),
+                       which=lambda _: "claude",
+                       sleep=_stepping_sleep(clock), clock=clock)
+        assert [s for s, _ in stops][0] == FORK_SID, stops
+
+    def test_respawn_b6_gate_sees_the_live_fork(self, native_home, monkeypatch):
+        """The gate used to poll the RETIRED sid and pass vacuously, leaving a
+        dead-marked record with a live session PLUS a fresh gen-0 body."""
+        _held_claim()
+        _seed_pipe_worker(status="idle")
+        _releasing_send(monkeypatch)
+        _record_stops(monkeypatch)
+        # The fork is still on the roster -> the gate must halt.
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_sequence(
+            (True, [make_roster_entry(FORK_SID)]),
+            (True, [make_roster_entry(FORK_SID)]),
+        ))
+
+        def _boom(*a, **k):
+            raise AssertionError("successor dispatched while the fork was live")
+        monkeypatch.setattr(fleet, "dispatch_bg", _boom)
+        clock = _Clock()
+        with pytest.raises(fleet.SupervisorLifecycleRefusal) as exc:
+            fleet.cmd_respawn(_respawn_args(), run=_fake_run_factory(),
+                              which=lambda _: "claude",
+                              sleep=_stepping_sleep(clock), clock=clock)
+        assert "SUP-RESPAWN-HALTED-B6" in str(exc.value)
+        assert FORK_SID in str(exc.value)
+
+    def test_respawn_stops_the_fork_before_dispatching(self, native_home, monkeypatch):
+        _held_claim()
+        _seed_pipe_worker(status="idle")
+        _releasing_send(monkeypatch)
+        stops = _record_stops(monkeypatch)
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_sequence(
+            (True, []),
+            (True, []),
+            (True, [make_roster_entry(NEW_SID, status="idle")]),
+        ))
+        clock = _Clock()
+        rc = fleet.cmd_respawn(_respawn_args(), run=_fake_run_factory(),
+                               which=lambda _: "claude",
+                               sleep=_stepping_sleep(clock), clock=clock)
+        assert rc == 0
+        stopped = [s for s, _ in stops]
+        assert stopped[0] == FORK_SID, stops
+        assert HOLDER_SID in stopped, stops
+        assert any(r["kind"] == "stopped"
+                   for r in fleet.read_outcomes(SUP_PIPE, sid=FORK_SID))
 
 
 # ---------------------------------------------------------------------------
@@ -362,8 +508,7 @@ class TestKillArmTwo:
         _refusing_send(monkeypatch, "suspicious roster (G9)")
         monkeypatch.setattr(fleet, "_stop_native_session_status",
                             lambda *a, **k: (True, "gone"))
-        fleet.cmd_kill(_kill_args(), run=_fake_run_factory(),
-                       which=lambda _: "claude", sleep=lambda s: None)
+        fleet.cmd_kill(_kill_args(), **_timed())
         out = capsys.readouterr().out
         assert "SUP-KILL-FROZEN" in out
         assert "suspicious roster (G9)" in out
@@ -384,8 +529,7 @@ def _respawn_happy(native_home, monkeypatch, args=None, run=None):
         (True, [make_roster_entry(NEW_SID, status="idle")]),
     ))
     return fleet.cmd_respawn(args or _respawn_args(),
-                             run=run or _fake_run_factory(),
-                             which=lambda _: "claude", sleep=lambda s: None)
+                             **_timed(run=run))
 
 
 class TestRespawnSuccess:
@@ -515,20 +659,91 @@ class TestMatrixRefusals:
 # remove it.
 # ---------------------------------------------------------------------------
 class TestProtectionOrdering:
-    def test_arm2_corpse_is_protected_then_sweepable(self, native_home):
+    """FIX WAVE 1, rs MIN-2: the proposal's wording is that arm-2's corpse
+    SURVIVES `_sweep_husks` and `_archive_eligible` while the claim names it,
+    and that after a seizure BOTH mechanisms actually remove/archive it. The
+    build only asserted the predicates, which is a weaker claim than the one
+    §7 test 8 makes -- so this now drives the real sweep."""
+
+    def _roster_with_corpse(self, monkeypatch):
+        # The corpse's sid is still on the roster as a dead entry (no
+        # status/pid): what a stopped session looks like before reaping.
+        monkeypatch.setattr(
+            fleet, "_fetch_agents_roster",
+            lambda **_: (True, [make_roster_entry(HOLDER_SID, status=None, pid=None,
+                                                  state="completed")]))
+
+    def test_arm2_corpse_survives_the_real_sweep_while_it_holds_the_claim(
+            self, native_home, monkeypatch):
         _held_claim()
         _seed_pipe_worker(status="dead")
+        # Exactly what kill arm 2 leaves behind: dead record + "killed"
+        # tombstone, claim still naming the corpse.
+        fleet.write_tombstone_outcome(SUP_PIPE, HOLDER_SID, "killed")
+        self._roster_with_corpse(monkeypatch)
+        rmd = []
+        monkeypatch.setattr(fleet, "_rm_native_session_status",
+                            lambda sid, **k: (rmd.append(sid), (True, "gone"))[1])
+
         rec = fleet.load_registry()["workers"][SUP_PIPE]
         assert fleet._record_is_supervisor_claim_holder(rec) is True
         eligible, reason = fleet._archive_eligible(
             SUP_PIPE, rec, [], datetime.now(timezone.utc))
         assert eligible is False
         assert "claim-holder" in reason
-        # A fixture seizure moves the claim to a different body: the corpse is
-        # now an ordinary husk.
+
+        removed, _deferred = fleet._sweep_husks(dry_run=False)
+        assert HOLDER_SID not in rmd, rmd
+        assert all(HOLDER_SID not in str(r) for r in removed), removed
+
+    def test_after_a_seizure_both_mechanisms_release_the_corpse(
+            self, native_home, monkeypatch):
+        _held_claim()
+        _seed_pipe_worker(status="dead")
+        # Exactly what kill arm 2 leaves behind: dead record + "killed"
+        # tombstone, claim still naming the corpse.
+        fleet.write_tombstone_outcome(SUP_PIPE, HOLDER_SID, "killed")
+        self._roster_with_corpse(monkeypatch)
+        rmd = []
+        monkeypatch.setattr(fleet, "_rm_native_session_status",
+                            lambda sid, **k: (rmd.append(sid), (True, "gone"))[1])
+
+        # A successor seizes: the claim now names a different body.
         _held_claim(sid=NEW_SID, incarnation_id="inc-next")
-        rec2 = fleet.load_registry()["workers"][SUP_PIPE]
-        assert fleet._record_is_supervisor_claim_holder(rec2) is not True
+        rec = fleet.load_registry()["workers"][SUP_PIPE]
+        assert fleet._record_is_supervisor_claim_holder(rec) is not True
+
+        # (a) archive: the tombstoned corpse is now TTL-eligible.
+        old = _iso(datetime.now(timezone.utc) - timedelta(days=30))
+        rec = dict(rec, last_activity=old)
+        eligible, reason = fleet._archive_eligible(
+            SUP_PIPE, rec, [], datetime.now(timezone.utc))
+        assert eligible is True, reason
+
+        # (b) husk sweep, in the real B1/B9 order: archive stamps
+        # `archived_at`, which moves the sid from PROTECTED to merely OWNED,
+        # and only then does the sweep rm it. (While the corpse held the
+        # claim, gate 0 blocked step (a), so the sweep never got here at all
+        # -- that is the whole ordering guarantee.)
+        data = fleet.load_registry()
+        data["workers"][SUP_PIPE]["archived_at"] = fleet.now_iso()
+        fleet.save_registry(data)
+        fleet._sweep_husks(dry_run=False)
+        assert rmd == [HOLDER_SID], rmd
+
+    def test_the_claim_holder_is_never_swept_even_when_archived(self, native_home,
+                                                                monkeypatch):
+        """Belt-and-braces: the §7.2 holder-alone gate in `_sweep_husks` is
+        keyed on the CLAIM, not on `archived_at`, so even a record that
+        somehow acquired an archive stamp stays protected while it holds."""
+        _held_claim()
+        _seed_pipe_worker(status="dead", archived_at=fleet.now_iso())
+        self._roster_with_corpse(monkeypatch)
+        rmd = []
+        monkeypatch.setattr(fleet, "_rm_native_session_status",
+                            lambda sid, **k: (rmd.append(sid), (True, "gone"))[1])
+        fleet._sweep_husks(dry_run=False)
+        assert rmd == [], rmd
 
 
 # ---------------------------------------------------------------------------
@@ -542,7 +757,9 @@ class TestTombstoneKinds:
                 p.unlink()
             _held_claim()
             _seed_pipe_worker()
-            (_silent_send if silent else _releasing_send)(monkeypatch)
+            # Mid-turn path keeps the sid stable so this test stays about
+            # KINDS; the fork case is covered by TestCrit1StaleSidStop.
+            (_silent_send if silent else _releasing_send)(monkeypatch, fork=False)
             monkeypatch.setattr(fleet, "_stop_native_session_status",
                                 lambda *a, **k: (True, "gone"))
             clock = _Clock()
@@ -554,7 +771,9 @@ class TestTombstoneKinds:
 
     def test_respawn_writes_stopped(self, native_home, monkeypatch):
         assert _respawn_happy(native_home, monkeypatch) == 0
-        kinds = {r["kind"] for r in fleet.read_outcomes(SUP_PIPE, sid=HOLDER_SID)}
+        # The steer fork-steered the idle holder, so the tombstone names the
+        # sid respawn actually stopped -- the fork (CRIT-1).
+        kinds = {r["kind"] for r in fleet.read_outcomes(SUP_PIPE, sid=FORK_SID)}
         assert kinds == {"stopped"}
 
     def test_kinds_stay_within_the_declared_tuple(self):
@@ -626,8 +845,7 @@ class TestAbortLandingSpot:
         _seed_pipe_worker()
         _refusing_send(monkeypatch, "suspicious roster (G9)")
         with pytest.raises(fleet.SupervisorLifecycleRefusal) as exc:
-            fleet.cmd_respawn(_respawn_args(), run=_fake_run_factory(),
-                              which=lambda _: "claude", sleep=lambda s: None)
+            fleet.cmd_respawn(_respawn_args(), **_timed())
         assert "SUP-RESPAWN-ABORTED steer-refused:" in str(exc.value)
         assert "suspicious roster (G9)" in str(exc.value)
 
@@ -646,8 +864,7 @@ class TestAbortLandingSpot:
                               sleep=_stepping_sleep(clock), clock=clock)
         _released_claim()                       # the late async release lands
         with pytest.raises(fleet.SupervisorLifecycleRefusal) as exc:
-            fleet.cmd_respawn(_respawn_args(), run=_fake_run_factory(),
-                              which=lambda _: "claude", sleep=lambda s: None)
+            fleet.cmd_respawn(_respawn_args(), **_timed())
         assert exc.value.rc == 2
         assert "released" in str(exc.value)
         assert "sup-spawn" in str(exc.value)
@@ -689,14 +906,36 @@ class TestFreezeWindowStatusSurface:
         assert _remaining_of(first) - _remaining_of(later) == 300
 
     def test_released_branch_still_wins(self, native_home, monkeypatch):
-        """The new branch must COEXIST with CN:1688-1701's released branch,
-        never shadow it: a released claim has no heartbeat at all."""
+        """FIX WAVE 1, rb MIN-3. This was VACUOUS as written: hoisting the
+        freeze branch above the released branch left it green, because
+        `_claim_holder_dead_note` returns None for a released claim BY
+        CONSTRUCTION (`_record_is_supervisor_claim_holder` answers False on a
+        released claim, so no holder is ever found).
+
+        Rewritten as a real precedence assertion: force the note function to
+        return a sentinel, so the only thing that can keep it out of the
+        output is the released branch returning FIRST. Now a hoist goes red."""
         self._goals(native_home)
         monkeypatch.setattr(fleet, "supervisor_goals_active", lambda: True)
+        monkeypatch.setattr(fleet, "_claim_holder_dead_note",
+                            lambda claim, inc, age: "SENTINEL-FREEZE-NOTE")
         _released_claim()
         _seed_pipe_worker(status="dead")
         line = fleet.supervisor_status_line(now=NOW)
         assert "released" in line
+        assert "SENTINEL-FREEZE-NOTE" not in line
+
+    def test_stale_heartbeat_branch_still_wins(self, native_home, monkeypatch):
+        """Same precedence question one branch down: a claim already past the
+        stale threshold is seizable NOW, so the "seizable in <remaining>s"
+        countdown must not claim otherwise."""
+        self._goals(native_home)
+        monkeypatch.setattr(fleet, "supervisor_goals_active", lambda: True)
+        _held_claim(heartbeat_at=_iso(
+            NOW - timedelta(seconds=fleet.SUPERVISOR_CLAIM_STALE_SECONDS + 60)))
+        _seed_pipe_worker(status="dead")
+        line = fleet.supervisor_status_line(now=NOW)
+        assert "stale" in line
         assert "seizable in" not in line
 
     def test_live_holder_is_unaffected(self, native_home, monkeypatch):
@@ -741,8 +980,7 @@ class TestF1SteerRefused:
         before_registry = _registry_bytes()
         before_claim = _claim_bytes()
         with pytest.raises(fleet.SupervisorLifecycleRefusal):
-            fleet.cmd_respawn(_respawn_args(), run=_fake_run_factory(),
-                              which=lambda _: "claude", sleep=lambda s: None)
+            fleet.cmd_respawn(_respawn_args(), **_timed())
         assert _registry_bytes() == before_registry
         assert _claim_bytes() == before_claim
         assert fleet.read_outcomes(SUP_PIPE, sid=HOLDER_SID) == []
@@ -760,8 +998,7 @@ class TestF1SteerRefused:
         monkeypatch.setattr(fleet, "_cmd_kill_native", _boom)
         monkeypatch.setattr(fleet, "_cmd_kill_supervisor", _boom)
         with pytest.raises(fleet.SupervisorLifecycleRefusal):
-            fleet.cmd_respawn(_respawn_args(), run=_fake_run_factory(),
-                              which=lambda _: "claude", sleep=lambda s: None)
+            fleet.cmd_respawn(_respawn_args(), **_timed())
 
 
 # ---------------------------------------------------------------------------
@@ -782,22 +1019,78 @@ class TestF2BoundedWait:
         assert sum(slept) == fleet.SUPERVISOR_RELEASE_TIMEOUT_SECONDS
         assert clock.t == fleet.SUPERVISOR_RELEASE_TIMEOUT_SECONDS
 
-    def test_respawn_aborts_at_exactly_t_release_and_is_byte_identical(
+    def test_respawn_aborts_at_exactly_t_release_with_a_scoped_effect_set(
             self, native_home, monkeypatch):
+        """FIX WAVE 1, MAJ-D. Ruling 1's condition 2 asks for byte-identical
+        state after ANY abort. On the `T_release-expired` phase that is
+        PHYSICALLY UNSATISFIABLE: the steer was delivered before the timeout
+        could exist, and a delivered steer either queues mail or fork-steers
+        the body. The build only appeared to satisfy it because the steer was
+        stubbed into a no-op.
+
+        So this asserts the honest contract instead -- steer-DELIVERY effects
+        only, and NOTHING from the destructive tail. Queued for operator
+        ratification as a narrowing of a binding condition; see the proposal's
+        Build record."""
         _held_claim()
-        _seed_pipe_worker()
+        _seed_pipe_worker(status="idle")
         _silent_send(monkeypatch)
-        before_registry = _registry_bytes()
         before_claim = _claim_bytes()
         slept = []
         clock = _Clock()
-        with pytest.raises(fleet.SupervisorLifecycleRefusal):
+        stops = _record_stops(monkeypatch)
+
+        def _boom(*a, **k):
+            raise AssertionError("dispatch reached from an aborted respawn")
+        monkeypatch.setattr(fleet, "dispatch_bg", _boom)
+
+        with pytest.raises(fleet.SupervisorLifecycleRefusal) as exc:
             fleet.cmd_respawn(_respawn_args(), run=_fake_run_factory(),
                               which=lambda _: "claude",
                               sleep=_stepping_sleep(clock, slept), clock=clock)
         assert sum(slept) == fleet.SUPERVISOR_RELEASE_TIMEOUT_SECONDS
-        assert _registry_bytes() == before_registry
-        assert _claim_bytes() == before_claim
+
+        # PERMITTED effect set: steer delivery only.
+        rec = fleet.load_registry()["workers"][SUP_PIPE]
+        assert rec["session_id"] == FORK_SID          # restamped by the steer
+        assert HOLDER_SID in rec["retired_sids"]
+
+        # FORBIDDEN: everything in the destructive tail.
+        assert rec["status"] != "dead"
+        assert _claim_bytes() == before_claim         # no claim-file change
+        assert fleet.read_outcomes(SUP_PIPE, sid=FORK_SID) == []
+        assert fleet.read_outcomes(SUP_PIPE, sid=HOLDER_SID) == []
+        assert stops == []                            # nothing was stopped
+        assert set(fleet.load_registry()["workers"]) == {SUP_PIPE}   # no successor
+
+        # And the message says so, rather than claiming the body is untouched.
+        msg = str(exc.value)
+        assert "steer WAS DELIVERED" in msg
+        assert "FORK-STEERED" in msg
+        assert "no tombstone" in msg
+
+    def test_the_final_sleep_is_clamped_to_the_remaining_budget(self, native_home,
+                                                                monkeypatch):
+        """FIX WAVE 1, rb MIN-1. The clamp `sleep(min(poll, timeout - elapsed))`
+        was UNPINNED: the shipped poll (5.0) divides T_release (300.0) exactly,
+        so replacing the clamp with a bare `sleep(poll)` left F2 green. With a
+        poll that does NOT divide the timeout, an unclamped loop overshoots.
+
+        Verified RED with the clamp removed (`sleep(poll)`): total wait 308.0
+        != 300.0. Restored."""
+        monkeypatch.setattr(fleet, "SUPERVISOR_RELEASE_POLL_SECONDS", 7.0)
+        _held_claim()
+        clock = _Clock()
+        slept = []
+        released = fleet._await_claim_released(
+            timeout=fleet.SUPERVISOR_RELEASE_TIMEOUT_SECONDS,
+            poll=fleet.SUPERVISOR_RELEASE_POLL_SECONDS,
+            clock=clock, sleep=_stepping_sleep(clock, slept))
+        assert released is False
+        assert sum(slept) == fleet.SUPERVISOR_RELEASE_TIMEOUT_SECONDS
+        assert clock.t == fleet.SUPERVISOR_RELEASE_TIMEOUT_SECONDS
+        # The overshoot the clamp exists to prevent: 43 polls of 7.0 = 301.0.
+        assert slept[-1] < 7.0, slept[-3:]
 
     def test_release_midway_returns_early(self, native_home, monkeypatch):
         """Not an unbounded wait AND not a fixed one: a release at t=15 is
@@ -847,8 +1140,7 @@ class TestF3B6CallerGate:
             raise AssertionError("successor dispatched past the B6 gate")
         monkeypatch.setattr(fleet, "dispatch_bg", _boom)
         with pytest.raises(fleet.SupervisorLifecycleRefusal) as exc:
-            fleet.cmd_respawn(_respawn_args(), run=_fake_run_factory(),
-                              which=lambda _: "claude", sleep=lambda s: None)
+            fleet.cmd_respawn(_respawn_args(), **_timed())
         assert "B6" in str(exc.value)
         assert HOLDER_SID in str(exc.value)
 
@@ -858,8 +1150,7 @@ class TestF3B6CallerGate:
         _releasing_send(monkeypatch)
         monkeypatch.setattr(fleet, "_stop_native_session_status",
                             lambda *a, **k: (False, "timeout"))
-        rc = fleet.cmd_kill(_kill_args(), run=_fake_run_factory(),
-                            which=lambda _: "claude", sleep=lambda s: None)
+        rc = fleet.cmd_kill(_kill_args(), **_timed())
         assert rc == 1
         assert "B6" in capsys.readouterr().err
 
@@ -880,8 +1171,7 @@ class TestF4DispatchFailureRollback:
             raise fleet.NativeDispatchError("daemon refused")
         monkeypatch.setattr(fleet, "dispatch_bg", _explode)
         with pytest.raises(fleet.FleetCliError) as exc:
-            fleet.cmd_respawn(_respawn_args(), run=_fake_run_factory(),
-                              which=lambda _: "claude", sleep=lambda s: None)
+            fleet.cmd_respawn(_respawn_args(), **_timed())
         assert "daemon refused" in str(exc.value)
         # The durable recovery point: the claim is RELEASED, boot-ready.
         assert fleet.read_incarnation()["state"] == "released"
@@ -895,16 +1185,48 @@ class TestF4DispatchFailureRollback:
 # F5 -- RELEASED journalled, then death before write_incarnation.
 # ---------------------------------------------------------------------------
 class TestF5CrashBetweenWrites:
-    def test_next_boot_freezes_on_the_mismatch(self, native_home):
+    """FIX WAVE 1, rb MIN-2. The build's F5 wrote a `RELEASED` entry and then
+    passed `latest_entry=None`, so the `freeze` it asserted came from the
+    GENERIC "holder roster-gone but heartbeat fresh" arm and the test pinned
+    nothing about the F5 scenario -- deleting the transition-in-flight branch
+    left it green. It now feeds its own journal entry through the real reader,
+    and the roster-gone arm is neutralised (the holder IS live, which is the
+    actual crash-between-writes shape: the body journalled RELEASED and died
+    or hung before `write_incarnation`)."""
+
+    def test_journal_says_released_while_the_claim_is_still_live_shaped(self, native_home):
         beat = datetime.now(timezone.utc) - timedelta(seconds=30)
         claim = _held_claim(heartbeat_at=_iso(beat))
-        # The journal says released; the claim is still live-shaped.
         fleet.supervisor_journal_append("RELEASED", claim["incarnation_id"],
                                         HOLDER_SID, "released cleanly: crash test")
+        latest = fleet.supervisor_journal_latest()
+        assert latest is not None and latest["kind"] == "RELEASED"
+        assert latest["inc"] == claim["incarnation_id"]
+
+        # Holder still roster-live, so the generic roster-gone arm cannot be
+        # what answers here.
         verdict, reason = fleet.supervisor_claim_decision(
-            fleet.read_incarnation(), live_sids=set(), latest_entry=None,
+            fleet.read_incarnation(), live_sids={HOLDER_SID},
+            latest_entry=latest, now=datetime.now(timezone.utc),
+            caller_sid="somebody-else")
+        assert verdict in ("freeze", "refuse"), (verdict, reason)
+
+    def test_a_fresher_incarnation_in_the_journal_refuses_the_boot(self, native_home):
+        """The transition-in-flight branch itself, pinned: the journal names
+        an incarnation the claim does not, with a timestamp AFTER the claim's
+        heartbeat. Verdict is `refuse` (not `freeze`) -- a fresher checkpoint
+        is evidence, not ambiguity. Deleting the branch goes red here."""
+        beat = datetime.now(timezone.utc) - timedelta(seconds=30)
+        _held_claim(heartbeat_at=_iso(beat))
+        fleet.supervisor_journal_append("RELEASED", "inc-fresher", HOLDER_SID,
+                                        "a newer incarnation journalled first")
+        latest = fleet.supervisor_journal_latest()
+        assert latest["inc"] == "inc-fresher"
+        verdict, reason = fleet.supervisor_claim_decision(
+            fleet.read_incarnation(), live_sids=set(), latest_entry=latest,
             now=datetime.now(timezone.utc))
-        assert verdict == "freeze", (verdict, reason)
+        assert verdict == "refuse", (verdict, reason)
+        assert "inc-fresher" in reason, reason
 
 
 # ---------------------------------------------------------------------------
@@ -926,8 +1248,7 @@ class TestHuskRespawnGetsTheBootRitual:
             (True, [make_roster_entry(NEW_SID, status="idle")]),
         ))
         rc = fleet.cmd_respawn(_respawn_args(name=SUP_PIPE),
-                               run=_fake_run_factory(),
-                               which=lambda _: "claude", sleep=lambda s: None)
+                               **_timed())
         assert rc == 0
         workers = fleet.load_registry()["workers"]
         new_names = [n for n in workers if n != SUP_PIPE]
@@ -947,8 +1268,7 @@ class TestHuskRespawnGetsTheBootRitual:
             (True, [make_roster_entry(NEW_SID, name="w1", status="idle")]),
         ))
         rc = fleet.cmd_respawn(_respawn_args(name="w1"),
-                               run=_fake_run_factory(),
-                               which=lambda _: "claude", sleep=lambda s: None)
+                               **_timed())
         assert rc == 0
         body = fleet.task_file_path("w1").read_text(encoding="utf-8")
         assert "JOURNAL-SENTINEL-88" in body

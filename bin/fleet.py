@@ -861,8 +861,45 @@ def load_registry() -> dict:
     return data
 
 
+REGISTRY_REPLACE_RETRIES = 5
+REGISTRY_REPLACE_BACKOFF_SECONDS = 0.1
+
+
+def _replace_with_retry(tmp_name: str, dest: str, sleep=time.sleep) -> None:
+    """`os.replace` with a bounded retry on `PermissionError` only.
+
+    FIX WAVE 1, rb MIN-5 (Windows). `os.replace` onto a path another process
+    has open fails with WinError 5/32 -- observed live crashing `cmd_kill`'s
+    own `save_registry`. POSIX rename has no such failure mode, so this is a
+    pure win32 mitigation and costs nothing elsewhere.
+
+    The §10.4 build WIDENED that window on purpose-built hot paths, which is
+    why the retry lands now: `_await_claim_released` polls INCARNATION up to
+    60x per verb against the holder's own `write_incarnation`, and
+    `_claim_holder_dead_note` added a registry read to `supervisor_status_line`
+    -- which runs in the SessionStart hook of EVERY Claude Code session on this
+    box. Readers are safe and never quarantine; each merely widens the
+    writer-side collision window.
+
+    `PermissionError` ONLY, and bounded: a genuinely wrong destination (a
+    directory, a missing parent, a read-only volume) must still fail fast and
+    loud rather than after five sleeps, and an exhausted retry re-raises the
+    original error rather than inventing a new one."""
+    delay = REGISTRY_REPLACE_BACKOFF_SECONDS
+    for attempt in range(REGISTRY_REPLACE_RETRIES):
+        try:
+            os.replace(tmp_name, dest)
+            return
+        except PermissionError:
+            if attempt == REGISTRY_REPLACE_RETRIES - 1:
+                raise
+            sleep(delay)
+            delay *= 2
+
+
 def save_registry(data: dict) -> None:
-    """Atomically write state/fleet.json (temp file + os.replace)."""
+    """Atomically write state/fleet.json (temp file + os.replace, with a
+    bounded win32 sharing-violation retry -- see `_replace_with_retry`)."""
     d = state_dir()
     d.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=str(d), prefix=".fleet.", suffix=".tmp")
@@ -870,7 +907,7 @@ def save_registry(data: dict) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
             f.write("\n")
-        os.replace(tmp_name, str(registry_path()))
+        _replace_with_retry(tmp_name, str(registry_path()))
     except BaseException:
         try:
             os.unlink(tmp_name)
@@ -5431,9 +5468,21 @@ def _supervisor_lifecycle_target(verb, name):
         return None
     if rec is None:
         return None
-    holder = _record_is_supervisor_claim_holder(rec)
+    # FIX WAVE 1, MIN-1 (spec lens): read the claim's STATE first, not through
+    # `_record_is_supervisor_claim_holder`. That predicate calls
+    # `read_incarnation`, which collapses corrupt to None and so answers False
+    # -- routing a possible holder addressed by its REAL pipe name onto the
+    # ordinary kill path on an unreadable claim. Corrupt must freeze (rc 3)
+    # however the target was addressed, exactly as it does for the logical name.
+    state, claim = read_incarnation_status()
+    if state == "corrupt" and _is_supervisor_shaped(name):
+        raise SupervisorLifecycleRefusal(
+            f"{verb}: refusing -- {name} is supervisor-shaped and "
+            f"supervisor/INCARNATION is unreadable, so holdership cannot be "
+            f"determined. Never decide blind on a destructive verb; run "
+            f"`fleet doctor`.", rc=3)
+    holder = _record_is_supervisor_claim_holder(rec, claim=claim if state == "ok" else None)
     if holder is True:
-        state, claim = read_incarnation_status()
         if state != "ok" or not isinstance(claim, dict):
             raise SupervisorLifecycleRefusal(
                 f"{verb}: refusing -- {name} looks like the supervisor claim holder "
@@ -5446,6 +5495,33 @@ def _supervisor_lifecycle_target(verb, name):
             f"cannot be determined (supervisor/INCARNATION unreadable). Failing "
             f"toward refusal: run `fleet doctor` and inspect the claim.", rc=3)
     return None
+
+
+def _lifecycle_holder_is_limited(rec) -> bool:
+    """FIX WAVE 1, MAJ-B: the ruling-2 refusal predicate. Deliberately NOT
+    `_holder_is_limited`, which stays exactly as it is.
+
+    `_holder_is_limited` answers the LIMIT-TRANSFER BOOT question -- "may a
+    successor claim right now?" -- and for that job its two conditions are
+    correct: a truthy `limit_reset_at` (fleet does not know when a
+    null-horizon body returns, and ambiguity is what the freeze is for) and an
+    exact `session_id` match (the boot path holds the claim's own sid).
+
+    Both are wrong for the REFUSAL role, and each failed open:
+
+      * null horizon -- a poisoned park has `limit_reset_at = None`, so the
+        refusal did not fire for the exact case its own message teaches the
+        operator about;
+      * sid-union lag -- after a fork-steer the claim still carries the OLD sid
+        while the record was eagerly restamped (ND4a). Every other claim
+        predicate matches on the sid UNION; the exact-sid one missed, and the
+        window does NOT self-heal because a parked body cannot pull-restamp.
+
+    Here `rec` is the already-union-resolved holder record, so the question is
+    just "is this body parked" -- horizon or not. Erring toward refusal is the
+    correct direction for a destructive verb: the escapes are all cheap and
+    the message prints every one of them."""
+    return isinstance(rec, dict) and rec.get("status") == "limited"
 
 
 def _supervisor_lifecycle_interaction_refusals(verb, name, rec, claim):
@@ -5474,7 +5550,7 @@ def _supervisor_lifecycle_interaction_refusals(verb, name, rec, claim):
             f"  fleet sup-handoff-complete   -- if the successor booted\n"
             f"  fleet sup-handoff-abort      -- if it did not\n"
             f"then re-run `fleet {verb} supervisor`.", rc=2)
-    if _holder_is_limited(claim.get("session_id")):
+    if _lifecycle_holder_is_limited(rec):
         raise SupervisorLifecycleRefusal(
             f"{verb} supervisor: refusing -- the claim holder ({name}) is parked on a "
             f"usage limit. A park is RECOVERABLE state, and every route through it is "
@@ -5489,6 +5565,60 @@ def _supervisor_lifecycle_interaction_refusals(verb, name, rec, claim):
             f"{SUPERVISOR_CLAIM_STALE_SECONDS:.0f}s before any successor may seize -- "
             f"fleet cannot steer a limited body into `sup-release`, and no other actor "
             f"may release for it (B5).", rc=2)
+
+
+def _refetch_holder_record(name, fallback):
+    """Re-read the holder's registry record AFTER the release steer resolved.
+
+    FIX WAVE 1, CRIT-1 (break lens). Both verbs used to capture `session_id`
+    from the PRE-STEER snapshot and drive the stop, the tombstone and the
+    caller-side B6 gate off it. That is wrong for the primary intended case:
+    an IDLE holder. `_cmd_send_native`'s idle path is a FORK-STEER (RATIFIED
+    G2b) -- it dispatches a NEW session and `_restamp_after_steer` moves
+    `session_id` to the fork, pushing the old sid into `retired_sids`. So the
+    pre-steer sid is the RETIRED one, and acting on it meant:
+
+      * kill printed `SUP-KILL-RELEASED`, rc 0, marked the record dead -- and
+        never stopped the live fork;
+      * respawn's B6 gate passed VACUOUSLY (it polled the retired sid), leaving
+        a dead-marked record with a live session PLUS a fresh gen-0 body: two
+        live supervisor bodies, the exact invariant §10.4 exists to hold.
+
+    A dead record with a live session is also the rogue-session class
+    `_cmd_kill_native`'s own ND-1 comment calls "a C1 CRITICAL, reached through
+    the front door": husk sweeps skip it forever, and once the freeze expires
+    `_archive_eligible`/`fleet clean` delete the LIVE session's files.
+
+    Returns the fresh record, or `fallback` (the pre-steer snapshot) when the
+    registry cannot be read -- never None, so callers keep a record to act on.
+    A corrupt registry mid-verb is reported by its own doctor row; degrading to
+    the snapshot is strictly better than aborting after the claim was released."""
+    try:
+        rec = load_registry().get("workers", {}).get(name)
+    except RegistryCorruptError:
+        return fallback
+    return rec if isinstance(rec, dict) else fallback
+
+
+def _refuse_launch_in_flight(verb, name, rec):
+    """FIX WAVE 1, MAJ-A: the launch-in-flight guard ordinary `kill`/`respawn`
+    apply, restored on the §10.4 routes.
+
+    A pre-claim (`session_id is None`, launch claim unexpired) is a dispatch
+    still in flight: there is no session to steer or stop, and marking the
+    record dead races the in-flight dispatch's own commit. The supervisor arms
+    ran ahead of the ordinary checks and lost it, which was fail-OPEN exactly
+    where respawn's claim arm is fail-closed:
+
+      * kill: the sid-less holder fell into arm 2 ("nothing to steer"), marked
+        the pre-claim dead and bought the full 3600s freeze;
+      * respawn's husk arm: marked the pre-claim dead and dispatched a SECOND
+        body.
+
+    Same message and same shape as `cmd_kill`'s own guard -- this is a restored
+    check, not a new policy."""
+    if rec.get("session_id") is None and not _launch_claim_expired(rec.get("last_activity")):
+        raise FleetCliError(f"launch in flight for {name}; retry in a few seconds")
 
 
 def _steer_supervisor_release(name, reason, *, run, which, sleep):
@@ -5564,6 +5694,8 @@ def _cmd_kill_supervisor(args, name, rec, claim, *, run, which, sleep, clock) ->
     Arm 2 is also where a holder with no session id lands -- there is nothing
     to steer, so phase 1 is skipped rather than failed."""
     inc = claim.get("incarnation_id", "?")
+    # MAJ-A: the guard ordinary kill applies, before anything is mutated.
+    _refuse_launch_in_flight("kill", name, rec)
     sid = rec.get("session_id")
     arm2_reason = None
     if not sid:
@@ -5576,11 +5708,19 @@ def _cmd_kill_supervisor(args, name, rec, claim, *, run, which, sleep, clock) ->
             # F1: fall through with ZERO wait. Waiting out T_release after a
             # refusal that already happened is five wasted minutes.
             arm2_reason = f"the release steer was refused: {refusal}"
-        elif not _await_claim_released(
-                timeout=SUPERVISOR_RELEASE_TIMEOUT_SECONDS,
-                poll=SUPERVISOR_RELEASE_POLL_SECONDS, clock=clock, sleep=sleep):
-            arm2_reason = (f"T_release expired ({SUPERVISOR_RELEASE_TIMEOUT_SECONDS:.0f}s) "
-                           f"without the claim reading `released`")
+        else:
+            if not _await_claim_released(
+                    timeout=SUPERVISOR_RELEASE_TIMEOUT_SECONDS,
+                    poll=SUPERVISOR_RELEASE_POLL_SECONDS, clock=clock, sleep=sleep):
+                arm2_reason = (f"T_release expired ({SUPERVISOR_RELEASE_TIMEOUT_SECONDS:.0f}s) "
+                               f"without the claim reading `released`")
+            # CRIT-1: the steer LANDED, so the record may have fork-steered
+            # under us. Re-read it on BOTH outcomes (released and timed out)
+            # and stop the CURRENT sid set -- `_cmd_kill_native` stops
+            # `session_id` with the full timeout and sweeps `retired_sids`
+            # best-effort, which is exactly the fork + its retired parent.
+            rec = _refetch_holder_record(name, rec)
+            sid = rec.get("session_id") or sid
 
     rc = _cmd_kill_native(name, rec, run=run, which=which, announce=False)
 
@@ -5606,7 +5746,7 @@ def _cmd_kill_supervisor(args, name, rec, claim, *, run, which, sleep, clock) ->
     return rc
 
 
-def _supervisor_abort(phase, reason, name):
+def _supervisor_abort(phase, reason, name, *, delivered):
     """Ruling 1, condition 1 (binding): the respawn abort surface.
 
     Grep-able `SUP-RESPAWN-ABORTED <phase>: <reason>`, the escalation commands
@@ -5615,11 +5755,40 @@ def _supervisor_abort(phase, reason, name):
     body can complete `sup-release` after the timeout, so the operator must
     check `sup-status` before acting on this abort. A re-run after such a late
     release lands on the resolver's released-claim refusal arm, which is a
-    tested contract, not an accident."""
+    tested contract, not an accident.
+
+    FIX WAVE 1, MAJ-D -- `delivered` exists because ruling 1's condition 2
+    ("registry, claim file, and the body's record byte-identical after abort")
+    is PHYSICALLY UNSATISFIABLE on the `T_release-expired` phase, and the build
+    only appeared to satisfy it because every test stubbed the steer:
+
+      * `delivered=False` (steer-refused): nothing was sent, nothing was
+        written. The byte-identical guarantee stands unchanged (F1).
+      * `delivered=True` (T_release-expired): a steer that LANDED has already
+        appended a mailbox message or fork-steered the body -- mail/steer
+        events, and on the idle path a restamped `session_id`. Claiming "NOT
+        touched" there would be a lie printed by the tool itself.
+
+    So the timeout phase states what actually happened and asserts a precisely
+    scoped effect set instead (steer-delivery effects only -- and NOTHING from
+    the destructive tail: no tombstone, no dead-marking, no claim-file change,
+    no dispatch). This narrowing is a PHYSICS CORRECTION to a binding 4-0
+    condition; it is recorded in the proposal's Build record and QUEUED FOR
+    OPERATOR RATIFICATION -- it is not itself ratified."""
+    if delivered:
+        touched = (
+            f"The steer WAS DELIVERED before this abort, so the body is not untouched: "
+            f"the message was queued (mid-turn) or the body FORK-STEERED (idle), which "
+            f"mints a new session id and retires the old one. What did NOT happen: no "
+            f"tombstone, no dead-marking, no claim-file change, no successor dispatch.\n")
+    else:
+        touched = (
+            f"The steer was never delivered, so the supervisor body was NOT touched -- "
+            f"respawn has no mandate to destroy a body that will not cooperate "
+            f"(ruling 1, 4-0).\n")
     raise SupervisorLifecycleRefusal(
         f"SUP-RESPAWN-ABORTED {phase}: {reason}\n"
-        f"The supervisor body was NOT touched -- respawn has no mandate to destroy a "
-        f"body that will not cooperate (ruling 1, 4-0).\n"
+        f"{touched}"
         f"WARNING: the release steer may still land asynchronously -- a slow body can "
         f"complete `sup-release` after this abort. Check `fleet sup-status` BEFORE "
         f"acting on this message.\n"
@@ -5660,19 +5829,26 @@ def _cmd_respawn_supervisor(args, name, rec, claim, *, run, which, sleep, clock)
         if not old_sid:
             _supervisor_abort("stop-precondition",
                               f"launch in flight for {name} (no session id yet) -- "
-                              f"there is no body to release or stop", name)
+                              f"there is no body to release or stop", name,
+                              delivered=False)
         _require_instance_settings()
         refusal = _steer_supervisor_release(
             name, f"respawn supervisor {inc}", run=run, which=which, sleep=sleep)
         if refusal is not None:
-            _supervisor_abort("steer-refused", refusal, name)
-        if not _await_claim_released(
-                timeout=SUPERVISOR_RELEASE_TIMEOUT_SECONDS,
-                poll=SUPERVISOR_RELEASE_POLL_SECONDS, clock=clock, sleep=sleep):
+            # Nothing was delivered, so nothing was mutated: this phase keeps
+            # the byte-identical guarantee (F1).
+            _supervisor_abort("steer-refused", refusal, name, delivered=False)
+        expired = not _await_claim_released(
+            timeout=SUPERVISOR_RELEASE_TIMEOUT_SECONDS,
+            poll=SUPERVISOR_RELEASE_POLL_SECONDS, clock=clock, sleep=sleep)
+        # CRIT-1: the steer landed; re-read before doing anything with a sid.
+        rec = _refetch_holder_record(name, rec)
+        old_sid = rec.get("session_id") or old_sid
+        if expired:
             _supervisor_abort(
                 "T_release-expired",
                 f"the claim did not read `released` within "
-                f"{SUPERVISOR_RELEASE_TIMEOUT_SECONDS:.0f}s", name)
+                f"{SUPERVISOR_RELEASE_TIMEOUT_SECONDS:.0f}s", name, delivered=True)
     else:
         _require_instance_settings()
         # Husk arm: no claim to release, so the only thing standing between
@@ -5680,6 +5856,9 @@ def _cmd_respawn_supervisor(args, name, rec, claim, *, run, which, sleep, clock)
         # contract `_cmd_respawn_native` publishes -- a running turn needs
         # --force -- and the same refusal on an unfetchable roster (never
         # assume a session is dead on ambiguous data).
+        # MAJ-A: and the launch-in-flight guard, which a sid-less husk would
+        # otherwise walk straight past into a SECOND dispatch.
+        _refuse_launch_in_flight("respawn", name, rec)
         if old_sid:
             roster_ok, entries = _fetch_agents_roster(which=which, run=run)
             if not roster_ok:
@@ -5695,9 +5874,20 @@ def _cmd_respawn_supervisor(args, name, rec, claim, *, run, which, sleep, clock)
     stopped_ok = True
     stop_outcome = "no-sid"
     if old_sid:
+        # CRIT-1: stop the CURRENT sid set, not the pre-steer snapshot's sid.
+        # A landed steer against an idle holder fork-steers, so `session_id` is
+        # the live fork and the pre-steer sid sits in `retired_sids` -- and the
+        # Steering contract leaves that parent's roster entry untouched, so it
+        # may still be live too. Primary gets the full timeout; the retired
+        # parents are swept best-effort, mirroring `_cmd_kill_native`.
         stopped_ok, stop_outcome = _stop_native_session_status(
             old_sid, run=run, which=which,
             ref=rec.get("native_short_id") or None)
+        for retired in list(rec.get("retired_sids", []) or [])[-_RETIRED_SID_SWEEP_CAP:]:
+            if retired and retired != old_sid:
+                _stop_native_session_status(
+                    retired, run=run, which=which,
+                    timeout=_RETIRED_SID_SWEEP_TIMEOUT_SECONDS)
         # G10: `claude stop` fires no Stop hook -- fleet writes the outcome
         # record itself. Same kind respawn --force already writes.
         write_tombstone_outcome(name, old_sid, "stopped")
@@ -5706,21 +5896,34 @@ def _cmd_respawn_supervisor(args, name, rec, claim, *, run, which, sleep, clock)
         # refuse the successor anyway, but an automated caller must gate
         # itself: "the graceful-kill arm is only safe once the old body is
         # confirmed roster-gone". Same grace-then-refetch loop
-        # `_cmd_respawn_native` runs for --force.
-        roster_ok, entries = _fetch_agents_roster(which=which, run=run)
-        still_live = (not roster_ok) or (old_sid in _roster_live_sids(entries))
+        # `_cmd_respawn_native` runs for --force -- but over the whole sid
+        # union, since ANY live session of this record breaks the invariant.
+        gate_sids = _record_sids(rec)
+
+        def _any_live():
+            roster_ok, entries = _fetch_agents_roster(which=which, run=run)
+            if not roster_ok:
+                return True
+            return bool(gate_sids & _roster_live_sids(entries))
+
+        still_live = _any_live()
         if still_live and stopped_ok:
             sleep(2)
-            roster_ok2, entries2 = _fetch_agents_roster(which=which, run=run)
-            still_live = (not roster_ok2) or (old_sid in _roster_live_sids(entries2))
+            still_live = _any_live()
         if still_live:
+            # MIN-3: a DISTINCT grep token. This state is not an abort -- the
+            # claim is already released and the body was stopped, so it is not
+            # side-effect-free and must not answer to the same token as the
+            # three enumerated abort phases (ruling 1 named exactly three).
             raise SupervisorLifecycleRefusal(
-                f"SUP-RESPAWN-ABORTED b6-gate: {name} ({old_sid}) is still roster-live "
-                f"after the stop attempt ({stop_outcome}) -- refusing to dispatch a "
-                f"successor. B6: a successor may boot only once the old body is "
-                f"confirmed roster-gone, or two bodies answer for one claim.\n"
-                f"The claim is already RELEASED, so recovery is: stop the body "
-                f"manually, then `fleet sup-spawn --task <brief>`.", rc=2)
+                f"SUP-RESPAWN-HALTED-B6: {name} still has a roster-live session "
+                f"({', '.join(sorted(s for s in gate_sids if s))}) after the stop "
+                f"attempt ({stop_outcome}) -- refusing to dispatch a successor. B6: a "
+                f"successor may boot only once the old body is confirmed roster-gone, "
+                f"or two bodies answer for one claim.\n"
+                f"THIS IS NOT AN ABORT: the claim is already RELEASED and the body was "
+                f"stopped and tombstoned. Recovery is: stop the session manually, then "
+                f"`fleet sup-spawn --task <brief>`.", rc=2)
 
     with fleet_lock():
         data = load_registry()
@@ -10829,6 +11032,17 @@ def cmd_sup_status(args) -> int:
         age = f"{beat_age:.0f}s ago" if beat_age is not None else "unreadable"
         print(f"supervisor: {claim.get('incarnation_id', '?')} sid={claim.get('session_id')} "
               f"via {claim.get('claimed_via', '?')}, heartbeat {age}")
+    # FIX WAVE 1, MAJ-C: council condition 5 names `sup-status` AND the
+    # statusline. The nag carried the freeze-window note ("claim held by a DEAD
+    # sid -- seizable in <remaining>s") to the statusline, doctor and
+    # `sup-status --json`, but the HUMAN branch never printed it -- so the one
+    # surface an operator actually types after a `SUP-KILL-FROZEN` line was the
+    # one that stayed silent about the window. Printed unconditionally rather
+    # than special-cased to the freeze branch: a view that shows the canonical
+    # supervisor summary only in the state someone remembered to enumerate is
+    # how this gap appeared in the first place.
+    if info["nag"]:
+        print(info["nag"])
     if hs is not None:
         print(f"handshake: {hs.get('incarnation_id')} sid={hs.get('session_id')} (handoff in flight)")
     if info["abort_flag"]:
