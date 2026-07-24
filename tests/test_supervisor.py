@@ -3379,19 +3379,16 @@ class TestHandoff:
         assert fleet.handoff_abort_flag_path().exists()
         assert fleet.read_handshake() is None
 
-    def test_handoff_abort_proceeds_on_absent_handshake_with_matching_flag(self, sup_home):
-        # Finding 2 fix: with no HANDSHAKE, the recorded limbo successor in
-        # the abort flag (written by sup-handoff-begin on DOA/dispatch-fail)
-        # is the only evidence that makes an absent-HANDSHAKE abort legit.
-        self._hold()
-        fleet._write_json_atomic(fleet.handoff_abort_flag_path(), {
-            "aborted_at": fleet.now_iso(), "reason": "successor-doa",
-            "successor_sid": "sid-whatever", "successor_short_id": None,
-            "holder": "inc-old"})
-        run = lambda argv, **kw: SimpleNamespace(returncode=0, stdout="", stderr="")
-        args = SimpleNamespace(sid="sid-old", successor_sid="sid-whatever")
-        assert fleet.cmd_sup_handoff_abort(args, which=_fake_which, run=run) == 0
-        assert fleet.handoff_abort_flag_path().exists()
+    # DELETED (R7, fix wave 1): `test_handoff_abort_proceeds_on_absent_
+    # handshake_with_matching_flag` hand-wrote an abort flag carrying a
+    # `successor_sid` under a comment asserting `sup-handoff-begin` writes that
+    # shape on DOA/dispatch-fail. Begin never writes it -- every `_abort_flag`
+    # call site omits `successor_sid` -- so the fixture manufactured the
+    # evidence production cannot produce, and the arm it "covered" could only
+    # fire on a repeat abort of an already-stopped sid. Same
+    # defect-encoded-as-fixture class as the timeout drill below. The arm is
+    # gone; the real DOA path is covered by the pending-entry and
+    # resolvable-stale arms in tests/test_handoff_seams.py.
 
     def test_handoff_abort_refuses_on_absent_handshake_with_mismatched_flag(self, sup_home):
         self._hold()
@@ -3419,12 +3416,13 @@ class TestHandoff:
             fleet.cmd_sup_handoff_abort(args, which=_fake_which, run=run)
         assert not calls   # nothing stopped
 
-    def test_handoff_abort_refuses_on_none_successor_sid_matching_none_flag(self, sup_home):
-        # Roll-up item 8: an abort flag recorded with successor_sid=None
-        # (the dispatch-failed shape) must not be treated as matching an
-        # args.successor_sid that is itself None -- unreachable via the CLI
-        # (argparse required=True) but must refuse, not proceed into
-        # `claude stop None`.
+    def test_handoff_abort_refuses_when_the_caller_names_no_successor_at_all(
+            self, sup_home):
+        # Roll-up item 8, retargeted by R3: `--successor-sid` is no longer
+        # `required=True` (`--successor-inc` is the other handle), so a call
+        # naming NEITHER is now reachable and must refuse up front rather than
+        # fall through to `claude stop None`. The abort flag is seeded to prove
+        # the refusal does not consult it -- R7 deleted that arm.
         self._hold()
         fleet._write_json_atomic(fleet.handoff_abort_flag_path(), {
             "aborted_at": fleet.now_iso(), "reason": "successor-doa",
@@ -3434,8 +3432,8 @@ class TestHandoff:
         def run(argv, **kw):
             calls.append(argv)
             return SimpleNamespace(returncode=0, stdout="", stderr="")
-        args = SimpleNamespace(sid="sid-old", successor_sid=None)
-        with pytest.raises(fleet.FleetCliError, match="matches no recorded limbo successor"):
+        args = SimpleNamespace(sid="sid-old", successor_sid=None, successor_inc=None)
+        with pytest.raises(fleet.FleetCliError, match="successor-sid or --successor-inc"):
             fleet.cmd_sup_handoff_abort(args, which=_fake_which, run=run)
         assert not calls   # nothing stopped
 
@@ -3475,15 +3473,16 @@ class TestHandoff:
         with pytest.raises(fleet.FleetCliError):   # no HANDSHAKE was written
             fleet.cmd_sup_handoff_complete(args)
         assert not fleet.handoff_abort_flag_path().exists()   # nothing fabricated
-        pending = fleet.handoff_pending_from(fleet.read_incarnation())
-        assert pending is not None and pending["successor_sid"] == "succ0001-full"
+        entries = fleet.handoff_pending_entries(fleet.read_incarnation())
+        assert len(entries) == 1 and entries[0]["successor_sid"] == "succ0001-full"
+        pending = entries[0]
         def stop_run(argv, **kw):
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         abort = SimpleNamespace(sid="sid-old", successor_sid=pending["successor_sid"],
                                 nonce=gen)
         assert fleet.cmd_sup_handoff_abort(abort, which=_fake_which, run=stop_run) == 0
         assert fleet.read_incarnation()["session_id"] == "sid-old"
-        assert fleet.handoff_pending_from(fleet.read_incarnation()) is None
+        assert fleet.handoff_pending_entries(fleet.read_incarnation()) == []
 
 
 class TestHandoffToken:

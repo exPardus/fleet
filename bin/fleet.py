@@ -9034,100 +9034,356 @@ def write_handshake(incarnation_id: str, session_id: str,
     _write_json_atomic(handshake_path(), data)
 
 
-def handoff_task_file_path(successor_inc: str) -> Path:
-    """§5.9: the successor's bootstrap task file, which carries the plaintext
-    handoff token. Written by `sup-handoff-begin`, unlinked by complete/abort,
-    and NOTE-backstopped by the doctor for the crash-before-unlink paths."""
-    return state_dir() / f"supervisor-handoff-{successor_inc}.md"
-
-
-HANDOFF_PENDING_KEY = "handoff_pending"
+INCARNATION_ID_RE = re.compile(r"^inc-\d{8}T\d{6}Z-[0-9a-f]{4}$")
 
 _HANDOFF_TASK_FILE_RE = re.compile(
     r"^supervisor-handoff-(?P<inc>inc-\d{8}T\d{6}Z-[0-9a-f]{4})\.md$")
 
 
-def handoff_pending_from(claim) -> dict | None:
-    """D1: the PENDING-SUCCESSOR marker `sup-handoff-begin` stamps into the
-    claim (`{successor_inc, successor_sid, task_file, minted_at}`), or None.
+def valid_incarnation_id(value) -> str:
+    """R6: an incarnation id, or `ValueError`. The shape `mint_incarnation_id`
+    produces and nothing else.
 
-    The seam this closes was found LIVE on 2026-07-24 (inc-651f -> inc-7d7d,
-    two stillborn attempts): begin recorded a successor NOWHERE the abort path
-    could read it. It writes the token hash into the claim and the abort FLAG
-    only on its own dispatch-failure/DOA branches -- so a successor that
-    dispatched, joined the roster, and then died before writing HANDSHAKE left
-    no HANDSHAKE and no flag, and `sup-handoff-abort` refused it as "matches no
-    recorded limbo successor". A handoff that died in exactly the window the
-    abort verb exists for was UNABORTABLE. The marker is that recorded
-    successor; it does not widen abort into a "stop any sid" verb -- the
-    refusal is the safety property, the missing record was the defect.
+    This is a PATH COMPONENT (`handoff_task_file_path`) reached from three
+    pieces of input this process does not author: `--handoff-inc` and
+    `--expect-inc` off the command line, and `HANDSHAKE.incarnation_id`, which
+    the SUCCESSOR writes. The break lens deleted a file outside FLEET_HOME with
+    rc 0 by putting `../..` in the last of those. Shape-checking the id is the
+    cheap half of the fix; `handoff_task_file_path`'s containment check below
+    is the half that does not depend on this regex being exhaustive."""
+    if not isinstance(value, str) or not INCARNATION_ID_RE.match(value):
+        raise ValueError(
+            f"not an incarnation id: {value!r} -- expected inc-<YYYYMMDD>T<HHMMSS>Z-<4 hex>")
+    return value
 
-    Tolerant like `read_handshake`: a non-dict under the key reads as absent."""
+
+def _argparse_incarnation_id(value: str) -> str:
+    """`type=` adapter: argparse renders ValueError as a usage error."""
+    try:
+        return valid_incarnation_id(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc))
+
+
+def handoff_task_file_path(successor_inc: str) -> Path:
+    """§5.9: the successor's bootstrap task file, which carries the plaintext
+    handoff token. Written by `sup-handoff-begin`, unlinked by complete/abort,
+    and NOTE-backstopped by the doctor for the crash-before-unlink paths.
+
+    R6: CONFINED. The id is shape-checked (`ValueError`) and the resolved path
+    must sit directly inside `state_dir()` (`FleetCliError`) -- neither ever
+    returns a path outside the fleet home for a caller to unlink. The break
+    lens deleted a file outside FLEET_HOME with rc 0 by putting a traversal in
+    `HANDSHAKE.incarnation_id`, which the SUCCESSOR writes; the unlink sites
+    treat both refusals as "there is no file here", never as a hard failure,
+    because an abort must still abort."""
+    valid_incarnation_id(successor_inc)
+    root = state_dir()
+    path = (root / f"supervisor-handoff-{successor_inc}.md").resolve()
+    if path.parent != root.resolve():
+        raise FleetCliError(
+            f"refusing a handoff task path outside {root.as_posix()}: {path.as_posix()}")
+    return path
+
+
+def unlink_handoff_task_file(successor_inc, context="") -> bool:
+    """Unlink one successor's task file. True when a file was removed.
+
+    The single unlink site for complete/abort/begin's failure path, so the R6
+    containment refusals are handled once and identically: a malformed or
+    escaping incarnation id removes NOTHING and says so, rather than wedging
+    the verb that was cleaning up. Only a MISSING file is silent -- an
+    unremovable token file is the §5.9 retention failure itself."""
+    try:
+        handoff_task_file_path(successor_inc).unlink()
+    except FileNotFoundError:
+        return False
+    except (ValueError, FleetCliError) as exc:
+        print(f"WARNING: not unlinking a handoff task file for {successor_inc!r}"
+              f"{context}: {exc}")
+        return False
+    except OSError as exc:
+        print(f"WARNING: could not unlink the handoff task file for {successor_inc}"
+              f"{context} -- it carries a handoff token: {exc}")
+        return False
+    return True
+
+
+HANDOFF_PENDING_KEY = "handoff_pending"
+
+# R3's three entry states, published by the view and consumed by abort.
+HANDOFF_JOINING = "joining"                    # no sid yet, inside the join window
+HANDOFF_AWAITING_HANDSHAKE = "awaiting-handshake"   # joined, HANDSHAKE not yet written
+HANDOFF_RESOLVABLE_STALE = "resolvable-stale"  # no sid, past T -- retirable by inc
+
+
+def handoff_pending_entries(claim) -> list:
+    """R1: the pending successors of a claim, as a LIST.
+
+    A SLOT was the wave-1 defect. `sup-handoff-begin` overwrote the single
+    marker, so after the real 2026-07-24 sequence -- three begins in sixteen
+    minutes -- only the newest successor was abortable and the older two
+    produced the exact pre-fix refusal string. The fix for the incident
+    resurrected the incident. Entries are appended and removed by resolution;
+    begin never destroys an unresolved one.
+
+    Tolerant, like `read_handshake`: a non-list reads as empty, and non-dict
+    members are dropped. A bare dict is read as a ONE-ENTRY list -- the shape
+    the first cut of this branch wrote, which may sit in a live INCARNATION."""
     if not isinstance(claim, dict):
-        return None
+        return []
     pending = claim.get(HANDOFF_PENDING_KEY)
-    return pending if isinstance(pending, dict) else None
+    if isinstance(pending, dict):
+        return [pending]
+    if not isinstance(pending, list):
+        return []
+    return [e for e in pending if isinstance(e, dict)]
 
 
-def handoff_task_files_to_sweep(names, claim) -> list:
-    """D2, the PURE predicate: which `supervisor-handoff-<inc>.md` FILENAMES
-    are dead and may be unlinked.
+def handoff_entry_state(entry, now=None, timeout_seconds=None) -> str:
+    """R3: which of the three states an entry is in. Pure; never raises.
+
+    An entry with no sid is NOT evidence that no body exists -- that is the
+    can-not-tell state the whole wave turns on -- so it is not silently
+    dropped. It ages out instead: past the handoff timeout it becomes
+    RESOLVABLE-STALE, which `sup-handoff-abort --successor-inc` can retire
+    without ever claiming it stopped a session it never had."""
+    if entry.get("successor_sid"):
+        return HANDOFF_AWAITING_HANDSHAKE
+    if timeout_seconds is None:
+        timeout_seconds = SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS
+    if now is None:
+        now = datetime.now(timezone.utc)
+    try:
+        age = (now - _parse_iso(entry["minted_at"])).total_seconds()
+    except (KeyError, TypeError, ValueError):
+        # `minted_at` unreadable: the entry cannot be aged, so it cannot be
+        # retired on age. Fail closed toward "still joining" -- the state that
+        # deletes nothing.
+        return HANDOFF_JOINING
+    return HANDOFF_RESOLVABLE_STALE if age > timeout_seconds else HANDOFF_JOINING
+
+
+def handoff_task_files_to_sweep(candidates, claim, timeout_seconds=None) -> list:
+    """D2/R2, the PURE predicate: which `supervisor-handoff-<inc>.md` files are
+    dead and may be unlinked. It FAILS CLOSED at every step.
+
+    `candidates` is an iterable of `(filename, age_seconds)`; `age_seconds` may
+    be None when it could not be read.
 
     A handoff task file carries the successor's PLAINTEXT one-shot token
-    (§5.9), and exactly two incarnations may still need theirs:
+    (§5.9), and it is also the successor's ONLY input: the whole prompt is
+    `Read <task_path> and follow it exactly`. Deleting it under a booting
+    successor does not crash anything -- it silently strips the body of its
+    instructions, including the HANDOFF-ORPHAN self-termination the same file
+    prescribes. Wave 1 had three reachable paths to exactly that (supersede,
+    seize-then-boot, and the operator doing what the runbook tells them:
+    removing `supervisor/INCARNATION` by hand, after which nothing was
+    protected and the sweep took everything). So:
 
-      * the PENDING successor of an in-flight handoff -- it is the body
-        reading the file, and deleting it is the bug this would be trading
-        for; and
-      * the CURRENT holder -- its own bootstrap file, when a `complete` that
-        crashed before its unlink left it behind.
+      * NOTHING is swept when the claim is absent, unreadable, or not a claim
+        (no `incarnation_id`) -- an unknown claim protects nothing, and
+        "protects nothing" must mean "delete nothing", not "delete all";
+      * never a file named by ANY pending entry, whatever its state;
+      * never the CURRENT holder's own file;
+      * never a file younger than the handoff timeout, and never one whose age
+        could not be read -- a fresh file is a handoff still in flight.
 
-    Every other file names an incarnation that is neither: a superseded or
-    stillborn attempt whose bearer token has no owner. §5.9 unlinks on
-    complete and on abort, but the 2026-07-24 succession took three attempts
-    and neither verb ran for the first two, so three plaintext tokens sat in
-    `state/` indefinitely. A token whose claim has already transferred is
-    dead; a bearer secret with no owner should not persist.
-
-    Pure and total -- names in, subset out, sorted. A name that does not parse
-    as `supervisor-handoff-<incarnation id>.md` is NEVER returned: an
+    Pure and total -- candidates in, subset out, sorted. A name that does not
+    parse as `supervisor-handoff-<incarnation id>.md` is NEVER returned: an
     unrecognised shape is left for a human, not guessed at."""
-    pending = handoff_pending_from(claim)
-    live = set()
-    if pending is not None:
-        live.add(pending.get("successor_inc"))
-    if isinstance(claim, dict):
-        live.add(claim.get("incarnation_id"))
-    live.discard(None)
+    if not isinstance(claim, dict) or not claim.get("incarnation_id"):
+        return []
+    if timeout_seconds is None:
+        timeout_seconds = SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS
+    live = {claim["incarnation_id"]}
+    for entry in handoff_pending_entries(claim):
+        inc = entry.get("successor_inc")
+        if inc:
+            live.add(inc)
     dead = []
-    for name in names:
+    for name, age in candidates:
         match = _HANDOFF_TASK_FILE_RE.match(name)
-        if match is not None and match.group("inc") not in live:
-            dead.append(name)
+        if match is None or match.group("inc") in live:
+            continue
+        if not isinstance(age, (int, float)) or age <= timeout_seconds:
+            continue
+        dead.append(name)
     return sorted(dead)
 
 
 def sweep_handoff_task_files(claim) -> list:
-    """D2, the effect: unlink what `handoff_task_files_to_sweep` calls dead
+    """D2/R2, the effect: unlink what `handoff_task_files_to_sweep` calls dead
     and return the names actually removed.
 
-    Caller MUST hold `fleet_lock` -- it decides on the claim's pending marker,
-    which a concurrent `sup-handoff-begin` rewrites. Best-effort and never
-    raises: a file that vanished under us, or one the OS will not release, is
-    not a reason to fail the verb doing the sweeping. The doctor NOTE stays as
-    the backstop for whatever this cannot reach (§5.9)."""
+    Caller MUST hold `fleet_lock` -- it decides on the claim's pending entries,
+    which a concurrent `sup-handoff-begin` appends to.
+
+    R6: a vanished file is expected and silent; ANY other `OSError` is
+    reported, never swallowed. The wave-1 code caught `OSError` wholesale,
+    which turned a `PermissionError` on a live token file into a silent
+    no-op -- the exact shape of a retention failure nobody would ever see."""
+    root = state_dir()
     try:
-        names = [p.name for p in state_dir().glob("supervisor-handoff-*.md")]
-    except OSError:
+        candidates = []
+        for path in root.glob("supervisor-handoff-*.md"):
+            try:
+                age = time.time() - path.stat().st_mtime
+            except OSError:
+                age = None
+            candidates.append((path.name, age))
+    except OSError as exc:
+        print(f"WARNING: could not list {root.as_posix()} for handoff-file sweep: {exc}")
         return []
     swept = []
-    for name in handoff_task_files_to_sweep(names, claim):
+    for name in handoff_task_files_to_sweep(candidates, claim):
         try:
-            (state_dir() / name).unlink()
-        except OSError:
+            (root / name).unlink()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            print(f"WARNING: could not unlink stale handoff task file {name} "
+                  f"(it carries a handoff token): {exc}")
             continue
         swept.append(name)
     return swept
+
+
+def handoff_entry_matching(claim, successor_sid=None, successor_inc=None):
+    """The pending entry a caller named, or None. Sid first (it is the handle
+    every printed recipe carries), then inc; when both are given they must
+    agree, so a caller pointed at two different successors matches neither."""
+    entries = handoff_pending_entries(claim)
+    for entry in entries:
+        if successor_sid and entry.get("successor_sid") == successor_sid:
+            if successor_inc and entry.get("successor_inc") != successor_inc:
+                return None
+            return entry
+    if successor_inc:
+        for entry in entries:
+            if entry.get("successor_inc") == successor_inc:
+                if successor_sid and entry.get("successor_sid"):
+                    return None      # named a sid, matched an entry with another
+                return entry
+    return None
+
+
+def _carry_handoff_pending(old_claim, new_claim) -> None:
+    """R5: carry the pending successors across a CLAIM TRANSITION.
+
+    The fresh-claim and seize/limit-transfer literals in `cmd_sup_boot` build a
+    new dict from scratch (§9's dict-literal rule, the one T10 exists to
+    police), so before this the pending set died at exactly the transition the
+    succession path exists for: a predecessor that dies mid-handoff has its
+    in-flight successor erased by the next boot -- invisible in `sup-status
+    --json`, unabortable, and its bootstrap file then unprotected from the
+    sweep. The taking body inherits the duty to finish or abort them because it
+    is the only body that holds a claim.
+
+    Mutates `new_claim` in place; a no-op when there is nothing to carry, so
+    the common fresh boot still writes exactly the literal above."""
+    carried = handoff_pending_entries(old_claim)
+    if carried:
+        new_claim[HANDOFF_PENDING_KEY] = carried
+
+
+def resolve_handoff_abort(claim, handshake, successor_sid=None, successor_inc=None,
+                          now=None, timeout_seconds=None) -> dict:
+    """R3: what `sup-handoff-abort` may do, decided as a PURE function.
+
+    Returns one of
+      `{"action": "stop",   "sid":..., "inc":..., "entry":..., "via":...}`
+      `{"action": "retire", "sid": None, "inc":..., "entry":..., "via":...}`
+      `{"action": "refuse", "reason": ...}`
+    and never touches the filesystem, so every arm is unit-testable without a
+    successor.
+
+    Arm order:
+
+      1. **HANDSHAKE present** -- the successor got far enough to write one.
+         Whichever handle the caller passed must match it, or the caller is
+         pointed at the wrong session and nothing happens (M-B T10 fix 2).
+      2. **No HANDSHAKE, a matching pending entry with a sid** -- the stillborn
+         case this whole branch exists for. The entry is recorded evidence:
+         begin appended it and stamped the sid at the roster join.
+      3. **No HANDSHAKE, a matching entry with NO sid, past the handoff
+         timeout** -- RETIRE. The dispatch either failed to join or could not
+         be observed, and no sid was ever recorded, so there is nothing to
+         stop and the verb must not pretend otherwise. Before R3 these entries
+         were immortal: all three abort arms were dead at once and nothing the
+         body could do retired them.
+      4. **No HANDSHAKE, a matching entry with no sid, INSIDE the window** --
+         refuse and say when it becomes retirable. A join in progress is not a
+         dead successor.
+      5. **Nothing matches** -- refuse. This is the safety property, unchanged:
+         `sup-handoff-abort` is not a "stop any sid" verb.
+
+    The wave-1 third arm (the `handoff_abort_flag_path()` fallback) is GONE
+    (R7). No begin path ever wrote a sid into that flag -- every `_abort_flag`
+    call site omits `successor_sid` -- so it could only ever fire on a repeat
+    abort of a sid the first abort had already stopped, while its docstring
+    claimed it covered the DOA/dispatch-failure path. Arms 2-4 cover that path
+    for real. The flag remains what it always was in practice: a doctor-visible
+    record, not evidence any verb turns on."""
+    if handshake is not None:
+        hs_sid, hs_inc = handshake.get("session_id"), handshake.get("incarnation_id")
+        if successor_sid and hs_sid != successor_sid:
+            return {"action": "refuse", "reason": (
+                f"--successor-sid does not match HANDSHAKE sid {hs_sid} -- "
+                f"refusing to stop an unrelated session")}
+        if successor_inc and hs_inc != successor_inc:
+            return {"action": "refuse", "reason": (
+                f"--successor-inc does not match HANDSHAKE inc {hs_inc} -- "
+                f"refusing to stop an unrelated session")}
+        return {"action": "stop", "sid": hs_sid, "inc": hs_inc, "via": "handshake",
+                "entry": handoff_entry_matching(claim, successor_sid=hs_sid,
+                                                successor_inc=hs_inc)}
+    entry = handoff_entry_matching(claim, successor_sid=successor_sid,
+                                   successor_inc=successor_inc)
+    if entry is None:
+        named = successor_sid or successor_inc
+        known = ", ".join(
+            f"{e.get('successor_inc')}"
+            f"[{handoff_entry_state(e, now=now, timeout_seconds=timeout_seconds)}"
+            f"{'' if not e.get('successor_sid') else ' sid=' + e['successor_sid']}]"
+            for e in handoff_pending_entries(claim)) or "none recorded"
+        return {"action": "refuse", "reason": (
+            f"no HANDSHAKE and {named} matches no recorded limbo successor -- "
+            f"refusing to stop an unverified session (pending successors: {known}; "
+            f"check claude agents; stop manually if certain)")}
+    state = handoff_entry_state(entry, now=now, timeout_seconds=timeout_seconds)
+    if state == HANDOFF_AWAITING_HANDSHAKE:
+        return {"action": "stop", "sid": entry["successor_sid"],
+                "inc": entry.get("successor_inc"), "entry": entry, "via": "pending-entry"}
+    if state == HANDOFF_RESOLVABLE_STALE:
+        return {"action": "retire", "sid": None, "inc": entry.get("successor_inc"),
+                "entry": entry, "via": "stale-entry"}
+    if timeout_seconds is None:
+        timeout_seconds = SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS
+    return {"action": "refuse", "reason": (
+        f"successor {entry.get('successor_inc')} was dispatched at "
+        f"{entry.get('minted_at')} and has no recorded sid yet -- it is still inside "
+        f"the {timeout_seconds:.0f}s join window, so there is nothing to stop and "
+        f"nothing to retire. Wait it out, then retire it with "
+        f"`--successor-inc {entry.get('successor_inc')}`")}
+
+
+def drop_handoff_entry(claim, entry) -> None:
+    """Retire one pending entry, and -- R4 -- the handoff token with the LAST
+    one.
+
+    The stranded plaintext token is LIVE, not spent: `sup-boot --handoff-inc
+    <inc> --handoff-token <tok>` still validates it against the claim's stored
+    `handoff_token_hash`. Only begin writes that hash, and only for its newest
+    attempt, so it belongs to whichever attempt is still outstanding -- when
+    none is, nothing may verify against it."""
+    remaining = [e for e in handoff_pending_entries(claim)
+                 if e.get("successor_inc") != entry.get("successor_inc")]
+    if remaining:
+        claim[HANDOFF_PENDING_KEY] = remaining
+    else:
+        claim.pop(HANDOFF_PENDING_KEY, None)
+        claim.pop("handoff_token_hash", None)
 
 
 def mint_incarnation_id() -> str:
@@ -9589,11 +9845,13 @@ def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
                 # survives checkpoints and heartbeats and is then silently
                 # destroyed here -- a claim that works for days and fails at
                 # the worst moment. T10 exists solely to catch a missed one.
-                write_incarnation({"incarnation_id": inc, "session_id": caller_sid,
-                                   "claimed_at": now_iso(), "heartbeat_at": now_iso(),
-                                   "claimed_via": "fresh",
-                                   "nonce_hash": nonce_digest(value), "nonce_seq": 1,
-                                   "lineage_id": mint_lineage_id()})
+                fresh = {"incarnation_id": inc, "session_id": caller_sid,
+                         "claimed_at": now_iso(), "heartbeat_at": now_iso(),
+                         "claimed_via": "fresh",
+                         "nonce_hash": nonce_digest(value), "nonce_seq": 1,
+                         "lineage_id": mint_lineage_id()}
+                _carry_handoff_pending(claim, fresh)
+                write_incarnation(fresh)
                 supervisor_journal_append("BOOT", inc, caller_sid, f"fresh claim: {reason}")
                 inc_line = inc
                 notices.append(f"NONCE: {value}")
@@ -9636,11 +9894,13 @@ def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
                 # not alive to vouch for anything, and it may yet come back
                 # when its horizon passes -- carrying its lineage would hand
                 # every worker it spawned to the taking body (§6.2).
-                write_incarnation({"incarnation_id": inc, "session_id": caller_sid,
-                                   "claimed_at": now_iso(), "heartbeat_at": now_iso(),
-                                   "claimed_via": verdict if verdict != "seize" else "seize",
-                                   "nonce_hash": nonce_digest(value), "nonce_seq": 1,
-                                   "lineage_id": mint_lineage_id()})
+                taken = {"incarnation_id": inc, "session_id": caller_sid,
+                         "claimed_at": now_iso(), "heartbeat_at": now_iso(),
+                         "claimed_via": verdict if verdict != "seize" else "seize",
+                         "nonce_hash": nonce_digest(value), "nonce_seq": 1,
+                         "lineage_id": mint_lineage_id()}
+                _carry_handoff_pending(claim, taken)
+                write_incarnation(taken)
                 supervisor_journal_append(kind, inc, caller_sid,
                                           f"{took} {dead}: {reason}")
                 inc_line = inc
@@ -10286,20 +10546,30 @@ def _project_claim(claim, now=None):
     out["nonce_present"] = bool(claim.get("nonce_hash"))
     out["pending_present"] = bool(claim.get("pending_nonce_hash"))
     out["pending_age_seconds"] = pending_age
-    # D1: the pending SUCCESSOR, which is a different thing from the pending
-    # GENERATION two lines up -- during the 2026-07-24 succession the operator
-    # read `pending_present: false` (correctly, about the nonce) as evidence
-    # that no successor was recorded, while a successor task file and registry
-    # record both existed. Deliberately distinct key names. No secret: an
-    # incarnation id and a sid, both already published by this same view and by
-    # the git-tracked journal (§5.1/§5.8). The marker's `task_file` is NOT
-    # published -- it is the path of a live plaintext token, and a lock-free
-    # view has no reason to advertise it (the doctor names orphans once they
-    # are spent).
-    handoff_pending = handoff_pending_from(claim)
-    out["handoff_successor_inc"] = (handoff_pending or {}).get("successor_inc")
-    out["handoff_successor_sid"] = (handoff_pending or {}).get("successor_sid")
-    out["handoff_pending_since"] = (handoff_pending or {}).get("minted_at")
+    # D1/R1/R3: the pending SUCCESSORS, which are a different thing from the
+    # pending GENERATION two lines up -- during the 2026-07-24 succession the
+    # operator read `pending_present: false` (correctly, about the nonce) as
+    # evidence that no successor was recorded, while a successor task file and
+    # registry record both existed. Deliberately distinct key names.
+    #
+    # A LIST, not three scalars: there can be several attempts outstanding at
+    # once (that is R1), and a slot-shaped view of a collection is what made
+    # the older attempts invisible in the first place. Each entry carries its
+    # own `state`, so a DOA attempt reads `resolvable-stale` instead of
+    # advertising a successor that never joined as if it were still coming.
+    #
+    # No secret: an incarnation id and a sid, both already published by this
+    # same view and by the git-tracked journal (§5.1/§5.8). `task_file` is NOT
+    # published -- it is the path of a LIVE plaintext token, and a lock-free
+    # view has no reason to advertise it.
+    entries = handoff_pending_entries(claim)
+    out[HANDOFF_PENDING_KEY] = [
+        {"successor_inc": e.get("successor_inc"),
+         "successor_sid": e.get("successor_sid"),
+         "minted_at": e.get("minted_at"),
+         "state": handoff_entry_state(e, now=now)}
+        for e in entries]
+    out["handoff_pending_count"] = len(entries)
     return out
 
 
@@ -10417,6 +10687,16 @@ def cmd_sup_status(args) -> int:
               f"via {claim.get('claimed_via', '?')}, heartbeat {age}")
     if hs is not None:
         print(f"handshake: {hs.get('incarnation_id')} sid={hs.get('session_id')} (handoff in flight)")
+    # rb-MIN-4: the plain form said nothing about a pending successor, so the
+    # one surface an operator reads by reflex mid-incident was silent about the
+    # thing they were looking for. The `--json` form is not the fallback for a
+    # human at 3am.
+    for entry in info["incarnation"].get(HANDOFF_PENDING_KEY, []) if info["incarnation"] else []:
+        handle = (f"--successor-sid {entry['successor_sid']}" if entry.get("successor_sid")
+                  else f"--successor-inc {entry['successor_inc']}")
+        print(f"pending successor: {entry.get('successor_inc')} [{entry.get('state')}]"
+              f" minted {entry.get('minted_at')} -- abort with `fleet sup-handoff-abort "
+              f"{handle} --nonce <value>`")
     if info["abort_flag"]:
         print(f"WARNING: aborted-handoff flag present ({handoff_abort_flag_path()})")
     pd = info["pending_decision"]
@@ -11000,34 +11280,40 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
         handoff_token = mint_nonce()
         task_path = handoff_task_file_path(successor_inc)
         claim["handoff_token_hash"] = nonce_digest(handoff_token)
-        # D1: the PENDING-SUCCESSOR marker, in the SAME claim write as the
-        # token hash. Before this, begin recorded the successor nowhere abort
-        # could read it, so a successor that died after the roster join and
-        # before HANDSHAKE was unabortable (see `handoff_pending_from`). The
-        # sid is NULL here and stamped after the roster join below -- it does
-        # not exist yet, and the marker must be durable BEFORE the dispatch
-        # that could strand it, not after.
-        claim[HANDOFF_PENDING_KEY] = {
+        # D1/R1: APPEND a pending-successor entry, in the SAME claim write as
+        # the token hash. Before this, begin recorded the successor nowhere
+        # abort could read it, so a successor that died after the roster join
+        # and before HANDSHAKE was unabortable (see `handoff_pending_entries`).
+        #
+        # APPEND, never overwrite: wave 1 wrote a single marker and the second
+        # begin destroyed the first one's, which on the real three-attempt
+        # sequence left the two older successors matching nothing and
+        # reproducing the pre-fix refusal verbatim. The sid is NULL here and
+        # stamped after the roster join below -- it does not exist yet, and the
+        # entry must be durable BEFORE the dispatch that could strand it.
+        claim[HANDOFF_PENDING_KEY] = handoff_pending_entries(claim) + [{
             "successor_inc": successor_inc,
             "successor_sid": None,
             "task_file": task_path.as_posix(),
             "minted_at": now_iso(),
-        }
+        }]
         write_incarnation(claim)
         task_path.parent.mkdir(parents=True, exist_ok=True)
         task_path.write_text(
             _render_successor_task(successor_inc, claim["incarnation_id"], handoff_token),
             encoding="utf-8")
-        # D2: this attempt SUPERSEDES any previous one, so the previous
-        # attempt's task file -- a plaintext one-shot token with no owner --
-        # goes now. Keyed on the claim just written, so the file written one
-        # line above (the new pending successor's) and the holder's own are
-        # the two the predicate protects.
+        # D2/R2: an age-gated, fail-closed sweep of ownerless residue. It does
+        # NOT clean up after the previous attempt: that attempt's successor may
+        # be alive and mid-boot, its task file is its only input, and its entry
+        # above still protects it. Only a file past the handoff timeout that no
+        # entry and no holder claims is taken.
         sweep_handoff_task_files(claim)
         supervisor_journal_append("HANDOFF-BEGIN", claim["incarnation_id"], caller,
                                   f"successor={successor_inc} task={task_path.as_posix()}")
         try:
-            # A new attempt supersedes any previous aborted handoff.
+            # A new attempt supersedes any previous aborted handoff. This is a
+            # DOCTOR flag, not evidence any verb turns on (R7 deleted abort's
+            # flag arm), so clearing it costs no successor its abortability.
             handoff_abort_flag_path().unlink()
         except FileNotFoundError:
             pass
@@ -11050,25 +11336,36 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     def _drop_pending_marker():
         """D1/D2, the DISPATCH-FAILED path only: no process was ever launched,
         so there is no body that could still be reading the task file and
-        nothing for a later abort to stop. Drop the marker and the plaintext
-        token with it.
+        nothing for a later abort to stop. Retire THIS attempt's entry and the
+        plaintext token with it.
 
         Deliberately NOT called on the DOA or INDETERMINATE returns: DOA means
         the roster never showed the successor and indeterminate means the
         roster could not be read at all, and in neither case may we assert
         that no body exists -- a live successor must not have its bootstrap
-        file deleted out from under it. Those two leave the marker standing;
-        the next `sup-handoff-begin` supersedes and sweeps it."""
-        with fleet_lock():
-            live = read_incarnation()
-            pending = handoff_pending_from(live)
-            if pending is not None and pending.get("successor_inc") == successor_inc:
-                live.pop(HANDOFF_PENDING_KEY, None)
-                write_incarnation(live)
+        file deleted out from under it. Those two leave the entry standing, and
+        R3 ages it out into `resolvable-stale`, which `sup-handoff-abort
+        --successor-inc` retires honestly.
+
+        The identity guard is load-bearing (M25): entries belong to attempts,
+        and popping on anything but an exact `successor_inc` match would retire
+        a RIVAL begin's live successor from this attempt's failure path.
+
+        BEST-EFFORT BY CONSTRUCTION (rb-MIN-2): every caller is already raising
+        a `FleetCliError` that names the real failure, so a lock timeout or an
+        unwritable claim here must not replace that diagnosis with its own. The
+        residue it fails to clear is exactly what the doctor NOTE reports."""
         try:
-            handoff_task_file_path(successor_inc).unlink()
-        except OSError:
-            pass
+            with fleet_lock():
+                live = read_incarnation()
+                entry = handoff_entry_matching(live, successor_inc=successor_inc)
+                if entry is not None:
+                    drop_handoff_entry(live, entry)
+                    write_incarnation(live)
+        except (FleetCliError, OSError) as exc:
+            print(f"WARNING: could not clear the pending entry for {successor_inc}: {exc}")
+            return
+        unlink_handoff_task_file(successor_inc, context=" (dispatch failed)")
 
     roster_fetch = lambda: _fetch_agents_roster(which=which, run=run)  # noqa: E731
     pre_ok, pre_payload = roster_fetch()
@@ -11193,19 +11490,22 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     # + peek/result parity with gen-0 bodies (a wanted side effect).
     succ_mode = getattr(args, "permission_mode", None) or SUCCESSOR_DEFAULT_MODE
     with fleet_lock():
-        # D1: stamp the joined sid onto the pending marker. THIS is what makes
-        # a stillborn successor abortable -- `sup-handoff-abort --successor-sid`
-        # is a sid handle, so a marker with no sid ties nothing. Re-read under
-        # the lock and stamp only when the marker still names THIS successor:
-        # a `begin` that raced ahead of us owns the claim now, and re-writing
-        # the whole claim dict captured before the dispatch would roll its
-        # marker back.
+        # D1: stamp the joined sid onto THIS attempt's pending entry. That is
+        # what makes a stillborn successor abortable by sid -- an entry with no
+        # sid ties nothing to `--successor-sid` (R3 retires those by inc and by
+        # age instead).
+        #
+        # M07, the guard this comment exists for: re-read the claim under the
+        # lock and stamp only the entry whose `successor_inc` is OURS. The dict
+        # captured before the dispatch is stale by up to the whole join window;
+        # writing it back would roll a concurrent begin's appended entry out of
+        # the claim, and stamping "the pending entry" positionally would put
+        # THIS successor's sid on a RIVAL attempt's entry -- pointing abort at
+        # the wrong live session.
         live = read_incarnation()
-        live_pending = handoff_pending_from(live)
-        if (live_pending is not None
-                and live_pending.get("successor_inc") == successor_inc):
-            live_pending["successor_sid"] = successor_sid
-            live[HANDOFF_PENDING_KEY] = live_pending
+        entry = handoff_entry_matching(live, successor_inc=successor_inc)
+        if entry is not None:
+            entry["successor_sid"] = successor_sid
             write_incarnation(live)
         data = load_registry()
         if name not in data["workers"]:
@@ -11299,16 +11599,25 @@ def cmd_sup_handoff_complete(args) -> int:
         # on the value its own boot delivered, with no in-place upgrade. The
         # token hash is the PREDECESSOR's and is deliberately not carried.
         #
-        # D1: the pending-successor marker is dropped BY CONSTRUCTION -- this
-        # literal never copies `handoff_pending`, and the handoff it recorded
-        # is over the moment this claim is written. Same reasoning as the token
-        # hash one line up: a spent marker a later abort could still read is a
-        # lever pointed at a body that now holds the claim.
+        # D1/R1/R5: the COMPLETED successor's entry is dropped -- it holds the
+        # claim now, and a lever aimed at the holder is not a lever. Every
+        # OTHER pending entry is CARRIED FORWARD. Those are rival attempts of
+        # the same succession, and after the real three-begins-in-sixteen-
+        # minutes sequence they may still be live limbo bodies; the new holder
+        # is the only body with a claim, so it is the only body that can abort
+        # them. Dropping them here would rebuild the wave-1 CRIT one transfer
+        # later. (Their plaintext tokens die regardless: `handoff_token_hash`
+        # is the PREDECESSOR's and is deliberately not carried, so nothing
+        # verifies against them any more -- R4.)
+        carried = [e for e in handoff_pending_entries(claim)
+                   if e.get("successor_inc") != args.expect_inc]
         new_claim = {"incarnation_id": args.expect_inc,
                      "session_id": successor_sid,
                      "claimed_at": now_iso(), "heartbeat_at": now_iso(),
                      "claimed_via": "handoff",
                      "lineage_id": claim.get("lineage_id")}
+        if carried:
+            new_claim[HANDOFF_PENDING_KEY] = carried
         succ_nonce_hash = hs.get("nonce_hash")
         if succ_nonce_hash:
             new_claim["nonce_hash"] = succ_nonce_hash
@@ -11338,10 +11647,7 @@ def cmd_sup_handoff_complete(args) -> int:
         except FileNotFoundError:
             pass
         # §5.9: the task file carries the plaintext token; unlink it here.
-        try:
-            handoff_task_file_path(args.expect_inc).unlink()
-        except FileNotFoundError:
-            pass
+        unlink_handoff_task_file(args.expect_inc, context=" (handoff complete)")
         # D2: and so does every EARLIER attempt's file. The claim has just
         # transferred, so those tokens are spent and ownerless -- keyed on the
         # claim we just wrote, whose holder is the successor and whose pending
@@ -11355,36 +11661,32 @@ def cmd_sup_handoff_complete(args) -> int:
 
 
 def cmd_sup_handoff_abort(args, which=shutil.which, run=subprocess.run) -> int:
-    """`fleet sup-handoff-abort --successor-sid S [--sid ...]` -- spec §4
-    timeout branch: old resumes duty, stops the limbo successor (`claude
-    stop`, NEVER raw kill -- G10 zombie hazard), removes HANDSHAKE, raises
-    the doctor-visible flag. Note contract G10: `claude stop` fires NO Stop
-    hook -- nothing will have journaled on the successor's behalf.
+    """`fleet sup-handoff-abort (--successor-sid S | --successor-inc I) [--sid ...]`
+    -- spec §4 timeout branch: old resumes duty, stops the limbo successor
+    (`claude stop`, NEVER raw kill -- G10 zombie hazard), removes HANDSHAKE,
+    raises the doctor-visible flag. Note contract G10: `claude stop` fires NO
+    Stop hook -- nothing will have journaled on the successor's behalf.
 
-    Sid cross-check (M-B T10 fix 2): a live HANDSHAKE naming a different sid
-    than --successor-sid means the caller is pointed at the wrong session --
+    Cross-check (M-B T10 fix 2): a live HANDSHAKE naming a different session
+    than the caller passed means the caller is pointed at the wrong body --
     refuse before touching anything (nothing stopped, no flag written).
 
     BEHAVIOR CHANGE (M-B T10 fix wave, Finding 2 -- Important): absent
-    HANDSHAKE no longer means "unchecked, proceed". Verification order is:
-    (1) HANDSHAKE present -- cross-check its sid as above (mismatch refuses,
-    match proceeds); (2) HANDSHAKE absent -- the claim's PENDING-SUCCESSOR
-    marker (D1, `handoff_pending_from`): if its `successor_sid` matches
-    --successor-sid, proceed; (3) HANDSHAKE absent -- fall back to the abort
-    flag (`handoff_abort_flag_path()`) written by sup-handoff-begin on a DOA/
-    dispatch-failure; if its `successor_sid` matches --successor-sid,
-    proceed (stopping the recorded limbo successor is the documented duty);
-    (4) HANDSHAKE absent and no matching recorded evidence -- refuse. There
-    is no longer a path where an arbitrary --successor-sid is stopped with
-    zero verification.
+    HANDSHAKE no longer means "unchecked, proceed", and there is no path
+    where an arbitrary `--successor-sid` is stopped with zero verification.
+    The whole decision is `resolve_handoff_abort`, a pure function -- read its
+    docstring for the arm order and for why the wave-1 abort-flag arm is gone.
 
-    Arm (2) is D1 (2026-07-24 live succession). Without it a successor that
-    dispatched, joined the roster, and then died before writing HANDSHAKE
-    matched NOTHING -- no HANDSHAKE, and no abort flag either, because begin
-    writes that flag only on its own dispatch-failure/DOA branches. The
-    handoff was unabortable in exactly the window this verb exists for. The
-    marker adds a recorded successor; it does NOT relax the refusal, which is
-    the safety property here."""
+    R3: the verb now takes EITHER handle. `--successor-sid` stops a recorded
+    session; `--successor-inc` additionally RETIRES an entry that aged out of
+    the join window without ever recording a sid. On that path nothing is
+    stopped and the verb says so -- it must never report stopping a session it
+    never had."""
+    successor_sid = getattr(args, "successor_sid", None)
+    successor_inc = getattr(args, "successor_inc", None)
+    if not successor_sid and not successor_inc:
+        raise FleetCliError("sup-handoff-abort needs --successor-sid or --successor-inc "
+                            "(see `fleet sup-status --json` for the pending successors)")
     with fleet_lock():
         # The old side RESUMES duty here (it rewrites its own heartbeat
         # below), so it mints and is delivered a fresh generation like any
@@ -11392,88 +11694,67 @@ def cmd_sup_handoff_abort(args, which=shutil.which, run=subprocess.run) -> int:
         claim, caller, notices = _require_claim_holder(
             getattr(args, "sid", None), nonce=getattr(args, "nonce", None),
             verb="sup-handoff-abort")
-        hs = read_handshake()
-        aborted_inc = None
-        pending = handoff_pending_from(claim)
-        pending_sid = pending.get("successor_sid") if pending is not None else None
-        if hs is not None:
-            if hs.get("session_id") != args.successor_sid:
-                raise FleetCliError(
-                    f"--successor-sid does not match HANDSHAKE sid {hs.get('session_id')} -- "
-                    f"refusing to stop an unrelated session")
-            aborted_inc = hs.get("incarnation_id")
-        elif pending_sid is not None and pending_sid == args.successor_sid:
-            # D1, the STILLBORN arm and the reason this fix exists: no
-            # HANDSHAKE, because the successor never got that far. The claim's
-            # own pending marker -- written by begin, sid stamped at the roster
-            # join -- names the successor this body dispatched, which is
-            # recorded evidence of exactly the kind the refusal below demands.
-            # No HANDSHAKE is required to abort a body that never wrote one.
-            aborted_inc = pending.get("successor_inc")
-        else:
-            flag = read_handoff_abort_flag()
-            recorded_sid = flag.get("successor_sid") if flag is not None else None
-            # Roll-up item 8 (simplified): an abort flag recorded with
-            # successor_sid=None (the dispatch-failed shape) names nothing
-            # verifiable to stop -- refuse on the RECORDED side, whatever the
-            # caller passed. The old args-side None check was dead via the
-            # CLI (argparse required=True) and is now subsumed: a None
-            # args.successor_sid can only match a None recorded_sid, which
-            # this refuses first.
-            if recorded_sid is None or recorded_sid != args.successor_sid:
-                raise FleetCliError(
-                    f"no HANDSHAKE and --successor-sid {args.successor_sid} matches no "
-                    f"recorded limbo successor -- refusing to stop an unverified session "
-                    f"(pending successor: {pending_sid or 'none recorded'}; "
-                    f"check claude agents; stop manually if certain)")
+        verdict = resolve_handoff_abort(claim, read_handshake(),
+                                        successor_sid=successor_sid,
+                                        successor_inc=successor_inc)
+        if verdict["action"] == "refuse":
+            raise FleetCliError(verdict["reason"])
+        retiring = verdict["action"] == "retire"
+        target_sid, aborted_inc = verdict["sid"], verdict["inc"]
         try:
             handshake_path().unlink()
         except FileNotFoundError:
             pass
         # §5.9: the aborted successor's task file carries the plaintext token;
-        # unlink it here too (best-effort, keyed on the HANDSHAKE's inc when we
-        # have one and on the pending marker's when we do not -- D1 gave the
-        # no-HANDSHAKE arm a successor inc it previously lacked, so only the
-        # abort-flag arm still relies on the doctor NOTE as its backstop).
+        # unlink it here too. R6: only a MISSING file is silent -- a token file
+        # we could not remove is exactly what §5.9 exists to prevent, so it is
+        # said out loud rather than swallowed.
         if aborted_inc:
-            try:
-                handoff_task_file_path(aborted_inc).unlink()
-            except OSError:
-                pass
-        supervisor_journal_append("HANDOFF-ABORT", claim["incarnation_id"], caller,
-                                  f"stopping limbo successor sid={args.successor_sid}")
+            unlink_handoff_task_file(aborted_inc, context=" (handoff abort)")
+        supervisor_journal_append(
+            "HANDOFF-ABORT", claim["incarnation_id"], caller,
+            f"retiring stale successor {aborted_inc} (no sid was ever recorded)"
+            if retiring else
+            f"stopping limbo successor sid={target_sid} inc={aborted_inc}")
         _write_json_atomic(handoff_abort_flag_path(), {
             "aborted_at": now_iso(),
-            "successor_sid": args.successor_sid,
+            "reason": "stale-entry-retired" if retiring else "aborted",
+            "successor_sid": target_sid,
+            "successor_inc": aborted_inc,
             "holder": claim["incarnation_id"],
         })
         claim["heartbeat_at"] = now_iso()   # old resumes duty
-        # The handoff this body started is over; its token hash is spent. Drop
-        # it so a later verb never re-reads a stale token (§6.4). A fresh begin
-        # overwrites it regardless; clearing it keeps the resumed claim clean.
-        claim.pop("handoff_token_hash", None)
-        # D1: and the pending-successor marker with it. The successor it named
-        # has just been stopped, so leaving the marker would leave a second
-        # abort aimed at a dead sid -- and would keep the swept-file predicate
-        # protecting a task file with no reader.
-        claim.pop(HANDOFF_PENDING_KEY, None)
+        # R1/R4: retire THIS entry only -- a rival attempt's live successor
+        # keeps its own -- and the handoff token dies with the LAST one, which
+        # is what stops a stranded plaintext token from still validating
+        # against the claim (`drop_handoff_entry`).
+        if verdict.get("entry") is not None:
+            drop_handoff_entry(claim, verdict["entry"])
         write_incarnation(claim)
-        # D2: with the marker gone, any residue from this or an earlier
-        # attempt is ownerless. Sweep under the lock we already hold.
+        # D2/R2: age-gated, fail-closed sweep of ownerless residue, under the
+        # lock we already hold. It cannot reach a surviving entry's file.
         sweep_handoff_task_files(claim)
+    if retiring:
+        print(f"stale successor {aborted_inc} retired: NO session was stopped -- no sid "
+              f"was ever recorded for it (dispatch never joined the roster, or the "
+              f"roster could not be read). Its task file and handoff token are gone. "
+              f"If a body did start, stop it via `claude agents`. Duty resumed by "
+              f"{claim['incarnation_id']}.")
+        _deliver_notices(notices)
+        return 0
     # S1 fix (final wave): route through _stop_native_session -- the ONLY
     # sanctioned stop primitive -- instead of an inline full-sid `run(...)`.
     # T12 established `claude stop` requires the SHORT id; the raw full-sid
     # call here no-op'd 100% of the time (job-ref conversion is entirely
     # internal to _stop_native_session/_rm_native_session, and this was not
     # a call site of either).
-    stopped = _stop_native_session(args.successor_sid, run=run, which=which, timeout=60)
+    stopped = _stop_native_session(target_sid, run=run, which=which, timeout=60)
     if not stopped:
-        print(f"WARNING: `claude stop {args.successor_sid}` stop failed -- "
+        print(f"WARNING: `claude stop {target_sid}` stop failed -- "
               f"successor may still be live; stop it manually via the agents menu. "
               f"Abort flag is set either way.")
     else:
-        print(f"limbo successor {args.successor_sid} stopped; duty resumed by "
+        print(f"limbo successor {target_sid} stopped; duty resumed by "
               f"{claim['incarnation_id']}. Doctor will flag until the abort flag is cleared.")
     _deliver_notices(notices)
     return 0
@@ -11667,11 +11948,21 @@ def _doctor_check_supervisor_handoff():
             if fage > SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS:
                 orphans.append(f.name)
         if orphans:
+            # rs-MIN-2: the advice was right, the rationale was false. These
+            # tokens are not "spent". Nothing invalidates a handoff token but
+            # the claim dropping `handoff_token_hash`, so while the claim still
+            # carries the hash of one of these files' tokens, `sup-boot
+            # --handoff-inc <inc> --handoff-token <tok>` still validates -- a
+            # bearer secret, readable by anything that can read `state/`.
+            # Deleting them is not hygiene-when-convenient; it is the retention
+            # policy (§5.9).
             parts.append(
                 f"NOTE: {len(orphans)} orphaned successor task file(s) past the handoff "
                 f"timeout ({', '.join(sorted(orphans))}) -- residue from a handoff that "
-                f"crashed before unlinking; each carries a spent handoff token, safe to "
-                f"delete manually (claim-nonce §5.9)")
+                f"crashed before unlinking. Each carries a handoff token that is still "
+                f"LIVE if the claim still holds its hash; delete them (claim-nonce §5.9), "
+                f"and prefer `fleet sup-handoff-abort --successor-inc <inc>`, which "
+                f"retires the pending entry and the token hash with the file")
     except OSError:
         pass
     if not parts:
@@ -11844,6 +12135,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_supboot.add_argument("--sid", help="override caller session id (default: CLAUDE_CODE_SESSION_ID)")
     p_supboot.add_argument("--nonce", help=NONCE_ARG_HELP)
     p_supboot.add_argument("--handoff-inc", dest="handoff_inc",
+                           type=_argparse_incarnation_id,
                            help="handoff-successor mode: write HANDSHAKE with this incarnation id; no claim action")
     p_supboot.add_argument("--handoff-token", dest="handoff_token",
                            help="handoff-successor mode: the one-shot token from the "
@@ -11934,7 +12226,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_suphb.add_argument("--nonce", help=NONCE_ARG_HELP)
 
     p_suphc = sub.add_parser("sup-handoff-complete", help="verify HANDSHAKE and transfer the claim")
-    p_suphc.add_argument("--expect-inc", dest="expect_inc", required=True)
+    # R6: an incarnation id is a PATH COMPONENT (`handoff_task_file_path`).
+    # Shape-check it at the parser so a traversal never reaches the filesystem.
+    p_suphc.add_argument("--expect-inc", dest="expect_inc", required=True,
+                         type=_argparse_incarnation_id)
     # §6.4: optional. The token verifies the successor; --expect-sid is
     # observability, and a mismatch is a warning naming the fork, not a refusal.
     p_suphc.add_argument("--expect-sid", dest="expect_sid",
@@ -11943,7 +12238,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_suphc.add_argument("--nonce", help=NONCE_ARG_HELP)
 
     p_supha = sub.add_parser("sup-handoff-abort", help="abort a handoff: stop the limbo successor, resume duty")
-    p_supha.add_argument("--successor-sid", dest="successor_sid", required=True)
+    # R3: EITHER handle. `--successor-sid` stops a recorded session;
+    # `--successor-inc` also retires an entry that aged out of the join window
+    # without ever recording one (nothing is stopped on that path, and the verb
+    # says so). Not `required=True` on either, not a mutually-exclusive group:
+    # passing both is legitimate and means "this sid AND this inc", which
+    # `handoff_entry_matching` requires to agree.
+    p_supha.add_argument("--successor-sid", dest="successor_sid",
+                         help="sid of the limbo successor to stop")
+    p_supha.add_argument("--successor-inc", dest="successor_inc",
+                         type=_argparse_incarnation_id,
+                         help="incarnation id of the pending successor; retires a "
+                              "stale entry that never recorded a sid")
     p_supha.add_argument("--sid", help="override caller session id")
     p_supha.add_argument("--nonce", help=NONCE_ARG_HELP)
 
