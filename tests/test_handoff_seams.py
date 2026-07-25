@@ -1524,3 +1524,160 @@ class TestDeadCodeIsGone:
         invitation to route a decision back through a record no begin path ever
         writes a sid into."""
         assert not hasattr(fleet, "read_handoff_abort_flag")
+
+
+def _make_escaping_path(link: Path, target_dir: Path):
+    """Plant a real filesystem escape at `link` -- a path INSIDE `state/` whose
+    `resolve()` lands somewhere else. A symlink where the platform allows one
+    (POSIX always; Windows only with the privilege), otherwise a Windows
+    directory junction, which needs no privilege and is resolved by
+    `Path.resolve()` exactly like a symlink.
+
+    Both are the R6 threat model, not a contrivance: anything that can write
+    into `state/` can plant one, and the incarnation id in a HANDSHAKE is
+    written by the SUCCESSOR."""
+    try:
+        os.symlink(str(target_dir), str(link), target_is_directory=True)
+        return
+    except (OSError, NotImplementedError, AttributeError):
+        pass
+    if os.name == "nt":
+        proc = subprocess.run(["cmd", "/c", "mklink", "/J", str(link),
+                               str(target_dir)], capture_output=True, text=True)
+        if proc.returncode == 0 and link.exists():
+            return
+    pytest.skip("no way to create a resolving escape (symlink/junction) here")
+
+
+class TestR10MutationSurvivors(_HandoffBase):
+    """R10 -- the eight mutations that survived the full wave-2 suite. Each
+    test below goes RED under exactly one of them, mutate-red-restore.
+
+    N13 (sid cross-check dropped on an inc match) and N21 (drop by object
+    identity instead of by inc) are killed by
+    `TestEntriesMatchOnIdentityNotPosition`, where the fix that made them
+    reachable lives (rb-MIN-6). The other six are here.
+
+    N23 + N38 + N24 + N32 are the sharp ones: three round-1 fixes shipped with
+    NO test that dies when the fix is removed. R6's containment was exercised
+    only through `valid_incarnation_id`, which cannot reach the containment
+    branch at all, and rb-MIN-2's best-effort marker drop had no failing-lock
+    test."""
+
+    def test_N09_the_stale_boundary_is_strictly_PAST_the_timeout(self):
+        """N09: `age > timeout` flipped to `>=`. An entry at exactly T is a
+        join that has just run out of window, not one that ran out -- and the
+        boundary is the moment an operator's `--successor-inc` starts deleting
+        a task file, so which side owns the instant is not decoration."""
+        # second precision on BOTH sides: `minted_at` is written by strftime,
+        # so a `now` carrying microseconds would put the boundary case a
+        # fraction past T and test nothing.
+        now = fleet.datetime.now(fleet.timezone.utc).replace(microsecond=0)
+        def at(age):
+            return {"successor_inc": DEAD_INC_A,
+                    "minted_at": (now - fleet.timedelta(seconds=age)).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ")}
+        assert fleet.handoff_entry_state(at(T), now=now) == fleet.HANDOFF_JOINING
+        assert fleet.handoff_entry_state(at(T - 1), now=now) == fleet.HANDOFF_JOINING
+        assert fleet.handoff_entry_state(at(T + 1), now=now) == \
+            fleet.HANDOFF_RESOLVABLE_STALE
+
+    def test_N23_a_path_that_RESOLVES_outside_the_state_dir_is_refused(
+            self, sup_home, capsys):
+        """N23: the containment check deleted. The id shape-check cannot cover
+        this -- the id here is perfectly well-formed; it is the FILESYSTEM that
+        redirects, which is precisely why `handoff_task_file_path` has a second
+        half that does not depend on the regex being exhaustive."""
+        outside = sup_home / "outside"
+        outside.mkdir()
+        (outside / "victim.md").write_text("do not delete me", encoding="utf-8")
+        inc = DEAD_INC_A
+        link = sup_home / "state" / f"supervisor-handoff-{inc}.md"
+        _make_escaping_path(link, outside)
+        assert link.resolve() != link, "the escape did not take"
+        with pytest.raises(fleet.FleetCliError,
+                           match="refusing a handoff task path outside"):
+            fleet.handoff_task_file_path(inc)
+        assert fleet.unlink_handoff_task_file(inc, context=" (abort)") is False
+        assert (outside / "victim.md").exists()
+        assert "WARNING" in capsys.readouterr().out
+
+    def test_N38_containment_compares_RESOLVED_roots(self, tmp_path, monkeypatch):
+        """N38: `path.parent != root.resolve()` mutated to `path.parent != root`.
+        The left side is always resolved, so dropping the right side's resolve
+        makes every legitimate path look like an escape the moment the fleet
+        home reaches `state/` through anything the filesystem normalizes -- and
+        then complete, abort and begin all refuse to unlink the file that
+        carries the plaintext token. A fail-closed check that fails closed on
+        the happy path is a retention failure, not a defense."""
+        home = tmp_path / "home"
+        (home / "state").mkdir(parents=True)
+        (home / "sub").mkdir()
+        monkeypatch.setattr(fleet, "FLEET_HOME", home / "sub" / "..")
+        inc = fleet.mint_incarnation_id()
+        path = fleet.handoff_task_file_path(inc)
+        assert path.parent == (home / "state").resolve()
+        assert path.name == f"supervisor-handoff-{inc}.md"
+
+    def test_N24_an_unremovable_token_file_is_REPORTED_not_swallowed(
+            self, sup_home, capsys, monkeypatch):
+        """N24: the `OSError` arm of `unlink_handoff_task_file` mutated back to
+        a silent `return False`. Only a MISSING file may be silent -- a file we
+        could not remove is the §5.9 retention failure itself, and it is
+        exactly the case nobody would ever see."""
+        _orphan(sup_home, DEAD_INC_A)
+        real_unlink = Path.unlink
+        def boom(self, *a, **kw):
+            if self.name.endswith(f"{DEAD_INC_A}.md"):
+                raise PermissionError(13, "file is locked")
+            return real_unlink(self, *a, **kw)
+        monkeypatch.setattr(Path, "unlink", boom)
+        assert fleet.unlink_handoff_task_file(
+            DEAD_INC_A, context=" (handoff abort)") is False
+        out = capsys.readouterr().out
+        assert "WARNING" in out and DEAD_INC_A in out
+        assert "handoff token" in out and "(handoff abort)" in out
+
+    def test_N29_the_HANDSHAKE_inc_cross_check_refuses_a_mismatch(self):
+        """N29: the inc arm of the HANDSHAKE cross-check dropped, leaving only
+        the sid arm. `--successor-inc` is the handle the doctor NOTE and the
+        stale-entry recipe both print, so it is the one an operator reaches for
+        mid-incident -- and with the check gone it stops whatever session the
+        HANDSHAKE happens to name, which is the wrong body by construction."""
+        claim = {"incarnation_id": "inc-20260724T000000Z-0old"}
+        hs = {"incarnation_id": DEAD_INC_A, "session_id": "sid-from-handshake"}
+        verdict = fleet.resolve_handoff_abort(claim, hs, successor_inc=DEAD_INC_B)
+        assert verdict["action"] == "refuse"
+        assert "does not match HANDSHAKE inc" in verdict["reason"]
+        assert fleet.resolve_handoff_abort(
+            claim, hs, successor_inc=DEAD_INC_A)["action"] == "stop"
+
+    def test_N32_a_failed_marker_drop_never_replaces_the_real_diagnosis(
+            self, sup_home, capsys, monkeypatch):
+        """N32: `_drop_pending_marker`'s `except (FleetCliError, OSError)`
+        removed. Every caller is already raising a `FleetCliError` that names
+        the real failure -- the dispatch that did not happen -- so a lock
+        timeout or an unwritable claim in the CLEANUP must not surface instead
+        of it. The operator would then be told the claim is unwritable and
+        never told the successor was never launched."""
+        self._hold()
+        def run(argv, **kw):
+            if "--bg" in argv:
+                return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+            return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+        real_write = fleet.write_incarnation
+        writes = {"n": 0}
+        def wedged(claim):
+            writes["n"] += 1
+            if writes["n"] > 1:          # the begin write lands; the cleanup does not
+                raise OSError(5, "INCARNATION is unwritable")
+            return real_write(claim)
+        monkeypatch.setattr(fleet, "write_incarnation", wedged)
+        args = SimpleNamespace(sid="sid-old", model=None, permission_mode=None,
+                               nonce=None)
+        with pytest.raises(fleet.FleetCliError, match="successor dispatch failed"):
+            fleet.cmd_sup_handoff_begin(args, which=_fake_which, run=run,
+                                        sleep=lambda s: None)
+        out = capsys.readouterr().out
+        assert "WARNING: could not clear the pending entry" in out
+        assert writes["n"] > 1, "the cleanup never attempted the write it must survive"
