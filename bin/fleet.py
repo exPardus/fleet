@@ -11476,6 +11476,10 @@ Do exactly this, in order:
    token hash and your own freshly minted generation). It also prints a
    `NONCE:` line -- that is YOUR generation; keep it, you present it on your
    first supervisor verb after the claim transfers. You hold NO claim yet.
+   IF THAT COMMAND REFUSES (`VERDICT: handoff-refused`, exit 5): your predecessor
+   began another handoff after dispatching you, so you were superseded and at most
+   one successor may boot. You hold nothing and there is nothing to retry. STOP --
+   take no actions, end your turn with the final message: HANDOFF-ORPHAN {successor_inc}
 2. Take NO spawn/respawn/send/kill/clean actions before claim transfer -- spec §4's double-spawn guard.
 3. Poll every ~30s (up to 10 minutes): "{py}" {fleet_py} sup-status --json
    - When incarnation.incarnation_id == "{successor_inc}": the claim is yours. Run:
@@ -11691,6 +11695,16 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
         and popping on anything but an exact `successor_inc` match would retire
         a RIVAL begin's live successor from this attempt's failure path.
 
+        R9, the same evidence used twice: because no process was launched, this
+        attempt also never had the right to supersede anything. Every entry it
+        marked is UN-superseded here -- by `superseded_by`, so a third attempt's
+        marks are untouched. Without this, a begin that fails at dispatch takes
+        the previous, possibly live and perfectly good successor down with it:
+        that successor would refuse at `sup-boot --handoff-inc` for a rival that
+        does not exist, and the succession would have no bootable successor at
+        all -- while the condition that failed the dispatch (a `claude` off
+        PATH) is exactly the one that stops the operator retrying.
+
         BEST-EFFORT BY CONSTRUCTION (rb-MIN-2): every caller is already raising
         a `FleetCliError` that names the real failure, so a lock timeout or an
         unwritable claim here must not replace that diagnosis with its own. The
@@ -11699,8 +11713,15 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
             with fleet_lock():
                 live = read_incarnation()
                 entry = handoff_entry_matching(live, successor_inc=successor_inc)
+                restored = False
+                for member in handoff_pending_entries(live):
+                    if member.get("superseded_by") == successor_inc:
+                        member.pop(HANDOFF_SUPERSEDED_KEY, None)
+                        member.pop("superseded_by", None)
+                        restored = True
                 if entry is not None:
                     drop_handoff_entry(live, entry)
+                if entry is not None or restored:
                     write_incarnation(live)
         except (FleetCliError, OSError) as exc:
             print(f"WARNING: could not clear the pending entry for {successor_inc}: {exc}")

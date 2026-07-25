@@ -1681,3 +1681,57 @@ class TestR10MutationSurvivors(_HandoffBase):
         out = capsys.readouterr().out
         assert "WARNING: could not clear the pending entry" in out
         assert writes["n"] > 1, "the cleanup never attempted the write it must survive"
+
+
+class TestASupersessionIsUndoneWhenItsAttemptNeverLaunched(_HandoffBase):
+    """R9 liveness corner. `_drop_pending_marker` runs on the DISPATCH-FAILED
+    path only, whose whole premise is that no process was ever launched -- so
+    the attempt that failed never had the right to supersede anything either."""
+
+    def _dispatch_fails(self, argv, **kw):
+        if "--bg" in argv:
+            return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+        return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+
+    def test_a_failed_begin_leaves_the_previous_attempt_bootable(
+            self, sup_home, capsys):
+        self._hold()
+        _rc, gen = self._begin(capsys)               # attempt 1: live, joined
+        first = self._incs()[0]
+        args = SimpleNamespace(sid="sid-old", model=None, permission_mode=None,
+                               nonce=gen)
+        with pytest.raises(fleet.FleetCliError, match="successor dispatch failed"):
+            fleet.cmd_sup_handoff_begin(args, which=_fake_which,
+                                        run=self._dispatch_fails,
+                                        sleep=lambda s: None)
+        capsys.readouterr()
+        entry = fleet.handoff_pending_entries(fleet.read_incarnation())[0]
+        assert entry["successor_inc"] == first
+        assert fleet.handoff_entry_state(entry) == fleet.HANDOFF_AWAITING_HANDSHAKE
+        assert fleet.handoff_boot_refusal(fleet.read_incarnation(), first) is None
+        assert _boot_successor("succ0001-full", first,
+                               _token_of(sup_home, first)) == 0
+        capsys.readouterr()
+        assert fleet.read_handshake()["incarnation_id"] == first
+
+    def test_a_THIRD_attempts_supersession_is_not_undone(self, sup_home, capsys):
+        """Only the marks this attempt made are lifted -- by `superseded_by`,
+        not by 'clear them all'."""
+        self._hold()
+        _rc, gen = self._begin(capsys)               # attempt 1
+        first = self._incs()[0]
+        self._begin(capsys, nonce=gen,               # attempt 2 supersedes it
+                    run=_dispatch_then_roster("succ0002-full", "succ0002"))
+        second = self._incs()[1]
+        args = SimpleNamespace(sid="sid-old", model=None, permission_mode=None,
+                               nonce=gen)
+        with pytest.raises(fleet.FleetCliError, match="successor dispatch failed"):
+            fleet.cmd_sup_handoff_begin(args, which=_fake_which,   # attempt 3 dies
+                                        run=self._dispatch_fails,
+                                        sleep=lambda s: None)
+        capsys.readouterr()
+        states = {e["successor_inc"]: fleet.handoff_entry_state(e)
+                  for e in fleet.handoff_pending_entries(fleet.read_incarnation())}
+        assert states[first] == fleet.HANDOFF_SUPERSEDED, \
+            "attempt 2's supersession is not attempt 3's to undo"
+        assert states[second] == fleet.HANDOFF_AWAITING_HANDSHAKE

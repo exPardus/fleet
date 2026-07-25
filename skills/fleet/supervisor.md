@@ -150,12 +150,38 @@ Old incarnation:
    no session was stopped. Abort still refuses a handle that ties to no recorded
    successor: that refusal is the safety property, not a bug.
 
+   **A second `begin` SUPERSEDES the first attempt, and a superseded attempt
+   cannot boot** (claim-nonce §6.4 A3, UNRATIFIED). The protocol underneath is
+   single-successor — one HANDSHAKE path, one token hash — so two bootable
+   successors race and the late one clobbers the winner, after which neither
+   complete nor abort can end the succession. A superseded attempt stays
+   abortable by either handle (immediately: there is no join left to wait out)
+   and stays in `sup-status`; what it no longer is, is bootable. Its
+   `sup-boot --handoff-inc` refuses with rc 5 and tells that body to terminate.
+
+   **There is deliberately no promote verb.** To hand the claim to an EARLIER
+   attempt, abort it and run `sup-handoff-begin` again. Only the current attempt
+   can complete, and that is a consequence of the above rather than a rule of
+   its own.
+
+   **Retiring the whole set:** `fleet sup-handoff-abort --retire-all --nonce
+   <value>` retires every entry that names no session (stale, superseded, and —
+   with `--force` — one whose `minted_at` cannot be read and which would
+   therefore never age out). It stops nothing; anything bearing a sid comes back
+   in the output with its own recipe. `fleet doctor` FAILS while such an entry
+   stands, because each one pins a task file whose plaintext handoff token is
+   still LIVE.
+
 Successor: driven entirely by the task file `sup-handoff-begin` wrote — it
 boots claim-pending with `--handoff-token`, writes HANDSHAKE (carrying the
 token hash and its OWN freshly minted generation, printed as its `NONCE:`
 line), polls `fleet sup-status --json`, and takes NO fleet actions until the
 claim shows its incarnation id. Its first verb after transfer presents that
-generation — the transferred claim is live, not a legacy upgrade.
+generation — the transferred claim is live, not a legacy upgrade. If its
+`sup-boot --handoff-inc` REFUSES (rc 5, `VERDICT: handoff-refused`), it was
+superseded or retired while it was starting: it holds no claim and no
+generation, and its instruction is to terminate with the HANDOFF-ORPHAN final
+message its task file already prescribes.
 
 ## Standing down: release, then stop (claim-nonce §6.3)
 
