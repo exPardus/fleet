@@ -9149,14 +9149,22 @@ def handoff_pending_entries(claim) -> list:
     resurrected the incident. Entries are appended and removed by resolution;
     begin never destroys an unresolved one.
 
-    Tolerant, like `read_handshake`: a non-list reads as empty, and non-dict
-    members are dropped. A bare dict is read as a ONE-ENTRY list -- the shape
-    the first cut of this branch wrote, which may sit in a live INCARNATION.
+    Tolerant, like `read_handshake`: a non-list reads as empty, and a member
+    that is not a dict naming a successor is dropped. A bare dict is read as a
+    ONE-ENTRY list -- the shape the first cut of this branch wrote, which may
+    sit in a live INCARNATION.
+
+    "Naming a successor" is the whole membership test: an entry is a thing a
+    caller can point `--successor-inc` at. A dict with no readable
+    `successor_inc` is not one, and publishing it here would put an entry in
+    every view and every refusal message that no handle can ever address.
 
     The dropped members are NOT forgotten: `handoff_pending_torn` reports them,
     the sweep fails closed on them (rb-MIN-7), the doctor moves its verdict on
     them, and `handoff_pending_members` is what writers rebuild from."""
-    return [e for e in handoff_pending_members(claim) if isinstance(e, dict)]
+    return [e for e in handoff_pending_members(claim)
+            if isinstance(e, dict) and isinstance(e.get("successor_inc"), str)
+            and e.get("successor_inc")]
 
 
 def handoff_pending_torn(claim) -> list:
