@@ -27,10 +27,26 @@ a slot-shaped record could not express:
      input; confine the path, validate the shape, and do not swallow OSError.
   R7 the abort flag arm is gone: no begin path ever wrote a sid into it.
   R8 six mutations survived the wave-1 suite. Each has a test here.
+
+WAVE 3 (R9/R10) answers what R1 and R2 together created. Keeping every attempt
+recorded AND keeping its task file left a superseded successor fully BOOTABLE,
+on top of a protocol whose HANDSHAKE and token hash are single-valued:
+
+  R9  AT MOST ONE BOOTABLE SUCCESSOR, and supersession is EXPLICIT. Keep the
+      collection -- that is what makes every attempt abortable and auditable --
+      but a begin marks every earlier unresolved entry superseded: still
+      abortable by either handle, sweepable once past T, and NOT bootable.
+      `sup-boot --handoff-inc` refuses a superseded inc and tells that body to
+      terminate, which is what stops a rival from clobbering the winner's
+      HANDSHAKE and stranding the claim with no holder (rb-CRIT-2). There is
+      deliberately no promote verb: abort, then begin again.
+  R10 eight more mutations survived the wave-2 suite. Each has a test here that
+      goes RED under exactly that mutation, proven mutate-red-restore.
 """
 import json
 import os
 import re
+import subprocess
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -149,6 +165,43 @@ DEAD_INC_A = "inc-20260724T045450Z-0dea"
 DEAD_INC_B = "inc-20260724T081049Z-754f"
 
 
+def _roster_run(*sids):
+    """`subprocess.run` double that only ever answers the roster query."""
+    def run(argv, **kw):
+        return SimpleNamespace(returncode=0, stderr="", stdout=json.dumps(
+            [{"sessionId": s, "status": "busy"} for s in sids]))
+    return run
+
+
+def _token_of(sup_home, inc):
+    """The PLAINTEXT one-shot token, read where the successor body reads it:
+    out of the `sup-boot --handoff-inc ... --handoff-token ...` line of its own
+    task file (§6.4). No test-only channel."""
+    text = (sup_home / "state" / f"supervisor-handoff-{inc}.md").read_text(
+        encoding="utf-8")
+    return re.search(r"--handoff-token (\S+)", text).group(1)
+
+
+def _boot_successor(sid, inc, token=None, roster=()):
+    """A REAL successor boot: the same `cmd_sup_boot` entry point, the same
+    argv shape the task file prescribes."""
+    return fleet.cmd_sup_boot(
+        SimpleNamespace(sid=sid, handoff_inc=inc, handoff_token=token, nonce=None),
+        which=_fake_which, run=_roster_run(*(roster or (sid,))))
+
+
+def _backdate(entry_inc, key, seconds):
+    """Back-date one timestamp field of a REAL begin-produced entry."""
+    claim = fleet.read_incarnation()
+    for entry in fleet.handoff_pending_entries(claim):
+        if entry.get("successor_inc") == entry_inc:
+            entry[key] = (fleet.datetime.now(fleet.timezone.utc)
+                          - fleet.timedelta(seconds=seconds)).strftime(
+                              "%Y-%m-%dT%H:%M:%SZ")
+    fleet.write_incarnation(claim)
+    return claim
+
+
 class _HandoffBase:
     """A live claim-holding predecessor, plus `begin` driven to a chosen
     outcome. Generations are captured off begin's own stdout, exactly where a
@@ -187,9 +240,10 @@ class _HandoffBase:
                 for e in fleet.handoff_pending_entries(fleet.read_incarnation())]
 
     def _abort(self, run=None, sid="sid-old", nonce=None, successor_sid=None,
-               successor_inc=None):
+               successor_inc=None, force=False, retire_all=False):
         args = SimpleNamespace(sid=sid, nonce=nonce, successor_sid=successor_sid,
-                               successor_inc=successor_inc)
+                               successor_inc=successor_inc, force=force,
+                               retire_all=retire_all)
         return fleet.cmd_sup_handoff_abort(args, which=_fake_which,
                                            run=run or _stop_ok())
 
@@ -870,3 +924,603 @@ class TestAbortRecipeCarriesTheNonce:
         for match in self.RECIPE.finditer(out):
             assert "--nonce" in match.group(0), match.group(0)
         assert "sup-handoff-abort" in out and "sup-handoff-complete" in out
+
+
+class TestAtMostOneBootableSuccessor(_HandoffBase):
+    """R9 / rb-CRIT-2 -- the defect wave 2 CREATED. Wave 1 made a rival
+    unbootable by deleting its task file; wave 2 kept the file (R2) and kept the
+    entry (R1), so the rival became fully bootable on top of a protocol whose
+    HANDSHAKE is a single path and whose `handoff_token_hash` is a single
+    value."""
+
+    def _two_live_attempts(self, sup_home, capsys):
+        """Two REAL begins: the slow rival first, then the winner. Returns
+        `(gen, rival_inc, rival_token, winner_inc, winner_token)` with both
+        task files on disk and both plaintext tokens live."""
+        self._hold()
+        _rc, gen = self._begin(capsys)
+        rival_inc = self._incs()[0]
+        rival_token = _token_of(sup_home, rival_inc)
+        rc, _g = self._begin(capsys, nonce=gen,
+                             run=_dispatch_then_roster("succ0002-full", "succ0002"))
+        assert rc == 0
+        winner_inc = self._incs()[1]
+        return gen, rival_inc, rival_token, winner_inc, _token_of(sup_home, winner_inc)
+
+    def test_rb_CRIT_2_a_superseded_rival_cannot_clobber_the_winners_handshake(
+            self, sup_home, capsys):
+        """THE probe, with two REAL successor boots and no hand-built state.
+
+        Before R9 the second boot overwrote `supervisor/HANDSHAKE` with the
+        rival's incarnation id and its own token hash. `complete` on the winner
+        then refused (the HANDSHAKE names the rival), `abort` on the winner
+        refused (sid mismatch), and aborting the rival deleted the HANDSHAKE the
+        winner would never rewrite -- `_render_successor_task` runs `sup-boot
+        --handoff-inc` once at step 1 and only polls afterwards. The claim
+        transferred to NOBODY."""
+        gen, rival_inc, rival_token, winner_inc, winner_token = \
+            self._two_live_attempts(sup_home, capsys)
+
+        assert _boot_successor("succ0002-full", winner_inc, winner_token) == 0
+        capsys.readouterr()
+        winners_handshake = fleet.read_handshake()
+        assert winners_handshake["incarnation_id"] == winner_inc
+
+        # the slow rival boots LATE, for real, holding its own live token
+        rc = _boot_successor("succ0001-full", rival_inc, rival_token)
+        out = capsys.readouterr().out
+        assert rc == fleet.SUPERVISOR_BOOT_HANDOFF_REFUSED_RC
+        assert "SUPERSEDED" in out and winner_inc in out
+        assert "TERMINATE" in out and f"HANDOFF-ORPHAN {rival_inc}" in out
+        assert fleet.read_handshake() == winners_handshake, \
+            "the superseded rival clobbered the live attempt's HANDSHAKE"
+        assert "NONCE:" not in out, "a refused body must hold no generation"
+
+        # and because it could not, the succession still completes
+        assert fleet.cmd_sup_handoff_complete(SimpleNamespace(
+            sid="sid-old", expect_inc=winner_inc, expect_sid="succ0002-full",
+            nonce=gen)) == 0
+        assert fleet.read_incarnation()["incarnation_id"] == winner_inc
+
+    def test_the_current_attempt_still_boots_normally(self, sup_home, capsys):
+        """The refusal must not cost the succession its one working path."""
+        self._hold()
+        _rc, _gen = self._begin(capsys)
+        inc = self._incs()[0]
+        assert _boot_successor("succ0001-full", inc, _token_of(sup_home, inc)) == 0
+        capsys.readouterr()
+        assert fleet.read_handshake()["incarnation_id"] == inc
+
+    def test_a_claim_recording_no_attempt_at_all_still_boots(self, sup_home, capsys):
+        """Fails OPEN with nothing to read: an old-code predecessor records no
+        pending set, and refusing every handoff on that evidence would wedge the
+        one path that still works."""
+        self._hold()
+        assert _boot_successor("succ0001-full", DEAD_INC_A, "tok") == 0
+        capsys.readouterr()
+        assert fleet.read_handshake()["incarnation_id"] == DEAD_INC_A
+
+    def test_an_inc_no_entry_records_is_refused_when_others_are_recorded(
+            self, sup_home, capsys):
+        """The retired-rival shape: its entry is gone (aborted), so it is not
+        the current attempt either, and it must not write a HANDSHAKE."""
+        self._hold()
+        self._begin(capsys)
+        rc = _boot_successor("succ0009-full", DEAD_INC_B, "tok")
+        out = capsys.readouterr().out
+        assert rc == fleet.SUPERVISOR_BOOT_HANDOFF_REFUSED_RC
+        assert "not a pending successor" in out and "TERMINATE" in out
+        assert fleet.read_handshake() is None
+
+    def test_begin_supersedes_every_earlier_unresolved_entry(self, sup_home, capsys):
+        self._hold()
+        _rc, gen = self._begin(capsys)
+        for n in (2, 3):
+            self._begin(capsys, nonce=gen,
+                        run=_dispatch_then_roster(f"succ000{n}-full", f"succ000{n}"))
+        entries = fleet.handoff_pending_entries(fleet.read_incarnation())
+        states = [fleet.handoff_entry_state(e) for e in entries]
+        assert states == [fleet.HANDOFF_SUPERSEDED, fleet.HANDOFF_SUPERSEDED,
+                          fleet.HANDOFF_AWAITING_HANDSHAKE]
+        assert entries[0]["superseded_by"] == entries[1]["successor_inc"], \
+            "supersession must name the attempt that took over"
+        assert entries[1]["superseded_by"] == entries[2]["successor_inc"]
+
+    def test_a_superseded_entry_is_still_abortable_by_either_handle(
+            self, sup_home, capsys):
+        """R9 clause (a). Supersession removes bootability, not abortability --
+        a superseded body may be LIVE, and only an abort stops it."""
+        self._hold()
+        _rc, gen = self._begin(capsys)
+        superseded = self._incs()[0]
+        self._begin(capsys, nonce=gen,
+                    run=_dispatch_then_roster("succ0002-full", "succ0002"))
+        calls = []
+        assert self._abort(run=_stop_ok(calls), nonce=gen,
+                           successor_inc=superseded) == 0
+        assert calls[0][-1] == fleet._native_job_ref("succ0001-full"), \
+            "a superseded entry that recorded a sid is STOPPED, not just retired"
+        assert superseded not in self._incs()
+
+    def test_a_superseded_sidless_entry_retires_at_once_no_waiting(
+            self, sup_home, capsys):
+        """It is not `resolvable-stale` and never will be -- there is no join
+        left to wait out, so waiting T for it would be a fiction."""
+        self._hold()
+        gen = self._begin_doa(capsys)             # attempt 1: never joined
+        superseded = self._incs()[0]
+        self._begin(capsys, nonce=gen,
+                    run=_dispatch_then_roster("succ0002-full", "succ0002"))
+        calls = []
+        assert self._abort(run=_stop_ok(calls), nonce=gen,
+                           successor_inc=superseded) == 0
+        out = capsys.readouterr().out
+        assert not calls and "NO session was stopped" in out
+        assert "superseded" in out
+        assert superseded not in self._incs()
+
+    def test_complete_supersedes_the_rivals_it_carries(self, sup_home, capsys):
+        """The succession is over: a rival that booted after the transfer would
+        clobber the NEW holder's HANDSHAKE, so none of them may boot again."""
+        self._hold()
+        _rc, gen = self._begin(capsys)
+        loser = self._incs()[0]
+        self._begin(capsys, nonce=gen,
+                    run=_dispatch_then_roster("succ0002-full", "succ0002"))
+        winner = self._incs()[1]
+        assert _boot_successor("succ0002-full", winner,
+                               _token_of(sup_home, winner)) == 0
+        capsys.readouterr()
+        assert fleet.cmd_sup_handoff_complete(SimpleNamespace(
+            sid="sid-old", expect_inc=winner, expect_sid="succ0002-full",
+            nonce=gen)) == 0
+        capsys.readouterr()
+        carried = fleet.handoff_pending_entries(fleet.read_incarnation())
+        assert [e["successor_inc"] for e in carried] == [loser]
+        assert fleet.handoff_entry_state(carried[0]) == fleet.HANDOFF_SUPERSEDED
+        assert carried[0]["superseded_by"] == winner
+        rc = _boot_successor("succ0001-full", loser, "tok")
+        assert rc == fleet.SUPERVISOR_BOOT_HANDOFF_REFUSED_RC
+        capsys.readouterr()
+
+    def test_a_superseded_entry_stops_protecting_its_file_only_past_T(
+            self, sup_home, capsys):
+        """R9 clause (b), and the bound on rb-MAJ-6: superseded entries are
+        never `resolvable-stale`, so without this the list and its token files
+        could only ever grow. Inside T the file is still protected -- the body
+        may be reading it right now."""
+        self._hold()
+        _rc, gen = self._begin(capsys)
+        superseded = self._incs()[0]
+        self._begin(capsys, nonce=gen,
+                    run=_dispatch_then_roster("succ0002-full", "succ0002"))
+        name = f"supervisor-handoff-{superseded}.md"
+        _age_file(sup_home / "state" / name, 10 * T)
+        claim = fleet.read_incarnation()
+        assert fleet.handoff_task_files_to_sweep([(name, 10 * T)], claim) == []
+        _backdate(superseded, "superseded_at", 2 * T)
+        aged = fleet.read_incarnation()
+        assert fleet.handoff_task_files_to_sweep([(name, 10 * T)], aged) == [name]
+        assert fleet.sweep_handoff_task_files(aged) == [name]
+
+    def test_an_unreadable_superseded_at_keeps_protecting_its_file(
+            self, sup_home, capsys):
+        self._hold()
+        _rc, gen = self._begin(capsys)
+        superseded = self._incs()[0]
+        self._begin(capsys, nonce=gen,
+                    run=_dispatch_then_roster("succ0002-full", "succ0002"))
+        claim = fleet.read_incarnation()
+        fleet.handoff_pending_entries(claim)[0]["superseded_at"] = "not-a-date"
+        name = f"supervisor-handoff-{superseded}.md"
+        assert fleet.handoff_task_files_to_sweep([(name, 10 * T)], claim) == []
+
+
+class TestCollideProofSuccessorIds(_HandoffBase):
+    """rb-MIN-5: two entries sharing an inc means ONE task file for TWO
+    successors, one token overwriting the other, and a single abort retiring
+    both -- the double-spawn-on-one-inc shape §4 exists to prevent."""
+
+    def test_a_colliding_mint_is_re_minted(self, sup_home, capsys, monkeypatch):
+        self._hold()
+        _rc, gen = self._begin(capsys)
+        taken = self._incs()[0]
+        fresh = "inc-20260724T111111Z-beef"
+        minted = iter([taken, taken, fresh])
+        monkeypatch.setattr(fleet, "mint_incarnation_id", lambda: next(minted))
+        self._begin(capsys, nonce=gen,
+                    run=_dispatch_then_roster("succ0002-full", "succ0002"))
+        assert self._incs() == [taken, fresh]
+
+    def test_a_mint_that_only_ever_collides_dispatches_nothing(
+            self, sup_home, capsys, monkeypatch):
+        self._hold()
+        _rc, gen = self._begin(capsys)
+        taken = self._incs()[0]
+        monkeypatch.setattr(fleet, "mint_incarnation_id", lambda: taken)
+        dispatched = []
+        def run(argv, **kw):
+            dispatched.append(argv)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        with pytest.raises(fleet.FleetCliError, match="could not mint an unused"):
+            self._begin(capsys, nonce=gen, run=run)
+        assert not any("--bg" in a for a in dispatched)
+        assert self._incs() == [taken]
+
+    def test_an_existing_task_file_also_counts_as_taken(self, sup_home, capsys,
+                                                        monkeypatch):
+        """The file is the collision that matters: it is the successor's only
+        input and it carries the plaintext token."""
+        self._hold()
+        _orphan(sup_home, DEAD_INC_A)
+        fresh = "inc-20260724T222222Z-cafe"
+        minted = iter([DEAD_INC_A, fresh])
+        monkeypatch.setattr(fleet, "mint_incarnation_id", lambda: next(minted))
+        self._begin(capsys)
+        assert self._incs() == [fresh]
+
+    def test_appending_a_duplicate_id_is_refused(self):
+        claim = {"incarnation_id": "inc-20260724T000000Z-0old"}
+        fleet.handoff_pending_append(claim, {"successor_inc": DEAD_INC_A,
+                                             "minted_at": fleet.now_iso()})
+        with pytest.raises(fleet.FleetCliError, match="second pending successor"):
+            fleet.handoff_pending_append(claim, {"successor_inc": DEAD_INC_A,
+                                                 "minted_at": fleet.now_iso()})
+        assert len(fleet.handoff_pending_entries(claim)) == 1
+
+
+class TestEntriesMatchOnIdentityNotPosition(_HandoffBase):
+    """rb-MIN-6 / N13 / N21."""
+
+    def _claim_with(self, *entries):
+        return {"incarnation_id": "inc-20260724T000000Z-0old",
+                "handoff_pending": list(entries)}
+
+    def test_N13_naming_a_sid_that_belongs_to_another_attempt_matches_nothing(self):
+        """The sid cross-check on an inc match. Dropping it points an abort at
+        the entry the INC named while reporting the SID the caller passed."""
+        claim = self._claim_with(
+            {"successor_inc": DEAD_INC_A, "successor_sid": "sid-A"},
+            {"successor_inc": DEAD_INC_B, "successor_sid": "sid-B"})
+        assert fleet.handoff_entry_matching(
+            claim, successor_sid="sid-B", successor_inc=DEAD_INC_A) is None
+        verdict = fleet.resolve_handoff_abort(
+            claim, None, successor_sid="sid-B", successor_inc=DEAD_INC_A)
+        assert verdict["action"] == "refuse"
+
+    def test_two_entries_sharing_a_sid_are_AMBIGUOUS_not_first_wins(self):
+        """LIST ORDER used to decide which live session an abort stopped."""
+        claim = self._claim_with(
+            {"successor_inc": DEAD_INC_A, "successor_sid": "sid-shared"},
+            {"successor_inc": DEAD_INC_B, "successor_sid": "sid-shared"})
+        assert fleet.handoff_entry_matching(claim, successor_sid="sid-shared") is None
+        assert len(fleet.handoff_entries_matching(claim, successor_sid="sid-shared")) == 2
+        verdict = fleet.resolve_handoff_abort(claim, None, successor_sid="sid-shared")
+        assert verdict["action"] == "refuse"
+        assert "AMBIGUOUS" in verdict["reason"]
+        assert DEAD_INC_A in verdict["reason"] and DEAD_INC_B in verdict["reason"]
+
+    def test_the_ambiguous_refusal_stops_no_session(self, sup_home, capsys):
+        self._hold()
+        _rc, gen = self._begin(capsys)
+        claim = fleet.read_incarnation()
+        twin = dict(fleet.handoff_pending_entries(claim)[0])
+        twin["successor_inc"] = DEAD_INC_B
+        claim["handoff_pending"] = fleet.handoff_pending_members(claim) + [twin]
+        fleet.write_incarnation(claim)
+        calls = []
+        with pytest.raises(fleet.FleetCliError, match="AMBIGUOUS"):
+            self._abort(run=_stop_ok(calls), nonce=gen, successor_sid="succ0001-full")
+        assert not calls
+        assert len(self._incs()) == 2
+
+    def test_N21_an_entry_is_dropped_by_its_id_not_by_object_identity(self):
+        """Every real caller re-reads the claim under the lock and drops an
+        entry it matched in THAT dict -- but `resolve_handoff_abort` hands back
+        an entry from the dict the caller read BEFORE the lock. Identity-only
+        dropping silently retires nothing and leaves the live token hash
+        standing (R4)."""
+        claim = self._claim_with({"successor_inc": DEAD_INC_A,
+                                  "successor_sid": "sid-A", "minted_at": "x"},
+                                 {"successor_inc": DEAD_INC_B,
+                                  "successor_sid": "sid-B", "minted_at": "x"})
+        claim["handoff_token_hash"] = "sha256-of-something"
+        detached = dict(claim["handoff_pending"][0])      # same id, other object
+        assert detached is not claim["handoff_pending"][0]
+        fleet.drop_handoff_entry(claim, detached)
+        assert [e["successor_inc"]
+                for e in fleet.handoff_pending_entries(claim)] == [DEAD_INC_B]
+        other = dict(claim["handoff_pending"][0])
+        fleet.drop_handoff_entry(claim, other)
+        assert fleet.handoff_pending_entries(claim) == []
+        assert "handoff_token_hash" not in claim, \
+            "R4: the last entry retiring takes the live token hash with it"
+
+    def test_a_sidless_entry_answers_to_no_sid(self):
+        claim = self._claim_with({"successor_inc": DEAD_INC_A, "successor_sid": None})
+        assert fleet.handoff_entry_matching(claim, successor_sid="sid-A") is None
+        assert fleet.handoff_entry_matching(claim, successor_inc=DEAD_INC_A) is not None
+
+
+class TestTornPendingMembersFailClosed:
+    """rb-MIN-7: a torn entry failed OPEN while a torn claim failed CLOSED --
+    inside a predicate whose whole doctrine is fail-closed."""
+
+    CLAIM = "inc-20260724T045450Z-0dea"
+
+    def _claim(self, *members):
+        return {"incarnation_id": self.CLAIM, "handoff_pending": list(members)}
+
+    def test_an_unreadable_member_protects_every_task_file(self):
+        candidates = [(f"supervisor-handoff-{DEAD_INC_B}.md", 10 * T),
+                      ("supervisor-handoff-inc-20260724T082006Z-696e.md", 10 * T)]
+        readable = self._claim({"successor_inc": DEAD_INC_B, "minted_at": "x"})
+        assert fleet.handoff_task_files_to_sweep(candidates, readable) == \
+            ["supervisor-handoff-inc-20260724T082006Z-696e.md"]
+        for torn in ("not-a-dict", None, 7, {"successor_sid": "sid-x"},
+                     {"successor_inc": ""}):
+            claim = self._claim({"successor_inc": DEAD_INC_B, "minted_at": "x"}, torn)
+            assert fleet.handoff_task_files_to_sweep(candidates, claim) == [], torn
+
+    def test_torn_members_are_reported_not_silently_dropped(self):
+        claim = self._claim({"successor_inc": DEAD_INC_B}, "torn", {"x": 1})
+        assert len(fleet.handoff_pending_entries(claim)) == 1
+        assert fleet.handoff_pending_torn(claim) == ["torn", {"x": 1}]
+        assert len(fleet.handoff_pending_members(claim)) == 3
+
+    def test_a_torn_member_survives_a_claim_transition(self):
+        old = self._claim({"successor_inc": DEAD_INC_B}, "torn")
+        fresh = {"incarnation_id": "inc-20260724T090000Z-new0"}
+        fleet._carry_handoff_pending(old, fresh)
+        assert fleet.handoff_pending_torn(fresh) == ["torn"]
+
+    def test_a_torn_member_survives_a_per_entry_retirement(self):
+        claim = self._claim({"successor_inc": DEAD_INC_B}, "torn")
+        claim["handoff_token_hash"] = "live"
+        fleet.drop_handoff_entry(claim, {"successor_inc": DEAD_INC_B})
+        assert fleet.handoff_pending_torn(claim) == ["torn"]
+        assert claim["handoff_token_hash"] == "live", \
+            "an unreadable member may still name an attempt: fail closed"
+
+    def test_the_doctor_moves_its_verdict_on_a_torn_member(self, sup_home):
+        fleet.write_incarnation(self._claim({"successor_inc": DEAD_INC_B,
+                                             "successor_sid": "sid-A"}, "torn"))
+        _name, ok, detail = fleet._doctor_check_supervisor_handoff()
+        assert ok is False
+        assert "unreadable pending member" in detail
+
+
+class TestClockStepBack:
+    """rb-MIN-8: a `minted_at` in the FUTURE pinned an entry at `joining`
+    forever -- no verb retired it and its token file was immortal."""
+
+    def _entry(self, offset_seconds):
+        return {"successor_inc": DEAD_INC_A, "minted_at":
+                (fleet.datetime.now(fleet.timezone.utc)
+                 + fleet.timedelta(seconds=offset_seconds)).strftime(
+                     "%Y-%m-%dT%H:%M:%SZ")}
+
+    def test_a_far_future_stamp_ages_out_at_once(self):
+        assert fleet.handoff_entry_state(self._entry(4 * T)) == \
+            fleet.HANDOFF_RESOLVABLE_STALE
+
+    def test_ordinary_skew_is_left_to_the_clock(self):
+        """A stamp a few seconds ahead is skew between two writers, not a step
+        back, and it resolves itself in seconds."""
+        assert fleet.handoff_entry_state(self._entry(5)) == fleet.HANDOFF_JOINING
+        assert fleet.handoff_entry_state(self._entry(T - 5)) == fleet.HANDOFF_JOINING
+
+    def test_the_operator_can_then_retire_it(self, sup_home, capsys):
+        beat = fleet.now_iso()
+        claim = {"incarnation_id": "inc-20260724T000000Z-0old", "session_id": "sid-old",
+                 "claimed_at": beat, "heartbeat_at": beat, "claimed_via": "fresh",
+                 "handoff_pending": [self._entry(4 * T)],
+                 "handoff_token_hash": "live"}
+        fleet.write_incarnation(claim)
+        args = SimpleNamespace(sid="sid-old", nonce=None, successor_sid=None,
+                               successor_inc=DEAD_INC_A, force=False, retire_all=False)
+        assert fleet.cmd_sup_handoff_abort(args, which=_fake_which, run=_stop_ok()) == 0
+        assert fleet.handoff_pending_entries(fleet.read_incarnation()) == []
+        assert "handoff_token_hash" not in fleet.read_incarnation()
+
+
+class TestForcedRetire(_HandoffBase):
+    """rs-MIN-B: an entry with an unreadable `minted_at` resolves by neither
+    evidence nor time -- the one shape that defeats the thesis of R3."""
+
+    def _wreck_minted_at(self, inc):
+        claim = fleet.read_incarnation()
+        for entry in fleet.handoff_pending_entries(claim):
+            if entry["successor_inc"] == inc:
+                entry["minted_at"] = "whenever"
+        fleet.write_incarnation(claim)
+
+    def test_without_force_it_is_refused_and_the_refusal_names_force(
+            self, sup_home, capsys):
+        self._hold()
+        gen = self._begin_doa(capsys)
+        inc = self._incs()[0]
+        self._wreck_minted_at(inc)
+        with pytest.raises(fleet.FleetCliError, match="--force"):
+            self._abort(nonce=gen, successor_inc=inc)
+        assert self._incs() == [inc]
+
+    def test_force_retires_it_and_stops_nothing(self, sup_home, capsys):
+        self._hold()
+        gen = self._begin_doa(capsys)
+        inc = self._incs()[0]
+        self._wreck_minted_at(inc)
+        task_file = sup_home / "state" / f"supervisor-handoff-{inc}.md"
+        calls = []
+        assert self._abort(run=_stop_ok(calls), nonce=gen, successor_inc=inc,
+                           force=True) == 0
+        out = capsys.readouterr().out
+        assert not calls and "NO session was stopped" in out and "--force" in out
+        assert self._incs() == []
+        assert not task_file.exists()
+        assert "handoff_token_hash" not in fleet.read_incarnation()
+
+    def test_force_never_overrides_the_handshake_cross_check(self, sup_home, capsys):
+        """`--force` is a retirement lever, not a stop-anything lever."""
+        self._hold()
+        _rc, gen = self._begin(capsys)
+        fleet.write_handshake("inc-20260724T090000Z-abcd", "sid-from-handshake")
+        calls = []
+        with pytest.raises(fleet.FleetCliError, match="does not match HANDSHAKE sid"):
+            self._abort(run=_stop_ok(calls), nonce=gen, successor_sid="succ0001-full",
+                        force=True)
+        assert not calls
+
+
+class TestRetireAll(_HandoffBase):
+    """rb-MAJ-6: retirement was O(N) manual aborts, and N was three inside
+    sixteen minutes on the real sequence -- each one pinning a live token."""
+
+    def test_it_retires_every_sidless_entry_in_one_write(self, sup_home, capsys):
+        self._hold()
+        gen = self._begin_doa(capsys, short_id="nope0001")
+        first = self._incs()[0]
+        gen2 = self._begin_doa(capsys, nonce=gen, short_id="nope0002")
+        second = self._incs()[1]
+        # first: superseded by the second. second: aged out of its join window.
+        _age_entry(second, 2 * T)
+        assert self._abort(nonce=gen2, retire_all=True) == 0
+        out = capsys.readouterr().out
+        assert "retired 2 pending successor(s)" in out
+        assert first in out and second in out
+        assert "NO session was stopped" in out
+        assert self._incs() == []
+        assert "handoff_token_hash" not in fleet.read_incarnation()
+        assert not list((sup_home / "state").glob("supervisor-handoff-*.md"))
+        assert fleet.supervisor_journal_latest()["kind"] == "HANDOFF-ABORT"
+
+    def test_an_entry_bearing_a_sid_is_left_standing_with_its_own_recipe(
+            self, sup_home, capsys):
+        """Stopping a session is a per-body decision with a `claude stop`
+        behind it. This verb never stops anything."""
+        self._hold()
+        _rc, gen = self._begin(capsys)                       # joins: has a sid
+        live = self._incs()[0]
+        gen2 = self._begin_doa(capsys, nonce=gen, short_id="nope0002")
+        _age_entry(self._incs()[1], 2 * T)      # the sid-less one is retirable
+        calls = []
+        assert self._abort(run=_stop_ok(calls), nonce=gen2, retire_all=True) == 0
+        out = capsys.readouterr().out
+        assert not calls
+        assert f"STILL STANDING: {live}" in out
+        assert "--successor-sid succ0001-full" in out and "--nonce" in out
+        assert self._incs() == [live]
+
+    def test_it_clears_torn_members_that_block_the_sweep(self, sup_home, capsys):
+        self._hold()
+        _rc, gen = self._begin(capsys)
+        claim = fleet.read_incarnation()
+        claim["handoff_pending"] = fleet.handoff_pending_members(claim) + ["torn"]
+        fleet.write_incarnation(claim)
+        assert self._abort(nonce=gen, retire_all=True, force=True) == 0
+        out = capsys.readouterr().out
+        assert "unreadable pending member" in out
+        assert fleet.handoff_pending_torn(fleet.read_incarnation()) == []
+
+    def test_a_live_handshake_refuses_the_whole_call(self, sup_home, capsys):
+        self._hold()
+        _rc, gen = self._begin(capsys)
+        inc = self._incs()[0]
+        fleet.write_handshake(inc, "succ0001-full")
+        with pytest.raises(fleet.FleetCliError, match="HANDSHAKE is present"):
+            self._abort(nonce=gen, retire_all=True)
+        assert self._incs() == [inc]
+
+    def test_nothing_retirable_refuses_and_says_what_stands(self, sup_home, capsys):
+        self._hold()
+        _rc, gen = self._begin(capsys)
+        with pytest.raises(fleet.FleetCliError, match="nothing to retire"):
+            self._abort(nonce=gen, retire_all=True)
+        assert len(self._incs()) == 1
+
+    def test_it_takes_no_handle(self, sup_home, capsys):
+        self._hold()
+        _rc, gen = self._begin(capsys)
+        with pytest.raises(fleet.FleetCliError, match="takes no handle"):
+            self._abort(nonce=gen, retire_all=True, successor_inc=self._incs()[0])
+
+    def test_the_parser_exposes_both_levers(self):
+        args = fleet.build_parser().parse_args(
+            ["sup-handoff-abort", "--retire-all", "--force"])
+        assert args.retire_all is True and args.force is True
+
+
+class TestDoctorMovesItsVerdict(_HandoffBase):
+    """rb-MAJ-6 second half / rs-MIN-A: `begin` clears the abort flag that used
+    to make doctor FAIL, so N stranded plaintext tokens read as PASS."""
+
+    def test_a_resolvable_stale_entry_fails_the_row(self, sup_home, capsys):
+        self._hold()
+        self._begin_doa(capsys)
+        inc = self._incs()[0]
+        _age_entry(inc, 2 * T)
+        _name, ok, detail = fleet._doctor_check_supervisor_handoff()
+        assert ok is False
+        assert inc in detail and "--retire-all" in detail
+
+    def test_a_superseded_entry_fails_the_row(self, sup_home, capsys):
+        self._hold()
+        _rc, gen = self._begin(capsys)
+        self._begin(capsys, nonce=gen,
+                    run=_dispatch_then_roster("succ0002-full", "succ0002"))
+        _name, ok, detail = fleet._doctor_check_supervisor_handoff()
+        assert ok is False and fleet.HANDOFF_SUPERSEDED in detail
+
+    def test_a_healthy_in_flight_attempt_still_passes(self, sup_home, capsys):
+        """The row must not cry wolf at every handoff: one live attempt, no
+        flag, no stale HANDSHAKE, is a PASS."""
+        self._hold()
+        self._begin(capsys)
+        if fleet.handoff_abort_flag_path().exists():
+            fleet.handoff_abort_flag_path().unlink()
+        _name, ok, _detail = fleet._doctor_check_supervisor_handoff()
+        assert ok is True
+
+    def test_the_verdict_survives_an_unreadable_claim(self, sup_home):
+        fleet.incarnation_path().write_text("{not json", encoding="utf-8")
+        _name, ok, _detail = fleet._doctor_check_supervisor_handoff()
+        assert ok is True
+
+
+class TestStatusPrintsTheRecipeThatWorks(_HandoffBase):
+    """rs-MIN-C: the plain form printed an abort recipe that is REFUSED inside
+    the join window -- the operator's first move mid-incident was a refusal."""
+
+    def test_a_joining_entry_says_when_it_becomes_retirable(self, sup_home, capsys):
+        self._hold()
+        self._begin_doa(capsys)
+        assert fleet.cmd_sup_status(SimpleNamespace(json=False)) == 0
+        out = capsys.readouterr().out
+        assert "still joining" in out and "retirable at" in out
+        assert re.search(r"retirable at 20\d\d-\d\d-\d\dT", out)
+
+    def test_an_unageable_entry_is_told_to_use_force(self, sup_home, capsys):
+        self._hold()
+        self._begin_doa(capsys)
+        claim = fleet.read_incarnation()
+        fleet.handoff_pending_entries(claim)[0]["minted_at"] = "whenever"
+        fleet.write_incarnation(claim)
+        assert fleet.cmd_sup_status(SimpleNamespace(json=False)) == 0
+        out = capsys.readouterr().out
+        assert "--force" in out and "never age out" in out
+
+    def test_a_sid_bearing_entry_keeps_the_recipe_that_works_now(
+            self, sup_home, capsys):
+        self._hold()
+        self._begin(capsys)
+        assert fleet.cmd_sup_status(SimpleNamespace(json=False)) == 0
+        out = capsys.readouterr().out
+        assert "abort with `fleet sup-handoff-abort --successor-sid succ0001-full" in out
+
+
+class TestDeadCodeIsGone:
+    def test_rs_MIN_D_read_handoff_abort_flag_is_deleted(self):
+        """R7 deleted its only caller. A reader with no callers is a standing
+        invitation to route a decision back through a record no begin path ever
+        writes a sid into."""
+        assert not hasattr(fleet, "read_handoff_abort_flag")
