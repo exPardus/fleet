@@ -3433,7 +3433,8 @@ class TestHandoff:
             calls.append(argv)
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         args = SimpleNamespace(sid="sid-old", successor_sid=None, successor_inc=None)
-        with pytest.raises(fleet.FleetCliError, match="successor-sid or --successor-inc"):
+        with pytest.raises(fleet.FleetCliError,
+                           match=r"needs --successor-sid, --successor-inc or --retire-all"):
             fleet.cmd_sup_handoff_abort(args, which=_fake_which, run=run)
         assert not calls   # nothing stopped
 

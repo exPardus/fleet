@@ -360,7 +360,8 @@ class TestAbortResolution(_HandoffBase):
     def test_neither_handle_is_a_refusal_not_a_crash(self, sup_home, capsys):
         self._hold()
         _rc, gen = self._begin(capsys)
-        with pytest.raises(fleet.FleetCliError, match="successor-sid or --successor-inc"):
+        with pytest.raises(fleet.FleetCliError,
+                           match="needs --successor-sid, --successor-inc or --retire-all"):
             self._abort(nonce=gen)
 
     def test_R7_a_sid_bearing_abort_flag_is_no_longer_evidence(self, sup_home):
@@ -775,8 +776,11 @@ class TestViewsPublishThePendingSuccessors(_HandoffBase):
         assert inc["handoff_pending_count"] == 2
         assert [e["successor_sid"] for e in inc["handoff_pending"]] == [
             "succ0001-full", "succ0002-full"]
-        assert {e["state"] for e in inc["handoff_pending"]} == \
-            {fleet.HANDOFF_AWAITING_HANDSHAKE}
+        # R9: the second begin SUPERSEDED the first attempt, and the view says
+        # so. Both are still published and both are still abortable -- what the
+        # older one is not, any more, is bootable.
+        assert [e["state"] for e in inc["handoff_pending"]] == [
+            fleet.HANDOFF_SUPERSEDED, fleet.HANDOFF_AWAITING_HANDSHAKE]
         assert inc["pending_present"] is False     # the nonce pending: unrelated
 
     def test_a_DOA_attempt_reads_as_stale_not_as_a_live_successor(
