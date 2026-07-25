@@ -1,85 +1,87 @@
-# Next session — continue the day-3 autonomous build-out (handoff written 2026-07-24 ~12:15Z)
+# Next session — day-4 handoff (written 2026-07-26 by the interface session)
 
-You are the fresh manager session. The claim is **RELEASED** (predecessor supervisor `inc-...7d7d`
-released cleanly at 12:09Z — ceiling-locked at 207k). `fleet sup-boot` claims fresh via rule 1b:
-no seizure, no freeze window. Operator wants: **same work, autonomous — churn the spec backlog +
-testing until fleet is a full build, launch-ready.**
+## READ THIS FIRST — do NOT run `fleet sup-boot`
 
-## Boot ritual (exact order)
+**If you are the operator's own interactive session, you are the INTERFACE tier and you must never
+run `sup-boot`.** You bootstrap a supervisor with `sup-spawn` and steer it with
+`fleet send supervisor`. The previous handoff told the incoming session to `sup-boot`, that session
+did, and the result was a wedged claim (full record: `docs/AUTONOMOUS-2026-07-26.md` §G-D).
 
-1. Invoke the `fleet` skill. `git pull` first.
-2. `supervisor/JOURNAL.md` is MODIFIED-uncommitted (predecessor's release entry) — commit+push it
-   before anything else.
-3. `py -3.13 bin/fleet.py sup-boot > <scratchpad>/boot.txt 2>&1` then grep
-   `^(VERDICT|INCARNATION|NONCE):` from the FILE. **Never pipe sup-* output through head/tail —
-   the NONCE is the last line and truncation cost a claim once already (lessons day-3, class-4).**
-   Carry the nonce; present `--nonce` on every mutating verb; sup-checkpoint rotates it.
-4. Read (in order): `supervisor/JOURNAL.md` last ~10 entries (the full 5-generation day-3 arc +
-   release state), `docs/AUTONOMOUS-2026-07-24.md` (run ledger: G-A..G-C councils, gate ledger,
-   build queue), `knowledge/lessons.md#2026-07-24` day-3 entry.
+**Live wedge status.** The claim `inc-20260725T220334Z-5675` is `released`, but B6
+(`bin/fleet.py:10172-10176`) refuses to let any body consume a released claim whose
+`released_by_sid` is still roster-live — and that releaser is the interface session, alive by
+design. So no supervisor can boot while that session lives.
 
-## Standing operator directives (verbatim intent, unchanged)
+- **If the wedging session (`adfda529-ee84-457e-a181-682dedefef1b`) has ended**, the wedge is gone.
+  Just launch a supervisor and hand it the queue:
+  `py -3.13 bin/fleet.py sup-spawn --task @state/tasks/sup-campaign-day4.md`
+- **If it is still alive** and you want a supervisor now, the only other exit is the operator's
+  §5.7 lever: delete the `"released_by_sid"` line from `supervisor/INCARNATION`. Operator's call
+  alone — no agent takes it.
 
-- Autonomous. Operator-gated questions → **4-councilor council of differing personalities
-  (risk auditor / delivery pragmatist / strategist / incident responder) + synthesis**; act on
-  synthesis; record every gated item in `docs/AUTONOMOUS-2026-07-24.md` for morning ratification.
-- **Full spec build-out, launch-ready** — when this queue drains, sweep `docs/specs/**` for
-  remaining `[UNBUILT]` and keep building+testing (v2-deferred rows stay deferred).
-- Band 150–200k binds you: checkpoint at wave boundaries; at the band, RELEASE (proven path) —
-  **do NOT use sup-handoff until the handoff-seams fixes are merged; the handoff path is
-  defective** (successors dispatch into dontAsk auto-deny and can never sup-boot; 5 stillborn
-  attempts today).
+## Where things stand
 
-## Immediate queue (in order)
+`main` = `a2358f2`, pushed. **`build/sup-tombstone` is MERGED** (§10.4 kill/respawn tombstone) —
+both floors on main measured **2147 passed / 16 skipped on py3.13 AND py3.10**, receipts 56/56.
+GitHub PR #9 carried that branch and needs closing/reconciling.
 
-1. **handoff-seams fix wave 2** — brief ALREADY WRITTEN at `state/tasks/hs-fixwave2.md`
-   (predecessor wrote it while ceiling-locked). Branch `fix/handoff-seams` (worker
-   `handoff-seams`, idle; check `git worktree list` for its worktree). Dispatch the wave, then
-   the gate cycle per the 09:43+ journal checkpoints (hs-rs/hs-rb verdicts recorded there),
-   re-gate, merge, push. This unblocks safe supervisor handoffs forever.
-2. **Merge `build/sup-tombstone`** — §10.4 kill/respawn choreography, went through 3 fix waves +
-   1 escalation + micro-confirm (see 06:53–08:10 checkpoints for exactly where it stopped).
-   Still owed: the FLEET_LIVE=1 haiku integration run
-   (`tests/integration/test_sup_tombstone_live.py`, written, UNEXECUTED) before merge. Then
-   merge no-ff, both floors, push.
-3. **fleet-q M1+M2 build** — spec gated-sound on main (`docs/specs/fleet-index.md`,
-   `ready-for-gate`; operator ORDERED full build). Honor §11.7 [UNVERIFIED] live-receipt
-   acceptance item + §16 doc-sync list. Worktree recipe: manager-side `fleet index init` step.
-4. **Cleanup owed**: 5 leaked plaintext-token files `state/supervisor-handoff-inc-*.md` (§5.9
-   violation — unlink once no handoff is pending; the D2 sweep from wave-1 may handle some);
-   stillborn successor husk records (`sup|inc-...|successor`, working/0-turn — verify sessions
-   dead, then kill/clean); old worktrees for merged branches; ~17 pre-run idle workers age
-   toward autoclean.
-5. **Doc-sync owed**: SPEC.md §18 rows for tombstone+handoff-seams when they merge; claim-nonce
-   §5.9 marker/sweep prose; `skills/fleet/supervisor.md` abort recipe gains `--nonce` (doc
-   defect, 08:20 checkpoint). `claim-nonce §7` taxonomy row for sup-spawn + the §7.1 amendment
-   are **OPERATOR-owned — queue, never edit**.
+Two builds were in flight when this was written, both on their own branches, **neither gated,
+neither merged**:
 
-## Operator ratification stack (present when operator returns; only they tick)
+1. `fix/handoff-seams` — worker `hs-fix2`, **fix wave 2** (rulings R9 + R10), brief
+   `state/tasks/hs-fixwave2-dispatch.md`. Base `90e0ddf`, cut from main@`fd49071`. **Last wave
+   before the final gate; a 3rd needs escalation.** When it reports green: advance the review
+   worktrees `C:/proga/fleet-hs-rs` and `C:/proga/fleet-hs-rb` to the new sha, run a delta-only
+   dual-lens gate (verdict contract CONFIRM-CLEAN | ESCALATE), then merge no-ff, both floors, push.
+2. `fix/b6-interface-release` — the gen-0 supervisor body acting as a **builder** (it holds no
+   claim), brief `state/tasks/b6-interface-release.md`. Ships `sup-release --interface` (council
+   4–0), a truthful `sup-status` releaser-live branch, and a `fleet doctor` FAIL for this wedge.
+   Same gate-then-merge treatment.
 
-claim-nonce §7.1 interface-send amendment (council 4-0 (a), built+merged, provisional);
-tombstone rulings 1+2 + ruling-1 cond-2 honest narrowing + husk-respawn boot-ritual call +
-six-token terminal contract; abort-recipe doc defect; G-A..G-C ledger records;
-fleet-index OPERATOR-GATES settled row (order of record: lessons day-3 entry).
+## Queue after those two land
 
-## Hard-won warnings (today's blood)
+1. **fleet-q M1+M2 build** — `docs/specs/fleet-index.md` is gated-sound on main (`ready-for-gate`);
+   operator ORDERED the full build. Honor the §11.7 `[UNVERIFIED]` live-receipt acceptance item and
+   the §16 doc-sync list. Worktree recipe includes a manager-side `fleet index init` step.
+2. **Doc-sync owed**: SPEC §18 rows for the tombstone merge (landed) and for handoff-seams when it
+   merges; claim-nonce §5.9 marker/sweep prose; `skills/fleet/supervisor.md` abort recipe gains
+   `--nonce`. **OPERATOR-owned, queue but never edit**: claim-nonce §7 taxonomy row for `sup-spawn`
+   and the §7.1 amendment.
+3. **Cleanup**: 5 leaked plaintext-token files `state/supervisor-handoff-inc-*.md` (§5.9); the 5
+   stillborn `sup|…|successor` husk records; worktrees for merged branches (`fleet-sup-tomb`,
+   `fleet-tomb-rs`, `fleet-tomb-rb`, and the older merged ones in `git worktree list`); archived
+   tombstone worker records.
+4. **Then**: sweep `docs/specs/**` for remaining `[UNBUILT]` and keep building (v2-deferred rows
+   stay deferred).
 
-- Fix waves mint defects: **8/8 lifetime**. Always re-gate; ESCALATE beats a 3rd wave (fired
-  once today, correctly).
-- FI discipline: commit BEFORE injecting (a `git checkout --` restore destroyed uncommitted work
-  once); fabricated-state fixtures are a live defect class (found twice today).
-- Windows: `os.replace` onto open files raises (registry + INCARNATION now retry; shards
-  specced); pipe chars invalid in paths (`name_fs_stem` maps `|`→`~` — use it for ANY name-keyed
-  path).
-- Worker fences in worker vocabulary: "no `git push` of ANY ref". Reviewers get "run, don't
-  read" + mandatory FI-theater checks — 3 green test-theater survivors were caught that way
-  today.
+## Operator ratification stack (only the operator ticks)
+
+**New this run** — the G-D synthesis: `sup-release --interface` (council 4–0, built, provisional);
+the two rejected repairs (a+)/(e) recorded with their refutations; and Vista's proposed doctrine —
+*the claim belongs to a role, not a body; the interface never runs `sup-boot`*, *a guard keyed on a
+proxy must name the predicate it proxies for*, plus the `[UNBUILT]` follow-up to gate `sup-boot` on
+fleet-launched provenance so the interface cannot claim **by construction**.
+
+**Carried from day 3**: claim-nonce §7.1 interface-send amendment (council 4–0, merged,
+provisional); tombstone rulings 1+2, the ruling-1 cond-2 honest narrowing, the husk-respawn
+boot-ritual call, the six-token terminal contract, the rb MIN-D lock-budget note; the abort-recipe
+doc defect; G-A..G-C ledger records; the fleet-index OPERATOR-GATES settled row; R9 (it changes the
+handoff protocol's shape — say so plainly, not as a clarification).
+
+## Hard-won warnings
+
+- **Fix waves mint defects: 10/10 lifetime.** Always re-gate; ESCALATE beats a 3rd wave. The
+  sharpest instance was a supervisor RULING minting a CRIT — when you rule on a data-structure
+  shape, check the protocol underneath is the same shape.
+- **A skip-by-default live test is an unexecuted claim** (`test_sup_tombstone_live` shipped an
+  impossible assertion through 3 waves, 2 gates and a CONFIRM-CLEAN). Run the live tier yourself
+  before merging anything that touches it.
+- **Absence is not evidence on this substrate** — records are deletable, archivable, and born with
+  `session_id: None`. Any predicate that permits on a missing record fails open.
+- **Every worker now boots contextless**: autoclean swept `state/journals/` and archived the day-3
+  records (archived = history only; `send`/`respawn` refuse them, only `clean --tombstones` frees
+  the name). Put branch, sha, baseline tallies and fences INSIDE every brief.
+- Commit BEFORE injecting a fault (`git checkout --` reverts the whole uncommitted file);
+  `core.autocrlf=true` makes naive sha compares lie — trust `git status --porcelain`.
+- **Never pipe `sup-*` output through `head`/`tail`** — the NONCE is the last line.
 - `git log` is the only truth; push main at every green milestone.
-
-## State at handoff
-
-main = `fd49071` (pushed, 2039/8 both floors). Unmerged gated branches: `build/sup-tombstone`
-(2137/11 at tip), `fix/handoff-seams` (2063/8 at tip, wave 2 pending). Suite floor: both
-`py -3.13` and `py -3.10` must stay zero-failure. Claim: released-clean. Prior handoff's own
-content (overnight run close-out) is fully executed and superseded — its record lives in
-`docs/OVERNIGHT-2026-07-23.md`, the ledger, and lessons day-2/day-3 entries.
