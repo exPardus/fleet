@@ -68,9 +68,11 @@ GitHub PR #9 carried that branch and needs closing/reconciling.
 Two builds were in flight when this was written, both on their own branches, **neither gated,
 neither merged**:
 
-1. `fix/handoff-seams` — worker `hs-fix2`, **fix wave 2** (rulings R9 + R10), brief
-   `state/tasks/hs-fixwave2-dispatch.md`. Base `90e0ddf`, cut from main@`fd49071`. **Last wave
-   before the final gate; a 3rd needs escalation.** When it reports green: advance the review
+1. `fix/handoff-seams` — **fix wave 2 is GREEN and complete** (`02df553`, `1570491`, `daed33c`,
+   `cb9f078`, `a9d2c64`; tip `a9d2c64`). **2142 passed / 8 skipped on both floors**, receipts pass,
+   rb-CRIT-2 closed with two real successor boots, R10 8/8 mutate→RED→restore. **Last wave before
+   the final gate; a 3rd needs escalation.** Amendment **A3 is UNRATIFIED and changes the protocol
+   shape.** Next step is the gate, not more building: advance the review
    worktrees `C:/proga/fleet-hs-rs` and `C:/proga/fleet-hs-rb` to the new sha, run a delta-only
    dual-lens gate (verdict contract CONFIRM-CLEAN | ESCALATE), then merge no-ff, both floors, push.
 2. `fix/b6-interface-release` — the gen-0 supervisor body acting as a **builder** (it holds no

@@ -197,6 +197,23 @@ gate.
 
 ## Build results this run (both UNGATED and UNMERGED — supervision work is what is stalled)
 
+- **`fix/handoff-seams` fix wave 2 — GREEN** (`02df553` R9 code, `1570491` R9 tests, `daed33c` R10,
+  `cb9f078` amendments + un-supersede, `a9d2c64` ratification queue). **2142 passed / 8 skipped on
+  BOTH floors** (baseline 2089/8, no net loss); receipts pass, nothing re-pinned (the one warning
+  is a pre-existing `ls -ld` mtime line the worker never touched). Doctor measured in that
+  worktree: 3 FAILs, all `worker-settings.json missing` because it was never `fleet init`-ed —
+  everything else PASS, including `supervisor-handoff`.
+  **rb-CRIT-2 closed with two REAL successor attempts and two REAL boots**: shipped code gives
+  rival `rc=5 handoff-refused`, `CLOBBERED: False`, `complete rc=0`, claim → winner; the mutant
+  (`refusal = None`) reproduces the deadlock verbatim — rival `rc=0`, `CLOBBERED: True`, complete
+  refused *"HANDSHAKE mismatch"*, abort on winner refused *"does not match HANDSHAKE sid"*, final
+  holder still the predecessor. **R10: 8/8 mutate→RED→restore**, restore proven by
+  `git status --porcelain == ''`; N23 plants a real resolving escape (junction) and N38 reaches
+  `state/` via `sub/..`.
+  Two judgment calls the worker flagged: `--retire-all` never stops a session, and a begin that
+  fails **at dispatch** now un-supersedes the entries it marked — otherwise a failed retry would
+  kill a live, good successor. **A3 is UNRATIFIED and changes the protocol shape** — not a
+  clarification.
 - **`fix/b6-interface-release`** (gen-0 body as builder; `aeb0ad6`, `1927058`, `2e824ea`).
   `sup-release --interface` with the rule-1 carve-out keyed `is True` (not truthiness), a truthful
   `sup-status` releaser-live branch, and a `fleet doctor` `supervisor-wedge` **FAIL** that delegates
