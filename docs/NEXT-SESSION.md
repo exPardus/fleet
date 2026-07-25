@@ -19,6 +19,46 @@ design. So no supervisor can boot while that session lives.
   §5.7 lever: delete the `"released_by_sid"` line from `supervisor/INCARNATION`. Operator's call
   alone — no agent takes it.
 
+## SECOND BLOCKER — the daemon leaks the first dispatch's `FLEET_WORKER` into every later session
+
+Found and verified this run. **Unwedging the claim is not sufficient on its own; read this before
+you `sup-spawn`.**
+
+`_worker_env` (`bin/fleet.py:1431-1464`) stamps `FLEET_WORKER=<name>` and `dispatch_bg` passes it
+as `Popen(env=...)` (`:9315`, `:12005`) — but that only sets the env of a **launcher that asks the
+daemon**. The daemon hosts the actual session. Evidence from `~/.claude/daemon.lock` while
+`hs-fix2` was running:
+
+```
+"pid": 36476, "origin": "transient",
+"spawnedBy": {"label": "claude --bg", "cwd": "C:\\proga\\fleet-handoff-seams", "pid": 34700}
+```
+
+That cwd is `hs-fix2`'s worktree: the daemon was started by the FIRST `--bg` dispatch, inherited
+that worker's `FLEET_WORKER`, and every later session inherits it. The gen-0 supervisor body
+launched afterwards carried `FLEET_WORKER=hs-fix2` — its own sid was correct, only this variable
+was stale. This answers the question the source itself marks **UNOBSERVED** at `:11876-11879`
+("whether the daemon actually propagates the launcher's environment into the hosted session").
+
+**Why it is a blocker, not a nuisance:** `_is_supervisor_shaped("hs-fix2")` is False, and §6.5
+refuses `_require_claim_holder` for a non-supervisor-shaped `FLEET_WORKER` (probed in a temp fleet
+home: `REFUSED -- this is a worker turn ... claim-nonce §6.5`). `cmd_sup_boot` does NOT call
+`_require_claim_holder`, but all seven holder verbs do (`sup-checkpoint`, `sup-heartbeat`,
+`sup-release`, `sup-decision`, `sup-handoff-begin/complete/abort`). So such a supervisor **takes
+the claim and can then never beat, checkpoint, or release it** — a fresh wedge, and B6-shaped
+again because it cannot release.
+
+**Operational remedy until this is fixed:** make sure the hosting daemon was not started by a
+worker dispatch — dispatch the **supervisor first** from a clean shell (an interface session's env
+has no `FLEET_WORKER`), or let the transient daemon idle-exit with no `--bg` sessions alive and
+have the supervisor's `sup-spawn` be the dispatch that starts the new one. Verify before trusting
+it: the hosted body should report `FLEET_WORKER=sup|<inc>|boot`, which IS supervisor-shaped and
+therefore exempt.
+
+**Not yet fixed in code, and not yet gated** — it is a finding, with a repro, filed for the
+supervisor's queue. The real fix is that the hosted session's identity must not depend on which
+dispatch happened to start the daemon.
+
 ## Where things stand
 
 `main` = `a2358f2`, pushed. **`build/sup-tombstone` is MERGED** (§10.4 kill/respawn tombstone) —

@@ -158,6 +158,62 @@ without a supervisor: the two builds above. What **cannot**: the final dual-lens
 handoff-seams and its merge, the `fleet q` M1+M2 build, and all cleanup — those are supervision
 work and wait on a booted supervisor, hence the escalation above.
 
+## G-E. The daemon leaks the first dispatch's `FLEET_WORKER` — second blocker, found late in the run
+
+Not council-gated (it is a defect, not a fork), but it is the run's most consequential finding and
+it changes the escalation remedy above.
+
+**Repro, verified.** `_worker_env` (`:1431-1464`) stamps `FLEET_WORKER=<name>`; `dispatch_bg`
+passes it as `Popen(env=...)` (`:9315`, `:12005`). That env reaches only a **launcher that asks the
+daemon** — the daemon hosts the real session. `~/.claude/daemon.lock` while `hs-fix2` ran:
+`pid 36476, origin transient, spawnedBy {label: "claude --bg", cwd: "C:\proga\fleet-handoff-seams"}`
+— i.e. the daemon was started by the FIRST `--bg` dispatch and inherited that worker's identity.
+The gen-0 supervisor body, launched afterwards, carried `FLEET_WORKER=hs-fix2` (its own sid was
+correct; only this variable was stale).
+
+**This answers a question the source explicitly marks UNOBSERVED** at `:11876-11879`: whether the
+daemon propagates the launcher's environment into the hosted session. It does not — it propagates
+its own, from whichever dispatch started it.
+
+**Why it blocks three-tier.** `_is_supervisor_shaped("hs-fix2")` is False, and §6.5 refuses
+`_require_claim_holder` on a non-supervisor-shaped `FLEET_WORKER` (probed in a temp fleet home:
+`REFUSED -- this is a worker turn ... §6.5`). `cmd_sup_boot` does not call `_require_claim_holder`,
+but all seven holder verbs do. **A daemon-hosted supervisor can therefore take the claim and then
+never heartbeat, checkpoint, or release it** — a fresh wedge, B6-shaped again, because release is
+exactly the verb it cannot reach.
+
+**Interim remedy** (until fixed): ensure the hosting daemon was not started by a worker dispatch —
+dispatch the supervisor first from a clean shell, or let the transient daemon idle-exit with no
+`--bg` sessions alive so the supervisor's own `sup-spawn` starts the new one. Verify rather than
+assume: the hosted body should report `FLEET_WORKER=sup|<inc>|boot` (supervisor-shaped, exempt).
+
+**Contamination check on the B6 wave: clean.** `conftest::_no_inherited_claude_session` is autouse
+and deletes both variables, so all 2213 tests and every FI probe ran unaffected. One honest
+caveat the builder raised itself: its
+`test_the_attesting_releaser_cannot_run_a_holder_verb_by_sid_match` asserts only
+`pytest.raises(FleetCliError)`, so in a contaminated shell it would pass for the §6.5 reason rather
+than the released-branch reason — the assertion is not reason-specific. Worth tightening at the
+gate.
+
+## Build results this run (both UNGATED and UNMERGED — supervision work is what is stalled)
+
+- **`fix/b6-interface-release`** (gen-0 body as builder; `aeb0ad6`, `1927058`, `2e824ea`).
+  `sup-release --interface` with the rule-1 carve-out keyed `is True` (not truthiness), a truthful
+  `sup-status` releaser-live branch, and a `fleet doctor` `supervisor-wedge` **FAIL** that delegates
+  its verdict to `supervisor_claim_decision`. **2213 passed / 11 skipped on BOTH floors** (+61,
+  builder measured its own baseline at `a2358f2` = 2152/11 rather than trusting the brief's number
+  — see the baseline note below); receipts 56/56, nothing re-pinned. Spec amendments in
+  claim-nonce §16 and three-tier §15, both marked DESCRIPTIVE, REQUIRING OPERATOR RATIFICATION;
+  `OPERATOR-GATES.md` untouched. (a+), (b) and (c) are pinned by tests so a future edit reaching
+  for them fails.
+  **Its own FI-5 caught a defect in its own wave**: v1 of the doctor check returned early for the
+  attested and no-releaser cases, so the delegation was unreachable for exactly the rows that could
+  disagree — the "cannot disagree" claim was theater until `1927058`. Fix-waves-mint-defects holds;
+  this time the builder caught it itself.
+  **Baseline discrepancy, unresolved and worth a look**: the interface measured `a2358f2` at
+  2147 passed / 16 skipped; the builder measures the same sha at 2152/11. Same 2163 total, so it is
+  a skip/pass split difference between environments (native-pin and live tiers), not a lost test.
+
 ## New facts worth carrying (candidates for `knowledge/lessons.md`)
 
 - **A guard's postcondition must be satisfiable by every legitimate caller class.** B6 says "wait
