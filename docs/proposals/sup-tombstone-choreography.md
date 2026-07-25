@@ -1,6 +1,8 @@
 # Proposal: §10.4 `kill supervisor` / `respawn supervisor` tombstone choreography
 
-Status: council-ruled — ready for build (pending operator ratification)
+Status: **BUILT** 2026-07-24 on branch `build/sup-tombstone` (pending operator ratification of the
+two council rulings). Everything below is the design of record and was built as specified, with the
+build-time notes collected in the closing section "Build record".
 
 Citation prefixes (same convention as `docs/proposals/sup-spawn-choreography.md:8-9`):
 `SPEC:` = `docs/specs/three-tier-command.md`, `CN:` = `docs/specs/claim-nonce.md`,
@@ -560,3 +562,282 @@ Binding conditions:
      `sup-status` and the statusline must show "claim held by dead sid, seizable in
      `<remaining>`s" during any freeze window — diagnosable without scroll-back, not just
      the one-shot `SUP-KILL-FROZEN` line (§3 phase-2 item 5, §7 test 12).
+
+---
+
+## Build record — 2026-07-24, branch `build/sup-tombstone`
+
+Built red-first against §7. `tests/test_sup_tombstone.py` (§7's 12 + F1–F5 + the flagged gap below),
+`tests/test_sup_tombstone_fixwave1.py` (the gate findings), and
+`tests/integration/test_sup_tombstone_live.py` (the one end-to-end graceful kill,
+`FLEET_LIVE`-gated). Full suite green on **both** interpreters: `py -3.13` and the
+`fleet.MIN_PYTHON_VERSION` floor `py -3.10` — **2113 passed, 11 skipped** on each.
+
+*(rs MIN-4 / rb MIN-6: the build slice's first draft of this line said "2 skipped" and the task brief
+said 8. The observed figure is **11** on both floors — 6 `test_native_pin` + 3 this slice's live file
++ 2 platform-gated. Corrected rather than left as a number nobody re-ran.)*
+
+**Stale premises this proposal carried, corrected at build time.** Every `fleet.py:` line number in
+§1–§6 is from the design worktree's HEAD and had drifted by ~180 lines (the file is now ~11.9k lines;
+the claim constants live at `:8634-8635`, not `:8458-8460`). Two of the deltas §1 lists as *needed*
+were already shipped:
+
+- **(a) the §4 resolver already exists** as `_resolve_worker_target` (built for `send` by the
+  sup-spawn slice, pinned in `tests/test_sup_spawn.py`). §10.4 did **not** re-implement it. It adds a
+  *sibling* entry point, `_resolve_supervisor_lifecycle_target`, for one reason: the refusal **grades**
+  differ. `send` collapses everything to `FleetCliError` (rc 1), which is right for a message with
+  nowhere to go; a destructive verb owes the rc 2 / rc 3 split this proposal specifies, and a message
+  that names the next command *for that verb* ("kill it by its real name" is nonsense advice for
+  respawn). Implemented as a new `SupervisorLifecycleRefusal(FleetCliError)` carrying `.rc`, with a
+  `main()` arm ahead of the generic ones — fleet's existing taxonomy has no rc 2/3 for a verb error
+  (1 = generic, 4 = continuity), so re-grading the shared resolver would have changed `send`.
+- **(b) §5's protection ordering is already shipped** — the husk sweep's protected set and
+  `_archive_eligible`'s gate 0 both key on the live claim holder under any name. §7 test 8 is
+  therefore assertion-only, with **no code delta**.
+
+**Council condition 5, and the one honest substitution.** The condition names "holder **roster-gone**",
+but `supervisor_status_line` is file-only by mandate (no lock, no roster fetch, no subprocess — it runs
+in the SessionStart hook of every Claude Code session on this machine). The built branch
+(`_claim_holder_dead_note`) uses the registry's own `status == "dead"` as the liveness proxy, read
+lock-free and without quarantining. That is exactly what kill's arm 2 writes before printing
+`SUP-KILL-FROZEN`, so the persistent surface tracks the event that creates the freeze window. A body
+that died without fleet noticing keeps the pre-existing stale-heartbeat line: the branch **adds** a
+surface, it does not replace one. Recorded here rather than silently narrowed.
+
+**The flagged gap, ruled at build time (NOT a council ruling — operator sign-off wanted).** The
+sup-spawn fix wave flagged that `respawn` of a **non-holder supervisor-shaped husk** relaunched with
+`compose_prompt`'s journal/mailbox carry-over and **no boot ritual**, producing a supervisor-shaped
+body that never runs `sup-boot`, holds no claim, and answers to none of the supervisor contracts.
+Ruled fail-closed and consistent with §2: *every* supervisor-shaped respawn routes through the
+choreography. The husk arm skips the release-steer (there is no claim) but still dispatches a fresh
+`sup|<launch-id>|boot` under the sup-spawn boot ritual, so **`sup-boot` makes the claim decision** —
+`refuse` if a live claim exists, `claim` if none does. Fleet never infers holdership from a respawn
+flag. If the operator prefers "refuse husk respawn, point at `sup-spawn`", that is a one-branch delta
+plus two tests (`TestHuskRespawnGetsTheBootRitual`).
+
+**Superseded guard.** The fix wave's fail-closed stub `_refuse_unbuilt_supervisor_lifecycle` (CRIT-2)
+is **deleted** — it existed only to hold this door shut until §10.4 landed. Its two load-bearing
+properties are inherited verbatim by the new routing and still pinned by the same fault injections:
+FI-7 (the holder is caught however it is addressed, never only by the literal name) and FI-7b (an
+indeterminate holder verdict fails toward refusal, and only for supervisor-shaped names, so an
+unreadable INCARNATION cannot freeze kills of ordinary workers). Its test class was rewritten against
+the built behaviour rather than deleted (`TestSupervisorLifecycleRouting`).
+
+**Doc-sync done here:** SPEC §10.4's `[UNBUILT]` tags and its "sup-release does not exist yet"
+sentence. The pinned receipts in that section were **not** re-pinned — a receipt is a claim about a
+commit, not about `HEAD`. SPEC §13/§18 milestone rows and the `claim-nonce` §7 taxonomy row remain
+owed and are **out of this slice's scope** (the taxonomy row is operator-owned).
+
+**Husk-respawn carve-out vs. the ratified carry-over text (rs MIN-5).** `commands/respawn.md:2` and
+three-tier SPEC:1513 both describe `respawn` as relaunching **under the same name** with the worker's
+journal + drained mailbox carried forward. The husk ruling above deviates from that on exactly one
+class of target — supervisor-**shaped** records — which get a fresh `sup|<launch-id>|boot` name and
+the boot ritual instead of the carry-over. The deviation is deliberate (a supervisor-shaped body with
+no boot ritual holds no claim and answers to none of the supervisor contracts) but it is **not**
+covered by any ratified text, and the ratified bodies were **not edited here**. Recorded as a
+carve-out and attached to the operator sign-off item below.
+
+---
+
+## Fix wave 1 — dual-lens gate findings (2026-07-24, commit after `fb8e5ab`)
+
+Spec lens `tomb-rs`: CONFORMS-WITH-FINDINGS 0C/3M/5m. Break lens `tomb-rb`: 1C/3M/6m
+(`state/journals/tomb-rb.md`). All thirteen fixed; every fix carries a mutate → RED → restore proof
+(10/10 RED).
+
+**CRIT-1 — the stop acted on a STALE sid, and the tests could not have caught it.** Both verbs
+captured `session_id` *before* the release steer. A steer delivered to an **idle** holder — the
+primary intended case, a planned context reset — takes `_cmd_send_native`'s fork-steer branch
+(RATIFIED G2b): `_restamp_after_steer` moves `session_id` to a NEW session and retires the old sid.
+Everything downstream then used the retired one. `kill` printed `SUP-KILL-RELEASED`, exited 0 and
+marked the record dead **while the live fork kept running**; `respawn`'s caller-side B6 gate polled
+the retired sid, passed vacuously, and ended with a dead-marked record holding a live session **plus**
+a fresh gen-0 body — two live supervisor bodies, the one invariant §10.4 exists to hold. A
+dead-record-with-live-session is also the rogue-session class `_cmd_kill_native`'s own ND-1 comment
+calls "a C1 CRITICAL, reached through the front door".
+
+The reason 47 tests missed it is worth recording: **every one of them stubbed `_cmd_send_native` into
+a no-op and seeded `status="working"`**, so the entire fork-steer branch was untested. The fix
+re-fetches the record after the steer resolves (both outcomes) and acts on the current sid union; the
+test doubles now call the production `_restamp_after_steer` rather than modelling it, because a double
+that drifts from the code it stands in for is how this happened.
+
+**MAJ-D — a binding condition that is physically unsatisfiable, narrowed honestly.** Ruling 1's
+condition 2 requires registry, claim file and record **byte-identical after abort**. That holds for
+the `steer-refused` phase and cannot hold for `T_release-expired`: the timeout only exists *because* a
+steer was delivered, and delivery either queues mail or fork-steers the body. The build appeared to
+satisfy it only because the steer was stubbed. Now:
+
+- `steer-refused` — byte-identical guarantee **unchanged** (F1 stands as ratified);
+- `T_release-expired` — a **precisely scoped effect set**: steer-delivery effects only (mail/steer
+  events, restamped sid) and **nothing** from the destructive tail (no tombstone, no dead-marking, no
+  claim-file change, no dispatch), each asserted;
+- the abort text no longer claims the body was untouched — it states that the steer landed and the
+  body may have forked.
+
+> **This narrowing is QUEUED FOR OPERATOR RATIFICATION. It is a correction to a binding 4–0
+> condition and is NOT itself ratified.** Presenting it as ratified would be exactly the kind of
+> quiet scope-move the condition was written to prevent.
+
+**MAJ-A/MAJ-B — two guards that failed OPEN.** The launch-in-flight guard ordinary `kill`/`respawn`
+apply was lost on both §10.4 routes (a pre-claim got dead-marked; the husk arm dispatched a *second*
+body) — restored. Ruling 2's limited-parked refusal missed a **null-horizon park**, the exact poisoned
+park its own message teaches about, and the ND4a **sid-union lag**; root cause is that
+`_holder_is_limited` answers the limit-transfer *boot* question, so it is left untouched and the
+refusal got its own union-resolved predicate.
+
+**MAJ-C** — council condition 5 names `sup-status` **and** the statusline; the human branch never
+printed the freeze-window note, so the surface an operator actually types after `SUP-KILL-FROZEN` was
+the silent one.
+
+**MINs** — corrupt `INCARNATION` now freezes (rc 3) on the real-pipe-name route too; §7 test 8 drives
+the real `_sweep_husks` and the archive→sweep handoff instead of only asserting predicates; the B6
+halt gets its own token **`SUP-RESPAWN-HALTED-B6`** (it is not side-effect-free, and ruling 1
+enumerated exactly three abort phases); the wait clamp is pinned with a poll that does *not* divide
+the timeout; F5 feeds its own `RELEASED` entry through the real journal reader (it previously passed
+`latest_entry=None` and pinned nothing of its own scenario); the vacuous released-branch precedence
+test is now non-vacuous; every injected `sleep` is paired with the clock it advances, so a regression
+fails fast instead of hanging 300s; and `save_registry` retries `os.replace` on `PermissionError`
+(bounded, exponential) — a live WinError 5 class that this build's two new lock-free readers widen.
+
+**Two of the wave's own tests were themselves theater, caught by the injections and rewritten:** the
+`save_registry` retry test grepped `inspect.getsource` and stayed green when the call was swapped for
+a bare `os.replace` (the docstring still named the helper), and the released-branch precedence test
+could not fail by construction. Both are now behavioural.
+
+---
+
+## Fix wave 2 — re-gate findings (2026-07-24, re-gate of `206a648`)
+
+Spec lens: CONFORMS + 3 MIN. Break lens: CRIT-1 confirmed fixed, **2 MAJ + 3 MIN — every one of
+them inside fix-wave-1 code.** The pattern this repo tracks as *fix-waves-mint-defects* held again;
+that is now 7/7. All eight fixed, 10/10 fault injections RED.
+
+**rb MAJ-A/B — the wave-1 fix reintroduced its own bug's payload.** `_refetch_holder_record` fell
+back to the **pre-steer snapshot** — the exact value CRIT-1 had just proved dangerous — whenever the
+re-read failed. Two reachable ways: the registry is corrupt (`load_registry` *quarantines and
+reinitialises*, so the read succeeds against an **empty** registry and the record is simply absent),
+or the record was removed mid-choreography — and that one is a *consequence of a successful arm 1*,
+not an unrelated race: releasing the claim drops the §7.2 gate-0 protection, after which
+`autoclean`/`clean` may legitimately take the record.
+
+Kill then printed `SUP-KILL-RELEASED`, exited 0, and left the live fork running. Fail-open is bad;
+**fail-open-and-announce is worse**, because a clean terminal line ends the operator's
+investigation. The re-fetch now returns `(record, verified)`:
+
+- **kill** degrades loudly — stops the whole pre-steer snapshot union, prints `SUP-KILL-UNVERIFIED`
+  to stderr naming what could not be checked **and** that a fork minted after the last good read
+  would not be in that set, rc 1, and does *not* print the success line;
+- **respawn** halts with `SUP-RESPAWN-HALTED-UNVERIFIED` *before* the successor-dispatch decision.
+  The caller-side B6 gate cannot pass on state nobody can verify, and dispatching there is precisely
+  how two live supervisor bodies happen.
+
+**rb MIN-A — residual double-fork TOCTOU.** A restamp landing between the post-steer re-fetch and
+the stop left fork2 running under a record about to be marked dead. `_cmd_kill_native` now takes the
+stop sid set from **its own under-lock registry read** — the lock it already held for
+`other_current_sids`, which is the narrowest correct place — unioned with the caller's snapshot and
+any forced `extra_stop_sids`.
+
+**rb MIN-B — a docstring that lied.** `_replace_with_retry` claimed a wrong destination "must still
+fail fast". False on win32: a **directory** destination raises `PermissionError`, indistinguishable
+here from a sharing violation, so it is retried the full four times (~1.5s) before re-raising. Fixed
+by correcting the docstring rather than adding an `isdir` fast-fail — that would be a permanent
+`stat` on every registry and claim write to shave 1.5s off a programming error that does not occur
+in a running fleet. The other wrong-destination errors are not `PermissionError` and do fail on the
+first attempt.
+
+**rb MIN-C — supersedes wave 1's "left for the operator to scope".** Wave 1 fixed `save_registry`
+only and recorded `_write_json_atomic` as out of scope. The re-gate produced the harm path that
+settles it, so the earlier note is withdrawn on evidence, not on preference: `sup-release`'s
+`write_incarnation` collides with `_await_claim_released`'s poller → `os.replace` raises → the claim
+never reads `released` → `kill supervisor` falls through to arm 2. A millisecond file lock becomes an
+**up-to-3600s freeze of the whole supervisor tier**. This build engineers that collision (up to 60
+polls per verb against that exact writer), so it is this slice's to fix.
+
+**rs MIN-A/B/C — three tests that pinned less than they appeared to.** A refusal test asserted only
+the exception *class*, which respawn's steer-refused abort also raises, so it stayed green under the
+MAJ-B revert. Wave 1's unconditional nag print duplicated the hand-written line in the no-claim and
+released states; `sup-status` now prints the freeze note directly, inside the held-claim branch only.
+And an F5 assertion used a `("freeze", "refuse")` disjunction against a deterministic fixture, which
+pins neither doctrine — now the exact verdict.
+
+**One of this wave's own injections came back GREEN and produced a better test.** Dropping the
+under-lock `retired_sids` from the sweep union changed nothing, because with a *single* restamp the
+intermediate fork is still reachable as the snapshot's `session_id`. Only a **double** restamp puts a
+live sid exclusively in the under-lock record. The test was rewritten to that shape; the injection is
+now RED.
+
+---
+
+## Fix wave 3 — escalation-scoped (2026-07-24, confirmation gate on `c443ee1`)
+
+Spec lens **CONFIRM-CLEAN** (2 advisory MIN). Break lens **ESCALATE** on one new MAJ — minted by
+wave 2. That takes *fix-waves-mint-defects* to **8/8**: wave 1 minted the findings wave 2 fixed,
+and wave 2 minted **MAJ-NEW** below.
+
+**MAJ-NEW — wave 2's own fix made the sweep cap lexicographic.** Closing the rb MIN-A TOCTOU
+required unioning three sid sources, and the union was built as a `set`, then taken as
+`sorted(_sweep)[-20:]`. `retired_sids` is **oldest-first**, so `[-cap:]` is "the 20 MOST RECENT" —
+the contract stated in `_cmd_kill_native`'s own docstring and still written in the comment directly
+above the bug — *only while insertion order survives*. Sorting by sid **text** discards whichever
+sids happen to sort low, and the newest retired sid is the **fork-steer parent**, which the Steering
+contract explicitly leaves roster-live. Repro: 24 retired `f0000000-*` sids plus a newest
+`0aaaaaaa-*` → the one session that might still be running is exactly the one truncated out.
+
+Fixed in the reviewer-verified shape: ordered concatenation (authoritative retired → snapshot
+retired → snapshot session → `extra_stop_sids`), `dict.fromkeys` dedup preserving first position,
+then the cap. The cap stays a **wall-time bound, not a correctness guarantee** — a live retired sid
+past 20 is still not swept by that invocation — but it now discards the oldest, as advertised.
+
+**rb MIN-E — a test seam that could not be used.** `_replace_with_retry(sleep=time.sleep)` binds the
+function object at *import*, so `monkeypatch.setattr(fleet.time, "sleep", …)` intercepts nothing and
+any timing assertion written that way passes vacuously. Both internal callers pass nothing, so the
+late bind is their only seam; the default is now `None`, resolved at call time.
+
+**rs MIN-D / rs MIN-E — two operator-surface omissions.** `SUP-RESPAWN-HALTED-UNVERIFIED` never
+stated what did *not* happen, while its sibling `SUP-RESPAWN-HALTED-B6` fires **after** the stop and
+tombstone — so "HALTED" had already taught operators that the body is down, which is the opposite of
+the truth here. It now says: no stop attempted, no tombstone, record not marked dead, body very
+likely still alive. And `SUP-KILL-UNVERIFIED` was **stderr-only** while both benign outcomes go to
+stdout, so a stdout-redirecting grep for `SUP-KILL-` found every outcome *except* the one warning
+that a supervisor may still be running. Decided: print it to **both** streams; rc 1 unchanged.
+
+**rb MIN-D — accepted trade-off, NO code change, queued for operator awareness.** The bounded
+`os.replace` retry sleeps **inside `fleet_lock`**. Worst case is ~1.5s, which is **30% of
+`LOCK_TIMEOUT_SECONDS`**; two retrying writes in sequence reach ~60%. A writer stalling on a win32
+sharing violation can therefore convert into a `FleetLockTimeout` for *unrelated* verbs waiting on
+the same lock. Accepted because the alternative it replaced is worse (an unretried write fails the
+verb outright, and for `_write_json_atomic` that means the up-to-3600s freeze in rb MIN-C), and
+because the collision window is milliseconds in practice. Recorded rather than fixed: moving the
+sleeps outside the lock would mean releasing and re-acquiring mid-write, which is a larger change
+than this escalation-scoped wave is allowed to make.
+
+---
+
+## Ratification queue (operator)
+
+1. **Ruling 1** (respawn aborts on steer failure) and **ruling 2** (refuse kill of a limited-parked
+   holder) — council 4–0 each, still pending operator ratification.
+2. **MAJ-D narrowing** of ruling 1's condition 2 — the `T_release-expired` phase asserts a scoped
+   effect set rather than byte-identity, because byte-identity is unsatisfiable once a steer has been
+   delivered. **New; not ratified.**
+3. **Husk-respawn build-time call** — every supervisor-shaped respawn routes through the choreography
+   and gets the boot ritual, *including* the carve-out from `commands/respawn.md:2` / SPEC:1513's
+   same-name carry-over text (rs MIN-5).
+4. **`claim-nonce` §7 taxonomy row** — operator-owned, deliberately not edited by this slice.
+5. **The terminal-contract token family** — sign-off on the surface itself. Ruling 1 enumerated
+   **three** abort phases; across three waves the family grew to **six** tokens, each added for a
+   defensible reason but none of them ratified as a set:
+
+   | Token | Meaning | Stream | rc |
+   |---|---|---|---|
+   | `SUP-KILL-RELEASED` | arm 1: claim released, body stopped, record dead | stdout | 0 |
+   | `SUP-KILL-FROZEN` | arm 2: body stopped, claim frozen up to 3600s | stdout | 0 |
+   | `SUP-KILL-UNVERIFIED` | steer landed, record unreadable — **body may be alive** | stdout **+** stderr | 1 |
+   | `SUP-RESPAWN-ABORTED <phase>` | ruling 1's three phases; body untouched (steer-refused) or steer-delivered-only (T_release-expired) | stderr | 2 |
+   | `SUP-RESPAWN-HALTED-B6` | claim released, body stopped+tombstoned, successor withheld | stderr | 2 |
+   | `SUP-RESPAWN-HALTED-UNVERIFIED` | steer landed, nothing else done, body likely alive | stderr | 2 |
+
+   The operator decision is whether this is the intended surface — in particular the
+   `ABORTED` / `HALTED` / `UNVERIFIED` split, which encodes *how much was already done* and is what
+   an operator must read correctly under time pressure.

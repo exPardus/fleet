@@ -6,6 +6,10 @@ CRIT-2  respawn/kill of the resolved supervisor CLAIM-HOLDER fail CLOSED until
         three-tier §10.4 is built (council rejected the bare body swap 4-0).
         Interrupt stays allowed: turn-kill, transcript survives, no claim
         transition (rb MIN-2 scope call, disclosed).
+        SUPERSEDED 2026-07-24 by the §10.4 build: the stub is gone and
+        `TestSupervisorLifecycleFailClosed` is now
+        `TestSupervisorLifecycleRouting`, pinning the same FI-7/FI-7b routing
+        properties against the built choreography. See that class's header.
 CRIT-3  the resolver's no-claim/released arm is PINNED (FI-4 for real).
 MAJ-2   boot ritual follows the class-4 nonce doctrine (redirect to file,
         grep -- never read a secret off the stream tail) + MIN-4 verdict table.
@@ -278,72 +282,136 @@ class TestSupervisorShapedLifecycleChoreography:
         assert rc == 0
         assert fleet.load_registry()["workers"][SUP_PIPE]["status"] == "interrupted"
 
-    def test_respawn_force_completes_with_pipe_name(self, native_home, monkeypatch):
-        # No claim held: the husk respawn path itself (CRIT-1 site :4836).
+    def test_respawn_force_of_a_husk_relaunches_with_the_boot_ritual(
+            self, native_home, monkeypatch):
+        """No claim held: the husk respawn path (CRIT-1 site :4836).
+
+        AMENDED by the §10.4 build. This test used to assert the ORDINARY
+        respawn shape -- same name restamped to the new sid, prompt carrying
+        the mapped journal. That was precisely the gap the sup-spawn fix wave
+        flagged for §10.4 to rule (state/journals/supspawn-fix.md): a
+        supervisor-SHAPED body relaunched with no boot ritual holds no claim,
+        never runs `sup-boot`, and answers to none of the supervisor
+        contracts. §10.4 routes every supervisor-shaped respawn through the
+        choreography, so the husk now gets a FRESH `sup|<launch-id>|boot`
+        record under the boot ritual and `sup-boot` makes the claim decision.
+        The CRIT-1 property this test was written for -- the pipe name survives
+        every fs path -- is still exercised end to end."""
         old_sid = SID
         journal = fleet.journals_dir() / "sup~inc-1~boot.md"
         journal.parent.mkdir(parents=True, exist_ok=True)
         journal.write_text("JOURNAL-SENTINEL-77", encoding="utf-8")
         _seed_pipe_worker(sid=old_sid, status="working")
+        monkeypatch.setattr(fleet, "_stop_native_session_status",
+                            lambda *a, **k: (True, "gone"))
         monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_sequence(
-            (True, [make_roster_entry(old_sid)]),
-            (True, []),
-            (True, []),
+            (True, [make_roster_entry(old_sid)]),   # husk liveness gate: needs --force
+            (True, []),                             # caller-side B6 gate
+            (True, []),                             # dispatch pre-snapshot
             (True, [make_roster_entry(NEW_SID, status="idle")]),
         ))
         rc = fleet.cmd_respawn(
             SimpleNamespace(name=SUP_PIPE, task=None, force=True, yes=True,
                             nonce=None, max_budget_usd=None,
-                            setting_sources=None, token_ceiling=None),
+                            setting_sources=None, token_ceiling=None,
+                            model=None, permission_mode=None),
             run=_fake_run_factory(stdout="backgrounded · eeeeffff · sup\n"),
             which=lambda _: "claude", sleep=lambda s: None)
         assert rc == 0
-        rec = fleet.load_registry()["workers"][SUP_PIPE]
-        assert rec["session_id"] == NEW_SID
-        assert old_sid in rec["retired_sids"]
+        workers = fleet.load_registry()["workers"]
+        # The husk is retired and tombstoned, not restamped.
+        assert workers[SUP_PIPE]["status"] == "dead"
         assert any(r["kind"] == "stopped"
                    for r in fleet.read_outcomes(SUP_PIPE, sid=old_sid))
-        # The respawn prompt carried the MAPPED journal's content.
-        task_text = fleet.task_file_path(SUP_PIPE).read_text(encoding="utf-8")
-        assert "JOURNAL-SENTINEL-77" in task_text
+        new_names = [n for n in workers if n != SUP_PIPE]
+        assert len(new_names) == 1, workers
+        assert fleet._is_supervisor_shaped(new_names[0])
+        assert workers[new_names[0]]["session_id"] == NEW_SID
+        # The fresh body gets the boot ritual, NOT the old journal carry-over.
+        task_text = fleet.task_file_path(new_names[0]).read_text(encoding="utf-8")
+        assert "sup-boot" in task_text
+        assert "JOURNAL-SENTINEL-77" not in task_text
 
 
 # ---------------------------------------------------------------------------
-# CRIT-2: kill/respawn of the supervisor claim-holder FAIL CLOSED. FI-7.
+# CRIT-2, as SUPERSEDED by the three-tier §10.4 build (build/sup-tombstone).
+#
+# This class originally pinned the fail-closed stub
+# `_refuse_unbuilt_supervisor_lifecycle`, which refused kill/respawn of the
+# claim holder outright with "§10.4 ... not built". §10.4 is now built, so the
+# refusal messages are gone -- but the two ROUTING properties the stub existed
+# to guarantee are exactly the ones the choreography must keep, so the tests
+# are rewritten against the built behavior rather than deleted:
+#
+#   FI-7   the holder is caught HOWEVER it is addressed (logical name or its
+#          real pipe name) -- it must never reach the ordinary kill/respawn
+#          path, which would bare-swap it.
+#   FI-7b  an INDETERMINATE holder verdict fails TOWARD refusal, and only for
+#          supervisor-shaped names, so an unreadable INCARNATION cannot freeze
+#          kills of ordinary workers.
+#
+# The choreography's own contracts are pinned in tests/test_sup_tombstone.py.
 # ---------------------------------------------------------------------------
-class TestSupervisorLifecycleFailClosed:
+class TestSupervisorLifecycleRouting:
     def _holder(self, sid=HOLDER_SID):
         _held_claim(session_id=sid)
         return _seed_pipe_worker(sid=sid, status="working")
 
-    def test_respawn_supervisor_refused(self, native_home):
+    def _refusing_steer(self, monkeypatch):
+        """A steer fleet cannot deliver -- the cheapest way to reach a terminal
+        state in one turn: kill takes arm 2, respawn aborts."""
+        def _boom(name, message, **kw):
+            raise fleet.FleetCliError("suspicious roster (G9)")
+        monkeypatch.setattr(fleet, "_cmd_send_native", _boom)
+
+    def test_respawn_supervisor_routes_into_the_choreography(self, native_home, monkeypatch):
         self._holder()
-        with pytest.raises(fleet.FleetCliError, match=r"10\.4.*not built"):
+        self._refusing_steer(monkeypatch)
+        with pytest.raises(fleet.SupervisorLifecycleRefusal,
+                           match="SUP-RESPAWN-ABORTED steer-refused"):
             fleet.cmd_respawn(SimpleNamespace(
                 name="supervisor", task=None, force=True, yes=True, nonce=None,
-                max_budget_usd=None, setting_sources=None, token_ceiling=None))
-        # Nothing was retired: record untouched.
+                max_budget_usd=None, setting_sources=None, token_ceiling=None,
+                model=None, permission_mode=None),
+                run=_fake_run_factory(), which=lambda _: "claude",
+                sleep=lambda s: None)
+        # Ruling 1: the body is left ALIVE and untouched -- never bare-swapped.
         rec = fleet.load_registry()["workers"][SUP_PIPE]
         assert rec["session_id"] == HOLDER_SID
         assert rec["status"] == "working"
 
-    def test_kill_supervisor_refused(self, native_home):
+    def test_kill_supervisor_routes_into_the_choreography(self, native_home,
+                                                          monkeypatch, capsys):
         self._holder()
-        with pytest.raises(fleet.FleetCliError, match=r"10\.4.*not built"):
-            fleet.cmd_kill(SimpleNamespace(name="supervisor", yes=True, nonce=None))
-        assert fleet.load_registry()["workers"][SUP_PIPE]["status"] == "working"
-        assert "killed" not in _events_kinds()
+        self._refusing_steer(monkeypatch)
+        monkeypatch.setattr(fleet, "_stop_native_session_status",
+                            lambda *a, **k: (True, "gone"))
+        rc = fleet.cmd_kill(SimpleNamespace(name="supervisor", yes=True, nonce=None),
+                            run=_fake_run_factory(), which=lambda _: "claude",
+                            sleep=lambda s: None)
+        assert rc == 0
+        out = capsys.readouterr().out
+        # The arm announcement, not the ordinary "<name>: killed" line.
+        assert "SUP-KILL-FROZEN" in out
+        assert f"{SUP_PIPE}: killed" not in out
+        assert fleet.load_registry()["workers"][SUP_PIPE]["status"] == "dead"
 
-    def test_kill_holder_by_real_name_also_refused(self, native_home):
-        """FI-7 (recorded fault injection): a guard keyed on the LITERAL
+    def test_kill_holder_by_real_name_also_routes(self, native_home, monkeypatch, capsys):
+        """FI-7 (recorded fault injection): routing keyed on the LITERAL
         'supervisor' target instead of the resolved claim-holder record goes
-        red here -- addressing the holder by its pipe name would bare-swap it
-        straight past the refusal. Injection: condition the refusal on
-        `args.name == SUPERVISOR_BODY_NAME` checked before resolution;
-        confirmed red 2026-07-24; restored."""
+        red here -- addressing the holder by its pipe name would take the
+        ordinary kill path and bare-swap it past the whole choreography.
+        Injection: condition `_supervisor_lifecycle_target` on
+        `name == SUPERVISOR_BODY_NAME` alone; confirmed red 2026-07-24 (stub
+        era) and re-confirmed against the built routing; restored."""
         self._holder()
-        with pytest.raises(fleet.FleetCliError, match=r"10\.4.*not built"):
-            fleet.cmd_kill(SimpleNamespace(name=SUP_PIPE, yes=True, nonce=None))
+        self._refusing_steer(monkeypatch)
+        monkeypatch.setattr(fleet, "_stop_native_session_status",
+                            lambda *a, **k: (True, "gone"))
+        fleet.cmd_kill(SimpleNamespace(name=SUP_PIPE, yes=True, nonce=None),
+                       run=_fake_run_factory(), which=lambda _: "claude",
+                       sleep=lambda s: None)
+        assert "SUP-KILL-FROZEN" in capsys.readouterr().out
 
     def test_kill_ordinary_worker_unaffected(self, native_home, monkeypatch):
         self._holder()
@@ -354,23 +422,41 @@ class TestSupervisorLifecycleFailClosed:
         assert rc == 0
         assert fleet.load_registry()["workers"]["w1"]["status"] == "dead"
 
-    def test_refusal_names_the_escape_hatches(self, native_home):
+    def test_the_steer_names_sup_release(self, native_home, monkeypatch):
+        """B5 stays visible in the operator-facing surface: fleet cannot
+        release, so the steer it delivers tells the HOLDER to run the verb."""
         self._holder()
-        with pytest.raises(fleet.FleetCliError, match="sup-release"):
-            fleet.cmd_kill(SimpleNamespace(name="supervisor", yes=True, nonce=None))
+        sent = []
+
+        def _capture(name, message, **kw):
+            sent.append(message)
+            return 0
+        monkeypatch.setattr(fleet, "_cmd_send_native", _capture)
+        monkeypatch.setattr(fleet, "_stop_native_session_status",
+                            lambda *a, **k: (True, "gone"))
+        clock = type("C", (), {"t": 0.0, "__call__": lambda s: s.t})()
+
+        def _sleep(seconds):
+            clock.t += seconds
+        fleet.cmd_kill(SimpleNamespace(name="supervisor", yes=True, nonce=None),
+                       run=_fake_run_factory(), which=lambda _: "claude",
+                       sleep=_sleep, clock=clock)
+        assert sent and "sup-release" in sent[0]
 
     def test_indeterminate_holder_fails_toward_refusal_for_sup_shaped(self, native_home):
-        """The guard's asymmetric None arm (claim held, holder sid
-        unreadable): fail TOWARD refusal, but only for supervisor-shaped
-        names. FI-7b (recorded fault injection): deleting the
-        `holder is None and ...` conjunct from
-        _refuse_unbuilt_supervisor_lifecycle left every other FailClosed
-        test green; THIS test went red (the maybe-holder body was killed on
-        an unreadable INCARNATION). Confirmed red 2026-07-24; restored."""
+        """The asymmetric None arm (claim held, holder sid unreadable): fail
+        TOWARD refusal, but only for supervisor-shaped names. FI-7b (recorded
+        fault injection): deleting the `holder is None and ...` conjunct from
+        the routing left every other test in this class green; THIS test went
+        red (the maybe-holder body was killed on an unreadable INCARNATION).
+        Confirmed red 2026-07-24; restored. Now graded rc 3 (freeze) -- "never
+        decide blind" -- rather than the stub's flat refusal."""
         _held_claim(session_id="")          # claim with no readable holder sid
         _seed_pipe_worker(sid=SID, status="working")
-        with pytest.raises(fleet.FleetCliError, match=r"10\.4.*not built"):
+        with pytest.raises(fleet.SupervisorLifecycleRefusal) as exc:
             fleet.cmd_kill(SimpleNamespace(name=SUP_PIPE, yes=True, nonce=None))
+        assert exc.value.rc == 3
+        assert fleet.load_registry()["workers"][SUP_PIPE]["status"] == "working"
 
     def test_indeterminate_holder_never_freezes_ordinary_kills(self, native_home, monkeypatch):
         _held_claim(session_id="")          # unreadable holder sid
