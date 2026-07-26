@@ -458,3 +458,133 @@ treating "exactly two predicates" as the whole story.
   makes the next `sup-boot` *refuse*, which is recoverable. **To get a fresh supervisor:
   `fleet kill` this body (or `claude stop` its session), then `fleet sup-boot`** — roster-gone
   plus an aged heartbeat resolves to `seize`, no lever needed.
+
+---
+
+# Successor body — `inc-20260726T164216Z-3b33` (booted 16:42Z)
+
+Fresh claim, `VERDICT: claim`, predecessor `inc-20260726T140221Z-26ce` had released cleanly. No
+seizure, no transfer, no §5.7 lever. Baseline re-measured by this body: `main` = `8dee4b8`,
+**2152 passed / 11 skipped on py3.13 AND py3.10** — the predecessor's figure reproduces exactly.
+
+## G-H. The §G-E leak, measured on the supervisor's own body — and the registry vindicated
+
+The identity check in this body's boot brief was expected to be a formality. It was not: **the
+leak reproduced on me, at boot, unprompted.**
+
+```
+my env CLAUDE_CODE_SESSION_ID : 108300de-8d43-411e-8177-94843bee05ab
+my env FLEET_WORKER           : sup|inc-20260726T140146Z-5a0e|boot
+
+records whose sid union contains MY env sid: ['sup|inc-20260726T164152Z-8180|boot']
+my actual dispatched worker name          : sup|inc-20260726T164152Z-8180|boot
+env FLEET_WORKER names a DIFFERENT record :  True (status: idle )
+```
+
+`fleet doctor`, same minute: `daemon.lock held by pid 28812 since 2026-07-26T14:01:49Z` — the
+daemon was started by the **14:01** dispatch and has been donating that dispatch's identity to
+every session it has hosted since. Causal chain closed, no inference required.
+
+**This is the council's proposed experiment, run for free, and it returns the council's answer.**
+At one instant, on one body: resolving identity **from the registry by the acting session's own
+sid** returned **exactly one** record and it was the correct one; resolving it **from
+`FLEET_WORKER`** returned a different, idle worker. Registry right and environment wrong,
+simultaneously, in the same process. The 4–0 synthesis is no longer a design argument — it has a
+receipt.
+
+It bit nobody: the donated name is supervisor-shaped, so §6.5 exempted me. That is luck about
+which dispatch happened to start the daemon, not a property of the design.
+
+Sid-union detail worth keeping: the leaking record `sup|inc-20260726T140146Z-5a0e|boot` carries
+**two** sids (`6d1a77bd` pre-fork, `76ae301e` post-fork). Any registry-keyed resolver must match
+on `_record_sids`, never on the bare `session_id`, or fork-steered bodies stop resolving.
+
+## G-I. The council's framing is wrong on one load-bearing point: this is spec-vs-spec
+
+The council recorded that *"the project already decided this; the code diverged from its own
+ratified rule."* Having read both documents verbatim, **that is not what happened, and the
+difference changes the remedy.**
+
+- `docs/SPEC.md:196` (ratified): a guard enforcing *"a worker turn must never hold the supervisor
+  claim"* **"must key on the registry or the claim itself, never on `FLEET_WORKER`."**
+- `docs/specs/claim-nonce.md` **§6.5 D5** (ratified, ~line 1772): *"The design **depends on** a
+  `FLEET_WORKER` refusal in `_require_claim_holder`, which does not exist today … That is a
+  **shipped-code defect**, filed separately and not built here."*
+
+**Two ratified specs mandate opposite things.** The guard at `:10899` did not go rogue — it
+faithfully implements claim-nonce §6.5, and in doing so violates SPEC.md:196. So the fix is not
+merely "correct the code": **one of the two specs must be amended, and no author ratifies their
+own spec.** The build is therefore instructed to build to SPEC.md:196 and to file the
+claim-nonce §6.5 amendment as `DESCRIPTIVE — REQUIRES OPERATOR RATIFICATION`.
+
+Collateral: `docs/SPEC.md:334` cites this prohibition as *"§6.1"*. §6.1 is *"D1 — the boot
+verdict order"*; the env-channel section is **§6.5**. A mis-citation in the spec of record —
+queued as doc-sync, deliberately not fixed inside the build branch.
+
+## G-J. The invariant added to the council's design, and why it is not optional
+
+The synthesis replaces an env-derived predicate (`FLEET_WORKER`) with a registry lookup **keyed
+by an env-derived value** (`CLAUDE_CODE_SESSION_ID`). That improves blame-assignment but **does
+not leave the medium**: both variables arrive through the same donated daemon environment. Under
+C4's still-open hypothesis (ii) — the vendor passes the environment through — a registry-by-sid
+judge inherits the identical defect one level down, and the whole synthesis rests on sand exactly
+as C4 warned.
+
+The pre-flight that would settle it needs the machine-wide daemon restarted from a shell that
+*holds* a sid, which kills live sessions including the supervisor's. **It remains an
+operator-shell experiment and this body did not attempt it.**
+
+So rather than block on it, the build is required to be sound under **both** hypotheses, via one
+added invariant:
+
+> **An identity inference derived from the environment may never be the sole basis of a refusal.
+> The nonce and the claim refuse; inference may only inform and announce.**
+
+With that, a misidentification costs a wrong *measurement* or a spurious *announcement* — never
+a wrongly-refused claim verb. Plus a **uniqueness** rule: exactly one matching record is an
+identity; two or more live matches is itself a leak signature, reported distinctly and treated as
+unresolved rather than silently taking the first match.
+
+## G-K. `fleet spawn` silently destroys an operator-authored task file — found by hitting it
+
+Dispatching the ruling council cost four workers a wasted start, and the mechanism is a real
+defect.
+
+`dispatch_bg` writes the worker's prompt to `state/tasks/<name>.md` with an **unconditional**
+`task_path.write_text(prompt_body)` (`bin/fleet.py:9250`) — no existence check, no warning — and
+then dispatches the body with the tiny prompt `Read <task_path> and follow it exactly.`
+(`:9259`).
+
+I had authored each councilor's brief at `state/tasks/rule-c1.md` … `rule-c4.md` — the natural
+path, in fleet's own directory, under fleet's own naming scheme — and passed
+`--task "Read state/tasks/rule-c1.md and follow it exactly."`. The dispatch **overwrote each
+brief with its own preamble plus my task line**, so all four workers booted holding a file whose
+only instruction was to read the file they were already reading. Content destroyed, silently,
+before the body ever read it.
+
+Why it is latent rather than obvious: the predecessor avoided it only by accident, because it
+named its brief files after the *task* (`hs-fixwave2-dispatch.md`, `b6-interface-release.md`)
+rather than after the *worker*. Anyone naming a brief after its worker — the obvious
+convention — loses it.
+
+Recovery taken: rewrote the four briefs under `state/tasks/lens/`, then `fleet send` to all four
+with the corrected pointers and an explicit instruction to discard anything concluded from the
+broken file. All four picked the correction up at their next tool boundary (mail drained to 0)
+and none had produced anything from the stub. Subsequent briefs live under
+`state/tasks/briefs/`.
+
+Queued fixes, **not built here**: `dispatch_bg` should refuse (or at minimum warn loudly) when
+`state/tasks/<name>.md` already exists and was not written by a prior dispatch of that same
+worker; and the self-referential case — a task line that points at the task file itself — is
+mechanically detectable at dispatch time and should be refused outright. Secondary hazard worth
+recording: `state/tasks/` is also swept by cleanup paths, so an operator brief parked there is
+exposed to deletion as well as to clobbering.
+
+## G-L. `doctor` FAIL carried forward: the native contract is unverified at claude 2.1.220
+
+`[FAIL] pin-version: claude 2.1.220 != 2.1.218 at last pin pass (2026-07-23)`. Standing doctrine
+from M-D is explicit — **run the pin tier on every `claude` bump, not only at merges** — and the
+8th live-tier catch in this project's history *was* a vendor change. Two patch versions have gone
+by unverified, and the council separately noted `--setting-sources` is still marked UNOBSERVED at
+2.1.207 while the live daemon is 2.1.220. Queued for this body: run the `FLEET_LIVE=1` pin tier
+and re-stamp, or record what broke.
