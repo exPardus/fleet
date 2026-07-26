@@ -1438,23 +1438,41 @@ class TestWorkerTurnsCannotHoldTheClaim:
     """§6.5 / §13 item 1: *"a worker turn can hold the supervisor claim, and is
     prevented only by accident."*
 
-    Adjudicated by council to option (i), the NARROW arm, because a BLANKET
-    refusal is refuted by the corpus and by the code: `_worker_env` stamps
-    `FLEET_WORKER` on every fleet-launched session, and the handoff SUCCESSOR
-    is dispatched through that very function -- its first act after claim
-    transfer is `sup-checkpoint`, a `_require_claim_holder` caller. A blanket
-    refusal breaks the one session the handoff exists to serve, and breaks
-    three-tier's `sup-spawn`, which spawns the supervisor itself as a worker.
+    RE-KEYED ONTO THE REGISTRY, 2026-07-26. The council adjudicated this to the
+    NARROW arm -- refuse when `FLEET_WORKER` is set and its value is not
+    supervisor-shaped -- and that arm faithfully implemented claim-nonce §6.5
+    while violating `docs/SPEC.md:196`, which binds any such guard to *"key on
+    the registry or the claim itself, NEVER on `FLEET_WORKER`"*. SPEC.md:196
+    won, on the grounds it predicted: the machine-wide `claude` daemon donates
+    the environment of whichever `--bg` dispatch started it to every session it
+    hosts afterwards, so `FLEET_WORKER` names a long-dead dispatch and a guard
+    keyed on it refuses whoever the donor happened to be. Measured live; the
+    receipt is encoded in `tests/test_identity_registry.py`.
 
-    So: refuse when `FLEET_WORKER` is set AND its value is not
-    supervisor-shaped. The exempt shape is `sup|<inc>|successor`, and it is
-    unforgeable through `fleet spawn` -- `NAME_RE` is `^[a-z0-9-]+$` and
-    forbids `|` in every spawnable worker name.
+    TWO THINGS CHANGED, and the second is the load-bearing one:
 
-    It is a SPEED-BUMP, not a control: `env -u FLEET_WORKER fleet …` defeats
-    it, and §2.1 is why nothing here can do better. That is consistent with
-    the operator's gate answer (option (b), knowingly bypassable) and must be
-    described that way rather than as a boundary."""
+    1. The role is judged by `_acting_worker_name()` -- the acting session's own
+       sid resolved against every record's sid union -- not by the env stamp.
+    2. It is no longer a GATE. An identity inferred from the environment may
+       never be the sole basis of a refusal (both `FLEET_WORKER` and
+       `CLAUDE_CODE_SESSION_ID` come from the same donated medium, so a
+       registry lookup keyed by the sid inherits the defect one level down if
+       the sid can leak too -- an open question). The NONCE refuses; the role
+       verdict only decides how an already-certain refusal is worded,
+       exit-coded and logged. So a body holding the live generation is never
+       refused for looking like a worker.
+
+    What that costs, stated plainly: a worker turn that has somehow been GIVEN
+    the live nonce is no longer stopped. That was always a speed-bump and never
+    a control (`env -u FLEET_WORKER fleet …` defeated the old one), and the
+    trade buys the property that matters -- a legitimate holder is never
+    refused its own `sup-release`, which is exactly the wedge the donated
+    environment produced.
+
+    The `sup|<inc>|<role>` family stays exempt from the ROLE classifier, still
+    unforgeable through `fleet spawn` (`NAME_RE` is `^[a-z0-9-]+$` and forbids
+    `|`), so a supervisor body dispatched as a fleet worker is never told it is
+    a worker."""
 
     def _hold(self, sid="sid-me"):
         value = fleet.mint_nonce()
@@ -1466,41 +1484,72 @@ class TestWorkerTurnsCannotHoldTheClaim:
                                  "nonce_hash": fleet.nonce_digest(value)})
         return value
 
-    # (a) an ordinary worker turn is refused at every caller
+    def _as_worker(self, monkeypatch, name="some-worker", sid="sid-w"):
+        """The acting body IS worker `name`, per the registry -- the only judge
+        of that question. `FLEET_WORKER` is set to a DIFFERENT, long-dead name
+        throughout this class, because that is the live defect and every test
+        here must hold whether or not the witness agrees."""
+        monkeypatch.setenv("FLEET_WORKER", "a-stamp-the-daemon-donated")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", sid)
+        fleet.save_registry({"workers": {
+            name: {"session_id": sid, "retired_sids": [], "status": "working"},
+            "a-stamp-the-daemon-donated": {"session_id": "sid-long-dead",
+                                           "retired_sids": [], "status": "idle"}}})
 
-    def test_a_worker_turn_is_refused_even_holding_the_live_generation(
+    # (a) an ordinary worker turn that ALSO fails the nonce is named as one
+
+    def test_a_worker_turn_failing_the_nonce_is_told_it_is_a_worker(
             self, sup_home, monkeypatch):
-        live = self._hold()
-        monkeypatch.setenv("FLEET_WORKER", "some-worker")
+        self._hold()
+        self._as_worker(monkeypatch)
         with pytest.raises(fleet.FleetCliError) as exc:
-            fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=live))
+            fleet.cmd_sup_checkpoint(_ckpt(sid="sid-w", nonce=fleet.mint_nonce()))
         assert "some-worker" in str(exc.value)
         assert "sup-checkpoint" in str(exc.value)
         assert fleet.supervisor_journal_entries() == []
 
+    def test_the_name_is_the_registrys_not_the_environments(self, sup_home, monkeypatch):
+        # The whole point. The donated witness must appear nowhere in the answer.
+        self._hold()
+        self._as_worker(monkeypatch)
+        with pytest.raises(fleet.FleetCliError) as exc:
+            fleet.cmd_sup_checkpoint(_ckpt(sid="sid-w", nonce=fleet.mint_nonce()))
+        assert "a-stamp-the-daemon-donated" not in str(exc.value)
+
+    def test_a_worker_turn_HOLDING_the_live_generation_is_NOT_refused(
+            self, sup_home, monkeypatch, capsys):
+        # The §5 invariant, at its sharpest. Inference never refuses; the nonce
+        # decides, and this caller presented it.
+        live = self._hold(sid="sid-w")
+        self._as_worker(monkeypatch)
+        assert fleet.cmd_sup_checkpoint(_ckpt(sid="sid-w", nonce=live)) == 0
+        capsys.readouterr()
+
     @pytest.mark.parametrize("verb", ["checkpoint", "heartbeat", "handoff-abort"])
-    def test_every_require_claim_holder_caller_refuses(self, sup_home, monkeypatch, verb):
-        live = self._hold()
-        monkeypatch.setenv("FLEET_WORKER", "some-worker")
+    def test_every_require_claim_holder_caller_classifies(self, sup_home, monkeypatch, verb):
+        self._hold()
+        self._as_worker(monkeypatch)
+        bad = fleet.mint_nonce()
         calls = {
-            "checkpoint": lambda: fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=live)),
+            "checkpoint": lambda: fleet.cmd_sup_checkpoint(_ckpt(sid="sid-w", nonce=bad)),
             "heartbeat": lambda: fleet.cmd_sup_heartbeat(
-                SimpleNamespace(sid="sid-me", nonce=live)),
+                SimpleNamespace(sid="sid-w", nonce=bad)),
             "handoff-abort": lambda: fleet.cmd_sup_handoff_abort(
-                SimpleNamespace(sid="sid-me", nonce=live, successor_sid="sid-x")),
+                SimpleNamespace(sid="sid-w", nonce=bad, successor_sid="sid-x")),
         }
         with pytest.raises(fleet.FleetCliError) as exc:
             calls[verb]()
         assert "some-worker" in str(exc.value)
 
-    def test_the_refusal_lands_before_the_claim_is_even_read(self, sup_home, monkeypatch):
-        # No claim at all: a worker turn must be told it is a worker, not that
-        # a claim is missing. The role answer does not depend on the claim.
-        monkeypatch.setenv("FLEET_WORKER", "some-worker")
+    def test_a_worker_turn_facing_no_claim_is_still_told_it_is_a_worker(
+            self, sup_home, monkeypatch):
+        # No claim at all. The refusal is the absent claim's -- the role verdict
+        # only adds the sentence that answers "why should I not be here".
+        self._as_worker(monkeypatch)
         with pytest.raises(fleet.FleetCliError) as exc:
-            fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me"))
+            fleet.cmd_sup_checkpoint(_ckpt(sid="sid-w"))
         assert "some-worker" in str(exc.value)
-        assert "no supervisor claim" not in str(exc.value)
+        assert "worker turn" in str(exc.value)
 
     def test_it_is_an_ordinary_error_not_a_continuity_failure(self, sup_home, monkeypatch):
         # Exit 4 means "a second body of your lineage may be acting" (§5.6).
@@ -1508,18 +1557,19 @@ class TestWorkerTurnsCannotHoldTheClaim:
         # evidence of a second body; conflating them would make the one code
         # an operator scripts against mean two different incidents.
         self._hold()
-        monkeypatch.setenv("FLEET_WORKER", "some-worker")
-        assert fleet.main(["sup-checkpoint", "body", "--sid", "sid-me"]) == 1
+        self._as_worker(monkeypatch)
+        assert fleet.main(["sup-checkpoint", "body", "--sid", "sid-w"]) == 1
 
     def test_the_refusal_is_described_as_a_speed_bump_not_a_boundary(
             self, sup_home, monkeypatch):
-        # §2.1: nothing on this box can authorize. `env -u FLEET_WORKER`
-        # defeats this, and the message must not imply otherwise -- v1's whole
-        # class of error was describing a speed-bump as a control.
+        # §2.1: nothing on this box can authorize, and the message must not
+        # imply otherwise -- v1's whole class of error was describing a
+        # speed-bump as a control. The wording now also names the SHARPER fact:
+        # the identity behind it is donatable by the hosting daemon.
         self._hold()
-        monkeypatch.setenv("FLEET_WORKER", "some-worker")
+        self._as_worker(monkeypatch)
         with pytest.raises(fleet.FleetCliError) as exc:
-            fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me"))
+            fleet.cmd_sup_checkpoint(_ckpt(sid="sid-w", nonce=fleet.mint_nonce()))
         assert "not a security boundary" in str(exc.value)
 
     # (b) the successor -- the one body the handoff exists to serve
@@ -1527,7 +1577,10 @@ class TestWorkerTurnsCannotHoldTheClaim:
     def test_the_handoff_successor_passes_through_to_the_normal_claim_check(
             self, sup_home, monkeypatch, capsys):
         live = self._hold()
-        monkeypatch.setenv("FLEET_WORKER", "sup|inc-20260723T101112Z-abcd|successor")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-me")
+        fleet.save_registry({"workers": {
+            "sup|inc-20260723T101112Z-abcd|successor": {
+                "session_id": "sid-me", "retired_sids": [], "status": "working"}}})
         assert fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=live)) == 0
         capsys.readouterr()
 
@@ -1536,23 +1589,28 @@ class TestWorkerTurnsCannotHoldTheClaim:
         # three-tier §10.1 sup-spawn (manager ruling, extension-not-reversal):
         # sup-spawn dispatches its bodies under the family `sup|<inc>|<role>`,
         # not only the handoff `sup|<inc>|successor`. A gen-0 supervisor body
-        # under such a name carries FLEET_WORKER=that-name and its first act is
-        # sup-checkpoint. Before the shape extension this body was REFUSED ITS
-        # OWN CLAIM (the shape only accepted `successor`); the extension turns
-        # this green. Council E(2) grounding: the exempt shape must be
+        # under such a name is a REGISTRY record of that name, and its first act
+        # is sup-checkpoint. Council E(2) grounding: the exempt shape must be
         # unforgeable via `fleet spawn`, and ANY `|`-bearing name satisfies that
-        # (NAME_RE forbids `|`), so the whole family is exempt-safe.
+        # (NAME_RE forbids `|`), so the whole family is exempt-safe. That
+        # grounding survives the re-key unchanged -- it was never about where
+        # the name was READ from, only about who could mint one.
         live = self._hold()
-        monkeypatch.setenv("FLEET_WORKER", "sup|inc-me|boot")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-me")
+        fleet.save_registry({"workers": {
+            "sup|inc-me|boot": {"session_id": "sid-me", "retired_sids": [],
+                                "status": "working"}}})
         assert fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=live)) == 0
         capsys.readouterr()
 
     def test_the_successor_still_faces_the_continuity_check(self, sup_home, monkeypatch):
-        # "Passes through" means exactly that: exempt from the ROLE arm, not
-        # exempt from §5.3. An exemption that skipped the claim check would
-        # hand the claim to anyone who can set one env var to a known shape.
+        # "Passes through" means exactly that: exempt from the ROLE classifier,
+        # not exempt from §5.3.
         self._hold()
-        monkeypatch.setenv("FLEET_WORKER", "sup|inc-20260723T101112Z-abcd|successor")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-me")
+        fleet.save_registry({"workers": {
+            "sup|inc-20260723T101112Z-abcd|successor": {
+                "session_id": "sid-me", "retired_sids": [], "status": "working"}}})
         with pytest.raises(fleet.FleetCliError) as exc:
             fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=fleet.mint_nonce()))
         assert "continuity proof failed" in str(exc.value)
@@ -1570,14 +1628,22 @@ class TestWorkerTurnsCannotHoldTheClaim:
         # by test_the_family_is_supervisor_shaped). Only shapes that leave the
         # family entirely (extra separator, wrong prefix/case, empty segment,
         # surrounding whitespace) remain refused here.
+        #
+        # Registry-keyed now: a RECORD of that name, not an env stamp. Names
+        # like these cannot be created through `fleet spawn` either -- this
+        # pins that if one appears in the registry by any other route, it does
+        # not inherit the family's exemption.
     ])
-    def test_near_miss_shapes_are_refused(self, sup_home, monkeypatch, value):
-        live = self._hold()
-        monkeypatch.setenv("FLEET_WORKER", value)
-        with pytest.raises(fleet.FleetCliError):
-            fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=live))
+    def test_near_miss_shapes_are_classified_as_workers(self, sup_home, monkeypatch, value):
+        self._hold()
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-w")
+        fleet.save_registry({"workers": {
+            value: {"session_id": "sid-w", "retired_sids": [], "status": "working"}}})
+        with pytest.raises(fleet.FleetCliError) as exc:
+            fleet.cmd_sup_checkpoint(_ckpt(sid="sid-w", nonce=fleet.mint_nonce()))
+        assert "worker turn" in str(exc.value)
 
-    # (c) unset -- the manager's own session, and every human shell
+    # (c) the env stamp decides nothing, in either direction
 
     def test_an_unset_FLEET_WORKER_is_unchanged(self, sup_home, monkeypatch, capsys):
         live = self._hold()
@@ -1585,12 +1651,12 @@ class TestWorkerTurnsCannotHoldTheClaim:
         assert fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=live)) == 0
         capsys.readouterr()
 
-    @pytest.mark.parametrize("value", ["", " "])
-    def test_an_empty_FLEET_WORKER_is_treated_as_unset(self, sup_home, monkeypatch,
-                                                       capsys, value):
-        # `_worker_env` never stamps an empty value; an empty one is a shell
-        # artifact, and refusing on it would break a plain human shell that
-        # happens to export it.
+    @pytest.mark.parametrize("value", ["", " ", "some-worker", "sup|inc-x|successor"])
+    def test_no_value_of_FLEET_WORKER_changes_the_outcome(self, sup_home, monkeypatch,
+                                                          capsys, value):
+        # The regression guard for the whole re-key: the acting body is an
+        # UNREGISTERED session holding the live generation, and no stamp --
+        # empty, worker-shaped, or supervisor-shaped -- may alter that.
         live = self._hold()
         monkeypatch.setenv("FLEET_WORKER", value)
         assert fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=live)) == 0

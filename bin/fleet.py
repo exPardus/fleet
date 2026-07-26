@@ -1408,16 +1408,16 @@ def resolve_claude_executable(which=shutil.which) -> str:
 #
 # The handoff successor is dispatched as a fleet worker under this exact name
 # shape (see `_successor_worker_name`, used by `cmd_sup_handoff_begin`), so it
-# carries `FLEET_WORKER` like any other worker -- and its first act after
-# claim transfer is `sup-checkpoint`, a `_require_claim_holder` caller. A
-# BLANKET `FLEET_WORKER` refusal would therefore break the one session the
-# handoff exists to serve, and would break three-tier's `sup-spawn`, which
-# spawns the supervisor itself as a fleet worker.
+# is a registry record like any other worker -- and its first act after claim
+# transfer is `sup-checkpoint`, a `_require_claim_holder` caller. A BLANKET
+# worker refusal would therefore break the one session the handoff exists to
+# serve, and would break three-tier's `sup-spawn`, which spawns the supervisor
+# itself as a fleet worker. So the family is EXEMPT from the role verdict.
 #
 # The shape is unforgeable through `fleet spawn`: `NAME_RE` is `^[a-z0-9-]+$`,
 # so `|` is forbidden in every spawnable worker name and no worker can be
 # named into the exemption. Held here, beside `_worker_env`, so the dispatch
-# and the refusal arm read ONE shape -- two copies of a security-relevant
+# and the role classifier read ONE shape -- two copies of a security-relevant
 # literal drift silently, with the dispatch still working while the exemption
 # quietly stops matching it.
 # three-tier §10.1 sup-spawn (manager ruling, 2026-07-24 -- extension, NOT
@@ -1427,12 +1427,19 @@ def resolve_claude_executable(which=shutil.which) -> str:
 # name satisfies that, because `NAME_RE` (`^[a-z0-9-]+$`) forbids `|` in every
 # spawnable worker name. So widening `successor` to `[a-z][a-z0-9-]*` keeps the
 # grounding intact: `sup-spawn` dispatches its gen-0 body under `sup|<inc>|boot`
-# (a role other than `successor`), that body carries FLEET_WORKER=that-name, and
-# it must not be refused its own claim. `<role>` is anchored `[a-z][a-z0-9-]*`
-# (a real role, never empty), `<inc>` is `[^|]+` (never empty), and the two
-# pipes are literal -- so `supervisor`, `sup|x|`, `sup||role` and a third
-# separator all stay OUT of the family (unit-tested). Held here beside
-# `_worker_env` so the dispatch and the refusal arm read ONE shape.
+# (a role other than `successor`), and it must not be refused its own claim.
+# `<role>` is anchored `[a-z][a-z0-9-]*` (a real role, never empty), `<inc>` is
+# `[^|]+` (never empty), and the two pipes are literal -- so `supervisor`,
+# `sup|x|`, `sup||role` and a third separator all stay OUT of the family
+# (unit-tested). Held here beside `_worker_env` so the dispatch and the role
+# classifier read ONE shape.
+#
+# 2026-07-26 re-key (SPEC.md:196): the name this is matched against is now the
+# one the REGISTRY gives the acting session (`_acting_worker_name`), not the
+# `FLEET_WORKER` stamp -- the daemon donates that stamp to sessions it never
+# launched. The E(2) grounding is untouched by the change: it was always about
+# who can MINT such a name, never about where the name is read from, and
+# `fleet spawn` still cannot mint one.
 _SUPERVISOR_SHAPED_WORKER_RE = re.compile(r"^sup\|[^|]+\|[a-z][a-z0-9-]*$")
 
 
@@ -1453,10 +1460,20 @@ def _is_supervisor_shaped(name) -> bool:
 def _worker_env(name: str) -> dict:
     """Child environment for a worker turn: the parent's, plus FLEET_WORKER.
 
-    Phase 1.6 D5: a globally-enabled fleet plugin fires its SessionStart hook
-    in EVERY Claude Code session on this machine, including every worker turn.
-    The hook reads FLEET_WORKER and suppresses itself, so a worker never gets
-    the manager's fleet briefing injected into its context.
+    Phase 1.6 D5 wrote this stamp so a globally-enabled fleet plugin's
+    SessionStart hook could suppress itself inside a worker. That hook no
+    longer exists (terminal-surface D7, 2026-07-22: fleet injects nothing and
+    the plugin manifest declares no hooks), and as of 2026-07-26 nothing keys a
+    DECISION on the stamp either -- see the identity block above
+    `_acting_worker_identity`, and SPEC.md:196.
+
+    THE STAMP IS KEPT ANYWAY, and this is the only reason: it is the WITNESS
+    `_doctor_check_identity_witness` checks the registry against. The daemon
+    that hosts `--bg` sessions donates the environment of whichever dispatch
+    started it, so a stamp that disagrees with the registry is a measurable
+    leak -- and deleting the write would delete the only evidence of it. A
+    witness is exactly as trustworthy as it needs to be, because it decides
+    nothing.
 
     os.environ is copied explicitly -- passing env= at all replaces the whole
     inherited environment, and a child without PATH cannot launch.
@@ -2086,6 +2103,141 @@ def _record_is_supervisor_claim_holder(record, claim=None):
     return holder_sid in _record_sids(record)
 
 
+# ---------------------------------------------------------------------------
+# Fleet identity: THE REGISTRY JUDGES, THE ENVIRONMENT ONLY WITNESSES.
+#
+# `_worker_env` stamps `FLEET_WORKER=<name>` into a dispatch's child
+# environment, but that env reaches only a thin LAUNCHER: the machine-wide
+# `claude` daemon hosts the real session and donates its OWN environment to it,
+# frozen from whichever `--bg` dispatch happened to start the daemon. So every
+# session the daemon hosts inherits the `FLEET_WORKER` of a long-dead dispatch.
+# Measured on a live supervisor body, 2026-07-26:
+#
+#     my env CLAUDE_CODE_SESSION_ID : 108300de-8d43-411e-8177-94843bee05ab
+#     my env FLEET_WORKER           : sup|inc-20260726T140146Z-5a0e|boot
+#     records whose sid union contains MY env sid:
+#                                     ['sup|inc-20260726T164152Z-8180|boot']
+#     my actual dispatched worker name:
+#                                     sup|inc-20260726T164152Z-8180|boot
+#     env FLEET_WORKER names a DIFFERENT record: True (status: idle)
+#
+# At one instant, on one body: resolving identity from the REGISTRY by the
+# acting sid returned exactly one record and it was the right one; resolving it
+# from `FLEET_WORKER` returned a different, idle worker. So `FLEET_WORKER` is
+# not a predicate anywhere in this file. It is still WRITTEN (`_worker_env`),
+# and `_doctor_check_identity_witness` reports a witness that disagrees with the
+# registry as the leak it is.
+#
+# THE INVARIANT THIS SURFACE IS BUILT UNDER. An identity inference derived from
+# the environment may never be the SOLE basis of a refusal; the nonce and the
+# claim refuse, inference may only inform and announce. `FLEET_WORKER` and
+# `CLAUDE_CODE_SESSION_ID` are read from the SAME medium -- the donated daemon
+# environment -- so re-keying onto "registry lookup by the acting sid" improves
+# blame-assignment without escaping that medium. Whether the sid itself can be
+# donated is an OPEN question: `_worker_env` pops it before `Popen(env=...)`, so
+# the daemon on this machine was started by a launcher with no sid to donate,
+# and every measurement we hold is equally consistent with "the vendor stamps a
+# fresh sid into each hosted session" and "the vendor passes the environment
+# through and there was simply nothing to pass". Deciding it needs the
+# machine-wide daemon restarted from a process that HOLDS a sid, which kills
+# every live session. Until then the invariant is what makes both hypotheses
+# safe: a misidentification costs a wrong measurement or a spurious
+# announcement, never a wrongly-refused claim verb.
+# ---------------------------------------------------------------------------
+
+IDENTITY_RESOLVED = "resolved"
+IDENTITY_UNRESOLVED = "unresolved"
+IDENTITY_AMBIGUOUS = "ambiguous"
+
+
+def _record_is_live(rec) -> bool:
+    """A record that could plausibly BE an acting body right now: not archived,
+    not marked dead. Only live records contend for an identity, so the husks a
+    respawn or fork-steer leaves behind never manufacture an AMBIGUOUS verdict.
+    Never raises: every caller is a hot path or a doctor row."""
+    return (isinstance(rec, dict) and rec.get("archived_at") is None
+            and rec.get("status") != "dead")
+
+
+def _acting_worker_identity(sid=None, registry=None) -> dict:
+    """WHICH FLEET WORKER AM I? -- the single place that answers it.
+
+    Resolves the acting session's OWN `CLAUDE_CODE_SESSION_ID` against every
+    registry record's sid UNION (`_record_sids` = `session_id` u
+    `retired_sids`), never against the bare `session_id`: a sid ROTATES on
+    fork-steer and respawn, and the union is what keeps a steered body
+    resolvable (ND4a, the same bridge `_caller_holds_supervisor_claim` uses).
+
+    Returns a dict -- `verdict`, `name`, `record`, `matches`, `sid`:
+
+      IDENTITY_RESOLVED   -- exactly one candidate record carries my sid.
+      IDENTITY_UNRESOLVED -- no record does. This means "I am not a
+                             fleet-launched body" -- the interface session, a
+                             human shell -- and it is NOT an error. It is also
+                             what a legitimately-NEW body sees during its own
+                             DISPATCH WINDOW: `cmd_sup_spawn` and the worker
+                             spawn path create the record with
+                             `new_worker_record(session_id=None, ...)` BEFORE
+                             the session exists and fill the sid in only once
+                             the dispatch returns it. Callers must abstain on
+                             this verdict, never fail-closed on it.
+      IDENTITY_AMBIGUOUS  -- two or more candidates carry my sid. That is
+                             itself a leak signature; the first match is NOT
+                             silently taken. Control flow treats it exactly
+                             like UNRESOLVED; `_doctor_check_identity_witness`
+                             announces it distinctly from a plain
+                             witness/registry disagreement.
+
+    Candidates are the LIVE matches when there are any, else all matches --
+    so a dead or archived husk sharing a sid with a live record does not make
+    the live record ambiguous, while two husks and no live record still refuse
+    to guess.
+
+    Read-only and never raises: it runs on the dispatch hot path, inside
+    `_require_claim_holder`, and inside a doctor row. A corrupt or unreadable
+    registry degrades to UNRESOLVED -- "I do not know who I am" -- which every
+    caller already has an abstention path for."""
+    if sid is None:
+        sid = current_caller_session()
+    ident = {"verdict": IDENTITY_UNRESOLVED, "name": None, "record": None,
+             "matches": [], "sid": sid}
+    if not isinstance(sid, str) or not sid:
+        return ident
+    if registry is None:
+        try:
+            registry = load_registry()
+        except RegistryCorruptError:
+            return ident
+    workers = registry.get("workers") if isinstance(registry, dict) else None
+    if not isinstance(workers, dict):
+        return ident
+    matches = sorted(n for n, rec in workers.items() if sid in _record_sids(rec))
+    if not matches:
+        return ident
+    ident["matches"] = matches
+    live = [n for n in matches if _record_is_live(workers.get(n))]
+    candidates = live or matches
+    if len(candidates) == 1:
+        ident["verdict"] = IDENTITY_RESOLVED
+        ident["name"] = candidates[0]
+        ident["record"] = workers.get(candidates[0])
+    else:
+        ident["verdict"] = IDENTITY_AMBIGUOUS
+    return ident
+
+
+def _acting_worker_name(sid=None, registry=None):
+    """The acting body's fleet worker NAME, or None when the registry declines
+    to judge (UNRESOLVED or AMBIGUOUS). None is an abstention, never a
+    refusal -- see `_acting_worker_identity`."""
+    return _acting_worker_identity(sid=sid, registry=registry)["name"]
+
+
+def _acting_worker_record(sid=None, registry=None):
+    """The acting body's own registry record, or None on an abstention."""
+    return _acting_worker_identity(sid=sid, registry=registry)["record"]
+
+
 def _resolve_worker_target(name):
     """three-tier §5.1/§10.2-§10.3 amendments (operator ruling 1(ii),
     2026-07-24, sup-spawn choreography design §2): the literal `supervisor`
@@ -2163,32 +2315,60 @@ def _ceiling_refuses_dispatch(verb, now=None):
     Applies to EXACTLY ONE caller -- the supervisor claim-holder (ND1). Three
     exemptions, in this order so they compose (ND4's closing note):
 
-      (c) STRUCTURAL interface exemption, FIRST, before any sid work: the
-          interface is not a fleet-launched child, so `FLEET_WORKER` is absent
-          from its environment. That absence exempts it unconditionally -- a
-          refusal it could never escape (it is outside fleet's launch surface,
-          §3.1) must never be raisable against it. This runs ahead of (b) so
-          the fail-toward-the-band default can never catch the human channel.
+      * no sid at all -> a human shell, which is outside fleet's launch
+        surface (§3.1) and cannot be the claim-holder BODY.
       * a caller that holds no claim (`_caller_holds_supervisor_claim` -> False)
         is never subject -- a worker calls neither verb, but if it did, it is
         not the holder and is not refused.
+      (c) STRUCTURAL interface exemption, RE-KEYED ONTO THE REGISTRY: no
+          registry record claims my sid AND I am not the claim-holder. It used
+          to read `FLEET_WORKER`'s ABSENCE, on the reasoning that the interface
+          is not a fleet-launched child so the stamp is absent -- but the
+          machine-wide daemon DONATES that stamp to sessions it never launched
+          (see the identity block above `_acting_worker_identity`), so its
+          presence proves nothing about the acting body and its absence
+          exempted whoever happened to unset it. "No record claims my sid" is
+          the same structural question asked of the judge that can answer it.
+          A refusal the interface could never escape must never be raisable
+          against it, so this still runs ahead of (b) and the
+          fail-toward-the-band default still cannot catch the human channel.
+          The `and not the claim-holder` conjunct is what keeps it from being a
+          loophole: a body the CLAIM names as holder is subject to the ceiling
+          whether or not the registry has caught up with it.
       (b) an UNRESOLVABLE identity (-> None) is treated AS the supervisor and
           the ceiling applies: an unresolvable identity must never be the reason
           a ceiling stays dormant (ND4b), mirroring §11.2's fail-toward-band.
 
+    An AMBIGUOUS identity (two live records carrying my sid) exempts exactly
+    like an unresolved one: it is an abstention, and abstention here means "do
+    not let a confused identity be the reason a dispatch is refused".
+
+    DIRECTION OF TRAVEL, and why re-keying here is compatible with the
+    invariant in the identity block above: at this site the inference only ever
+    EXEMPTS. The refusal's sole basis stays the measured occupancy of the acting
+    transcript; identity only selects whose transcript to measure.
+
     Occupancy is the caller's OWN transcript, resolved from its OWN
-    `CLAUDE_CODE_SESSION_ID` (B2/B3, the sid guaranteed fresh for the acting
-    body). An unreadable occupancy fails TOWARD the band (§11.2): None refuses,
-    never "plenty of room". Between 150k and 200k the ceiling does NOT refuse --
-    that band is a standing directive (§5.2), enforced only at the hard top."""
-    # (c) structural interface exemption -- ahead of any sid resolution.
-    if not (os.environ.get("FLEET_WORKER") or "").strip():
-        return None
+    `CLAUDE_CODE_SESSION_ID` (B2/B3). The earlier wording here called that "the
+    sid guaranteed fresh for the acting body"; that guarantee is NOT proven --
+    `_worker_env` pops the sid before `Popen(env=...)`, so no measurement we
+    hold distinguishes "the vendor stamps a fresh sid" from "the vendor passes
+    the environment through and there was nothing to pass". What IS known is
+    that the sid read here is the one every other identity surface in this file
+    reads, so a donated sid would mis-measure consistently rather than
+    inconsistently. An unreadable occupancy fails TOWARD the band (§11.2): None
+    refuses, never "plenty of room". Between 150k and 200k the ceiling does NOT
+    refuse -- that band is a standing directive (§5.2), enforced only at the
+    hard top."""
     caller = current_caller_session()
     if caller is None:
         return None                     # no sid -> cannot be the claim-holder body
-    if _caller_holds_supervisor_claim(caller) is False:
+    holds = _caller_holds_supervisor_claim(caller)
+    if holds is False:
         return None                     # a claim is held, this is not its holder
+    # (c) structural exemption, judged by the registry rather than the env.
+    if holds is not True and _acting_worker_name(sid=caller) is None:
+        return None
     # holder (True) or indeterminate (None, ND4b fail-toward-band): apply the
     # ceiling. Occupancy is the caller's own transcript (never the claim's sid).
     occupancy = _transcript_occupancy(find_transcript_path(None, caller))
@@ -8057,6 +8237,83 @@ def _doctor_check_orphaned_claims(workers=None):
     return ("orphaned-claims", True, "no orphaned *.claimed.*, mailbox, or ceiling files")
 
 
+DAEMON_ENV_LEAK_REMEDY = (
+    "The stamp comes from the machine-wide `claude` daemon, which donates the "
+    "environment of whichever `--bg` dispatch started it to every session it "
+    "hosts afterwards. Fleet cannot fix it from inside a hosted session: let "
+    "the daemon idle-exit (no `--bg` sessions alive) so the next dispatch "
+    "starts a fresh one, or ensure the supervisor's own dispatch is the one "
+    "that starts it. Nothing in fleet keys a decision on this variable, so an "
+    "unfixed leak costs accuracy in this row and nothing else")
+
+
+def _doctor_check_identity_witness(workers: dict):
+    """`FLEET_WORKER` VS THE REGISTRY -- the leak, announced by name.
+
+    `_worker_env` still stamps `FLEET_WORKER=<name>` and nothing keys a
+    decision on it any more (see the identity block above
+    `_acting_worker_identity`). What it is now is a WITNESS, and a witness that
+    disagrees with the registry is a detected leak: the daemon donated a
+    long-dead dispatch's stamp to this session. Measured live on 2026-07-26,
+    which is why this row exists rather than a comment.
+
+    FAIL on a real disagreement, and on AMBIGUITY -- two live records carrying
+    one sid, which is a leak signature in its own right and gets its own
+    wording so an operator can tell the two apart. NOTE-only when the acting
+    sid resolves to nothing: that is every body's DISPATCH WINDOW (the record
+    is created with `session_id=None` and filled in when the dispatch returns),
+    and a transient window must not turn a health check red.
+
+    Never raises: a doctor row must survive a field-shape-drifted record."""
+    witness = (os.environ.get("FLEET_WORKER") or "").strip()
+    sid = current_caller_session()
+    ident = _acting_worker_identity(sid=sid, registry={"workers": workers})
+    verdict = ident["verdict"]
+
+    if verdict == IDENTITY_AMBIGUOUS:
+        return ("identity-witness", False,
+                f"AMBIGUOUS identity: session id {sid!r} is carried by "
+                f"{len(ident['matches'])} live registry records "
+                f"({', '.join(repr(n) for n in ident['matches'])}). One session "
+                f"cannot be two workers, so at least one record's sid union is "
+                f"wrong -- fleet abstains from judging this body's identity "
+                f"until it is resolved (no verb is refused because of it). "
+                f"Inspect those records in state/fleet.json and retire the "
+                f"stale one (`fleet clean`, or edit the registry out of band)"
+                + (f". FLEET_WORKER witness: {witness!r}" if witness else ""))
+
+    if not witness:
+        return ("identity-witness", True,
+                f"no FLEET_WORKER stamp in this environment; registry verdict "
+                f"for sid {sid!r}: {verdict}"
+                + (f" ({ident['name']!r})" if ident["name"] else ""))
+
+    if verdict == IDENTITY_UNRESOLVED:
+        return ("identity-witness", True,
+                f"NOTE: FLEET_WORKER={witness!r} but no registry record claims "
+                f"this session's own id ({sid!r}), so the witness cannot be "
+                f"checked against anything. Expected during a body's own "
+                f"dispatch window (the record is written before the session "
+                f"exists and the sid is filled in when the dispatch returns), "
+                f"and expected for any session fleet did not launch. If it "
+                f"persists for a body that IS fleet-launched, treat it as the "
+                f"daemon leak below")
+
+    if witness == ident["name"]:
+        return ("identity-witness", True,
+                f"the FLEET_WORKER witness agrees with the registry (both name "
+                f"{witness!r} for sid {sid!r})")
+
+    named = witness in workers
+    return ("identity-witness", False,
+            f"LEAK: the FLEET_WORKER witness names a DIFFERENT record than this "
+            f"session's own id resolves to. Witness: {witness!r} "
+            f"({'a registry record, status ' + str(workers.get(witness, {}).get('status')) if named else 'no registry record of that name'}). "
+            f"Registry verdict for my sid {sid!r}: {ident['name']!r}. "
+            f"The registry is the judge and {ident['name']!r} is who this "
+            f"session is. " + DAEMON_ENV_LEAK_REMEDY)
+
+
 def _doctor_check_claude_agents(workers: dict, which=shutil.which, run=subprocess.run):
     """Note-only (SPEC §2/§5): `claude agents --json` may not exist on
     older CLI builds, or may fail for any number of environmental reasons
@@ -8742,6 +8999,7 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
         functools.partial(_doctor_check_legacy_mix, workers),
         functools.partial(_doctor_check_dead_suspected, workers),
         functools.partial(_doctor_check_orphaned_claims, workers=workers),
+        functools.partial(_doctor_check_identity_witness, workers),
         functools.partial(_doctor_check_claude_agents, workers, which=which, run=run),
         functools.partial(_doctor_check_daemon_wedge),
         functools.partial(_doctor_check_autoclean, run=run),
@@ -11160,6 +11418,31 @@ def _continuity_refusal(verb, claim: dict) -> FleetCliError:
         f"operator.")
 
 
+def _worker_turn_note(role) -> str:
+    """The sentence a registry-judged WORKER identity adds to a refusal that
+    has ALREADY been decided by something else -- an absent claim, or a failed
+    nonce. Empty string when the registry abstains (UNRESOLVED/AMBIGUOUS) or
+    when the acting body is supervisor-shaped.
+
+    It is a note and never a gate, because the invariant above
+    `_acting_worker_identity` forbids an environment-derived inference from
+    being the sole basis of a refusal. The parenthetical says so in the words
+    an operator needs: the old text called `FLEET_WORKER` "settable by anyone
+    who can run this command", which was true and incomplete -- the sharper
+    fact, the one this whole surface was rebuilt for, is that a hosting daemon
+    DONATES its environment to sessions it never launched."""
+    if not role:
+        return ""
+    return (f" This is a worker turn: the registry resolves this session to "
+            f"worker {role!r}, and the supervisor claim is not a worker's to "
+            f"hold (claim-nonce §6.5, keyed on the registry per SPEC.md:196). "
+            f"(A speed-bump, not a security boundary: the identity behind it is "
+            f"inferred from an environment-supplied session id -- settable by "
+            f"anyone who can run this command, and donatable by the daemon that "
+            f"hosts the session. It only classifies a refusal the nonce already "
+            f"made; it never makes one.)")
+
+
 def _mint_pending_nonce(claim: dict, now=None) -> str:
     """§5.3's mint step, in-memory. Returns the stdout notice the verb emits
     AFTER its commit; the caller performs the single `write_incarnation`.
@@ -11232,30 +11515,39 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
     question it asks has changed from "are you the recorded sid" to "are you
     the actor the last generation was delivered to"."""
     # §6.5 / §13 item 1: "a worker turn can hold the supervisor claim, and is
-    # prevented only by accident." Adjudicated to the NARROW arm -- refuse when
-    # FLEET_WORKER is set and its value is not supervisor-shaped. See
-    # `_SUPERVISOR_SHAPED_WORKER_RE` for why a blanket refusal is wrong and why
-    # the exempt shape cannot be forged through `fleet spawn`.
+    # prevented only by accident." SPEC.md:196 binds how that may be enforced --
+    # *"must key on the registry or the claim itself, NEVER on `FLEET_WORKER`,
+    # or it will refuse the one session whose whole purpose is to receive the
+    # claim."* The shipped arm read `FLEET_WORKER` and thereby implemented
+    # claim-nonce §6.5 while violating SPEC.md:196; this is the registry-keyed
+    # rebuild (see the amendment block in docs/specs/claim-nonce.md).
     #
-    # Ahead of the claim read on purpose: the ROLE answer does not depend on
-    # whether a claim exists, and a worker turn should be told it is a worker
-    # rather than that a claim is missing.
+    # AND IT IS NO LONGER A GATE. The invariant in the identity block above
+    # `_acting_worker_identity` forbids an environment-derived inference from
+    # being the SOLE basis of a refusal, and a registry lookup keyed by an
+    # env-supplied sid is still such an inference. So the role verdict decides
+    # only how an ALREADY-CERTAIN refusal is worded, exit-coded and logged; the
+    # nonce decides whether there is a refusal at all. Concretely: a body that
+    # presents the live generation is never refused for looking like a worker.
+    # That is what makes the §1 wedge impossible -- a supervisor body hosted by
+    # a daemon that an ordinary worker dispatch started could `sup-boot` (which
+    # does not call this function) and then never heartbeat, checkpoint, or
+    # RELEASE, because the donated `FLEET_WORKER` was worker-shaped.
     #
-    # This keys on the worker NAME because that is what `_worker_env` stamps
-    # (`env["FLEET_WORKER"] = name`). three-tier-command.md ~L1078 describes it
-    # as `FLEET_WORKER=1`; that text is wrong and its own receipt at :1402-1408
-    # pastes the correct line. An arm keyed on the value "1" would be a no-op.
-    worker = os.environ.get("FLEET_WORKER")
-    if worker and worker.strip() and not _is_supervisor_shaped(worker):
-        raise FleetCliError(
-            f"{verb}: refusing -- this is a worker turn (FLEET_WORKER={worker!r}) and "
-            f"the supervisor claim is not a worker's to hold (claim-nonce §6.5). "
-            f"Escalate to the supervisor session. (A speed-bump, not a security "
-            f"boundary: an environment variable is settable by anyone who can run "
-            f"this command.)")
+    # UNRESOLVED and AMBIGUOUS both abstain: `_acting_worker_name` returns None
+    # and no role is claimed. UNRESOLVED is every body's dispatch window,
+    # including the supervisor's own, so classifying it as a worker would put
+    # the wrong words on the one refusal a newborn supervisor can legitimately
+    # hit. `_is_supervisor_shaped` still exempts the `sup|<inc>|<role>` family
+    # -- unforgeable through `fleet spawn`, `NAME_RE` forbids `|` -- so a
+    # supervisor body dispatched as a fleet worker is never called a worker.
+    role = _acting_worker_name()
+    if role is not None and _is_supervisor_shaped(role):
+        role = None
     claim = read_incarnation()
     if claim is None:
-        raise FleetCliError("no supervisor claim exists -- run `fleet sup-boot` first")
+        raise FleetCliError("no supervisor claim exists -- run `fleet sup-boot` first."
+                            + _worker_turn_note(role))
     caller = sid_override or current_caller_session()
     if not caller:
         raise FleetCliError("caller session unknown -- pass --sid or run from a Claude session")
@@ -11301,6 +11593,25 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         _append_nonce_rejection("superseded-pending", verb, caller, claim, nonce)
     elif _nonce_presentation(claim, nonce) is not None:
         pass                                              # rule 1 (live)
+    elif role is not None:
+        # Rule 5, RECLASSIFIED. The nonce already refused -- this branch only
+        # exists because it did. What the registry-judged role changes is the
+        # words, the exit code and the log kind, never the outcome:
+        #  * words: "you are a worker" is the actionable answer for a worker
+        #    that wandered into a supervisor verb; "a second body of your
+        #    lineage may be acting" is not.
+        #  * exit code: `SupervisorContinuityError` is exit 4, and an operator
+        #    scripts against that code meaning ONE incident (§5.6). A role
+        #    error is exit 1.
+        #  * log kind: a `refused` record makes `_doctor_check_supervisor_claim`
+        #    FAIL with "a second body of this lineage may be acting". A worker
+        #    turn is not evidence of that, and filing it as such would train an
+        #    operator to ignore the one signal that does mean two bodies. The
+        #    evidence is still recorded, under its own kind.
+        _append_nonce_rejection("worker-turn", verb, caller, claim, nonce)
+        raise FleetCliError(
+            f"{verb}: refusing --{_worker_turn_note(role)} "
+            f"Escalate to the supervisor session.")
     else:
         _append_nonce_rejection("refused", verb, caller, claim, nonce)
         raise _continuity_refusal(verb, claim)            # rule 5

@@ -161,6 +161,14 @@ class TestSpawnStampsLineage:
             self, isolated_home, tmp_path, monkeypatch):
         monkeypatch.setattr(fleet, "_fetch_agents_roster", _native_roster_with())
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-sup")
+        # This caller IS the claim-holder, so the §11.3 ceiling applies to it
+        # and an unreadable transcript fails TOWARD the band. It used to be
+        # exempt for an unrelated reason -- `FLEET_WORKER` was absent from the
+        # test env -- and that structural exemption is now keyed on the
+        # registry instead (SPEC.md:196). Give the holder a readable, roomy
+        # occupancy so this test measures lineage stamping and not the ceiling.
+        monkeypatch.setattr(fleet, "find_transcript_path", lambda name, sid: "/fake")
+        monkeypatch.setattr(fleet, "_transcript_occupancy", lambda p: 1000)
         (isolated_home / "supervisor").mkdir(parents=True, exist_ok=True)
         fleet.write_incarnation({"incarnation_id": "inc-me", "session_id": "sid-sup",
                                  "claimed_at": "2026-07-23T00:00:00Z",
