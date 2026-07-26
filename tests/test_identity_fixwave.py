@@ -169,6 +169,42 @@ class TestNoSupervisorVerbQuarantinesTheRegistry:
         capsys.readouterr()
         assert fleet.registry_path().read_bytes() == before
 
+    def test_the_successor_is_not_locked_out_by_the_restored_gate(self, sup_home):
+        """TASK 3's stated risk, VERIFIED rather than trusted.
+
+        Restoring the worker-turn arm to a GATE raises the question of whether
+        it can refuse a legitimate successor mid-handoff. It cannot, in either
+        window, and for two different reasons -- which is why both are pinned:
+
+          * BETWEEN begin and complete, `sup-handoff-begin` has registered a
+            `sup|<inc>|successor` record but the sid is not filled in until the
+            dispatch returns it. The successor's own sid is therefore in no
+            record: UNRESOLVED, which ABSTAINS. Unclassified, not refused.
+          * AFTER complete, the sid is stamped and resolves to a
+            supervisor-shaped name, which `_is_supervisor_shaped` exempts.
+
+        Note the two mechanisms are independent: even if the dispatch window
+        were eliminated, the shape exemption still carries it."""
+        inc = "inc-20260727T000000Z-abcd"
+        name = f"sup|{inc}|successor"
+
+        # window 1: record exists, sid not yet stamped (the dispatch window)
+        fleet.save_registry({"workers": {
+            name: {"session_id": None, "retired_sids": [], "status": "working"}}})
+        assert fleet._acting_worker_name(sid="sid-successor") is None
+
+        # window 2: sid stamped -- resolves, and is exempt BY SHAPE
+        fleet.save_registry({"workers": {
+            name: {"session_id": "sid-successor", "retired_sids": [],
+                   "status": "working"}}})
+        assert fleet._acting_worker_name(sid="sid-successor") == name
+        assert fleet._is_supervisor_shaped(name) is True
+
+        # and end to end: the gate lets the successor through in both windows.
+        nonce = _hold(sid="sid-successor")
+        assert fleet.cmd_sup_heartbeat(
+            SimpleNamespace(sid="sid-successor", nonce=nonce)) == 0
+
     def test_the_seven_call_sites_are_all_covered(self):
         """The seed check. If a verb is added to `_require_claim_holder`'s
         callers and not to `VERBS`, the parametrisation above silently stops

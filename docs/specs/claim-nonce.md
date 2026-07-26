@@ -2618,14 +2618,37 @@ not taken.
 
 ---
 
-## 16. AMENDMENT — §6.5 D5's prerequisite was built against `docs/SPEC.md`, not against §6.5
+## 16. AMENDMENT — §6.5 D5's prerequisite was re-keyed onto the registry, and the 200k ceiling's identity read with it
 
 > **DESCRIPTIVE — REQUIRES OPERATOR RATIFICATION.** Appended 2026-07-26 by the builder of
-> `fix/identity-registry-judges`. It records what was built and why it diverges from §6.5 D5.
-> It does **not** amend §6.5, and it is **not** ratified: an author does not ratify their own
-> amendment. §6.5 D5's text above is left exactly as it was written.
+> `fix/identity-registry-judges`; **rewritten 2026-07-27** after two adversarial reviews and the
+> supervisor's ruling on them. It records what was built and how it relates to §6.5 D5. It does
+> **not** amend §6.5, and it is **not** ratified: an author does not ratify their own amendment.
+> §6.5 D5's text above is left exactly as it was written.
+>
+> **The first revision of this section described a design that no longer ships.** It argued that
+> `SPEC.md` §6.1 and §6.5 D5 contradicted each other, picked the former, and demoted the
+> worker-turn refusal from a gate to a classifier. Both reviews rejected the demotion and the
+> ruling agreed: the two documents constrain **different things** — §6.1 the guard's KEY, D5 the
+> guard's EXISTENCE — so a registry-keyed **gate** satisfies both and there is no loser to pick.
+> The demotion is not in the tree. §16.3 and §16.4 are rewritten accordingly; §16.5 is new.
 
-### 16.1 The contradiction, both sides quoted
+### 16.0 Pointers for a reader who arrived from a ratified section
+
+Two ratified sections above describe the shipped code less accurately after this work, and this
+amendment is not permitted to edit them. If you got here from either, read this first:
+
+- **§6.5 D5** says the design *"depends on a `FLEET_WORKER` refusal in `_require_claim_holder`,
+  which does not exist today."* That refusal now **exists and is keyed on the REGISTRY, not on
+  `FLEET_WORKER`** (§16.3). D5's actual subject — that `--nonce` is the only presentation channel
+  and there is no env channel for the nonce — is untouched.
+- **§13 item 1** files *"a worker turn can hold the supervisor claim, and is prevented only by
+  accident"* as a shipped-code defect to be built elsewhere. It **was built**, on this branch, as
+  the registry-keyed gate in §16.3.
+- **`docs/specs/three-tier-command.md` §11.3 ND4** is the other spec this work touches, at a site
+  neither of the above mentions: the 200k dispatch ceiling. See §16.5.
+
+### 16.1 The contradiction as it was first read, both sides quoted
 
 §6.5 D5 (this document, above) states as a binding consequence for the builder:
 
@@ -2641,8 +2664,15 @@ not taken.
 > `FLEET_WORKER`, or it will refuse the one session whose whole purpose is to receive the claim.
 
 The arm shipped in the nonce build faithfully implemented §6.5 D5's prerequisite, and thereby violated
-`SPEC.md` §6.1. **This is a spec-vs-spec contradiction, not a code-vs-spec divergence** — the code was
-correct with respect to one ratified document and wrong with respect to another.
+`SPEC.md` §6.1.
+
+**And it is not in fact a contradiction — that was this amendment's first reading and it was wrong.**
+Read again with attention to what each sentence constrains: §6.1 binds the guard's **key** (*"must key
+on the registry or the claim itself"* — it names the permitted keys, it does not forbid the guard),
+while §6.5 D5 requires the guard to **exist**. A guard that exists and is keyed on the registry
+satisfies both sentences at once. What the nonce build shipped was neither document's fault: it was a
+guard that existed (D5, satisfied) keyed on the one thing §6.1 names as prohibited. The fix is to
+change the key, not to choose a document.
 
 ```
 # at 8dee4b8
@@ -2657,10 +2687,10 @@ $ sed -n '10899,10906p' bin/fleet.py
             f"this command.)")
 ```
 
-### 16.2 Which document was built to, and why
+### 16.2 The failure `SPEC.md` §6.1 predicted, and the measurement of it
 
-**`docs/SPEC.md` §6.1.** It is the more general document, it is the spec of record, and it predicted
-this exact failure mode in advance.
+§6.1 predicted this exact failure mode in advance, which is why its constraint on the key is the
+one that governs how the guard is rebuilt.
 
 The failure it predicted arrived. The machine-wide `claude` daemon hosts every `--bg` session and
 donates the environment of whichever dispatch started it, frozen for the daemon's whole life — so
@@ -2699,56 +2729,126 @@ exactly one key is stripped) is untouched and is now doubly supported, since the
 means the environment is not even reliably *this dispatch's* environment. D5's belt-and-braces
 instruction — strip any future env channel in `_worker_env` — stands unchanged.
 
-**Loses — only the prerequisite sentence.** The `FLEET_WORKER` refusal D5 says the design "depends on"
-was built as a **registry-keyed classifier** rather than an env-keyed gate, in two steps:
+**Loses — only the prerequisite sentence's KEY.** The `FLEET_WORKER` refusal D5 says the design
+"depends on" is now a **registry-keyed gate**. It still exists, it still refuses, and it is still
+positioned ahead of the claim read as the shipped arm was:
 
-1. **Re-keyed.** The acting body's role is judged by `_acting_worker_name()` — the acting session's own
-   `CLAUDE_CODE_SESSION_ID` resolved against every registry record's sid **union** (`_record_sids`, so
-   fork-steered and respawned bodies still resolve). `FLEET_WORKER` is read in exactly one place in
-   `bin/fleet.py`, and that place is a `fleet doctor` row that reports a witness disagreeing with the
-   registry as the leak it is.
+- **Re-keyed.** The acting body's role is judged by `_acting_worker_name()` — the acting session's own
+  caller sid resolved against every registry record's sid **union** (`_record_sids`, so fork-steered
+  and respawned bodies still resolve). The caller sid is `sid_override or current_caller_session()`,
+  i.e. §4.3's *"sole source of caller identity … what the caller typed or exported, in both
+  branches"*, so `--sid` moves the role question and the continuity question together.
+- **Still a gate.** `UNRESOLVED` and `AMBIGUOUS` both **abstain** — the registry declining to judge is
+  never a refusal — and `_is_supervisor_shaped` exempts the `sup|<inc>|<role>` family, which
+  `NAME_RE` makes unforgeable through `fleet spawn`.
 
-2. **Demoted from gate to classifier**, which is the larger divergence and the one most in need of
-   ratification. **An identity inference derived from the environment may never be the sole basis of a
-   refusal; the nonce and the claim refuse, inference may only inform and announce.** Both
-   `FLEET_WORKER` and `CLAUDE_CODE_SESSION_ID` are read from the *same* donated medium, so re-keying
-   onto a registry lookup improves blame-assignment without escaping that medium: if the sid can be
-   donated the way `FLEET_WORKER` demonstrably is, a registry-by-sid judge inherits the identical
-   defect one level down. **Whether it can is an open question** — `_worker_env` pops
-   `CLAUDE_CODE_SESSION_ID` before `Popen(env=…)`, so the daemon on this machine was started by a
-   launcher with no sid to donate, and every measurement we hold is equally consistent with "the vendor
-   stamps a fresh sid into each hosted session" and "the vendor passes the environment through and
-   there was simply nothing to pass". Deciding it requires restarting the machine-wide daemon from a
-   process that holds a sid, which kills every live session including the supervisor's.
+**WHAT THE RE-KEY BUYS, precisely.** A legitimate claim-holder is never refused its own
+`sup-release`. That is the §16.2 wedge and the re-key alone cures it: the wedged supervisor's own
+registry record is supervisor-shaped, so the gate exempts it however worker-shaped the donated
+`FLEET_WORKER` is. **The first revision of this section credited that cure to the gate→classifier
+demotion. It was the re-key's.**
 
-   So the nonce decides **whether** a caller is refused; the registry-judged role decides only **how**
-   an already-certain refusal is worded, exit-coded (1, a role error, not 4, which means "a second body
-   of your lineage may be acting") and logged (kind `worker-turn`, so `_doctor_check_supervisor_claim`'s
-   second-body alarm is not cried wolf). A body presenting the live generation is never refused for
-   looking like a worker.
+**WHAT THE DEMOTION WOULD HAVE BOUGHT, and why it is not here.** Only one further thing: that a body
+the *registry* judges to be an ordinary worker also passes when it presents a valid nonce. That is
+worth something exclusively under the hypothesis that the daemon donates the **sid** as well as the
+stamp — in which case a registry-by-sid judge inherits the identical defect one level down. **That
+hypothesis is open** (see :2573 above; `_worker_env` pops `CLAUDE_CODE_SESSION_ID` before
+`Popen(env=…)`, so the daemon here was started by a launcher with no sid to donate, and every
+measurement is equally consistent with "the vendor stamps a fresh sid" and "the vendor passed an
+environment that had nothing to pass"). Trading a ratified control away **unconditionally** to insure
+against an unresolved hypothesis is a call only the operator can make, and merging the demotion would
+*be* that ratification. So the question is filed (§16.4) and the ratified shape ships meanwhile.
+
+`FLEET_WORKER` survives in exactly two places, and the claim guard is neither of them — the ceiling's
+ratified structural exemption (§16.5) and the doctor row that reports the leak:
 
 ```
-# at 2878c68
-$ grep -c "os.environ.get(\"FLEET_WORKER\")" bin/fleet.py
-1
+# at bf32d5e
 $ grep -n "os.environ.get(\"FLEET_WORKER\")" bin/fleet.py
-8205:    witness = (os.environ.get("FLEET_WORKER") or "").strip()
+2456:    if not (os.environ.get("FLEET_WORKER") or "").strip():
+8366:    witness = (os.environ.get("FLEET_WORKER") or "").strip()
 ```
 
-**The cost, stated rather than buried.** A worker turn that has somehow been *given* the live nonce is
-no longer stopped by this arm. The shipped arm's own message called itself *"a speed-bump, not a
-security boundary"* and `env -u FLEET_WORKER fleet …` defeated it, so what is traded away was never a
-control; what is bought is that a legitimate claim-holder is never refused its own `sup-release`, which
-is the exact wedge the donated environment produces. **If the operator judges that trade wrong, the
-place to change it is here** — reinstating a refusal means accepting that a misidentified body can be
-wrongly refused a claim verb, and that acceptance is an operator's call, not a builder's.
+Those two are re-derived rather than restated:
+`tests/test_identity_registry.py::TestTheWitnessIsStillWritten` reads them back out of the source by
+enclosing function name on every run, so a third reader — or a re-key of the claim guard back onto
+the stamp — goes red rather than rotting this paragraph.
+
+**The residual cost, stated rather than buried.** A worker turn that has somehow been *given* the live
+nonce **is** refused, and if the donated-sid hypothesis turns out true, that refusal can in principle
+land on a legitimate supervisor wearing a worker's registry identity. Symmetrically, this arm remains
+*"a speed-bump, not a security boundary"*: it is keyed on a sid the same daemon supplies.
 
 ### 16.4 What ratification would settle
 
-1. Whether `SPEC.md` §6.1 or §6.5 D5 governs, so the loser is amended by its owner rather than by a
-   builder appending to it.
-2. Whether the gate→classifier demotion (16.3 item 2) is adopted as doctrine, or whether the refusal
-   should be reinstated once — and only once — the open question about `CLAUDE_CODE_SESSION_ID`
-   donation is settled by the operator-shell experiment described above.
-3. Whether the invariant in 16.3 item 2 belongs in `docs/SPEC.md` as a general rule about
-   environment-derived identity, rather than living only in code comments and in this amendment.
+1. **Whether the gate should be demoted to a classifier** (§16.3) — i.e. whether §6.5 D5's refusal
+   should be conceded in advance of settling the `CLAUDE_CODE_SESSION_ID` donation question. This
+   replaces the first revision's *"whether `SPEC.md` §6.1 or §6.5 D5 governs"*: on the reading in
+   §16.1 both are satisfied by the shipped shape and **there is no loser to amend**.
+2. Whether the open question about sid donation should be settled empirically, which requires
+   restarting the machine-wide daemon from a process that holds a sid — killing every live session
+   including the supervisor's.
+3. **Whether the candidate invariant belongs in `docs/SPEC.md`**: *"an identity inference derived
+   from the environment may never be the sole basis of a refusal."* It originates in a supervisor's
+   task brief, appears in the ratified corpus **nowhere**, and is cited in `bin/fleet.py` marked
+   `[PROPOSED — NOT RATIFIED DOCTRINE]` pointing here. Read strictly it condemns more than it was
+   aimed at — the 200k ceiling refusal (§16.5) rests on an environment-derived identity too, and one
+   standard cannot be right at one site and wrong at the other.
+
+### 16.5 The 200k ceiling — `three-tier-command.md` §11.3 ND4, and what this branch did to it
+
+**This section is new, and its absence was a defect in the first revision:** the site that actually
+broke ratified text was not described at all.
+
+`_ceiling_refuses_dispatch` — the 200k hard dispatch ceiling — carried its own `FLEET_WORKER` read,
+and this branch re-keyed it onto the registry alongside the claim guard. That was wrong in three
+places, all against `docs/specs/three-tier-command.md` §11.3 ND4 (spec of record, ratified
+2026-07-23):
+
+- **ND4(c)** requires the interface to be exempted *"structurally, with no sid at all … independent
+  of any sid resolution"*. The re-keyed exemption was three sid resolutions deep.
+- **ND4(b)** requires that *"an unresolvable identity must never be the reason a ceiling stays
+  dormant"*. It became exactly that reason: a caller at 500,000 tokens whose sid no record carried
+  was exempt, and so was one whose `state/fleet.json` was corrupt — making a **hard** ceiling
+  bypassable by any condition that renders the registry unreadable.
+- **ND4(b)+(c) composed**, per `three-tier`:1500-1502: *"(c) exempts the interface before (b)'s
+  fail-toward-the-band default can catch it, so failing closed for the supervisor does not silence
+  the human's control channel."* The re-key inverted that composition and flipped the
+  interface-holder verdict from exempt to refused.
+
+**Restored, and why `SPEC.md`:196 never licensed the removal.** :196 constrains *"a future guard
+enforcing **a worker turn must never hold the supervisor claim**"*. The ceiling is not that guard: it
+is an occupancy limit, and its `FLEET_WORKER` read was an **exemption for the human channel**, never
+a refusal of a worker turn. So :196 neither prohibited ND4(c)'s key nor authorised dropping it.
+
+**The asymmetry that makes ND4(c) sound**, which the re-key missed and which is the most transferable
+result of this work: the daemon leak **donates** a stamp, and donation can only ever **add** one —
+nothing removes a stamp. Therefore `FLEET_WORKER` **present** is unsound evidence and `FLEET_WORKER`
+**absent** is sound. ND4(c) reads absence. The claim guard read presence. That is the whole difference
+between the site :196 names and the site it does not.
+
+**Post-fix behaviour, in order:** (c) an absent stamp exempts structurally, before any sid is read or
+any registry file is opened; then no-sid exempts; then a caller the registry proves is *not* the
+holder exempts; otherwise — holder, unplaceable sid, corrupt registry, unreadable holder sid — the
+ceiling applies (ND4(b)). Two accepted costs, recorded: a claim-holder that unsets `FLEET_WORKER`
+escapes the ceiling (a self-inflicted escape by the one body the ceiling slows, and the ceiling is a
+speed-bump by construction), and a daemon-donated stamp costs an interface session the structural
+exemption — which fails toward **measuring** it rather than excusing it. The refusal's wording no
+longer claims *"the interface tier is never subject to it"*, because with a donated stamp it is.
+
+### 16.6 `load_registry` is not a read — the fifth and sixth findings of one class
+
+Both identity reads reached the registry through `load_registry`, inside
+`except RegistryCorruptError`. `load_registry`'s own docstring forbids exactly that: *"corrupt/
+unreadable file is quarantined (renamed aside) and raises RegistryCorruptError — callers must abort,
+not catch-and-continue."* The exception was swallowed; **the rename was not**. So on a corrupt
+registry every one of `_require_claim_holder`'s seven call sites silently renamed `state/fleet.json`
+aside and returned **rc=0**, `sup-heartbeat` — the highest-frequency supervisor verb — included, and
+`sup-handoff-begin` — the one lever the ceiling exempts, i.e. the command an over-ceiling supervisor
+is told to reach for — included.
+
+Both now read through `_registry_records_or_none` (*"never writes, never quarantines, never
+raises"*). The class has now been found five times by people and a sixth time by
+`tests/test_load_registry_callers.py`, which enumerates the call sites out of the AST so a new
+non-mutating reader cannot be added silently; that sixth finding was `_caller_holds_supervisor_claim`,
+on the ceiling path, in neither review.
