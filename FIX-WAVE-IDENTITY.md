@@ -155,11 +155,23 @@ survive by *independent* mechanisms — between begin and complete the successor
 in no record (UNRESOLVED → abstain), and after complete it resolves to a
 supervisor-shaped name (exempt by shape). Either alone would carry it.
 
-**rb MAJOR 5 closes with the ordering**, and it is pinned as its own behaviour rather
-than as a side effect: `test_the_gate_is_AHEAD_of_the_claim_read` plants a five-key legacy
-INCARNATION and asserts a worker turn is refused *and* that no generation was minted for
-it. With the classifier sitting after the four nonce arms, that worker walked through
-rule 4 on sid equality alone and minted itself generation 1 with no `--nonce` ever passed.
+**rb MAJOR 5 closes with the ordering — WHEN THE REGISTRY RESOLVES**, and it is pinned as
+its own behaviour rather than as a side effect:
+`test_the_gate_is_AHEAD_of_the_claim_read` plants a five-key legacy INCARNATION and asserts
+a worker turn is refused *and* that no generation was minted for it. With the classifier
+sitting after the four nonce arms, that worker walked through rule 4 on sid equality alone
+and minted itself generation 1 with no `--nonce` ever passed.
+
+> **CORRECTED IN WAVE 2 — this paragraph originally claimed the closure without
+> qualification, and that was the sentence the confirmation review's MAJOR 2 attacked.** A
+> registry-keyed gate is not there at all when the registry does not resolve: a corrupt
+> registry, an AMBIGUOUS double match and a typed `--sid` naming an unregistered sid all
+> made `_acting_worker_name` return `None`, and the same worker turn `main` refuses walked
+> through here. Rule 4 then honoured bare sid equality and minted generation 1. **The
+> ordering closes rb MAJOR 5 through the front door; the abstention door stayed open until
+> wave 2's Task 1 closed it** by requiring the §9 legacy upgrade to have an affirmative
+> *"the registry read and you are not a worker"* rather than an abstention. See §wave-2
+> below for what that does and does not reach.
 
 **One thing the restoration costs, disclosed because my §9.1's silence about the mirror
 of it is what earned rb MAJOR 5.** With the gate ahead of the claim read, a worker-turn
@@ -172,6 +184,21 @@ log, exactly as it did before this branch existed. Re-instating the record would
 moving the gate after the claim read, which is the ordering rb MAJOR 5 is about. I am not
 willing to trade one for the other silently, so I kept `main`'s ordering and am naming
 the cost here.
+
+> **EXTENDED IN WAVE 2 — the bound above is true and it is not the whole sentence.** The
+> confirmation review drove the case this record does not name: **a second body whose sid
+> the registry resolves to a WORKER record presents a wrong generation, is refused at the
+> gate, files nothing, and `_doctor_check_supervisor_claim` stays GREEN.** That is a
+> genuine continuity failure made invisible — the class `SPEC.md`:273 exists for. It
+> follows directly from the ordering disclosed above, so it is within the cost named here
+> rather than a separate defect, but *"a refused worker turn leaves no trace"* and *"a
+> second body that looks like a worker leaves no trace"* read very differently to an
+> operator, and the second one is the true statement.
+>
+> The bound does hold for the case that matters, and the review drove that too: a second
+> body the registry does **not** call a worker presents a wrong generation, files
+> `refused`, and the doctor row goes `ok=False`. The wave did not fix the mis-filing by
+> removing the filing.
 
 ## 6. TASK 4 — one function, one caller identity
 
@@ -326,3 +353,207 @@ itself pre-authorised reporting instead of approximating (§9 above).
 The four items filed for the operator and excluded from this wave — the demotion
 question, rs S-8, S-10's `SPEC.md`:196 doc-sync, S-2's grounding in §6.1 D1 — are
 untouched. `SPEC.md`:334's "§6.1" self-reference stays struck.
+
+---
+
+# WAVE 2 — the gate stops being contingent on the registry
+
+Wave 1's record above stands as written; the two paragraphs marked **CORRECTED IN WAVE 2**
+and **EXTENDED IN WAVE 2** are edits to specific sentences that were wrong or incomplete,
+not a rewrite of what wave 1 did.
+
+Brief: `state/tasks/briefs/id-fix-wave-2.md`, the supervisor's ruling on the confirmation
+review `C:/proga/fleet-id-c/CONFIRM-BREAK-IDENTITY.md` (verdict **MERGE-WITH-FIXES**).
+Wave 1 shipped at `2c9ad6a`; wave 2 builds on it.
+
+## W2.1 The numbers
+
+| | py3.13 | py3.10 |
+|---|---|---|
+| baseline at `2c9ad6a` | 2309 passed / 11 skipped | 2309 passed / 11 skipped |
+| after wave 2 | **2360 passed / 11 skipped** | **2360 passed / 11 skipped** |
+
+**+51 tests, 0 regressions**, attributable:
+
+| where | tests | task |
+|---|---|---|
+| `tests/test_identity_fixwave2.py` | +38 | Tasks 1, 2, 4 |
+| `tests/test_load_registry_callers.py` | +9 | Task 3 (8) + the attribution rule (1) |
+| `tests/test_identity_registry.py` | +4 net | Task 5 item 4 (5 new, 1 replaced) |
+
+Receipts, unchanged from wave 1 and re-run on this tree:
+
+    $ py -3.13 tools/verify_receipts.py --self-test --strict docs/specs/claim-nonce.md
+    SELF-TEST PASSED: a one-word paraphrase inside a pasted receipt is caught.
+    EXTRACTION SELF-TEST PASSED: a receipt that stops being parsed is reported, not silently dropped.
+    WARN  line 1357 [pinned @ 091d5fa]: ...            (the inherited volatile-mtime warning)
+    parsed receipts: 60/61 reproduce exactly (57 fenced blocks, 0 unclassified, 0 volatile-skipped)
+    VERDICT:         pass -- 0 failure(s), 1 warning(s)
+
+**The RED run, captured on the unfixed tree before a line of `bin/fleet.py` was touched:
+32 failed / 87 passed.** Every pin in the sections below was in it.
+
+## W2.2 TASK 1 — the abstention door, and why it is closed at the legacy arm rather than at the gate
+
+`_acting_worker_identity` now returns two more facts: `registry_read` and `candidates`.
+`_acting_body_is_worker_turn(ident)` is the tri-state built on them, shaped exactly like
+`_caller_holds_supervisor_claim` — `True` worker, `False` provably not, `None` cannot say:
+
+| state | verdict | why |
+|---|---|---|
+| RESOLVED, worker-shaped | True | the ordinary refusal |
+| RESOLVED, supervisor-shaped | False | `_is_supervisor_shaped`, unchanged |
+| UNRESOLVED, registry READ | **False** | affirmative: the file was read and no record carries this sid |
+| AMBIGUOUS, every candidate worker-shaped | **True** | the brief's first bullet: every answer is a worker turn |
+| AMBIGUOUS, every candidate supervisor-shaped | False | the symmetric argument, made explicitly |
+| AMBIGUOUS, mixed shapes | None | the two answers genuinely disagree |
+| registry unreadable | None | the bit that was being thrown away |
+
+**An UNINITIALISED registry counts as READ, and that distinction is load-bearing.**
+`_registry_records_or_none` returns `None` for *both* "no file yet" and "unreadable", so
+`_acting_worker_identity` now reads `_read_registry_readonly()`'s `(ok, reason, data)`
+directly and treats `not_initialized` as a definite *"there are no records"*. Collapsing
+them would have refused the §9 legacy upgrade on every fresh install — which is how I found
+it, from the pin rather than from the argument.
+
+**Two consumers, two thresholds, and that is the design rather than an inconsistency.**
+
+- **The §6.5 gate refuses on `True` alone.** `None` still passes. The gate sits ahead of
+  the claim read — which is what closes rb MAJOR 5's front door — so it cannot consult the
+  nonce, and with no registry there is nothing at that point in the function that could
+  tell a holder from a worker. Failing closed there would brick every supervisor verb on a
+  broken `state/fleet.json`, including the `sup-release` that ends the incident.
+- **The §9 legacy upgrade requires an affirmative `False`.** That arm demands no generation
+  at all — bare sid equality mints generation 1 — so an abstention must not earn it. This
+  is rb MAJOR 5's remaining door and it is the one that shuts.
+
+**What the residual actually is, stated so it can be judged rather than assumed.** On an
+unreadable registry a body still faces every nonce arm: rules 1–3 need a generation it was
+given, and rule 5 refuses. So the only thing the abstention now buys is that a body the
+registry *would* have called a worker is not told so. The compound the confirmation review
+drove — minting generation 1 with no `--nonce` — needed the legacy arm, and that arm no
+longer takes it.
+
+**I did not push back, and I checked whether I should.** The brief invited a stop-and-report
+if the abstention lane could not be made safe as described, or if closing it cost a body the
+review confirmed passes. Neither happened: the shape the brief ordered is implementable as
+written, the roster is green throughout (`TestTheFailClosedRoster`, seven members, each
+pinned individually), and the lane the brief said to leave open is left open *and pinned
+open* (`test_a_CORRUPT_registry_still_passes_the_gate_and_that_is_DISCLOSED`) so that moving
+it later is a deliberate edit rather than a silent one.
+
+**One thing the new refusal deliberately does NOT do: file a rejection.** The legacy-arm
+refusal raises without `_append_nonce_rejection`. The state it fires on is a legacy claim, a
+caller whose sid *equals* the holder's, and a registry that cannot be read — overwhelmingly
+the real holder plus a broken file. `refused` is the row `SPEC.md`:273 makes the doctor fail
+on **as evidence of a second body**, and filing it here would cry wolf on the holder's own
+turn. Pinned as a choice (`test_the_refusal_does_not_cry_second_body`), not left implicit.
+It does mean this wave adds one more member to the "refusals that leave no trace" list,
+alongside the inherited §9 sid-mismatch refusal the brief excluded from this wave.
+
+## W2.3 TASK 2 — the seventh instance
+
+`_supervisor_gate`'s send carve-out reads `_registry_records_or_none()` instead of
+`load_registry()` inside `except RegistryCorruptError`, and the `_supervisor_gate` entry is
+deleted from the detector's `ALLOWED` with the reasoning left in place of it. The fail
+direction is unchanged: no readable registry means no proof that the target IS the holder,
+so the carve-out declines and the gate stays armed.
+
+`test_a_corrupt_registry_SURVIVES_a_refused_send` drives the real verb end to end and then
+looks at the filesystem — the file is still there, still byte-identical, and no quarantine
+copy appeared beside it. The two carve-out behaviours (holder target ungated, non-holder
+target gated) are pinned alongside it so the swap cannot quietly widen or narrow seam #1.
+
+**Attribution, restated because the brief measured it before ordering the fix:** the call is
+byte-identical on `main` and this branch did not mint it. What this branch minted is the
+allowlist entry that certified it, filed under *"all inside `fleet_lock()`"* — which is
+false — and against the list's own admission rule, both of whose disqualifiers applied.
+
+## W2.4 TASK 3 — the detector's three static evasions
+
+`_callers()` walks class bodies and nested classes (`Class.method`, `Outer.Inner.method`,
+`Class.<class body>`), module level (`<module>`, a name no allowlist entry can accidentally
+already carry), and resolves module-level aliases as a **fixpoint** so a chain buys nothing
+a single hop does not. Attribution *within* a function is still to the outermost enclosing
+function, and that rule is now pinned rather than assumed.
+
+`getattr` dispatch is **not** closed and cannot be. The docstring says so, the file's scope
+paragraph says so, and `test_getattr_dispatch_is_UNDECIDABLE_and_the_docstring_says_so`
+pins the honesty rather than the capability — including that the sentence survives a
+reflow, because a docstring's honesty must not be hostage to where the line wrapped.
+
+`test_the_evasions_are_offenders_against_the_REAL_allowlist` is the half that matters: the
+walk finding them is not enough, the assertion has to reject them.
+
+## W2.5 TASK 4 — `sup-boot`
+
+One call site, as the brief predicted, using the same predicate at the same threshold —
+because a body `sup-boot` admits and every other verb refuses IS the wedge, and that
+agreement is itself pinned (`test_the_boot_gate_and_the_verb_gate_agree`). It sits ahead of
+the roster subprocess: a refused boot should not pay for a `claude agents --json` it will
+not use, and `test_the_refused_boot_writes_NOTHING` asserts no INCARNATION and no journal
+entry, because a refusal that still wrote a claim would be the same wedge with an error
+message on top. A gen-0 `sup|<launch-id>|boot` body, an UNRESOLVED interface session, the
+successor in `--handoff-inc` mode and a corrupt registry all still boot.
+
+## W2.6 TASK 5 — the disclosures
+
+1. **§5 corrected.** rb MAJOR 5 closes with the ordering *when the registry resolves*; the
+   abstention door is named, and Task 1 is named as what closes it.
+2. **§16.3 now states where the gate is ABSENT rather than lenient**, in its own paragraph
+   ahead of the argument, and §16.4 item 1 says what that means for the demotion ruling the
+   operator is being asked to make: a ruling to keep the gate is a ruling about a control
+   with that hole in it, and a ruling to demote gives up a control present in every
+   readable state.
+3. **Target 5's un-named extension added** to the disclosed cost in §5: a second body whose
+   sid the registry resolves to a *worker* record is refused at the gate, files nothing, and
+   `_doctor_check_supervisor_claim` stays **GREEN**. It follows from the ordering wave 1
+   disclosed, so it is within the cost already named — but *"a refused worker turn leaves no
+   trace"* and *"a second body that looks like a worker leaves no trace"* read very
+   differently, and the second is the true one.
+4. **The escape is now detected.** `_doctor_check_identity_witness` **fails** on
+   registry-RESOLVED + witness-gone — the one on-box state that falsifies *"absent ⇒ no
+   fleet dispatch is in my donation chain"*, and precisely what a blanked stamp produces.
+   Blanks (`""`, `"   "`, `"\t"`, `"\n"`) are pinned as reddening too, since they are what
+   the `.strip()` makes indistinguishable from unset. `DAEMON_ENV_LEAK_REMEDY` was true of
+   donation and silent about removal; it now says both, and §16.5 records it. ND1 forbids
+   *preventing* the escape and says nothing about *detecting* it.
+
+## W2.7 What I refused, and what moved that was not asked for
+
+**Refused: nothing in the brief.** The one place I went beyond the letter of an instruction
+is Task 1's *"AMBIGUOUS, all candidates non-supervisor-shaped → REFUSE"*: I also made
+**AMBIGUOUS, all candidates supervisor-shaped → `False`**, explicitly, rather than letting
+it fall into `None`. The brief's own reasoning demands the symmetric case — if "every answer
+is a worker turn" refuses, then "no answer is a worker turn" must not merely abstain — and
+leaving it as an abstention would have made the shipped rule read *"ambiguity refuses"*,
+which is not what was ordered. It is pinned in its own test.
+
+**Two behaviours changed that existing tests asserted, both ordered by the brief and both
+rewritten rather than deleted:**
+
+- `test_an_ambiguous_body_passes_through_to_the_nonce` planted two ordinary workers and
+  asserted they passed. It is now `..._of_MIXED_SHAPE_...` and asserts the ambiguity that is
+  genuinely mute; the all-worker case moved to `test_identity_fixwave2.py` as a refusal.
+- `test_no_witness_no_finding` asserted `ok=True` on registry-RESOLVED + witness-gone. That
+  is the state Task 5 item 4 orders reddened; it is replaced by four tests that pin which
+  witness-absent states stay green and which one does not.
+
+**One thing I moved that the brief did not ask for, disclosed because it is a spelling
+change on a hot read:** `_acting_worker_identity` reads `_read_registry_readonly()` rather
+than `_registry_records_or_none()`. Both are *"never writes, never quarantines, never
+raises"* and the detector treats neither differently; the reason is the `not_initialized`
+paragraph in W2.2, and §16.6's sentence claiming both identity reads go through
+`_registry_records_or_none` is corrected rather than left to rot.
+
+**The four `retired_sids` writer citations were re-pinned** (`:4955, :5402, :9452, :13111`),
+as they are on any wave that changes line counts in `bin/fleet.py`. Mechanical, and the
+citation harness is what forces it.
+
+**The four operator questions are untouched.** The demotion (§16.4 item 1), rs S-8's scope
+clause, S-10's `SPEC.md`:196 doc-sync, and S-2's grounding in §6.1 D1 stay filed and
+unanswered; Task 5 corrects what the operator will *read* about them and answers none of
+them. `docs/OPERATOR-GATES.md`, `docs/SPEC.md`, `three-tier` §11.3 and claim-nonce §6.5 D5 /
+§13 are unedited. MINOR 2 (`fleet doctor` quarantining the registry it was invoked to
+diagnose) is left alone as the brief directs, and so is the inherited §9 legacy-arm unfiled
+refusal.
