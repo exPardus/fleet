@@ -1449,30 +1449,33 @@ class TestWorkerTurnsCannotHoldTheClaim:
     keyed on it refuses whoever the donor happened to be. Measured live; the
     receipt is encoded in `tests/test_identity_registry.py`.
 
-    TWO THINGS CHANGED, and the second is the load-bearing one:
+    ONE THING CHANGED: the role is judged by `_acting_worker_name()` -- the
+    acting session's own sid resolved against every record's sid union -- and
+    not by the env stamp. It is STILL A GATE, positioned ahead of the claim
+    read exactly as before, and it still refuses.
 
-    1. The role is judged by `_acting_worker_name()` -- the acting session's own
-       sid resolved against every record's sid union -- not by the env stamp.
-    2. It is no longer a GATE. An identity inferred from the environment may
-       never be the sole basis of a refusal (both `FLEET_WORKER` and
-       `CLAUDE_CODE_SESSION_ID` come from the same donated medium, so a
-       registry lookup keyed by the sid inherits the defect one level down if
-       the sid can leak too -- an open question). The NONCE refuses; the role
-       verdict only decides how an already-certain refusal is worded,
-       exit-coded and logged. So a body holding the live generation is never
-       refused for looking like a worker.
+    An intervening revision also DEMOTED it to a classifier that only re-words
+    a refusal the nonce had already made, reasoning that both `FLEET_WORKER`
+    and `CLAUDE_CODE_SESSION_ID` come from the same donated medium so a
+    registry lookup keyed by the sid inherits the defect one level down. That
+    reasoning depends on the daemon donating the SID as well as the stamp,
+    which claim-nonce:2573 records as an OPEN question, and the demotion
+    conceded ratified §6.5 D5 to insure against it. SPEC.md:196 constrains the
+    guard's KEY; §6.5 D5 requires the guard to EXIST; a registry-keyed gate is
+    both, so there was never a loser to pick. The question is filed for the
+    operator; the ratified shape ships meanwhile.
 
-    What that costs, stated plainly: a worker turn that has somehow been GIVEN
-    the live nonce is no longer stopped. That was always a speed-bump and never
-    a control (`env -u FLEET_WORKER fleet …` defeated the old one), and the
-    trade buys the property that matters -- a legitimate holder is never
-    refused its own `sup-release`, which is exactly the wedge the donated
-    environment produced.
+    THE WEDGE IS CURED BY THE RE-KEY ALONE, which is what made the demotion
+    unnecessary. A supervisor body hosted by a daemon that an ordinary worker
+    dispatch started carries a worker-shaped `FLEET_WORKER` -- and its own
+    registry record is supervisor-shaped, so the gate exempts it and it can
+    heartbeat, checkpoint and RELEASE. Pinned in
+    `tests/test_identity_registry.py::TestInferenceNeverRefuses`.
 
-    The `sup|<inc>|<role>` family stays exempt from the ROLE classifier, still
-    unforgeable through `fleet spawn` (`NAME_RE` is `^[a-z0-9-]+$` and forbids
-    `|`), so a supervisor body dispatched as a fleet worker is never told it is
-    a worker."""
+    The `sup|<inc>|<role>` family stays exempt from the gate, still unforgeable
+    through `fleet spawn` (`NAME_RE` is `^[a-z0-9-]+$` and forbids `|`), so a
+    supervisor body dispatched as a fleet worker is never told it is a
+    worker."""
 
     def _hold(self, sid="sid-me"):
         value = fleet.mint_nonce()
@@ -1516,13 +1519,22 @@ class TestWorkerTurnsCannotHoldTheClaim:
             fleet.cmd_sup_checkpoint(_ckpt(sid="sid-w", nonce=fleet.mint_nonce()))
         assert "a-stamp-the-daemon-donated" not in str(exc.value)
 
-    def test_a_worker_turn_HOLDING_the_live_generation_is_NOT_refused(
+    def test_a_worker_turn_HOLDING_the_live_generation_is_STILL_refused(
             self, sup_home, monkeypatch, capsys):
-        # The §5 invariant, at its sharpest. Inference never refuses; the nonce
-        # decides, and this caller presented it.
+        # §6.5 D5 at its sharpest: the claim is not a worker's to hold, and
+        # holding the live generation does not make the registry's verdict
+        # wrong. The gate is ahead of the nonce arms, so the nonce is never
+        # consulted for this caller.
+        #
+        # Its predecessor asserted rc=0 here, under the demotion. What that
+        # bought was insurance against the OPEN donated-sid hypothesis; what it
+        # cost was a ratified control, unconditionally.
         live = self._hold(sid="sid-w")
         self._as_worker(monkeypatch)
-        assert fleet.cmd_sup_checkpoint(_ckpt(sid="sid-w", nonce=live)) == 0
+        with pytest.raises(fleet.FleetCliError) as exc:
+            fleet.cmd_sup_checkpoint(_ckpt(sid="sid-w", nonce=live))
+        assert "some-worker" in str(exc.value)
+        assert fleet.supervisor_journal_entries() == []
         capsys.readouterr()
 
     @pytest.mark.parametrize("verb", ["checkpoint", "heartbeat", "handoff-abort"])
