@@ -274,14 +274,30 @@ class TestTheReceipt:
 # --------------------------------------------------------------------------
 
 class TestSiteACeiling:
-    """`_ceiling_refuses_dispatch`'s exemption (c) was *"`FLEET_WORKER` is
-    absent, therefore I am the interface"*. It becomes *"no registry record
-    claims my sid AND I am not the claim-holder"*.
+    """`_ceiling_refuses_dispatch`'s exemption (c), RESTORED BY THE FIX WAVE.
 
-    Direction of travel matters: at this site the inference only ever EXEMPTS.
-    The refusal's sole basis stays the measured occupancy of the acting
-    transcript; identity only selects whose transcript to measure. That is why
-    re-keying here does not violate the §5 invariant."""
+    This branch re-keyed (c) from *"`FLEET_WORKER` is absent, therefore I am
+    the interface"* onto *"no registry record claims my sid AND I am not the
+    claim-holder"*. That broke ratified `three-tier-command.md` §11.3 ND4 in
+    three places at once and the tests below were written to the broken rule:
+
+      (c) *"Exempt the interface structurally, with no sid at all ...
+          independent of any sid resolution"* -- the re-keyed exemption was
+          three sid resolutions deep.
+      (b) *"An unresolvable identity must never be the reason a ceiling stays
+          dormant"* -- it became exactly that reason: a caller at 500,000
+          tokens whose sid no record carries was exempt, and so was one whose
+          `state/fleet.json` was corrupt.
+
+    THE ASYMMETRY THAT MAKES ND4(c) SOUND, which the re-key missed. The daemon
+    leak DONATES a `FLEET_WORKER` stamp to sessions it never launched. Donation
+    can only ADD a stamp; nothing removes one. So PRESENCE is unsound evidence
+    and ABSENCE is sound -- and ND4(c) reads absence. The claim guard (Site B)
+    read presence, which is why SPEC.md:196 names that guard and not this one.
+
+    Direction of travel still matters here: at this site the inference only
+    ever EXEMPTS, and the refusal's sole basis stays the measured occupancy of
+    the acting transcript."""
 
     def _occ(self, monkeypatch, occupancy):
         monkeypatch.setattr(fleet, "find_transcript_path",
@@ -289,8 +305,11 @@ class TestSiteACeiling:
         monkeypatch.setattr(fleet, "_transcript_occupancy", lambda p: occupancy)
 
     def test_the_interface_session_is_still_exempt(self, id_home, monkeypatch):
-        # The realistic interface: its own sid, no registry record, not the
-        # holder. Exempt no matter the occupancy (ND1/ND4c).
+        # The realistic interface: no `FLEET_WORKER` stamp (nothing fleet
+        # launched it and no daemon donated to it), its own sid, no registry
+        # record. Exempt no matter the occupancy (ND1/ND4c), and exempt
+        # STRUCTURALLY -- before any sid is resolved.
+        monkeypatch.delenv("FLEET_WORKER", raising=False)
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-interface")
         fleet.write_incarnation(_held("sid-holder"))
         _registry({"supervisor": _rec("sid-holder")})
@@ -299,15 +318,30 @@ class TestSiteACeiling:
 
     def test_the_interface_is_exempt_even_with_an_empty_registry(
             self, id_home, monkeypatch):
-        # Nothing places either sid -> `_caller_holds_supervisor_claim` is
-        # INDETERMINATE (None). The structural arm must still exempt, or the
-        # fail-toward-band default catches the human channel -- a refusal it
-        # could never escape, since it is outside fleet's launch surface.
+        # Nothing places either sid -> `_caller_holds_supervisor_claim` would be
+        # INDETERMINATE (None) and (b)'s fail-toward-band would catch the human
+        # channel -- a refusal it could never escape, being outside fleet's
+        # launch surface (§3.1). (c) runs ahead of (b) precisely so it cannot.
+        monkeypatch.delenv("FLEET_WORKER", raising=False)
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-interface")
         fleet.write_incarnation(_held("sid-ghost"))
         _registry({})
         self._occ(monkeypatch, 500000)
         assert fleet._ceiling_refuses_dispatch("send") is None
+
+    def test_the_interface_is_exempt_even_with_a_CORRUPT_registry(
+            self, id_home, monkeypatch):
+        # ND4(c) is "independent of ANY sid resolution", and that has to include
+        # the resolution that cannot happen. Also the Task 1 direction: the
+        # exempt path must not read the registry at all, so it cannot quarantine
+        # one either.
+        monkeypatch.delenv("FLEET_WORKER", raising=False)
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-interface")
+        fleet.write_incarnation(_held("sid-holder"))
+        fleet.registry_path().write_text("{ not json", encoding="utf-8")
+        self._occ(monkeypatch, 500000)
+        assert fleet._ceiling_refuses_dispatch("send") is None
+        assert fleet.registry_path().exists()
 
     def test_a_human_shell_with_no_sid_is_exempt(self, id_home, monkeypatch):
         monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
@@ -315,74 +349,167 @@ class TestSiteACeiling:
         self._occ(monkeypatch, 500000)
         assert fleet._ceiling_refuses_dispatch("spawn") is None
 
-    def test_the_dispatch_window_newborn_is_exempt(self, id_home, monkeypatch):
-        # §4: UNRESOLVED => exempt. Safe, because a newborn body cannot be at
-        # 200k tokens; and an unresolvable identity must never be the reason a
-        # ceiling refuses a brand-new body.
-        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-newborn")
-        fleet.write_incarnation(_held("sid-holder"))
-        _registry({"supervisor": _rec("sid-holder"), "newborn": _rec(None)})
-        self._occ(monkeypatch, 500000)
-        assert fleet._ceiling_refuses_dispatch("spawn") is None
-
-    def test_an_ambiguous_identity_is_exempt_like_an_unresolved_one(
-            self, id_home, monkeypatch):
-        # §5: AMBIGUOUS is treated as UNRESOLVED for control flow.
-        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-dup")
-        fleet.write_incarnation(_held("sid-holder"))
-        _registry({"supervisor": _rec("sid-holder"),
-                   "a": _rec("sid-dup"), "b": _rec("sid-dup")})
-        self._occ(monkeypatch, 500000)
-        assert fleet._ceiling_refuses_dispatch("spawn") is None
-
-    def test_an_unresolved_body_that_IS_the_claim_holder_is_NOT_exempt(
-            self, id_home, monkeypatch):
-        # The `and not the claim-holder` conjunct. A stranded stamp -- the claim
-        # names my sid but no record does -- must not buy an escape from the
-        # ceiling. ND4b's fail-toward-band, restated at the structural arm.
-        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-holder")
-        fleet.write_incarnation(_held("sid-holder"))
-        _registry({})
-        self._occ(monkeypatch, 300000)
-        assert fleet._ceiling_refuses_dispatch("spawn") is not None
-
     def test_a_resolved_holder_over_the_ceiling_is_refused(self, id_home, monkeypatch):
+        monkeypatch.setenv("FLEET_WORKER", "sup|inc-x|boot")
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-holder")
         fleet.write_incarnation(_held("sid-holder"))
         _registry({"sup|inc-x|boot": _rec("sid-holder", status="working")})
         self._occ(monkeypatch, 205000)
         assert fleet._ceiling_refuses_dispatch("spawn") is not None
 
-    def test_an_absent_FLEET_WORKER_no_longer_exempts_the_holder(
+    def test_an_absent_FLEET_WORKER_EXEMPTS_because_ND4c_says_so(
             self, id_home, monkeypatch):
-        """THE MUTATION GUARD for Site A.
+        """THE PIN THIS FIX WAVE INVERTED, and why.
 
-        Under the shipped predicate this body was exempt for one reason only:
-        `FLEET_WORKER` was absent from its environment. It is a registered,
-        resolved, over-ceiling claim-holder, and the environment has no
-        standing to excuse it. Restoring the env-keyed exemption turns this
-        red."""
+        Its predecessor -- `test_an_absent_FLEET_WORKER_no_longer_exempts_the_
+        holder` -- asserted the opposite, on the reasoning that the environment
+        has no standing to excuse a registered, resolved, over-ceiling
+        claim-holder. That reasoning is sound in the abstract and it is not the
+        ratified rule: `three-tier-command.md` §11.3 ND4(c) exempts on
+        `FLEET_WORKER`-absence *unconditionally* and *independent of any sid
+        resolution*, and SPEC.md:196 -- the citation the re-key was built on --
+        constrains only the guard enforcing *"a worker turn must never hold the
+        supervisor claim"*, which this site is not.
+
+        THE RESIDUAL HOLE THIS RATIFIES, stated so it is a known cost and not a
+        surprise: a claim-holder that unsets `FLEET_WORKER` escapes the 200k
+        ceiling. That is a self-inflicted escape by the one body the ceiling
+        exists to slow down, not an attack surface -- and the ceiling is
+        explicitly *"a speed-bump, not a security boundary"*. Buying protection
+        against it costs the human control channel, which ND1 forbids."""
         monkeypatch.delenv("FLEET_WORKER", raising=False)
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-holder")
         fleet.write_incarnation(_held("sid-holder"))
         _registry({"sup|inc-x|boot": _rec("sid-holder", status="working")})
         self._occ(monkeypatch, 400000)
-        assert fleet._ceiling_refuses_dispatch("spawn") is not None
+        assert fleet._ceiling_refuses_dispatch("spawn") is None
 
-    def test_a_present_FLEET_WORKER_no_longer_costs_the_interface_its_exemption(
+    def test_a_donated_FLEET_WORKER_costs_a_session_the_structural_exemption(
             self, id_home, monkeypatch):
-        """The other half of the same mutation guard -- and the live defect.
+        """The accepted cost of ND4(c), inverted from its predecessor
+        (`test_a_present_FLEET_WORKER_no_longer_costs_the_interface_its_
+        exemption`) for the same reason as the test above.
 
-        The daemon donates `FLEET_WORKER` to sessions it never launched. Under
-        the shipped predicate that donation alone stripped the structural
-        exemption from a body no registry record claims. It must not."""
+        A daemon-donated stamp does make an interface session look
+        fleet-launched, and it therefore loses the structural exemption and
+        falls through to (b). This is the price of reading the ONE signal that
+        answers "am I fleet-launched" without resolving a sid, and it fails in
+        the SAFE direction: the body is measured rather than excused. The
+        refusal wording must not tell such a caller that "the interface tier is
+        never subject to it", because here it plainly is -- pinned separately by
+        `test_the_refusal_does_not_claim_the_interface_can_never_see_it`."""
         monkeypatch.setenv("FLEET_WORKER", "a-worker-that-is-not-me")
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-interface")
         fleet.write_incarnation(_held("sid-holder"))
         _registry({"supervisor": _rec("sid-holder"),
                    "a-worker-that-is-not-me": _rec("sid-long-dead")})
         self._occ(monkeypatch, 500000)
+        # `_caller_holds_supervisor_claim` places the holder and not the caller
+        # -> provably NOT the holder -> False -> exempt by the middle arm. The
+        # donation costs the STRUCTURAL exemption, not the verdict.
         assert fleet._ceiling_refuses_dispatch("send") is None
+
+    def test_the_refusal_does_not_claim_the_interface_can_never_see_it(
+            self, id_home, monkeypatch):
+        """rb MINOR 6, re-graded into Task 2(c). An interface session CAN hold
+        the claim -- `fleet sup-boot` is runnable from it and stamps its own
+        sid -- and with a donated `FLEET_WORKER` it reaches this refusal. The
+        shipped sentence *"the interface tier is never subject to it"* told
+        that caller something false about its own situation."""
+        monkeypatch.setenv("FLEET_WORKER", "a-donated-stamp")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-interface")
+        fleet.write_incarnation(_held("sid-interface"))
+        _registry({"a-donated-stamp": _rec("sid-long-dead")})
+        self._occ(monkeypatch, 500000)
+        reason = fleet._ceiling_refuses_dispatch("send")
+        assert reason is not None                    # it IS subject
+        assert "never subject" not in reason
+        assert "FLEET_WORKER" in reason              # names the escape it has
+
+
+class TestSiteAFailsTowardTheBand:
+    """TASK 5 PIN 2 -- ratified `three-tier-command.md` §11.3 ND4(b):
+    *"An unresolvable identity must never be the reason a ceiling stays
+    dormant."*
+
+    This branch inverted it. Both shapes below were EXEMPT on the branch and
+    both were measured by the break lens at 500,000 tokens; the second was
+    driven end-to-end as `fleet spawn` at **999,999 tokens on a corrupt
+    registry returning rc=0 and replacing the roster with a single record**.
+    Two failures in one receipt -- a 200k hard ceiling bypassable by any
+    condition that makes the registry unreadable, and a roster REPLACED rather
+    than merely quarantined.
+
+    A `FLEET_WORKER` stamp is present in every test here on purpose: without
+    one, ND4(c) exempts structurally and (b) is never reached. (b) is the
+    default AFTER (c) declines, not instead of it."""
+
+    def _occ(self, monkeypatch, occupancy):
+        monkeypatch.setattr(fleet, "find_transcript_path",
+                            lambda name, sid: "/fake" if sid else None)
+        monkeypatch.setattr(fleet, "_transcript_occupancy", lambda p: occupancy)
+
+    def test_an_unplaceable_sid_REFUSES_at_the_ceiling(self, id_home, monkeypatch):
+        # Neither the caller's sid nor the holder's is in any record ->
+        # `_caller_holds_supervisor_claim` is INDETERMINATE. Fail toward the
+        # band: measure this body rather than excuse it.
+        monkeypatch.setenv("FLEET_WORKER", "sup|inc-x|successor")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-mystery")
+        fleet.write_incarnation(_held("sid-ghost"))
+        _registry({"other": _rec("sid-else")})
+        self._occ(monkeypatch, 500000)
+        assert fleet._caller_holds_supervisor_claim("sid-mystery") is None
+        assert fleet._ceiling_refuses_dispatch("spawn") is not None
+
+    def test_a_CORRUPT_registry_REFUSES_at_the_ceiling(self, id_home, monkeypatch):
+        # The branch exempted here, which made the hard ceiling bypassable by
+        # any condition that makes `state/fleet.json` unreadable.
+        monkeypatch.setenv("FLEET_WORKER", "sup|inc-x|successor")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-mystery")
+        fleet.write_incarnation(_held("sid-ghost"))
+        fleet.registry_path().write_text("{ not json", encoding="utf-8")
+        self._occ(monkeypatch, 999999)
+        assert fleet._ceiling_refuses_dispatch("spawn") is not None
+
+    def test_the_ceiling_read_does_not_QUARANTINE_a_corrupt_registry(
+            self, id_home, monkeypatch):
+        # TASK 1's direction, at Site A. The refusal above is only half the
+        # receipt: `load_registry` RENAMES a corrupt registry aside, so the
+        # refusal could arrive having already destroyed the operator's
+        # evidence. A ceiling check is a read.
+        monkeypatch.setenv("FLEET_WORKER", "sup|inc-x|successor")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-mystery")
+        fleet.write_incarnation(_held("sid-ghost"))
+        fleet.registry_path().write_text("{ not json", encoding="utf-8")
+        self._occ(monkeypatch, 999999)
+        fleet._ceiling_refuses_dispatch("spawn")
+        assert fleet.registry_path().read_text(encoding="utf-8") == "{ not json"
+        assert not list(fleet.registry_path().parent.glob("fleet.json.corrupt*"))
+
+    def test_an_AMBIGUOUS_identity_REFUSES_at_the_ceiling(self, id_home, monkeypatch):
+        # Two live records carry my sid -- itself a leak signature. The branch
+        # exempted; ND4(b) says an identity fleet cannot settle is never the
+        # reason the ceiling stays dormant.
+        monkeypatch.setenv("FLEET_WORKER", "w-dup")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-dup")
+        claim = _held("sid-holder")
+        del claim["session_id"]              # unreadable holder sid -> None
+        fleet.write_incarnation(claim)
+        _registry({"a": _rec("sid-dup"), "b": _rec("sid-dup")})
+        self._occ(monkeypatch, 500000)
+        assert fleet._ceiling_refuses_dispatch("spawn") is not None
+
+    def test_a_body_provably_not_the_holder_is_still_exempt(
+            self, id_home, monkeypatch):
+        # The line (b) must not cross: an ordinary worker whose sid the registry
+        # PLACES, against a holder the registry also places, is definitely not
+        # the holder. Not indeterminate -- exempt, ceiling or no ceiling.
+        monkeypatch.setenv("FLEET_WORKER", "w1")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-worker")
+        fleet.write_incarnation(_held("sid-holder"))
+        _registry({"w1": _rec("sid-worker"), "sup|inc-x|boot": _rec("sid-holder")})
+        self._occ(monkeypatch, 500000)
+        assert fleet._ceiling_refuses_dispatch("spawn") is None
 
 
 # --------------------------------------------------------------------------
@@ -390,25 +517,70 @@ class TestSiteACeiling:
 # --------------------------------------------------------------------------
 
 class TestInferenceNeverRefuses:
-    """THE HARD INVARIANT. An identity inference derived from the environment
-    may never be the SOLE basis of a refusal.
+    """WHAT THE RE-KEY BUYS, AND WHAT IT DOES NOT -- corrected by the fix wave.
 
-    So the worker-turn arm stops being a gate and becomes a CLASSIFIER: the
-    nonce decides whether the caller is refused, and the registry-judged
-    identity decides how that refusal is worded, exit-coded and logged. A body
-    that presents the live generation is never refused for looking like a
-    worker -- under hypothesis (ii) (the sid is donated too) that body may be
-    the legitimate supervisor, and the wedge this whole build exists to cure is
-    exactly a legitimate holder refused its own `sup-release`."""
+    This class was written under the reading that the worker-turn arm must stop
+    being a gate and become a CLASSIFIER, because an identity inference derived
+    from the environment may never be the SOLE basis of a refusal (the PROPOSED
+    invariant, claim-nonce §16.4 item 3, which originates in a supervisor
+    instruction and is in NO ratified document).
 
-    def test_a_worker_shaped_identity_holding_the_live_nonce_is_NOT_refused(
+    THE GATE IS RESTORED and the cure survives it, which is the point this
+    class now pins. The §1 wedge -- a legitimate claim-holder refused its own
+    `sup-release` -- is cured by the RE-KEY alone: the wedged supervisor's own
+    registry record is supervisor-shaped, `_is_supervisor_shaped` exempts it,
+    and the donated worker-shaped `FLEET_WORKER` that used to decide the
+    refusal now decides nothing. The demotion bought a second thing on top --
+    that a worker-shaped body presenting a valid nonce also passes -- and that
+    is only valuable under the OPEN hypothesis that the daemon donates the SID
+    as well as the stamp (claim-nonce:2573). Ratified §6.5 D5 requires the
+    refusal to exist; SPEC.md:196 constrains only its KEY; a registry-keyed
+    gate satisfies both, so nothing had to be traded away."""
+
+    def test_a_worker_shaped_identity_holding_the_live_nonce_IS_refused(
             self, id_home, monkeypatch, capsys):
+        """The demotion, reversed -- and the cost of the reversal, stated.
+
+        The registry judges this body to be the ordinary worker `some-worker`,
+        and claim-nonce §6.5 D5 says the supervisor claim is not a worker's to
+        hold. It is refused even though it presents the LIVE generation.
+
+        Under hypothesis (ii) -- the daemon donates the sid too -- this body
+        could be a legitimate supervisor wearing a worker's registry identity,
+        and refusing it would be the §1 wedge all over again one layer down.
+        That hypothesis is OPEN, deciding it needs the machine-wide daemon
+        restarted from a process that HOLDS a sid, and trading a ratified
+        control away to insure against it is the operator's call. Filed, not
+        taken."""
         monkeypatch.setenv("FLEET_WORKER", "some-worker")
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-me")
         _registry({"some-worker": _rec("sid-me", status="working")})
         live = _hold_with_live_nonce("sid-me")
-        assert fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=live)) == 0
+        with pytest.raises(fleet.FleetCliError) as exc:
+            fleet.cmd_sup_checkpoint(_ckpt(sid="sid-me", nonce=live))
+        assert "worker turn" in str(exc.value)
         capsys.readouterr()
+
+    def test_the_gate_is_AHEAD_of_the_claim_read(self, id_home, monkeypatch):
+        """The ordering `main` had, restored -- and it is not cosmetic.
+
+        With the classifier sitting AFTER the four nonce arms instead, a worker
+        turn walked through rule 4 (the §9 legacy path) on sid equality ALONE,
+        upgraded the legacy claim and minted itself generation 1 with no
+        `--nonce` ever passed. Reachability was bounded -- nothing mints a
+        five-key legacy INCARNATION today -- but the ordering is what closed
+        it, so the ordering is what gets pinned."""
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-w1")
+        _registry({"w1": _rec("sid-w1", status="working")})
+        fleet.write_incarnation({                        # a five-key legacy claim
+            "incarnation_id": "inc-legacy", "session_id": "sid-w1",
+            "lineage_id": "lin-x", "state": "active",
+            "heartbeat_at": fleet.now_iso()})
+        with pytest.raises(fleet.FleetCliError) as exc:
+            fleet.cmd_sup_checkpoint(_ckpt(sid="sid-w1"))
+        assert "worker turn" in str(exc.value)
+        # The claim was never upgraded: no generation was minted for a worker.
+        assert "nonce_hash" not in fleet.read_incarnation()
 
     def test_the_wedged_supervisor_can_still_RELEASE(self, id_home, monkeypatch, capsys):
         """The §1 incident, end to end, asserted at the verb that was
@@ -536,17 +708,51 @@ class TestTheRoleClassifier:
     def test_the_role_refusal_is_not_logged_as_a_continuity_refusal(
             self, id_home, monkeypatch):
         # A `refused` record makes `fleet doctor` say "a second body of this
-        # lineage may be acting". A worker turn is not that, and must not train
-        # the operator to ignore the one signal that does mean two bodies.
+        # lineage may be acting" (SPEC.md:273). A worker turn is not that, and
+        # must not train the operator to ignore the one signal that does mean
+        # two bodies.
+        #
+        # With the GATE restored the worker turn is refused BEFORE the claim is
+        # read, so no rejection is journalled at all -- `_append_nonce_rejection`
+        # takes the claim this call never gets to. That is `main`'s behaviour
+        # and it satisfies the requirement the same way, by never filing the
+        # wrong kind rather than by filing a second one. The evidence trade is
+        # recorded in FIX-WAVE-IDENTITY.md: a worker turn now leaves no
+        # rejection trace, exactly as it did before this branch existed.
         self._worker_turn(monkeypatch)
         _hold_with_live_nonce("sid-holder")
         with pytest.raises(fleet.FleetCliError):
             fleet.cmd_sup_checkpoint(_ckpt(sid="sid-w1", nonce=fleet.mint_nonce()))
         kinds = [r.get("kind") for r in fleet._recent_nonce_rejections()]
         assert "refused" not in kinds
-        assert "worker-turn" in kinds
         name, ok, _msg = fleet._doctor_check_supervisor_claim()
         assert ok is True
+
+    def test_a_sid_override_continuity_refusal_IS_filed_as_refused(
+            self, id_home, monkeypatch):
+        """TASK 4's consequence, pinned.
+
+        The role was read from `current_caller_session()` while the continuity
+        check ran against `sid_override or current_caller_session()` -- one
+        function, two caller identities. A genuine second-body continuity
+        failure raised by a caller using `--sid` was therefore classified off
+        the AMBIENT sid, filed under kind `worker-turn`, and
+        `_doctor_check_supervisor_claim` stayed GREEN through exactly the
+        incident it exists to catch.
+
+        Here the ambient environment says `sid-w1` (a worker) and the caller
+        typed `--sid sid-other` (not a worker, and not the holder). Ratified
+        claim-nonce §4.3 makes what the caller typed the sole source of caller
+        identity, so this is a continuity failure and must be filed as one."""
+        self._worker_turn(monkeypatch)               # ambient env: worker `w1`
+        _registry({"w1": _rec("sid-w1", status="working")})
+        _hold_with_live_nonce("sid-holder")
+        with pytest.raises(fleet.SupervisorContinuityError):
+            fleet.cmd_sup_checkpoint(_ckpt(sid="sid-other", nonce=fleet.mint_nonce()))
+        kinds = [r.get("kind") for r in fleet._recent_nonce_rejections()]
+        assert kinds == ["refused"], kinds
+        _name, ok, msg = fleet._doctor_check_supervisor_claim()
+        assert ok is False, msg
 
     def test_it_is_still_described_as_a_speed_bump_not_a_boundary(
             self, id_home, monkeypatch):
@@ -745,17 +951,63 @@ class TestTheWitnessIsStillWritten:
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-parent")
         assert "CLAUDE_CODE_SESSION_ID" not in fleet._worker_env("pmbot")
 
-    def test_FLEET_WORKER_is_no_longer_a_predicate_anywhere(self):
-        """The structural pin. `os.environ.get("FLEET_WORKER")` must appear in
-        `bin/fleet.py` exactly ONCE -- inside the doctor row that reports the
-        leak. Every other read was a predicate, and a predicate is what the
-        daemon's donated environment makes unsound."""
+    def test_FLEET_WORKER_is_not_a_predicate_at_the_CLAIM_GUARD(self):
+        """The structural pin, RE-SCOPED BY THE FIX WAVE (Task 2).
+
+        The rule this pin enforced -- *"`FLEET_WORKER` appears exactly once,
+        in the doctor row"* -- was wrong, and it was wrong in the direction
+        that fights ratified text. `three-tier-command.md` §11.3 ND4(c)
+        (spec-of-record, ratified 2026-07-23) REQUIRES the 200k ceiling to
+        *"exempt the interface structurally, with no sid at all ... independent
+        of any sid resolution"*, and the only thing on this machine that
+        answers "am I a fleet-launched body at all" without resolving a sid is
+        `FLEET_WORKER`'s ABSENCE.
+
+        SPEC.md:196's prohibition is NARROWER than this pin read it. Quoted:
+        *"A future guard enforcing `a worker turn must never hold the
+        supervisor claim` must key on the registry or the claim itself, never
+        on `FLEET_WORKER`."* That is one guard -- the claim guard, Site B --
+        and `_ceiling_refuses_dispatch` is not it: it is an occupancy ceiling
+        whose `FLEET_WORKER` read was an EXEMPTION for the human channel, never
+        a refusal of a worker turn.
+
+        AND THE TWO DIRECTIONS ARE NOT SYMMETRIC, which is what the original
+        pin missed. The daemon leak DONATES a stamp: a session the daemon hosts
+        inherits the `FLEET_WORKER` of whichever `--bg` dispatch started the
+        daemon. Donation can only ever ADD a stamp -- there is no mechanism
+        that REMOVES one. So `FLEET_WORKER` PRESENT is unsound evidence ("I am
+        that worker" may be a lie), while `FLEET_WORKER` ABSENT is sound ("no
+        fleet dispatch is anywhere in my donation chain"). ND4(c) keys on the
+        sound direction. The claim guard keyed on the unsound one, and that is
+        the defect SPEC.md:196 records.
+
+        So the pin now asserts what actually holds: the reads are exactly the
+        two ALLOWLISTED non-predicate/structural sites, and the claim guard is
+        not one of them."""
         from pathlib import Path
-        src = Path(fleet.__file__).read_text(encoding="utf-8")
-        reads = [ln for ln in src.splitlines()
+        import re
+        lines = Path(fleet.__file__).read_text(encoding="utf-8").splitlines()
+        owner, cur = {}, None
+        for i, ln in enumerate(lines, start=1):
+            m = re.match(r"^(?:def|class)\s+(\w+)", ln)
+            if m:
+                cur = m.group(1)
+            owner[i] = cur
+        reads = {owner[i] for i, ln in enumerate(lines, start=1)
                  if 'os.environ.get("FLEET_WORKER")' in ln
-                 or "os.environ.get('FLEET_WORKER')" in ln]
-        assert len(reads) == 1, reads
+                 or "os.environ.get('FLEET_WORKER')" in ln}
+        # The seed check: a reworded read that this matcher misses would make
+        # every assertion below pass vacuously, which is the failure mode
+        # `tools/verify_receipts.py --self-test` exists for.
+        assert reads, "no `FLEET_WORKER` read found at all -- the matcher rotted"
+        assert reads == {"_ceiling_refuses_dispatch", "_doctor_check_identity_witness"}, (
+            f"unexpected `FLEET_WORKER` reader(s): {sorted(reads)}. Only two are "
+            f"allowed: three-tier §11.3 ND4(c)'s structural ceiling exemption "
+            f"(absence, the sound direction) and the doctor row that reports the "
+            f"witness/registry disagreement. Anything else is a predicate.")
+        assert "_require_claim_holder" not in reads, (
+            "SPEC.md:196: the guard enforcing `a worker turn must never hold the "
+            "supervisor claim` must key on the registry or the claim itself")
 
 
 def _nonce_from(out: str):
