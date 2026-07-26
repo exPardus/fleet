@@ -141,6 +141,29 @@ Two remedies, in preference order:
    literal; `state` stays `"released"`). Rule 1 then finds no releaser to test and claims fresh.
    This is an out-of-band mutation of claim state and is the operator's call alone.
 
+## RESOLUTION — both blockers cleared, supervisor live (operator returned and ordered "fix these")
+
+1. **Claim wedge (G-D)**: the operator authorized the §5.7 lever. The interface removed the
+   `"released_by_sid"` key from `supervisor/INCARNATION` (backup kept in the session scratchpad);
+   `state` stayed `"released"`, every other key untouched. Rule 1 then found no releaser to test.
+   **This is an operator-authorized out-of-band mutation of claim state, recorded here as the
+   order of record** — the same shape as the day-3 nonce class-4 lever use.
+2. **Daemon leak (G-E), operationally**: `~/.claude/daemon.lock` was found ABSENT — the transient
+   daemon had idle-exited. That is the clean-start window: the next `--bg` dispatch starts the new
+   daemon and donates its env. The interface's shell carries no `FLEET_WORKER`, so `sup-spawn` was
+   run FIRST, before any worker dispatch, so the new daemon comes up clean. The supervisor's brief
+   orders it to verify this from its own env rather than assume it.
+   **The durable code fix is NOT done** — it is queue item 2 for the supervisor, with the design
+   trap named (a sid-keyed registry lookup fails during `sup-spawn`'s own dispatch window, when the
+   record still carries `session_id: None`).
+3. **Result**: `sup-spawn` → `sup|inc-20260726T140146Z-5a0e|boot`, which booted and took the claim
+   as **`inc-20260726T140221Z-26ce`** (sid `6d1a77bd`, via `fresh`). The fleet has a supervisor
+   again and it owns the queue from here.
+
+**Standing doctrine established tonight: an interface session must never run `sup-boot`.** The old
+handoff told it to, and that single step produced both a wedged claim and a supervisor that could
+not have released it.
+
 ## Dispatch record
 
 - `hs-fix2` (opus, bypass, worktree `C:/proga/fleet-handoff-seams`, branch `fix/handoff-seams`):
