@@ -10108,6 +10108,37 @@ def _holder_is_limited(holder_sid) -> bool:
     return False
 
 
+def _releaser_is_roster_live(claim, live_sids: set) -> bool:
+    """THE WEDGED STATE, as ONE predicate: this claim is `released` and the
+    body that released it is still LIVE in the roster.
+
+    Held as a function with TWO consumers that must not be able to disagree --
+    B6 (§6.1 rule 1, which REFUSES a successor boot into this state) and the §7
+    gate (`_supervisor_gate`, which ARMS on it). The 2026-07-26 ruling's whole
+    ordering argument -- B6 fail-closed multiplies wedges, so the gate must
+    contain them first or in the same commit -- is only sound if the two mean
+    the SAME state by "wedged". Two copies of the comparison would let that
+    silently stop being true, and R3's own process lesson is that this project
+    "writes down the right rule and then ships a guard that does not follow
+    it". So there is one comparison and both callers key on it.
+
+    Keyed on a non-empty STRING only: a released claim carries no `session_id`
+    at all (§6.3), so a `None` that a drifted or hostile roster put in the live
+    set must not gate a record that names no releaser -- that would strand the
+    claim, and now also brick every mutating verb, forever on a value nobody
+    wrote.
+
+    PURE: no IO, no roster fetch of its own. `live_sids` is resolved by the
+    caller, which is what lets `sup-boot` reuse the roster it already holds and
+    the gate skip the subprocess entirely on every non-released claim."""
+    if not isinstance(claim, dict) or claim.get("state") != "released":
+        return False
+    released_by = claim.get("released_by_sid")
+    if not isinstance(released_by, str) or not released_by:
+        return False
+    return released_by in live_sids
+
+
 def supervisor_claim_decision(claim, live_sids: set, latest_entry, now=None,
                               stale_seconds: float = SUPERVISOR_CLAIM_STALE_SECONDS,
                               caller_sid=None, nonce_valid: bool = False,
@@ -10164,13 +10195,11 @@ def supervisor_claim_decision(claim, live_sids: set, latest_entry, now=None,
         # differently-named session. Consuming the record inside that window
         # produces exactly the two-live-supervisors shape §6.6 exists for.
         #
-        # Keyed on a non-empty STRING only: a released claim carries no
-        # `session_id` at all (§6.3), so a `None` that a drifted or hostile
-        # roster put in the live set must not be able to gate a record that
-        # names no releaser -- that would strand the claim forever on a value
-        # nobody wrote.
+        # The comparison itself lives in `_releaser_is_roster_live` -- the ONE
+        # predicate the §7 gate also arms on, so "wedged" cannot come to mean
+        # two different things in the two places that act on it.
         released_by = claim.get("released_by_sid")
-        if isinstance(released_by, str) and released_by and released_by in live_sids:
+        if _releaser_is_roster_live(claim, live_sids):
             return ("refuse", f"claim {claim.get('incarnation_id', '?')} is released but its "
                               f"releaser (sid {released_by}) is still live in the roster -- "
                               f"release+stop is not complete; wait for that body to exit")
@@ -10481,6 +10510,55 @@ def _claim_is_legacy(claim: dict) -> bool:
     return "nonce_hash" not in claim and "state" not in claim
 
 
+def _wedged_release_gate(verb, claim):
+    """`_supervisor_gate`'s released-claim arm. Returns (disarmed) or raises.
+
+    Split out rather than inlined because it is the ONE place in the gate that
+    performs IO, and the cost has to be visible: `_fetch_agents_roster` is a
+    `claude agents --json --all` subprocess (~1.7s measured on this box, 30s
+    worst case) and the gate runs at the top of every mutating verb including
+    `send`, the beat contract's hot path. It is reached ONLY on a `released`
+    claim that names a releaser -- the window between `sup-release` and the
+    next `sup-boot`, and nothing else. A held claim, an absent claim, a legacy
+    claim and a no-sid caller all return before this function is called.
+
+    NO CONTINUITY PATH, and this is the substantive difference from the
+    held-claim arm below. §6.3's post-release key set carries no `nonce_hash`,
+    no `pending_nonce_hash` and no `prior_pending_hash`, so `_nonce_presentation`
+    would return None for every caller and every value: there is no generation
+    to present because there is no claim to prove continuity ON. Offering
+    `--nonce` here would be a named remedy that always fails, which is the
+    exact defect the 2026-07-26 ruling (R2) forbids writing into a refusal.
+
+    WHAT ACTUALLY ENDS THE WEDGE, and therefore what the message names: the
+    releasing body leaving the roster. `cmd_sup_release` already tells it to
+    ("this incarnation must EXIT: take no further fleet actions"), so the
+    normal case self-heals in seconds; if it does not, the operator stops that
+    session by the sid printed here. §5.7 binds the wording otherwise: this is
+    agent-facing, so it names the ambiguity and the escalation and never a
+    lever a second body could pull against the first."""
+    released_by = claim.get("released_by_sid")
+    if not isinstance(released_by, str) or not released_by:
+        return                          # names no releaser -- nothing to gate
+    roster_ok, payload = _fetch_agents_roster()
+    if not roster_ok:
+        return                          # roster unreadable: fail OPEN
+    if not _releaser_is_roster_live(claim, _roster_live_sids(payload)):
+        return                          # release+stop completed -- claim open
+    raise SupervisorClaimGateError(
+        f"{verb}: refusing -- the supervisor claim "
+        f"({claim.get('incarnation_id', '?')}) is RELEASED but its releasing "
+        f"body (sid {released_by}) is still live in the roster, so no body "
+        f"holds the claim and the fleet has no supervisor. That body was told "
+        f"to exit and has not; until it does, no successor can boot "
+        f"(claim-nonce §6.1 rule 1) and this gate stays armed. There is no "
+        f"generation to present -- a released claim carries none. If you ARE "
+        f"that body: stop taking fleet actions and exit. Otherwise escalate to "
+        f"the operator, who can stop session {released_by} directly. This is a "
+        f"SPEED-BUMP, not a security boundary: it is bypassable by anyone who "
+        f"can run this command without a session id.")
+
+
 def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     """claim-nonce §7 -- THE GATE (option (b), ratified 2026-07-23). Raises
     `SupervisorClaimGateError` when a mutating lifecycle verb is run by ANY
@@ -10511,7 +10589,22 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         STRUCTURAL exemption for `autoclean`'s scheduled task (no operator env)
         and for a human shell; `autoclean` additionally is not wired to call
         this at all (§7).
-      * no held claim / a released claim -> nothing to gate against.
+      * no held claim -> nothing to gate against.
+      * a released claim whose releaser is roster-GONE -> nothing to gate
+        against; release+stop completed and the claim is open.
+      * a released claim whose releaser is still roster-LIVE -> ARMED, and
+        unconditionally so (`_wedged_release_gate`). Councilor 4's finding,
+        2026-07-26 §R3, measured live on `main` @ `8252806`: this arm used to
+        return with the rest of the released case, which disarmed the gate for
+        EVERY caller and EVERY mutating verb -- `fleet clean --yes`, the
+        irreversible one, simply ran from a third body. The wedge has no
+        heartbeat to age out of and no successor can close it (B6 correctly
+        refuses to boot into it), so the ungated window was INDEFINITE.
+      * a released claim naming no releaser -> not armed (§6.3: a released
+        claim carries no `session_id`, so a `None` in the live set must not
+        brick every verb forever on a value nobody wrote).
+      * a roster fleet cannot read -> fail OPEN, exactly as an unreadable
+        heartbeat does below and for the same reason.
       * heartbeat older than `SUPERVISOR_CLAIM_STALE_SECONDS` -> DISARMED. This
         slice ships no automatic beat (§4.13(e)), so protection is present only
         in the hour after a human last acted and absent in the quiet stretches
@@ -10537,8 +10630,10 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         claim = read_incarnation()
     except Exception:  # noqa: BLE001 -- speed-bump: never crash a verb on this
         return
-    if not isinstance(claim, dict) or claim.get("state") == "released":
+    if not isinstance(claim, dict):
         return
+    if claim.get("state") == "released":
+        return _wedged_release_gate(verb, claim)
     if now is None:
         now = datetime.now(timezone.utc)
     try:

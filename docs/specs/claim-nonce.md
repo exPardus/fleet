@@ -2003,6 +2003,70 @@ a sentence noting that the interface's canonical steer (`fleet send supervisor`)
 the §7 gate via this carve-out, so the two specs read coherently. Left unwritten here
 because `three-tier-command.md` is itself still `PROPOSAL — RESTRUCTURE REQUIRED`.
 
+### 7.2 ARMING correction — a `released` claim whose releaser is still roster-live
+
+> **STATUS: PROVISIONAL — RATIFICATION-WITHHELD**, on the same terms as §7.1. The §7
+> taxonomy is OPERATOR-owned. This subsection records a shipped **narrowing of a
+> disarm condition** (the gate refuses strictly more than before; it never refuses
+> less), ruled binding-and-first by the 2026-07-26 council supervisor in
+> `docs/AUTONOMOUS-2026-07-26.md` §R3, which states it as *"~10 lines, fail-closed,
+> no protocol change"* and ticks no box in `OPERATOR-GATES.md`. Written here because
+> a guard whose arming conditions are not in the spec is exactly the defect R3's
+> closing section names.
+
+Until 2026-07-26, `_supervisor_gate` returned early on **any** claim with
+`state == "released"`. §6.3 makes that read as *"a released claim has no holder, so
+there is no divergent-second-body question to gate"* — which is true of a claim whose
+releaser has **exited**, and false of one whose releaser is still running.
+
+**The wedged state**: `state == "released"` **and** `released_by_sid` is still
+roster-live. It is the state B6 (§6.1 rule 1, table row 1) already computes, and its
+properties are unusually bad:
+
+- **Nothing holds the claim**, so every arming condition below the released check —
+  heartbeat freshness, `_claim_is_legacy`, `_nonce_presentation` — was unreachable and
+  the gate was disarmed **for every caller and every mutating lifecycle verb**.
+  Measured live on `main` @ `8252806`: from a third body, `kill`/`clean`/`interrupt`
+  were all ungated and `fleet clean --yes` — the irreversible one — simply ran.
+- **It does not age out.** A released claim carries no `heartbeat_at` (§6.3), so the
+  ≤3600 s disarm that bounds the held-claim case does not apply here in either
+  direction.
+- **No successor can end it.** B6 correctly refuses to boot into it. So the ungated
+  window was closable only by the boot that is being refused — i.e. indefinite.
+
+**Shipped rule.** The released branch is now decided by one predicate,
+`_releaser_is_roster_live(claim, live_sids)`, shared verbatim with B6:
+
+| Released-claim state | §7 gate |
+|---|---|
+| releaser roster-**gone** | **disarmed** — release+stop completed, the claim is open |
+| releaser names no sid (`released_by_sid` absent/empty/non-string) | **disarmed** — §6.3's own rule: a `None` in the live set must not brick every verb forever on a value nobody wrote |
+| roster unreadable | **disarmed (fail OPEN)** — same doctrine as an unreadable heartbeat: a speed-bump must not brick every mutating verb, and `claude` missing from `PATH` is a strictly larger blast radius than the wedge |
+| releaser roster-**LIVE** | **ARMED, unconditionally** |
+
+**The armed arm has no continuity path, and that is deliberate.** §6.3's post-release
+key set carries no `nonce_hash`, `pending_nonce_hash` or `prior_pending_hash`, so
+`_nonce_presentation` returns `None` for every caller and every value — there is no
+generation to present because there is no claim to prove continuity *on*. The refusal
+therefore does **not** offer `--nonce`; naming a remedy that always fails is the defect
+`docs/AUTONOMOUS-2026-07-26.md` R2 forbids. What it names instead is what actually ends
+the wedge: the releasing body exiting (`cmd_sup_release` already instructs it to), and
+failing that, the operator stopping that session by the sid the refusal prints. §7's
+structural no-sid bypass is disclosed as always.
+
+**Cost, stated rather than hidden.** This is the only IO in the gate:
+`_fetch_agents_roster` is a `claude agents --json --all` subprocess (~1.7 s measured,
+30 s worst case) and the gate runs at the top of every mutating verb including `send`.
+It is reached **only** on a released claim that names a releaser — the window between
+`sup-release` and the next `sup-boot` — and `tests/test_gate_arm_wedge.py` pins that a
+held claim, an absent claim and a no-sid caller never fetch the roster at all.
+
+**Not widened.** The same released early-out at `_caller_holds_supervisor_claim` and
+`_record_is_supervisor_claim_holder` is left unchanged, with the reason executable
+rather than asserted: the ceiling's only consumer runs strictly *after* the gate at all
+three call sites, and `_archive_eligible`'s roster-liveness gate already protects a
+roster-live releaser, so neither can be shown to lose anything in the wedged state.
+
 ---
 
 ## 8. Invariants, specs and shipped contracts touched
