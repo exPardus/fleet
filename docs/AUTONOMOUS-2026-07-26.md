@@ -266,3 +266,162 @@ gate.
 - **Absence is not evidence on this substrate** — records are deletable (`clean`), archivable
   (`autoclean`), and born with `session_id: None`. Any predicate that permits on a missing record
   fails open on all three paths.
+
+---
+
+# G-F. Gen-0 supervisor, second launch — the gate escalated both branches
+
+Supervisor `inc-20260726T140221Z-26ce` (body `sup|inc-20260726T140146Z-5a0e|boot`, sid
+`6d1a77bd`). Booted `claim` — predecessor released cleanly, no seizure. Pre-boot env check
+per the brief's first act returned `FLEET_WORKER=sup|inc-20260726T140146Z-5a0e|boot`
+(supervisor-shaped): **the G-E leak did not hit this body**, confirming the interim remedy
+(dispatch the supervisor first, from a clean shell, into a freshly idle-exited daemon).
+
+## HEADLINE — nothing merged. Four reviewers, four ESCALATE.
+
+**`fix/handoff-seams` @ `a9d2c64` — both lenses independently found the SAME defect.** It is
+precisely the judgment call the builder flagged and that both briefs ordered adjudicated
+rather than repeated: *a begin that fails AT DISPATCH un-supersedes the entries it marked.*
+
+- `gate-hs-rs`: R9's un-supersede restores a superseded successor's **bootability** without
+  restoring `claim["handoff_token_hash"]`, so the rescued successor boots, writes HANDSHAKE,
+  and `sup-handoff-complete` refuses it as a body the claim never dispatched.
+- `gate-hs-rb`: same defect, **reproduced end to end** — `begin` overwrote
+  `handoff_token_hash` and `drop_handoff_entry` only clears it when the pending list empties —
+  **with no test in the delta that dies.**
+
+So wave 2's fix for `rb-CRIT-2` minted a defect of the same family: a successor that is
+**bootable but not completable**. That is HANDOFF-ORPHAN re-entered through the rescue path
+wave 2 itself added. **Fix-waves-mint-defects is now 11/11 lifetime.**
+
+**This was the last authorised wave. ESCALATE-beats-a-3rd-wave is standing doctrine, so no
+wave 3 was ordered.** Operator decides: authorise a scoped wave 3, or park the branch.
+
+**`fix/b6-interface-release` @ `2e824ea` — two ESCALATEs; the break lens found something worse
+than the bug the branch fixes.**
+
+- `gate-b6-rb` (CRITICAL): **`--interface` is forgeable on a §9 legacy claim via the `--sid`
+  override** — the same override the council cited when rejecting design (a+) — turning B6's
+  fail-closed refusal into a **silent, unpaged claim takeover from a live supervisor.** A fix
+  for a wedge that opens a silent takeover is a net negative; the wedge at least announced
+  itself.
+- `gate-b6-rs`: the honesty surfaces are still wrong in the wedged state — the always-on
+  statusline keeps the exact false `boot one (fleet sup-boot)` prediction the branch claims to
+  fix, and both `sup-status` and `doctor` name `fleet sup-release --interface` as a remedy
+  **that always exits 1.** A doctor check whose named remedy always fails is worse than no
+  remedy: it spends the operator's trust in the one surface they consult at 3am.
+
+Both findings land in the branch's own core claims, not in adjacent code.
+
+## The finding this supervisor hit live, before the reviews returned
+
+**There is no clean stand-down for a supervisor body that cannot exit.**
+
+B6 is literally `released_by_sid in live_sids` against the native roster (`:10172-10176`). A
+fleet-dispatched supervisor body **does not exit when its turn ends** — it goes idle and stays
+in the roster. Therefore **any `sup-release` by a fleet-launched supervisor re-creates the very
+wedge that convened the b6 branch**, and `--interface` would be a *false* attestation from a
+body that is not the interface tier.
+
+The b6 branch narrows B6 for the interface case and leaves the supervisor's own case exactly
+as wedged as before. This is the adjacent-uncovered-case the b6 brief told its reviewer to hunt
+for, found from the outside by hitting it. Whatever replaces b6 must answer: **how does a
+supervisor body that cannot exit stand down cleanly?** Directions, not decided and not built:
+attest to *standing down* rather than to tier membership; key B6 on the releaser still
+*holding* something rather than merely being alive; or have the release verb tombstone its own
+body so it leaves the roster.
+
+## Council on the G-E daemon leak — 4–0, and it settles more than it was asked
+
+Four councilors (risk auditor / delivery pragmatist / strategist / incident responder) all
+rejected every shape that keeps **inferring** identity from the environment.
+
+**Adopted synthesis:** the **registry is the sole judge** of a session's fleet identity, keyed
+on the acting session's own `CLAUDE_CODE_SESSION_ID` matched against the **sid union**
+(`_record_sids`, so fork-steer and respawn still resolve); the **env survives only as a
+witness**, whose disagreement with the registry is a *detected leak* that `fleet doctor` reports
+by name; §6.5's env arm is **deleted** and replaced by a registry-keyed arm; site A's structural
+interface exemption re-keys from "`FLEET_WORKER` absent" to "no registry record claims my sid"
+AND-NOT-claim-holder; and the dispatch window (`session_id: None`) is answered by **abstention**
+— at site A a newborn body cannot be at 200k, and at site B the nonce is the real gate.
+
+**The citation that settles it:** `docs/SPEC.md:196` already carries a **ratified** rule — a
+guard enforcing "a worker turn must never hold the supervisor claim" *"must key on the registry
+or the claim itself, **never** on `FLEET_WORKER`."* **That warning was written, ratified, and
+then violated by the very guard it was written about** (`:10899`). And `claim-nonce.md:874-876`
+refused to carry the nonce in an env var because *"the whole parent environment is copied and
+exactly one key is stripped … §6.5 is the consequence"* — the spec understood the medium, then
+§6.5's enforcement read that same medium. **The project already decided this; the code diverged
+from its own ratified rule.**
+
+### BLOCKING PRE-FLIGHT before any of that is built (C4)
+
+Our confidence that `CLAUDE_CODE_SESSION_ID` does **not** leak is **confounded evidence**.
+`_worker_env` (`:1461-1463`) **pops** `CLAUDE_CODE_SESSION_ID` before `Popen(env=…)`, so every
+measurement we hold — the receipts at `:1450-1453` and §G-E's own — was taken while the donated
+env had **no sid to donate**. That is equally consistent with (i) the vendor stamps a fresh sid
+per hosted session, and (ii) the vendor passes the env through and there was nothing to pass.
+`daemon.lock` reports `origin: transient`, implying other origin classes whose donated env
+*would* carry a sid.
+
+**If (ii) holds:** every worker under a daemon started by an interactive session presents as
+that session — `_worker_is_foreign`/`_confirm_destructive` (`:3092-3134`) would let a worker
+`fleet kill`/`clean` its siblings with **no `--yes`** (the 2026-07-09 incident, silently
+un-guarded), `_caller_holds_supervisor_claim` would answer True for every worker, **and the
+entire registry-by-sid synthesis above rests on sand.**
+
+The decisive probe was dispatched and **the 200k ceiling refused the spawn** — two correct rules
+interacting correctly. Partial evidence already held: all 8 workers dispatched under this one
+daemon received **distinct** sids and were tracked correctly by `fleet status`, the Stop hooks
+and the outcome records, so per-session sid stamping is real for *this* daemon-origin class.
+That narrows (ii) to the sid-ful-donation case without closing it. **The fully decisive form
+needs a daemon started by something that holds a sid — an operator-shell experiment.**
+
+### C1's collateral finding, queued for the operator
+
+The M-0 gate **G4 "env propagation — CONFIRMED"** (`spike/m0/VERDICTS.md:46`) is a **false
+CONFIRMED**: `m0-core` was the first `--bg` dispatch and therefore *started the daemon*, so the
+observation cannot discriminate the two hypotheses; the spike's negative control is confounded
+the same way. `daemon.lock` — the one observable that separates them — was not read until
+2026-07-26. The generalisation is the part worth keeping: **M-0 ran one session per daemon
+lifetime; production runs many, so every M-0 conclusion was scored in a regime we no longer
+operate in.** Related: `:9280-9283` marks `--setting-sources` UNOBSERVED at 2.1.207 while the
+live daemon is **2.1.220** — 13 patch versions with nothing re-running the probe.
+
+## Two rules enforcing themselves against their own author
+
+1. **The 200k ceiling refused the sitting supervisor's own dispatch** at 201,920 tokens
+   (three-tier §11.3). Fleet-enforced, not discretion. It fired on a legitimate probe, which is
+   the correct outcome.
+2. **§6.5's leak is live in the benign direction right now**: this daemon was started by the
+   supervisor's own dispatch, so all eight workers carried the supervisor's `FLEET_WORKER` and
+   were §6.5-exempt. Acceptable this wave — they hold no nonce and were fenced — and recorded
+   so it is not rediscovered.
+
+**Narrowed blast radius (grep-verified at `67dd53a`):** `FLEET_WORKER` is read in exactly two
+places, `:2163` and `:10899`, plus the single write at `:1463`. **The hooks do not read it at
+all** — they resolve workers by `session_id` from the hook payload, confirmed empirically. C1
+argues the true exposure is wider via sid-derived identity generally; read its R2 before
+treating "exactly two predicates" as the whole story.
+
+## State left for the operator
+
+- `main` = `af62850` (SPEC §18 tombstone row + `bgIsolation` setting), **2152 passed / 11
+  skipped on py3.13 AND py3.10**, measured by this supervisor. The 2147/16-vs-2152/11 question
+  from the previous handoff is **resolved**: same 2163 total, five live-tier tests skipping
+  without `FLEET_LIVE=1`.
+- **Both branches unmerged and blocked on you.** Merge mechanics are pre-verified so nobody
+  redoes them: `fix/b6-interface-release` merges with **zero** conflicts; `fix/handoff-seams`
+  auto-merges `bin/fleet.py` and `claim-nonce.md` cleanly with **only `docs/NEXT-SESSION.md`**
+  conflicting — in both orders. A clean textual merge of two semantic changes to the same claim
+  subsystem proves nothing; the merged tree needs a full both-floors run before it is pushed.
+- Cleanup done: 5 leaked plaintext-token files deleted (§5.9), 10 merged worktrees removed,
+  stale `sessionstart_fleet` `.pyc` removed, PR #9 reconciled (already merged upstream).
+- **Evidence on disk, none of it in any context:** `C:/proga/fleet-{hs-rs,hs-rb,b6-rs,b6-rb}/REVIEW-*.md`
+  (with mutation ledgers and end-to-end repros) and `C:/proga/fleet-council/COUNCIL-{1..4}-*.md`.
+  All five reviewer/council worktrees verified clean — every fault injection restored.
+- **The claim is deliberately still HELD, not released.** A release from this body would wedge
+  it (see above) and cost the §5.7 manual lever a second time in two days. A held claim merely
+  makes the next `sup-boot` *refuse*, which is recoverable. **To get a fresh supervisor:
+  `fleet kill` this body (or `claude stop` its session), then `fleet sup-boot`** — roster-gone
+  plus an aged heartbeat resolves to `seize`, no lever needed.
