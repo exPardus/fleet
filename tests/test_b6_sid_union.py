@@ -169,6 +169,36 @@ class TestB6IsKeyedOnTheSidUnion:
         _roster(monkeypatch, "sid-other")
         fleet._supervisor_gate("clean", nonce=None)      # disarmed, no crash
 
+    def test_sup_boot_itself_refuses_the_fork_steered_wedge(
+            self, wedge_home, monkeypatch, capsys):
+        """THE LAST VERB for B6, and the only test that can catch
+        `cmd_sup_boot` failing to hand the registry over.
+
+        Every other test in this class calls `supervisor_claim_decision`
+        directly and supplies `registry=` itself, so all of them stay green if
+        the one production call site drops the argument -- and rule 1 would
+        silently go back to the bare comparison that failed open in §G-G.
+        Asserting on the predicate is precisely the smell the 2026-07-26
+        ruling is about, so this drives `fleet sup-boot` and asserts on what it
+        did to the claim."""
+        entries = _roster(monkeypatch, "sid-post-fork", "sid-successor")
+        _released(released_by="sid-pre-fork")
+        rec = fleet.new_worker_record("sid-post-fork", "C:/proj", "t", "acceptEdits",
+                                      dispatch_kind="bg")
+        rec["retired_sids"] = ["sid-pre-fork"]
+        data = fleet.load_registry()
+        data["workers"]["sup|inc-old|boot"] = rec
+        fleet.save_registry(data)
+
+        rc = fleet.main(["sup-boot", "--sid", "sid-successor"])
+
+        assert rc == fleet.SUPERVISOR_BOOT_RC["refuse"]
+        after = fleet.read_incarnation()
+        assert after["state"] == "released", "sup-boot consumed a wedged claim"
+        assert after["incarnation_id"] == "inc-old", "a successor minted an incarnation"
+        assert "sid-pre-fork" in capsys.readouterr().out
+        assert entries                          # epoch check saw a non-empty roster
+
     def test_the_gate_never_quarantines_a_corrupt_registry(
             self, wedge_home, monkeypatch):
         """The defect this re-key nearly minted, pinned.
