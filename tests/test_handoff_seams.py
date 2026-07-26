@@ -1683,21 +1683,77 @@ class TestR10MutationSurvivors(_HandoffBase):
         assert writes["n"] > 1, "the cleanup never attempted the write it must survive"
 
 
-class TestASupersessionIsUndoneWhenItsAttemptNeverLaunched(_HandoffBase):
-    """R9 liveness corner. `_drop_pending_marker` runs on the DISPATCH-FAILED
-    path only, whose whole premise is that no process was ever launched -- so
-    the attempt that failed never had the right to supersede anything either."""
+class TestEveryAdmittedBodyReachesATerminalState(_HandoffBase):
+    """R1 of the 2026-07-26 council ruling, and the rule the council produced:
+
+        Assert on the LAST verb of the sequence the change exists to enable --
+        not on the precondition the change manipulates.
+
+    `cb9f078` un-superseded the entries a dispatch-failed begin had marked, and
+    its gate asserted the earlier attempt was *bootable*. Bootability is a
+    precondition nobody wants for its own sake. The sequence a body actually
+    runs to collect the claimed benefit is `begin` -> *fail at dispatch* ->
+    `sup-boot` -> **`sup-handoff-complete`**, and on the resurrected attempt
+    that LAST verb refused under every input: part 3 of the failed `begin`'s
+    write had already overwritten `handoff_token_hash` with the dead attempt's,
+    `sha(tokA)` is absent from the entire claim, and the only surviving copy of
+    token A is the plaintext in the successor's own task file -- so there is
+    nothing to restore it from. The un-supersede therefore admitted a body it
+    could not carry to any terminal state; it wrote a HANDSHAKE nobody could
+    act on and failed two verbs later with a message that was factually false
+    about that body.
+
+    The counterfactual, which is what this asserts: the body is refused at its
+    own `sup-boot` with `rc=5` and operator-actionable TERMINATE text.
+
+    Corollary, and it is the general rule: a state-machine change must drive
+    every newly admitted body to a terminal state.
+    """
 
     def _dispatch_fails(self, argv, **kw):
         if "--bg" in argv:
             return SimpleNamespace(returncode=1, stdout="", stderr="boom")
         return SimpleNamespace(returncode=0, stdout="[]", stderr="")
 
-    def test_a_failed_begin_leaves_the_previous_attempt_bootable(
+    def test_a_dispatch_failure_admits_no_body_it_cannot_terminate(
             self, sup_home, capsys):
+        """Drive EVERY attempt the claim still records through both remaining
+        verbs of the sequence, and assert each one's terminal outcome."""
         self._hold()
-        _rc, gen = self._begin(capsys)               # attempt 1: live, joined
+        _rc, gen = self._begin(capsys)                # attempt 1: live, joined
         first = self._incs()[0]
+        args = SimpleNamespace(sid="sid-old", model=None, permission_mode=None,
+                               nonce=gen)
+        with pytest.raises(fleet.FleetCliError, match="successor dispatch failed"):
+            fleet.cmd_sup_handoff_begin(args, which=_fake_which,   # attempt 2 dies
+                                        run=self._dispatch_fails,
+                                        sleep=lambda s: None)
+        capsys.readouterr()
+        recorded = self._incs()
+        assert recorded == [first], \
+            "R1 keeps the collection: attempt 1 stays recorded and abortable"
+        for inc in recorded:
+            rc = _boot_successor("succ0001-full", inc, _token_of(sup_home, inc))
+            out = capsys.readouterr().out
+            assert rc == fleet.SUPERVISOR_BOOT_HANDOFF_REFUSED_RC, \
+                f"{inc} booted -- a body was admitted that no verb can complete"
+            assert "VERDICT: handoff-refused" in out
+            assert f"HANDOFF-ORPHAN {inc}" in out, \
+                "the refusal must be legible to a BODY: it says terminate"
+            assert fleet.read_handshake() is None
+            with pytest.raises(fleet.FleetCliError, match="no supervisor/HANDSHAKE"):
+                fleet.cmd_sup_handoff_complete(SimpleNamespace(
+                    sid="sid-old", nonce=gen, expect_inc=inc, expect_sid=None))
+
+    def test_the_dead_attempts_own_entry_and_token_file_are_gone(
+            self, sup_home, capsys):
+        """The half of `_drop_pending_marker` that survives the revert: this
+        attempt launched no process, so its own entry and the plaintext token
+        with it are retired. Only the un-supersede goes."""
+        self._hold()
+        _rc, gen = self._begin(capsys)
+        first = self._incs()[0]
+        before = set((sup_home / "state").glob("supervisor-handoff-*.md"))
         args = SimpleNamespace(sid="sid-old", model=None, permission_mode=None,
                                nonce=gen)
         with pytest.raises(fleet.FleetCliError, match="successor dispatch failed"):
@@ -1705,33 +1761,58 @@ class TestASupersessionIsUndoneWhenItsAttemptNeverLaunched(_HandoffBase):
                                         run=self._dispatch_fails,
                                         sleep=lambda s: None)
         capsys.readouterr()
-        entry = fleet.handoff_pending_entries(fleet.read_incarnation())[0]
-        assert entry["successor_inc"] == first
-        assert fleet.handoff_entry_state(entry) == fleet.HANDOFF_AWAITING_HANDSHAKE
-        assert fleet.handoff_boot_refusal(fleet.read_incarnation(), first) is None
-        assert _boot_successor("succ0001-full", first,
-                               _token_of(sup_home, first)) == 0
-        capsys.readouterr()
-        assert fleet.read_handshake()["incarnation_id"] == first
+        assert set((sup_home / "state").glob("supervisor-handoff-*.md")) == before
+        assert (sup_home / "state" / f"supervisor-handoff-{first}.md").exists(), \
+            "attempt 1's only input file is not attempt 2's to delete"
 
-    def test_a_THIRD_attempts_supersession_is_not_undone(self, sup_home, capsys):
-        """Only the marks this attempt made are lifted -- by `superseded_by`,
-        not by 'clear them all'."""
+
+class TestForceConsultsTheAgeItClaimsToHaveConsulted(_HandoffBase):
+    """MAJOR-2. `--force` exists for exactly one shape: an entry that records
+    no sid AND whose `minted_at` cannot be read, which resolves by neither
+    evidence nor time and would otherwise be immortal (rs-MIN-B). Three
+    surfaces say so -- the flag's own help, `resolve_handoff_abort`'s arm 4,
+    and `--retire-all`'s docstring -- and the retire message says so *while it
+    prints*: "it recorded no sid and could not be aged".
+
+    The code never evaluated that predicate. On a readable, fresh, sid-less
+    entry `--force` retired a still-joining successor and unlinked its ONLY
+    input file, then printed a reason it had not checked. This is the
+    fail-closed narrowing that makes the code match the three surfaces."""
+
+    def test_force_is_refused_on_an_entry_that_can_be_aged(self, sup_home, capsys):
         self._hold()
-        _rc, gen = self._begin(capsys)               # attempt 1
-        first = self._incs()[0]
-        self._begin(capsys, nonce=gen,               # attempt 2 supersedes it
-                    run=_dispatch_then_roster("succ0002-full", "succ0002"))
-        second = self._incs()[1]
-        args = SimpleNamespace(sid="sid-old", model=None, permission_mode=None,
-                               nonce=gen)
-        with pytest.raises(fleet.FleetCliError, match="successor dispatch failed"):
-            fleet.cmd_sup_handoff_begin(args, which=_fake_which,   # attempt 3 dies
-                                        run=self._dispatch_fails,
-                                        sleep=lambda s: None)
-        capsys.readouterr()
-        states = {e["successor_inc"]: fleet.handoff_entry_state(e)
-                  for e in fleet.handoff_pending_entries(fleet.read_incarnation())}
-        assert states[first] == fleet.HANDOFF_SUPERSEDED, \
-            "attempt 2's supersession is not attempt 3's to undo"
-        assert states[second] == fleet.HANDOFF_AWAITING_HANDSHAKE
+        gen = self._begin_doa(capsys)
+        inc = self._incs()[0]
+        task_file = sup_home / "state" / f"supervisor-handoff-{inc}.md"
+        with pytest.raises(fleet.FleetCliError, match="still inside the") as exc:
+            self._abort(nonce=gen, successor_inc=inc, force=True)
+        assert "--force does not apply" in str(exc.value), \
+            "a declined --force must say it was declined and why"
+        assert self._incs() == [inc]
+        assert task_file.exists(), "a still-joining successor keeps its only input"
+
+    def test_retire_all_force_leaves_an_ageable_joining_entry_standing(
+            self, sup_home, capsys):
+        self._hold()
+        gen = self._begin_doa(capsys)
+        inc = self._incs()[0]
+        with pytest.raises(fleet.FleetCliError, match="nothing to retire") as exc:
+            self._abort(nonce=gen, retire_all=True, force=True)
+        assert "not a way out of the join window" in str(exc.value), \
+            "the recipe must not advertise --force as a way out of the window"
+        assert self._incs() == [inc]
+        assert (sup_home / "state" / f"supervisor-handoff-{inc}.md").exists()
+
+    def test_retire_all_force_still_takes_the_unageable_entry(
+            self, sup_home, capsys):
+        """Positive control: the narrowing must not reach the one shape
+        `--force` was built for."""
+        self._hold()
+        gen = self._begin_doa(capsys)
+        inc = self._incs()[0]
+        claim = fleet.read_incarnation()
+        fleet.handoff_pending_entries(claim)[0]["minted_at"] = "whenever"
+        fleet.write_incarnation(claim)
+        assert self._abort(nonce=gen, retire_all=True, force=True) == 0
+        assert self._incs() == []
+        assert not (sup_home / "state" / f"supervisor-handoff-{inc}.md").exists()
