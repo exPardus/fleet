@@ -224,6 +224,43 @@ class TestTheWedgedStateArmsTheGate:
         assert fleet.main(["clean", "--yes"]) == 0
         assert _names() == []
 
+    def test_the_roster_ok_flag_is_what_disarms_not_the_payload_shape(
+            self, wedge_home, monkeypatch):
+        # Measured, not assumed: with the shipped contract (`roster_ok=False`
+        # => payload is a REASON STRING) deleting the `not roster_ok` guard
+        # changes nothing, because `_roster_live_sids` over a string yields the
+        # empty set and the gate disarms by the back door. That makes the guard
+        # look redundant and invites a future reader to delete it.
+        #
+        # It is not redundant, and this is the arm that proves it: a failed
+        # fetch whose payload is off-contract -- entries rather than a reason,
+        # which is what a partial result or a CLI drift would produce -- must
+        # STILL disarm. Correctness must rest on the flag fleet checked, never
+        # on `_roster_live_sids` happening to tolerate whatever came back.
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", THIRD)
+        _released()
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (
+            False, [{"sessionId": RELEASER, "status": "idle", "pid": 4242}]))
+        _tombstone()
+        assert fleet.main(["clean", "--yes"]) == 0
+        assert _names() == []
+
+    def test_scheduled_autoclean_still_runs_under_a_wedge(
+            self, wedge_home, monkeypatch):
+        # `cmd_autoclean` routes its first tier through `cmd_archive`, which IS
+        # gated -- so arming a NEW state on the gate reaches autoclean whether
+        # or not §7 calls it exempt. The scheduled task has no operator env and
+        # therefore no sid, which is the structural exemption, and this pins
+        # that the wedge does not quietly take it away: a scheduler that starts
+        # erroring the moment a supervisor retires would be a silent, permanent
+        # regression nobody watches (the scheduler ignores exit codes,
+        # docs/specs/autoclean.md:38).
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        _released()
+        _roster(monkeypatch, RELEASER)
+        rc = fleet.main(["autoclean", "--fleet-home", str(wedge_home)])
+        assert rc == 0
+
     def test_the_wedge_refusal_writes_nothing(self, wedge_home, monkeypatch):
         # §7: READ-ONLY. No lock, no mint, no write -- a refusal least of all.
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", THIRD)
