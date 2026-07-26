@@ -995,6 +995,28 @@ def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
         # A record without it (pre-field, or a human-shell spawn) reads as
         # None and gets today's spawned_by-only ownership answer.
         "spawned_by_lineage": spawned_by_lineage,
+        # LOAD-BEARING AND WRITE-ONCE: this is the ONLY site in the file that
+        # writes `created`, and no path may ever rewrite it on an existing
+        # record -- not even to carry a worker's age forward across a respawn,
+        # which is otherwise a reasonable thing to want.
+        #
+        # `_releaser_live_sids` bounds the §7 gate's union arm by comparing this
+        # field against the claim's `released_at`: a record MINTED AFTER the
+        # release cannot be the body that performed it, so a fork-steer (which
+        # restamps the record IN PLACE and leaves `created` alone) arms the
+        # wedge while a respawn (which REPLACES the record through this
+        # function, stamping a fresh `created`) does not. Carrying `created`
+        # forward across a respawn INVERTS that test silently: every respawned
+        # body would answer "the releaser is roster-live" forever, B6 would
+        # refuse every successor on the same state, and the fleet would have no
+        # in-fleet exit from the wedge -- break-lens MAJ-2, 2026-07-27, which
+        # was measured at exactly that.
+        #
+        # Pinned, so the next editor finds the test and not only this warning:
+        # `tests/test_b6_sid_union.py::TestTheUnionArmIsBoundedToTheForkSteerWindow`
+        # -- `test_a_fork_steered_releaser_still_arms_the_gate` and
+        # `test_a_respawned_body_does_not_arm_the_gate` are the two halves, and
+        # `test_a_respawned_body_leaves_an_in_fleet_exit` is the harm itself.
         "created": created,
         "status": "working",
         "attached_since": None,
@@ -10304,8 +10326,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :4566, :5013, :8941,
-    :12411), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :4588, :5035, :8963,
+    :12433), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -10896,8 +10918,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:4566, :5013, :8941,
-    #     :12411) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:4588, :5035, :8963,
+    #     :12433) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
