@@ -10108,7 +10108,31 @@ def _holder_is_limited(holder_sid) -> bool:
     return False
 
 
-def _releaser_is_roster_live(claim, live_sids: set) -> bool:
+def _registry_records_or_none():
+    """The registry's records for an IDENTITY question, or None if unreadable.
+
+    The ONE degradation the sid-union re-key needs, named once so both its
+    consumers spell it the same way. `_releaser_is_roster_live` treats None as
+    "bare comparison only" -- today's shipped answer -- so an unreadable
+    registry can never brick a `sup-boot` or a mutating verb; the corrupt
+    registry is reported by its own doctor row, and it is never a reason to
+    decide blind.
+
+    IT MUST NOT BE `load_registry`, and that is the whole reason this function
+    exists rather than a bare try/except at each site. `load_registry`
+    QUARANTINES a corrupt registry -- it renames the file aside (`:812`) --
+    which is a WRITE. `_supervisor_gate` promises "READ-ONLY: no lock, no mint,
+    no write" and runs at the top of every mutating verb, so routing its
+    identity read through `load_registry` would let a speed-bump shred operator
+    evidence on a path that documents itself as touching nothing. This is D4's
+    rule for the view path (`:2574`) applied to the one other reader that has
+    no business quarantining. Quarantining stays where it belongs: the
+    lock-holding verbs, `cmd_sup_boot` included via `_holder_is_limited`."""
+    ok, _reason, data = _read_registry_readonly()
+    return data if ok else None
+
+
+def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     """THE WEDGED STATE, as ONE predicate: this claim is `released` and the
     body that released it is still LIVE in the roster.
 
@@ -10128,23 +10152,61 @@ def _releaser_is_roster_live(claim, live_sids: set) -> bool:
     claim, and now also brick every mutating verb, forever on a value nobody
     wrote.
 
-    PURE: no IO, no roster fetch of its own. `live_sids` is resolved by the
-    caller, which is what lets `sup-boot` reuse the roster it already holds and
-    the gate skip the subprocess entirely on every non-released claim."""
+    KEYED ON THE SID UNION (`_record_sids` = session_id ∪ retired_sids), which
+    is councilor 1's half of the same ruling. A bare `released_by_sid in
+    live_sids` is what shipped, and `_record_sids`' own docstring says why it
+    is wrong -- *"matching against `session_id` alone fails open on it
+    (ND4a)"* -- for the seven other sites that already key on the union
+    (`:2020, :2064, :2116, :5503, :5790, :6057, :7117`). B6 was the one
+    roster comparison that did not, and §G-G measured it failing open exactly
+    as predicted: the releaser fork-steered, so its record was eagerly
+    restamped (`session_id` = post-fork, pre-fork sid pushed into
+    `retired_sids`) while INCARNATION still carried the PRE-fork sid it was
+    written with. The roster listed the post-fork sid, the bare comparison
+    found nothing, and a second supervisor booted through.
+
+    The union is ADDITIVE: a live releaser sid that matches no record still
+    answers True, so this can never be a regression on the state the bare
+    comparison already caught. It cannot make one body answer for another
+    either -- no FOREIGN sid ever enters a record's `retired_sids` (every
+    writer appends that record's OWN prior sid alone: :4505, :4952, :8061,
+    :11147), the same safety invariant §7.1's send carve-out rests on.
+
+    PURE: no IO, and deliberately so -- both consumers run on paths where a
+    read must not surprise anyone (`sup-boot` under `fleet_lock`, the gate at
+    the top of every mutating verb). `live_sids` AND `registry` are resolved by
+    the caller. With `registry=None` this degrades to the bare comparison,
+    which is today's shipped answer: never worse, never a crash."""
     if not isinstance(claim, dict) or claim.get("state") != "released":
         return False
     released_by = claim.get("released_by_sid")
     if not isinstance(released_by, str) or not released_by:
         return False
-    return released_by in live_sids
+    if released_by in live_sids:
+        return True
+    if not isinstance(registry, dict):
+        return False
+    # OR across every record carrying the sid rather than the first hit: the
+    # uniqueness invariant above says there is at most one, and a registry that
+    # has drifted out of that invariant must resolve TOWARD the gate.
+    return any(released_by in sids and bool(sids & live_sids)
+               for sids in (_record_sids(rec)
+                            for rec in registry.get("workers", {}).values()))
 
 
 def supervisor_claim_decision(claim, live_sids: set, latest_entry, now=None,
                               stale_seconds: float = SUPERVISOR_CLAIM_STALE_SECONDS,
                               caller_sid=None, nonce_valid: bool = False,
-                              holder_limited: bool = False):
+                              holder_limited: bool = False, registry=None):
     """Claim rules at boot (claim-nonce §6.1, verbatim order). Returns
     (verdict, reason); verdict in SUPERVISOR_BOOT_VERDICTS. Pure -- no IO.
+
+    `registry` is the loaded registry dict, supplied by the lock-holding caller
+    for the same reason `holder_limited` is: rule 1's B6 arm identifies the
+    releaser through the sid UNION (`_releaser_is_roster_live`), and this
+    function has no registry access by design. Omitted, rule 1 degrades to the
+    bare-sid comparison -- today's shipped answer, and fail-open on a
+    fork-steered releaser (ND4a).
 
     Rule order, and why it is this order:
 
@@ -10199,7 +10261,7 @@ def supervisor_claim_decision(claim, live_sids: set, latest_entry, now=None,
         # predicate the §7 gate also arms on, so "wedged" cannot come to mean
         # two different things in the two places that act on it.
         released_by = claim.get("released_by_sid")
-        if _releaser_is_roster_live(claim, live_sids):
+        if _releaser_is_roster_live(claim, live_sids, registry=registry):
             return ("refuse", f"claim {claim.get('incarnation_id', '?')} is released but its "
                               f"releaser (sid {released_by}) is still live in the roster -- "
                               f"release+stop is not complete; wait for that body to exit")
@@ -10408,9 +10470,15 @@ def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
                     nonce_valid=presented is not None,
                     # Resolved here rather than inside the pure function --
                     # this block already holds `fleet_lock`, and the decision
-                    # function has no registry access by design.
+                    # function has no registry access by design. `registry` is
+                    # supplied for the same reason: rule 1's B6 arm keys the
+                    # releaser through the sid UNION (ND4a), which needs the
+                    # records. Unreadable -> None -> rule 1 degrades to the bare
+                    # comparison; a corrupt registry must not brick a boot that
+                    # would otherwise refuse or freeze on its own merits.
                     holder_limited=claim is not None and _holder_is_limited(
-                        claim.get("session_id")))
+                        claim.get("session_id")),
+                    registry=_registry_records_or_none())
             if verdict == "claim":
                 inc = mint_incarnation_id()
                 value = mint_nonce()
@@ -10543,7 +10611,8 @@ def _wedged_release_gate(verb, claim):
     roster_ok, payload = _fetch_agents_roster()
     if not roster_ok:
         return                          # roster unreadable: fail OPEN
-    if not _releaser_is_roster_live(claim, _roster_live_sids(payload)):
+    if not _releaser_is_roster_live(claim, _roster_live_sids(payload),
+                                    registry=_registry_records_or_none()):
         return                          # release+stop completed -- claim open
     raise SupervisorClaimGateError(
         f"{verb}: refusing -- the supervisor claim "
