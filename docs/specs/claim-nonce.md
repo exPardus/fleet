@@ -2615,3 +2615,140 @@ not taken.
 - Incidents: `supervisor/JOURNAL.md:94`, `:114`, `:146`; `knowledge/lessons.md:601`, `:625`, `:627`.
 - Substrate (read-only input, status unchanged): `docs/specs/native-substrate.md:43`, `:146`,
   `:208-213`, `:233`, `:268-274`.
+
+---
+
+## 16. AMENDMENT — §6.5 D5's prerequisite was built against `docs/SPEC.md`, not against §6.5
+
+> **DESCRIPTIVE — REQUIRES OPERATOR RATIFICATION.** Appended 2026-07-26 by the builder of
+> `fix/identity-registry-judges`. It records what was built and why it diverges from §6.5 D5.
+> It does **not** amend §6.5, and it is **not** ratified: an author does not ratify their own
+> amendment. §6.5 D5's text above is left exactly as it was written.
+
+### 16.1 The contradiction, both sides quoted
+
+§6.5 D5 (this document, above) states as a binding consequence for the builder:
+
+> The design **depends on** a `FLEET_WORKER` refusal in `_require_claim_holder`, which does not exist
+> today — a worker turn can hold the supervisor claim and is prevented only by accident. That is a
+> **shipped-code defect, filed separately and not built here** (§13).
+
+`docs/SPEC.md` §6.1 (line 196) states the opposite as a binding constraint:
+
+> **Constraint this creates, recorded so the next builder does not trip on it:** `FLEET_WORKER` here
+> means "not the manager session", **not** "is a registry worker". A future guard enforcing *a worker
+> turn must never hold the supervisor claim* must key on the registry or the claim itself, never on
+> `FLEET_WORKER`, or it will refuse the one session whose whole purpose is to receive the claim.
+
+The arm shipped in the nonce build faithfully implemented §6.5 D5's prerequisite, and thereby violated
+`SPEC.md` §6.1. **This is a spec-vs-spec contradiction, not a code-vs-spec divergence** — the code was
+correct with respect to one ratified document and wrong with respect to another.
+
+```
+# at 8dee4b8
+$ sed -n '10899,10906p' bin/fleet.py
+    worker = os.environ.get("FLEET_WORKER")
+    if worker and worker.strip() and not _is_supervisor_shaped(worker):
+        raise FleetCliError(
+            f"{verb}: refusing -- this is a worker turn (FLEET_WORKER={worker!r}) and "
+            f"the supervisor claim is not a worker's to hold (claim-nonce §6.5). "
+            f"Escalate to the supervisor session. (A speed-bump, not a security "
+            f"boundary: an environment variable is settable by anyone who can run "
+            f"this command.)")
+```
+
+### 16.2 Which document was built to, and why
+
+**`docs/SPEC.md` §6.1.** It is the more general document, it is the spec of record, and it predicted
+this exact failure mode in advance.
+
+The failure it predicted arrived. The machine-wide `claude` daemon hosts every `--bg` session and
+donates the environment of whichever dispatch started it, frozen for the daemon's whole life — so
+every session the daemon hosts carries the `FLEET_WORKER` of a long-dead dispatch. Measured on a live
+supervisor body, 2026-07-26. **This is not a receipt and is deliberately not fenced as one**: its
+evidence is a running process's environment, not any commit's tree, so nothing in this repo can
+re-execute it and a `# volatile` marker would only assert that. What *is* re-executable is the same
+disagreement reconstructed in a sandbox registry —
+`tests/test_identity_registry.py::TestTheReceipt`, which fails if either read site is ever re-keyed
+back onto `FLEET_WORKER`. The original measurement, indented as the prose it is:
+
+    my env CLAUDE_CODE_SESSION_ID : 108300de-8d43-411e-8177-94843bee05ab
+    my env FLEET_WORKER           : sup|inc-20260726T140146Z-5a0e|boot
+
+    records whose sid union contains MY env sid: ['sup|inc-20260726T164152Z-8180|boot']
+    my actual dispatched worker name          : sup|inc-20260726T164152Z-8180|boot
+    env FLEET_WORKER names a DIFFERENT record :  True (status: idle )
+
+`fleet doctor` in the same minute reported `daemon.lock held by pid 28812 since
+2026-07-26T14:01:49Z` — the daemon was started by the **14:01** supervisor dispatch and had been
+donating that dispatch's identity to every session it hosted since.
+
+At one instant, on one body: the registry judged identity correctly and the environment judged it
+wrongly, simultaneously. `SPEC.md` §6.1's sentence — *"it will refuse the one session whose whole
+purpose is to receive the claim"* — is the concrete hazard: a supervisor body hosted by a daemon that
+an ordinary **worker** dispatch started carries a worker-shaped stamp, can `sup-boot` (which does not
+call `_require_claim_holder`), and can then never heartbeat, checkpoint or **release** — release being
+precisely the verb it cannot reach. A wedged claim requiring a manual operator lever. It has been
+benign so far only because this daemon happened to be started by a supervisor dispatch.
+
+### 16.3 What §6.5 D5 keeps, and what it loses
+
+**Keeps — the whole of D5's actual subject.** `--nonce <value>` remains the only presentation channel;
+there is still no `FLEET_SUP_NONCE`; §4.10's reasoning (the whole parent environment is copied and
+exactly one key is stripped) is untouched and is now doubly supported, since the daemon donation
+means the environment is not even reliably *this dispatch's* environment. D5's belt-and-braces
+instruction — strip any future env channel in `_worker_env` — stands unchanged.
+
+**Loses — only the prerequisite sentence.** The `FLEET_WORKER` refusal D5 says the design "depends on"
+was built as a **registry-keyed classifier** rather than an env-keyed gate, in two steps:
+
+1. **Re-keyed.** The acting body's role is judged by `_acting_worker_name()` — the acting session's own
+   `CLAUDE_CODE_SESSION_ID` resolved against every registry record's sid **union** (`_record_sids`, so
+   fork-steered and respawned bodies still resolve). `FLEET_WORKER` is read in exactly one place in
+   `bin/fleet.py`, and that place is a `fleet doctor` row that reports a witness disagreeing with the
+   registry as the leak it is.
+
+2. **Demoted from gate to classifier**, which is the larger divergence and the one most in need of
+   ratification. **An identity inference derived from the environment may never be the sole basis of a
+   refusal; the nonce and the claim refuse, inference may only inform and announce.** Both
+   `FLEET_WORKER` and `CLAUDE_CODE_SESSION_ID` are read from the *same* donated medium, so re-keying
+   onto a registry lookup improves blame-assignment without escaping that medium: if the sid can be
+   donated the way `FLEET_WORKER` demonstrably is, a registry-by-sid judge inherits the identical
+   defect one level down. **Whether it can is an open question** — `_worker_env` pops
+   `CLAUDE_CODE_SESSION_ID` before `Popen(env=…)`, so the daemon on this machine was started by a
+   launcher with no sid to donate, and every measurement we hold is equally consistent with "the vendor
+   stamps a fresh sid into each hosted session" and "the vendor passes the environment through and
+   there was simply nothing to pass". Deciding it requires restarting the machine-wide daemon from a
+   process that holds a sid, which kills every live session including the supervisor's.
+
+   So the nonce decides **whether** a caller is refused; the registry-judged role decides only **how**
+   an already-certain refusal is worded, exit-coded (1, a role error, not 4, which means "a second body
+   of your lineage may be acting") and logged (kind `worker-turn`, so `_doctor_check_supervisor_claim`'s
+   second-body alarm is not cried wolf). A body presenting the live generation is never refused for
+   looking like a worker.
+
+```
+# at 2878c68
+$ grep -c "os.environ.get(\"FLEET_WORKER\")" bin/fleet.py
+1
+$ grep -n "os.environ.get(\"FLEET_WORKER\")" bin/fleet.py
+8205:    witness = (os.environ.get("FLEET_WORKER") or "").strip()
+```
+
+**The cost, stated rather than buried.** A worker turn that has somehow been *given* the live nonce is
+no longer stopped by this arm. The shipped arm's own message called itself *"a speed-bump, not a
+security boundary"* and `env -u FLEET_WORKER fleet …` defeated it, so what is traded away was never a
+control; what is bought is that a legitimate claim-holder is never refused its own `sup-release`, which
+is the exact wedge the donated environment produces. **If the operator judges that trade wrong, the
+place to change it is here** — reinstating a refusal means accepting that a misidentified body can be
+wrongly refused a claim verb, and that acceptance is an operator's call, not a builder's.
+
+### 16.4 What ratification would settle
+
+1. Whether `SPEC.md` §6.1 or §6.5 D5 governs, so the loser is amended by its owner rather than by a
+   builder appending to it.
+2. Whether the gate→classifier demotion (16.3 item 2) is adopted as doctrine, or whether the refusal
+   should be reinstated once — and only once — the open question about `CLAUDE_CODE_SESSION_ID`
+   donation is settled by the operator-shell experiment described above.
+3. Whether the invariant in 16.3 item 2 belongs in `docs/SPEC.md` as a general rule about
+   environment-derived identity, rather than living only in code comments and in this amendment.
