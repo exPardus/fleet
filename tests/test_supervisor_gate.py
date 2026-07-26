@@ -16,8 +16,10 @@ The honest accounting §7 read the decision against, made executable here:
     refusal itself, not pretended away.
 """
 import json
+import re
 import types
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -32,6 +34,25 @@ def gate_home(tmp_path, monkeypatch):
         (tmp_path / sub).mkdir()
     (tmp_path / "state" / "worker-settings.json").write_text("{}", encoding="utf-8")
     return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def _never_dispatch(monkeypatch):
+    """MAJ-4: NOTHING in this file may reach the dispatcher, and the guard is
+    applied to the CLASS rather than to the tests that happened to be caught.
+
+    Every test here drives a mutating verb expecting the gate to refuse it. The
+    armed gate is therefore the ONLY thing between `fleet.main(["spawn", ...])`
+    and a real, billable `claude` session -- which is precisely the assumption
+    the whole slice exists to distrust. It was already wrong once: the break
+    lens found 18 `state: blocked` sessions in `claude agents --json --all`,
+    from nine prior runs of the two `spawn`-driving tests below, launched into
+    pytest tmp dirs because the fix for the first incident was applied to one
+    test instead of to every test that could produce it.
+
+    A test that legitimately needs a dispatcher stubs its own after this one."""
+    monkeypatch.setattr(fleet, "dispatch_bg", lambda *a, **k: pytest.fail(
+        "a gate test reached dispatch_bg -- that dispatches a REAL claude session"))
 
 
 def _fresh_claim(sid="sid-sup", lineage="lin-L", beat_age_seconds=5, **extra):
@@ -59,8 +80,16 @@ class TestGateArming:
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-anyone")
         fleet._supervisor_gate("spawn", nonce=None)
 
-    def test_a_released_claim_disarms_the_gate(self, gate_home, monkeypatch):
+    def test_a_CLEANLY_released_claim_disarms_the_gate(self, gate_home, monkeypatch):
+        # NARROWED 2026-07-26 (§R3, councilor 4): "released" alone no longer
+        # disarms. A released claim whose releaser is still roster-LIVE is the
+        # wedged state and it ARMS -- see tests/test_gate_arm_wedge.py. What
+        # disarms is release+stop having COMPLETED, which is this test.
+        # The roster is stubbed rather than left live: without the stub this
+        # passes only because the developer's own roster happens not to list
+        # `sid-x`, which is a test outcome that depends on who ran it.
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-anyone")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
         fleet.write_incarnation({"incarnation_id": "inc-old", "lineage_id": "lin-L",
                                  "claimed_via": "fresh", "released_at": fleet.now_iso(),
                                  "released_by_sid": "sid-x", "state": "released"})
@@ -75,7 +104,13 @@ class TestGateArming:
         # released claim has no holder, so there is no divergent-second-body
         # question to gate. Without the `state == "released"` conjunct this
         # would arm and refuse a caller presenting no generation.
+        #
+        # Still true after the §R3 narrowing, and now carrying MORE weight: the
+        # released branch runs first and answers for this claim entirely, so an
+        # anomalous fresh beat and an anomalous nonce_hash are both ignored --
+        # a released claim is decided by its releaser's roster state alone.
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-anyone")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
         value = fleet.mint_nonce()
         fleet.write_incarnation({"incarnation_id": "inc-old", "lineage_id": "lin-L",
                                  "claimed_via": "fresh", "released_at": fleet.now_iso(),
@@ -236,8 +271,29 @@ class TestGateExitCode:
 
 # --- every mutating lifecycle verb is behind the gate ----------------------
 
-GATED_VERBS = ["spawn", "send", "respawn", "kill", "clean", "interrupt",
-               "archive", "resume-limited", "release", "init"]
+GATED_VERBS = ["spawn", "sup-spawn", "send", "respawn", "kill", "clean",
+               "interrupt", "archive", "resume-limited", "release", "init"]
+
+
+def _gated_argv(verb, home):
+    """§7's taxonomy as argv, shared by BOTH arming arms (held and wedged) so
+    the two taxonomies cannot drift apart -- which is what let a carve-out
+    disarming seven of the eleven verbs survive the whole suite (CRIT-1).
+
+    A name that does not exist is fine: the gate runs BEFORE the verb's own
+    work, so the gate refusal (exit 4) precedes any unknown-worker error (exit
+    1). That ordering is part of the assertion."""
+    return {"spawn": ["spawn", "w", "--dir", str(home), "--task", "go"],
+            "sup-spawn": ["sup-spawn", "--task", "go"],
+            "send": ["send", "w", "hi"],
+            "respawn": ["respawn", "w"],
+            "kill": ["kill", "w"],
+            "clean": ["clean"],
+            "interrupt": ["interrupt", "w"],
+            "archive": ["archive"],
+            "resume-limited": ["resume-limited"],
+            "release": ["release", "w"],
+            "init": ["init"]}[verb]
 
 
 class TestEveryMutatingVerbIsGated:
@@ -250,20 +306,20 @@ class TestEveryMutatingVerbIsGated:
     def test_verb_is_refused_under_an_armed_gate(self, gate_home, monkeypatch, verb):
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-sup")
         _fresh_claim()
-        # a name that does not exist is fine: the gate runs BEFORE the verb's
-        # own work, so the gate refusal (exit 4) precedes any unknown-worker
-        # error (exit 1). That ordering is the assertion.
-        argv = {"spawn": ["spawn", "w", "--dir", str(gate_home), "--task", "go"],
-                "send": ["send", "w", "hi"],
-                "respawn": ["respawn", "w"],
-                "kill": ["kill", "w"],
-                "clean": ["clean"],
-                "interrupt": ["interrupt", "w"],
-                "archive": ["archive"],
-                "resume-limited": ["resume-limited"],
-                "release": ["release", "w"],
-                "init": ["init"]}[verb]
-        assert fleet.main(argv) == fleet.SUPERVISOR_CONTINUITY_RC
+        assert fleet.main(_gated_argv(verb, gate_home)) == fleet.SUPERVISOR_CONTINUITY_RC
+
+    def test_the_taxonomy_covers_every_call_site_in_fleet(self):
+        """The list is not allowed to be shorter than the code.
+
+        `GATED_VERBS` is the thing both arming arms are parametrised over, so a
+        verb that reaches `_supervisor_gate` and is missing from this list is
+        invisible to BOTH taxonomy tests at once -- the failure CRIT-1
+        describes, one level up. Read out of the source rather than restated."""
+        src = (Path(fleet.__file__)).read_text(encoding="utf-8")
+        called = set(re.findall(r'_supervisor_gate\(\s*"([a-z-]+)"', src))
+        assert called == set(GATED_VERBS), (
+            f"call sites not in GATED_VERBS: {sorted(called - set(GATED_VERBS))}; "
+            f"GATED_VERBS with no call site: {sorted(set(GATED_VERBS) - called)}")
 
     def test_autoclean_is_structurally_exempt(self, gate_home, monkeypatch):
         # Even with a sid and a fresh claim and no generation, autoclean is not
@@ -274,3 +330,37 @@ class TestEveryMutatingVerbIsGated:
         monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
         rc = fleet.main(["autoclean", "--fleet-home", str(gate_home)])
         assert rc != fleet.SUPERVISOR_CONTINUITY_RC
+
+
+class TestEveryMutatingVerbIsGatedByTheWedge:
+    """The SAME taxonomy, on the WEDGED arm -- fix-wave item 1, break-lens
+    CRIT-1.
+
+    The held-claim arm above has driven all of §7's verbs since the gate
+    shipped. The wedged arm shipped with four (`clean`, `kill`, `interrupt`,
+    `spawn`), and the break lens measured what that costs: two behavioural
+    mutants of `_wedged_release_gate` survived the entire 2185-test suite --
+    `if verb not in ("clean","kill","interrupt","spawn"): return`, which opens
+    `respawn` and `release` while leaving the branch's own headline verb
+    protected, and `if verb == "send": return`, which is the exact carve-out
+    this branch's own report names as the first change it would make. Nothing in
+    the suite could tell anyone whether such a change landed for one verb or
+    took six others with it.
+
+    Parametrised over the SAME `GATED_VERBS` list as the held arm, deliberately:
+    one taxonomy, two arms, no way for them to drift.
+
+    The discriminator -- that this refusal is the wedge and not something
+    unconditional -- is not repeated per verb; it is
+    `tests/test_gate_arm_wedge.py`'s roster-gone pair, which drives the same
+    verbs to rc=0 with their real work reached."""
+
+    @pytest.mark.parametrize("verb", GATED_VERBS)
+    def test_verb_is_refused_under_a_wedged_claim(self, gate_home, monkeypatch, verb):
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-third-body")
+        fleet.write_incarnation({"incarnation_id": "inc-old", "lineage_id": "lin-L",
+                                 "claimed_via": "fresh", "released_at": fleet.now_iso(),
+                                 "released_by_sid": "sid-releaser", "state": "released"})
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (
+            True, [{"sessionId": "sid-releaser", "status": "idle", "pid": 4242}]))
+        assert fleet.main(_gated_argv(verb, gate_home)) == fleet.SUPERVISOR_CONTINUITY_RC

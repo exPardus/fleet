@@ -995,6 +995,28 @@ def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
         # A record without it (pre-field, or a human-shell spawn) reads as
         # None and gets today's spawned_by-only ownership answer.
         "spawned_by_lineage": spawned_by_lineage,
+        # LOAD-BEARING AND WRITE-ONCE: this is the ONLY site in the file that
+        # writes `created`, and no path may ever rewrite it on an existing
+        # record -- not even to carry a worker's age forward across a respawn,
+        # which is otherwise a reasonable thing to want.
+        #
+        # `_releaser_live_sids` bounds the §7 gate's union arm by comparing this
+        # field against the claim's `released_at`: a record MINTED AFTER the
+        # release cannot be the body that performed it, so a fork-steer (which
+        # restamps the record IN PLACE and leaves `created` alone) arms the
+        # wedge while a respawn (which REPLACES the record through this
+        # function, stamping a fresh `created`) does not. Carrying `created`
+        # forward across a respawn INVERTS that test silently: every respawned
+        # body would answer "the releaser is roster-live" forever, B6 would
+        # refuse every successor on the same state, and the fleet would have no
+        # in-fleet exit from the wedge -- break-lens MAJ-2, 2026-07-27, which
+        # was measured at exactly that.
+        #
+        # Pinned, so the next editor finds the test and not only this warning:
+        # `tests/test_b6_sid_union.py::TestTheUnionArmIsBoundedToTheForkSteerWindow`
+        # -- `test_a_fork_steered_releaser_still_arms_the_gate` and
+        # `test_a_respawned_body_does_not_arm_the_gate` are the two halves, and
+        # `test_a_respawned_body_leaves_an_in_fleet_exit` is the harm itself.
         "created": created,
         "status": "working",
         "attached_since": None,
@@ -6366,6 +6388,17 @@ def _archive_eligible(name: str, record: dict, roster_entries: list, now,
        the caller passes in, not necessarily the raw stored one).
     3. roster entry for the current sid is absent OR dead (no `status`/
        `pid` keys) -- NEVER archive a live-process entry (G12 gap).
+    3b. this record is not the one the §7 gate is currently WEDGING the
+       fleet on (a `released` claim whose releasing body is still
+       roster-live through this record's sid union). Deliberately NOT a
+       re-key of gate 3 onto the union: T9's finding C1 ruled that a live
+       RETIRED sid is skipped by the rm loop and is "not a reason to block
+       the whole worker", and that ruling stands for ordinary workers.
+       What this gate closes is narrower -- break-lens MAJ-3 measured that
+       the record wedging every mutating verb fleet-wide was fully
+       archive-eligible, so `autoclean` could delete the very state the
+       gate reads. Same predicate the gate arms on, so the two cannot
+       disagree; it releases the moment the wedge does.
     4. an outcome record exists for the current sid (ANY kind -- a result
        vouches completion, a tombstone vouches an operator decision); no
        record at all is dead-suspected territory, never auto-archived.
@@ -6387,7 +6420,13 @@ def _archive_eligible(name: str, record: dict, roster_entries: list, now,
     sid unreadable) it fails TOWARD protection, but only for supervisor-shaped
     NAMES, so a briefly unreadable INCARNATION cannot freeze archiving of every
     ordinary worker."""
-    holder = _record_is_supervisor_claim_holder(record)
+    # Read ONCE and hand to both claim-keyed gates (0 and 3b). This function
+    # runs per-record inside `cmd_archive`'s verdict comprehension and
+    # `autoclean`'s scheduled sweep, so a second independent read here would be
+    # one extra INCARNATION read per worker per run for no new information --
+    # and would let the two gates decide against different snapshots of it.
+    claim = read_incarnation()
+    holder = _record_is_supervisor_claim_holder(record, claim=claim)
     if holder is True or (holder is None and
                           (name == SUPERVISOR_BODY_NAME or _is_supervisor_shaped(name))):
         return (False, "supervisor claim-holder -- protected while live (§7.2)")
@@ -6405,6 +6444,30 @@ def _archive_eligible(name: str, record: dict, roster_entries: list, now,
     live = entry is not None and ("status" in entry or "pid" in entry)
     if live:
         return (False, "roster-live")
+    # Gate 3b (break-lens MAJ-3, 2026-07-27 fix wave item 4): the record the §7
+    # gate is WEDGING the whole fleet on is not archivable while it is doing so.
+    #
+    # Gate 3 above keys on `session_id` alone, and that is DELIBERATE -- T9's
+    # finding C1 ruled that a live RETIRED sid is skipped by the rm loop and is
+    # "not a reason to block the whole worker", pinned by
+    # `test_rm_skips_a_live_retired_sid_but_rms_current_sid`. Re-keying gate 3
+    # through the union would reverse that ruling for every ordinary
+    # fork-steered worker, so it is not re-keyed.
+    #
+    # What MAJ-3 actually measured is narrower: the union arm of the §7 gate
+    # arms on a record whose `session_id` is roster-gone while a retired sid is
+    # live, and for exactly those records gate 0 answers False (released, by
+    # design, B9) and gate 3 answers "not live" -- so the record wedging every
+    # mutating verb fleet-wide was fully archive-eligible, and an `autoclean`
+    # could delete the state the gate reads. This gate protects THAT record and
+    # nothing else, through the SAME predicate the gate arms on (a one-record
+    # registry, so the two can never disagree about what a wedge is), and it
+    # releases the moment the wedge does.
+    if (isinstance(claim, dict)
+            and claim.get("released_by_sid") in _record_sids(record)
+            and _releaser_live_sids(claim, _roster_live_sids(roster_entries),
+                                    registry={"workers": {name: record}})):
+        return (False, "wedging-released-claim")
     if not read_outcomes(name, sid=sid):
         return (False, "no-outcome-record")
     try:
@@ -10108,12 +10171,187 @@ def _holder_is_limited(holder_sid) -> bool:
     return False
 
 
+def _registry_records_or_none():
+    """The registry's records for an IDENTITY question, or None if unreadable.
+
+    The ONE degradation the sid-union re-key needs, named once so both its
+    consumers spell it the same way. `_releaser_is_roster_live` treats None as
+    "bare comparison only" -- today's shipped answer -- so an unreadable
+    registry can never brick a `sup-boot` or a mutating verb; the corrupt
+    registry is reported by its own doctor row, and it is never a reason to
+    decide blind.
+
+    IT MUST NOT BE `load_registry`, and that is the whole reason this function
+    exists rather than a bare try/except at each site. `load_registry`
+    QUARANTINES a corrupt registry -- it renames the file aside (`:812`) --
+    which is a WRITE. `_supervisor_gate` promises "READ-ONLY: no lock, no mint,
+    no write" and runs at the top of every mutating verb, so routing its
+    identity read through `load_registry` would let a speed-bump shred operator
+    evidence on a path that documents itself as touching nothing. This is D4's
+    rule for the view path (`:2574`) applied to the one other reader that has
+    no business quarantining. Quarantining stays where it belongs: the
+    lock-holding verbs, `cmd_sup_boot` included via `_holder_is_limited`."""
+    ok, _reason, data = _read_registry_readonly()
+    return data if ok else None
+
+
+def _releaser_live_sids(claim, live_sids: set, registry=None) -> set:
+    """THE WEDGED STATE as a SET: every roster-live sid that answers for the
+    body which released this claim. An EMPTY set means "not wedged".
+
+    This is the comparison itself; `_releaser_is_roster_live` below is its
+    boolean spelling and the name §6.1 row 1 and §7.2 both cite. It hands back
+    the sids rather than a bool because every refusal built on it names a
+    session for the operator to stop, and in the UNION arm `released_by_sid` is
+    BY CONSTRUCTION not that session: the union arm exists precisely for the
+    case where the releaser's own sid is roster-GONE and a different sid of its
+    record is live. Printing `released_by_sid` there names a remedy that can
+    never execute -- the R2 defect this branch refused to commit for `--nonce`
+    and then committed here (break-lens MAJ-1, fix-wave item 2).
+
+    THE UNION ARM IS BOUNDED TO THE UN-RESTAMPED FORK-STEER WINDOW and nothing
+    else (fix-wave item 3, break-lens MAJ-2). `retired_sids` is not a fork-steer
+    artefact only: `cmd_respawn` carries `prior_retired + [old_sid]` into a
+    record it MINTS FRESH, and a respawn is a genuinely different body. The
+    safety invariant below ("no FOREIGN sid ever enters a record's
+    `retired_sids`") is true and is not the relevant one -- those sids are all
+    the record's own and they are still different bodies. Unbounded, a record
+    whose releaser died and was respawned answers "the releaser is roster-live"
+    FOREVER: B6 then refuses every successor on the same state, and the break
+    lens measured that there is no in-fleet exit at all (`send`, `kill`,
+    `respawn` and `send supervisor` all refuse), which converts a self-healing
+    wedge into a lockout clearable only by a human editing INCARNATION.
+
+    THE BOUNDARY is the record's own `created` against the claim's
+    `released_at`: a record MINTED AFTER the release cannot be the body that
+    performed it.
+
+      * fork-steer -- `_restamp_after_steer` mutates the record IN PLACE
+        (`session_id` := the fork, the old sid appended to `retired_sids`), so
+        `created` still carries the original spawn time, which necessarily
+        precedes a release that body performed. ARMS -- this is ND4a, the whole
+        point of the union re-key.
+      * respawn -- `cmd_respawn` REPLACES the record with `new_worker_record`,
+        stamping a fresh `created` at respawn time, which necessarily follows
+        the release it is respawning past. DECLINES.
+      * `_cmd_respawn_supervisor` mints a differently-NAMED record and leaves
+        the old one behind, so a supervisor successor never carries the
+        releaser's sid at all; the same boundary covers it without a case.
+
+    Ties resolve TOWARD the gate: `created == released_at` arms. Both are
+    second-precision (`now_iso`), so a respawn landing inside the same second
+    as the release reads as the fork-steer case rather than silently disarming
+    a wedge.
+
+    DEGRADATION, one direction, stated once. An unreadable registry
+    (`registry=None`), a claim with no parseable `released_at`, or a record with
+    no parseable `created` each drop that record out of the union and leave the
+    bare `released_by_sid in live_sids` comparison standing -- which is `main`'s
+    shipped answer, so the union arm can never be worse than the state the fleet
+    already lives with. Same direction `_registry_records_or_none` already takes
+    for an unreadable registry, and it resolves the ambiguity toward the failure
+    an operator can still act on (a fail-open B6, refusable at the next boot)
+    rather than the one that needs a human with a text editor."""
+    if not isinstance(claim, dict) or claim.get("state") != "released":
+        return set()
+    released_by = claim.get("released_by_sid")
+    if not isinstance(released_by, str) or not released_by:
+        return set()
+    if released_by in live_sids:
+        return {released_by}
+    if not isinstance(registry, dict):
+        return set()
+    try:
+        released_at = _parse_iso(claim.get("released_at"))
+    except (TypeError, ValueError):
+        return set()            # no boundary to draw -- bare comparison only
+    live = set()
+    # OR across every record carrying the sid rather than the first hit: the
+    # uniqueness invariant below says there is at most one, and a registry that
+    # has drifted out of that invariant must resolve TOWARD the gate.
+    for rec in registry.get("workers", {}).values():
+        sids = _record_sids(rec)
+        if released_by not in sids:
+            continue
+        # `rec` is a dict here or `_record_sids` would have yielded nothing.
+        try:
+            created = _parse_iso(rec.get("created"))
+        except (TypeError, ValueError):
+            continue            # unreadable birth: not attributable, skip it
+        if created > released_at:
+            continue            # minted AFTER the release -- a respawn, not a fork
+        live |= sids & live_sids
+    return live
+
+
+def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
+    """THE WEDGED STATE, as ONE predicate: this claim is `released` and the
+    body that released it is still LIVE in the roster.
+
+    The boolean spelling of `_releaser_live_sids` above, which holds the
+    comparison, the union arm's fork-steer boundary and the degradation rules.
+    Both consumers decide through THIS function and reach for the set only to
+    name sessions in a refusal, so the decision cannot drift from the message.
+
+    Held as a function with TWO consumers that must not be able to disagree --
+    B6 (§6.1 rule 1, which REFUSES a successor boot into this state) and the §7
+    gate (`_supervisor_gate`, which ARMS on it). The 2026-07-26 ruling's whole
+    ordering argument -- B6 fail-closed multiplies wedges, so the gate must
+    contain them first or in the same commit -- is only sound if the two mean
+    the SAME state by "wedged". Two copies of the comparison would let that
+    silently stop being true, and R3's own process lesson is that this project
+    "writes down the right rule and then ships a guard that does not follow
+    it". So there is one comparison and both callers key on it.
+
+    Keyed on a non-empty STRING only: a released claim carries no `session_id`
+    at all (§6.3), so a `None` that a drifted or hostile roster put in the live
+    set must not gate a record that names no releaser -- that would strand the
+    claim, and now also brick every mutating verb, forever on a value nobody
+    wrote.
+
+    KEYED ON THE SID UNION (`_record_sids` = session_id ∪ retired_sids), which
+    is councilor 1's half of the same ruling. A bare `released_by_sid in
+    live_sids` is what shipped, and `_record_sids`' own docstring says why it
+    is wrong -- *"matching against `session_id` alone fails open on it
+    (ND4a)"* -- for the seven other sites that already key on the union
+    (`:2020, :2064, :2116, :5503, :5790, :6057, :7117`). B6 was the one
+    roster comparison that did not, and §G-G measured it failing open exactly
+    as predicted: the releaser fork-steered, so its record was eagerly
+    restamped (`session_id` = post-fork, pre-fork sid pushed into
+    `retired_sids`) while INCARNATION still carried the PRE-fork sid it was
+    written with. The roster listed the post-fork sid, the bare comparison
+    found nothing, and a second supervisor booted through.
+
+    The union is ADDITIVE: a live releaser sid that matches no record still
+    answers True, so this can never be a regression on the state the bare
+    comparison already caught. It cannot make one body answer for another
+    either -- no FOREIGN sid ever enters a record's `retired_sids` (every
+    writer appends that record's OWN prior sid alone: :4588, :5035, :8963,
+    :12433), the same safety invariant §7.1's send carve-out rests on. That
+    invariant is what makes the union SAFE; it is NOT what makes it correct,
+    and `_releaser_live_sids`' fork-steer boundary is the difference.
+
+    PURE: no IO, and deliberately so -- both consumers run on paths where a
+    read must not surprise anyone (`sup-boot` under `fleet_lock`, the gate at
+    the top of every mutating verb). `live_sids` AND `registry` are resolved by
+    the caller. With `registry=None` this degrades to the bare comparison,
+    which is today's shipped answer: never worse, never a crash."""
+    return bool(_releaser_live_sids(claim, live_sids, registry=registry))
+
+
 def supervisor_claim_decision(claim, live_sids: set, latest_entry, now=None,
                               stale_seconds: float = SUPERVISOR_CLAIM_STALE_SECONDS,
                               caller_sid=None, nonce_valid: bool = False,
-                              holder_limited: bool = False):
+                              holder_limited: bool = False, registry=None):
     """Claim rules at boot (claim-nonce §6.1, verbatim order). Returns
     (verdict, reason); verdict in SUPERVISOR_BOOT_VERDICTS. Pure -- no IO.
+
+    `registry` is the loaded registry dict, supplied by the lock-holding caller
+    for the same reason `holder_limited` is: rule 1's B6 arm identifies the
+    releaser through the sid UNION (`_releaser_is_roster_live`), and this
+    function has no registry access by design. Omitted, rule 1 degrades to the
+    bare-sid comparison -- today's shipped answer, and fail-open on a
+    fork-steered releaser (ND4a).
 
     Rule order, and why it is this order:
 
@@ -10164,16 +10402,21 @@ def supervisor_claim_decision(claim, live_sids: set, latest_entry, now=None,
         # differently-named session. Consuming the record inside that window
         # produces exactly the two-live-supervisors shape §6.6 exists for.
         #
-        # Keyed on a non-empty STRING only: a released claim carries no
-        # `session_id` at all (§6.3), so a `None` that a drifted or hostile
-        # roster put in the live set must not be able to gate a record that
-        # names no releaser -- that would strand the claim forever on a value
-        # nobody wrote.
+        # The comparison itself lives in `_releaser_is_roster_live` -- the ONE
+        # predicate the §7 gate also arms on, so "wedged" cannot come to mean
+        # two different things in the two places that act on it.
         released_by = claim.get("released_by_sid")
-        if isinstance(released_by, str) and released_by and released_by in live_sids:
-            return ("refuse", f"claim {claim.get('incarnation_id', '?')} is released but its "
-                              f"releaser (sid {released_by}) is still live in the roster -- "
-                              f"release+stop is not complete; wait for that body to exit")
+        if _releaser_is_roster_live(claim, live_sids, registry=registry):
+            # MAJ-1: name the sids that are ACTUALLY live. In the union arm
+            # `released_by_sid` is by construction roster-GONE, so a message
+            # built on it alone tells the reader to wait for a session that has
+            # already exited.
+            still = ", ".join(sorted(_releaser_live_sids(
+                claim, live_sids, registry=registry))) or "?"
+            return ("refuse", f"claim {claim.get('incarnation_id', '?')} is released by sid "
+                              f"{released_by} but that body is still live in the roster as "
+                              f"session(s) {still} -- release+stop is not complete; wait for "
+                              f"that body to exit")
         return ("claim", f"predecessor {claim.get('incarnation_id', '?')} released cleanly "
                          f"-- fresh claim, no seizure")
     holder_sid = claim.get("session_id")
@@ -10379,9 +10622,15 @@ def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
                     nonce_valid=presented is not None,
                     # Resolved here rather than inside the pure function --
                     # this block already holds `fleet_lock`, and the decision
-                    # function has no registry access by design.
+                    # function has no registry access by design. `registry` is
+                    # supplied for the same reason: rule 1's B6 arm keys the
+                    # releaser through the sid UNION (ND4a), which needs the
+                    # records. Unreadable -> None -> rule 1 degrades to the bare
+                    # comparison; a corrupt registry must not brick a boot that
+                    # would otherwise refuse or freeze on its own merits.
                     holder_limited=claim is not None and _holder_is_limited(
-                        claim.get("session_id")))
+                        claim.get("session_id")),
+                    registry=_registry_records_or_none())
             if verdict == "claim":
                 inc = mint_incarnation_id()
                 value = mint_nonce()
@@ -10481,6 +10730,67 @@ def _claim_is_legacy(claim: dict) -> bool:
     return "nonce_hash" not in claim and "state" not in claim
 
 
+def _wedged_release_gate(verb, claim):
+    """`_supervisor_gate`'s released-claim arm. Returns (disarmed) or raises.
+
+    Split out rather than inlined because it is the ONE place in the gate that
+    performs IO, and the cost has to be visible: `_fetch_agents_roster` is a
+    `claude agents --json --all` subprocess (~1.7s measured on this box, 30s
+    worst case) and the gate runs at the top of every mutating verb including
+    `send`, the beat contract's hot path. It is reached ONLY on a `released`
+    claim that names a releaser -- the window between `sup-release` and the
+    next `sup-boot`, and nothing else. A held claim, an absent claim, a legacy
+    claim and a no-sid caller all return before this function is called.
+
+    NO CONTINUITY PATH, and this is the substantive difference from the
+    held-claim arm below. §6.3's post-release key set carries no `nonce_hash`,
+    no `pending_nonce_hash` and no `prior_pending_hash`, so `_nonce_presentation`
+    would return None for every caller and every value: there is no generation
+    to present because there is no claim to prove continuity ON. Offering
+    `--nonce` here would be a named remedy that always fails, which is the
+    exact defect the 2026-07-26 ruling (R2) forbids writing into a refusal.
+
+    WHAT ACTUALLY ENDS THE WEDGE, and therefore what the message names: the
+    releasing body leaving the roster. `cmd_sup_release` already tells it to
+    ("this incarnation must EXIT: take no further fleet actions"), so the
+    normal case self-heals in seconds; if it does not, the operator stops that
+    session by the sid printed here. §5.7 binds the wording otherwise: this is
+    agent-facing, so it names the ambiguity and the escalation and never a
+    lever a second body could pull against the first.
+
+    THE SID IT PRINTS IS THE ONE THAT IS LIVE, never `released_by_sid` alone
+    (break-lens MAJ-1, fix-wave item 2). On the union arm the releaser's own sid
+    is roster-GONE by construction -- that arm exists for exactly that case --
+    so "stop session <released_by>" was a remedy that always no-ops, R2's
+    forbidden shape. `_releaser_live_sids` hands back the sessions an operator
+    can actually stop, and both are printed: the sid that released (identity)
+    and the sids still live (the remedy)."""
+    released_by = claim.get("released_by_sid")
+    if not isinstance(released_by, str) or not released_by:
+        return                          # names no releaser -- nothing to gate
+    roster_ok, payload = _fetch_agents_roster()
+    if not roster_ok:
+        return                          # roster unreadable: fail OPEN
+    live_now = _releaser_live_sids(claim, _roster_live_sids(payload),
+                                   registry=_registry_records_or_none())
+    if not live_now:
+        return                          # release+stop completed -- claim open
+    still = ", ".join(sorted(live_now))
+    raise SupervisorClaimGateError(
+        f"{verb}: refusing -- the supervisor claim "
+        f"({claim.get('incarnation_id', '?')}) is RELEASED but the body that "
+        f"released it (sid {released_by}) is still live in the roster as "
+        f"session(s) {still}, so no body holds the claim and the fleet has no "
+        f"supervisor. That body was told to exit and has not; until it does, "
+        f"no successor can boot (claim-nonce §6.1 rule 1) and this gate stays "
+        f"armed. There is no generation to present -- a released claim carries "
+        f"none. If you ARE that body: stop taking fleet actions and exit. "
+        f"Otherwise escalate to the operator, who can stop session(s) {still} "
+        f"directly -- those are the live ones; sid {released_by} may already "
+        f"be gone. This is a SPEED-BUMP, not a security boundary: it is "
+        f"bypassable by anyone who can run this command without a session id.")
+
+
 def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     """claim-nonce §7 -- THE GATE (option (b), ratified 2026-07-23). Raises
     `SupervisorClaimGateError` when a mutating lifecycle verb is run by ANY
@@ -10511,7 +10821,26 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         STRUCTURAL exemption for `autoclean`'s scheduled task (no operator env)
         and for a human shell; `autoclean` additionally is not wired to call
         this at all (§7).
-      * no held claim / a released claim -> nothing to gate against.
+      * no held claim -> nothing to gate against.
+      * a released claim whose releaser is roster-GONE -> nothing to gate
+        against; release+stop completed and the claim is open.
+      * a released claim whose releaser is still roster-LIVE -> ARMED, and
+        unconditionally so (`_wedged_release_gate`). "Still roster-live" is
+        `_releaser_live_sids`: the releaser's own sid, or another sid of the
+        record that body ALREADY HAD when it released (the un-restamped
+        fork-steer window). A record MINTED after the release is a respawn --
+        a different body -- and does not arm. Councilor 4's finding,
+        2026-07-26 §R3, measured live on `main` @ `8252806`: this arm used to
+        return with the rest of the released case, which disarmed the gate for
+        EVERY caller and EVERY mutating verb -- `fleet clean --yes`, the
+        irreversible one, simply ran from a third body. The wedge has no
+        heartbeat to age out of and no successor can close it (B6 correctly
+        refuses to boot into it), so the ungated window was INDEFINITE.
+      * a released claim naming no releaser -> not armed (§6.3: a released
+        claim carries no `session_id`, so a `None` in the live set must not
+        brick every verb forever on a value nobody wrote).
+      * a roster fleet cannot read -> fail OPEN, exactly as an unreadable
+        heartbeat does below and for the same reason.
       * heartbeat older than `SUPERVISOR_CLAIM_STALE_SECONDS` -> DISARMED. This
         slice ships no automatic beat (§4.13(e)), so protection is present only
         in the hour after a human last acted and absent in the quiet stretches
@@ -10537,8 +10866,23 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         claim = read_incarnation()
     except Exception:  # noqa: BLE001 -- speed-bump: never crash a verb on this
         return
-    if not isinstance(claim, dict) or claim.get("state") == "released":
+    if not isinstance(claim, dict):
         return
+    if claim.get("state") == "released":
+        # MIN-1: inside the same never-crash contract that wraps
+        # `read_incarnation()` above. The wedged arm is the only part of this
+        # gate that does IO -- a roster subprocess and a registry read -- and it
+        # runs at the top of every mutating verb. A speed-bump must not be able
+        # to traceback `kill`, and the break lens drove both a RuntimeError out
+        # of the roster and an OSError out of the registry read straight through
+        # this frame. The refusal itself is the ONE exception that must survive:
+        # swallowing it would disarm the gate on its own armed path.
+        try:
+            return _wedged_release_gate(verb, claim)
+        except SupervisorClaimGateError:
+            raise
+        except Exception:  # noqa: BLE001 -- speed-bump: never crash a verb on this
+            return
     if now is None:
         now = datetime.now(timezone.utc)
     try:
@@ -10574,8 +10918,13 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:4505, :4952, :8061,
-    #     :11147) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:4588, :5035, :8963,
+    #     :12433) -- so the sid union can never make one body answer for another.
+    #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
+    #     TheyAreCited` re-reads them out of this file on every run, because a
+    #     citation nobody checks is this repo's named recurring defect and the
+    #     numbers here were four lines of unrelated code when the spec lens
+    #     looked (S-7).
     if verb == "send" and send_target is not None:
         try:
             resolved_rec = load_registry().get("workers", {}).get(send_target)
