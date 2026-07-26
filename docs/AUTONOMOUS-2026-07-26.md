@@ -164,6 +164,39 @@ Two remedies, in preference order:
 handoff told it to, and that single step produced both a wedged claim and a supervisor that could
 not have released it.
 
+## G-G. First LIVE exercise of the §10.4 respawn-of-holder choreography — three findings
+
+The interface retired the ceiling-bound supervisor `inc-20260726T140221Z-26ce` through the
+tombstone machinery merged earlier tonight. It worked, and it surfaced three things worth pinning.
+
+1. **Neither party can retire the body alone — the two guards are complementary halves.**
+   `fleet respawn supervisor` from the interface is refused by the §7 nonce gate (the interface
+   holds no generation, by design). From the holder, the same verb hits the spawn-ownership
+   confirmation (the interface spawned that record; the holder does not own itself). The holder
+   passed `--yes` and judged — correctly — that the confirmation's owner was the party ordering the
+   retirement, and that this was not the §10.4 abort it had been told to stop on.
+2. **The choreography stalls silently while it waits for the holder's own release (B5).** The
+   holder's `respawn` call blocked ~2 minutes and its harness killed the client. A caller with a
+   timeout therefore sees **a hang, not a phase** — there is no `SUP-RESPAWN-<phase>` surface
+   emitted during the wait. The release itself completed cleanly (`exit 0`, generation still
+   valid), but **the successor was never dispatched**, because the client that would have dispatched
+   it was dead. Retirement and succession are not atomic in practice.
+3. **The fork-steer sid rotation walked around B6 by accident.** The claim recorded
+   `released_by_sid = 76ae301e` (the forked session), while the roster's live entry for that same
+   body is its PRE-fork sid `6d1a77bd`. B6 tests the recorded value against the live set, so it did
+   not fire — the successor booted cleanly over a released claim whose body is still alive. Tonight
+   that was convenient; as a guard property it is luck, and it means B6's protection silently
+   evaporates for any holder that was ever fork-steered.
+
+Also observed: **§5.3's interface-divergence detector false-positives on a self-directed holder
+verb.** `sup-status` warned that two caller sids steered the supervisor within 3600s, naming the
+interface and the supervisor's OWN forked body — the second is the holder running
+`respawn supervisor` on itself, not a divergent interface. Detection-only, nothing broke, but the
+predicate cannot distinguish a holder steering itself from an interface steering it.
+
+**Recovery taken**: `sup-spawn` → `sup|inc-20260726T164152Z-8180|boot`, carrying
+`state/tasks/sup-successor-brief.md`. No §5.7 lever, no seizure.
+
 ## Dispatch record
 
 - `hs-fix2` (opus, bypass, worktree `C:/proga/fleet-handoff-seams`, branch `fix/handoff-seams`):
