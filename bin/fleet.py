@@ -9446,11 +9446,16 @@ def resolve_handoff_abort(claim, handshake, successor_sid=None, successor_inc=No
          body could do retired them.
       4. **No HANDSHAKE, a matching entry with no sid, INSIDE the window** --
          refuse and say when it becomes retirable. A join in progress is not a
-         dead successor. `force=True` (`--force`) converts exactly this arm
-         into a RETIRE: it is the operator's explicit way out for an entry
-         whose `minted_at` cannot be read at all, which resolves by neither
-         evidence nor time and would otherwise be immortal (rs-MIN-B). It never
-         stops a session and never overrides arm 1's cross-check.
+         dead successor. `force=True` (`--force`) converts this arm into a
+         RETIRE for ONE entry shape and no other: one whose `minted_at` cannot
+         be read at all, which resolves by neither evidence nor time and would
+         otherwise be immortal (rs-MIN-B). That predicate is EVALUATED here
+         (MAJOR-2): before this, `--force` retired ANY sid-less entry --
+         unlinking a still-joining successor's only input file while printing
+         "it recorded no sid and could not be aged", a predicate it had never
+         checked, for an entry whose `minted_at` read fine at age 0.2s. On a
+         readable entry `--force` is now declined and the refusal says so. It
+         never stops a session and never overrides arm 1's cross-check.
       5. **Nothing matches** -- refuse. This is the safety property, unchanged:
          `sup-handoff-abort` is not a "stop any sid" verb. An AMBIGUOUS handle
          (rb-MIN-6: two entries answering to one sid) lands here too, with a
@@ -9517,7 +9522,8 @@ def resolve_handoff_abort(claim, handshake, successor_sid=None, successor_inc=No
     if state == HANDOFF_RESOLVABLE_STALE:
         return {"action": "retire", "sid": None, "inc": entry.get("successor_inc"),
                 "entry": entry, "via": "stale-entry"}
-    if force:
+    unageable = _entry_age_seconds(entry, "minted_at", now=now) is None
+    if force and unageable:
         return {"action": "retire", "sid": None, "inc": entry.get("successor_inc"),
                 "entry": entry, "via": "forced"}
     if timeout_seconds is None:
@@ -9528,10 +9534,12 @@ def resolve_handoff_abort(claim, handshake, successor_sid=None, successor_inc=No
         f"the {timeout_seconds:.0f}s join window, so there is nothing to stop and "
         f"nothing to retire. Wait it out, then retire it with "
         f"`--successor-inc {entry.get('successor_inc')}`"
-        + ("" if _entry_age_seconds(entry, "minted_at", now=now) is not None else
-           f" -- or, since its minted_at ({entry.get('minted_at')!r}) cannot be read "
+        + (f" -- or, since its minted_at ({entry.get('minted_at')!r}) cannot be read "
            f"and it will therefore NEVER age out, retire it now with "
-           f"`--successor-inc {entry.get('successor_inc')} --force`"))}
+           f"`--successor-inc {entry.get('successor_inc')} --force`" if unageable else
+           " -- --force does not apply here: its minted_at reads fine, so it ages "
+           "out on its own and forcing it would unlink a still-joining successor's "
+           "only input file" if force else ""))}
 
 
 def drop_handoff_entry(claim, entry) -> None:
@@ -11695,15 +11703,20 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
         and popping on anything but an exact `successor_inc` match would retire
         a RIVAL begin's live successor from this attempt's failure path.
 
-        R9, the same evidence used twice: because no process was launched, this
-        attempt also never had the right to supersede anything. Every entry it
-        marked is UN-superseded here -- by `superseded_by`, so a third attempt's
-        marks are untouched. Without this, a begin that fails at dispatch takes
-        the previous, possibly live and perfectly good successor down with it:
-        that successor would refuse at `sup-boot --handoff-inc` for a rival that
-        does not exist, and the succession would have no bootable successor at
-        all -- while the condition that failed the dispatch (a `claude` off
-        PATH) is exactly the one that stops the operator retrying.
+        THIS ATTEMPT'S ENTRY ONLY. The marks it laid on EARLIER entries stand:
+        `cb9f078` lifted them here, on the reasoning that an attempt which
+        launched no process never had the right to supersede anything, and the
+        2026-07-26 council reverted it 4-0. The un-supersede admitted a body no
+        verb could carry to a terminal state. Part 3 of this same `begin`'s
+        write has already overwritten `handoff_token_hash` with the dead
+        attempt's, `sha(tokA)` is absent from the whole claim, and the only
+        surviving copy of token A is the plaintext in the resurrected
+        successor's task file -- so `sup-handoff-complete` refuses that body
+        under every input, and there is nothing to restore the hash from. The
+        counterfactual is strictly better: the body is refused at its own
+        `sup-boot` with rc=5 and TERMINATE text an operator can act on, instead
+        of writing a HANDSHAKE nobody can act on and failing two verbs later
+        with a message that is factually false about it.
 
         BEST-EFFORT BY CONSTRUCTION (rb-MIN-2): every caller is already raising
         a `FleetCliError` that names the real failure, so a lock timeout or an
@@ -11713,15 +11726,8 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
             with fleet_lock():
                 live = read_incarnation()
                 entry = handoff_entry_matching(live, successor_inc=successor_inc)
-                restored = False
-                for member in handoff_pending_entries(live):
-                    if member.get("superseded_by") == successor_inc:
-                        member.pop(HANDOFF_SUPERSEDED_KEY, None)
-                        member.pop("superseded_by", None)
-                        restored = True
                 if entry is not None:
                     drop_handoff_entry(live, entry)
-                if entry is not None or restored:
                     write_incarnation(live)
         except (FleetCliError, OSError) as exc:
             print(f"WARNING: could not clear the pending entry for {successor_inc}: {exc}")
@@ -12051,7 +12057,10 @@ def _cmd_sup_handoff_retire_all(args, force=False) -> int:
       * torn members (rb-MIN-7) -- unreadable, naming nothing this code can
         stop, and blocking the sweep for every OTHER file while they stand;
       * with `--force`, also `joining` entries whose `minted_at` cannot be read
-        and which would therefore never age out at all (rs-MIN-B).
+        and which would therefore never age out at all (rs-MIN-B) -- and ONLY
+        those. `--force` used to sweep in every `joining` entry regardless
+        (MAJOR-2), which is a still-joining successor losing its only input
+        file to a flag documented as covering the unreadable case.
 
     An entry that DID record a sid is left alone and reported with its own
     recipe: stopping a session is a per-body decision with a `claude stop`
@@ -12078,7 +12087,9 @@ def _cmd_sup_handoff_retire_all(args, force=False) -> int:
             state = handoff_entry_state(entry, now=now)
             if entry.get("successor_sid"):
                 standing.append((entry, state))
-            elif state in (HANDOFF_RESOLVABLE_STALE, HANDOFF_SUPERSEDED) or force:
+            elif (state in (HANDOFF_RESOLVABLE_STALE, HANDOFF_SUPERSEDED)
+                    or (force and _entry_age_seconds(entry, "minted_at",
+                                                     now=now) is None)):
                 retirable.append((entry, state))
             else:
                 standing.append((entry, state))
@@ -12090,7 +12101,10 @@ def _cmd_sup_handoff_retire_all(args, force=False) -> int:
             raise FleetCliError(
                 f"nothing to retire: {detail}. An entry bearing a sid is stopped by "
                 f"handle (`--successor-sid <sid>`); one still inside the join window "
-                f"becomes retirable when it ages out, or now with --force")
+                f"becomes retirable when it ages out. --force adds only entries whose "
+                f"minted_at cannot be read at all -- it is not a way out of the join "
+                f"window, and forcing one would unlink a still-joining successor's "
+                f"only input file")
         retired_incs = []
         for entry, _state in retirable:
             retired_incs.append(entry.get("successor_inc"))
@@ -12789,7 +12803,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_supha.add_argument("--force", action="store_true",
                          help="also retire an entry that records no sid and cannot "
                               "be aged (unreadable minted_at), which no other verb "
-                              "would ever retire; never stops a session")
+                              "would ever retire; never stops a session, and is "
+                              "DECLINED on an entry whose minted_at reads fine")
     p_supha.add_argument("--sid", help="override caller session id")
     p_supha.add_argument("--nonce", help=NONCE_ARG_HELP)
 
