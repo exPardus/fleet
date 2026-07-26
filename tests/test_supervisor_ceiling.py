@@ -2,11 +2,21 @@
 
 At and above `BAND_HARD_TOKENS` the dispatch verbs (`fleet spawn`/`fleet send`)
 REFUSE to start new worker turns -- but for EXACTLY ONE caller: the supervisor
-claim-holder (ND1). The interface tier is exempt STRUCTURALLY (ND4c: no
-`FLEET_WORKER` in its env), a caller that holds no claim is never subject, the
-identity gate resolves through `retired_sids` (ND4a) so the un-restamped
-fork-steer window does not fail open, and an unresolvable identity fails TOWARD
-the band (ND4b). Occupancy is the caller's OWN transcript (B2/B3).
+claim-holder (ND1). The interface tier is exempt STRUCTURALLY (ND4c), a caller
+that holds no claim is never subject, the identity gate resolves through
+`retired_sids` (ND4a) so the un-restamped fork-steer window does not fail open,
+and an unresolvable identity fails TOWARD the band (ND4b). Occupancy is the
+caller's OWN transcript (B2/B3).
+
+ND4c's KEY CHANGED (SPEC.md:196, `tests/test_identity_registry.py`). It read
+*"no `FLEET_WORKER` in its env"*; the machine-wide daemon donates that stamp to
+sessions it never launched, so its presence and its absence say equally little
+about the acting body. The structural question is now asked of the registry --
+*"does any record claim my own sid, and am I the claim-holder"* -- and ND4b
+narrows to match: an identity fleet cannot place at all abstains and exempts
+(it is the interface, a human shell, or a body inside its own dispatch window,
+and a newborn body cannot be at 200k tokens), while a REGISTERED body whose
+holder-ness is merely indeterminate still fails toward the band.
 """
 import json
 from types import SimpleNamespace
@@ -110,11 +120,37 @@ class TestCeiling:
         _write_incarnation(_held(sid))
 
     def test_interface_is_exempt_even_over_ceiling(self, ceil_home, monkeypatch):
-        # No FLEET_WORKER => interface: NEVER refused, no matter the occupancy
-        # (ND1/ND4c). Structural, ahead of any sid resolution.
+        # The interface: NEVER refused, no matter the occupancy (ND1/ND4c).
+        #
+        # The exemption is still STRUCTURAL, but it is keyed on the registry
+        # now, not on `FLEET_WORKER`'s absence (SPEC.md:196 -- the daemon
+        # donates that stamp to sessions it never launched, so neither its
+        # presence nor its absence says anything about the acting body). The
+        # structural question is "does any registry record claim my sid", and
+        # for the interface the answer is no.
+        #
+        # This test used to give the interface the HOLDER's own sid, which the
+        # old env-keyed predicate never looked at. It is not a shape the fleet
+        # can produce -- the interface is a human's session and the holder is a
+        # `--bg` supervisor body -- so it is written realistically here.
         monkeypatch.delenv("FLEET_WORKER", raising=False)
-        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-holder")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-interface")
         _write_incarnation(_held("sid-holder"))
+        _write_registry({"supervisor": {"session_id": "sid-holder", "retired_sids": []}})
+        self._occ(monkeypatch, 500000)
+        assert fleet._ceiling_refuses_dispatch("send") is None
+
+    def test_interface_is_exempt_even_when_nothing_places_either_sid(
+            self, ceil_home, monkeypatch):
+        # The half the structural arm exists for: an EMPTY registry makes
+        # `_caller_holds_supervisor_claim` INDETERMINATE, and (b)'s
+        # fail-toward-band would otherwise catch the human channel -- a refusal
+        # it could never escape, being outside fleet's launch surface (§3.1).
+        # (c) still runs ahead of (b).
+        monkeypatch.setenv("FLEET_WORKER", "a-stamp-the-daemon-donated")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-interface")
+        _write_incarnation(_held("sid-ghost"))
+        _write_registry({})
         self._occ(monkeypatch, 500000)
         assert fleet._ceiling_refuses_dispatch("send") is None
 
@@ -159,15 +195,46 @@ class TestCeiling:
         assert fleet._ceiling_refuses_dispatch("spawn") is None
 
     def test_indeterminate_identity_fails_toward_band(self, ceil_home, monkeypatch):
-        # FLEET_WORKER present (not interface), a claim is held, but identity is
-        # unresolvable (holder sid in no record). ND4b: treat as the supervisor
-        # and apply the ceiling.
+        # ND4b, NARROWED to bodies the registry can place. A claim is held, the
+        # holder sid is in no record, so `_caller_holds_supervisor_claim` is
+        # INDETERMINATE -- and the caller is a REGISTERED fleet body, so the
+        # structural arm does not exempt it and the ceiling applies.
+        #
+        # The narrowing: this test used to give the caller a sid no record
+        # carried, and the old predicate refused it because `FLEET_WORKER` was
+        # set. A sid fleet cannot place is not evidence that this body is an
+        # over-ceiling supervisor -- it is the interface, a human shell, or a
+        # body inside its own dispatch window, and a newborn body cannot be at
+        # 200k tokens. That case is now exempt and has its own test below.
+        #
+        # The reachable shape of an indeterminate verdict for a REGISTERED
+        # caller is a claim with no readable holder sid: once the registry
+        # places the caller, "holder sid in no record" resolves to a definite
+        # NOT-the-holder (False) rather than to None.
+        claim = _held("sid-holder")
+        del claim["session_id"]
+        monkeypatch.setenv("FLEET_WORKER", "sup|inc-x|successor")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-mystery")
+        _write_incarnation(claim)
+        _write_registry({"other": {"session_id": "sid-else", "retired_sids": []},
+                         "sup|inc-x|successor": {"session_id": "sid-mystery",
+                                                 "retired_sids": []}})
+        self._occ(monkeypatch, 300000)
+        assert fleet._caller_holds_supervisor_claim("sid-mystery") is None
+        assert fleet._ceiling_refuses_dispatch("spawn") is not None
+
+    def test_an_unplaceable_sid_is_exempt_rather_than_failing_toward_band(
+            self, ceil_home, monkeypatch):
+        # The other side of the narrowing, stated as its own behaviour so the
+        # trade is visible rather than implied: no record carries the caller's
+        # sid and no record carries the holder's either. Fleet cannot place
+        # this body at all, so it abstains and exempts.
         monkeypatch.setenv("FLEET_WORKER", "sup|inc-x|successor")
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-mystery")
         _write_incarnation(_held("sid-ghost"))
         _write_registry({"other": {"session_id": "sid-else", "retired_sids": []}})
         self._occ(monkeypatch, 300000)
-        assert fleet._ceiling_refuses_dispatch("spawn") is not None
+        assert fleet._ceiling_refuses_dispatch("spawn") is None
 
     def test_no_session_id_is_not_refused(self, ceil_home, monkeypatch):
         monkeypatch.setenv("FLEET_WORKER", "supervisor")
