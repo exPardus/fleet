@@ -588,3 +588,277 @@ from M-D is explicit — **run the pin tier on every `claude` bump, not only at 
 by unverified, and the council separately noted `--setting-sources` is still marked UNOBSERVED at
 2.1.207 while the live daemon is 2.1.220. Queued for this body: run the `FLEET_LIVE=1` pin tier
 and re-stamp, or record what broke.
+
+# Successor body — `inc-20260726T170625Z-55bb` (claim received 17:07:25Z via handoff)
+
+Lineage `lin-20260726T164216Z-6908` preserved, so the five in-flight workers were
+lineage-owned by me on arrival (claim-nonce §6.2). I took no fleet action between
+`sup-boot` and claim transfer (spec §4 double-spawn guard).
+
+## G-M. The one item my predecessor certified "safe to fix" is the wrong correction
+
+G-I's collateral says `docs/SPEC.md:334` mis-cites the `FLEET_WORKER` prohibition as
+§6.1 when the env-channel section is `claim-nonce` §6.5, and handed it to me as "my
+finding, mine to hand you, safe to fix". I verified before editing. It does not hold.
+
+`docs/SPEC.md`'s **own** §6.1 ("The second dispatch path — supervisor successor") spans
+lines 173–201 — the next heading is §7 at :202 — and the prohibition itself is at
+`SPEC.md:196`, **inside** it. G-I's own text cites :196 as the source of the
+prohibition. So :334 is a correct *internal* cross-reference. The mis-diagnosis came
+from reading a bare "§6.1" as `claim-nonce`'s §6.1 (boot verdict order) when the
+containing document is SPEC.
+
+Had I applied it, I would have repointed a correct reference at `claim-nonce` §6.5 D5 —
+a different rule which, per G-I itself, *depends on* a `FLEET_WORKER` refusal and so
+mandates the opposite of what :334 asserts. The edit would have inverted the sentence
+while looking like a typo fix.
+
+**Unaffected:** G-I's load-bearing claim stands — `SPEC.md:196` and `claim-nonce` §6.5 D5
+are both ratified and mandate opposite things, so the guard at :10899 faithfully
+implements one spec and thereby violates the other. Only the collateral sub-item is
+withdrawn. **Lesson:** a handoff's "safe to fix, do not re-derive" carries no
+verification; the single item certified safe was the only wrong one handed over, and it
+cost two greps to falsify. A bare section number is ambiguous across a multi-document
+spec set — a cross-doc citation must name its document.
+
+---
+
+# THE RULING — both escalated branches, synthesised from a 4-councilor council
+
+Doctrine: the operator is AWAY and both dispositions are operator-gated, so the question
+goes to four councilors of differing personalities plus synthesis, and I act on the
+synthesis (standing since 2026-07-24). I did **not** rule solo and I did not stall for a
+sleeping operator. Each councilor booted contextless, independently re-drove both
+mandatory repros on both floors, and was required to name the most plausible opposite
+ruling. Three of the four explicitly flagged convergence-with-the-predecessor as a risk
+rather than a comfort; c3 put it best — *"a council that ratifies its predecessor's
+conclusion while inheriting its predecessor's reasoning has produced nothing."*
+
+Reports: `RULING-RISK-AUDITOR.md` (c1), `RULING-DELIVERY.md` (c2),
+`RULING-ARCHITECT.md` (c3), `RULING-HISTORIAN.md` (c4), in the matching
+`C:/proga/fleet-rule-c*` worktrees.
+
+## R1 — Branch A `fix/handoff-seams`: DELETE the un-supersede, then merge. **4–0.**
+
+| councilor | disposition |
+|---|---|
+| c1 risk-auditor | (a) delete the un-supersede |
+| c2 delivery | (e) **revert** `cb9f078`'s hunk — same code change |
+| c3 architect | (a) delete |
+| c4 historian | (a) = (e-narrow) delete |
+
+Unanimous on the code change; the only split was procedural framing, and **c2's framing
+wins**: this is a revert of a self-contained hunk, not a third fix wave, so it is not a
+bet against fix-waves-mint-defects 11/11. c2 measured it — on both floors the revert
+removes exactly the two tests it deletes, produces **zero** other failures, and 3 of the
+34 mutants stop applying.
+
+Three councilors reached the same place by three independent routes, and each route
+kills option (b) — "just restore the hash" — on its own:
+
+- **c1: the rescue path has never once rescued anybody.** The token hash it needs is
+  overwritten and only cleared when the pending list empties, so the resurrected
+  successor is refused at `complete` under *every* input. (b) does not preserve a benefit
+  that (a) discards; it preserves a path with a 0% success rate.
+- **c3: part 3 of `begin`'s write is not compensable.** After the failed `begin`,
+  `sha(tokA)` is absent from the entire claim JSON and the only surviving copy of the
+  token is the **plaintext in the successor's task file**. So (b) as the brief words it
+  "is recommending code that cannot be written" — any real (b) either re-reads a
+  plaintext secret off disk or moves the hash onto the entry, a protocol-shape change on
+  top of an unratified amendment.
+- **c4: the counterfactual is strictly better.** Without the un-supersede the body is
+  refused at its own `sup-boot` with `rc=5` and operator-actionable TERMINATE text,
+  instead of writing a HANDSHAKE nobody can act on.
+
+**The brief's own framing was defective and c1 caught it:** option (e) was posed as
+"revert `cb9f078`, but is throwing away the deadlock fix and 12 mutants proportionate?"
+That trade-off does not exist. `cb9f078`'s *only* functional change is the un-supersede;
+`rb-CRIT-2`'s deadlock fix lives in earlier wave-2 commits and is untouched. A councilor
+steered by the brief alone could have picked (b) to avoid a loss that would not occur.
+
+**Scope — three edits, nothing else** (c1 A5, concurred by c3/c4):
+1. `_drop_pending_marker`: revert the un-supersede loop and the `or restored` condition.
+   **Keep** `cb9f078`'s task-file paragraph — it is the honesty surface and it is good.
+2. `resolve_handoff_abort` + `_cmd_sup_handoff_retire_all`: make `--force` consult
+   `_entry_age_seconds`, so the code matches the three surfaces documenting it. Rides in
+   the same wave as a fail-closed narrowing. (MAJOR-2 is worse than its summary: it
+   prints a predicate it never evaluated. Note c4 checked and the **journal row is
+   honest** — the "and journals" half of that claim did not survive execution.)
+3. `claim-nonce` §6.4 A1: re-read rather than edit; it stops being falsified once (1) lands.
+
+**What the re-gate must assert, and it is a rule not a test** (c1, and this is the most
+transferable thing the council produced):
+
+> Assert on the **last verb of the sequence the change exists to enable** — not on the
+> precondition the change manipulates. Take the benefit the change claims in its own
+> docstring, name the verb sequence a user runs to collect it (`begin` → *fail* →
+> `sup-boot` → **`complete`**), and assert on the final verb's outcome.
+
+The existing test's name is the tell: *"leaves the previous attempt **bootable**"*.
+Bootability is a precondition nobody wants for its own sake. Corollary: **a state-machine
+change must drive every newly admitted body to a terminal state.**
+
+**Parking A is the one disposition ruled clearly wrong** (c2, unrebutted): `main` today
+has *no* pending-successor collection at all and *no* containment check on
+`handoff_task_file_path` — the function composing the path to a file holding a live
+plaintext handoff token. Parking discards that check along with its tests.
+
+**Recorded against my own ruling** (c2's self-nomination, and it is correct on the
+facts): merging A does **not** close the root — a single-valued `handoff_token_hash`
+under a *set* of attempts. `rb`'s WAVE-1-CARRYOVER shows a sibling failure reachable
+without `cb9f078` at all. It is wave-1 shape, outside this gate's delta, and A3-shaped —
+operator-owned. I merge a bounded, documented, ratification-queued root rather than keep
+two unbounded ones, and I am naming it so the operator can overrule me.
+
+## R2 — Branch B `fix/b6-interface-release`: `--interface` dies (**4–0**); the detection half ships (**4–0 on substance**)
+
+The nominal tally reads 3–1 for park. **That tally is misleading and I decline to rule on
+it.** Read for substance rather than for the option letter, the council is unanimous
+twice:
+
+- **Drop `--interface` and its whole attestation surface: 4–0.** No councilor defends it.
+- **Land corrected wedge-detection and honesty surfaces now: 4–0.** c1 carves them out
+  and ships them alone; c2 keeps them as a subset merge; c4 lands them "separately
+  against `main`"; and c3 — nominally park — says in its own dissent that if anyone wants
+  value from this branch now, the honest form is a scoped fix wave *on the honesty
+  surfaces*.
+
+So the only live disagreement is the **vehicle**: cherry-pick branch B's detection
+commits (c2), or rewrite equivalent code fresh against `main` (c1/c3/c4).
+
+**I rule for c2's vehicle.** `_doctor_check_supervisor_wedge` is 66 lines with **26/26
+mutants killed, zero survivors** — the break lens's own words, *"the strongest I have
+measured on this project"* — plus FI-5 regression-pinned. Rewriting that fresh on `main`
+discards verified work *and* takes a new bet against 11/11 to re-reach a place we have
+already reached. The three's objection to c2's vehicle is that the branch's honesty
+surfaces are still wrong as written; that objection is **already satisfied inside c2's
+(d)**, which rewrites both remedy strings and fixes the statusline in the same motion. I
+am not overruling the majority's requirement, I am accepting the minority's cheaper route
+to it.
+
+**Land:** `_doctor_check_supervisor_wedge` + its `cmd_doctor` registration,
+`cmd_sup_status`'s released-state branches, commit `1927058` in full (delegation to the
+shared predicate, FI-5/M18 pinned).
+**Drop:** the `--interface` argparse flag, `cmd_sup_release`'s attestation write,
+`supervisor_claim_decision`'s attestation skip, the `--json` projection, and
+`_project_claim`'s `released_by_interface` allowlist. `supervisor_claim_decision` reverts
+to `main`'s already-ratified unconditional B6.
+**Rewrite,** because a `doctor` row whose named remedy always exits non-zero is worse than
+no row — `doctor` is the 3 a.m. surface and its credibility is the asset being spent:
+both surfaces must name the two exits that actually execute (stop the roster-live session
+by sid; the `claim-nonce` §5.7 operator lever), never `sup-release --interface`. Also fix
+`supervisor_status_line`'s released arm at `bin/fleet.py:12292`, which promises a fresh
+claim that will not happen — **that false prediction is already on `main`**; the branch
+neither introduced nor fixed it.
+
+That single rewrite closes `gate-b6-rs` F1/F2/F2b and `gate-b6-rb` FINDING 1 **by
+deletion rather than by writing docs**, because those MAJORs exist only because the text
+advertises a flag that is now gone.
+
+**Why `--interface` dies, on the merits and not merely on the vulnerability** — three
+independent reasons, any one sufficient:
+- **c3, and this is the sharpest:** `--interface` asks a body to self-report a fact the
+  substrate **already publishes**. Every roster entry carries `kind`; the live roster is
+  72 `background` and exactly 1 `interactive` — the operator's own session. `kind` is read
+  **nowhere** in `bin/fleet.py`. The branch adds a forgeable trust surface to recover a
+  fact fleet could have read for free.
+- **c4:** the branch repairs a path doctrine now forbids while leaving the universal case
+  — every supervisor retirement — exactly as wedged.
+- **c1:** B6 is already not providing the protection everyone believes it provides, so
+  branch B carves an escape hatch beside a guard that does not currently guard.
+
+**Parked, not rejected:** the B3 redesign (`sup-release` tombstoning its own body /
+respawn-shaped retirement). c1 flags honestly that its own B3 design keys on roster
+`status` and would be the *third* guard keyed on a substrate property this project does
+not control — B6 on roster-liveness, §6.5 on env propagation, both of which bit. It also
+depends on the confounded-sid pre-flight, which remains an operator-shell experiment.
+
+## R3 — THE ORDERING CONSTRAINT. This is mine; no councilor could see it, and it inverts the obvious build order
+
+The two best findings in the stack **interact adversarially**, and each councilor could
+only see their own. c1's headline and c4's C1.1 are individually correct and, shipped in
+the intuitive order, make the fleet *less* safe. I verified every fact below myself
+against `main` @ `8252806`, not against the reports.
+
+**c1's finding (verified):** B6 at `bin/fleet.py:10173` compares a bare
+`released_by_sid` against the roster, while `_record_sids` — whose own docstring says
+*"matching against `session_id` alone fails open"* — is used at **seven** other sites
+(:2020, :2064, :2116, :5503, :5790, :6057, :7117). B6 is not one of them. That is exactly
+why B6 evaporated for the fork-steered holder in G-G: it tested the post-fork sid, the
+roster held the pre-fork one, and it **failed open**.
+
+**c4's finding (verified):** `_supervisor_gate` — the claim-nonce §7 speed-bump — returns
+early at `bin/fleet.py:10540` on *any* `released` claim, disarming it **for every caller
+and every mutating lifecycle verb**. c4 measured it: with a held claim, `kill`/`clean`/
+`interrupt` from a third body are all gated; with the wedged record, all three are
+ungated and `fleet clean --yes` — the irreversible one — **simply ran**. The same
+early-out at :2005 and :2059 also strips the supervisor body's band/ceiling recognition
+and its archive protection. **This is live on `main` right now, independent of either
+branch** — the only finding in this stack already true in production.
+
+**The interaction, which is the actual ruling:** c1's fix converts B6 from fail-open to
+fail-closed. It therefore **creates wedges where today a successor boots through**. And
+every wedge is, per c4, an indefinite fleet-wide *ungated* window — closable only by the
+successful boot that B6 is now correctly refusing. **Shipping c1's one-liner alone
+strictly increases exposure to the worst thing on this list.** c4 saw the shape of it —
+*"B6 does not freeze the fleet safely; it maximises the duration of the least-protected
+state it exists to shorten"* — but not that the council's other headline recommendation
+would multiply the frequency.
+
+**Therefore, binding build order:**
+1. **c4's containment first, or in the same commit — never after.** Arm the §7 gate on a
+   `released` record whose `released_by_sid` is still roster-live: exactly the state B6
+   already computes. ~10 lines, fail-closed, no protocol change.
+2. **Then c1's `_record_sids` union re-key of B6.** One line, no protocol change,
+   independent of both branches, and a strict prerequisite for any future B3.
+
+Never (2) alone. If only one lands this session, it must be (1).
+
+## R4 — Record correction, 4–0: the forgery is **MAJOR**, not CRITICAL
+
+`gate-b6-rb` graded it MAJOR and said so explicitly — c2 counts three times, including
+*"That is why it is MAJOR and not CRITICAL."* Three downstream artifacts — the 16:29
+checkpoint, §G-F, and **this council's own common brief §4** — render it "(CRITICAL)",
+unmarked and unattributed. c1, c2 and c4 each caught this independently; c3 warned that
+"ruling on an inflated severity is how a council launders a label into a decision."
+
+The inflation was load-bearing: the brief framed the b6 disposition around it, so a
+councilor working from the brief alone would have ruled against a CRITICAL its finder
+declined to assign. c2 further established that a current `sup-boot` **cannot mint a
+legacy claim** and the live claim here **is not legacy** — so the state the forgery needs
+is not currently reachable on this machine.
+
+**Standing process amendment, and it is cheap:** a verdict line carried across an
+escalation must reproduce the reviewer's own severity token **verbatim**; any re-labelling
+by the escalating body must be marked as theirs and given a reason. It protects the one
+channel a councilor cannot audit without re-reading 145 KB. c1 files the same defect class
+one level down: `gate-hs-rs` MAJOR-2 claims the false `--force` reason is *"printed and
+journals"* — c4 drove it and the **journal row is honest**.
+
+Note the shape: **G-M, R4, and the brief's false option-(e) trade-off are all the same
+defect** — a claim that gained authority in transit and was never re-driven at the point
+of decision.
+
+## R5 — G-K confirmed independently, and it hit a councilor live
+
+c1 and c2 both filed it; c2 filed it from *inside* the failure — it booted holding a task
+file whose only instruction was to read the file it was already reading. Confirms G-K is
+silent (the spawn succeeds; only a *suspicious* worker notices) and that its blast radius
+is any dispatch writing a brief to `state/tasks/<worker>.md`. Queued fix stands: refuse or
+warn on a pre-existing task file not written by a prior dispatch of that same worker, and
+refuse the mechanically-detectable self-referential case.
+
+## The pattern under R1, R4 and G-M — worth more than any single finding
+
+This project reliably **writes down the right rule and then ships a guard that does not
+follow it**, because nothing checks that ratified identity rules are actually keyed on.
+`SPEC.md:196` said *never* key on `FLEET_WORKER`; the guard at :10899 does.
+`_record_sids`' docstring says matching a bare sid fails open; B6 does exactly that. Two
+instances, same shape, found by two councils. c1's proposed remedy generalises both: **a
+lint or doctor check enumerating every predicate that compares a bare sid against a roster
+or registry.** Filed as the highest-value process item from this council.
+
+Nothing in this ruling ticks a box in `OPERATOR-GATES.md`. Ratifying amendment A3 (whose
+`--force` clause describes the code *more narrowly than what ships*, so it must not be
+ratified before R1 scope item 2 lands), `claim-nonce` §16 and `three-tier-command` §15
+remain operator-only, as does the confounded-sid pre-flight.
