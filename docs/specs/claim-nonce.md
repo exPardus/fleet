@@ -2046,6 +2046,38 @@ releaser that a bare `session_id` comparison would miss:
 | roster unreadable | **disarmed (fail OPEN)** — same doctrine as an unreadable heartbeat: a speed-bump must not brick every mutating verb, and `claude` missing from `PATH` is a strictly larger blast radius than the wedge |
 | releaser roster-**LIVE** | **ARMED, unconditionally** |
 
+**The union arm is bounded to the un-restamped fork-steer window**, and nothing else
+(2026-07-27 fix wave, item 3 — the supervisor's ruling on the break lens's MAJ-2).
+`retired_sids` is not a fork-steer artefact only: `cmd_respawn` carries the old
+record's `retired_sids + old_sid` into a record it mints **fresh**, and a respawn is a
+genuinely different body. Unbounded, a record whose releaser died and was respawned
+answers *"the releaser is roster-live"* forever — B6 refusing every successor on the
+same state, with **no in-fleet exit at all** (measured: `send`, `kill`, `respawn` and
+`send supervisor` all refuse), i.e. a lockout clearable only by a human editing
+`supervisor/INCARNATION`. The boundary is the record's own `created` against the
+claim's `released_at`: **a record minted after the release cannot be the body that
+performed it.**
+
+| Record carrying `released_by_sid` in its sid union | §7 gate / B6 |
+|---|---|
+| `created` ≤ `released_at` — the record the releasing body already had; a fork-steer restamps it **in place** | contributes its live sids: **ARMED / refuse** (this is ND4a) |
+| `created` > `released_at` — `cmd_respawn` replaced the record, so the live session is a body that never held the claim | drops out of the union: **disarmed / claim** |
+| `released_at` or `created` absent or unparseable | drops out of the union — the bare `released_by_sid in live_sids` comparison is all that is left, which is `main`'s shipped answer |
+
+The tie (`created == released_at`, both second-precision) resolves **toward the gate**.
+The degradation resolves the other way, deliberately and once: toward the failure an
+operator can still act on (a fail-open B6, refusable at the next boot) rather than the
+one that needs a text editor. `_cmd_respawn_supervisor` needs no case of its own — it
+mints a differently-**named** record and leaves the old one behind, so a supervisor
+successor never carries the releaser's sid at all.
+
+**The refusal names the session that is live, not the one that released.** On the union
+arm `released_by_sid` is by construction roster-**gone** — that arm exists for exactly
+that case — so *"the operator can stop session `<released_by>`"* named a remedy that
+always no-ops, which is the R2 defect this slice refused to commit for `--nonce`.
+`_releaser_live_sids` returns the matching live sids and both consumers print them: the
+sid that released (identity) and the sids still live (the remedy).
+
 **The armed arm has no continuity path, and that is deliberate.** §6.3's post-release
 key set carries no `nonce_hash`, `pending_nonce_hash` or `prior_pending_hash`, so
 `_nonce_presentation` returns `None` for every caller and every value — there is no
@@ -2070,11 +2102,50 @@ It is reached **only** on a released claim that names a releaser — the window 
 `sup-release` and the next `sup-boot` — and `tests/test_gate_arm_wedge.py` pins that a
 held claim, an absent claim and a no-sid caller never fetch the roster at all.
 
-**Not widened.** The same released early-out at `_caller_holds_supervisor_claim` and
-`_record_is_supervisor_claim_holder` is left unchanged, with the reason executable
-rather than asserted: the ceiling's only consumer runs strictly *after* the gate at all
-three call sites, and `_archive_eligible`'s roster-liveness gate already protects a
-roster-live releaser, so neither can be shown to lose anything in the wedged state.
+**Archive protection: a new gate 3b, NOT a union re-key of gate 3 (fix-wave item 4).**
+This slice's first cut asserted that `_archive_eligible`'s gate 3 *"already protects a
+roster-live releaser"*. That was true of the **bare** arm only, and this slice's own
+union arm falsified it: the union arm arms the §7 gate on records whose `session_id` is
+roster-gone while a retired sid is live, and for exactly those records gate 0 answers
+`False` (released, by design, B9) while gate 3 answers "not live" — so **the record
+wedging every mutating verb fleet-wide was fully archive-eligible**, and `autoclean`
+could delete the very state the gate reads.
+
+The ordered fix was to re-key gate 3 through `_record_sids` as the eighth ND4a site.
+**It is not what shipped, because it reverses a prior ruling:** T9's finding C1 decided
+that a live RETIRED sid is skipped by the archive rm loop and is *"not a reason to block
+the whole worker"*, since a fork-steer leaves the parent's roster entry untouched and an
+ordinary worker can carry a live retired sid indefinitely. The re-key was written first
+and `test_rm_skips_a_live_retired_sid_but_rms_current_sid` caught it — measured, not
+reasoned. What ships is **gate 3b**: the record a `released` claim is currently wedging
+the fleet on is not archivable while it is doing so, decided through the SAME predicate
+the §7 gate arms on (`_releaser_live_sids` over a one-record registry), so the two
+cannot disagree about what a wedge is. It protects that record and nothing else, and it
+releases the moment the wedge does. Both halves are pinned on one record in
+`tests/test_gate_arm_wedge.py`, because the claim being made is that they are the same
+state; the T9 C1 contract is pinned alongside it.
+
+**Not widened, stated as narrowly as it is true.** The released early-out at
+`_caller_holds_supervisor_claim` (`:2005`) and `_record_is_supervisor_claim_holder` is
+left unchanged, and the earlier claim that *"neither can be shown to lose anything in
+the wedged state"* is **withdrawn as false**. What is true is narrower: the ceiling's
+only consumer runs strictly *after* the gate at all three call sites, so the ceiling is
+unreachable in the wedged state **while the gate is armed**. On the gate's own fail-open
+arms (`if not roster_ok: return`, and a released claim naming no releaser) the ordering
+guarantee buys nothing: `_caller_holds_supervisor_claim` sees `state == "released"`,
+returns `False`, the ceiling stays dormant, and a supervisor body above
+`BAND_HARD_TOKENS` that has released the claim and not exited dispatches with **neither**
+guard firing. That residual is pre-existing on `main`, R3 did not order it closed, and
+it is **filed as its own open item, not closed by assertion** — see the open items
+below.
+
+**Open items this subsection does NOT close** (filed, deliberately unfixed here):
+
+| Item | Where | Why not here |
+|---|---|---|
+| the released early-out at `_caller_holds_supervisor_claim` / `_record_is_supervisor_claim_holder` leaves the ceiling dormant on the gate's fail-open arms | `bin/fleet.py:2005`, `:2059` | pre-existing on `main`; R3 did not order it, and widening it touches the ceiling's own ND4 bindings |
+| the §7.1 `send` carve-out reads the registry through `load_registry()`, which **quarantines** — a rename plus a journal append from inside a function that promises "no lock, no mint, no write" | `bin/fleet.py`, §7.1's carve-out | inherited, and §7.1 is a ratified predicate; every **new** path in this slice goes through `_read_registry_readonly` instead |
+| §7's ratified accounting says the gate is *"armed only while the heartbeat is fresh"*; the wedged arm is armed with no heartbeat and no time bound | `claim-nonce.md` §7 (`:1817`, `:1866`) | §7's body is OPERATOR-owned; ratification and the `OPERATOR-GATES.md` entry are the operator's, not this slice's |
 
 ---
 

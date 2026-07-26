@@ -27,6 +27,7 @@ council's transferable rule): a test that asserts `_supervisor_gate` returned
 non-None asserts the precondition, and asserting the precondition is the exact
 smell that produced the defect this ruling is about.
 """
+import re
 from datetime import datetime, timezone
 
 import pytest
@@ -46,6 +47,18 @@ def wedge_home(tmp_path, monkeypatch):
     (tmp_path / "state" / "worker-settings.json").write_text("{}", encoding="utf-8")
     fleet.save_registry({"workers": {}})
     return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def _never_dispatch(monkeypatch):
+    """MAJ-4, applied to the CLASS. See the twin fixture in
+    `tests/test_supervisor_gate.py` for the incident this closes: the gate is
+    the ONLY thing between a `spawn` test and a real, billable claude session,
+    and this file is where that was learned the expensive way -- four sessions
+    launched into pytest tmp dirs on the first RED run. The lesson belongs to
+    every test in the file, not to the one that paid for it."""
+    monkeypatch.setattr(fleet, "dispatch_bg", lambda *a, **k: pytest.fail(
+        "a gate test reached dispatch_bg -- that dispatches a REAL claude session"))
 
 
 def _released(released_by=RELEASER, **extra):
@@ -108,6 +121,30 @@ def _spy(monkeypatch, attr):
 
     monkeypatch.setattr(fleet, attr, _fake)
     return reached
+
+
+def _forked_releaser_record(pre="sid-pre-fork", post="sid-post-fork",
+                            name="sup|inc-old|boot", created="2020-01-01T00:00:00Z",
+                            save=True):
+    """THE UN-RESTAMPED FORK-STEER WINDOW (ND4a), which is what the union arm
+    is for: the releasing body was fork-steered after it released, so
+    `_restamp_after_steer` eagerly restamped its record IN PLACE (`session_id`
+    = the post-fork sid, the pre-fork sid appended to `retired_sids`) while
+    INCARNATION still carries the PRE-fork sid it was written with.
+
+    `created` predates the release BY CONSTRUCTION -- a body cannot release a
+    claim before its own record exists, and a fork-steer does not mint a new
+    record -- and that is exactly the boundary separating this record from a
+    respawn's (fix-wave item 3)."""
+    rec = fleet.new_worker_record(post, "C:/proj", "t", "acceptEdits",
+                                  dispatch_kind="bg")
+    rec["retired_sids"] = [pre]
+    rec["created"] = created
+    if save:
+        data = fleet.load_registry()
+        data["workers"][name] = rec
+        fleet.save_registry(data)
+    return rec
 
 
 def _names():
@@ -288,8 +325,48 @@ class TestTheWedgedStateArmsTheGate:
         assert "--nonce" not in msg
         assert "--interface" not in msg
         assert RELEASER in msg                      # the sid to stop
+        assert f"stop session(s) {RELEASER}" in msg
         assert "operator" in msg.lower()
         assert "speed-bump" in msg.lower()
+
+    def test_the_union_arm_names_the_session_that_is_actually_live(
+            self, wedge_home, monkeypatch):
+        # Break-lens MAJ-1, fix-wave item 2. The test above drives the BARE arm,
+        # where `released_by_sid` IS the live sid, so it cannot see this: on the
+        # UNION arm the releaser's own sid is roster-GONE by construction -- the
+        # arm exists for precisely that case -- and the refusal used to tell the
+        # operator to "stop session sid-pre-fork", a session that has already
+        # exited. That is R2's defect exactly: a named remedy that always
+        # no-ops, which this branch refused to commit for `--nonce` and then
+        # committed here.
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", THIRD)
+        _released(released_by="sid-pre-fork")
+        _roster(monkeypatch, "sid-post-fork")
+        _forked_releaser_record()
+        with pytest.raises(fleet.SupervisorClaimGateError) as exc:
+            fleet._supervisor_gate("clean", nonce=None)
+        msg = str(exc.value)
+        # the remedy must name the session an operator can actually stop
+        assert "stop session(s) sid-post-fork" in msg
+        assert "stop session(s) sid-pre-fork" not in msg
+        # and the sid that released is still named, as identity, not as remedy
+        assert "sid-pre-fork" in msg
+
+    def test_the_refusal_never_names_a_roster_gone_session_as_the_remedy(
+            self, wedge_home, monkeypatch):
+        # The general form of the same rule, so it cannot regress for a shape
+        # nobody wrote a fixture for: EVERY sid the refusal offers as something
+        # to stop must be one the roster says is live.
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", THIRD)
+        _released(released_by="sid-pre-fork")
+        _roster(monkeypatch, "sid-post-fork")
+        _forked_releaser_record()
+        with pytest.raises(fleet.SupervisorClaimGateError) as exc:
+            fleet._supervisor_gate("clean", nonce=None)
+        offered = set(re.findall(r"stop session\(s\) ([^.]+?) directly",
+                                 str(exc.value))[0].split(", "))
+        assert offered == {"sid-post-fork"}, (
+            f"the refusal offers sessions that are not roster-live: {offered}")
 
     def test_presenting_a_generation_cannot_open_the_wedge(
             self, wedge_home, monkeypatch):
@@ -323,6 +400,69 @@ class TestTheWedgedStateArmsTheGate:
         assert calls == []
 
 
+class TestTheWedgedArmCannotCrashAVerb:
+    """MIN-1, fix-wave item 6. `_supervisor_gate` wraps `read_incarnation()` in
+    `except Exception: return` with the comment *"speed-bump: never crash a verb
+    on this"*. The wedged arm was called OUTSIDE that guard and performs two IO
+    calls -- a `claude agents` subprocess and a registry read -- so anything
+    either surface raised became an unhandled traceback on EVERY mutating verb.
+    Both production surfaces are defensively coded today, which is exactly why
+    this is pinned rather than argued: the structural asymmetry is the defect.
+
+    The refusal itself must still escape, or the fix would disarm the gate on
+    its own armed path -- pinned by every other test in this file, and by the
+    third test here explicitly."""
+
+    @pytest.mark.parametrize("surface,exc", [
+        ("_fetch_agents_roster", RuntimeError("roster exploded")),
+        ("_registry_records_or_none", OSError("registry exploded")),
+    ])
+    def test_a_raising_surface_does_not_crash_the_verb(
+            self, wedge_home, monkeypatch, surface, exc):
+        # Driven through the LAST VERB and asserted on its effect: `clean --yes`
+        # must complete and delete, exactly as it does on the gate's other
+        # fail-open arms, rather than traceback.
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", THIRD)
+        _released()
+        _roster(monkeypatch, RELEASER)
+        _tombstone()
+
+        def _boom(*a, **k):
+            raise exc
+
+        monkeypatch.setattr(fleet, surface, _boom)
+        assert fleet.main(["clean", "--yes"]) == 0
+        assert _names() == []
+
+    @pytest.mark.parametrize("surface", ["_fetch_agents_roster",
+                                         "_registry_records_or_none"])
+    def test_the_raise_does_not_escape_the_gate_frame(
+            self, wedge_home, monkeypatch, surface):
+        # The same fault at the frame the break lens drove it out of, so a
+        # future caller that does not go through `fleet.main` is covered too.
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", THIRD)
+        _released()
+        _roster(monkeypatch, RELEASER)
+
+        def _boom(*a, **k):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(fleet, surface, _boom)
+        fleet._supervisor_gate("kill", nonce=None)      # returns, does not raise
+
+    def test_the_never_crash_guard_does_not_swallow_the_refusal(
+            self, wedge_home, monkeypatch):
+        # The one exception the guard must NOT catch. A bare `except Exception:
+        # return` around the arm would disarm the gate in the exact state it
+        # exists for, and every arming test in this file would still pass if the
+        # refusal were re-raised as something else -- so pin the type.
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", THIRD)
+        _released()
+        _roster(monkeypatch, RELEASER)
+        with pytest.raises(fleet.SupervisorClaimGateError):
+            fleet._supervisor_gate("kill", nonce=None)
+
+
 class TestTheGateFiresAheadOfTheCeiling:
     """Evidence for a NEGATIVE result, recorded rather than assumed.
 
@@ -346,8 +486,8 @@ class TestTheGateFiresAheadOfTheCeiling:
         # A REAL, BILLABLE session is what sits past this line -- measured the
         # hard way while this file was RED, which is itself the point: with the
         # gate disarmed, `spawn` from a third body ran all the way to dispatch.
-        monkeypatch.setattr(fleet, "dispatch_bg", lambda *a, **k: pytest.fail(
-            "spawn reached dispatch through a wedged claim"))
+        # The stub that makes that impossible is now the file-wide autouse
+        # `_never_dispatch` fixture (MAJ-4), not a line in this one test.
         rc = fleet.main(["spawn", "w", "--dir", str(wedge_home), "--task", "go"])
         assert rc == fleet.SUPERVISOR_CONTINUITY_RC
         assert ceiling_consulted == []
@@ -377,5 +517,79 @@ class TestArchiveProtectionIsNotStrippedByTheWedge:
             "sup|inc-old|boot", rec, roster, datetime.now(timezone.utc))
         assert eligible is False
         assert "holder" not in reason      # protected by roster-liveness, not by gate 0
+
+    def test_the_record_wedging_the_fleet_through_the_UNION_is_protected_too(
+            self, wedge_home, monkeypatch):
+        """Break-lens MAJ-3, fix-wave item 4 -- the half of the result above
+        that this branch's OWN Task 2 falsified.
+
+        The test above holds only for the BARE arm, where the record's
+        `session_id` IS the releaser and gate 3 sees a roster-live entry. The
+        union arm arms the §7 gate on records whose `session_id` is roster-GONE
+        while a RETIRED sid is live. For those, gate 0 answers False (released,
+        by design, B9) and a `session_id`-only gate 3 answered "not live" -- so
+        the very record wedging every mutating verb fleet-wide was fully
+        archive-eligible -- so `autoclean` could delete the state the gate
+        reads out from under it.
+
+        The fix is gate 3b, NOT a union re-key of gate 3: T9's finding C1
+        ruled that a live retired sid is skipped by the rm loop and is "not a
+        reason to block the whole worker"
+        (`test_rm_skips_a_live_retired_sid_but_rms_current_sid`), and re-keying
+        gate 3 reverses that for every ordinary fork-steered worker. Measured,
+        not reasoned: the union re-key was written first and that test caught
+        it. Gate 3b keys on the SAME predicate the §7 gate arms on, so the two
+        cannot disagree about what a wedge is, and it protects nothing else.
+
+        Both halves are asserted in one test on ONE record, because the claim
+        being made is that they are the same state."""
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", THIRD)
+        _released(released_by="sid-parent-live")
+        # the live sid sits in retired_sids; session_id is roster-gone
+        rec = _forked_releaser_record(pre="sid-parent-live", post="sid-child-dead")
+        rec["status"] = "idle"
+        rec["last_activity"] = "2020-01-01T00:00:00Z"       # far past the TTL
+        data = fleet.load_registry()
+        data["workers"]["sup|inc-old|boot"] = rec
+        fleet.save_registry(data)
+        # Gate 3 must be the ONLY thing left standing, or this test would pass
+        # for the wrong reason: without an outcome record `_archive_eligible`
+        # stops at gate 4 ("no-outcome-record") and reports ineligible even with
+        # the defect present. Measured -- that is exactly what the pre-fix run
+        # returned.
+        fleet.write_tombstone_outcome("sup|inc-old|boot", "sid-child-dead", "stopped")
+        roster = [{"sessionId": "sid-parent-live", "status": "idle", "pid": 4242}]
+
+        # half 1: this record ARMS the gate -- the wedge is real
+        _roster(monkeypatch, "sid-parent-live")
+        with pytest.raises(fleet.SupervisorClaimGateError):
+            fleet._supervisor_gate("clean", nonce=None)
+
+        # half 2: and it is NOT archive-eligible
+        assert fleet._record_is_supervisor_claim_holder(rec) is False, (
+            "B9's ratified answer for a released claim -- the premise of this test")
+        eligible, reason = fleet._archive_eligible(
+            "sup|inc-old|boot", rec, roster, datetime.now(timezone.utc))
+        assert eligible is False, "the record wedging the fleet is archivable"
+        assert reason == "wedging-released-claim"
+
+    def test_an_ordinary_worker_with_a_live_retired_sid_is_still_archivable(
+            self, wedge_home, monkeypatch):
+        # The boundary of gate 3b, and the reason it is not a union re-key of
+        # gate 3. T9 finding C1: a fork-steer leaves the PARENT's roster entry
+        # untouched, so an ordinary worker can carry a live retired sid
+        # indefinitely; the rm loop skips that sid and archives the worker
+        # anyway. Gate 3b must not quietly reverse that for every worker on the
+        # box -- it fires only for the record a released claim is wedging on.
+        _released(released_by="sid-someone-else")       # a wedge, but not THIS record
+        rec = _forked_releaser_record(pre="sid-parent-live", post="sid-child-dead",
+                                      save=False)
+        rec["status"] = "idle"
+        rec["last_activity"] = "2020-01-01T00:00:00Z"
+        fleet.write_tombstone_outcome("w", "sid-child-dead", "stopped")
+        roster = [{"sessionId": "sid-parent-live", "status": "idle", "pid": 4242}]
+        eligible, reason = fleet._archive_eligible(
+            "w", rec, roster, datetime.now(timezone.utc))
+        assert (eligible, reason) == (True, "eligible")
 
 

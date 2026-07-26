@@ -16,6 +16,8 @@ indefinite fleet-wide UNGATED window. This change must never ship without that
 one; the shared predicate is what makes "never Task 2 alone" mechanical rather
 than a note in a commit message.
 """
+from datetime import datetime, timezone
+
 import pytest
 
 import fleet
@@ -23,6 +25,16 @@ import fleet
 
 RELEASER = "sid-releaser"
 THIRD = "sid-third-body"
+
+# The claim is released at `now`; a record the releasing body ALREADY HAD is
+# necessarily older than that. Stated as a constant because it is the whole
+# boundary between a fork-steer and a respawn (fix-wave item 3): a fork-steer
+# mutates the record in place and leaves `created` alone, a respawn mints a
+# fresh record whose `created` is stamped AFTER the release it is respawning
+# past. Written explicitly rather than left at `new_worker_record`'s `now_iso()`
+# so these fixtures do not depend on which side of a one-second tick they land.
+BEFORE_RELEASE = "2020-01-01T00:00:00Z"
+AFTER_RELEASE = "2099-01-01T00:00:00Z"
 
 
 @pytest.fixture
@@ -62,8 +74,32 @@ def _tombstone(name="ghost", sid="sid-ghost"):
     return rec
 
 
+def _record(current, retired=(), created=BEFORE_RELEASE):
+    rec = fleet.new_worker_record(current, "C:/proj", "t", "acceptEdits",
+                                  dispatch_kind="bg")
+    rec["retired_sids"] = list(retired)
+    rec["created"] = created
+    return rec
+
+
+def _install(rec, name="sup|inc-old|boot"):
+    data = fleet.load_registry()
+    data["workers"][name] = rec
+    fleet.save_registry(data)
+    return rec
+
+
 def _names():
     return sorted(fleet.load_registry()["workers"])
+
+
+@pytest.fixture(autouse=True)
+def _never_dispatch(monkeypatch):
+    """MAJ-4, applied to the class -- see the twin fixture in
+    `tests/test_supervisor_gate.py`. Nothing in this file may reach a real
+    claude session."""
+    monkeypatch.setattr(fleet, "dispatch_bg", lambda *a, **k: pytest.fail(
+        "a gate test reached dispatch_bg -- that dispatches a REAL claude session"))
 
 
 # --- Task 2: B6 re-keyed through the sid union -----------------------------
@@ -73,11 +109,9 @@ class TestB6IsKeyedOnTheSidUnion:
     identity concept; B6 was the only roster comparison not using it, and G-G
     measured it failing open for a fork-steered releaser."""
 
-    def _registry(self, current, retired=(), name="sup|inc-old|boot"):
-        rec = fleet.new_worker_record(current, "C:/proj", "t", "acceptEdits",
-                                      dispatch_kind="bg")
-        rec["retired_sids"] = list(retired)
-        return {"workers": {name: rec}}
+    def _registry(self, current, retired=(), name="sup|inc-old|boot",
+                  created=BEFORE_RELEASE):
+        return {"workers": {name: _record(current, retired, created)}}
 
     def test_b6_refuses_when_the_releaser_sid_is_only_in_retired_sids(self):
         # G-G, exactly: the body fork-steered after releasing, so the record
@@ -100,12 +134,7 @@ class TestB6IsKeyedOnTheSidUnion:
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", THIRD)
         _released(released_by="sid-pre-fork")
         _roster(monkeypatch, "sid-post-fork")
-        rec = fleet.new_worker_record("sid-post-fork", "C:/proj", "t", "acceptEdits",
-                                      dispatch_kind="bg")
-        rec["retired_sids"] = ["sid-pre-fork"]
-        data = fleet.load_registry()
-        data["workers"]["sup|inc-old|boot"] = rec
-        fleet.save_registry(data)
+        _install(_record("sid-post-fork", ["sid-pre-fork"]))
         _tombstone()
         assert fleet.main(["clean", "--yes"]) == fleet.SUPERVISOR_CONTINUITY_RC
         assert "ghost" in _names()
@@ -183,12 +212,7 @@ class TestB6IsKeyedOnTheSidUnion:
         did to the claim."""
         entries = _roster(monkeypatch, "sid-post-fork", "sid-successor")
         _released(released_by="sid-pre-fork")
-        rec = fleet.new_worker_record("sid-post-fork", "C:/proj", "t", "acceptEdits",
-                                      dispatch_kind="bg")
-        rec["retired_sids"] = ["sid-pre-fork"]
-        data = fleet.load_registry()
-        data["workers"]["sup|inc-old|boot"] = rec
-        fleet.save_registry(data)
+        _install(_record("sid-post-fork", ["sid-pre-fork"]))
 
         rc = fleet.main(["sup-boot", "--sid", "sid-successor"])
 
@@ -233,13 +257,146 @@ class TestOnePredicateForBothConsumers:
         (set(), False),
     ])
     def test_the_shared_predicate_decides_both(self, live, expect):
-        rec = fleet.new_worker_record("sid-post-fork", "C:/proj", "t", "acceptEdits",
-                                      dispatch_kind="bg")
-        rec["retired_sids"] = ["sid-pre-fork"]
-        reg = {"workers": {"sup|inc-old|boot": rec}}
+        reg = {"workers": {"sup|inc-old|boot":
+                           _record("sid-post-fork", ["sid-pre-fork"])}}
         claim = {"incarnation_id": "inc-old", "state": "released",
                  "released_by_sid": "sid-pre-fork", "released_at": fleet.now_iso()}
         assert fleet._releaser_is_roster_live(claim, live, registry=reg) is expect
         v, _ = fleet.supervisor_claim_decision(
             claim, live, None, caller_sid="sid-new", registry=reg)
         assert (v == "refuse") is expect
+
+
+class TestTheUnionArmIsBoundedToTheForkSteerWindow:
+    """Fix-wave item 3 / break-lens MAJ-2 -- the supervisor's design decision,
+    executed and pinned by BOTH fixtures it named.
+
+    `retired_sids` is not a fork-steer artefact only. `cmd_respawn` carries
+    `prior_retired + [old_sid]` into a record it MINTS FRESH, and a respawn is a
+    genuinely different body. The union arm as first shipped could not tell the
+    two apart, so a record whose releaser died and was respawned answered "the
+    releaser is roster-live" FOREVER -- B6 refusing every successor on the same
+    state, with (measured by the break lens) no in-fleet exit at all: `send`,
+    `kill`, `respawn` and `send supervisor` all refused. A self-healing wedge
+    became a lockout clearable only by a human editing `supervisor/INCARNATION`.
+
+    The boundary is the record's own `created` against the claim's
+    `released_at`: a record minted AFTER the release cannot be the body that
+    performed it. A fork-steer mutates the record in place and leaves `created`
+    alone; a respawn stamps a new one.
+
+    "Assert on the last verb" throughout: `clean --yes` deleting or not, and
+    `sup-boot` consuming the claim or not."""
+
+    def _wedge(self, monkeypatch, created, live="sid-live-now",
+               releaser="sid-dead-releaser"):
+        _released(released_by=releaser)
+        _roster(monkeypatch, live)
+        _install(_record(live, [releaser], created=created))
+
+    # --- the fork-steer window still ARMS (ND4a -- the point of Task 2) ------
+
+    def test_a_fork_steered_releaser_still_arms_the_gate(self, wedge_home, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", THIRD)
+        self._wedge(monkeypatch, BEFORE_RELEASE)
+        _tombstone()
+        assert fleet.main(["clean", "--yes"]) == fleet.SUPERVISOR_CONTINUITY_RC
+        assert "ghost" in _names(), "clean deleted through a fork-steer wedge"
+
+    def test_a_fork_steered_releaser_still_refuses_a_successor_boot(
+            self, wedge_home, monkeypatch):
+        _roster(monkeypatch, "sid-live-now", "sid-successor")
+        _released(released_by="sid-dead-releaser")
+        _install(_record("sid-live-now", ["sid-dead-releaser"], created=BEFORE_RELEASE))
+        assert (fleet.main(["sup-boot", "--sid", "sid-successor"])
+                == fleet.SUPERVISOR_BOOT_RC["refuse"])
+        assert fleet.read_incarnation()["state"] == "released"
+
+    def test_the_tie_arms(self, wedge_home, monkeypatch):
+        # `created == released_at` is the same second, and both stamps are
+        # second-precision (`now_iso`). It resolves TOWARD the gate: a respawn
+        # landing inside the release's own second reads as the fork-steer case
+        # rather than silently disarming a live wedge.
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", THIRD)
+        released_at = fleet.now_iso()
+        _released(released_by="sid-dead-releaser", released_at=released_at)
+        _roster(monkeypatch, "sid-live-now")
+        _install(_record("sid-live-now", ["sid-dead-releaser"], created=released_at))
+        _tombstone()
+        assert fleet.main(["clean", "--yes"]) == fleet.SUPERVISOR_CONTINUITY_RC
+
+    # --- a respawn chain does NOT ------------------------------------------
+
+    def test_a_respawned_body_does_not_arm_the_gate(self, wedge_home, monkeypatch):
+        # The record carries the releaser's sid in `retired_sids` exactly as a
+        # fork-steered one does -- `cmd_respawn` puts it there. What differs is
+        # that the record itself was MINTED after the release, so the live
+        # session is a body that never held or released the claim.
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", THIRD)
+        self._wedge(monkeypatch, AFTER_RELEASE)
+        _tombstone()
+        assert fleet.main(["clean", "--yes"]) == 0
+        assert "ghost" not in _names(), "a respawn chain kept the fleet wedged"
+
+    def test_a_respawned_body_leaves_an_in_fleet_exit(self, wedge_home, monkeypatch):
+        # THE harm, reversed. With the union arm unbounded, B6 refused every
+        # successor forever on this state and nothing inside fleet could clear
+        # it. A successor must be able to boot and take the claim.
+        _roster(monkeypatch, "sid-live-now", "sid-successor")
+        _released(released_by="sid-dead-releaser")
+        _install(_record("sid-live-now", ["sid-dead-releaser"], created=AFTER_RELEASE))
+        rc = fleet.main(["sup-boot", "--sid", "sid-successor"])
+        assert rc == fleet.SUPERVISOR_BOOT_RC["claim"]
+        after = fleet.read_incarnation()
+        assert after.get("state") != "released", "no successor could ever boot"
+        assert after["incarnation_id"] != "inc-old"
+        assert after["session_id"] == "sid-successor"
+
+    def test_a_respawn_chain_is_not_protected_from_archive_either(self, wedge_home):
+        # The corollary of item 4: gate 3 is re-keyed through the sid union, and
+        # that must not quietly grant a respawned body's dead ancestors an
+        # archive exemption they never had. Only a LIVE sid protects.
+        rec = _record("sid-gone", ["sid-also-gone"], created=AFTER_RELEASE)
+        rec["status"] = "dead"
+        rec["last_activity"] = "2020-01-01T00:00:00Z"
+        fleet.write_tombstone_outcome("w", "sid-gone", "stopped")
+        eligible, reason = fleet._archive_eligible(
+            "w", rec, [{"sessionId": "sid-unrelated", "status": "idle", "pid": 1}],
+            datetime.now(timezone.utc))
+        assert (eligible, reason) == (True, "eligible")
+
+    # --- degradation, one direction ----------------------------------------
+
+    @pytest.mark.parametrize("mutate,why", [
+        (lambda c, r: c.pop("released_at"), "claim carries no released_at"),
+        (lambda c, r: c.update(released_at="not-a-timestamp"), "unparseable released_at"),
+        (lambda c, r: r.pop("created"), "record carries no created"),
+        (lambda c, r: r.update(created="not-a-timestamp"), "unparseable created"),
+    ])
+    def test_an_undrawable_boundary_degrades_to_the_bare_comparison(
+            self, wedge_home, monkeypatch, mutate, why):
+        # Stated once in `_releaser_live_sids` and pinned here: with no boundary
+        # to draw, that record drops out of the union and the bare
+        # `released_by_sid in live_sids` comparison is all that is left -- which
+        # is `main`'s shipped answer, so the union arm can never be worse than
+        # the state the fleet already lives with. It resolves the ambiguity
+        # toward a failure an operator can still act on (a fail-open B6,
+        # refusable at the next boot) rather than one needing a text editor.
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", THIRD)
+        claim = {"incarnation_id": "inc-old", "lineage_id": "lin-L",
+                 "claimed_via": "fresh", "released_at": fleet.now_iso(),
+                 "released_by_sid": "sid-dead-releaser", "state": "released"}
+        rec = _record("sid-live-now", ["sid-dead-releaser"], created=BEFORE_RELEASE)
+        mutate(claim, rec)
+        fleet.write_incarnation(claim)
+        _install(rec)
+        _roster(monkeypatch, "sid-live-now")
+        _tombstone()
+        assert fleet.main(["clean", "--yes"]) == 0, why
+        assert "ghost" not in _names(), why
+
+        # ... and the BARE arm is untouched by any of it: with the releaser's
+        # own sid live, the wedge still arms and never reads the registry.
+        _roster(monkeypatch, "sid-dead-releaser")
+        with pytest.raises(fleet.SupervisorClaimGateError):
+            fleet._supervisor_gate("clean", nonce=None)
