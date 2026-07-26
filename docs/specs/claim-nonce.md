@@ -1580,19 +1580,19 @@ offered, because nothing a fresh body could present would be unavailable to a wr
 ### 6.1 D1 — the boot verdict order
 
 New signature: `supervisor_claim_decision(claim, live_sids, latest_entry, now=None,
-stale_seconds=..., caller_sid=None, nonce_valid=False, holder_limited=False)`. Order:
+stale_seconds=..., caller_sid=None, nonce_valid=False, holder_limited=False, registry=None)`. Order:
 
 | # | Condition | Verdict |
 |---|---|---|
 | 0 | `claim is None` | `claim` (fresh) |
-| 1 | `state == "released"` **and** `released_by_sid in live_sids` | **`refuse`** — B6 (three-tier `:1184-1190`, filed against this slice under three-tier authority): `sup-boot` must not consume a `released` record while its releaser is still roster-live — the release+stop window is real |
+| 1 | `state == "released"` **and** `_releaser_is_roster_live(claim, live_sids, registry)` | **`refuse`** — B6 (three-tier `:1184-1190`, filed against this slice under three-tier authority): `sup-boot` must not consume a `released` record while its releaser is still roster-live — the release+stop window is real. **Re-keyed 2026-07-26 (§R3, councilor 1)** from a bare `released_by_sid in live_sids` onto the sid UNION: the releaser is roster-live if that sid is live, **or** if any record whose `_record_sids` carries it has a live sid. The bare form is the one roster comparison that was not keyed on the union, and it failed open in §G-G for a fork-steered releaser — record eagerly restamped, INCARNATION still carrying the pre-fork sid, roster listing the post-fork one (ND4a). Predicate shared verbatim with the §7 gate (§7.2) |
 | 1b | `state == "released"` (releaser gone or unnamed) | `claim` (fresh), reason *predecessor released cleanly* — §6.3 |
 | 1c | `holder_limited` **and not** resumable (holder parked `limited` with a recorded horizon, and the caller is not that holder proving continuity) | **`limit-transfer`** — three-tier `:432-437`, filed against this slice under three-tier authority: a fleet-observed park authorizes an immediate transfer (re-mints lineage), unlike a G9-ambiguous roster-gone. Runs **ahead of rule 2** because a parked body is still roster-live. Journal kind `LIMIT-TRANSFER`, never `SEIZED` |
 | 2 | `holder_sid in live_sids` **and not** (`holder_sid == caller_sid` **and** `nonce_valid`) | **`refuse`** — the roster-liveness two-supervisor guard |
 | 3 | `nonce_valid` **and** (`holder_sid not in live_sids` **or** `holder_sid == caller_sid`) | **`resume`** — no seize, no new incarnation, no `SEIZED`, no page. Restamp `session_id`, refresh `heartbeat_at`, journal `BOOT` bodied *resumed own claim after \<age\>* |
 | 4– | otherwise, **and only when `holder_sid not in live_sids`** (see below): heartbeat unreadable ⇒ `freeze`; journal names a fresher incarnation ⇒ `refuse`; heartbeat stale ⇒ `seize`; heartbeat fresh ⇒ `freeze` | |
 
-*(Rows 1/1b are the two arms of the released-claim check; row 1c is resolved with `holder_limited` supplied by the lock-holding caller — the pure function has no registry access. Both the B6 refuse and the limit-transfer ship under `docs/specs/three-tier-command.md`'s authority, and `skills/fleet/SKILL.md` / `skills/fleet/supervisor.md` document them the same way — as `sup-boot` verdicts a supervisor acts on.)*
+*(Rows 1/1b are the two arms of the released-claim check; rows 1 and 1c are resolved with `registry` and `holder_limited` supplied by the lock-holding caller — the pure function has no registry access, and with `registry=None` row 1 degrades to the bare comparison, which is fail-open on a fork-steered releaser. Both the B6 refuse and the limit-transfer ship under `docs/specs/three-tier-command.md`'s authority, and `skills/fleet/SKILL.md` / `skills/fleet/supervisor.md` document them the same way — as `sup-boot` verdicts a supervisor acts on.)*
 
 **Rule 0b (`re-issue`) is deleted.** v1 granted a fresh nonce to any caller matching the recorded sid,
 which §2.1 shows is an environment-variable assignment away — a documented, permanent bypass of the
@@ -2035,7 +2035,9 @@ properties are unusually bad:
   window was closable only by the boot that is being refused — i.e. indefinite.
 
 **Shipped rule.** The released branch is now decided by one predicate,
-`_releaser_is_roster_live(claim, live_sids)`, shared verbatim with B6:
+`_releaser_is_roster_live(claim, live_sids, registry)`, shared verbatim with B6 (§6.1
+table row 1) — including its sid-union keying, so the gate arms on a fork-steered
+releaser that a bare `session_id` comparison would miss:
 
 | Released-claim state | §7 gate |
 |---|---|
@@ -2053,6 +2055,13 @@ therefore does **not** offer `--nonce`; naming a remedy that always fails is the
 the wedge: the releasing body exiting (`cmd_sup_release` already instructs it to), and
 failing that, the operator stopping that session by the sid the refusal prints. §7's
 structural no-sid bypass is disclosed as always.
+
+**The gate does not quarantine.** Its identity read goes through
+`_registry_records_or_none` → `_read_registry_readonly`, never `load_registry`, which
+renames a corrupt registry aside (`bin/fleet.py:812`) — a write. D4 (`:2574`) states the
+rule for the view path; a speed-bump that promises "no lock, no mint, no write" and runs
+at the top of every mutating verb is the other reader that must not shred operator
+evidence. Quarantining stays with the lock-holding verbs.
 
 **Cost, stated rather than hidden.** This is the only IO in the gate:
 `_fetch_agents_roster` is a `claude agents --json --all` subprocess (~1.7 s measured,
