@@ -2622,7 +2622,11 @@ not taken.
 
 > **DESCRIPTIVE — REQUIRES OPERATOR RATIFICATION.** Appended 2026-07-26 by the builder of
 > `fix/identity-registry-judges`; **rewritten 2026-07-27** after two adversarial reviews and the
-> supervisor's ruling on them. It records what was built and how it relates to §6.5 D5. It does
+> supervisor's ruling on them, and **amended again the same day** after a confirmation review
+> (break lens) returned MERGE-WITH-FIXES: §16.3 now states where the gate is *absent* rather than
+> lenient, §16.4 item 1 says what that means for the ruling it asks for, §16.5 records that the
+> ceiling escape is now detected, and §16.6 adds the seventh finding of its class. It records what
+> was built and how it relates to §6.5 D5. It does
 > **not** amend §6.5, and it is **not** ratified: an author does not ratify their own amendment.
 > §6.5 D5's text above is left exactly as it was written.
 >
@@ -2733,14 +2737,47 @@ instruction — strip any future env channel in `_worker_env` — stands unchang
 "depends on" is now a **registry-keyed gate**. It still exists, it still refuses, and it is still
 positioned ahead of the claim read as the shipped arm was:
 
-- **Re-keyed.** The acting body's role is judged by `_acting_worker_name()` — the acting session's own
+- **Re-keyed.** The acting body's role is judged by `_acting_body_is_worker_turn()` (fix wave 2; it
+  was `_acting_worker_name()`, whose single `None` could not distinguish *"cannot say"* from
+  *"provably not"*) — the acting session's own
   caller sid resolved against every registry record's sid **union** (`_record_sids`, so fork-steered
   and respawned bodies still resolve). The caller sid is `sid_override or current_caller_session()`,
   i.e. §4.3's *"sole source of caller identity … what the caller typed or exported, in both
   branches"*, so `--sid` moves the role question and the continuity question together.
-- **Still a gate.** `UNRESOLVED` and `AMBIGUOUS` both **abstain** — the registry declining to judge is
-  never a refusal — and `_is_supervisor_shaped` exempts the `sup|<inc>|<role>` family, which
-  `NAME_RE` makes unforgeable through `fleet spawn`.
+- **Still a gate.** `_is_supervisor_shaped` exempts the `sup|<inc>|<role>` family, which `NAME_RE`
+  makes unforgeable through `fleet spawn`. `UNRESOLVED` **abstains** — the registry declining to
+  place a session is never a refusal, and that lane is the interface tier, a newborn body inside its
+  own dispatch window, and the handoff successor in window 1. `AMBIGUOUS` abstains **only when the
+  candidates disagree about shape** (fix wave 2): when two records carry one sid and every one of
+  them is an ordinary worker, which one this body is does not matter, because every answer is a
+  worker turn, and the gate fires.
+
+**WHERE THE GATE IS, AND WHERE IT IS NOT. The operator ruling in §16.4 item 1 turns on this
+paragraph, so it is stated before the argument rather than after it.** The gate is keyed on the
+registry, so **it protects only where the registry gives a verdict.** It is *absent* — not lenient,
+absent — whenever `state/fleet.json` cannot be read at all. It is present for every readable state,
+including an uninitialised registry (*"there are no records"* is a verdict) and an ambiguity whose
+candidates agree.
+
+That contingency was **not** in this section's first two revisions and the confirmation review filed
+it as MAJOR: driven A/B against `main`, whose gate read `FLEET_WORKER` and so consulted no file, the
+same worker turn `main` refuses walked through here on a corrupt registry — and on a §9 legacy claim
+minted itself generation 1 with no `--nonce` ever passed. Fix wave 2 closed the part that is
+closable without moving the gate:
+
+- The §9 **legacy upgrade** — the one arm that demands no generation at all — now requires an
+  affirmative *"the registry read and this is not a worker"*. An abstention no longer earns
+  generation 1. That is rb MAJOR 5's remaining door, and it is shut.
+- The **unreadable-registry lane still passes the gate itself**, deliberately and disclosed. The gate
+  sits ahead of the claim read (which is what closes rb MAJOR 5's front door), so it cannot consult
+  the nonce; with no registry there is nothing at that point in the function that could tell a holder
+  from a worker, and failing closed would brick every supervisor verb on a broken file — including
+  the `sup-release` that would end the incident. What survives on that lane is bounded: a body there
+  must still prove continuity on the nonce like anybody else, so the only thing an unreadable
+  registry now buys is that a body the registry *would* have called a worker is not told so.
+- `cmd_sup_boot` takes the same predicate at the same threshold (fix wave 2, MINOR 1). It had none
+  at all, so a worker-shaped body could take the claim at rc 0 and then be refused by every
+  subsequent verb — `sup-release` included — holding a live generation it could not put down.
 
 **WHAT THE RE-KEY BUYS, precisely.** A legitimate claim-holder is never refused its own
 `sup-release`. That is the §16.2 wedge and the re-key alone cures it: the wedged supervisor's own
@@ -2785,6 +2822,13 @@ land on a legitimate supervisor wearing a worker's registry identity. Symmetrica
    should be conceded in advance of settling the `CLAUDE_CODE_SESSION_ID` donation question. This
    replaces the first revision's *"whether `SPEC.md` §6.1 or §6.5 D5 governs"*: on the reading in
    §16.1 both are satisfied by the shipped shape and **there is no loser to amend**.
+   **What the gate actually guarantees, which is what this ruling is being asked to weigh:** it
+   protects wherever the registry gives a verdict and it is *absent* where the registry cannot be
+   read (§16.3, *"where the gate is, and where it is not"*). A ruling that the gate is worth
+   keeping is a ruling about a control with that hole in it; a ruling to demote it gives up a
+   control that is present in every readable state, which is every state an operator will normally
+   meet. The confirmation review's MAJOR 2 is what put this sentence here, and it is the review's
+   own judgement that the finding *"bears on the demotion question"*.
 2. Whether the open question about sid donation should be settled empirically, which requires
    restarting the machine-wide daemon from a process that holds a sid — killing every live session
    including the supervisor's.
@@ -2836,7 +2880,19 @@ speed-bump by construction), and a daemon-donated stamp costs an interface sessi
 exemption — which fails toward **measuring** it rather than excusing it. The refusal's wording no
 longer claims *"the interface tier is never subject to it"*, because with a donated stamp it is.
 
-### 16.6 `load_registry` is not a read — the fifth and sixth findings of one class
+**The escape is wider than "unsets" and it is no longer silent (fix wave 2).** The predicate is
+`.strip()`-absent, so `""`, `"   "`, `"\t"` and `"\n"` all grant the exemption exactly as an unset
+variable does — the confirmation review drove all four against a body stubbed at 500,000 tokens. It
+also looked for a reachable blanker in fleet, `bin/hooks/`, `worker-settings.template.json` and
+`bin/fleet.cmd` and found **none**, so the asymmetry argument above survives the drive and this
+stays a recorded note rather than a finding. What *was* a defect is that the state it produces —
+**registry-RESOLVED + witness-gone**, the one on-box state that falsifies *"absent ⇒ no fleet
+dispatch is in my donation chain"* — was the greenest row in `fleet doctor`.
+`_doctor_check_identity_witness` now **fails** on it, and `DAEMON_ENV_LEAK_REMEDY`, which was true
+of donation and silent about removal, says so. ND1 forbids *preventing* the escape; it says nothing
+about *detecting* it, and the information to redden that row was already in the message it printed.
+
+### 16.6 `load_registry` is not a read — the fifth, sixth and seventh findings of one class
 
 Both identity reads reached the registry through `load_registry`, inside
 `except RegistryCorruptError`. `load_registry`'s own docstring forbids exactly that: *"corrupt/
@@ -2847,8 +2903,26 @@ aside and returned **rc=0**, `sup-heartbeat` — the highest-frequency superviso
 `sup-handoff-begin` — the one lever the ceiling exempts, i.e. the command an over-ceiling supervisor
 is told to reach for — included.
 
-Both now read through `_registry_records_or_none` (*"never writes, never quarantines, never
-raises"*). The class has now been found five times by people and a sixth time by
+Neither now reads through `load_registry` (`_caller_holds_supervisor_claim` uses
+`_registry_records_or_none` — *"never writes, never quarantines, never raises"*;
+`_acting_worker_identity` uses that helper's own `(ok, reason, data)` source, because the identity
+question needs one bit more than records-or-None: whether the registry was *readable*, which §16.3
+explains). The class has now been found five times by people and a sixth time by
 `tests/test_load_registry_callers.py`, which enumerates the call sites out of the AST so a new
 non-mutating reader cannot be added silently; that sixth finding was `_caller_holds_supervisor_claim`,
 on the ceiling path, in neither review.
+
+**The seventh was `_supervisor_gate`, and the detector had ALLOWLISTED it** (fix wave 2, MAJOR 1).
+It documents itself *"READ-ONLY: no lock, no mint, no write"* and *"called at the top of every
+mutating lifecycle verb"*, and it called `load_registry()` inside `except RegistryCorruptError`: so
+`fleet send w1 hello` against a corrupt registry renamed `state/fleet.json` aside and refused with a
+message that never mentioned the registry, while `cmd_send`'s own sanctioned aborting read under the
+lock was never reached. The path is the everyday one — the gate reaches that read exactly when a
+claim is held with a fresh heartbeat and the caller presented no generation, which is the interface
+tier's normal state by design (§7 seam #1). The call is byte-identical on `main`, so this branch did
+not mint it; what this branch did was bless it, listing it under *"all inside `fleet_lock()`"* — it
+takes no lock and says so — against the allowlist's own admission rule, which disqualifies anything
+that documents itself read-only or runs on a hot path. A harness built to stop a seventh instance
+shipped with the seventh instance certified. Both halves are fixed, and the detector's walk now
+covers class methods, module level and module-level aliases; `getattr` dispatch is not statically
+decidable and the file says so instead of implying totality.
