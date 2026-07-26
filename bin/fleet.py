@@ -8273,7 +8273,7 @@ def _doctor_check_identity_witness(workers: dict):
     if verdict == IDENTITY_AMBIGUOUS:
         return ("identity-witness", False,
                 f"AMBIGUOUS identity: session id {sid!r} is carried by "
-                f"{len(ident['matches'])} live registry records "
+                f"{len(ident['matches'])} registry records "
                 f"({', '.join(repr(n) for n in ident['matches'])}). One session "
                 f"cannot be two workers, so at least one record's sid union is "
                 f"wrong -- fleet abstains from judging this body's identity "
@@ -8296,8 +8296,9 @@ def _doctor_check_identity_witness(workers: dict):
                 f"dispatch window (the record is written before the session "
                 f"exists and the sid is filled in when the dispatch returns), "
                 f"and expected for any session fleet did not launch. If it "
-                f"persists for a body that IS fleet-launched, treat it as the "
-                f"daemon leak below")
+                f"persists for a body that IS fleet-launched, the record's sid "
+                f"was never filled in -- inspect state/fleet.json. "
+                + DAEMON_ENV_LEAK_REMEDY)
 
     if witness == ident["name"]:
         return ("identity-witness", True,
