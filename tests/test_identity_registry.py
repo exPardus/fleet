@@ -640,10 +640,21 @@ class TestInferenceNeverRefuses:
             fleet.cmd_sup_checkpoint(_ckpt(sid="sid-newborn", nonce=fleet.mint_nonce()))
         assert "continuity proof failed" in str(exc.value)
 
-    def test_an_ambiguous_body_passes_through_to_the_nonce(
+    def test_an_ambiguous_body_of_MIXED_SHAPE_passes_through_to_the_nonce(
             self, id_home, monkeypatch, capsys):
+        """AMBIGUOUS is no longer a blanket abstention -- FIX WAVE 2, MAJOR 2.
+
+        This test used to plant TWO ORDINARY WORKERS and assert they passed.
+        That is now a refusal and `tests/test_identity_fixwave2.py` pins it:
+        when every candidate is a worker, which one this body is does not
+        matter, because every answer is a worker turn.
+
+        What survives here is the ambiguity that is genuinely mute. One
+        candidate is a worker and the other is supervisor-shaped, so the two
+        answers disagree, the registry has no verdict to give, and the nonce
+        stays the real gate."""
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-dup")
-        _registry({"a": _rec("sid-dup"), "b": _rec("sid-dup")})
+        _registry({"a": _rec("sid-dup"), "sup|inc-x|boot": _rec("sid-dup")})
         live = _hold_with_live_nonce("sid-dup")
         assert fleet.cmd_sup_checkpoint(_ckpt(sid="sid-dup", nonce=live)) == 0
         capsys.readouterr()
@@ -826,14 +837,70 @@ class TestDoctorAnnouncesTheLeak:
         return fleet._doctor_check_identity_witness(
             workers if workers is not None else fleet.load_registry()["workers"])
 
-    def test_no_witness_no_finding(self, id_home, monkeypatch):
+    def test_a_RESOLVED_body_with_NO_witness_is_REDDENED(self, id_home, monkeypatch):
+        """FIX WAVE 2, Task 5 item 4 -- the one state that FALSIFIES the
+        ceiling's soundness argument, and it used to be the greenest row here.
+
+        ND4(c)'s structural exemption rests on *"donation can only ever ADD a
+        stamp; nothing removes one"*, so an ABSENT `FLEET_WORKER` is sound
+        evidence that no fleet dispatch is in this session's donation chain.
+        Registry-RESOLVED + witness-GONE is exactly the state that makes that
+        false: the registry says a fleet dispatch created this body, and the
+        stamp that dispatch wrote is not here.
+
+        The confirmation review found no reachable blanker anywhere in fleet,
+        the hooks, the settings template or the launcher -- so the escape stays
+        a note rather than a finding, and ND1 forbids PREVENTING it in any
+        case. ND1 says nothing about DETECTING it, and the information to
+        redden this row was already in the message it printed."""
         monkeypatch.delenv("FLEET_WORKER", raising=False)
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-w1")
         _registry({"w1": _rec("sid-w1")})
         name, ok, msg = self._check()
         assert name == "identity-witness"
+        assert ok is False
+        assert "no FLEET_WORKER" in msg and "w1" in msg
+        # The row must name what it costs, or an operator cannot act on it.
+        assert "200k" in msg or "ceiling" in msg
+
+    def test_a_blanked_witness_reddens_it_too(self, id_home, monkeypatch):
+        """`FLEET_WORKER=""`, `"   "`, `"\\t"`, `"\\n"` are not merely
+        falsy-absent, they are `.strip()`-absent -- all four grant the
+        structural exemption. The doctor row reads the stamp through the same
+        `.strip()`, so it must redden on all four rather than on unset alone."""
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-w1")
+        _registry({"w1": _rec("sid-w1")})
+        for blank in ("", "   ", "\t", "\n"):
+            monkeypatch.setenv("FLEET_WORKER", blank)
+            _name, ok, _msg = self._check()
+            assert ok is False, f"a blanked witness {blank!r} stayed green"
+
+    def test_an_UNRESOLVED_body_with_no_witness_stays_GREEN(self, id_home, monkeypatch):
+        """The interface session and every non-fleet shell live here, and they
+        are the common case. No record claims this sid, so nothing says a fleet
+        dispatch is in the donation chain, and the absent stamp agrees."""
+        monkeypatch.delenv("FLEET_WORKER", raising=False)
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-nobody")
+        _registry({"w1": _rec("sid-w1")})
+        _name, ok, msg = self._check()
         assert ok is True
         assert "no FLEET_WORKER" in msg
+
+    def test_a_human_shell_with_neither_a_sid_nor_a_witness_stays_GREEN(
+            self, id_home, monkeypatch):
+        monkeypatch.delenv("FLEET_WORKER", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        _registry({"w1": _rec("sid-w1")})
+        _name, ok, _msg = self._check()
+        assert ok is True
+
+    def test_the_remedy_text_stops_being_silent_about_REMOVAL(self):
+        """`DAEMON_ENV_LEAK_REMEDY` said the one decision keyed on this variable
+        keys on the stamp's ABSENCE, *"which donation cannot manufacture"*. True
+        of donation and silent about removal -- and removal is the half that
+        matters, because absence is what grants the exemption."""
+        assert "donation cannot manufacture" in fleet.DAEMON_ENV_LEAK_REMEDY
+        assert "remove" in fleet.DAEMON_ENV_LEAK_REMEDY.lower()
 
     def test_an_agreeing_witness_passes(self, id_home, monkeypatch):
         monkeypatch.setenv("FLEET_WORKER", "w1")
