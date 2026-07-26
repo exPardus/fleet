@@ -59,8 +59,16 @@ class TestGateArming:
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-anyone")
         fleet._supervisor_gate("spawn", nonce=None)
 
-    def test_a_released_claim_disarms_the_gate(self, gate_home, monkeypatch):
+    def test_a_CLEANLY_released_claim_disarms_the_gate(self, gate_home, monkeypatch):
+        # NARROWED 2026-07-26 (§R3, councilor 4): "released" alone no longer
+        # disarms. A released claim whose releaser is still roster-LIVE is the
+        # wedged state and it ARMS -- see tests/test_gate_arm_wedge.py. What
+        # disarms is release+stop having COMPLETED, which is this test.
+        # The roster is stubbed rather than left live: without the stub this
+        # passes only because the developer's own roster happens not to list
+        # `sid-x`, which is a test outcome that depends on who ran it.
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-anyone")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
         fleet.write_incarnation({"incarnation_id": "inc-old", "lineage_id": "lin-L",
                                  "claimed_via": "fresh", "released_at": fleet.now_iso(),
                                  "released_by_sid": "sid-x", "state": "released"})
@@ -75,7 +83,13 @@ class TestGateArming:
         # released claim has no holder, so there is no divergent-second-body
         # question to gate. Without the `state == "released"` conjunct this
         # would arm and refuse a caller presenting no generation.
+        #
+        # Still true after the §R3 narrowing, and now carrying MORE weight: the
+        # released branch runs first and answers for this claim entirely, so an
+        # anomalous fresh beat and an anomalous nonce_hash are both ignored --
+        # a released claim is decided by its releaser's roster state alone.
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-anyone")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
         value = fleet.mint_nonce()
         fleet.write_incarnation({"incarnation_id": "inc-old", "lineage_id": "lin-L",
                                  "claimed_via": "fresh", "released_at": fleet.now_iso(),
