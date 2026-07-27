@@ -1459,11 +1459,12 @@ class TestWorkerTurnsCannotHoldTheClaim:
     and `CLAUDE_CODE_SESSION_ID` come from the same donated medium so a
     registry lookup keyed by the sid inherits the defect one level down. That
     reasoning depends on the daemon donating the SID as well as the stamp,
-    which claim-nonce:2573 records as an OPEN question, and the demotion
+    which claim-nonce §16.3 records as an OPEN question, and the demotion
     conceded ratified §6.5 D5 to insure against it. SPEC.md:196 constrains the
     guard's KEY; §6.5 D5 requires the guard to EXIST; a registry-keyed gate is
-    both, so there was never a loser to pick. The question is filed for the
-    operator; the ratified shape ships meanwhile.
+    both, so there was never a loser to pick. The operator ruled on 2026-07-27
+    (claim-nonce §17, the scoped clause): this gate grounds its refusal on the
+    REGISTRY, not on a donated stamp, so the clause does not condemn it.
 
     THE WEDGE IS CURED BY THE RE-KEY ALONE, which is what made the demotion
     unnecessary. A supervisor body hosted by a daemon that an ordinary worker
