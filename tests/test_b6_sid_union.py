@@ -233,7 +233,16 @@ class TestB6IsKeyedOnTheSidUnion:
         the top of every mutating verb, so reading the records through
         `load_registry` would let a speed-bump destroy the operator's evidence
         while claiming to touch nothing. D4 states the rule for the view path;
-        this is the same rule for the gate's identity read."""
+        this is the same rule for the gate's identity read.
+
+        SCOPE, because this pin reads broader than it is. A RELEASED claim is
+        answered inside `_wedged_release_gate` and returns or raises there, so
+        this covers the WEDGED ARM's read and nothing else. `_supervisor_gate`
+        has a SECOND registry read -- the §7.1 `send` carve-out -- reachable
+        only on a claim that is HELD and FRESH, which this fixture never
+        builds. It shipped calling `load_registry` while this test stayed
+        green. Its own pin is `tests/test_supervisor_gate.py::TestTheSendCarve
+        OutNeverQuarantinesTheRegistry`; keep both."""
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", THIRD)
         _released(released_by="sid-old")
         _roster(monkeypatch, "sid-old")
