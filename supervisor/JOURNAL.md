@@ -1485,3 +1485,85 @@ handoff template; the open decision) plus NOTEs for TWO orphaned successor task 
 carrying a spent plaintext token, neither abortable. My claim is held with a fresh heartbeat; if
 this session ends it ages out and becomes seizable after an hour, which is the designed recovery
 and is now the most likely way this claim moves.
+
+## 2026-07-27T00:11:48Z CHECKPOINT inc=inc-20260726T223247Z-bffe sid=dc392dc9-ae35-49a6-82b9-064ce7799a7b
+
+G-Y. CLEAN STAND-DOWN ON INTERFACE ORDER. THE FOUR ITEMS THE NEXT BODY NEEDS, STATED EXPLICITLY SO NOTHING RIDES ON PROSE ELSEWHERE.
+
+ABORT ATTEMPTED AND REFUSED, EXACTLY AS PREDICTED -- THIRD LIVE INSTANCE TONIGHT. `sup-handoff-abort --nonce <gen>` first failed argparse: `--successor-sid` is REQUIRED, so the recipe in the order (and the one `sup-handoff-begin` prints) is doubly incomplete -- it omits the nonce AND cannot be run without a sid. Supplying the pending successor's sid then refused on the merits: "no HANDSHAKE and --successor-sid 294404c1-... matches no recorded limbo successor -- refusing to stop an unverified session". That is defect 1 firing for the third time and I did not fight it, per order.
+
+(1) `fix/handoff-seams` @ f7a364e -- EXACT STATE AND WHAT "SURVEY UNDRIVEN" OWES.
+    UNMERGED. Green ON ITS OWN BRANCH at 2145/8 and NEVER run against the tree it enters; that
+    tree has now moved five times and is `ea1391c` today. What is owed, none of it done by me:
+    (a) RE-DRIVE THE CONFLICT SURVEY against ea1391c. The inherited reading -- "hs auto-merges
+        bin/fleet.py and claim-nonce.md, conflicts only in docs/NEXT-SESSION.md" -- is from the
+        same stale survey whose b6 half I falsified tonight. Treat it as unverified, not as
+        probably-right.
+    (b) THE INTEGRATION MEASUREMENT ITSELF: full both floors on the MERGED tree, not on the
+        branch. A clean TEXTUAL merge of two semantic changes to one claim subsystem proves
+        nothing.
+    (c) R9's un-supersede path is RULED DELETE, not repair -- but f7a364e's own title is
+        "revert(handoff): delete the un-supersede; --force consults the age (R1, 4-0)", so
+        CHECK WHETHER THE DELETION IS ALREADY ON THE BRANCH before executing it again.
+    (d) Merge order is b6 THEN hs, so (2) below blocks this one.
+    Contents that make it top priority: 7c03cb5 "record the pending successor so a stillborn
+    handoff is abortable", 77cac7b "pending successors are a collection with a lifecycle", and
+    R7/rs-MIN-D deleting the abort-flag arm that refused me three times tonight.
+
+(2) `fix/b6-interface-release` @ 2e824ea -- NOW CONFLICTS WITH MAIN. MEASURED BY ME, NOT
+    INHERITED: `git merge --no-ff fix/b6-interface-release` against main=ea1391c gives
+    CONFLICT (content) in `bin/fleet.py` AND in `docs/specs/claim-nonce.md`. Merge-base a2358f2;
+    the gate-arm wave touched both files since. THE EARLIER "ZERO CONFLICTS" READING IS STALE
+    AND MUST NOT BE RE-USED. I aborted cleanly -- `git merge --abort`, porcelain EMPTY, main
+    unchanged at ea1391c -- rather than resolve a claim-subsystem conflict at 187k with no room
+    to test it.
+
+(3) `fix/identity-registry-judges` @ 7d33d28 -- CONFIRMED, VERDICT ESCALATE, DECISION OPEN.
+    2360/11 on BOTH floors (+51, 0 regressions), RED-before-green 32 failed/87 passed, receipts
+    60/61 with only the inherited :1357 WARN, porcelain empty; every number re-measured by an
+    independent lens that re-drove both of its own MAJORs and could not re-open either. NOT
+    MERGED. Its `pending_decision` is OPEN in supervisor state and is the first item in
+    docs/OPERATOR-GATES.md: A) merge now and fix on main, B) tight wave 3 on the branch, C) hold.
+    I recommended A and named the tension -- A RELOCATES the third fix wave rather than avoiding
+    it. The residual MAJOR: the section-9 legacy upgrade is granted on an ABSENT registry while a
+    CORRUPT one is refused, and quarantine RENAMES corrupt into absent, so the refusal message's
+    own advice ("see `fleet doctor`") walks the caller through the door. Remedy is small and
+    already patterned at :7518 -- gate `not_initialized` on the `fleet.json.corrupt.*` glob. DO
+    NOT close the carve-out; mutant W11 proves that refuses the upgrade on every fresh install
+    and kills 39 tests. Under the standing autonomy instruction this may be COUNCILLED (4
+    personas + synthesis) rather than left waiting for the operator.
+
+(4) TWO ORPHANED SUCCESSOR TASK FILES, EACH CARRYING A SPENT PLAINTEXT TOKEN, NEITHER ABORTABLE:
+      state/supervisor-handoff-inc-20260726T234444Z-8b3e.md  (sid fea5d8e2-88a2-4129-849d-16654bc7ae6a)
+      state/supervisor-handoff-inc-20260727T000022Z-b86d.md  (sid 294404c1-8fb6-4721-b785-d5701c21d076)
+    Both sessions exist in `claude agents` and NEITHER ever produced a transcript. §5.9 says the
+    abort unlinks these; the abort cannot run, so they persist. `fleet doctor` reports them as a
+    NOTE and says they are safe to delete manually -- that is an operator action at a shell, not
+    mine, and I have not taken it.
+
+WHY I AM RELEASING RATHER THAN ATTESTING OR RESPAWNING. `sup-release --interface` would be a
+FALSE ATTESTATION from a supervisor and my lineage already ruled that out; `respawn` half-failed
+on its first live exercise and left a claim released with no successor dispatched. A plain
+release reads unambiguously at the next boot (`claim`, no seizure, no page, claim-nonce §6.3),
+which is the whole point of the verb and is what distinguishes an authorized stand-down from a
+crash. The interface tier takes succession and will stop this body so its sid leaves the roster.
+
+AND THIS SPENDS THE FIRST REAL `sup-release`. It has been carried as an UNSPENT DELIBERATE
+EXPERIMENT for five incarnations -- every fixture in the gate-arm wave was a tmp_path FLEET_HOME
+and a handoff is not a release, so no predecessor ever ran it against a live claim. It is being
+spent now, under an interface order, with the operator away and the outcome recorded either way.
+If it misbehaves, THAT is the finding, and this entry is the pre-registration of it.
+
+STATE AT STAND-DOWN. main=e85ad57, FIFTEEN ahead of origin/main, UNPUSHED, porcelain EMPTY.
+Nothing merged this incarnation. All workers idle, no mail, no limited parks, archive a total
+no-op. SEVEN operator gates open. Doctor: 2 FAIL -- supervisor-claim (the FALSE second-body row
+manufactured by the handoff template handing the successor a `sup-checkpoint` with no `--nonce`;
+one line to fix and it is poisoning the row that will one day be real) and
+supervisor-pending-decision (correct and expected) -- plus the two NOTEs above. The merge brief
+is written, complete and fenced at `state/tasks/briefs/hs-merge.md`; the interface tier is exempt
+from the 200k ceiling and can spawn it in one command. pid 21724 (session 44542e80) remains the
+deliberately-preserved G-O abort fixture. No watchers or servers started by me.
+
+## 2026-07-27T00:11:58Z RELEASED inc=inc-20260726T223247Z-bffe sid=dc392dc9-ae35-49a6-82b9-064ce7799a7b
+
+released cleanly: ceiling-locked, three stillborn handoffs; interface takes succession
