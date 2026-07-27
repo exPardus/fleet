@@ -10974,7 +10974,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
     writer appends that record's OWN prior sid alone: :4588, :5035, :8963,
-    :12433), the same safety invariant §7.1's send carve-out rests on. That
+    :13314), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -11595,18 +11595,24 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
     #     writer appends that record's OWN prior sid alone (:4588, :5035, :8963,
-    #     :12433) -- so the sid union can never make one body answer for another.
+    #     :13314) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
     #     numbers here were four lines of unrelated code when the spec lens
     #     looked (S-7).
     if verb == "send" and send_target is not None:
-        try:
-            resolved_rec = load_registry().get("workers", {}).get(send_target)
-        except RegistryCorruptError:
-            resolved_rec = None     # fail toward the gate (a corrupt registry
-                                    # is reported by its own doctor row)
+        #   * `_registry_records_or_none`, NEVER `load_registry`. This gate
+        #     documents itself "READ-ONLY: no lock, no mint, no write" and
+        #     `load_registry` QUARANTINES a corrupt registry -- it RENAMES the
+        #     file aside (`:812`), which is a write. Routing the identity read
+        #     through it made `fleet send` shred the operator's evidence from a
+        #     path that promises to touch nothing; the helper exists for exactly
+        #     this and names this gate as its reason (`:10821`). A `None` here
+        #     still fails toward the gate -- an unreadable registry is reported
+        #     by its own doctor row, and is never a reason to decide blind.
+        records = _registry_records_or_none()
+        resolved_rec = (records or {}).get("workers", {}).get(send_target)
         if (resolved_rec is not None
                 and _record_is_supervisor_claim_holder(resolved_rec, claim=claim) is True):
             return
@@ -12577,8 +12583,9 @@ Do exactly this, in order:
      SUP-BOOT-FROZEN <reason>
 5. After a successful claim: proceed per skills/fleet/supervisor.md -- with the boot bundle
    content you read in step 3 (GOALS, journal tail, knowledge index, fleet status), run an early
-   "{py}" "{fleet_py}" sup-checkpoint "<note>" presenting your nonce, then begin the campaign
-   brief below.
+   "{py}" "{fleet_py}" sup-checkpoint "<note>" --nonce <YOUR-NONCE>, substituting the NONCE
+   value from step 2, then begin the campaign brief below. The flag is not optional: every
+   `sup-*` holder verb is refused without it.
 
 --- CAMPAIGN BRIEF ---
 {campaign}
@@ -12777,7 +12784,11 @@ Do exactly this, in order:
 2. Take NO spawn/respawn/send/kill/clean actions before claim transfer -- spec §4's double-spawn guard.
 3. Poll every ~30s (up to 10 minutes): "{py}" {fleet_py} sup-status --json
    - When incarnation.incarnation_id == "{successor_inc}": the claim is yours. Run:
-     "{py}" {fleet_py} sup-checkpoint "claim received via handoff from {old_inc}"
+     "{py}" {fleet_py} sup-checkpoint "claim received via handoff from {old_inc}" --nonce <YOUR-NONCE>
+     substituting the NONCE value step 1 printed. THE FLAG IS NOT OPTIONAL: `sup-checkpoint`
+     is a `_require_claim_holder` verb, so without it this call is REFUSED and the refusal
+     files a false second-body row in `fleet doctor` -- a permanently-red row trains the
+     operator to ignore the row that will one day be real.
      then read your boot bundle output and continue the supervisor duty per skills/fleet/supervisor.md.
    - If 10 minutes pass without transfer: the handoff was aborted. STOP -- take no actions,
      end your turn with the final message: HANDOFF-ORPHAN {successor_inc}
