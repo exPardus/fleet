@@ -1533,6 +1533,44 @@ Two further rules in the same family:
   gains a NOTE for any `state/supervisor-handoff-*.md` older than
   `SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS`. Unlink on completion is the mechanism; the NOTE is the
   backstop for the paths that crash before it.
+
+  > **AMENDMENT A2 — 2026-07-24, DESCRIPTIVE, REQUIRING OPERATOR RATIFICATION.** The shipped code
+  > diverges from the two bullets above, and this note reports the divergence rather than promoting
+  > it. Ratify or reject.
+  >
+  > **The observable was not enough, and the reason is empirical.** The 2026-07-24 succession took
+  > three attempts; neither `complete` nor `abort` ran for the first two, so three files sat in
+  > `state/` with the NOTE firing and nobody acting on it. A `supervisor-handoff-<inc>.md` is not
+  > merely residue: it carries a **plaintext one-shot bearer token that is still LIVE** — nothing
+  > invalidates it but the claim dropping `handoff_token_hash`, so `sup-boot --handoff-inc <inc>
+  > --handoff-token <tok>` still validates against a stranded file. (The wave-1 doctor NOTE called
+  > these tokens "spent"; that rationale was false and is corrected in the code.)
+  >
+  > As shipped there is a **fail-closed, age-gated sweep** (`handoff_task_files_to_sweep`, a pure
+  > predicate over `(name, age)` pairs) run at **four** sites: `sup-handoff-begin`,
+  > `sup-handoff-complete`, `sup-handoff-abort`, and `cmd_sup_boot`. It never deletes a file named by
+  > any pending entry or by the current holder, never one younger than
+  > `SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS` or of unreadable age, and **never anything at all when the
+  > claim is missing, unreadable, or holderless**. That last clause is the one the incident review
+  > demanded: a successor's entire prompt is `Read <task_path> and follow it exactly`, so deleting
+  > that file mid-boot silently strips the body of its only input — including the HANDOFF-ORPHAN
+  > self-termination the same file prescribes — and §5.7's own manual lever (remove
+  > `supervisor/INCARNATION` by hand) is one of the states that reaches it.
+  >
+  > `fleet clean` is still **not** a sweep site; §4.13(g)'s receipt is unaffected. Retirement is now
+  > additionally reachable by the operator through `sup-handoff-abort --successor-inc <inc>`, which
+  > drops the entry, the file, and — when it is the last entry — the token hash (§6.4 A1, whose last
+  > paragraph is where that token-hash drop is written down).
+  >
+  > **Amended again by A3 (§6.4, 2026-07-26), in two places.** The clause "never a file named by ANY
+  > pending entry" is now "never a file named by a pending entry that still PROTECTS it": a
+  > `superseded` entry stops protecting its file once its supersession is past the handoff timeout,
+  > because a superseded attempt can no longer boot and nothing can still be reading that file for
+  > the first time. Without that clause the pending set and its stranded plaintext tokens could only
+  > grow — superseded entries are never `resolvable-stale`, so nothing aged them out. And a **torn**
+  > pending member (unreadable, naming no successor this code can identify) makes the predicate
+  > protect EVERY file, which is what "fails closed" has to mean when the thing that names the file
+  > is the thing that is unreadable.
 - **`state/supervisor-nonce-rejections.jsonl`** is bounded, but **not by the writer.** v2 said *"the
   writer truncates to the most recent 200 records"*; truncation is a read-modify-write needing
   `GENERIC_WRITE`, which is exactly the access mode `_atomic_append_bytes`'s docstring says forfeits
@@ -1757,6 +1795,109 @@ equality — the same root cause, third instance.
 
 `sup-handoff-abort` is unchanged — **both** of its sid checks (the HANDSHAKE arm @7441-7445 and the
 abort-flag arm @7456, §4.13(a)) are genuinely sid questions: they choose which *session* to stop.
+
+> **AMENDMENT A1 — 2026-07-24, DESCRIPTIVE, REQUIRING OPERATOR RATIFICATION.** The paragraph above no
+> longer describes the shipped code, and this note is a *report* of what a live incident forced, not a
+> promotion of it (no author promotes its own spec). Ratify or reject; until then the paragraph stands
+> as the v3 text and this note as the divergence record.
+>
+> The 2026-07-24 succession (inc-651f → inc-7d7d, three attempts in sixteen minutes) found that a
+> successor which dispatched, joined the roster, and then died **before writing HANDSHAKE** matched
+> neither arm: no HANDSHAKE, and no abort flag either, because every `_abort_flag` call site in
+> `sup-handoff-begin` omits `successor_sid`. The handoff was **unabortable in exactly the window the
+> abort verb exists for**, and the operator hit the refusal twice live.
+>
+> As shipped, `sup-handoff-abort` decides through one pure function (`resolve_handoff_abort`) over
+> **three** arms, and the abort-flag arm is **deleted** — it was unreachable from any begin path and
+> could only fire on a repeat abort of an already-stopped sid:
+>
+> 1. **HANDSHAKE present** — cross-check whichever handle the caller passed (unchanged in substance).
+> 2. **No HANDSHAKE, a pending entry bearing a sid** — stop it. The claim now records every successor
+>    begin dispatches (`handoff_pending`, a LIST — three concurrent attempts is a real sequence).
+> 3. **No HANDSHAKE, a pending entry with NO sid, past the handoff timeout** — `--successor-inc`
+>    RETIRES it: entry cleared, task file unlinked, and the verb states plainly that **no session was
+>    stopped**, because none was ever recorded. Inside the window it refuses and says when.
+>
+> The refusal for a handle that ties to no recorded successor is **unchanged and load-bearing**: this
+> is not a "stop any sid" verb. `--successor-sid` is still a sid question; `--successor-inc` is an
+> *attempt* question, which is what an attempt that never produced a session requires.
+>
+> **Retiring an entry retires the TOKEN with it, and that is where the live credential dies**
+> (rs-MIN-F: §5.9's A2 sends the reader here for this and this note did not carry it). A stranded
+> `supervisor-handoff-<inc>.md` is not spent residue — `sup-boot --handoff-inc <inc> --handoff-token
+> <tok>` still validates it, because validation is against `claim["handoff_token_hash"]` and nothing
+> else clears that hash. Only `begin` writes it, and only for its newest attempt, so it belongs to
+> whichever attempt is still outstanding: as shipped, `drop_handoff_entry` drops the entry, and when
+> it was the LAST entry it drops `handoff_token_hash` too. Unlinking the file is hygiene; dropping
+> the hash is what makes every copy of that token — in a backup, in a terminal scrollback, in an
+> unswept file — verify against nothing.
+
+> **AMENDMENT A3 — 2026-07-26, DESCRIPTIVE, REQUIRING OPERATOR RATIFICATION. THIS ONE CHANGES THE
+> PROTOCOL SHAPE.** A1 and A2 report divergences inside the design v3 already had. This note does
+> not: it adds a STATE and a REFUSAL to the handoff protocol, and it is written plainly as that
+> rather than smuggled in as a clarification. Ratify or reject.
+>
+> **What forced it.** A1 made the pending successors a COLLECTION so that no attempt loses its
+> record, and A2 made the task-file sweep FAIL CLOSED so that no live successor loses its only
+> input. Both are right on their own, and together they made a *superseded* successor **fully
+> bootable** — its entry stands, its task file stands, and its plaintext token still validates.
+> Underneath them the protocol is single-successor: `supervisor/HANDSHAKE` is ONE path and
+> `claim["handoff_token_hash"]` is ONE value. Two live successors therefore race, and the loser
+> wins:
+>
+> 1. the fast successor boots and writes HANDSHAKE;
+> 2. the slow rival boots LATE and CLOBBERS it — same file, its own incarnation id and token hash;
+> 3. `sup-handoff-complete --expect-inc <winner>` refuses: the HANDSHAKE names the rival;
+> 4. `sup-handoff-abort --successor-sid <winner>` refuses: the HANDSHAKE sid is the rival's;
+> 5. aborting the RIVAL deletes the HANDSHAKE, and the winner never writes another —
+>    `_render_successor_task` runs `sup-boot --handoff-inc` **once**, at step 1, and only polls
+>    afterwards.
+>
+> The claim transfers to NOBODY, both bodies self-terminate at HANDOFF-ORPHAN, and the operator
+> restarts the succession mid-incident. Wave 1 made this impossible by deleting the rival's file;
+> wave 2 removed that deletion for the reason A2 gives and did not put anything in its place.
+>
+> **The rule as shipped: AT MOST ONE BOOTABLE SUCCESSOR, and supersession is EXPLICIT.**
+>
+> - `sup-handoff-begin` appends its entry and, in the SAME claim write, marks every earlier
+>   unresolved entry `superseded_at` / `superseded_by`. `sup-handoff-complete` marks whatever it
+>   carries forward the same way: the succession is over, and a rival that booted after the transfer
+>   would clobber the NEW holder's HANDSHAKE.
+> - A superseded entry is **(a)** still abortable, by inc or by sid, and immediately — it stops if it
+>   recorded a sid and retires if it never did, with no join window left to wait out; **(b)**
+>   sweepable once its supersession is past `SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS`, which is what
+>   bounds the list and its stranded tokens; and **(c)** **NOT BOOTABLE**.
+> - `sup-boot --handoff-inc <inc>` reads the refusal under the same `fleet_lock` as the HANDSHAKE
+>   write, so a `begin` cannot supersede a successor between its check and its write. It refuses an
+>   inc that is superseded, and an inc that no entry records **when the claim records other
+>   attempts**. It fails OPEN when the claim records no pending set at all: an old-code predecessor
+>   cannot distinguish the current attempt from a superseded one, and refusing on that evidence would
+>   wedge the one path that still works. rc is `SUPERVISOR_BOOT_HANDOFF_REFUSED_RC` (5), distinct
+>   from `refuse` (2), and NO generation is delivered — a refused body holds nothing.
+> - The refusal text addresses a BODY, not an operator: the successor's whole prompt is
+>   `Read <task file> and follow it exactly`, so it names the attempt that superseded it and says
+>   **TERMINATE**, in those words, with the HANDOFF-ORPHAN final message the task file already
+>   prescribes.
+>
+> **There is deliberately NO promote verb.** To promote an earlier attempt the operator aborts it and
+> begins again. A promote would have to move `handoff_token_hash`, re-point HANDSHAKE and re-mint the
+> superseded entry's bootability, which is the whole race re-introduced behind one verb — and the
+> begin it replaces costs one command. This is also why only the current attempt can `complete`:
+> superseded attempts cannot boot, so they cannot produce a HANDSHAKE for complete to verify. That
+> property is now **correct by construction** rather than enforced by a check.
+>
+> **Retirement gets one verb for the whole set.** `sup-handoff-abort --retire-all` retires every
+> entry that names no session — `resolvable-stale`, `superseded`, and (with `--force`) an entry whose
+> `minted_at` cannot be read and which would therefore never age out at all. It stops nothing, ever;
+> an entry bearing a sid is reported with its own per-entry recipe, and a live HANDSHAKE refuses the
+> whole call. `_doctor_check_supervisor_handoff` now **FAILS** on a stranded or superseded entry
+> rather than noting it: `begin` clears the abort flag that used to carry that verdict, so the
+> 2026-07-24 residue — three entries, three live plaintext tokens — read as PASS.
+>
+> **Storage shape.** Entries gain `superseded_at` (ISO) and `superseded_by` (the inc that took over).
+> A pending member that is not a dict, or that carries no readable `successor_inc`, is a **torn**
+> member: it names a file this code cannot identify, so the sweep protects EVERY task file while one
+> stands, the doctor fails, and `--retire-all` is what clears it.
 
 ### 6.5 D5 — no environment-variable channel
 
@@ -2162,7 +2303,7 @@ below.
 | **`supervisor_status_line`** @7503-7530 | a released-claim branch ahead of the heartbeat read (§6.3). Without it a clean `sup-release` reports as corruption in `fleet doctor`, `sup-status`, **and the SessionStart hook of every Claude Code session on this box**. v2's table omitted this function entirely | this slice |
 | **`supervisor/JOURNAL.md:6`** | the live, git-tracked kinds line — never regenerated (§4.7), so `RELEASED` must be added there as well as to the seed | this slice |
 | `_doctor_check_supervisor_handoff` | a NOTE for orphaned `state/supervisor-handoff-*.md` (§5.9) | this slice |
-| `cmd_sup_boot` | out-of-band compaction of `state/supervisor-nonce-rejections.jsonl` under the `fleet_lock` it already holds (§5.9). **The only sweep site this spec authorizes** — `fleet clean` is not one, per §4.13(g) | this slice |
+| `cmd_sup_boot` | out-of-band compaction of `state/supervisor-nonce-rejections.jsonl` under the `fleet_lock` it already holds (§5.9). **The only sweep site this spec authorizes** — `fleet clean` is not one, per §4.13(g). *Superseded for handoff task files by AMENDMENT A2 below (2026-07-24), which adds three more sites and is UNRATIFIED* | this slice |
 | **`skills/fleet/SKILL.md`** | `:37` publishes `Exit 0=hold/handshake-written, 2=refuse, 3=freeze` — amended for the new code (§4.13(b)); `:38` publishes the `--kind` list (§4.7) | this slice |
 | **`skills/fleet/supervisor.md`** | the boot verdict table (`:13`, `:18`), the handoff sequence with its required `--expect-sid` (`:59`), the successor protocol (`:65`), and the *release-then-stop* doctrine plus the human-facing manual lever (§5.7, §6.3) | this slice |
 | **`_render_successor_task`** @7257-7274 | the successor's generated protocol (§4.6, §6.4) — amended in the same commit or the handoff fails only during a real handoff | this slice |
