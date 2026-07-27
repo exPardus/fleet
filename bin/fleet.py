@@ -45,7 +45,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 # The interpreter floor, in ONE place (posix-port campaign, follow-up 2).
 # Everything else that states it -- this module's docstring, the
@@ -14618,15 +14618,29 @@ class IndexConfigError(FleetCliError):
 class IndexPathError(FleetCliError):
     """A path handed to the index that does not name a file INSIDE the root.
 
-    Raised from `_index_posix_rel`, i.e. from the one function every index path
-    passes through, because the alternative was measured and it deletes data:
-    with the check spelled separately on each entry surface, `--files` and the
-    `verified_shard_rows` choke point each grew a guard that rejected only a
-    LEADING `../`, an interior `..` reached `_index_prune_shard`, and the
-    prune unlinked a file outside the index root and rmdir'd its way out of the
-    tree -- printing "orphan shard pruned" and exiting 0. One rejection, at the
-    one place a rel becomes canonical, is why there is no second spelling to
-    keep in step."""
+    TWO guards raise it, and they are two because containment is two separate
+    questions -- one about the spelling of a rel, one about where that spelling
+    lands on a real filesystem. Neither can answer the other's:
+
+    - `_index_posix_rel` is the STRING guard, and it is the one function every
+      index path passes through. It rejects a `..` segment anywhere and any rel
+      that is not relative. The alternative was measured and it deletes data:
+      with the check spelled separately on each entry surface, `--files` and
+      the `verified_shard_rows` choke point each grew a guard that rejected
+      only a LEADING `../`, an interior `..` reached `_index_prune_shard`, and
+      the prune unlinked a file outside the index root and rmdir'd its way out
+      of the tree -- printing "orphan shard pruned" and exiting 0. One
+      rejection, at the one place a rel becomes canonical, is why there is no
+      second spelling to keep in step.
+    - `_index_require_inside` is the FILESYSTEM guard. A rel made of entirely
+      ordinary segments still leaves the root when one of those segments is a
+      symlink or a win32 junction, and no amount of string analysis can see
+      that. `index_source_files` has fenced the build walk against it since
+      wave 2; the choke point had not, and served a file outside the root at
+      `status: ok`.
+
+    A caller that wants both -- and every caller does -- takes them together
+    from `_index_entry_paths`."""
 
 
 # --- paths ------------------------------------------------------------------
@@ -14655,19 +14669,107 @@ def _index_posix_rel(rel) -> str:
     An interior `..` is the same escape wearing a disguise -- `a/../../x`
     leaves the root exactly as `../x` does -- and this is the single guard for
     every caller, because a rel that survives here goes on to name a file the
-    prune path will unlink."""
+    prune path will unlink.
+
+    A rel that is not RELATIVE raises too, and that half is what a `..` check
+    alone misses entirely: `C:/victim/x.py` carries no `..`, so it came back
+    unchanged, and `root / rel` and `symbols / (rel + '.tsv')` are joins --
+    pathlib REPLACES on an absolute right-hand side instead of appending.
+    Measured through the choke point: a file outside the root overwritten with
+    shard bytes, and a shard materialised outside the root answering
+    `status: ok`.
+
+    The test is `drive or root`, NOT `is_absolute()`, and that is not a
+    stylistic choice -- `PureWindowsPath('C:x.py').is_absolute()` is False
+    while `Path('D:/root') / 'C:x.py'` is `C:x.py`. A drive-relative rel is not
+    absolute and still escapes, so `is_absolute()` leaves the hole open.
+
+    It is asked of `PureWindowsPath` on EVERY platform, deliberately. A rel is
+    the shard's identity and it is persisted; an index built on posix can be
+    read on win32, so a rel that is inert here and absolute there has to be
+    refused where it is created, not where it detonates. `PureWindowsPath` is
+    pure -- it parses win32 syntax without touching a win32 filesystem -- so
+    this is a syntax question answered the same way everywhere, not an OS
+    branch (invariant 8). The posix half needs no separate spelling: a leading
+    `/` is already dropped as an empty segment above."""
     parts = [p for p in str(rel).replace("\\", "/").split("/") if p not in ("", ".")]
     if ".." in parts:
         raise IndexPathError(
             f"index path {str(rel)!r} is outside the index root -- a '..' "
             f"segment never names a file this index describes")
-    return "/".join(parts)
+    out = "/".join(parts)
+    spelled = PureWindowsPath(out)
+    if spelled.drive or spelled.root:
+        named = spelled.drive or spelled.root
+        raise IndexPathError(
+            f"index path {str(rel)!r} is outside the index root -- an index "
+            f"path is relative to the root, and this one names {named!r} of "
+            f"its own")
+    return out
 
 
 def shard_path_for_source(root, rel) -> Path:
     """`.fleet-index/symbols/<source-path>.tsv` -- the shard mirrors the
     source path, which is why the source path is not a column (§5)."""
     return index_symbols_dir(root) / (_index_posix_rel(rel) + INDEX_SHARD_SUFFIX)
+
+
+def _index_require_inside(base, path, rel, what) -> None:
+    """Refuse `path` unless it RESOLVES strictly inside `base`.
+
+    The companion to `_index_posix_rel`, and the half a string guard cannot
+    cover. `link/secret.py` is an ordinary rel by every spelling rule -- no
+    `..`, no drive -- and when `link` is a symlink or a `mklink /J` junction it
+    names a file outside the root anyway. `index_source_files` fences the build
+    walk against exactly that shape (§11.1) and `_index_prune_shard` fences the
+    delete; measured before this existed, the choke point in between fenced
+    neither and answered `status: ok` with rows for a file outside the root.
+
+    BOTH sides are resolved, never just the candidate. `base in path.parents`
+    on unresolved paths is a comparison of spellings, which is the bug, and
+    resolving only the candidate breaks the ordinary case instead: a root
+    reached through a link (a `/tmp` symlink, a substed drive) would stop
+    containing its own files. Strictly inside, so `rel == ''` -- the root
+    itself, which is a directory and never a source file -- is refused rather
+    than admitted by an `==` arm nobody needs."""
+    try:
+        real_base = Path(base).resolve()
+        real = Path(path).resolve()
+    except OSError as exc:
+        raise IndexPathError(
+            f"index path {rel!r}: its {what} cannot be resolved ({exc}), so "
+            f"nothing can say whether it is inside the index root")
+    if real_base not in real.parents:
+        raise IndexPathError(
+            f"index path {rel!r} escapes the index root -- its {what} resolves "
+            f"to {real}, which is not inside {real_base}. A path that is "
+            f"spelled inside the root and lives outside it is a reparse point")
+
+
+def _index_entry_paths(root, rel) -> tuple:
+    """`(rel, source, shard)` -- the three things one index entry is, with BOTH
+    containment guards applied.
+
+    Every surface that takes a rel from a CALLER goes through here, so there is
+    one place that knows what a trustworthy index entry is: `verified_shard_rows`
+    (the read choke point) and `_index_refresh_one` (the write choke point).
+    `build_index` reaches the latter with rels from `index_source_files`, which
+    fenced them already, so the guards are a no-op on that path -- measured at
+    1.2% of a full build (0.079s of 6.594s over this repo's tree), which is the
+    price of not having a second definition of "inside the root" to keep in
+    step with this one."""
+    root = Path(root)
+    rel = _index_posix_rel(rel)
+    source = root / rel
+    shard = index_symbols_dir(root) / (rel + INDEX_SHARD_SUFFIX)
+    _index_require_inside(root, source, rel, "source file")
+    # The shard half is guarded for the same reason the PRUNE half already is:
+    # a junction inside the mirror tree redirects the atomic replace, which
+    # turns "may write in .fleet-index/" into "may overwrite any file on this
+    # machine". Guarding the unlink and not the write would leave the two
+    # spellings of one rule to drift apart, which is how this file got here.
+    _index_require_inside(index_symbols_dir(root), shard, rel, "shard")
+    return rel, source, shard
 
 
 def source_rel_from_shard(root, shard_path) -> str:
@@ -15260,10 +15362,8 @@ def verified_shard_rows(root, rel, no_write=False, sleep=None) -> dict:
     docstring above says this function exists to prevent, and it needed no
     injection to reproduce -- 21% of refreshes under a concurrent writer, i.e.
     under the manager-builds-while-worker-edits pattern this fleet runs."""
-    rel = _index_posix_rel(rel)
     root = Path(root)
-    source = root / rel
-    shard = shard_path_for_source(root, rel)
+    rel, source, shard = _index_entry_paths(root, rel)
     result = {"rel": rel, "status": "ok", "header": None, "rows": [],
               "refreshed": False, "written": False, "note": None}
     try:
@@ -15402,8 +15502,16 @@ def _new_index_report() -> dict:
 
 
 def _index_refresh_one(root, rel, force, sleep, report) -> None:
+    # Canonicalised and fenced HERE, not only at the callers. `build_index`
+    # hands over an already-canonical rel from `index_source_files` and
+    # `update_index` canonicalises its own before it can compare them against
+    # the selection -- but "the one function every index path passes through"
+    # is a claim the code has to make true, not one a comment can assert on its
+    # behalf, and a caller-supplied rel reaching a write path uncanonicalised
+    # is exactly the shape that shipped. Canonicalisation is a fixpoint, so the
+    # second application costs a string walk and changes nothing.
     root = Path(root)
-    source = root / rel
+    rel, source, shard = _index_entry_paths(root, rel)
     try:
         # One read, hashed and parsed -- the build path tears exactly the way
         # `verified_shard_rows` does, and it is the one a manager runs WHILE a
@@ -15416,14 +15524,14 @@ def _index_refresh_one(root, rel, force, sleep, report) -> None:
         return
     header = header_for_bytes(raw, rel)
     if not force:
-        existing = read_shard(shard_path_for_source(root, rel))
+        existing = read_shard(shard)
         if existing is not None and existing[0] == header:
             report["skipped"] += 1
             return
     # §6/§9: an unparseable file yields no rows, so it becomes a header-only
     # shard and the build carries on. It is never a build failure.
     rows = parse_source_symbols(source, header["lang"], raw=raw)
-    if write_shard_atomic(shard_path_for_source(root, rel), header, rows, sleep=sleep):
+    if write_shard_atomic(shard, header, rows, sleep=sleep):
         report["indexed"] += 1
         report["indexed_rels"].append(rel)
     else:
@@ -15456,8 +15564,17 @@ def build_index(root, force=False, sleep=None) -> dict:
 
 def update_index(root, rels, force=False, sleep=None) -> dict:
     """Refresh exactly the named files -- the cheap path on a large tree,
-    where a full `build` walk is the expensive part."""
+    where a full `build` walk is the expensive part.
+
+    Canonicalised UP FRONT, before anything is compared or written. `selected`
+    holds canonical rels, so an uncanonicalised caller rel -- `./a.py`,
+    `a\\b.py`, or a drive-qualified one -- missed the selection test and fell
+    through to a branch that then joined it onto the root anyway. Refusing the
+    whole invocation rather than the one entry is deliberate and matches
+    `--files`: a batch that names an out-of-root path is a caller that has the
+    root wrong, and half-applying its intent is worse than applying none."""
     root = Path(root)
+    rels = [_index_posix_rel(rel) for rel in rels]
     selected = set(index_source_files(root))
     report = _new_index_report()
     for rel in rels:
@@ -15514,6 +15631,17 @@ def index_status(root) -> dict:
 # printed -- a cap nobody is told about reads as "that was everything".
 INDEX_LIST_CAP = 20
 
+# `failed > 0` is a DISTINCT outcome from "the command refused to run", and
+# collapsing both onto 1 threw away the only difference a script cares about:
+# after exit 1 from `_require_index` nothing was indexed and the operator runs
+# `init`, while after `failed 3` an index exists, most of it is current, and
+# the operator retries the three. main() collapses every `FleetCliError` to 1,
+# so the partial outcome -- the new one, and the narrower one -- takes the new
+# code rather than displacing a convention every other verb shares. 2 and 3 are
+# `SupervisorLifecycleRefusal`'s REFUSE/FREEZE grades, 4 is
+# SUPERVISOR_CONTINUITY_RC and 5 is SUPERVISOR_BOOT_HANDOFF_REFUSED_RC.
+INDEX_FAILED_RC = 6
+
 
 def _index_root_arg(args) -> Path:
     """`--path DIR` names the INDEX ROOT on all four verbs, defaulting to cwd.
@@ -15553,10 +15681,16 @@ def _index_files_arg(root, raw) -> list:
                     f"--files entry {entry!r} is outside the index root {root}")
         else:
             # No containment check of its own: `_index_posix_rel` refuses a
-            # `..` segment for every caller. A second guard here is what let
-            # the two spellings drift apart in the first place -- this one
-            # rejected a LEADING `../` while the canonicaliser waved an
-            # interior one through to the prune path.
+            # `..` segment AND a non-relative rel for every caller. A second
+            # guard here is what let the two spellings drift apart in the first
+            # place -- this one rejected a LEADING `../` while the canonicaliser
+            # waved an interior one through to the prune path.
+            #
+            # Note what the `is_absolute()` arm above does NOT catch, and why
+            # this branch cannot be trusted to be the relative one: `C:x.py` is
+            # drive-relative, so `Path.is_absolute()` is False and it lands
+            # here -- and it still escapes a root on another drive. The
+            # canonicaliser is what refuses it.
             rel = _index_posix_rel(entry)
         if rel and rel not in rels:
             rels.append(rel)
@@ -15662,8 +15796,10 @@ def _print_index_report(report) -> int:
         print(f"fleet: {warning}", file=sys.stderr)
     # A file this run could not index is a file the index does not describe.
     # Exiting 0 on `failed 3` reads as success to every caller that checks a
-    # return code instead of parsing the count line back out of stdout.
-    return 1 if report["failed"] else 0
+    # return code instead of parsing the count line back out of stdout --
+    # and exiting 1 reads as "the command did not run at all", which is the
+    # collision `INDEX_FAILED_RC` exists to break.
+    return INDEX_FAILED_RC if report["failed"] else 0
 
 
 def cmd_index_init(args) -> int:
