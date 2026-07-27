@@ -1,6 +1,6 @@
 {
   "name": "claude-fleet",
-  "description": "claude-fleet: one Claude Code manager session that spawns, steers and monitors worker sessions across projects.",
+  "description": "claude-fleet: three-tier command for Claude Code — an interface session that owns the plan, a supervisor that dispatches and gates, and durable worker sessions across projects.",
   "owner": {
     "name": "Altai"
   },
@@ -8,7 +8,7 @@
     {
       "name": "fleet",
       "source": "./",
-      "description": "Spawn, steer, monitor and hand off multiple Claude Code worker sessions across projects from one manager session."
+      "description": "Three-tier command for Claude Code sessions: an interface tier that owns the plan, a supervisor tier that dispatches and gates, and worker sessions that survive reboots."
     }
   ]
 }

@@ -107,25 +107,34 @@ Mutating `/fleet:*` commands bypass this path entirely: they invoke the ordinary
 
 ### 4.1 `fleet.status_snapshot()` — the single derivation
 
-Signature: `status_snapshot(home: Path | None = None) -> dict`
+Signature: `status_snapshot(now: datetime | None = None, include_archived: bool = False) -> dict`
 
-Reads `state/fleet.json`; counts `mailbox/<sid>.md` per worker. Never opens `fleet.lock`, never calls `PLATFORM.*`, never writes. Returns:
+Reads `state/fleet.json`; counts `mailbox/<sid>.md` per worker; reads the supervisor claim file. Never opens `fleet.lock`, never calls `PLATFORM.*`, never writes. Returns:
 
 ```python
 {
   "ok": True,                      # False if registry missing/unreadable
   "reason": None,                  # "not_initialized" | "unreadable" when ok=False
   "generated_at": "2026-07-09T…Z",
-  "totals": {"workers": 3, "working": 1, "idle": 1, "limited": 1,
-             "attached": 0, "dead": 0, "mail": 2, "cost_usd": 2.14},
+  "totals": {"workers": 3, "mail": 2, "cost_usd": 2.14, "by_status": {…}},
+  "supervisor": {"goals_active": True, "state": "held",
+                 "incarnation_id": "inc-…", "heartbeat_age_seconds": 42.0},
   "workers": [
     {"name": "pmbot", "status": "working", "turns": 7, "cost_usd": 1.02,
      "mail": 0, "stale_seconds": 12, "limit_reset_at": None, "limit_kind": None,
-     "attached_since": None},
+     "attached_since": None, "tier": "worker", "dispatch_kind": "native",
+     "archived_at": None},
     …
   ],
 }
 ```
+
+**The tier fields (three-tier §3).** One flat roster carries two tiers: a supervisor body is a registry row like any other, and the claim that makes one of them *the* supervisor lives in a different file. A view that reads only `workers` therefore projects two tiers as one and counts husks of a retired command tier as workers.
+
+- `workers[].tier` is `"supervisor"` or `"worker"`, derived from the `sup|<inc>|<role>` name family through fleet's own `_is_supervisor_shaped` — no consumer re-implements the shape (invariant 9). It describes the **body**, never the claim: a released or seized supervisor keeps its name.
+- `snap["supervisor"]` is the **claim**. `state` ∈ `held` | `released` | `none` | `unknown`. It is present on every path, `ok=False` included — the claim lives in a different file, so a corrupt worker table must not take the one field that says whether anything can be dispatched.
+- `heartbeat_age_seconds` is `None` on a `released` claim **by design** (claim-nonce §6.3 strips `heartbeat_at`); a view must not render that as staleness.
+- `unknown` is a rendered word, not silence. **Absence is not evidence on this substrate** — "the claim could not be read" must never present as "there is no supervisor". The projection never raises: every failure degrades to `unknown`.
 
 Honours the additive-schema rule: every field read with a default (`cost_baseline` → `0.0`, `limit_reset_at`/`limit_kind`/`max_budget_usd`/`setting_sources` → `None`). Unknown keys ignored, never dropped (it does not write, so round-trip preservation is trivially satisfied).
 
@@ -144,13 +153,18 @@ Bare `fleet status` behaviour — the human table, the recompute, the anomaly fl
 - Renders **one line**, ANSI-coloured:
 
 ```
-[fleet]  work 3  mail 1  lim 1 resets 14:20  idle 1 15m  +4 dead  $2.14
+[fleet]  sup held  work 3  mail 1  lim 1 resets 14:20  idle 1 15m  +4 dead
 ```
 
+- **The command tier leads the line** (three-tier §3). `sup held` / `sup released` / `sup none` / `sup ?`, rendered only while `supervisor.goals_active` — a fleet not running supervisor doctrine carries no permanent scold. A `held` claim whose heartbeat is older than the D2 threshold appends its age (` sup held 2h`); a `released` one never does, because §6.3 leaves it no heartbeat to age.
+- **A live supervisor body is not a worker.** Rows with `tier == "supervisor"` and a non-`dead` status leave the worker buckets entirely. A **dead** one rejoins the flat roster for the grey tail: a corpse is a corpse whatever tier it died in, and a second grey field would break the grey-means-inert rule below.
+- **More than one live supervisor body is an alarm**, rendered `N bodies` in a reserved bold red — the count, not a boolean, because 2 and 9 are different incidents. This is the one condition three-tier exists to prevent.
+- The tier fields are **not** live workers: an all-supervisor fleet still renders `no live workers`, so going live with GOALS.md never silently retires that message.
+- **No cost field** (removed 2026-07-27, operator's call). Under the Max-20x cap doctrine the plan limits spend, fleet enforces no dollar ceiling, and native dispatch records no cost at all — so the running total summed rows that report nothing, and it was not something the operator could act on. `fleet status` still totals it.
 - Rows/states not present are omitted. `limited` workers append ` resets 14:20` from `limit_reset_at`, or ` reset?` when it is null. A worker whose `limit_reset_at` has passed renders `resume-eligible` — a **flag only**, never a launch (invariant 1: a view does not start turns; SPEC §5 `status` row states this same rule).
 - A bucket whose every worker has `stale_seconds > 300` appends the freshest ` <age>` (D2). The age is coloured, **not** dimmed: dimming the whole chunk rendered grey-on-dark counts that the operator could not read.
 - **Buckets appear in a fixed order** (`work · mail · att · lim · budget · ceiling · idle`), never count-sorted — a count-sorted line reshuffles between refreshes, forcing a re-read, and lets a pile of corpses outrank the one live worker. `dead` is not a bucket at all: it collapses into a `+N dead` tail counter.
-- **Colour is the second channel and it is exclusive.** One hue per status, plus a distinct hue each for the `[fleet]` nameplate, the age, and the cost. **Grey is reserved for `dead`** — nothing else on the line may use it, or "greyed out" stops meaning "inert".
+- **Colour is the second channel and it is exclusive.** One hue per status, plus a distinct hue each for the `[fleet]` nameplate, the age, the command-tier field, and the second-body alarm. **Grey is reserved for `dead`** — nothing else on the line may use it, or "greyed out" stops meaning "inert".
 - **The line is pure ASCII by construction** — no glyphs, no box drawing. A cp1252 console cannot encode geometric glyphs; `print()` then raises `UnicodeEncodeError`, the exit-0 guard swallows it, and the operator gets a permanently **blank** statusline. Colour and word already carry the whole signal, so the glyphs bought nothing but width and that failure mode. Asserted by test, not convention.
 - `NO_COLOR` env (or a non-tty) → no escapes; the same words, unpainted.
 - **Exit 0 on every path.** On any exception: print nothing, exit 0. This is the statusline analogue of invariant 2 (exit-0 hooks) — a traceback in a statusline is rendered under the operator's input box on every keystroke-adjacent refresh.

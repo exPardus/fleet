@@ -1,6 +1,6 @@
 {
   "name": "fleet",
-  "description": "Spawn, steer, monitor and hand off multiple Claude Code worker sessions across projects from one manager session.",
+  "description": "Three-tier command for Claude Code sessions: an interface tier that owns the plan, a supervisor tier that dispatches and gates, and worker sessions that survive reboots.",
   "version": "0.2.0",
   "author": {
     "name": "Altai"

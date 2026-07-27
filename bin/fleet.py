@@ -2618,6 +2618,51 @@ def _read_registry_readonly() -> tuple:
     return (True, None, {"workers": workers})
 
 
+def _supervisor_tier_snapshot(now=None) -> dict:
+    """The command tier, projected for VIEWS (three-tier §3).
+
+    File-only by the same mandate as `supervisor_status_line`: no lock, no
+    roster read, no probe, no subprocess -- every supervisor state file is
+    written atomically, so a lock-free read is safe, and the terminal-surface
+    doctrine forbids a view taking `fleet.lock`.
+
+    NEVER RAISES. This is called from `status_snapshot`, which the statusline
+    refires after every assistant message; an exception here would blank the
+    operator's statusline via the exit-0 guard and give no reason why. Every
+    failure degrades to `state: "unknown"`, which renders as a visible word
+    rather than as silence -- absence is not evidence on this substrate, so a
+    view must not present "cannot read the claim" as "no supervisor".
+
+    `state` is the CLAIM's state, not a body's liveness:
+      * `none`     -- GOALS active, no claim file. Nobody holds command.
+      * `held`     -- a claim exists and is not released.
+      * `released` -- cleanly stood down (claim-nonce §6.3). The next
+                      `sup-boot` claims fresh; note §6.3 strips
+                      `heartbeat_at`, so `heartbeat_age_seconds` is None here
+                      BY DESIGN and its absence must never read as staleness.
+      * `unknown`  -- the claim could not be read or projected.
+    """
+    out = {"goals_active": False, "state": "none",
+           "incarnation_id": None, "heartbeat_age_seconds": None}
+    try:
+        out["goals_active"] = bool(supervisor_goals_active())
+        claim = read_incarnation()
+        if claim is None:
+            return out
+        out["incarnation_id"] = claim.get("incarnation_id")
+        out["state"] = "released" if claim.get("state") == "released" else "held"
+        if now is None:
+            now = datetime.now(timezone.utc)
+        try:
+            out["heartbeat_age_seconds"] = (
+                now - _parse_iso(claim["heartbeat_at"])).total_seconds()
+        except (KeyError, TypeError, ValueError):
+            out["heartbeat_age_seconds"] = None
+    except Exception:  # noqa: BLE001 -- a view never surfaces a traceback
+        out["state"] = "unknown"
+    return out
+
+
 def status_snapshot(now=None, include_archived: bool = False) -> dict:
     """Read-only fleet snapshot. See the module comment above for why this
     exists alongside cmd_status rather than reusing it.
@@ -2636,6 +2681,13 @@ def status_snapshot(now=None, include_archived: bool = False) -> dict:
         "generated_at": now_iso(),
         "totals": {"workers": 0, "mail": 0, "cost_usd": 0.0, "by_status": {}},
         "workers": [],
+        # three-tier §3: the tiers are not derivable from the worker table
+        # alone -- a supervisor BODY is a registry row like any other, and the
+        # claim that makes one of them THE supervisor lives in a different
+        # file. Views that render "the fleet" without this project two tiers
+        # as one and count husks of a retired command tier as workers.
+        # File-only, never raises: see `_supervisor_tier_snapshot`.
+        "supervisor": _supervisor_tier_snapshot(now),
     }
     if not ok:
         return snap
@@ -2678,6 +2730,13 @@ def status_snapshot(now=None, include_archived: bool = False) -> dict:
             # is_native's full record shape.
             "dispatch_kind": rec.get("dispatch_kind"),
             "archived_at": rec.get("archived_at"),
+            # three-tier §3/§10.1: which TIER this row's session occupies.
+            # Derived from the name family `sup|<inc>|<role>` via fleet's own
+            # predicate, so no consumer re-implements the shape. "supervisor"
+            # here means "a supervisor-shaped BODY", NOT "holds the claim" --
+            # a released or seized body keeps its name. `snap["supervisor"]`
+            # is the claim; this is the body.
+            "tier": "supervisor" if _is_supervisor_shaped(name) else "worker",
         })
 
     snap["workers"] = rows
@@ -10973,8 +11032,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :4588, :5035, :8963,
-    :13314), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :4647, :5094, :9022,
+    :13373), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -11594,8 +11653,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:4588, :5035, :8963,
-    #     :13314) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:4647, :5094, :9022,
+    #     :13373) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the

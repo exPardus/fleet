@@ -29,8 +29,15 @@ Soul = `supervisor/GOALS.md` (operator-owned) + `supervisor/JOURNAL.md`
    next supervisor verb AND on every mutating lifecycle verb (§7's gate), and
    the presenter obligation binds you: **present the most recent generation you
    were given.** `NONCE: unchanged` means the outstanding one still stands.
-4. Reconcile workers from the bundle's fleet-status section (M-A interim:
-   registry verdicts; the outcome discriminator arrives in M-B).
+4. Reconcile workers from the bundle's fleet-status section. `fleet status`
+   runs the outcome discriminator and the silent-limit transcript scan, so
+   the verdicts there are measured, not registry guesses (M-B, shipped).
+5. **Check your own `FLEET_WORKER` against your registry name.** The daemon
+   donates the FIRST dispatch's env to every later session, so the value you
+   inherit is often a stale launch id from an earlier body. Supervisor-shaped
+   is benign (the §6.5 exemption still resolves) and is not a stop condition;
+   **worker-shaped is malignant** — that body takes the claim and can then
+   never beat, checkpoint or release it. Record which variant you are in.
 
 ### Gen-0 body via `fleet sup-spawn` (three-tier §10.1)
 
@@ -48,10 +55,16 @@ design §1(5)): the `<launch-id>` in your worker name was minted at dispatch
 time and never changes; your incarnation is minted at boot by `sup-boot`,
 and `fleet sup-status` reads `supervisor/INCARNATION`, never your worker
 name. Addressing: verbs aimed at `supervisor` resolve through the claim to
-the holder's record (ruling 1(ii)); `kill`/`respawn` of the claim-holder
-refuse until §10.4's choreography is built — use `sup-release`/`sup-boot`
-for claim transitions (`interrupt` stays available: it kills the turn, not
-the claim).
+the holder's record (ruling 1(ii)). `kill`/`respawn` of the claim-holder is
+**built** (§10.4 tombstone choreography, council-ruled 4–0): both share
+phase 1 — resolve, refuse, steer the holder to release, bounded wait — and
+diverge on failure on purpose. **`kill` falls through** and stops the body
+anyway with the claim frozen, announcing `SUP-KILL-RELEASED` or
+`SUP-KILL-FROZEN` (kill never blocks indefinitely). **`respawn` ABORTS and
+leaves the body untouched** (ruling 1) — the operator asked for a context
+reset, not a termination at any cost. Prefer `sup-release` + `sup-spawn` for
+ordinary claim transitions; `interrupt` remains the turn-level lever, it
+kills the turn and not the claim.
 
 ## Watchtower beat
 
@@ -104,10 +117,18 @@ Swap-trigger rule (three-tier §11.3): at 150k the hand-off directive is
 standing — finish the current wave, then hand off. At 200k the only
 permitted work is finishing work already dispatched (read-only
 reconciliation: `status`/`wait`/`result`/`peek`) plus the handoff verbs —
-no new spawns, no steers. The 200k ceiling is specified as a
-fleet-enforced dispatch refusal for the supervisor claim-holder
-`[UNBUILT — three-tier build slice]`; until built, treat it as binding
-doctrine.
+no new spawns, no steers. The ceiling is **built and enforced** as a
+dispatch refusal for the supervisor claim-holder at three verbs —
+`_ceiling_refuses_dispatch("spawn")`, `("send")`, `("sup-spawn")`. It does
+not yet cover `fleet respawn`; the operator ruled that a gap (2026-07-27)
+and ordered it closed on the `--task` discriminator — `--task` absent is
+§11.4 recovery of an over-band worker and stays permitted over the ceiling,
+`--task` supplied is §11.3 new-task dispatch and is refused. Until that
+lands, respawn-with-`--task` over the ceiling is forbidden by doctrine with
+nothing to refuse it. Do not treat a verb's silence as permission.
+
+`fleet sup-context` measures your own occupancy against the band; use it
+rather than estimating.
 
 Handoff verifies a one-shot **token**, not a sid (claim-nonce §6.4): a
 successor that forks between HANDSHAKE and complete still holds the token, so
