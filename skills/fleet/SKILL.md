@@ -1,27 +1,38 @@
 ---
 name: 'fleet'
-description: 'Use when managing multiple Claude Code sessions — "fleet", "spawn workers", "manage sessions", "dispatch task to <project>", "check on workers", parallel work across projects, long-running babysat jobs, or review pipelines. Makes this session the fleet manager: spawns/steers/monitors headless worker sessions via the fleet CLI, with a persistent knowledge loop in the fleet home directory.'
+description: 'Use when managing multiple Claude Code sessions — "fleet", "spawn workers", "manage sessions", "dispatch task to <project>", "check on workers", "boot a supervisor", parallel work across projects, long-running babysat jobs, or review pipelines. Makes this session the fleet''s interface tier: it owns the plan, spawns/steers/monitors headless worker sessions via the fleet CLI, and dispatches a supervisor body to run campaigns — with a persistent knowledge loop in the fleet home directory.'
 ---
 
 # Fleet manager
 
 You are the manager of a fleet of Claude Code worker sessions on this machine. Tool home: run `fleet home` to resolve it (spec: `docs/SPEC.md` inside that directory). Workers are durable sessions on disk, not processes — they survive reboots, your death, everything. If `fleet` CLI is missing or errors, it is not built yet: build it per the spec before managing anything.
 
+## Which tier are you? (`docs/specs/three-tier-command.md`, ratified 2026-07-23)
+
+Command is three tiers, and the tier you occupy decides which verbs are yours:
+
+- **Interface** — the session a human is typing into. That is you when this skill activates from a human prompt. You own the *plan*: what gets worked on, in what order, and every operator-facing answer. You spawn workers directly for small/doc-shaped work, and for a campaign you bootstrap a supervisor.
+- **Supervisor** — a dispatched body holding `supervisor/INCARNATION`. It owns *execution*: slicing the plan into worker tasks, dispatching, gating, merging. Its runbook is `skills/fleet/supervisor.md`.
+- **Worker** — one task, one session, no dispatch verbs.
+
+**If you are the interface, never run `fleet sup-boot`.** `sup-boot` claims the supervisor identity for *this* body; an interface session never exits, so its claim never clears, and a released claim whose releaser is still roster-live is refused (`bin/fleet.py:5886`) — the claim wedges for as long as your terminal is open. This has happened and cost hours. Bootstrap a supervisor with `fleet sup-spawn --task @<brief>` and steer it with `fleet send supervisor @<file>`. (Doctrine, not yet enforced in code: gating `sup-boot` on fleet-launched provenance is `[UNBUILT]`.)
+
 ## Startup ritual (every time this skill activates)
 
 Nothing injects fleet state into a session any more — no SessionStart hook, no briefing (`docs/specs/terminal-surface.md` D7). Fleet is pull-only, so this ritual is the pull. Run it here, not later.
 
-1. Read `$(fleet home)/docs/OPERATOR-GATES.md`. Every `- [ ]` line is a decision only the operator may settle. **Put the open ones to them in one message, before spawning anything or starting work.** A `- [x]` line is settled history — never re-ask it.
-2. `fleet status` — what exists, what's stale, anomalies (`idle+mail`, stale attach, dead).
+1. Read `$(fleet home)/docs/OPERATOR-GATES.md`. Every `- [ ]` line is a decision only the operator may settle. **Put the open ones to them in one message, before spawning anything or starting work.** A `- [x]` line is settled history — never re-ask it. Neither you nor a worker may tick a box.
+2. `fleet status` — what exists, what's stale, anomalies (`idle+mail`, stale attach, dead). Then `fleet sup-status` — is a supervisor already live, released, or absent?
 3. Read `$(fleet home)/knowledge/INDEX.md`.
 4. Load relevant `knowledge\projects\<p>.md` for any project you're about to touch.
-5. If supervisor/GOALS.md is active and you are (or should become) the supervisor: run the boot ritual in skills/fleet/supervisor.md.
+5. If `supervisor/GOALS.md` is active and a campaign is starting: **dispatch a supervisor body** with `fleet sup-spawn --task @<brief>` — do not become one (see the tier note above). The boot ritual in `skills/fleet/supervisor.md` is for that dispatched body to run, not for you.
 
 ## CLI reference
 
 | Command | Use |
 |---|---|
 | `fleet home` | Print the resolved fleet home directory. Use this instead of hardcoding a path. |
+| `fleet knowledge` | Print `knowledge/INDEX.md`. Step 3 of the ritual without a path. |
 | `fleet init` | Render the machine-local `state\worker-settings.json` from the git-tracked template (real interpreter path + FLEET_HOME). Run once per machine, and again after editing the template or moving the repo. `spawn`/`send` refuse with a clear error if this hasn't been run. |
 | `fleet spawn <name> --dir <path> --task <text\|@file> [--mode bypass\|accept\|dontask\|plan\|omit] [--model m] [--token-ceiling n] [--category c] [--setting-sources <list>]` | New worker; native (`claude --bg`)-hosted. Name `[a-z0-9-]+`. Task via @file for anything long. `--token-ceiling` is the budget cap (native dispatch carries no cost field, so `--max-budget-usd` is refused — see doctrine below). `--category` tags the agents-menu grouping (default `fleet`). `--setting-sources` restricts which settings sources merge (see foreign-hooks doctrine below). |
 | `fleet send <name> <text\|@file>` | Steer. Mid-turn → delivered at next tool boundary (seconds). Idle → starts new turn. |
@@ -37,7 +48,10 @@ Nothing injects fleet state into a session any more — no SessionStart hook, no
 | `fleet archive [name] [--ttl-hours F] [--dry-run]` | Auto-retire idle/dead/interrupted native workers past a TTL (default 24h): moves journal/outcomes/task file into `logs/archive/<name>/`, `claude rm`s every sid (current + retired), keeps the registry entry as a tombstone (`fleet clean` is still the only deleter). `--dry-run` prints eligibility verdicts, mutates nothing. Hidden from `fleet status` by default — `--all` shows archived rows flagged `archived`. |
 | `fleet autoclean [--ttl-hours F] [--expire-tombstones-hours F] [--dry-run] [--fleet-home P]` | Staleness sweep without anyone remembering (docs/specs/autoclean.md): tier 1 = the archive TTL pass; tier 2 = `claude rm` of fleet-owned daemon husks (sid-based ownership, default-deny — never touches sessions fleet didn't spawn; refuses outright while a `fleet.json.corrupt.*` quarantine artifact exists); tier 3 (default OFF) drops registry tombstones older than the flag's hours, never deleting files. `--fleet-home` = explicit home override (resolved, must exist — the scheduled task always passes it, Task Scheduler has no operator env). Installed as a Scheduled Task via `fleet init --autoclean [--autoclean-interval-hours N]` (default every 6h); uninstall via `fleet init --autoclean-remove`. |
 | `fleet doctor` | Health check (claude/version + pin freshness, hook wiring + smoke test, stale attaches, orphaned mailboxes/claims, limited parks, dead-suspected, fleet-unknown sessions, autoclean scheduler state, ...). Run when anything smells wrong; nonzero exit means something needs attention. |
-| `fleet sup-boot [--nonce <value>] [--handoff-inc <id>]` | Supervisor boot ritual: epoch check → claim/resume/seize/limit-transfer/refuse/freeze + boot bundle. Exit 0=hold/handshake-written, 2=refuse, 3=freeze, 4=continuity proof failed. See `skills/fleet/supervisor.md`. |
+| `fleet sup-spawn --task <text\|@file> [--model m] [--permission-mode M] [--nonce N]` | **The interface tier's bootstrap verb.** Dispatches a gen-0 supervisor body as `sup\|<launch-id>\|boot` (three-tier §10.1), cwd forced to the fleet home, mode default `bypass`, model from the GOALS tier policy. Its first act is `fleet sup-boot` — run from that dispatched body, never from yours. The name segment is a *launch id*, not the incarnation id `sup-boot` mints. |
+| `fleet sup-boot [--nonce <value>] [--handoff-inc <id>]` | Supervisor boot ritual: epoch check → claim/resume/seize/limit-transfer/refuse/freeze + boot bundle. Exit 0=hold/handshake-written, 2=refuse, 3=freeze, 4=continuity proof failed. **Interface sessions do not run this** — see the tier note above. See `skills/fleet/supervisor.md`. |
+| `fleet sup-context [--sid <id>] [--json]` | Read-only: this session's own context occupancy against the 150–200k band (three-tier §11.2). How a body checks whether it is in-band without guessing. |
+| `fleet sup-decision --raise <q> [--context-ref <ref>] \| --answer <text> \| --clear \| (show)` | Operator-gate routing (three-tier §8). The **supervisor** `--raise`s a decision only the operator may take and parks; the **interface** carries it to the operator and writes the ruling back with `--answer`. One open at a time. `fleet doctor` FAILS while a decision is open — that failure is the routing working, not a defect. |
 | `fleet sup-checkpoint <text\|@file> [--kind CHECKPOINT\|PROPOSAL]` | Append a journal checkpoint (claim holder only) + refresh heartbeat. |
 | `fleet sup-heartbeat` | Refresh the claim heartbeat without a journal entry. |
 | `fleet sup-release [--reason TEXT] [--nonce N]` | Release the supervisor claim cleanly (claim holder only): rewrites INCARNATION as `released`, journals `RELEASED`, then the body EXITS. The next `sup-boot` claims fresh — no seizure, no page (claim-nonce §6.3). The **release-then-stop** doctrine; there is no `--force` form. |
@@ -47,6 +61,14 @@ Nothing injects fleet state into a session any more — no SessionStart hook, no
 **Journal kinds** (`supervisor/JOURNAL.md`): `BOOT`, `CHECKPOINT`, `PROPOSAL`, `SEIZED`, `RELEASED`, `LIMIT-TRANSFER`, `HANDOFF-BEGIN`, `HANDOFF-COMPLETE`, `HANDOFF-ABORT`.
 
 **The claim gate (claim-nonce §7).** While a supervisor claim is held with a **fresh** heartbeat, the mutating lifecycle verbs (`spawn`, `send`, `respawn`, `kill`, `clean`, `interrupt`, `archive`, `resume-limited`, `release`, `init`) require the caller to present the current generation with `--nonce <value>` — the value the last `sup-*` verb printed. Without it a session-bearing caller is refused (exit 4). It is a **speed-bump against a divergent second body, not authorization**: bypassable by running without a session id, and armed only while the heartbeat is fresh (`autoclean` is structurally exempt). The generation does not rotate on a mutating verb — only `sup-*` verbs mint.
+
+**The no-sid bypass is load-bearing infrastructure, not a convenience** (claim-nonce §7.2, DESCRIPTIVE/UNRATIFIED). The gate also arms on a **released** claim whose releasing body is still roster-live, and §6.3 strips `heartbeat_at` from a released claim — so that arm has nothing to age out of, and `kill`, `send`, `respawn` and `send supervisor` are all refused by the very wedge they would clear. The documented escape works and you will need it: run the verb from a shell carrying **no** `CLAUDE_CODE_SESSION_ID` —
+
+```
+env -u CLAUDE_CODE_SESSION_ID py -3.13 bin/fleet.py <verb> …
+```
+
+Two rules fall out of that shape, and they generalise: **a verb that clears a state must not be gated on that state**, and **a guard's postcondition must be satisfiable by every legitimate caller class**.
 
 ## Doctrine
 
@@ -65,6 +87,11 @@ Nothing injects fleet state into a session any more — no SessionStart hook, no
 - **Foreign hooks:** worker inherits target repo's own hooks + global plugins. If a repo's Stop hook fights turn-end, spawn with `--setting-sources` passthrough.
 - **Attach asymmetry:** while human is attached, fleet hooks don't run — mail queues. Nag stale attaches.
 - Worker journals live at `$(fleet home)/state/journals/<name>.md` — read one before respawning or diagnosing.
+- **Keep briefs SHORT — it is the highest-leverage thing you control.** Five supervisors in a row each burned a full context reading long handovers and merged nothing; the one handed a one-page "merge first, read second" brief merged the blocker on its first turn. A long handover is not thoroughness, it is the failure mode.
+- **Never author a task file at `state/tasks/<workername>.md`.** Dispatch overwrites that exact path, so the worker boots holding a file that tells it to read the file it is reading. Put authored briefs in `state/tasks/lens/` or `state/tasks/briefs/` and pass `--task @<that path>`.
+- **Write briefs to a file and `send @file`.** PowerShell mangles quotes and Git Bash mangles Windows paths (`C:/x` → `C;C:\Program Files\Git\x`); anything long or quoted loses either way.
+- **Succession is a three-step maneuver and the middle step is yours.** `fleet sup-release` → **the interface stops the retired body** so its sid leaves the roster → fresh `fleet sup-spawn`. A fleet-launched body never leaves the roster on its own, and the released-claim refusal above means a supervisor **cannot complete its own stand-down**. Handoff dispatch (`sup-handoff-begin`) is still unproven end to end — eight stillbirths across two days — so prefer release-then-stop until someone drives it green.
+- **Live defect: the daemon leaks the FIRST dispatch's `FLEET_WORKER` into every later session.** Benign when the leaked value is supervisor-shaped; **malignant** when worker-shaped — that body takes the claim and can then never beat, checkpoint or release it. Mitigation: let the transient daemon idle-exit, and make `sup-spawn` the dispatch that starts the new one. Any body should check its own `FLEET_WORKER` against its registry name at boot.
 
 ## Learning loop (mandatory, after every campaign)
 
