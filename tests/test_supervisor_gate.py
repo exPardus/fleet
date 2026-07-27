@@ -198,6 +198,54 @@ class TestGateValidatesWithoutMinting:
         assert fleet.read_incarnation() == before
 
 
+class TestTheSendCarveOutNeverQuarantinesTheRegistry:
+    """The §7.1 `send` carve-out reads the registry, and that read must not be
+    `load_registry`.
+
+    `load_registry` QUARANTINES a corrupt registry -- it RENAMES the file aside
+    (`bin/fleet.py:812`), which is a write, and this gate documents itself
+    "READ-ONLY: no lock, no mint, no write". Shipped code called it here, so
+    `fleet send` on a corrupt registry destroyed the operator's evidence from
+    the one path that promises to touch nothing.
+
+    WHY IT SURVIVED A PIN THAT LOOKS LIKE IT COVERS IT.
+    `tests/test_b6_sid_union.py::test_the_gate_never_quarantines_a_corrupt_
+    registry` asserts exactly this property and is CORRECT -- but it drives a
+    RELEASED claim, and a released claim returns or raises inside
+    `_wedged_release_gate` several branches earlier. The carve-out's read sits
+    behind `if verb == "send" and send_target is not None`, reachable ONLY on a
+    claim that is HELD and FRESH. So the two registry reads in this function
+    are not one property with one pin: the wedged arm was pinned, the carve-out
+    was never reachable from that fixture, and the gap is invisible unless you
+    ask which STATE each arm needs rather than which verb. Injection-checked in
+    both directions: swap this back to `load_registry` and this class fails
+    while that one stays green."""
+
+    def _corrupt_registry(self):
+        fleet.registry_path().write_text("{ not json", encoding="utf-8")
+
+    def test_a_corrupt_registry_survives_the_send_carve_out(
+            self, gate_home, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-other-body")
+        _fresh_claim()
+        self._corrupt_registry()
+        with pytest.raises(fleet.SupervisorClaimGateError):
+            fleet._supervisor_gate("send", nonce=None, send_target="some-worker")
+        assert fleet.registry_path().exists(), \
+            "the send carve-out quarantined the registry"
+        assert not list(fleet.registry_path().parent.glob("fleet.json.corrupt.*"))
+
+    def test_an_unreadable_registry_fails_toward_the_gate(
+            self, gate_home, monkeypatch):
+        # The degradation `_registry_records_or_none` promises: None is
+        # "decide without the registry", never "let the caller through".
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-other-body")
+        _fresh_claim()
+        self._corrupt_registry()
+        with pytest.raises(fleet.SupervisorClaimGateError):
+            fleet._supervisor_gate("send", nonce=None, send_target="supervisor")
+
+
 class TestGateBypassIsDocumented:
     def test_the_refusal_names_the_bypass_not_a_lever_over_the_other_body(
             self, gate_home, monkeypatch):
