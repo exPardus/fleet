@@ -7,6 +7,13 @@ slice on `spec/succession-signal`, rebased onto `main` @ `c318224`.
 tree by `tools/verify_receipts.py`. `bin/fleet.py` is untouched by this slice; the deliverable is this
 document plus one `RECEIPT_FLOOR` entry (§8.1).
 
+`c318224` is the base this document was measured against. The branch has since been rebased forward
+over **docs-only** commits, so the pin is deliberately *not* chased — a receipt is a claim about a
+commit, and re-pinning it across a change that cannot affect it is churn that makes a real re-pin
+harder to notice. Verified rather than assumed: `git diff c318224 <base> --stat` touches no file under
+`bin/`. **If a later rebase crosses a commit that does touch `bin/`, every receipt here must be
+re-measured, not just re-pinned.**
+
 **The shape is RATIFIED** (operator, 2026-07-27 evening docket). This document specifies it; it does
 not relitigate it. The ratified elements, restated so a reader can check the spec against them:
 
