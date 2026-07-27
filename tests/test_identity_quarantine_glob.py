@@ -623,7 +623,7 @@ class TestTheHelperIsTheONLYSpelling:
 
     def test_the_doctor_row_surfaces_through_the_helper(self, qg_home, monkeypatch):
         self._fake(monkeypatch, ["fleet.json.corrupt.SENTINEL"])
-        _, _, note = fleet._doctor_check_autoclean(run=_roster_run())
+        _, _, note = fleet._doctor_check_autoclean()
         assert "SENTINEL" in note
 
     # -- the abstention note (the fifth reader) ------------------------------

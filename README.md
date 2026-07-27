@@ -84,7 +84,7 @@ Every `fleet` command is a short-lived CLI invocation. The registry is the singl
 | **Usage-limit park/resume** | A worker that hits a Claude plan usage limit parks itself (`limited` status, recorded reset horizon) instead of dying silently; `fleet resume-limited` relaunches it once the window passes. |
 | **Durable manager identity** | A boot-claim + heartbeat + hand-off protocol (`fleet sup-boot` / `sup-handoff-*`) so exactly one manager owns the fleet across restarts — and can pass the baton to a successor without dropping a campaign. |
 | **Knowledge loop** | `knowledge/` is git-tracked: an index, playbooks, per-project quirks, and append-only lessons that every manager session reads at startup and writes back to after every campaign. The fleet gets better at running the fleet. |
-| **`fleet doctor`** | 25 health checks in one command — registry readability, hook wiring, stale sessions, orphaned mailboxes, stale attaches, version pins, autoclean scheduler state, supervisor claim, and more. Report-only: `--repair` is the one flag that mutates, and it only quarantines a corrupt `state/fleet.json`. |
+| **`fleet doctor`** | 25 health checks in one command — registry readability, hook wiring, stale sessions, orphaned mailboxes, stale attaches, version pins, how long since the last `autoclean` sweep, supervisor claim, and more. Report-only: `--repair` is the one flag that mutates, and it only quarantines a corrupt `state/fleet.json`. |
 | **Terminal surface** | Statusline + `/fleet:*` slash commands, shipped as a normal Claude Code plugin. The statusline is opt-in (`fleet init --statusline`) and is the only ambient surface; the plugin itself registers no hooks and injects nothing. |
 | **Interactive hand-off** | A worker is a real Claude Code session, so you drop into it through Claude Code — the agents menu (Ctrl+T) or `claude attach <session-id>`. `fleet release` hands a stale `attached` record back to headless. *(`fleet attach` itself currently refuses and redirects there; native attach integration is a later milestone.)* |
 | **Crash-safe by design** | A worker is a durable Claude Code session addressed by `--session-id`/`--resume`, not a process fleet has to keep alive. Fleet runs no persistent process of its own — every `fleet` command is a short-lived CLI invocation. |
@@ -127,7 +127,7 @@ Then open a Claude Code session, say *"become the fleet manager"*, and spawn you
 | `fleet respawn` | Fresh session for a worker (the context-reset lever) |
 | `fleet resume-limited` | Relaunch workers parked on a usage limit past their reset horizon |
 | `fleet kill` | Interrupt (if running) and mark a worker dead |
-| `fleet clean` / `archive` / `autoclean` | Tiered cleanup: remove dead workers, archive terminal ones, scheduled staleness sweep |
+| `fleet clean` / `archive` / `autoclean` | Tiered cleanup: remove dead workers, archive terminal ones, staleness sweep run by the supervisor's beat and the interface's startup ritual |
 | `fleet doctor [--repair]` | Run the 25 fleet health checks. Report-only unless `--repair` is passed, which quarantines a corrupt `state/fleet.json` by renaming it aside |
 | `fleet sup-*` | Supervisor identity: `boot`, `spawn`, `heartbeat`, `checkpoint`, `status`, `handoff-{begin,complete,abort}` |
 
