@@ -74,7 +74,15 @@ _CLAIM_RE = re.compile(
     r"|none\s+takes?\s+.{0,20}fleet\.lock"
     r"|no\s+view\s+writes"
     r"|not\s+repaired\s+from\s+a\s+view"
-    r"|read\s+surface\s+never\s+takes",
+    r"|read\s+surface\s+never\s+takes"
+    # The architecture-diagram sentence and the error-handling table note. Both
+    # were missed by the first draft of this regex, and fault injection 2 is what
+    # surfaced it: restoring their original wording left the pin green. They are
+    # named here because a claim site the regex cannot see is a claim site the
+    # pin does not hold.
+    r"|never\s+contend\s+for\s+a\s+lock"
+    r"|views\s+report,\s+the\s+writer\s+quarantines"
+    r"|a\s+view\s+must\s+do\s+\W*none\W*\s+of\s+that",
     re.I,
 )
 
@@ -101,8 +109,11 @@ _NOT_A_CLAIM = (
 )
 
 
-def _paragraphs(path):
-    """(first_line_number, text) per blank-line-separated paragraph."""
+_BULLET_RE = re.compile(r"^(?:[-*+]\s|\d+[.)]\s)")
+
+
+def _blocks(path):
+    """(first_line_number, lines) per blank-line-separated block."""
     out, cur, start = [], [], 1
     for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if line.strip():
@@ -110,10 +121,37 @@ def _paragraphs(path):
                 start = n
             cur.append(line)
         elif cur:
-            out.append((start, "\n".join(cur)))
+            out.append((start, cur))
             cur = []
     if cur:
-        out.append((start, "\n".join(cur)))
+        out.append((start, cur))
+    return out
+
+
+def _paragraphs(path):
+    """(first_line_number, text) per CLAIM UNIT.
+
+    A claim unit is a blank-line block, EXCEPT that a block containing top-level
+    bullets is split one unit per bullet, each carrying the block's lead-in text.
+
+    Granularity is the whole game here. Root `CLAUDE.md`'s rules are one
+    unbroken bullet list, so at block granularity a qualifier in ANY rule
+    satisfies the D4 rule -- an unqualified doctrine sentence would sail through
+    the moment some unrelated bullet happened to say "REQUIREMENT". Splitting per
+    bullet removes that coupling. The lead-in travels with each bullet because
+    D4's CURRENT STATE states the qualification once and then enumerates, which
+    is the right way to write it and must not be punished.
+    """
+    out = []
+    for start, lines in _blocks(path):
+        idx = [i for i, l in enumerate(lines) if _BULLET_RE.match(l)]
+        if not idx:
+            out.append((start, "\n".join(lines)))
+            continue
+        lead = "\n".join(lines[:idx[0]])
+        for j, i in enumerate(idx):
+            end = idx[j + 1] if j + 1 < len(idx) else len(lines)
+            out.append((start + i, lead + "\n" + "\n".join(lines[i:end])))
     return out
 
 
@@ -224,22 +262,65 @@ def test_doctrine_is_not_restated_unqualified_while_it_is_false(
         f"land the `doctor-repair` fix and this test stops asking.")
 
 
-def test_known_claim_sites_are_all_found():
-    """Non-vacuity for the claim regex: it must still see the sites it was written for.
+# The six restatements as they read BEFORE the views-doctrine slice corrected
+# them -- i.e. the exact prose the measurement showed false. Verbatim from
+# `02bf276`. `_CLAIM_RE` must recognise every one of them: these are precisely
+# the sentences a future author would restore, and a regex that stops seeing them
+# is a disarmed pin regardless of what the documents currently say.
+#
+# Fault injection 2 is why this list exists. The first draft of `_CLAIM_RE`
+# missed two of these (the architecture-diagram sentence and the table note), and
+# a count-based non-vacuity check could not tell.
+ORIGINAL_CLAIMS = {
+    "CLAUDE.md rules bullet":
+        "Views (statusline, `/fleet:*`) never take `fleet.lock`, never probe a "
+        "PID, never write, and never quarantine a corrupt registry — they read "
+        "`fleet.status_snapshot()` and exit 0.",
+    "architectural constraint, No view writes":
+        "**No view writes.** Nothing in this phase writes `state/fleet.json`, "
+        "`state/events.jsonl`, or takes `state/fleet.lock`.",
+    "D4 heading":
+        "**D4 — a view reports registry corruption; it does not quarantine.**",
+    "D4 body":
+        "A view must do **none** of that: quarantine is a write, and a "
+        "statusline refiring every 10 s would quarantine in a loop.",
+    "architecture diagram":
+        "The read surface and the write surface never contend for a lock, "
+        "because the read surface never takes one.",
+    "error-handling table note":
+        "The corrupt-registry row is D4: views report, the writer quarantines.",
+    "invariant 6":
+        "**6 single-writer registry** — no surface in this phase writes "
+        "`fleet.json` or `events.jsonl`, and none takes `fleet.lock`.",
+}
 
-    If `_CLAIM_RE` is narrowed until it matches nothing, the test above passes
-    with an empty list and the pin is gone. These are the five restatements the
-    views-doctrine slice corrected; a regex that stops seeing them is broken
-    regardless of what the documents say.
+
+@pytest.mark.parametrize("site", sorted(ORIGINAL_CLAIMS), ids=lambda s: s)
+def test_the_original_false_wording_is_still_recognised(site):
+    """Non-vacuity for `_CLAIM_RE`. Narrow it and this goes red, not silent."""
+    assert _CLAIM_RE.search(ORIGINAL_CLAIMS[site]), (
+        f"`_CLAIM_RE` no longer recognises the {site!r} restatement of D4 as a "
+        f"claim. Restoring that exact sentence would now pass the pin.")
+
+
+def test_known_claim_sites_are_all_found():
+    """...and the regex must still find them where they actually live.
+
+    A floor, not an exact count: the documents may gain restatements. Six is what
+    the views-doctrine slice measured after its corrections (CLAUDE.md's rule
+    bullet; and in terminal-surface.md the 'No view writes' constraint, D4's
+    heading, D4's CURRENT STATE enumeration, the architecture-diagram sentence,
+    the error-handling table note, and invariant 6). The floor is set one below
+    that because D4's CURRENT STATE bullets are this slice's own prose and a
+    later rewrite may merge them away without weakening anything.
     """
     assert len(_claim_paragraphs(CLAUDE_MD)) >= 1, (
         "the D4 restatement in CLAUDE.md is no longer recognised as a claim")
     found = len(_claim_paragraphs(TERMINAL_SURFACE))
-    assert found >= 4, (
-        f"only {found} D4 restatement(s) recognised in terminal-surface.md; the "
-        f"slice that wrote this pin found 4 (the 'No view writes' constraint, "
-        f"D4 itself, the architecture-diagram sentence, and invariant 6). A "
-        f"regex that stops seeing them silently disarms the pin.")
+    assert found >= 5, (
+        f"only {found} D4 restatement(s) recognised in terminal-surface.md, "
+        f"floor is 5. Either restatements were deleted, or `_CLAIM_RE` / "
+        f"`_paragraphs` stopped seeing them -- which silently disarms the pin.")
 
 
 def test_the_receipt_section_is_present_and_cited():
