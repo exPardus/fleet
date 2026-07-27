@@ -580,6 +580,26 @@ class TestOutline:
         assert rc == 0
         assert out.splitlines()[0] == "## src/api.py (17 lines, python)"
 
+    def test_the_raw_argument_is_the_fallback_when_the_cwd_candidate_is_unknown(
+            self, proj, monkeypatch, capsys):
+        # The OTHER half of `_q_outline_rels`' contract, and it had no test:
+        # pointer lines print index-root-relative paths, so a worker sitting in
+        # `src/` who copies `root.py` back out of one must still hit. Found by
+        # fault injection -- narrowing the candidate list to the first entry
+        # whenever that entry is CONTAINED left the whole suite green, because
+        # every existing test exercised the cwd-resolved candidate winning and
+        # none exercised it losing.
+        monkeypatch.chdir(proj / "src")
+        capsys.readouterr()
+        assert fleet._q_outline_rels(proj, "root.py") == ["src/root.py", "root.py"]
+        # The first candidate is contained -- so containment is NOT what
+        # rejects it -- and it is simply not a thing this index describes.
+        assert fleet._q_contained(proj, "src/root.py")
+        assert not fleet._q_outline_known(proj, "src/root.py")
+        rc, out, _err = _run(capsys, "--outline", "root.py")
+        assert rc == 0
+        assert out.splitlines()[0] == "## root.py (2 lines, python)"
+
     def test_an_unknown_path_exits_1_with_a_basename_candidate_list(
             self, proj, capsys):
         rc, out, err = _run(capsys, "--outline", "api.py")
