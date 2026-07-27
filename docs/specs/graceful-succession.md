@@ -1,9 +1,9 @@
 # Spec: The graceful-succession signal — a fleet that says when it has no command tier
 
 **Status:** DRAFT, ready-for-gate. Nothing here is built. Written 2026-07-27 by the `succession-spec`
-slice on `spec/succession-signal`, rebased onto `main` @ `0c6bf23`.
+slice on `spec/succession-signal`, rebased onto `main` @ `d543691`.
 
-**Vantage.** Every receipt is pinned `# at 0c6bf23` and re-executed against that commit's materialised
+**Vantage.** Every receipt is pinned `# at d543691` and re-executed against that commit's materialised
 tree by `tools/verify_receipts.py`. `bin/fleet.py` is untouched by this slice; the deliverable is this
 document plus one `RECEIPT_FLOOR` entry (§8.1).
 
@@ -126,7 +126,7 @@ hook and the plugin `hooks` key were deleted and a test pins their absence.
 
 ---
 
-## 3. CURRENT STATE, measured at `0c6bf23`
+## 3. CURRENT STATE, measured at `d543691`
 
 Descriptive. Every row has a receipt in §9.
 
@@ -155,18 +155,21 @@ Two things in that table are the whole defect:
 ### 3.1 A correction the brief needs, now partly overtaken
 
 The brief states that `_ceiling_refuses_dispatch` *"already refuses `spawn`, `send` and `sup-spawn`"*.
-At `0c6bf23` it refuses at **five** call sites — `spawn`, `send`, `sup-spawn`, and `respawn` twice,
+At `d543691` it refuses at **five** call sites — `spawn`, `send`, `sup-spawn`, and `respawn` twice,
 gated on `--task` (R10).
 
-The operator has since **ratified the extension** (evening docket): §11.3's enumeration is to name
-`respawn` (task-bearing only) and `sup-spawn`, with a **binding process condition** — *do not trust the
-cited line numbers; grep the enumeration and edit what is measured*, because line-number citations in
-prose have rotted twice in this repo and nothing tests them. This spec therefore cites
+The operator has since **ratified the extension** (evening docket), with a **binding process
+condition** — *do not trust the cited line numbers; grep the enumeration and edit what is measured*,
+because line-number citations in prose have rotted twice in this repo and nothing tests them. **The
+doc-sync edit landed at `d543691`**, so §11.3 now names `fleet spawn`, `fleet send`, `fleet sup-spawn`
+and **task-bearing** `fleet respawn`, with the `--task` discriminator marked normative. That closes the
+three-tier half of this correction; this spec keeps the practice, citing
 `_ceiling_refuses_dispatch` **by grep** (R10) and by function name, never by line.
 
-`skills/fleet/supervisor.md` still reads *"It does not yet cover `fleet respawn`"*. That is now stale
-in the under-claiming direction, and it now contradicts a ratified decision as well as shipped code.
-`skills/**` is outside this slice's scope fence — **filed, not fixed** (§10.2 A4).
+**What is not closed:** `skills/fleet/supervisor.md` still reads *"It does not yet cover `fleet
+respawn`"*. That is stale in the under-claiming direction and now contradicts a ratified decision as
+well as shipped code. `skills/**` is outside this slice's scope fence — **filed, not fixed**
+(§10.2 A4).
 
 ---
 
@@ -457,7 +460,7 @@ slice could give the doctor row a roster-confirmed arm the statusline cannot hav
 
 ### 5.1 What the tombstone merge already solved — it is now the base, not a branch
 
-`fix/sup-release-tombstone` merged at `0cda9f6` and is in `main` @ `0c6bf23`. As shipped (R13):
+`fix/sup-release-tombstone` merged at `0cda9f6` and is in `main` @ `d543691`. As shipped (R13):
 
 - `cmd_sup_release` tombstones the releasing body's **own** registry record —
   `_tombstone_releasing_body`, `status = "dead"`, the same field and literal `_cmd_kill_native` writes,
@@ -875,14 +878,14 @@ it — so adding a spec without adding the floor leaves the suite red. **`bin/fl
 
 ## 9. Receipts
 
-Re-executed against the materialised tree of `0c6bf23` by `tools/verify_receipts.py`. No block is
+Re-executed against the materialised tree of `d543691` by `tools/verify_receipts.py`. No block is
 `# volatile` or `# live`: every one is a `grep` over a file in the repo, so they are ordinary pinned
 receipts and no evidence here lives outside it.
 
 **R1 — the statusline's four supervisor words. None means "outage".**
 
 ```
-# at 0c6bf23
+# at d543691
 $ grep -n "_SUP_STATE_LABEL = " -A 1 bin/fleet_statusline.py
 123:_SUP_STATE_LABEL = {"held": "sup held", "released": "sup released",
 124-                    "none": "sup none", "unknown": "sup ?"}
@@ -891,7 +894,7 @@ $ grep -n "_SUP_STATE_LABEL = " -A 1 bin/fleet_statusline.py
 **R2 — a live supervisor body leaves the worker buckets, so a `limited` supervisor is in no bucket.**
 
 ```
-# at 0c6bf23
+# at d543691
 $ grep -n 'if w.get("tier") == "supervisor" and w.get("status") != "dead":' -A 1 bin/fleet_statusline.py
 186:        if w.get("tier") == "supervisor" and w.get("status") != "dead":
 187-            continue
@@ -900,7 +903,7 @@ $ grep -n 'if w.get("tier") == "supervisor" and w.get("status") != "dead":' -A 1
 **R3 — the supervisor projection carries four keys; none is a verdict.**
 
 ```
-# at 0c6bf23
+# at d543691
 $ grep -n 'out = {"goals_active": False, "state": "none",' -A 1 bin/fleet.py
 3133:    out = {"goals_active": False, "state": "none",
 3134-           "incarnation_id": None, "heartbeat_age_seconds": None}
@@ -909,7 +912,7 @@ $ grep -n 'out = {"goals_active": False, "state": "none",' -A 1 bin/fleet.py
 **R4 — `sup-status --json`'s eight keys; none is a succession verdict.**
 
 ```
-# at 0c6bf23
+# at d543691
 $ grep -n '^        "goals_active"\|^        "incarnation"\|^        "heartbeat_age_seconds"\|^        "handshake"\|^        "abort_flag"\|^        "pending_decision"\|^        "interface_divergence"\|^        "nag"' bin/fleet.py
 13373:        "goals_active": supervisor_goals_active(),
 13378:        "incarnation": _project_claim(claim),
@@ -924,7 +927,7 @@ $ grep -n '^        "goals_active"\|^        "incarnation"\|^        "heartbeat_
 **R5 — the only two supervisor rows in doctor's check list.**
 
 ```
-# at 0c6bf23
+# at d543691
 $ grep -n "functools.partial(_doctor_check_supervisor" bin/fleet.py
 9437:        functools.partial(_doctor_check_supervisor_claim),
 9438:        functools.partial(_doctor_check_supervisor_handoff),
@@ -933,7 +936,7 @@ $ grep -n "functools.partial(_doctor_check_supervisor" bin/fleet.py
 **R6 — `limited-parks` is always `ok=True`, so a limit-parked supervisor reads `[PASS]`.**
 
 ```
-# at 0c6bf23
+# at d543691
 $ grep -n 'return ("limited-parks"' bin/fleet.py
 8523:        return ("limited-parks", True, "no usage-limit parks")
 8536:    return ("limited-parks", True, " | ".join(parts))
@@ -943,7 +946,7 @@ $ grep -n 'return ("limited-parks"' bin/fleet.py
 This is window A's state, and it is what §5.1 R-a is about.**
 
 ```
-# at 0c6bf23
+# at d543691
 $ grep -n 'is released -- there is no holder to respawn' -A 1 bin/fleet.py
 6079:            detail = (f"claim {inc} is released -- there is no holder to respawn. "
 6080-                      f"Boot a fresh body with `fleet sup-spawn --task <brief>`.")
@@ -952,7 +955,7 @@ $ grep -n 'is released -- there is no holder to respawn' -A 1 bin/fleet.py
 **R8 — `sup-release`'s `reason` is free text on the claim: the string that was accurate and unread.**
 
 ```
-# at 0c6bf23
+# at d543691
 $ grep -n 'released\["reason"\] = reason' -B 1 bin/fleet.py
 13219-        if reason:
 13220:            released["reason"] = reason
@@ -961,7 +964,7 @@ $ grep -n 'released\["reason"\] = reason' -B 1 bin/fleet.py
 **R9 — `[UNBUILT]`: nothing this spec specifies exists yet, in either file.**
 
 ```
-# at 0c6bf23
+# at d543691
 $ grep -c "succession_needed\|succession_cause\|sup-recover\|sup_recover" bin/fleet.py bin/fleet_statusline.py
 bin/fleet.py:0
 bin/fleet_statusline.py:0
@@ -973,7 +976,7 @@ exit 1
 per the operator's binding process condition (§3.1).**
 
 ```
-# at 0c6bf23
+# at d543691
 $ grep -n '_ceiling_refuses_dispatch("' bin/fleet.py
 3949:    _ceiling_refusal = _ceiling_refuses_dispatch("spawn")
 5048:    _ceiling_refusal = _ceiling_refuses_dispatch("send")
@@ -986,7 +989,7 @@ $ grep -n '_ceiling_refuses_dispatch("' bin/fleet.py
 is not always fresh.**
 
 ```
-# at 0c6bf23
+# at d543691
 $ grep -n 'updated\["status"\] = "limited"' -B 2 -A 2 bin/fleet.py
 2917-        is_limit, reset_at, kind = scan(sid, transcript_path=path)
 2918-        if is_limit:
@@ -1000,7 +1003,7 @@ gains the three keys, the snapshot that publishes them, and the shipped preceden
 holder's record from a view path (`_claim_holder_dead_note`, called by `supervisor_status_line`).**
 
 ```
-# at 0c6bf23
+# at d543691
 $ grep -n "def _read_registry_readonly\|def status_snapshot\|def _claim_holder_dead_note\|def _supervisor_tier_snapshot" bin/fleet.py
 3089:def _read_registry_readonly() -> tuple:
 3109:def _supervisor_tier_snapshot(now=None) -> dict:
@@ -1012,7 +1015,7 @@ $ grep -n "def _read_registry_readonly\|def status_snapshot\|def _claim_holder_d
 consults it, and the own-record writer `sup-release` calls (§5.1).**
 
 ```
-# at 0c6bf23
+# at d543691
 $ grep -n "def _releaser_body_is_tombstoned\|_releaser_body_is_tombstoned(released_by, registry)\|def _tombstone_releasing_body" bin/fleet.py
 11533:def _releaser_body_is_tombstoned(released_by, registry) -> bool:
 11654:    if _releaser_body_is_tombstoned(released_by, registry):
@@ -1053,7 +1056,7 @@ operator owes** (which I may not make).
 | **A2** | **`claim-nonce` §6.3's post-release key set does not say what happens to `handoff_pending` and `handoff_token_hash`.** It enumerates seven keys kept and six removed; these two are in neither list. `sup-recover` §5.7 refuses on `handoff_token_hash`, so its behaviour after a release depends on an unspecified key. | **operator** (§6.3 is a ratified D-decision) | A released claim still carrying a minted token would mean a superseded successor could in principle validate against it. I could not determine from the text whether that is intended. **Flagged as a live ambiguity, not assumed either way.** |
 | **A3** | **A 25th doctor check that can FAIL changes `fleet doctor`'s exit-code contract for a new class of condition,** and `docs/SPEC.md` §13 records the roster and a check count. | operator / doc-sync | Adding a FAIL-capable row is a policy change about what makes doctor red, and the count is a ratified number. |
 | **A4** | **`skills/fleet/supervisor.md` is stale about the respawn ceiling** (§3.1, R10) — and the operator has now **ratified** the extension, so the skill contradicts a ratified decision as well as shipped code. | doc-sync; **outside this slice's scope fence** (`skills/**`) | Filed, not fixed. |
-| **A5** | **§11.3's own enumeration must be edited by grep, not by the three cited line numbers** (`1407`, `1433`, `1516`) — the operator's binding process condition. This spec obeys it (R10) but does not perform the §11.3 edit, which belongs to the doc-sync slice. | doc-sync | Not this write-set. |
+| **A5** | ~~§11.3's enumeration must name task-bearing `respawn` and `sup-spawn`, edited by grep rather than by the three cited line numbers.~~ **DISCHARGED at `d543691`** while this spec was being written — §11.3 now names all four verbs and marks the `--task` discriminator normative. Left in the table rather than deleted, because a row that silently disappears is indistinguishable from one that was never raised. | ~~doc-sync~~ **done** | Nothing owed. Verified: `d543691` touches `docs/specs/three-tier-command.md` only, so every receipt here re-pinned from `0c6bf23` to `d543691` with byte-identical output. |
 | **A6** | **Whether a test pins "a released claim renders no age"** (§6.1). I did not read the statusline test suite. | builder + gate | Asserting either way would be a claim I had not measured. **Stated as unverified.** |
 | **A7** | **`sup-recover`'s exact rc values.** This spec reuses `SupervisorLifecycleRefusal`'s rc 2 / rc 3 split and `sup-boot`'s rc 4. I did not re-derive every constant. | builder | Named so the build confirms rather than infers. |
 
@@ -1086,7 +1089,7 @@ tick.
 | `docs/specs/claim-nonce.md` | §6.3 post-release key set | **A2** — say explicitly what happens to `handoff_pending` and `handoff_token_hash` on release. | **operator** |
 | `docs/specs/claim-nonce.md` | §6.3 boot table | additive note: the signal is a **view** over the same state and fires on `claim`/`seize`/`limit-transfer` plus `holder-frozen`; it moves no threshold in this table (§4.6). | operator / gate |
 | `docs/specs/three-tier-command.md` | §10.4 | record that `respawn supervisor` is one arm of a larger front door, and that `sup-recover` delegates to it rather than duplicating it. | operator / gate |
-| `docs/specs/three-tier-command.md` | §11.3 enumeration | **A5** — name task-bearing `respawn` and `sup-spawn`, **edited by grep, not by the cited line numbers**. | doc-sync |
+| `docs/specs/three-tier-command.md` | §11.3 enumeration | **A5 — ALREADY DONE at `d543691`.** Named here so a reader of this table does not re-open it. | ~~doc-sync~~ done |
 | `docs/SPEC.md` | §13 doctor roster | **A3** — 25th check `supervisor-succession`; the roster count changes. | operator / doc-sync |
 | `skills/fleet/supervisor.md` | Handoff section | **A4** — the respawn-ceiling paragraph is stale (R10). **Outside this slice's scope fence; filed, not fixed.** | doc-sync |
 | `skills/fleet/supervisor.md` | Standing down | when `sup-recover` ships, the recipe becomes *release, then stop* for the supervisor and *`fleet sup-recover`* for the interface — one command, not three. **Outside scope; filed.** | doc-sync |
