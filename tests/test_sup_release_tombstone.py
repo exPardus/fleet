@@ -567,3 +567,62 @@ class TestTheRetiredAttestationRoadStaysClosed:
             reg = _registry((BODY, _record(RELEASER)))
             assert fleet._releaser_live_sids(
                 claim, {RELEASER}, registry=reg) == {RELEASER}, forged
+
+
+# --- 7. THE CONSEQUENCE OF REUSING A STICKY STATUS -------------------------
+
+class TestWhatElseTheTombstoneChanges:
+    """Found while auditing the reuse rather than by driving the feature, and
+    pinned so it is a decision instead of a surprise. `"dead"` is in
+    `_NATIVE_STICKY`, so `recompute_worker_native` passes it through unchanged
+    and `fleet clean` -- which deletes on the RECOMPUTED verdict -- becomes
+    willing to sweep the retired body's record even while its session lingers.
+
+    That is the right answer and it is not new: it is exactly the state a
+    `fleet kill` leaves, and it is what the manual step produced anyway once the
+    operator stopped the body. Recorded because the alternative reading -- "the
+    release quietly made a live session's evidence deletable" -- is a fair thing
+    for the next reader to worry about, and the two things it must NOT cost are
+    checked below."""
+
+    def test_the_retired_body_becomes_sweepable_by_clean(self, sup_home,
+                                                         monkeypatch, capsys):
+        _install(_record(RELEASER))
+        value = _hold()
+        assert _release(nonce=value) == 0
+        # The session is STILL live in the roster -- this is the whole point.
+        _roster(monkeypatch, RELEASER)
+        assert fleet.main(["clean", "--yes"]) == 0
+        assert BODY not in fleet.load_registry()["workers"]
+
+    def test_it_does_not_cost_the_supervisor_journal(self, sup_home, monkeypatch,
+                                                     capsys):
+        # The ratified journal lives on a fixed supervisor-scoped path belonging
+        # to no worker record, so `fleet clean` cannot reach it (§4.13(g)). That
+        # is what makes the sweep above cheap; if it ever stopped being true,
+        # tombstoning on release would be destroying the campaign's record.
+        _install(_record(RELEASER))
+        value = _hold()
+        assert _release(nonce=value, reason="standing down") == 0
+        journal = fleet.supervisor_journal_path()
+        assert "RELEASED" in journal.read_text(encoding="utf-8")
+        _roster(monkeypatch, RELEASER)
+        assert fleet.main(["clean", "--yes"]) == 0
+        assert "RELEASED" in journal.read_text(encoding="utf-8")
+
+    def test_it_does_not_cost_the_operator_the_stop_lever(self, sup_home, capsys):
+        # `fleet kill <body>` must still reach a tombstoned record, or the
+        # operator loses the ability to stop a lingering released session
+        # through fleet. `kill` refuses ARCHIVED records, not dead ones -- which
+        # is one more reason the tombstone is `status`, never `archived_at`.
+        _install(_record(RELEASER))
+        value = _hold()
+        assert _release(nonce=value) == 0
+        rec = fleet.load_registry()["workers"][BODY]
+        assert rec.get("archived_at") is None
+        stopped = []
+        fleet.cmd_kill(SimpleNamespace(name=BODY, yes=True, nonce=None),
+                       run=lambda *a, **k: stopped.append(a) or SimpleNamespace(
+                           returncode=0, stdout="", stderr=""),
+                       which=lambda _x: "claude")
+        assert stopped, "kill could not reach the tombstoned body"
