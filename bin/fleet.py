@@ -4480,12 +4480,28 @@ def _cmd_peek_native(name: str, sid, n: int) -> int:
     record`) from the current sid's transcript tail (`_read_tail_lines` --
     bounded bytes, works mid-turn since the daemon writes the transcript
     live). Tolerant parsing: an unparseable/non-dict line is skipped, never
-    a crash (mirrors `transcript_limit_scan`'s own discipline). No sid
-    (launch-in-flight) or no resolvable transcript both exit 1 with a hint
-    rather than printing an empty digest that could be misread as "nothing
-    happened yet"."""
+    a crash (mirrors `transcript_limit_scan`'s own discipline). No sid or no
+    resolvable transcript both exit 1 with a hint rather than printing an empty
+    digest that could be misread as "nothing happened yet".
+
+    The no-sid message states a RECORD-SHAPE fact and refuses to name a cause
+    (2026-07-27). It used to read "no transcript yet -- dispatch may still be in
+    flight", which is a claim about TIMING that this function cannot make: it
+    has read one field, `session_id`, and knows only that it is null. For three
+    days that sentence was printed over stillborn handoff successors whose 82KB
+    transcripts already existed on disk -- the sid was missing from the REGISTRY
+    (see `cmd_sup_handoff_begin`), not from the machine -- and one supervisor
+    quoted it back as evidence that no session had ever launched. `sid is None`
+    is consistent with in-flight, with dispatch-failed, and with a live session
+    whose sid was never recorded; the output must not silently pick the
+    reassuring one."""
     if sid is None:
-        print(f"{name}: no transcript yet -- dispatch may still be in flight", file=sys.stderr)
+        print(f"{name}: no session id on the registry record -- there is no "
+              f"transcript to address. This does NOT mean no session is "
+              f"running: the dispatch may be in flight, may have failed, or "
+              f"may have produced a session whose sid was never recorded. "
+              f"Confirm with `fleet status {name}` and `claude agents`.",
+              file=sys.stderr)
         return 1
     path = find_transcript_path(name, sid)
     if path is None:
@@ -10498,21 +10514,41 @@ def nonce_matches(presented, stored) -> bool:
     return hmac.compare_digest(nonce_digest(presented), stored)
 
 # B4/D6: the fleet mode name the handoff successor is dispatched under when the
-# operator passes no --permission-mode. Deliberately the SAME default
-# `fleet spawn` uses (`p_spawn --mode`, MODE_FLAGS @949) rather than a bespoke
-# one: the successor's first act is a Bash call, and a headless --bg session
-# under claude's own default mode wedges on an unanswerable permission prompt
-# (the T12 hang class). Held as a named constant so the dispatch and its pin
-# read the same value.
-SUCCESSOR_DEFAULT_MODE = "dontask"
+# operator passes no --permission-mode. Deliberately the SAME value
+# `SUP_SPAWN_DEFAULT_MODE` (nine lines below) carries rather than a bespoke one:
+# both verbs dispatch a SUPERVISOR BODY into FLEET_HOME whose first act is
+# `fleet sup-boot` -- i.e. `fleet` itself, run through Bash.
+#
+# This was `dontask` from 1c0eb42 (2026-07-21) to 2026-07-27, reasoned from a
+# real hazard: a headless `--bg` session under claude's OWN default mode wedges
+# on an unanswerable permission prompt (the T12 hang class). That reasoning is
+# CORRECT ABOUT HANGS AND WRONG ABOUT DENIALS, and it was never tested against a
+# command outside the allow-list. `dontAsk` does not prompt -- it DENIES
+# anything the allow-list does not already cover, and the successor's bootstrap
+# Bash call is not allow-listed, so the body dies before it can boot.
+#
+# Measured, not reasoned (state/events.jsonl `spawned` events + six transcripts
+# read directly, 2026-07-27): 10 successors dispatched under `dontask` were ALL
+# stillborn (2 x `permission-rule` denial, dead in 25-33s, the body's own words
+# "Bash denied, PowerShell denied"); 7 dispatched under `bypass` ALL booted and
+# completed their handoffs (75-122 min alive). 17/17, zero exceptions.
+#
+# Do NOT "restore" dontask to close the hang class: it trades a loud wedge for a
+# silent death, which is strictly worse and cost three days. Held as a named
+# constant so the dispatch and its pin read the same value -- but note the pin
+# asserts THE FLAG ON THE DISPATCH ARGV, never this literal, because a test that
+# restates the line it guards passes against whatever the line is next set to.
+SUCCESSOR_DEFAULT_MODE = "bypass"
 
 # three-tier §10.2: the gen-0 supervisor runs under BYPASS in the fleet repo
 # (earned-privilege doctrine, acknowledged in GOALS -- see
-# `_warn_missing_bypass_ack`). Deliberately asymmetric with
-# SUCCESSOR_DEFAULT_MODE ("dontask"): the successor inherits a running
-# campaign mid-handoff with the operator presumed absent; `sup-spawn` is an
-# operator-attended act and §10.2 names bypass for it. `--permission-mode`
-# overrides through the one MODE_FLAGS vocabulary (G3).
+# `_warn_missing_bypass_ack`). Deliberately EQUAL to SUCCESSOR_DEFAULT_MODE
+# since 2026-07-27 (see its comment for the measurement that closed the gap):
+# both dispatch a supervisor body that must run `fleet sup-boot` as its first
+# act, and a mode that cannot answer that call is a mode that cannot supervise.
+# The two constants stay separate because the VERBS differ -- `sup-spawn` is an
+# operator-attended act, a handoff is not -- not because the values must.
+# `--permission-mode` overrides through the one MODE_FLAGS vocabulary (G3).
 SUP_SPAWN_DEFAULT_MODE = "bypass"
 
 SUPERVISOR_JOURNAL_KINDS = (
@@ -11877,8 +11913,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :5232, :5689, :9806,
-    :14629), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :5248, :5705, :9822,
+    :14696), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -12522,8 +12558,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:5232, :5689, :9806,
-    #     :14629) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:5248, :5705, :9822,
+    #     :14696) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -14172,14 +14208,19 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     record, registered on the success path below, defaults it to None).
 
     Mode flags ARE carried (B4/D6 fix wave). `dispatch_bg` ends every worker
-    argv with `mode_flags(mode)` and `fleet spawn` defaults that to `dontask`;
-    this path emitted a permission flag only when the operator typed
-    `--permission-mode`, so the default was claude's own. The successor's
-    bootstrap opens with a Bash call (`sup-boot --handoff-inc`), and a headless
-    `--bg` session cannot answer a permission prompt -- it wedges until the
-    300s handshake timeout. That is the T12 hang class. The default is
-    `SUCCESSOR_DEFAULT_MODE`, deliberately the SAME fleet mode name a worker
-    gets, not a bespoke one; an explicit `--permission-mode` still wins.
+    argv with `mode_flags(mode)`; this path emitted a permission flag only when
+    the operator typed `--permission-mode`, so the default was claude's own.
+    The successor's bootstrap opens with a Bash call (`sup-boot --handoff-inc`),
+    and a headless `--bg` session cannot answer a permission prompt -- it wedges
+    until the 300s handshake timeout. That is the T12 hang class.
+
+    The default is `SUCCESSOR_DEFAULT_MODE`, and since 2026-07-27 it is `bypass`
+    -- the SAME value `sup-spawn` uses for a supervisor body, NOT the `dontask`
+    a plain worker gets. Read that constant's comment before changing it: the
+    fix for the hang class above was originally `dontask`, which closes the
+    prompt (it never asks) and opens a worse one (it DENIES), and every one of
+    the ten successors dispatched under it died at its first Bash call. An
+    explicit `--permission-mode` still wins.
 
     ONE mode vocabulary (G3 fix wave). `--permission-mode` takes a FLEET mode
     name -- argparse-constrained to `MODE_FLAGS`, the same keyspace `fleet
@@ -14460,13 +14501,38 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     # sid -> record once the claim transfers -- the live-reproduced dead-end was
     # `holder sid ... matches no registry record`. Created only on the success
     # path (the successor is verified live), so the DOA/indeterminate/dispatch-
-    # failure returns above leave no orphan record and need no cleanup. The sid
-    # is deliberately NULL here: the daemon minted the successor's own, and the
-    # roster-joined `successor_sid` can still be superseded by a fork before
-    # HANDSHAKE -- so `sup-handoff-complete` stamps the AUTHORITATIVE HANDSHAKE
-    # sid, the same create-sid-less-then-stamp shape `cmd_sup_spawn` uses for a
-    # gen-0 body (:10596). This also grants the successor §7.2 archive exemption
-    # + peek/result parity with gen-0 bodies (a wanted side effect).
+    # failure returns above leave no orphan record and need no cleanup. This
+    # also grants the successor §7.2 archive exemption + peek/result parity with
+    # gen-0 bodies (a wanted side effect).
+    #
+    # THE SID IS STAMPED HERE (2026-07-27). It used to be NULL, reasoned from a
+    # true premise -- the roster-joined `successor_sid` can be superseded by a
+    # fork before HANDSHAKE, so `sup-handoff-complete` stamps the AUTHORITATIVE
+    # one -- that does not support the conclusion. `sup-handoff-complete` ALREADY
+    # retires a differing prior sid into `retired_sids` before restamping (grep
+    # `prior != successor_sid` in that function), so a provisional sid costs
+    # nothing there; and the analogy to `cmd_sup_spawn`'s create-sid-less-then-
+    # stamp shape does not hold, because THAT path has no sid yet when it creates
+    # the record, while this one is about to PRINT the sid two lines below.
+    #
+    # What the NULL cost, measured 2026-07-27: hooks resolve a worker name by
+    # scanning the registry for `session_id == sid` (`stop_outcome.py::
+    # _resolve_name`). With no sid on the record the scan misses, the Stop hook
+    # falls back to `key = sid`, and the turn's outcome is written to
+    # `state/outcomes/<raw-sid>.jsonl` -- where `read_outcomes(name)` never
+    # looks. Ten stillborn successors each stated their own diagnosis in a
+    # result nothing on the fleet side could read. Successful successors escaped
+    # only by accident of timing: `sup-handoff-complete` stamped their sid
+    # within ~45s, before their first Stop.
+    #
+    # `turns` is stamped for the same reason. Every OTHER dispatch commit sets
+    # `turns = 1` when it stamps the sid (`cmd_spawn`, `cmd_respawn`, `send`'s
+    # fresh-session path, `cmd_sup_spawn`); this block is a fourth dispatch site
+    # that set neither, so a successor that had been running for 17 minutes
+    # rendered as `working, 0 turns` -- and that reading was then used as
+    # evidence that no session had ever started. It is a registry accounting
+    # defect, not a fact about the body. The dispatch has returned rc 0 and the
+    # roster join has verified this sid live, so the turn HAS started.
     succ_mode = getattr(args, "permission_mode", None) or SUCCESSOR_DEFAULT_MODE
     with fleet_lock():
         # D1: stamp the joined sid onto THIS attempt's pending entry. That is
@@ -14489,11 +14555,12 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
         data = load_registry()
         if name not in data["workers"]:
             succ_rec = new_worker_record(
-                None, FLEET_HOME,
+                successor_sid, FLEET_HOME,
                 f"supervisor successor {successor_inc} (handoff from {holder_inc})",
                 succ_mode, model=getattr(args, "model", None),
                 spawned_by=caller, spawned_by_lineage=claim.get("lineage_id"),
                 dispatch_kind="bg", category=None)
+            succ_rec["turns"] = 1
             succ_rec["last_dispatch_at"] = now_iso()
             data["workers"][name] = succ_rec
             save_registry(data)
