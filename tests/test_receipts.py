@@ -115,16 +115,19 @@ UNENFORCED = {
     "phase-3-telegram.md": "predates the convention; no fenced receipts.",
     "phase-4-webui.md": "predates the convention; no fenced receipts.",
     "phase-5-intelligence.md": "predates the convention; no fenced receipts.",
-    # Specs unbuilt behaviour (M1 ready-for-build, M2/M3 draft), so there is
-    # nothing to re-execute yet: `fleet index` does not exist. Written
-    # deliberately receipt-free -- no `$ `-prefixed lines in any fence, and all
-    # format examples use synthetic placeholders rather than this repo's real
-    # symbols. Its adversarial review (docs/reviews/IDX-ADVERSARIAL-2026-07-22.md)
-    # failed an earlier draft for exactly the opposite: hand-written output that
-    # looked like a transcript and encoded six wrong coordinates. Promote to
-    # pinned receipts when M1 ships and `fleet index build` can be run.
-    "fleet-index.md": ("specs unbuilt behaviour (M1 ready-for-build); no fenced "
-                       "receipts by construction -- promote when M1 ships."),
+    # M1's shard layer and the `fleet index` CLI are BUILT (`idx/core`); M2's
+    # `fleet q` and M3 are not. The document stays receipt-free by construction
+    # -- no `$ `-prefixed lines in any fence, and every format example uses
+    # synthetic placeholders rather than this repo's real symbols. Its
+    # adversarial review (docs/reviews/IDX-ADVERSARIAL-2026-07-22.md) failed an
+    # earlier draft for exactly the opposite: hand-written output that looked
+    # like a transcript and encoded six wrong coordinates. What re-executes M1's
+    # claims today is `tests/test_fleet_index.py`, which drives the real CLI
+    # rather than quoting it. Promote to pinned receipts when M2 ships and a
+    # `fleet q` transcript is worth pasting.
+    "fleet-index.md": ("M1 built and covered by tests/test_fleet_index.py, M2/M3 "
+                       "unbuilt; no fenced receipts by construction -- promote "
+                       "when M2 ships."),
 }
 
 
