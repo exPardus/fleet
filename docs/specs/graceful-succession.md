@@ -1,9 +1,9 @@
 # Spec: The graceful-succession signal — a fleet that says when it has no command tier
 
 **Status:** DRAFT, ready-for-gate. Nothing here is built. Written 2026-07-27 by the `succession-spec`
-slice on `spec/succession-signal`, rebased onto `main` @ `d543691`.
+slice on `spec/succession-signal`, rebased onto `main` @ `c318224`.
 
-**Vantage.** Every receipt is pinned `# at d543691` and re-executed against that commit's materialised
+**Vantage.** Every receipt is pinned `# at c318224` and re-executed against that commit's materialised
 tree by `tools/verify_receipts.py`. `bin/fleet.py` is untouched by this slice; the deliverable is this
 document plus one `RECEIPT_FLOOR` entry (§8.1).
 
@@ -31,10 +31,9 @@ REQUIREMENT/CURRENT-STATE split), `docs/specs/native-substrate.md` contract G11,
 ## 0. The one-paragraph version
 
 A fleet whose command tier is gone must say so on a surface the operator already reads. This spec
-specifies **one cause-agnostic signal** — `succession_needed`, a **derived** predicate over state
-already on disk, with the cause carried as metadata rather than as a second mechanism — because from
-fleet's side a clean release, a usage-limit park, a dead body and a rebooted host are **the same
-fact**. It specifies how that signal renders on the three pull surfaces (statusline, `fleet
+specifies **one signal** — `succession_needed`, a **derived** predicate over state already on disk,
+with the cause carried as metadata rather than as a second mechanism — because from fleet's side a
+clean release, a usage-limit park and a body fleet has retired are **the same fact**. It specifies how that signal renders on the three pull surfaces (statusline, `fleet
 sup-status`, `fleet doctor`), and one operator-run verb, **`fleet sup-recover`**, that performs the
 whole maneuver without ever writing the claim — so it cannot produce two live supervisors under any
 interleaving. Nothing here injects anything into any session, and nothing here is automatic: the
@@ -73,35 +72,56 @@ is finer-grained and is the citation this spec uses.)*
 > nobody is obliged to read is not a signal.** The fix is not more recording; it is making the pull
 > surfaces render an outage AS an outage.
 
-### 1.1 Window B, and the finding that makes the predicate cause-agnostic
+### 1.1 Which window this design covers, and which it does not
 
-**FLEET HAS NO POST-REBOOT RESTART PATH.** Durable-sessions-survive-reboots was designed and built for
-**workers**. Nobody built the other half. So a box that comes back has a full roster and **no command
-tier** — and on 2026-07-27 the machine returned healthy at `15:25:07Z` with the fleet still dead, and
-nothing anywhere said so for 1 h 28 m. **Window B is the receipt.**
+**Window A is this design's.** The claim read `released` from `04:00:41Z`, GOALS were active, and
+nothing held command. §4.4 row 3 fires on exactly that state, with no delay and no recompute: the
+statusline would have rendered `sup DOWN released` from the first refresh after the release, for all
+**2 h 09 m** of window A. That is the whole of what this spec claims against real data, and it is
+enough — window A is the part that had a live machine, a live operator session, and a surface already
+on screen.
 
-This is a requirement on the design, not an observation about it:
+**Window B is NOT this design's, and that is a ruling, not an omission.** See §1.2.
 
-> **The signal fires on `claim released-or-absent` AND `GOALS active` AND `no live supervisor body` —
-> WHATEVER THE CAUSE.** A released claim and a rebooted host are the same fact from fleet's side and
-> must reach the operator by the same path. **Do not build two mechanisms.**
+### 1.2 CONSIDERED AND REFUSED — a fleet-side post-reboot restart path
 
-A design with one branch for "ceiling", another for "usage limit" and a third for "the host rebooted"
-is the wrong design. The causes are **metadata carried by one signal**, never separate signals. §4 is
-built on exactly that.
+An earlier draft of this document widened the signal to fire *"whatever the cause"* and treated a
+rebooted host as one more cause. **The operator refused that** (2026-07-27), and the refusal is
+recorded here rather than silently dropped, because a spec that omits a rejected option invites the
+next author to re-propose it.
 
-**Honesty about what window B did and did not exercise.** During both windows A and B of *this*
-incident the claim was `released` — so both were the same cause, which is itself the operator's point.
-The *orphaned* branch of §4.4 (a host that reboots while a supervisor is on duty, leaving a claim
-`held` by a body that no longer exists) **did not occur on 2026-07-27**. It is specified because window
-B proves that state is unmonitored, not because it was observed. §4.7 states how long it would take to
-surface, and the answer uses this incident's own numbers.
+**The ruling.** The fleet comes back to life when **the operator relaunches the interface session**.
+That is **step 5 of the startup ritual in `skills/fleet/SKILL.md`**, landed at `c318224`: GOALS active
+plus no live supervisor ⇒ the fleet is stopped, the interface `sup-spawn`s one and **says so out loud
+rather than reviving silently**.
 
-*(Adjacent and out of scope, recorded so it is not re-found: `claude-fleet-autoclean` carries
-`StartWhenAvailable: False`, so the occurrence lost to the power cut was dropped with no catch-up at
-boot — an 18 h gap in a 6-hourly sweep. Same family as window B — a guard that stands down exactly when
-the machine most needs it — but it is a scheduler property, not a succession one, and it is already
-recorded at `9f3bfa8`.)*
+**The grounds, which generalise and are the reason this belongs in a spec rather than in a commit
+message:**
+
+> Any fleet-side watcher for a rebooted host would have to either fire in a session nobody asked to be
+> fleet-aware — the **D7 leak** deleted on 2026-07-22 — or dispatch a replacement with **no operator in
+> the loop**, which is how two live supervisors happen. **When the honest mechanism would have to be an
+> injection or an autonomous actor, the trigger belongs on the human action that was going to happen
+> anyway.**
+
+Both horns are the two things §2 and §5.8 already forbid. There is no third mechanism, so there is
+nothing for this spec to build.
+
+**What this costs the design, stated plainly.** Nothing in this document shortens window B. A fleet
+that is dark because the box was dark has no reader, and **a pull signal with no reader is not a
+signal** — which is the same sentence as the lesson this whole document exists for, pointed at itself.
+
+**One honest consequence, so no one is surprised by it.** After a reboot the claim survives reading
+`held` and the heartbeat stops advancing, so once it ages past `SUPERVISOR_CLAIM_STALE_SECONDS` the
+predicate *will* report `holder-silent` (§4.4 row 7). **That is incidental, not a feature.** Row 7
+exists for the usage-limit park (§4.7) and is justified by it alone. **No part of this spec may be
+cited as post-reboot coverage, and nothing may be built that depends on it for that** — the startup
+ritual owns revival, exclusively.
+
+*(Adjacent, out of scope, and already settled elsewhere: the `claude-fleet-autoclean` timer was
+retired in the same ruling — the staleness sweep is now run by the tiers, at `c318224`, because a
+timer sweeps when the clock says so, which on a machine that loses power means it does not sweep at
+all. Same shape as the ruling above: the work moves onto an action that was going to happen anyway.)*
 
 ---
 
@@ -126,7 +146,7 @@ hook and the plugin `hooks` key were deleted and a test pins their absence.
 
 ---
 
-## 3. CURRENT STATE, measured at `d543691`
+## 3. CURRENT STATE, measured at `c318224`
 
 Descriptive. Every row has a receipt in §9.
 
@@ -155,7 +175,7 @@ Two things in that table are the whole defect:
 ### 3.1 A correction the brief needs, now partly overtaken
 
 The brief states that `_ceiling_refuses_dispatch` *"already refuses `spawn`, `send` and `sup-spawn`"*.
-At `d543691` it refuses at **five** call sites — `spawn`, `send`, `sup-spawn`, and `respawn` twice,
+At `c318224` it refuses at **five** call sites — `spawn`, `send`, `sup-spawn`, and `respawn` twice,
 gated on `--task` (R10).
 
 The operator has since **ratified the extension** (evening docket), with a **binding process
@@ -175,7 +195,7 @@ well as shipped code. `skills/**` is outside this slice's scope fence — **file
 
 ## 4. Part 1 — the signal
 
-### 4.1 One predicate, cause-agnostic
+### 4.1 One predicate, one enumerated set of causes
 
 > **`succession_needed` ⇔ `goals_active` AND the claim is UNMANNED.**
 >
@@ -185,11 +205,19 @@ well as shipped code. `skills/**` is outside this slice's scope fence — **file
 > - **`no-claim`** — there is no claim file. *(absent)*
 > - **`released`** — a claim exists and was explicitly stood down. *(released)*
 > - **`orphaned`** — a claim exists and says `held`, but no live body answers for it. *(absent — and
->   this is the branch that covers the rebooted host, §4.5)*
+>   this is the branch that covers a usage-limit park and a body that died without fleet
+>   observing it, §4.5)*
 
-Everything else — the 200k ceiling, a usage-limit park, a stillborn successor, a dead body, a power
-cut — is **why** the claim became unmanned. Those are `succession_cause` values. **They are metadata on
-one signal, never a second signal**, per §1.1.
+The two walls the ratified shape names — **the 200k context ceiling** and **a plan usage-limit park** —
+plus the states fleet itself creates (`kill supervisor` arm 2, a stillborn successor) are **why** the
+claim became unmanned. Those are `succession_cause` values: **metadata on one signal, not a second
+signal.** One fact with a cause is item 1 of the ratified shape; a signal per cause would give the
+operator three things to read and no single question to ask.
+
+**Scoped, not universal.** The enum in §4.4 is closed and enumerates conditions fleet can observe from
+its own state. It is deliberately **not** widened to "any reason a fleet might be dark" — §1.2 records
+that widening as considered and refused, and the boundary matters: **a cause fleet cannot observe
+without an injection or an autonomous actor is out of scope by ruling, not by oversight.**
 
 > **DECISION D-GS1 — DERIVED, NEVER STORED.** `succession_needed` is a projection computed at read
 > time. No new file, no new registry key, no new claim key, no writer.
@@ -199,12 +227,13 @@ The brief anticipated this shape, and the argument for it *is* the design:
 | The question | A stored flag | A derived predicate |
 |---|---|---|
 | *"What writes it when the body is parked and cannot act?"* | needs a third-party writer. A **view** writing it violates terminal-surface D1/D4 and invariant 6; a **mutating verb** writing it means the fact appears only when somebody runs one — and during an outage nobody runs anything. | nothing writes it. |
-| *"What writes it when the host loses power?"* | **nothing can.** There is no moment at which to write. | nothing needs to. The claim file and the registry survive the reboot; the predicate reads them. |
+| *"What writes it when the body dies without warning — a crash, an outside `claude stop`, a `kill supervisor` arm-2 freeze?"* | **nothing can.** There is no turn in which to write it. | nothing needs to. The claim file and the registry outlive the body; the predicate reads them. |
 | *"What clears it?"* | a clearing step somebody must remember on `claim` / `seize` / `limit-transfer` / `resume` / handoff-complete. A missed one is a permanent false alarm. | nothing. The condition stops existing (§4.8). |
 | *"Can it go stale and lie?"* | yes, both directions. | no. It has no persistence in which to be wrong. |
 
 **A signal that depends on a dying body successfully writing something is a signal that fails in
-exactly the case it exists for.** Window B is the proof: no writer could have run.
+exactly the case it exists for.** The three stillborn successors are the proof: each was dispatched,
+none ever took a turn, and a body that never takes a turn cannot write anything at all.
 
 There is a fourth reason, and it is the one that would have mattered on the night. **A stored flag
 would naturally be cleared by `fleet sup-spawn`** — the verb that dispatches a successor. That would
@@ -296,23 +325,28 @@ Specification notes, not commentary:
   operator's action is identical; two enum values for one action is a distinction a 4 a.m. reader pays
   for and does not use.
 
-### 4.5 What `absent` means, precisely — and the rebooted host
+### 4.5 What `absent` means, precisely — and the death fleet did not observe
 
 The requirement is that "absent" must cover *a claim that is `held` by a body that no longer exists*.
-That is the **orphaned** branch — rows 5/6/7 — and it is worth spelling out what a reboot actually
-leaves on disk, because the naive reading gets it wrong:
+That is the **orphaned** branch — rows 5/6/7. It is worth spelling out what a body that dies *without
+fleet observing it* leaves on disk — an outside `claude stop`, a crash, a host that went away — because
+the naive reading gets it wrong:
 
-| After a reboot mid-campaign | on disk |
+| After an unobserved death | on disk |
 |---|---|
 | `supervisor/GOALS.md` | survives. `goals_active` stays `True`. |
 | `supervisor/INCARNATION` | survives, `state: "held"`, `session_id` naming a session that no longer exists. |
 | the holder's registry record | **survives, with whatever status the last recompute wrote** — very possibly `working` or `idle`. |
-| `heartbeat_at` | frozen at the last beat before the cut. |
+| `heartbeat_at` | frozen at the last beat. |
 
-**So the registry is the wrong detector for this case and the heartbeat is the right one.** A rebooted
-supervisor's record can read `working` indefinitely, because `recompute_worker_native` only runs when
-somebody drives a recomputing verb and during an outage nobody does. Rows 4–6 would all miss it.
-**Row 7 catches it from the claim file alone** — no recompute, no registry, no roster, no hook.
+**So the registry is the wrong detector for this case and the heartbeat is the right one.** Such a
+record can read `working` indefinitely, because `recompute_worker_native` only runs when somebody
+drives a recomputing verb and during an outage nobody does. Rows 4–6 would all miss it. **Row 7
+catches it from the claim file alone** — no recompute, no registry, no roster, no hook.
+
+*(This is also, incidentally, the shape a rebooted host leaves. §1.2 is explicit that revival after a
+reboot is the startup ritual's job and not this signal's; the row is justified by the usage-limit park
+and by unobserved death alone, and must not be cited as post-reboot coverage.)*
 
 ### 4.6 Coexistence with `seize` / `freeze` — which the operator sees first
 
@@ -357,7 +391,7 @@ freeze exists for.
 |---|---|---|
 | **200k context ceiling** | loud and self-aware. The body knows, `fleet sup-context` measures it, `_ceiling_refuses_dispatch` refuses it at five sites (R10). It ends in a `sup-release`, so the signal fires on **row 3** the instant the claim is written. | **immediate** |
 | **plan usage-limit park** | **silent** (G11: no Stop hook, roster unaffected). Two paths; the design does not depend on the faster one. | see below |
-| **host reboot / crash** | nothing writes anything (§4.5). | ≤ 1 h |
+| **a death fleet did not observe** (outside `claude stop`, crash) | nothing writes anything (§4.5). | ≤ 1 h |
 
 **The usage-limit park in detail, because it is the half a naive design gets wrong.**
 
@@ -375,15 +409,16 @@ is **not** an always-fresh cause.
 *What closes it: row 7.* A parked body cannot run `sup-checkpoint` or `sup-heartbeat`, so its heartbeat
 ages, and the heartbeat lives in the claim file, which the predicate reads directly.
 
-> **A supervisor parked on a usage limit — or killed by a power cut — becomes visible within
+> **A supervisor parked on a usage limit becomes visible within
 > `SUPERVISOR_CLAIM_STALE_SECONDS` (3600 s) from the claim file alone. When a recompute has run, the
 > cause is upgraded to `holder-limited` and the alarm arrives immediately instead. Worst case one hour;
 > best case immediate. The registry buys the *cause word*, never the *alarm*.**
 
-**Measured against this incident: window B was 1 h 28 m.** Row 7 would have fired with roughly 28
-minutes to spare, on a surface the operator already had open, with no command typed. That is the
-design's own claim checked against the only real data there is — and it is also the honest ceiling on
-what it buys: it would not have shortened window A's first hour.
+**Row 7's latency is unmeasured against real data, and this document will not pretend otherwise.** The
+2026-07-27 incident produced no supervisor park — it produced a clean release, which row 3 catches
+instantly (§1.1) — so the one-hour bound above is derived from `SUPERVISOR_CLAIM_STALE_SECONDS`, not
+observed. What *is* measured is the half this design does cover: window A, 2 h 09 m, on row 3, with
+zero delay.
 
 *The cost of row 7, owned.* `supervisor_status_line`'s docstring records that its file-only heartbeat
 read *"may false-fire on a live idle supervisor (accepted: the nag is advisory)"*. Row 7 promotes that
@@ -454,13 +489,39 @@ for, and because the first thing an operator does with a statusline that stutter
 slice could give the doctor row a roster-confirmed arm the statusline cannot have. **Filed, not built**
 (§10.1 O10).
 
+### 4.10 BINDING — every input is a measurement or a state, never a self-report
+
+No input to `succession_needed` is anything a body *said about itself*. All four (§4.2) are either
+state a body wrote as a durable fact (`state`, `heartbeat_at`, `released_at`) or a verdict fleet
+computed itself (the registry `status`, via `recompute_worker_native`). **Nothing the predicate reads
+is an estimate, an attestation, or prose.**
+
+This is not fastidiousness. It is measured, twice, from this project's own record:
+
+- **A supervisor body estimated its own context occupancy at roughly 60k "by feel". `fleet sup-context`
+  measured 198,767 tokens.** Wrong by ~140k, in the direction that matters — the body believed it had
+  room and was one refusal away from the ceiling. Four gate results at 2–5k output tokens each are most
+  of a body's budget, and none of that is legible from the inside. **If any part of this design ever
+  triggers on occupancy, it must trigger on `fleet sup-context`'s measurement and never on a
+  self-report.** Today it triggers on occupancy nowhere: the ceiling is the only occupancy consumer,
+  and `_ceiling_refuses_dispatch` already resolves the caller's own transcript and sums the three
+  usage terms rather than asking anyone.
+- **`sup-release --reason` is the counter-example, and it is why §4 exists.** It is prose written by a
+  body under context pressure. It was accurate on the night and it changed nothing (R8). §5.5 therefore
+  forbids `sup-recover` from presenting it as a brief.
+
+This composes with `claim-nonce` §17's ratified clause — *"inference may select the SUBJECT of a
+measurement, but may not supply the GROUNDS of a refusal"* — and stands slightly stronger than it: this
+predicate grounds no refusal at all, but it still declines self-report as an **input**, because a
+detector built on what a degrading actor believes about itself degrades with it.
+
 ---
 
 ## 5. Part 3 — folding the maneuver into one verb
 
 ### 5.1 What the tombstone merge already solved — it is now the base, not a branch
 
-`fix/sup-release-tombstone` merged at `0cda9f6` and is in `main` @ `d543691`. As shipped (R13):
+`fix/sup-release-tombstone` merged at `0cda9f6` and is in `main` @ `c318224`. As shipped (R13):
 
 - `cmd_sup_release` tombstones the releasing body's **own** registry record —
   `_tombstone_releasing_body`, `status = "dead"`, the same field and literal `_cmd_kill_native` writes,
@@ -474,16 +535,53 @@ slice could give the doctor row a roster-confirmed arm the statusline cannot hav
 - Order is release-then-tombstone inside one `fleet_lock` section, so a death between the two writes
   leaves today's B6 refusal, which self-heals.
 
-> **The middle step of the three-step maneuver is solved, for the `sup-release` path.** The recipe
-> `sup-release` → *[the interface stops the retired body]* → `sup-spawn` has lost its middle term. That
-> is a real closure and this spec does not re-solve it.
+> **The middle step of the three-step maneuver is solved — for the clean-release path, and only for
+> it.** The recipe `sup-release` → *[the interface stops the retired body]* → `sup-spawn` has lost its
+> middle term on that path. That is a real closure and this spec does not re-solve it.
+
+#### 5.1.1 The scope, MEASURED — and why it changes item 3's justification without weakening it
+
+`_tombstone_releasing_body` has **exactly one caller: `cmd_sup_release`** (R14, re-derived here rather
+than accepted from the sentence). It is not on the kill path, not on a heartbeat path, not on any
+timer, and **nothing anywhere notices a body that simply stopped.**
+
+So the two-step succession holds for a narrow case: a *fleet-launched* body that *voluntarily* runs
+`sup-release`, whose registry is readable, and whose sid resolves to exactly one record.
+
+**It does not run at all for:**
+
+1. **A usage-limit park.** The body never gets another turn — that is precisely what makes limit death
+   silent (G11). It **cannot call `sup-release`, so it can never tombstone itself, by construction.**
+2. **A body that dies at the ceiling without releasing**, crashes, or is stopped from outside.
+
+**And it deliberately abstains in three more**, by its own docstring rather than by guessing:
+`UNRESOLVED` (not a fleet-launched body), `AMBIGUOUS` (two records carry the sid — a leak signature),
+and a registry that will not read. On the third it prints, in the shipped code's own words, that
+*"B6 stays armed until the body leaves the roster, i.e. **the manual step is back for this one
+release**."*
+
+> **THE SENTENCE THAT MATTERS: the tombstone helps least in exactly the cases this signal exists for.**
+> It removes the middle step from the **graceful** path — where a healthy body chose to stand down and
+> could already have told someone. It leaves the middle step **fully intact on both walls the signal
+> fires on**: the ceiling body that did not get to release, and the usage-limit park that *by
+> construction can never release*.
+
+**Two consequences for the wording of this spec, stated so the next author does not delete the middle
+step as redundant after reading the tombstone commit:**
+
+- **Do not say "a supervisor can never complete its own stand-down" unqualified.** Since `0cda9f6` a
+  supervisor completing a *clean voluntary release* does exactly that. This document does not make that
+  claim anywhere, and must not acquire it.
+- **Do say:** `sup-recover` must still perform the middle step, because **the signal fires on the paths
+  where no release ran**, and on those paths the row is still roster-live and B6 still refuses. See
+  §5.4 arm 5, and its idempotence requirement.
 
 **Four things it does not close, and they are what the verb owes:**
 
 | # | What remains | Why the tombstone cannot reach it |
 |---|---|---|
 | **R-a** | **The handover of intent across the tier boundary.** `sup-release` ends the supervisor's session; `sup-spawn` must be run by a *different* tier, later, by someone who noticed. Nothing carries the intent across. | The tombstone makes the *mechanism* work. Nothing makes the *interface* act. **This is window A — 2 h 09 m** with a clean release, a working mechanism, and no second command. |
-| **R-b** | **The already-gone case.** No `sup-release` ran, so no tombstone exists. The claim is `held` with an aging heartbeat, and `sup-boot` verdicts `refuse` or **`freeze` for up to 3600 s**. **This is window B, and every future reboot.** | The tombstone is written *by* `sup-release`. A body that died — or lost power — cannot write one. |
+| **R-b** | **The already-gone case.** No `sup-release` ran, so no tombstone exists. The claim is `held` with an aging heartbeat, and `sup-boot` verdicts `refuse` or **`freeze` for up to 3600 s**. **This is the parked supervisor and every body that dies without fleet observing it.** | The tombstone is written *by* `sup-release`. A body that is parked, stopped from outside, or crashed cannot write one. |
 | **R-c** | **Released-but-untombstoned.** A release by pre-tombstone code, or one whose `_tombstone_releasing_body` legitimately abstained (identity `UNRESOLVED`/`AMBIGUOUS`, or an unreadable registry — all three arms print and return `None`). B6 refuses and the manual middle step is back for that release. | By design: it abstains rather than guessing, which is correct, and leaves the operator holding the step. |
 | **R-d** | **`sup-spawn` requires `--task <text\|@file>`.** After an unplanned death the interface must author a campaign brief from nothing, at whatever hour the outage happened. | Out of the tombstone's scope entirely. |
 
@@ -533,7 +631,7 @@ dispatch** (F4 doctrine: never hold `fleet.lock` across a subprocess).
 | **4** | claim `released`, releaser **tombstoned or roster-gone** | dispatch a gen-0 body (`_dispatch_supervisor_body`). Nothing to stop. **Post-tombstone this is the common case.** | 0 |
 | **5** | claim `released`, releaser **still roster-live and untombstoned** (R-c) | **stop that session, tombstone its record, then dispatch** — the manual middle step, performed in-fleet | 0 |
 | **6** | claim `held`, holder record `limited` | dispatch. `sup-boot` verdicts `limit-transfer`. | 0 |
-| **7** | claim `held`, heartbeat **stale** (incl. the post-reboot case, §4.5) | dispatch. `sup-boot` verdicts `seize` and journals `SEIZED`. | 0 |
+| **7** | claim `held`, heartbeat **stale** (incl. the unobserved-death case, §4.5) | dispatch. `sup-boot` verdicts `seize` and journals `SEIZED`. | 0 |
 | **8** | claim `held`, holder record `dead`, heartbeat **fresh** — the **freeze window** | **REFUSE by default**, printing the G9 ambiguity and the `seizable in <n>s` remaining. `--force-frozen` overrides. | 2 |
 | **9** | no claim at all | dispatch. `sup-boot` verdicts `claim`. | 0 |
 
@@ -547,6 +645,19 @@ typed, not inferred.
 target-restricted by construction: the sid it stops is `claim["released_by_sid"]` and the record it
 tombstones is the one whose `_record_sids` contains it. There is no name argument by which it could be
 aimed elsewhere — the same structural property `_tombstone_releasing_body` relies on (R13).
+
+> **BINDING — arms 4 and 5 are one idempotent step, not two verbs.** The middle step is stated as a
+> **postcondition, never as an action**: *after this step, no roster-live session answers for the
+> outgoing body.* When the tombstone already fired (the clean-release path, §5.1.1) that postcondition
+> already holds and the step is a **no-op that exits 0** — it must never become an error, a warning, or
+> a second stop just because the row already reads `dead`. `_tombstone_releasing_body` sets the
+> precedent in shipped code: *"already a tombstone — never re-stamp one"*, returning the name rather
+> than failing.
+>
+> **Why this is binding rather than tidy.** The two paths differ by which body ran which verb minutes
+> earlier, and that is invisible to the operator at the moment they type `sup-recover`. A verb that
+> succeeds on the wall paths and errors on the graceful one would teach the operator to check *before*
+> recovering — which is one more step, in the exact place this design exists to remove one.
 
 ### 5.5 `--task`, and R-d
 
@@ -590,9 +701,27 @@ Three routes, **disjoint by the outgoing body's liveness**, the only classifier 
 
 | Route | Precondition on the outgoing body | Driven by | Status |
 |---|---|---|---|
-| `sup-handoff-begin` / `-complete` | **healthy and in-band** — it can mint a token, poll, complete | the outgoing body | **PREFERRED.** In-band planned succession. Unchanged by this spec. |
+| `sup-handoff-begin` / `-complete` | **healthy and in-band** — it can mint a token, poll, complete | the outgoing body | the **designed** in-band route, and **currently UNREPAIRED** — see below. Unchanged by this spec. |
 | `fleet respawn supervisor` | **alive and steerable**, interface-initiated | the interface | **UNCHANGED.** `sup-recover` arm 3 delegates to it. |
-| **`fleet sup-recover`** | **cannot participate** — released, parked, dead, silent, absent, or rebooted away | the interface | **FALLBACK** to the first, **PEER** to the second. |
+| **`fleet sup-recover`** | **cannot participate** — released, parked, dead, silent, or absent | the interface | **FALLBACK** to the first, **PEER** to the second. |
+
+> **An earlier draft of this table called the handoff route "PREFERRED". That was wrong and the
+> correction is load-bearing.** `sup-handoff-begin` has been **stillborn three times** — registry row
+> `working`, 0 turns, no transcript — and **three supervisors in a row have now released at the ceiling
+> rather than hand off**, because `sup-spawn` is the route that demonstrably works. The incarnation
+> that dispatched this slice released at the ceiling an hour later and said so in its own journal
+> entry: *"This is exactly the maneuver the graceful-succession target exists to make one command
+> instead of three — and I am, once again, the evidence for it."*
+>
+> So: the handoff path is the *designed* route and the *cheapest* one when it works, but **anything
+> that depends on it depends on an unrepaired mechanism, and this spec says so rather than inheriting
+> the word "preferred" from a document written before the failures.**
+>
+> **`sup-recover` does not depend on it.** Every dispatching arm routes through
+> `_dispatch_supervisor_body` — the `sup-spawn` path, the one with a live track record — and **never**
+> through `sup-handoff-begin`. That is a deliberate choice, not an accident of structure: a recovery
+> verb built on the mechanism that fails is not a recovery verb. If the handoff path is repaired, this
+> spec needs no change; if it is not, `sup-recover` still works.
 
 > **In one sentence, because an ambiguous relationship between two succession paths is how a fleet ends
 > up with neither working: `sup-recover` is a FALLBACK to `sup-handoff-*` and a PEER to
@@ -816,16 +945,35 @@ ever runs one, that cause never fires — **and that is why the design does not 
 reaches the same alarm from the claim file alone, bounded by `SUPERVISOR_CLAIM_STALE_SECONDS`.
 
 **Q. What does `absent` mean, and how does it avoid colliding with `seize`/`freeze`?** §4.5 and §4.6.
-`absent` = *no live body holds command*, covering the no-claim case and the orphaned-claim case
-(including the rebooted host). It collides with nothing: the signal reads **no roster** and the freeze
-window is **defined by roster evidence**, so the signal fires exactly on the states where `sup-boot`
-would take the claim, plus the one stated exception (`holder-frozen`), and moves no threshold.
+`absent` = *no live body holds command*, covering the no-claim case and the orphaned-claim case (a
+park, or a death fleet did not observe). It collides with nothing: the signal reads **no roster** and
+the freeze window is **defined by roster evidence**, so the signal fires exactly on the states where
+`sup-boot` would take the claim, plus the one stated exception (`holder-frozen`), and moves no
+threshold.
+
+**Q. Does this signal cover a fleet that went dark because the host did?** **No, by ruling** (§1.2).
+Revival after a reboot is step 5 of the interface startup ritual (`skills/fleet/SKILL.md`, `c318224`),
+not a fleet-side watcher — because the only honest mechanisms for one would be an injection (D7) or an
+autonomous dispatcher (two live supervisors). The predicate will *incidentally* report `holder-silent`
+once the heartbeat ages, but **nothing may be built that relies on it for that.**
+
+**Q. Does anything here depend on `sup-handoff-*`, which failed three times?** **No** (§5.7).
+Every dispatching arm of `sup-recover` routes through `_dispatch_supervisor_body` — the `sup-spawn`
+path — and never through `sup-handoff-begin`. The one thing that *does* touch the handoff path is a
+**refusal** (a minted `handoff_token_hash` blocks recovery), which is safe in the direction that
+matters: it declines to act, rather than depending on the broken mechanism to succeed.
 
 **Q. Which does the operator see first?** **The signal, always** — it is ambient on a surface they
 already installed. `seize` / `freeze` are boot verdicts that only exist after the operator has acted.
 
-**Q. Which part of the three-step maneuver does the tombstone already solve?** The middle step, for the
-`sup-release` path — completely, and it is now in the base (§5.1). R-a…R-d remain.
+**Q. Which part of the three-step maneuver does the tombstone already solve?** The middle step, on the
+**clean-release path and only there** — measured, not inferred: `_tombstone_releasing_body` has exactly
+one caller, `cmd_sup_release` (R14). **So it helps least in the two cases this signal exists for.** A
+usage-limit park can never tombstone itself *by construction*, because a parked body never receives
+another turn (G11); a body that dies at the ceiling without releasing never ran the verb either. On
+both walls the row stays roster-live and B6 still refuses, so `sup-recover` must still perform the
+middle step — as an **idempotent postcondition** that no-ops on the clean-release path rather than
+erroring (§5.1.1, §5.4). R-a…R-d remain.
 
 **Q. Is `sup-recover` a replacement, a fallback, or a peer?** A **fallback** to `sup-handoff-*` and a
 **peer** to `respawn supervisor`, disjoint by the outgoing body's liveness (§5.7).
@@ -838,9 +986,9 @@ already installed. `seize` / `freeze` are boot verdicts that only exist after th
 no fixture: all nine rows, precedence when several conditions hold at once, and `holder_record=None`
 falling through to row 7 rather than crashing.
 
-**The post-reboot case, as its own test** — claim `held`, holder record `status: "working"`, heartbeat
-aged past 3600 s ⇒ `needed is True`, cause `holder-silent`. **This is window B and it must have a test
-of its own**, because the naive implementation reads the registry first and calls it manned.
+**The unobserved-death case, as its own test** — claim `held`, holder record `status: "working"`,
+heartbeat aged past 3600 s ⇒ `needed is True`, cause `holder-silent`. **It must have a test of its
+own**, because the naive implementation reads the registry first and calls it manned.
 
 **Clearing** — one test per route in §4.8 asserting `needed is False` after `write_incarnation`. **And
 the one that is the point: `sup-spawn` does NOT clear it.**
@@ -861,11 +1009,19 @@ row however broken the rest of the supervisor state is.**
 `--force-frozen`; the handoff-in-flight refusal; **arm 5 tombstones only the releaser's own record**;
 and the concurrency test: two dispatches, one claim, the loser terminates.
 
+**The middle step's idempotence, as its own test** (§5.4): run `sup-recover` against a claim released
+by a body whose record `cmd_sup_release` **already** tombstoned, and assert **rc 0, a dispatch, and no
+second stop** — not an error and not a warning. Then run it against a released claim whose record is
+still roster-live (the pre-tombstone / abstained shape) and assert the stop-then-tombstone-then-dispatch
+sequence. **Both must reach the same postcondition**, which is the property, rather than the same code
+path, which is not.
+
 **Fault injections the gate should demand come back RED** — (i) clear the flag on `sup-spawn`;
 (ii) render `succession_age_seconds` into `heartbeat_age_seconds`; (iii) make the statusline take
 `fleet.lock`, or fetch the roster, to answer the predicate; (iv) let arm 0 key on `FLEET_WORKER`
 instead of claim-holdership; (v) let `sup-recover` write `supervisor/INCARNATION` directly;
-(vi) make `needed is None` PASS; (vii) decide the post-reboot case from the registry status alone.
+(vi) make `needed is None` PASS; (vii) decide the unobserved-death case from the registry status
+alone; (viii) widen any cause to a condition fleet cannot observe without an injection (§1.2).
 
 ### 8.1 The one non-spec file this slice touches
 
@@ -878,14 +1034,14 @@ it — so adding a spec without adding the floor leaves the suite red. **`bin/fl
 
 ## 9. Receipts
 
-Re-executed against the materialised tree of `d543691` by `tools/verify_receipts.py`. No block is
+Re-executed against the materialised tree of `c318224` by `tools/verify_receipts.py`. No block is
 `# volatile` or `# live`: every one is a `grep` over a file in the repo, so they are ordinary pinned
 receipts and no evidence here lives outside it.
 
 **R1 — the statusline's four supervisor words. None means "outage".**
 
 ```
-# at d543691
+# at c318224
 $ grep -n "_SUP_STATE_LABEL = " -A 1 bin/fleet_statusline.py
 123:_SUP_STATE_LABEL = {"held": "sup held", "released": "sup released",
 124-                    "none": "sup none", "unknown": "sup ?"}
@@ -894,7 +1050,7 @@ $ grep -n "_SUP_STATE_LABEL = " -A 1 bin/fleet_statusline.py
 **R2 — a live supervisor body leaves the worker buckets, so a `limited` supervisor is in no bucket.**
 
 ```
-# at d543691
+# at c318224
 $ grep -n 'if w.get("tier") == "supervisor" and w.get("status") != "dead":' -A 1 bin/fleet_statusline.py
 186:        if w.get("tier") == "supervisor" and w.get("status") != "dead":
 187-            continue
@@ -903,7 +1059,7 @@ $ grep -n 'if w.get("tier") == "supervisor" and w.get("status") != "dead":' -A 1
 **R3 — the supervisor projection carries four keys; none is a verdict.**
 
 ```
-# at d543691
+# at c318224
 $ grep -n 'out = {"goals_active": False, "state": "none",' -A 1 bin/fleet.py
 3133:    out = {"goals_active": False, "state": "none",
 3134-           "incarnation_id": None, "heartbeat_age_seconds": None}
@@ -912,7 +1068,7 @@ $ grep -n 'out = {"goals_active": False, "state": "none",' -A 1 bin/fleet.py
 **R4 — `sup-status --json`'s eight keys; none is a succession verdict.**
 
 ```
-# at d543691
+# at c318224
 $ grep -n '^        "goals_active"\|^        "incarnation"\|^        "heartbeat_age_seconds"\|^        "handshake"\|^        "abort_flag"\|^        "pending_decision"\|^        "interface_divergence"\|^        "nag"' bin/fleet.py
 13373:        "goals_active": supervisor_goals_active(),
 13378:        "incarnation": _project_claim(claim),
@@ -927,7 +1083,7 @@ $ grep -n '^        "goals_active"\|^        "incarnation"\|^        "heartbeat_
 **R5 — the only two supervisor rows in doctor's check list.**
 
 ```
-# at d543691
+# at c318224
 $ grep -n "functools.partial(_doctor_check_supervisor" bin/fleet.py
 9437:        functools.partial(_doctor_check_supervisor_claim),
 9438:        functools.partial(_doctor_check_supervisor_handoff),
@@ -936,7 +1092,7 @@ $ grep -n "functools.partial(_doctor_check_supervisor" bin/fleet.py
 **R6 — `limited-parks` is always `ok=True`, so a limit-parked supervisor reads `[PASS]`.**
 
 ```
-# at d543691
+# at c318224
 $ grep -n 'return ("limited-parks"' bin/fleet.py
 8523:        return ("limited-parks", True, "no usage-limit parks")
 8536:    return ("limited-parks", True, " | ".join(parts))
@@ -946,7 +1102,7 @@ $ grep -n 'return ("limited-parks"' bin/fleet.py
 This is window A's state, and it is what §5.1 R-a is about.**
 
 ```
-# at d543691
+# at c318224
 $ grep -n 'is released -- there is no holder to respawn' -A 1 bin/fleet.py
 6079:            detail = (f"claim {inc} is released -- there is no holder to respawn. "
 6080-                      f"Boot a fresh body with `fleet sup-spawn --task <brief>`.")
@@ -955,7 +1111,7 @@ $ grep -n 'is released -- there is no holder to respawn' -A 1 bin/fleet.py
 **R8 — `sup-release`'s `reason` is free text on the claim: the string that was accurate and unread.**
 
 ```
-# at d543691
+# at c318224
 $ grep -n 'released\["reason"\] = reason' -B 1 bin/fleet.py
 13219-        if reason:
 13220:            released["reason"] = reason
@@ -964,7 +1120,7 @@ $ grep -n 'released\["reason"\] = reason' -B 1 bin/fleet.py
 **R9 — `[UNBUILT]`: nothing this spec specifies exists yet, in either file.**
 
 ```
-# at d543691
+# at c318224
 $ grep -c "succession_needed\|succession_cause\|sup-recover\|sup_recover" bin/fleet.py bin/fleet_statusline.py
 bin/fleet.py:0
 bin/fleet_statusline.py:0
@@ -976,7 +1132,7 @@ exit 1
 per the operator's binding process condition (§3.1).**
 
 ```
-# at d543691
+# at c318224
 $ grep -n '_ceiling_refuses_dispatch("' bin/fleet.py
 3949:    _ceiling_refusal = _ceiling_refuses_dispatch("spawn")
 5048:    _ceiling_refusal = _ceiling_refuses_dispatch("send")
@@ -989,7 +1145,7 @@ $ grep -n '_ceiling_refuses_dispatch("' bin/fleet.py
 is not always fresh.**
 
 ```
-# at d543691
+# at c318224
 $ grep -n 'updated\["status"\] = "limited"' -B 2 -A 2 bin/fleet.py
 2917-        is_limit, reset_at, kind = scan(sid, transcript_path=path)
 2918-        if is_limit:
@@ -1003,7 +1159,7 @@ gains the three keys, the snapshot that publishes them, and the shipped preceden
 holder's record from a view path (`_claim_holder_dead_note`, called by `supervisor_status_line`).**
 
 ```
-# at d543691
+# at c318224
 $ grep -n "def _read_registry_readonly\|def status_snapshot\|def _claim_holder_dead_note\|def _supervisor_tier_snapshot" bin/fleet.py
 3089:def _read_registry_readonly() -> tuple:
 3109:def _supervisor_tier_snapshot(now=None) -> dict:
@@ -1015,12 +1171,29 @@ $ grep -n "def _read_registry_readonly\|def status_snapshot\|def _claim_holder_d
 consults it, and the own-record writer `sup-release` calls (§5.1).**
 
 ```
-# at d543691
+# at c318224
 $ grep -n "def _releaser_body_is_tombstoned\|_releaser_body_is_tombstoned(released_by, registry)\|def _tombstone_releasing_body" bin/fleet.py
 11533:def _releaser_body_is_tombstoned(released_by, registry) -> bool:
 11654:    if _releaser_body_is_tombstoned(released_by, registry):
 13054:def _tombstone_releasing_body(caller: str, inc: str):
 ```
+
+**R14 — the tombstone's SCOPE: `_tombstone_releasing_body` has exactly one caller, and it is inside
+`cmd_sup_release` (`:13146`). Nothing on the kill path, no timer, nothing that notices a body which
+simply stopped — so a usage-limit park can never tombstone itself (§5.1.1).**
+
+```
+# at c318224
+$ grep -n "_tombstone_releasing_body\|^def cmd_sup_release" bin/fleet.py
+11538:    own record (`_tombstone_releasing_body`), so `_releaser_live_sids` below is
+13054:def _tombstone_releasing_body(caller: str, inc: str):
+13146:def cmd_sup_release(args) -> int:
+13179:    that just released. See `_tombstone_releasing_body` for own-record-only and
+13223:        retired = _tombstone_releasing_body(caller, inc)
+```
+
+Of the five hits, `11538` and `13179` are docstring prose, `13054` is the definition, `13146` is the
+enclosing function, and **`13223` is the sole invocation**.
 
 ---
 
@@ -1035,14 +1208,17 @@ operator owes** (which I may not make).
 |---|---|---|---|
 | **O1** | **Derived, never stored** (D-GS1). | §4.1. Cost: the predicate is only as fresh as its inputs, and one of its causes reads a registry field whose freshness depends on a recompute (§4.7). | Show a consumer that needs the fact when no reader is running. I could not construct one: every consumer of this fact **is** a reader. |
 | **O2** | Undecidable **claim** → FAIL; unreadable **registry** → quiet. | §4.5, §7. | Show that an unparseable `supervisor/INCARNATION` can occur transiently. If it can, this flips. |
-| **O3** | Row 7 promotes an **admittedly false-fireable** heartbeat read from advisory nag to doctor FAIL. | §4.7. It is the only always-fresh detector of the silent half **and of the reboot case**, and its "false" alarm is a true alarm about checkpoint discipline with a one-command remedy. | **The most attackable decision in the document; the gate should attack it.** |
+| **O3** | Row 7 promotes an **admittedly false-fireable** heartbeat read from advisory nag to doctor FAIL. | §4.7. It is the only always-fresh detector of the silent half, and its "false" alarm is a true alarm about checkpoint discipline with a one-command remedy. | **The most attackable decision in the document; the gate should attack it.** |
 | **O4** | `dead` and `dead-suspected` fold into one status test, split by heartbeat into rows 5/6. | §4.4. | One enum value; cheap to change. |
 | **O5** | The alarm hue is **reused** for `sup DOWN` and `N bodies`. | §6.1. Same class of event; a second red is indistinguishable on one line. | A reviewer with a stronger claim about colour budget. |
 | **O6** | Verb named `sup-recover`; `--task` optional. | §5.3, §5.5. | Cheap before build, expensive after. |
 | **O7** | `sup-recover` **never writes the claim**; it dispatches and lets `sup-boot` adjudicate. | §5.9. This is what makes the two-bodies argument structural rather than promised. | Do not overturn without replacing the safety argument. |
-| **O8** | **No worker-scoped hook**, though the brief permits one. | §2 — G11 says a limit wall fires no hook, and no hook survives a power cut. | Only by falsifying G11. |
+| **O8** | **No worker-scoped hook**, though the brief permits one. | §2 — G11 says a limit wall fires no hook, and no hook fires for a body that never gets a turn. | Only by falsifying G11. |
 | **O9** | The doctor row FAILs during the dispatch→claim window. | §6.3 note 4. That window was permanent three times on the night. | If the stillbirths are root-caused and fixed, revisit. |
 | **O10** | The predicate uses **liveness proxies, not liveness** (§4.9), and I named that as a deviation from the ratified wording rather than redefining the wording. | A roster fetch on a statusline refresh path is the exact defect D1 exists for. | A doctor-only roster-confirmed arm is a clean follow-up; **filed, not built.** |
+| **O11** | The rejected post-reboot arm is **kept in the document as a recorded refusal** (§1.2) rather than deleted. | A spec that silently omits a rejected option invites the next author to re-propose it, and the grounds generalise beyond this case. | Not really overturnable — the deletion is the operator's ruling; only the *recording* of it is mine. |
+| **O12** | §4.10 makes "**measurement or state, never self-report**" a binding property of every input, not just a habit. | A body estimated 60k where `sup-context` measured 198,767. A detector built on what a degrading actor believes about itself degrades with it. | Show an input that must be a self-report. I could not find one. |
+| **O13** | §5.7 **downgrades** `sup-handoff-*` from "PREFERRED" to "designed but unrepaired", and `sup-recover` is specified to route through `_dispatch_supervisor_body` exclusively. | Three stillbirths; three supervisors in a row released at the ceiling rather than hand off. A recovery verb built on the mechanism that fails is not a recovery verb. | Repair the handoff path and the word can be restored. The routing choice should stand either way. |
 
 ### 10.2 Ratifications the operator owes
 
@@ -1055,8 +1231,8 @@ operator owes** (which I may not make).
 | **A1** | **The §7.2 disarm table is now incomplete about shipped code.** The tombstone merge (`0cda9f6`, now in base) adds a third disarm — releaser tombstoned — and the ratified table says *"releaser roster-**LIVE** → **ARMED, unconditionally**"*. The tombstone slice reported this and correctly refused to edit it. **This spec is built on that code, so it inherits the debt and restates it rather than assuming it discharged.** | **operator** — §7 is operator-owned; **the supervisor may not ratify a narrowing of an operator-owned section** | Not mine to ratify. `docs/OPERATOR-GATES.md` already records *"an in-fleet disarm path is owed"*, so this discharges scheduled work rather than inventing a narrowing — the shape still needs the tick. |
 | **A2** | **`claim-nonce` §6.3's post-release key set does not say what happens to `handoff_pending` and `handoff_token_hash`.** It enumerates seven keys kept and six removed; these two are in neither list. `sup-recover` §5.7 refuses on `handoff_token_hash`, so its behaviour after a release depends on an unspecified key. | **operator** (§6.3 is a ratified D-decision) | A released claim still carrying a minted token would mean a superseded successor could in principle validate against it. I could not determine from the text whether that is intended. **Flagged as a live ambiguity, not assumed either way.** |
 | **A3** | **A 25th doctor check that can FAIL changes `fleet doctor`'s exit-code contract for a new class of condition,** and `docs/SPEC.md` §13 records the roster and a check count. | operator / doc-sync | Adding a FAIL-capable row is a policy change about what makes doctor red, and the count is a ratified number. |
-| **A4** | **`skills/fleet/supervisor.md` is stale about the respawn ceiling** (§3.1, R10) — and the operator has now **ratified** the extension, so the skill contradicts a ratified decision as well as shipped code. | doc-sync; **outside this slice's scope fence** (`skills/**`) | Filed, not fixed. |
-| **A5** | ~~§11.3's enumeration must name task-bearing `respawn` and `sup-spawn`, edited by grep rather than by the three cited line numbers.~~ **DISCHARGED at `d543691`** while this spec was being written — §11.3 now names all four verbs and marks the `--task` discriminator normative. Left in the table rather than deleted, because a row that silently disappears is indistinguishable from one that was never raised. | ~~doc-sync~~ **done** | Nothing owed. Verified: `d543691` touches `docs/specs/three-tier-command.md` only, so every receipt here re-pinned from `0c6bf23` to `d543691` with byte-identical output. |
+| **A4** | **`skills/fleet/supervisor.md` is stale about the respawn ceiling** (§3.1, R10) — it still says the ceiling covers *three* verbs and *"does not yet cover `fleet respawn`"*, which now contradicts a ratified decision (`d543691`) as well as shipped code. Still present at `c318224`. **Note for whoever fixes it: the sentence wraps as `It does` / `not yet cover`, so a single-line grep for the phrase returns nothing and reads as already-fixed.** I nearly recorded it as discharged on exactly that mistake. | doc-sync; **outside this slice's scope fence** (`skills/**`) | Filed, not fixed. |
+| **A5** | ~~§11.3's enumeration must name task-bearing `respawn` and `sup-spawn`, edited by grep rather than by the three cited line numbers.~~ **DISCHARGED at `d543691`** while this spec was being written — §11.3 now names all four verbs and marks the `--task` discriminator normative. Left in the table rather than deleted, because a row that silently disappears is indistinguishable from one that was never raised. | ~~doc-sync~~ **done** | Nothing owed. Verified rather than assumed: `d543691` touches `docs/specs/three-tier-command.md` only, so re-pinning the receipts across it changed no output. |
 | **A6** | **Whether a test pins "a released claim renders no age"** (§6.1). I did not read the statusline test suite. | builder + gate | Asserting either way would be a claim I had not measured. **Stated as unverified.** |
 | **A7** | **`sup-recover`'s exact rc values.** This spec reuses `SupervisorLifecycleRefusal`'s rc 2 / rc 3 split and `sup-boot`'s rc 4. I did not re-derive every constant. | builder | Named so the build confirms rather than infers. |
 
