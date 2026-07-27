@@ -1627,6 +1627,30 @@ class TestPathContainment:
         assert report["indexed_rels"] == ["deep/a.py"]
         assert fleet.shard_path_for_source(root, "deep/a.py").is_file()
 
+    def test_an_absolute_path_INSIDE_the_root_is_accepted_and_relativised(
+            self, tmp_path, capsys):
+        # Found by fault injection: deleting `_index_files_arg`'s
+        # `is_absolute()` branch outright left the whole suite GREEN. The
+        # REFUSAL half is now covered twice over -- the canonicaliser rejects a
+        # drive-qualified rel on its own -- so only this direction still
+        # distinguishes the branch, and nothing exercised it. An operator
+        # pasting a full path from a stack trace is the ordinary use.
+        root = _project(tmp_path, {"deep/a.py": "X = 1\n"})
+        fleet.main(["index", "init", "--path", str(root)])
+        _write(root / "deep" / "a.py", "def moved():\n    pass\n")
+        capsys.readouterr()
+        rc = fleet.main(["index", "update", "--path", str(root),
+                         "--files", str(root / "deep" / "a.py")])
+        assert rc == 0
+        assert "+ deep/a.py" in capsys.readouterr().out
+        assert b"moved" in fleet.shard_path_for_source(root, "deep/a.py").read_bytes()
+
+    def test_the_files_arg_relativises_an_absolute_entry_at_the_library_level(
+            self, tmp_path):
+        root = _project(tmp_path, {"deep/a.py": "X = 1\n"})
+        assert fleet._index_files_arg(root, str(root / "deep" / "a.py")) \
+            == ["deep/a.py"]
+
     def test_a_junctioned_mirror_directory_is_not_pruned_through(self, tmp_path):
         # The second half of the same defect, and the half a `..` check cannot
         # reach: `stop in current.parents` is a comparison of SPELLINGS. A
