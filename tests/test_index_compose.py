@@ -344,18 +344,32 @@ class TestAbsentContextIsFree:
 
     def test_absent_context_is_byte_identical_in_an_indexed_project(self, indexed_project):
         """An index in the project changes the prompt (the teach lines do that,
-        §11.8) but `--context` still costs nothing when it is not given."""
+        §11.8) but `--context` still costs nothing when it is not given.
+
+        Asserted against a CONSTRUCTED expectation, not against another call to
+        `compose_prompt`: a self-comparison only pins that the two spellings
+        agree, so a change that charges both of them the same stray byte would
+        keep it green. This one names the exact bytes.
+        """
         assert _compose("w1", indexed_project) == _compose(
             "w1", indexed_project, context=None)
+        assert _compose("w1", indexed_project) == self._expected(
+            indexed_project, teach=fleet.INDEX_TEACH_LINES)
+
+    @staticmethod
+    def _expected(cwd, teach=""):
+        return (fleet._PREAMBLE_TEMPLATE.format(
+            name="w1", cwd=cwd,
+            journal_target=fleet.journal_file_path("w1").as_posix())
+            + teach + "\nthe task")
 
     def test_absent_context_matches_the_prompt_fleet_composes_today(self, plain_project):
         """The regression pin, spelled out rather than inferred: for a project
         with no index and no `--context`, the composed prompt is EXACTLY the
         preamble template and the task, byte for byte."""
-        expected = fleet._PREAMBLE_TEMPLATE.format(
-            name="w1", cwd=plain_project,
-            journal_target=fleet.journal_file_path("w1").as_posix()) + "\nthe task"
-        assert _compose("w1", plain_project) == expected
+        assert _compose("w1", plain_project) == self._expected(plain_project)
+        assert _compose("w1", plain_project, context=[]) == self._expected(plain_project)
+        assert _compose("w1", plain_project, context=None) == self._expected(plain_project)
 
     def test_absent_context_writes_nothing_into_the_index(self, indexed_project):
         """Composition is a read. Without `--context` it must not even look."""
