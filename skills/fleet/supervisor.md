@@ -85,8 +85,15 @@ nothing caught up at boot, leaving an 18-hour gap in a 6-hourly guard that
 nobody noticed. Running it on the beat ties the sweep to *the fleet being
 alive*, which is the condition that actually makes sweeping necessary. The
 interface tier runs it too, in its startup ritual, so a fleet with no
-supervisor still gets swept. `autoclean` is structurally exempt from §7's
-claim gate, so it needs no `--nonce` from either caller.
+supervisor still gets swept. `autoclean` is exempt from §7's claim gate, so
+it needs no `--nonce` from either caller — and it has no `--nonce` flag to
+give one, so if you ever see the sweep refused by the gate that is a BUG in
+fleet, not something you can work around from the beat. **It was exactly that
+bug between 2026-07-27 and 2026-07-28**: the exemption stopped at
+`cmd_autoclean`'s own frame while tier 1 delegated to `cmd_archive`, which is
+gated, so every beat-driven sweep lost its archive pass. The exemption now
+travels explicitly into the tier call. Report a recurrence rather than
+routing around it.
 `limited` is a
 sticky park: the boot reconcile and the epoch freeze never demote it --
 `fleet resume-limited` clears a parked worker via fork-steer (M-B T6);

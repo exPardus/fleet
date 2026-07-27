@@ -347,8 +347,9 @@ def _gated_argv(verb, home):
 class TestEveryMutatingVerbIsGated:
     """§7's taxonomy is binding. Each mutating lifecycle verb refuses under an
     armed gate with no generation; `autoclean` (the gate's own primary caller)
-    is structurally exempt. Driven through `fleet.main` so the parser wiring
-    (the `--nonce` argument) is exercised too."""
+    is exempt -- NOT transitively, see `cmd_archive`'s `as_autoclean_tier`.
+    Driven through `fleet.main` so the parser wiring (the `--nonce` argument)
+    is exercised too."""
 
     @pytest.mark.parametrize("verb", GATED_VERBS)
     def test_verb_is_refused_under_an_armed_gate(self, gate_home, monkeypatch, verb):
@@ -369,15 +370,24 @@ class TestEveryMutatingVerbIsGated:
             f"call sites not in GATED_VERBS: {sorted(called - set(GATED_VERBS))}; "
             f"GATED_VERBS with no call site: {sorted(set(GATED_VERBS) - called)}")
 
-    def test_autoclean_is_structurally_exempt(self, gate_home, monkeypatch):
+    def test_autoclean_is_exempt(self, gate_home, monkeypatch):
         # Even with a sid and a fresh claim and no generation, autoclean is not
-        # gated (§7): it is the gate's own primary caller and the scheduler
-        # ignores its exit code anyway (docs/specs/autoclean.md:38).
+        # gated (§7): it is the gate's own primary caller.
+        #
+        # STRENGTHENED 2026-07-28. This test had the right condition -- a sid
+        # AND a fresh claim -- and asserted the wrong thing. `rc !=
+        # SUPERVISOR_CONTINUITY_RC` only says "the process did not exit 4",
+        # and a §7 refusal INSIDE the sweep never can: `cmd_autoclean`'s tier
+        # isolation catches it and returns 1. So this passed green for the
+        # entire 24h in which every beat-driven sweep was refused at tier 1.
+        # `rc == 0` is what "exempt" actually means, and rc 1 (a tier reported
+        # an error) is what a re-armed gate would produce.
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-sup")
         _fresh_claim()
         monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
         rc = fleet.main(["autoclean", "--fleet-home", str(gate_home)])
         assert rc != fleet.SUPERVISOR_CONTINUITY_RC
+        assert rc == 0, "a tier reported an error -- see state/autoclean-last-run.json"
 
 
 class TestEveryMutatingVerbIsGatedByTheWedge:

@@ -2,10 +2,12 @@
 (fault-injected), husk sweep gates, tier isolation, tier-3 default-off,
 clean tiering split, scheduler install/remove/doctor."""
 import argparse
+import ast
 import inspect
 import json
 import os
 import pathlib
+import textwrap
 import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -737,14 +739,206 @@ class TestSchedulerSurfaceIsRetired:
         assert args.dry_run is True
         assert callable(fleet.cmd_autoclean)
 
-    def test_the_verb_keeps_its_section_7_claim_gate_exemption(self):
-        """Both tiers must be able to sweep with no `--nonce` while a claim is
-        held. The exemption is STRUCTURAL -- cmd_autoclean does not call the
-        gate at all -- and that is now load-bearing: the old prose justified it
-        by "the scheduled task has no session id", and both new callers HAVE
-        one. Had it rested on that clause, retiring the timer would have gated
-        the sweep behind the very claim it exists to clean up around."""
+    def test_cmd_autoclean_itself_never_calls_the_gate(self):
+        """A source fact about ONE FRAME, and that is all it has ever been.
+
+        CORRECTED 2026-07-28. This test used to be named
+        `test_the_verb_keeps_its_section_7_claim_gate_exemption` and its
+        docstring claimed it proved *"both tiers must be able to sweep with no
+        `--nonce` while a claim is held"*. It proved no such thing. It reads
+        the source of a single function; the sweep is a call GRAPH, and tier 1
+        delegates to `cmd_archive`, which DOES call `_supervisor_gate`. The
+        exemption is not transitive, and the very failure the old docstring
+        described as averted -- *"retiring the timer would have gated the sweep
+        behind the very claim it exists to clean up around"* -- is exactly what
+        shipped, measured one hour after the merge.
+
+        Kept, because the fact is still true and still worth pinning: the
+        exemption must live in the sweep's own frame, not be smuggled in by a
+        `--nonce` the beat cannot source. What proves the sweep actually sweeps
+        is `TestTheSweepUnderAHeldClaim` below, which holds a fresh claim --
+        the condition that was never in this test."""
         assert "_supervisor_gate" not in inspect.getsource(fleet.cmd_autoclean)
+
+
+class TestTheSweepUnderAHeldClaim:
+    """REGRESSION PIN (2026-07-28, `fix/autoclean-archive-gate`). The whole
+    defect is that THE CONDITION WAS NEVER IN THE TEST.
+
+    Every pre-existing autoclean test runs with no supervisor claim, or (in
+    `tests/test_gate_arm_wedge.py::test_scheduled_autoclean_still_runs_under_a
+    _wedge`) with `CLAUDE_CODE_SESSION_ID` explicitly deleted -- the retired
+    Scheduled Task's shape. Both pass against the broken tree. The condition
+    that matters is the one under which the sweep is now DRIVEN: a session
+    with a sid, calling while a supervisor claim is HELD and FRESH. That is
+    not an edge case for the new callers -- it is the only state in which the
+    supervisor's watchtower beat runs at all.
+
+    Measured on `main` @ `f10f055`, `fleet autoclean` from a beat holding a
+    fresh claim:
+
+        autoclean: archive tier failed: archive: refusing -- a supervisor
+        claim (inc-20260727T184603Z-f054) is held and fresh, and this call did
+        not prove continuity on it (claim-nonce §7).
+        autoclean: husks_removed=0 husks_deferred=0 tombstones_expired=0 errors=1
+
+    ...and `fleet autoclean` has no `--nonce` flag, so there is no caller-side
+    workaround: the refusal names a remedy the caller cannot execute.
+    """
+
+    HOLDER_SID = "11110000-0000-4000-8000-000000000001"
+    INTERFACE_SID = "22220000-0000-4000-8000-000000000002"
+    STALE_SID = "99990000-0000-4000-8000-000000000009"
+
+    @pytest.fixture
+    def claimed_home(self, home, monkeypatch):
+        """A fresh, held, non-legacy claim -- the state the beat runs in."""
+        (home / "supervisor").mkdir(exist_ok=True)
+        beat = fleet.now_iso()
+        fleet.write_incarnation(
+            {"incarnation_id": "inc-acgate", "session_id": self.HOLDER_SID,
+             "lineage_id": "lin-acgate", "claimed_at": beat, "heartbeat_at": beat,
+             "claimed_via": "fresh", "state": "active", "nonce_seq": 1,
+             "nonce_hash": fleet.nonce_digest("the-live-generation")})
+        return home
+
+    def _seed_archivable(self, name="stale"):
+        """A worker that passes every `_archive_eligible` gate against an empty
+        roster. If tier 1 runs, this record ends up with `archived_at` set; if
+        tier 1 is refused, it does not. That is the behavioural difference the
+        source-scan test above could not see."""
+        rec = seed_worker(name, self.STALE_SID, status="idle")
+        rec["last_activity"] = _iso(NOW - timedelta(
+            hours=fleet.ARCHIVE_TTL_HOURS_DEFAULT + 1))
+        data = fleet.load_registry()
+        data["workers"][name] = rec
+        fleet.save_registry(data)
+        fleet.append_outcome(self.STALE_SID,
+                             {"ts": _iso(NOW), "session_id": self.STALE_SID,
+                              "kind": "result", "result_text": "done"})
+        return rec
+
+    def _sweep(self):
+        return fleet.cmd_autoclean(_autoclean_args(),
+                                   run=fake_run_factory([]),
+                                   which=lambda _: "claude")
+
+    def test_the_supervisor_beat_sweeps_tier_one_holding_its_own_claim(
+            self, claimed_home, monkeypatch):
+        """CALLER 1 -- the watchtower beat. Its sid IS the claim holder's, and
+        that does not disarm the gate: `_supervisor_gate` arms on the PRESENCE
+        of a sid under a fresh claim, holder included. The beat holds a
+        generation but has nowhere to put it, so this must pass without one."""
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", self.HOLDER_SID)
+        self._seed_archivable()
+        rc = self._sweep()
+        stamp = json.loads(fleet.autoclean_stamp_path().read_text(encoding="utf-8"))
+        assert stamp["errors"] == [], stamp["errors"]
+        assert stamp["archive_rc"] == 0
+        assert rc == 0
+        assert fleet.load_registry()["workers"]["stale"]["archived_at"] is not None
+
+    def test_the_interface_ritual_sweeps_tier_one_with_no_nonce_to_present(
+            self, claimed_home, monkeypatch):
+        """CALLER 2 -- the interface tier's startup ritual, and the reason a
+        `--nonce` flag on `autoclean` could only ever have fixed HALF of this.
+
+        The interface holds no nonce BY DESIGN (claim-nonce §7.1, the same seam
+        that forced the `send`-to-the-holder carve-out). There is no value it
+        could pass, so its sweep has to work with none."""
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", self.INTERFACE_SID)
+        self._seed_archivable()
+        rc = self._sweep()
+        stamp = json.loads(fleet.autoclean_stamp_path().read_text(encoding="utf-8"))
+        assert stamp["errors"] == [], stamp["errors"]
+        assert rc == 0
+        assert fleet.load_registry()["workers"]["stale"]["archived_at"] is not None
+
+    def test_no_gate_refusal_can_reach_the_sweeps_error_channel(
+            self, claimed_home, monkeypatch):
+        """The general form, so this cannot regress for a tier nobody wrote a
+        fixture for: NO tier of the sweep may report a §7 refusal, whatever the
+        caller's sid. Named by class, not by message, so a reworded refusal
+        still trips it."""
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", self.INTERFACE_SID)
+        self._seed_archivable()
+        self._sweep()
+        stamp = json.loads(fleet.autoclean_stamp_path().read_text(encoding="utf-8"))
+        assert not [e for e in stamp["errors"]
+                    if fleet.SupervisorClaimGateError.__name__ in e], stamp["errors"]
+
+    def test_the_archive_verb_itself_stays_gated(self, claimed_home, monkeypatch):
+        """THE OTHER HALF, and the one that makes this a fix rather than a
+        narrowing of an operator-owned section. §7 is the operator's; the
+        supervisor may not weaken its arming. `fleet archive` invoked as a verb
+        by a sid-bearing caller under a fresh claim is refused exactly as
+        before -- only the sweep's own internal tier call is exempt, which is
+        what the ratified decision already said `autoclean` was."""
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", self.INTERFACE_SID)
+        self._seed_archivable()
+        args = fleet.build_parser().parse_args(["archive"])
+        with pytest.raises(fleet.SupervisorClaimGateError):
+            fleet.cmd_archive(args, run=fake_run_factory([]),
+                              which=lambda _: "claude")
+        assert fleet.load_registry()["workers"]["stale"]["archived_at"] is None
+
+    def test_the_exemption_is_explicit_and_not_an_accident_of_call_order(self):
+        """The brief's condition on this shape: *"the exemption must be
+        explicit and pinned, not an accident of which function calls which."*
+        The old exemption WAS such an accident -- it held only because
+        `cmd_autoclean` happened not to name the gate, while the function it
+        delegates to did. Pin the named parameter, so deleting it is a test
+        failure and not a silent re-arming.
+
+        Parsed with `ast`, NOT matched as a substring. The first cut of this
+        test asserted `"as_autoclean_tier=True" in
+        inspect.getsource(fleet.cmd_autoclean)` and **survived the fault
+        injection that removed the keyword from the call** -- because the
+        comment sitting above that call explains the flag by name, so the
+        string was still there with the code gone. A source-substring test
+        that a comment can satisfy is the same failure this whole branch is
+        about, one level up: the check read text near the thing instead of
+        the thing."""
+        params = inspect.signature(fleet.cmd_archive).parameters
+        assert "as_autoclean_tier" in params
+        assert params["as_autoclean_tier"].default is False
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fleet.cmd_autoclean)))
+        exempted = [
+            call for call in ast.walk(tree)
+            if isinstance(call, ast.Call)
+            and getattr(call.func, "id", None) == "cmd_archive"
+            and any(kw.arg == "as_autoclean_tier"
+                    and isinstance(kw.value, ast.Constant) and kw.value.value is True
+                    for kw in call.keywords)]
+        assert len(exempted) == 1, (
+            "the sweep's cmd_archive call does not pass as_autoclean_tier=True "
+            "-- tier 1 is gated again")
+
+    def test_a_real_tier_failure_still_reaches_the_stamp_and_the_doctor_note(
+            self, claimed_home, monkeypatch):
+        """END-TO-END on the one thing that WORKED and must not break. The
+        branch's own "a fresh timestamp alone can lie" confirmation pass is why
+        this bug was caught in one run instead of in eighteen hours: the
+        stamp's `errors` array is appended to the doctor note, so a bricked
+        sweep never reads green-and-fresh.
+
+        `TestDoctorAutoclean::test_stamp_errors_surfaced` pins the note against
+        a HAND-WRITTEN stamp. This pins the whole path -- a tier really fails,
+        `cmd_autoclean` really records it, doctor really surfaces it -- because
+        the fix touches the tier-1 call site the note reports on."""
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", self.HOLDER_SID)
+
+        def boom(*a, **k):
+            raise RuntimeError("tier-1 exploded")
+        monkeypatch.setattr(fleet, "cmd_archive", boom)
+        assert self._sweep() == 1
+        stamp = json.loads(fleet.autoclean_stamp_path().read_text(encoding="utf-8"))
+        assert stamp["errors"] == ["archive: RuntimeError: tier-1 exploded"]
+        _, ok, msg = fleet._doctor_check_autoclean()
+        assert ok, "note-only: doctor stays report-only"
+        assert "last run 0.0h ago" in msg          # fresh...
+        assert "tier-1 exploded" in msg            # ...and NOT green
 
 
 class TestParser:
