@@ -960,18 +960,27 @@ a resting state. **A signal nobody is obliged to read is not a signal**, and the
 recording: it is making the pull surfaces render an outage AS an outage.
 
 **FLEET HAS NO POST-REBOOT RESTART PATH, and window B is its receipt.** Durable-sessions-survive-
-reboots was designed and is true of *workers*; nobody ever built the other half, so a box that comes
-back has a full roster and no command tier. This is now a stated requirement on the ratified
-succession build: the signal fires on *claim released-or-absent + GOALS active + no live body*,
-**whatever the cause** — a released claim and a rebooted host must reach the operator by the same
-path, because from the fleet's side they are the same fact.
+reboots was designed and is true of *workers*; the command tier is not, so a box that comes back has
+a full roster and nobody in charge. **The operator refused a fleet-side mechanism for this and was
+right:** any watcher would either fire in a session nobody asked to be fleet-aware (D7) or dispatch a
+replacement with no operator in the loop, which is how two live supervisors happen. **The revival
+trigger is the operator relaunching their interface session**, so the restart path is a step in the
+skill's startup ritual — revive when GOALS is active and no supervisor is live, and say so out loud.
+The general form: *when the honest mechanism would have to be an injection or an autonomous actor,
+the right place for the trigger is the human action that was going to happen anyway.*
 
-**The staleness sweep silently skipped the outage too.** `claude-fleet-autoclean` has
-`StartWhenAvailable: False`, so a missed occurrence is dropped rather than run at boot: last run
-02:22Z, the 08:22Z occurrence lost to the power cut, and **no catch-up when the machine returned** —
-next fire 20:22Z, an 18-hour gap in a 6-hourly sweep. Found only because the outage prompted a look.
-**A scheduled guard on a machine that loses power needs `StartWhenAvailable`, or it is a guard that
-stands down exactly when the machine most needs sweeping.**
+**The staleness sweep silently skipped the outage too — and the fix was to delete the timer, not to
+configure it.** `claude-fleet-autoclean` carried `StartWhenAvailable: False`, so the missed
+occurrence was dropped rather than run at boot: last run 02:22Z, the 08:22Z occurrence lost to the
+power cut, no catch-up when the machine returned, next fire 20:22Z — an 18-hour gap in a 6-hourly
+guard, found only because the outage prompted a look. My proposed fix was to set the flag in the
+`fleet init --autoclean` code path. **The operator retired the timer instead**: `fleet autoclean`
+becomes a step on the supervisor's watchtower beat and in the interface's startup ritual. **A timer
+sweeps when the clock says so; a beat sweeps when the fleet is alive — which is the condition that
+makes sweeping necessary in the first place.** It also deletes a whole class of problem rather than
+patching one instance of it: no Task Scheduler, no machine-local install state, no missed-run policy
+to get wrong, and nothing to re-verify per machine. **Fixing the setting would have been the smaller
+change and the worse one.**
 
 **Operator's four rulings (evening pass, recorded in `docs/OPERATOR-GATES.md`):** extend §11.3 to name
 task-bearing `respawn` + `sup-spawn` (with a binding *grep-don't-trust-the-line-numbers* condition);

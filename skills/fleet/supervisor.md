@@ -70,10 +70,23 @@ kills the turn and not the claim.
 
 Each beat: `fleet status` (runs the outcome discriminator + the silent-limit
 transcript scan -- a rate-limit wall shows as `limited`, contract G11, never
-`dead-suspected`), then `fleet archive` (cautious operators: `fleet archive
---dry-run` first to preview) to retire idle/dead/interrupted native workers
-past the TTL into tombstoned history, then `fleet resume-limited` for any
-worker whose reset horizon has passed, then a checkpoint/heartbeat (below).
+`dead-suspected`), then **`fleet autoclean`** (below), then `fleet archive`
+(cautious operators: `fleet archive --dry-run` first to preview) to retire
+idle/dead/interrupted native workers past the TTL into tombstoned history,
+then `fleet resume-limited` for any worker whose reset horizon has passed,
+then a checkpoint/heartbeat (below).
+
+**`fleet autoclean` is YOUR job, not a timer's** (operator ruling
+2026-07-27). It used to run from a Windows Scheduled Task every 6h; that is
+being retired. A timer sweeps when the clock says so, which on a machine
+that loses power means **it does not sweep at all** -- the task carried
+`StartWhenAvailable: False`, so the missed occurrence was dropped and
+nothing caught up at boot, leaving an 18-hour gap in a 6-hourly guard that
+nobody noticed. Running it on the beat ties the sweep to *the fleet being
+alive*, which is the condition that actually makes sweeping necessary. The
+interface tier runs it too, in its startup ritual, so a fleet with no
+supervisor still gets swept. `autoclean` is structurally exempt from §7's
+claim gate, so it needs no `--nonce` from either caller.
 `limited` is a
 sticky park: the boot reconcile and the epoch freeze never demote it --
 `fleet resume-limited` clears a parked worker via fork-steer (M-B T6);
