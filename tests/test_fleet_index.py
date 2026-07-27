@@ -14,6 +14,8 @@ text-mode `write_text`, so a golden shard is byte-identical on win32 and POSIX
 (§11.2). The same reason the shard writer pins `newline="\\n"`.
 """
 import os
+import shutil
+from pathlib import Path
 
 import pytest
 
@@ -578,3 +580,580 @@ class TestRenderDigest:
         header = {"sha8": "a3f21c8e", "lines": 999, "lang": "python"}
         rows = [(f"f{i}", i, i, "func", "()") for i in range(1, 501)]
         assert len(fleet.render_digest("big.py", header, rows).splitlines()) == 501
+
+
+# ---------------------------------------------------------------------------
+# §8/§11.3 -- the verify-then-get choke point
+#
+# "No path serves an unverified coordinate." A stale line number does not
+# error, it silently slices the wrong code, so every read path goes through
+# `verified_shard_rows` and every test below is about that guarantee.
+# ---------------------------------------------------------------------------
+
+def _tree(root):
+    """Every file under `root` as {relpath: bytes} -- the no-write assertion."""
+    return {p.relative_to(root).as_posix(): p.read_bytes()
+            for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def _indexed_tree(tmp_path, files=None):
+    """A tiny opted-in project. Returns the root."""
+    root = tmp_path / "proj"
+    for rel, body in (files or {"a.py": "X = 1\n"}).items():
+        _write(root / rel, body)
+    fleet.index_dir(root).mkdir(parents=True, exist_ok=True)
+    return root
+
+
+class TestVerifiedShardRows:
+    def test_missing_shard_is_parsed_and_written(self, tmp_path):
+        root = _indexed_tree(tmp_path, {"a.py": "def f():\n    pass\n"})
+        got = fleet.verified_shard_rows(root, "a.py")
+        assert got["status"] == "ok"
+        assert got["refreshed"] is True and got["written"] is True
+        assert got["rows"] == [("f", 1, 2, "func", "()")]
+        assert fleet.read_shard(fleet.shard_path_for_source(root, "a.py"))[1] == got["rows"]
+
+    def test_a_current_shard_is_served_without_a_refresh(self, tmp_path):
+        root = _indexed_tree(tmp_path, {"a.py": "def f():\n    pass\n"})
+        fleet.verified_shard_rows(root, "a.py")
+        before = _tree(root)
+        got = fleet.verified_shard_rows(root, "a.py")
+        assert got["status"] == "ok"
+        assert got["refreshed"] is False and got["written"] is False
+        assert _tree(root) == before
+
+    def test_a_stale_shard_is_refreshed_then_answered(self, tmp_path):
+        root = _indexed_tree(tmp_path, {"a.py": "def f():\n    pass\n"})
+        fleet.verified_shard_rows(root, "a.py")
+        _write(root / "a.py", "# moved down\n\ndef f():\n    pass\n")
+        got = fleet.verified_shard_rows(root, "a.py")
+        assert got["refreshed"] is True
+        assert got["rows"] == [("f", 3, 4, "func", "()")]
+        assert fleet.read_shard(fleet.shard_path_for_source(root, "a.py"))[1] == got["rows"]
+
+    def test_an_edit_that_preserves_the_line_count_is_still_stale(self, tmp_path):
+        # The staleness key is the SHA-256, not the line count. An edit that
+        # keeps the file the same length is the exact case a length check
+        # would wave through, and it is not a rare shape: renaming a symbol,
+        # or swapping two same-length lines, does it.
+        root = _indexed_tree(tmp_path, {"a.py": "def f():\n    pass\n"})
+        fleet.verified_shard_rows(root, "a.py")
+        _write(root / "a.py", "def g():\n    pass\n")
+        got = fleet.verified_shard_rows(root, "a.py")
+        assert got["refreshed"] is True
+        assert [r[0] for r in got["rows"]] == ["g"]
+
+    def test_a_mutated_source_never_yields_a_stale_coordinate(self, tmp_path):
+        # §12 acceptance criterion 3, stated as a property: whatever the shard
+        # on disk says, the rows handed back always agree with a fresh parse
+        # of the bytes currently on disk.
+        root = _indexed_tree(tmp_path, {"a.py": "def f():\n    pass\n"})
+        fleet.verified_shard_rows(root, "a.py")
+        for body in ("\n\ndef f():\n    pass\n",
+                     "class C:\n    def f(self):\n        pass\n",
+                     "def f():\n    pass\n"):
+            _write(root / "a.py", body)
+            got = fleet.verified_shard_rows(root, "a.py")
+            assert got["rows"] == fleet.parse_source_symbols(root / "a.py", "python")
+
+    @pytest.mark.parametrize("damage", ["corrupt", "truncated", "empty", "unknown-kind"])
+    def test_a_damaged_shard_takes_the_stale_path_never_an_optimistic_parse(
+            self, tmp_path, damage):
+        root = _indexed_tree(tmp_path, {"a.py": "def f():\n    pass\n"})
+        fleet.verified_shard_rows(root, "a.py")
+        shard = fleet.shard_path_for_source(root, "a.py")
+        header_line = shard.read_bytes().split(b"\n")[0]
+        # Each damaged body keeps a header that still MATCHES the unchanged
+        # source, so nothing but the row damage can trigger a refresh. An
+        # implementation that skipped malformed lines instead of refreshing
+        # would serve the wrong rows here and never notice.
+        blobs = {
+            "corrupt": header_line + b"\nWRONG\t999\t999\twidget\t\n",
+            "truncated": header_line + b"\nWRO",
+            "empty": b"",
+            "unknown-kind": header_line + b"\nWRONG\t999\t999\tsection\t\njunk\n",
+        }
+        shard.write_bytes(blobs[damage])
+        got = fleet.verified_shard_rows(root, "a.py")
+        assert got["status"] == "ok"
+        assert got["refreshed"] is True
+        assert got["rows"] == [("f", 1, 2, "func", "()")]
+        assert fleet.read_shard(shard) is not None
+
+    def test_no_write_withholds_a_stale_shard_and_writes_nothing(self, tmp_path):
+        root = _indexed_tree(tmp_path, {"a.py": "def f():\n    pass\n"})
+        fleet.verified_shard_rows(root, "a.py")
+        _write(root / "a.py", "\ndef f():\n    pass\n")
+        before = _tree(root)
+        got = fleet.verified_shard_rows(root, "a.py", no_write=True)
+        assert got["status"] == "withheld"
+        assert got["rows"] == []
+        assert got["note"]
+        assert _tree(root) == before
+
+    def test_no_write_withholds_a_missing_shard(self, tmp_path):
+        root = _indexed_tree(tmp_path, {"a.py": "X = 1\n"})
+        before = _tree(root)
+        got = fleet.verified_shard_rows(root, "a.py", no_write=True)
+        assert got["status"] == "withheld"
+        assert _tree(root) == before
+
+    def test_no_write_still_serves_a_current_shard(self, tmp_path):
+        root = _indexed_tree(tmp_path, {"a.py": "X = 1\n"})
+        fleet.verified_shard_rows(root, "a.py")
+        got = fleet.verified_shard_rows(root, "a.py", no_write=True)
+        assert got["status"] == "ok" and got["rows"] == [("X", 1, 1, "const", "")]
+
+    def test_an_orphan_shard_is_suppressed_and_pruned(self, tmp_path):
+        root = _indexed_tree(tmp_path, {"a.py": "X = 1\n"})
+        fleet.verified_shard_rows(root, "a.py")
+        shard = fleet.shard_path_for_source(root, "a.py")
+        (root / "a.py").unlink()
+        got = fleet.verified_shard_rows(root, "a.py")
+        assert got["status"] == "orphan"
+        assert got["rows"] == []
+        assert got["note"]
+        assert not shard.exists()
+
+    def test_an_orphan_shard_is_not_pruned_under_no_write(self, tmp_path):
+        root = _indexed_tree(tmp_path, {"a.py": "X = 1\n"})
+        fleet.verified_shard_rows(root, "a.py")
+        (root / "a.py").unlink()
+        before = _tree(root)
+        got = fleet.verified_shard_rows(root, "a.py", no_write=True)
+        assert got["status"] == "orphan" and got["rows"] == []
+        assert _tree(root) == before
+
+    def test_an_abandoned_replace_still_answers_from_the_in_memory_parse(
+            self, tmp_path, monkeypatch):
+        # §11.3: the on-disk shard stays stale, but THIS invocation answers
+        # from its own verified parse -- it must not degrade to withholding
+        # just because the write could not land.
+        root = _indexed_tree(tmp_path, {"a.py": "def f():\n    pass\n"})
+        fleet.verified_shard_rows(root, "a.py")
+        shard = fleet.shard_path_for_source(root, "a.py")
+        stale_bytes = shard.read_bytes()
+        _write(root / "a.py", "\ndef f():\n    pass\n")
+
+        def deny(src, dst):
+            raise PermissionError(13, "sharing violation")
+
+        monkeypatch.setattr(fleet.os, "replace", deny)
+        got = fleet.verified_shard_rows(root, "a.py", sleep=lambda _d: None)
+        assert got["status"] == "ok"
+        assert got["written"] is False
+        assert got["rows"] == [("f", 2, 3, "func", "()")]
+        assert shard.read_bytes() == stale_bytes
+
+    def test_an_unparseable_source_verifies_to_a_header_only_shard(self, tmp_path):
+        root = _indexed_tree(tmp_path, {"a.py": "def (:\n"})
+        got = fleet.verified_shard_rows(root, "a.py")
+        assert got["status"] == "ok" and got["rows"] == []
+        assert fleet.read_shard(fleet.shard_path_for_source(root, "a.py"))[1] == []
+
+
+# ---------------------------------------------------------------------------
+# §8 -- which files the index covers
+# ---------------------------------------------------------------------------
+
+class TestIndexSourceFiles:
+    def test_defaults_take_python_and_markdown_at_any_depth(self, tmp_path):
+        root = _indexed_tree(tmp_path, {
+            "a.py": "", "docs/b.md": "", "deep/er/c.py": "",
+            "d.rs": "", "e.txt": "",
+        })
+        assert fleet.index_source_files(root) == ["a.py", "deep/er/c.py", "docs/b.md"]
+
+    def test_excludes_apply(self, tmp_path):
+        root = _indexed_tree(tmp_path, {
+            "a.py": "", "node_modules/x.py": "", "sub/.venv/y.py": "",
+            "target/z.py": "",
+        })
+        assert fleet.index_source_files(root) == ["a.py"]
+
+    def test_the_index_and_git_trees_are_never_walked(self, tmp_path):
+        root = _indexed_tree(tmp_path, {"a.py": "", ".git/hooks/x.py": ""})
+        _write(fleet.index_dir(root) / "junk.py", "")
+        assert fleet.index_source_files(root) == ["a.py"]
+
+    def test_a_custom_include_is_honoured(self, tmp_path):
+        root = _indexed_tree(tmp_path, {"a.py": "", "b.rs": ""})
+        _write(fleet.index_config_path(root), '[index]\ninclude = ["**/*.rs"]\n')
+        assert fleet.index_source_files(root) == ["b.rs"]
+
+    def test_order_is_deterministic_and_posix(self, tmp_path):
+        root = _indexed_tree(tmp_path, {"b/a.py": "", "a/b.py": "", "a.py": ""})
+        got = fleet.index_source_files(root)
+        assert got == sorted(got)
+        assert all("\\" not in rel for rel in got)
+
+
+# ---------------------------------------------------------------------------
+# §6/§8/§9 -- the `fleet index` CLI family
+# ---------------------------------------------------------------------------
+
+def _project(tmp_path, files):
+    root = tmp_path / "proj"
+    root.mkdir(parents=True, exist_ok=True)
+    for rel, body in files.items():
+        _write(root / rel, body)
+    return root
+
+
+class TestIndexInit:
+    def test_creates_the_index_config_and_gitignore_entry_then_builds(self, tmp_path):
+        root = _project(tmp_path, {"a.py": "def f():\n    pass\n"})
+        assert fleet.main(["index", "init", "--path", str(root)]) == 0
+        assert fleet.index_symbols_dir(root).is_dir()
+        assert (fleet.index_config_path(root).read_bytes()
+                == fleet.INDEX_CONFIG_DEFAULT_TOML.encode("utf-8"))
+        assert _read(root / ".gitignore").splitlines() == [".fleet-index/"]
+        assert fleet.shard_path_for_source(root, "a.py").is_file()
+
+    def test_appends_to_an_existing_gitignore_without_clobbering_it(self, tmp_path):
+        root = _project(tmp_path, {"a.py": ""})
+        _write(root / ".gitignore", "*.log\nbuild/\n")
+        fleet.main(["index", "init", "--path", str(root)])
+        assert _read(root / ".gitignore") == "*.log\nbuild/\n.fleet-index/\n"
+
+    def test_adds_a_final_newline_when_the_gitignore_lacks_one(self, tmp_path):
+        root = _project(tmp_path, {"a.py": ""})
+        _write(root / ".gitignore", "*.log")
+        fleet.main(["index", "init", "--path", str(root)])
+        assert _read(root / ".gitignore") == "*.log\n.fleet-index/\n"
+
+    def test_is_idempotent_and_never_duplicates_the_entry(self, tmp_path):
+        root = _project(tmp_path, {"a.py": "X = 1\n"})
+        assert fleet.main(["index", "init", "--path", str(root)]) == 0
+        assert fleet.main(["index", "init", "--path", str(root)]) == 0
+        assert _read(root / ".gitignore").count(".fleet-index/") == 1
+
+    def test_the_gitignore_entry_is_written_even_when_the_index_already_exists(
+            self, tmp_path):
+        # "unconditionally" (§8): a project whose .gitignore entry was deleted
+        # by hand gets it back on the next init, index present or not.
+        root = _project(tmp_path, {"a.py": "X = 1\n"})
+        fleet.main(["index", "init", "--path", str(root)])
+        (root / ".gitignore").unlink()
+        fleet.main(["index", "init", "--path", str(root)])
+        assert ".fleet-index/" in _read(root / ".gitignore")
+
+    def test_an_existing_config_is_not_overwritten(self, tmp_path):
+        root = _project(tmp_path, {"a.py": "", "b.rs": ""})
+        fleet.index_dir(root).mkdir(parents=True)
+        _write(fleet.index_config_path(root), '[index]\ninclude = ["**/*.rs"]\n')
+        fleet.main(["index", "init", "--path", str(root)])
+        assert _read(fleet.index_config_path(root)) == '[index]\ninclude = ["**/*.rs"]\n'
+        assert fleet.shard_path_for_source(root, "b.rs").is_file()
+
+    def test_defaults_to_cwd(self, tmp_path, monkeypatch):
+        root = _project(tmp_path, {"a.py": "X = 1\n"})
+        monkeypatch.chdir(root)
+        assert fleet.main(["index", "init"]) == 0
+        assert fleet.index_symbols_dir(root).is_dir()
+
+    def test_a_missing_path_is_a_clean_error(self, tmp_path, capsys):
+        assert fleet.main(["index", "init", "--path", str(tmp_path / "nope")]) == 1
+        assert "fleet:" in capsys.readouterr().err
+
+
+class TestNoIndexRefusal:
+    @pytest.mark.parametrize("argv", [
+        ["index", "build"], ["index", "status"],
+        ["index", "update", "--files", "a.py"],
+    ])
+    def test_build_update_status_refuse_without_an_index(self, tmp_path, capsys, argv):
+        root = _project(tmp_path, {"a.py": "X = 1\n"})
+        rc = fleet.main(argv + ["--path", str(root)])
+        assert rc != 0
+        assert "fleet index init" in capsys.readouterr().err
+
+    def test_init_is_the_only_command_that_creates_the_directory(self, tmp_path):
+        root = _project(tmp_path, {"a.py": "X = 1\n"})
+        for argv in (["index", "build"], ["index", "status"],
+                     ["index", "update", "--files", "a.py"]):
+            fleet.main(argv + ["--path", str(root)])
+            assert not fleet.index_dir(root).exists()
+
+
+class TestIndexBuild:
+    def test_indexes_every_selected_file(self, tmp_path):
+        root = _project(tmp_path, {"a.py": "X = 1\n", "docs/b.md": "# H\n",
+                                   "c.rs": "fn main() {}\n"})
+        fleet.main(["index", "init", "--path", str(root)])
+        assert fleet.shard_path_for_source(root, "a.py").is_file()
+        assert fleet.shard_path_for_source(root, "docs/b.md").is_file()
+        assert not fleet.shard_path_for_source(root, "c.rs").exists()
+
+    def test_incremental_skip(self, tmp_path, capsys):
+        root = _project(tmp_path, {"a.py": "X = 1\n", "b.py": "Y = 2\n"})
+        fleet.main(["index", "init", "--path", str(root)])
+        capsys.readouterr()
+        assert fleet.main(["index", "build", "--path", str(root)]) == 0
+        out = capsys.readouterr().out
+        assert "indexed 0" in out and "skipped 2" in out
+
+    def test_force_rebuilds_everything(self, tmp_path, capsys):
+        root = _project(tmp_path, {"a.py": "X = 1\n", "b.py": "Y = 2\n"})
+        fleet.main(["index", "init", "--path", str(root)])
+        capsys.readouterr()
+        fleet.main(["index", "build", "--path", str(root), "--force"])
+        out = capsys.readouterr().out
+        assert "indexed 2" in out and "skipped 0" in out
+
+    def test_only_the_edited_file_is_rewritten(self, tmp_path):
+        root = _project(tmp_path, {"a.py": "X = 1\n", "b.py": "Y = 2\n"})
+        fleet.main(["index", "init", "--path", str(root)])
+        before = _tree(root)
+        _write(root / "a.py", "X = 2\n")
+        fleet.main(["index", "build", "--path", str(root)])
+        after = _tree(root)
+        assert sorted(k for k in after if after[k] != before.get(k)) == [
+            ".fleet-index/symbols/a.py.tsv", "a.py"]
+
+    def test_two_disjoint_edits_touch_two_disjoint_shards_and_merge_cleanly(
+            self, tmp_path):
+        # §4: there is no global file, so disjoint source edits cannot
+        # conflict at any N. Proved structurally (only the matching shard
+        # moves) and by outcome (both results are correct at the end).
+        root = _project(tmp_path, {"a/x.py": "def one():\n    pass\n",
+                                   "b/y.py": "def two():\n    pass\n"})
+        fleet.main(["index", "init", "--path", str(root)])
+        base = _tree(root)
+
+        _write(root / "a" / "x.py", "\ndef one():\n    pass\n")
+        fleet.main(["index", "update", "--path", str(root), "--files", "a/x.py"])
+        after_a = _tree(root)
+        assert [k for k in after_a if after_a[k] != base.get(k)
+                and k.startswith(".fleet-index")] == [".fleet-index/symbols/a/x.py.tsv"]
+
+        _write(root / "b" / "y.py", "\ndef two():\n    pass\n")
+        fleet.main(["index", "update", "--path", str(root), "--files", "b/y.py"])
+        after_b = _tree(root)
+        assert [k for k in after_b if after_b[k] != after_a.get(k)
+                and k.startswith(".fleet-index")] == [".fleet-index/symbols/b/y.py.tsv"]
+
+        assert fleet.verified_shard_rows(root, "a/x.py")["rows"] == [
+            ("one", 2, 3, "func", "()")]
+        assert fleet.verified_shard_rows(root, "b/y.py")["rows"] == [
+            ("two", 2, 3, "func", "()")]
+        assert fleet.verified_shard_rows(root, "a/x.py")["refreshed"] is False
+
+    def test_the_index_holds_no_global_file(self, tmp_path):
+        root = _project(tmp_path, {"a.py": "X = 1\n", "b.py": "Y = 2\n"})
+        fleet.main(["index", "init", "--path", str(root)])
+        assert sorted(p.name for p in fleet.index_dir(root).iterdir()) == [
+            "config.toml", "symbols"]
+
+    def test_two_builds_on_an_unchanged_tree_produce_identical_shards(self, tmp_path):
+        # §12 acceptance criterion 2, byte-for-byte.
+        root = _project(tmp_path, {"a.py": PY_SAMPLE, "d.md": MD_SAMPLE})
+        fleet.main(["index", "init", "--path", str(root)])
+        first = _tree(fleet.index_symbols_dir(root))
+        fleet.main(["index", "build", "--path", str(root), "--force"])
+        assert _tree(fleet.index_symbols_dir(root)) == first
+
+    def test_an_unparseable_file_is_header_only_and_the_build_continues(
+            self, tmp_path):
+        root = _project(tmp_path, {"bad.py": "def (:\n", "good.py": "X = 1\n"})
+        assert fleet.main(["index", "init", "--path", str(root)]) == 0
+        bad = fleet.read_shard(fleet.shard_path_for_source(root, "bad.py"))
+        assert bad is not None and bad[1] == []
+        assert fleet.read_shard(fleet.shard_path_for_source(root, "good.py"))[1] == [
+            ("X", 1, 1, "const", "")]
+
+    def test_orphan_shards_are_pruned_on_build(self, tmp_path):
+        root = _project(tmp_path, {"a.py": "X = 1\n", "gone.py": "Y = 2\n"})
+        fleet.main(["index", "init", "--path", str(root)])
+        (root / "gone.py").unlink()
+        fleet.main(["index", "build", "--path", str(root)])
+        assert not fleet.shard_path_for_source(root, "gone.py").exists()
+        assert fleet.shard_path_for_source(root, "a.py").is_file()
+
+    def test_a_shard_dropped_by_a_config_change_is_pruned_too(self, tmp_path):
+        root = _project(tmp_path, {"a.py": "X = 1\n", "b.md": "# H\n"})
+        fleet.main(["index", "init", "--path", str(root)])
+        _write(fleet.index_config_path(root), '[index]\ninclude = ["**/*.py"]\n')
+        fleet.main(["index", "build", "--path", str(root)])
+        assert not fleet.shard_path_for_source(root, "b.md").exists()
+
+    def test_a_bad_config_fails_the_build_loudly(self, tmp_path, capsys):
+        root = _project(tmp_path, {"a.py": "X = 1\n"})
+        fleet.main(["index", "init", "--path", str(root)])
+        _write(fleet.index_config_path(root), '[index]\nmode = "tracked"\n')
+        assert fleet.main(["index", "build", "--path", str(root)]) == 1
+        assert "mode" in capsys.readouterr().err
+
+    def test_shard_paths_are_forward_slashed_in_output(self, tmp_path, capsys):
+        root = _project(tmp_path, {"deep/er/a.py": "X = 1\n"})
+        fleet.main(["index", "init", "--path", str(root)])
+        out = capsys.readouterr().out
+        assert "deep/er/a.py" in out
+        assert "deep\\er" not in out
+
+
+class TestIndexUpdate:
+    def test_refreshes_only_the_named_files(self, tmp_path):
+        root = _project(tmp_path, {"a.py": "X = 1\n", "b.py": "Y = 2\n"})
+        fleet.main(["index", "init", "--path", str(root)])
+        _write(root / "a.py", "X = 9\n")
+        _write(root / "b.py", "Y = 9\n")
+        fleet.main(["index", "update", "--path", str(root), "--files", "a.py"])
+        assert fleet.verified_shard_rows(root, "a.py", no_write=True)["status"] == "ok"
+        assert (fleet.verified_shard_rows(root, "b.py", no_write=True)["status"]
+                == "withheld")
+
+    def test_a_comma_list_names_several(self, tmp_path):
+        root = _project(tmp_path, {"a.py": "X = 1\n", "b.py": "Y = 2\n"})
+        fleet.main(["index", "init", "--path", str(root)])
+        _write(root / "a.py", "X = 9\n")
+        _write(root / "b.py", "Y = 9\n")
+        fleet.main(["index", "update", "--path", str(root), "--files", "a.py,b.py"])
+        for rel in ("a.py", "b.py"):
+            assert fleet.verified_shard_rows(root, rel, no_write=True)["status"] == "ok"
+
+    def test_refreshes_a_named_file_even_when_its_shard_looks_current(self, tmp_path):
+        root = _project(tmp_path, {"a.py": "X = 1\n"})
+        fleet.main(["index", "init", "--path", str(root)])
+        shard = fleet.shard_path_for_source(root, "a.py")
+        shard.write_bytes(b"garbage\n")
+        fleet.main(["index", "update", "--path", str(root), "--files", "a.py"])
+        assert fleet.read_shard(shard) is not None
+
+    def test_a_deleted_named_file_prunes_its_orphan_shard_and_warns(
+            self, tmp_path, capsys):
+        root = _project(tmp_path, {"a.py": "X = 1\n"})
+        fleet.main(["index", "init", "--path", str(root)])
+        (root / "a.py").unlink()
+        assert fleet.main(
+            ["index", "update", "--path", str(root), "--files", "a.py"]) == 0
+        assert not fleet.shard_path_for_source(root, "a.py").exists()
+        assert "a.py" in capsys.readouterr().err
+
+    def test_a_path_outside_the_root_is_refused(self, tmp_path, capsys):
+        root = _project(tmp_path, {"a.py": "X = 1\n"})
+        fleet.main(["index", "init", "--path", str(root)])
+        rc = fleet.main(["index", "update", "--path", str(root), "--files", "../x.py"])
+        assert rc == 1
+        assert "outside" in capsys.readouterr().err
+
+    def test_an_unselected_path_is_skipped_with_a_warning(self, tmp_path, capsys):
+        root = _project(tmp_path, {"a.rs": "fn main() {}\n"})
+        fleet.main(["index", "init", "--path", str(root)])
+        capsys.readouterr()
+        assert fleet.main(
+            ["index", "update", "--path", str(root), "--files", "a.rs"]) == 0
+        assert "a.rs" in capsys.readouterr().err
+        assert not fleet.shard_path_for_source(root, "a.rs").exists()
+
+    def test_an_empty_file_list_is_an_error(self, tmp_path):
+        root = _project(tmp_path, {"a.py": "X = 1\n"})
+        fleet.main(["index", "init", "--path", str(root)])
+        assert fleet.main(["index", "update", "--path", str(root), "--files", " , "]) == 1
+
+    def test_files_is_the_flag_name_not_paths(self):
+        # §6 renamed --paths to --files deliberately; a silent revival would
+        # give `--path` three meanings across the CLI.
+        with pytest.raises(SystemExit):
+            fleet.build_parser().parse_args(["index", "update", "--paths", "a.py"])
+
+
+class TestIndexStatus:
+    def test_reports_counts_and_writes_nothing(self, tmp_path, capsys):
+        root = _project(tmp_path, {"a.py": "def f():\n    pass\n", "b.md": "# H\n"})
+        fleet.main(["index", "init", "--path", str(root)])
+        before = _tree(root)
+        capsys.readouterr()
+        assert fleet.main(["index", "status", "--path", str(root)]) == 0
+        out = capsys.readouterr().out
+        assert "shards 2" in out
+        assert "symbols 2" in out
+        assert "stale 0" in out
+        assert _tree(root) == before
+
+    def test_names_the_stale_and_orphan_shards(self, tmp_path, capsys):
+        root = _project(tmp_path, {"a.py": "X = 1\n", "gone.py": "Y = 2\n",
+                                   "fresh.py": "Z = 3\n"})
+        fleet.main(["index", "init", "--path", str(root)])
+        _write(root / "a.py", "X = 2\n")
+        (root / "gone.py").unlink()
+        _write(root / "new.py", "W = 4\n")
+        capsys.readouterr()
+        fleet.main(["index", "status", "--path", str(root)])
+        out = capsys.readouterr().out
+        assert "stale 1" in out and "orphan 1" in out and "unindexed 1" in out
+        assert "stale a.py" in out
+        assert "orphan gone.py" in out
+        assert "unindexed new.py" in out
+
+    def test_status_does_not_repair_a_stale_shard(self, tmp_path):
+        root = _project(tmp_path, {"a.py": "X = 1\n"})
+        fleet.main(["index", "init", "--path", str(root)])
+        _write(root / "a.py", "X = 2\n")
+        before = _tree(root)
+        fleet.main(["index", "status", "--path", str(root)])
+        assert _tree(root) == before
+
+
+# ---------------------------------------------------------------------------
+# §9 -- the safety property: the index is strictly additive
+# ---------------------------------------------------------------------------
+
+class TestSafetyProperty:
+    def test_the_index_family_touches_no_fleet_state(self, tmp_path, monkeypatch):
+        # Invariant 9: no registry, no fleet.lock, no mailbox, no PID probe.
+        # Asserted structurally -- FLEET_HOME is an empty directory and must
+        # still be empty once the whole family has run.
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(fleet, "FLEET_HOME", home)
+        root = _project(tmp_path, {"a.py": "X = 1\n"})
+        for argv in (["index", "init"], ["index", "build"],
+                     ["index", "update", "--files", "a.py"], ["index", "status"]):
+            assert fleet.main(argv + ["--path", str(root)]) == 0
+        assert list(home.iterdir()) == []
+
+    def test_deleting_the_index_returns_fleet_to_baseline_with_no_errors(
+            self, tmp_path, capsys):
+        root = _project(tmp_path, {"a.py": "X = 1\n"})
+        fleet.main(["index", "init", "--path", str(root)])
+        shutil.rmtree(fleet.index_dir(root))
+        # The project is untouched apart from the .gitignore line, discovery
+        # reports no index, and the read path raises nothing.
+        assert sorted(p.name for p in root.iterdir()) == [".gitignore", "a.py"]
+        assert fleet.find_index_root(root) is None
+        capsys.readouterr()
+        assert fleet.main(["index", "status", "--path", str(root)]) != 0
+        assert "fleet index init" in capsys.readouterr().err
+
+    def test_no_temp_files_survive_a_build(self, tmp_path):
+        root = _project(tmp_path, {"a.py": PY_SAMPLE, "b.md": MD_SAMPLE})
+        fleet.main(["index", "init", "--path", str(root)])
+        assert _tmp_leftovers(root) == []
+
+
+# ---------------------------------------------------------------------------
+# The 3.10 floor: `tomllib` is 3.11+, so it may not be imported
+# ---------------------------------------------------------------------------
+
+class TestIndexHoldsTheInterpreterFloor:
+    def test_fleet_imports_no_module_newer_than_the_floor(self):
+        import ast as _ast
+        source = _read(Path(fleet.__file__))
+        imported = set()
+        for node in _ast.walk(_ast.parse(source)):
+            if isinstance(node, _ast.Import):
+                imported.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, _ast.ImportFrom) and node.module:
+                imported.add(node.module.split(".")[0])
+        # `tomllib` landed in 3.11; fleet.MIN_PYTHON_VERSION is (3, 10), so an
+        # import of it would pass every grep and break the floor at runtime.
+        # This repo has been bitten twice by exactly that shape.
+        assert fleet.MIN_PYTHON_VERSION < (3, 11)
+        assert "tomllib" not in imported
+
+    def test_the_hand_written_parser_is_what_replaces_it(self, tmp_path):
+        _write(tmp_path / ".fleet-index" / "config.toml",
+               fleet.INDEX_CONFIG_DEFAULT_TOML)
+        assert fleet.load_index_config(tmp_path) == fleet.INDEX_CONFIG_DEFAULTS
