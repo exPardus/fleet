@@ -928,3 +928,53 @@ moment the commit landed. **Naming the collision beats discovering it.**
 the CLAUDE.md rule *"views never quarantine"* are both false of shipped code. Ordered out of the
 doctor slice into its own commit with the driven receipt: the two disagree about what today's default
 behaviour even is, and a doc that is wrong about the default cannot review a change to it.
+
+## 2026-07-27 evening — the fleet stopped for 15h and nobody knew {#2026-07-27-evening-outage}
+
+Found on an operator's "status update": **zero workers running, no claim held, 15 hours**. The last
+supervisor had released *correctly* at 04:00 over the ceiling after three stillborn handoffs — and
+nothing restarted it. Twenty-nine commits of finished work sat unpushed the whole time.
+
+**THE lesson: a clean shutdown with no reader is indistinguishable from a healthy fleet.** Every
+mechanism worked. The release was clean, the journal entry was excellent, the reason was recorded,
+`sup-status` said `RELEASED` the entire time. **None of it was addressed to anyone.** The statusline
+rendered `sup released` in the same calm white as `sup held` — the outage was *on screen for 15
+hours* and read as a resting state. **A signal nobody is obliged to read is not a signal**, and the
+fix is not more recording: it is making the pull surfaces render an outage AS an outage.
+
+**Operator's four rulings (evening pass, recorded in `docs/OPERATOR-GATES.md`):** extend §11.3 to name
+task-bearing `respawn` + `sup-spawn` (with a binding *grep-don't-trust-the-line-numbers* condition);
+clear the resolved abort flag; delete the two token-free orphan successor files; and build succession
+as **a loud pull signal plus one verb, explicitly not a hook and explicitly not auto-spawn**.
+
+**A hook was the obvious answer and the wrong one, for the second time.** The ask was "a hook so the
+interface can bring up a new supervisor". But the interface is an ordinary Claude Code session — a
+hook that reaches it fires in **every** session on the machine, which is exactly the D7 leak deleted
+on 2026-07-22. Same shape as that day's lesson: *the question is not "make this injection smaller",
+it is "is this injection the plugin's to make"*. The buildable version is pull-only: record a
+machine-readable succession-needed fact **with its cause** (ceiling AND usage-limit park — `sup-release`
+records prose nobody parses), render it loudly on statusline/`sup-status`/`doctor`, and collapse the
+three-step maneuver into one verb — **including the middle step only the interface can perform**,
+since B6 refuses a released claim whose releaser is still roster-live, so a supervisor can never
+complete its own stand-down. Auto-spawn refused: a body dispatching its own replacement with nobody
+in the loop is how two live supervisors happen.
+
+**`doctor` was 3 FAIL and two of them were stale.** A resolved abort flag and an answered decision
+both kept failing. **A permanently-red doctor is a disabled doctor** — the operator's stated ground
+for clearing. Cleared: 3 FAIL → 1, and the survivor ages out on its own.
+
+**Measure before deleting, even when the record says it is safe.** The two orphan successor files were
+documented as carrying *"spent plaintext tokens"*; grepped before deletion, they carried a
+`handoff_token_hash` **reference**, not a token. The §5.9 hazard did not apply. The record was
+pessimistic rather than wrong, but the deletion was authorised on the measurement, not the record.
+
+**The §8 channel exists and I skipped it in the morning, then used it in the evening.** A decision
+parked with `sup-decision --raise` was answered by the operator through `--answer` this time, so the
+routing state and the truth agree and `doctor` flipped to PASS on its own. In the morning the same
+class of answer went as prose in a `send`, and the supervisor had to record it itself to stop
+`sup-status` asserting "needs operator" about a settled question. **Answer parked decisions through
+the channel that parked them.**
+
+**Inherited numbers are not measurements.** The outgoing body claimed 2563/11 both floors; re-ran it
+before pushing and it was exactly right — which is the point, the verification cost two minutes and
+converted a claim into a fact before 29 commits went to a remote.
