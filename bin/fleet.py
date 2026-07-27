@@ -446,27 +446,7 @@ class _WindowsPlatform:
     def autoclean_task_install(self, task_name: str, command: str,
                                interval_hours: int, run=subprocess.run):
         """(ok, message). `/F` makes re-install idempotent -- the caller is
-        responsible for the refuse-foreign-task check BEFORE calling this.
-
-        TWO steps, and the second is not optional. `schtasks /Create` leaves
-        `StartWhenAvailable` FALSE, which means Task Scheduler DROPS an
-        occurrence the machine was off for instead of running it once the
-        machine returns -- so the staleness guard stands down exactly when a
-        box has just come back from an outage and most needs sweeping.
-        Measured on 2026-07-27: a 9h14m power cut ate the 08:22Z sweep, no
-        catch-up on reboot, next fire 20:22Z -- an 18-hour hole in a 6-hourly
-        guard, and nothing surfaced it.
-
-        `schtasks /Create` has no switch for the setting (its whole switch set
-        is /SC /MO /D /M /I /TN /TR /S /U /P /RU /RP /SD /ED /ST /RI /ET /K
-        /IT /NP /Z /XML /V1 /F /RL /DELAY), so the flag is reachable only via
-        `/Create /XML <file>` or the Task Scheduler API. Authoring the whole
-        XML would mean synthesising principal, logon type and StartBoundary
-        and writing a UTF-16 file, and round-tripping `/Query /XML` back
-        through `/Create /XML` re-registers the entire task from a string
-        decoded with the console codepage -- both trade one boolean for a
-        rewrite of everything else. The API reaches exactly the one field:
-        read the live settings object, set the flag, write it back."""
+        responsible for the refuse-foreign-task check BEFORE calling this."""
         try:
             proc = run(["schtasks", "/Create", "/F", "/TN", task_name,
                         "/TR", command, "/SC", "HOURLY", "/MO", str(int(interval_hours))],
@@ -475,48 +455,7 @@ class _WindowsPlatform:
             return (False, str(exc))
         if proc.returncode != 0:
             return (False, (proc.stderr or proc.stdout or "").strip()[:300])
-        return self._set_start_when_available(task_name, run=run)
-
-    # Single-quoted PowerShell literal: '' is the only escape inside one, so a
-    # task name can carry no quoting that reaches the parser. `-TaskPath '\'`
-    # pins the ROOT folder -- a bare -TaskName matches a same-named task in any
-    # folder, and patching someone else's is the mirror of the /Create /F
-    # foreign-task hazard the caller already guards.
-    _SET_START_WHEN_AVAILABLE_PS = (
-        "$ErrorActionPreference = 'Stop'; "
-        "$t = Get-ScheduledTask -TaskName '{name}' -TaskPath '\\'; "
-        "$t.Settings.StartWhenAvailable = $true; "
-        "Set-ScheduledTask -TaskName '{name}' -TaskPath '\\' "
-        "-Settings $t.Settings | Out-Null")
-
-    def _set_start_when_available(self, task_name: str, run=subprocess.run):
-        """(ok, message) for the catch-up half of the install.
-
-        Fails the INSTALL when it fails. A task that exists but drops missed
-        occurrences is the silently-degraded guard this whole path exists to
-        prevent, and staying quiet about it is how the 18-hour hole went
-        unnoticed for a day. The task is already created and `/Create /F`
-        makes a re-run idempotent, so a loud failure costs a retry, not
-        recovery -- and the message carries the manual command for a box
-        whose PowerShell has no ScheduledTasks module."""
-        script = self._SET_START_WHEN_AVAILABLE_PS.format(
-            name=task_name.replace("'", "''"))
-        try:
-            proc = run(["powershell", "-NoProfile", "-NonInteractive",
-                        "-Command", script],
-                       capture_output=True, text=True, timeout=30)
-        except Exception as exc:
-            detail = str(exc)
-        else:
-            if proc.returncode == 0:
-                return (True, "")
-            detail = (proc.stderr or proc.stdout or "").strip()[:300]
-        return (False,
-                f"task {task_name!r} was created, but StartWhenAvailable "
-                f"could not be set ({detail}) -- as it stands the task will "
-                f"DROP a missed occurrence instead of running it when the "
-                f"machine comes back. Retry, or set it by hand: "
-                f"powershell -NoProfile -Command \"{script}\"")
+        return (True, "")
 
     def autoclean_task_remove(self, task_name: str, run=subprocess.run):
         """(ok, message). Missing task counts as failure -- the caller
@@ -11783,8 +11722,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :5196, :5653, :9712,
-    :14522), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :5135, :5592, :9651,
+    :14461), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -12428,8 +12367,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:5196, :5653, :9712,
-    #     :14522) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:5135, :5592, :9651,
+    #     :14461) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
