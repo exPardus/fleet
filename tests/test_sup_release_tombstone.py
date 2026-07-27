@@ -365,12 +365,30 @@ class TestReleaseTombstonesItsOwnRecord:
         assert "tombston" in capsys.readouterr().err.lower()
 
     def test_an_already_tombstoned_record_is_left_alone(self, sup_home, capsys):
+        """A frozen tombstone is never re-stamped: NO registry write and NO
+        event, not merely "the fields end up the same".
+
+        This assertion is the second version. The first compared `archived_at`
+        before and after, and injecting the defect (delete the
+        `if not _record_is_live(rec): return name` guard) left the suite GREEN --
+        of course it did: re-stamping `status = "dead"` onto a record that is
+        already dead changes no field. The harm is the SPURIOUS WRITE and the
+        spurious `status_changed: dead -> dead` event appended to an append-only
+        log about an archived record, which is the same "never recompute/persist/
+        event a frozen tombstone" rule the sweep paths already carry. So the
+        assertion is about what was DONE, not about what the fields say."""
         stamp = fleet.now_iso()
         _install(_record(RELEASER, status="dead", archived_at=stamp))
         value = _hold()
+        before_bytes = fleet.registry_path().read_bytes()
+        before_events = len(_events())
         assert _release(nonce=value) == 0
-        rec = fleet.load_registry()["workers"][BODY]
-        assert rec["archived_at"] == stamp, "the release re-stamped a tombstone"
+        assert fleet.registry_path().read_bytes() == before_bytes, \
+            "the release rewrote a registry it had nothing to change"
+        assert [e for e in _events()[before_events:]
+                if e.get("kind") == "status_changed"] == [], \
+            "the release appended a dead -> dead event to a frozen tombstone"
+        assert fleet.load_registry()["workers"][BODY]["archived_at"] == stamp
 
     def test_a_refused_release_tombstones_nothing(self, sup_home, capsys):
         # No continuity proof -> no release -> no tombstone. A verb that failed
