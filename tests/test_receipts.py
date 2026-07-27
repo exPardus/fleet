@@ -89,7 +89,7 @@ RECEIPT_FLOOR = {
     # asserting a state nothing measured -- `sup-release` recorded an accurate
     # free-text reason and no surface parsed it -- so every CURRENT-STATE claim
     # it makes about shipped code is a pinned receipt rather than a sentence.
-    "graceful-succession.md": 12,
+    "graceful-succession.md": 13,
 }
 
 # A commit whose bin/fleet.py predates the me/ul + me/daemon merges, used by the
