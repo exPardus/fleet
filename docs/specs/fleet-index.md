@@ -1,7 +1,7 @@
 # fleet-index — cutting duplicate exploration cost
 
 **Status:** ready-for-gate (M1+M2; M3 stays DRAFT). Author-flipped 2026-07-24 per the operator's full-M1+M2 build order (record of record: the `knowledge/lessons.md` day-3 entry ("2026-07-24 — operator morning queue cleared + autonomous day-3 opened", on `main`); the corresponding `docs/OPERATOR-GATES.md` settled row is still owed — §16); ratification is the operator's — an author never promotes its own spec.
-**Code citations:** every `bin/fleet.py` and `bin/hooks/stop_outcome.py` citation below is derived against merge-base `3ccb2d5` (`git merge-base main spec/fleet-q`, re-derived 2026-07-24); `bin/fleet.py` there is 11,288 lines. Line numbers rot, so each citation names the symbol it points at — re-grep the symbol before trusting the number.
+**Code citations:** every `bin/fleet.py` and `bin/hooks/stop_outcome.py` citation below is derived against merge-base `3ccb2d5` (`git merge-base main spec/fleet-q`, re-derived 2026-07-24); `bin/fleet.py` there is 11,288 lines. Line numbers rot, so each citation names the symbol it points at — re-grep the symbol before trusting the number. **Prose citations are not receipts** — the pinned `# at <sha>` blocks below are, and they are re-executed by `tools/verify_receipts.py` against that commit's materialised tree (root `CLAUDE.md`). This document was `UNENFORCED` while it specced unbuilt behaviour; it moved to the enforced set on 2026-07-27, when M1 and M2's worker-facing surface shipped and there was finally something to re-run.
 **Owner:** Altai
 **Design doc:** `docs/superpowers/specs/2026-07-22-fleet-index-design.md`
 **Adversarial review:** `docs/reviews/IDX-ADVERSARIAL-2026-07-22.md` (10 defects — 2 CRITICAL, 5 HIGH, 2 MED, 1 LOW). Disposition in §13.
@@ -165,6 +165,14 @@ A digest is a rendering of the shard, not a stored artifact:
 
 **`--context` path resolution:** paths resolve against the worker's `--dir`, never the manager's cwd. This preserves invariant 5 (cwd-scoped dispatch) by keeping a single cwd frame. Unknown paths warn and are skipped; they never fail a spawn.
 
+**Built 2026-07-27**, as a spawn-only flag:
+
+```
+# at 1844a1f
+$ grep -n '"--context"' bin/fleet.py
+15673:    p_spawn.add_argument("--context", default=None,
+```
+
 **Journal ordering is preserved on the paths that carry one.** Digest material is inserted ahead of the task, never between journal and turn. Note the honest limit: the idle-send path (`_cmd_send_native`, `bin/fleet.py:4174`) composes with no `journal_path` at all, so there is no journal to order against there — `--context` is a spawn-time flag and M1 injects digests on spawn only.
 
 ## 8. Staleness — gitignored-only
@@ -323,15 +331,72 @@ An unauthorised tool call under a non-bypass headless worker hangs on a permissi
 
    Subcommand-scoped, **never `Bash(fleet:*)`**. The wide grant is a kill grant: `fleet kill` and `fleet clean` are irreversible (CLAUDE.md), and the recorded incident where a *read-only slash command* reached `fleet clean` is the standing proof that any surface granted `fleet` wholesale eventually exercises its destructive subcommands. `Bash(fleet q:*)` is the only fleet grant the template will ever carry for workers; it deliberately excludes `fleet index:*` — lifecycle (init/build/update) is manager-side (§8), least privilege for the worker.
 
-   **Execution status: `[UNVERIFIED — live receipt owed]`.** No receipt shows a `--settings`-file `allow` taking effect for a `--bg` `dontask` worker. The evidence points the other way so far: the 2026-07-23 overnight incident record shows working allowlists only via a per-worktree `.claude/settings.local.json`, and `dispatch_bg`'s own comment marks `--setting-sources`' runtime effect under `--bg` **UNOBSERVED** (`bin/fleet.py:8265-8268`). The template mechanism above is therefore a design claim, not an observed behaviour. **Hard M2 build-gate acceptance item:** before M2 ships, a live experiment proves a default-spawned `dontask` `--bg` worker executes `fleet q` via the template grant alone (no per-worktree allowlist present), and the receipt is recorded with the M2 build. If the experiment fails, the fallback channel is the per-worktree `settings.local.json` doctrine (item 3) and this section is re-specified before ship — §11.9's revert criterion — BOTH prongs, adoption and token-reduction — is gated on this receipt existing first: no run recorded before the receipt counts toward either prong.
+   **Execution status: `[VERIFIED — live two-arm experiment, 2026-07-27]`.** The hard M2 build-gate item below is **closed, and it came back positive.**
+
+   The claim it was raised against was a real one. No receipt used to show a `--settings`-file `allow` taking effect for a `--bg` `dontask` worker, and the evidence pointed the other way: the 2026-07-23 overnight incident record shows working allowlists only via a per-worktree `.claude/settings.local.json`, and `dispatch_bg`'s own comment marks `--setting-sources`' runtime effect under `--bg` **UNOBSERVED** (`bin/fleet.py:8265-8268`). The gate item was therefore: before M2 ships, a live experiment must prove a default-spawned `dontask` `--bg` worker executes a granted command via the template grant alone, with no per-worktree allowlist present.
+
+   **The experiment, run 2026-07-27** (supervisor checkpoint G-B; the transcript is in the supervisor journal under the fleet home). Two arms, one variable — same task file, same cwd, same mode (`dontask`), same model, same everything except the grant. The cwd was a scratch directory with **no `.claude/` in it at all**, confirmed by `ls -a` showing only `./` and `../`:
+
+```
+# at 1844a1f
+# volatile: the evidence is a live two-arm `fleet spawn` experiment on one machine at one moment, not a fact about any tree. Its transcript lives in the supervisor journal under the fleet home — a different repository, machine-local, gitignored runtime — so nothing in a materialised tree can re-execute it and this receipt is a citation to that record rather than a reproduction of it. On any other machine it prints nothing: a WARN, never a FAIL.
+$ sed -n '/^  ARM B, CONTROL/,/^    PROBE-EXECUTED/p' /c/proga/claude-fleet/supervisor/JOURNAL.md
+  ARM B, CONTROL (no grant anywhere), worker probe-nogrant, dontask, sonnet:
+    PROBE-DENIED Permission to use Bash has been denied because Claude Code is running in don't ask mode.
+
+  ARM A, TREATMENT (one subcommand-scoped allow added to state/worker-settings.json only), worker probe-grant, dontask, sonnet:
+    PROBE-EXECUTED PROBE-OK-7748
+```
+
+   The grant was `"permissions": {"allow": ["Bash(py -3.13 -c:*)"]}` and the probed command was `py -3.13 -c "print('PROBE-OK-7748')"`. **The multi-token prefix was deliberate** so the grant has the same shape as the `Bash(fleet q:*)` this template carries; a one-token grant would have proven a weaker thing.
+
+   **Why the control was not optional.** Without arm B, arm A proves only that the worker ran a command, not that the grant is why — `dontask` being quietly more permissive than doctrine believes was a live possibility. Arm B rules it out, and incidentally re-confirms the documented failure mode: under `dontask` an ungranted `Bash` call is denied outright with a clear message rather than hanging on an unanswerable prompt.
+
+   **What this receipt proves, and what it does not.** It proves the *mechanism*: an `allow` entry in the rendered `state/worker-settings.json` that `dispatch_bg` passes via `--settings` reaches a default-spawned `dontask` `--bg` worker with no per-worktree `.claude/` present, for a multi-token `Bash(<prefix>:*)` grant. It does **not** execute the literal string `Bash(fleet q:*)`, because `fleet q` did not exist when the experiment ran; the shape, not the subcommand, is what was measured. It is also a single machine at a single `claude --version` — the same standing caveat every vendor-behaviour fact in this repo carries (`docs/specs/native-substrate.md`).
+
+   The tree-side half of the same claim is not volatile and is pinned here:
+
+```
+# at 1844a1f
+$ grep -n '"permissions"' worker-settings.template.json
+2:  "permissions": { "allow": ["Bash(fleet q:*)"] },
+```
+
+   …and the narrowness, which is the part a future edit is most likely to erode — `grep -c` exits 1 on zero matches, so the exit assertion is doing real work here:
+
+```
+# at 1844a1f
+$ grep -c 'Bash(fleet:\*)' worker-settings.template.json
+0
+$ echo "exit $?"
+exit 1
+```
 
 2. **Reaching existing installs.** The template is git-tracked; the rendered `state/worker-settings.json` is instance state, and the `instance-freshness` doctor check already diffs the two. Migration is: pull, re-run `fleet init`, confirmed by `fleet doctor`. No new mechanism — the freshness gate exists precisely so template changes propagate this way. Workers already running keep their old settings until their next respawn (settings are read at session start); the migration needs no fleet-wide restart, it arrives with normal worker churn.
 
-3. **Interaction with the per-worktree `.claude/settings.local.json` doctrine** (spawn-etiquette, 2026-07-23). Under `dontask` — auto-deny-everything-unlisted — task-specific allowlists live in a `settings.local.json` dropped into the worker's cwd, with **deny rules as hard fences** (`Bash(git push:*)`). Permission sources union their allows and deny always wins, so the split of responsibilities is clean: the fleet-owned template carries exactly the one fleet-owned grant (`fleet q` works in every indexed project with zero per-spawn setup), per-task grants stay in the worktree file, and a worktree deny rule can still fence `q` off for a specific task — the template grant cannot override a local fence. Nothing in the doctrine moves; the template just stops shipping permissions-empty.
+3. **Interaction with the per-worktree `.claude/settings.local.json` doctrine** (spawn-etiquette, 2026-07-23). **The fallback re-spec this item used to hold open is NOT needed** — item 1's experiment came back positive, so the template channel is the channel and `settings.local.json` is not being promoted to carry the fleet grant. What follows is the unchanged division of labour, not a fallback. Under `dontask` — auto-deny-everything-unlisted — task-specific allowlists live in a `settings.local.json` dropped into the worker's cwd, with **deny rules as hard fences** (`Bash(git push:*)`). Permission sources union their allows and deny always wins, so the split of responsibilities is clean: the fleet-owned template carries exactly the one fleet-owned grant (`fleet q` works in every indexed project with zero per-spawn setup), per-task grants stay in the worktree file, and a worktree deny rule can still fence `q` off for a specific task — the template grant cannot override a local fence. Nothing in the doctrine moves; the template just stops shipping permissions-empty.
 
 ### 11.8 Teaching the worker the tool exists
 
 A worker cannot call a tool it has never heard of, and `compose_prompt`'s preamble is fleet's only worker-facing channel. M2 adds **at most 4 preamble lines** teaching `fleet q` (name, one-line contract, `--src`, `--outline`) — rendered **only when the dispatch target's `--dir` contains `.fleet-index/`** at compose time. The check runs wherever compose runs, so the teach lines render on **all four compose paths** — spawn, idle-send (fork-steer), resume-limited, respawn (§3's call sites) — i.e. per **dispatch**, consistent with §3's re-paid-per-dispatch analysis: a respawned or steered worker in an indexed project is re-taught, and a worker in a non-indexed project pays zero tokens and sees no mention of a tool that would exit 3.
+
+**Built 2026-07-27.** The cap and the two call-site facts are pinned rather than asserted. Four lines, counted off the constant's own continuation strings; the check inside `compose_prompt` (so every dispatch path gets it by construction, which is what makes "all four paths" a property rather than four coincidences); and the digest's single read, which goes through §11.3's choke point:
+
+```
+# at 1844a1f
+$ sed -n '/^INDEX_TEACH_LINES = ($/,/^)$/p' bin/fleet.py | grep -c '\\n"$'
+4
+$ echo "exit $?"
+exit 0
+```
+
+```
+# at 1844a1f
+$ grep -n 'index_teach_lines(cwd)\|verified_shard_rows(root, rel, sleep=sleep)' bin/fleet.py
+1354:             + index_teach_lines(cwd)]
+15379:def index_teach_lines(cwd) -> str:
+15458:        result = verified_shard_rows(root, rel, sleep=sleep)
+```
 
 The honest adoption risk, unchanged from the review: these lines arrive inside a tool result (the task-file Read), competing against `Read`/`Grep`, which sit in the system region and need no learning. That is why §11.9 exists and why it carries a revert trigger, not a hope.
 
@@ -341,8 +406,8 @@ M2 is accepted or reverted on measurement, under the tokens-primary doctrine (op
 
 - **Primary metric:** `input_tokens` from Stop-hook outcome records, on a fixed task run as **≥3 paired A/B runs** — arm A: indexed project, teach lines present; arm B: same task, no index. Success = arm A's median total input tokens lower.
 - **Adoption check (diagnostic, volatile):** the §12 `tools/` transcript diagnostic additionally counts `fleet q` invocations per session. It is sunset-marked and decides nothing by itself — except one thing: **zero `fleet q` calls across all A-arm runs voids the token comparison** (whatever moved, it wasn't `q`) and is itself a revert trigger.
-- **Ordering gate:** adoption counts **only after §11.7's execution receipt exists** — the live proof that a default-spawned `dontask` `--bg` worker can execute `fleet q` via the template grant. A-arm runs made before that receipt are void for this criterion: zero adoption under an unproven grant would fire the revert against a permission bug, not against the tool.
-- **Revert criterion** (counting only runs recorded after §11.7's grant-execution receipt exists — both prongs): zero adoption across ≥3 A-arm runs, **or** no median input-token reduction across ≥3 pairs → revert M2's worker-facing surface: remove the preamble teach lines and the template `permissions` entry (one more `fleet init` propagation), and record the revert as a dated `knowledge/lessons.md` entry. The `fleet q` subcommand itself may stay as manager-side tooling — it costs nothing per worker once the teach lines and grant are gone.
+- **Ordering gate: SATISFIED 2026-07-27.** Adoption counts only after §11.7's execution receipt exists — the live proof that a default-spawned `dontask` `--bg` worker can execute a granted command via the template grant alone. That receipt is now landed in §11.7 item 1, so **runs recorded from 2026-07-27 onward count toward both prongs; anything earlier is void.** The gate was never about a date, it was about the confound: zero adoption under an unproven grant would fire the revert against a permission bug rather than against the tool. That confound is now measured away, with one residual named in §11.7 — the experiment proved the grant *shape*, not the literal `Bash(fleet q:*)` string, so an A-arm run showing zero `fleet q` calls must still rule out a plain typo in the template before it counts as non-adoption.
+- **Revert criterion** (counting only runs recorded on or after 2026-07-27, when §11.7's grant-execution receipt landed — both prongs): zero adoption across ≥3 A-arm runs, **or** no median input-token reduction across ≥3 pairs → revert M2's worker-facing surface: remove the preamble teach lines and the template `permissions` entry (one more `fleet init` propagation), and record the revert as a dated `knowledge/lessons.md` entry. The `fleet q` subcommand itself may stay as manager-side tooling — it costs nothing per worker once the teach lines and grant are gone.
 
 ## 12. Testing and acceptance
 
@@ -379,7 +444,7 @@ All 10 findings from `docs/reviews/IDX-ADVERSARIAL-2026-07-22.md`. Manager spot-
 | 4 | `fleet q` blocked — default mode `dontask`, template has no permissions block | CRITICAL | **Accepted.** Moved to M2 behind an explicit permissions-migration gate (§11). |
 | 5 | No lock or atomic write; §9's "corrupt = skip malformed lines" contradicts §8 | HIGH | **Accepted.** Atomic `os.replace` per shard (§6); corrupt shards are treated as stale, never parsed optimistically (§9). Sharding also shrinks each write to one small file. |
 | 6 | Six of eight code citations wrong — and they were the worked example | HIGH | **Accepted.** Every repo citation re-derived and manager-verified at acceptance (against the 2026-07-22 8,706-line tree), then **re-derived 2026-07-24 at merge-base `3ccb2d5`** (11,288 lines — every line-number citation had rotted; fix wave 1, header note). All format examples replaced with synthetic placeholders that make no claim about any real file. |
-| 7 | Two fenced blocks parse as executable receipts and fail | HIGH | **Accepted.** No `$ `-prefixed lines in this document, so it contains no receipts. Declared in `tests/test_receipts.py` `UNENFORCED` with the reason that it specs unbuilt behaviour. |
+| 7 | Two fenced blocks parse as executable receipts and fail | HIGH | **Accepted; superseded 2026-07-27.** The original disposition was "no `$ `-prefixed lines in this document, so it contains no receipts", declared `UNENFORCED` in `tests/test_receipts.py` because it specced unbuilt behaviour. M1 and M2's worker-facing surface are now built, so the document carries real pinned receipts (§11.7 item 1, §11.8) and has moved to the **enforced** set with a `RECEIPT_FLOOR` entry. The finding's actual lesson — a fenced block that *looks* like a transcript must either be one or not look like one — is what the format examples' synthetic placeholders (finding 6) and the pinned blocks now jointly satisfy. |
 | 8a | §5.4 "fixed per-spawn cost" false | MED | **Accepted** — corrected in §3, and moot for M1 since the map is gone. |
 | 8b | Invariant-4 argument does not hold on the idle-send path | MED | **Accepted.** §7 states the limit explicitly rather than generalising from respawn. |
 | 8c | Success criterion 1 not measurable with shipped telemetry | LOW | **Accepted; re-dispositioned 2026-07-23** (operator sub-decision (b)). Criterion 1 is re-based onto the `input_tokens` delta the Stop-hook outcome record already ships, over ≥3 paired A/B runs; the transcript counter survives only as a volatile sunset-marked `tools/` diagnostic (§12). |
@@ -420,7 +485,7 @@ Edits this spec obligates in **other** documents. Enumerated so the gate can che
 1. `docs/SPEC.md` §18 — fleet-index milestone entry (§18 currently stops at M-C; the §16 fleet-index paragraph there also still cites the rotted `@8478` dontask default — now `:10985` at `3ccb2d5`).
 2. `knowledge/playbooks/spawn-etiquette.md` — the "template carries hooks only, no permissions" line rots when §11.7 lands its `permissions` key.
 3. Campaign worktree recipe / campaign template — add the manager-side `fleet index init --path <worktree>` step (§8).
-4. `tests/test_receipts.py` — this file's `UNENFORCED` reason string still says "M1 ready-for-build"; the status is ready-for-gate (M1+M2), and the string rots again when anything builds.
+4. ~~`tests/test_receipts.py` — this file's `UNENFORCED` reason string still says "M1 ready-for-build"~~ — **done 2026-07-27.** The string did rot, exactly as predicted, the moment anything built. Resolved by removing the entry rather than rewording it: this document now carries pinned receipts, so it belongs in the enforced set with a `RECEIPT_FLOOR` entry, and the reason string has nothing left to rot.
 5. `docs/PLAN-PROGRESS.md` lines 147 and 156 — both fleet-index rows still say "design-approved / gate-row owed" and "ready-for-build (M1 only), operator-gated"; superseded by the 2026-07-24 full-M1+M2 order.
 6. `docs/NEXT-SESSION.md` items 4 and 8 — the "M1 go/no-go with the fresh evidence" decision item and the evidence note are resolved by the 2026-07-24 order (§1).
 7. `docs/OPERATOR-GATES.md` — settled row recording the 2026-07-24 full-M1+M2 build order (until it lands, the `knowledge/lessons.md` day-3 entry ("2026-07-24 — operator morning queue cleared + autonomous day-3 opened", on `main`) is the record of record — header).
@@ -428,4 +493,5 @@ Edits this spec obligates in **other** documents. Enumerated so the gate can che
 
 ## 17. Changelog
 
+- **2026-07-27 — M2 worker-facing surface built; the owed receipt landed.** §11.7 item 1's `[UNVERIFIED — live receipt owed]` is flipped to `[VERIFIED — live two-arm experiment, 2026-07-27]`: the hard M2 build-gate item was run (supervisor checkpoint G-B) and came back **positive**, so the template channel works and item 3's fallback re-spec is **not needed** — item 3 now says so rather than standing as a live branch. §11.9's ordering gate is marked **satisfied**, with the residual named (the experiment proved the grant *shape*, `Bash(py -3.13 -c:*)`, not the literal `Bash(fleet q:*)`). The experiment receipt is `# volatile` — it is a claim about one machine at one moment, its transcript lives outside this repo, and nothing in a materialised tree can re-execute it. This document consequently leaves `tests/test_receipts.py`'s `UNENFORCED` set (finding 7's disposition superseded, §16 item 4 closed) and gains a `RECEIPT_FLOOR`. Also built and receipted: §7's `--context` flag (spawn-only) and §11.8's teach lines on all four compose paths.
 - **2026-07-24 — fix wave 1 (dual-lens gate).** All `bin/fleet.py` / `stop_outcome.py` citations re-derived at merge-base `3ccb2d5` (header note; the 2026-07-22 line numbers had all rotted). §11.1 gains the repository-boundary rule (walk-up stops at the first `.git` entry, file or dir — nested worktrees can no longer resolve a parent index). §11.7's template-grant mechanism marked `[UNVERIFIED — live receipt owed]` with a hard M2 gate item; §11.9 revert now gated on that receipt. Windows `os.replace` sharing-violation contract specified (§6, §11.5, §11.6). win32 matching semantics pinned — case-sensitive exact/tail, `fnmatchcase` globs, forward-slash paths everywhere (§11.2). `fleet index update` file-list flag renamed `--paths` → `--files` and `update` gains `--path DIR` root resolution (§6). `--src`/`--outline` 400-line cap, `kind=section` end definition, `--outline` failure rows, teach-lines-on-all-compose-paths, and §12 golden-test coverage for all of the above.
