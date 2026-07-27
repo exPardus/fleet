@@ -60,21 +60,36 @@ template's missing `--nonce`, and a spec note on guards that block their own rem
    to forge — it removes the condition instead of trusting what the caller says about itself. It also
    retires the manual "the interface stops the retired body" step in the succession recipe below,
    which is where every unproven handoff has died.
+   **BUILT, 2026-07-27, on `fix/sup-release-tombstone`** (worker `tombstone`): `sup-release` now
+   tombstones its own registry record via §10.4's spelling (`status: dead`, read by
+   `_record_is_live`), and `_releaser_body_is_tombstoned` is the arm `_releaser_live_sids` gained —
+   one predicate, so B6 and the §7 gate cannot disagree. No new flag; the retired attestation road is
+   pinned shut by `test_no_flag_by_which_the_caller_declares_anything_about_itself`. **Owed:**
+   `docs/specs/claim-nonce.md` §6.1 row 1 and §7.2's *"ARMED, unconditionally"* row are now
+   incomplete about shipped code and need an operator amendment — §7 is operator-owned, so the
+   worker reported it instead of editing it. This is the in-fleet disarm `docs/OPERATOR-GATES.md`
+   already recorded as owed work on 2026-07-27.
 4. The **`[UNBUILT]` sweep** across `docs/specs/**` toward launch-ready (v2-deferred rows stay
    deferred).
 
 ## The interface maneuvers that actually work (learned the hard way)
 
-- **Succession**: `sup-release` → **the interface stops the retired body** (so its sid leaves the
-  roster) → fresh `sup-spawn`. A fleet-launched body never leaves the roster on its own, and B6
-  refuses a released claim whose releaser is still live — so a supervisor **cannot complete its own
-  stand-down**. That last step is yours, every time.
+- **Succession**: `sup-release` → fresh `sup-spawn`. **Two steps, both fleet's, since
+  `fix/sup-release-tombstone`.** `sup-release` tombstones the releasing body's own registry record,
+  so B6's live-releaser test is false by construction and the successor boots immediately. The old
+  middle step — *the interface stops the retired body so its sid leaves the roster* — is **gone**;
+  it was the last step of this recipe that lived outside the fleet, and it is where every unproven
+  handoff died. Stop the retired body anyway to reclaim the session, but succession no longer waits
+  on it. The old rule still applies to a release that could not tombstone: an **interface** session
+  (no registry record to retire — which is one more reason the interface must never `sup-boot`), an
+  ambiguous registry identity, an unreadable registry, or a crash between the release and the
+  tombstone. `sup-release` says which case it was on stdout.
 - **`fleet kill` can be refused by the very wedge it clears** (§7 armed on a released claim). The
   documented escape is real and load-bearing: run the verb from a shell with **no
   `CLAUDE_CODE_SESSION_ID`** — `env -u CLAUDE_CODE_SESSION_ID py -3.13 bin/fleet.py …`. Filed as
   claim-nonce §7.2, DESCRIPTIVE/UNRATIFIED.
 - **Handoff dispatch is still unproven** — three stillbirths on 2026-07-27 on top of day-3's five.
-  Prefer release-then-interface-stops-body until someone proves the dispatch path end to end.
+  Prefer release-then-`sup-spawn` until someone proves the dispatch path end to end.
 - **Keep briefs SHORT — the highest-leverage thing you control.** Five supervisors each burned a
   full context reading long handovers and merged nothing; the one given a one-page "merge first,
   read second" brief merged the blocker on its first turn. Long handovers are the failure mode.
