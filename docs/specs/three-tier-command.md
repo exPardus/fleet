@@ -1427,8 +1427,17 @@ every next task "the current urgent task" and never cross into hand-off. The fix
   Finishing that is bounded (the workers were already spawned); it is a state fleet reads, not a
   self-asserted importance label. Nothing else qualifies as "the current urgent task."
 - **200k is a hard, enforced ceiling, not a directive** — **and it applies to exactly one caller.** At
-  and above a fixed `H` (the 200k band top), `fleet spawn`/`fleet send` **refuse to start new worker
-  turns** when — and only when — the caller **is the current supervisor claim-holder**. The enforcement
+  and above a fixed `H` (the 200k band top), `fleet spawn`, `fleet send`, `fleet sup-spawn` and
+  **task-bearing** `fleet respawn` **refuse to start new worker turns** when — and only when — the
+  caller **is the current supervisor claim-holder**.
+
+  > **The `--task` discriminator is normative, not an implementation detail** (ratified 2026-07-27,
+  > extending this enumeration to match shipped code as of merge `d969de3`). `fleet respawn` is refused
+  > **only when `--task` is supplied**: `--task` absent is §11.4 *recovery* of an over-band worker and
+  > stays **PERMITTED** over the ceiling; `--task` supplied is §11.3 *new-task dispatch* and is
+  > **REFUSED**. §11.4 independently confirms the carve-out — its worker-arm remedy **is** a bare
+  > respawn, so a uniform refusal would break band doctrine. `sup-spawn` carries no such split: it
+  > always dispatches a new body and is always refused. The enforcement
   reuses B3's rotation-safe resolution: the dispatch verb reads the caller's own
   `CLAUDE_CODE_SESSION_ID` (fresh for the acting body, §11.2 receipt), resolves the caller's live
   transcript, computes the B2-correct occupancy, and refuses above `H`. So "zero new dispatches past
@@ -1450,8 +1459,9 @@ every next task "the current urgent task" and never cross into hand-off. The fix
   > the band now applies to the supervisor **and** to workers (§11, §11.4). The exemption's real and
   > durable basis is **recourse and dispatch**, not tier: (a) the interface is outside fleet's launch
   > surface, so a refusal it cannot escape has no remedy; and (b) workers, who *do* observe the band, are
-  > not refused here either — they do not call `spawn`/`send`, so there is nothing to refuse. Their band is
-  > enforced by respawn at a task boundary (§11.4), not by a dispatch ceiling.
+  > not refused here either — they call none of the refusing verbs, so there is nothing to refuse. Their
+  > band is enforced by respawn at a task boundary (§11.4), not by a dispatch ceiling — and that remedy is
+  > a *bare* respawn, which the `--task` discriminator above deliberately leaves permitted.
   >
   > **Binding for the build:** the refusal predicate is *caller-is-the-supervisor-claim-holder* — the
   > same `CLAUDE_CODE_SESSION_ID` vs `supervisor/INCARNATION` resolution B1 uses for the archive
@@ -1463,16 +1473,21 @@ every next task "the current urgent task" and never cross into hand-off. The fix
 - **Past `H`, what remains is deliberately narrow, and reconcile is READ-ONLY (ND2 fix).** Above the
   ceiling the supervisor may run: the handoff verbs (`sup-handoff-begin` / `-complete` / `-abort`), and
   **read-only** reconciliation of already-dispatched work — `fleet status`, `wait`, `result`, `peek`
-  (outcome/roster reads). It may **not** issue a `fleet send` to "steer an in-flight worker to wrap up":
+  (outcome/roster reads) — and a **bare** `fleet respawn`, which is §11.4 recovery of an over-band or
+  stuck worker rather than new dispatch. It may **not** issue a `fleet send` to "steer an in-flight
+  worker to wrap up":
   that send is a new worker turn and is caught by the very refusal above, so leaving it implicitly
   permitted would have made the carve-out undecidable. Finishing the in-flight wave therefore means
   *letting it finish and reading its outcomes*, not steering it further. (The handoff dispatch itself is
   not caught: `sup-handoff-begin` hand-rolls its own argv and routes through neither `cmd_spawn` nor
-  `dispatch_bg` (§10.1), so a ceiling scoped to `spawn`/`send` cannot deadlock the handoff it exists to
-  force.)
+  `dispatch_bg` (§10.1), so the ceiling — even widened to `sup-spawn` and task-bearing `respawn` — cannot
+  deadlock the handoff it exists to force.)
 
   [BUILT `c6fde34`] (receipt §A2.6) — the ceiling and the identity concept it is gated on both exist:
   `BAND_SOFT_TOKENS`/`BAND_HARD_TOKENS` are module constants and the `spawn`/`send` refusal is live.
+  (That sentence is a claim about `c6fde34` and is left as measured. The refusal was **widened** later:
+  `sup-spawn` at the three-tier build slice and task-bearing `respawn` at merge `d969de3`, which is what
+  the enumeration above now names.)
   Neither existed at this document's pin, and the no-match below is retained as the absence proof it
   was, true at `235421e5` (note it lumps `SUPERVISOR_BODY_NAME` and `sup-context` — both now present
   — with the beat symbols, which are still absent; §A2.8 separates them):
@@ -1539,8 +1554,10 @@ following from what a worker is:
   claim-nonce ritual applies — `fleet respawn` already does exactly this ("same name, cwd, mode; journal
   and drained mailbox carried over" — the shipped context-reset lever) and mints a fresh record
   (§3.5.1's receipt). The worker's continuity lives in its journal and task file, which respawn carries.
-- **Enforcement is by the supervisor, not by a dispatch refusal.** §11.3's ceiling refuses `spawn`/`send`
-  *for the supervisor caller*; a worker calls neither, so there is nothing to refuse. The worker arm is
+- **Enforcement is by the supervisor, not by a dispatch refusal.** §11.3's ceiling refuses `spawn`,
+  `send`, `sup-spawn` and task-bearing `respawn` *for the supervisor caller*; a worker calls none of
+  them, so there is nothing to refuse. The remedy named here is a **bare** respawn, which §11.3's
+  `--task` discriminator leaves permitted over the ceiling precisely so this arm survives it. The worker arm is
   therefore: the worker self-reports occupancy (the same §11.2 `sup-context`-shaped read, which is not
   supervisor-specific — it reads the caller's own transcript), and the **supervisor respawns an
   over-band worker at its next task boundary**. **[PARTLY BUILT — the read shipped; the worker arm is
