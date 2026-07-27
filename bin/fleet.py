@@ -15693,6 +15693,15 @@ def _require_index(root) -> None:
 
 
 def _index_files_arg(root, raw) -> list:
+    """`--files a.py,b/c.md` -> verified rels, or a loud refusal (§6).
+
+    Fix wave C2, second site. `_index_posix_rel` is the shared normaliser, and
+    a path-escape guard added to it later turns the escape into a RAISE that
+    happens one layer earlier than the `rel.startswith("../")` check below --
+    with a different message. That is invisible until it is a merge that
+    changes this verb's user-facing refusal. The escape is normalised back to
+    THIS function's own wording, so `fleet index update --files ../x.py` says
+    the same thing whichever layer catches it."""
     rels = []
     for chunk in str(raw).split(","):
         entry = chunk.strip()
@@ -15706,7 +15715,12 @@ def _index_files_arg(root, raw) -> list:
                 raise FleetCliError(
                     f"--files entry {entry!r} is outside the index root {root}")
         else:
-            rel = _index_posix_rel(entry)
+            try:
+                rel = _index_posix_rel(entry)
+            except (FleetCliError, ValueError) as exc:
+                raise FleetCliError(
+                    f"--files entry {entry!r} is outside the index root "
+                    f"{root} ({exc})") from exc
         if rel == ".." or rel.startswith("../"):
             raise FleetCliError(
                 f"--files entry {entry!r} is outside the index root {root}")
