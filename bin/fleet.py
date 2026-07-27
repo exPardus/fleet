@@ -15830,14 +15830,20 @@ def _q_contained(root, rel) -> bool:
     inside the root but lands outside `symbols/` (`../<root-name>/src/api.py`
     writes into `.fleet-index/` itself, where nothing enumerates or prunes it).
 
-    Attribution, because it bounds what a fix here can be responsible for: the
-    UNLINK half pre-exists at base, guarded only by the lexical
-    `rel == ".." or rel.startswith("../")` in `_index_prune_shard`'s caller --
-    base code, and exactly the test this docstring calls inadequate. The WRITE
-    half is NOT reachable at base: `update_index` guards writes by set
-    membership against `index_source_files`, an `os.walk` enumeration that can
-    only yield clean rels. `q --outline` is the first surface in this tool that
-    can make the index write outside its own root, so that half is this
+    Attribution, because it bounds what a fix here can be responsible for.
+
+    The UNLINK half pre-exists at base and belongs to `idx/core`. Verified
+    rather than assumed: `_index_prune_shard` and its caller in
+    `verified_shard_rows` carry NO containment check of any kind -- the shard
+    path is concatenated and unlinked. The one lexical
+    `rel == ".." or rel.startswith("../")` in this file lives in
+    `_index_files_arg`, which validates `fleet index update --files` and is
+    reached from nowhere else; it never sees a rel from this path.
+
+    The WRITE half is NOT reachable at base: `update_index` guards writes by
+    set membership against `index_source_files`, an `os.walk` enumeration that
+    can only yield clean rels. `q --outline` is the first surface in this tool
+    that can make the index write outside its own root, so that half is this
     slice's, and repairing the primitive would not have covered it.
 
     Resolving also settles symlinks, in the safe direction: a link inside the
