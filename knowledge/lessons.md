@@ -931,16 +931,47 @@ behaviour even is, and a doc that is wrong about the default cannot review a cha
 
 ## 2026-07-27 evening — the fleet stopped for 15h and nobody knew {#2026-07-27-evening-outage}
 
-Found on an operator's "status update": **zero workers running, no claim held, 15 hours**. The last
-supervisor had released *correctly* at 04:00 over the ceiling after three stillborn handoffs — and
-nothing restarted it. Twenty-nine commits of finished work sat unpushed the whole time.
+Found on an operator's "status update": **zero workers running, no claim held**. The last supervisor
+had released *correctly* at 04:00:41Z over the ceiling after three stillborn handoffs — and nothing
+restarted it. Twenty-nine commits of finished work sat unpushed the whole time.
+
+**MEASURE THE OUTAGE BEFORE YOU DRAW THE LESSON FROM IT.** My first report said "~15 hours", read off
+worker staleness. The operator knew a power cut covered part of it, so it got measured against the
+Windows event log (6008 unexpected shutdown, 41 dirty reboot, 6005 log service start) rather than
+inferred:
+
+| window | span |
+|---|---|
+| total dark (release → new claim) | **12h 53m** |
+| power cut (06:10:40Z → 15:25:07Z) | 9h 14m |
+| up-but-stopped A (release 04:00:41Z → shutdown) | **2h 09m** |
+| up-but-stopped B (reboot 15:25:07Z → restart 16:54:06Z) | **1h 28m** |
+| **genuinely uncovered** | **3h 38m** |
+
+The corrected number is *worse* for the design, not better. **3h38m is the part no amount of hardware
+explains** — and window B is the sharper of the two, because the machine came back *healthy* with the
+fleet still dead and nothing anywhere said so.
 
 **THE lesson: a clean shutdown with no reader is indistinguishable from a healthy fleet.** Every
 mechanism worked. The release was clean, the journal entry was excellent, the reason was recorded,
 `sup-status` said `RELEASED` the entire time. **None of it was addressed to anyone.** The statusline
-rendered `sup released` in the same calm white as `sup held` — the outage was *on screen for 15
-hours* and read as a resting state. **A signal nobody is obliged to read is not a signal**, and the
-fix is not more recording: it is making the pull surfaces render an outage AS an outage.
+rendered `sup released` in the same calm white as `sup held` — the outage was *on screen* and read as
+a resting state. **A signal nobody is obliged to read is not a signal**, and the fix is not more
+recording: it is making the pull surfaces render an outage AS an outage.
+
+**FLEET HAS NO POST-REBOOT RESTART PATH, and window B is its receipt.** Durable-sessions-survive-
+reboots was designed and is true of *workers*; nobody ever built the other half, so a box that comes
+back has a full roster and no command tier. This is now a stated requirement on the ratified
+succession build: the signal fires on *claim released-or-absent + GOALS active + no live body*,
+**whatever the cause** — a released claim and a rebooted host must reach the operator by the same
+path, because from the fleet's side they are the same fact.
+
+**The staleness sweep silently skipped the outage too.** `claude-fleet-autoclean` has
+`StartWhenAvailable: False`, so a missed occurrence is dropped rather than run at boot: last run
+02:22Z, the 08:22Z occurrence lost to the power cut, and **no catch-up when the machine returned** —
+next fire 20:22Z, an 18-hour gap in a 6-hourly sweep. Found only because the outage prompted a look.
+**A scheduled guard on a machine that loses power needs `StartWhenAvailable`, or it is a guard that
+stands down exactly when the machine most needs sweeping.**
 
 **Operator's four rulings (evening pass, recorded in `docs/OPERATOR-GATES.md`):** extend §11.3 to name
 task-bearing `respawn` + `sup-spawn` (with a binding *grep-don't-trust-the-line-numbers* condition);
