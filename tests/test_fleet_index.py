@@ -18,7 +18,7 @@ import shutil
 import subprocess
 import threading
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
@@ -1447,6 +1447,186 @@ class TestPathContainment:
         assert "outside" in capsys.readouterr().err
         assert precious.is_file()
 
+    # --- the non-relative half: no `..` anywhere, escapes anyway ------------
+
+    @pytest.mark.parametrize("rel", [
+        "C:/victim/precious.tsv",       # drive-qualified, forward slashes
+        "C:\\victim\\precious.tsv",     # drive-qualified, the win32 spelling
+        "C:precious.tsv",               # drive-RELATIVE: is_absolute() is False
+        "Z:/anywhere/x.py",
+    ])
+    def test_a_rel_that_is_not_relative_is_refused(self, rel):
+        # None of these carries a `..`, so the `..` guard returned every one of
+        # them unchanged -- and `root / rel` is a JOIN, which pathlib resolves
+        # by REPLACING when the right-hand side is drive-qualified. Measured
+        # before the fix: a file outside the root overwritten with shard bytes.
+        with pytest.raises(fleet.IndexPathError):
+            fleet._index_posix_rel(rel)
+
+    def test_the_drive_relative_shape_is_why_is_absolute_is_the_wrong_test(self):
+        # This is the whole reason the guard asks `drive or root` rather than
+        # `is_absolute()`. Both assertions are the measurement, in-line: the
+        # shape is NOT absolute, and it still replaces a root on another drive.
+        assert PureWindowsPath("C:x.py").is_absolute() is False
+        assert str(PureWindowsPath("D:/root") / "C:x.py") == "C:x.py"
+        with pytest.raises(fleet.IndexPathError):
+            fleet._index_posix_rel("C:x.py")
+
+    def test_a_posix_absolute_and_a_unc_path_are_flattened_not_escapes(self):
+        # The counterweight: the empty-segment filter already neutralises a
+        # leading `/`, and a UNC spelling loses its `//` the same way. Both are
+        # ordinary relative rels afterwards, and refusing them would be a
+        # behaviour change nothing measured asks for.
+        assert fleet._index_posix_rel("/etc/passwd") == "etc/passwd"
+        assert fleet._index_posix_rel("//server/share/x.py") == "server/share/x.py"
+
+    def test_the_choke_point_refuses_a_drive_qualified_rel_and_writes_nothing(
+            self, tmp_path):
+        root = _indexed_tree(tmp_path, {"a.py": "X = 1\n"})
+        victim_dir, precious = _victim(tmp_path)
+        # The attack aims the choke point at a REAL source file outside the
+        # root; before the fix it came back `status: ok` with that file's
+        # symbols and left a shard next to it.
+        outside = victim_dir / "secret.py"
+        _write(outside, "def leaked_symbol():\n    pass\n")
+        with pytest.raises(fleet.IndexPathError):
+            fleet.verified_shard_rows(root, outside.as_posix())
+        assert not Path(str(outside) + fleet.INDEX_SHARD_SUFFIX).exists()
+        assert precious.read_bytes() == b"do not delete\n"
+
+    def test_a_drive_qualified_rel_cannot_overwrite_a_file_outside_the_root(
+            self, tmp_path):
+        # The write half, stated as the thing an operator actually loses: an
+        # arbitrary pre-existing file, clobbered with TSV. `precious.tsv` is
+        # already named so that `<victim>/precious` + the shard suffix lands
+        # exactly on it.
+        root = _indexed_tree(tmp_path, {"a.py": "X = 1\n"})
+        victim_dir, precious = _victim(tmp_path)
+        _write(victim_dir / "precious", "def clobber_me():\n    pass\n")
+        with pytest.raises(fleet.IndexPathError):
+            fleet.verified_shard_rows(root, (victim_dir / "precious").as_posix())
+        assert precious.read_bytes() == b"do not delete\n"
+
+    def test_the_update_library_surface_refuses_a_drive_qualified_rel(
+            self, tmp_path):
+        root = _indexed_tree(tmp_path, {"a.py": "X = 1\n"})
+        victim_dir, precious = _victim(tmp_path)
+        with pytest.raises(fleet.IndexPathError):
+            fleet.update_index(root, [(victim_dir / "precious").as_posix()])
+        assert precious.read_bytes() == b"do not delete\n"
+
+    # --- the reparse-point half: ordinary segments, real link ---------------
+
+    def test_the_choke_point_does_not_serve_a_file_through_a_junction(
+            self, tmp_path):
+        # `link/secret.py` carries no `..` and no drive, so no string guard can
+        # see it. The BUILD walk has fenced this shape since wave 2; measured
+        # before this fix, the choke point in between had not, and answered
+        # `status: ok` with `leaked_symbol` for a file outside the root.
+        root = _indexed_tree(tmp_path, {"a.py": "X = 1\n"})
+        victim_dir, _precious = _victim(tmp_path)
+        _write(victim_dir / "secret.py", "def leaked_symbol():\n    pass\n")
+        if not _link_dir(root / "link", victim_dir):
+            pytest.skip("this platform will not create a directory reparse point")
+        # The link really does reach the file -- otherwise this pin is vacuous.
+        assert (root / "link" / "secret.py").is_file()
+        with pytest.raises(fleet.IndexPathError):
+            fleet.verified_shard_rows(root, "link/secret.py")
+        assert not fleet.shard_path_for_source(root, "link/secret.py").exists()
+
+    def test_the_write_choke_point_does_not_index_through_a_junction(
+            self, tmp_path):
+        root = _indexed_tree(tmp_path, {"a.py": "X = 1\n"})
+        victim_dir, _precious = _victim(tmp_path)
+        _write(victim_dir / "secret.py", "def leaked_symbol():\n    pass\n")
+        if not _link_dir(root / "link", victim_dir):
+            pytest.skip("this platform will not create a directory reparse point")
+        report = fleet._new_index_report()
+        with pytest.raises(fleet.IndexPathError):
+            fleet._index_refresh_one(root, "link/secret.py", False, None, report)
+        assert report["indexed"] == 0
+
+    def test_a_junctioned_mirror_directory_does_not_take_the_WRITE_either(
+            self, tmp_path):
+        # The prune half of this shape has been guarded since wave 2; the write
+        # half had not. A junction inside the shard tree turns "may write in
+        # `.fleet-index/`" into "may overwrite any file on this machine", so
+        # both halves of the one rule are pinned side by side.
+        root = _indexed_tree(tmp_path, {"a.py": "X = 1\n"})
+        victim_dir, precious = _victim(tmp_path)
+        symbols = fleet.index_symbols_dir(root)
+        symbols.mkdir(parents=True, exist_ok=True)
+        if not _link_dir(symbols / "sub", victim_dir):
+            pytest.skip("this platform will not create a directory reparse point")
+        _write(root / "sub" / "precious", "def clobber_me():\n    pass\n")
+        assert (symbols / "sub" / "precious.tsv").read_bytes() == b"do not delete\n"
+        with pytest.raises(fleet.IndexPathError):
+            fleet.verified_shard_rows(root, "sub/precious")
+        assert precious.read_bytes() == b"do not delete\n"
+
+    def test_the_root_itself_is_not_a_source_file(self, tmp_path):
+        # The guard is "strictly inside", so the empty rel -- which canonicalises
+        # to `""` and joins to the root, a directory -- is refused outright
+        # rather than admitted by an `==` arm and left to fail later as an
+        # unreadable source.
+        root = _indexed_tree(tmp_path, {"a.py": "X = 1\n"})
+        with pytest.raises(fleet.IndexPathError):
+            fleet.verified_shard_rows(root, "")
+        with pytest.raises(fleet.IndexPathError):
+            fleet.verified_shard_rows(root, "./")
+
+    def test_a_root_reached_THROUGH_a_link_still_contains_its_own_files(
+            self, tmp_path):
+        # Why the guard resolves BOTH sides and not just the candidate. A root
+        # reached through a link is ordinary -- a substed drive, a `/tmp`
+        # symlink, this fleet's own worktrees -- and resolving only the
+        # candidate makes every file in such a root look like an escape, which
+        # is an index that refuses to index. The attack pins above cannot see
+        # this direction; only this one can.
+        real_root = _indexed_tree(tmp_path, {"a.py": "def f():\n    pass\n"})
+        via = tmp_path / "via"
+        if not _link_dir(via, real_root):
+            pytest.skip("this platform will not create a directory reparse point")
+        got = fleet.verified_shard_rows(via, "a.py")
+        assert got["status"] == "ok"
+        assert [row[0] for row in got["rows"]] == ["f"]
+
+    def test_an_ordinary_tree_still_passes_both_guards(self, tmp_path):
+        # The containment guards must not turn into an index that indexes
+        # nothing. A deep, entirely ordinary rel still goes all the way through.
+        root = _indexed_tree(tmp_path, {"deep/er/a.py": "def f():\n    pass\n"})
+        got = fleet.verified_shard_rows(root, "deep/er/a.py")
+        assert got["status"] == "ok" and got["written"] is True
+        assert [row[0] for row in got["rows"]] == ["f"]
+        assert fleet.shard_path_for_source(root, "deep/er/a.py").is_file()
+
+    # --- the claim itself ---------------------------------------------------
+
+    def test_every_caller_supplied_rel_is_canonicalised_before_it_is_used(
+            self, tmp_path):
+        # The MAJOR: `_index_posix_rel` was documented as "the one function
+        # every index path passes through" while `update_index` and
+        # `_index_refresh_one` both took a caller rel BEFORE canonicalisation.
+        # Benign then, load-bearing always. These are the same file named three
+        # ways; each must reach the shard the canonical rel names.
+        root = _indexed_tree(tmp_path, {"deep/a.py": "X = 1\n"})
+        shard = fleet.shard_path_for_source(root, "deep/a.py")
+        for spelling in ("./deep/a.py", "deep\\a.py", "deep/./a.py"):
+            if shard.exists():
+                shard.unlink()
+            report = fleet.update_index(root, [spelling], force=True)
+            assert report["indexed"] == 1, spelling
+            assert report["indexed_rels"] == ["deep/a.py"], spelling
+            assert shard.is_file(), spelling
+
+    def test_the_refresh_primitive_canonicalises_its_own_argument(self, tmp_path):
+        # Reached directly, with no `update_index` in front of it.
+        root = _indexed_tree(tmp_path, {"deep/a.py": "X = 1\n"})
+        report = fleet._new_index_report()
+        fleet._index_refresh_one(root, "deep\\a.py", True, None, report)
+        assert report["indexed_rels"] == ["deep/a.py"]
+        assert fleet.shard_path_for_source(root, "deep/a.py").is_file()
+
     def test_a_junctioned_mirror_directory_is_not_pruned_through(self, tmp_path):
         # The second half of the same defect, and the half a `..` check cannot
         # reach: `stop in current.parents` is a comparison of SPELLINGS. A
@@ -1834,6 +2014,62 @@ class TestAWorktreeStaysRemovableAfterInit:
 # §6/§9 -- a build that could not index a file does not exit 0
 # ---------------------------------------------------------------------------
 
+class TestReparsePointPredicate:
+    """`_index_is_reparse_point`'s two stated invariants, which the wave that
+    introduced it left unpinned."""
+
+    def test_a_junction_answers_true_even_though_islink_says_no(self, tmp_path):
+        # The invariant the whole predicate exists for: a `mklink /J` junction
+        # carries IO_REPARSE_TAG_MOUNT_POINT, not the symlink tag, so
+        # `os.path.islink` is False and `os.walk` descends it happily. The
+        # assertion is the CONJUNCTION -- on a platform that made a real
+        # symlink instead, `islink` is True and the pin would be vacuous, so
+        # that case is skipped rather than silently counted as evidence.
+        target = tmp_path / "target"
+        target.mkdir()
+        link = tmp_path / "link"
+        if not _link_dir(link, target):
+            pytest.skip("this platform will not create a directory reparse point")
+        if os.path.islink(str(link)):
+            pytest.skip("this platform made a symlink, not a junction -- the "
+                        "islink-is-False half is unreachable here")
+        assert os.path.islink(str(link)) is False
+        assert fleet._index_is_reparse_point(link) is True
+
+    def test_a_symlink_answers_true_where_one_can_be_made(self, tmp_path):
+        target = tmp_path / "target"
+        target.mkdir()
+        link = tmp_path / "link"
+        if not _link_dir(link, target) or not os.path.islink(str(link)):
+            pytest.skip("this platform will not create a symlink unprivileged")
+        assert fleet._index_is_reparse_point(link) is True
+
+    def test_an_unstattable_entry_answers_true(self, tmp_path, monkeypatch):
+        # The stated fallback: "the index has nothing to gain by descending
+        # something it cannot even inspect." Answering False here would open
+        # the fence on any entry whose lstat raises -- exactly the entries
+        # least worth trusting.
+        ordinary = _write(tmp_path / "a.py", "X = 1\n")
+        assert fleet._index_is_reparse_point(ordinary) is False
+
+        def _boom(_path):
+            raise OSError(13, "permission denied")
+
+        monkeypatch.setattr(fleet.os, "lstat", _boom)
+        assert fleet._index_is_reparse_point(ordinary) is True
+
+    def test_a_missing_entry_answers_true_through_the_same_arm(self, tmp_path):
+        assert fleet._index_is_reparse_point(tmp_path / "nope") is True
+
+    def test_an_ordinary_file_and_directory_answer_false(self, tmp_path):
+        # The counterweight: a predicate that answered True for everything
+        # would pass every attack pin above and index nothing at all.
+        (tmp_path / "d").mkdir()
+        _write(tmp_path / "d" / "a.py", "X = 1\n")
+        assert fleet._index_is_reparse_point(tmp_path / "d") is False
+        assert fleet._index_is_reparse_point(tmp_path / "d" / "a.py") is False
+
+
 class TestIndexExitCodes:
     def test_build_exits_nonzero_when_a_file_failed(
             self, tmp_path, capsys, monkeypatch):
@@ -1841,7 +2077,8 @@ class TestIndexExitCodes:
         fleet.main(["index", "init", "--path", str(root)])
         monkeypatch.setattr(fleet, "write_shard_atomic", lambda *a, **kw: False)
         capsys.readouterr()
-        assert fleet.main(["index", "build", "--path", str(root), "--force"]) == 1
+        assert fleet.main(["index", "build", "--path", str(root), "--force"]) \
+            == fleet.INDEX_FAILED_RC
         assert "failed 1" in capsys.readouterr().out
 
     def test_update_exits_nonzero_when_a_file_failed(
@@ -1852,19 +2089,82 @@ class TestIndexExitCodes:
         _write(root / "a.py", "X = 2\n")
         capsys.readouterr()
         assert fleet.main(
-            ["index", "update", "--path", str(root), "--files", "a.py"]) == 1
+            ["index", "update", "--path", str(root), "--files", "a.py"]) \
+            == fleet.INDEX_FAILED_RC
 
     def test_init_exits_nonzero_when_its_first_build_failed(
             self, tmp_path, capsys, monkeypatch):
         root = _project(tmp_path, {"a.py": "X = 1\n"})
         monkeypatch.setattr(fleet, "write_shard_atomic", lambda *a, **kw: False)
         capsys.readouterr()
-        assert fleet.main(["index", "init", "--path", str(root)]) == 1
+        assert fleet.main(["index", "init", "--path", str(root)]) \
+            == fleet.INDEX_FAILED_RC
 
     def test_a_clean_run_still_exits_zero(self, tmp_path):
         root = _project(tmp_path, {"a.py": "X = 1\n"})
         assert fleet.main(["index", "init", "--path", str(root)]) == 0
         assert fleet.main(["index", "build", "--path", str(root)]) == 0
+
+    def test_a_mixed_run_indexes_what_it_can_and_still_exits_failed(
+            self, tmp_path, capsys, monkeypatch):
+        # N15. The three tests above monkeypatch `write_shard_atomic` to False
+        # UNCONDITIONALLY, so every file fails and the interesting case -- some
+        # indexed, some failed -- was never exercised. A `return 0 if
+        # report["indexed"] else RC` would have passed all three.
+        root = _project(tmp_path, {"good.py": "X = 1\n", "bad.py": "Y = 2\n"})
+        fleet.main(["index", "init", "--path", str(root)])
+        stale = fleet.shard_path_for_source(root, "bad.py").read_bytes()
+        _write(root / "good.py", "def moved():\n    pass\n")
+        _write(root / "bad.py", "def never_lands():\n    pass\n")
+        real = fleet.write_shard_atomic
+
+        def _fail_only_bad(shard, header, rows, **kw):
+            if Path(shard).name.startswith("bad.py"):
+                return False
+            return real(shard, header, rows, **kw)
+
+        monkeypatch.setattr(fleet, "write_shard_atomic", _fail_only_bad)
+        capsys.readouterr()
+        rc = fleet.main(["index", "build", "--path", str(root)])
+        out = capsys.readouterr()
+        assert "indexed 1" in out.out and "failed 1" in out.out
+        assert rc == fleet.INDEX_FAILED_RC
+        # The half that succeeded really did land -- a run that failed CLOSED
+        # and wrote nothing would also satisfy the exit code.
+        assert b"moved" in fleet.shard_path_for_source(root, "good.py").read_bytes()
+        # And the half that failed is left STALE, not torn: the §6 contract the
+        # warning states in words ("the old shard is left in place").
+        assert fleet.shard_path_for_source(root, "bad.py").read_bytes() == stale
+
+    def test_a_partial_failure_does_not_wear_a_refusal_s_exit_code(
+            self, tmp_path, capsys, monkeypatch):
+        # The collision MIN-c introduced. `main()` collapses every
+        # `FleetCliError` to 1, and `failed > 0` returned 1 too, so a caller
+        # could not tell "nothing was indexed, run `init`" from "the index is
+        # there and three files need a retry". Both states, side by side.
+        root = _project(tmp_path, {"a.py": "X = 1\n"})
+        capsys.readouterr()
+        refusal = fleet.main(["index", "build", "--path", str(root)])
+        assert refusal == 1
+        assert fleet.INDEX_NO_INDEX_MESSAGE in capsys.readouterr().err
+
+        fleet.main(["index", "init", "--path", str(root)])
+        monkeypatch.setattr(fleet, "write_shard_atomic", lambda *a, **kw: False)
+        capsys.readouterr()
+        partial = fleet.main(["index", "build", "--path", str(root), "--force"])
+        assert partial == fleet.INDEX_FAILED_RC
+        assert partial != refusal
+
+    def test_the_index_failure_code_collides_with_no_other_fleet_exit_code(self):
+        # A new code is only worth having if it stays distinct. These are every
+        # non-zero code the CLI already publishes.
+        taken = {1,                                        # generic FleetCliError
+                 2, 3,                                     # SupervisorLifecycleRefusal
+                 fleet.SUPERVISOR_CONTINUITY_RC,
+                 fleet.SUPERVISOR_BOOT_HANDOFF_REFUSED_RC,
+                 *fleet.SUPERVISOR_BOOT_RC.values()}
+        assert fleet.INDEX_FAILED_RC not in taken
+        assert fleet.INDEX_FAILED_RC != 0
 
 
 # ---------------------------------------------------------------------------
