@@ -212,6 +212,20 @@ claim before the session ends**: `fleet sup-release --nonce <value>
 boot (`claim`, no seizure, no page), which is what distinguishes an authorized
 stop from a daemon restart. There is deliberately no `--force` release.
 
+**You can complete your own stand-down now, and you could not before.**
+`sup-release` also tombstones YOUR OWN registry record (`status: dead`, the same
+mark `kill` writes), so the released-claim refusal — which keys on whether the
+releasing body is still live — does not arm against you. The successor's
+`sup-boot` claims immediately; nobody has to stop your session first, which used
+to be a step that lived outside the fleet and is where every unproven handoff
+died. Only your own record is ever touched: the target is whatever the registry
+resolves YOUR sid to, so a release can never retire another body.
+
+Still stop your session after releasing — you are told to EXIT and you should —
+but succession no longer waits on it. If `sup-release` prints that it could
+*not* tombstone (unreadable registry, ambiguous identity), the old rule is back
+for that one release: the operator must stop the body before a successor boots.
+
 If a body is *already* gone and could not release itself, the shape resolves
 on its own: roster-gone plus a heartbeat aged past one hour becomes `seize`.
 Below that hour it is `freeze` — page the operator. **The only manual lever is

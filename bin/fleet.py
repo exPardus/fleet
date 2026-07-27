@@ -11404,9 +11404,68 @@ def _registry_records_or_none():
     return data if ok else None
 
 
+def _releaser_body_is_tombstoned(released_by, registry) -> bool:
+    """True iff fleet itself has RETIRED the body that released the claim --
+    i.e. every registry record carrying `released_by` is tombstoned.
+
+    THE POINT OF THE WHOLE SLICE. `sup-release` tombstones the releasing body's
+    own record (`_tombstone_releasing_body`), so `_releaser_live_sids` below is
+    false BY CONSTRUCTION for the body that just released and the succession
+    recipe loses its out-of-fleet middle step ("the interface stops the retired
+    body so its sid leaves the roster"). Every unproven handoff this project has
+    had died at a step that lives outside the fleet.
+
+    WHY THIS IS NOT AN ATTESTATION, which is the retired road (`--interface`,
+    `fix/b6-interface-release` @ `2e824ea`, ruled dead 4-0 on 2026-07-27).
+    Ratified doctrine (§17): *"inference may select the SUBJECT of a
+    measurement, but may not supply the GROUNDS of a refusal"* -- because a
+    flag by which a caller swears something about itself can only ever be
+    ADDED by an adversary, never withheld, so its presence proves nothing.
+    A tombstone is a different KIND of fact: nothing the caller SAID, but a
+    state change fleet performed under the lock, on the record fleet resolved
+    from continuity the caller had already proven. This function reads no field
+    the caller could have supplied -- not the claim, only the registry.
+
+    IT IS THE SAME SPELLING §10.4 ALREADY USES and deliberately not a new one.
+    `_cmd_kill_native` flips `status` to `"dead"`; `_record_is_live`
+    is the predicate that reads it and `archived_at` both. Two spellings of one
+    state is how this repo grows the defects it later names, so the disarm keys
+    on the predicate rather than on a field of its own.
+
+    RESOLVES TOWARD THE GATE, exactly as the union arm below does. A record must
+    CARRY the sid for its tombstone to count (`bool(carriers)`), so a fleet in
+    which some unrelated worker was killed does not disarm B6 fleet-wide; and if
+    a drifted registry has several carriers, ONE live carrier keeps the gate
+    armed. `registry=None` -- unreadable, or a caller that has none -- answers
+    False: a tombstone fleet cannot SEE is never ASSUMED, which leaves the
+    refusal standing, the abstaining direction.
+
+    Keyed on the sid UNION through `_record_sids`, for the reason
+    `_releaser_is_roster_live` states at length: a fork-steered releaser proves
+    continuity under its post-fork sid while INCARNATION still carries the
+    pre-fork one, and the bare `session_id` fails open on exactly that window
+    (ND4a). Without the union here, the one case ND4a exists for would be the
+    one case that still needed the manual step."""
+    if not isinstance(registry, dict):
+        return False
+    workers = registry.get("workers")
+    if not isinstance(workers, dict):
+        return False
+    carriers = [rec for rec in workers.values()
+                if released_by in _record_sids(rec)]
+    return bool(carriers) and not any(_record_is_live(rec) for rec in carriers)
+
+
 def _releaser_live_sids(claim, live_sids: set, registry=None) -> set:
     """THE WEDGED STATE as a SET: every roster-live sid that answers for the
     body which released this claim. An EMPTY set means "not wedged".
+
+    THE TOMBSTONE ARM RUNS FIRST AND DOMINATES THE ROSTER
+    (`_releaser_body_is_tombstoned`, whose docstring holds the argument). A body
+    whose registry record fleet has retired is not a live releaser however long
+    its session lingers in `claude agents` -- `sup-release` never runs `claude
+    stop`, so the roster cannot be the thing that changes. This is the one arm
+    that makes a supervisor able to complete its own stand-down.
 
     This is the comparison itself; `_releaser_is_roster_live` below is its
     boolean spelling and the name §6.1 row 1 and §7.2 both cite. It hands back
@@ -11466,6 +11525,8 @@ def _releaser_live_sids(claim, live_sids: set, registry=None) -> set:
     released_by = claim.get("released_by_sid")
     if not isinstance(released_by, str) or not released_by:
         return set()
+    if _releaser_body_is_tombstoned(released_by, registry):
+        return set()            # fleet retired that body: not a live releaser
     if released_by in live_sids:
         return {released_by}
     if not isinstance(registry, dict):
@@ -11536,7 +11597,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
     writer appends that record's OWN prior sid alone: :5028, :5475, :9525,
-    :14084), the same safety invariant §7.1's send carve-out rests on. That
+    :14267), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -12181,7 +12242,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
     #     writer appends that record's OWN prior sid alone (:5028, :5475, :9525,
-    #     :14084) -- so the sid union can never make one body answer for another.
+    #     :14267) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -12796,6 +12857,98 @@ def cmd_sup_heartbeat(args) -> int:
     return 0
 
 
+def _tombstone_releasing_body(caller: str, inc: str):
+    """Retire the RELEASING BODY'S OWN registry record. Returns the name it
+    tombstoned, or None when it declined to. CALLER MUST HOLD `fleet_lock`, and
+    must already have committed the released claim -- see the ORDER note in
+    `cmd_sup_release`.
+
+    ONLY ITS OWN RECORD, AND ONLY ITS OWN, and that is structural rather than
+    checked: the target is whatever `_acting_worker_identity` resolves the
+    CALLER'S OWN sid to, through the same sid union (`_record_sids`) every other
+    identity question in this file uses. No name is taken from the caller and no
+    record is searched for by shape, so there is no input by which a release
+    could be aimed at another body's record. The safety property is the one the
+    `retired_sids` invariant rests on -- no foreign sid ever enters another
+    record's state -- and it holds here for the same reason: the only sid
+    consulted is the one continuity was proven with.
+
+    IT ABSTAINS RATHER THAN GUESSING, on all three of identity's non-answers:
+
+      * UNRESOLVED -- no record carries this sid. That is *"I am not a
+        fleet-launched body"* (the interface tier, a human shell), and it is not
+        an error: such a body is not in the roster either, so nothing was ever
+        wedged by it. Nothing to tombstone, nothing to say.
+      * AMBIGUOUS -- two or more records carry it, which is itself a leak
+        signature. The first match is NOT silently taken; guessing here would
+        tombstone some other body's record, the one thing this must never do.
+      * a registry that will not read -- the release is ALREADY COMMITTED by the
+        time this runs, so an unreadable registry must not make `sup-release`
+        report failure. It degrades to the pre-slice behaviour and says so: B6
+        stays armed until the body leaves the roster, i.e. the manual step is
+        back for this one release.
+
+    THE READ IS `_read_registry_readonly`, NEVER `load_registry`, and the first
+    draft of this function got that wrong -- caught by
+    `tests/test_identity_fixwave.py::TestNoSupervisorVerbQuarantinesTheRegistry`,
+    which parametrizes `sup-release` and byte-compares the file. `load_registry`
+    QUARANTINES a corrupt registry: it renames `state/fleet.json` aside, which is
+    a WRITE, and it would have happened on a path the operator reached by
+    standing a supervisor down. That is the exact recurring class
+    `tests/test_load_registry_callers.py` was built to stop, on its eighth
+    sighting. The write below is reached ONLY on `ok`, so F2 -- *"never silently
+    degrade to an empty registry; a later `save_registry()` would overwrite live
+    worker records with nothing"* -- cannot fire either: an unreadable registry
+    abstains before anything is saved. `{"workers": ...}` is the whole top-level
+    schema (SPEC §4), so round-tripping through this read drops no sibling key.
+
+    THE WRITE IS §10.4's, NOT A NEW ONE: `status = "dead"`, the same field and
+    literal `_cmd_kill_native` writes, read by the same `_record_is_live`.
+    Cited by NAME and not by line: a bare pointer nobody re-derives is this
+    repo's named recurring defect, and the claim that the two sites are one
+    spelling is pinned behaviourally instead
+    (`test_the_release_tombstone_and_the_kill_tombstone_are_one_predicate`). `status_changed` is likewise the existing event kind
+    every other status writer in this file uses -- a registry flip with no event
+    is an audit hole, and a NEW event kind for this one would be a second
+    spelling of a transition that already has one.
+
+    NO STOP OUTCOME IS WRITTEN, deliberately. `write_tombstone_outcome`'s kinds
+    (`killed`/`interrupted`/`stopped`) all assert that fleet ENDED the session;
+    `sup-release` runs no `claude stop` -- the body is told to exit itself -- so
+    writing one would be a receipt for something that did not happen. The
+    supervisor journal's `RELEASED` entry is the durable record of WHY."""
+    ok, reason, data = _read_registry_readonly()
+    if not ok:
+        if reason != "not_initialized":
+            print(f"fleet: sup-release: registry {reason} -- the releasing body's own "
+                  f"record could NOT be tombstoned (and was NOT quarantined). Claim "
+                  f"{inc} IS released; until this session leaves the roster a "
+                  f"successor `sup-boot` still refuses (B6). Run `fleet doctor`, "
+                  f"then stop this session.", file=sys.stderr)
+        return None
+    ident = _acting_worker_identity(sid=caller, registry=data)
+    if ident["verdict"] == IDENTITY_AMBIGUOUS:
+        print(f"fleet: sup-release: registry identity is AMBIGUOUS for sid {caller} "
+              f"({', '.join(ident['candidates'])}) -- NOT tombstoning any of them, "
+              f"because guessing would retire another body's record. Claim {inc} IS "
+              f"released; a successor `sup-boot` refuses until this session leaves "
+              f"the roster. Run `fleet doctor`.", file=sys.stderr)
+        return None
+    if ident["verdict"] != IDENTITY_RESOLVED:
+        return None                     # not a fleet-launched body: nothing to retire
+    name = ident["name"]
+    rec = data["workers"].get(name)
+    if not isinstance(rec, dict):
+        return None
+    if not _record_is_live(rec):
+        return name                     # already a tombstone -- never re-stamp one
+    old = rec.get("status")
+    rec["status"] = "dead"
+    save_registry(data)
+    append_event("status_changed", name, old=old, new="dead")
+    return name
+
+
 def cmd_sup_release(args) -> int:
     """`fleet sup-release [--reason TEXT] [--nonce N] [--sid S]` -- claim-nonce
     §6.3 / D3. The verb that produces a RELEASED claim.
@@ -12822,9 +12975,34 @@ def cmd_sup_release(args) -> int:
     be dead on delivery -- and it would be the only `NONCE:` line a supervisor
     ever reads that it must not present.
 
+    IT ALSO TOMBSTONES ITS OWN BODY'S REGISTRY RECORD, and that is what lets a
+    supervisor complete its own stand-down. Before this, `sup-release` left the
+    releasing body in the registry and the roster, so B6 saw a LIVE RELEASER and
+    refused the next `sup-boot`: the succession recipe had a middle step that
+    lived outside the fleet ("the interface stops the retired body"), and every
+    unproven handoff this project has had died at a step outside the fleet. With
+    the tombstone, `_releaser_live_sids` is false BY CONSTRUCTION for the body
+    that just released. See `_tombstone_releasing_body` for own-record-only and
+    `_releaser_body_is_tombstoned` for why this is not the retired `--interface`
+    attestation.
+
+    ORDER IS LOAD-BEARING AND IT IS RELEASE-THEN-TOMBSTONE. These are two state
+    changes, so name what a death between them leaves. THIS order leaves
+    `released` + a live untombstoned releaser -- precisely today's B6 refusal,
+    which is the ABSTAINING state and self-heals the moment that session exits
+    the roster. The reverse order would leave a HELD claim owned by a record
+    fleet had already retired: the frozen-claim shape that no in-fleet verb can
+    clear. A half-released claim must fail toward refusal, never toward a free
+    claim, and the ordering is the whole of that guarantee -- there is no
+    two-write transaction here to lean on.
+
+    BOTH WRITES COMMIT INSIDE ONE `fleet_lock` SECTION, so no concurrent verb
+    ever observes the intermediate state; only a process death can.
+
     Doctrine (`skills/fleet/supervisor.md`): release, THEN stop. The window
     between the two commands is real, which is why §6.1 rule 1 refuses to
-    consume a released record whose releaser is still roster-live (B6)."""
+    consume a released record whose releaser is still roster-live (B6) -- and
+    why the tombstone above closes it from inside the fleet instead."""
     with fleet_lock():
         claim, caller, _ = _require_claim_holder(
             getattr(args, "sid", None), nonce=getattr(args, "nonce", None),
@@ -12847,9 +13025,14 @@ def cmd_sup_release(args) -> int:
         if reason:
             released["reason"] = reason
         write_incarnation(released)
+        # AFTER the claim write, never before -- see the ORDER note above.
+        retired = _tombstone_releasing_body(caller, inc)
+    tail = (f"This body's registry record ({retired}) is tombstoned, so the next "
+            f"`fleet sup-boot` claims immediately -- nobody has to stop this "
+            f"session first." if retired else
+            f"The next body claims fresh via `fleet sup-boot` (no seizure, no page).")
     print(f"claim {inc} released. Nothing holds the supervisor claim now -- this "
-          f"incarnation must EXIT: take no further fleet actions. The next body "
-          f"claims fresh via `fleet sup-boot` (no seizure, no page).")
+          f"incarnation must EXIT: take no further fleet actions. {tail}")
     return 0
 
 
