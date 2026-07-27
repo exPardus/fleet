@@ -75,6 +75,9 @@ RECEIPT_FLOOR = {
     "claim-nonce.md": 59,
     "three-tier-command.md": 39,
     "native-substrate.md": 6,
+    # Joined the enforced set in the 2026-07-27 `unbuilt-sweep` pass (see
+    # UNENFORCED below). Floor is the count the harness extracts today.
+    "autoclean.md": 6,
 }
 
 # A commit whose bin/fleet.py predates the me/ul + me/daemon merges, used by the
@@ -107,7 +110,11 @@ UNENFORCED = {
     # -- it lives outside the repo and a `--bg` worker cannot reproduce it -- and
     # the three dead-daemon `RATIFICATION WITHHELD` strings are deliberately NOT
     # receipted (no honest reproduction exists; see that spec's receipts section).
-    "autoclean.md": "predates the convention; no fenced receipts.",
+    # autoclean.md was ENFORCED by the 2026-07-27 `unbuilt-sweep` pass: correcting
+    # its stale `ready-for-build` status line to BUILT required a grep receipt for
+    # the claim, so it gained a "Build receipt" section with pinned blocks and left
+    # this list. `test_every_spec_is_classified`'s `stale` assertion is what names
+    # this edit as the remedy -- a spec that grows receipts must not stay listed.
     "terminal-surface.md": "predates the convention; no fenced receipts.",
     "providers.md": "predates the convention; no fenced receipts.",
     "phase1-hardening-kernels.md": "predates the convention; no fenced receipts.",
