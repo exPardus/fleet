@@ -427,6 +427,46 @@ class TestOutputFormat:
         assert out == "src/api.py:6-9\tfunc\talpha\t(x: int) -> str\n"
         assert "src/api.py" in err
 
+    def test_the_same_row_against_a_REAL_unreadable_file(
+            self, proj, monkeypatch, capsys):
+        # The test above REPLACES `_q_source_lines`, so it pins the caller's
+        # handling and nothing about the function itself. Measured: injecting
+        # `except OSError: return []` into the real `_q_source_lines` left the
+        # whole suite GREEN -- §11.5's unreadable-source row had no test that
+        # touched the real read at all. This one does.
+        #
+        # The seam is `_q_pointer`, and it is used ONLY as a clock: it is the
+        # last thing `_q_print_slice` does before reading the file, so
+        # swapping the source out there reproduces §11.5's actual timing
+        # ("readable when the header was hashed, unreadable by the time the
+        # slice was read") while leaving the function under test REAL. A
+        # directory in the file's slot is the portable way to be unreadable --
+        # `IsADirectoryError` on POSIX, `PermissionError` on win32, `OSError`
+        # on both -- with no permission bits to restore afterwards.
+        real_pointer = fleet._q_pointer
+        target = proj / "src" / "api.py"
+
+        def swap_then_format(hit):
+            if target.is_file():
+                target.unlink()
+                target.mkdir()
+            return real_pointer(hit)
+
+        monkeypatch.setattr(fleet, "_q_pointer", swap_then_format)
+        rc, out, err = _run(capsys, "alpha", "--src", "--path", "src/api.py")
+        assert rc == 0                       # a hit WAS printed
+        assert out == "src/api.py:6-9\tfunc\talpha\t(x: int) -> str\n"
+        assert "src/api.py: source unreadable at slice time" in err
+        assert "pointer only, no slice" in err
+
+    def test_q_source_lines_really_raises_on_an_unreadable_path(self, proj):
+        # And the primitive itself, with no CLI around it: the `except OSError`
+        # in `_q_print_slice` is only a contract if this actually raises.
+        with pytest.raises(OSError):
+            fleet._q_source_lines(proj / "src")            # a directory
+        with pytest.raises(OSError):
+            fleet._q_source_lines(proj / "no" / "such" / "file.py")
+
 
 class TestOutputCap:
     """§11.4's 400-line cap, its exact trailer, and its unchanged exit code."""
@@ -474,6 +514,44 @@ class TestOutputCap:
         assert len(lines) == fleet.Q_OUTPUT_LINE_CAP + 1
         assert lines[0] == "## many.py (500 lines, python)"
         assert lines[-1] == "[truncated 101 lines — narrow the query]"
+
+    def test_the_two_capped_paths_disagree_about_the_identity_line(
+            self, tmp_path, monkeypatch, capsys):
+        """The cap admits a different amount of PAYLOAD on each path.
+
+        `--src` prints its pointer OUTSIDE `_q_print_capped`, so a capped slice
+        is `1 pointer + 400 body + trailer` = 402 stdout lines. `--outline`
+        feeds the whole rendering THROUGH the cap, header included, so a capped
+        outline is `1 header + 399 rows + trailer` = 401. Both satisfy §11.4
+        read literally -- the slice is 400 lines, the rendering is 400 lines --
+        but "the cap" buys a worker 400 body lines on one path and 399 on the
+        other, and nothing in the tree said so.
+
+        Measured here rather than repaired: aligning them means changing which
+        §12-pinned golden is right about what §11.4's 400 counts, and that is a
+        spec decision, not a bug fix. Pinned so the asymmetry is a recorded
+        choice instead of an accident, and so the numbers stop being
+        mis-quoted -- an earlier report gave 401/400, having not counted the
+        trailer that `_q_print_capped` always emits. NOTHING IS LOST SILENTLY
+        on either path; this is a consistency defect only."""
+        src_root = _project(tmp_path / "s", {
+            "big.py": "def huge():\n" + "    x = 0\n" * 448 + "    return x\n"})
+        monkeypatch.chdir(src_root)
+        capsys.readouterr()
+        _rc, src_out, _err = _run(capsys, "huge", "--src")
+
+        outline_root = _project(tmp_path / "o", {
+            "many.py": "".join(f"K{n:03d} = {n}\n" for n in range(500))})
+        monkeypatch.chdir(outline_root)
+        capsys.readouterr()
+        _rc, outline_out, _err = _run(capsys, "--outline", "many.py")
+
+        src, outline = src_out.splitlines(), outline_out.splitlines()
+        assert (len(src), len(outline)) == (402, 401)
+        assert "truncated" in src[-1] and "truncated" in outline[-1]
+        # The asymmetry stated as the thing it is: body lines delivered.
+        assert len(src) - 2 == fleet.Q_OUTPUT_LINE_CAP          # 400 body lines
+        assert len(outline) - 2 == fleet.Q_OUTPUT_LINE_CAP - 1  # 399 rows
 
 
 # ---------------------------------------------------------------------------
@@ -801,9 +879,299 @@ class TestQueryPathsCannotEscapeTheRoot:
             assert path.is_file(), f"{name} was deleted outside the index root"
 
     def test_every_rel_a_query_visits_is_inside_the_root(self, proj, capsys):
+        # THIS TEST USED TO BE ITS OWN ORACLE, and that is worth spelling out
+        # because the shape recurs. It asserted only that `_q_contained` says
+        # YES to the rels `index_shard_rels` produces -- all of which are clean
+        # by construction -- so it passed unchanged against a guard stubbed to
+        # `return True`. Measured: under that injection it was not among the
+        # RED tests. A guard test that never exercises a REFUSAL measures
+        # nothing; it certifies the very defect it is named after.
         for rel in fleet.index_shard_rels(proj):
             assert ".." not in rel.split("/")
-            assert fleet._q_contained(proj, rel)
+            assert fleet._q_contained(proj, rel), rel
+        # ...so the other half, which is what makes the assertion falsifiable:
+        # the guard must also say NO. Both escape shapes are represented --
+        # the source escaping the root, and the source staying inside while the
+        # SHARD escapes `.fleet-index/symbols/` (see `_q_contained`).
+        for rel in ("../victim/api.py",
+                    "a/../../../../victim/PRECIOUS",
+                    "../../victim/api.py",
+                    f"../{proj.name}/src/api.py"):
+            assert not fleet._q_contained(proj, rel), rel
+
+
+class TestAPathGlobNeverProducesAConfidentAbsence:
+    """`--path` speaks a `**`-aware dialect, and saying so is not optional.
+
+    The dialect itself is settled (see the module note in `bin/fleet.py`); what
+    was broken is WHEN the tool admits to it. The hint fired only when the glob
+    selected ZERO shards -- i.e. only in the case where the empty result was
+    already self-explanatory -- and stayed silent whenever the glob selected
+    something that merely did not contain the symbol. That is the case where
+    the dialect IS the reason for the empty answer, and it is the case a worker
+    cannot diagnose."""
+
+    def test_a_glob_that_selects_a_shard_but_finds_nothing_still_explains(
+            self, proj, capsys):
+        # `alpha` exists twice, in `src/`. `*.py` selects `root.py` -- a
+        # non-empty selection with no `alpha` in it -- so the old code answered
+        # with a flat "no symbol matches 'alpha'" and nothing else.
+        rc, out, err = _run(capsys, "alpha", "--path", "*.py")
+        assert rc == 1
+        assert out == ""
+        assert "`**`-aware" in err
+        assert "**/*.py" in err and "any depth" in err
+        # ...and the widened glob proves the absence was never real.
+        rc, out, _err = _run(capsys, "alpha", "--path", "**/*.py")
+        assert (rc, len(out.splitlines())) == (0, 2)
+
+    def test_the_hint_still_fires_when_the_glob_selects_nothing(
+            self, proj, capsys):
+        rc, _out, err = _run(capsys, "alpha", "--path", "nowhere/*.py")
+        assert rc == 1
+        assert "matched no indexed file" in err
+        assert "`**`-aware" in err
+
+    def test_a_query_without_path_is_not_lectured_about_globs(
+            self, proj, capsys):
+        rc, _out, err = _run(capsys, "no_such_symbol_at_all")
+        assert rc == 1
+        assert "no symbol matches" in err
+        assert "`**`-aware" not in err
+
+
+class TestAnUnreadShardNeverBecomesAConfidentAnswer:
+    """F3 x F4: the silent-wrong-answer chain, fixed and pinned as one.
+
+    A shard this query could not read is a shard that may be hiding a
+    competitor. Two separate defects let that fact vanish:
+
+    * `--src` tested ambiguity against the hits it MANAGED to collect, so a
+      withheld competitor turned a two-hit ambiguity (rc 1) into a confident
+      one-hit slice (rc 0).
+    * the empty-hits path printed no summary line at all when anything was
+      suppressed, leaving only notes -- which `Q_NOTE_CAP` truncates.
+
+    Separately each leaves a trace a careful reader might catch. TOGETHER the
+    wrong answer is fully silent, which is why the composite is pinned below
+    and not just the two halves."""
+
+    @staticmethod
+    def _noisy(tmp_path, monkeypatch, capsys, extra, noise=26):
+        files = dict(extra)
+        for n in range(noise):
+            files[f"noise{n:02d}.py"] = f"def noise{n:02d}():\n    return {n}\n"
+        root = _project(tmp_path, files)
+        monkeypatch.chdir(root)
+        capsys.readouterr()
+        return root
+
+    @staticmethod
+    def _stale(root, rel):
+        """Prepend a comment so the source no longer hashes to its header."""
+        _write(root / rel, (root / rel).read_bytes().decode("utf-8") + "# drift\n")
+
+    def test_a_withheld_competitor_cannot_turn_ambiguity_into_a_slice(
+            self, tmp_path, monkeypatch, capsys):
+        root = _project(tmp_path, {"a.py": "def only():\n    return 1\n",
+                                   "b.py": "def only():\n    return 2\n"})
+        monkeypatch.chdir(root)
+        capsys.readouterr()
+        # The control: over fresh shards this query is ambiguous and exits 1.
+        assert _run(capsys, "only", "--src")[0] == 1
+        self._stale(root, "b.py")
+        rc, out, err = _run(capsys, "only", "--src", "--no-refresh")
+        # Measured before the fix: rc 0, and a confident slice of `a.py`.
+        assert rc == 1
+        assert "return 1" not in out                  # not one line of source
+        assert out.splitlines() == ["a.py:1-2\tfunc\tonly\t()"]
+        assert "1 shard(s) could not be read" in err
+        assert "will not commit" in err
+
+    def test_the_composite_the_note_cap_cannot_swallow_the_signal(
+            self, tmp_path, monkeypatch, capsys):
+        # 26 stale shards sort ahead of `zzz_competitor.py`, so `Q_NOTE_CAP`
+        # deletes the one note that named it. The count line is the fix: it is
+        # not a note, so no cap can drop it.
+        root = self._noisy(tmp_path, monkeypatch, capsys, {
+            "a.py": "def only():\n    return 1\n",
+            "zzz_competitor.py": "def only():\n    return 2\n"})
+        for rel in [f"noise{n:02d}.py" for n in range(26)] + ["zzz_competitor.py"]:
+            self._stale(root, rel)
+        rc, out, err = _run(capsys, "only", "--src", "--no-refresh")
+        assert rc == 1
+        assert "return 1" not in out
+        # The cap really did fire, and it really did hide the competitor --
+        # this test is only worth anything while both remain true.
+        assert "more shard notes" in err
+        assert "zzz_competitor" not in err
+        # ...and the answer is still not confident, because the count survives.
+        assert "27 shard(s) could not be read" in err
+
+    def test_empty_hits_plus_unread_shards_is_not_a_claim_of_absence(
+            self, tmp_path, monkeypatch, capsys):
+        root = self._noisy(tmp_path, monkeypatch, capsys,
+                           {"target.py": "def onlyhere():\n    return 1\n"})
+        for rel in [f"noise{n:02d}.py" for n in range(26)] + ["target.py"]:
+            self._stale(root, rel)
+        rc, out, err = _run(capsys, "onlyhere", "--no-refresh")
+        assert rc == 1
+        assert out == ""
+        assert "more shard notes" in err          # the cap fired...
+        assert "target.py" not in err             # ...and hid the only note that mattered
+        assert "NOT evidence" in err and "27 shard(s) could not be read" in err
+        # And the confident phrasing must NOT appear: the symbol is right there.
+        assert "no symbol matches" not in err
+
+    def test_a_gone_source_is_not_counted_as_hiding_anything(
+            self, proj, capsys):
+        # The other side of the rule, and the reason `_q_collect_rows` re-tests
+        # existence: an orphan whose source is GONE cannot hide a competitor,
+        # so it must not suppress the plain "no symbol matches" answer or turn
+        # every routine deleted file into a refusal.
+        (proj / "root.py").unlink()
+        rc, out, err = _run(capsys, "gamma")
+        assert rc == 1
+        assert out == ""
+        assert "no symbol matches" in err
+        assert "could not be read" not in err
+
+    def test_a_gone_source_does_not_block_a_src_slice_elsewhere(
+            self, proj, capsys):
+        (proj / "root.py").unlink()
+        rc, out, err = _run(capsys, "Beta.solo", "--src")
+        assert rc == 0
+        assert out.splitlines()[1] == "    def solo(self):"
+        assert "will not commit" not in err
+
+
+class TestOutlineShardPathContainment:
+    """The SECOND path `--outline` derives, and the one the first guard missed.
+
+    `verified_shard_rows` derives two paths from one rel -- the source
+    (`root / rel`) and the shard (`.fleet-index/symbols/` + rel) -- and those
+    climb from roots two levels apart. A rel whose `..` count is tuned to the
+    symbols directory lands the SOURCE back inside the root, satisfying a
+    source-only containment check, while the SHARD escapes entirely.
+
+    THE PROCESS CWD IS PART OF THE ATTACK. From the index root the same
+    argument resolves to a clean rel, `_q_outline_rels` offers that first, and
+    `next(...)` takes it before the raw `..`-bearing string is ever considered
+    -- there is NO escape at all. `test_the_cwd_is_the_precondition` below
+    measures that non-escape explicitly, so that nobody reading this class
+    concludes the root-relative case was simply an untested duplicate: a
+    containment test written from the root passes against the DELETING build
+    and reads as proof of safety.
+
+    Both halves are asserted the way `TestOutlinePathContainment` asserts
+    them -- against the filesystem, never against the exit code alone. The
+    write half exited 0 with an empty stderr, and the unlink half exited 1 with
+    a note that reads like routine housekeeping."""
+
+    NAMES = ("VICTIM.py", "GONE.py")
+
+    @pytest.fixture
+    def jail(self, tmp_path, monkeypatch):
+        # The root's last three segments and the rel's three `..` are a matched
+        # pair: `root/../../../gp/par/proj/X` normalises back to `root/X`
+        # (inside), while `symbols/../../../gp/par/proj/X.tsv` lands at
+        # `tmp_path/gp/par/gp/par/proj/X.tsv` (outside).
+        root = tmp_path / "gp" / "par" / "proj"
+        (root / "sub").mkdir(parents=True)
+        for name in self.NAMES:
+            _write(root / name, "def victim():\n    pass\n")
+        _write(root / "sub" / "keep.py", "def keep():\n    pass\n")
+        assert fleet.main(["index", "init", "--path", str(root)]) == 0
+        return root
+
+    @staticmethod
+    def _escaped(root, name):
+        """Where the shard-path concatenation actually lands for the attack
+        rel -- computed, not hardcoded, so it stays honest if the shard tree
+        moves."""
+        shard = fleet.shard_path_for_source(root, f"../../../gp/par/proj/{name}")
+        resolved = Path(os.path.normpath(str(shard)))
+        assert not str(resolved).startswith(str(Path(root).resolve()) + os.sep), (
+            "the fixture no longer escapes -- this test would be vacuous")
+        return resolved
+
+    def test_a_shard_path_escape_writes_nothing_outside_the_root(
+            self, jail, monkeypatch, capsys):
+        monkeypatch.chdir(jail / "sub")
+        capsys.readouterr()
+        escaped = self._escaped(jail, "VICTIM.py")
+        rc, out, err = _run(capsys, "--outline", "../../../gp/par/proj/VICTIM.py")
+        assert rc != 0
+        assert out == ""
+        assert "outside the index root" in err
+        # The measured failure was rc 0 with an empty stderr and this file on
+        # disk -- a write outside the root that announced nothing at all.
+        assert not escaped.exists(), f"a shard was written outside the root at {escaped}"
+
+    def test_a_shard_path_escape_unlinks_nothing_outside_the_root(
+            self, jail, monkeypatch, capsys):
+        escaped = self._escaped(jail, "GONE.py")
+        escaped.parent.mkdir(parents=True, exist_ok=True)
+        _write(escaped, "do not delete\n")
+        (jail / "GONE.py").unlink()          # -> the orphan-prune branch
+        monkeypatch.chdir(jail / "sub")
+        capsys.readouterr()
+        rc, out, err = _run(capsys, "--outline", "../../../gp/par/proj/GONE.py")
+        assert rc != 0
+        assert out == ""
+        assert "outside the index root" in err
+        # The measured failure was rc 1 with `source file is gone -- hits
+        # suppressed; orphan shard pruned`: a delete outside the root wearing
+        # the exit code and the wording of routine housekeeping.
+        assert escaped.is_file(), "a file outside the index root was deleted"
+        assert escaped.read_bytes() == b"do not delete\n"
+
+    def test_the_cwd_is_the_precondition_not_an_incidental_detail(
+            self, jail, monkeypatch, capsys):
+        # Run the IDENTICAL argument from the root. `_q_outline_rels` resolves
+        # it against the cwd, lands inside the root, and offers `VICTIM.py` as
+        # the first candidate -- so the raw rel is never reached and nothing
+        # escapes even with the guard removed. Pinned so that a future rewrite
+        # of these tests cannot quietly relocate them to the root and keep
+        # measuring a non-escape.
+        monkeypatch.chdir(jail)
+        capsys.readouterr()
+        escaped = self._escaped(jail, "VICTIM.py")
+        rc, out, _err = _run(capsys, "--outline", "../../../gp/par/proj/VICTIM.py")
+        assert rc == 0                                   # legitimate, not refused
+        assert out.splitlines()[0] == "## VICTIM.py (2 lines, python)"
+        assert not escaped.exists()
+
+    def test_the_guard_runs_before_the_shard_layer_is_touched(
+            self, jail, monkeypatch, capsys):
+        def forbidden(*_args, **_kwargs):
+            raise AssertionError("an escaping rel reached the shard layer")
+
+        monkeypatch.setattr(fleet, "verified_shard_rows", forbidden)
+        monkeypatch.chdir(jail / "sub")
+        capsys.readouterr()
+        assert _run(capsys, "--outline", "../../../gp/par/proj/VICTIM.py")[0] != 0
+
+    def test_the_guard_also_refuses_a_rel_that_only_leaves_the_shard_tree(
+            self, jail):
+        # One `..` is enough to leave `symbols/` without leaving the root: the
+        # shard lands in `.fleet-index/` itself, where nothing enumerates it
+        # and no prune ever reaches it. Not an escape from the repository, but
+        # still a write the shard tree could not account for.
+        #
+        # Asserted at the guard rather than through the CLI ON PURPOSE. No
+        # `--outline` argument reaches `_q_contained` with this rel as its ONLY
+        # candidate -- `_q_outline_rels` always offers a cwd-resolved candidate
+        # first, and here that one is clean -- so a CLI-level assertion would
+        # be measuring the first candidate's fate, not the guard's. The guard
+        # is nonetheless the thing that has to be right: it is the reason the
+        # shard test is `inside(shard, symbols)` and not the weaker
+        # `inside(shard, base)`, which would wave this through.
+        rel = f"../{jail.name}/VICTIM.py"
+        stray = Path(os.path.normpath(str(fleet.shard_path_for_source(jail, rel))))
+        assert fleet.index_symbols_dir(jail).resolve() not in stray.parents
+        assert Path(jail).resolve() in stray.parents        # inside the ROOT...
+        assert not fleet._q_contained(jail, rel)            # ...and still refused
 
 
 # ---------------------------------------------------------------------------
