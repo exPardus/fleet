@@ -24,6 +24,27 @@ design. So no supervisor can boot while that session lives.
 Found and verified this run. **Unwedging the claim is not sufficient on its own; read this before
 you `sup-spawn`.**
 
+<!-- MERGE NOTE (hs merge, 2026-07-27): the `fix/handoff-seams` side of this conflict was the
+day-3 numbered operator queue. Items 1-5 are spent (G-1..G-4 ratified, cc-oracle pushed, both
+GOALS proposals applied, fleet-index build ordered, providers.md parked as an open gate); item 6's
+A1/A2/A3 detail moved to "Operator ratification stack" below, where main already carried the R9
+stub. Nothing from that side was dropped unrecorded. -->
+
+<!-- SUPERSEDED-QUEUE (day 3, kept for the audit trail):
+1. **Ratify/reverse the council verdicts** in `docs/OVERNIGHT-2026-07-23.md` G-1..G-4 (boxes in OPERATOR-GATES untouched — only you tick). Headline: the freeze-verdict live catch (G-1) — council majority was wrong, dissent was right; worth a lessons-grade read.
+2. **Push cc-oracle**: `cd C:\proga\claude-oracle && git checkout main && git merge mf/integration && git push` (+ version bump if releasing).
+3. **Apply or reject three GOALS.md proposals**: `docs/proposals/GOALS-threetier-sync-proposal.md`, `docs/proposals/GOALS-tier-chain-proposal.md` (incl. its "Operator follow-ups": the §7.2 holder-alone one-line spec amendment).
+4. **fleet-index M1 go/no-go** with the fresh evidence (it undercuts; the queued decision wanted exactly this data).
+5. `docs/specs/providers.md` re-base-or-park: still parked by you, still not surfaced as a blocker.
+6. **Ratify or reject three DESCRIPTIVE spec amendments** on branch `fix/handoff-seams` (unmerged): `docs/specs/claim-nonce.md` **A1** (§6.4 — `sup-handoff-abort` now has three arms, and the abort-flag arm is deleted as unreachable) and **A2** (§5.9/§8 — a fail-closed age-gated sweep of `supervisor-handoff-*.md` at four sites, where §5.9 said "written once and never deleted" and §8 said `cmd_sup_boot` is the only authorized sweep site). Both describe **shipped** behaviour a live incident forced; neither is self-promoted. The code is merge-ready independently — the amendments are the paperwork, and the branch is where they live until you rule.
+
+   Context for the ruling: the 2026-07-24 succession (inc-651f → inc-7d7d, three attempts in sixteen minutes) hit a handoff that was **unabortable in exactly the window the abort verb exists for**, and the wave-1 fix for it reproduced the same failure one attempt later because it modelled the successors as a slot instead of a collection. Both amendments are consequences of that.
+
+   **A3** (§6.4/§5.9, 2026-07-26, fix wave 2) is the one that needs a real ruling rather than paperwork: **it changes the protocol shape**, and says so in its first line. A1's collection plus A2's fail-closed sweep together left a *superseded* successor fully bootable on top of a single-valued HANDSHAKE, so a late rival clobbered the winner's handshake and the claim transferred to **nobody** — complete refused, abort on the winner refused, and aborting the rival deleted the handshake the winner would never rewrite. A3 adds an explicit `superseded` state and a **boot refusal**: at most one successor may boot, a superseded attempt stays abortable and auditable but not bootable, and there is deliberately **no promote verb** (abort, then begin again). It also adds `sup-handoff-abort --retire-all` / `--force` and makes `fleet doctor` FAIL on a stranded or superseded entry. Reproduced live both ways (with the refusal: claim transfers; without it: `CLOBBERED: True`, both verbs refuse, claim stays with the predecessor).
+-->
+
+
+
 `_worker_env` (`bin/fleet.py:1431-1464`) stamps `FLEET_WORKER=<name>` and `dispatch_bg` passes it
 as `Popen(env=...)` (`:9315`, `:12005`) — but that only sets the env of a **launcher that asks the
 daemon**. The daemon hosts the actual session. Evidence from `~/.claude/daemon.lock` while
@@ -109,6 +130,32 @@ provisional); tombstone rulings 1+2, the ruling-1 cond-2 honest narrowing, the h
 boot-ritual call, the six-token terminal contract, the rb MIN-D lock-budget note; the abort-recipe
 doc defect; G-A..G-C ledger records; the fleet-index OPERATOR-GATES settled row; R9 (it changes the
 handoff protocol's shape — say so plainly, not as a clarification).
+
+**Landed with the `fix/handoff-seams` merge (2026-07-27) and still owed a ruling** — three
+DESCRIPTIVE amendments to `docs/specs/claim-nonce.md`, now on `main` rather than on a branch:
+
+- **A1** (§6.4) — `sup-handoff-abort` has three arms, and the abort-flag arm is deleted as
+  unreachable.
+- **A2** (§5.9/§8) — a fail-closed age-gated sweep of `supervisor-handoff-*.md` at four sites,
+  where §5.9 said "written once and never deleted" and §8 said `cmd_sup_boot` is the only
+  authorized sweep site.
+  A1 and A2 both describe **shipped** behaviour a live incident forced; neither is self-promoted.
+  The 2026-07-24 succession (inc-651f → inc-7d7d, three attempts in sixteen minutes) hit a handoff
+  that was **unabortable in exactly the window the abort verb exists for**, and the wave-1 fix
+  reproduced the same failure one attempt later because it modelled the successors as a slot
+  instead of a collection. Both amendments are consequences of that.
+- **A3** (§6.4/§5.9, fix wave 2) — the one needing a real ruling rather than paperwork: **it
+  changes the protocol shape**, and says so in its first line. A1's collection plus A2's
+  fail-closed sweep together left a *superseded* successor fully bootable on top of a
+  single-valued HANDSHAKE, so a late rival clobbered the winner's handshake and the claim
+  transferred to **nobody**. A3 adds an explicit `superseded` state and a **boot refusal**: at
+  most one successor may boot, a superseded attempt stays abortable and auditable but not
+  bootable, and there is deliberately **no promote verb** (abort, then begin again). It also adds
+  `sup-handoff-abort --retire-all` / `--force` and makes `fleet doctor` FAIL on a stranded or
+  superseded entry. Reproduced live both ways.
+
+The code merged on its own merits (the stillborn-handoff hole had cost six supervisors); the
+amendments are the paperwork and are unratified until you tick them.
 
 ## Hard-won warnings
 
