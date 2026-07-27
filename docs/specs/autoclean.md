@@ -1,6 +1,9 @@
 # Spec: Autoclean — staleness is cleaned up without anyone remembering
 
-**Status:** ready-for-build (mc-autoclean, 2026-07-16)
+**Status:** **BUILT AND SHIPPED** (mc-autoclean, designed 2026-07-16; shipped in M-C, POSIX backend
+added by the 2026-07-23 reconcile campaign). Status corrected 2026-07-27 by the `unbuilt-sweep` pass —
+it still read `ready-for-build` long after the verb, the install flag and both scheduler backends
+landed. `docs/SPEC.md` §11 is the descriptive record; the receipt is §"Build receipt" below.
 **Inherits:** SPEC.md invariants, terminal-surface views doctrine, native-agents pivot §5.1.2 (auto-archival, shipped as `fleet archive`), CLAUDE.md irreversibility doctrine (`fleet clean` is the only deleter).
 
 ## Problem
@@ -49,13 +52,62 @@ Scheduler mechanics live in the platform adapter (`autoclean_task_install/query/
 - `fleet init --autoclean-remove` — uninstall (`schtasks /Delete /TN claude-fleet-autoclean /F`). Manual equivalent documented for operators without fleet at hand.
 - `fleet clean [--dead-only | --tombstones]` — manual tiering split.
 
+## Build receipt (2026-07-27, `unbuilt-sweep`)
+
+The verb, both scheduler backends, and the adapter seam all exist — which is why the status line above
+no longer reads `ready-for-build`:
+
+```
+# at 0e8d7ca
+$ grep -n "def cmd_autoclean" bin/fleet.py
+7634:def cmd_autoclean(args, run=subprocess.run, which=shutil.which) -> int:
+```
+
+```
+# at 0e8d7ca
+$ grep -n "class _WindowsPlatform\|class _PosixPlatform" bin/fleet.py
+391:class _WindowsPlatform:
+522:class _PosixPlatform:
+```
+
+```
+# at 0e8d7ca
+$ grep -c "raise UnsupportedPlatformError" bin/fleet.py
+0
+```
+
+The §7.2 supervisor exemption below shipped too:
+
+```
+# at 0e8d7ca
+$ grep -n "def _record_is_supervisor_claim_holder\|supervisor claim-holder -- protected" bin/fleet.py
+2087:def _record_is_supervisor_claim_holder(record, claim=None):
+6799:        return (False, "supervisor claim-holder -- protected while live (§7.2)")
+```
+
+The two tags this document keeps — the `scheduled_task_*` rename and the combined-flag `fleet init`
+wiring — are both still absent, and the adapter methods still carry their autoclean-shaped names:
+
+```
+# at 0e8d7ca
+$ grep -cE "scheduled_task_|\"--supervisor-beat\"" bin/fleet.py
+0
+```
+
+```
+# at 0e8d7ca
+$ grep -n "def autoclean_task_install" bin/fleet.py
+446:    def autoclean_task_install(self, task_name: str, command: str,
+604:    def autoclean_task_install(self, task_name: str, command: str,
+```
+
 ## Three-tier interactions (doc-sync 2026-07-23, per `docs/specs/three-tier-command.md` §12)
 
 The ratified three-tier spec (2026-07-23) touches this spec in three places:
 
 - **The scheduler adapter now serves a second task family** (three-tier §6.1). The adapter methods (`autoclean_task_install/query/remove`) are already generic over `task_name`/`command`/`interval_hours`, and the planned supervisor-beat task installs through the same seam (`task_name="claude-fleet-supervisor-beat"`). The `autoclean_task_*` naming is now a misnomer for a generic scheduler seam; a rename to `scheduled_task_*` is `[UNBUILT]` cosmetic cleanup, not a blocker.
 - **Per-task ownership, exactly as the F4 doctrine above demands** (three-tier §6.2). The beat task's ownership predicate is `_fleet_task_is_ours(command, "beat")` — the full-identity match, never a fresh path-only predicate — so the beat and autoclean tasks coexist without either `/Create /F`-ing the other. The multi-flag `fleet init` wiring (`--autoclean` + `--supervisor-beat` in one invocation) is `[UNBUILT]`.
-- **The supervisor record becomes exempt from tier 1 and tier 2, keyed on the live claim-holder, never a static name** (three-tier §7.2, `[UNBUILT — three-tier build slice]`). The archive TTL (24 h) vs the schtasks interval clamp (≤23 h) means an idle supervisor record would otherwise be archived/rm'd out from under a running campaign. The predicate: a record is protected iff its `session_id` (or a member of its `retired_sids`) is the current `supervisor/INCARNATION` claim-holder's **and** that body is roster-live — which protects a successor under any name (`sup|<inc>|successor`) and never protects a dead husk (three-tier B1/B9).
+- **The supervisor record becomes exempt from tier 1 and tier 2, keyed on the live claim-holder, never a static name** (three-tier §7.2). **[BUILT `5a8860b`]** — receipt below. The archive TTL (24 h) vs the schtasks interval clamp (≤23 h) means an idle supervisor record would otherwise be archived/rm'd out from under a running campaign. The predicate: a record is protected iff its `session_id` (or a member of its `retired_sids`) is the current `supervisor/INCARNATION` claim-holder's — **holder alone**, which protects a successor under any name (`sup|<inc>|successor`) and never protects a dead husk (three-tier B1/B9). *(Correction, 2026-07-27 `unbuilt-sweep`: this bullet previously read "**and** that body is roster-live". That conjunct was removed by the 2026-07-24 operator amendment before the build — it made the gate a no-op, since `_archive_eligible` gate 3 already refuses every roster-live record, and it failed to close §7.2's own disaster case. The shipped predicate is holder-alone; this bullet was describing a design that was never built.)*
 
 ## Testing
 
