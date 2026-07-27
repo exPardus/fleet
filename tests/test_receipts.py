@@ -75,6 +75,13 @@ RECEIPT_FLOOR = {
     "claim-nonce.md": 59,
     "three-tier-command.md": 39,
     "native-substrate.md": 6,
+    # Enforced by the views-doctrine slice (2026-07-27): D4 asserted a rule as
+    # if it were shipped behaviour for days while shipped behaviour violated it.
+    # Its receipts are the first in this corpus that EXECUTE fleet rather than
+    # grep it -- each builds a throwaway FLEET_HOME under `.probe/` inside the
+    # materialised pinned tree, so they stay hermetic and never touch a live
+    # fleet's state/.
+    "terminal-surface.md": 7,
 }
 
 # A commit whose bin/fleet.py predates the me/ul + me/daemon merges, used by the
@@ -108,7 +115,9 @@ UNENFORCED = {
     # the three dead-daemon `RATIFICATION WITHHELD` strings are deliberately NOT
     # receipted (no honest reproduction exists; see that spec's receipts section).
     "autoclean.md": "predates the convention; no fenced receipts.",
-    "terminal-surface.md": "predates the convention; no fenced receipts.",
+    # terminal-surface.md was ENFORCED by the views-doctrine slice (2026-07-27):
+    # its D4 read as a description of shipped behaviour that measurement showed
+    # false, so the measurement now lands as pinned receipts. See RECEIPT_FLOOR.
     "providers.md": "predates the convention; no fenced receipts.",
     "phase1-hardening-kernels.md": "predates the convention; no fenced receipts.",
     "phase-2-watchtower.md": "predates the convention; no fenced receipts.",
