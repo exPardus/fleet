@@ -825,6 +825,36 @@ def _quarantine_registry(path: Path) -> Path:
     return quarantined
 
 
+def _quarantine_artifacts() -> list:
+    """Every `state/fleet.json.corrupt.<ts>` artifact `_quarantine_registry`
+    has left behind, sorted by name (oldest first). Empty list, never a raise.
+
+    THE ONE SPELLING OF THE GLOB, and it is named because three separate
+    questions turn out to be the same question: *"was a registry corrupt here
+    recently?"* The artifact is the only evidence that survives, because the
+    quarantine RENAMES -- so the very next load sees a MISSING file, not a
+    broken one, and cannot tell a repaired incident from a fresh install.
+
+    Its three readers, and why each is presence-only rather than
+    newest-artifact-vs-current-registry:
+
+      * `_husk_sweep_refuses` -- a rename can hide live worker records from the
+        roster sweep. `os.rename` PRESERVES mtime, so the artifact's mtime is
+        the pre-corruption WRITE time and any recreated registry is always
+        newer; an mtime comparison would never fire on the one bypass it exists
+        to stop.
+      * `_doctor_check_autoclean` -- a lingering artifact means the sweep above
+        is refusing itself, which is how a bricked sweep reads green-and-fresh.
+      * `_acting_worker_identity` -- the §9 legacy upgrade. See there.
+
+    The operator clears the artifact (after restoring what it holds) to re-arm
+    all three. That is one rule with one remedy, so it gets one function."""
+    try:
+        return sorted(state_dir().glob("fleet.json.corrupt.*"))
+    except OSError:
+        return []
+
+
 def load_registry() -> dict:
     """Load state/fleet.json. Missing file -> {"workers": {}}. An existing
     but corrupt/unreadable file is quarantined (renamed aside) and raises
@@ -2252,6 +2282,35 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     stays the short way at this helper's siblings, whose questions do not need
     the bit.
 
+    UNLESS A QUARANTINE ARTIFACT SITS BESIDE IT -- and that clause is the whole
+    of the corrupt->absent fix (gate reviewer, 2026-07-27). Absent and corrupt
+    are not two independent hazards, they are a SEQUENCE, because fleet's own
+    repair verb walks the one into the other:
+
+      1. corrupt registry -> the §9 arm below REFUSES, and its refusal text
+         says *"Repair `state/fleet.json` (see `fleet doctor`)"*.
+      2. `fleet doctor` -> `_quarantine_registry` RENAMES the file aside, so
+         there is now NO `state/fleet.json` at all.
+      3. the SAME call -> rc 0, `nonce_seq == 1`, a `NONCE:` printed, no
+         `--nonce` ever passed. The abstention became the affirmative verdict
+         the arm was waiting for, and the refusal named the command that did it.
+
+    So `not_initialized` is affirmative only when it means *"nothing was ever
+    written here"*. `_quarantine_artifacts()` is how the two absences are told
+    apart: no artifact = a fresh install, still an affirmative *"there are no
+    records"*; an artifact = a registry that was corrupt moments ago wearing a
+    different name, which abstains exactly as corrupt does.
+
+    IT IS NOT *"make `not_initialized` abstain"*, which is the obvious fix and
+    is wrong: mutant W11 measured that refusing the §9 upgrade on every fresh
+    install kills 39 tests. The fresh-install lane must stay open.
+
+    THE GATE IS ON `not_initialized` ALONE, never on `ok`. A healthy registry
+    answers for itself, and an artifact can outlive its incident by days --
+    `_husk_sweep_refuses` tells the operator to restore the file first and
+    delete the artifact second, so the in-between state is EXPECTED and must not
+    lock anyone out. Pinned by `tests/test_identity_quarantine_glob.py`.
+
     Read-only: it runs on the dispatch hot path, inside `_require_claim_holder`,
     and inside a doctor row. A corrupt or unreadable registry degrades to
     UNRESOLVED -- "I do not know who I am" -- which every caller already has an
@@ -2290,7 +2349,8 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
         return ident                    # no read happened: `registry_read` False
     if registry is None:
         ok, reason, data = _read_registry_readonly()
-        registry = data if (ok or reason == "not_initialized") else None
+        registry = data if (ok or (reason == "not_initialized"
+                                   and not _quarantine_artifacts())) else None
     ident["registry_read"] = isinstance(registry, dict)
     workers = registry.get("workers") if isinstance(registry, dict) else None
     if not isinstance(workers, dict):
@@ -7515,7 +7575,7 @@ def _sweep_husks(dry_run: bool, run=subprocess.run, which=shutil.which) -> tuple
     # would never fire on exactly the spawn-recreation bypass it exists to
     # stop. Presence-only is the sound superset; the operator clears the
     # artifact (after restoring what it holds) to re-arm the sweep.
-    quarantine_artifacts = sorted(state_dir().glob("fleet.json.corrupt.*"))
+    quarantine_artifacts = _quarantine_artifacts()
     if quarantine_artifacts:
         raise FleetCliError(
             f"husk sweep refused: quarantine artifact present "
@@ -8720,10 +8780,7 @@ def _doctor_check_autoclean(run=subprocess.run):
             f"no session holds it open), but {streak} in a row means this tier "
             f"is starving: the husks stay on the roster and nothing is "
             f"reclaiming them. Check `claude daemon status`")
-    try:
-        artifacts = sorted(state_dir().glob("fleet.json.corrupt.*"))
-    except OSError:
-        artifacts = []
+    artifacts = _quarantine_artifacts()
     if artifacts:
         extras.append(f"quarantine artifact present ({artifacts[-1].name}) -- "
                       f"husk sweep is refusing itself (NEW-1); restore the "
@@ -11462,8 +11519,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :4955, :5402, :9452,
-    :14003), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :5015, :5462, :9509,
+    :14072), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -12107,8 +12164,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:4955, :5402, :9452,
-    #     :14003) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:5015, :5462, :9509,
+    #     :14072) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -12435,8 +12492,20 @@ def _identity_abstention_note(ident) -> str:
     """Why the registry declined to judge this body, in one clause, for a
     refusal that is CAUSED by the abstention (the §9 legacy upgrade). An
     operator told only *"the registry cannot confirm"* cannot tell a corrupt
-    file from two records sharing a sid, and those have different remedies."""
+    file from two records sharing a sid, and those have different remedies.
+
+    THE QUARANTINED CASE IS A THIRD REMEDY and gets its own clause, because the
+    generic one sends the operator in a circle: it names `fleet doctor`, and
+    doctor is precisely what MADE this state -- it renamed the corrupt registry
+    aside. Running it again finds nothing to repair. The way out is to restore
+    what the artifact holds."""
     if not ident.get("registry_read"):
+        artifacts = _quarantine_artifacts()
+        if artifacts and not registry_path().exists():
+            return (f"state/fleet.json is GONE and {artifacts[-1].name} sits "
+                    f"beside it -- a corrupt registry was quarantined, so this "
+                    f"absence is a repaired incident and not a fresh install; "
+                    f"restore the quarantined file, then remove the artifact")
         return "state/fleet.json could not be read"
     if ident["verdict"] == IDENTITY_AMBIGUOUS:
         names = ", ".join(repr(n) for n in ident["candidates"])
