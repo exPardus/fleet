@@ -75,6 +75,11 @@ RECEIPT_FLOOR = {
     "claim-nonce.md": 59,
     "three-tier-command.md": 39,
     "native-substrate.md": 6,
+    # Enforced 2026-07-27, when M1 + M2's worker-facing surface shipped and the
+    # §11.7 grant-execution experiment was landed. One of its six is `# volatile`
+    # (the live two-arm spawn experiment: one machine, one moment, transcript
+    # outside this repo) and is WARN-only; the other five are pinned greps.
+    "fleet-index.md": 6,
 }
 
 # A commit whose bin/fleet.py predates the me/ul + me/daemon merges, used by the
@@ -115,16 +120,14 @@ UNENFORCED = {
     "phase-3-telegram.md": "predates the convention; no fenced receipts.",
     "phase-4-webui.md": "predates the convention; no fenced receipts.",
     "phase-5-intelligence.md": "predates the convention; no fenced receipts.",
-    # Specs unbuilt behaviour (M1 ready-for-build, M2/M3 draft), so there is
-    # nothing to re-execute yet: `fleet index` does not exist. Written
-    # deliberately receipt-free -- no `$ `-prefixed lines in any fence, and all
-    # format examples use synthetic placeholders rather than this repo's real
-    # symbols. Its adversarial review (docs/reviews/IDX-ADVERSARIAL-2026-07-22.md)
-    # failed an earlier draft for exactly the opposite: hand-written output that
-    # looked like a transcript and encoded six wrong coordinates. Promote to
-    # pinned receipts when M1 ships and `fleet index build` can be run.
-    "fleet-index.md": ("specs unbuilt behaviour (M1 ready-for-build); no fenced "
-                       "receipts by construction -- promote when M1 ships."),
+    # fleet-index.md was UNENFORCED here while it specced unbuilt behaviour --
+    # `fleet index` did not exist, so there was nothing to re-execute, and the
+    # entry's own reason string was flagged in that spec's §16 as something that
+    # would rot the moment anything built. It did. M1's shard layer and M2's
+    # worker-facing surface shipped 2026-07-26/27, the §11.7 grant-execution
+    # experiment was landed as a receipt, and the spec moved to the ENFORCED set
+    # above (RECEIPT_FLOOR). Promoting rather than rewording is the point: a
+    # document that gains receipts and keeps its exclusion proves nothing.
 }
 
 
