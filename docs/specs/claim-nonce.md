@@ -3220,6 +3220,22 @@ Three sites in `bin/fleet.py` carry the marker `RATIFIED DOCTRINE -- claim-nonce
 - `_ceiling_refuses_dispatch` — the site the clause **permits** (§17.2, first bullet);
 - `_require_claim_holder` — the site it was aimed at.
 
+The corrected state, receipted rather than asserted — every marker names §17, and no `[PROPOSED]`
+marker or pointer at the open question survives:
+
+```
+# at 7f3acdd
+$ grep -onE "RATIFIED DOCTRINE -- claim-nonce §[0-9.]+" bin/fleet.py
+2143:RATIFIED DOCTRINE -- claim-nonce §17
+2526:RATIFIED DOCTRINE -- claim-nonce §17
+12572:RATIFIED DOCTRINE -- claim-nonce §17
+$ grep -cE "NOT RATIFIED DOCTRINE|§16\.4 item 3" bin/fleet.py
+0
+$ echo "exit $?"
+exit 1
+```
+
+Those three line numbers are the only thing in this section that can rot, and nothing rests on them:
 `tests/test_doctrine_citations.py` re-derives all three out of `bin/fleet.py` on every run and checks
 that each names a section that **exists**, is **ratified**, and states the clause the citing comment
 quotes — both halves. Re-pointing a citation at a different clause, or dropping the scope sentence
