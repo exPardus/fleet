@@ -26,6 +26,7 @@ interpreter, not the floor -- a bare `python` there resolves to 3.10.1.
 from __future__ import annotations
 
 import argparse
+import ast
 import ctypes
 import functools
 import hashlib
@@ -36,6 +37,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -43,7 +45,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 # The interpreter floor, in ONE place (posix-port campaign, follow-up 2).
 # Everything else that states it -- this module's docstring, the
@@ -11405,8 +11407,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :5041, :5498, :9334,
-    :14164), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :5043, :5500, :9336,
+    :14166), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -12057,8 +12059,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:5041, :5498, :9334,
-    #     :14164) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:5043, :5500, :9336,
+    #     :14166) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -14703,6 +14705,1315 @@ def _doctor_check_supervisor_handoff():
 
 
 # ---------------------------------------------------------------------------
+# fleet-index M1: the shard layer (docs/specs/fleet-index.md)
+#
+# ONE artifact type, one shard per source file, path-mirrored under
+# `.fleet-index/symbols/` (§4/§5). Sharding -- not the file format -- is what
+# makes this safe under fleet's concurrency: two workers editing DISJOINT
+# source files touch disjoint index files, so the conflict cannot arise at
+# any N. There is deliberately no global symbols/files table.
+#
+# The index is NOT fleet state (invariant 9). Nothing below reads or writes
+# the registry, takes `fleet.lock`, touches a mailbox, or probes a PID: it is
+# a pure function of a target repo's working tree plus its gitignored index.
+# Deleting `.fleet-index/` returns fleet to today's behaviour with no errors.
+# ---------------------------------------------------------------------------
+
+INDEX_DIR_NAME = ".fleet-index"
+INDEX_SYMBOLS_DIR_NAME = "symbols"
+INDEX_CONFIG_FILE_NAME = "config.toml"
+INDEX_SHARD_SUFFIX = ".tsv"
+
+# §5. `sig` carries the remainder of the line, so the column count is fixed at
+# five and a row is parsed by a plain `split("\t")` with no quoting rules.
+SHARD_KINDS = ("func", "class", "method", "const", "section")
+
+# §5. How many hex digits of the source SHA-256 the header carries.
+#
+# 16, not the 8 an earlier draft specified, and the four extra bytes are not
+# paranoia -- 8 hex is 32 bits, and a measured search over 109,096 two-line
+# modules (well inside a second) produced a colliding pair with an IDENTICAL
+# line count, which is the rest of the staleness key. Swapping those two files
+# serves the wrong file's symbols with `refreshed: False` while `index status`
+# reports nothing stale: the exact silent-wrong-coordinate failure §8 calls the
+# single most important property in the spec. `TestShaWidth` pins the width
+# against that measured pair. 64 bits puts a chance collision out of reach for
+# any repo, at 8 bytes per shard.
+INDEX_SHA_HEX_LEN = 16
+
+# §8. `.fleet-index/` is ALWAYS ignored; `init` writes this pattern
+# unconditionally and committing the index is documented-unsupported. WHERE it
+# is written is `_ensure_index_excluded`'s decision -- `$GIT_COMMON_DIR/info/
+# exclude`, not the tracked `.gitignore`.
+INDEX_GITIGNORE_ENTRY = INDEX_DIR_NAME + "/"
+
+INDEX_CONFIG_KEYS = ("include", "exclude")
+INDEX_CONFIG_DEFAULTS = {
+    "include": ["**/*.py", "**/*.md"],
+    "exclude": ["**/node_modules/**", "**/.venv/**", "**/target/**"],
+}
+# Written verbatim by `init`; `load_index_config` parses it back to
+# INDEX_CONFIG_DEFAULTS (pinned by a test, so the two cannot drift).
+INDEX_CONFIG_DEFAULT_TOML = (
+    "[index]\n"
+    'include = ["**/*.py", "**/*.md"]\n'
+    'exclude = ["**/node_modules/**", "**/.venv/**", "**/target/**"]\n'
+)
+
+# Never descended into during a build, whatever `include` says: the index's
+# own tree (indexing the index is circular) and git's object store.
+INDEX_SKIP_DIR_NAMES = frozenset({INDEX_DIR_NAME, ".git"})
+
+INDEX_NO_INDEX_MESSAGE = "no index -- run 'fleet index init'"
+
+
+class IndexConfigError(FleetCliError):
+    """`.fleet-index/config.toml` is outside the fixed schema (§8).
+
+    Loud by design, and the reserved `mode` key is the reason the rule exists:
+    an old `mode = "tracked"` line from the retired two-mode design must fail
+    the run rather than be silently ignored, which would leave an operator
+    believing a mode is in force that no code implements."""
+
+
+class IndexPathError(FleetCliError):
+    """A path handed to the index that does not name a file INSIDE the root.
+
+    TWO guards raise it, and they are two because containment is two separate
+    questions -- one about the spelling of a rel, one about where that spelling
+    lands on a real filesystem. Neither can answer the other's:
+
+    - `_index_posix_rel` is the STRING guard, and it is the one function every
+      index path passes through. It rejects a `..` segment anywhere and any rel
+      that is not relative. The alternative was measured and it deletes data:
+      with the check spelled separately on each entry surface, `--files` and
+      the `verified_shard_rows` choke point each grew a guard that rejected
+      only a LEADING `../`, an interior `..` reached `_index_prune_shard`, and
+      the prune unlinked a file outside the index root and rmdir'd its way out
+      of the tree -- printing "orphan shard pruned" and exiting 0. One
+      rejection, at the one place a rel becomes canonical, is why there is no
+      second spelling to keep in step.
+    - `_index_require_inside` is the FILESYSTEM guard. A rel made of entirely
+      ordinary segments still leaves the root when one of those segments is a
+      symlink or a win32 junction, and no amount of string analysis can see
+      that. `index_source_files` has fenced the build walk against it since
+      wave 2; the choke point had not, and served a file outside the root at
+      `status: ok`.
+
+    A caller that wants both -- and every caller does -- takes them together
+    from `_index_entry_paths`."""
+
+
+# --- paths ------------------------------------------------------------------
+
+def index_dir(root) -> Path:
+    return Path(root) / INDEX_DIR_NAME
+
+
+def index_symbols_dir(root) -> Path:
+    return index_dir(root) / INDEX_SYMBOLS_DIR_NAME
+
+
+def index_config_path(root) -> Path:
+    return index_dir(root) / INDEX_CONFIG_FILE_NAME
+
+
+def _index_posix_rel(rel) -> str:
+    """A source path in the index's canonical form: forward slashes, no
+    leading `./`, on every platform (§11.2).
+
+    Normalising backslashes here is not cosmetic -- without it the same win32
+    source file reachable as `bin\\fleet.py` and `bin/fleet.py` would get TWO
+    shards, and each would look stale to the other's reader.
+
+    A `..` segment ANYWHERE raises `IndexPathError`, not just a leading one.
+    An interior `..` is the same escape wearing a disguise -- `a/../../x`
+    leaves the root exactly as `../x` does -- and this is the single guard for
+    every caller, because a rel that survives here goes on to name a file the
+    prune path will unlink.
+
+    A rel that is not RELATIVE raises too, and that half is what a `..` check
+    alone misses entirely: `C:/victim/x.py` carries no `..`, so it came back
+    unchanged, and `root / rel` and `symbols / (rel + '.tsv')` are joins --
+    pathlib REPLACES on an absolute right-hand side instead of appending.
+    Measured through the choke point: a file outside the root overwritten with
+    shard bytes, and a shard materialised outside the root answering
+    `status: ok`.
+
+    The test is `drive or root`, NOT `is_absolute()`, and that is not a
+    stylistic choice -- `PureWindowsPath('C:x.py').is_absolute()` is False
+    while `Path('D:/root') / 'C:x.py'` is `C:x.py`. A drive-relative rel is not
+    absolute and still escapes, so `is_absolute()` leaves the hole open.
+
+    It is asked of `PureWindowsPath` on EVERY platform, deliberately. A rel is
+    the shard's identity and it is persisted; an index built on posix can be
+    read on win32, so a rel that is inert here and absolute there has to be
+    refused where it is created, not where it detonates. `PureWindowsPath` is
+    pure -- it parses win32 syntax without touching a win32 filesystem -- so
+    this is a syntax question answered the same way everywhere, not an OS
+    branch (invariant 8). The posix half needs no separate spelling: a leading
+    `/` is already dropped as an empty segment above."""
+    parts = [p for p in str(rel).replace("\\", "/").split("/") if p not in ("", ".")]
+    if ".." in parts:
+        raise IndexPathError(
+            f"index path {str(rel)!r} is outside the index root -- a '..' "
+            f"segment never names a file this index describes")
+    out = "/".join(parts)
+    spelled = PureWindowsPath(out)
+    if spelled.drive or spelled.root:
+        named = spelled.drive or spelled.root
+        raise IndexPathError(
+            f"index path {str(rel)!r} is outside the index root -- an index "
+            f"path is relative to the root, and this one names {named!r} of "
+            f"its own")
+    return out
+
+
+def shard_path_for_source(root, rel) -> Path:
+    """`.fleet-index/symbols/<source-path>.tsv` -- the shard mirrors the
+    source path, which is why the source path is not a column (§5)."""
+    return index_symbols_dir(root) / (_index_posix_rel(rel) + INDEX_SHARD_SUFFIX)
+
+
+def _index_require_inside(base, path, rel, what) -> None:
+    """Refuse `path` unless it RESOLVES strictly inside `base`.
+
+    The companion to `_index_posix_rel`, and the half a string guard cannot
+    cover. `link/secret.py` is an ordinary rel by every spelling rule -- no
+    `..`, no drive -- and when `link` is a symlink or a `mklink /J` junction it
+    names a file outside the root anyway. `index_source_files` fences the build
+    walk against exactly that shape (§11.1) and `_index_prune_shard` fences the
+    delete; measured before this existed, the choke point in between fenced
+    neither and answered `status: ok` with rows for a file outside the root.
+
+    BOTH sides are resolved, never just the candidate. `base in path.parents`
+    on unresolved paths is a comparison of spellings, which is the bug, and
+    resolving only the candidate breaks the ordinary case instead: a root
+    reached through a link (a `/tmp` symlink, a substed drive) would stop
+    containing its own files. Strictly inside, so `rel == ''` -- the root
+    itself, which is a directory and never a source file -- is refused rather
+    than admitted by an `==` arm nobody needs."""
+    try:
+        real_base = Path(base).resolve()
+        real = Path(path).resolve()
+    except OSError as exc:
+        raise IndexPathError(
+            f"index path {rel!r}: its {what} cannot be resolved ({exc}), so "
+            f"nothing can say whether it is inside the index root")
+    if real_base not in real.parents:
+        raise IndexPathError(
+            f"index path {rel!r} escapes the index root -- its {what} resolves "
+            f"to {real}, which is not inside {real_base}. A path that is "
+            f"spelled inside the root and lives outside it is a reparse point")
+
+
+def _index_entry_paths(root, rel) -> tuple:
+    """`(rel, source, shard)` -- the three things one index entry is, with BOTH
+    containment guards applied.
+
+    Every surface that takes a rel from a CALLER goes through here, so there is
+    one place that knows what a trustworthy index entry is: `verified_shard_rows`
+    (the read choke point) and `_index_refresh_one` (the write choke point).
+    `build_index` reaches the latter with rels from `index_source_files`, which
+    fenced them already, so the guards are a no-op on that path -- measured at
+    1.2% of a full build (0.079s of 6.594s over this repo's tree), which is the
+    price of not having a second definition of "inside the root" to keep in
+    step with this one."""
+    root = Path(root)
+    rel = _index_posix_rel(rel)
+    source = root / rel
+    shard = index_symbols_dir(root) / (rel + INDEX_SHARD_SUFFIX)
+    _index_require_inside(root, source, rel, "source file")
+    # The shard half is guarded for the same reason the PRUNE half already is:
+    # a junction inside the mirror tree redirects the atomic replace, which
+    # turns "may write in .fleet-index/" into "may overwrite any file on this
+    # machine". Guarding the unlink and not the write would leave the two
+    # spellings of one rule to drift apart, which is how this file got here.
+    _index_require_inside(index_symbols_dir(root), shard, rel, "shard")
+    return rel, source, shard
+
+
+def source_rel_from_shard(root, shard_path) -> str:
+    """Inverse of `shard_path_for_source`; ValueError off the shard tree."""
+    rel = Path(shard_path).relative_to(index_symbols_dir(root)).as_posix()
+    if not rel.endswith(INDEX_SHARD_SUFFIX):
+        raise ValueError(f"not a shard path: {shard_path}")
+    return rel[:-len(INDEX_SHARD_SUFFIX)]
+
+
+def source_lang(rel) -> str:
+    """The `lang` header column. `python`/`markdown` are the two parsed
+    languages (§6); everything else names its own suffix so a header-only
+    shard still says what it is."""
+    suffix = Path(_index_posix_rel(rel)).suffix.lower()
+    if suffix == ".py":
+        return "python"
+    if suffix == ".md":
+        return "markdown"
+    return suffix[1:] if suffix else "text"
+
+
+# --- shard bytes ------------------------------------------------------------
+
+def _index_tsv_field(value) -> str:
+    """Escape a value for a TSV cell: literal tabs become `\\t`, newlines are
+    stripped (§5).
+
+    Applied at PARSE time, not at render time, so a row handed back by a fresh
+    parse is byte-identical to the same row read off a shard. Without that,
+    `verified_shard_rows` would answer differently depending on whether it had
+    just refreshed -- a difference no caller could see coming.
+
+    Deliberately NOT a reversible escape (a backslash is not itself escaped),
+    because §5 specifies exactly this one substitution and a `\\\\` escape
+    would change the rendering of every regex-bearing signature."""
+    return str(value).replace("\r", "").replace("\n", "").replace("\t", "\\t")
+
+
+_INDEX_LINE_BREAK_RE = re.compile(r"\r\n|\r|\n")
+
+
+def _index_split_lines(text) -> list:
+    """Split on the three real line terminators -- `\\r\\n`, `\\r`, `\\n` --
+    dropping the trailing empty element.
+
+    This is exactly `bytes.splitlines()`'s rule, and it has to be, because the
+    header's line COUNT is taken from the bytes while the parsers' line
+    NUMBERS come from here; any disagreement between the two rules ships a
+    shard whose own rows cite a line past its stated end.
+
+    Deliberately NOT `str.splitlines()`, which additionally breaks on \\x0b,
+    \\x0c, \\x1c-\\x1e, \\x85, \\u2028 and \\u2029 -- none of which `bytes`
+    (or `ast`, or an editor, or git) treats as a line break. A markdown file
+    with a form feed in it would get coordinates nothing else in the toolchain
+    agrees with.
+
+    Nor is it a plain `split("\\n")`: a CR-only file then counts as one line
+    while `ast` numbers its symbols 1..N, so the header claimed 1 line and its
+    own rows cited line 5."""
+    lines = _INDEX_LINE_BREAK_RE.split(text)
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
+def _index_row_key(row):
+    """THE row order, defined once (§5).
+
+    Once, because it was defined twice: `render_shard` sorted, the parser
+    returned parse order, and the two agreed on every file without a
+    `(line, end)` tie. On `ZED = ALPHA = 1` they disagreed, so
+    `verified_shard_rows` handed back `[ZED, ALPHA]` when it had just
+    refreshed and `[ALPHA, ZED]` when it read the shard -- the shard BYTES
+    were reproducible and the returned ROWS were not, which is the half a
+    caller can actually see."""
+    name, line, end = row[0], row[1], row[2]
+    return (line, end, name)
+
+
+def render_shard(header: dict, rows) -> str:
+    """The exact shard bytes (§5): header line, then one row per symbol,
+    tab-separated and sorted by line number.
+
+    Sorted by line rather than by name so a source edit perturbs a contiguous
+    region of the shard instead of scattering hunks across it. The sort is a
+    no-op for rows straight from `parse_source_symbols`, which already emits
+    `_index_row_key` order; it stays here because §5's format promise is about
+    the bytes, and this is where the bytes are made."""
+    out = ["#\t{}\t{}\t{}".format(header["sha"], header["lines"], header["lang"])]
+    for name, line, end, kind, sig in sorted(rows, key=_index_row_key):
+        out.append(f"{name}\t{line}\t{end}\t{kind}\t{sig}")
+    return "\n".join(out) + "\n"
+
+
+_INDEX_HEX = frozenset("0123456789abcdef")
+
+
+def read_shard(shard_path):
+    """`(header, rows)` for a well-formed shard, or None for "not readable".
+
+    None is the ONLY failure signal, and every caller must treat it as stale
+    (§9): missing, unreadable, corrupt and truncated are deliberately not
+    distinguished, because the safe response to all four is identical --
+    re-parse the source. A shard is never parsed optimistically; a partially
+    valid shard yields None rather than the rows it happens to contain.
+
+    The final-newline check is the torn-write detector: the writer always ends
+    with `\\n`, so a body cut mid-row is caught even when that row happens to
+    split into five fields. A truncation landing exactly on a row boundary is
+    NOT detectable from these bytes -- see the note in `verified_shard_rows`."""
+    try:
+        raw = Path(shard_path).read_bytes()
+    except OSError:
+        return None
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if not text or not text.endswith("\n"):
+        return None
+    lines = _index_split_lines(text)
+    head = lines[0].split("\t")
+    if len(head) != 4 or head[0] != "#":
+        return None
+    sha, count, lang = head[1], head[2], head[3]
+    # Exactly INDEX_SHA_HEX_LEN, not "at least": a shard written by the
+    # 8-hex draft is not readable here, so it takes the stale path and is
+    # repaired on first read. That is the whole migration.
+    if len(sha) != INDEX_SHA_HEX_LEN or not set(sha) <= _INDEX_HEX:
+        return None
+    if not count.isdigit():
+        return None
+    rows = []
+    for line in lines[1:]:
+        fields = line.split("\t")
+        if len(fields) != 5:
+            return None
+        name, s_line, s_end, kind, sig = fields
+        if not s_line.isdigit() or not s_end.isdigit():
+            return None
+        if kind not in SHARD_KINDS:
+            return None
+        rows.append((name, int(s_line), int(s_end), kind, sig))
+    return {"sha": sha, "lines": int(count), "lang": lang}, rows
+
+
+def _index_unlink_quiet(path) -> None:
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def write_shard_atomic(shard_path, header: dict, rows, sleep=None) -> bool:
+    """Write one shard atomically: temp file in the SAME directory, then
+    `os.replace` (§6). True if the shard landed, False if it was abandoned.
+
+    A torn shard is indistinguishable from a short one, which would silently
+    yield wrong coordinates -- so the write is never in-place.
+
+    The Windows contract (§6/§11.6): `os.replace` onto a shard a concurrent
+    reader holds open raises `PermissionError` (a sharing violation). That is
+    retried with the bounded backoff this repo already uses for the registry
+    commit -- `_replace_with_retry`, deliberately reused rather than a second
+    policy -- and on exhaustion the write is ABANDONED with the old shard left
+    in place. Stale is safe (the header hash detects it and the next read
+    repairs it); torn is not.
+
+    EVERY `OSError` degrades to False, not just the sharing violation. This
+    function is called from the `verified_shard_rows` choke point, so an
+    escaping exception is a crash in the primitive M2's `q --outline <path>`
+    hands a caller-supplied path to -- and a caller-supplied path reaches
+    shapes the build never does (`nul.py` on win32 renders a shard path
+    `os.replace` refuses with `FileExistsError`, not `PermissionError`). The
+    outcome for all of them is the one this layer already has a safe answer
+    for: the old shard stays, the caller is answered from this run's parse.
+    A non-OSError still unwinds the temp file and propagates -- it is not a
+    hazard this layer knows how to survive."""
+    shard_path = Path(shard_path)
+    try:
+        shard_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(dir=str(shard_path.parent),
+                                        prefix=".idx.", suffix=".tmp")
+    except OSError:
+        return False
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(render_shard(header, rows))
+        _replace_with_retry(tmp_name, str(shard_path), sleep=sleep)
+        return True
+    except OSError:
+        _index_unlink_quiet(tmp_name)
+        return False
+    except BaseException:
+        _index_unlink_quiet(tmp_name)
+        raise
+
+
+# --- parsers (§6) -----------------------------------------------------------
+
+def header_for_bytes(raw, rel) -> dict:
+    """The staleness key for one buffer of source BYTES: `sha256` truncated to
+    `INDEX_SHA_HEX_LEN` hex, the line count, and the language (§5/§8).
+
+    Bytes, not decoded text: a CRLF/LF difference is a real difference to
+    every line-number consumer, so it must invalidate the shard -- and a file
+    that is not valid UTF-8 at all still has to get a header, because that is
+    how staleness keeps tracking it.
+
+    Takes bytes rather than a path so the header and the parse can be made
+    from the SAME buffer; see `verified_shard_rows`."""
+    return {"sha": hashlib.sha256(raw).hexdigest()[:INDEX_SHA_HEX_LEN],
+            "lines": len(raw.splitlines()),
+            "lang": source_lang(rel)}
+
+
+def source_header(source_path, rel) -> dict:
+    """`header_for_bytes` over the file at `source_path`. One read."""
+    return header_for_bytes(Path(source_path).read_bytes(), rel)
+
+
+def _index_decode(raw):
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _index_py_sig(node) -> str:
+    """`(args) -> ret`, rendered by `ast.unparse` (3.9+, so inside the 3.10
+    floor). Verified byte-identical on 3.10 and 3.13 before being pinned by a
+    golden -- `ast.unparse`'s output is not a documented stability guarantee,
+    so the golden is what would catch a future drift."""
+    try:
+        sig = "(" + ast.unparse(node.args) + ")"
+        if node.returns is not None:
+            sig += " -> " + ast.unparse(node.returns)
+        return sig
+    except (ValueError, TypeError, AttributeError, RecursionError):
+        return "()"
+
+
+def _index_py_symbols(body, prefix, rows, module_level) -> None:
+    """§6's four Python symbol kinds. Deliberately not a full `ast.walk`:
+    a function nested inside a function is an implementation detail, not a
+    symbol a worker looks up, and indexing it would put unreachable names in
+    the lookup namespace."""
+    for node in body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            rows.append((prefix + node.name, node.lineno, node.end_lineno,
+                         "func" if module_level else "method", _index_py_sig(node)))
+        elif isinstance(node, ast.ClassDef):
+            name = prefix + node.name
+            rows.append((name, node.lineno, node.end_lineno, "class", ""))
+            # A nested class qualifies as `Outer.Inner`, so its methods are
+            # reachable as `Outer.Inner.m` and by the M2 dotted-tail form.
+            _index_py_symbols(node.body, name + ".", rows, module_level=False)
+        elif module_level and isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    rows.append((target.id, node.lineno, node.end_lineno, "const", ""))
+        elif module_level and isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name):
+                rows.append((node.target.id, node.lineno, node.end_lineno, "const", ""))
+
+
+def _index_parse_python(raw) -> list:
+    text = _index_decode(raw)
+    if text is None:
+        return []
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        # §6/§9: an unparseable file never aborts a build -- it becomes a
+        # header-only shard so staleness still tracks it.
+        return []
+    rows = []
+    _index_py_symbols(tree.body, "", rows, module_level=True)
+    return rows
+
+
+_MD_HEADING_RE = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.*)$")
+_MD_CLOSING_HASHES_RE = re.compile(r"\s+#+\s*$")
+
+
+def _index_parse_markdown(raw) -> list:
+    """ATX headings as `kind=section`, with §11.4's `end` computed HERE, at
+    parse time, so `--src` never has to re-derive it at query time.
+
+    Fenced blocks are tracked because this repo's own docs are full of them:
+    a spec's ```` ``` ```` block routinely contains `# comment` lines, and
+    without fence tracking every one of those becomes a phantom section that
+    swallows the range of the real heading above it."""
+    text = _index_decode(raw)
+    if text is None:
+        return []
+    lines = _index_split_lines(text)
+    heads = []
+    fence = None
+    for lineno, raw in enumerate(lines, start=1):
+        stripped = raw.strip()
+        if fence is not None:
+            if stripped.startswith(fence):
+                fence = None
+            continue
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            fence = stripped[:3]
+            continue
+        match = _MD_HEADING_RE.match(raw)
+        if match:
+            title = _MD_CLOSING_HASHES_RE.sub("", match.group(2).strip()).strip()
+            heads.append((lineno, len(match.group(1)), title))
+    eof = len(lines)
+    rows = []
+    for idx, (lineno, level, title) in enumerate(heads):
+        end = eof
+        for next_line, next_level, _title in heads[idx + 1:]:
+            if next_level <= level:
+                end = next_line - 1
+                break
+        rows.append((title, lineno, max(end, lineno), "section", ""))
+    return rows
+
+
+def parse_source_symbols(source_path, lang=None, raw=None) -> list:
+    """Parse ONE source file into shard rows (§6), in `_index_row_key` order.
+    Never raises for a bad source file: an unparseable, unreadable or
+    undecodable file yields no rows and therefore a header-only shard, so the
+    build continues and staleness still tracks the file.
+
+    `raw` lets a caller that has ALREADY read the bytes hand them over instead
+    of paying a second read -- which is not an optimisation. A caller that
+    hashes one read and parses another can persist a shard describing file A
+    with the symbols of file B, and once the tree returns to A that shard
+    verifies clean forever. Measured at 2,037 torn shards in 9,811 refreshes
+    under a concurrent writer, with no injection at all."""
+    source_path = Path(source_path)
+    if lang is None:
+        lang = source_lang(source_path.name)
+    if raw is None:
+        try:
+            raw = source_path.read_bytes()
+        except OSError:
+            return []
+    if lang == "python":
+        rows = _index_parse_python(raw)
+    elif lang == "markdown":
+        rows = _index_parse_markdown(raw)
+    else:
+        rows = []
+    return sorted(
+        ((_index_tsv_field(name), line, end, kind, _index_tsv_field(sig))
+         for name, line, end, kind, sig in rows),
+        key=_index_row_key)
+
+
+# --- config (§8) ------------------------------------------------------------
+#
+# TRAP, and the reason there is a hand-written parser here: `tomllib` is
+# 3.11+, and `fleet.MIN_PYTHON_VERSION` is (3, 10) -- `py -3.10 -c "import
+# tomllib"` is a ModuleNotFoundError. A third-party TOML dependency is also
+# out (stdlib-only, SPEC §14). The schema is fixed and tiny, and §8 already
+# demands that anything outside it fail loudly, so a full TOML parser would
+# buy nothing but the ability to accept input this schema must reject.
+
+def _index_config_array(value, path, lineno, key) -> list:
+    def bad(why):
+        return IndexConfigError(
+            f"{path}:{lineno}: {key!r} {why} -- expected a single-line array "
+            f"of double-quoted strings, got {value!r}")
+
+    if not (value.startswith("[") and value.endswith("]")):
+        raise bad("is not an array")
+    inner = value[1:-1]
+    out, i, expect_item = [], 0, True
+    while i < len(inner):
+        char = inner[i]
+        if char in " \t":
+            i += 1
+        elif char == ",":
+            if expect_item:
+                raise bad("has an empty array slot")
+            expect_item = True
+            i += 1
+        elif char != '"':
+            raise bad("has a non-string array item")
+        elif not expect_item:
+            raise bad("is missing a comma between items")
+        else:
+            close = inner.find('"', i + 1)
+            if close < 0:
+                raise bad("has an unterminated string")
+            out.append(inner[i + 1:close])
+            i = close + 1
+            expect_item = False
+    return out
+
+
+def _parse_index_config(text, path) -> dict:
+    config = {key: list(value) for key, value in INDEX_CONFIG_DEFAULTS.items()}
+    table = None
+    for lineno, raw in enumerate(_index_split_lines(text), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("["):
+            if line != "[index]":
+                raise IndexConfigError(
+                    f"{path}:{lineno}: unrecognised table {line!r} -- the only "
+                    f"table this schema accepts is [index]")
+            table = "index"
+            continue
+        if table != "index":
+            raise IndexConfigError(
+                f"{path}:{lineno}: key outside a table -- every key must follow "
+                f"the [index] header")
+        key, sep, value = line.partition("=")
+        if not sep:
+            raise IndexConfigError(
+                f"{path}:{lineno}: not a `key = [...]` assignment: {line!r}")
+        key = key.strip()
+        if key not in INDEX_CONFIG_KEYS:
+            raise IndexConfigError(
+                f"{path}:{lineno}: unrecognised key {key!r} -- this schema "
+                f"accepts only {', '.join(INDEX_CONFIG_KEYS)}")
+        config[key] = _index_config_array(value.strip(), path, lineno, key)
+    return config
+
+
+def load_index_config(root) -> dict:
+    """`.fleet-index/config.toml`, or the defaults when it is absent (§8)."""
+    path = index_config_path(root)
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return {key: list(value) for key, value in INDEX_CONFIG_DEFAULTS.items()}
+    except OSError as exc:
+        raise IndexConfigError(f"{path}: unreadable ({exc})")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise IndexConfigError(f"{path}: not valid UTF-8")
+    return _parse_index_config(text, path)
+
+
+@functools.lru_cache(maxsize=256)
+def _index_glob_regex(pattern):
+    """Compile an include/exclude pattern.
+
+    NOT `fnmatch`: its `*` crosses `/`, and more importantly `fnmatch` has no
+    `**`, so the default `**/*.py` would fail to match a root-level `fleet.py`
+    -- the index would silently skip every top-level source file. Here `**/`
+    is an optional directory prefix, `**` spans separators, and `*`/`?` do
+    not. Case-sensitive on every platform, matching §11.2's rule for the M2
+    `--path` filter."""
+    out, i, size = [], 0, len(pattern)
+    while i < size:
+        char = pattern[i]
+        if pattern[i:i + 3] == "**/":
+            out.append("(?:.*/)?")
+            i += 3
+        elif pattern[i:i + 2] == "**":
+            out.append(".*")
+            i += 2
+        elif char == "*":
+            out.append("[^/]*")
+            i += 1
+        elif char == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(char))
+            i += 1
+    return re.compile("(?s:" + "".join(out) + r")\Z")
+
+
+def _index_glob_match(path, pattern) -> bool:
+    return _index_glob_regex(pattern).match(path) is not None
+
+
+# --- digest rendering (§7) --------------------------------------------------
+
+def render_digest(rel, header: dict, rows) -> str:
+    """§7's digest for one file. UNCAPPED by contract: the 400-line cap on
+    `q --outline` is the caller's concern (§11.4), and the spawn-time
+    `--context` digest is not capped at all -- so capping here would silently
+    impose `q`'s limit on a path the spec exempts."""
+    out = [f"## {rel} ({header['lines']} lines, {header['lang']})"]
+    for name, line, _end, kind, sig in rows:
+        indent = "  " if kind == "method" else ""
+        label = f"class {name}" if kind == "class" else f"{name}{sig}"
+        out.append(f"- L{line} {indent}{label}")
+    return "\n".join(out) + "\n"
+
+
+# --- index discovery (§11.1) ------------------------------------------------
+
+def _index_is_repo_boundary(directory) -> bool:
+    """A directory holding a `.git` ENTRY -- file or directory (§11.1).
+
+    ONE predicate, used in both directions: `find_index_root` walking UP so a
+    worker cannot resolve a parent checkout's index, and `index_source_files`
+    walking DOWN so a build cannot index a nested checkout's files. The
+    downward half was missing, and a parent `fleet index init` indexed
+    `.claude/worktrees/w1/*.py` -- shards for files on another branch, in a
+    tree with an index of its own."""
+    return (Path(directory) / ".git").exists()
+
+
+def _index_is_reparse_point(path) -> bool:
+    """A symlink or, on win32, a junction/mount point.
+
+    `os.path.islink` alone is not enough: a `mklink /J` junction carries
+    `IO_REPARSE_TAG_MOUNT_POINT`, not the symlink tag, so `islink` is False,
+    `os.walk` descends it happily, and a junction pointed anywhere leaks files
+    from outside the root into the index. `st_reparse_tag` is win32-only and
+    read through `getattr`, so this is an attribute probe, not an OS branch
+    (invariant 8). An unstattable entry answers True: the index has nothing to
+    gain by descending something it cannot even inspect."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return True
+    return bool(stat.S_ISLNK(st.st_mode) or getattr(st, "st_reparse_tag", 0))
+
+
+def find_index_root(start=None):
+    """The nearest `.fleet-index/` at or above `start`, or None (§11.1).
+
+    The walk STOPS at the first repository boundary -- a directory holding a
+    `.git` ENTRY, file or directory. The file case is the load-bearing one: a
+    linked worktree's `.git` is a file, and without this stop a worker in an
+    un-`init`ed campaign worktree would resolve the PARENT checkout's index.
+    Its staleness checks would pass (they hash the parent's files), so the
+    worker would get confidently wrong coordinates for a tree sitting on a
+    different branch, and a refresh would write into the parent's index from
+    inside a fenced worktree. A boundary directory's OWN index still wins, so
+    the check order here is `.fleet-index` first, boundary second."""
+    try:
+        current = Path(start if start is not None else os.getcwd()).resolve()
+    except OSError:
+        return None
+    for directory in (current, *current.parents):
+        if (directory / INDEX_DIR_NAME).is_dir():
+            return directory
+        if _index_is_repo_boundary(directory):
+            return None
+    return None
+
+
+# --- the verify-then-get primitive (§8/§11.3) -------------------------------
+
+def verified_shard_rows(root, rel, no_write=False, sleep=None) -> dict:
+    """THE choke point. Every read path goes through here, and it never hands
+    back a coordinate it has not just verified against the file on disk.
+
+    That is the single most important property in the spec (§8, §10): a stale
+    line number does not error -- it silently slices the wrong code, and the
+    worker cannot tell. So the shard is consulted only AFTER re-hashing the
+    source, and a shard that is stale, missing, corrupt or truncated is
+    re-parsed rather than trusted.
+
+    Returns a dict:
+      status    "ok"       -- `rows` are verified against the bytes on disk
+                "withheld" -- no-write mode met a shard it may not repair
+                "orphan"   -- the source file is gone or unreadable
+      rows      verified rows, [] unless status is "ok"
+      refreshed the source was re-parsed this call
+      written   the on-disk shard actually changed (a pruned orphan counts)
+      note      one line for stderr, or None
+
+    Two edges worth stating, because both are easy to get backwards:
+
+    - `written` False with status "ok" is the §11.3 abandoned-replace case.
+      The caller is still answered, from this run's own verified parse; only
+      the on-disk shard stays stale, and the next read repairs it. Degrading
+      to "withheld" there would turn a Windows sharing violation into a
+      user-visible failure for no safety gain.
+    - `no_write` withholds rather than serving. A read-only mount or a
+      `git bisect` is not a reason to relax the verification rule.
+
+    ONE read of the source, and the parse works off that same buffer. Reading
+    twice -- once to hash, once to parse -- opens a window in which a write
+    lands between them, and the shard that gets persisted then carries file
+    A's header over file B's rows. That shard is not detectably wrong: as soon
+    as the tree returns to A it verifies clean, and this function answers
+    `status: ok`, `refreshed: False`, `note: None` with coordinates for a file
+    it does not describe. It is the exact silent-wrong-coordinate failure the
+    docstring above says this function exists to prevent, and it needed no
+    injection to reproduce -- 21% of refreshes under a concurrent writer, i.e.
+    under the manager-builds-while-worker-edits pattern this fleet runs."""
+    root = Path(root)
+    rel, source, shard = _index_entry_paths(root, rel)
+    result = {"rel": rel, "status": "ok", "header": None, "rows": [],
+              "refreshed": False, "written": False, "note": None}
+    try:
+        raw = source.read_bytes()
+    except OSError as exc:
+        result["status"] = "orphan"
+        if source.exists():
+            # Present but unreadable (a directory in the slot, a permission
+            # denial). NOT pruned: the shard may well be the only surviving
+            # description of a file whose readability is a transient problem.
+            result["note"] = f"{rel}: source unreadable ({exc}) -- hits suppressed"
+            return result
+        result["note"] = f"{rel}: source file is gone -- hits suppressed"
+        if not no_write and _index_prune_shard(root, rel):
+            result["written"] = True
+            result["note"] += "; orphan shard pruned"
+        return result
+    header = header_for_bytes(raw, rel)
+    existing = read_shard(shard)
+    if existing is not None and existing[0] == header:
+        result["header"], result["rows"] = existing
+        return result
+    if no_write:
+        result["status"] = "withheld"
+        result["note"] = (f"{rel}: shard is stale or unreadable and no-write mode "
+                          f"forbids repairing it -- hits withheld")
+        return result
+    rows = parse_source_symbols(source, header["lang"], raw=raw)
+    result["header"] = header
+    result["rows"] = rows
+    result["refreshed"] = True
+    result["written"] = write_shard_atomic(shard, header, rows, sleep=sleep)
+    if not result["written"]:
+        result["note"] = (f"{rel}: shard refresh could not land -- answering from "
+                          f"this run's own parse, the on-disk shard stays stale")
+    return result
+
+
+# --- enumeration and the build (§6/§8) --------------------------------------
+
+def _index_selects(rel, include, exclude) -> bool:
+    if not any(_index_glob_match(rel, pattern) for pattern in include):
+        return False
+    return not any(_index_glob_match(rel, pattern) for pattern in exclude)
+
+
+def index_source_files(root, config=None) -> list:
+    """Every source path the index covers, as sorted forward-slash relatives.
+
+    The walk is fenced on BOTH counts §11.1 fences the reader's walk-up on:
+
+    - **A nested repository boundary is not descended.** A checkout inside the
+      root -- a vendored clone, or one of this fleet's own campaign worktrees
+      under `.claude/worktrees/` -- describes a different tree, usually on a
+      different branch, and has an index of its own. Measured: without this, a
+      parent `index init` wrote shards for `.claude/worktrees/w1/*.py`. `root`
+      itself is exempt (it is nearly always a checkout); only entries BELOW it
+      are tested, which is what filtering `dirnames` rather than `dirpath`
+      does.
+    - **Reparse points are not followed.** `os.walk` does not follow POSIX
+      symlinks, but it does descend a win32 junction, so a `mklink /J` inside
+      the root pulled a file from outside it into the index -- with a shard
+      path claiming it lives here. Files are tested too: a symlinked file is
+      the same leak one entry smaller."""
+    root = Path(root)
+    if config is None:
+        config = load_index_config(root)
+    include, exclude = config["include"], config["exclude"]
+    out = []
+    for dirpath, dirnames, filenames in os.walk(str(root)):
+        base = Path(dirpath)
+        dirnames[:] = [d for d in dirnames
+                       if d not in INDEX_SKIP_DIR_NAMES
+                       and not _index_is_repo_boundary(base / d)
+                       and not _index_is_reparse_point(base / d)]
+        for name in filenames:
+            # `relative_to(...).as_posix()`, not a separator substitution:
+            # invariant 8 confines OS branching to the platform adapter, and
+            # pathlib already yields forward slashes everywhere (§11.2, §14).
+            rel = (base / name).relative_to(root).as_posix()
+            if _index_selects(rel, include, exclude) and not _index_is_reparse_point(
+                    base / name):
+                out.append(rel)
+    return sorted(out)
+
+
+def index_shard_rels(root) -> list:
+    """Every source path the shard tree currently claims to describe."""
+    symbols = index_symbols_dir(root)
+    out = []
+    for dirpath, _dirnames, filenames in os.walk(str(symbols)):
+        base = Path(dirpath)
+        for name in filenames:
+            if not name.endswith(INDEX_SHARD_SUFFIX):
+                continue        # a `.idx.*.tmp` from an in-flight write
+            out.append(source_rel_from_shard(root, base / name))
+    return sorted(out)
+
+
+def _index_prune_shard(root, rel) -> bool:
+    """Delete one shard, then the mirror directories it emptied.
+
+    Every path here is RESOLVED before it is trusted. `stop in current.parents`
+    is a string comparison: it says the shard's path is spelled inside the
+    shard tree, not that the bytes it unlinks live there. A symlinked or
+    junctioned mirror directory satisfies the spelling and fails the fact, and
+    the walk-up then rmdir's its way straight out of the root -- measured on
+    this primitive, reported as "orphan shard pruned", exit 0."""
+    shard = shard_path_for_source(root, rel)
+    try:
+        stop = index_symbols_dir(root).resolve()
+        real = shard.resolve()
+    except OSError:
+        return False
+    if real == stop or stop not in real.parents:
+        return False
+    try:
+        shard.unlink()
+    except OSError:
+        return False
+    # Leave no empty mirror directories behind, or the shard tree slowly
+    # accumulates the skeleton of every directory a project ever had.
+    current = real.parent
+    while current != stop and stop in current.parents:
+        try:
+            current.rmdir()
+        except OSError:
+            break
+        current = current.parent
+    return True
+
+
+def _new_index_report() -> dict:
+    return {"indexed": 0, "skipped": 0, "failed": 0, "pruned": 0,
+            "indexed_rels": [], "pruned_rels": [], "warnings": []}
+
+
+def _index_refresh_one(root, rel, force, sleep, report) -> None:
+    # Canonicalised and fenced HERE, not only at the callers. `build_index`
+    # hands over an already-canonical rel from `index_source_files` and
+    # `update_index` canonicalises its own before it can compare them against
+    # the selection -- but "the one function every index path passes through"
+    # is a claim the code has to make true, not one a comment can assert on its
+    # behalf, and a caller-supplied rel reaching a write path uncanonicalised
+    # is exactly the shape that shipped. Canonicalisation is a fixpoint, so the
+    # second application costs a string walk and changes nothing.
+    root = Path(root)
+    rel, source, shard = _index_entry_paths(root, rel)
+    try:
+        # One read, hashed and parsed -- the build path tears exactly the way
+        # `verified_shard_rows` does, and it is the one a manager runs WHILE a
+        # worker edits the tree, so it is the likelier of the two to meet a
+        # concurrent writer.
+        raw = source.read_bytes()
+    except OSError as exc:
+        report["failed"] += 1
+        report["warnings"].append(f"{rel}: unreadable ({exc}) -- skipped")
+        return
+    header = header_for_bytes(raw, rel)
+    if not force:
+        existing = read_shard(shard)
+        if existing is not None and existing[0] == header:
+            report["skipped"] += 1
+            return
+    # §6/§9: an unparseable file yields no rows, so it becomes a header-only
+    # shard and the build carries on. It is never a build failure.
+    rows = parse_source_symbols(source, header["lang"], raw=raw)
+    if write_shard_atomic(shard, header, rows, sleep=sleep):
+        report["indexed"] += 1
+        report["indexed_rels"].append(rel)
+    else:
+        report["failed"] += 1
+        report["warnings"].append(
+            f"{rel}: shard write abandoned after the bounded replace retries -- "
+            f"the old shard is left in place (stale, not torn)")
+
+
+def build_index(root, force=False, sleep=None) -> dict:
+    """Rebuild the whole index: refresh every selected source file (skipping
+    the ones whose SHA-256 already matches unless `force`), then prune every
+    shard the selection no longer covers."""
+    root = Path(root)
+    config = load_index_config(root)
+    selected = index_source_files(root, config)
+    report = _new_index_report()
+    for rel in selected:
+        _index_refresh_one(root, rel, force, sleep, report)
+    keep = set(selected)
+    for rel in index_shard_rels(root):
+        # Both a deleted source and a source the config no longer selects: a
+        # shard that survived either one would keep answering for a file this
+        # index does not describe.
+        if rel not in keep and _index_prune_shard(root, rel):
+            report["pruned"] += 1
+            report["pruned_rels"].append(rel)
+    return report
+
+
+def update_index(root, rels, force=False, sleep=None) -> dict:
+    """Refresh exactly the named files -- the cheap path on a large tree,
+    where a full `build` walk is the expensive part.
+
+    Canonicalised UP FRONT, before anything is compared or written. `selected`
+    holds canonical rels, so an uncanonicalised caller rel -- `./a.py`,
+    `a\\b.py`, or a drive-qualified one -- missed the selection test and fell
+    through to a branch that then joined it onto the root anyway. Refusing the
+    whole invocation rather than the one entry is deliberate and matches
+    `--files`: a batch that names an out-of-root path is a caller that has the
+    root wrong, and half-applying its intent is worse than applying none."""
+    root = Path(root)
+    rels = [_index_posix_rel(rel) for rel in rels]
+    selected = set(index_source_files(root))
+    report = _new_index_report()
+    for rel in rels:
+        if rel in selected:
+            _index_refresh_one(root, rel, force, sleep, report)
+        elif (root / rel).exists():
+            # Honouring include/exclude here too is deliberate: a shard built
+            # for an unselected file would be pruned by the very next `build`,
+            # so writing it would be a promise this index cannot keep.
+            report["warnings"].append(
+                f"{rel}: not selected by this index's include/exclude -- skipped")
+        elif _index_prune_shard(root, rel):
+            report["pruned"] += 1
+            report["pruned_rels"].append(rel)
+            report["warnings"].append(f"{rel}: source file is gone -- orphan shard pruned")
+        else:
+            report["warnings"].append(f"{rel}: no such file, and no shard to prune")
+    return report
+
+
+def index_status(root) -> dict:
+    """Counts plus the stale/orphan/unindexed shard lists. READ-ONLY: status
+    reports staleness, it never repairs it, so an operator can see the true
+    state of an index without the act of looking changing it."""
+    root = Path(root)
+    selected = index_source_files(root)
+    selected_set = set(selected)
+    shard_rels = index_shard_rels(root)
+    stale, orphan, symbols = [], [], 0
+    for rel in shard_rels:
+        source = root / rel
+        if rel not in selected_set or not source.exists():
+            orphan.append(rel)
+            continue
+        existing = read_shard(shard_path_for_source(root, rel))
+        try:
+            header = source_header(source, rel)
+        except OSError:
+            stale.append(rel)
+            continue
+        if existing is None or existing[0] != header:
+            stale.append(rel)
+            continue
+        symbols += len(existing[1])
+    return {"root": root, "shards": len(shard_rels), "symbols": symbols,
+            "stale": stale, "orphan": orphan,
+            "unindexed": [rel for rel in selected if rel not in set(shard_rels)]}
+
+
+# --- `fleet index` CLI (§6) -------------------------------------------------
+
+# Per-file lines are capped so a first build of a large repo does not dump
+# thousands of lines into a manager's context. The suppressed count is always
+# printed -- a cap nobody is told about reads as "that was everything".
+INDEX_LIST_CAP = 20
+
+# `failed > 0` is a DISTINCT outcome from "the command refused to run", and
+# collapsing both onto 1 threw away the only difference a script cares about:
+# after exit 1 from `_require_index` nothing was indexed and the operator runs
+# `init`, while after `failed 3` an index exists, most of it is current, and
+# the operator retries the three. main() collapses every `FleetCliError` to 1,
+# so the partial outcome -- the new one, and the narrower one -- takes the new
+# code rather than displacing a convention every other verb shares. 2 and 3 are
+# `SupervisorLifecycleRefusal`'s REFUSE/FREEZE grades, 4 is
+# SUPERVISOR_CONTINUITY_RC and 5 is SUPERVISOR_BOOT_HANDOFF_REFUSED_RC.
+INDEX_FAILED_RC = 6
+
+
+def _index_root_arg(args) -> Path:
+    """`--path DIR` names the INDEX ROOT on all four verbs, defaulting to cwd.
+
+    Note the deliberate asymmetry with M2's `fleet q --path GLOB`, which is a
+    filter: `q` takes no root argument (its root comes from the §11.1
+    walk-up), so the flag name is free there for the job a querying worker
+    actually needs."""
+    raw = getattr(args, "path", None)
+    try:
+        root = (Path(raw).expanduser() if raw else Path.cwd()).resolve()
+    except OSError as exc:
+        raise FleetCliError(f"--path {raw!r}: {exc}")
+    if not root.is_dir():
+        raise FleetCliError(f"--path {root} is not a directory")
+    return root
+
+
+def _require_index(root) -> None:
+    """`init` is the ONLY command that creates `.fleet-index/` (§6)."""
+    if not index_dir(root).is_dir():
+        raise FleetCliError(INDEX_NO_INDEX_MESSAGE)
+
+
+def _index_files_arg(root, raw) -> list:
+    rels = []
+    for chunk in str(raw).split(","):
+        entry = chunk.strip()
+        if not entry:
+            continue
+        candidate = Path(entry).expanduser()
+        if candidate.is_absolute():
+            try:
+                rel = candidate.resolve().relative_to(root).as_posix()
+            except (ValueError, OSError):
+                raise FleetCliError(
+                    f"--files entry {entry!r} is outside the index root {root}")
+        else:
+            # No containment check of its own: `_index_posix_rel` refuses a
+            # `..` segment AND a non-relative rel for every caller. A second
+            # guard here is what let the two spellings drift apart in the first
+            # place -- this one rejected a LEADING `../` while the canonicaliser
+            # waved an interior one through to the prune path.
+            #
+            # Note what the `is_absolute()` arm above does NOT catch, and why
+            # this branch cannot be trusted to be the relative one: `C:x.py` is
+            # drive-relative, so `Path.is_absolute()` is False and it lands
+            # here -- and it still escapes a root on another drive. The
+            # canonicaliser is what refuses it.
+            rel = _index_posix_rel(entry)
+        if rel and rel not in rels:
+            rels.append(rel)
+    if not rels:
+        raise FleetCliError("--files named no paths")
+    return rels
+
+
+def _index_git_common_dir(root):
+    """`$GIT_COMMON_DIR` for `root`, or None when `root` is not a checkout.
+
+    `.git` is a DIRECTORY in an ordinary checkout and a FILE holding
+    `gitdir: <path>` in a linked worktree. `info/` is one of git's COMMON
+    paths, so a linked worktree's `info/exclude` is the parent clone's -- the
+    worktree's own gitdir names it in a `commondir` file, which is what the
+    second hop reads. Resolved with pathlib rather than by shelling out to
+    `git`: `fleet index init` must not grow a subprocess dependency, and a
+    missing or malformed pointer answers None, never a wrong directory."""
+    dot = Path(root) / ".git"
+    if dot.is_dir():
+        return dot
+    try:
+        text = dot.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    gitdir = ""
+    for line in text.splitlines():
+        if line.startswith("gitdir:"):
+            gitdir = line[len("gitdir:"):].strip()
+            break
+    if not gitdir:
+        return None
+    path = Path(gitdir)
+    if not path.is_absolute():
+        path = Path(root) / path
+    try:
+        common = (path / "commondir").read_bytes().decode("utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return path
+    if not common:
+        return path
+    candidate = Path(common)
+    return candidate if candidate.is_absolute() else path / candidate
+
+
+def _ensure_index_excluded(root):
+    """§8: `init` writes the ignore entry UNCONDITIONALLY -- committing
+    `.fleet-index/` is documented-unsupported, and the entry covers
+    `config.toml` too, so the config needs no entry of its own. Idempotent:
+    "unconditionally" means not conditional on any mode or config, not that
+    the line is appended twice. Returns `(path, added)`.
+
+    The entry goes to `$GIT_COMMON_DIR/info/exclude`, NOT to `.gitignore`.
+    `.gitignore` is a TRACKED file, and §8 also mandates `fleet index init
+    --path <worktree>` for every campaign worktree -- so writing there dirtied
+    a tracked file in every worktree fleet creates, and `git worktree remove`
+    then refused it with "contains modified or untracked files". §13 finding
+    2b disposed that hazard as unreachable once tracked mode was cut. It is
+    reachable, measured, and this is the repair. `info/exclude` is git's own
+    per-clone ignore list: untracked by construction, so nothing is dirtied,
+    and common to every worktree of the clone -- which is exactly the scope of
+    the claim being made ("this clone never commits `.fleet-index/`").
+
+    A project that is not a checkout at all falls back to `.gitignore`: there
+    is no tracked file to dirty there, and a later `git init` then starts out
+    already ignoring the index."""
+    common = _index_git_common_dir(root)
+    path = (common / "info" / "exclude") if common is not None \
+        else (Path(root) / ".gitignore")
+    try:
+        text = path.read_bytes().decode("utf-8")
+    except FileNotFoundError:
+        text = ""
+    except (OSError, UnicodeDecodeError) as exc:
+        raise FleetCliError(f"{path}: cannot read to add the index entry ({exc})")
+    if any(line.strip() in (INDEX_GITIGNORE_ENTRY, INDEX_DIR_NAME)
+           for line in text.splitlines()):
+        return path, False
+    if text and not text.endswith("\n"):
+        text += "\n"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes((text + INDEX_GITIGNORE_ENTRY + "\n").encode("utf-8"))
+    except OSError as exc:
+        raise FleetCliError(f"{path}: cannot write the index entry ({exc})")
+    return path, True
+
+
+def _print_index_report(report) -> int:
+    for rel in report["indexed_rels"][:INDEX_LIST_CAP]:
+        print(f"  + {rel}")
+    hidden = len(report["indexed_rels"]) - INDEX_LIST_CAP
+    if hidden > 0:
+        print(f"  ... and {hidden} more indexed")
+    for rel in report["pruned_rels"][:INDEX_LIST_CAP]:
+        print(f"  - {rel}")
+    hidden = len(report["pruned_rels"]) - INDEX_LIST_CAP
+    if hidden > 0:
+        print(f"  ... and {hidden} more pruned")
+    print("indexed {indexed}   skipped {skipped}   pruned {pruned}   "
+          "failed {failed}".format(**report))
+    for warning in report["warnings"]:
+        print(f"fleet: {warning}", file=sys.stderr)
+    # A file this run could not index is a file the index does not describe.
+    # Exiting 0 on `failed 3` reads as success to every caller that checks a
+    # return code instead of parsing the count line back out of stdout --
+    # and exiting 1 reads as "the command did not run at all", which is the
+    # collision `INDEX_FAILED_RC` exists to break.
+    return INDEX_FAILED_RC if report["failed"] else 0
+
+
+def cmd_index_init(args) -> int:
+    root = _index_root_arg(args)
+    index_symbols_dir(root).mkdir(parents=True, exist_ok=True)
+    config = index_config_path(root)
+    if not config.exists():
+        config.write_bytes(INDEX_CONFIG_DEFAULT_TOML.encode("utf-8"))
+    path, added = _ensure_index_excluded(root)
+    print(f"index root: {root}")
+    print(f"git exclude: {path} "
+          + ("(entry added)" if added else "(entry already present)"))
+    return _print_index_report(build_index(root))
+
+
+def cmd_index_build(args) -> int:
+    root = _index_root_arg(args)
+    _require_index(root)
+    return _print_index_report(build_index(root, force=args.force))
+
+
+def cmd_index_update(args) -> int:
+    root = _index_root_arg(args)
+    _require_index(root)
+    return _print_index_report(
+        update_index(root, _index_files_arg(root, args.files)))
+
+
+def cmd_index_status(args) -> int:
+    root = _index_root_arg(args)
+    _require_index(root)
+    status = index_status(root)
+    print(f"index root: {status['root']}")
+    print("shards {shards}   symbols {symbols}   stale {stale_n}   "
+          "orphan {orphan_n}   unindexed {unindexed_n}".format(
+              stale_n=len(status["stale"]), orphan_n=len(status["orphan"]),
+              unindexed_n=len(status["unindexed"]), **status))
+    for label in ("stale", "orphan", "unindexed"):
+        for rel in status[label][:INDEX_LIST_CAP]:
+            print(f"{label} {rel}")
+        hidden = len(status[label]) - INDEX_LIST_CAP
+        if hidden > 0:
+            print(f"{label} ... and {hidden} more")
+    return 0
+
+
+def cmd_index(args) -> int:
+    return {"init": cmd_index_init, "build": cmd_index_build,
+            "update": cmd_index_update, "status": cmd_index_status}[
+        args.index_command](args)
+
+
+# ---------------------------------------------------------------------------
 # CLI: argparse wiring + main()
 # ---------------------------------------------------------------------------
 
@@ -14855,6 +16166,28 @@ def build_parser() -> argparse.ArgumentParser:
     p_autoclean.add_argument("--fleet-home", dest="fleet_home", default=None,
                              help="explicit FLEET_HOME override for a caller whose "
                                   "environment does not carry one")
+
+    # fleet-index M1 (docs/specs/fleet-index.md §6). Opt-in per project and
+    # strictly additive: no registry read or write, no fleet.lock, no mailbox,
+    # no PID probe -- the index is not fleet state (invariant 9).
+    p_index = sub.add_parser("index", help="per-project symbol index (opt-in)")
+    index_sub = p_index.add_subparsers(dest="index_command", required=True)
+
+    p_ix_init = index_sub.add_parser(
+        "init", help="opt in: create .fleet-index/ and run the first build")
+    p_ix_build = index_sub.add_parser("build", help="rebuild an existing index")
+    p_ix_build.add_argument("--force", action="store_true",
+                            help="re-parse every file, not just the changed ones")
+    p_ix_update = index_sub.add_parser("update", help="refresh named files only")
+    # `--files`, deliberately NOT `--paths`: `--path` already means the index
+    # root here and (in M2) a glob filter on `q`, and a third meaning on the
+    # same token was the reason for the rename (§6).
+    p_ix_update.add_argument("--files", required=True,
+                             help="comma-separated source paths, relative to the index root")
+    p_ix_status = index_sub.add_parser("status", help="counts and stale shards")
+    for p_ix in (p_ix_init, p_ix_build, p_ix_update, p_ix_status):
+        p_ix.add_argument("--path", default=None,
+                          help="index root (default: the current directory)")
 
     p_doctor = sub.add_parser("doctor", help="run fleet health checks")
     p_doctor.add_argument(
@@ -15085,6 +16418,8 @@ def main(argv=None) -> int:
             return cmd_archive(args)
         if args.command == "autoclean":
             return cmd_autoclean(args)
+        if args.command == "index":
+            return cmd_index(args)
         if args.command == "doctor":
             return cmd_doctor(args)
         if args.command == "sup-boot":
