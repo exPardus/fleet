@@ -639,3 +639,34 @@ class TestTemplateRenderAndFreshnessHandleTheNewKey:
             autoclean_remove=False, autoclean_interval_hours=None))
         assert fleet.instance_freshness_info()["stale"] is False
         assert fleet._doctor_check_instance_freshness()[1] is True
+
+    def test_freshness_does_not_notice_a_hand_edited_instance(
+            self, isolated_home, monkeypatch):
+        """THE LIMIT, pinned so it cannot be re-described as a diff.
+
+        `instance-freshness` compares MTIMES, not content. An instance that is
+        newer than the template but has had the `permissions` key removed reads
+        `[PASS]`. That was harmless while the template carried hooks only; it is
+        less harmless now, because the silent outcome is a worker whose fleet
+        grant has gone missing -- which presents as zero `fleet q` calls, the
+        exact shape of §11.9's revert trigger, fired against a permission bug
+        rather than against the tool.
+
+        This test asserts the CURRENT behaviour, not the desired one. If someone
+        makes the check content-aware, it goes red and that is the signal to
+        delete it and strike the caveat from §11.7 item 2 -- which is the whole
+        point of pinning a known limit rather than only writing it down.
+        """
+        monkeypatch.setattr(fleet, "template_settings_path", lambda: TEMPLATE)
+        fleet.cmd_init(SimpleNamespace(
+            force=False, statusline=False, chain=False, autoclean=False,
+            autoclean_remove=False, autoclean_interval_hours=None))
+        instance = fleet.instance_settings_path()
+        rendered = json.loads(instance.read_text(encoding="utf-8"))
+        assert rendered.pop("permissions")["allow"] == ["Bash(fleet q:*)"]
+        instance.write_text(json.dumps(rendered, indent=2), encoding="utf-8")
+
+        assert fleet.instance_freshness_info()["stale"] is False
+        assert fleet._doctor_check_instance_freshness()[1] is True, (
+            "instance-freshness became content-aware -- delete this test and the "
+            "caveat it pins in §11.7 item 2")
