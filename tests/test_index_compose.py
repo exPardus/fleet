@@ -680,11 +680,69 @@ class TestContextDigest:
     def test_a_path_escaping_the_dispatch_dir_is_skipped(
             self, indexed_project, plain_project, capsys):
         """`--context ../plain/src/api.py` must not reach outside `--dir`:
-        the digest would describe a file the worker's index does not cover."""
+        the digest would describe a file the worker's index does not cover.
+
+        FIX WAVE C2, and the re-pin is the point. This used to pass only
+        because `_index_posix_rel` RETURNED a rel that then failed the
+        membership test. A sibling slice repairs that helper to REJECT a `..`
+        segment by raising, at which point this test went PASS -> ERROR --
+        measured, by injecting that guard verbatim. It is now asserted as
+        BEHAVIOUR (no digest, a warning, compose returns) rather than as a
+        return path, so it holds under either implementation, and it names no
+        exception class from the branch that raises."""
         prompt = _compose("w1", indexed_project,
                           context=["../plain/src/api.py"])
         assert "api.py (" not in prompt
+        assert "## " not in prompt
         assert capsys.readouterr().err.strip()
+
+    def test_an_escaping_path_is_skipped_even_when_normalisation_raises(
+            self, indexed_project, monkeypatch, capsys):
+        """The same property under the OTHER implementation, forced, so this
+        file pins both worlds without waiting on a merge.
+
+        The raised class is minted locally and descends from `FleetCliError`:
+        the contract under test is "one unusable path costs one warning", not
+        any particular spelling."""
+
+        class _PathRejected(fleet.FleetCliError):
+            pass
+
+        real = fleet._index_posix_rel
+        monkeypatch.setattr(fleet, "_index_posix_rel", lambda rel: (
+            (_ for _ in ()).throw(_PathRejected(f"escapes the root: {rel}"))
+            if ".." in str(rel) else real(rel)))
+
+        prompt = _compose("w1", indexed_project,
+                          context=["src/api.py", "../plain/src/api.py"])
+        assert "## src/api.py" in prompt, (
+            "a rejected path took the OTHER named paths down with it")
+        assert "## ../plain" not in prompt
+        assert "digest skipped" in capsys.readouterr().err
+
+    def test_the_index_update_verb_keeps_its_own_refusal_wording(self, tmp_path,
+                                                                 monkeypatch):
+        """C2's SECOND site, which the gate's blast-radius measurement did not
+        reach because it ran only this file.
+
+        `_index_posix_rel` is shared: `fleet index update --files ../x.py`
+        goes through it too, and a guard that raises there pre-empts
+        `_index_files_arg`'s own `startswith("../")` refusal with a different
+        message. Measured: injecting the sibling slice's guard verbatim turned
+        `tests/test_fleet_index.py::TestIndexUpdate::test_a_path_outside_the_root_is_refused`
+        red on the word `outside` alone. The escape is normalised back to this
+        verb's own wording, so the refusal reads the same either way."""
+
+        class _PathRejected(fleet.FleetCliError):
+            pass
+
+        real = fleet._index_posix_rel
+        monkeypatch.setattr(fleet, "_index_posix_rel", lambda rel: (
+            (_ for _ in ()).throw(_PathRejected(f"escapes the root: {rel}"))
+            if ".." in str(rel) else real(rel)))
+
+        with pytest.raises(fleet.FleetCliError, match="outside the index root"):
+            fleet._index_files_arg(tmp_path, "../x.py")
 
     def test_context_in_a_project_with_no_index_warns_and_proceeds(
             self, plain_project, capsys):
