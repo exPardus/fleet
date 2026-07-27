@@ -3028,6 +3028,14 @@ land on a legitimate supervisor wearing a worker's registry identity. Symmetrica
    aimed at — the 200k ceiling refusal (§16.5) rests on an environment-derived identity too, and one
    standard cannot be right at one site and wrong at the other.
 
+   > **RESOLVED 2026-07-27 by operator gate — see §17, which is where the clause now lives.** It
+   > became doctrine, **scoped**: inference may select the SUBJECT of a measurement but may not
+   > supply the GROUNDS of a refusal. The over-reach this item flags is what the scope half answers —
+   > the ceiling reads the stamp's ABSENCE and is permitted; the claim guard read its PRESENCE and
+   > was not. It landed in `docs/specs/**` rather than in `docs/SPEC.md`, which is the one place this
+   > item guessed wrong. The wording above is left as it was written: it is the question, dated, and
+   > a question edited to match its answer is no longer evidence of what was asked.
+
 ### 16.5 The 200k ceiling — `three-tier-command.md` §11.3 ND4, and what this branch did to it
 
 **This section is new, and its absence was a defect in the first revision:** the site that actually
@@ -3115,3 +3123,105 @@ that documents itself read-only or runs on a hot path. A harness built to stop a
 shipped with the seventh instance certified. Both halves are fixed, and the detector's walk now
 covers class methods, module level and module-level aliases; `getattr` dispatch is not statically
 decidable and the file says so instead of implying totality.
+
+## 17. RATIFIED — inference selects the SUBJECT of a measurement, never the GROUNDS of a refusal
+
+> **RATIFIED by Altai, 2026-07-27**, in-session operator docket. The ruling is recorded verbatim in
+> `docs/OPERATOR-GATES.md` (the identity-invariant gate), where the same clause is rendered with bold
+> where this section uses capitals.
+>
+> **This section is not an amendment and is not the amending author's.** §16 above stays exactly as
+> its author wrote it and stays unratified; nothing here edits it. §16.4 item 3 is the question this
+> section answers, and it is marked RESOLVED there with a pointer back here.
+
+### 17.1 The clause
+
+> **Inference may select the SUBJECT of a measurement, but may not supply the GROUNDS of a refusal.
+> Donation can only ever ADD a `FLEET_WORKER` stamp and nothing anywhere removes one, therefore
+> presence of the stamp is unsound evidence and absence is sound.**
+
+Both sentences are the clause. The second is not commentary on the first — it is the **scope**, and
+it is what makes the first decidable. Cited without it, the headline is the unscoped form §17.3
+supersedes, which read strictly condemns the 200k ceiling refusal as well (that refusal also rests on
+an environment-derived identity) and therefore condemns roughly every guard in this file.
+
+The clause was chosen, in the operator's own accounting, because it is the only candidate resting on
+a **mechanical property of the system** — donation adds, nothing removes — rather than on who
+authored it, and because it was verified by driving rather than by argument.
+
+### 17.2 What it decides, exactly
+
+- **`_caller_holds_supervisor_claim` survives** wherever it selects *what to measure*. At
+  `_ceiling_refuses_dispatch` the identity read only ever chooses whose transcript the occupancy
+  comes from; the grounds of the refusal stay the measured occupancy. That is the permitted half of
+  the clause, not an exception to it.
+- **It is condemned only where it grounds a refusal on stamp PRESENCE.** That is the direction
+  `SPEC.md:196` already named, and it is the arm that was removed.
+- **`three-tier-command.md` §11.3 ND4(c) is blessed, not tolerated.** ND4(c) exempts the interface on
+  the **absence** of `FLEET_WORKER`, which is the sound direction; the clause's second sentence is
+  the reason it is sound, stated once here instead of re-derived at each site.
+- **The §6.5 registry-keyed gate STANDS** (ratified the same day, same docket). The contradiction
+  that once motivated demoting it does not exist: `SPEC.md:196` constrains the gate's **key**,
+  ratified §6.5 D5 requires the refusal to **exist**, and a registry-keyed gate satisfies both. The
+  gate's limit is **coverage** — it is absent where the registry cannot be read (§16.3) — and
+  coverage is extended elsewhere. This clause is not a licence to delete a refusal.
+
+### 17.3 What it supersedes, enumerated by grep and not by inspection
+
+The superseded form is *"an identity inference derived from the environment may never be the sole
+basis of a refusal; the nonce and the claim refuse, inference may only inform and announce."* Its
+provenance is why it needed ratifying rather than adopting: it originates in a **supervisor's own
+task brief** (`supervisor/JOURNAL.md` G-J), and before this section it appeared in `docs/specs/**`
+**only** inside the unratified §16 amendment — while three sites in `bin/fleet.py` cited it in
+prescriptive voice. That is a supervisor instruction wearing the clothes of doctrine.
+
+Every place the superseded form was asserted, at the commit the ruling landed on:
+
+```
+# at 0e8d7ca
+$ grep -rniE "sole basis|basis of a refusal" --include=*.py --include=*.md . | cut -d: -f1,2 | sed 's|^\./||' | LC_ALL=C sort
+REVIEW-INPUT-IDENTITY.md:198
+REVIEW-INPUT-IDENTITY.md:202
+bin/fleet.py:12556
+bin/fleet.py:2145
+bin/fleet.py:2520
+docs/AUTONOMOUS-2026-07-26.md:540
+docs/specs/claim-nonce.md:3025
+supervisor/JOURNAL.md:807
+supervisor/JOURNAL.md:841
+tests/test_identity_registry.py:299
+tests/test_identity_registry.py:31
+tests/test_identity_registry.py:524
+```
+
+The enumeration is a receipt rather than a list because a list produced by inspection has been wrong
+five times in this repo's history and every one of them took one grep to catch. It is deliberately
+wrap-tolerant: `tests/test_identity_registry.py:31` carries only the tail of a sentence that begins
+on line 30, and a pattern anchored on the whole phrase misses it.
+
+Of the twelve, **six are corrected** — the three prescriptive citations in `bin/fleet.py`
+(`:2145`, `:2520`, `:12556`) and the three in `tests/test_identity_registry.py` (`:31`, `:299`,
+`:524`). Two of those six (`bin/fleet.py:2520`, `tests/test_identity_registry.py:299`) were already
+stating the *permitted* half of the clause correctly; they are re-worded to **cite** §17 rather than
+to restate an unratified rule in their own words.
+
+**Six are left exactly as written.** `docs/AUTONOMOUS-2026-07-26.md`, `REVIEW-INPUT-IDENTITY.md` and
+`supervisor/JOURNAL.md` (four hits) are dated records of what was believed and argued at the time,
+and editing a record to agree with a later ruling falsifies it. `claim-nonce.md:3025` — §16.4 item 3
+— is the *question*, and it keeps its wording for the same reason; it gains a RESOLVED marker
+pointing here.
+
+### 17.4 Where the code cites this section, and what keeps the citation honest
+
+Three sites in `bin/fleet.py` carry the marker `RATIFIED DOCTRINE -- claim-nonce §17`:
+
+- the identity block above `_acting_worker_identity` — the banner that used to carry
+  `[PROPOSED -- NOT RATIFIED DOCTRINE]`;
+- `_ceiling_refuses_dispatch` — the site the clause **permits** (§17.2, first bullet);
+- `_require_claim_holder` — the site it was aimed at.
+
+`tests/test_doctrine_citations.py` re-derives all three out of `bin/fleet.py` on every run and checks
+that each names a section that **exists**, is **ratified**, and states the clause the citing comment
+quotes — both halves. Re-pointing a citation at a different clause, or dropping the scope sentence
+from this section, turns it RED. That test is the answer to the specific defect this section exists
+to close: a citation nobody can check is indistinguishable from an assertion.

@@ -2140,27 +2140,34 @@ def _record_is_supervisor_claim_holder(record, claim=None):
 # and `_doctor_check_identity_witness` reports a witness that disagrees with the
 # registry as the leak it is.
 #
-# [PROPOSED -- NOT RATIFIED DOCTRINE. See docs/specs/claim-nonce.md §16.4 item 3.]
-# A CANDIDATE INVARIANT THIS SURFACE WAS DRAFTED UNDER. "An identity inference
-# derived from the environment may never be the SOLE basis of a refusal; the
-# nonce and the claim refuse, inference may only inform and announce."
+# RATIFIED DOCTRINE -- claim-nonce §17 (Altai, 2026-07-27). THE INVARIANT THIS
+# SURFACE IS DRAFTED UNDER, quoted so the code and the corpus can be diffed:
 #
-# Its provenance, stated because prescriptive voice in a comment is how a
-# proposal becomes doctrine by accident: it originates in a supervisor's task
-# brief, it appears in the ratified corpus ONLY inside the unratified §16
-# amendment this work adds, and nothing in `docs/SPEC.md`,
-# `docs/specs/three-tier-command.md` or ratified `claim-nonce` states it.
-# Whether it becomes doctrine is the operator's call. Read strictly it also
-# condemns more than it was aimed at -- the 200k ceiling refusal at
-# `_ceiling_refuses_dispatch` rests on an environment-derived identity too --
-# and one standard cannot be right at one site and wrong at the other; that
-# tension is filed for the operator, not resolved here.
+#     "Inference may select the SUBJECT of a measurement, but may not supply
+#     the GROUNDS of a refusal. Donation can only ever ADD a `FLEET_WORKER`
+#     stamp and nothing anywhere removes one, therefore presence of the stamp
+#     is unsound evidence and absence is sound."
+#
+# Both sentences are the clause; the second is the SCOPE, not a gloss on the
+# first. `tests/test_doctrine_citations.py` re-derives this citation and the
+# two below out of this file on every run and checks that §17 exists, is
+# ratified, and says what is quoted here -- because the defect being closed is
+# a comment in prescriptive voice citing something nobody can open.
+#
+# SUPERSEDED, and named so nobody re-derives it: the unscoped form *"an
+# identity inference derived from the environment may never be the SOLE basis
+# of a refusal"*, which originated in a supervisor's task brief and appeared in
+# `docs/specs/**` only inside the unratified §16 amendment. Read strictly it
+# condemned the 200k ceiling refusal too (`_ceiling_refuses_dispatch` rests on
+# an environment-derived identity), i.e. one standard right at one site and
+# wrong at the other. §17's second sentence is what resolves that: the ceiling
+# reads ABSENCE and is permitted, the old claim guard read PRESENCE and was not.
 #
 # WHERE THE CODE ACTUALLY STANDS: the worker-turn GATE in
-# `_require_claim_holder` DOES refuse on a registry-judged identity, because
-# ratified claim-nonce §6.5 D5 requires that refusal to exist and SPEC.md:196
-# constrains only its key. So this proposal is not what the shipped guard
-# obeys; it is a live question about whether the guard should exist at all.
+# `_require_claim_holder` DOES refuse on a registry-judged identity, and §17
+# does not condemn it -- ratified claim-nonce §6.5 D5 requires that refusal to
+# exist and SPEC.md:196 constrains only its key. The gate's limit is coverage,
+# not legitimacy.
 #
 # WHAT IS FACTUAL RATHER THAN PROPOSED. `FLEET_WORKER` and
 # `CLAUDE_CODE_SESSION_ID` are read from the SAME medium -- the donated daemon
@@ -2516,9 +2523,16 @@ def _ceiling_refuses_dispatch(verb, now=None):
     wording below therefore does NOT tell the caller that the interface tier can
     never see it, because with a donated stamp it can.
 
-    DIRECTION OF TRAVEL: at this site the inference only ever EXEMPTS. The
-    refusal's sole basis stays the measured occupancy of the acting transcript;
-    identity only selects whose transcript to measure.
+    DIRECTION OF TRAVEL -- RATIFIED DOCTRINE -- claim-nonce §17 (Altai,
+    2026-07-27): *"Inference may select the SUBJECT of a measurement, but may
+    not supply the GROUNDS of a refusal. Donation can only ever ADD a
+    `FLEET_WORKER` stamp and nothing anywhere removes one, therefore presence
+    of the stamp is unsound evidence and absence is sound."* At this site the
+    inference only ever EXEMPTS, and it only ever selects WHOSE transcript to
+    measure; the grounds of the refusal stay the measured occupancy of the
+    acting transcript. That is the PERMITTED half of the clause rather than an
+    exception to it, and the second sentence is why (c)'s read of `FLEET_WORKER`
+    ABSENCE is blessed rather than merely tolerated (§17.2).
 
     ONE SCOPE NOTE (rs S-9). Past (c), the verdict is
     `_caller_holds_supervisor_claim`'s, which resolves through each record's sid
@@ -11462,8 +11476,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :4955, :5402, :9452,
-    :14003), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :4969, :5416, :9466,
+    :14025), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -12107,8 +12121,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:4955, :5402, :9452,
-    #     :14003) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:4969, :5416, :9466,
+    #     :14025) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -12554,12 +12568,20 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
     # re-word a refusal the nonce had already made -- reasoning that a registry
     # lookup keyed by an env-supplied sid is still an environment-derived
     # inference, and that such an inference may never be the sole basis of a
-    # refusal (the PROPOSED invariant, claim-nonce §16.4 item 3). The demotion
-    # buys something only under the hypothesis that the daemon donates the SID
-    # as well as the stamp, and claim-nonce:2573 records that hypothesis as
-    # OPEN. Trading a ratified control away to insure against an unresolved
-    # hypothesis is the operator's call to make, not this file's; the question
-    # is filed, and the ratified shape ships meanwhile.
+    # refusal. THAT WAS THE UNSCOPED FORM, AND IT IS NOT WHAT WAS RATIFIED.
+    # RATIFIED DOCTRINE -- claim-nonce §17 (Altai, 2026-07-27): *"Inference may
+    # select the SUBJECT of a measurement, but may not supply the GROUNDS of a
+    # refusal. Donation can only ever ADD a `FLEET_WORKER` stamp and nothing
+    # anywhere removes one, therefore presence of the stamp is unsound evidence
+    # and absence is sound."* This gate grounds its refusal on what the REGISTRY
+    # says, never on the presence of a donated stamp, so §17 does not condemn
+    # it, and §6.5 D5 requires the refusal to exist (§17.2). The demotion would
+    # have bought one further thing -- that a worker-shaped body presenting a
+    # valid nonce also passes -- and that is worth something only under the
+    # hypothesis that the daemon donates the SID as well as the stamp, which
+    # claim-nonce §16.3 records as OPEN. The gate's real limit is COVERAGE: it
+    # is absent where the registry cannot be read, and that is being extended
+    # rather than traded away.
     #
     # UNRESOLVED still ABSTAINS -- it is every body's dispatch window, including
     # the supervisor's own, and `sup-handoff-begin` registers the successor as
