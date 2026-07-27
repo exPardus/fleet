@@ -1031,9 +1031,11 @@ bin/fleet.py:5423:    to survive an update. FAIL is reserved for a confirmed mis
 bin/fleet.py:6634:            f"uuid-shaped names are reserved for session ids, F6)")
 ```
 
-Reserved-name *enforcement* exists (uuid-shape refusal at `validate_name`). What does not exist is a
-reserved-name **list** for a supervisor body name — still `[UNBUILT — owned by the three-tier
-slice]`, now on a receipt that supports the conclusion. This spec reserves no name.
+Reserved-name *enforcement* exists (uuid-shape refusal at `validate_name`). What did not exist at this
+pin is a reserved-name **list** for a supervisor body name — then `[UNBUILT — owned by the three-tier
+slice]`, on a receipt that supports the conclusion. This spec reserves no name. **[BUILT `2ad0053`,
+merged `31e139e`]** by the three-tier slice as `RESERVED_NAMES`, checked at the same choke point;
+receipt §4.14a.
 
 **(d) The handoff task file is written once and never deleted.**
 
@@ -1130,6 +1132,10 @@ $ sed -n '4184,4197p' bin/fleet.py
 
 ### 4.14 `[UNBUILT]` proofs — reproduced as no-matches at `091d5fa`
 
+**Currency note (2026-07-27, `unbuilt-sweep`): every claim in this section has since been built.** The
+blocks stay — a receipt is a claim about a commit — but read §4.14a before quoting any of them as a
+statement about today.
+
 ```
 # at 091d5fa
 $ grep -rIn "nonce" bin/
@@ -1145,11 +1151,70 @@ $ echo "exit $?"
 exit 1
 ```
 
-- No nonce of any kind exists in `bin/` — **`[UNBUILT — owned by this slice]`**.
-- No `sup-release` verb exists — **`[UNBUILT — owned by this slice]`** (§6.3).
-- `SUPERVISOR_JOURNAL_KINDS` @6825-6828 has no `RELEASED` kind — **`[UNBUILT — owned by this
-  slice]`**, and adding one touches the five lists of §4.7.
-- No reserved-name list — **`[UNBUILT — owned by the three-tier slice]`**, receipt at §4.13(c).
+Each of the four claims below was true at `091d5fa`. **All four have since been built.** Each is
+attributed to the commit that actually introduced the symbol, found with `git log -S`, not to a merge
+sha read off a summary — `docs/SPEC.md` §18 attributes this slice to `2d58eba`, which is a *docs*
+commit ("journal kinds line gains RELEASED + LIMIT-TRANSFER"), so that citation does not support the
+build claim and is not reused here. The no-matches above stay because they are claims about `091d5fa`;
+§4.14a re-asks the same questions at `0e8d7ca`.
+
+- No nonce of any kind exists in `bin/` — was **`[UNBUILT — owned by this slice]`**; **[BUILT
+  `568071b`]** (claim-nonce §5.2 continuity primitives), §4.14a.
+- No `sup-release` verb exists — was **`[UNBUILT — owned by this slice]`** (§6.3); **[BUILT
+  `c2225e8`]**, §4.14a.
+- `SUPERVISOR_JOURNAL_KINDS` @6825-6828 has no `RELEASED` kind — was **`[UNBUILT — owned by this
+  slice]`**, and adding one touches the five lists of §4.7; **[BUILT `c2225e8`, widened `5b90824`]**,
+  §4.14a.
+- No reserved-name list — was **`[UNBUILT — owned by the three-tier slice]`**, receipt at §4.13(c);
+  **[BUILT `2ad0053`]** as `RESERVED_NAMES` (merged `31e139e`), §4.14a.
+
+### 4.14a The same four questions, re-asked at `0e8d7ca` (2026-07-27, `unbuilt-sweep`)
+
+```
+# at 0e8d7ca
+$ grep -cI "nonce" bin/fleet.py
+242
+```
+
+```
+# at 0e8d7ca
+$ grep -n "def cmd_sup_release" bin/fleet.py
+12718:def cmd_sup_release(args) -> int:
+```
+
+```
+# at 0e8d7ca
+$ sed -n '10164,10167p' bin/fleet.py
+SUPERVISOR_JOURNAL_KINDS = (
+    "BOOT", "CHECKPOINT", "PROPOSAL", "SEIZED", "RELEASED", "LIMIT-TRANSFER",
+    "HANDOFF-BEGIN", "HANDOFF-COMPLETE", "HANDOFF-ABORT",
+)
+```
+
+```
+# at 0e8d7ca
+$ grep -n "^RESERVED_NAMES\|if name in RESERVED_NAMES" bin/fleet.py
+768:RESERVED_NAMES = frozenset({SUPERVISOR_BODY_NAME})
+796:    if name in RESERVED_NAMES:
+```
+
+### 4.14b The §5.7 manual lever is now documented for a human
+
+`skills/fleet/supervisor.md` no longer mentions `supervisor/INCARNATION` only as the definition of
+"body" — it states the lever, scopes it to a human at a shell, and attaches the escalation rule, which
+is exactly what §5.7's row asked for:
+
+```
+# at 0e8d7ca
+$ sed -n '196,198p' skills/fleet/supervisor.md
+Below that hour it is `freeze` — page the operator. **The only manual lever is
+the operator's**: remove `supervisor/INCARNATION` by hand. That lever is for a
+human at a shell; a refused agent must escalate, never reach for it (§5.7).
+```
+
+The `--help` half of that row is still `[UNBUILT]` and stays that way on purpose — §5.7 binds
+agent-facing output not to name a lever that resolves the ambiguity unilaterally, and `--help` is
+agent-facing.
 
 ---
 
@@ -1443,7 +1508,7 @@ context compaction eating the last printed value. Its options:
 |---|---|---|
 | Wait out the heartbeat, then `sup-boot` ⇒ `seize` | up to `SUPERVISOR_CLAIM_STALE_SECONDS` = 3600 s (@6821); writes a `SEIZED` entry, which is the correct audit record for "a body lost continuity" | no — but it is today's shipped behavior, unchanged |
 | Escalate to the operator | immediate | n/a |
-| The operator's manual lever (remove `supervisor/INCARNATION`) | immediate | no — today's only release lever, undocumented in `--help` **and, `[UNBUILT — owned by this slice]`, undocumented anywhere else either: `skills/fleet/supervisor.md` mentions the file once, at `:6`, as the definition of "body". Documenting it for a human is a change §8 assigns to this slice, not a fact about today.** |
+| The operator's manual lever (remove `supervisor/INCARNATION`) | immediate | no — today's only release lever, undocumented in `--help`. It **was** undocumented everywhere else too (`[UNBUILT — owned by this slice]`: `skills/fleet/supervisor.md` mentioned the file once, at `:6`, as the definition of "body"). **[BUILT]** — `supervisor.md:197` now states it, human-scoped, with the escalation rule attached; receipt §4.14b. The `--help` half stands: still `[UNBUILT]`, deliberately (§5.7's binding constraint is that agent-facing output must not name this lever). |
 
 **This spec adds no fourth path.** That is a deliberate reversal of v1, which added three, each keyed
 on a value a read-only view prints, and whose refusal message *instructed the refused caller to run
