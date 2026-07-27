@@ -625,3 +625,23 @@ class TestTheHelperIsTheONLYSpelling:
         self._fake(monkeypatch, ["fleet.json.corrupt.SENTINEL"])
         _, _, note = fleet._doctor_check_autoclean(run=_roster_run())
         assert "SENTINEL" in note
+
+    # -- the abstention note (the fifth reader) ------------------------------
+
+    def test_the_abstention_note_reads_through_the_helper(self, qg_home, monkeypatch):
+        """`ident` is hand-built rather than resolved, deliberately: the point
+        is to isolate THIS site's read of the helper from
+        `_acting_worker_identity`'s, which reads it too. A resolved ident would
+        make one fake satisfy both and prove neither."""
+        self._fake(monkeypatch, ["fleet.json.corrupt.SENTINEL"])
+        assert not fleet.registry_path().exists()
+        assert "SENTINEL" in fleet._identity_abstention_note({"registry_read": False})
+
+    def test_the_abstention_note_GOES_PLAIN_when_the_helper_says_clean(
+            self, qg_home, monkeypatch):
+        """The discriminating half: a REAL artifact is on disk and the helper is
+        silenced. A site that globbed inline would still name it."""
+        (fleet.state_dir() / ARTIFACT).write_text(CORRUPT, encoding="utf-8")
+        self._fake(monkeypatch, [])
+        assert (fleet._identity_abstention_note({"registry_read": False})
+                == "state/fleet.json could not be read")
