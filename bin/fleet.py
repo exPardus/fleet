@@ -5389,6 +5389,16 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
     worker -- the operator keeps a registry entry pointing at the old
     (possibly already-stopped) session instead of losing the name outright.
     """
+    # three-tier §11.3, same arming as `cmd_respawn`'s call site: a
+    # `--task`-bearing respawn is a new-task dispatch and is refused over the
+    # 200k ceiling; a bare respawn is §11.4 recovery and is not. Repeated here
+    # rather than left to the caller so a direct call into this body -- the
+    # shape that let a supervisor dispatch a wave at 224,321 tokens -- cannot
+    # slip past the ceiling by entering below it.
+    if getattr(args, "task", None):
+        _ceiling_refusal = _ceiling_refuses_dispatch("respawn")
+        if _ceiling_refusal is not None:
+            raise FleetCliError(_ceiling_refusal)
     name = args.name
     if getattr(args, "max_budget_usd", None) is not None:
         raise FleetCliError(
@@ -5590,6 +5600,18 @@ def cmd_respawn(args, run=subprocess.run, which=shutil.which,
     held. Ahead of the destructive-guard prompt: the gate is the outer policy,
     the ownership prompt the inner one."""
     _supervisor_gate("respawn", nonce=getattr(args, "nonce", None))
+    # three-tier §11.3: `respawn` is TWO verbs wearing one name, and only one of
+    # them is a dispatch. WITH `--task` it starts a new worker turn on new work,
+    # exactly like `spawn`/`send`, so the 200k ceiling applies. WITHOUT it, this
+    # is §11.4 recovery -- the lever that FIXES an over-band worker -- and it
+    # stays permitted over the ceiling: a guard whose refusal set contains its
+    # own remedy is a circular dependency (`docs/specs/claim-nonce.md` §7.2),
+    # and refusing here would make the ceiling self-sealing at the one state it
+    # exists for. `_cmd_respawn_native` carries the same pair for direct calls.
+    if getattr(args, "task", None):
+        _ceiling_refusal = _ceiling_refuses_dispatch("respawn")
+        if _ceiling_refusal is not None:
+            raise FleetCliError(_ceiling_refusal)
     _require_instance_settings()
     # three-tier §10.4: the claim holder routes into the tombstone
     # choreography (release-steer -> stop -> fresh gen-0 body), never into the
@@ -11535,8 +11557,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :5028, :5475, :9525,
-    :14084), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :5028, :5485, :9547,
+    :14106), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -12180,8 +12202,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:5028, :5475, :9525,
-    #     :14084) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:5028, :5485, :9547,
+    #     :14106) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
