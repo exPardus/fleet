@@ -26,11 +26,36 @@ respawn) are each driven END TO END through their real call site with a
 capturing `dispatch_bg`, never by calling `compose_prompt` four times. The
 teach lines live inside `compose_prompt`, so a per-call-site test looks
 redundant -- it is not: it is the only thing that fails if one call site starts
-composing its prompt some other way, and the census test below is the only
-thing that fails if a FIFTH dispatch path is added.
+composing its prompt some other way.
+
+**A correction this file used to get wrong, and it was the strongest finding
+against it.** The census below used to claim it was "the only thing that fails
+if a FIFTH dispatch path is added". It was not, twice over:
+
+1. Its walk-back to the enclosing `def` matched `startswith("def ")` at COLUMN
+   ZERO ONLY, so a `compose_prompt` call inside a CLASS METHOD walked straight
+   past its own method and resolved to whatever approved module-level `def`
+   happened to sit above it. Measured: a line-count-neutral fifth dispatch
+   path added as a class method left the full suite at `2664 passed`, ZERO
+   red. A detector that cannot detect its own class is worse than no detector,
+   because it is quoted as coverage.
+2. There are **five** real dispatch paths, not four, and the fifth has never
+   gone through `compose_prompt` at all -- `_dispatch_supervisor_body` renders
+   its own body via `_render_sup_spawn_task`. A census over `compose_prompt`
+   call sites can never see it. So there are now TWO censuses: one over the
+   compose call sites, one over the `dispatch_bg` call sites, and the second
+   is the one that reflects five.
+
+The trap in verifying (1) is worth writing down: a naive injection also
+reddens `tests/test_retired_sid_citations.py`, which pins line numbers and so
+fails on ANY line-count change to `bin/fleet.py`, for a reason that has
+nothing to do with dispatch paths. That reads as "caught" and it is not. The
+injection that proves the lint is line-count-NEUTRAL, and the proof is that
+THIS file's census goes red.
 """
 import json
 import os
+import re
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -114,11 +139,39 @@ def _compose(name, cwd, task="the task", sid=None, **kw):
     return prompt
 
 
+@pytest.fixture
+def taught_verb_present(monkeypatch):
+    """Declare every verb the teach lines name as REGISTERED on the parser.
+
+    §11.8's second gate (fix wave C3) suppresses the teach lines entirely
+    unless every `fleet <verb>` they name is a real subcommand -- and on this
+    branch `fleet q` is not one yet, so without this fixture every teach-line
+    test would pass for the wrong reason.
+
+    It is requested by BOTH kinds of teach-line test, deliberately. The ones
+    that assert the lines RENDER would otherwise be vacuous. The ones that
+    assert the lines are ABSENT would otherwise be vacuous too, and that is
+    the worse case: a test claiming "silent because there is no index" that is
+    actually silent because of a second, unrelated gate cannot fail if the
+    index check regresses. The gate itself is tested on its own, against the
+    real parser, in `TestTheTaughtVerbMustExist`.
+    """
+    real = fleet.registered_cli_verbs
+    monkeypatch.setattr(
+        fleet, "registered_cli_verbs",
+        lambda: frozenset(real()) | set(fleet.index_teach_verbs()))
+
+
 # ---------------------------------------------------------------------------
 # §11.8 -- the teach lines
 # ---------------------------------------------------------------------------
 
 class TestTeachLines:
+
+    @pytest.fixture(autouse=True)
+    def _verb(self, taught_verb_present):
+        """Every test in this class is about the INDEX gate, so the verb gate
+        is held open for all of them -- see `taught_verb_present`."""
 
     def test_no_mention_of_fleet_q_in_a_non_indexed_project(self, plain_project):
         """A worker must not be told about a tool that would exit 3 there.
@@ -175,6 +228,89 @@ class TestTeachLines:
         assert "fleet q" not in _compose("w1", root)
 
 
+class TestTheTaughtVerbMustExist:
+    """§11.8's second gate (fix wave C3): NEVER TEACH A VERB THIS BUILD DOES
+    NOT HAVE.
+
+    The defect these pin was live and confirmed by execution: `bin/fleet.py q
+    foo` exited **2** with an argparse `invalid choice: 'q'` while the teach
+    lines taught `fleet q` and the worker-settings template granted
+    `Bash(fleet q:*)`. §11.8's own argument -- do not spend a worker's turn on
+    a command that cannot work -- applies with more force to a verb that is
+    not registered at all than to the exit-3 case it was written for.
+
+    These tests run against the REAL parser and are correct on both sides of
+    the merge that brings `fleet q` in. Nothing here asks which slice landed.
+    """
+
+    def test_the_taught_verbs_are_derived_from_the_constant(self):
+        """Derived, not listed: a fifth teach line naming a new verb must not
+        slip past the gate because a hand-written tuple was not extended."""
+        assert fleet.index_teach_verbs() == ("q",)
+        assert all(f"`fleet {v}" in fleet.INDEX_TEACH_LINES
+                   for v in fleet.index_teach_verbs())
+
+    def test_the_teach_lines_render_iff_every_taught_verb_is_registered(
+            self, indexed_project):
+        """THE unconditional assertion, and the only one in this file that is
+        about the live tree rather than a declared world.
+
+        It is an `iff`, so it holds before the merge (verb absent -> silent)
+        and after it (verb present -> taught) with no edit. A test that
+        asserted either arm outright would have to be rewritten by whoever
+        merges `fleet q`, and a test somebody has to remember to rewrite is a
+        test that gets rewritten wrong."""
+        registered = fleet.registered_cli_verbs()
+        every_verb_exists = all(v in registered for v in fleet.index_teach_verbs())
+        taught = fleet.INDEX_TEACH_LINES in _compose("w1", indexed_project)
+        assert taught is every_verb_exists, (
+            f"teach lines rendered={taught} but taught verbs "
+            f"{fleet.index_teach_verbs()} registered={every_verb_exists}. §11.8 "
+            f"must not teach a verb this build does not have -- `fleet <verb>` "
+            f"exits 2 with an argparse `invalid choice`.")
+
+    def test_an_unregistered_verb_suppresses_the_lines_in_an_indexed_project(
+            self, indexed_project, monkeypatch):
+        """The absent arm, forced, so it is pinned whichever side of the merge
+        this file is read on."""
+        monkeypatch.setattr(fleet, "registered_cli_verbs", frozenset)
+        prompt = _compose("w1", indexed_project)
+        assert prompt == TestAbsentContextIsFree._expected(indexed_project)
+        for token in ("fleet q", "--outline", "--src"):
+            assert token not in prompt.lower()
+
+    def test_a_registered_verb_renders_the_lines_in_an_indexed_project(
+            self, indexed_project, taught_verb_present):
+        """The present arm, forced. Together with the test above, both arms
+        are pinned regardless of what the parser carries today."""
+        assert fleet.INDEX_TEACH_LINES in _compose("w1", indexed_project)
+
+    def test_the_gate_does_not_resurrect_the_lines_without_an_index(
+            self, plain_project, taught_verb_present):
+        """The two gates are AND, not OR: a registered verb is not an opt-in."""
+        assert "fleet q" not in _compose("w1", plain_project)
+
+    def test_the_template_grant_names_exactly_the_taught_verb(self):
+        """The third leg of the same coupling. The template grant, the teach
+        lines and the parser are one claim in three files; the branch shipped
+        two of the three ahead of the parser, which is how a worker ended up
+        holding a grant for a verb that exits 2.
+
+        Pinned as a relation, not a literal, so it survives a verb rename."""
+        grants = _template()["permissions"]["allow"]
+        assert grants == [f"Bash(fleet {v}:*)" for v in fleet.index_teach_verbs()], (
+            f"the template grant {grants} and the taught verbs "
+            f"{fleet.index_teach_verbs()} have diverged -- a worker is either "
+            f"taught a verb it cannot run, or granted one it is never told about.")
+
+    def test_the_verb_probe_reads_the_real_parser(self):
+        """Non-vacuity for the probe itself: it must answer from
+        `build_parser()`, not from a constant that could drift."""
+        registered = fleet.registered_cli_verbs()
+        assert "spawn" in registered and "doctor" in registered
+        assert "definitely-not-a-verb" not in registered
+
+
 # ---------------------------------------------------------------------------
 # §11.8 -- all four compose paths, driven through their real call sites
 # ---------------------------------------------------------------------------
@@ -229,6 +365,11 @@ class TestAllFourComposePaths:
     """§11.8: the check runs wherever compose runs, so the teach lines render
     on every dispatch -- a respawned or steered worker in an indexed project is
     re-taught (§3: the cost is per dispatch, not per spawn)."""
+
+    @pytest.fixture(autouse=True)
+    def _verb(self, taught_verb_present):
+        """These tests are about WHERE compose runs, not about the verb
+        gate -- see `taught_verb_present`."""
 
     def _spawn(self, project, captured, **kw):
         args = SimpleNamespace(
@@ -300,33 +441,145 @@ class TestAllFourComposePaths:
         assert "fleet q" not in self._respawn(plain_project, captured, monkeypatch)
 
 
+_DEF_RE = re.compile(r"^(\s*)def\s+(\w+)")
+_CLASS_RE = re.compile(r"^(\s*)class\s+(\w+)")
+
+
+def _enclosing_qualname(src, n):
+    """The innermost `def` enclosing 1-based line `n`, qualified by any
+    enclosing classes -- `"Klass.method"`, `"outer.inner"`, `"module_level"`.
+
+    THIS FUNCTION IS THE M2 FIX. The version it replaces matched
+    `line.startswith("def ")`, i.e. column zero only, so a call inside a class
+    method resolved to the module-level `def` above the class and the census
+    reported an approved name. Indentation is the whole point: walk back and
+    take the first `def`/`class` header at a strictly SMALLER indent than the
+    deepest landmark accepted so far.
+    """
+    parts = []
+    limit = len(src[n - 1]) - len(src[n - 1].lstrip())
+    for m in range(n - 1, 0, -1):
+        line = src[m - 1]
+        match = _DEF_RE.match(line) or _CLASS_RE.match(line)
+        if match is None:
+            continue
+        indent = len(match.group(1))
+        if indent >= limit:
+            continue
+        parts.append(match.group(2))
+        limit = indent
+        if indent == 0:
+            break
+    return ".".join(reversed(parts))
+
+
+def _call_sites(needle, skip_defs=()):
+    """Every enclosing qualname that calls `needle` in `bin/fleet.py`.
+
+    Comment/docstring lines are skipped by the same crude prefix test the
+    original census used; `skip_defs` drops the definition itself."""
+    src = Path(fleet.__file__).read_text(encoding="utf-8").splitlines()
+    out = set()
+    for n, line in enumerate(src, start=1):
+        if needle not in line or line.lstrip().startswith(("#", "*", '"')):
+            continue
+        if any(line.lstrip().startswith(f"def {d}") for d in skip_defs):
+            continue
+        qualname = _enclosing_qualname(src, n)
+        if qualname:
+            out.add(qualname)
+    return out
+
+
 def test_no_fifth_compose_path_appeared_uncovered():
-    """The census. §3 enumerates FOUR `compose_prompt` call sites and §11.8
-    binds the teach lines to all of them; a fifth dispatch path added later
-    would be silently untaught, and the four tests above would still pass.
+    """The compose census. §3 enumerates FOUR `compose_prompt` call sites and
+    §11.8 binds the teach lines to all of them; a fifth COMPOSE path added
+    later would be silently untaught, and the four tests above would still
+    pass.
 
     Re-derived from the source on every run, like the `retired_sids` citation
     test -- a new call site is a deliberate one-line change here, not an
-    omission.
+    omission. Note the scope, which the docstring used to overstate: this
+    census sees `compose_prompt` callers ONLY. A dispatch path that composes
+    its prompt some other way is invisible to it and is caught by
+    `test_the_dispatch_census_reflects_five_paths` instead.
     """
-    src = Path(fleet.__file__).read_text(encoding="utf-8").splitlines()
-    callers = set()
-    for n, line in enumerate(src, start=1):
-        if "compose_prompt(" not in line or line.lstrip().startswith(("#", "*", '"')):
-            continue
-        if line.lstrip().startswith("def compose_prompt"):
-            continue
-        # Walk back to the enclosing `def`.
-        for m in range(n - 1, 0, -1):
-            stripped = src[m - 1]
-            if stripped.startswith("def "):
-                callers.add(stripped[4:].split("(")[0])
-                break
+    callers = _call_sites("compose_prompt(", skip_defs=("compose_prompt",))
     assert callers == {"cmd_spawn", "_cmd_send_native",
                        "_resume_one_limited_native", "_cmd_respawn_native"}, (
         f"the set of compose_prompt call sites changed: {sorted(callers)}. §11.8 "
         f"binds the teach lines to EVERY dispatch path -- add the new one to "
         f"TestAllFourComposePaths and re-pin this set.")
+
+
+def test_the_compose_census_sees_a_call_site_inside_a_class():
+    """NON-VACUITY for the census above, and the M2 regression pin.
+
+    The census's walk-back used to match `def ` at column zero, so a
+    `compose_prompt` call in a class method resolved to the module-level `def`
+    above the class -- an APPROVED name -- and a line-count-neutral fifth
+    dispatch path added that way left the whole suite green. This asserts the
+    resolver on the exact geometry that defeated it, without editing
+    `bin/fleet.py`: given a synthetic source, a method's call must resolve to
+    `Klass.method`, never to the module-level `cmd_spawn` above it.
+    """
+    src = [
+        "def cmd_spawn(args):",
+        "    prompt, _c = compose_prompt(a, b, c, None)",
+        "",
+        "",
+        "class _Fifth:",
+        "",
+        "    def dispatch(self):",
+        "        prompt, _c = compose_prompt(a, b, c, None)",
+        "",
+        "        def _inner():",
+        "            return compose_prompt(a, b, c, None)",
+    ]
+    assert _enclosing_qualname(src, 2) == "cmd_spawn"
+    assert _enclosing_qualname(src, 8) == "_Fifth.dispatch", (
+        "the census walk-back resolved a class method's call to an enclosing "
+        "module-level def -- this is exactly the hole that let a fifth "
+        "dispatch path ship with the suite green")
+    assert _enclosing_qualname(src, 11) == "_Fifth.dispatch._inner"
+
+
+def test_the_dispatch_census_reflects_five_paths():
+    """THE census that reflects five, and the reason there are two of them.
+
+    §11.8's four compose paths are not the four dispatch paths -- there are
+    FIVE launches of a worker session in this file, and the fifth,
+    `_dispatch_supervisor_body`, renders its own prompt through
+    `_render_sup_spawn_task` and has never called `compose_prompt` at all. The
+    compose census above cannot see it by construction.
+
+    That the supervisor body gets no teach lines is a FACT recorded here, not
+    a property being endorsed: it is a deliberate scope boundary (the
+    supervisor's body is a fixed boot ritual, not a task prompt), and it is
+    written down so the next person adding a dispatch path has to decide
+    which census their path belongs in rather than discovering neither
+    covered it.
+    """
+    dispatchers = _call_sites("dispatch_bg(", skip_defs=("dispatch_bg",))
+    assert dispatchers == {"cmd_spawn", "_cmd_send_native",
+                           "_resume_one_limited_native", "_cmd_respawn_native",
+                           "_dispatch_supervisor_body"}, (
+        f"the set of dispatch_bg call sites changed: {sorted(dispatchers)}. "
+        f"Every dispatch launches a worker session and pays a prompt: decide "
+        f"whether the new one composes via compose_prompt (add it to the "
+        f"compose census and to TestAllFourComposePaths) or renders its own "
+        f"body (say so here), and re-pin this set.")
+
+
+def test_the_supervisor_body_does_not_compose_through_compose_prompt():
+    """The behavioural half of the five-path census: pinned by calling the
+    renderer, not by reading the source, so it also fails if the supervisor
+    body starts routing through `compose_prompt` without the census moving."""
+    body = fleet._render_sup_spawn_task("sup|inc-x|boot", "inc-x", "CAMPAIGN")
+    assert "CAMPAIGN" in body
+    assert "You are fleet worker" not in body, (
+        "the supervisor body now carries compose_prompt's preamble -- move it "
+        "into the compose census and TestAllFourComposePaths")
 
 
 # ---------------------------------------------------------------------------
@@ -342,7 +595,8 @@ class TestAbsentContextIsFree:
         assert _compose("w1", plain_project) == _compose(
             "w1", plain_project, context=[])
 
-    def test_absent_context_is_byte_identical_in_an_indexed_project(self, indexed_project):
+    def test_absent_context_is_byte_identical_in_an_indexed_project(
+            self, indexed_project, taught_verb_present):
         """An index in the project changes the prompt (the teach lines do that,
         §11.8) but `--context` still costs nothing when it is not given.
 
@@ -443,7 +697,15 @@ class TestContextDigest:
         """§11.4/§11.1: the 400-line cap is `--outline`'s, not the spawn-time
         digest's. The two outputs differ only when the cap truncates, so a cap
         applied here would silently impose `q`'s limit on a path the spec
-        exempts."""
+        exempts.
+
+        **The cap this compares against does not exist on this branch.**
+        `q --outline` and its 400-line cap are a sibling slice; naming a
+        number no code here implements is how a comparison rots into folklore,
+        so the assertion below is about the DIGEST's own behaviour -- it emits
+        a symbol past line 400 of a 2000-line file and never truncates --
+        and the number 400 appears only as the claim it is being measured
+        against."""
         root = tmp_path / "big"
         body = "".join(f"def f{i}():\n    return {i}\n\n\n" for i in range(500))
         _write(root / "big.py", body)
@@ -452,6 +714,81 @@ class TestContextDigest:
         prompt = _compose("w1", root, context=["big.py"])
         assert "- L1993 f498()" in prompt
         assert "truncated" not in prompt
+        digest_lines = [l for l in prompt.splitlines() if l.startswith("- L")]
+        assert len(digest_lines) == 500 > 400, (
+            "the digest emitted a bounded number of rows -- if a cap was added "
+            "here deliberately, §11.1's 'the two renderings differ only when "
+            "the cap truncates' has to move with it")
+
+    def test_the_uncapped_digest_cost_is_pinned_by_measurement(self, tmp_path):
+        """M4. What "uncapped" actually costs, measured rather than assumed.
+
+        The pin this replaces asserted only that a synthetic 500-symbol file
+        was not truncated. That is the contract, but it is not the cost, and
+        the cost is the thing a manager needs before typing `--context`. So
+        this measures the real worst case in the repo -- `bin/fleet.py`
+        itself -- and pins the SHAPE of the growth rather than a byte count
+        that would rot on every edit to that file:
+
+          * one digest row per indexed symbol, plus one header line;
+          * no truncation at any size;
+          * N distinct files cost the sum of their digests -- there is no
+            budget, so the manager's `--context` list IS the budget.
+
+        Measured 2026-07-27 at this fix wave's base commit: `bin/fleet.py`
+        (16,075 source lines) rendered **539 digest lines / 27,835 chars**,
+        and fifty distinct files of that size would render ~1.39 MB into a
+        single prompt. No cap was added: §11.1 states the digest and
+        `q --outline` differ only when the cap truncates, so capping here
+        would silently impose `q`'s limit on a path the spec exempts, and that
+        is a spec decision rather than a fix-wave one. Dedup WAS added
+        (`parse_context_arg`) -- paying twice for the same file defends
+        nothing.
+        """
+        root = tmp_path / "real"
+        _write(root / "bin" / "fleet.py",
+               Path(fleet.__file__).read_text(encoding="utf-8"))
+        fleet.index_symbols_dir(root).mkdir(parents=True, exist_ok=True)
+        fleet.build_index(root)
+
+        digest, warnings = fleet.compose_context_digests(root, ["bin/fleet.py"])
+        assert warnings == []
+        rows = [l for l in digest.splitlines() if l.startswith("- L")]
+        header = [l for l in digest.splitlines() if l.startswith("## ")]
+        _hdr, shard_rows = fleet.read_shard(
+            fleet.shard_path_for_source(root, "bin/fleet.py"))
+
+        assert len(header) == 1
+        assert len(rows) == len(shard_rows), (
+            "the digest no longer renders one row per indexed symbol -- the "
+            "cost model in this test's docstring is stale")
+        assert "truncated" not in digest
+        assert len(digest) > 20_000, (
+            f"{len(digest)} chars for a 16k-line file: something started "
+            f"bounding the digest, which §11.1 forbids without moving the spec")
+
+        # Linear in DISTINCT files, and that is the whole budget story.
+        (root / "bin" / "second.py").write_bytes(
+            (root / "bin" / "fleet.py").read_bytes())
+        fleet.build_index(root)
+        both, _w = fleet.compose_context_digests(
+            root, ["bin/fleet.py", "bin/second.py"])
+        assert len(both) > 2 * len(digest) - 200, (
+            "two distinct files no longer cost two digests -- if a shared cap "
+            "or a cross-file budget was introduced, pin it")
+
+    def test_naming_the_same_path_twice_is_paid_for_once(self, indexed_project):
+        """M4's one honest mitigation. Before this, `--context a.py,a.py`
+        rendered `a.py` twice for zero additional information -- and with a
+        27,835-char digest behind it, the second copy is not free."""
+        once = _compose("w1", indexed_project, context=["src/api.py"])
+        twice = _compose("w1", indexed_project,
+                         context=fleet.parse_context_arg("src/api.py,src/api.py"))
+        assert once == twice
+        assert once.count("## src/api.py") == 1
+
+    def test_dedup_preserves_the_order_the_manager_named(self):
+        assert fleet.parse_context_arg("b.md,a.py,b.md,a.py") == ["b.md", "a.py"]
 
     def test_a_file_the_index_config_excludes_is_skipped_not_indexed(
             self, indexed_project, capsys):
@@ -534,6 +871,204 @@ class TestDigestNeverServesAnUnverifiedCoordinate:
         prompt = _compose("w1", indexed_project, context=["src/api.py"])
         assert "## src/api.py" not in prompt
         assert capsys.readouterr().err.strip()
+
+
+class TestComposeFailureNeverLeavesAPhantomRecord:
+    """FIX WAVE C1. The window, measured before the fix:
+
+        `cmd_spawn` committed the pre-claim record under `fleet_lock()`, THEN
+        called `compose_prompt`, THEN entered the `try:` whose `except`
+        clauses roll that record back. Anything raising in between escaped
+        `cmd_spawn` uncaught and left
+        `{"status": "working", "session_id": null}` in the registry plus a
+        `spawned` event -- a live-looking worker that never existed, pinned
+        there by the launch-in-flight guard. Reproduced end to end with
+        `--context` naming a file whose shard directory could not be created:
+        `FileExistsError [WinError 183]`, record present, status `working`.
+
+    Two independent fixes, because measurement showed neither alone is enough:
+
+    1. `compose_prompt` is hoisted ABOVE the registry commit, so no raise
+       from ANY compose arm -- present or future -- can see a committed
+       record. Hoisting alone converts the phantom into an uncaught traceback.
+    2. `compose_context_digests` wraps the per-path body, so the three known
+       `--context` arms take §7's stated behaviour (warn, skip, spawn
+       proceeds) instead of raising at all.
+
+    All three arms are pinned below. NONE of them had a test.
+    """
+
+    @staticmethod
+    def _args(project, context=None, name="w1"):
+        return SimpleNamespace(
+            name=name, dir=str(project), task="the task", mode="dontask",
+            model=None, max_budget_usd=None, setting_sources=None,
+            token_ceiling=None, category=None, context=context)
+
+    @staticmethod
+    def _dispatch_ok(monkeypatch):
+        """A `dispatch_bg` that SUCCEEDS -- these tests are about compose, and
+        a capturing stub that raises would let the rollback path hide the very
+        thing being measured."""
+        monkeypatch.setattr(fleet, "dispatch_bg", lambda name, cwd, prompt, mode, **kw: {
+            "session_id": SID, "short_id": SID.partition("-")[0]})
+
+    @staticmethod
+    def _events():
+        path = fleet.events_path()
+        if not path.exists():
+            return []
+        return [json.loads(line)["kind"]
+                for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    def _spawn(self, project, monkeypatch, context=None):
+        self._dispatch_ok(monkeypatch)
+        return fleet.cmd_spawn(self._args(project, context),
+                               run=lambda *a, **k: None, which=lambda _: "claude",
+                               sleep=lambda s: None, clock=lambda: 0.0)
+
+    # -- arm 1: the shard write. REAL, no monkeypatching at all. -------------
+
+    def test_arm_1_an_unwritable_shard_directory_warns_and_the_spawn_proceeds(
+            self, indexed_project, monkeypatch, capsys):
+        """The arm that reproduced the phantom, constructed on the real
+        filesystem: occupy `.fleet-index/symbols/src` with a plain FILE, so
+        `write_shard_atomic`'s `mkdir` raises `FileExistsError`."""
+        shard = fleet.shard_path_for_source(indexed_project, "src/api.py")
+        shard.unlink()
+        shard.parent.rmdir()
+        shard.parent.write_bytes(b"not a directory")
+
+        assert self._spawn(indexed_project, monkeypatch, "src/api.py") == 0
+        err = capsys.readouterr().err
+        assert "src/api.py" in err and "digest skipped" in err
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["session_id"] == SID and rec["status"] == "working"
+
+    def test_arm_1_produces_no_phantom_even_if_the_skip_is_removed(
+            self, indexed_project, monkeypatch):
+        """The hoist, on its own. Force the SAME arm to raise past the
+        per-path skip by breaking the layer above it, and assert the registry
+        is untouched -- this is what fails if someone deletes the hoist and
+        keeps only the warn-and-skip."""
+        self._dispatch_ok(monkeypatch)
+        monkeypatch.setattr(fleet, "compose_context_digests",
+                            lambda *a, **k: (_ for _ in ()).throw(
+                                OSError("shard directory is a file")))
+        with pytest.raises(fleet.FleetCliError, match="could not compose"):
+            fleet.cmd_spawn(self._args(indexed_project, "src/api.py"),
+                            run=lambda *a, **k: None, which=lambda _: "claude",
+                            sleep=lambda s: None, clock=lambda: 0.0)
+        assert fleet.load_registry()["workers"] == {}
+        assert "spawned" not in self._events()
+
+    # -- arm 2: the source parse. -------------------------------------------
+
+    def test_arm_2_a_source_that_dies_mid_parse_warns_and_the_spawn_proceeds(
+            self, indexed_project, monkeypatch, capsys):
+        """`verified_shard_rows` re-reads the source AFTER hashing it, so a
+        file that disappears in that gap raises `OSError` from
+        `parse_source_symbols`. Forced rather than raced, because the window
+        is a few microseconds wide and a racy test is a flaky test."""
+        real = fleet.parse_source_symbols
+
+        def _boom(source_path, lang=None):
+            if str(source_path).endswith("api.py"):
+                raise OSError("source vanished between header and parse")
+            return real(source_path, lang)
+
+        monkeypatch.setattr(fleet, "parse_source_symbols", _boom)
+        # Force the re-parse: a fresh shard would be served without one.
+        fleet.shard_path_for_source(indexed_project, "src/api.py").unlink()
+
+        assert self._spawn(indexed_project, monkeypatch, "src/api.py") == 0
+        assert "digest skipped" in capsys.readouterr().err
+        assert fleet.load_registry()["workers"]["w1"]["session_id"] == SID
+
+    # -- arm 3: the path shape. ---------------------------------------------
+
+    def test_arm_3_a_rejected_path_shape_warns_and_the_spawn_proceeds(
+            self, indexed_project, monkeypatch, capsys):
+        """`_index_posix_rel` grows a path-shape guard on `idx/core` that
+        RAISES on `..` instead of returning a rel that fails the membership
+        test. Simulated here with a `FleetCliError` subclass minted locally,
+        so this test encodes no exception NAME from that branch -- only the
+        contract that a rejected path is one path's problem."""
+
+        class _PathRejected(fleet.FleetCliError):
+            pass
+
+        real = fleet._index_posix_rel
+
+        def _guarded(rel):
+            if ".." in str(rel):
+                raise _PathRejected(f"path escapes the index root: {rel}")
+            return real(rel)
+
+        monkeypatch.setattr(fleet, "_index_posix_rel", _guarded)
+
+        assert self._spawn(indexed_project, monkeypatch,
+                           "src/api.py,../plain/src/api.py") == 0
+        err = capsys.readouterr().err
+        assert "digest skipped" in err
+        assert fleet.load_registry()["workers"]["w1"]["session_id"] == SID
+
+    # -- the umbrella, and the control. -------------------------------------
+
+    def test_any_compose_failure_at_all_leaves_no_record_and_no_event(
+            self, indexed_project, monkeypatch):
+        """THE structural pin, and the one that outlives this fix wave's three
+        arms: whatever `compose_prompt` raises, for whatever reason, the
+        registry must be untouched and no `spawned` event may be written."""
+        self._dispatch_ok(monkeypatch)
+        monkeypatch.setattr(fleet, "compose_prompt",
+                            lambda *a, **k: (_ for _ in ()).throw(
+                                RuntimeError("compose blew up")))
+        with pytest.raises(fleet.FleetCliError, match="nothing was registered"):
+            fleet.cmd_spawn(self._args(indexed_project, "src/api.py"),
+                            run=lambda *a, **k: None, which=lambda _: "claude",
+                            sleep=lambda s: None, clock=lambda: 0.0)
+        assert fleet.load_registry()["workers"] == {}
+        assert self._events() == []
+
+    def test_a_keyboard_interrupt_during_compose_is_not_swallowed(
+            self, indexed_project, monkeypatch):
+        """`Exception`, not `BaseException`: nothing has been registered yet,
+        so there is nothing to convert a Ctrl-C into a CLI error for."""
+        self._dispatch_ok(monkeypatch)
+        monkeypatch.setattr(fleet, "compose_prompt",
+                            lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()))
+        with pytest.raises(KeyboardInterrupt):
+            fleet.cmd_spawn(self._args(indexed_project, "src/api.py"),
+                            run=lambda *a, **k: None, which=lambda _: "claude",
+                            sleep=lambda s: None, clock=lambda: 0.0)
+        assert fleet.load_registry()["workers"] == {}
+
+    def test_the_control_arm_is_unaffected(self, indexed_project, monkeypatch):
+        """The same spawn with NO `--context`. This is what proved `--context`
+        opened the window in the first place, and it stays here so a future
+        reader can tell a compose regression from a spawn regression."""
+        assert self._spawn(indexed_project, monkeypatch, None) == 0
+        assert fleet.load_registry()["workers"]["w1"]["session_id"] == SID
+
+    def test_compose_runs_before_the_registry_commit(self):
+        """The geometry itself, asserted on the source. The behavioural tests
+        above all go through `cmd_spawn`'s one commit; this one fails if the
+        call is ever moved back down between the commit and the rollback
+        `try:`, which is the exact edit that created the defect."""
+        src = Path(fleet.__file__).read_text(encoding="utf-8").splitlines()
+        start = next(n for n, l in enumerate(src, 1)
+                     if l.startswith("def cmd_spawn("))
+        end = next(n for n, l in enumerate(src[start:], start + 1)
+                   if l.startswith("def ") and n > start)
+        body = list(enumerate(src[start - 1:end - 1], start))
+        compose = next(n for n, l in body if "compose_prompt(" in l
+                       and not l.lstrip().startswith("#"))
+        commit = next(n for n, l in body if 'append_event("spawned"' in l)
+        assert compose < commit, (
+            f"cmd_spawn composes at line {compose}, AFTER the pre-claim commit "
+            f"at line {commit}. Every raise arm in compose now lands in a "
+            f"window with no rollback in it -- this is fix wave C1, reopened.")
 
 
 # ---------------------------------------------------------------------------
@@ -670,3 +1205,109 @@ class TestTemplateRenderAndFreshnessHandleTheNewKey:
         assert fleet._doctor_check_instance_freshness()[1] is True, (
             "instance-freshness became content-aware -- delete this test and the "
             "caveat it pins in §11.7 item 2")
+        # ...and the check that DOES notice it, added by fix wave M3. The pair
+        # is the point: the limit above is still real, and doctor no longer
+        # ends its report without mentioning it.
+        assert fleet._doctor_check_instance_grants()[1] is False
+
+
+class TestDoctorSaysSoWhenTheInstanceGrantDiverges:
+    """FIX WAVE M3. The finding was not that `instance-freshness` is wrong --
+    it compares mtimes, that is pinned above as a known limit, and a second
+    `fleet init` really does repair a broken instance. The finding was that
+    **doctor never says so.** Measured: widening the rendered instance's grant
+    to `Bash(fleet:*)` -- the kill grant, reaching the irreversible `fleet
+    kill` and `fleet clean` -- left `fleet doctor` reporting `[PASS]` on every
+    line, with no hint that a re-`init` would undo it.
+
+    So this check exists to make the repair DISCOVERABLE, and it is content-
+    based, which is what makes it immune to the mtime limit that produced the
+    hole."""
+
+    @pytest.fixture(autouse=True)
+    def _repo_template(self, monkeypatch):
+        monkeypatch.setattr(fleet, "template_settings_path", lambda: TEMPLATE)
+
+    @staticmethod
+    def _init():
+        return fleet.cmd_init(SimpleNamespace(
+            force=False, statusline=False, chain=False, autoclean=False,
+            autoclean_remove=False, autoclean_interval_hours=None))
+
+    @staticmethod
+    def _rewrite(mutate):
+        path = fleet.instance_settings_path()
+        data = json.loads(path.read_text(encoding="utf-8"))
+        mutate(data)
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        return data
+
+    def test_a_freshly_rendered_instance_passes(self, isolated_home):
+        self._init()
+        name, ok, detail = fleet._doctor_check_instance_grants()
+        assert (name, ok) == ("instance-grants", True)
+        assert "Bash(fleet q:*)" in detail
+
+    def test_widening_to_the_kill_grant_is_reported_and_named(self, isolated_home):
+        """THE case. `Bash(fleet:*)` reaches `fleet kill` and `fleet clean`."""
+        self._init()
+        self._rewrite(lambda d: d["permissions"].__setitem__(
+            "allow", ["Bash(fleet:*)"]))
+        assert fleet._doctor_check_instance_freshness()[1] is True, (
+            "freshness became content-aware -- this class's premise moved")
+        name, ok, detail = fleet._doctor_check_instance_grants()
+        assert (name, ok) == ("instance-grants", False)
+        assert "Bash(fleet:*)" in detail
+        assert "fleet init" in detail, (
+            "doctor reported the divergence without naming the repair -- the "
+            "whole finding was that the repair exists and nobody is told")
+
+    def test_a_lost_grant_is_reported(self, isolated_home):
+        """The silent direction: zero `fleet q` calls is also the exact shape
+        of §11.9's revert trigger, so a permission bug can be mistaken for the
+        tool failing to get adopted."""
+        self._init()
+        self._rewrite(lambda d: d.pop("permissions"))
+        name, ok, detail = fleet._doctor_check_instance_grants()
+        assert (name, ok) == ("instance-grants", False)
+        assert "Bash(fleet q:*)" in detail
+
+    def test_a_deny_entry_fencing_the_grant_is_reported(self, isolated_home):
+        """Reading only `allow` would call this instance clean while it had
+        fenced the grant off in another bucket."""
+        self._init()
+        self._rewrite(lambda d: d["permissions"].__setitem__(
+            "deny", ["Bash(fleet q:*)"]))
+        assert fleet._doctor_check_instance_grants()[1] is False
+
+    def test_unrelated_operator_grants_are_not_flagged(self, isolated_home):
+        """Non-vacuity in the other direction: a check that fires on an
+        operator's own unrelated allow entries trains the operator to ignore
+        it."""
+        self._init()
+        self._rewrite(lambda d: d["permissions"]["allow"].append("Bash(git status:*)"))
+        assert fleet._doctor_check_instance_grants()[1] is True
+
+    def test_a_second_fleet_init_repairs_it_and_the_check_clears(self, isolated_home):
+        """The repair the check now points at, executed."""
+        self._init()
+        self._rewrite(lambda d: d["permissions"].__setitem__(
+            "allow", ["Bash(fleet:*)"]))
+        assert fleet._doctor_check_instance_grants()[1] is False
+        self._init()
+        assert fleet._doctor_check_instance_grants()[1] is True
+        instance = json.loads(
+            fleet.instance_settings_path().read_text(encoding="utf-8"))
+        assert instance["permissions"]["allow"] == ["Bash(fleet q:*)"]
+
+    def test_the_check_is_wired_into_fleet_doctor(self):
+        """A check nobody runs says nothing. `cmd_doctor` shells out to
+        `claude` twice and runs two real hook subprocesses, so this asserts
+        the wiring at the source rather than driving the whole report: the
+        check must be referenced from inside `cmd_doctor`'s body."""
+        assert "cmd_doctor" in _call_sites(
+            "_doctor_check_instance_grants",
+            skip_defs=("_doctor_check_instance_grants",)), (
+            "_doctor_check_instance_grants is defined but never run by "
+            "`fleet doctor` -- the finding was that doctor stays silent, and a "
+            "check that is not in the list is exactly that, one layer down")
