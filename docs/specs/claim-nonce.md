@@ -2212,6 +2212,39 @@ one that needs a text editor. `_cmd_respawn_supervisor` needs no case of its own
 mints a differently-**named** record and leaves the old one behind, so a supervisor
 successor never carries the releaser's sid at all.
 
+### A guard that blocks its own remedy — the escape hatch is mandatory, not optional
+
+*(DESCRIPTIVE, UNRATIFIED — written 2026-07-27 from a live incident. It states a
+consequence of the arming rule above; it does not change it. Operator ratification
+pending.)*
+
+The armed released-claim wedge has a property the table above does not show, and it was
+paid for live rather than reasoned about. **`fleet kill` is the only verb that can clear
+the wedge, and it is a §7-gated verb, so it refuses for the wedge's own reason.** The
+`gate-arm` merge armed the gate on a released claim whose releaser was still roster-live;
+the body holding it could not be stopped from inside the fleet, and the interface tier had
+to reach for the documented no-`CLAUDE_CODE_SESSION_ID` route to stop it. The bounding in
+the table above narrows *when* this state is entered; it does not give the state an
+in-fleet exit once entered.
+
+The general shape, stated so it is not re-derived a third time: **a guard whose refusal set
+contains its own remedy is a circular dependency, and the bypass is then load-bearing
+infrastructure rather than a convenience.** §7 already documents itself as a speed-bump
+whose bypass is named in its own refusal text — that framing is what keeps this incident a
+recoverable annoyance instead of a lockout. So the bypass is not merely *tolerated* by the
+design; on this path it is the **only** exit, and removing or authenticating it (a
+recurring suggestion, since a bypassable gate reads like an unfinished one) would convert
+every armed wedge into a state clearable only by a human editing `supervisor/INCARNATION`.
+
+Two consequences worth holding onto:
+
+- **Do not "harden" §7 by closing the no-sid route** without first giving the wedge an
+  in-fleet exit. The order matters and it is the whole of this note.
+- **A verb that clears a state must not be gated on that state.** The cheapest general fix
+  is to exempt the clearing verb rather than to widen the bypass; that is a design change
+  and therefore the operator's, not a supervisor's, which is why this is written down here
+  instead of acted on.
+
 **The refusal names the session that is live, not the one that released.** On the union
 arm `released_by_sid` is by construction roster-**gone** — that arm exists for exactly
 that case — so *"the operator can stop session `<released_by>`"* named a remedy that

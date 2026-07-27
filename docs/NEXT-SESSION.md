@@ -157,6 +157,15 @@ DESCRIPTIVE amendments to `docs/specs/claim-nonce.md`, now on `main` rather than
 The code merged on its own merits (the stillborn-handoff hole had cost six supervisors); the
 amendments are the paperwork and are unratified until you tick them.
 
+**Also new, same merge**: `claim-nonce` §7.2 gains a DESCRIPTIVE, UNRATIFIED note — *"a guard
+that blocks its own remedy — the escape hatch is mandatory, not optional"*. `fleet kill` is the
+only verb that clears an armed released-claim wedge and is itself §7-gated, so it refuses for the
+wedge's own reason; the interface tier had to use the no-`CLAUDE_CODE_SESSION_ID` route to stop
+the body. The note changes no behaviour. It records two things a future hardening pass would
+otherwise get wrong: **do not close the no-sid route before the wedge has an in-fleet exit**, and
+**a verb that clears a state must not be gated on that state**. The general remedy (exempt the
+clearing verb) is a design change and therefore yours.
+
 ## Hard-won warnings
 
 - **Fix waves mint defects: 10/10 lifetime.** Always re-gate; ESCALATE beats a 3rd wave. The
