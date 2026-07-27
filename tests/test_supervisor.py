@@ -3965,13 +3965,39 @@ class TestOperatorGatesFile:
     or model) following the ritual needs the open/settled distinction to be
     unambiguous, and a drift that blurs it is invisible from any one gate."""
 
-    def test_the_shipped_gates_file_parses_and_has_open_items(self):
+    def test_the_shipped_gates_file_parses(self):
+        """Every OPEN gate must be phrased as a question.
+
+        This used to additionally assert `open_gates` was non-empty, which
+        encoded the assumption that the docket is never fully cleared. On
+        2026-07-27 the operator cleared all eight gates in one pass and the
+        assertion went RED on a correct file -- a cleared docket is the
+        SUCCESS state of this file, not a malformed one. What is worth
+        pinning is the open/settled distinction and the question form, so
+        that is all this asserts now; `test_settled_gates_are_recorded`
+        below covers the other direction, so an empty file still fails."""
         repo = Path(__file__).resolve().parents[1]
         text = (repo / "docs" / "OPERATOR-GATES.md").read_text(encoding="utf-8")
         open_gates = [ln for ln in text.splitlines() if ln.strip().startswith("- [ ]")]
-        assert open_gates, "no open gates parse out of the shipped file"
         for ln in open_gates:
             assert ln.strip().endswith("?"), f"a gate must be a question: {ln[:80]}"
+
+    def test_settled_gates_are_recorded(self):
+        """The file must still be a decision RECORD. Without this, the
+        relaxation above would let a file with no gates at all pass -- the
+        failure mode where someone deletes settled gates as clutter, which
+        the format section explicitly forbids."""
+        repo = Path(__file__).resolve().parents[1]
+        text = (repo / "docs" / "OPERATOR-GATES.md").read_text(encoding="utf-8")
+        settled = [ln for ln in text.splitlines() if ln.strip().startswith("- [x]")]
+        assert settled, "the gates file records no settled decisions at all"
+        for ln in settled:
+            # "Answer" not "Answer:" -- a real entry reads "Answer, both
+            # halves:", and a test that forces the punctuation would be
+            # editing the operator's prose to suit itself.
+            assert "Answer" in ln, f"a settled gate must record its answer: {ln[:80]}"
+            assert re.search(r"\*\(20\d\d-\d\d-\d\d", ln), (
+                f"a settled gate must carry its decision date: {ln[:80]}")
 
     def test_the_skill_startup_ritual_still_routes_the_operator_to_the_gates(self):
         """The hook was the enforcement; the skill is now the only one. If the

@@ -1958,6 +1958,17 @@ what this spec relies on, and it is unaffected.
 > documented, the gate is armed only while the heartbeat is fresh, `autoclean` is structurally
 > exempt, and the corrected verb taxonomy below becomes binding. The section's analysis is preserved
 > unchanged as the record the decision was made against.
+>
+> **Amendment (Altai, 2026-07-27, operator gate — narrowing of the disarm envelope above).** The
+> heartbeat-freshness clause is no longer true of every arm. `fix/gate-arm-released` arms the gate on
+> a **released** claim whose releasing body is still roster-live, and §6.3 strips `heartbeat_at` from
+> a released claim — so that arm has **no heartbeat and no time bound**, and is bounded only by the
+> releasing body's roster lifetime. The operator ratified the narrower envelope, on the accounting
+> that the alternative leaves `fleet clean --yes` reachable from any third body while a claim sits in
+> `released` state. **Known defect, scheduled not ratified:** that arm has **no in-fleet disarm** —
+> `send`, `kill`, `respawn` and `send supervisor` are all refused, so clearing a stuck wedge needs a
+> human at a shell. An in-fleet disarm path is owed work; the human-at-a-shell exit is explicitly
+> NOT ratified as a property of the design.
 
 **This spec did not decide this.** v1 did, and the gate unwound it. Three-tier adjudication item 2 is
 re-put here with the cost statement corrected.
@@ -2007,7 +2018,11 @@ callers. The honest accounting:
 - **It is armed only while the heartbeat is fresh** (≤ 3600 s, @6821) and **this slice ships no beat**
   (§4.13(e)). Protection would be present in the hour after a human last typed a command and absent
   during exactly the quiet stretches when an unattended second body does damage. Incident 1 ran ~100
-  minutes; the window is 60.
+  minutes; the window is 60. *(Amended 2026-07-27 — this describes the heartbeat-keyed arm only. The
+  released-claim arm added by `fix/gate-arm-released` has no heartbeat to be fresh: §6.3 strips
+  `heartbeat_at` on release, so that arm is bounded by the releasing body's roster lifetime and by
+  nothing else, and it has no in-fleet disarm. See the operator amendment in the decision block at
+  the head of this section.)*
 - Its own primary caller is structurally exempt: the `autoclean` scheduled task has no
   `CLAUDE_CODE_SESSION_ID`, so a caller-identity gate can never fire on it, and
   `docs/specs/autoclean.md:38` records that *the scheduler ignores exit codes* anyway.
@@ -2319,7 +2334,7 @@ below.
 |---|---|---|
 | the released early-out at `_caller_holds_supervisor_claim` / `_record_is_supervisor_claim_holder` leaves the ceiling dormant on the gate's fail-open arms | `bin/fleet.py:2005`, `:2059` | pre-existing on `main`; R3 did not order it, and widening it touches the ceiling's own ND4 bindings |
 | the §7.1 `send` carve-out reads the registry through `load_registry()`, which **quarantines** — a rename plus a journal append from inside a function that promises "no lock, no mint, no write" | `bin/fleet.py`, §7.1's carve-out | inherited, and §7.1 is a ratified predicate; every **new** path in this slice goes through `_read_registry_readonly` instead |
-| §7's ratified accounting says the gate is *"armed only while the heartbeat is fresh"*; the wedged arm is armed with no heartbeat and no time bound | `claim-nonce.md` §7 (`:1817`, `:1866`) | §7's body is OPERATOR-owned; ratification and the `OPERATOR-GATES.md` entry are the operator's, not this slice's |
+| §7's ratified accounting says the gate is *"armed only while the heartbeat is fresh"*; the wedged arm is armed with no heartbeat and no time bound | `claim-nonce.md` §7 decision block and the accounting bullet beneath it (the `:1817`/`:1866` pointers this row originally carried were wrong — those lines are `sup-handoff-abort` arms and supersession) | **RESOLVED 2026-07-27 by operator gate**: envelope ratified as narrowed, both sites amended in place, and the missing in-fleet disarm recorded as owed work rather than ratified |
 
 ---
 

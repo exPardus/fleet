@@ -1,6 +1,9 @@
 # Spec: Provider profiles — proxies & alternate AI backends
 
-**Status:** stub — unclaimed
+**Status:** **PARKED** *(operator gate, 2026-07-27 by Altai)* — not re-based, not deleted, not build-eligible.
+**Why parked:** the worker-providers design doc this stub fed is `spike-negative — §4 dead as written` (settled 2026-07-23), and this stub's own env-delivery mechanism (§"Mechanism (fixed)" below) was already obsolete *before* that spike — so it is obsolete twice over. `docs/longcat-fleet-usage.md` is the **working alternative of record**, verified end-to-end; use it, not this file.
+**Kept, not deleted,** because it records what was tried and why the env-delivery mechanism failed. Everything below this line is preserved as that record and is NOT current design.
+**Un-park condition:** re-base when the providers line next moves and its requirements are actually known — re-basing now would be writing a design against unknown requirements.
 **Inherits:** SPEC.md, ROADMAP.md principles. Independent of watchtower; can be specced/built any time after Phase 1.5 (needs `fleet init` machinery).
 
 ## Goal
