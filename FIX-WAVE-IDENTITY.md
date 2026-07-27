@@ -630,20 +630,27 @@ test can still see it.
 
 **The glob was already spelled twice in `bin/fleet.py` for the same question**, so this
 wave introduces `_quarantine_artifacts()` and the two existing sites
-(`_husk_sweep_refuses`, `_doctor_check_autoclean`) now read it. One rule, one remedy —
-the operator restores the quarantined file and deletes the artifact, which re-arms all
-three readers at once. A lint pins the literal pattern to exactly one occurrence in the
-source. The pre-existing `try/except OSError` at the doctor site moved into the helper, so
-the husk-sweep site is now tolerant where it previously was not; that is a strict
-loosening of a check that cannot fire from a real filesystem (`Path.glob` on a missing
-directory yields nothing, it does not raise).
+(`_sweep_husks`, `_doctor_check_autoclean`) now read it. The operator restores the
+quarantined file and deletes the artifact, which re-arms every reader at once. A lint pins
+the literal pattern to exactly one occurrence in the source. The pre-existing
+`try/except OSError` at the doctor site moved into the helper, so the husk-sweep site is
+now tolerant where it previously was not; that is a strict loosening of a check that cannot
+fire from a real filesystem (`Path.glob` on a missing directory yields nothing, it does not
+raise).
+
+> **CORRECTED 2026-07-27 (gate reviewer CRITICAL).** The two paragraphs above originally
+> claimed *"one rule, one remedy"* and the table below originally recorded
+> *registry valid + stale artifact → **unchanged***. Both were wrong, and the second was the
+> defect: it is the state probes D and F land in. See **W3.6**. The readers share one
+> remedy but ask **two** questions, and the wording that fused them is what let the §9 arm
+> ship with the weaker of the two rules.
 
 **Scope of the threshold change, pinned in both directions:**
 
 | state | before | after |
 |---|---|---|
-| registry valid | read, verdict stands | unchanged — the gate is on `not_initialized` alone |
-| registry valid + stale artifact | read | **unchanged** — an artifact outlives its incident by design, and `_husk_sweep_refuses` tells the operator to restore first and delete second |
+| registry valid | read, verdict stands | unchanged — gate 1 is on `not_initialized` alone |
+| registry valid + stale artifact | read | read (gate 1 unchanged — poisoning it would break §6.5), but the **§9 upgrade REFUSES at gate 2** |
 | registry corrupt | abstain | unchanged |
 | registry absent, no artifact | affirmative False | **unchanged** — the fresh-install carve-out |
 | registry absent + artifact | affirmative False | **abstain** |
@@ -712,7 +719,72 @@ Each injection was made on the committed tree, kept line-count-neutral so the
 | 3. glob the literal `fleet.json.corrupt` (no `*`) | `TestTheThreeStepRepro::test_step_3_the_QUARANTINED_registry_MUST_STILL_REFUSE` |
 | 4. glob the process cwd instead of `state_dir()` | `TestTheFreshInstallCarveOutSurvives::test_the_glob_reads_state_dir_NOT_the_process_cwd` |
 
-## W3.6 What this wave did not touch
+## W3.6 The gate reviewer's CRITICAL — absence alone reopened the door
+
+`gate-ig-rb` escalated, and re-driving both probes through the real
+`_quarantine_registry` reproduces it exactly:
+
+    probe D -- a routine spawn recreates fleet.json    quarantined-only: REFUSED
+                                                       after rebuild  : rc=0 GRANTED  nonce_seq=1  artifact_still_present=True
+    probe F -- operator 'recreates' an EMPTY registry  quarantined-only: REFUSED
+                                                       after rebuild  : rc=0 GRANTED  nonce_seq=1  artifact_still_present=True
+
+W3.3 keyed the rule on registry-file **absence**, which is the exact shape
+`tests/test_autoclean.py::TestQuarantineArtifactGuard` (NEW-1) had already ruled
+insufficient for `_sweep_husks` — the sibling reader of the *same helper*, naming these
+same two probes. `_quarantine_registry` RENAMES, so anything that puts a `state/fleet.json`
+back stops the absence check firing while the records the artifact holds are still gone:
+the file reads `ok`, no record carries the caller's sid, and the §9 arm takes that
+thinness as the affirmative *"you are provably not a worker"* it demands. **The caller is a
+worker in both probes** — its own record is inside the artifact — so this mints generation
+1 for the one body the §6.5 gate exists to refuse.
+
+**The fix is NOT the brief's literal wording, and the measurement is why.** The brief said
+*"gate on artifact presence regardless of `ok`"* at the `:2352` site. Applied there it
+takes two tests RED, and the second is not a bookkeeping failure:
+
+```
+FAILED test_identity_quarantine_glob.py::TestTheGlobsEdges::test_an_artifact_beside_a_VALID_registry_does_NOT_interfere
+FAILED test_identity_quarantine_glob.py::TestTheGlobsEdges::test_an_artifact_beside_a_valid_registry_still_RESOLVES_a_worker
+E       AssertionError: assert None is True
+2 failed, 2485 passed, 11 skipped in 137.45s
+```
+
+`_acting_worker_identity` is **shared**: the §6.5 worker-turn gate refuses on `True`
+**alone**, so degrading a *healthy* registry's worker verdict to an abstention stops §6.5
+seeing a real worker. That closes the §9 door by opening a wider one.
+
+So the refusal goes where the hazard is, which is also what `_sweep_husks` actually does —
+its rule is not *"poison the shared read"* but *"REFUSE at the hazard site, presence-only,
+registry present or not"* (`:7578`). There are now **two gates on the §9 arm**:
+
+| | question | site | shape |
+|---|---|---|---|
+| gate 1 | did the registry **answer**? | `_acting_worker_identity` | absence-aware (rule 2) |
+| gate 2 | was it **complete** when it did? | `_require_claim_holder` §9 arm | presence-only (rule 1) |
+
+`ok` is not `complete`. Gate 2 runs **after** gate 1 so a registry that is abstaining right
+now still earns the precise note its own state deserves, and only a registry that gave an
+affirmative answer reaches the question of whether it was entitled to.
+
+**The MAJOR was the mechanism, not a cosmetic defect.** `_quarantine_artifacts`' docstring
+claimed *"three separate questions turn out to be the same question … one rule with one
+remedy"*. They were never one rule — `_sweep_husks` read presence-only, `_acting_worker_
+identity` read presence **and** registry-absent — and the false unity made a reader that had
+been given the weaker rule look like it already carried the stronger one. The docstring now
+states both rules, names all **five** readers, and says which reads which.
+
+**MINORs.** `_husk_sweep_refuses` never existed (the name is `_sweep_husks`, `:7530`); all
+7 citations across `bin/fleet.py`, this file and the test module are renamed. The reader
+count was 3 and is 5. The helper's predicate is pinned as presence-of-**any entry**, not
+presence-of-a-**file** (injection I14 was GREEN — `is_file()` was a silent hole). And the
+one-spelling rule now has a **behavioural** pin at all three refusal sites
+(`TestTheHelperIsTheONLYSpelling`) rather than only a string-count lint: each site is tested
+by *replacing* the helper in both directions, so a site that diverges in meaning while the
+literal is still spelled once fails — which is precisely how F1/F2, and this CRITICAL, got
+through.
+
+## W3.7 What this wave did not touch
 
 `fleet doctor`'s quarantine behaviour (the already-queued report-only item), the §6.5
 registry-keyed gate (which **stands** — operator, 2026-07-27), the identity resolver's

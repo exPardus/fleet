@@ -829,26 +829,55 @@ def _quarantine_artifacts() -> list:
     """Every `state/fleet.json.corrupt.<ts>` artifact `_quarantine_registry`
     has left behind, sorted by name (oldest first). Empty list, never a raise.
 
-    THE ONE SPELLING OF THE GLOB, and it is named because three separate
-    questions turn out to be the same question: *"was a registry corrupt here
-    recently?"* The artifact is the only evidence that survives, because the
-    quarantine RENAMES -- so the very next load sees a MISSING file, not a
-    broken one, and cannot tell a repaired incident from a fresh install.
+    THE ONE SPELLING OF THE GLOB. It is named because the artifact is the only
+    evidence a quarantine leaves: the rename means the very next load sees a
+    MISSING file rather than a broken one, so nothing else on disk can tell a
+    repaired incident from a fresh install.
 
-    Its three readers, and why each is presence-only rather than
-    newest-artifact-vs-current-registry:
+    ITS FIVE READERS ASK **TWO** DIFFERENT QUESTIONS, and an earlier revision of
+    this docstring claimed they asked one -- *"three separate questions turn out
+    to be the same question ... one rule with one remedy, so it gets one
+    function"*. That was false, and the falsehood was load-bearing: it made a
+    reader that had been given the WEAKER of the two rules look like it was
+    already carrying the stronger one, which is how the §9 upgrade shipped with
+    a hole the sibling reader had been fixed for eight days earlier (gate
+    reviewer CRITICAL, 2026-07-27). The two rules are spelled out here rather
+    than unified because they genuinely differ.
 
-      * `_husk_sweep_refuses` -- a rename can hide live worker records from the
-        roster sweep. `os.rename` PRESERVES mtime, so the artifact's mtime is
-        the pre-corruption WRITE time and any recreated registry is always
-        newer; an mtime comparison would never fire on the one bypass it exists
-        to stop.
-      * `_doctor_check_autoclean` -- a lingering artifact means the sweep above
-        is refusing itself, which is how a bricked sweep reads green-and-fresh.
-      * `_acting_worker_identity` -- the §9 legacy upgrade. See there.
+    RULE 1 -- *"is the state/ directory still CARRYING an unresolved
+    incident?"* Presence-only, registry present or not. Every REFUSAL reads
+    this one, and presence-only is deliberate: `os.rename` PRESERVES mtime, so
+    the artifact's mtime is the pre-corruption WRITE time and any recreated
+    registry is always newer -- an "artifact newer than the registry"
+    comparison would never fire on the recreation bypasses it exists to stop.
 
-    The operator clears the artifact (after restoring what it holds) to re-arm
-    all three. That is one rule with one remedy, so it gets one function."""
+      * `_sweep_husks` (:7530) -- a rename can hide live worker records from
+        the roster sweep, so a thin registry would rm sessions it still owns.
+      * `_doctor_check_autoclean` (:8783) -- a lingering artifact means the
+        sweep above is refusing itself, which is how a bricked sweep reads
+        green-and-fresh.
+      * `_require_claim_holder`'s §9 arm (:12702) -- the legacy upgrade mints
+        generation 1 on bare sid equality, so it needs the registry that
+        cleared it to be COMPLETE, not merely readable. See there.
+
+    RULE 2 -- *"is this particular ABSENCE a fresh install, or an incident
+    wearing a different name?"* Presence **and** `state/fleet.json` absent.
+    These two are not refusals at all; they are how an absent registry gets
+    read and described, and the question only arises when there is no file to
+    answer for itself.
+
+      * `_acting_worker_identity` (:2352) -- `not_initialized` stays the
+        affirmative *"there are no records"* only with no artifact beside it.
+        SCOPED TO THE ABSENT CASE ON PURPOSE: this resolver is shared with the
+        §6.5 worker-turn gate, which refuses on `True` alone, so poisoning a
+        HEALTHY read here would let a real worker turn through §6.5 -- closing
+        the §9 door by opening a wider one. Rule 1 lives at the §9 arm instead.
+      * `_identity_abstention_note` (:12491) -- the same distinction, in words,
+        because the generic note names `fleet doctor` and doctor is what MADE
+        this state.
+
+    The operator clears the artifact (after restoring what it holds), which
+    re-arms every reader at once. One remedy, two rules."""
     try:
         return sorted(state_dir().glob("fleet.json.corrupt.*"))
     except OSError:
@@ -2305,11 +2334,29 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     is wrong: mutant W11 measured that refusing the §9 upgrade on every fresh
     install kills 39 tests. The fresh-install lane must stay open.
 
-    THE GATE IS ON `not_initialized` ALONE, never on `ok`. A healthy registry
-    answers for itself, and an artifact can outlive its incident by days --
-    `_husk_sweep_refuses` tells the operator to restore the file first and
-    delete the artifact second, so the in-between state is EXPECTED and must not
-    lock anyone out. Pinned by `tests/test_identity_quarantine_glob.py`.
+    THE GATE HERE IS ON `not_initialized` ALONE, never on `ok`, AND THAT IS NOT
+    THE WHOLE OF THE ARTIFACT RULE -- it is `_quarantine_artifacts`' rule 2 (see
+    there). A healthy registry answers for itself at THIS site, because this
+    resolver is shared: the §6.5 worker-turn gate refuses on `True` alone, so an
+    artifact that degraded a healthy read into an abstention would stop §6.5
+    seeing a real worker. Measured, not assumed --
+    `test_an_artifact_beside_a_valid_registry_still_RESOLVES_a_worker` goes RED
+    on exactly that change.
+
+    WHAT THAT LEAVES OPEN IS CLOSED AT THE §9 ARM, NOT HERE, and an earlier
+    revision's failure to say so was the CRITICAL. `ok` is not the same claim as
+    *"complete"*: `_quarantine_registry` RENAMES, so a registry recreated after a
+    quarantine -- by a routine spawn, or by an operator "recreating" an empty one
+    -- reads `ok` while MISSING every record the artifact holds, and the §9 arm
+    read that thinness as an affirmative *"you are provably not a worker"*. The
+    presence-only refusal that closes it lives in `_require_claim_holder`
+    (`:12702`), where it costs the §6.5 gate nothing.
+
+    An artifact can also outlive its incident by days -- `_sweep_husks` tells the
+    operator to restore the file first and delete the artifact second -- so that
+    in-between state is EXPECTED. It does not lock anyone out of anything except
+    the one grant that mints a generation with no generation presented. Pinned by
+    `tests/test_identity_quarantine_glob.py`.
 
     Read-only: it runs on the dispatch hot path, inside `_require_claim_holder`,
     and inside a doctor row. A corrupt or unreadable registry degrades to
@@ -11519,8 +11566,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :5015, :5462, :9509,
-    :14072), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :5062, :5509, :9556,
+    :14175), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -12164,8 +12211,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:5015, :5462, :9509,
-    #     :14072) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:5062, :5509, :9556,
+    #     :14175) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -12709,6 +12756,62 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
                 f"answer, not an abstention. Repair `state/fleet.json` (see "
                 f"`fleet doctor`), or run this from a session the registry can "
                 f"place.")
+        # GATE 2, AND IT IS NOT THE SAME QUESTION AS GATE 1 (gate reviewer
+        # CRITICAL, 2026-07-27). Gate 1 asks *"did the registry answer?"*; this
+        # asks *"is the registry that answered COMPLETE?"* -- and an affirmative
+        # answer from a registry that is missing records is not an answer at all.
+        #
+        # The first version of this fix keyed the whole rule on registry-file
+        # ABSENCE inside `_acting_worker_identity`, which is the exact shape
+        # `TestQuarantineArtifactGuard` (NEW-1) had already ruled insufficient
+        # for `_sweep_husks` -- the sibling reader of the SAME helper -- and it
+        # failed here for the same two repro'd reasons. `_quarantine_registry`
+        # RENAMES, so the records it carried are gone from `state/fleet.json`
+        # while the sids they vouched for are still live:
+        #
+        #   probe D -- a routine spawn recreates fleet.json with one record
+        #   probe F -- an operator "recreates" an EMPTY registry
+        #
+        # Either way the file is PRESENT and thin, `_read_registry_readonly`
+        # returns `ok`, no record carries the caller's sid, and gate 1 reads
+        # that thinness as the affirmative *"you are provably not a worker"*
+        # this arm demands. Both were driven end to end: rc 0, `nonce_seq == 1`,
+        # a `NONCE:` printed, no `--nonce` ever passed, artifact still on disk.
+        # A worker whose own record sits inside the artifact upgrades the claim.
+        #
+        # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as `_sweep_husks`
+        # spells it at `:7578`. Not an mtime comparison: `os.rename` preserves
+        # mtime, so the artifact's mtime is the PRE-corruption write time and any
+        # recreated registry is always newer -- the comparison would never fire
+        # on the one bypass it exists to stop.
+        #
+        # AFTER gate 1, deliberately: a registry that is abstaining RIGHT NOW
+        # gets the precise note its own state earns (`fleet doctor` really is
+        # the remedy for a present-but-corrupt file), and only a registry that
+        # gave an affirmative answer reaches the question of whether it was
+        # entitled to. Pinned both ways by
+        # `tests/test_identity_quarantine_glob.py`.
+        #
+        # SCOPED TO THIS ARM, and that scope is the fix. The same clause inside
+        # `_acting_worker_identity` would poison the shared read: the §6.5 gate
+        # refuses on `True` ALONE, so degrading a healthy registry's worker
+        # verdict to an abstention lets a REAL worker turn through §6.5. That
+        # was measured -- it takes `test_an_artifact_beside_a_valid_registry_
+        # still_RESOLVES_a_worker` RED -- so the §9 door does not get closed by
+        # opening the §6.5 one.
+        legacy_artifacts = _quarantine_artifacts()
+        if legacy_artifacts:
+            raise FleetCliError(
+                f"{verb}: refusing -- this is a §9 legacy claim, whose upgrade "
+                f"is granted on sid equality alone with no generation "
+                f"presented, and {legacy_artifacts[-1].name} sits in state/. A "
+                f"corrupt registry was renamed aside, so the registry that just "
+                f"placed this session is missing whatever that file held -- "
+                f"including, possibly, the record that would call this session a "
+                f"worker. An upgrade that mints generation 1 needs a COMPLETE "
+                f"registry, not merely a readable one. Restore the quarantined "
+                f"file, then remove the artifact -- the same remedy the husk "
+                f"sweep asks for.")
         value = mint_nonce()
         claim["nonce_hash"] = nonce_digest(value)
         claim["nonce_seq"] = 1
