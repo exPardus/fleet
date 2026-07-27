@@ -318,7 +318,8 @@ def statusline_script_path() -> Path:
 # from its own location. That hook is gone (terminal-surface D7) and the
 # marker had no other reader -- `fleet.py`, `fleet_statusline.py` and both
 # shell shims resolve $FLEET_HOME, else their own location, and the autoclean
-# scheduled task carries an explicit `--fleet-home <path>`.
+# scheduled task carried an explicit `--fleet-home <path>` (that task was
+# retired 2026-07-27; `--fleet-home` remains for any headless caller).
 #
 # It is deleted rather than kept, because it was fleet's only unconditional
 # write to global machine state: plain `fleet init` stamped `~/.claude/`
@@ -342,15 +343,22 @@ def now_iso() -> str:
 #
 # This is the ONLY section of fleet.py permitted to branch on os.name /
 # sys.platform, read subprocess creation flags, or shell out to an
-# OS-specific tool (schtasks/crontab, ctypes/kernel32). Every other
-# function in this module calls through the PLATFORM singleton below
-# instead of doing any of that itself. Two implemented backends:
-# _WindowsPlatform (schtasks scheduling, FILE_APPEND_DATA outcome append)
-# and _PosixPlatform (crontab scheduling, O_APPEND outcome append --
-# macOS + Linux, the posix-port branch). UnsupportedPlatformError remains
-# the contract for any future genuinely-unportable operation. A
-# source-scan test (test_steering.py) enforces that no other function in
-# this module references os.name/sys.platform.
+# OS-specific tool (ctypes/kernel32). Every other function in this module
+# calls through the PLATFORM singleton below instead of doing any of that
+# itself. Two implemented backends: _WindowsPlatform (FILE_APPEND_DATA
+# outcome append) and _PosixPlatform (O_APPEND outcome append -- macOS +
+# Linux, the posix-port branch). UnsupportedPlatformError remains the
+# contract for any future genuinely-unportable operation. A source-scan test
+# (test_steering.py) enforces that no other function in this module
+# references os.name/sys.platform.
+#
+# The scheduler surface (schtasks on Windows, crontab on POSIX) lived here
+# until 2026-07-27, when the operator retired the autoclean timer: the sweep
+# is driven by the supervisor's watchtower beat and the interface's startup
+# ritual instead, so fleet installs no OS-scheduler state on any platform and
+# the whole per-OS scheduling seam -- with its ownership predicate, its
+# fail-closed query and its two path-comparison dialects -- is gone rather
+# than ported. Deleting the class of problem beat fixing one instance of it.
 # ---------------------------------------------------------------------------
 
 _FILE_APPEND_DATA = 0x0004
@@ -360,114 +368,24 @@ _OPEN_ALWAYS = 4
 _FILE_ATTRIBUTE_NORMAL = 0x80
 
 
-class AutocleanTaskQueryError(Exception):
-    """The scheduler could not say whether the autoclean task exists (F3:
-    transient failure, access denied, timeout). Raised by BOTH backends --
-    schtasks on Windows, `crontab -l` on POSIX -- since both can fail in a
-    way that is not an answer. Callers fail CLOSED -- treating this as "task
-    absent" would let an install clobber a foreign task of the same name on a
-    hiccup (schtasks `/Create /F`, or a crontab rewrite that drops the
-    foreign line)."""
-
-
 class UnsupportedPlatformError(NotImplementedError):
     """A PLATFORM operation this OS has no implementation for.
 
     NOT raised by any adapter method today: both backends implement the whole
-    surface (the posix port filled in what _PosixPlatform once stubbed). It is
-    the reserved contract for a genuinely-unportable FUTURE operation -- one
-    where some OS has no equivalent primitive at all, as opposed to a
-    different tool for the same job (schtasks vs crontab, FILE_APPEND_DATA vs
+    surface. It is the reserved contract for a genuinely-unportable FUTURE
+    operation -- one where some OS has no equivalent primitive at all, as
+    opposed to a different tool for the same job (FILE_APPEND_DATA vs
     O_APPEND), which is what the adapter exists to absorb silently.
 
-    Two handlers stay wired, and must: `_doctor_check_autoclean` catches it
-    around `PLATFORM.autoclean_task_query` and degrades that tier to a
-    "unsupported on this platform -- skipped" PASS-note rather than failing
-    doctor; `main()` lists it in the top-level except so any other unportable
-    call exits 1 with a `fleet: <message>` line instead of a traceback. A new
-    unportable method inherits the second for free on the OS that lacks it."""
+    One handler stays wired, and must: `main()` lists it in the top-level
+    except so any unportable call exits 1 with a `fleet: <message>` line
+    instead of a traceback. (`_doctor_check_autoclean` caught it too, around
+    the scheduler query, until the timer was retired on 2026-07-27 -- that
+    check now reads only the run stamp and has nothing unportable to call.)"""
 
 
 class _WindowsPlatform:
     """Windows implementation of every OS-specific fleet operation."""
-
-    # Path-comparison semantics for scheduled-task ownership (D8, closed by
-    # the posix-port campaign). NTFS/ReFS compare paths case-insensitively
-    # and `\` is THE separator -- and schtasks XML round-trips genuinely
-    # emit both spellings of one path -- so folding both variances is
-    # required here for `_fleet_task_is_ours` to recognise fleet's own task.
-    task_paths_are_case_insensitive = True
-    task_paths_use_backslash_separator = True
-
-    def autoclean_task_query(self, task_name: str, run=subprocess.run):
-        """None ONLY when the task is definitively absent; its command
-        string when installed ("" if the XML is unparseable); raises
-        AutocleanTaskQueryError when existence cannot be determined (F3:
-        callers must fail CLOSED -- reading a transient failure as
-        "absent" licensed /Create /F over a foreign task).
-
-        Two locale-safe steps: existence via the full `/FO CSV` listing
-        (a targeted /TN query's not-found error string is locale-
-        translated and indistinguishable from access-denied by exit code;
-        the listing's exit code + name presence are not), then the
-        command via `/XML` (element names are not translated either)."""
-        try:
-            listing = run(["schtasks", "/Query", "/FO", "CSV"],
-                          capture_output=True, text=True, timeout=30)
-        except Exception as exc:
-            raise AutocleanTaskQueryError(f"schtasks listing failed: {exc}")
-        if listing.returncode != 0:
-            raise AutocleanTaskQueryError(
-                f"schtasks listing exit {listing.returncode}: "
-                f"{(listing.stderr or '').strip()[:200]}")
-        if f'"\\{task_name}"' not in (listing.stdout or ""):
-            return None  # definitively absent
-        try:
-            proc = run(["schtasks", "/Query", "/TN", task_name, "/XML"],
-                       capture_output=True, text=True, timeout=15)
-        except Exception as exc:
-            raise AutocleanTaskQueryError(f"schtasks XML query failed: {exc}")
-        if proc.returncode != 0:
-            raise AutocleanTaskQueryError(
-                f"schtasks XML query exit {proc.returncode}: "
-                f"{(proc.stderr or '').strip()[:200]}")
-        xml = proc.stdout or ""
-        parts = []
-        for tag in ("Command", "Arguments"):
-            m = re.search(rf"<{tag}>(.*?)</{tag}>", xml, re.S)
-            if m:
-                text = m.group(1).strip()
-                for ent, ch in (("&quot;", '"'), ("&lt;", "<"),
-                                ("&gt;", ">"), ("&amp;", "&")):
-                    text = text.replace(ent, ch)
-                parts.append(text)
-        return " ".join(p for p in parts if p)
-
-    def autoclean_task_install(self, task_name: str, command: str,
-                               interval_hours: int, run=subprocess.run):
-        """(ok, message). `/F` makes re-install idempotent -- the caller is
-        responsible for the refuse-foreign-task check BEFORE calling this."""
-        try:
-            proc = run(["schtasks", "/Create", "/F", "/TN", task_name,
-                        "/TR", command, "/SC", "HOURLY", "/MO", str(int(interval_hours))],
-                       capture_output=True, text=True, timeout=30)
-        except Exception as exc:
-            return (False, str(exc))
-        if proc.returncode != 0:
-            return (False, (proc.stderr or proc.stdout or "").strip()[:300])
-        return (True, "")
-
-    def autoclean_task_remove(self, task_name: str, run=subprocess.run):
-        """(ok, message). Missing task counts as failure -- the caller
-        reports it; nothing here raises."""
-        try:
-            proc = run(["schtasks", "/Delete", "/TN", task_name, "/F"],
-                       capture_output=True, text=True, timeout=30)
-        except Exception as exc:
-            return (False, str(exc))
-        if proc.returncode != 0:
-            return (False, (proc.stderr or proc.stdout or "").strip()[:300])
-        return (True, "")
 
     def atomic_append_bytes(self, path: Path, data: bytes) -> None:
         """Single-syscall atomic append. Opens the file for FILE_APPEND_DATA
@@ -522,115 +440,13 @@ class _WindowsPlatform:
 class _PosixPlatform:
     """POSIX backend (posix-port): macOS + Linux.
 
-    Autoclean scheduling uses the user crontab on both OSes -- macOS still
-    ships cron, and one crontab backend is strictly simpler than a
-    launchd-plist/cron split (launchd can become a refinement if cron's
-    macOS sandboxing ever bites; fleet's autoclean only touches user-owned
-    FLEET_HOME paths, which cron may). The fleet-owned entry is found by a
-    trailing `# <task_name>` tag, never by parsing schedules -- the same
-    "match our own marker, refuse to guess" doctrine as the schtasks
-    backend's task-name match."""
-
-    # Path-comparison semantics for scheduled-task ownership (D8, closed by
-    # the posix-port campaign). The mirror image of the Windows declaration:
-    # ext4/APFS-case-sensitive compare paths byte-for-byte, and `\` is an
-    # ordinary filename character, not a separator. Folding either variance
-    # here would make two GENUINELY DIFFERENT paths compare equal -- a false
-    # MATCH on a predicate that decides whether a scheduled job may be
-    # overwritten. See `_normalize_task_token` and
-    # `TestTaskPathSemanticsFollowTheFilesystem`.
-    #
-    # macOS note: HFS+/APFS are usually case-INSENSITIVE, so this
-    # declaration is conservative there rather than exact -- it can only
-    # produce the safe error (refusing a task that is provably the
-    # operator's, recoverable with `--force`), never the dangerous one
-    # (adopting a task that is not ours). Case-sensitivity is a per-volume
-    # property on macOS, not a per-OS one, so no static declaration can be
-    # exact; erring toward refusal is the whole doctrine of this predicate.
-    task_paths_are_case_insensitive = False
-    task_paths_use_backslash_separator = False
-
-    def _cron_tag(self, task_name: str) -> str:
-        return f"# {task_name}"
-
-    def _read_crontab(self, run):
-        """(lines, error). lines is None on failure; [] means 'user has no
-        crontab', a DEFINITIVE absence (crontab -l exits nonzero for it,
-        so it must be told apart from access failures by message -- cron
-        implementations do not localize 'no crontab', unlike schtasks'
-        locale-translated not-found error that forced the CSV dance on
-        Windows)."""
-        try:
-            proc = run(["crontab", "-l"], capture_output=True, text=True,
-                       timeout=30)
-        except Exception as exc:
-            return (None, f"crontab listing failed: {exc}")
-        if proc.returncode == 0:
-            return ((proc.stdout or "").splitlines(), "")
-        if "no crontab" in (proc.stderr or "").lower():
-            return ([], "")
-        return (None, f"crontab listing exit {proc.returncode}: "
-                      f"{(proc.stderr or '').strip()[:200]}")
-
-    def _write_crontab(self, lines, run):
-        """(ok, message). Installs the given lines as the user crontab."""
-        text = "\n".join(lines) + ("\n" if lines else "")
-        try:
-            proc = run(["crontab", "-"], input=text, capture_output=True,
-                       text=True, timeout=30)
-        except Exception as exc:
-            return (False, str(exc))
-        if proc.returncode != 0:
-            return (False, (proc.stderr or proc.stdout or "").strip()[:300])
-        return (True, "")
-
-    def autoclean_task_query(self, task_name: str, run=subprocess.run):
-        """None ONLY when the entry is definitively absent; its command
-        string when installed ("" if the line is unparseable); raises
-        AutocleanTaskQueryError when existence cannot be determined (F3:
-        callers must fail CLOSED, same contract as the schtasks backend)."""
-        lines, err = self._read_crontab(run)
-        if lines is None:
-            raise AutocleanTaskQueryError(err)
-        tag = self._cron_tag(task_name)
-        for line in lines:
-            if line.rstrip().endswith(tag):
-                body = line.rsplit(tag, 1)[0].strip()
-                # five schedule fields, then the command
-                parts = body.split(None, 5)
-                return parts[5] if len(parts) == 6 else ""
-        return None
-
-    def autoclean_task_install(self, task_name: str, command: str,
-                               interval_hours: int, run=subprocess.run):
-        """(ok, message). Idempotent re-install: any existing fleet-tagged
-        line is replaced -- the caller is responsible for the
-        refuse-foreign-task check BEFORE calling this (same split as the
-        schtasks backend's /F)."""
-        # % is a line separator inside a crontab command field; a command
-        # containing one would be silently mangled, not run.
-        if "%" in command or "\n" in command:
-            return (False, "command contains a character cron cannot "
-                           "carry literally (% or newline)")
-        lines, err = self._read_crontab(run)
-        if lines is None:
-            return (False, err)
-        tag = self._cron_tag(task_name)
-        kept = [ln for ln in lines if not ln.rstrip().endswith(tag)]
-        kept.append(f"0 */{int(interval_hours)} * * * {command} {tag}")
-        return self._write_crontab(kept, run)
-
-    def autoclean_task_remove(self, task_name: str, run=subprocess.run):
-        """(ok, message). Missing entry counts as failure -- the caller
-        reports it; nothing here raises."""
-        lines, err = self._read_crontab(run)
-        if lines is None:
-            return (False, err)
-        tag = self._cron_tag(task_name)
-        kept = [ln for ln in lines if not ln.rstrip().endswith(tag)]
-        if kept == lines:
-            return (False, f"no crontab entry tagged {tag!r}")
-        return self._write_crontab(kept, run)
+    Was also the crontab scheduling backend for autoclean until the timer was
+    retired on 2026-07-27. Note what retirement bought here specifically: cron
+    has no catch-up concept AT ALL (that is anacron's job, which is not
+    installed by default on macOS and not guaranteed on Linux), so the POSIX
+    side could not have been given the missed-run behaviour the Windows task
+    was missing. The defect was never Windows-specific -- it was
+    timer-specific."""
 
     def atomic_append_bytes(self, path: Path, data: bytes) -> None:
         """Single-syscall atomic append via O_APPEND. POSIX specifies that
@@ -3837,18 +3653,24 @@ def cmd_init(args) -> int:
     (hooks run outside fleet.py, spawned by `claude`, so they cannot fall
     back to a bare `py`/`python3` on PATH).
 
-    N1 (re-review, MED): the home guard is evaluated BEFORE anything is
-    written. With --autoclean, a guard problem refuses the WHOLE init before
-    any write, so a worktree never gets a scheduled task pinned to it;
-    --force overrides. Plain `fleet init` writes only inside the fleet home
-    and needs no guard.
+    `fleet init` writes NOTHING outside the repo except `--statusline`, which
+    is what that flag is for. It once also stamped the global
+    `~/.claude/fleet-home` marker (removed 2026-07-22 with the marker's only
+    reader) and once installed a Scheduled Task under `--autoclean`.
 
-    Since 2026-07-22 plain `fleet init` writes NOTHING outside the repo. It
-    used to also stamp the global `~/.claude/fleet-home` marker, which is why
-    this guard once had a second condition and this docstring once described
-    a marker-repointing hazard; both went with the marker's only reader (see
-    the note above `_home_guard_problems`). `--statusline` remains the one
-    flag that touches `~/.claude/`, which is what it is for.
+    THE TIMER IS RETIRED (operator ruling 2026-07-27). `--autoclean`,
+    `--autoclean-interval-hours` and `--autoclean-remove` are gone, and with
+    them the home guard (N1) that existed only to keep a scheduled task from
+    being pinned at a linked worktree it would outlive. `init` now creates no
+    state that outlives the shell, so there is nothing left for that guard to
+    protect. The `fleet autoclean` VERB is untouched: the supervisor runs it
+    on its watchtower beat and the interface runs it in its startup ritual
+    (`skills/fleet/supervisor.md`, `skills/fleet/SKILL.md`). Rationale: a
+    timer sweeps when the clock says so, which on a machine that loses power
+    means it does not sweep at all -- a 9h14m power cut dropped the 08:22Z
+    sweep and nothing caught up at boot, an 18-hour hole in a 6-hourly guard.
+    A beat sweeps when the fleet is ALIVE, which is the condition that makes
+    sweeping necessary in the first place.
 
     §7 THE GATE: `init` is a mutating lifecycle verb, so a supervisor-shaped
     caller must prove continuity while a fresh claim is held (bypassable, see
@@ -3856,14 +3678,6 @@ def cmd_init(args) -> int:
     with a session id acting against a live supervisor -- a human at a plain
     shell (no sid) is unaffected, which is how init is run at setup."""
     _supervisor_gate("init", nonce=getattr(args, "nonce", None))
-    force = getattr(args, "force", False)
-    guard_problems = _home_guard_problems()
-    if getattr(args, "autoclean", False) and guard_problems and not force:
-        raise FleetCliError(
-            "fleet init --autoclean refused before writing anything (N1): "
-            + "; ".join(guard_problems)
-            + " -- run from the canonical fleet home, or rerun with --force")
-
     template_path = template_settings_path()
     if not template_path.exists():
         raise FleetCliError(
@@ -3883,11 +3697,6 @@ def cmd_init(args) -> int:
     if getattr(args, "statusline", False):
         _install_statusline(force=getattr(args, "force", False),
                             chain=getattr(args, "chain", False))
-    if getattr(args, "autoclean", False):
-        _install_autoclean_task(getattr(args, "autoclean_interval_hours", None),
-                                force=getattr(args, "force", False))
-    if getattr(args, "autoclean_remove", False):
-        _remove_autoclean_task(force=getattr(args, "force", False))
     return 0
 
 
@@ -7580,25 +7389,44 @@ def cmd_archive(args, run=subprocess.run, which=shutil.which) -> int:
 
 # ---------------------------------------------------------------------------
 # Autoclean (docs/specs/autoclean.md): staleness cleaned up without anyone
-# remembering. One mutating command, three callers (the Scheduled Task
-# `fleet init --autoclean` installs, a supervisor beat, an operator by
-# hand). Tier 1 = the existing archive TTL pass; tier 2 = daemon-husk
-# removal under a sid-based default-deny ownership discriminator; tier 3
-# (default-OFF) = registry tombstone expiry, never file deletion --
-# `fleet clean` stays the only deleter.
+# remembering. One mutating command, now TWO callers, both of them alive
+# fleet tiers: the supervisor's watchtower beat (`skills/fleet/supervisor.md`)
+# and the interface's startup ritual (`skills/fleet/SKILL.md`) -- plus an
+# operator by hand, as always. Tier 1 = the existing archive TTL pass; tier 2
+# = daemon-husk removal under a sid-based default-deny ownership
+# discriminator; tier 3 (default-OFF) = registry tombstone expiry, never file
+# deletion -- `fleet clean` stays the only deleter.
+#
+# THE THIRD CALLER IS GONE (operator ruling 2026-07-27). A Windows Scheduled
+# Task installed by `fleet init --autoclean` used to drive this every 6h. A
+# timer sweeps when the CLOCK says so, which on a machine that loses power
+# means it does not sweep at all: the task carried `StartWhenAvailable=False`,
+# so a 9h14m power cut dropped the 08:22Z occurrence, nothing caught up at
+# boot, and an 18-hour hole opened in a 6-hourly guard with nobody noticing.
+# Setting that flag was the smaller fix and the worse one -- a beat sweeps
+# when the FLEET IS ALIVE, which is the condition that makes sweeping
+# necessary in the first place, and retiring the timer deletes the whole class
+# of problem (no scheduler, no machine-local install state, no missed-run
+# policy, nothing to re-verify per machine) instead of patching one instance.
 # ---------------------------------------------------------------------------
 
-AUTOCLEAN_TASK_NAME = "claude-fleet-autoclean"
-AUTOCLEAN_INTERVAL_HOURS_DEFAULT = 6
-AUTOCLEAN_STALE_RUN_HOURS = 48.0
+# How old the last `autoclean` run may get before doctor says the beat is not
+# beating. Derived from the BEAT CADENCE, not from the retired 6h timer: a
+# supervisor must keep its heartbeat younger than 60 min
+# (`skills/fleet/supervisor.md`, S = 3600s) and sweeps once per beat, so an
+# hour is the expected spacing and 3h is three missed beats -- long enough not
+# to fire on one slow beat, short enough that the 18-hour hole would have been
+# on screen before breakfast. It is deliberately far tighter than the 48h it
+# was under the timer: a timer that had not fired in 47h was plausible, a
+# fleet that has not swept in 3h is not being run by anyone.
+AUTOCLEAN_STALE_RUN_HOURS = 3.0
 # ND-3 (re-review MD-CONTRACT-REVIEW-2026-07-17.md): how many CONSECUTIVE
 # husk-deferring autoclean runs before doctor calls it starvation rather than
 # routine. A single deferral is the normal case at 2.1.212 -- the daemon is
 # transient and this tier is the one most likely to meet it dead (§Q2) -- so
-# noting the first one is cry-wolf. The scheduled task's floor is hourly
-# (`--autoclean-interval-hours` is 1..23), so 3 in a row is >=3h of an
-# unreachable daemon: long past any idle-exit, and short enough that a genuinely
-# broken daemon surfaces the same day.
+# noting the first one is cry-wolf. Beat spacing is about an hour (above), so
+# 3 in a row is >=3h of an unreachable daemon: long past any idle-exit, and
+# short enough that a genuinely broken daemon surfaces the same day.
 AUTOCLEAN_DEFERRAL_STREAK_THRESHOLD = 3
 
 
@@ -7679,8 +7507,10 @@ def _sweep_husks(dry_run: bool, run=subprocess.run, which=shutil.which) -> tuple
     M1 fix wave (review MD-CONTRACT-REVIEW-2026-07-17.md): `deferred` used
     to be a local that died at the return, so a dead-daemon-starved sweep
     was byte-identical to a clean one at every durable surface (stamp,
-    `autoclean_run` event, exit code) -- and the scheduled task is headless,
-    so the stderr roll-up went to a console nobody owns. A permanently dead
+    `autoclean_run` event, exit code) -- and the caller was a headless
+    scheduled task, so the stderr roll-up went to a console nobody owns.
+    (The timer is retired; a beat caller has a reader, but the durable
+    surfaces are still the ones doctor can see, so this stays.) A permanently dead
     daemon could starve this tier for weeks while `fleet doctor` read
     green-and-fresh. The reviewer proved the gap by deleting the roll-up
     with the full suite still green. Deferred sids now reach the caller.
@@ -7791,7 +7621,8 @@ def _sweep_husks(dry_run: bool, run=subprocess.run, which=shutil.which) -> tuple
                   f"{_rm_outcome_note(outcome)}", file=sys.stderr)
     if deferred:
         # Loud, non-fatal, and honest about the retry. The stderr line alone is
-        # NOT enough (M1): it is invisible to the headless scheduled task, so
+        # NOT enough (M1): it was invisible to the headless scheduled task, and
+        # is still no use to a beat that does not read stderr closely, so
         # `deferred` is returned to the caller, which carries it into the run
         # stamp and the autoclean_run event -- the surfaces doctor reads.
         print(f"husk: {len(deferred)} husk(s) left on the roster for the next "
@@ -7848,8 +7679,12 @@ def cmd_autoclean(args, run=subprocess.run, which=shutil.which) -> int:
     registry, the exact fail-open the reviewer repro'd.
 
     `--fleet-home` (F2): overrides the module FLEET_HOME before anything
-    reads a path -- the scheduled task carries it because Task Scheduler
-    provides no operator environment for the env-var route."""
+    reads a path. It existed because the scheduled task ran with no operator
+    environment for the env-var route; the timer is retired (2026-07-27) and
+    both beat callers inherit a real environment, but the flag stays -- it is
+    the only way any future headless or cross-home caller can name the home
+    it means, and removing it would be a second surface change riding on
+    this one."""
     fleet_home_override = getattr(args, "fleet_home", None)
     if fleet_home_override:
         # NEW-2 (re-review, LOW): resolve + validate, never use verbatim --
@@ -7926,300 +7761,6 @@ def cmd_autoclean(args, run=subprocess.run, which=shutil.which) -> int:
           f"tombstones_expired={len(tombstones)}"
           f" errors={len(errors)}{' (dry-run)' if dry_run else ''}")
     return 1 if errors else 0
-
-
-def _autoclean_script_path() -> Path:
-    """The fleet.py the scheduled task will pin. A seam (monkeypatchable)
-    so tests can model canonical-vs-worktree installs without moving files."""
-    return Path(__file__).resolve()
-
-
-def _autoclean_task_command() -> str:
-    """The Scheduled Task's command line: the exact interpreter running
-    this `fleet init` plus this fleet.py -- mirroring cmd_init's own
-    sys.executable-as-{{PYTHON}} doctrine (a scheduled task cannot fall
-    back to a bare `py` on PATH either).
-
-    F2 (adversarial review, HIGH): FLEET_HOME is embedded EXPLICITLY as an
-    argv flag -- Task Scheduler runs with no operator environment, so
-    without it fleet.py falls back to script-location resolution and the
-    task sweeps whatever repo copy it happens to live in (a worktree's
-    empty state/, forever, doctor green) instead of the operator's home."""
-    py = Path(sys.executable).resolve()
-    script = _autoclean_script_path()
-    home = Path(FLEET_HOME).resolve()
-    return f'"{py}" "{script}" autoclean --fleet-home "{home}"'
-
-
-def _home_guard_problems() -> list:
-    """N1: the home-guard subset that protects state OUTLIVING this shell --
-    now exactly one condition, the resolved home being a linked git worktree.
-    A scheduled task pinned at a worktree keeps running after `git worktree
-    remove` deletes the tree out from under it.
-
-    Used by `_install_autoclean_task` (which adds its own script-location
-    check on top) and by `cmd_init --autoclean`, which must evaluate it
-    BEFORE writing anything. Deliberately EXCLUDES the script check: a
-    sandboxed or relocated home with no `.git` file is a legitimate target.
-
-    Was `_marker_guard_problems` and carried a second condition -- an existing
-    `~/.claude/fleet-home` marker pointing elsewhere. Both the marker and that
-    check were removed on 2026-07-22 with their only reader (see the note
-    where the marker helpers used to live, above)."""
-    home = Path(FLEET_HOME).resolve()
-    problems = []
-    if (home / ".git").is_file():
-        problems.append(f"{home} is a linked git worktree (.git is a file) -- "
-                        "a task pinned here dies with the worktree")
-    return problems
-
-
-# A scheduled task's command line, as it comes back from the platform
-# adapter: `"<py>" "<script>" <verb> --fleet-home "<home>"`. Quoted runs are
-# single tokens (paths contain spaces); everything else splits on whitespace.
-# `--flag="quoted value"` is one token too, split on the `=` afterwards.
-# Platform-neutral by construction -- it only ever sees a string.
-_TASK_ARG_RE = re.compile(r'[^\s"]*"[^"]*"|\S+')
-
-
-def _normalize_task_token(value) -> str:
-    """Normalize one scheduled-task command-line token for comparison, under
-    the running filesystem's own path-equality rules.
-
-    Two of the three normalizations are PLATFORM-DECLARED, not universal
-    (D8, closed by the posix-port campaign -- previously applied
-    unconditionally and filed as a Phase-1.5 note while the POSIX scheduler
-    backend was still hypothetical):
-
-      - case folding: correct on Windows (schtasks XML round-trips emit
-        case-varied spellings of one path, and NTFS considers them the same
-        file); a false MATCH on a case-sensitive filesystem, where
-        `/opt/Fleet` and `/opt/fleet` are two different directories.
-      - backslash-to-slash: correct on Windows (`\\` is the separator, and
-        schtasks round-trips vary it against `/`); a false MATCH on POSIX,
-        where `\\` is an ordinary filename character, so `/opt/my\\fleet`
-        and `/opt/my/fleet` are two different directories.
-
-    Both wrong directions are the DANGEROUS one. `_fleet_task_is_ours` is
-    what decides whether a scheduled job belongs to this fleet and may
-    therefore be replaced; a false MATCH means overwriting somebody else's
-    job, where a false MISS costs one `--force`.
-
-    The third normalization is universal and stays unconditional: strip a
-    trailing separator (B2 -- a directory argument that round-trips through
-    schtasks XML can pick one up). `/` is a separator on every platform;
-    a trailing `\\` is stripped only where `\\` is a separator, which the
-    branch above has already converted."""
-    text = str(value).strip()
-    if PLATFORM.task_paths_use_backslash_separator:
-        text = text.replace("\\", "/")
-    if PLATFORM.task_paths_are_case_insensitive:
-        text = text.lower()
-    return text.rstrip("/") or text
-
-
-def _strip_task_quotes(raw: str) -> str:
-    if len(raw) >= 2 and raw.startswith('"') and raw.endswith('"'):
-        return raw[1:-1]
-    return raw
-
-
-def _task_command_tokens(command: str) -> list:
-    """Normalized tokens of a scheduled task's command line, quotes stripped.
-
-    One token in, one token out -- this never SYNTHESIZES a token (G2). An
-    earlier revision split `--flag=value` into two tokens here so that
-    index-based lookup saw one shape either way; the cost was that
-    `--exclude=--fleet-home <home>` manufactured a `--fleet-home` token the
-    command never carried, and the ownership predicate read it as ours. A
-    predicate that can be *fed* an argument it was never given is the same
-    shape as the untested-parser defect that preceded it. The `=` spelling is
-    resolved where it is consumed instead -- see `_task_flag_value`."""
-    return [_normalize_task_token(_strip_task_quotes(raw))
-            for raw in _TASK_ARG_RE.findall(command or "")]
-
-
-def _task_flag_value(tokens: list, flag: str):
-    """Value of `flag` in a tokenized task command, or None if absent.
-
-    Accepts both spellings fleet's own argparse accepts: `--flag value` (two
-    tokens) and `--flag=value` (one). Only a token that IS the flag, or that
-    starts with `flag=`, can supply a value -- so no other argument's value can
-    stand in for it. The `=` value is re-normalized after its quotes come off,
-    because the enclosing token ended in a quote and so escaped the trailing-
-    separator rule the first time through."""
-    want = _normalize_task_token(flag)
-    prefix = want + "="
-    for i, tok in enumerate(tokens):
-        if tok == want:
-            return tokens[i + 1] if i + 1 < len(tokens) else None
-        if tok.startswith(prefix):
-            return _normalize_task_token(_strip_task_quotes(tok[len(prefix):]))
-    return None
-
-
-def _fleet_task_is_ours(command: str, subcommand: str) -> bool:
-    """F4 ownership, by FULL identity: the task runs OUR resolved fleet.py,
-    with THIS subcommand, against THIS fleet home.
-
-    The predicate used to match the script path alone, which made it say
-    "ours" for every fleet-owned scheduled task regardless of verb or home --
-    so the moment a second one exists (the three-tier adjudication's
-    `fleet init --supervisor-beat` is the concrete near-term case),
-    `fleet init --autoclean` would silently /Create /F over it. Latent while
-    only one task exists; data loss the day a second lands.
-
-    F4 doctrine is intact and tightened: matching is on whole, quote-stripped
-    tokens, never a bare substring -- a foreign `C:/tools/autoclean.exe`
-    task still refuses, and now so does a task that merely mentions the word
-    somewhere. Slash/case normalization is kept (schtasks XML round-trips
-    carry both variances). An absent `--fleet-home` is NOT ours: `fleet`
-    embeds it in every task it installs (F2), so a command without one was
-    installed by something else. (B11: that includes a task installed by a
-    fleet build older than F2 -- it has no `--fleet-home` and is refused
-    rather than overwritten. Safe direction, `--force` recovers, and the
-    refusal message names all three identity components.)
-
-    QUOTING (B1 fix wave). Accepted: every form fleet itself renders, either
-    path quoted or bare, slash- or case-varied, and `--fleet-home=VALUE` (which
-    fleet's own argparse accepts, so a hand-edited task may carry it).
-    Refused, deliberately: a command whose paths contain spaces and carry NO
-    quotes at all -- that is genuinely undecidable, not merely unhandled -- and
-    sh-style single quotes. The POSIX scheduler backend now exists, so that
-    refusal no longer rests on "no dialect to validate against"; it rests on
-    what it always really meant. `_autoclean_task_command` renders DOUBLE
-    quotes on both backends and cron stores that command field verbatim, so a
-    single-quoted command is never one fleet wrote -- while `'` is a legal
-    Windows filename character (`C:\\Users\\O'Brien\\...`) that a single-quote
-    alternation would mis-tokenize. Both refusals are the SAFE direction: the cost is one
-    `--force` on a task that is provably the operator's, where the opposite
-    error is `/Create /F` over somebody else's scheduled task. Pinned by
-    `TestOwnershipQuotingVariants`, which fixes each verdict as a decision.
-
-    NOT constrained: the interpreter (argv[0]). A contrived command that runs
-    a foreign wrapper but still names our fleet.py, the `autoclean` verb and
-    our `--fleet-home` reads as ours (B7). Recorded so it is not re-filed as
-    new; it is strictly narrower than the pre-fix substring predicate, and
-    every realistic shape answers correctly.
-
-    Portability (invariant 8): pure string work over a command string plus
-    `Path(...).resolve()`, with the two filesystem-dependent path-equality
-    rules DECLARED BY THE ADAPTER rather than assumed -- see
-    `_normalize_task_token`. D8 (CLOSED, posix-port campaign): both
-    normalizations used to be applied unconditionally, which on a
-    case-sensitive filesystem made two genuinely different paths compare
-    EQUAL. The old note here called `.lower()` a "false MISS" risk; it is
-    the opposite, and a false MATCH is the dangerous direction for a
-    predicate that licenses replacing a scheduled job.
-
-    Reachable, not theoretical: the crontab backend finds fleet's line by a
-    CONSTANT `# claude-fleet-autoclean` tag, so two fleet homes under one
-    user account -- differing only in path case, or one carrying a literal
-    backslash -- write same-tagged lines, and this predicate is the only
-    thing stopping the second install from overwriting the first's job.
-    Pinned end-to-end through the real crontab backend by
-    `TestTaskPathSemanticsFollowTheFilesystem`, which drives both adapters
-    on both operating systems."""
-    tokens = _task_command_tokens(command)
-    try:
-        script_at = tokens.index(_normalize_task_token(_autoclean_script_path()))
-    except ValueError:
-        return False
-    # The verb is the argument immediately after the script path -- fleet.py's
-    # own parser takes the subcommand first, so anything else is a different
-    # task even if the word appears later in the line.
-    if tokens[script_at + 1:script_at + 2] != [_normalize_task_token(subcommand)]:
-        return False
-    home = _task_flag_value(tokens, "--fleet-home")
-    return home is not None and home == _normalize_task_token(Path(FLEET_HOME).resolve())
-
-
-def _autoclean_task_is_ours(command: str) -> bool:
-    """F4 for the autoclean task specifically -- see `_fleet_task_is_ours`.
-    Kept as a named seam so the sole consumer (`_install_autoclean_task`)
-    reads the same as before and a second fleet task gets its own one-liner."""
-    return _fleet_task_is_ours(command, "autoclean")
-
-
-def _install_autoclean_task(interval_hours, force: bool) -> None:
-    if interval_hours is None:
-        interval_hours = AUTOCLEAN_INTERVAL_HOURS_DEFAULT
-    interval_hours = int(interval_hours)
-    if not 1 <= interval_hours <= 23:
-        raise FleetCliError("--autoclean-interval-hours must be 1..23 (schtasks /SC HOURLY /MO)")
-
-    # F2 home guards: a scheduled task outlives this shell -- refuse to pin
-    # it to a fleet.py that is not the target home's own copy, or to a linked
-    # git worktree (dies with the worktree). --force overrides both. A third
-    # guard (a home contradicting the machine's fleet-home marker) went with
-    # the marker on 2026-07-22.
-    home = Path(FLEET_HOME).resolve()
-    script = _autoclean_script_path()
-    problems = []
-    if script.parent.parent != home:
-        problems.append(f"this fleet.py ({script}) is not the target home's copy ({home})")
-    problems += _home_guard_problems()
-    if problems and not force:
-        raise FleetCliError(
-            "autoclean install refused (F2): " + "; ".join(problems) +
-            " -- run from the canonical fleet home, or rerun with --force")
-
-    command = _autoclean_task_command()
-    try:
-        existing = PLATFORM.autoclean_task_query(AUTOCLEAN_TASK_NAME)
-    except AutocleanTaskQueryError as exc:
-        # F3: fail closed -- unknown existence must not become /Create /F.
-        if not force:
-            raise FleetCliError(
-                f"cannot determine whether task {AUTOCLEAN_TASK_NAME!r} already "
-                f"exists ({exc}) -- retry, or rerun with --force to install anyway")
-        existing = None
-    if existing is not None and not _autoclean_task_is_ours(existing) and not force:
-        raise FleetCliError(
-            f"scheduled task {AUTOCLEAN_TASK_NAME!r} exists and is not "
-            f"fleet-owned by THIS identity -- ownership is all three of: this "
-            f"fleet.py ({_autoclean_script_path()}), the `autoclean` "
-            f"subcommand, and --fleet-home {Path(FLEET_HOME).resolve()}. "
-            f"Found {existing[:120]!r} -- rerun with --force to overwrite. "
-            f"(A task installed by a fleet build older than F2 carries no "
-            f"--fleet-home and lands here; --force is safe if the fleet.py "
-            f"path above is yours.)")
-    ok, msg = PLATFORM.autoclean_task_install(AUTOCLEAN_TASK_NAME, command, interval_hours)
-    if not ok:
-        raise FleetCliError(f"scheduler create failed: {msg}")
-    print(f"fleet init: scheduled task {AUTOCLEAN_TASK_NAME!r} installed "
-          f"(every {interval_hours}h)")
-    print(f"  command:   {command}")
-    print(f"  uninstall: fleet init --autoclean-remove")
-
-
-def _remove_autoclean_task(force: bool = False) -> None:
-    # Residual 4 (carried): removal is guarded by the SAME ownership predicate
-    # the install runs. Deleting purely by task name would silently remove a
-    # FOREIGN scheduled task that happens to carry our name -- the exact
-    # asymmetry the create side already refuses. F3 fail-closed too: an
-    # indeterminate query must refuse, never blind-delete, unless --force.
-    try:
-        existing = PLATFORM.autoclean_task_query(AUTOCLEAN_TASK_NAME)
-    except AutocleanTaskQueryError as exc:
-        if not force:
-            raise FleetCliError(
-                f"cannot determine whether task {AUTOCLEAN_TASK_NAME!r} is "
-                f"fleet-owned ({exc}) -- retry, or rerun with --force to remove "
-                f"anyway")
-        existing = None
-    if existing is not None and not _autoclean_task_is_ours(existing) and not force:
-        raise FleetCliError(
-            f"scheduled task {AUTOCLEAN_TASK_NAME!r} exists and is not "
-            f"fleet-owned by THIS identity -- ownership is all three of: this "
-            f"fleet.py ({_autoclean_script_path()}), the `autoclean` "
-            f"subcommand, and --fleet-home {Path(FLEET_HOME).resolve()}. "
-            f"Found {existing[:120]!r} -- refusing to delete a foreign task of "
-            f"the same name; rerun with --force to remove anyway.")
-    ok, msg = PLATFORM.autoclean_task_remove(AUTOCLEAN_TASK_NAME)
-    if not ok:
-        raise FleetCliError(f"scheduler delete failed: {msg}")
-    print(f"fleet init: scheduled task {AUTOCLEAN_TASK_NAME!r} removed")
 
 
 # ---------------------------------------------------------------------------
@@ -8851,10 +8392,24 @@ def _autoclean_deferral_streak() -> tuple:
     return (streak, husks, since)
 
 
-def _doctor_check_autoclean(run=subprocess.run):
-    """Note-only (docs/specs/autoclean.md D4): reports scheduler-task state
-    (installed/missing) and last-run staleness from the run stamp. Never
-    turns doctor red -- a missing task is a choice, not broken plumbing.
+def _doctor_check_autoclean():
+    """Note-only (docs/specs/autoclean.md D4): WHEN DID `autoclean` LAST RUN.
+    Never turns doctor red -- a fleet nobody is running is a fact about the
+    operator's day, not broken plumbing.
+
+    It used to ask "is the scheduled task installed", which stopped being an
+    answerable question on 2026-07-27 when the operator retired the timer.
+    The honest signal now that a beat drives the sweep is the RUN STAMP'S AGE:
+    `autoclean` is called by the supervisor's watchtower beat and by the
+    interface's startup ritual, so a last run older than
+    `AUTOCLEAN_STALE_RUN_HOURS` means neither tier has beaten in that window --
+    i.e. THE BEAT IS NOT BEATING. That is the condition that went unnoticed for
+    18 hours on 2026-07-27, and it is strictly more informative than the old
+    question: an installed task said nothing about whether it ever fired, which
+    is exactly how a dropped occurrence read as green.
+
+    The message names the tier that is supposed to be running it, because
+    "stale" is only actionable if the reader knows who was meant to act.
 
     LOW advisory (confirmation pass): a fresh timestamp alone can lie --
     the stamp's `errors` array and a lingering fleet.json.corrupt.*
@@ -8890,14 +8445,12 @@ def _doctor_check_autoclean(run=subprocess.run):
     nothing-to-do pass, and therefore is not by itself proof that the daemon was
     reachable. See `_autoclean_deferral_streak` for why that is still the right
     rule."""
-    stamp_note, stale, run_errors = "no run recorded yet", False, []
+    age_h, run_errors = None, []
     husks_deferred = 0
     try:
         raw = json.loads(autoclean_stamp_path().read_text(encoding="utf-8"))
         last = _parse_iso(raw.get("ts"))
         age_h = (datetime.now(timezone.utc) - last).total_seconds() / 3600.0
-        stamp_note = f"last run {age_h:.1f}h ago"
-        stale = age_h > AUTOCLEAN_STALE_RUN_HOURS
         errs = raw.get("errors")
         if isinstance(errs, list):
             run_errors = [str(e) for e in errs if e]
@@ -8929,47 +8482,22 @@ def _doctor_check_autoclean(run=subprocess.run):
                       f"quarantined data, then remove the artifact")
     suffix = ("; " + "; ".join(extras)) if extras else ""
 
-    try:
-        existing = PLATFORM.autoclean_task_query(AUTOCLEAN_TASK_NAME, run=run)
-    except UnsupportedPlatformError:
+    # Who was supposed to have run it. A staleness note is only actionable if
+    # the reader knows whose job it was -- under the timer the answer was "the
+    # machine", which is nobody.
+    drivers = ("the supervisor runs it on its watchtower beat, the interface "
+               "in its startup ritual")
+    if age_h is None:
         return ("autoclean", True,
-                f"scheduler query unsupported on this platform -- skipped{suffix}")
-    except AutocleanTaskQueryError as exc:
+                f"no run recorded yet ({autoclean_stamp_path().name} absent or "
+                f"unreadable) -- {drivers}{suffix}")
+    if age_h > AUTOCLEAN_STALE_RUN_HOURS:
         return ("autoclean", True,
-                f"scheduler query failed ({exc}) -- state unknown; {stamp_note}{suffix}")
-    if existing is None:
-        return ("autoclean", True,
-                f"no scheduled task installed (fleet init --autoclean) -- "
-                f"staleness sweeps are manual; {stamp_note}{suffix}")
-    # F2: a task pinned to a deleted worktree's fleet.py fails silently on
-    # every trigger -- flag it (note-only, but actionable).
-    #
-    # B6/D9: tokenize through `_task_command_tokens`, the same splitter the
-    # ownership predicate uses. This scan previously required QUOTED tokens
-    # (`re.findall(r'"([^"]+)"', existing)`), so an unquoted script path --
-    # a shape a schtasks XML round-trip can produce, and one the predicate
-    # accepts -- made the check silently no-op and doctor read green on a
-    # task pinned to a deleted worktree. Two tokenizers over the same string
-    # is exactly the drift this branch exists to remove. Note the tokens come
-    # back slash/case-normalized; `Path.exists()` is fine with forward slashes
-    # on Windows, and this check is note-only either way.
-    # Only an ABSOLUTE token can be proven dead: a relative `fleet.py` resolves
-    # against the scheduler's working directory, which is not ours to know, so
-    # `Path(tok).exists()` would answer against the WRONG cwd. The old
-    # quoted-only scan excluded those by accident (fleet always quotes an
-    # absolute path); this makes the exclusion the stated rule, and keeps the
-    # check to claims it can actually support.
-    for tok in _task_command_tokens(existing):
-        if (tok.endswith("fleet.py") and Path(tok).is_absolute()
-                and not Path(tok).exists()):
-            return ("autoclean", True,
-                    f"task installed but pinned to a missing path ({tok}) -- "
-                    f"reinstall from the canonical home: fleet init --autoclean{suffix}")
-    if stale:
-        return ("autoclean", True,
-                f"task installed but {stamp_note} (> {AUTOCLEAN_STALE_RUN_HOURS:.0f}h) "
-                f"-- scheduler may be stale{suffix}")
-    return ("autoclean", True, f"task installed; {stamp_note}{suffix}")
+                f"last run {age_h:.1f}h ago, past the "
+                f"{AUTOCLEAN_STALE_RUN_HOURS:.0f}h beat window -- THE BEAT IS "
+                f"NOT BEATING: {drivers}, so neither tier has run in that "
+                f"window. Check `fleet sup-status`{suffix}")
+    return ("autoclean", True, f"last run {age_h:.1f}h ago{suffix}")
 
 
 def _doctor_check_tzdata():
@@ -9432,7 +8960,7 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
         functools.partial(_doctor_check_identity_witness, workers),
         functools.partial(_doctor_check_claude_agents, workers, which=which, run=run),
         functools.partial(_doctor_check_daemon_wedge),
-        functools.partial(_doctor_check_autoclean, run=run),
+        functools.partial(_doctor_check_autoclean),
         functools.partial(_doctor_check_hook_errors),
         functools.partial(_doctor_check_supervisor_claim),
         functools.partial(_doctor_check_supervisor_handoff),
@@ -11722,8 +11250,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :5135, :5592, :9651,
-    :14461), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :4944, :5401, :9179,
+    :13996), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -12266,10 +11794,17 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
 
     THE ARMING CONDITIONS, and why each disarms:
       * no `CLAUDE_CODE_SESSION_ID` -> not armed. A caller with no sid cannot
-        be the divergent supervisor body a fork produced. This is also the
-        STRUCTURAL exemption for `autoclean`'s scheduled task (no operator env)
-        and for a human shell; `autoclean` additionally is not wired to call
-        this at all (§7).
+        be the divergent supervisor body a fork produced. This covers a human
+        shell, and it used to cover `autoclean`'s scheduled task (which ran
+        with no operator env at all).
+        `autoclean`'s exemption does NOT depend on that clause and never did:
+        the verb is simply not wired to call this function (§7). That is load-
+        bearing since the timer was retired on 2026-07-27 -- the sweep is now
+        called BY the supervisor's beat and BY the interface's startup ritual,
+        both of which are sessions WITH a sid, and both must be able to sweep
+        with no `--nonce` while a claim is held. Had the exemption rested on
+        "no sid", retiring the timer would have silently gated the sweep
+        behind the very claim it exists to clean up around.
       * no held claim -> nothing to gate against.
       * a released claim whose releaser is roster-GONE -> nothing to gate
         against; release+stop completed and the claim is open.
@@ -12367,8 +11902,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:5135, :5592, :9651,
-    #     :14461) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:4944, :5401, :9179,
+    #     :13996) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -15019,17 +14554,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="with --statusline: keep an existing foreign statusline and print "
                              "fleet's row beneath it")
     p_init.add_argument("--force", action="store_true",
-                        help="with --statusline/--autoclean: overwrite a foreign statusline / "
-                             "scheduled task")
-    p_init.add_argument("--autoclean", action="store_true",
-                        help="install/update the Windows Scheduled Task that runs "
-                             "`fleet autoclean` on an interval")
-    p_init.add_argument("--autoclean-interval-hours", type=int, default=None,
-                        dest="autoclean_interval_hours",
-                        help=f"with --autoclean: run interval in hours, 1-23 "
-                             f"(default {AUTOCLEAN_INTERVAL_HOURS_DEFAULT})")
-    p_init.add_argument("--autoclean-remove", action="store_true", dest="autoclean_remove",
-                        help="uninstall the autoclean scheduled task")
+                        help="with --statusline: overwrite a foreign statusline")
+    # `--autoclean`, `--autoclean-interval-hours` and `--autoclean-remove`
+    # were removed on 2026-07-27 with the Scheduled Task itself (operator
+    # ruling; see the autoclean banner). Deliberately NOT kept as accepted
+    # no-ops: a flag that silently does nothing is how an operator believes a
+    # sweep is installed when none is. `fleet autoclean` the verb is unchanged.
 
     p_spawn = sub.add_parser("spawn", help="spawn a new worker session")
     p_spawn.add_argument("name")
@@ -15155,8 +14685,8 @@ def build_parser() -> argparse.ArgumentParser:
                                   "this; files in logs/archive/ are never deleted")
     p_autoclean.add_argument("--dry-run", action="store_true", dest="dry_run")
     p_autoclean.add_argument("--fleet-home", dest="fleet_home", default=None,
-                             help="explicit FLEET_HOME override; the scheduled task "
-                                  "always passes this (Task Scheduler has no operator env)")
+                             help="explicit FLEET_HOME override for a caller whose "
+                                  "environment does not carry one")
 
     sub.add_parser("doctor", help="run fleet health checks")
 

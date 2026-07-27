@@ -1,9 +1,36 @@
 # Spec: Autoclean — staleness is cleaned up without anyone remembering
 
-**Status:** **BUILT AND SHIPPED** (mc-autoclean, designed 2026-07-16; shipped in M-C, POSIX backend
-added by the 2026-07-23 reconcile campaign). Status corrected 2026-07-27 by the `unbuilt-sweep` pass —
-it still read `ready-for-build` long after the verb, the install flag and both scheduler backends
-landed. `docs/SPEC.md` §11 is the descriptive record; the receipt is §"Build receipt" below.
+**Status:** **BUILT AND SHIPPED, WITH ITS TRIGGER RETIRED** (mc-autoclean, designed 2026-07-16;
+shipped in M-C, POSIX backend added by the 2026-07-23 reconcile campaign). Status corrected
+2026-07-27 by the `unbuilt-sweep` pass — it still read `ready-for-build` long after the verb, the
+install flag and both scheduler backends landed. `docs/SPEC.md` §11 is the descriptive record; the
+receipt is §"Build receipt" below.
+
+> ### AMENDMENT 2026-07-27 — THE TIMER IS RETIRED (operator ruling). D1 is superseded.
+>
+> **`fleet autoclean` the verb is unchanged and still shipped.** What is gone is the OS scheduler
+> that used to call it: `fleet init --autoclean`, `--autoclean-interval-hours`,
+> `--autoclean-remove`, the `autoclean_task_install/query/remove` adapter methods on BOTH backends,
+> the task-ownership predicate, and the machine-local Scheduled Task itself. **The sweep is now
+> driven by the two live tiers** — the supervisor's watchtower beat (`skills/fleet/supervisor.md`)
+> and the interface's startup ritual (`skills/fleet/SKILL.md`), both landed at `c318224`.
+>
+> **Why, and it is not the defect that prompted it.** The registered task carried
+> `StartWhenAvailable=False`, so a missed occurrence was DROPPED rather than run at boot: measured
+> 2026-07-27, a 9h14m power cut ate the 08:22Z sweep, nothing caught up when the machine returned,
+> next fire 20:22Z — **an 18-hour gap in a 6-hourly guard, surfaced by nothing.** Setting that flag
+> was the smaller fix and the worse one. **A timer sweeps when the CLOCK says so, which on a machine
+> that loses power means it does not sweep at all. A beat sweeps when the FLEET IS ALIVE, which is
+> the condition that makes sweeping necessary in the first place.** Retiring the timer deletes the
+> whole class of problem — no scheduler, no machine-local install state, no missed-run policy to get
+> wrong, nothing to re-verify per machine — instead of patching one instance of it. Note the defect
+> was never Windows-specific: cron, the POSIX backend, has no catch-up concept at all.
+>
+> **This record is kept, not deleted.** D1's reasoning about *why a scheduler and not a piggyback*
+> is still the reasoning that rejected piggybacking, and the F2/F3/F4 install-guard history is why
+> any FUTURE scheduled task must carry full-identity ownership rather than a path-only predicate.
+> The sections below are historical from the trigger's side and current from the verb's side; each
+> superseded passage says so inline.
 **Inherits:** SPEC.md invariants, terminal-surface views doctrine, native-agents pivot §5.1.2 (auto-archival, shipped as `fleet archive`), CLAUDE.md irreversibility doctrine (`fleet clean` is the only deleter).
 
 ## Problem
@@ -16,6 +43,16 @@ landed. `docs/SPEC.md` §11 is the descriptive record; the receipt is §"Build r
 **D1 — trigger is an OS scheduler running a new first-class command, `fleet autoclean`; no opportunistic piggyback.** The stated gap is *"between campaigns nothing runs"* — piggybacking on mutating commands cannot close that gap by definition (between campaigns, no mutating commands run either), while a scheduler closes both the between-campaigns case and the while-in-use case (it fires on its interval regardless). Piggyback would also add a roster fetch + best-effort `claude rm` subprocesses to every `spawn`/`send` hot path and mint a new failure-isolation surface inside commands that already carry delicate lock/commit choreography — the C4/M-B lesson that fix waves and riders mint new Criticals argues against it for no coverage gain. Views stay untouched: `fleet autoclean` is an ordinary *mutating* CLI command (terminal-surface doctrine unamended); it is invocable by the Windows Scheduled Task (`fleet init --autoclean` installs it), by a supervisor watchtower beat, or by hand — one code path, three callers.
 
 Scheduler mechanics live in the platform adapter (`autoclean_task_install/query/remove` on `_WindowsPlatform`, `schtasks`-based; `_PosixPlatform` raises `UnsupportedPlatformError` — the clean seam invariant 8 requires; cron/systemd-timer fills it in Phase 1.5).
+
+> **SUPERSEDED 2026-07-27 (see the amendment above).** D1's *trigger* choice is retired: there is no OS
+> scheduler and no adapter scheduling seam on any platform. Both backends' `autoclean_task_*` methods
+> are deleted, not stubbed. **Callers are now two, both of them alive fleet tiers** (supervisor beat,
+> interface startup ritual), plus an operator by hand — still one code path. D1's *rejection of the
+> opportunistic piggyback* stands unamended and is why the beat is an explicit step in a ritual rather
+> than a hook riding on other verbs. `fleet autoclean` remains structurally exempt from §7's claim
+> gate, which is now load-bearing rather than incidental: both new callers are sessions WITH a session
+> id, so an exemption that had rested on "the scheduled task has no sid" would have silently gated the
+> sweep behind the very claim it exists to clean up around.
 
 <!-- ac-tiers -->
 **D2 — three tiers; only the reversible two are default-on.**
@@ -45,11 +82,37 @@ Scheduler mechanics live in the platform adapter (`autoclean_task_install/query/
 <!-- ac-observability -->
 **D4 — observability.** Per-item events already exist (`archived`) or are added (`husk_removed` with sid, `tombstone_expired`); every run appends one `autoclean_run` summary event and rewrites `state/autoclean-last-run.json` (timestamp + counts + errors). `fleet doctor` gains a note-only `autoclean` check: scheduled task installed/missing (via the adapter query), and "installed but last run > 48 h ago" staleness from the stamp — note-only per doctor doctrine (only broken infrastructure turns doctor red).
 
+> **AMENDED 2026-07-27.** The stamp and the `autoclean_run` event are unchanged. The doctor check no
+> longer asks *"is the task installed"* — that stopped being a question anyone can ask — and asks
+> **"when did `autoclean` last run"** instead, which is strictly more informative: an installed task
+> said nothing about whether it ever fired, and that is exactly how a dropped occurrence read as
+> green for 18 hours. **The threshold comes from the BEAT CADENCE, not the retired 6h timer**: a
+> supervisor keeps its heartbeat younger than 60 min and sweeps once per beat, so the window is
+> `AUTOCLEAN_STALE_RUN_HOURS = 3.0` — three missed beats, down from 48h. A stamp older than that means
+> **the beat is not beating**, and the message names which tiers were supposed to be running it,
+> because "stale" is only actionable if the reader knows whose job it was. Still note-only in every
+> arm, per the same doctrine and per the 2026-07-27 lesson that *a permanently-red doctor is a
+> disabled doctor*: a fleet nobody is running is a fact about the operator's day, not broken plumbing.
+
 ## Command surface
 
 - `fleet autoclean [--ttl-hours F] [--expire-tombstones-hours F] [--dry-run] [--fleet-home P]` — tier 1 + tier 2; tier 3 only with its flag. `--dry-run` previews all tiers, mutates nothing, rm's nothing. `--fleet-home` explicitly overrides the home (F2: Task Scheduler provides no operator environment, so the env-var route doesn't exist for the scheduled run).
 - `fleet init --autoclean [--autoclean-interval-hours N]` — idempotent install/update of Scheduled Task `claude-fleet-autoclean` (`schtasks /Create /F /SC HOURLY /MO N`, default every 6 h, valid 1–23) running `"<python>" "<fleet.py>" autoclean --fleet-home "<home>"` (F2: home embedded in the command, never inferred from script location at trigger time). **Install guards (F2, `--force` overrides):** refuses when the resolved fleet.py is not the target home's own copy, when the home is a linked git worktree (`.git` is a file — the task dies with the worktree), or when `~/.claude/fleet-home` points at a different home. **Ownership + fail-closed query (F3/F4):** a same-named task is fleet-owned iff its command carries the **full identity** — our resolved fleet.py path **and** the `autoclean` subcommand as the token immediately after it **and** `--fleet-home <this home>` — matched on whole, quote-stripped, slash/case-normalized tokens (`_fleet_task_is_ours`), never a substring match. An absent `--fleet-home` is not ours (a pre-F2 task lands here; `--force` recovers). **Path-only ownership is the defect, not the design:** it answers "ours" for *every* fleet-owned task regardless of verb or home, so the day a second one exists — `fleet init --supervisor-beat` is the near-term case — `/Create /F` silently overwrites it. Any new scheduled task must go through `_fleet_task_is_ours(command, <its own subcommand>)`, never a fresh path-only predicate. Task existence is established via the locale-safe `schtasks /Query /FO CSV` listing, and a query that *errors* refuses the install rather than reading as "absent" and `/Create /F`-ing over a foreign task. Doctor flags an installed task pinned to a fleet.py path that no longer exists. Composable with `--statusline`. **Guards run before init writes (N1, re-review):** `cmd_init` evaluates the worktree/marker guards *before* stamping anything — with `--autoclean` a guard problem refuses the whole init (marker and settings untouched); plain `fleet init` on a guarded home still renders the worktree-local settings but skips the global `~/.claude/fleet-home` marker stamp, loudly. Otherwise a worktree init repoints the marker first and the install-time marker-mismatch guard compares against a marker the same invocation just wrote — unfireable on the real path.
 - `fleet init --autoclean-remove` — uninstall (`schtasks /Delete /TN claude-fleet-autoclean /F`). Manual equivalent documented for operators without fleet at hand.
+
+> **BOTH BULLETS ABOVE ARE RETIRED, 2026-07-27 — the flags no longer exist.** They are kept as the
+> record of what was installed and of the F2/F3/F4 guard reasoning any future scheduled task must
+> inherit. The flags were **removed outright rather than accepted as no-ops**: a flag that silently
+> does nothing is how an operator comes to believe a sweep is installed when none is — the same
+> failure shape as the dropped occurrence. **Order of operations, for anyone doing this again:** the
+> live task was uninstalled with `fleet init --autoclean-remove` *while that flag still existed*, and
+> verified absent, BEFORE the install and remove paths were deleted together. Deleting the remove
+> path first strands an installed task with no supported uninstall — on that machine and on everyone
+> else's. **An existing install elsewhere does not self-repair:** a machine that still carries
+> `claude-fleet-autoclean` keeps firing a `fleet.py` that no longer has the flag to remove it. Such an
+> operator should run `schtasks /Delete /TN claude-fleet-autoclean /F` (Windows) or drop the
+> `# claude-fleet-autoclean`-tagged crontab line (POSIX) by hand. Left alone it is not dangerous — the
+> `autoclean` verb it calls still exists and still works — merely a timer nobody is watching.
 - `fleet clean [--dead-only | --tombstones]` — manual tiering split.
 
 ## Build receipt (2026-07-27, `unbuilt-sweep`)
