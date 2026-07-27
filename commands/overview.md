@@ -7,7 +7,7 @@ allowed-tools: 'Bash(fleet status:*), Bash(fleet doctor:*), Bash(fleet knowledge
 
 ## Status
 
-!`fleet status`
+!`fleet status --stale-ok`
 
 ## Health
 
@@ -22,3 +22,7 @@ allowed-tools: 'Bash(fleet status:*), Bash(fleet doctor:*), Bash(fleet knowledge
 Summarize the fleet's state in three lines or fewer: what is running, what needs
 attention, and what the operator should do next. If `doctor` reported nothing and
 every worker is healthy, say so plainly and stop.
+
+Status rows are **last-committed plus staleness**, not a fresh liveness probe — this
+screen never writes (terminal-surface D1/D4). If `doctor` reports `[FAIL] registry:`,
+say so and name `fleet doctor --repair`; do not run it yourself.
