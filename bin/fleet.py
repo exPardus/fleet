@@ -15569,21 +15569,38 @@ def _q_print_notes(notes) -> None:
 def _q_collect_rows(root, rels, kind, no_refresh, notes) -> tuple:
     """Verified rows from `rels`, `--kind`-filtered.
 
-    THE choke point call. Returns `(rows, suppressed)`; `suppressed` is True
-    when any shard was withheld (`--no-refresh` over a stale shard) or was an
-    orphan, so the caller can say WHICH kind of nothing it is serving."""
-    rows, suppressed = [], False
+    THE choke point call. Returns `(rows, unknown)`, where `unknown` counts the
+    shards this query could not read the symbols of AND whose source file is
+    still on disk -- the shards that may be HIDING A COMPETITOR.
+
+    The `and whose source is still on disk` half is what makes the count worth
+    more than a bare "something was suppressed" flag, and it cuts both ways:
+
+    * A shard withheld under `--no-refresh`, or one whose source is present but
+      unreadable, describes a file that still exists. Any symbol it claims may
+      still be in the tree, so this query's answer is INCOMPLETE by an unknown
+      amount and no caller may present it as exhaustive.
+    * An ORPHAN whose source is gone is the opposite: whatever that shard used
+      to claim, the file is not in the tree, so it cannot compete with anything
+      and the answer is complete without it. Counting it would make every
+      routine deleted-file-with-a-stale-shard into a false alarm.
+
+    `verified_shard_rows` folds both of those into one "orphan" status,
+    distinguishing them only in the note text, so the existence test is redone
+    here rather than parsed back out of a sentence."""
+    rows, unknown = [], 0
     for rel in rels:
         result = verified_shard_rows(root, rel, no_write=no_refresh)
         if result["note"]:
             notes.append(result["note"])
         if result["status"] != "ok":
-            suppressed = True
+            if (Path(root) / rel).exists():
+                unknown += 1
             continue
         for name, line, end, row_kind, sig in result["rows"]:
             if kind is None or row_kind == kind:
                 rows.append((rel, name, line, end, row_kind, sig))
-    return rows, suppressed
+    return rows, unknown
 
 
 def _q_match(rows, query) -> list:
@@ -15676,35 +15693,84 @@ def _q_shard_rels(root, path_glob):
     return selected
 
 
+def _q_path_dialect_hint(path_glob) -> None:
+    """The `--path` dialect, on stderr, whenever a `--path` query came back
+    empty-handed.
+
+    FIRES ON AN EMPTY RESULT, NOT ON AN EMPTY SELECTION, and the difference is
+    the whole finding. The first version of this hint printed only when the
+    glob selected ZERO shards -- so on a tree with a root-level `.py` file:
+
+        $ fleet q alpha --path '*.py'      -> rc 1, "no symbol matches 'alpha'"
+        $ fleet q alpha --path '**/*.py'   -> rc 0, two hits
+
+    `*.py` selected `root.py`, the selection was therefore not empty, and the
+    hint was skipped -- leaving a flat, confident, WRONG "that symbol does not
+    exist" for a symbol that exists twice. The hint fired only in the case
+    where the worker did not need it, and stayed silent in the case where the
+    dialect was the entire reason for the empty answer."""
+    print(f"fleet: --path {path_glob!r} is `**`-aware: `**/*.py` matches at "
+          f"any depth, `*.py` only at the index root -- widen the glob if you "
+          f"meant any depth", file=sys.stderr)
+
+
 def _cmd_q_query(root, args) -> int:
     rels = _q_shard_rels(root, args.path)
     if rels is None:
         # Distinguished from "no such symbol" on purpose: under this dialect
         # `*.py` is root-level only, and a worker who typed the fnmatch form
         # would otherwise conclude the symbol does not exist.
-        print(f"fleet: --path {args.path!r} matched no indexed file -- this "
-              f"glob is `**`-aware (`**/*.py` matches at any depth, `*.py` "
-              f"only at the index root)", file=sys.stderr)
+        print(f"fleet: --path {args.path!r} matched no indexed file",
+              file=sys.stderr)
+        _q_path_dialect_hint(args.path)
         return 1
     notes = []
-    rows, suppressed = _q_collect_rows(root, rels, args.kind, args.no_refresh, notes)
+    rows, unknown = _q_collect_rows(root, rels, args.kind, args.no_refresh, notes)
     hits = _q_sorted(_q_match(rows, args.query))
     limit = Q_LIMIT_DEFAULT if args.limit is None else args.limit
     if not hits:
         _q_print_notes(notes)
-        if not suppressed:
+        if unknown:
+            # NOT "no symbol matches": this query did not read every shard it
+            # selected, so absence here is not evidence of absence. Said as a
+            # COUNT rather than left to the notes, because `Q_NOTE_CAP` may
+            # have dropped every note that named a file the worker cared about
+            # -- a capped list of other people's problems reads as "we looked
+            # everywhere", which is exactly backwards.
+            print(f"fleet: no hits, but {unknown} shard(s) could not be read "
+                  f"-- this is NOT evidence that {args.query!r} is absent; "
+                  f"re-run without `--no-refresh`", file=sys.stderr)
+        else:
             # §11.5: stderr says which kind of nothing this is, and points at
             # the substring search this tool deliberately does not do (§11.2).
             print(f"fleet: no symbol matches {args.query!r} -- try "
                   f"`grep -r {args.query} .fleet-index/symbols/`, then a repo "
                   f"grep", file=sys.stderr)
+        if args.path is not None:
+            _q_path_dialect_hint(args.path)
         return 1
-    if args.src and len(hits) > 1:
+    if args.src and (len(hits) > 1 or unknown):
         # §11.4: dumping N slices is a token blowout in the exact place this
         # tool exists to prevent one, so ambiguity resolves to pointers.
         _q_print_hits(hits, limit)
         _q_print_notes(notes)
-        print("fleet: ambiguous — narrow with `--path`/`--kind`", file=sys.stderr)
+        if len(hits) > 1:
+            print("fleet: ambiguous — narrow with `--path`/`--kind`",
+                  file=sys.stderr)
+        else:
+            # ONE hit is not the same as ONE symbol when shards went unread.
+            # Measured before this branch existed: with `b.py` stale,
+            # `q alpha --src --no-refresh` returned rc 0 and a confident slice
+            # of `a.py`, while the same query over fresh shards returned rc 1
+            # "ambiguous". The withheld shard did not make the answer
+            # incomplete-but-honest -- it made it WRONG AND CONFIDENT, which is
+            # the failure this whole tool exists to prevent. `--src` commits to
+            # one symbol, so it may only commit when every selected shard was
+            # actually read.
+            print(f"fleet: {unknown} shard(s) could not be read, so this hit "
+                  f"is not known to be the only one -- `--src` will not commit "
+                  f"to a slice; re-run without `--no-refresh`, or narrow with "
+                  f"`--path`/`--kind`", file=sys.stderr)
         return 1
     if args.src:
         return _q_print_slice(root, hits[0], notes)
@@ -15714,7 +15780,7 @@ def _cmd_q_query(root, args) -> int:
 
 
 def _q_contained(root, rel) -> bool:
-    """Is `rel` genuinely inside the index root?
+    """Is `rel` genuinely inside the index root -- BOTH the paths it derives?
 
     `q --outline <path>` is the only caller-supplied PATH in this tool, so
     this is the boundary where an untrusted path stops. The check is on the
@@ -15730,20 +15796,63 @@ def _q_contained(root, rel) -> bool:
         fleet: ...: source file is gone -- hits suppressed; orphan shard pruned
         rc=1                          # and ../victim/PRECIOUS.tsv was GONE
 
-    That is `verified_shard_rows`' orphan-prune path unlinking outside the
-    root, and repairing it is `idx/core`'s job, not this slice's. The guard
-    here is defence in depth and stays correct independently: this surface is
-    the one that takes untrusted input, so it validates before calling in
-    rather than relying on the primitive's own containment.
+    ONE REL, TWO PATHS, AND THE FIRST VERSION OF THIS GUARD CHECKED ONLY ONE.
+    `verified_shard_rows` derives a source path (`root / rel`) AND a shard
+    path (`shard_path_for_source`, i.e. `.fleet-index/symbols/` + rel), and
+    those two climb from roots two levels apart. A rel whose `..` count is
+    tuned to the symbols directory lands the SOURCE back inside the root while
+    the SHARD escapes -- so validating the source alone waved it straight
+    through. Measured on a jail rooted at `<J>/gp/par/proj`, from a cwd of
+    `<J>/gp/par/proj/sub`:
+
+        $ fleet q --outline '../../../gp/par/proj/VICTIM.py'
+        ## ../../../gp/par/proj/VICTIM.py (2 lines, python)
+        rc=0        # and <J>/gp/par/gp/par/proj/VICTIM.py.tsv was WRITTEN,
+                    # outside the root, at exit 0, with an empty stderr
+
+        $ fleet q --outline '../../../gp/par/proj/GONE.py'
+        fleet: ...: source file is gone -- hits suppressed; orphan shard pruned
+        rc=1        # and the planted file at that same escaped path was GONE
+
+    THE CWD IS PART OF THE ATTACK, not incidental to it. From the root itself
+    there is no escape at all: `_q_outline_rels`' first candidate is the clean
+    resolved rel, which is both contained and known, and `next(...)` takes it
+    before the raw argument is ever reached. The escape needs a cwd inside a
+    subdirectory -- the exact case that function's docstring motivates ("a
+    worker that has cd'd into `src/`") -- because only then does resolving the
+    argument against the cwd fail to land inside the root, leaving the raw
+    `..`-bearing rel as the sole candidate. A containment test written from
+    the root measures a NON-escape and reads as proof of safety.
+
+    So each derived path is validated against its own root: the source against
+    the index root, the shard against the symbols directory. Note that the
+    shard test is the strictly stronger one -- it also refuses a rel that stays
+    inside the root but lands outside `symbols/` (`../<root-name>/src/api.py`
+    writes into `.fleet-index/` itself, where nothing enumerates or prunes it).
+
+    Attribution, because it bounds what a fix here can be responsible for: the
+    UNLINK half pre-exists at base, guarded only by the lexical
+    `rel == ".." or rel.startswith("../")` in `_index_prune_shard`'s caller --
+    base code, and exactly the test this docstring calls inadequate. The WRITE
+    half is NOT reachable at base: `update_index` guards writes by set
+    membership against `index_source_files`, an `os.walk` enumeration that can
+    only yield clean rels. `q --outline` is the first surface in this tool that
+    can make the index write outside its own root, so that half is this
+    slice's, and repairing the primitive would not have covered it.
 
     Resolving also settles symlinks, in the safe direction: a link inside the
     root that points outside it is NOT contained."""
+    def inside(child, parent) -> bool:
+        return child == parent or parent in child.parents
+
     try:
         base = Path(root).resolve()
+        symbols = index_symbols_dir(base).resolve()
         target = (base / rel).resolve()
+        shard = shard_path_for_source(base, rel).resolve()
     except OSError:
         return False
-    return target == base or base in target.parents
+    return inside(target, base) and inside(shard, symbols)
 
 
 def _q_outline_rels(root, raw) -> list:
