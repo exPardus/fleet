@@ -867,3 +867,64 @@ All eight open gates in `docs/OPERATOR-GATES.md` were put to Altai one at a time
 **A test asserted the docket is never empty.** `TestOperatorGatesFile` carried `assert open_gates, "no open gates parse out of the shipped file"` — so clearing every gate turned a *correct* file RED. **A cleared docket is this file's SUCCESS state.** The assertion encoded "there is always pending work" as a format invariant. Replaced with the two things actually worth pinning — open gates are questions, settled gates carry an answer and a date — the second added so relaxing the first cannot let an empty file pass. Same class as the day-4 allowlist lesson: *the first thing to check about a check is not what it catches but what it assumes.*
 
 **Two stale line pointers, and the file contradicted itself.** The §7 gate cited `claim-nonce.md:1817` / `:1866` as the false sentences; those lines are `sup-handoff-abort` arms and supersession — the real sites are §7's decision block and the accounting bullet beneath it. **Line-number citations in prose rot silently and nothing tests them** (the receipt harness covers fenced blocks, not inline `:NNNN` refs). Separately, the gates file's own format section said settled gates stay "in place" while its closing line said "move it here", and every settled gate followed the closing line — corrected to match practice. **Doctrine reaffirmed by both: verify a cited location before restating what it says; the gate text is a claim like any other.**
+
+## 2026-07-27 — day-5 interface tier: the surface lied about the shape of the system {#2026-07-27-day5-surface}
+
+Interface-tier session, operator away and explicitly autonomous. Two operator asks — align the fleet
+skill/plugin docs with three-tier, and align the statusline with it while removing the cost field —
+turned into a drift audit, because **you cannot align a description without measuring the thing**.
+
+**THE lesson: a document describing a CLI must be re-derived from `--help`, never from memory or from
+the last person who edited it.** `skills/fleet/SKILL.md` — the file every fleet session actually reads —
+was missing **four shipped verbs entirely** (`sup-spawn`, `sup-context`, `sup-decision`, `knowledge`),
+and its startup ritual told an interface session to *become* the supervisor, which is precisely the
+maneuver that wedged a claim for hours on day 4. `supervisor.md` carried **two `[UNBUILT]` tags on
+features that are built** (the 200k ceiling — three call sites, measured — and §10.4 kill/respawn).
+One `fleet --help` and two greps found all six. Nothing tests prose against `add_parser`, so this rots
+by default; the `[UNBUILT]` sweep now has a demonstrated yield rather than a hypothetical one.
+
+**A flat view of a tiered system is a lying view.** The statusline rendered one roster, so a fleet
+with one worker and fourteen retired `sup|…|boot` husks read as fifteen workers, while the field that
+decides whether anything can be dispatched — *does anyone hold the claim* — was not on the line at
+all. The fix is a projection, not a filter: `status_snapshot()` now carries `workers[].tier` (the
+BODY, from fleet's own `_is_supervisor_shaped` — a released or seized supervisor keeps its name) and
+`snap["supervisor"]` (the CLAIM). **They are different questions and a view that conflates them will
+report a husk as command.** First live render immediately paid: `sup held 14m  8 bodies  work 1
+idle 24  +9 dead` — the eight-body alarm is true, and was invisible before.
+
+**`unknown` must be a rendered word, never silence.** The claim projection never raises, because the
+statusline swallows exceptions into a *blank line with no reason*; every failure degrades to
+`unknown`. Day-4's "absence is not evidence on this substrate" applied to a view: **"cannot read the
+claim" must never present as "there is no supervisor".** Same reasoning kills the age on a `released`
+claim — §6.3 strips `heartbeat_at`, so rendering an age there invents staleness out of a correct
+stand-down.
+
+**Removing a field is a doctrine change, so say why in the code.** The cost counter went because
+under the Max-20x cap doctrine the plan limits spend, fleet enforces no dollar ceiling, and native
+dispatch records no cost at all — it summed rows that report nothing. Pinned by a test, because
+`fleet status` still totals cost and the field is one edit from coming back.
+
+**Line-number citations are a recurring tax and the remedy is mechanical.** Adding ~59 lines above the
+four `retired_sids` writers turned both floors red — the *second* time in two days, the first being a
+merge. `TestRetiredSidWritersAreWhereTheyAreCited` did exactly its job: re-pin and move on. **Budget
+the re-pin into any edit that inserts above line ~4600 of `bin/fleet.py`**, and warn the supervisor
+before it hits the same red on the merged tree, so it re-pins forward instead of reverting your numbers.
+
+**Process, and it is a real miss: the §8 routing surface exists — use it.** I relayed five settled
+operator gates to the supervisor as a `fleet send` steer. It was right and it acted on it, but it had
+to *record the answer itself* via `sup-decision --answer` to stop `sup-status` asserting "needs
+operator" about a question the operator had answered. **The interface answers a parked decision through
+`fleet sup-decision --answer`, not through prose in a steer** — otherwise the routing state and the
+truth diverge, and the divergence is only visible from `sup-status`.
+
+**Steering that worked, cheaply:** the queue reorder that put `fix/identity-registry-judges` *ahead*
+of the fleet-q merge — enter the tree you were gated against, not the tree the next campaign leaves
+behind — and telling the supervisor which files the interface was holding dirty, with the expected
+red and its remedy. It had already staged the merge in a scratch worktree and fast-forwarded the
+moment the commit landed. **Naming the collision beats discovering it.**
+
+**Open, found by a worker and worth more than the slice that found it:** `id-glob` measured that
+`fleet status` / `peek` / `result` *do* rename a corrupt registry aside — so terminal-surface D4 and
+the CLAUDE.md rule *"views never quarantine"* are both false of shipped code. Ordered out of the
+doctor slice into its own commit with the driven receipt: the two disagree about what today's default
+behaviour even is, and a doc that is wrong about the default cannot review a change to it.
