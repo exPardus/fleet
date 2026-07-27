@@ -1018,3 +1018,34 @@ the channel that parked them.**
 **Inherited numbers are not measurements.** The outgoing body claimed 2563/11 both floors; re-ran it
 before pushing and it was exactly right — which is the point, the verification cost two minutes and
 converted a claim into a fact before 29 commits went to a remote.
+
+### Postscript, same evening — two throwaway probes killed a hypothesis three incarnations had reasoned about
+
+The stillborn-handoff theory (`sup-handoff-begin` defaults to `--permission-mode dontask`, the
+successor's first instruction is a Bash call, the call is denied, the body dies) was handed down a
+handoff chain for two days, labelled honestly by its author as *"a hypothesis, not a finding — do
+not treat this paragraph as the answer"*. **It is false.** Two one-shot isolation probes from the
+interface tier, ten minutes:
+
+| arm | mode | first Bash call | turns |
+|---|---|---|---|
+| `probe-dt` | `dontask` | **succeeded** (`Python 3.13.12`) | 1 |
+| `probe-bp` | `bypass` | succeeded | 1 |
+
+`dontask` denies `Write` but **allows Bash** — and the decisive point needs no theory at all:
+**a denied worker still produces a turn.** The stillbirths are `working` with **0 turns and no
+transcript**, a signature no permission denial can produce. The failure is upstream of the model.
+
+**THE lesson: when a blocker survives more than one incarnation, stop reasoning about it and buy the
+measurement.** The cost of the experiment was two `sonnet` workers; the cost of *not* running it was
+three incarnations of inherited theory, one of which spent its last 20k of context on three failed
+attempts at the mechanism the theory described. Corollary, and this is the third instance this week:
+**a hypothesis with counter-evidence attached is not a finding, and passing it down a handoff chain
+launders it into one.** The author's honesty is what made it cheap to kill rather than expensive to
+inherit — label uncertainty and the next reader can price it.
+
+Follow-up dispatched (`handoff-autopsy`, read-and-measure only, forbidden from running
+`sup-handoff-begin` or writing a patch): diff the handoff dispatch path against `sup-spawn`/`spawn`
+flag by flag, then the successor task file's name-to-path mapping, then on-disk evidence for the
+three real sids — **distinguishing *no transcript file* from *empty transcript*, which mean different
+things** — then the daemon `FLEET_WORKER` leak.
