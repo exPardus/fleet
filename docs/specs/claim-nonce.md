@@ -2034,6 +2034,28 @@ what this spec relies on, and it is unaffected.
 > `send`, `kill`, `respawn` and `send supervisor` are all refused, so clearing a stuck wedge needs a
 > human at a shell. An in-fleet disarm path is owed work; the human-at-a-shell exit is explicitly
 > NOT ratified as a property of the design.
+>
+> **MEASURED NOTE — worker `acgate`, 2026-07-28, `fix/autoclean-archive-gate`. NOT A RATIFICATION AND
+> NOT AN AMENDMENT; §7 is operator-owned and nothing below changes the ruling or the arming.** Two
+> facts the operator should have on the record here:
+>
+> 1. *"`autoclean` is structurally exempt"* was **false of the shipped sweep** for 24 hours after the
+>    timer was retired. `cmd_autoclean` does not call `_supervisor_gate`, but the exemption is not
+>    transitive and tier 1 delegates to `cmd_archive`, which does — so every beat-driven sweep was
+>    refused, with a message naming a `--nonce` flag `fleet autoclean` does not have. Fixed by
+>    carrying the exemption explicitly (`cmd_archive(..., as_autoclean_tier=True)`); the `archive`
+>    VERB's arming is byte-for-byte unchanged. Receipt and reasoning: `docs/specs/autoclean.md`.
+> 2. **The accounting this exemption was priced on is void, and that is an operator call, not a
+>    worker's.** The bullet below reads *"the `autoclean` scheduled task has no
+>    `CLAUDE_CODE_SESSION_ID`, so a caller-identity gate can never fire on it"* — true when ratified,
+>    false since 2026-07-27: both callers (supervisor beat, interface startup ritual) are sessions
+>    WITH a sid. So `autoclean` is no longer an exemption a timer alone can reach; it is an exempt
+>    verb any sid-bearing body can run, a divergent one included, and its tiers `claude rm` sessions
+>    and expire tombstones. That widening arrived with the timer's retirement, not with the fix above
+>    — tiers 2 and 3 were already reachable that way, and the fix restores tier 1 to the same set
+>    rather than creating it. Whether the exemption should still be unconditional under
+>    sid-bearing drivers is **§7's question and therefore the operator's**; it is raised here, not
+>    answered. Nothing was narrowed pending that answer.
 
 **This spec did not decide this.** v1 did, and the gate unwound it. Three-tier adjudication item 2 is
 re-put here with the cost statement corrected.

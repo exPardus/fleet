@@ -225,9 +225,11 @@ class TestTheWedgedStateArmsTheGate:
 
     def test_a_no_sid_caller_keeps_its_structural_exemption(
             self, wedge_home, monkeypatch):
-        # §7's structural exemption is unchanged by the wedge: autoclean's
-        # scheduled task and a human shell both land here, and a caller with no
-        # sid cannot be the divergent body a fork produced.
+        # §7's no-sid exemption is unchanged by the wedge: a human shell (and,
+        # until 2026-07-27, autoclean's scheduled task) lands here, and a
+        # caller with no sid cannot be the divergent body a fork produced.
+        # Distinct from `autoclean`'s OWN verb exemption, which is not keyed on
+        # the sid at all -- see `cmd_archive`'s `as_autoclean_tier`.
         monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
         _released()
         _roster(monkeypatch, RELEASER)
@@ -286,12 +288,20 @@ class TestTheWedgedStateArmsTheGate:
             self, wedge_home, monkeypatch):
         # `cmd_autoclean` routes its first tier through `cmd_archive`, which IS
         # gated -- so arming a NEW state on the gate reaches autoclean whether
-        # or not §7 calls it exempt. The scheduled task has no operator env and
-        # therefore no sid, which is the structural exemption, and this pins
-        # that the wedge does not quietly take it away: a scheduler that starts
-        # erroring the moment a supervisor retires would be a silent, permanent
-        # regression nobody watches (the scheduler ignores exit codes,
-        # docs/specs/autoclean.md:38).
+        # or not §7 calls it exempt. THIS COMMENT WAS RIGHT AND WAS NOT READ:
+        # the 2026-07-27 timer retirement shipped on a check that asserted
+        # `_supervisor_gate` was absent from `cmd_autoclean`'s SOURCE and
+        # concluded the sweep was exempt, contradicting the call-graph fact
+        # stated right here. The regression it predicted happened (fixed
+        # 2026-07-28, `cmd_archive(..., as_autoclean_tier=True)`; the sid-
+        # bearing condition is pinned by
+        # `tests/test_autoclean.py::TestTheSweepUnderAHeldClaim`).
+        #
+        # What THIS test still covers, and why it is not redundant: the NO-SID
+        # caller -- a human at a shell, and formerly the Scheduled Task -- under
+        # the wedged-release arm specifically. A sweep that starts erroring the
+        # moment a supervisor retires would be a silent, permanent regression
+        # nobody watches.
         monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
         _released()
         _roster(monkeypatch, RELEASER)
