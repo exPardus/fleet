@@ -146,10 +146,18 @@ class TestSeam2SuccessorRecord:
         name = successors[0]
         assert fleet._is_supervisor_shaped(name)
         assert workers[name]["dispatch_kind"] == "bg"
-        # The daemon mints the sid; the record starts sid-less and is stamped by
-        # the sid-stamping seam (handoff-complete's --expect-sid), like a gen-0
-        # sup-spawn record between create and _commit_native_stamp.
-        assert workers[name]["session_id"] is None
+        # 2026-07-27: this used to assert `session_id is None`, on the reasoning
+        # that the daemon mints the sid and `sup-handoff-complete` stamps the
+        # authoritative one -- like a gen-0 sup-spawn record between create and
+        # `_commit_native_stamp`. The analogy was false: sup-spawn has no sid yet
+        # at create time, while `begin` is holding the roster-joined sid and
+        # printing it two lines below. A null here sent every successor's Stop
+        # outcome to `state/outcomes/<raw-sid>.jsonl`, which `read_outcomes(name)`
+        # never opens -- ten stillborn successors each recorded their own
+        # diagnosis where nothing on the fleet side could read it.
+        # `tests/test_stillborn_handoff.py` carries the end-to-end pin; complete
+        # still restamps to the HANDSHAKE sid and retires this one if they differ.
+        assert workers[name]["session_id"] == "succ0001-full"
 
     def test_complete_stamps_the_successor_sid_and_resolver_finds_it(self, seam_home):
         # The pair that closes seam #2: begin left a sid-less record; complete
@@ -164,7 +172,9 @@ class TestSeam2SuccessorRecord:
                                  "claimed_via": "fresh", "nonce_hash": fleet.nonce_digest(value),
                                  "nonce_seq": 2, "lineage_id": "lin-L",
                                  "handoff_token_hash": fleet.nonce_digest(token)})
-        _seed_record(SUCC_NAME, None, status="working")   # begin's sid-less record
+        # A sid-less record is still the shape complete must handle: records
+        # written by a pre-2026-07-27 begin, and any record cleaned and re-seeded.
+        _seed_record(SUCC_NAME, None, status="working")
         succ_nonce = fleet.mint_nonce()
         fleet.write_handshake("inc-succ", HOLDER_SID,
                               handoff_token_hash=fleet.nonce_digest(token),
@@ -175,6 +185,41 @@ class TestSeam2SuccessorRecord:
         rec = fleet.load_registry()["workers"][SUCC_NAME]
         assert rec["session_id"] == HOLDER_SID
         # The whole point: the logical name now resolves to the successor body.
+        assert fleet._resolve_worker_target("supervisor") == SUCC_NAME
+
+    def test_complete_retires_the_provisional_sid_a_forked_successor_left(self, seam_home):
+        """Composition pin for the 2026-07-27 change that made `begin` stamp the
+        roster-joined sid instead of NULL.
+
+        The null was defended on a TRUE premise -- that sid is provisional,
+        because a successor can fork between dispatch and HANDSHAKE -- which
+        does not support it: `complete` already retires a differing prior sid
+        before restamping the AUTHORITATIVE HANDSHAKE one. `begin`'s null simply
+        made that arm unreachable in production, so nothing exercised it. This
+        is the fork case end to end: provisional sid in, forked sid out, and the
+        `retired_sids` invariant (a record only ever carries its OWN prior sid)
+        intact across the switch."""
+        token = "tok-good"
+        value = fleet.mint_nonce()
+        beat = _iso(datetime.now(timezone.utc) - timedelta(seconds=5))
+        fleet.write_incarnation({"incarnation_id": "inc-old", "session_id": "sid-old",
+                                 "claimed_at": beat, "heartbeat_at": beat,
+                                 "claimed_via": "fresh", "nonce_hash": fleet.nonce_digest(value),
+                                 "nonce_seq": 2, "lineage_id": "lin-L",
+                                 "handoff_token_hash": fleet.nonce_digest(token)})
+        # What `begin` writes now: the sid the roster join produced.
+        _seed_record(SUCC_NAME, OTHER_SID, status="working")
+        succ_nonce = fleet.mint_nonce()
+        # ...and the body forked before HANDSHAKE, so it hands back a DIFFERENT sid.
+        fleet.write_handshake("inc-succ", HOLDER_SID,
+                              handoff_token_hash=fleet.nonce_digest(token),
+                              nonce_hash=fleet.nonce_digest(succ_nonce))
+        args = SimpleNamespace(sid="sid-old", expect_inc="inc-succ",
+                               expect_sid=OTHER_SID, nonce=value)
+        assert fleet.cmd_sup_handoff_complete(args) == 0
+        rec = fleet.load_registry()["workers"][SUCC_NAME]
+        assert rec["session_id"] == HOLDER_SID
+        assert rec["retired_sids"] == [OTHER_SID]
         assert fleet._resolve_worker_target("supervisor") == SUCC_NAME
 
     def test_complete_without_a_successor_record_is_a_noop_not_a_crash(self, seam_home):
