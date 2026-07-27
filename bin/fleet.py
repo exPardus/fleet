@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import ast
 import ctypes
+import fnmatch
 import functools
 import hashlib
 import hmac
@@ -11463,8 +11464,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :4956, :5403, :9453,
-    :14004), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :4957, :5404, :9454,
+    :14005), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -12108,8 +12109,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:4956, :5403, :9453,
-    #     :14004) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:4957, :5404, :9454,
+    #     :14005) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -15465,6 +15466,408 @@ def cmd_index(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# fleet-index M2: `fleet q`, the read path (docs/specs/fleet-index.md §11)
+# ---------------------------------------------------------------------------
+#
+# `q` is the "smaller reads" lever (§2): the worker gets a symbol, not a file.
+# It adds no artifact type -- everything below reads the M1 shards (§5).
+#
+# Two properties hold this whole block up, and both are load-bearing rather
+# than stylistic:
+#
+# 1. EVERY shard read goes through `verified_shard_rows` (§11.3). Reading a
+#    shard around it re-opens the hole §8 exists to close: a stale line number
+#    does not error, it silently slices the wrong code, and the worker cannot
+#    tell. `TestEveryReadGoesThroughTheChokePoint` spies on `read_shard` and
+#    fails on any call made outside a `verified_shard_rows` frame.
+# 2. `q` NEVER touches fleet state (invariant 9, §11.6): no registry read or
+#    write, no `fleet.lock`, no mailbox, no PID probe, no subprocess. It is a
+#    pure function of the target repo's working tree plus its gitignored
+#    index, which is what makes it safe to hand a worker.
+#
+# THE `--path` GLOB DIALECT, stated once here because the spec and the shipped
+# M1 code disagree and something had to win. §11.1/§11.2 pin
+# `fnmatch.fnmatchcase` for `--path`. §8's own default config globs are
+# `**/*.py` and `**/node_modules/**`, and `fnmatchcase("fleet.py", "**/*.py")`
+# is False -- so M1 could not use fnmatch for include/exclude and wrote
+# `_index_glob_match` (`**`-aware, `*` does not cross `/`, case-sensitive on
+# every platform). `--path` and the config lists are globs over the SAME
+# forward-slash source-relative path space, and the config file is where a
+# worker reads the dialect from, so `--path` uses `_index_glob_match` too.
+# Shipping two glob dialects for one path space inside one tool is a defect
+# that reads as correct. The NAME glob (query form 3) keeps `fnmatchcase`:
+# names contain no `/`, so `**` is meaningless there, and §12 pins that
+# spelling by golden. Both dialects are case-sensitive on every platform,
+# which is the property §11.2's rationale actually protects.
+
+Q_LIMIT_DEFAULT = 20
+
+# §11.4. Applies to a `--src` slice and to an `--outline` rendering; the
+# spawn-time `--context` digest is deliberately NOT capped (§11.1), which is
+# why `render_digest` stays uncapped and the cap lives here.
+Q_OUTPUT_LINE_CAP = 400
+
+# §11.4's exact trailer, em dash included. Deliberately NOT ASCII-folded the
+# way `INDEX_NO_INDEX_MESSAGE` was: that constant is the one the spec spells
+# two different ways (§6 vs §11.5), and reproducing the fold here would create
+# a second string whose shipped bytes differ from the bytes §12 golden-tests.
+Q_TRUNCATION_TRAILER = "[truncated {n} lines — narrow the query]"
+
+# Diagnostics are capped for the same reason `INDEX_LIST_CAP` exists: a query
+# in a repo with 200 stale shards would otherwise put 200 stderr lines into a
+# worker's tool result -- a token blowout in the tool that exists to prevent
+# one. The suppressed count is always printed; a silent cap reads as "that
+# was everything".
+Q_NOTE_CAP = 20
+
+
+def _q_pointer(hit) -> str:
+    """§11.4's pointer line: `<path>:<line>-<end>\\t<kind>\\t<name>\\t<sig>`.
+
+    `rel` is already the index's canonical forward-slash form on every
+    platform (§11.2) and is formatted as a plain string -- a `str(Path(rel))`
+    anywhere here would emit `src\\api.py` on win32 and diverge §12's goldens
+    from a Linux run."""
+    rel, name, line, end, kind, sig = hit
+    return f"{rel}:{line}-{end}\t{kind}\t{name}\t{sig}"
+
+
+def _q_source_lines(source_path) -> list:
+    """The lines of a source file, for a `--src` slice.
+
+    BYTES FROM THE FILE (§11.4). The index supplies the range and the file
+    supplies truth: source never comes from the shard, which is what makes the
+    slice worth more than the pointer. Undecodable bytes are replaced rather
+    than raised on -- a latin-1 source file still slices, and the only failure
+    this reports is OSError, the §11.5 "unreadable at slice time" row."""
+    text = Path(source_path).read_bytes().decode("utf-8", "replace")
+    return _index_split_lines(text)
+
+
+def _q_print_capped(lines) -> None:
+    """Print at most `Q_OUTPUT_LINE_CAP` lines, then §11.4's trailer.
+
+    Truncation does not change the exit code: an oversized symbol is the
+    query's problem to narrow, not an error."""
+    for line in lines[:Q_OUTPUT_LINE_CAP]:
+        print(line)
+    hidden = len(lines) - Q_OUTPUT_LINE_CAP
+    if hidden > 0:
+        print(Q_TRUNCATION_TRAILER.format(n=hidden))
+
+
+def _q_print_notes(notes) -> None:
+    """Staleness/orphan notes, on stderr (§11.4: stdout carries hits only, so
+    a worker's tool result carries signal)."""
+    for note in notes[:Q_NOTE_CAP]:
+        print(f"fleet: {note}", file=sys.stderr)
+    hidden = len(notes) - Q_NOTE_CAP
+    if hidden > 0:
+        print(f"fleet: ... and {hidden} more shard notes", file=sys.stderr)
+
+
+def _q_collect_rows(root, rels, kind, no_refresh, notes) -> tuple:
+    """Verified rows from `rels`, `--kind`-filtered.
+
+    THE choke point call. Returns `(rows, suppressed)`; `suppressed` is True
+    when any shard was withheld (`--no-refresh` over a stale shard) or was an
+    orphan, so the caller can say WHICH kind of nothing it is serving."""
+    rows, suppressed = [], False
+    for rel in rels:
+        result = verified_shard_rows(root, rel, no_write=no_refresh)
+        if result["note"]:
+            notes.append(result["note"])
+        if result["status"] != "ok":
+            suppressed = True
+            continue
+        for name, line, end, row_kind, sig in result["rows"]:
+            if kind is None or row_kind == kind:
+                rows.append((rel, name, line, end, row_kind, sig))
+    return rows, suppressed
+
+
+def _q_match(rows, query) -> list:
+    """§11.2's three forms, in their short-circuit order.
+
+    The short-circuit is the whole point: ANY exact hit means tail matching
+    never runs, so the two tiers never mix in one result. §11.2's own worked
+    example -- `q run` returns the top-level `run` and NOT `Beta.run`, which
+    stays reachable as `q Beta.run`. Ambiguity WITHIN a tier is still
+    ambiguity; the short-circuit never resolves it by falling through."""
+    if "*" in query or "?" in query:
+        # Form 3, over the NAME. `fnmatchcase`, never `fnmatch`: the latter
+        # case-folds via `os.path.normcase` on win32, so `beta.*` would match
+        # `Beta.run` on Windows and not on Linux (§11.2).
+        return [row for row in rows if fnmatch.fnmatchcase(row[1], query)]
+    exact = [row for row in rows if row[1] == query]
+    if exact or "." in query:
+        # A dotted query is the qualified form; it never tail-matches, or
+        # `q Gamma.run` would silently answer with `Beta.run`.
+        return exact
+    return [row for row in rows
+            if "." in row[1] and row[1].rsplit(".", 1)[1] == query]
+
+
+def _q_sorted(hits) -> list:
+    """§11.2: source path, then line. Nothing ranks (§10).
+
+    `name` is the final key, and that tiebreak is load-bearing rather than
+    tidy. `verified_shard_rows` hands back rows in SHARD order (`render_shard`
+    sorts by `(line, end, name)`) when the shard was current, and in PARSE
+    order when it just refreshed -- and those diverge on any `(line, end)` tie,
+    e.g. `ZED = ALPHA = 1`. Measured on `--outline`, which renders the
+    primitive's rows directly:
+
+        cached : - L1 ALPHA / - L1 ZED        (shard order)
+        refresh: - L1 ZED   / - L1 ALPHA      (parse order)
+
+    A total order here makes the QUERY path's output identical either way, so
+    §12's goldens cannot flake on whether the shard happened to be current.
+    Stated explicitly because it also MASKS that primitive-level instability
+    on this one path: the defect is real, it belongs to `idx/core`, and
+    `TestRowOrderAcrossARefresh` keeps it visible on the `--outline` path
+    rather than sorting it away in two places."""
+    return sorted(hits, key=lambda row: (row[0], row[2], row[3], row[1]))
+
+
+def _q_print_hits(hits, limit) -> None:
+    """Pointer lines, `--limit`-capped. A truncated list is still exit 0
+    (§11.5); the suppressed count goes to stderr with the narrowing hint."""
+    for hit in hits[:limit]:
+        print(_q_pointer(hit))
+    hidden = len(hits) - limit
+    if hidden > 0:
+        print(f"fleet: {hidden} more hit(s) suppressed by --limit {limit} -- "
+              f"narrow with `--path`/`--kind`", file=sys.stderr)
+
+
+def _q_print_slice(root, hit, notes) -> int:
+    """The pointer line, then lines `line..end` of the source file, verbatim."""
+    rel, _name, line, end, _kind, _sig = hit
+    print(_q_pointer(hit))
+    try:
+        lines = _q_source_lines(Path(root) / rel)
+    except OSError as exc:
+        # §11.5: readable when the header was hashed, unreadable by the time
+        # the slice was read. The hit degrades to its pointer -- still useful,
+        # still exit 0, because a hit WAS printed.
+        notes.append(f"{rel}: source unreadable at slice time ({exc}) -- "
+                     f"pointer only, no slice")
+    else:
+        _q_print_capped(lines[line - 1:end])
+    _q_print_notes(notes)
+    return 0
+
+
+def _q_shard_rels(root, path_glob):
+    """The shard set a query runs over, `--path`-filtered.
+
+    Filtering happens BEFORE verification (§11.2: "after `--path`/`--kind`
+    filtering"), which is not just an ordering detail -- it is what keeps a
+    narrow query from re-hashing, refreshing and pruning every source file in
+    the repo. Returns None when the glob selected nothing, which the caller
+    reports rather than presenting as "no such symbol"."""
+    rels = index_shard_rels(root)
+    if path_glob is None:
+        return rels
+    selected = [rel for rel in rels if _index_glob_match(rel, path_glob)]
+    if not selected:
+        return None
+    return selected
+
+
+def _cmd_q_query(root, args) -> int:
+    rels = _q_shard_rels(root, args.path)
+    if rels is None:
+        # Distinguished from "no such symbol" on purpose: under this dialect
+        # `*.py` is root-level only, and a worker who typed the fnmatch form
+        # would otherwise conclude the symbol does not exist.
+        print(f"fleet: --path {args.path!r} matched no indexed file -- this "
+              f"glob is `**`-aware (`**/*.py` matches at any depth, `*.py` "
+              f"only at the index root)", file=sys.stderr)
+        return 1
+    notes = []
+    rows, suppressed = _q_collect_rows(root, rels, args.kind, args.no_refresh, notes)
+    hits = _q_sorted(_q_match(rows, args.query))
+    limit = Q_LIMIT_DEFAULT if args.limit is None else args.limit
+    if not hits:
+        _q_print_notes(notes)
+        if not suppressed:
+            # §11.5: stderr says which kind of nothing this is, and points at
+            # the substring search this tool deliberately does not do (§11.2).
+            print(f"fleet: no symbol matches {args.query!r} -- try "
+                  f"`grep -r {args.query} .fleet-index/symbols/`, then a repo "
+                  f"grep", file=sys.stderr)
+        return 1
+    if args.src and len(hits) > 1:
+        # §11.4: dumping N slices is a token blowout in the exact place this
+        # tool exists to prevent one, so ambiguity resolves to pointers.
+        _q_print_hits(hits, limit)
+        _q_print_notes(notes)
+        print("fleet: ambiguous — narrow with `--path`/`--kind`", file=sys.stderr)
+        return 1
+    if args.src:
+        return _q_print_slice(root, hits[0], notes)
+    _q_print_hits(hits, limit)
+    _q_print_notes(notes)
+    return 0
+
+
+def _q_contained(root, rel) -> bool:
+    """Is `rel` genuinely inside the index root?
+
+    `q --outline <path>` is the only caller-supplied PATH in this tool, so
+    this is the boundary where an untrusted path stops. The check is on the
+    RESOLVED location, never on the string: an interior `..` survives every
+    lexical test (`rel.startswith("../")` is False for `a/../../victim`) while
+    still addressing a file outside the declared root, and the shard path is
+    built by string concatenation onto `.fleet-index/symbols/`, so a rel that
+    climbs four levels lands beside the repository.
+
+    Measured, on this tree, before the guard existed:
+
+        $ fleet q --outline "a/../../../../victim/PRECIOUS"
+        fleet: ...: source file is gone -- hits suppressed; orphan shard pruned
+        rc=1                          # and ../victim/PRECIOUS.tsv was GONE
+
+    That is `verified_shard_rows`' orphan-prune path unlinking outside the
+    root, and repairing it is `idx/core`'s job, not this slice's. The guard
+    here is defence in depth and stays correct independently: this surface is
+    the one that takes untrusted input, so it validates before calling in
+    rather than relying on the primitive's own containment.
+
+    Resolving also settles symlinks, in the safe direction: a link inside the
+    root that points outside it is NOT contained."""
+    try:
+        base = Path(root).resolve()
+        target = (base / rel).resolve()
+    except OSError:
+        return False
+    return target == base or base in target.parents
+
+
+def _q_outline_rels(root, raw) -> list:
+    """`--outline PATH` as index-root-relative posix paths, best first.
+
+    A path that resolves against the process cwd and lands inside the index
+    root wins: a worker that has cd'd into `src/` says `api.py` and means
+    `src/api.py`. The raw argument is kept as a second candidate because
+    pointer lines print index-root-relative paths, so a worker copying one
+    back from a subdirectory must still hit."""
+    out = []
+    try:
+        resolved = Path(raw).expanduser().resolve()
+        out.append(resolved.relative_to(Path(root).resolve()).as_posix())
+    except (ValueError, OSError):
+        pass
+    rel = _index_posix_rel(raw)
+    if rel and rel not in out:
+        out.append(rel)
+    return out or [_index_posix_rel(raw)]
+
+
+def _q_outline_known(root, rel) -> bool:
+    """Is there something to outline at `rel`?
+
+    Either a shard (which may be stale, missing its source, whatever -- the
+    choke point sorts that out), or a source file this index's include/exclude
+    actually SELECTS. The selection test is deliberate: outlining an excluded
+    file would refresh a shard the very next `build` prunes, which is the same
+    promise-it-cannot-keep `update_index` already refuses to make."""
+    if shard_path_for_source(root, rel).is_file():
+        return True
+    if not (Path(root) / rel).is_file():
+        return False
+    config = load_index_config(root)
+    return _index_selects(rel, config["include"], config["exclude"])
+
+
+def _q_print_outline_candidates(root, rel) -> None:
+    """§11.5's `--outline` unknown-path row: the same narrow-it hint shape as
+    an ambiguous `--src` -- shard source paths whose final segment matches the
+    argument's basename."""
+    base = rel.rsplit("/", 1)[-1]
+    candidates = [candidate for candidate in index_shard_rels(root)
+                  if candidate.rsplit("/", 1)[-1] == base]
+    print(f"fleet: no indexed file at {rel!r} -- nothing to outline",
+          file=sys.stderr)
+    for candidate in candidates[:INDEX_LIST_CAP]:
+        print(f"fleet:   candidate {candidate}", file=sys.stderr)
+    hidden = len(candidates) - INDEX_LIST_CAP
+    if hidden > 0:
+        print(f"fleet:   ... and {hidden} more", file=sys.stderr)
+    if not candidates:
+        print("fleet: no indexed file has that basename -- `fleet index "
+              "status` lists what this index covers", file=sys.stderr)
+
+
+def _cmd_q_outline(root, args) -> int:
+    # Containment BEFORE anything touches the shard layer: nothing derived
+    # from an out-of-root argument may reach `verified_shard_rows`, whose
+    # orphan-prune path unlinks what it is pointed at.
+    candidates = [rel for rel in _q_outline_rels(root, args.outline)
+                  if _q_contained(root, rel)]
+    if not candidates:
+        print(f"fleet: --outline {args.outline!r} resolves outside the index "
+              f"root {root} -- refused", file=sys.stderr)
+        return 1
+    rel = next((c for c in candidates if _q_outline_known(root, c)), None)
+    if rel is None:
+        _q_print_outline_candidates(root, candidates[0])
+        return 1
+    notes = []
+    result = verified_shard_rows(root, rel, no_write=args.no_refresh)
+    if result["note"]:
+        notes.append(result["note"])
+    if result["status"] != "ok":
+        # Withheld under --no-refresh, or the source is gone. §11.3 binds
+        # `--outline` exactly as it binds a query: no path serves an
+        # unverified coordinate.
+        _q_print_notes(notes)
+        return 1
+    # A header-only shard renders to its `## path (N lines, lang)` line and
+    # nothing else, and that is exit 0 (§11.5): having no symbols is a fact
+    # about the file, not a failure.
+    _q_print_capped(_index_split_lines(
+        render_digest(rel, result["header"], result["rows"])))
+    _q_print_notes(notes)
+    return 0
+
+
+def cmd_q(args) -> int:
+    parser = args.q_parser
+    # §11.5 row 2: usage errors are argparse's, and argparse exits 2. The two
+    # forms in §11.1 are separate grammars, so mixing them is a usage error
+    # rather than a silently-ignored flag -- an ignored flag reads as correct.
+    if args.outline is None and args.query is None:
+        parser.error("give a QUERY or --outline PATH")
+    if args.outline is not None and args.query is not None:
+        parser.error("--outline takes no QUERY -- they are two different forms")
+    if args.outline is not None:
+        extra = [name for name, given in (
+            ("--src", args.src), ("--path", args.path is not None),
+            ("--kind", args.kind is not None),
+            ("--limit", args.limit is not None)) if given]
+        if extra:
+            parser.error("--outline takes only --no-refresh, not "
+                         + ", ".join(extra))
+    if args.limit is not None and args.limit < 1:
+        parser.error("--limit must be at least 1")
+    # §11.1: the walk-up from the process cwd, stopping at the first
+    # repository boundary. No flag overrides discovery -- a worker's cwd is
+    # its registered `--dir` by construction (invariant 5).
+    root = find_index_root()
+    if root is None:
+        # Exit 3, and the SHIPPED constant: §6 and §11.5 spell this message
+        # with different bytes, so the constant is the only correct source.
+        print(f"fleet: {INDEX_NO_INDEX_MESSAGE}", file=sys.stderr)
+        return 3
+    if args.outline is not None:
+        return _cmd_q_outline(root, args)
+    return _cmd_q_query(root, args)
+
+
+# ---------------------------------------------------------------------------
 # CLI: argparse wiring + main()
 # ---------------------------------------------------------------------------
 
@@ -15644,6 +16047,35 @@ def build_parser() -> argparse.ArgumentParser:
     for p_ix in (p_ix_init, p_ix_build, p_ix_update, p_ix_status):
         p_ix.add_argument("--path", default=None,
                           help="index root (default: the current directory)")
+
+    # fleet-index M2 (docs/specs/fleet-index.md §11): the read path. Same
+    # posture as the index family -- no registry, no fleet.lock, no mailbox,
+    # no PID probe (§11.6, invariant 9).
+    p_q = sub.add_parser("q", help="query this project's symbol index (M2)")
+    # Stashed so `cmd_q` can raise argparse's own exit-2 usage error for the
+    # cross-flag rules argparse cannot express (§11.5 row 2).
+    p_q.set_defaults(q_parser=p_q)
+    p_q.add_argument("query", nargs="?", default=None,
+                     help="exact name, dotted name, or a `*`/`?` glob over names")
+    p_q.add_argument("--outline", default=None, metavar="PATH",
+                     help="print one file's digest instead of running a query; "
+                          "takes only --no-refresh")
+    p_q.add_argument("--src", action="store_true",
+                     help="the query must resolve to exactly one symbol; print "
+                          "its source, sliced from the file")
+    # `--path` is a FILTER here, not a root: `q` takes no root argument (the
+    # §11.1 walk-up supplies it), which is what frees the flag name.
+    p_q.add_argument("--path", default=None, metavar="GLOB",
+                     help="restrict hits to source paths matching this glob "
+                          "(the config.toml dialect: `**`-aware, case-sensitive)")
+    p_q.add_argument("--kind", default=None, choices=list(SHARD_KINDS),
+                     help="restrict hits to one symbol kind")
+    p_q.add_argument("--limit", type=int, default=None, metavar="N",
+                     help=f"cap printed hits (default {Q_LIMIT_DEFAULT}); a "
+                          f"truncated list is still exit 0")
+    p_q.add_argument("--no-refresh", action="store_true", dest="no_refresh",
+                     help="never write anything: stale and orphan hits are "
+                          "withheld rather than repaired")
 
     sub.add_parser("doctor", help="run fleet health checks")
 
@@ -15870,6 +16302,8 @@ def main(argv=None) -> int:
             return cmd_autoclean(args)
         if args.command == "index":
             return cmd_index(args)
+        if args.command == "q":
+            return cmd_q(args)
         if args.command == "doctor":
             return cmd_doctor(args)
         if args.command == "sup-boot":
