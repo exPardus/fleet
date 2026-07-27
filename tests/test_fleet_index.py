@@ -15,6 +15,9 @@ text-mode `write_text`, so a golden shard is byte-identical on win32 and POSIX
 """
 import os
 import shutil
+import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -109,6 +112,14 @@ class TestShardPaths:
         # A caller that hands over an os.sep-joined path must not produce a
         # different shard than the same path in posix form -- otherwise the
         # same source file has two shards on win32.
+        #
+        # Asserted on the STRING, not on the two Path objects: on win32
+        # `Path("bin\\fleet.py")` already splits on the backslash, so the
+        # Path-equality form passed with the normalisation deleted -- it was
+        # testing pathlib on the only platform that runs it, and would have
+        # gone red only on POSIX, where the bug it guards cannot occur.
+        assert fleet._index_posix_rel("bin\\fleet.py") == "bin/fleet.py"
+        assert fleet._index_posix_rel(".\\bin\\\\deep\\a.py") == "bin/deep/a.py"
         assert (fleet.shard_path_for_source(tmp_path, "bin\\fleet.py")
                 == fleet.shard_path_for_source(tmp_path, "bin/fleet.py"))
 
@@ -132,21 +143,21 @@ class TestSourceLang:
 
 class TestShardRendering:
     def test_header_then_rows_tab_separated_lf_terminated(self):
-        header = {"sha8": "a3f21c8e", "lines": 120, "lang": "python"}
+        header = {"sha": "a3f21c8e5b04d917", "lines": 120, "lang": "python"}
         rows = [("alpha", 12, 28, "func", "(x: int) -> str"),
                 ("Beta", 31, 95, "class", "")]
         assert fleet.render_shard(header, rows) == (
-            "#\ta3f21c8e\t120\tpython\n"
+            "#\ta3f21c8e5b04d917\t120\tpython\n"
             "alpha\t12\t28\tfunc\t(x: int) -> str\n"
             "Beta\t31\t95\tclass\t\n"
         )
 
     def test_header_only_shard_is_just_the_header_line(self):
-        header = {"sha8": "00000000", "lines": 0, "lang": "text"}
-        assert fleet.render_shard(header, []) == "#\t00000000\t0\ttext\n"
+        header = {"sha": "0000000000000000", "lines": 0, "lang": "text"}
+        assert fleet.render_shard(header, []) == "#\t0000000000000000\t0\ttext\n"
 
     def test_rows_are_sorted_by_line(self):
-        header = {"sha8": "a3f21c8e", "lines": 9, "lang": "python"}
+        header = {"sha": "a3f21c8e5b04d917", "lines": 9, "lang": "python"}
         rows = [("b", 5, 5, "const", ""), ("a", 2, 2, "const", "")]
         body = fleet.render_shard(header, rows).splitlines()[1:]
         assert [line.split("\t")[0] for line in body] == ["a", "b"]
@@ -164,8 +175,17 @@ class TestFieldSanitisation:
         # rows handed back by a fresh parse and rows read off a shard must be
         # the same objects, or `verified_shard_rows` would answer differently
         # depending on whether it refreshed.
-        header = {"sha8": "a3f21c8e", "lines": 1, "lang": "markdown"}
-        rows = [(fleet._index_tsv_field("a\tb"), 1, 1, "section", "")]
+        #
+        # The rows come from PARSING a tabbed source, not from calling
+        # `_index_tsv_field` here. Calling the escaper in the test made the
+        # assertion true by construction: with sanitisation deleted from the
+        # parser this test still passed, because the test was doing the
+        # parser's job for it. `TestParseTimeSanitisation` below is the
+        # end-to-end pin; this one keeps the render/read half.
+        src = _write(tmp_path / "d.md", "## a\tb\n")
+        rows = fleet.parse_source_symbols(src, "markdown")
+        assert rows == [("a\\tb", 1, 1, "section", "")]
+        header = fleet.source_header(src, "d.md")
         shard = tmp_path / "s.tsv"
         shard.write_bytes(fleet.render_shard(header, rows).encode("utf-8"))
         assert fleet.read_shard(shard) == (header, rows)
@@ -276,20 +296,109 @@ class TestOtherLanguagesAreHeaderOnly:
 
 
 class TestSourceHeader:
-    def test_sha8_is_the_first_eight_hex_of_the_sha256_of_the_bytes(self, tmp_path):
+    def test_sha_is_the_leading_hex_of_the_sha256_of_the_bytes(self, tmp_path):
         import hashlib
         src = _write(tmp_path / "a.py", "X = 1\n")
-        want = hashlib.sha256(b"X = 1\n").hexdigest()[:8]
-        assert fleet.source_header(src, "a.py")["sha8"] == want
+        want = hashlib.sha256(b"X = 1\n").hexdigest()[:fleet.INDEX_SHA_HEX_LEN]
+        assert fleet.source_header(src, "a.py")["sha"] == want
 
     def test_line_count_and_lang(self, tmp_path):
         src = _write(tmp_path / "a.py", "X = 1\nY = 2\n")
         assert fleet.source_header(src, "a.py") == {
-            "sha8": fleet.source_header(src, "a.py")["sha8"], "lines": 2, "lang": "python"}
+            "sha": fleet.source_header(src, "a.py")["sha"], "lines": 2, "lang": "python"}
 
     def test_empty_file_is_zero_lines(self, tmp_path):
         src = _write(tmp_path / "a.py", "")
         assert fleet.source_header(src, "a.py")["lines"] == 0
+
+    def test_the_hash_is_over_BYTES_never_over_decoded_text(self, tmp_path):
+        # The pin against hashing `read_text()`: universal newlines translate
+        # CRLF to LF while decoding, so a text hash cannot tell the two files
+        # apart -- and their line NUMBERS are identical, so nothing downstream
+        # would catch it either. A CRLF/LF change is a real change to every
+        # consumer of a byte offset, and it must invalidate the shard.
+        import hashlib
+        crlf = tmp_path / "crlf.py"
+        crlf.write_bytes(b"X = 1\r\nY = 2\r\n")
+        lf = tmp_path / "lf.py"
+        lf.write_bytes(b"X = 1\nY = 2\n")
+        assert (fleet.source_header(crlf, "crlf.py")["sha"]
+                == hashlib.sha256(b"X = 1\r\nY = 2\r\n")
+                .hexdigest()[:fleet.INDEX_SHA_HEX_LEN])
+        assert (fleet.source_header(crlf, "crlf.py")["sha"]
+                != fleet.source_header(lf, "lf.py")["sha"])
+        # ...and both are still 2 lines, so `lines` cannot be the thing that
+        # notices. The hash is.
+        assert fleet.source_header(crlf, "crlf.py")["lines"] == 2
+        assert fleet.source_header(lf, "lf.py")["lines"] == 2
+
+    def test_a_source_that_is_not_utf8_still_gets_a_header(self, tmp_path):
+        # Second half of the same pin: decoding at header time would have to
+        # choose between raising (a build abort) and lossy replacement (a hash
+        # that no longer identifies the file). Hashing bytes has neither
+        # problem, and §6 wants a header-only shard here.
+        import hashlib
+        src = tmp_path / "bin.py"
+        src.write_bytes(b"\xff\xfe\x00def x(\n")
+        assert (fleet.source_header(src, "bin.py")["sha"]
+                == hashlib.sha256(b"\xff\xfe\x00def x(\n")
+                .hexdigest()[:fleet.INDEX_SHA_HEX_LEN])
+
+    def test_a_CRLF_to_LF_rewrite_is_seen_as_stale(self, tmp_path):
+        # The property the two above exist for, end to end.
+        root = _indexed_tree(tmp_path, {"a.py": "X = 1\n"})
+        (root / "a.py").write_bytes(b"def f():\r\n    pass\r\n")
+        first = fleet.verified_shard_rows(root, "a.py")
+        assert first["refreshed"] is True
+        (root / "a.py").write_bytes(b"def f():\n    pass\n")
+        second = fleet.verified_shard_rows(root, "a.py")
+        assert second["refreshed"] is True
+
+
+class TestShaWidth:
+    """M1's widening, pinned against a measured collision (§5).
+
+    The pair below is not synthetic: it came out of a search over 109,096
+    two-line modules -- under a second of CPU -- for two sources sharing the
+    first 8 hex of their SHA-256. They also share a line count and a language,
+    which is the REST of the staleness key, so under an 8-hex header swapping
+    one for the other is invisible: the shard verifies, `refreshed` is False,
+    `index status` reports 0 stale, and the worker is served the wrong file's
+    symbols."""
+
+    A = "sym_96178 = 1\nVALUE = 96178\n"
+    B = "sym_109095 = 1\nVALUE = 109095\n"
+
+    def test_the_collision_pair_really_collides_at_eight_hex(self):
+        import hashlib
+        digests = [hashlib.sha256(body.encode("utf-8")).hexdigest()
+                   for body in (self.A, self.B)]
+        assert digests[0][:8] == digests[1][:8]
+        assert digests[0] != digests[1]
+
+    def test_the_header_is_wide_enough_to_tell_them_apart(self, tmp_path):
+        a = _write(tmp_path / "a.py", self.A)
+        b = _write(tmp_path / "b.py", self.B)
+        assert fleet.source_header(a, "a.py") != fleet.source_header(b, "b.py")
+        assert len(fleet.source_header(a, "a.py")["sha"]) == fleet.INDEX_SHA_HEX_LEN
+
+    def test_swapping_the_colliding_twin_is_detected_and_repaired(self, tmp_path):
+        root = _indexed_tree(tmp_path, {"a.py": self.A})
+        assert [r[0] for r in fleet.verified_shard_rows(root, "a.py")["rows"]] == [
+            "sym_96178", "VALUE"]
+        _write(root / "a.py", self.B)
+        got = fleet.verified_shard_rows(root, "a.py")
+        assert got["refreshed"] is True
+        assert [r[0] for r in got["rows"]] == ["sym_109095", "VALUE"]
+        assert fleet.index_status(root)["stale"] == []
+
+    def test_a_shard_written_by_the_eight_hex_draft_is_not_readable(self, tmp_path):
+        # Migration, in one line: an old shard fails `read_shard`, so it takes
+        # the stale path and the first read repairs it. No migration command,
+        # no version column.
+        shard = tmp_path / "s.tsv"
+        shard.write_bytes(b"#\ta3f21c8e\t9\tpython\nalpha\t1\t2\tfunc\t()\n")
+        assert fleet.read_shard(shard) is None
 
 
 # ---------------------------------------------------------------------------
@@ -299,27 +408,30 @@ class TestSourceHeader:
 class TestReadShard:
     def _good(self, tmp_path):
         shard = tmp_path / "s.tsv"
-        shard.write_bytes(b"#\ta3f21c8e\t9\tpython\nalpha\t1\t2\tfunc\t()\n")
+        shard.write_bytes(
+            b"#\ta3f21c8e5b04d917\t9\tpython\nalpha\t1\t2\tfunc\t()\n")
         return shard
 
     def test_reads_header_and_rows(self, tmp_path):
         assert fleet.read_shard(self._good(tmp_path)) == (
-            {"sha8": "a3f21c8e", "lines": 9, "lang": "python"},
+            {"sha": "a3f21c8e5b04d917", "lines": 9, "lang": "python"},
             [("alpha", 1, 2, "func", "()")])
 
     def test_missing_shard_is_not_readable(self, tmp_path):
         assert fleet.read_shard(tmp_path / "absent.tsv") is None
 
     @pytest.mark.parametrize("blob", [
-        b"",                                            # empty
-        b"alpha\t1\t2\tfunc\t()\n",                     # no header line
-        b"#\ta3f21c8e\t9\n",                            # short header
-        b"#\tZZZZZZZZ\t9\tpython\n",                    # non-hex sha
-        b"#\ta3f21c8e\tmany\tpython\n",                 # non-int line count
-        b"#\ta3f21c8e\t9\tpython\nalpha\t1\t2\tfunc\n",  # short row
-        b"#\ta3f21c8e\t9\tpython\nalpha\tx\t2\tfunc\t()\n",  # non-int line
-        b"#\ta3f21c8e\t9\tpython\nalpha\t1\t2\twidget\t()\n",  # unknown kind
-        b"#\ta3f21c8e\t9\tpython\nalpha\t1\t2\tfunc\t()",  # torn: no final LF
+        b"",                                                    # empty
+        b"alpha\t1\t2\tfunc\t()\n",                             # no header line
+        b"#\ta3f21c8e5b04d917\t9\n",                            # short header
+        b"#\tZZZZZZZZZZZZZZZZ\t9\tpython\n",                    # non-hex sha
+        b"#\ta3f21c8e\t9\tpython\n",                            # 8-hex sha
+        b"#\ta3f21c8e5b04d9170\t9\tpython\n",                   # 17-hex sha
+        b"#\ta3f21c8e5b04d917\tmany\tpython\n",                 # non-int count
+        b"#\ta3f21c8e5b04d917\t9\tpython\nalpha\t1\t2\tfunc\n",  # short row
+        b"#\ta3f21c8e5b04d917\t9\tpython\nalpha\tx\t2\tfunc\t()\n",  # non-int line
+        b"#\ta3f21c8e5b04d917\t9\tpython\nalpha\t1\t2\twidget\t()\n",  # bad kind
+        b"#\ta3f21c8e5b04d917\t9\tpython\nalpha\t1\t2\tfunc\t()",  # torn: no LF
     ])
     def test_corrupt_or_truncated_shard_is_not_readable(self, tmp_path, blob):
         shard = tmp_path / "s.tsv"
@@ -335,15 +447,15 @@ class TestReadShard:
 # §6/§11.6 -- atomic writes and the Windows sharing-violation contract
 # ---------------------------------------------------------------------------
 
-HEADER_A = {"sha8": "aaaaaaaa", "lines": 1, "lang": "python"}
-HEADER_B = {"sha8": "bbbbbbbb", "lines": 2, "lang": "python"}
+HEADER_A = {"sha": "aaaaaaaaaaaaaaaa", "lines": 1, "lang": "python"}
+HEADER_B = {"sha": "bbbbbbbbbbbbbbbb", "lines": 2, "lang": "python"}
 
 
 class TestAtomicShardWrite:
     def test_writes_the_rendered_bytes_and_creates_parents(self, tmp_path):
         shard = tmp_path / ".fleet-index" / "symbols" / "bin" / "a.py.tsv"
         assert fleet.write_shard_atomic(shard, HEADER_A, []) is True
-        assert _read(shard) == "#\taaaaaaaa\t1\tpython\n"
+        assert _read(shard) == "#\taaaaaaaaaaaaaaaa\t1\tpython\n"
 
     def test_written_bytes_use_lf_on_every_platform(self, tmp_path):
         shard = tmp_path / "s.tsv"
@@ -390,6 +502,56 @@ class TestAtomicShardWrite:
         assert shard.read_bytes() == before
         assert _tmp_leftovers(tmp_path) == []
 
+    def test_any_other_oserror_abandons_too_instead_of_escaping(
+            self, tmp_path, monkeypatch):
+        # `PermissionError` was the only OSError this caught, so every other
+        # one escaped `write_shard_atomic` and, through it, the
+        # `verified_shard_rows` choke point -- which M2 hands a
+        # caller-supplied path (`q --outline <path>`). A caller-supplied path
+        # reaches shapes a build never does: on win32 a source named `nul.py`
+        # renders a shard path `os.replace` refuses with `FileExistsError`.
+        shard = tmp_path / "s.tsv"
+        fleet.write_shard_atomic(shard, HEADER_A, [])
+        before = shard.read_bytes()
+
+        def deny(src, dst):
+            raise FileExistsError(17, "cannot create a file that already exists")
+
+        monkeypatch.setattr(fleet.os, "replace", deny)
+        assert fleet.write_shard_atomic(
+            shard, HEADER_B, [], sleep=lambda _d: None) is False
+        assert shard.read_bytes() == before
+        assert _tmp_leftovers(tmp_path) == []
+
+    def test_the_choke_point_answers_through_a_non_permission_oserror(
+            self, tmp_path, monkeypatch):
+        root = _indexed_tree(tmp_path, {"a.py": "def f():\n    pass\n"})
+
+        def deny(src, dst):
+            raise FileExistsError(17, "cannot create a file that already exists")
+
+        monkeypatch.setattr(fleet.os, "replace", deny)
+        got = fleet.verified_shard_rows(root, "a.py", sleep=lambda _d: None)
+        assert got["status"] == "ok"
+        assert got["written"] is False
+        assert got["rows"] == [("f", 1, 2, "func", "()")]
+
+    def test_a_non_oserror_still_propagates(self, tmp_path, monkeypatch):
+        # The widening stops at OSError. A bug in this module is not a hazard
+        # to swallow behind a "the shard stayed stale" return value.
+        shard = tmp_path / "s.tsv"
+
+        class Boom(RuntimeError):
+            pass
+
+        def explode(tmp_name, dest, sleep=None):
+            raise Boom("not an OSError")
+
+        monkeypatch.setattr(fleet, "_replace_with_retry", explode)
+        with pytest.raises(Boom):
+            fleet.write_shard_atomic(shard, HEADER_A, [])
+        assert _tmp_leftovers(tmp_path) == []
+
     def test_a_transient_permission_error_still_lands(self, tmp_path, monkeypatch):
         shard = tmp_path / "s.tsv"
         fleet.write_shard_atomic(shard, HEADER_A, [])
@@ -405,7 +567,7 @@ class TestAtomicShardWrite:
         monkeypatch.setattr(fleet.os, "replace", flaky)
         assert fleet.write_shard_atomic(
             shard, HEADER_B, [], sleep=lambda _d: None) is True
-        assert _read(shard) == "#\tbbbbbbbb\t2\tpython\n"
+        assert _read(shard) == "#\tbbbbbbbbbbbbbbbb\t2\tpython\n"
 
 
 def _tmp_leftovers(root):
@@ -551,7 +713,7 @@ class TestIndexGlobMatching:
 
 class TestRenderDigest:
     def test_the_exact_shape_from_the_spec(self):
-        header = {"sha8": "a3f21c8e", "lines": 120, "lang": "python"}
+        header = {"sha": "a3f21c8e5b04d917", "lines": 120, "lang": "python"}
         rows = [("alpha", 12, 28, "func", "(x: int) -> str"),
                 ("Beta", 31, 95, "class", ""),
                 ("Beta.run", 40, 62, "method", "(self, y) -> bool")]
@@ -563,11 +725,11 @@ class TestRenderDigest:
         )
 
     def test_a_symbol_free_shard_renders_its_header_line_only(self):
-        header = {"sha8": "a3f21c8e", "lines": 3, "lang": "rs"}
+        header = {"sha": "a3f21c8e5b04d917", "lines": 3, "lang": "rs"}
         assert fleet.render_digest("a.rs", header, []) == "## a.rs (3 lines, rs)\n"
 
     def test_const_and_section_render_bare(self):
-        header = {"sha8": "a3f21c8e", "lines": 9, "lang": "markdown"}
+        header = {"sha": "a3f21c8e5b04d917", "lines": 9, "lang": "markdown"}
         rows = [("Intro", 1, 4, "section", ""), ("GAMMA", 7, 7, "const", "")]
         assert fleet.render_digest("d.md", header, rows) == (
             "## d.md (9 lines, markdown)\n"
@@ -577,7 +739,7 @@ class TestRenderDigest:
 
     def test_rendering_is_uncapped(self):
         # The 400-line cap is `q`'s concern, not the renderer's (§11.4).
-        header = {"sha8": "a3f21c8e", "lines": 999, "lang": "python"}
+        header = {"sha": "a3f21c8e5b04d917", "lines": 999, "lang": "python"}
         rows = [(f"f{i}", i, i, "func", "()") for i in range(1, 501)]
         assert len(fleet.render_digest("big.py", header, rows).splitlines()) == 501
 
@@ -801,43 +963,87 @@ def _project(tmp_path, files):
     return root
 
 
+def _fake_checkout(root):
+    """The `.git` directory shape of an ordinary checkout."""
+    (root / ".git").mkdir(parents=True, exist_ok=True)
+    return root / ".git" / "info" / "exclude"
+
+
 class TestIndexInit:
-    def test_creates_the_index_config_and_gitignore_entry_then_builds(self, tmp_path):
+    def test_creates_the_index_config_and_exclude_entry_then_builds(self, tmp_path):
         root = _project(tmp_path, {"a.py": "def f():\n    pass\n"})
+        exclude = _fake_checkout(root)
         assert fleet.main(["index", "init", "--path", str(root)]) == 0
         assert fleet.index_symbols_dir(root).is_dir()
         assert (fleet.index_config_path(root).read_bytes()
                 == fleet.INDEX_CONFIG_DEFAULT_TOML.encode("utf-8"))
-        assert _read(root / ".gitignore").splitlines() == [".fleet-index/"]
+        assert _read(exclude).splitlines() == [".fleet-index/"]
         assert fleet.shard_path_for_source(root, "a.py").is_file()
 
-    def test_appends_to_an_existing_gitignore_without_clobbering_it(self, tmp_path):
-        root = _project(tmp_path, {"a.py": ""})
-        _write(root / ".gitignore", "*.log\nbuild/\n")
-        fleet.main(["index", "init", "--path", str(root)])
-        assert _read(root / ".gitignore") == "*.log\nbuild/\n.fleet-index/\n"
+    def test_the_tracked_gitignore_is_never_touched(self, tmp_path):
+        # THE M3 pin. `.gitignore` is tracked, and §8 mandates `fleet index
+        # init --path <worktree>` for every campaign worktree -- so writing
+        # there left every one of them dirty and un-removable. Measured, not
+        # theoretical: `git worktree remove` refuses with "contains modified
+        # or untracked files" (see the git-backed test below).
+        root = _project(tmp_path, {"a.py": "X = 1\n"})
+        _fake_checkout(root)
+        _write(root / ".gitignore", "*.log\n")
+        assert fleet.main(["index", "init", "--path", str(root)]) == 0
+        assert _read(root / ".gitignore") == "*.log\n"
 
-    def test_adds_a_final_newline_when_the_gitignore_lacks_one(self, tmp_path):
+    def test_appends_to_an_existing_exclude_without_clobbering_it(self, tmp_path):
         root = _project(tmp_path, {"a.py": ""})
-        _write(root / ".gitignore", "*.log")
+        exclude = _fake_checkout(root)
+        _write(exclude, "*.log\nbuild/\n")
         fleet.main(["index", "init", "--path", str(root)])
-        assert _read(root / ".gitignore") == "*.log\n.fleet-index/\n"
+        assert _read(exclude) == "*.log\nbuild/\n.fleet-index/\n"
+
+    def test_adds_a_final_newline_when_the_exclude_lacks_one(self, tmp_path):
+        root = _project(tmp_path, {"a.py": ""})
+        exclude = _fake_checkout(root)
+        _write(exclude, "*.log")
+        fleet.main(["index", "init", "--path", str(root)])
+        assert _read(exclude) == "*.log\n.fleet-index/\n"
 
     def test_is_idempotent_and_never_duplicates_the_entry(self, tmp_path):
         root = _project(tmp_path, {"a.py": "X = 1\n"})
+        exclude = _fake_checkout(root)
         assert fleet.main(["index", "init", "--path", str(root)]) == 0
         assert fleet.main(["index", "init", "--path", str(root)]) == 0
-        assert _read(root / ".gitignore").count(".fleet-index/") == 1
+        assert _read(exclude).count(".fleet-index/") == 1
 
-    def test_the_gitignore_entry_is_written_even_when_the_index_already_exists(
-            self, tmp_path):
-        # "unconditionally" (§8): a project whose .gitignore entry was deleted
-        # by hand gets it back on the next init, index present or not.
+    def test_the_entry_is_written_even_when_the_index_already_exists(self, tmp_path):
+        # "unconditionally" (§8): a project whose entry was deleted by hand
+        # gets it back on the next init, index present or not.
         root = _project(tmp_path, {"a.py": "X = 1\n"})
+        exclude = _fake_checkout(root)
         fleet.main(["index", "init", "--path", str(root)])
-        (root / ".gitignore").unlink()
+        exclude.unlink()
         fleet.main(["index", "init", "--path", str(root)])
-        assert ".fleet-index/" in _read(root / ".gitignore")
+        assert ".fleet-index/" in _read(exclude)
+
+    def test_a_linked_worktree_writes_into_the_common_dir(self, tmp_path):
+        # A linked worktree's `.git` is a FILE, and `info/` is a COMMON path,
+        # so the entry belongs to the parent clone -- where it covers every
+        # worktree of that repository at once.
+        parent = _project(tmp_path, {"x.py": "X = 1\n"})
+        common = parent / ".git"
+        (common / "worktrees" / "w1").mkdir(parents=True)
+        (common / "worktrees" / "w1" / "commondir").write_bytes(b"../..\n")
+        worktree = _project(tmp_path / "wt", {"a.py": "X = 1\n"})
+        (worktree / ".git").write_bytes(
+            ("gitdir: " + str(common / "worktrees" / "w1") + "\n").encode("utf-8"))
+        assert fleet.main(["index", "init", "--path", str(worktree)]) == 0
+        assert ".fleet-index/" in _read(common / "info" / "exclude")
+        assert not (worktree / ".gitignore").exists()
+
+    def test_a_project_that_is_not_a_checkout_falls_back_to_gitignore(self, tmp_path):
+        # Nothing is tracked outside a repository, so there is no file to
+        # dirty -- and a later `git init` starts out already ignoring it.
+        root = _project(tmp_path, {"a.py": "X = 1\n"})
+        assert fleet.main(["index", "init", "--path", str(root)]) == 0
+        assert _read(root / ".gitignore").splitlines() == [".fleet-index/"]
 
     def test_an_existing_config_is_not_overwritten(self, tmp_path):
         root = _project(tmp_path, {"a.py": "", "b.rs": ""})
@@ -1131,6 +1337,534 @@ class TestSafetyProperty:
         root = _project(tmp_path, {"a.py": PY_SAMPLE, "b.md": MD_SAMPLE})
         fleet.main(["index", "init", "--path", str(root)])
         assert _tmp_leftovers(root) == []
+
+
+# ---------------------------------------------------------------------------
+# §11.2 -- containment: a path handed to the index names a file INSIDE it
+#
+# These are ATTACKS, not unit tests, and the difference is load-bearing. The
+# defect they pin was reproduced on a build whose own test asserted only an
+# exit code -- the deleting build returned a non-zero code with a note that
+# read like ordinary housekeeping, and the assertion passed. So every test
+# here plants a REAL file and a REAL directory outside the index root, aims a
+# traversal at them, and asserts THE FILE IS STILL THERE.
+# ---------------------------------------------------------------------------
+
+def _victim(tmp_path):
+    """A real file and a real directory outside any index root."""
+    victim_dir = tmp_path / "victim"
+    victim_dir.mkdir(parents=True, exist_ok=True)
+    precious = victim_dir / "precious.tsv"
+    precious.write_bytes(b"do not delete\n")
+    return victim_dir, precious
+
+
+def _link_dir(link, target):
+    """A directory reparse point -- symlink where that works, junction on
+    win32, where an unprivileged symlink is refused but `mklink /J` is not.
+    False if this platform will make neither."""
+    try:
+        os.symlink(str(target), str(link), target_is_directory=True)
+        return os.path.isdir(link)
+    except (OSError, NotImplementedError, AttributeError):
+        pass
+    if os.name != "nt":
+        return False
+    try:
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                       capture_output=True)
+    except OSError:
+        return False
+    return os.path.isdir(link)
+
+
+# `<root>/.fleet-index/symbols/` + this = `<tmp_path>/victim/precious.tsv`,
+# with the escape hidden in the MIDDLE of the path -- the shape the old
+# "rejects a leading `../`" guard waved through.
+ESCAPE_INTERIOR = "a/../../../../victim/precious"
+ESCAPE_LEADING = "../../../victim/precious"
+
+
+class TestPathContainment:
+    @pytest.mark.parametrize("rel", [ESCAPE_INTERIOR, ESCAPE_LEADING])
+    def test_the_choke_point_refuses_and_the_victim_survives(self, tmp_path, rel):
+        root = _indexed_tree(tmp_path, {"a.py": "X = 1\n"})
+        victim_dir, precious = _victim(tmp_path)
+        assert fleet.shard_path_for_source(root, "x").parent.resolve() \
+            == fleet.index_symbols_dir(root).resolve()
+        with pytest.raises(fleet.IndexPathError):
+            fleet.verified_shard_rows(root, rel)
+        assert precious.is_file()
+        assert precious.read_bytes() == b"do not delete\n"
+        assert victim_dir.is_dir()
+
+    @pytest.mark.parametrize("rel", [ESCAPE_INTERIOR, ESCAPE_LEADING])
+    def test_the_update_cli_refuses_and_the_victim_survives(
+            self, tmp_path, capsys, rel):
+        root = _project(tmp_path, {"a.py": "X = 1\n"})
+        fleet.main(["index", "init", "--path", str(root)])
+        victim_dir, precious = _victim(tmp_path)
+        capsys.readouterr()
+        rc = fleet.main(["index", "update", "--path", str(root), "--files", rel])
+        assert rc == 1
+        assert "outside" in capsys.readouterr().err
+        assert precious.is_file()
+        assert victim_dir.is_dir()
+
+    @pytest.mark.parametrize("rel", [ESCAPE_INTERIOR, ESCAPE_LEADING])
+    def test_the_library_surface_refuses_too(self, tmp_path, rel):
+        # `update_index` bypasses the CLI's argument parsing entirely. The
+        # guard lives in the primitive, so this surface is closed by the same
+        # repair rather than by a second copy of the check.
+        root = _indexed_tree(tmp_path, {"a.py": "X = 1\n"})
+        victim_dir, precious = _victim(tmp_path)
+        with pytest.raises(fleet.IndexPathError):
+            fleet.update_index(root, [rel])
+        assert precious.is_file()
+        assert victim_dir.is_dir()
+
+    def test_building_a_shard_path_at_all_is_refused(self, tmp_path):
+        with pytest.raises(fleet.IndexPathError):
+            fleet.shard_path_for_source(tmp_path, ESCAPE_INTERIOR)
+
+    @pytest.mark.parametrize("rel", ["..", "../x", "a/../../b", "a/..", "a\\..\\..\\b"])
+    def test_a_dotdot_segment_anywhere_is_refused(self, rel):
+        with pytest.raises(fleet.IndexPathError):
+            fleet._index_posix_rel(rel)
+
+    def test_a_plain_relative_path_is_still_ordinary(self):
+        assert fleet._index_posix_rel("./a/b.py") == "a/b.py"
+        assert fleet._index_posix_rel("a/..b/c.py") == "a/..b/c.py"
+
+    def test_an_absolute_path_outside_the_root_is_still_refused(
+            self, tmp_path, capsys):
+        root = _project(tmp_path, {"a.py": "X = 1\n"})
+        fleet.main(["index", "init", "--path", str(root)])
+        victim_dir, precious = _victim(tmp_path)
+        capsys.readouterr()
+        assert fleet.main(["index", "update", "--path", str(root),
+                           "--files", str(precious)]) == 1
+        assert "outside" in capsys.readouterr().err
+        assert precious.is_file()
+
+    def test_a_junctioned_mirror_directory_is_not_pruned_through(self, tmp_path):
+        # The second half of the same defect, and the half a `..` check cannot
+        # reach: `stop in current.parents` is a comparison of SPELLINGS. A
+        # reparse point inside the shard tree is spelled inside it and lives
+        # outside it, so the unlink and then the rmdir walk-up leave the root
+        # entirely -- while every string in the code still looks contained.
+        root = _indexed_tree(tmp_path, {"a.py": "X = 1\n"})
+        victim_dir, precious = _victim(tmp_path)
+        symbols = fleet.index_symbols_dir(root)
+        symbols.mkdir(parents=True, exist_ok=True)
+        if not _link_dir(symbols / "sub", victim_dir):
+            pytest.skip("this platform will not create a directory reparse point")
+        # The attack is real: that path IS the victim file, reached from
+        # inside the shard tree with no `..` anywhere.
+        assert (symbols / "sub" / "precious.tsv").read_bytes() == b"do not delete\n"
+        assert fleet._index_prune_shard(root, "sub/precious") is False
+        assert precious.is_file()
+        assert victim_dir.is_dir()
+
+    def test_an_ordinary_orphan_is_still_pruned_and_its_directory_removed(
+            self, tmp_path):
+        # The containment guard must not turn into a prune that never prunes.
+        root = _indexed_tree(tmp_path, {"deep/er/a.py": "X = 1\n"})
+        fleet.verified_shard_rows(root, "deep/er/a.py")
+        shard = fleet.shard_path_for_source(root, "deep/er/a.py")
+        assert shard.is_file()
+        assert fleet._index_prune_shard(root, "deep/er/a.py") is True
+        assert not shard.exists()
+        assert not shard.parent.exists()
+        assert not shard.parent.parent.exists()
+        assert fleet.index_symbols_dir(root).is_dir()
+
+
+# ---------------------------------------------------------------------------
+# §8 -- the source is read ONCE, so a shard can never carry A's header over
+# B's rows
+# ---------------------------------------------------------------------------
+
+def _atomic_source_write(path, raw):
+    """Replace a source file's bytes atomically, so a concurrent reader always
+    observes one whole version and never a partial write."""
+    tmp = path.parent / (path.name + ".churn")
+    try:
+        tmp.write_bytes(raw)
+        for _ in range(400):
+            try:
+                os.replace(str(tmp), str(path))
+                return
+            except PermissionError:
+                time.sleep(0.001)
+    except OSError:
+        pass
+
+
+class TestTheSourceIsReadOnce:
+    A = "def alpha():\n    pass\n"
+    B = "\n\n\ndef beta():\n    pass\n"
+    # Bigger bodies for the concurrency probe: the race window is the gap
+    # between the hash and the parse, and `read_shard` sits inside it -- so a
+    # file with many symbols (a fat shard to read back) widens the window
+    # without touching a line of production code.
+    BIG_A = "".join("def a_%d():\n    pass\n" % i for i in range(200))
+    BIG_B = "\n\n" + "".join("def b_%d():\n    pass\n" % i for i in range(200))
+
+    def test_a_write_between_the_hash_and_the_parse_cannot_tear_the_shard(
+            self, tmp_path, monkeypatch):
+        # The race window, forced open rather than waited for. The write is
+        # real and lands exactly where the second read used to be. With one
+        # read the parse still describes the bytes that were hashed; with two
+        # it describes the file that replaced them, and the shard that gets
+        # written is header(A) over rows(B) -- which verifies CLEAN the moment
+        # the tree returns to A, forever.
+        root = _indexed_tree(tmp_path, {"a.py": self.A})
+        real = fleet.parse_source_symbols
+
+        def parse_after_a_concurrent_write(source_path, lang=None, raw=None):
+            _write(root / "a.py", self.B)
+            return real(source_path, lang, raw)
+
+        monkeypatch.setattr(fleet, "parse_source_symbols",
+                            parse_after_a_concurrent_write)
+        got = fleet.verified_shard_rows(root, "a.py")
+        assert [r[0] for r in got["rows"]] == ["alpha"]
+        header, rows = fleet.read_shard(fleet.shard_path_for_source(root, "a.py"))
+        assert header == fleet.header_for_bytes(self.A.encode("utf-8"), "a.py")
+        assert [r[0] for r in rows] == ["alpha"]
+
+    def test_the_build_path_reads_once_too(self, tmp_path, monkeypatch):
+        # `_index_refresh_one` had the identical two-read shape, and it is the
+        # path a MANAGER runs while a worker edits the tree -- the likelier of
+        # the two to meet a concurrent writer, not the rarer.
+        root = _project(tmp_path, {"a.py": self.A})
+        fleet.main(["index", "init", "--path", str(root)])
+        real = fleet.parse_source_symbols
+
+        def parse_after_a_concurrent_write(source_path, lang=None, raw=None):
+            _write(root / "a.py", self.B)
+            return real(source_path, lang, raw)
+
+        monkeypatch.setattr(fleet, "parse_source_symbols",
+                            parse_after_a_concurrent_write)
+        fleet.main(["index", "build", "--path", str(root), "--force"])
+        header, rows = fleet.read_shard(fleet.shard_path_for_source(root, "a.py"))
+        assert header == fleet.header_for_bytes(self.A.encode("utf-8"), "a.py")
+        assert [r[0] for r in rows] == ["alpha"]
+
+    def test_a_concurrent_writer_never_persists_a_torn_shard(self, tmp_path):
+        # The same defect without any injection at all: a writer thread
+        # flipping one file between two versions while the choke point
+        # refreshes it. Measured at 2,037 torn shards in 9,811 refreshes (21%)
+        # on the two-read build.
+        root = _indexed_tree(tmp_path, {"a.py": self.BIG_A})
+        shard = fleet.shard_path_for_source(root, "a.py")
+        expected = {}
+        for body in (self.BIG_A, self.BIG_B):
+            raw = body.encode("utf-8")
+            expected[fleet.header_for_bytes(raw, "a.py")["sha"]] = [
+                r[0] for r in fleet.parse_source_symbols(
+                    root / "a.py", "python", raw=raw)]
+        stop = threading.Event()
+
+        def churn():
+            flip = 0
+            while not stop.is_set():
+                body = self.BIG_A if flip % 2 else self.BIG_B
+                _atomic_source_write(root / "a.py", body.encode("utf-8"))
+                flip += 1
+
+        writer = threading.Thread(target=churn, daemon=True)
+        writer.start()
+        try:
+            for _ in range(600):
+                got = fleet.verified_shard_rows(root, "a.py")
+                if got["status"] == "ok":
+                    assert [r[0] for r in got["rows"]] \
+                        == expected[got["header"]["sha"]]
+                on_disk = fleet.read_shard(shard)
+                if on_disk is not None:
+                    assert [r[0] for r in on_disk[1]] \
+                        == expected[on_disk[0]["sha"]]
+        finally:
+            stop.set()
+            writer.join(timeout=10)
+
+
+# ---------------------------------------------------------------------------
+# §8 -- the staleness key is the WHOLE header, not just the hash
+# ---------------------------------------------------------------------------
+
+class TestHeaderComparisonUsesEveryColumn:
+    """`existing[0] == header`, and each column earns its place.
+
+    Not a hypothetical: this wave changed how `lines` is counted (a CR-only
+    file used to count as one line while `ast` numbered its symbols 1..N), so
+    shards written by the previous rule carry the SAME hash and a different
+    line count. A hash-only comparison serves those shards forever."""
+
+    def _corrupt_header_column(self, shard, index, value):
+        head, _, body = _read(shard).partition("\n")
+        fields = head.split("\t")
+        fields[index] = value
+        shard.write_bytes(("\t".join(fields) + "\n" + body).encode("utf-8"))
+
+    @pytest.mark.parametrize("index,value", [(2, "99"), (3, "rust")])
+    def test_a_matching_hash_with_another_column_wrong_is_stale(
+            self, tmp_path, index, value):
+        root = _indexed_tree(tmp_path, {"a.py": "def f():\n    pass\n"})
+        fleet.verified_shard_rows(root, "a.py")
+        shard = fleet.shard_path_for_source(root, "a.py")
+        self._corrupt_header_column(shard, index, value)
+        assert fleet.read_shard(shard) is not None      # readable, just wrong
+        got = fleet.verified_shard_rows(root, "a.py")
+        assert got["refreshed"] is True
+        assert fleet.read_shard(shard)[0] == fleet.source_header(
+            root / "a.py", "a.py")
+
+    @pytest.mark.parametrize("index,value", [(2, "99"), (3, "rust")])
+    def test_status_reports_it_stale_too(self, tmp_path, index, value):
+        root = _indexed_tree(tmp_path, {"a.py": "def f():\n    pass\n"})
+        fleet.verified_shard_rows(root, "a.py")
+        self._corrupt_header_column(
+            fleet.shard_path_for_source(root, "a.py"), index, value)
+        assert fleet.index_status(root)["stale"] == ["a.py"]
+
+
+# ---------------------------------------------------------------------------
+# §5/§6 -- where a line ends, and where a field is escaped
+# ---------------------------------------------------------------------------
+
+class TestLineSplittingRule:
+    def test_only_the_three_real_terminators_split_a_line(self):
+        assert fleet._index_split_lines("a\r\nb\rc\nd") == ["a", "b", "c", "d"]
+        assert fleet._index_split_lines("a\n") == ["a"]
+        assert fleet._index_split_lines("") == []
+        # `str.splitlines()` breaks on all of these; nothing else in the
+        # toolchain does -- not `bytes.splitlines`, not `ast`, not git.
+        for exotic in ("\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85",
+                       "\u2028", "\u2029"):
+            assert fleet._index_split_lines("a" + exotic + "b") == ["a" + exotic + "b"]
+
+    def test_the_text_rule_and_the_byte_rule_agree(self):
+        for body in ("a\nb\n", "a\r\nb\r\n", "a\rb\r", "a\nb", "", "a\x0cb\n"):
+            assert len(fleet._index_split_lines(body)) \
+                == len(body.encode("utf-8").splitlines())
+
+    def test_a_form_feed_does_not_move_a_markdown_coordinate(self, tmp_path):
+        src = _write(tmp_path / "d.md", "# A\npage\x0cbreak\n## B\ntail\n")
+        assert fleet.parse_source_symbols(src, "markdown") == [
+            ("A", 1, 4, "section", ""), ("B", 3, 4, "section", "")]
+        assert fleet.source_header(src, "d.md")["lines"] == 4
+
+    def test_a_CR_only_python_source_counts_the_lines_its_parser_numbers(
+            self, tmp_path):
+        src = tmp_path / "a.py"
+        src.write_bytes(b"A = 1\rB = 2\rC = 3\rD = 4\rE = 5\r")
+        header = fleet.source_header(src, "a.py")
+        rows = fleet.parse_source_symbols(src, "python")
+        assert header["lines"] == 5
+        assert rows[-1] == ("E", 5, 5, "const", "")
+        # The defect stated as the property it broke: a shard's own rows may
+        # not cite a line past the end its own header declares.
+        assert max(r[2] for r in rows) <= header["lines"]
+
+    def test_a_CR_only_markdown_source_is_split_into_its_headings(self, tmp_path):
+        src = tmp_path / "d.md"
+        src.write_bytes(b"# a\r# b\r")
+        assert fleet.parse_source_symbols(src, "markdown") == [
+            ("a", 1, 1, "section", ""), ("b", 2, 2, "section", "")]
+        assert fleet.source_header(src, "d.md")["lines"] == 2
+
+
+class TestParseTimeSanitisation:
+    """Escaping happens in the PARSER, and the pin is a parsed source.
+
+    The previous test called `_index_tsv_field` in the test body and compared
+    the result to itself through render/read -- so deleting the escape from
+    `parse_source_symbols` left it green. What the escape actually buys is
+    that a fresh parse and a shard read return the SAME rows; that is only
+    observable end to end."""
+
+    def test_a_tab_in_a_heading_is_escaped_by_the_parser(self, tmp_path):
+        src = _write(tmp_path / "d.md", "## a\tb\n")
+        assert fleet.parse_source_symbols(src, "markdown") == [
+            ("a\\tb", 1, 1, "section", "")]
+
+    def test_a_tabbed_source_survives_a_round_trip_through_a_shard(self, tmp_path):
+        root = _indexed_tree(tmp_path, {"d.md": "# top\n## a\tb\n### c\td\n"})
+        refreshed = fleet.verified_shard_rows(root, "d.md")
+        cached = fleet.verified_shard_rows(root, "d.md")
+        assert refreshed["refreshed"] is True and cached["refreshed"] is False
+        assert refreshed["rows"] == cached["rows"]
+        assert [r[0] for r in cached["rows"]] == ["top", "a\\tb", "c\\td"]
+        # And the shard is still a five-column TSV: an unescaped tab would
+        # have made the second row six fields, which `read_shard` rejects
+        # outright -- the shard would read as corrupt on every single access.
+        body = _read(fleet.shard_path_for_source(root, "d.md")).splitlines()[1:]
+        assert all(len(line.split("\t")) == 5 for line in body)
+
+    def test_a_newline_bearing_field_cannot_add_a_row(self, tmp_path):
+        # Same class, other substitution: a stripped newline is what keeps one
+        # symbol from rendering as two shard rows.
+        assert fleet._index_tsv_field("a\r\nb") == "ab"
+
+
+# ---------------------------------------------------------------------------
+# §5/§8 -- the rows handed back do not depend on whether a refresh happened
+# ---------------------------------------------------------------------------
+
+class TestRowOrderIsStableAcrossARefresh:
+    @pytest.mark.parametrize("body", ["ZED = ALPHA = 1\n", "ZED = 1; ALPHA = 2\n"])
+    def test_cached_and_refreshed_answer_identically(self, tmp_path, body):
+        root = _indexed_tree(tmp_path, {"a.py": body})
+        refreshed = fleet.verified_shard_rows(root, "a.py")
+        cached = fleet.verified_shard_rows(root, "a.py")
+        assert refreshed["refreshed"] is True
+        assert cached["refreshed"] is False
+        assert refreshed["rows"] == cached["rows"]
+        assert [r[0] for r in cached["rows"]] == ["ALPHA", "ZED"]
+
+    def test_the_digest_does_not_change_across_a_refresh(self, tmp_path):
+        root = _indexed_tree(tmp_path, {"a.py": "ZED = ALPHA = 1\n"})
+        refreshed = fleet.verified_shard_rows(root, "a.py")
+        cached = fleet.verified_shard_rows(root, "a.py")
+        assert fleet.render_digest("a.py", refreshed["header"], refreshed["rows"]) \
+            == fleet.render_digest("a.py", cached["header"], cached["rows"])
+
+    def test_the_parser_itself_emits_the_shard_order(self, tmp_path):
+        # Repaired at the cause: there is one order, `_index_row_key`, and the
+        # parser emits it. `render_shard`'s sort is then a no-op on real rows
+        # rather than a second, divergent definition.
+        src = _write(tmp_path / "a.py", "ZED = ALPHA = 1\n")
+        rows = fleet.parse_source_symbols(src, "python")
+        assert rows == sorted(rows, key=fleet._index_row_key)
+        assert [r[0] for r in rows] == ["ALPHA", "ZED"]
+
+
+# ---------------------------------------------------------------------------
+# §11.1 -- the boundary rule, applied to the BUILD walking down
+# ---------------------------------------------------------------------------
+
+class TestBuildSideRepositoryBoundary:
+    def test_a_nested_linked_worktree_is_not_indexed(self, tmp_path):
+        root = _indexed_tree(tmp_path, {"a.py": "X = 1\n",
+                                        ".claude/worktrees/w1/b.py": "Y = 2\n"})
+        (root / ".claude" / "worktrees" / "w1" / ".git").write_bytes(
+            b"gitdir: /elsewhere/.git/worktrees/w1\n")
+        assert fleet.index_source_files(root) == ["a.py"]
+
+    def test_a_nested_git_directory_stops_the_walk_too(self, tmp_path):
+        root = _indexed_tree(tmp_path, {"a.py": "X = 1\n", "vendor/dep/c.py": "Z = 3\n"})
+        (root / "vendor" / "dep" / ".git").mkdir(parents=True)
+        assert fleet.index_source_files(root) == ["a.py"]
+
+    def test_the_root_itself_is_allowed_to_be_a_checkout(self, tmp_path):
+        # The root nearly always IS one, so the fence tests entries BELOW the
+        # root only -- which is what filtering `dirnames` rather than `dirpath`
+        # buys.
+        root = _indexed_tree(tmp_path, {"a.py": "X = 1\n"})
+        (root / ".git").mkdir()
+        assert fleet.index_source_files(root) == ["a.py"]
+
+    def test_a_junction_does_not_leak_a_file_from_outside_the_root(self, tmp_path):
+        outside = tmp_path / "outside"
+        _write(outside / "leak.py", "SECRET = 1\n")
+        root = _indexed_tree(tmp_path, {"a.py": "X = 1\n"})
+        if not _link_dir(root / "linked", outside):
+            pytest.skip("this platform will not create a directory reparse point")
+        # `os.walk` does not follow a POSIX symlink, but it descends a win32
+        # junction quite happily -- and the shard it writes claims the file
+        # lives inside this root.
+        assert (root / "linked" / "leak.py").is_file()
+        assert fleet.index_source_files(root) == ["a.py"]
+        fleet.main(["index", "build", "--path", str(root)])
+        assert not fleet.shard_path_for_source(root, "linked/leak.py").exists()
+
+
+# ---------------------------------------------------------------------------
+# §8/§13 -- `init` may not dirty a tracked file
+# ---------------------------------------------------------------------------
+
+class TestAWorktreeStaysRemovableAfterInit:
+    """§13 finding 2b, re-measured.
+
+    That row disposed the dirty-tracked-file hazard as unreachable once
+    tracked mode was cut. §8 then mandated `fleet index init --path <worktree>`
+    for every campaign worktree, and `init` wrote to the tracked `.gitignore`
+    -- so every worktree fleet creates became un-removable. This is the
+    measurement, against real git, that the disposition was false."""
+
+    def _git(self, git, *args, cwd, env):
+        return subprocess.run([git, *args], cwd=str(cwd), env=env,
+                              capture_output=True, text=True)
+
+    def test_git_worktree_remove_still_works(self, tmp_path):
+        git = shutil.which("git")
+        if git is None:
+            pytest.skip("git is not on PATH")
+        env = dict(os.environ,
+                   GIT_CONFIG_NOSYSTEM="1",
+                   GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
+                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.invalid")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        run = lambda *a, cwd=repo: self._git(git, *a, cwd=cwd, env=env)
+        assert run("init", "-q").returncode == 0
+        _write(repo / "a.py", "X = 1\n")
+        _write(repo / ".gitignore", "*.log\n")       # TRACKED, as in a real repo
+        assert run("add", "-A").returncode == 0
+        assert run("commit", "-q", "-m", "seed").returncode == 0
+        worktree = tmp_path / "wt"
+        added = run("worktree", "add", "-q", str(worktree), "-b", "side")
+        assert added.returncode == 0, added.stderr
+
+        assert fleet.main(["index", "init", "--path", str(worktree)]) == 0
+        assert fleet.shard_path_for_source(worktree, "a.py").is_file()
+
+        status = run("status", "--porcelain", cwd=worktree)
+        assert status.stdout == "", status.stdout
+        removed = run("worktree", "remove", str(worktree))
+        assert removed.returncode == 0, removed.stderr
+        assert _read(repo / ".gitignore") == "*.log\n"
+
+
+# ---------------------------------------------------------------------------
+# §6/§9 -- a build that could not index a file does not exit 0
+# ---------------------------------------------------------------------------
+
+class TestIndexExitCodes:
+    def test_build_exits_nonzero_when_a_file_failed(
+            self, tmp_path, capsys, monkeypatch):
+        root = _project(tmp_path, {"a.py": "X = 1\n"})
+        fleet.main(["index", "init", "--path", str(root)])
+        monkeypatch.setattr(fleet, "write_shard_atomic", lambda *a, **kw: False)
+        capsys.readouterr()
+        assert fleet.main(["index", "build", "--path", str(root), "--force"]) == 1
+        assert "failed 1" in capsys.readouterr().out
+
+    def test_update_exits_nonzero_when_a_file_failed(
+            self, tmp_path, capsys, monkeypatch):
+        root = _project(tmp_path, {"a.py": "X = 1\n"})
+        fleet.main(["index", "init", "--path", str(root)])
+        monkeypatch.setattr(fleet, "write_shard_atomic", lambda *a, **kw: False)
+        _write(root / "a.py", "X = 2\n")
+        capsys.readouterr()
+        assert fleet.main(
+            ["index", "update", "--path", str(root), "--files", "a.py"]) == 1
+
+    def test_init_exits_nonzero_when_its_first_build_failed(
+            self, tmp_path, capsys, monkeypatch):
+        root = _project(tmp_path, {"a.py": "X = 1\n"})
+        monkeypatch.setattr(fleet, "write_shard_atomic", lambda *a, **kw: False)
+        capsys.readouterr()
+        assert fleet.main(["index", "init", "--path", str(root)]) == 1
+
+    def test_a_clean_run_still_exits_zero(self, tmp_path):
+        root = _project(tmp_path, {"a.py": "X = 1\n"})
+        assert fleet.main(["index", "init", "--path", str(root)]) == 0
+        assert fleet.main(["index", "build", "--path", str(root)]) == 0
 
 
 # ---------------------------------------------------------------------------
