@@ -416,6 +416,13 @@ directly and treats `not_initialized` as a definite *"there are no records"*. Co
 them would have refused the §9 legacy upgrade on every fresh install — which is how I found
 it, from the pin rather than from the argument.
 
+> **Amended by wave 3 (§W3, `fix/corrupt-glob`).** *Uninitialised counts as READ* is true of
+> a fresh install and **false of a registry that was corrupt a moment ago**, because
+> `_quarantine_registry` RENAMES the file aside: doctor turns `unreadable` into
+> `not_initialized`, and this wave's own refusal text names doctor as the remedy. The row
+> below now reads *"registry absent AND no quarantine artifact → False; absent WITH one →
+> None"*. The fresh-install lane is unchanged.
+
 **Two consumers, two thresholds, and that is the design rather than an inconsistency.**
 
 - **The §6.5 gate refuses on `True` alone.** `None` still passes. The gate sits ahead of
@@ -557,3 +564,158 @@ them. `docs/OPERATOR-GATES.md`, `docs/SPEC.md`, `three-tier` §11.3 and claim-no
 §13 are unedited. MINOR 2 (`fleet doctor` quarantining the registry it was invoked to
 diagnose) is left alone as the brief directs, and so is the inherited §9 legacy-arm unfiled
 refusal.
+
+---
+
+# W3 — `fix/corrupt-glob`: the corrupt→absent conversion
+
+Builder: worker `id-glob`. Brief: `state/tasks/id-glob.md`, from a gate reviewer's
+three-step live repro. Branch cut from the verified identity merge `8a5f9bb`.
+
+**Verdict on the brief: right on the defect, right on the remedy, and wrong on the one
+thing it told me to measure rather than assume.** It doubted the escalation record's claim
+that `fleet status` / `peek` / `result` also quarantine. They do. Details in §W3.4.
+
+## W3.1 The numbers
+
+| | py3.13 | py3.10 |
+|---|---|---|
+| baseline at `8a5f9bb` | 2468 passed / 11 skipped | 2468 passed / 11 skipped |
+| after wave 3 | **2487 passed / 11 skipped** | **2487 passed / 11 skipped** |
+
+**+19 tests, 0 regressions**, all in `tests/test_identity_quarantine_glob.py`.
+
+Receipts, re-run on this tree and unchanged from wave 2 — the one WARN is the inherited
+volatile-mtime warning on a path outside the repo:
+
+    $ py -3.13 tools/verify_receipts.py --self-test --strict docs/specs/claim-nonce.md
+    SELF-TEST PASSED: a one-word paraphrase inside a pasted receipt is caught.
+    EXTRACTION SELF-TEST PASSED: a receipt that stops being parsed is reported, not silently dropped.
+    parsed receipts: 60/61 reproduce exactly (57 fenced blocks, 0 unclassified, 0 volatile-skipped)
+    VERDICT:         pass -- 0 failure(s), 1 warning(s)
+
+## W3.2 The defect — two registry states that are one SEQUENCE
+
+Wave 2 closed the §9 legacy upgrade against an ABSTAINING registry. What it left open is
+that *corrupt* and *absent* are not independent hazards, because fleet's own repair verb
+walks one into the other. Driven live in a throwaway `FLEET_HOME`, pre-change:
+
+1. corrupt `state/fleet.json` → `sup-heartbeat` **refuses**, and the refusal says
+   *"Repair `state/fleet.json` (see `fleet doctor`), or run this from a session the
+   registry can place."*
+2. `fleet doctor` → `_quarantine_registry` **renames** it to
+   `state/fleet.json.corrupt.<ts>`. There is now no `state/fleet.json` at all.
+3. the SAME command, no `--nonce` ever passed → **rc 0**, `NONCE:` on stdout,
+   `"nonce_seq": 1` written into INCARNATION.
+
+The refusal message named the command that opened the door. `unreadable` ⇒ `registry =
+None` ⇒ abstention ⇒ the arm refuses; `not_initialized` counted as a successful read ⇒ an
+affirmative *"no record carries this sid"* ⇒ the arm grants. The rename converts the
+second into the first — and the §9 arm is the one arm that mints generation 1 on bare sid
+equality with **no generation presented**, so reaching it through *"the registry cannot
+say"* is a privilege escalation.
+
+## W3.3 The remedy — the quarantine-artifact glob, named once
+
+`not_initialized` stays an affirmative answer **only when no `state/fleet.json.corrupt.*`
+artifact sits beside it**. No artifact = nothing was ever written here = a fresh install.
+An artifact = a registry that was corrupt moments ago wearing a different name = abstain,
+exactly as corrupt does.
+
+**What it is NOT: making `not_initialized` abstain unconditionally.** That is the obvious
+fix, it is wrong, and the brief carried the measurement — mutant W11 refuses the §9 upgrade
+on every fresh install and kills 39 tests. `test_a_fresh_install_STILL_earns_the_upgrade`
+is the test that stops it, and fault injection 2 (invert the glob check) is what proves the
+test can still see it.
+
+**The glob was already spelled twice in `bin/fleet.py` for the same question**, so this
+wave introduces `_quarantine_artifacts()` and the two existing sites
+(`_husk_sweep_refuses`, `_doctor_check_autoclean`) now read it. One rule, one remedy —
+the operator restores the quarantined file and deletes the artifact, which re-arms all
+three readers at once. A lint pins the literal pattern to exactly one occurrence in the
+source. The pre-existing `try/except OSError` at the doctor site moved into the helper, so
+the husk-sweep site is now tolerant where it previously was not; that is a strict
+loosening of a check that cannot fire from a real filesystem (`Path.glob` on a missing
+directory yields nothing, it does not raise).
+
+**Scope of the threshold change, pinned in both directions:**
+
+| state | before | after |
+|---|---|---|
+| registry valid | read, verdict stands | unchanged — the gate is on `not_initialized` alone |
+| registry valid + stale artifact | read | **unchanged** — an artifact outlives its incident by design, and `_husk_sweep_refuses` tells the operator to restore first and delete second |
+| registry corrupt | abstain | unchanged |
+| registry absent, no artifact | affirmative False | **unchanged** — the fresh-install carve-out |
+| registry absent + artifact | affirmative False | **abstain** |
+
+The §6.5 gate still refuses on `True` alone, so an abstention still passes it: a holder
+presenting a live generation against a quarantined registry keeps working, and the
+`sup-release` that ends the incident is not bricked. Pinned by
+`test_an_artifact_does_not_brick_the_6_5_gate_on_a_HELD_claim`.
+
+**The glob costs nothing on the hot path.** `ok or (reason == "not_initialized" and not
+_quarantine_artifacts())` short-circuits: a healthy registry never globs, and neither does
+a corrupt one.
+
+**One thing beyond the letter of the brief, disclosed.** `_identity_abstention_note` gained
+a third clause. That helper exists precisely because *"the registry cannot confirm"* hides
+remedies that differ — and the new state's remedy differs from both existing ones. Told
+only the generic note, an operator reads *"Repair `state/fleet.json` (see `fleet doctor`)"*
+and runs the command that **caused** the state; doctor finds nothing to repair and the loop
+closes. The clause names the artifact and says to restore it. A still-corrupt registry with
+an artifact from an earlier incident keeps the plain note — pinned both ways.
+
+## W3.4 The measurement the brief asked for, and it goes against the brief
+
+The brief doubted the escalation record: *"views never quarantine a corrupt registry"* is
+standing doctrine (root `CLAUDE.md`, `docs/specs/terminal-surface.md` D4). Measured by
+driving each verb against a corrupt registry in a fresh throwaway `FLEET_HOME` per verb:
+
+| command | rc | `state/fleet.json` |
+|---|---|---|
+| `fleet status` | 1 | **RENAMED ASIDE** |
+| `fleet status --json --stale-ok` | 0 | survives |
+| `fleet peek w1` | 1 | **RENAMED ASIDE** |
+| `fleet result w1` | 1 | **RENAMED ASIDE** |
+| `fleet doctor` (control) | 1 | renamed aside |
+
+**The escalation record is right and the brief's doubt is wrong.** Only the
+`--stale-ok` snapshot path honours D4. `cmd_status` (bare), `cmd_peek` and `cmd_result`
+each take `fleet_lock()` and call `load_registry()`, which quarantines. The doctrine
+sentence names `/fleet:*` as views, and `commands/status.md`, `commands/peek.md`,
+`commands/result.md` and `commands/overview.md` all shell out to the **bare** verbs — so
+the slash commands the doctrine is written about are exactly the ones that write.
+
+**Not fixed here**, as the brief directs: a second defect, scope for a follow-up. Two
+things about it that matter for whoever takes it:
+
+- It is not merely a doctrine violation, it is a **second mouth on this wave's door**.
+  Every one of those three verbs performs step 2 of the repro, so an operator who reacts to
+  a corrupt registry by running `/fleet:status` — the most natural first move there is —
+  converts the abstaining state into the absent one without ever being told they did.
+  This wave closes the door for all of them at once, because the fix is at the §9 arm and
+  not at doctor.
+- The three verbs need the registry's records to do their job, so the fix is not
+  "route them through `status_snapshot`" for `peek`/`result`. It is that `load_registry`'s
+  quarantine is a write on a read path, which is the same shape as the already-queued
+  "make `fleet doctor` report-only by default" item and should probably be decided with it.
+
+## W3.5 Fault injection
+
+Each injection was made on the committed tree, kept line-count-neutral so the
+`retired_sids` citation harness could not add noise, and reverted after:
+
+| injection | RED test |
+|---|---|
+| 1. revert the gate (`not_initialized` unconditional) | `TestTheThreeStepRepro::test_step_3_the_QUARANTINED_registry_MUST_STILL_REFUSE` |
+| 2. invert the gate (abstain when NO artifact) | `TestTheFreshInstallCarveOutSurvives::test_a_fresh_install_STILL_earns_the_upgrade` |
+| 3. glob the literal `fleet.json.corrupt` (no `*`) | `TestTheThreeStepRepro::test_step_3_the_QUARANTINED_registry_MUST_STILL_REFUSE` |
+| 4. glob the process cwd instead of `state_dir()` | `TestTheFreshInstallCarveOutSurvives::test_the_glob_reads_state_dir_NOT_the_process_cwd` |
+
+## W3.6 What this wave did not touch
+
+`fleet doctor`'s quarantine behaviour (the already-queued report-only item), the §6.5
+registry-keyed gate (which **stands** — operator, 2026-07-27), the identity resolver's
+design, the view-quarantine defect above, and every open operator question. The four
+`retired_sids` writer citations were re-pinned to `:5015, :5462, :9509, :14072`, as they
+are on any wave that changes line counts in `bin/fleet.py`.
