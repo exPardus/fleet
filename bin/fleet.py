@@ -11463,8 +11463,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :4955, :5402, :9452,
-    :14003), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :4956, :5403, :9453,
+    :14004), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -12108,8 +12108,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:4955, :5402, :9452,
-    #     :14003) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:4956, :5403, :9453,
+    #     :14004) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -15081,6 +15081,389 @@ def find_index_root(start=None):
     return None
 
 
+# --- the verify-then-get primitive (§8/§11.3) -------------------------------
+
+def verified_shard_rows(root, rel, no_write=False, sleep=None) -> dict:
+    """THE choke point. Every read path goes through here, and it never hands
+    back a coordinate it has not just verified against the file on disk.
+
+    That is the single most important property in the spec (§8, §10): a stale
+    line number does not error -- it silently slices the wrong code, and the
+    worker cannot tell. So the shard is consulted only AFTER re-hashing the
+    source, and a shard that is stale, missing, corrupt or truncated is
+    re-parsed rather than trusted.
+
+    Returns a dict:
+      status    "ok"       -- `rows` are verified against the bytes on disk
+                "withheld" -- no-write mode met a shard it may not repair
+                "orphan"   -- the source file is gone or unreadable
+      rows      verified rows, [] unless status is "ok"
+      refreshed the source was re-parsed this call
+      written   the on-disk shard actually changed (a pruned orphan counts)
+      note      one line for stderr, or None
+
+    Two edges worth stating, because both are easy to get backwards:
+
+    - `written` False with status "ok" is the §11.3 abandoned-replace case.
+      The caller is still answered, from this run's own verified parse; only
+      the on-disk shard stays stale, and the next read repairs it. Degrading
+      to "withheld" there would turn a Windows sharing violation into a
+      user-visible failure for no safety gain.
+    - `no_write` withholds rather than serving. A read-only mount or a
+      `git bisect` is not a reason to relax the verification rule."""
+    rel = _index_posix_rel(rel)
+    root = Path(root)
+    source = root / rel
+    shard = shard_path_for_source(root, rel)
+    result = {"rel": rel, "status": "ok", "header": None, "rows": [],
+              "refreshed": False, "written": False, "note": None}
+    try:
+        header = source_header(source, rel)
+    except OSError as exc:
+        result["status"] = "orphan"
+        if source.exists():
+            # Present but unreadable (a directory in the slot, a permission
+            # denial). NOT pruned: the shard may well be the only surviving
+            # description of a file whose readability is a transient problem.
+            result["note"] = f"{rel}: source unreadable ({exc}) -- hits suppressed"
+            return result
+        result["note"] = f"{rel}: source file is gone -- hits suppressed"
+        if not no_write and _index_prune_shard(root, rel):
+            result["written"] = True
+            result["note"] += "; orphan shard pruned"
+        return result
+    existing = read_shard(shard)
+    if existing is not None and existing[0] == header:
+        result["header"], result["rows"] = existing
+        return result
+    if no_write:
+        result["status"] = "withheld"
+        result["note"] = (f"{rel}: shard is stale or unreadable and no-write mode "
+                          f"forbids repairing it -- hits withheld")
+        return result
+    rows = parse_source_symbols(source, header["lang"])
+    result["header"] = header
+    result["rows"] = rows
+    result["refreshed"] = True
+    result["written"] = write_shard_atomic(shard, header, rows, sleep=sleep)
+    if not result["written"]:
+        result["note"] = (f"{rel}: shard refresh could not land -- answering from "
+                          f"this run's own parse, the on-disk shard stays stale")
+    return result
+
+
+# --- enumeration and the build (§6/§8) --------------------------------------
+
+def _index_selects(rel, include, exclude) -> bool:
+    if not any(_index_glob_match(rel, pattern) for pattern in include):
+        return False
+    return not any(_index_glob_match(rel, pattern) for pattern in exclude)
+
+
+def index_source_files(root, config=None) -> list:
+    """Every source path the index covers, as sorted forward-slash relatives."""
+    root = Path(root)
+    if config is None:
+        config = load_index_config(root)
+    include, exclude = config["include"], config["exclude"]
+    out = []
+    for dirpath, dirnames, filenames in os.walk(str(root)):
+        dirnames[:] = [d for d in dirnames if d not in INDEX_SKIP_DIR_NAMES]
+        base = Path(dirpath)
+        for name in filenames:
+            # `relative_to(...).as_posix()`, not a separator substitution:
+            # invariant 8 confines OS branching to the platform adapter, and
+            # pathlib already yields forward slashes everywhere (§11.2, §14).
+            rel = (base / name).relative_to(root).as_posix()
+            if _index_selects(rel, include, exclude):
+                out.append(rel)
+    return sorted(out)
+
+
+def index_shard_rels(root) -> list:
+    """Every source path the shard tree currently claims to describe."""
+    symbols = index_symbols_dir(root)
+    out = []
+    for dirpath, _dirnames, filenames in os.walk(str(symbols)):
+        base = Path(dirpath)
+        for name in filenames:
+            if not name.endswith(INDEX_SHARD_SUFFIX):
+                continue        # a `.idx.*.tmp` from an in-flight write
+            out.append(source_rel_from_shard(root, base / name))
+    return sorted(out)
+
+
+def _index_prune_shard(root, rel) -> bool:
+    shard = shard_path_for_source(root, rel)
+    try:
+        shard.unlink()
+    except OSError:
+        return False
+    # Leave no empty mirror directories behind, or the shard tree slowly
+    # accumulates the skeleton of every directory a project ever had.
+    stop = index_symbols_dir(root)
+    current = shard.parent
+    while current != stop and stop in current.parents:
+        try:
+            current.rmdir()
+        except OSError:
+            break
+        current = current.parent
+    return True
+
+
+def _new_index_report() -> dict:
+    return {"indexed": 0, "skipped": 0, "failed": 0, "pruned": 0,
+            "indexed_rels": [], "pruned_rels": [], "warnings": []}
+
+
+def _index_refresh_one(root, rel, force, sleep, report) -> None:
+    root = Path(root)
+    source = root / rel
+    try:
+        header = source_header(source, rel)
+    except OSError as exc:
+        report["failed"] += 1
+        report["warnings"].append(f"{rel}: unreadable ({exc}) -- skipped")
+        return
+    if not force:
+        existing = read_shard(shard_path_for_source(root, rel))
+        if existing is not None and existing[0] == header:
+            report["skipped"] += 1
+            return
+    # §6/§9: an unparseable file yields no rows, so it becomes a header-only
+    # shard and the build carries on. It is never a build failure.
+    rows = parse_source_symbols(source, header["lang"])
+    if write_shard_atomic(shard_path_for_source(root, rel), header, rows, sleep=sleep):
+        report["indexed"] += 1
+        report["indexed_rels"].append(rel)
+    else:
+        report["failed"] += 1
+        report["warnings"].append(
+            f"{rel}: shard write abandoned after the bounded replace retries -- "
+            f"the old shard is left in place (stale, not torn)")
+
+
+def build_index(root, force=False, sleep=None) -> dict:
+    """Rebuild the whole index: refresh every selected source file (skipping
+    the ones whose SHA-256 already matches unless `force`), then prune every
+    shard the selection no longer covers."""
+    root = Path(root)
+    config = load_index_config(root)
+    selected = index_source_files(root, config)
+    report = _new_index_report()
+    for rel in selected:
+        _index_refresh_one(root, rel, force, sleep, report)
+    keep = set(selected)
+    for rel in index_shard_rels(root):
+        # Both a deleted source and a source the config no longer selects: a
+        # shard that survived either one would keep answering for a file this
+        # index does not describe.
+        if rel not in keep and _index_prune_shard(root, rel):
+            report["pruned"] += 1
+            report["pruned_rels"].append(rel)
+    return report
+
+
+def update_index(root, rels, force=False, sleep=None) -> dict:
+    """Refresh exactly the named files -- the cheap path on a large tree,
+    where a full `build` walk is the expensive part."""
+    root = Path(root)
+    selected = set(index_source_files(root))
+    report = _new_index_report()
+    for rel in rels:
+        if rel in selected:
+            _index_refresh_one(root, rel, force, sleep, report)
+        elif (root / rel).exists():
+            # Honouring include/exclude here too is deliberate: a shard built
+            # for an unselected file would be pruned by the very next `build`,
+            # so writing it would be a promise this index cannot keep.
+            report["warnings"].append(
+                f"{rel}: not selected by this index's include/exclude -- skipped")
+        elif _index_prune_shard(root, rel):
+            report["pruned"] += 1
+            report["pruned_rels"].append(rel)
+            report["warnings"].append(f"{rel}: source file is gone -- orphan shard pruned")
+        else:
+            report["warnings"].append(f"{rel}: no such file, and no shard to prune")
+    return report
+
+
+def index_status(root) -> dict:
+    """Counts plus the stale/orphan/unindexed shard lists. READ-ONLY: status
+    reports staleness, it never repairs it, so an operator can see the true
+    state of an index without the act of looking changing it."""
+    root = Path(root)
+    selected = index_source_files(root)
+    selected_set = set(selected)
+    shard_rels = index_shard_rels(root)
+    stale, orphan, symbols = [], [], 0
+    for rel in shard_rels:
+        source = root / rel
+        if rel not in selected_set or not source.exists():
+            orphan.append(rel)
+            continue
+        existing = read_shard(shard_path_for_source(root, rel))
+        try:
+            header = source_header(source, rel)
+        except OSError:
+            stale.append(rel)
+            continue
+        if existing is None or existing[0] != header:
+            stale.append(rel)
+            continue
+        symbols += len(existing[1])
+    return {"root": root, "shards": len(shard_rels), "symbols": symbols,
+            "stale": stale, "orphan": orphan,
+            "unindexed": [rel for rel in selected if rel not in set(shard_rels)]}
+
+
+# --- `fleet index` CLI (§6) -------------------------------------------------
+
+# Per-file lines are capped so a first build of a large repo does not dump
+# thousands of lines into a manager's context. The suppressed count is always
+# printed -- a cap nobody is told about reads as "that was everything".
+INDEX_LIST_CAP = 20
+
+
+def _index_root_arg(args) -> Path:
+    """`--path DIR` names the INDEX ROOT on all four verbs, defaulting to cwd.
+
+    Note the deliberate asymmetry with M2's `fleet q --path GLOB`, which is a
+    filter: `q` takes no root argument (its root comes from the §11.1
+    walk-up), so the flag name is free there for the job a querying worker
+    actually needs."""
+    raw = getattr(args, "path", None)
+    try:
+        root = (Path(raw).expanduser() if raw else Path.cwd()).resolve()
+    except OSError as exc:
+        raise FleetCliError(f"--path {raw!r}: {exc}")
+    if not root.is_dir():
+        raise FleetCliError(f"--path {root} is not a directory")
+    return root
+
+
+def _require_index(root) -> None:
+    """`init` is the ONLY command that creates `.fleet-index/` (§6)."""
+    if not index_dir(root).is_dir():
+        raise FleetCliError(INDEX_NO_INDEX_MESSAGE)
+
+
+def _index_files_arg(root, raw) -> list:
+    rels = []
+    for chunk in str(raw).split(","):
+        entry = chunk.strip()
+        if not entry:
+            continue
+        candidate = Path(entry).expanduser()
+        if candidate.is_absolute():
+            try:
+                rel = candidate.resolve().relative_to(root).as_posix()
+            except (ValueError, OSError):
+                raise FleetCliError(
+                    f"--files entry {entry!r} is outside the index root {root}")
+        else:
+            rel = _index_posix_rel(entry)
+        if rel == ".." or rel.startswith("../"):
+            raise FleetCliError(
+                f"--files entry {entry!r} is outside the index root {root}")
+        if rel and rel not in rels:
+            rels.append(rel)
+    if not rels:
+        raise FleetCliError("--files named no paths")
+    return rels
+
+
+def _ensure_index_gitignore(root) -> bool:
+    """§8: `init` writes the `.gitignore` entry UNCONDITIONALLY -- committing
+    `.fleet-index/` is documented-unsupported, and the entry covers
+    `config.toml` too, so the config needs no entry of its own. Idempotent:
+    "unconditionally" means not conditional on any mode or config, not that
+    the line is appended twice."""
+    path = Path(root) / ".gitignore"
+    try:
+        text = path.read_bytes().decode("utf-8")
+    except FileNotFoundError:
+        text = ""
+    except (OSError, UnicodeDecodeError) as exc:
+        raise FleetCliError(f"{path}: cannot read to add the index entry ({exc})")
+    if any(line.strip() in (INDEX_GITIGNORE_ENTRY, INDEX_DIR_NAME)
+           for line in text.splitlines()):
+        return False
+    if text and not text.endswith("\n"):
+        text += "\n"
+    path.write_bytes((text + INDEX_GITIGNORE_ENTRY + "\n").encode("utf-8"))
+    return True
+
+
+def _print_index_report(report) -> None:
+    for rel in report["indexed_rels"][:INDEX_LIST_CAP]:
+        print(f"  + {rel}")
+    hidden = len(report["indexed_rels"]) - INDEX_LIST_CAP
+    if hidden > 0:
+        print(f"  ... and {hidden} more indexed")
+    for rel in report["pruned_rels"][:INDEX_LIST_CAP]:
+        print(f"  - {rel}")
+    hidden = len(report["pruned_rels"]) - INDEX_LIST_CAP
+    if hidden > 0:
+        print(f"  ... and {hidden} more pruned")
+    print("indexed {indexed}   skipped {skipped}   pruned {pruned}   "
+          "failed {failed}".format(**report))
+    for warning in report["warnings"]:
+        print(f"fleet: {warning}", file=sys.stderr)
+
+
+def cmd_index_init(args) -> int:
+    root = _index_root_arg(args)
+    index_symbols_dir(root).mkdir(parents=True, exist_ok=True)
+    config = index_config_path(root)
+    if not config.exists():
+        config.write_bytes(INDEX_CONFIG_DEFAULT_TOML.encode("utf-8"))
+    added = _ensure_index_gitignore(root)
+    print(f"index root: {root}")
+    print(".gitignore: " + ("entry added" if added else "entry already present"))
+    _print_index_report(build_index(root))
+    return 0
+
+
+def cmd_index_build(args) -> int:
+    root = _index_root_arg(args)
+    _require_index(root)
+    _print_index_report(build_index(root, force=args.force))
+    return 0
+
+
+def cmd_index_update(args) -> int:
+    root = _index_root_arg(args)
+    _require_index(root)
+    _print_index_report(update_index(root, _index_files_arg(root, args.files)))
+    return 0
+
+
+def cmd_index_status(args) -> int:
+    root = _index_root_arg(args)
+    _require_index(root)
+    status = index_status(root)
+    print(f"index root: {status['root']}")
+    print("shards {shards}   symbols {symbols}   stale {stale_n}   "
+          "orphan {orphan_n}   unindexed {unindexed_n}".format(
+              stale_n=len(status["stale"]), orphan_n=len(status["orphan"]),
+              unindexed_n=len(status["unindexed"]), **status))
+    for label in ("stale", "orphan", "unindexed"):
+        for rel in status[label][:INDEX_LIST_CAP]:
+            print(f"{label} {rel}")
+        hidden = len(status[label]) - INDEX_LIST_CAP
+        if hidden > 0:
+            print(f"{label} ... and {hidden} more")
+    return 0
+
+
+def cmd_index(args) -> int:
+    return {"init": cmd_index_init, "build": cmd_index_build,
+            "update": cmd_index_update, "status": cmd_index_status}[
+        args.index_command](args)
+
+
 # ---------------------------------------------------------------------------
 # CLI: argparse wiring + main()
 # ---------------------------------------------------------------------------
@@ -15239,6 +15622,28 @@ def build_parser() -> argparse.ArgumentParser:
     p_autoclean.add_argument("--fleet-home", dest="fleet_home", default=None,
                              help="explicit FLEET_HOME override; the scheduled task "
                                   "always passes this (Task Scheduler has no operator env)")
+
+    # fleet-index M1 (docs/specs/fleet-index.md §6). Opt-in per project and
+    # strictly additive: no registry read or write, no fleet.lock, no mailbox,
+    # no PID probe -- the index is not fleet state (invariant 9).
+    p_index = sub.add_parser("index", help="per-project symbol index (opt-in)")
+    index_sub = p_index.add_subparsers(dest="index_command", required=True)
+
+    p_ix_init = index_sub.add_parser(
+        "init", help="opt in: create .fleet-index/ and run the first build")
+    p_ix_build = index_sub.add_parser("build", help="rebuild an existing index")
+    p_ix_build.add_argument("--force", action="store_true",
+                            help="re-parse every file, not just the changed ones")
+    p_ix_update = index_sub.add_parser("update", help="refresh named files only")
+    # `--files`, deliberately NOT `--paths`: `--path` already means the index
+    # root here and (in M2) a glob filter on `q`, and a third meaning on the
+    # same token was the reason for the rename (§6).
+    p_ix_update.add_argument("--files", required=True,
+                             help="comma-separated source paths, relative to the index root")
+    p_ix_status = index_sub.add_parser("status", help="counts and stale shards")
+    for p_ix in (p_ix_init, p_ix_build, p_ix_update, p_ix_status):
+        p_ix.add_argument("--path", default=None,
+                          help="index root (default: the current directory)")
 
     sub.add_parser("doctor", help="run fleet health checks")
 
@@ -15463,6 +15868,8 @@ def main(argv=None) -> int:
             return cmd_archive(args)
         if args.command == "autoclean":
             return cmd_autoclean(args)
+        if args.command == "index":
+            return cmd_index(args)
         if args.command == "doctor":
             return cmd_doctor(args)
         if args.command == "sup-boot":
