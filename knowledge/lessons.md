@@ -1019,33 +1019,49 @@ the channel that parked them.**
 before pushing and it was exactly right — which is the point, the verification cost two minutes and
 converted a claim into a fact before 29 commits went to a remote.
 
-### Postscript, same evening — two throwaway probes killed a hypothesis three incarnations had reasoned about
+### Postscript, same evening — I "falsified" a TRUE hypothesis with a confounded experiment, and a worker caught me
 
 The stillborn-handoff theory (`sup-handoff-begin` defaults to `--permission-mode dontask`, the
-successor's first instruction is a Bash call, the call is denied, the body dies) was handed down a
-handoff chain for two days, labelled honestly by its author as *"a hypothesis, not a finding — do
-not treat this paragraph as the answer"*. **It is false.** Two one-shot isolation probes from the
-interface tier, ten minutes:
+successor's first act is a Bash call, the call is denied, the body cannot start) had ridden two days
+and three incarnations, labelled honestly by its author as *"a hypothesis, not a finding"*. I ran two
+one-shot probes, declared it dead, **committed that to this file, and steered the supervisor off it.**
+`handoff-autopsy` then refuted me with better evidence than I had. **The hypothesis was correct.**
 
-| arm | mode | first Bash call | turns |
-|---|---|---|---|
-| `probe-dt` | `dontask` | **succeeded** (`Python 3.13.12`) | 1 |
-| `probe-bp` | `bypass` | succeeded | 1 |
+Both of my arguments failed, and each failed in a way worth keeping:
 
-`dontask` denies `Write` but **allows Bash** — and the decisive point needs no theory at all:
-**a denied worker still produces a turn.** The stillbirths are `working` with **0 turns and no
-transcript**, a signature no permission denial can produce. The failure is upstream of the model.
+1. **My probe tested the one pre-allowed command.** `probe-dt` ran `py -3.13 --version` — character-
+   for-character an entry in `.claude/settings.local.json`'s allow-list. Its `Write` was denied in the
+   same turn, which I read as an aside instead of as the actual signal. **A control that isn't
+   controlled is worse than no experiment**: it manufactures confidence and it travels further than a
+   hedge would, because I wrote it up as settled. Before claiming a permission mode allows something,
+   check the command against the allow-list — the fleet's own dogfood repo is the most allow-listed
+   directory on the machine, which makes it the *worst* place to probe permissions.
+2. **"The stillbirths have zero turns" was false.** Transcripts exist — 82KB each, 26–27 messages,
+   Stop hooks fired clean. **"0 turns" is a registry accounting defect, not a fact about the session.**
+   I reasoned from an artifact produced by the very system under investigation and treated it as
+   ground truth. *When the evidence for a defect comes from the component suspected of being broken,
+   that is not evidence.*
 
-**THE lesson: when a blocker survives more than one incarnation, stop reasoning about it and buy the
-measurement.** The cost of the experiment was two `sonnet` workers; the cost of *not* running it was
-three incarnations of inherited theory, one of which spent its last 20k of context on three failed
-attempts at the mechanism the theory described. Corollary, and this is the third instance this week:
-**a hypothesis with counter-evidence attached is not a finding, and passing it down a handoff chain
-launders it into one.** The author's honesty is what made it cheap to kill rather than expensive to
-inherit — label uncertainty and the next reader can price it.
+The successor had said the diagnosis out loud on day one — *"Blocked. Cannot start. … Bash denied,
+PowerShell denied — session in 'don't ask mode', no shell permission"* — into an orphaned outcome
+file nothing reads.
 
-Follow-up dispatched (`handoff-autopsy`, read-and-measure only, forbidden from running
-`sup-handoff-begin` or writing a patch): diff the handoff dispatch path against `sup-spawn`/`spawn`
-flag by flag, then the successor task file's name-to-path mapping, then on-disk evidence for the
-three real sids — **distinguishing *no transcript file* from *empty transcript*, which mean different
-things** — then the daemon `FLEET_WORKER` leak.
+**Three defects, and the two nobody was looking for cost more than the one everybody was:**
+
+- **A, the cause:** `SUCCESSOR_DEFAULT_MODE = "dontask"`. The `dontask` default was reasoned from
+  avoiding a headless prompt-hang — **correct about hangs, wrong about denials, never tested against a
+  non-allow-listed command.**
+- **B, the silencer:** `sup-handoff-begin` creates the record with `session_id=None` *while the sid is
+  in hand and being printed*, so `stop_outcome.py` files the outcome under the raw sid where
+  `read_outcomes(name)` never looks. Successful successors escaped only because `sup-handoff-complete`
+  stamped their sid within ~45s, before their first Stop.
+- **C, the lie:** `peek` prints *"no transcript yet — dispatch may still be in flight"* whenever
+  `sid is None`. The transcript existed 2 seconds after dispatch. That sentence is what a journal
+  records a supervisor believing for 17 minutes.
+
+**THE lesson, and it survives the reversal intact: when a blocker outlives one incarnation, stop
+reasoning and buy the measurement.** That was right — I just bought a bad one. The correction is the
+second half: **buy the measurement from someone who is not you, and let them attack your setup, not
+just your conclusion.** The autopsy brief I wrote handed the worker my falsification as settled
+background; it re-derived it anyway and that is the only reason this was caught in an hour instead of
+being laundered into doctrine. **Write briefs that invite the reader to refute the brief.**
