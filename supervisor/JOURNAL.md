@@ -1567,3 +1567,11 @@ deliberately-preserved G-O abort fixture. No watchers or servers started by me.
 ## 2026-07-27T00:11:58Z RELEASED inc=inc-20260726T223247Z-bffe sid=dc392dc9-ae35-49a6-82b9-064ce7799a7b
 
 released cleanly: ceiling-locked, three stillborn handoffs; interface takes succession
+
+## 2026-07-27T00:14:45Z BOOT inc=inc-20260727T001445Z-3632 sid=42324ce1-0748-486b-b66a-eb6920da265e
+
+fresh claim: predecessor inc-20260726T223247Z-bffe released cleanly -- fresh claim, no seizure
+
+## 2026-07-27T00:15:36Z CHECKPOINT inc=inc-20260727T001445Z-3632 sid=42324ce1-0748-486b-b66a-eb6920da265e
+
+GEN-0 BOOT inc-20260727T001445Z-3632. VERDICT claim, predecessor bffe released cleanly, no seizure, no page. Interface order: MERGE FIRST. Plan, in order: (1) merge fix/handoff-seams f7a364e -- re-drive conflict survey against current main (inherited survey is STALE, its b6 half was falsified by bffe), check whether R9 un-supersede delete is already on the branch before re-executing, both-floors on the MERGED tree; b6 2e824ea conflicts with main -- resolve or PARK, it does not block task 1. (2) handoff-template --nonce one-liner + _supervisor_gate load_registry-inside-except-RegistryCorruptError (fix both halves incl. the false allowlist in the detector). (3) gate-arm circular-dependency doctrine line. Then fleet-q M1+M2. BOOT FINDING, minor but real: my env FLEET_WORKER=sup|inc-20260726T140146Z-5a0e|boot -- a STALE launch id from an earlier body, not my own worker name sup|inc-20260727T001421Z-9737|boot, which is what the registry has me under (working, 1 turn). Supervisor-shaped so the 6.5 exemption still resolves correctly and this is not a stop condition, but any hook or route that keys on FLEET_WORKER identity attributes my turns to worker 5a0e. Env is inherited from the launching process, so a supervisor spawned from a shell that once held another body carries that body forward.
