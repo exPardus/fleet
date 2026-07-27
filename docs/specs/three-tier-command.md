@@ -37,6 +37,15 @@ Line numbers below are this commit's; they differ from `claim-nonce.md`'s (pinne
 carries `[UNBUILT — owned by the three-tier build slice]` and a no-match receipt proving its absence
 at this commit (§Appendix A collects them).
 
+**Tag currency, 2026-07-27 (the `unbuilt-sweep` pass).** The three-tier build slice shipped
+(`c6fde34`), plus the `sup-spawn` choreography (`31e139e`) and two fix waves — so most of the
+`[UNBUILT]` tags below described a future that has since arrived, and the document was under-claiming
+what exists. Appendix A's no-match receipts remain **true at their pin** (`235421e5`) and are left
+untouched; **§Appendix A2 re-runs the same questions at `0e8d7ca`** and is the receipt for every tag
+this pass cleared. A tag still reading `[UNBUILT]` below has been re-checked against `0e8d7ca` and is
+still accurate. Where only part of a claim shipped the tag was **narrowed, not cleared** — those read
+`[PARTLY BUILT …]`.
+
 ^ `git show 235421e~0:docs/specs/three-tier-command.md` is the withdrawn PROPOSAL; not re-pasted here
 because verify would re-run it, and it is prose, not a receipt.
 
@@ -171,8 +180,10 @@ This fixes where each piece lives:
   It belongs in `supervisor/GOALS.md` — the git-tracked, human-editable, operator-owned policy file the
   supervisor already reads at boot — as a small role→tier table, **not** as a constant in a code path.
   A machine-read of that table by `sup-spawn`/`spawn` to auto-select `--model` is
-  `[UNBUILT — owned by the three-tier build slice]`; today the operator/supervisor types the alias
-  into `--model` by hand, guided by GOALS.md.
+  **[PARTLY BUILT — the `sup-spawn` arm shipped; the `spawn` arm is still `[UNBUILT]`]**:
+  `resolve_model_for_role()` reads the GOALS.md policy chain and `cmd_sup_spawn` defaults its model
+  through it, but `cmd_spawn` has no call site — for an ordinary worker the operator/supervisor still
+  types the alias into `--model` by hand, guided by GOALS.md. Receipt §A2.1.
 - **When the fleet spans providers**, a role resolves **per namespace**: cross-provider work needs
   separate `CLAUDE_CONFIG_DIR` namespaces (one daemon each), and each namespace's daemon resolves the
   same tier alias to its own provider's model. There is no per-worker mixing within one daemon — that
@@ -310,7 +321,11 @@ fresh second-tier body that limits immediately; that costs one body change to di
 step 4 handles it correctly. No shipped surface reports remaining usage per tier, so this is a real
 limit of the substrate, not an omission to be designed around.
 
-The chain, `[UNBUILT — owned by the three-tier build slice]`:
+The chain, **[PARTLY BUILT — step 2's boot verdict shipped; steps 2's registry fields and step 3's
+return logic are still `[UNBUILT]`]**. What shipped: `supervisor_claim_decision`'s `limit-transfer`
+verdict, which authorizes the outside-driven successor boot this chain's step 2 needs (§3.5.3, its own
+receipt). What did not: the additive `tier_preferred` / `tier_current` registry fields, and the return
+logic of step 3 — `grep -cE "tier_preferred|tier_current" bin/fleet.py` → `0`, receipt §A2.8:
 
 1. **Detect.** The supervisor's body hits the top tier's limit → existing detection parks it
    `status="limited"` with `limit_reset_at` (above). No new detection is needed; the supervisor is a
@@ -483,7 +498,9 @@ $ sed -n '2815p' bin/fleet.py
         validate_name(args.name, existing=data["workers"].keys())
 ```
 
-**Binding, and cheap because `sup-spawn` is `[UNBUILT]` anyway:**
+**Binding, and cheap because `sup-spawn` was `[UNBUILT]` when this was written. [BUILT `31e139e`]** —
+`cmd_sup_spawn` exists and takes `--model` (receipt §A2.1, §A2.7); both bullets below are satisfied by
+the shipped verb, so they now read as a description of it rather than a constraint on a future build:
 
 - **`sup-spawn` takes an explicit `--model <tier-alias>`.** It is the fallback's dispatch verb, so the
   tier must be settable at dispatch, not inherited. (`dispatch_bg` already accepts `model` — §10.1 — so
@@ -738,7 +755,7 @@ $ grep -n 'append_event("mail_sent"' bin/fleet.py
 (All three `mail_sent` events carry the *target/worker* `sid`; none records the caller's — the
 interface-tier provenance B7's mitigation would add.)
 
-**Mitigation (`[UNBUILT — owned by the three-tier build slice]`), and its honest limit:** record
+**Mitigation ([BUILT `c6fde34`] — both arms; receipt §A2.5), and its honest limit:** record
 **interface-caller provenance** on `send` — the caller's `CLAUDE_CODE_SESSION_ID` — into `events.jsonl`
 (`append_event` already takes `**fields`, so this is one keyword), and have the supervisor **surface a
 divergence warning** when briefs/steers for its campaign arrive from two distinct interface sids within
@@ -919,7 +936,7 @@ swap (which §11's 150–200k band makes routine, not exceptional) the live clai
 actual running manager. **The exemption is therefore keyed on *is this record the current live
 supervisor claim-holder*, under any name, not on a static registry name.**
 
-**The predicate**, `[UNBUILT — owned by the three-tier build slice]`: a record is protected iff its
+**The predicate**, [BUILT `5a8860b`] (receipt §A2.4): a record is protected iff its
 `session_id` (or a member of its `retired_sids`) equals `supervisor/INCARNATION`'s
 `incarnation_id`-body — i.e. the record is the body that currently holds the claim — **holder alone**.
 *(Amended 2026-07-24 by operator: the ratified text read "and that body is roster-live". That conjunct
@@ -985,19 +1002,22 @@ $ grep -c "NEEDS-OPERATOR\|needs_operator\|pending-decision\|pending_decision" b
 0
 ```
 
-`[UNBUILT — owned by the three-tier build slice]` — the design:
+[BUILT `c6fde34`] (receipt §A2.3) — the design, now a description of the shipped surface:
 
 - **A state file, `state/supervisor-pending-decision.json`** (not a journal kind — the withdrawn
   PROPOSAL's `NEEDS-OPERATOR` journal kind is rejected here per item 8: a journal is append-only and
   cannot be *cleared*, so it cannot represent an open-then-answered decision; and it is not a single
   answerable object). One open decision at a time: `{question, raised_by_inc, raised_at, context_ref}`.
 - **Answerable and un-re-derivable:** the interface session answers by writing the operator's decision
-  into the file's `answer` field (or removing it), through a `fleet sup-decision` verb `[UNBUILT]`; the
+  into the file's `answer` field (or removing it), through a `fleet sup-decision` verb [BUILT
+  `c6fde34`, receipt §A2.1]; the
   supervisor never writes its own answer. The file's presence *is* the "open" state — nothing re-derives
   it from journal scanning.
-- **Nag-visible:** `fleet doctor` and `sup-status` surface an open pending-decision (a `[UNBUILT]`
-  doctor check + a `sup-status --json` field, both trivially additive since `sup-status` already dumps a
-  dict; the terminal-surface D2 rule holds — it stays a lock-free projection).
+- **Nag-visible:** `fleet doctor` and `sup-status` surface an open pending-decision (a doctor check +
+  a `sup-status --json` field, both trivially additive since `sup-status` already dumps a dict; the
+  terminal-surface D2 rule holds — it stays a lock-free projection). [BUILT `c6fde34`] — both arms:
+  `_doctor_check_pending_decision` is registered in the doctor check list and
+  `"pending_decision"` is a `sup-status` key; receipt §A2.3.
 - **Stops the beat from burning turns:** `fleet beat` (§5.2) lists *operator decision pending* among the
   states in which it **does not dispatch a supervisor turn** — it records the skip and returns. So while
   a gate is open, the scheduled beat (v2) costs nothing, and the v1 interface-originated beat is the
@@ -1080,12 +1100,13 @@ $ sed -n '7708,7708p;7721,7722p' bin/fleet.py
              "--add-dir", journals_dir().as_posix()]
 ```
 
-**`sup-spawn` (`[UNBUILT]`) routes through `dispatch_bg`** exactly as `cmd_spawn` does — no hand-rolled
+**`sup-spawn` ([BUILT `31e139e`], receipt §A2.7) routes through `dispatch_bg`** exactly as `cmd_spawn` does — no hand-rolled
 argv — so the supervisor body gets: fleet's hooks (`--settings`), the tasks/journals dirs
 (`--add-dir`), the `_worker_env` process identity (parent env copied, `CLAUDE_CODE_SESSION_ID`
 stripped, `FLEET_WORKER` stamped), and a registry record. The one thing it adds over `cmd_spawn` is the
-first-turn sup-boot ritual (the successor bootstrap already models this; §10.4). `sup-spawn` does not
-exist yet:
+first-turn sup-boot ritual (the successor bootstrap already models this; §10.4). `sup-spawn` did not
+exist at this document's pin — it does now (§A2.1, §A2.7); the no-match below is retained as the
+absence proof it was, true at `235421e5`:
 
 ```
 # at 235421e56bfd328a7e913e519a1459ccf55918dc
@@ -1166,7 +1187,8 @@ def validate_name(name: str, existing=()) -> None:
     """Raise ValueError unless name matches [a-z0-9-]+ and isn't in `existing`.
 ```
 
-`[UNBUILT]` — a `RESERVED = {SUPERVISOR_BODY_NAME}` set checked in `validate_name`: `spawn`/`respawn`
+[BUILT `31e139e`] (receipt §A2.2) — a `RESERVED = {SUPERVISOR_BODY_NAME}` set checked in `validate_name`
+(shipped as `RESERVED_NAMES`): `spawn`/`respawn`
 of the name `supervisor` by the ordinary worker path is **refused**. *(Amended 2026-07-24 by operator
 ruling — sup-spawn choreography, see docs/proposals/sup-spawn-choreography.md: previously "the name is
 minted only by `sup-spawn`". No verb mints a record by this name — `sup-spawn` dispatches
@@ -1360,8 +1382,8 @@ exactly the conditions the band matters. `INCARNATION.session_id` is **stale aft
 — so resolving through it reads the **retired** body's context. The current turn's outcome record
 **does not exist yet** (it is written by the Stop hook, which has not fired mid-turn), and immediately
 after a fork-steer there is no record for the new sid at all. The registry record has a fresh sid but an
-unstable *name* (B1). `[UNBUILT — owned by the three-tier build slice]`, smallest additive mechanism —
-built to be rotation-safe:
+unstable *name* (B1). [BUILT `c6fde34` as `fleet sup-context`] (receipt §A2.1), smallest additive
+mechanism — built to be rotation-safe:
 
 - **Resolve the transcript from the running process's own `CLAUDE_CODE_SESSION_ID`**, the one key
   guaranteed fresh for the actor doing the reading: the daemon sets it to the child's *own* sid
@@ -1374,7 +1396,8 @@ $ sed -n '826,827p' bin/fleet.py
     return sid or None
 ```
 
-  So a `[UNBUILT]` `fleet sup-context` helper, **run by the supervisor itself**, reads its own sid from
+  So a `fleet sup-context` helper ([BUILT `c6fde34`], `cmd_sup_context`, receipt §A2.1), **run by the
+  supervisor itself**, reads its own sid from
   the environment, locates its transcript file directly (by sid, not via an outcome record), and returns
   **occupancy = `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`** from the last
   assistant `message.usage` (the B2-correct sum), plus the two thresholds (150k / 200k).
@@ -1448,8 +1471,11 @@ every next task "the current urgent task" and never cross into hand-off. The fix
   `dispatch_bg` (§10.1), so a ceiling scoped to `spawn`/`send` cannot deadlock the handoff it exists to
   force.)
 
-  `[UNBUILT — owned by the three-tier build slice]` — neither the ceiling nor the identity concept it
-  must be gated on exists today:
+  [BUILT `c6fde34`] (receipt §A2.6) — the ceiling and the identity concept it is gated on both exist:
+  `BAND_SOFT_TOKENS`/`BAND_HARD_TOKENS` are module constants and the `spawn`/`send` refusal is live.
+  Neither existed at this document's pin, and the no-match below is retained as the absence proof it
+  was, true at `235421e5` (note it lumps `SUPERVISOR_BODY_NAME` and `sup-context` — both now present
+  — with the beat symbols, which are still absent; §A2.8 separates them):
 
 ```
 # at 235421e56bfd328a7e913e519a1459ccf55918dc
@@ -1517,7 +1543,10 @@ following from what a worker is:
   *for the supervisor caller*; a worker calls neither, so there is nothing to refuse. The worker arm is
   therefore: the worker self-reports occupancy (the same §11.2 `sup-context`-shaped read, which is not
   supervisor-specific — it reads the caller's own transcript), and the **supervisor respawns an
-  over-band worker at its next task boundary**. `[UNBUILT — owned by the three-tier build slice]`.
+  over-band worker at its next task boundary**. **[PARTLY BUILT — the read shipped; the worker arm is
+  still `[UNBUILT]`]**: `fleet sup-context [--sid S]` exists and is not supervisor-gated (§11.2,
+  receipt §A2.1), so a worker can measure itself today; nothing in shipped code makes the supervisor
+  act on it, so the respawn half remains doctrine, not a guard.
 
 **Why the operator asked for this** (recorded because it is not a spend argument, and reading it as one
 would justify dropping it under §11.5's cap doctrine): unbounded worker contexts *drift the parts apart*,
@@ -1739,3 +1768,124 @@ $ grep -c "CLAUDE_CONFIG_DIR\|ANTHROPIC_" bin/fleet.py
 
 Each `0` proves the named behaviour is not in shipped code at the pin — the `[UNBUILT]` tag is a claim
 about the future, receipted as absent in the present.
+
+**Read Appendix A2 before treating any `0` above as a statement about today.** Five of these seven
+questions now answer differently; the blocks above stay because they are true *at `235421e5`*, which is
+all a pinned receipt ever claims.
+
+---
+
+## Appendix A2 — what has since been BUILT (receipts at `0e8d7ca`, 2026-07-27)
+
+Added by the `unbuilt-sweep` pass. Every tag this document cleared or narrowed cites a block here.
+Same discipline as Appendix A, one pin later: these are claims about `0e8d7ca`, not about `HEAD`.
+
+**§A2.1 — the three `sup-*` verbs the body tagged `[UNBUILT]` all exist.** Clears §5.2's
+`sup-context`/`sup-decision` references, §8's verb, §10.1's `sup-spawn`, §11.2's helper, §11.4's read:
+
+```
+# at 0e8d7ca
+$ grep -n "def cmd_sup_spawn\|def cmd_sup_context\|def cmd_sup_decision" bin/fleet.py
+13024:def cmd_sup_context(args) -> int:
+13062:def cmd_sup_decision(args) -> int:
+13284:def cmd_sup_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
+```
+
+**§A2.2 — the reserved-name set exists and is checked at `validate_name`.** Clears §10.3:
+
+```
+# at 0e8d7ca
+$ grep -n "^SUPERVISOR_BODY_NAME\|^RESERVED_NAMES\|if name in RESERVED_NAMES" bin/fleet.py
+767:SUPERVISOR_BODY_NAME = "supervisor"
+768:RESERVED_NAMES = frozenset({SUPERVISOR_BODY_NAME})
+796:    if name in RESERVED_NAMES:
+```
+
+**§A2.3 — the pending-decision state file, its doctor check and its `sup-status` field all exist.**
+Clears all three §8 bullets:
+
+```
+# at 0e8d7ca
+$ grep -n "def pending_decision_path\|def _doctor_check_pending_decision\|\"pending_decision\":" bin/fleet.py
+10342:def pending_decision_path() -> Path:
+12924:        "pending_decision": read_pending_decision(),   # §8: routing surface
+13157:def _doctor_check_pending_decision():
+```
+
+**§A2.4 — the §7.2 archive exemption is keyed on the claim-holder, holder-alone.** Clears §7.2's
+predicate (and `autoclean.md`'s copy of it):
+
+```
+# at 0e8d7ca
+$ grep -n "def _record_is_supervisor_claim_holder\|supervisor claim-holder -- protected" bin/fleet.py
+2087:def _record_is_supervisor_claim_holder(record, claim=None):
+6799:        return (False, "supervisor claim-holder -- protected while live (§7.2)")
+```
+
+**§A2.5 — send-provenance and the divergence surface both exist.** Clears §5.3's B7 mitigation, both
+arms (`caller_sid` stamped onto the `mail_sent` events, and the detector projected by `sup-status`):
+
+```
+# at 0e8d7ca
+$ grep -n "def _interface_divergence\|\"interface_divergence\":" bin/fleet.py
+12850:def _interface_divergence(now=None, window_seconds=None):
+12925:        "interface_divergence": _interface_divergence(),  # §5.3: B7 detection
+```
+
+```
+# at 0e8d7ca
+$ grep -c "caller_sid=caller_sid" bin/fleet.py
+4
+```
+
+**§A2.6 — the band constants and the hard-ceiling refusal exist.** Clears §11.3:
+
+```
+# at 0e8d7ca
+$ grep -n "^BAND_SOFT_TOKENS\|^BAND_HARD_TOKENS" bin/fleet.py
+1923:BAND_SOFT_TOKENS = 150_000
+1924:BAND_HARD_TOKENS = 200_000
+```
+
+```
+# at 0e8d7ca
+$ sed -n '2564p' bin/fleet.py
+        f"({occ_txt}) is at or above the {BAND_HARD_TOKENS:,}-token hard ceiling "
+```
+
+**§A2.7 — `sup-spawn` resolves its model off the GOALS policy chain and dispatches through
+`dispatch_bg`.** Clears §10.1; narrows §3.3 (there is no `cmd_spawn` call site, so the `spawn` arm of
+that bullet is still unbuilt — this grep would show a second hit if it existed):
+
+```
+# at 0e8d7ca
+$ grep -n "def resolve_model_for_role\|resolve_model_for_role(\"supervisor\", policy)" bin/fleet.py
+10280:def resolve_model_for_role(role: str, policy: dict = None):
+13336:    model = model or resolve_model_for_role("supervisor", policy)
+```
+
+```
+# at 0e8d7ca
+$ sed -n '13369p' bin/fleet.py
+        result = dispatch_bg(
+```
+
+**§A2.8 — what is STILL absent, re-receipted at this pin.** Every `[UNBUILT]` tag left standing in
+this document names something in this list: `fleet beat` (§5.2, §9.1), the `--supervisor-beat` install
+flag and its doctor check (§6.1–6.3, §7.1), the `scheduled_task_*` rename (§6.1), the `sup-fallback`
+verb (§3.5.3), and the `tier_preferred`/`tier_current` registry fields of §3.5's step 2–3:
+
+```
+# at 0e8d7ca
+$ grep -cE "def cmd_beat|add_parser\(\s*\"beat\"|\"--supervisor-beat\"|scheduled_task_|sup-fallback|tier_preferred|tier_current" bin/fleet.py
+0
+```
+
+The one tag not covered by that grep is §3.4's worker-model allowlist, which is absent as a *concept*
+rather than a symbol — `--model` is still a free string with no allowed set:
+
+```
+# at 0e8d7ca
+$ grep -cE "WORKER_MODELS|MODEL_ALLOWLIST|ALLOWED_MODELS" bin/fleet.py
+0
+```
