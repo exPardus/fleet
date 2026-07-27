@@ -1,151 +1,112 @@
-# Next session — day-5 handoff (written 2026-07-27 by the interface session)
+# Next session — day-6 handoff (written 2026-07-27 evening by the interface session)
 
 ## YOU ARE THE INTERFACE TIER. NEVER RUN `fleet sup-boot`.
 
-You bootstrap a supervisor with `sup-spawn` and steer it with `fleet send supervisor`. A previous
-handoff told the incoming session to `sup-boot`; it did, and wedged the claim for hours
-(`docs/AUTONOMOUS-2026-07-26.md` §G-D). The claim belongs to a role, not to a body.
+You bootstrap a supervisor with `fleet sup-spawn --task @<brief>` and steer it with
+`fleet send supervisor @<file>`. A handoff once told the incoming session to `sup-boot`; it did, and
+wedged the claim for hours. **The claim belongs to a role, not to a body.**
 
-## Operator's standing directives for this session (verbatim intent)
+**If the fleet is stopped when you arrive, reviving it is YOUR job and nothing else's.** GOALS active
++ no live supervisor ⇒ `sup-spawn` one and say so out loud. This is step 5 of the skill's startup
+ritual and it is the only restart path that exists, by operator ruling: a fleet-side watcher would
+have to fire in a session nobody asked to be fleet-aware (D7) or dispatch with no operator in the
+loop. On 2026-07-27 the absence of this cost **3h38m of machine-up time** across two windows.
 
-1. **Work fully autonomously.** The operator is away from the computer.
-2. **4-councilor council rule** for anything operator-gated: four subagents of differing
-   personalities (risk auditor / delivery pragmatist / strategist / incident responder) **+
-   synthesis**; act on the synthesis; record it in the day's ledger. Never stall for the operator.
-3. **Keep working the spec and roadmap backlog. Make sure everything keeps going.**
-4. **The operator is clearing `docs/OPERATOR-GATES.md` themselves, in a separate session.** Do not
-   tick boxes, do not wait on gates, never block a build on one.
-5. **Steer the supervisor more interactively and check on it more often** — short waits, frequent
-   `fleet status` / `peek`, and steer the moment it drifts. Do not fire-and-forget for an hour.
-6. **YOU choose the target tasks and make the plan; the supervisor manages workers and splits
-   tasks.** Explicit division: you decide what gets worked on and in what order; it slices,
-   dispatches, gates and merges. If it starts re-planning the queue, pull it back.
+## Operator's standing directives
 
-## State right now
+1. **Work fully autonomously** when the operator is away. Never stall waiting for them.
+2. **4-councilor council rule** for anything operator-gated and genuinely blocking: four subagents of
+   differing personalities (risk auditor / delivery pragmatist / strategist / incident responder) +
+   synthesis; act on the synthesis; record it in the day's ledger.
+3. **PUSH `main` TO ORIGIN AS WORK COMPLETES** — explicit standing order, 2026-07-27. Not at the end
+   of a session; at every green milestone. 29 commits once sat local-only through a power cut.
+4. **Keep 5–6 builders saturated.** Operator wants more of fleet done, faster. Slice by disjoint FILE
+   SETS. Merge `bin/fleet.py` slices one at a time, re-running both floors after each.
+5. **Steer interactively — short waits, frequent `status`/`peek`, correct drift immediately.** Do not
+   fire-and-forget for an hour.
+6. **YOU choose targets and own the plan; the supervisor slices, dispatches, gates and merges.** If it
+   starts re-planning the queue, pull it back.
 
-`main` is green: **2324 passed / 16 skipped on BOTH floors** (py3.13 and py3.10), verified directly
-by the interface rather than inherited from a report.
+## State (verify, do not inherit — that is the point of this line)
 
-Recently landed: `build/sup-tombstone` (§10.4 kill/respawn), **`fix/handoff-seams`** (the
-stillborn-handoff hole that had eaten six supervisors), the `gate-arm` §7 arming, the handoff
-template's missing `--nonce`, and a spec note on guards that block their own remedy.
+`main` = **`c318224`** at the time of writing, pushed. Last figure measured directly by the interface:
+2563/11 both floors at `2dec694`; the supervisor measured 2600/11 at `d543691`. **Re-measure.**
 
-**A supervisor is live**: `sup|inc-20260727T003701Z-bcc7|boot`, spawned on
-`state/tasks/lens/sup-brief-wave2.md`, with these targets in order:
+## What shipped 2026-07-27 (a heavy day — do not re-litigate any of it)
 
-1. **`fleet q` M1+M2** — `docs/specs/fleet-index.md`, gated-sound and `ready-for-gate`,
-   operator-ORDERED. The main event. Honor §11.7's `[UNVERIFIED]` live-receipt acceptance item and
-   the §16 doc-sync list; the worktree recipe includes a manager-side `fleet index init` step.
-2. **`fix/identity-registry-judges` @ `7d33d28`** — confirmed/ESCALATE, decision OPEN.
-3. ~~**`fix/b6-interface-release` @ `2e824ea`**~~ — **RULED RETIRED, 2026-07-27** (supervisor
-   `inc-20260727T003737Z-0ccd`, checkpoint G-C; retirement executed by `inc-20260727T012335Z-0dd8`).
-   **Retired on merit, not on merge cost**: the inherited "conflict too large to resolve in a wave"
-   premise was re-measured against the tree the branch would actually enter and came back at
-   **three hunks** (one `bin/fleet.py`, two `docs/specs/claim-nonce.md`) — false, and recorded as
-   false so the retirement does not rest on it. The grounds that decide it: (a) its founding incident
-   — an interface session running `sup-boot` — is now doctrine-*forbidden*, so its only customer is a
-   forbidden path; (b) `--interface` is **a caller supplying the grounds of its own non-refusal**,
-   which is precisely what the clause ratified 2026-07-27 forbids ("inference may select the SUBJECT
-   of a measurement, but may not supply the GROUNDS of a refusal") — an attestation can only ever be
-   *added*, never withheld by an adversary, so its presence proves nothing; (c) the case it leaves
-   broken is **every ordinary supervisor stand-down**, and that is better served by deleting the
-   condition than by authorising an exception to it.
-   **The ref is NOT deleted** — it holds the reasoning, tests and amendments. Its `claim-nonce.md`
-   and `three-tier-command.md` amendments were marked for operator ratification and die with it
-   unless the re-derived slice needs them, which it largely will not. Worktrees `C:/proga/fleet-b6`,
-   `fleet-b6-rb`, `fleet-b6-rs` removed as litter.
-   **Re-derive instead, as its own slice with its own gate — NOT a rebase of this branch:**
-   **`sup-release` tombstones its own body's registry record as part of releasing.** Then
-   `releaser_live` is FALSE by construction, `sup-boot` claims cleanly, and there is no attestation
-   to forge — it removes the condition instead of trusting what the caller says about itself. It also
-   retires the manual "the interface stops the retired body" step in the succession recipe below,
-   which is where every unproven handoff has died.
-   **BUILT, 2026-07-27, on `fix/sup-release-tombstone`** (worker `tombstone`): `sup-release` now
-   tombstones its own registry record via §10.4's spelling (`status: dead`, read by
-   `_record_is_live`), and `_releaser_body_is_tombstoned` is the arm `_releaser_live_sids` gained —
-   one predicate, so B6 and the §7 gate cannot disagree. No new flag; the retired attestation road is
-   pinned shut by `test_no_flag_by_which_the_caller_declares_anything_about_itself`. **Owed:**
-   `docs/specs/claim-nonce.md` §6.1 row 1 and §7.2's *"ARMED, unconditionally"* row are now
-   incomplete about shipped code and need an operator amendment — §7 is operator-owned, so the
-   worker reported it instead of editing it. This is the in-fleet disarm `docs/OPERATOR-GATES.md`
-   already recorded as owed work on 2026-07-27.
-4. The **`[UNBUILT]` sweep** across `docs/specs/**` toward launch-ready (v2-deferred rows stay
-   deferred).
+identity merge + the corrupt-glob gate and its CRITICAL fix wave; `views-doctrine` (D4 measured,
+split, pinned); `respawn-ceiling`; `doctrine-citations`; `unbuilt-sweep` (18 stale `[UNBUILT]` tags
+retired on grep receipts); b6 retired; `fix/sup-release-tombstone`; the §11.3 ratified edit; the
+terminal-surface command-tier statusline. **All twelve operator gates ruled and the docket is empty.**
 
-## The interface maneuvers that actually work (learned the hard way)
+## Queue
 
-- **Succession**: `sup-release` → fresh `sup-spawn`. **Two steps, both fleet's, since
-  `fix/sup-release-tombstone`.** `sup-release` tombstones the releasing body's own registry record,
-  so B6's live-releaser test is false by construction and the successor boots immediately. The old
-  middle step — *the interface stops the retired body so its sid leaves the roster* — is **gone**;
-  it was the last step of this recipe that lived outside the fleet, and it is where every unproven
-  handoff died. Stop the retired body anyway to reclaim the session, but succession no longer waits
-  on it. The old rule still applies to a release that could not tombstone: an **interface** session
-  (no registry record to retire — which is one more reason the interface must never `sup-boot`), an
-  ambiguous registry identity, an unreadable registry, or a crash between the release and the
-  tombstone. `sup-release` says which case it was on stdout.
-- **`fleet kill` can be refused by the very wedge it clears** (§7 armed on a released claim). The
-  documented escape is real and load-bearing: run the verb from a shell with **no
-  `CLAUDE_CODE_SESSION_ID`** — `env -u CLAUDE_CODE_SESSION_ID py -3.13 bin/fleet.py …`. Filed as
-  claim-nonce §7.2, DESCRIPTIVE/UNRATIFIED.
-- **Handoff dispatch is still unproven** — three stillbirths on 2026-07-27 on top of day-3's five.
-  Prefer release-then-`sup-spawn` until someone proves the dispatch path end to end.
-- **Keep briefs SHORT — the highest-leverage thing you control.** Five supervisors each burned a
-  full context reading long handovers and merged nothing; the one given a one-page "merge first,
-  read second" brief merged the blocker on its first turn. Long handovers are the failure mode.
-- **Never author a worker brief at `state/tasks/<workername>.md`** — `dispatch_bg` overwrites it, so
-  the worker boots holding a file telling it to read the file it is reading. Use `state/tasks/lens/`.
-- PowerShell mangles quotes; Git Bash mangles Windows paths (`C:/x` → `C;C:\Program Files\Git\x`).
-  For anything long or quoted, write a file and `send @file`.
+1. **The idx stack — the critical path.** Merge order is FIXED: `idx-fix` first, then `idx/q`, then
+   `idx/teach`. Both q-branches were cut from an escalated base, so their own green tallies are
+   meaningless for merge purposes. `idx/q`'s gate returned ESCALATE with F1 CONFIRMED CRITICAL.
+2. **Graceful succession** (operator-ordered). Ratified shape: machine-readable succession-needed fact
+   **with its cause** (200k ceiling AND usage-limit park), rendered as an **outage** on
+   statusline/`sup-status`/`doctor`, plus one verb for the maneuver. **Not a hook. Not auto-spawn.**
+   Both refused on the record. Note the target shrank when `sup-release` began tombstoning its own
+   record — verify how much.
+3. **Retire the autoclean timer.** `fleet autoclean` moves onto the supervisor's beat and the
+   interface ritual; the scheduled-task install surface goes. **Ordering: uninstall the live task with
+   `--autoclean-remove` FIRST, while that flag still exists, then delete install+remove together.**
+   Doctor's check is replaced, not deleted: *"when did autoclean last run"*.
+4. `fleet q` M2 once M1 lands. Then the remaining `[UNBUILT]` sweep toward launch-ready.
+
+## Interface maneuvers that actually work
+
+- **Succession is now TWO steps**: `sup-release` → `sup-spawn`. `sup-release` tombstones the releasing
+  body's own record, so the released-claim refusal no longer arms and nobody has to stop the retired
+  body for succession to work. (Stop it anyway to reclaim the session.)
+- **`sup-handoff-begin` is 3-for-3 stillborn** and has eaten context from three incarnations. Three
+  supervisors in a row correctly released at the ceiling instead. **`sup-spawn` is the working route.**
+- **`--task` takes TEXT; a file is `--task @<path>`.** A bare path is rendered *as the task* into
+  `state/tasks/<worker>.md`, overwriting a brief that lived there with the string naming it —
+  unrecoverable from itself. Author briefs in `state/tasks/lens/` and `wc -l` the rendered task after
+  every dispatch. **A dispatch that returned a session id has not proven it dispatched a brief.**
+- **Write steers to a file and `send @file`.** Bash eats backticks as command substitution and
+  PowerShell mangles quotes; I lost a steer to this today after documenting the rule the same day.
+- **`env -u CLAUDE_CODE_SESSION_ID py -3.13 bin/fleet.py …`** clears §7's gate when a verb is refused
+  by the wedge it would clear (claim-nonce §7.2, load-bearing infrastructure).
+- **Answer a parked decision through `fleet sup-decision --answer`**, never as prose in a steer —
+  otherwise routing state and truth diverge and only `sup-status` shows it.
+- **Keep briefs SHORT.** Five supervisors each burned a full context on long handovers and merged
+  nothing; the one given a one-page "act first, read second" brief merged the blocker on turn 1.
 
 ## Known live defects, none blocking
 
-- **The daemon leaks the first dispatch's `FLEET_WORKER`** into every later session (§G-E). Benign
-  when the leaked value is supervisor-shaped; **malignant** when worker-shaped — that body takes the
-  claim and can never beat, checkpoint or release it. Mitigation: let the transient daemon
-  idle-exit, and make `sup-spawn` the dispatch that starts the new one.
-- **`_supervisor_gate` calling `load_registry()` inside `except RegistryCorruptError`** while
-  documenting itself read-only — on a corrupt registry `fleet send` renames `state/fleet.json`
-  aside. Fixed on the hs branch; **re-verify it survived the merge.**
-- **Two orphaned successor task files** carry spent plaintext tokens and are **correctly unabortable
-  forever** (minted before the fix; no pending entry exists to retire). Deleting them is an operator
-  shell action per §5.9 — not an agent's.
-- `fleet doctor`'s second-body FAIL is self-healing: one historical refusal inside a 24h window, and
-  the template fix stops new ones.
-
-## Operator ratification stack (only the operator ticks — they are clearing it separately)
-
-Now on `main` with the hs merge, still owed a ruling: **A1** (§6.4 — `sup-handoff-abort` has three
-arms, abort-flag arm deleted as unreachable), **A2** (§5.9/§8 — fail-closed age-gated sweep at four
-sites), **A3** (§6.4/§5.9 — explicit `superseded` state + boot refusal; **changes the protocol
-shape**, no promote verb by design).
-
-Day-4: the G-D synthesis (`sup-release --interface`, council 4–0, built, now parked); the rejected
-repairs (a+)/(e) with their refutations; claim-nonce §7.2 (guard-blocks-its-own-remedy); the
-doctrine that *the claim belongs to a role, not a body* and that *a guard keyed on a proxy must name
-the predicate it proxies for*; the `[UNBUILT]` follow-up to gate `sup-boot` on fleet-launched
-provenance. Day-3 carry-over: claim-nonce §7.1 interface-send amendment; tombstone rulings 1+2, the
-ruling-1 cond-2 narrowing, the husk-respawn boot-ritual call, the six-token terminal contract, the
-rb MIN-D lock-budget note; the abort-recipe doc defect; G-A..G-C records; the fleet-index settled
-row.
+- The daemon leaks the FIRST dispatch's `FLEET_WORKER` into every later session. Supervisor-shaped is
+  benign; **worker-shaped is malignant** — that body takes the claim and can never beat, checkpoint or
+  release it. Every body checks its own stamp at boot.
+- `fleet doctor` may carry one FAIL from a historical continuity refusal inside its 24h window; it
+  ages out. **A permanently-red doctor is a disabled doctor** — clear resolved flags.
+- `fleet init --autoclean-remove` hits the §7 claim gate, so a *worker* cannot run it; the claim
+  holder or a no-sid shell must.
 
 ## Doctrine worth not re-learning
 
-- **Fix waves mint defects: 7 of 7 this campaign** — and the last two were traceable to a
-  *supervisor's ruling*, not a builder's slip. Always re-gate; ESCALATE beats a third wave.
-- **A pin written against the mechanism you fixed does not cover the mechanism you introduced** —
-  three instances in one campaign.
-- **An allowlist entry is a claim, like a receipt or a citation.** The first thing to check about a
-  new detector is not what it catches but what it excuses — one shipped blessing a live defect.
-- **Absence is not evidence on this substrate**: records are deletable, archivable, and born with
+- **A clean shutdown with no reader is indistinguishable from a healthy fleet.** Every mechanism can
+  work and the fleet still sits dead. A signal nobody is obliged to read is not a signal.
+- **Measure the incident before drawing the lesson from it** — "~15h dark" was really 12h53m, of which
+  9h14m was a power cut and **3h38m** was genuinely uncovered. The corrected number was worse.
+- **When the honest mechanism would have to be an injection or an autonomous actor, put the trigger on
+  the human action that was going to happen anyway.**
+- **A timer sweeps when the clock says so; a beat sweeps when the fleet is alive.** Retiring a timer
+  can delete a class of problem that configuring it only patches.
+- **Fix waves mint defects: 7 of 7 this campaign**, twice from a *supervisor's ruling*. Always re-gate;
+  ESCALATE beats a third wave.
+- **A doc describing a CLI must be re-derived from `--help`, never from memory.** Six drifts found that
+  way in one pass, including four shipped verbs missing from the skill.
+- **Run `fleet sup-context` at wave boundaries, never estimate by feel** — one body guessed 60k and
+  measured 198,767.
+- **Absence is not evidence on this substrate.** Records are deletable, archivable, born with
   `session_id: None`. Any predicate that permits on a missing record fails open.
-- **A guard's postcondition must be satisfiable by every legitimate caller class**, and **a verb that
-  clears a state must not be gated on that state.**
-- A skip-by-default live test is an unexecuted claim. Restore proof is `git status --porcelain`
-  EMPTY, never a sha compare. `git log` is the only truth; push `main` at every green milestone.
+- `git log` is the only truth a turn landed. Restore proof is `git status --porcelain` EMPTY.
 
 ## Ledgers
 
-`docs/AUTONOMOUS-2026-07-26.md` (day 4: §G-D claim wedge + council, §G-E daemon leak, §G-G first
-live respawn-of-holder, §G-H..§G-V identity work and the gate wave).
-`supervisor/JOURNAL.md` — read the last two CHECKPOINTs, never the whole file.
+`docs/AUTONOMOUS-2026-07-26.md` (day 4). `knowledge/lessons.md#2026-07-27-day5-surface` and
+`#2026-07-27-evening-outage` (day 5–6). `supervisor/JOURNAL.md` — read the last two CHECKPOINTs,
+never the whole file.
