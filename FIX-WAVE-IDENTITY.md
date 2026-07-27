@@ -719,6 +719,32 @@ Each injection was made on the committed tree, kept line-count-neutral so the
 | 3. glob the literal `fleet.json.corrupt` (no `*`) | `TestTheThreeStepRepro::test_step_3_the_QUARANTINED_registry_MUST_STILL_REFUSE` |
 | 4. glob the process cwd instead of `state_dir()` | `TestTheFreshInstallCarveOutSurvives::test_the_glob_reads_state_dir_NOT_the_process_cwd` |
 
+**Round 2 (W3.6's repairs).** Each injection line-count neutral and reverted after. The
+inline-glob injections are spelled with string concatenation so the one-spelling **lint
+stays green** — that is the whole point of I11, and every one of them is now caught by
+behaviour instead.
+
+| injection | RED test(s) |
+|---|---|
+| J1. gate 2 removed entirely (the CRITICAL fix reverted) | `TestTheRecreatedRegistryBypass::test_probe_d…` + `…probe_f…` + 4 more (6) |
+| J2. gate 2 keyed on registry ABSENCE too (the original defective rule) | same 6 |
+| J3. helper filtered to FILES only (**I14 — GREEN before this wave**) | `TestTheArtifactGlobHelper::test_a_DIRECTORY_artifact_still_counts` |
+| J4. husk-sweep site reverted to an inline glob (**I11 — lint-only before**) | `TestTheHelperIsTheONLYSpelling::test_the_husk_sweep_site_refuses_through_the_helper` + `…_proceeds_when_the_helper_says_clean` |
+| J5. §9 arm reverted to an inline glob | `…::test_the_S9_arm_refuses_through_the_helper` + `…_GRANTS_when_the_helper_says_clean` |
+| J6. doctor-autoclean site reverted to an inline glob | `…::test_the_doctor_row_surfaces_through_the_helper` |
+| J7. the glob loses its `*` | `TestTheArtifactGlobHelper::test_it_matches_the_name_the_REAL_writer_mints` + 14 more |
+| J8. abstention-note site reverted to an inline glob | `…::test_the_abstention_note_reads_through_the_helper` + `…_GOES_PLAIN_when_the_helper_says_clean` |
+| J9. gate 2 moved AHEAD of gate 1 | `TestTheThreeStepRepro::test_a_still_CORRUPT_registry_keeps_the_plain_note` + `…test_the_refusal_does_not_send_the_operator_back_to_doctor_alone` |
+
+**J8 was found GREEN on the first pass and is a finding against this wave's own repair.**
+Round 1 of W3.6 pinned three refusal sites behaviourally and left
+`_identity_abstention_note` — the fifth reader — on the string-count lint alone; reverting
+it to an inline glob left all 195 tests green. Fixed in `cf13b3e`, which is why the
+one-spelling claim above is about *four code sites*, not three.
+
+**And the brief's own literal remedy is injection J10**, kept because it is the reason the
+fix is not where the brief said to put it — see the receipt in W3.6.
+
 ## W3.6 The gate reviewer's CRITICAL — absence alone reopened the door
 
 `gate-ig-rb` escalated, and re-driving both probes through the real
