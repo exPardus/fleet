@@ -1303,7 +1303,8 @@ Do not leave servers or watchers running past the end of the turn without record
 """
 
 
-def compose_prompt(name: str, cwd, task: str, sid: str | None, journal_path=None) -> tuple[str, Path | None]:
+def compose_prompt(name: str, cwd, task: str, sid: str | None, journal_path=None,
+                   context=None) -> tuple[str, Path | None]:
     """preamble (SPEC §8) + claimed mailbox + task text (+ journal contents
     when respawning, i.e. when journal_path is given and exists).
 
@@ -1329,9 +1330,35 @@ def compose_prompt(name: str, cwd, task: str, sid: str | None, journal_path=None
     mailbox claim entirely -- there is no <sid>.md to claim yet, only
     <name>.md could exist and that channel is not wired for pre-claim
     spawns -- and returns (prompt, None), matching the no-mail shape.
+
+    fleet-index §7/§11.8 add two sources, in this order:
+
+      preamble (+ the fleet-index teach lines)
+      DIGEST <path>          per --context file
+      mailbox
+      task text
+      journal
+
+    Both are OFF by default and both are keyed on the DISPATCH TARGET's
+    directory, never the manager's cwd (invariant 5: one cwd frame). The
+    teach lines render whenever `cwd` carries a `.fleet-index/`, on every one
+    of the four compose paths -- §11.8 wants a respawned or steered worker
+    re-taught, since the cost is per DISPATCH, not per spawn (§3). `context`
+    is a spawn-time list of source paths and defaults to None, which is the
+    load-bearing half of §12's acceptance: WITH NO `--context` THIS FUNCTION
+    RETURNS EXACTLY WHAT IT RETURNED BEFORE fleet-index EXISTED, byte for
+    byte, so a project that never opted in pays nothing.
     """
     journal_target = journal_file_path(name).as_posix()
-    parts = [_PREAMBLE_TEMPLATE.format(name=name, cwd=cwd, journal_target=journal_target)]
+    parts = [_PREAMBLE_TEMPLATE.format(name=name, cwd=cwd, journal_target=journal_target)
+             + index_teach_lines(cwd)]
+
+    if context:
+        digests, warnings = compose_context_digests(cwd, context)
+        for warning in warnings:
+            print(f"fleet: {warning}", file=sys.stderr)
+        if digests:
+            parts.append(digests)
 
     claim = None
     if sid is not None:
@@ -3805,7 +3832,14 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
 
     # sid=None (pre-claim, no real sid exists yet) -- compose_prompt skips
     # the mailbox claim entirely and always returns a None claim here.
-    prompt, _claim = compose_prompt(args.name, cwd, task, None)
+    #
+    # fleet-index §7: `--context` is spawn-only. The other three compose paths
+    # get the §11.8 teach lines but no digest -- the idle-send path composes
+    # with no journal at all, so there is nothing to order a digest against
+    # there, and a steered worker would re-pay the same digest per dispatch.
+    prompt, _claim = compose_prompt(args.name, cwd, task, None,
+                                    context=parse_context_arg(
+                                        getattr(args, "context", None)))
 
     try:
         result = dispatch_bg(
@@ -11463,8 +11497,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :4956, :5403, :9453,
-    :14004), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :4990, :5437, :9487,
+    :14038), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -12108,8 +12142,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:4956, :5403, :9453,
-    #     :14004) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:4990, :5437, :9487,
+    #     :14038) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -15318,6 +15352,117 @@ def index_status(root) -> dict:
             "unindexed": [rel for rel in selected if rel not in set(shard_rels)]}
 
 
+# --- the compose-time surface (§7, §11.8) -----------------------------------
+#
+# Everything below is called by `compose_prompt`, which runs on all four
+# dispatch paths (§3). Both entry points are OFF unless the dispatch target
+# opted in, and neither reads or writes fleet state (invariant 9).
+
+# §11.8: at most FOUR lines -- name, one-line contract, `--src`, `--outline`.
+#
+# The cap is not decoration. `compose_prompt`'s output reaches the model as a
+# tool result (§2) and is re-paid per DISPATCH, not per spawn (§3), so a
+# steered worker pays for these lines on every steer. They also compete
+# against `Read`/`Grep`, which sit in the system region and need no learning
+# -- the honest adoption risk §11.9 exists to measure, not a solved problem.
+INDEX_TEACH_LINES = (
+    "This project carries a symbol index: `fleet q <symbol>` locates a symbol "
+    "without reading the file it lives in.\n"
+    "It prints one `<path>:<line>-<end>` pointer per hit, so a following Read "
+    "can ask for exactly that range.\n"
+    "`fleet q <symbol> --src` prints that symbol's source slice instead of the "
+    "pointer -- prefer it to reading a large file.\n"
+    "`fleet q --outline <path>` prints one file's symbol outline.\n"
+)
+
+
+def index_teach_lines(cwd) -> str:
+    """§11.8's preamble lines, or `""` when the dispatch target has no index.
+
+    The check is `<--dir>/.fleet-index/`, deliberately NOT §11.1's walk-up:
+    §11.8 words it as "the dispatch target's `--dir` contains `.fleet-index/`"
+    and this is that sentence. The failure directions are not symmetric --
+    teaching a tool that exits 3 spends a worker's turn on a command that
+    cannot work, while staying quiet in a project whose index sits one
+    directory up costs only the digest the worker never knew to ask for.
+
+    `is_dir()`, not `exists()`: a plain file named `.fleet-index` is not an
+    opt-in, and `fleet index init` never produces one.
+    """
+    try:
+        if not index_dir(cwd).is_dir():
+            return ""
+    except OSError:
+        return ""
+    return INDEX_TEACH_LINES
+
+
+def parse_context_arg(value) -> list:
+    """`--context a.py,b.md` -> `["a.py", "b.md"]`. None/empty -> `[]`."""
+    if not value:
+        return []
+    return [part.strip() for part in str(value).split(",") if part.strip()]
+
+
+def compose_context_digests(cwd, context, sleep=None) -> tuple:
+    """`(digest_text, warnings)` for §7's `--context` injection.
+
+    THE RULES THIS ENFORCES, each of which has a spec sentence behind it:
+
+    - **Paths resolve against the worker's `--dir`, never the manager's cwd**
+      (§7, invariant 5). `cwd` is the index root here, matching §11.8's teach
+      check exactly -- one opt-in test, not two.
+    - **Every row is read through `verified_shard_rows`** (§11.3's choke
+      point), so §8's rule that no path serves an unverified coordinate binds
+      the digest as hard as it binds `fleet q`. A stale line number does not
+      error; it silently points the worker at the wrong code.
+    - **Unknown paths warn and are skipped; they never fail a spawn** (§7,
+      §9). Same for a path that escapes `--dir`, a source the config does not
+      select, and an orphaned shard.
+    - **A file the index config excludes is skipped rather than indexed.**
+      `update_index` refuses these for the reason that applies here too: a
+      shard written for an unselected file would be pruned by the very next
+      `build`, so writing it is a promise this index cannot keep.
+    - **Not capped.** §11.4's 400-line cap is `q --outline`'s alone; §11.1
+      states the two renderings differ only when that cap truncates, so
+      capping here would silently impose `q`'s limit on a path the spec
+      exempts.
+
+    No index at all is the §9 no-index row: one warning, nothing injected, the
+    spawn proceeds. That is also the expected state for most projects.
+    """
+    root = Path(cwd)
+    warnings = []
+    if not context:
+        return "", warnings
+    if not index_dir(root).is_dir():
+        return "", [f"--context ignored: {INDEX_NO_INDEX_MESSAGE} "
+                    f"(no {INDEX_DIR_NAME}/ in {root.as_posix()})"]
+    try:
+        config = load_index_config(root)
+    except IndexConfigError as exc:
+        return "", [f"--context ignored: {exc}"]
+    # One walk, reused for every named path: `--context` is a small list and
+    # the walk is the expensive part. Membership here is also what rejects an
+    # absolute path or a `../` escape, since every selected rel is under root.
+    selected = set(index_source_files(root, config))
+    out = []
+    for raw in context:
+        rel = _index_posix_rel(raw)
+        if rel not in selected:
+            why = ("not selected by this index's include/exclude"
+                   if (root / rel).is_file()
+                   else f"no such file under the worker's --dir {root.as_posix()}")
+            warnings.append(f"--context {raw}: {why} -- digest skipped")
+            continue
+        result = verified_shard_rows(root, rel, sleep=sleep)
+        if result["status"] != "ok":
+            warnings.append(f"--context {raw}: {result['note']}")
+            continue
+        out.append(render_digest(rel, result["header"], result["rows"]))
+    return "".join(out), warnings
+
+
 # --- `fleet index` CLI (§6) -------------------------------------------------
 
 # Per-file lines are capped so a first build of a large repo does not dump
@@ -15521,6 +15666,14 @@ def build_parser() -> argparse.ArgumentParser:
     # to render_native_name; defaults to DEFAULT_CATEGORY ("fleet") when
     # unset at dispatch time.
     p_spawn.add_argument("--category", default=None)
+    # fleet-index §7: comma-separated source paths, resolved against --dir (NOT
+    # the manager's cwd -- invariant 5), each rendered into a digest ahead of
+    # the task. Spawn-only by spec: `--context` is a spawn-time flag, and an
+    # absent one changes the composed prompt not at all (§12).
+    p_spawn.add_argument("--context", default=None,
+                         help="comma-separated source paths under --dir whose "
+                              "fleet-index digests are injected into the prompt "
+                              "(§7); ignored when the project has no index")
 
     p_status = sub.add_parser("status", help="show worker status table")
     p_status.add_argument("name", nargs="?", default=None)
