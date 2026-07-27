@@ -1606,3 +1606,1405 @@ I AM IN-BAND: 152,554 tokens. Handing off at this wave boundary per 11.3, while 
 ## 2026-07-27T00:34:55Z RELEASED inc=inc-20260727T001445Z-3632 sid=42324ce1-0748-486b-b66a-eb6920da265e
 
 released cleanly: in-band at 152.5k, wave 1 complete and merged; handoff dispatch mechanics still unproven so releasing cleanly rather than spending context on a 4th stillbirth poll
+
+## 2026-07-27T00:37:37Z BOOT inc=inc-20260727T003737Z-0ccd sid=3fb1127d-1514-4e5d-8830-e42d7fec508b
+
+fresh claim: predecessor inc-20260727T001445Z-3632 released cleanly -- fresh claim, no seizure
+
+## 2026-07-27T00:38:16Z CHECKPOINT inc=inc-20260727T003737Z-0ccd sid=3fb1127d-1514-4e5d-8830-e42d7fec508b
+
+GEN-0 BOOT inc-20260727T003737Z-0ccd, wave 2. VERDICT claim -- predecessor inc-20260727T001445Z-3632 released cleanly, no seizure, no page, no transfer. Env check first per brief: FLEET_WORKER=sup|inc-20260726T140146Z-5a0e|boot -- the SAME stale launch id my predecessor recorded, supervisor-shaped, benign variant, not my own worker name (sup|inc-20260727T003701Z-bcc7|boot). Not a stop. Nonce held in working context only; boot bundle deleted after reading (5.8/5.9). Interface owns the plan; I split, dispatch, gate, merge. Queue as briefed, in order: (1) fleet q M1+M2 per docs/specs/fleet-index.md -- the main event, to be split into disjoint worktree slices with a dual-lens gate before merge; (2) fix/identity-registry-judges 7d33d28 escalation ruling then execute+gate+merge; (3) fix/b6-interface-release 2e824ea -- decide rebase-and-gate vs retire-and-re-derive sup-release self-tombstoning; (4) [UNBUILT] sweep across docs/specs/**. Not re-planning the queue. Never blocking on an operator gate. Starting target 1 by reading the spec to size the slices.
+
+## 2026-07-27T00:55:35Z CHECKPOINT inc=inc-20260727T003737Z-0ccd sid=3fb1127d-1514-4e5d-8830-e42d7fec508b
+
+G-A. TARGET 1a MERGED AND MEASURED -- but the main REF is blocked by someone else's uncommitted work in the fleet home, and I did not touch it.
+
+THE MERGE IS DONE AND VERIFIED. fix/identity-registry-judges 7d33d28 merged at b58bfe1 (parents a26a4d1 + 7d33d28), plus re-pin commit 8a5f9bb. I did the whole merge in a SCRATCH WORKTREE (C:/proga/fleet-mergesurvey, detached at main's sha) rather than in the fleet home, deliberately: a conflicted bin/fleet.py in C:/proga/claude-fleet breaks EVERY fleet command including my own sup-checkpoint and sup-heartbeat. That is a self-inflicted wedge and the scratch worktree costs nothing. Recommend this as standing practice for any merge that touches bin/fleet.py.
+
+CONFLICT SURVEY RE-DRIVEN AGAINST THE TREE IT ENTERED, not inherited. ONE conflicted file, bin/fleet.py, 3 hunks. docs/specs/claim-nonce.md and tests/test_supervisor.py auto-merged. Hunks 1+2 were the retired_sids line-number citations (stale on BOTH sides, as expected). Hunk 3 was SUBSTANTIVE and it is the interesting one: main and the branch fixed the SAME defect independently -- the _supervisor_gate load_registry-vs-_registry_records_or_none read my predecessor fixed in wave 1 task 2, which this branch had also fixed. Convergent, not divergent. I took main's comment block (it records WHY, and names the finding as the seventh of its class) over the BRANCH's body, which is strictly the more defensive of the two: main's  raises AttributeError if  is present but not a dict, where the branch's isinstance ladder degrades to None and the gate stays armed. Same fail-closed direction, one fewer crash. The merge note in the code says all of this so the next reader does not have to re-derive it.
+
+THE INTEGRATION MEASUREMENT EARNED ITS KEEP AGAIN -- SECOND MERGE RUNNING, SAME TEST. TestRetiredSidWritersAreWhereTheyAreCited went RED on the merged tree: actual writers 4955/5402/9452/14003 vs citations 4588/5035/8963/13314. ATTRIBUTION MEASURED, NOT ASSUMED: main at a26a4d1 green 2329/11 across the full suite (I measured both floors myself), branch parent 7d33d28 green 4/4 on tests/test_retired_sid_citations.py (I measured it in fleet-identity). Both parents green + merge RED = merge-induced, and the re-pin is the remedy the test docstring itself names. Note the detail: THREE of the four citations the branch carried were already correct for the merged tree; only the fourth moved, pushed down by main's own additions. A pick-a-side resolution would have been 75% right and still RED.
+
+FINAL: 2468 passed / 11 skipped, IDENTICAL on 3.13 AND 3.10. Receipts 60/61 with only the inherited directory-mtime WARN. AND THE TALLY IS EXACTLY ADDITIVE: branch 2360 + main 2329 - merge-base 2221 = 2468, so no test was lost or shadowed in the merge -- a free consistency check that a bare 'it is green' would not have caught.
+
+WHAT I COULD NOT DO, AND WHY IT IS NOT A FAILURE.  on main REFUSED, correctly. At my boot the fleet home had 2 modified files; it now has TWELVE, ~426 uncommitted lines -- bin/fleet.py (+59: _supervisor_tier_snapshot, the three-tier view projection), bin/fleet_statusline.py, tests/test_terminal_surface.py, skills/fleet/SKILL.md, skills/fleet/supervisor.md, docs/SPEC.md, docs/specs/claim-nonce.md, docs/specs/providers.md, knowledge/lessons.md, docs/OPERATOR-GATES.md. That is the interface tier building the terminal surface live in the shared checkout. Three of those files are also touched by my merge, so git blocked the ref update. I DID NOT STASH IT AND DID NOT COMMIT IT -- stashing someone else's live work is how you lose it, and it is not mine to commit. INTERFACE ACTION OWED: commit or stash those 12 files, then  on main. The merge itself is finished; only the ref is a beat behind. I inspected the bin/fleet.py delta before proceeding and it is additive read-only view work that does not touch the claim or gate machinery I depend on, so my own verbs are safe to keep running.
+
+THIS DID NOT BLOCK THE WAVE. 8a5f9bb is a real reachable commit, so I cut both worker branches straight from it rather than waiting on the ref. Dispatched, opus, bypass, deny-fenced settings.local.json in each worktree, both briefs in state/tasks/lens/ (never at state/tasks/<workername>.md -- dispatch_bg overwrites that):
+ - idx-core (540f901c) on idx/core in C:/proga/fleet-idx-core: fleet-index M1, the shard layer + . Owns the primitives the next two slices consume, and its final message must NAME them so the follow-on briefs can be written against real signatures.
+ - id-glob (60b92443) on fix/corrupt-glob in C:/proga/fleet-corrupt-glob: the relocated third fix wave -- gate not_initialized on the fleet.json.corrupt.* artifact glob.
+
+A TRAP I FOUND BEFORE DISPATCH RATHER THAN AFTER. The fleet-index spec specifies , and  IS 3.11+ --  is a ModuleNotFoundError on this box. The declared floor is 3.10 and bin/fleet.py is stdlib-only, so the obvious implementation cannot exist. Ruled in the brief: a small parser for the fixed one-table schema, unknown key = loud config error (which 8 demands anyway), pinned by a floor test. This repo has now been bitten twice by a 3.11+ API passing a grep and breaking the floor; this would have been the third, and it would have been found by a worker at the END of its task rather than at the start.
+
+TWO THINGS I AM CARRYING, NEITHER BLOCKING. (1) sup-status warns INTERFACE DIVERGENCE: 2 distinct caller sids steered me within 3600s (75732d35, adfda529). Detection only, and consistent with an interface that forked; I cannot confirm the human owns both sessions and I am not treating it as a stop. (2) The pending-decision row said 'needs operator' about a question the operator had already answered, because the interface delivered the gate answer as a steer rather than through sup-decision --answer. I recorded it myself with explicit provenance rather than leave sup-status asserting something false.
+
+BASELINE CORRECTION FOR THE RECORD. The wave-2 brief states main was 2324 passed / 16 skipped 'verified by the interface directly'. I measure 2329 passed / 11 skipped at a26a4d1, identical on both floors. Same 2340 total, so five tests SKIP in the interface's environment that RUN in mine. Not a defect and not a blocker, but nobody should gate on 2324/16 -- an environment-dependent skip count is not a baseline.
+
+## 2026-07-27T00:56:21Z CHECKPOINT inc=inc-20260727T003737Z-0ccd sid=3fb1127d-1514-4e5d-8830-e42d7fec508b
+
+G-A ERRATUM, and the operational lesson is worth more than the erratum.
+
+MY PREVIOUS CHECKPOINT WAS MANGLED BY MY OWN SHELL QUOTING. I passed the note as a double-quoted bash argument containing backticks, so bash ran six command substitutions INSIDE the message and the journal recorded their (empty) output instead of the text. The checkpoint itself succeeded; six code fragments are simply blank in it.
+
+NOTHING WAS MUTATED, and I checked rather than assumed. The substitutions that executed were: two `git merge --ff-only 8a5f9bb` (both refused with "Not possible to fast-forward, aborting", the same correct refusal as my real attempt), one `fleet index ...` (invalid choice, the subcommand does not exist yet -- which is the whole point of the wave), one python import of tomllib (ModuleNotFoundError, as expected), and two path/word fragments that were simply not commands. No writes, no state change, no ref moved.
+
+THE FIX, AND IT IS IN THE HELP TEXT ALREADY: `fleet sup-checkpoint` takes `<body|@file>`. Every checkpoint from here is written to a file and passed as @file. A supervisor note is prose ABOUT code, so it is dense with backticks by nature -- passing it as a double-quoted shell argument is not a slip, it is a shape that will recur for every incarnation that types one. Adjacent and already known: the class-4 nonce doctrine (never pipe sup-boot through head/tail). Same family -- the shell is not a neutral pipe for supervisor text.
+
+THE SIX BLANKED FRAGMENTS, RESTORED:
+
+1. Hunk 3 rationale: main's `(records or {}).get("workers", {})` raises AttributeError if `workers` is present but not a dict, where the branch's isinstance ladder degrades to None and the gate stays armed.
+
+2 and 3. The blocked ref: `git merge --ff-only 8a5f9bb` on main REFUSED, correctly. INTERFACE ACTION OWED: commit or stash the twelve modified files in the fleet home, then `git merge --ff-only 8a5f9bb` on main.
+
+4. idx-core's scope: the shard layer plus `fleet index init|build|update|status`.
+
+5. The floor trap: the spec specifies `.fleet-index/config.toml`, and `tomllib` IS 3.11+ -- `py -3.10 -c "import tomllib"` is a ModuleNotFoundError on this box.
+
+## 2026-07-27T00:59:55Z CHECKPOINT inc=inc-20260727T003737Z-0ccd sid=3fb1127d-1514-4e5d-8830-e42d7fec508b
+
+G-B. §11.7'S `[UNVERIFIED -- live receipt owed]` IS NOW VERIFIED. THE HARD M2 BUILD-GATE ITEM IS CLOSED, AND IT CAME BACK POSITIVE.
+
+THE QUESTION, restated from `docs/specs/fleet-index.md` §11.7: does an `allow` entry in the `--settings` file `dispatch_bg` passes actually take effect for a default-spawned `dontask` `--bg` worker, with NO per-worktree `.claude/settings.local.json` present? The spec marked its own template-grant mechanism a DESIGN CLAIM, not an observed behaviour, and the evidence pointed the other way: the 2026-07-23 overnight record shows working allowlists only via per-worktree `settings.local.json`, and `dispatch_bg`'s own comment marks `--setting-sources`' runtime effect under `--bg` UNOBSERVED. §11.9's revert criterion is gated on this receipt existing, BOTH prongs.
+
+TWO ARMS, ONE VARIABLE. Same task file, same cwd, same mode, same model, same everything except the grant. The cwd was a scratch dir created for this with NO `.claude/` in it at all -- confirmed by `ls -a`, which showed only `./` and `../`. `worker-settings.template.json` ships hooks only and no `permissions` block, exactly as §11.7 says.
+
+  ARM B, CONTROL (no grant anywhere), worker probe-nogrant, dontask, sonnet:
+    PROBE-DENIED Permission to use Bash has been denied because Claude Code is running in don't ask mode.
+
+  ARM A, TREATMENT (one subcommand-scoped allow added to state/worker-settings.json only), worker probe-grant, dontask, sonnet:
+    PROBE-EXECUTED PROBE-OK-7748
+
+The grant was `"permissions": {"allow": ["Bash(py -3.13 -c:*)"]}` and the probed command was `py -3.13 -c "print('PROBE-OK-7748')"`. I used a multi-token prefix deliberately so the grant has the SAME SHAPE as the `Bash(fleet q:*)` the template will carry -- a one-token grant would have proven a weaker thing.
+
+WHY THE CONTROL WAS NOT OPTIONAL. Without arm B, arm A proves only that the worker ran a command, not that the grant is why. `dontask` being quietly more permissive than doctrine believes was a live possibility, and arm B is what rules it out. It also, incidentally, re-confirms the documented failure mode: under `dontask` an ungranted Bash call is DENIED outright with a clear message rather than hanging on an unanswerable prompt.
+
+CONSEQUENCE FOR M2. The template mechanism in §11.7 item 1 works as designed. `Bash(fleet q:*)` in `worker-settings.template.json` will reach a default worker with zero per-spawn setup, the fallback-to-`settings.local.json` re-spec in item 3 is NOT needed, and §11.9's ordering gate is satisfiable: A-arm adoption runs recorded after this receipt count toward the criterion. The M2 slice must land this receipt in the repo and flip the `[UNVERIFIED]` marker -- it is currently recorded only here.
+
+STATE HYGIENE. `state/worker-settings.json` is instance state, gitignored, and I mutated it for arm A. Backed up first, restored after, verified `cmp` IDENTICAL and `grep -c permissions` = 0, and `fleet doctor` reports `[PASS] instance-freshness: instance is up to date with the template`. The mutation window did not overlap any other dispatch: settings are read at session start, and idx-core and id-glob both started before it.
+
+ONE THING I DID THAT IS WORTH DECLARING. I ran `fleet doctor` during the restore check -- the same verb whose quarantine rename is the subject of id-glob's task. The registry was valid, so nothing was renamed, but a supervisor running doctor while a worker studies doctor's rename is exactly the kind of interference that is invisible until it is not. Declaring it rather than leaving it to be discovered.
+
+## 2026-07-27T01:01:59Z CHECKPOINT inc=inc-20260727T003737Z-0ccd sid=3fb1127d-1514-4e5d-8830-e42d7fec508b
+
+G-C. TARGET 3 RULED: RETIRE `fix/b6-interface-release`, AND RE-DERIVE THE ONE MECHANISM WORTH KEEPING. Decision recorded, not deferred.
+
+FIRST I CORRECTED THE PREMISE I INHERITED, BECAUSE IT WAS WRONG. Two predecessors recorded that b6's conflict with main had grown too large to resolve inside a wave -- "its conflict is now larger than the one my predecessor measured and aborted at 187k", written WITHOUT re-measuring after the handoff-seams merge. I measured it against the tree it would actually enter (8a5f9bb, the verified identity merge, i.e. main plus TWO further merges since that note): THREE conflict hunks total -- ONE in `bin/fleet.py`, TWO in `docs/specs/claim-nonce.md`. That is a morning's work, not a wave. The inherited "too big to merge" premise is FALSE, and I am recording that plainly because I am about to retire the branch anyway and I do not want the retirement resting on a cost claim that does not survive measurement. THE BRANCH IS BEING RETIRED ON MERIT, NOT ON MERGE COST.
+
+WHAT THE BRANCH ACTUALLY DOES, read from the diff rather than from the reports: `fleet sup-release --interface`, an attestation flag by which the releasing body swears it is the interface tier and will not act as supervisor. The attestation is persisted on the released record as `released_by_interface`, and `sup-boot` consults it: a released claim whose releaser is STILL LIVE refuses, UNLESS that releaser attested. Plus a doctor wedge check and the claim-nonce/three-tier amendments. 891 lines across 4 files.
+
+THREE GROUNDS FOR RETIRING IT.
+
+1. ITS FOUNDING INCIDENT IS NOW FORBIDDEN. The branch exists because an interface session ran `sup-boot` and was refused. Doctrine since says an interface session must NEVER `sup-boot`. A guard whose only customer is a forbidden path is dead weight the moment it lands.
+
+2. AND THIS IS THE GROUND THAT DECIDES IT -- THE BRANCH IS CONDEMNED BY DOCTRINE RATIFIED TODAY, WHICH DID NOT EXIST WHEN IT WAS PARKED. The operator ratified this morning: *"Inference may select the SUBJECT of a measurement, but may not supply the GROUNDS of a refusal."* `--interface` is precisely a caller supplying the grounds of a NON-refusal, about itself, and the earlier break lens had already found it forgeable via `--sid`. The attestation is unsound evidence in exactly the sense the new clause names: it can only ever be ADDED, never withheld by an adversary, so its presence proves nothing and its absence is the only sound half. Two gate reviewers escalated this branch 2-0 and the break lens said it found something worse than the bug the branch fixes; the ratified clause is now the general statement of what they were both circling. I am not re-litigating their finding -- I am naming the rule that makes it structural rather than a matter of taste.
+
+3. THE UNIVERSAL CASE IS BETTER SERVED BY DELETING THE CONDITION THAN BY ADDING AN ESCAPE HATCH. The case b6 leaves broken is not exotic: it is EVERY ordinary supervisor stand-down. A supervisor releases, its body is still in the roster, and the next `sup-boot` refuses because a live releaser looks like a second body. Today's workaround is out-of-fleet and manual -- release, then the INTERFACE stops the body so the sid leaves the roster, then a fresh `sup-spawn`. That is the succession path my own predecessor used and the one the wave-2 brief calls "succession that works, proven tonight".
+
+THE MECHANISM WORTH RE-DERIVING, STATED SO THE NEXT BODY CAN BUILD IT WITHOUT READING THE BRANCH: **`sup-release` tombstones its own body's registry record as part of releasing.** Then `releaser_live` is FALSE by construction, `sup-boot` claims cleanly, and no attestation exists to forge. It removes the condition instead of authorising an exception to it -- and it needs no new trust in anything the caller says, which is the whole point of ground 2. It also retires the manual step that currently sits outside the fleet, which is where every unproven handoff has died. Scope it as its own small slice with its own gate; it is NOT a rebase of this branch.
+
+WHAT I AM NOT DOING. Not deleting the branch ref -- retirement is a decision, and the ref costs nothing and holds the reasoning, the tests and the amendments. `docs/specs/claim-nonce.md` and `docs/specs/three-tier-command.md` amendments on it are marked for operator ratification and die with it unless the re-derived slice needs them, which it largely will not: a tombstoning release needs far less specification than an attestation protocol. The worktrees `C:/proga/fleet-b6`, `fleet-b6-rb`, `fleet-b6-rs` are now litter and can be cleaned whenever a body has the turn.
+
+## 2026-07-27T01:20:06Z CHECKPOINT inc=inc-20260727T003737Z-0ccd sid=3fb1127d-1514-4e5d-8830-e42d7fec508b
+
+G-Z. HANDOVER — inc-20260727T003737Z-0ccd, at the ceiling. ONE PAGE, deliberately.
+
+I HIT THE 200k CEILING AT 228,145 TOKENS AND `fleet spawn` REFUSED ME, four times, correctly. Fifth supervisor the built arm has gated. Note the irony and then use it: the arm that fired is `spawn`; `respawn` HAS NO SUCH ARM, which is exactly the gap task 3 below exists to close. My last four dispatches died to the ceiling, so THE FOUR BRIEFS ARE WRITTEN AND THE FOUR WORKTREES EXIST — your first act is to dispatch them, not to plan them.
+
+## Dispatch these four immediately. Everything is on disk.
+
+Worktrees created at `0e8d7ca`, `.claude/settings.local.json` deny-fenced in each, briefs in
+`state/tasks/lens/<name>-brief.md`, all four reading `state/tasks/lens/STANDING-ORDERS.md` (new —
+shared fences/TDD/injection/restore/final-message contract, so briefs stay short):
+
+    fleet spawn <name> --dir C:/proga/fleet-<name> --task @state/tasks/lens/<name>-brief.md \
+        --mode bypass --model opus --category build --nonce <YOURS>
+
+`respawn-ceiling` · `doctor-repair` · `doctrine-citations` · `unbuilt-sweep`
+
+OPERATOR ORDER, standing: run **5–6 concurrent builders**, saturate the slate, dispatch the next the
+moment one lands. Slice by FILE SET, not topic. Two `bin/fleet.py` merges never share one
+verification — merge one at a time, both floors after each.
+
+## State
+
+- **`0e8d7ca` is the verified tree: 2469 passed / 11 skipped, IDENTICAL on 3.13 and 3.10.** It is
+  the identity merge + the interface's gates commit. Lives in scratch worktree
+  `C:/proga/fleet-mergesurvey`. **KEEP IT** until `main` catches up.
+- **`main` is still behind and it is not your fault or mine.** The interface holds `bin/fleet.py`
+  dirty (statusline/tier work) and will commit and tell you the sha. Then merge `0e8d7ca` in.
+  **Expect `TestRetiredSidWritersAreWhereTheyAreCited` RED** — re-pin to what you MEASURE. The
+  interface has already re-pinned its own copy to `:4647/:5094/:9022/:13373`; do not revert those to
+  older-looking numbers. Third merge running that this test has caught. It earns its keep every time.
+- **Do the merge in a SCRATCH WORKTREE, never in the fleet home.** A conflicted `bin/fleet.py` in
+  `C:/proga/claude-fleet` breaks every fleet command including your own `sup-checkpoint`. I did all
+  three merges this way and it cost nothing.
+
+## In flight / owed
+
+1. **`idx-core` STILL RUNNING** — fleet-q M1, branch `idx/core` @ `8a5f9bb`, worktree
+   `C:/proga/fleet-idx-core`. Its final message must NAME the shard-layer API functions it shipped;
+   the two follow-on fleet-q slices (`q` itself, and `--context` digest injection + teach lines +
+   the template grant) are specified against those names and cannot be briefed until you have them.
+2. **`id-glob` IS DONE AND UNGATED** — branch `fix/corrupt-glob`, +80/-11 in `bin/fleet.py`, 19 new
+   tests, both floors green, 4/4 injections RED, porcelain empty. **This is your first gate.**
+   Dual-lens, delta-only, `CONFIRM-CLEAN | ESCALATE`. I have NOT verified it myself — VANTAGE
+   doctrine says builder-run is not manager-run.
+3. **NEW DEFECT, MEASURED, AND IT CORRECTS MY OWN BRIEF.** I told id-glob the "views quarantine"
+   claim read against doctrine and asked it to measure. **The views DO quarantine**: bare
+   `fleet status`, `peek` and `result` each take `fleet_lock()` then `load_registry()` and RENAME a
+   corrupt registry aside. Only `--stale-ok` honours the rule, and `commands/{status,peek,result,
+   overview}.md` all shell out to the BARE verbs — so `/fleet:*`, the exact surface the doctrine
+   sentence names, is the surface that writes. An operator whose registry is corrupt and who runs
+   `/fleet:status` walks step 2 of the privilege-escalation repro and is told nothing. Folded into
+   the `doctor-repair` brief as scope item 3.
+4. **§11.7's `[UNVERIFIED — live receipt owed]` IS CLOSED, POSITIVE.** Two-arm probe, one variable:
+   no grant → `PROBE-DENIED (don't ask mode)`; one subcommand-scoped `allow` in the `--settings`
+   file only, no `.claude/` in cwd → `PROBE-EXECUTED`. So `Bash(fleet q:*)` in the template will
+   reach a default `dontask --bg` worker with zero per-spawn setup, the item-3 fallback re-spec is
+   NOT needed, and §11.9's ordering gate is satisfiable. **Owed: the M2 slice must land this receipt
+   in the repo and flip the marker — it is recorded only in my journal.** Full detail in checkpoint G-B.
+5. **`fix/b6-interface-release`: RULED RETIRE** (checkpoint G-C). Not on merge cost — I measured the
+   conflict at THREE hunks, so the inherited "too large" premise was false and I said so. Retired on
+   merit: its founding incident is doctrine-forbidden, and `--interface` is a caller supplying the
+   grounds of its own non-refusal, which is precisely what the clause ratified TODAY forbids.
+   **Re-derive instead: `sup-release` tombstones its own body's registry record**, so `releaser_live`
+   is false by construction and there is no attestation to forge. Own slice, own gate.
+
+## Two things that will bite you
+
+- **NEVER pass a checkpoint as a double-quoted shell argument.** Backticks in it get executed by
+  bash and the journal records their output. It happened to me (G-A is mangled; G-A-erratum restores
+  the six fragments). `sup-checkpoint` takes `@file` — its own help says so. Same family as the
+  class-4 nonce rule: the shell is not a neutral pipe for supervisor text.
+- **`docs/OPERATOR-GATES.md` and the fleet home are ACTIVELY EDITED by the interface tier.** Never
+  stash or commit its work. Check `git status --porcelain` before any ref operation.
+
+## Housekeeping
+
+Worker `probe-nogrant`/`probe-grant` idle and spent. Litter worktrees `fleet-b6`, `fleet-b6-rb`,
+`fleet-b6-rs` retired with the b6 ruling. `state/worker-settings.json` was mutated for the probe and
+restored — `cmp` IDENTICAL, doctor `[PASS] instance-freshness`.
+
+Releasing cleanly rather than attempting a handoff dispatch: it is unproven at three stillbirths,
+and I am past the ceiling with no context to spend on a fourth.
+
+## 2026-07-27T01:20:25Z RELEASED inc=inc-20260727T003737Z-0ccd sid=3fb1127d-1514-4e5d-8830-e42d7fec508b
+
+released cleanly: at the ceiling: 228,145 tokens, spawn refused 4x and correctly. Wave 2 output: identity branch merged+measured at 0e8d7ca (2469/11 both floors), b6 ruled retire, 11.7 live receipt closed positive, views-quarantine defect measured. idx-core still running, id-glob done and awaiting its dual-lens gate, four briefs+worktrees staged for immediate dispatch. Releasing rather than risking a 4th handoff-dispatch stillbirth.
+
+## 2026-07-27T01:23:35Z BOOT inc=inc-20260727T012335Z-0dd8 sid=91842ff6-eca4-4cab-9e87-336909cbfd23
+
+fresh claim: predecessor inc-20260727T003737Z-0ccd released cleanly -- fresh claim, no seizure
+
+## 2026-07-27T01:27:51Z CHECKPOINT inc=inc-20260727T012335Z-0dd8 sid=91842ff6-eca4-4cab-9e87-336909cbfd23
+
+H-A. BOOTED AND DISPATCHED ON TURN 1. Five builders out, slate at six.
+
+Fresh claim, no seizure -- inc-20260727T003737Z-0ccd released cleanly at the ceiling. I read its
+G-Z handover and the SUCCESSOR-ADDENDUM before writing this, and nothing else. That is deliberate:
+five supervisors before it burned full contexts reading long handovers and merged nothing.
+
+DISPATCHED, all bypass/opus/build, all reading state/tasks/lens/STANDING-ORDERS.md:
+
+  respawn-ceiling     C:/proga/fleet-respawn-ceiling     wave2/respawn-ceiling     @0e8d7ca
+  doctor-repair       C:/proga/fleet-doctor-repair       wave2/doctor-repair       @0e8d7ca
+  doctrine-citations  C:/proga/fleet-doctrine-citations  wave2/doctrine-citations  @0e8d7ca
+  unbuilt-sweep       C:/proga/fleet-unbuilt-sweep       wave2/unbuilt-sweep       @0e8d7ca
+  views-doctrine      C:/proga/fleet-views-doctrine      wave3/views-doctrine      @02bf276  (NEW, cut by me)
+
+Plus idx-core still running from wave 2 = six concurrent, which is the operator's standing slate.
+
+THE SIXTH SLICE, AND THE ONE DECISION IN IT. views-doctrine is the interface-ordered slice for the
+views-quarantine finding: `status`, `peek` and `result` each take fleet_lock() then load_registry(),
+which RENAMES a corrupt registry aside -- so `docs/specs/terminal-surface.md` D4 and the root
+CLAUDE.md line "views ... never quarantine a corrupt registry" are both FALSE OF SHIPPED CODE, and
+the interface committed a spec edit to that same file an hour ago that leaves D4 standing.
+
+I cut it from `02bf276` (= main), NOT from `0e8d7ca` like the other four, because the false spec text
+it must correct is the interface's just-committed version and that only exists on main. Its file set
+is docs/specs/terminal-surface.md + root CLAUDE.md + a receipt; doctor-repair's is bin/fleet.py +
+tests. Disjoint by construction, separate merges -- which is the whole reason the interface ordered
+them unbundled: the two slices disagree about what today's default behaviour IS, and bundling buries
+the contradiction.
+
+THE JUDGEMENT CALL I HANDED THE WORKER RATHER THAN DECIDING FROM A DISTANCE. Its pin must not be a
+pin that doctor-repair has to DELETE when it lands the real fix -- a pin the next slice must remove
+is worse than no pin. I told it to design the pin so it goes green naturally when the code is fixed,
+and to say plainly in its final message which way it resolved it. I also told it D4's DESIGN INTENT
+is correct and stays; what is wrong is that D4 reads as a description of shipped behaviour. A worker
+told "this doc is wrong" deletes the requirement; a worker told "the requirement is right and the
+description is wrong" keeps it.
+
+WHAT I HAVE NOT TOUCHED YET, in the order I own it: the id-glob dual-lens gate (done, unmerged,
+UNGATED -- my first gate, and my predecessor deliberately did not self-verify it); the merge of the
+verified identity tree 0e8d7ca into main=02bf276, in a scratch worktree, expecting
+TestRetiredSidWritersAreWhereTheyAreCited RED and re-pinning to what I MEASURE; fleet q M1+M2 once
+idx-core's final message names its shard-layer API; and the b6 retirement execution.
+
+One correction to my own inherited brief, small but worth the line: the boot brief said "five staged
+slices ... plus STANDING-ORDERS" and then said to add a sixth. There were FOUR staged briefs. The
+addendum's own arithmetic ("this plus my four staged briefs") is the right one -- five dispatches,
+six concurrent with idx-core. I am recording it so the next body does not go looking for a fifth
+brief file that was never written.
+
+## 2026-07-27T01:39:47Z CHECKPOINT inc=inc-20260727T012335Z-0dd8 sid=91842ff6-eca4-4cab-9e87-336909cbfd23
+
+H-B. THE IDENTITY MERGE IS ON `main`. `main` = `a5a026c`. COMBINED TREE MEASURED: 2494 passed / 11 skipped, IDENTICAL on py -3.13 and on the py -3.10 floor.
+
+Queue item 1 is closed. This is the merge five supervisors did not make.
+
+WHAT I MERGED INTO WHAT. `0e8d7ca` (the identity merge + the interface tier's operator-docket
+commit, measured 2469/11 by my predecessor) into `main` = `02bf276` (2355/11, measured by the
+interface on its committed tree). Done on branch `merge/wave3-identity` in scratch worktree
+`C:/proga/fleet-w3merge`, then fast-forwarded into the fleet home. NEVER merged in the fleet home:
+a conflicted `bin/fleet.py` there breaks every fleet command including my own `sup-checkpoint`.
+
+2494 IS NEITHER INHERITED NUMBER, WHICH IS THE POINT. The addendum warned me not to arithmetic my
+way to a baseline -- 2355 is main without the identity merge, 2469 is the identity merge without the
+terminal-surface commit, and 2355 + (2469-2468) is not 2494 either. I measured the tree I actually
+built. Anyone re-deriving a baseline for a slice cut from `main` should use 2494/11 and measure it
+themselves anyway.
+
+THE CONFLICT WAS EXACTLY WHAT I WAS TOLD TO EXPECT, AND IT EARNED ITS KEEP AGAIN. Two hunks, both in
+`bin/fleet.py`, both the same content: the four `retired_sids` writer line-number citations, at the
+module docstring (`:11524`) and at the send carve-out comment (`:12169`). HEAD carried
+`:4647 :5094 :9022 :13373` (the interface's re-pin); `0e8d7ca` carried `:4955 :5402 :9452 :14003`.
+**Both were wrong on the merged tree.** I resolved to HEAD, ran the pin test, and it printed the
+measured truth: writers at `5014, 5461, 9511, 14062`. Re-pinned to those, test green. Two citation
+sites, both updated -- I grepped for the old numbers afterwards to confirm no third site was left
+telling the old story.
+
+Note what the sequence proves: the correct resolution was available from NEITHER side of the
+conflict. A merge resolver picking a side would have shipped a wrong citation with a green-looking
+diff. `TestRetiredSidWritersAreWhereTheyAreCited` re-derives the numbers out of the file on every
+run, which is why this was a signal and not a nuisance. Fourth merge it has caught. Do not revert
+these numbers because an older set looks familiar; the next merge that moves `bin/fleet.py` will
+move them again and the remedy is to re-pin to what you MEASURE.
+
+FLEET HOME HYGIENE. The interface tier's dirty file (`supervisor/JOURNAL.md`) was untouched by the
+fast-forward -- I checked porcelain before and after and it is the only entry both times. `bin/fleet.py`
+changed under the running supervisor, so I re-ran `fleet status --stale-ok` from the home immediately
+after: the CLI works and the roster reads correctly.
+
+SLATE, all eight running: five builders (respawn-ceiling, doctor-repair, doctrine-citations,
+unbuilt-sweep, views-doctrine) + idx-core from wave 2 + the two gate reviewers I dispatched for
+id-glob.
+
+THE id-glob GATE IS OUT. Dual-lens, delta-only, independent, `CONFIRM-CLEAN | ESCALATE`:
+`gate-ig-rs` (spec-conformance lens) in `C:/proga/fleet-ig-rs`, `gate-ig-rb` (break lens, full
+fault-injection authority, restores everything) in `C:/proga/fleet-ig-rb`, both detached at the
+branch tip `43b906f`. Neither sees the other's report. I told BOTH of them, unprompted by any
+inherited brief, that `status_snapshot()` gained `supervisor` and `tier` AFTER `fix/corrupt-glob`
+was cut -- the addendum flagged that id-glob and idx-core were both cut before that landed, and a
+reviewer who does not know it will pass a delta that is already wrong where it is going.
+
+`C:/proga/fleet-mergesurvey` (the 0e8d7ca scratch) can now be cleaned -- `main` has caught up, which
+was my predecessor's stated condition for keeping it. Leaving it one more beat in case a gate needs
+the pre-merge tree.
+
+NEXT, in order: read the two gate verdicts when they land and rule on id-glob; execute the b6
+retirement (ruled RETIRE in G-C, unexecuted); brief the two fleet-q follow-on slices the moment
+idx-core's final message names its shard-layer API.
+
+## 2026-07-27T02:03:11Z CHECKPOINT inc=inc-20260727T012335Z-0dd8 sid=91842ff6-eca4-4cab-9e87-336909cbfd23
+
+H-C. M1 LANDED AND M2 IS UNBLOCKED. `idx-core` DONE at 2617/11 both floors, 149 new tests, and it handed me the nine spec problems that are now the most valuable thing in this campaign.
+
+`idx-core` finished on branch `idx/core` @ `077175e` (two commits on 8a5f9bb): `bin/fleet.py` +955,
+`tests/test_fleet_index.py` +1159. Baseline 2468 + 149 = 2617, identical on 3.13 and 3.10, zero
+pre-existing failures, 5 fault injections all RED, porcelain EMPTY. It dogfooded `fleet index init`
+over a copy of this repo: 129 files, 5370 symbols, two forced builds byte-identical.
+
+THE API IT SHIPPED, which is what the two follow-on slices were waiting on:
+`find_index_root`, `shard_path_for_source` + `source_rel_from_shard`, `read_shard`,
+`write_shard_atomic`, `parse_source_symbols`, **`verified_shard_rows`** (§11.3's choke point),
+`render_digest`, `load_index_config`, plus `index_dir`/`index_symbols_dir`/`index_config_path`/
+`source_lang`/`source_header`/`render_shard`/`index_source_files`/`index_shard_rels`/`build_index`/
+`update_index`/`index_status`/`SHARD_KINDS`/`INDEX_NO_INDEX_MESSAGE`/`IndexConfigError`.
+
+DISPATCHED `q-verb` -- M2 slice A, `fleet q` itself, §11.1-11.6 + §12's q list. Branch `idx/q` @
+`077175e`, worktree `C:/proga/fleet-q-verb`. I explicitly fenced it OUT of §11.7 (template grant),
+§11.8 (teach lines), §11.9 (adoption) and `--context` injection -- those are slice B, and disjoint
+file sets are the only thing that lets two bin/fleet.py slices merge one at a time.
+
+I TOLD IT ITS BASE IS UNGATED, IN THOSE WORDS. `idx/q` is cut from an unmerged, ungated branch while
+that branch's gate runs in parallel. That is a deliberate accepted risk to keep the operator's main
+event moving -- but a worker that does not KNOW its base is provisional will treat an M1 primitive's
+contract as settled law, and if a gate finding lands on it the rework is silent. It is told: report an
+M1 defect, do not fix it.
+
+THE SPEC PROBLEM I PROMOTED INTO ITS BRIEF AS A DECISION, not a note. §11.2 pins
+`fnmatch.fnmatchcase` for `--path`, and §8's default globs are `**/*.py` -- `fnmatchcase("fleet.py",
+"**/*.py")` is FALSE, so a literal reading silently skips every root-level source file. M1 wrote its
+own `**`-aware case-sensitive matcher. So `q --path` can speak either dialect and the spec sanctions
+the one that does not work. I made it the named judgement call of the slice and required the answer,
+with reasons, in the final message. A silent choice there is a defect that reads as correct forever.
+
+`idx-core` ALSO REPORTED SOMETHING I AM RECORDING BECAUSE IT WILL BE FORGOTTEN OTHERWISE: a shard
+truncated exactly on a row boundary is UNDETECTABLE under the current header, which carries the
+source line count and not a row count. It detects the realistic torn write and left the boundary case
+open because closing it changes the format §5 pins. That is a known, bounded, documented hole in a
+safety property -- not a defect it hid, a defect it declared. Both gate lenses have it as a lead.
+
+THE M1 GATE IS OUT, dual-lens, delta-only, detached at `077175e`: `gate-idx-rs` (spec lens,
+`C:/proga/fleet-idx-rs`) and `gate-idx-rb` (break lens, `C:/proga/fleet-idx-rb`). Both are asked for
+something beyond a verdict: RS must say which of the nine spec problems it AGREES with and which it
+does not -- a spec problem resolved wrongly is worth more to me than a code defect, because the wrong
+resolution is now load-bearing for M2. RB is told the central claim under attack is §8's "no path
+serves an unverified coordinate", and that a bare "no issues" on a 2110-line delta reads as a lens
+that was not driven -- if it finds nothing it must show the attacks that failed.
+
+I also told RS the `retired_sids` citations now measure `:5014 :5461 :9511 :14062` on the merged
+`main`, so it judges the REASON for this branch's +1 re-pin rather than the value, which will conflict
+and be re-pinned at merge anyway.
+
+SLATE: six builders (respawn-ceiling, doctor-repair, doctrine-citations, unbuilt-sweep,
+views-doctrine, q-verb) + three reviewers (gate-ig-rb still out on the id-glob gate, gate-idx-rs,
+gate-idx-rb). At the operator's stated band.
+
+STAGED, NOT YET DISPATCHED, in dispatch order as slots free: M2 slice B (`--context` digest injection
++ §11.8 teach lines + §11.7 template grant + the §11.7 receipt my predecessor drove and which is
+recorded ONLY in journal G-B -- that slice must land it in the repo and flip the `[UNVERIFIED]`
+marker); then `sup-tombstone-release`, brief already written at
+`state/tasks/lens/sup-tombstone-release-brief.md`.
+
+GATE STATUS: `gate-ig-rs` returned CONFIRM-CLEAN on `fix/corrupt-glob`, none gating -- 2487/11 both
+floors, view-quarantine table re-driven and matching the builder's exactly, injections 1 and 2
+re-driven personally (injection 1 printed a live `NONCE:` with no `--nonce` passed, which is the
+defect itself reproduced under review), single route to §9 verified by reading, no `status_snapshot()`
+coupling in the delta. Its one INFO is the merge re-pin I had already performed before it reported.
+I rule on id-glob when the break lens lands; one lens is not a gate.
+
+## 2026-07-27T02:16:39Z CHECKPOINT inc=inc-20260727T012335Z-0dd8 sid=91842ff6-eca4-4cab-9e87-336909cbfd23
+
+H-D. SECOND MERGE LANDED. `main` = `488289b`, 2497 passed / 11 skipped, identical both floors. AND `unbuilt-sweep` HANDED ME A CORRECTION TO THE ADDENDUM I HAVE BEEN BRIEFING WORKERS FROM.
+
+`unbuilt-sweep` DONE at `232e520`: 62 `[UNBUILT]` tags enumerated, **17 cleared + 1 stale status line,
+4 narrowed to `[PARTLY BUILT]`, 33 kept, 2 documents left explicitly undecided**, `bin/fleet.py`
+untouched. Every clear cites a pasted receipt pinned `# at 0e8d7ca`. Merged in scratch, clean, no
+conflicts.
+
+I VERIFIED IT MYSELF RATHER THAN ACCEPTING THE BUILDER'S RUN -- VANTAGE doctrine, builder-run is not
+manager-run. On the merged tree: `verify_receipts --self-test --strict` over all three touched specs
+returns **6/6 receipts reproduce exactly, 0 unclassified, 0 failures, 0 warnings**, and both self-tests
+pass (the one-word-paraphrase seed is caught; the extraction seed is reported and not silently
+dropped). Both floors 2497/11.
+
+WHY I DID NOT DUAL-LENS GATE THIS ONE, stated so the ruling is reviewable and not a quiet exception.
+This slice's product is 17 claims that something is BUILT. The failure mode is a clear that is not
+true -- and every clear here is backed by a pasted receipt that `tools/verify_receipts.py` RE-EXECUTES
+against the materialised tree at its pin, enforced by `tests/test_receipts.py` on every run, with the
+harness itself seed-tested in the same invocation. That is a mechanical gate that runs forever, not a
+reviewer's opinion that runs once. A dual-lens gate would have added a second opinion about documents
+whose claims are already machine-checked, at the cost of two reviewers I want on code. Code slices
+still get both lenses.
+
+**+3 TESTS, AND THE BUILDER WAS RIGHT TO BREAK ITS OWN RULE.** Its brief said any tally change is a
+finding to report, not a thing to accept. It changed 2469 -> 2472 and argued the case: correcting
+`autoclean.md`'s stale status line requires a receipt IN that document, a `# at` pin moves the document
+into the enforced set, and `test_every_spec_is_classified` then demands it -- +3 parametrized cases.
+Reverting the test file would either put the status line back to lying or make the clear unreceipted.
+I accept it. A worker that reports the contradiction and argues it is doing exactly what the final-
+message contract asks for; the rule exists to stop silent tally drift, and this was not silent.
+
+**THE CORRECTION THAT MATTERS MOST, AND IT IS AIMED AT MY OWN BRIEFINGS.** The SUCCESSOR-ADDENDUM told
+me `status_snapshot()` gained a top-level `supervisor` key and a per-row `tier` key, and to check
+`idx-core` and `id-glob` against it. `unbuilt-sweep` measured that **neither key exists at `0e8d7ca`**,
+and that `git merge-base --is-ancestor 2e46f4c HEAD` is **NO** -- the terminal-surface commit that
+added them is not an ancestor of the tree the wave-2 worktrees were cut from. So the addendum's item 2
+is false OF THOSE BRANCHES. The keys exist on `main` (which had `2e46f4c`) and therefore on every tree
+those branches MERGE INTO -- which means the warning was right about the hazard and wrong about where
+it lives: it is a MERGE-TIME check, not a branch-time one. I passed the branch-time version of it to
+`gate-idx-rs` in good faith. It is not harmful there (I asked it to judge a re-pin's reasoning, not its
+value), but the next body should carry the corrected form: **check snapshot-shape coupling when the
+branch merges, not when it is cut.**
+
+TWO MORE THINGS IT FOUND THAT ARE NOT MINE TO FIX AND ARE RECORDED SO THEY ARE NOT LOST:
+1. **`docs/SPEC.md` §18 cites the wrong commit for the claim-nonce build slice** -- it names `2d58eba`,
+   which is a docs commit ("journal kinds line gains RELEASED + LIMIT-TRANSFER"), not the build. The
+   worker correctly did not propagate a sha it could not verify. SPEC.md was outside its scope.
+2. It left `terminal-surface.md` alone ON PURPOSE -- the interface tier committed to it today and
+   `views-doctrine` is queued on D4. Its `ready-for-build` status line is stale and is that slice's to
+   fix. Correct instinct; two workers editing one spec is how a contradiction gets buried.
+
+**FIX-WAVES-MINT-DEFECTS, NOW 6/6 ON THIS CLASS AND THE SIXTH WAS THIS WORKER.** Its first verb
+enumeration used `grep 'add_parser("<name>"'` and missed `sup-spawn`, `sup-context`, `sup-decision` --
+parser names on a continuation line -- which would have KEPT 5+ demonstrably-built tags. Separately,
+`verify_receipts` caught a `grep -c` it had hand-counted as 3 when it is 4. Neither was catchable by
+reading. This is the fifth day-5 instance of the same shape: **a grep is a claim, and the enumeration
+you build your sweep on is the one nobody re-derives.** The day-5 lesson already says a doc describing
+a CLI must be re-derived from `--help`; this extends it -- an enumeration OF a CLI must be too.
+
+DISPATCHED `q-teach` -- M2 slice B, into the slot `unbuilt-sweep` freed. Branch `idx/teach` @
+`077175e`, worktree `C:/proga/fleet-q-teach`: `--context` digest injection (§7), the ≤4 teach lines on
+**all four** compose paths (§11.8), the subcommand-scoped template grant (§11.7 item 1), and **the
+receipt that is owed**. I gave it the G-B two-arm measurement in full -- control `PROBE-DENIED` under
+`dontask`, treatment `PROBE-EXECUTED PROBE-OK-7748` with one subcommand-scoped allow in the
+`--settings` file and no `.claude/` in cwd -- and told it to read G-B itself rather than work from my
+summary. That result exists in exactly one place, a journal checkpoint, and §11.9's ordering gate is
+blocked on it existing in the repo.
+
+I ALSO TOLD IT THE ONE THING THAT COULD GO WRONG HERE: **if it concludes the receipt cannot honestly be
+landed in this form, it must land nothing and say so.** A fabricated receipt is worse than an
+`[UNVERIFIED]` marker, and this repo has shipped four defects whose own fixture faked the thing under
+test. The temptation to manufacture evidence is highest when the evidence is known to exist and merely
+lives somewhere inconvenient.
+
+SLATE: six builders (respawn-ceiling, doctor-repair, doctrine-citations, views-doctrine, q-verb,
+q-teach) + three reviewers (gate-ig-rb, gate-idx-rs, gate-idx-rb). `sup-tombstone-release` stays
+staged for the next free slot.
+
+## 2026-07-27T02:26:40Z CHECKPOINT inc=inc-20260727T012335Z-0dd8 sid=91842ff6-eca4-4cab-9e87-336909cbfd23
+
+H-E. A CRITICAL, CAUGHT BY A GATE, IN A PRIMITIVE ANOTHER WORKER WAS WIRING UNTRUSTED INPUT INTO AT THAT MOMENT. Plus a third merge. `main` = `0efab34`, 2505/11 both floors.
+
+## THE CRITICAL. `idx/core` GATE VERDICT: ESCALATE.
+
+`gate-idx-rs` found, and drove end to end with two receipts:
+
+**`verified_shard_rows(root, rel)` deletes files OUTSIDE the index root when `rel` carries an interior
+`..`, reports `pruned 1`, and exits 0.** The containment guard at `bin/fleet.py:15376` rejects only
+`rel == ".."` and `rel.startswith("../")`; `_index_posix_rel` preserves interior `..`. The orphan-prune
+path then unlinks the resolved target and rmdirs its way back up, because the walk-up's
+`stop in current.parents` test is evaluated LEXICALLY on the unresolved path -- so it climbs out too.
+
+    >>> fleet.verified_shard_rows(proj, "a/../../../../victim/PRECIOUS")
+    resolves to: ...\q6\victim\PRECIOUS.tsv
+    status orphan written True
+    AFTER : file False dir False
+
+Silent, irreversible deletion outside the declared root, reported as success. The reviewer stated the
+qualifier plainly and unprompted: no CURRENT caller constructs a `..` rel, so nothing is losing data
+today. **`q --outline <path>` takes a caller-supplied path (§11.1), and `q-verb` was building exactly
+that wiring while the gate ran.** That is what turns a latent hole into a live one, and it is why the
+reviewer refused to merge unattended.
+
+**I STEERED `q-verb` MID-TURN RATHER THAN WAITING FOR IT TO FINISH.** Told it: do NOT fix M1 (the
+repair belongs to `idx/core`; I am not having one fix land twice in two spellings), but DO validate at
+its own boundary and pin it -- a `--outline` argument resolving outside the index root must be
+rejected before it reaches the primitive. Defence in depth is right here, not redundant: `q`'s surface
+is the one that takes untrusted input, and a guard at the caller stays correct even if the primitive's
+guard is later refactored. **And I told it to write the test as an ATTACK, not a unit test**: plant a
+real file outside the root, aim a `..`-bearing `--outline` at it, assert the file STILL EXISTS. A test
+asserting only an exit code passes against the deleting behaviour. I asked it to say whether the steer
+arrived in time.
+
+Also from that gate, and it lands on `q-verb` too -- **`MAJOR`: `verified_shard_rows` returns rows in a
+different ORDER depending on whether it just refreshed.** `render_shard` sorts by `(line, end, name)`;
+`parse_source_symbols` returns parse order; they diverge on any `(line, end)` tie (`ZED = ALPHA = 1`).
+This CONTRADICTS the invariant `_index_tsv_field`'s own docstring claims to establish -- shard BYTES
+are reproducible, returned ROWS are not. §12's M2 goldens would pass on a cached shard and flake on a
+refreshed one. Note the shape: **the builder's own stated invariant was true of the artifact and false
+of the API**, and it took a reviewer re-deriving the claim rather than reading it to see the gap.
+
+WHAT THE GATE ALSO CONFIRMED, so the fix wave does not re-litigate it: staleness contract, atomicity
+with bounded retry, the `.git`-boundary walk-up against a REAL linked-worktree layout (`.git` as a
+file), gitignored-only checked with `git check-ignore` rather than a line-present assertion,
+`no_write` suppressing writes down to directory mtimes, byte-reproducibility identical ACROSS
+INTERPRETERS (3.10 and 3.13 produce the same tree digest), every `read_shard` caller accounted for,
+and the `retired_sids` +1 re-pin correct for the right reason. It disagreed with one of the builder's
+nine spec problems (#8, `kind=section` end -- not a real ambiguity, the resolution is unreachable code)
+and found a tenth the builder missed. It also could not reproduce the builder's dogfood counts: commit
+`077175e` claims "129 files, 5370 symbols", a clean re-drive gives **163 shards, 5789 symbols**. The
+PROPERTY (byte-reproducible) reproduces; the NUMBERS describe some other tree. A pasted count is a
+claim, again.
+
+I am holding the fix wave until `gate-idx-rb` lands so ONE wave closes both lenses. Fix waves mint
+defects 6/6 in this project's record; two waves on one branch doubles that exposure for no gain.
+
+## THIRD MERGE: `doctrine-citations`. `main` = `0efab34`, 2505 / 11, both floors, receipts 68/69 with only the pre-existing volatile warning.
+
+It landed `claim-nonce.md` §17 -- the clause ratified today, with its SCOPE sentence intact -- and
+re-pointed every prescriptive citation at the ratified section instead of the unratified amendment.
+Eight new tests re-derive all three citation sites on every run. Eight fault injections, all RED,
+including one aimed at the subtlest case: **a citation re-pointed at a real, ratified, WRONG clause**.
+
+THREE THINGS IT REPORTED AGAINST ITS OWN BRIEF, all of which I accept:
+
+1. **The citation surface was SIX sites, not the three the brief named.** `tests/test_identity_registry.py`
+   asserted the unscoped form as binding in three more places, its module docstring sourcing the rule
+   to "THE HARD INVARIANT (§5 of the build brief)" -- a test file treating a brief as doctrine. It
+   knew this from its enumeration receipt, not from inspection.
+2. **A fourth dead citation, three copies**: `claim-nonce:2573` was cited in `bin/fleet.py` and two
+   test files as the record of an open hypothesis. It never pointed there -- checked at three
+   different shas. Re-pointed at the SECTION rather than a line, which is the durable form.
+3. **At the branch point, NOTHING caught a wrong citation.** Four of its eight injections are green at
+   baseline and RED only because of the new test. That is the finding: the repo had prescriptive
+   doctrine citations in production code with no mechanism asserting they pointed anywhere real.
+
+It also flagged, correctly and unprompted, that it EDITED A RATIFIED SPEC-OF-RECORD under its brief's
+explicit instruction, against STANDING-ORDERS' "do not edit a spec that is the source of record."
+**I rule that in-bounds and I am recording the reasoning rather than leaving it implicit.** The clause
+was ratified by the OPERATOR in-session on 2026-07-27; two independent journal records (my
+predecessor's G-C, and the day-5 lessons entry) quote the same wording. Transcribing an
+already-operator-ratified clause into the spec is not author self-promotion, which is what the
+operator gate forbids. Had the worker been asserting the clause on its own authority, it would be.
+
+## THE THIRD CONSECUTIVE MERGE WHOSE ONLY CONFLICT WAS THE SAME TWO CITATION BLOCKS
+
+`:5014 :5461 :9511 :14062` -> measured `:5028 :5475 :9525 :14084`. Third merge tonight, and for the
+third time **NEITHER SIDE of the conflict carried the correct value** -- the truth existed only in the
+merged tree. A resolver picking a side ships a wrong citation behind a clean diff every time. This is
+now a predictable, recurring, cheap tax and the next body should simply budget it: resolve to either
+side, run `-k RetiredSidWriters`, re-pin to what it prints, move on.
+
+## SLATE
+
+Dispatched `tombstone` (`fix/sup-release-tombstone` @ `0efab34`, worktree `C:/proga/fleet-tombstone`)
+into the slot `doctrine-citations` freed -- the b6 re-derivation: `sup-release` tombstones its own
+body's registry record so `releaser_live` is false by construction and no attestation exists to forge.
+Its brief tells it, in those words, that if its design starts to need a flag by which the caller
+declares something about itself, it has drifted back onto the retired branch's road and must stop.
+
+Six builders (respawn-ceiling, doctor-repair, views-doctrine, q-verb, q-teach, tombstone) + two
+reviewers (gate-ig-rb on the id-glob gate, gate-idx-rb on the M1 gate). Both outstanding gates are
+break lenses; both are the half that finds things.
+
+## 2026-07-27T02:34:47Z CHECKPOINT inc=inc-20260727T012335Z-0dd8 sid=91842ff6-eca4-4cab-9e87-336909cbfd23
+
+H-F. FOURTH MERGE: `respawn-ceiling`. `main` = `d969de3`, 2514 / 11 both floors. AND I HAVE RAISED THE FIRST OPERATOR DECISION OF THIS INCARNATION.
+
+THE SLICE. The 200k ceiling now refuses a **task-bearing** respawn, armed at two sites
+(`cmd_respawn` and `_cmd_respawn_native`), both guarded on the presence of a task. 9 new tests,
+5 fault injections including one the brief did not ask for (right sites, wrong verb literal), none
+left the suite green, porcelain EMPTY.
+
+This closes the gap my predecessor found by WALKING INTO IT: the ceiling refused its `spawn` four
+times, correctly, while `respawn` -- which dispatches a task exactly as `spawn` does -- had no arm at
+all. The guard that fired and the guard that was missing were one verb apart.
+
+**THE CARVE-OUT IS NOT A CONVENIENCE, AND THE SLICE PROVED IT FROM THE SPEC RATHER THAN ASSERTING IT.**
+§11.4's worker-arm remedy IS a bare respawn -- "the supervisor respawns an over-band worker at its next
+task boundary". A uniform refusal would have broken the band doctrine outright. So §11.4 independently
+CONFIRMS the task-bearing carve-out that §11.3's text does not mention. Two sections of one ratified
+spec, one of them describing the built behaviour correctly by accident of what it needed.
+
+## THE DECISION I RAISED, AND WHY I DID NOT DECIDE IT
+
+`docs/specs/three-tier-command.md` names the refusing verbs as `spawn`/`send` in three places
+(`:1407`, the ND1 binding block `:1433`, and `:1516`). `sup-spawn` was ALREADY outside that text;
+`respawn` makes two omissions. The worker found this, correctly did not edit the spec, and called it
+an operator call.
+
+I agree, and the line I am drawing is this: **correcting a doc that describes shipped behaviour is
+drift repair and mine; amending a RATIFIED BINDING BLOCK is a ratification change and is not.** The
+three-tier spec is ratified spec-of-record and §11.3 is a binding enumeration -- widening it changes
+what the fleet is permitted to refuse, which is exactly the class the operator gate holds. Raised via
+`fleet sup-decision --raise` with a context-ref to this checkpoint and the three line numbers.
+
+**A verb note worth carrying: `sup-decision --raise` says "supervisor parks until answered", and that
+is a ROUTING state, not a freeze.** I tested it immediately -- `sup-heartbeat` still works, the claim
+is intact, `sup-status` shows the decision OPEN. So the operator's standing order ("raise it and keep
+working, I answer through `--answer`, not prose") is mechanically satisfiable, and I am keeping
+working. I am recording this because "parks" reads like a stop, and a successor that believes it is
+frozen will sit still waiting for an answer that arrives on a human's schedule.
+
+## TWO THINGS THE SLICE REPORTED AGAINST ITS OWN BRIEF
+
+1. **The two call sites are not two reachable paths.** `_cmd_respawn_native` has exactly one caller.
+   Via the CLI the second site can never fire alone -- it is defence in depth against a direct call or
+   a future second route, not a distinct hole. Built as ordered, described honestly. That distinction
+   matters when someone later reads "armed at two sites" as "two holes were closed".
+2. **`cmd_respawn` has a THIRD body the brief did not name** -- `_cmd_respawn_supervisor`, which
+   handles the claim-holder and the supervisor-shaped husk. The armed site sits ahead of that routing,
+   so it IS covered; but if the intent was "every respawn body carries its own site", that one does
+   not. Recorded so a later reader does not mistake coverage-by-position for coverage-by-construction.
+
+Also: `--task ""` counts as absent (arming is truthiness, consistent with the file's pre-existing
+override test) -- a choice, not a derivation, and the worker said so.
+
+## THE CITATION TAX, FOURTH CONSECUTIVE MERGE
+
+`:5475 :9525 :14084` -> measured `:5485 :9547 :14106`. Note that `:5028` did NOT move this time -- only
+three of four shifted, which is exactly why re-pinning must be done from the measurement and never by
+applying a uniform delta.
+
+SLATE: five builders (doctor-repair, views-doctrine, q-verb, q-teach, tombstone) + two break-lens
+reviewers (gate-ig-rb, gate-idx-rb). Both outstanding gates are the half that finds things; the M1
+fix wave is held until `gate-idx-rb` lands so one wave closes both lenses.
+
+## 2026-07-27T02:45:22Z CHECKPOINT inc=inc-20260727T012335Z-0dd8 sid=91842ff6-eca4-4cab-9e87-336909cbfd23
+
+H-Z. HANDOVER -- inc-20260727T012335Z-0dd8, at the ceiling. ONE PAGE, deliberately.
+
+`fleet send` REFUSED ME at 208,404 tokens, correctly, citing §11.3. Sixth supervisor the built arm has
+gated -- and the FIRST one where the arm that fired was the one built THIS SESSION: `respawn-ceiling`
+merged three hours ago armed `respawn`; the verb that stopped me was `send`. The guard governing the
+session that merged its sibling is the sharpest dogfood this project has.
+
+**Your first act is to MERGE what is already finished, not to plan.** Short brief:
+`state/tasks/lens/sup-brief-wave4.md`. Five supervisors before my predecessor burned full contexts
+reading long handovers and merged nothing; the one handed a short "act first" brief merged the blocker
+on turn 1. That is why this page is this length.
+
+## FIVE MERGES LANDED. `main` = `561e31b`, 2530 passed / 11 skipped, identical on 3.13 and 3.10.
+
+| merge | what | main after |
+|---|---|---|
+| identity tree `0e8d7ca` | the merge five supervisors did not make | `a5a026c` 2494/11 |
+| `unbuilt-sweep` | 17 `[UNBUILT]` tags cleared with pinned receipts | `488289b` 2497/11 |
+| `doctrine-citations` | ratified clause §17 cited + re-derived, 6 sites not 3 | `0efab34` 2505/11 |
+| `respawn-ceiling` | the ceiling now refuses a task-bearing respawn | `d969de3` 2514/11 |
+| `views-doctrine` | the record stops asserting what the code does not do | `561e31b` 2530/11 |
+
+Plus `docs(b6)` `969d1f1`: the b6 retirement EXECUTED -- ruling recorded, ref kept, three litter
+worktrees removed, re-derivation briefed and dispatched as `tombstone`.
+
+**Every tally above I measured myself on the merged tree.** 2355 and 2469 were both inherited numbers
+about trees that no longer existed; neither was ever the combined figure.
+
+## THE ONE THING THAT WILL BITE YOU, AND IT IS CHEAP
+
+**Four of five merges conflicted in exactly two places: the `retired_sids` citation blocks in
+`bin/fleet.py`. NEITHER SIDE WAS EVER CORRECT.** The true value existed only in the merged tree, so a
+resolver picking a side ships a wrong citation behind a clean diff, every time. Recipe: resolve to
+either side, `pytest -k RetiredSidWriters`, re-pin to what it PRINTS, re-run. Once only three of the
+four moved -- so never apply a uniform delta. Budget it, do not investigate it.
+
+## IN FLIGHT AT HANDOVER -- 4 builders + 2 reviewers, none of them blocked
+
+`doctor-repair` · `q-verb` · `q-teach` · `tombstone` · `gate-ig-rb` · `gate-idx-rb`.
+
+1. **`idx/core` IS ESCALATED. CRITICAL, driven with receipts:** `verified_shard_rows(root, rel)`
+   DELETES FILES OUTSIDE THE INDEX ROOT on an interior `..`, reports `pruned 1`, exits 0. The guard
+   rejects only leading `../`; the rmdir walk-up climbs out too because containment is tested
+   lexically on the unresolved path. **Hold the fix wave until `gate-idx-rb` lands so ONE wave closes
+   both lenses** -- fix-waves-mint-defects is 6/6 here. Detail in `H-E`.
+   I steered `q-verb` mid-turn the moment I read it, because `q --outline` takes a caller-supplied path
+   and it was wiring that primitive in as I read: guard at YOUR boundary, do not fix M1, and **write
+   the test as an ATTACK** -- plant a real file outside the root, aim a `..` path at it, assert the
+   file still exists. A test asserting only an exit code passes against the deleting behaviour.
+2. **`id-glob`: one lens in.** `gate-ig-rs` CONFIRM-CLEAN, none gating, 2487/11, view-quarantine table
+   re-driven and matching, injections re-driven personally. Rule and merge when `gate-ig-rb` lands.
+   One lens is not a gate.
+3. **I WAS REFUSED BEFORE I COULD STEER `doctor-repair`, and the steer matters.** Text ready at
+   `C:/Users/Techn/.claude/jobs/91842ff6/tmp/steer-doctor-repair.md`. Its load-bearing half:
+   **"never probe a PID" is now VACUOUSLY TRUE** -- the pivot deleted PID probing -- **but its live
+   successor is the roster subprocess `cmd_status` spawns at `bin/fleet.py:3699`.** Same D1 violation
+   in post-pivot spelling, and a doc-only reading of that clause calls it satisfied, which is exactly
+   how it survived. Fold into `doctor-repair` scope item 3.
+4. **One operator decision OPEN**: may §11.3's ratified enumeration be widened to name `respawn` and
+   `sup-spawn`. **`--raise` parks the DECISION, not the supervisor** -- I verified `sup-heartbeat` and
+   every holder verb still work. A successor that reads "parks" as "freeze" will sit still waiting on a
+   human. Do not answer it yourself.
+
+## THE LINE I DREW, so you can hold the same one
+
+**Correcting a doc that describes shipped behaviour is drift repair and it is mine. Amending a
+RATIFIED BINDING BLOCK is a ratification change and it is not.** That is why the §11.3 enumeration went
+to the operator while D4 and the `CLAUDE.md` rule did not. Related: I ruled `doctrine-citations`'
+edit of ratified `claim-nonce.md` in-bounds because the clause was operator-ratified in-session and two
+independent journal records quote the same wording -- transcription, not author self-promotion.
+
+I also gated `unbuilt-sweep` WITHOUT a dual-lens review, deliberately: its 17 clears are each backed by
+a receipt `verify_receipts.py` RE-EXECUTES against the pinned tree on every run, with the harness
+seed-tested in the same invocation. A mechanical gate that runs forever beats a reviewer's opinion that
+runs once. Code slices still got both lenses.
+
+## WHAT I WOULD TELL YOU IF I HAD ONE LINE
+
+Every slice tonight reported something its own brief got wrong, and **four of those corrections changed
+what I did next**: `unbuilt-sweep` proved the addendum's `status_snapshot()` warning was a MERGE-time
+check and not a branch-time one; `doctrine-citations` found six citation sites where the brief said
+three; `respawn-ceiling` proved §11.4 independently confirms the carve-out §11.3's text omits;
+`views-doctrine` found two more false sentences than the brief named. **Keep asking for that line, and
+keep acting on it.** It is the highest-yield sentence in the final-message contract.
+
+## 2026-07-27T02:45:50Z HANDOFF-BEGIN inc=inc-20260727T012335Z-0dd8 sid=91842ff6-eca4-4cab-9e87-336909cbfd23
+
+successor=inc-20260727T024550Z-4743 task=C:/proga/claude-fleet/state/supervisor-handoff-inc-20260727T024550Z-4743.md
+
+## 2026-07-27T02:46:35Z HANDOFF-COMPLETE inc=inc-20260727T012335Z-0dd8 sid=91842ff6-eca4-4cab-9e87-336909cbfd23
+
+claim -> inc-20260727T024550Z-4743 sid=3430c962-edd5-4ec1-9eea-3c9226bca337
+
+## 2026-07-27T02:47:15Z CHECKPOINT inc=inc-20260727T024550Z-4743 sid=3430c962-edd5-4ec1-9eea-3c9226bca337
+
+claim received via handoff from inc-20260727T012335Z-0dd8
+
+## 2026-07-27T02:53:21Z CHECKPOINT inc=inc-20260727T024550Z-4743 sid=3430c962-edd5-4ec1-9eea-3c9226bca337
+
+I-A. CLAIM TAKEN, AND THE FIRST THING I FOUND IS THAT "MERGE FIRST" HAD NOTHING TO MERGE.
+
+Handoff clean: sup-boot at 02:46:18Z, HANDSHAKE written, claim transferred inside one poll window,
+checkpointed with my own generation. FLEET_WORKER inherited = `sup|inc-20260726T140146Z-5a0e|boot` --
+SUPERVISOR-SHAPED, the benign 6.5-exemption variant, not the malignant worker-shaped one. Recorded per
+the boot ritual's step 5. Context at claim: 103k, BELOW-BAND.
+
+## THREE OF THE SIX IN-FLIGHT LANDED, AND MY WAVE-4 BRIEF'S TURN-1 INSTRUCTION DID NOT SURVIVE THEM.
+
+The brief said: whatever is idle, read its result and MERGE it, that is the whole job. Landed were
+`gate-ig-rb`, `gate-idx-rb`, `q-verb`. **Both gates returned ESCALATE, and the one builder that
+finished is stacked on the branch the second gate escalated.** So the correct turn-1 act was to
+dispatch fix waves, not to merge. I am recording that the brief was wrong on its own headline rather
+than quietly doing something else -- the next body should not read "merge first" as a guarantee that
+a merge exists.
+
+**`q-verb` is DONE and NOT MERGEABLE.** `idx/q` @ `27de965`, 2724/11 both floors, baseline `2617`
+reproduced -- but that baseline IS `077175e`, the `idx/core` tip, so `idx/q` CONTAINS the escalated
+branch. Merging it merges three CRITICALs behind a green tally. `idx/teach` @ `1844a1f` is stacked the
+same way. Both are held until `idx/core` is repaired. This is the merge-time coupling my predecessor
+warned about in a different spelling: **a green branch tally says nothing about the base it carries.**
+
+## `gate-idx-rb` -- THREE MORE CRITICALS, AND ONE OF THEM REPRODUCES WITH NO INJECTION AT ALL.
+
+1. The traversal delete again, through a SECOND door: `index update --files 'x/../../../../victim/precious'`
+   deletes files AND removes directories outside the root, rc 0. Same root cause the break lens found
+   at `verified_shard_rows` -- `_index_posix_rel` keeps interior `..` and the rmdir walk-up's
+   `stop in current.parents` is a LEXICAL test on an UNRESOLVED path.
+2. **The source file is read TWICE** (`source_header` then `parse_source_symbols`), so a write between
+   them persists header(A)+rows(B); back at A the choke point answers `status: ok, refreshed: False,
+   note: None` for a file it does not describe. **2,037 bad shards in 9,811 refreshes -- 21% -- under a
+   concurrent writer, naturally, no fault injection.** That is precisely the
+   manager-builds-while-worker-edits pattern this fleet exists to run.
+3. **5 of 24 fault injections leave the suite GREEN**, three of them fixture-fakes-the-thing (a sha8
+   test using LF ASCII that cannot distinguish bytes from text; a round-trip test that calls
+   `_index_tsv_field` IN THE TEST instead of parsing a tabbed source; a win32-vacuous backslash test).
+   Note the shape, because it is the inverse of the usual one: the shipped code is CORRECT in all five
+   -- the reviewer proved fresh-parse/shard-read equivalence over 15 hostile inputs -- **only the
+   evidence is missing.** An evidence hole is not a code defect and must not be "fixed" by changing
+   working code.
+
+Plus MAJORs: sha8 is 32 bits and COLLIDES (84,203 hashes found two 2-line modules with identical sha8
+AND identical line count -- swap them and the index serves the wrong file's symbols reporting 0 stale);
+the builder walking DOWN has no repo boundary (a parent `index init` indexed `.claude/worktrees/w1`,
+and a `mklink /J` junction leaked a file in from outside); and `init` edits the TRACKED `.gitignore`,
+which makes S8's mandated per-worktree `index init` leave campaign worktrees UN-REMOVABLE -- a hazard
+S13 finding 2b had disposed as "cannot arise".
+
+## `gate-ig-rb` -- CRITICAL ON A BRANCH THE OTHER LENS CALLED CLEAN, AND THE BRIEF CAUSED IT.
+
+`gate-ig-rs` returned CONFIRM-CLEAN on `fix/corrupt-glob`. The break lens then drove two probes end to
+end: the new gate keys on registry-file ABSENCE alone, so a routine spawn that recreates `fleet.json`
+-- or an operator recreating an EMPTY one -- takes the grant with the quarantine artifact still sitting
+there. rc 0, GRANTED, `artifact_still_present=True`. **This repo had already ruled that exact keying
+insufficient, in a pre-existing test, for the sibling reader of the SAME helper.**
+
+And the cause is traceable to a sentence in the builder's brief: it said to reuse the established
+artifact glob pattern, then specified a rule that pattern does not implement -- `_sweep_husks` refuses
+on artifact presence REGARDLESS of a registry being present; the brief's remedy asked for presence AND
+absence. Two rules presented as one. **A brief that says "reuse the existing pattern" while specifying
+a different rule is worse than one that specifies from scratch**, because the builder has a reason to
+stop reading. I have written that failure into the fix brief itself so the next builder reads its own
+instructions adversarially.
+
+## DISPATCHED: TWO FIX WAVES, ONE PER BRANCH, EACH CLOSING BOTH LENSES IN ONE WAVE.
+
+`idx-fix` (worktree `C:/proga/fleet-idx-core`, branch `idx/core`) and `glob-fix` (worktree
+`C:/proga/fleet-corrupt-glob`, branch `fix/corrupt-glob`), both opus, both `dontask`.
+Fix-waves-mint-defects is 6/6 here, which is exactly why each is ONE wave and why both briefs require
+a pin that goes RED without it for every single repair. Both briefs order the worker to read the gate
+results ITSELF rather than work from my index of them -- my predecessor's rule, and the indexes above
+are lossy by construction.
+
+One coupling I flagged into the `idx-fix` brief rather than discovering it at merge: `q-verb` shipped a
+CHARACTERISATION test that goes RED BY DESIGN the moment `idx/core` fixes the row-order MAJOR. That is
+correct behaviour by both workers and it is a merge-sequencing obligation on me, not a regression.
+
+## OWED ITEM 3 DISCHARGED
+
+My predecessor was refused by the ceiling before it could steer `doctor-repair`; the text survived at
+`C:/Users/Techn/.claude/jobs/91842ff6/tmp/steer-doctor-repair.md` and I delivered it verbatim by
+`@file`. Queued to the mailbox -- the worker is mid-turn, so it arrives at the next tool boundary. Its
+load-bearing half: "never probe a PID" is now VACUOUSLY true, and its live successor is the roster
+subprocess `cmd_status` spawns at `bin/fleet.py:3699`.
+
+SLATE: five builders -- `doctor-repair`, `q-teach`, `tombstone`, `idx-fix`, `glob-fix`. No reviewers
+running; the next gate round is owed on whatever the two fix waves produce. The operator decision on
+S11.3's enumeration stays OPEN and is not mine to answer.
+
+## 2026-07-27T03:13:19Z CHECKPOINT inc=inc-20260727T024550Z-4743 sid=3430c962-edd5-4ec1-9eea-3c9226bca337
+
+I-B. `q-teach` LANDED. BOTH M2 BRANCHES ARE NOW DONE AND BOTH ARE STILL UNMERGEABLE -- so I gated them instead of idling the slot.
+
+`q-teach` DONE: `idx/teach` @ `9a08035`, 5 commits, **2664 passed / 11 skipped identical on 3.13 and
+3.10**, base `2617` reproduced at `077175e` first. 12 fault injections, all RED, one of which it had to
+fix its own test for (the byte-identity tests were comparing `compose_prompt` AGAINST ITSELF -- the
+fixture-fakes-the-thing class again, caught by the builder this time). Four compose paths driven end to
+end through their real call sites plus a lint against a fifth appearing.
+
+**BOTH `idx/q` AND `idx/teach` ARE FINISHED AND NEITHER CAN MERGE**, because both were cut from
+`077175e` and therefore CARRY the three escalated CRITICALs. Two green branch tallies, zero mergeable
+work. I am recording the shape because it is the trap: **a branch's own tally is silent about the base
+it drags in.**
+
+## WHAT `q-teach` REPORTED AGAINST ITS OWN BRIEF, AND ONE OF IT IS A DOCTOR DEFECT
+
+**The `instance-freshness` doctor check compares MTIMES, NOT CONTENT** -- my brief asserted it diffs
+template against rendered instance, and §11.7 item 2 repeats the same wrong word. Measured: delete the
+`permissions` key from the instance and `fleet doctor` still prints `[PASS] instance is up to date`.
+So a **silent grant loss is indistinguishable from zero adoption** -- which is precisely the confound
+§11.9's ordering gate exists to remove. The worker correctly did NOT fix it (core doctor surface, not
+M2's), corrected the spec, and pinned a test that goes red if anyone makes the check content-aware.
+
+**I DECLINED TO STEER THAT INTO `doctor-repair`, DELIBERATELY.** It is exactly that worker's surface,
+but I peeked first and it is mid fault-injection round 2 and has already absorbed my predecessor's
+queued steer ("the vacuity check the steer's warning implies" -- so the steer landed and is being acted
+on). Piling a third scope item onto a worker deep in an injection round, on a surface where two workers
+would then be editing one file, is how this project buries contradictions. **It gets its own slice
+after `doctor-repair` merges.** Recorded here so it cannot be lost.
+
+Also from `q-teach`, unprompted and correct: the §11.9 receipt it landed proves the grant SHAPE, not
+the grant -- the experiment used `Bash(py -3.13 -c:*)` because `fleet q` did not exist when it ran.
+And it marked that receipt `# volatile`, which means the harness WARNS and the test SKIPS: **nothing
+re-executes it.** It disclosed that itself via injection 6b. That is the most load-bearing unverified
+thing on either branch and I have aimed a gate straight at it.
+
+## DISPATCHED: TWO BREAK-LENS GATES, RUNNING IN PARALLEL WITH THE BASE REPAIR
+
+`gate-idxq-rb` (`C:/proga/fleet-idxq-rb` @ `27de965`) and `gate-teach-rb` (`C:/proga/fleet-teach-rb` @
+`9a08035`), both opus. **The delta is reviewable while the base is being repaired** -- that is why
+these can run now rather than after `idx-fix`, and it converts dead wait into gate coverage.
+
+Both briefs fence the scope to `077175e..<tip>` so they do not re-find what `idx-fix` already owns --
+**and both are told that a delta which DEPENDS on base behaviour under repair is the most valuable
+thing they can find**, since that coupling is what nobody is looking at. I named the one already known
+(`q-verb`'s characterisation test goes RED by design when `idx-fix` lands) so they hunt the undeclared
+ones.
+
+I deliberately held the SPEC lens on both branches. `idx-fix` may amend §11 (the sha8 widening and the
+§13-2b disposition are both spec edits), and a spec lens that judges against a spec about to change
+buys a re-run. Break lens now, spec lens on a stable base.
+
+SLATE: 4 builders (`doctor-repair`, `tombstone`, `idx-fix`, `glob-fix`) + 2 reviewers. Owed and
+unstarted: the `instance-freshness` content-aware doctor fix (after `doctor-repair` merges), the spec
+lens on both q branches, §11.9 M2 acceptance (after all four q-side merges). Operator decision on
+§11.3 still OPEN and still not mine.
+
+## 2026-07-27T03:15:10Z CHECKPOINT inc=inc-20260727T024550Z-4743 sid=3430c962-edd5-4ec1-9eea-3c9226bca337
+
+I-Z. HANDOVER -- inc-20260727T024550Z-4743, IN-BAND at 154,272 tokens. ONE PAGE.
+
+Short brief for my successor: `state/tasks/lens/sup-brief-wave5.md`. **Read that first, not this.**
+
+I am handing off at a clean wave boundary rather than riding the band: everything is dispatched,
+nothing is mergeable, and six workers are running. Reading six results is a fresh context's job. I
+merged nothing this incarnation and that was the correct outcome, not a failure -- see below.
+
+## THE HEADLINE, AND IT INVERTS MY OWN BRIEF
+
+My wave-4 brief's turn-1 instruction was "whatever is idle, merge it -- that is the whole job." Three
+workers had landed. **None of them yielded a merge**, and the reason generalises:
+
+- `gate-ig-rb` and `gate-idx-rb` both returned **ESCALATE**.
+- `q-verb` was DONE with 2724/11 on both floors -- and its branch `idx/q` is cut from `077175e`, the
+  `idx/core` tip, so it **CARRIES the three CRITICALs that gate escalated**. `q-teach` (2664/11) landed
+  later on the same base with the same problem.
+
+**A branch's own tally is silent about the base it drags in.** Two finished, fully green branches;
+zero mergeable work. That is the sentence I would put in my successor's hand if I had one.
+
+## WHAT THE GATES FOUND (detail in I-A / I-B)
+
+`gate-idx-rb`, three CRITICALs: the traversal-delete has a SECOND door (`index update --files`, removes
+files and directories outside the root, rc 0); the source file is **read twice**, so a concurrent write
+persists header(A)+rows(B) -- **2,037 bad shards in 9,811 refreshes, 21%, with no injection at all**,
+under exactly the manager-builds-while-worker-edits pattern this fleet exists to run; and **5 of 24
+fault injections stay GREEN**, three of them fixture-fakes-the-thing. Note the inversion in that third
+one: the shipped code is CORRECT in all five -- only the EVIDENCE is missing. An evidence hole must not
+be "fixed" by changing working code, and I wrote that into the brief.
+
+`gate-ig-rb`: a CRITICAL on a branch the other lens called CONFIRM-CLEAN -- **one lens is not a gate,
+demonstrated again**. And its cause is traceable to a single sentence in the builder's brief that said
+"reuse the existing pattern" while specifying a rule that pattern does not implement. **A brief that
+cites an existing pattern while specifying a different rule is worse than one that specifies from
+scratch, because it gives the builder a reason to stop reading.** I put that failure INTO the fix brief
+so the next builder reads its own instructions adversarially.
+
+## WHAT I DISPATCHED -- 4 builders + 2 reviewers, none blocked
+
+`idx-fix` and `glob-fix`: one fix wave per branch, each closing BOTH lenses in ONE wave because
+fix-waves-mint-defects is 6/6 here and two waves on one branch doubles that exposure. Every repair
+requires a pin that goes RED without it. Both briefs order the worker to read the gate results ITSELF
+rather than work from my index of them -- my summaries are lossy by construction.
+
+`gate-idxq-rb` and `gate-teach-rb`: break lenses on the two finished q branches, **running in parallel
+with the base repair**. The delta is reviewable while the base is being fixed, which converts dead wait
+into gate coverage. Both are fenced to `077175e..<tip>` so they do not re-find what `idx-fix` owns --
+and both are told that a delta which DEPENDS on base behaviour under repair is the most valuable thing
+they can find, because that coupling is what nobody is looking at.
+
+**I held the SPEC lens on both q branches on purpose.** `idx-fix` may amend §11 (the sha8 widening and
+the §13 finding-2b disposition are both spec edits); a spec lens judging a spec about to change buys a
+re-run.
+
+## TWO JUDGEMENTS I MADE THAT THE NEXT BODY SHOULD BE ABLE TO OVERTURN
+
+1. **I did not steer the `instance-freshness` finding into `doctor-repair`**, though it is exactly that
+   worker's surface. I peeked: it is mid fault-injection round 2 and has already absorbed my
+   predecessor's queued steer. Two workers editing one surface is how this project buries
+   contradictions. It is a slice of its own after that merge -- and it matters, because the check
+   compares MTIMES not content, so a silent grant loss reads as `[PASS]` and is indistinguishable from
+   zero adoption, which is the confound §11.9's ordering gate exists to remove.
+2. **I delivered my predecessor's `doctor-repair` steer verbatim without reading it first.** It was
+   written for exactly that send, the wave-4 brief endorsed it by name, and the peek confirms the
+   worker is acting on it. Stated plainly because it was a shortcut, not a habit to copy.
+
+## OWED, AND ONE OF IT IS A TRAP
+
+The §11.9 M2 acceptance rests on a receipt that **nothing re-executes**: `q-teach` landed it
+`# volatile` (harness WARNS, test SKIPS -- it disclosed this itself) and it proves the grant SHAPE, not
+the grant, because the experiment used `Bash(py -3.13 -c:*)` when `fleet q` did not yet exist.
+`gate-teach-rb` is aimed at it. Do not let §11.9's ordering gate rest on that block before reading that
+verdict.
+
+Also owed: the spec lenses, the `instance-freshness` slice, and the call I did not get to make --
+**whether the two fix waves need their own gate before merging.** I lean re-gate `idx-fix`, verify
+`glob-fix` personally. Reasoning is in the wave-5 brief; I did not measure it, so it is a call.
+
+The operator decision on §11.3's enumeration is still OPEN and still not mine. `--raise` parks the
+DECISION, not the supervisor -- I confirmed that again by working through this entire incarnation with
+it open.
+
+## 2026-07-27T03:15:19Z HANDOFF-BEGIN inc=inc-20260727T024550Z-4743 sid=3430c962-edd5-4ec1-9eea-3c9226bca337
+
+successor=inc-20260727T031519Z-2aff task=C:/proga/claude-fleet/state/supervisor-handoff-inc-20260727T031519Z-2aff.md
+
+## 2026-07-27T03:32:34Z HANDOFF-ABORT inc=inc-20260727T024550Z-4743 sid=3430c962-edd5-4ec1-9eea-3c9226bca337
+
+stopping limbo successor sid=2edb5fdf-ae3d-4262-a2e7-1f3350778c70 inc=inc-20260727T031519Z-2aff (via pending-entry)
+
+## 2026-07-27T03:32:43Z HANDOFF-BEGIN inc=inc-20260727T024550Z-4743 sid=3430c962-edd5-4ec1-9eea-3c9226bca337
+
+successor=inc-20260727T033243Z-84e5 task=C:/proga/claude-fleet/state/supervisor-handoff-inc-20260727T033243Z-84e5.md
+
+## 2026-07-27T03:39:22Z HANDOFF-ABORT inc=inc-20260727T024550Z-4743 sid=3430c962-edd5-4ec1-9eea-3c9226bca337
+
+stopping limbo successor sid=eaee469c-f13c-4db7-ac2b-fa13600fec17 inc=inc-20260727T033243Z-84e5 (via pending-entry)
+
+## 2026-07-27T03:41:27Z CHECKPOINT inc=inc-20260727T024550Z-4743 sid=3430c962-edd5-4ec1-9eea-3c9226bca337
+
+I-C. MY HANDOFF FAILED TWICE. I AM STAYING ON DUTY, AND THE FAILURE IS ITSELF THE FINDING.
+
+Correction to I-Z: that entry was written as a handover. **The handover did not happen.** I remain
+`inc-20260727T024550Z-4743`, claim held, IN-BAND at ~160k, below the 200k ceiling. The wave-5 brief at
+`state/tasks/lens/sup-brief-wave5.md` stands and stays accurate for whoever eventually takes this.
+
+## TWO DISPATCHED SUCCESSORS, NEITHER EVER TOOK A TURN
+
+| attempt | successor | outcome |
+|---|---|---|
+| 1 | `inc-20260727T031519Z-2aff` / `2edb5fdf` | registry `working`, **0 turns**, `peek` = "no transcript yet -- dispatch may still be in flight" for **17 min**. No HANDSHAKE. Aborted. |
+| 2 | `inc-20260727T033243Z-84e5` / `eaee469c` | identical, ~8 min. Aborted. |
+
+**I did not abort at the 300s timeout the runbook prescribes, and I want that reasoning on the record.**
+At timeout the successor's registry row read `working` and the roster showed it joined. The protocol's
+abort case is "timeout / dispatch failure"; this was neither a dead body nor a failed dispatch, so
+killing a possibly-healthy successor would have cost a second full boot for nothing. I extended, twice.
+**At 17 minutes with no transcript the evidence was in: `working` was a claim the registry could not
+support.** That is the same shape as every other lesson in this repo -- a status field asserting
+something nobody measured.
+
+## THE CONTROLS ARE WHAT MAKE THIS A FINDING RATHER THAN A BAD NIGHT
+
+In the same window, on the same daemon, **four ordinary `fleet spawn` dispatches started and produced
+live transcripts within a minute** (`idx-fix`, `glob-fix`, `gate-idxq-rb`, `gate-teach-rb`). Doctor:
+`daemon-wedge` **PASS** (lock held by pid 28812 since 2026-07-26T14:01:49Z, no wedge signature),
+`limited-parks` **PASS**. So: not the daemon, not a wedge, not a usage limit, not the machine.
+
+**And it is INTERMITTENT -- I am myself a successor who booted fine 50 minutes earlier through the same
+verb.** Any theory has to explain both.
+
+**IT IS ALSO NOT NEW, AND THAT IS THE PART THAT MATTERS.** The roster carries
+`sup|...|successor` rows at `0 turns` going back through yesterday -- `55bb`, `fb3e`, `b14a`, `3ec2`
+idle at zero, plus several dead at zero. **This project's record already says "five supervisors burned
+full contexts and merged nothing"; I now think some of those were never bodies at all.** A succession
+that silently produces a body which never takes a turn is invisible from every surface we have: the
+registry says `working`, `peek` says "may still be in flight", and it says that forever.
+
+## DISPATCHED `succession` -- worktree `C:/proga/fleet-succession`, off `561e31b`
+
+Root-cause + reproduce + **make the failure loud**. The lead I gave it is M-D's recorded finding that
+**the handoff dispatch bypasses the choke point `cmd_spawn` goes through** ("successor supervisors have
+no hooks") -- two dispatch routes, and the one that fails is the less-travelled one. I told it in those
+words that I formed that lead from a one-line record of someone else's finding and not from the code,
+and asked it to say if it is the wrong tree.
+
+Hard-fenced: isolated `FLEET_HOME` only, **never** touch the live claim or any of the seven live
+workers, no push. An honest "could not reproduce, here is what I ruled out" is an accepted deliverable
+-- I would rather have that than a plausible story, given four shipped defects in this repo whose own
+fixture faked the thing under test.
+
+Second, smaller defect handed to the same slice: **`sup-handoff-abort` says "Doctor will flag until the
+abort flag is cleared" and no `state/supervisor-handoff-aborted.json` appears** -- doctor's
+`supervisor-handoff` row stayed `[PASS]`. The verb is telling the operator something untrue. A message
+is a claim.
+
+## WHY I AM STAYING RATHER THAN RETRYING A THIRD TIME
+
+Two bodies and ~40 minutes are gone. I hold the claim, I am below the ceiling, and seven workers are
+running whose results need a live supervisor. Retrying blind a third time spends a third body on an
+unchanged experiment. **I stay on duty inside my remaining headroom, act on what lands, and hand off
+when either `succession` explains this or I approach 200k** -- at which point the ceiling refuses my
+dispatches anyway and the handoff verbs still work, which is exactly the state the band was designed
+for.
+
+SLATE: 7 workers -- `idx-fix`, `glob-fix`, `doctor-repair`, `tombstone`, `succession` +
+`gate-idxq-rb`, `gate-teach-rb`. Operator decision on §11.3 still OPEN, still not mine.
+
+## 2026-07-27T03:52:57Z CHECKPOINT inc=inc-20260727T024550Z-4743 sid=3430c962-edd5-4ec1-9eea-3c9226bca337
+
+I-D. FIRST MERGE. `main` = `2dec694`, 2563 / 11 IDENTICAL BOTH FLOORS. And BOTH fix waves corrected the same defect in MY briefs.
+
+## MERGED: `glob-fix`. I verified it myself rather than accepting the builder's run (VANTAGE).
+
+`main` `561e31b` -> `2dec694`. **2563 passed / 11 skipped, identical on 3.13 and 3.10**, both runs mine,
+`git status --porcelain` EMPTY. +33 over main, which is the branch's WHOLE delta (the original W3
+corrupt-glob wave plus the fix wave's +14, new file `tests/test_identity_quarantine_glob.py`) -- not
+the +14 alone. I checked that rather than assuming, because an unexplained tally is the thing this
+project punishes.
+
+**THE CITATION TAX, FIFTH CONSECUTIVE MERGE, AND THIS TIME ALL FOUR MOVED.** Conflict in the two
+`retired_sids` blocks, as predicted. HEAD carried `:5028 :5485 :9547 :14106`, the branch carried
+`:5062 :5509 :9556 :14175`, and the merged tree measures **`:5135 :5592 :9651 :14278`** -- **neither
+side held a single correct value.** A resolver picking a side ships four wrong citations behind a clean
+diff. Recipe worked exactly as my predecessor wrote it: resolve to either side, run
+`-k RetiredSidWriters`, re-pin to what it PRINTS. Last merge only three of four moved; this time four.
+**Never apply a uniform delta.**
+
+## THE FINDING THAT IS ABOUT ME, NOT ABOUT THE CODE
+
+**Both fix waves reported that MY brief cited the wrong site, and in both cases the citation came from
+a reviewer's finding that I passed through without checking its callers.**
+
+- `glob-fix`: I wrote "gate on artifact presence regardless of `ok` ... `bin/fleet.py:2352`". That line
+  is inside `_acting_worker_identity`, **SHARED with the §6.5 worker-turn gate**. Applying my remedy
+  there breaks healthy worker resolution -- it pasted the two failures. `_sweep_husks`, which I told it
+  to match, does not poison a shared read; it **refuses at its own hazard site**. The worker put the fix
+  on the §9 arm instead and split it into "did the registry answer?" / "was it complete?" -- because
+  **`ok` is not `complete`.**
+- `idx-fix`: I pinned C2 at `verified_shard_rows` alone. `_index_refresh_one`, the **build** path, had
+  the identical two-read shape and **BOTH GATES MISSED IT**. It matters more, not less: the scenario I
+  described in my own brief -- manager builds while a worker edits -- runs `fleet index build`, which
+  never touches `verified_shard_rows`. **Fixing only the site I cited would have left the exact
+  scenario I named still broken.**
+
+This is the same class that cost the previous wave its CRITICAL, and I reproduced it twice in one
+incarnation. **A line number inherited from a finding is a claim, and the check it needs is not "does
+this line exist" but "what else reads this site".** Both workers caught it because both briefs ordered
+them to say what the brief got wrong. That instruction has now paid on every single slice.
+
+Also from `idx-fix`, and it is the right instinct: it **refused my "stop if you write two guards"
+instruction** and said why. The `..` rejection and the resolved rmdir walk-up are independent -- a
+junction inside `.fleet-index/symbols/` reaches the same deletion with **no `..` anywhere in the
+path**, so it survives a perfect `..` guard. My instruction was right for the entry surfaces and wrong
+for the walk-up, and it flagged that rather than silently writing the second guard.
+
+`idx-fix` also disclosed a wart in its own evidence unprompted: its natural-reproduction concurrency
+test stayed GREEN under injection on the first build and it widened the source and iteration count
+until it went RED 3/3. **A probabilistic test tuned until it fails is exactly the class to distrust**,
+so I aimed the gate at it specifically.
+
+## `idx/core` IS NOT MERGED, DELIBERATELY. GATE DISPATCHED.
+
+`idx-fix` landed `3eb8e5c`: **2676 / 11 both floors, 18 injections, 18 RED.** I did not merge it.
+Fix-waves-mint-defects is 6/6 here, this wave closed THREE CRITICALs in one pass on a primitive that
+DELETES FILES, and it is the base `idx/q` and `idx/teach` both stack on. `gate-idxfix-rb`
+(`C:/proga/fleet-idxfix-rb` @ `3eb8e5c`) is aimed at the traversal guard's two independent halves, the
+deleted duplicate guard in `_index_files_arg`, the tuned concurrency test, the 8->16 hex stored-format
+change, `.git/info/exclude` in linked worktrees, and finding a 19th injection that stays green.
+**M4 IS FIXED, so `idx/q`'s `..._M1_DEFECT` characterisation test goes RED by design on merge** --
+that is a sequencing obligation, not a regression.
+
+## UNREAD, AND DURABLE
+
+`doctor-repair`, `gate-idxq-rb`, `gate-teach-rb` have all landed and I have NOT read them -- I am at
+~190k, inside the band and near the ceiling. Their results persist in the registry; `fleet result
+<name>` retrieves them whole. Reading three results plus acting on them is a fresh context's work, not
+the last 10k of mine. Still running: `gate-idxfix-rb`, `succession`, `tombstone`.
+
+Handoff remains blocked -- two stillborn successors, `succession` is investigating. I will retry the
+handoff now; the handoff verbs stay permitted over the ceiling by design.
+
+## 2026-07-27T03:53:10Z HANDOFF-BEGIN inc=inc-20260727T024550Z-4743 sid=3430c962-edd5-4ec1-9eea-3c9226bca337
+
+successor=inc-20260727T035310Z-dfc0 task=C:/proga/claude-fleet/state/supervisor-handoff-inc-20260727T035310Z-dfc0.md
+
+## 2026-07-27T03:59:50Z HANDOFF-ABORT inc=inc-20260727T024550Z-4743 sid=3430c962-edd5-4ec1-9eea-3c9226bca337
+
+stopping limbo successor sid=b13fbf4d-91ab-4930-9d3b-16bfeaeb4194 inc=inc-20260727T035310Z-dfc0 (via pending-entry)
+
+## 2026-07-27T04:00:33Z CHECKPOINT inc=inc-20260727T024550Z-4743 sid=3430c962-edd5-4ec1-9eea-3c9226bca337
+
+I-E. ROOT CAUSE FOUND, AND IT IS MINE. OPERATOR ACTION NEEDED. Standing down over-band.
+
+## THE PERMISSION DEFECT — this is why half my dispatches produced nothing
+
+`peek succession`: **"Permission to use Bash has been denied"**, and the worker's own words:
+*"Hit the wall. Reporting. BLOCKED -- and the blocker is a specimen of the bug."*
+
+Measured, and the split is exact:
+
+| worktree | `.claude/settings.local.json` | outcome |
+|---|---|---|
+| `fleet-idx-core` | **present** | `idx-fix` delivered 2676/11, 18/18 RED |
+| `fleet-corrupt-glob` | **present** | `glob-fix` delivered, MERGED |
+| `fleet-succession` | **MISSING** | denied every executing tool |
+| `fleet-idxq-rb` | **MISSING** | ditto |
+
+**The two worktrees that worked were pre-existing ones another worker had already provisioned. Every
+worktree I created fresh this incarnation has no allowlist, and `dontask` is auto-deny-everything.**
+That is documented project doctrine -- the day-3 lesson says it in those words -- and I did not apply
+it. Four dispatches wasted: `gate-idxq-rb`, `gate-teach-rb`, `gate-idxfix-rb`, `succession`.
+
+**`gate-idxq-rb` and `gate-teach-rb` REPORTED AS `idle` AND I RECORDED THEM AS "LANDED".** They almost
+certainly landed blocked, not finished. **A worker that is denied every tool still goes idle, and idle
+reads as done from every surface we have.** Anyone reading my I-D entry should treat those two as
+UNREAD AND UNTRUSTED until their results are actually read. I did not read them; I am over the ceiling.
+
+I have provisioned `settings.local.json` into all four worktrees (copied from the known-good one).
+**They are now recoverable by a BARE `fleet respawn` -- which stays permitted over the 200k ceiling by
+§11.4, precisely because it is recovery and not new dispatch.** That is the cheapest path back.
+
+## THE STRONGEST LEAD ON THE STILLBORN SUCCESSORS -- unverified, and I say so
+
+Three successor dispatches, three stillborn (`2aff`, `84e5`, `dfc0`), all aborted.
+`sup-handoff-begin` dispatches with `--permission-mode` defaulting to **`dontask`**, and the successor
+task file's FIRST instruction is a **Bash command** (`fleet sup-boot ...`). If that call is denied, the
+body dies exactly as observed: registry row `working`, **0 turns, no transcript, forever**.
+
+**This is a hypothesis, not a finding.** It does not yet explain why my own boot succeeded ~50 minutes
+earlier under the same verb, and I could not test it -- I am over the ceiling and the one worker I sent
+to investigate was killed by the very defect it was sent to investigate. **Do not treat this paragraph
+as the answer. It is the best lead, with its own counter-evidence attached.**
+
+If it holds, it explains the roster's pile of `sup|...|successor` rows at 0 turns going back days, and
+therefore some part of "five supervisors burned full contexts and merged nothing".
+
+## WHAT I AM LEAVING
+
+**MERGED this incarnation: `glob-fix`. `main` = `2dec694`, 2563 / 11 identical on both floors, mine.**
+
+**NOT merged, ready, gated-but-ungraded:** `idx/core` @ `3eb8e5c` (2676/11, 18/18 RED) -- its gate
+`gate-idxfix-rb` was one of the blocked dispatches, so **that gate has NOT run.** `idx/q` @ `27de965`
+and `idx/teach` @ `9a08035` remain stacked on it and unmergeable until it lands.
+
+**Unread results, durable in the registry** (`fleet result <name>`): `doctor-repair`, `gate-idxq-rb`,
+`gate-teach-rb`. **Still genuinely running:** `tombstone`.
+
+Short brief for the next body: `state/tasks/lens/sup-brief-wave5.md`. It is accurate except that it
+predates everything in I-D and I-E; read those two journal entries with it.
+
+## WHY I AM RELEASING THE CLAIM RATHER THAN HOLDING IT
+
+I am at ~210k, **over the hard ceiling**: no new dispatches, and my handoff has failed three times. A
+held claim on a body that cannot act is worse than no claim -- and per claim-nonce §6.3 a **released**
+claim reads unambiguously at the next boot (`claim`, no seizure, no operator page), whereas a session
+that simply ends looks like a crash and forces a `freeze` decision on whoever comes next.
+
+**OPERATOR: succession is broken and needs you.** The fleet cannot hand itself off right now. The
+recovery I would run first: `fleet sup-spawn` a fresh gen-0 supervisor body (a different route from
+`sup-handoff-begin`, and the one that has been working), then bare-respawn the four provisioned
+workers. Also owed: the three abort flags I raised, and the §11.3 decision still OPEN and still
+unanswered.
+
+## 2026-07-27T04:00:41Z RELEASED inc=inc-20260727T024550Z-4743 sid=3430c962-edd5-4ec1-9eea-3c9226bca337
+
+released cleanly: over 200k ceiling; handoff stillborn 3x (dontask permission lead); released so next boot reads clean per claim-nonce 6.3
+
+## 2026-07-27T16:54:06Z BOOT inc=inc-20260727T165406Z-e4e1 sid=3dd0782d-1f2e-48ae-9c6c-bd241e0436e9
+
+fresh claim: predecessor inc-20260727T024550Z-4743 released cleanly -- fresh claim, no seizure
+
+## 2026-07-27T16:55:07Z CHECKPOINT inc=inc-20260727T165406Z-e4e1 sid=3dd0782d-1f2e-48ae-9c6c-bd241e0436e9
+
+W6-A. BOOT. Fresh claim (VERDICT: claim), predecessor inc-20260727T024550Z-4743 released cleanly -- no seizure, no transfer, no anomaly. FLEET_WORKER inherited = sup|inc-20260727T165343Z-44b1|boot, supervisor-shaped and equal to my own registry name: the benign variant of the boot-ritual step-5 check, not the malignant worker-shaped one.
+
+Boot bundle read in full and DELETED from disk (class-4 nonce doctrine, claim-nonce 5.8/5.9 -- the generation is carried in working context only).
+
+Campaign brief received from the interface tier. Wave 6 opens on a fleet that has been STOPPED ~15h: every roster row is idle and stale by ~13h, so every "in flight" claim in the record is fiction until re-derived. My turn-1 order, as briefed:
+1. fleet status, then READ the four durable-but-unread results -- doctor-repair, gate-idxq-rb, gate-teach-rb, and tombstone (which reported "still running" at 04:00 and is now idle; its exit is unverified).
+2. Read state/tasks/lens/sup-brief-wave5.md plus journal I-D and I-E, and nothing else.
+3. Restart the critical path on the FIXED merge order idx-fix -> idx/q -> idx/teach. idx/core @ 3eb8e5c is ready but its gate NEVER RAN (gate-idxfix-rb was one of the four dispatches the permission defect killed), so gating it is job one. Both q-branches were cut from an escalated base; their own green tallies do not count toward merge.
+
+Interface-verified state I am inheriting rather than re-measuring: main = 2dec694 and PUSHED (origin/main in sync, first time in 29 commits); 2563 passed / 11 skipped identical on 3.13 and 3.10, measured by the interface on the pushed tree.
+
+NEW OPERATOR-ORDERED TARGET, outranking the idx stack from the moment the idx-fix gate is dispatched: the graceful-succession signal. A supervisor that can no longer dispatch -- 200k ceiling OR usage-limit park -- must record a machine-readable succession-needed fact with its cause, surfaced on the PULL paths the interface already reads (statusline, sup-status, doctor), and the three-step succession maneuver must collapse into ONE verb the interface runs. Hard constraint, stated by the interface and binding: FLEET INJECTS NOTHING INTO ANY SESSION (terminal-surface D7). No SessionStart hook, no surface that fires before the operator opts in. Not auto-spawn -- loud plus one command.
+
+Standing orders acknowledged: keep 5-6 builders on disjoint FILE SETS; merge bin/fleet.py slices one at a time with both floors re-run after each; expect TestRetiredSidWritersAreWhereTheyAreCited RED after any merge that moves bin/fleet.py and re-pin to what I MEASURE; and START SUCCESSION AT 150k, not 200k -- my predecessor released at ~210k after three stillborn handoffs, and I am not repeating that.
+
+## 2026-07-27T17:10:00Z CHECKPOINT inc=inc-20260727T165406Z-e4e1 sid=3dd0782d-1f2e-48ae-9c6c-bd241e0436e9
+
+W6-B. FLEET RESTARTED — 4 workers running. And I minted a defect in my own first dispatch wave; it is recorded here because it destroys briefs silently.
+
+## MY DEFECT: `--task <path>` is not `--task @<path>`, and the difference DELETES the brief
+
+`fleet spawn/respawn --task` takes the task **text**. A file is passed as `@<path>` (`_read_task_arg`, SPEC §5). I passed bare paths on four dispatches. Each worker received the literal seven-word string `state/tasks/<name>.md` as its entire task.
+
+**The silent half, and the reason this is worth a journal entry:** dispatch RENDERS the task to `state/tasks/<worker-name>.md`. When the brief you are passing already lives at that exact path, the render **overwrites the brief with the path string that named it** — self-referentially, so the file is not merely wrong, it is unrecoverable from itself. `gate-idxfix-rb.md` (84 lines, written by my predecessor, aimed at the highest-stakes delta in the campaign) and my own `succession-spec.md` were both destroyed this way. `state/` is gitignored, so there was no git restore.
+
+Two things saved it, and both are worth knowing:
+- The two gate re-runs survived because I had concatenated preface+original into `*2.md` files, whose names differ from the render target. **Storing a brief under a name the dispatcher will not render to is now my practice** — briefs go in `state/tasks/lens/`, never in the render directory.
+- `gate-idxfix-rb`'s brief was recovered **verbatim from the first worker body's transcript** at `~/.claude/projects/C--proga-fleet-idxfix-rb/<sid>.jsonl` — the prompt is durable in the session log even after the file is gone. Recovered 6165 chars, 84 lines, matching the original exactly. Note for whoever hits this next: the text is not in a plain `user`/`content` string field; walk every nested string in records matching the worker name.
+
+The failure was loud enough to catch immediately (fleet echoed a 6-line rendered task) but only because I checked `wc -l` on the rendered files. **A dispatch that returns a session id has not proven it dispatched a brief.** I now verify rendered task line-count after every dispatch wave.
+
+## THE BLOCKER THAT KILLED LAST NIGHT IS CLOSED, AND I WIDENED IT
+
+All five worktrees my predecessor provisioned carry byte-identical `.claude/settings.local.json` (sha256 `5cd065cb…`, verified). I widened the allowlist in nine worktrees by +14 grants, because the original list could not satisfy the briefs it was written for:
+
+- **`Bash(python:*)` does not match the absolute interpreter path** the briefs themselves instruct workers to use (`C:/Users/.../Python313/python.exe C:/proga/claude-fleet/bin/fleet.py <verb>`). Every brief tells the worker to run `fleet result <name>` that way, and every such call would have been denied — the same class of failure as last night, one layer down. Added the absolute path explicitly.
+- Added `sed/awk/head/tail/wc/sort/comm/diff/find/cp/rm/mv/touch`, which gates need for census and restore work.
+- **The deny fences are untouched**: `git push`, `git merge`, `claude plugin` remain hard-denied in all nine.
+
+## DISPATCHED — the critical path is moving again
+
+| worker | branch / worktree | job |
+|---|---|---|
+| `gate-idxfix-rb` | detached `3eb8e5c` · `fleet-idxfix-rb` | the gate that NEVER RAN. `idx/core` merges to `main` only through it. Original brief, recovered verbatim. |
+| `gate-idxq-rb` | detached `27de965` · `fleet-idxq-rb` | re-run to SETTLE BY EXECUTION the 7 findings its blocked body derived from source |
+| `gate-teach-rb` | detached `9a08035` · `fleet-teach-rb` | same, for C1–C4 + M1–M5 |
+| `succession-spec` | `spec/succession-signal` @ `2dec694` · `fleet-succession` | the operator-ordered NEW TARGET: spec the graceful-succession signal |
+
+## THE TWO BLOCKED GATES WERE NOT EMPTY — my predecessor's guess was too pessimistic
+
+I-E predicted `gate-idxq-rb` and `gate-teach-rb` "almost certainly landed blocked, not finished," and treated them as near-worthless. **Half right.** Both were denied every executing tool, produced no tallies and no fault injections, and both said so unprompted and refused to call themselves gates. But both delivered dense, specific, source-derived reviews:
+
+- **`gate-idxq-rb` F1, CANDIDATE CRITICAL**: `_q_contained` guards the SOURCE path while the primitive derives a SECOND path (`shard_path_for_source`) from the same rel, and `_index_posix_rel` strips only `""` and `"."` — `..` survives. The defeating shape is **climb-then-retrace**: source resolves back inside the root (guard PASSES) while the shard, two levels deeper, lands outside it. Then `write_shard_atomic` writes outside the index root, or `_index_prune_shard` **unlinks** outside it. Its observation is the sharpest thing in either report: all six shapes at `tests/test_fleet_q.py:728-734` escape *lexically* and **none retraces — the one shape that survives the guard is the one shape untested.**
+- **`gate-teach-rb` C4**: the §11.9 receipt's `# volatile` reason is **factually false in two commands**. It claims the transcript lives in "a different repository, machine-local, gitignored runtime"; `git worktree list` shows `C:/proga/claude-fleet` is the main worktree of THIS repository and `git ls-files supervisor` shows `supervisor/JOURNAL.md` is git-tracked. Worse, `git log --all -S PROBE-OK-7748` returns exactly one commit — the one that wrote the spec prose. **The receipt cites a document that has never contained the cited text.** Its C1 is also live: this delta moved a filesystem subsystem inside `cmd_spawn`'s post-commit / pre-rollback window, so a raise there leaves a phantom record with `session_id: None`.
+
+**The lesson I am drawing, against my predecessor's framing:** a tool-denied worker is not a lost worker — reading is still a capability, and both of these produced findings a gate would have been proud of. What they could not do is *settle* anything, and both were scrupulous about labelling that. The re-run briefs therefore do not re-ask for a review; they name each inherited finding and demand it be promoted to CONFIRMED or knocked down **by execution**, with the fault-injection matrix declared mandatory and an empty table declared a failed gate.
+
+## READ AND RESOLVED
+
+- **`doctor-repair` is DONE** — `wave2/doctor-repair` @ `51818c8`, both floors 2527/11, 18/18 injections RED, tree clean. The result was only a monitor-expiry notice; the substance is in `state/journals/doctor-repair.md`, including six contradiction items for me. Queued to merge.
+- **`tombstone` is DONE, not "still running"** — `fix/sup-release-tombstone` @ `25a6e1d`, both floors 2542/11, **12 injections, 12 RED** (injection 12 came back GREEN first and it fixed the test that was the hole). `sup-release` now tombstones its own registry record via one new arm on `_releaser_live_sids`, the single predicate B6 and the §7 gate both decide through.
+
+**`tombstone` is a direct hit on the new target's item 3.** It removes the undocumented middle step — the interface no longer has to stop the retired body for its sid to leave the roster. So the operator's "one verb" is a smaller build than the brief assumes, and I told the spec worker to read that branch and say which half of the three-step problem is already solved. It also flags, correctly, that its own change makes `claim-nonce.md` §7.2's disarm table incomplete — §7 is operator-owned, so it reported instead of editing. That is an operator ratification owed, and I will `sup-decision --raise` it rather than answer it.
+
+## MERGE PLAN, and why tombstone goes first
+
+Both ready branches touch `bin/fleet.py`, so they merge one at a time with both floors re-run after each. **`tombstone` first**, because the succession builder will land on the same surface and I would rather it be cut from a base that already has the tombstone than resolve that conflict later. Then `doctor-repair`. Baselines of 2542 and 2527 are both below `main`'s 2563 — those branches predate the identity and corrupt-glob merges, and the merged tallies must exceed 2563, not match the branch figures. Expect `TestRetiredSidWritersAreWhereTheyAreCited` RED on both and re-pin to what the merged tree MEASURES: on the last five merges neither side's citation values were ever correct, and on the most recent all four moved.
+
+## 2026-07-27T17:41:54Z CHECKPOINT inc=inc-20260727T165406Z-e4e1 sid=3dd0782d-1f2e-48ae-9c6c-bd241e0436e9
+
+W6-C. WAVE 6 CLOSED AT THE CEILING. Fleet is IN FLIGHT, not down. Full successor brief: state/tasks/lens/sup-brief-wave7.md -- read that file, it is the artifact, this entry is the index to it.
+
+## SHIPPED, PUSHED, VERIFIED BY ME
+
+`main` = `d543691`, `origin/main` in sync. **2600 passed / 11 skipped, identical on 3.13 and 3.10**, measured on the merged tree.
+
+1. **`fix/sup-release-tombstone` MERGED** (`0c6bf23`). `sup-release` tombstones its own registry record, so the succession middle step is no longer the interface's to perform. Citation tax, sixth consecutive merge: only ONE of the four `retired_sids` values moved (`:14278` -> `:14461`); last merge all four did. Never a uniform delta.
+2. **§11.3 ratified edit** (`d543691`). The ceiling enumeration now names `sup-spawn` and TASK-BEARING `respawn`, with the `--task` discriminator normative. Decision consumed and `--clear`ed. **The operator's binding process condition earned itself:** all three cited line numbers (1407/1433/1516) were stale; grepping found the enumeration at 1429/1453/1471/1475/1542, and I re-derived the four refusing call sites from `bin/fleet.py` rather than trusting the ruling -- both `respawn` sites are guarded by `if getattr(args, "task", None)`, exactly as ratified. I annotated the `[BUILT c6fde34]` receipt rather than rewriting it: it is a claim about that commit and the widening came later.
+
+## THE TWO GATES THAT LANDED — BOTH ESCALATE, AND THE IDX STACK DOES NOT MERGE
+
+**`gate-idxfix-rb` (idx/core @ 3eb8e5c): CRITICAL.** *"The wave's headline claim -- the traversal delete is CLOSED -- is half true, and the false half is the half it argued hardest for."* `_index_posix_rel` rejects `..` and nothing else, **and a drive-qualified rel carries no `..`**. `root / rel` is an absolute join on win32, so pathlib REPLACES: measured through the choke point, a file outside the root **overwritten**, and a shard materialised outside the root serving a leaked symbol. The delete genuinely is closed -- the prune resolve guard refused every shape. So: arbitrary read + write outside the root, and `idx/q` wires a caller-supplied `--outline <path>` into that same primitive. MAJOR alongside it: the completeness claim that justified deleting the duplicate guard (*"the one function every index path passes through"*) is false in two directions. **The gate verified the fix in a scratch copy: 5 failed -> 6 passed, 208 still passing.** Both floors 2676/11, worktree never written to.
+
+**`gate-teach-rb` (idx/teach @ 9a08035): four CRITICALs CONFIRMED BY EXECUTION**, both floors 2664/11, nine injections, **five holes**. C1 phantom registry record (`status: working, session_id: null`) reproduced on three raise arms with a clean control; the proposed hoist is **necessary but not sufficient**. C2 collision with `idx/core`'s repair proven by injecting that guard verbatim -- **and the fix belongs on `idx/teach`, not on `idx/core`, whose guard is right**. C3 `fleet q foo` exits 2. **M2 is the strongest finding on the branch: a LINE-COUNT-NEUTRAL fifth dispatch path leaves the suite at 2664 passed, zero red** -- the census lint's walk-back matches column-0 `def ` only, and the naive injection reddens an unrelated citation test in a way that reads as "caught".
+
+## THE GATE CORRECTED ME, AND THIS IS THE ENTRY'S REAL LESSON
+
+My re-run brief asserted, as its highest-severity inherited finding, that the §11.9 receipt *"cites a document that does not contain the cited text."* **That is false and the gate proved it in one command.** `git log -S` searches COMMITS; `supervisor/JOURNAL.md` is a working-tree file and it contains the token four times. C4 survives in a sharper form -- the receipt is **reproducible today by accident**, never committed, one `git stash` from evaporating -- but the disposition and the urgency differ from what I wrote.
+
+Worse, the gate named the shape of my error precisely: **my brief opened by scolding the previous brief for repeating a claim without checking it, then built its own top finding on an unchecked `git log` inference, and pre-empted verification on the adjacent question with "do not spend context re-deriving either."** A brief that orders "settle it by execution" while reasoning from an inference is applying the doctrine outward only. That is the third consecutive incarnation in which the *briefing* was the defect source, and the second in which "what did this brief get wrong?" paid for the whole slice.
+
+Related mechanism correction I owe the record: the CLI **does** execute `# volatile` receipt blocks (`0 volatile-skipped`); only `tests/test_receipts.py` skips them.
+
+## MY OWN MINTED DEFECT
+
+**`--task` takes the task TEXT; a file is `--task @<path>`.** I passed bare paths on four dispatches. Because dispatch RENDERS the task to `state/tasks/<worker-name>.md`, passing a brief that already lives at that path **overwrites the brief with the string that named it** -- self-referentially, so it cannot be recovered from itself. Two briefs destroyed, one my predecessor's 84-line gate charter. **Recovered verbatim from the worker body's transcript** (`~/.claude/projects/C--proga-<worktree>/<sid>.jsonl`) -- the prompt outlives the file, and it is not in a plain `content` string; walk every nested string. Now standing practice: briefs live in `state/tasks/lens/`, and `wc -l` the rendered task after every dispatch. **A dispatch that returns a session id has not proven it dispatched a brief.**
+
+## STILL RUNNING — durable, do not assume
+
+`gate-idxq-rb` (break lens on `idx/q`, aimed at the climb-then-retrace F1, which `gate-idxfix-rb`'s find one layer down makes likely-real), `succession-spec` (the operator-ordered target, steered with both rulings), `autoclean-catchup` (StartWhenAvailable, requirement 2). All three were dispatched with correct briefs and provisioned permissions.
+
+## WHY I AM RELEASING RATHER THAN HANDING OFF
+
+`fleet sup-context` measures **198,767 tokens** -- at the hard ceiling. I estimated ~60k by feel and was wrong by 140k: four gate results at 2-5k output tokens each are most of a body's budget. **That measurement is the single most useful operational fact in this entry: run `sup-context` at every wave boundary, never by feel.**
+
+My predecessor burned its last 20k on three stillborn `sup-handoff-begin` attempts at this exact altitude and the interface's brief to me was explicit -- if handoff is still stillborn, release cleanly and say so loudly rather than attempting a fourth. I have no evidence the handoff path is repaired, and `sup-spawn` is the route that demonstrably works: it is how I booted. So I am spending my remaining context on the successor's BRIEF instead of on a coin-flip handoff, and releasing per claim-nonce §6.3 so the next boot reads `claim` with no seizure and no operator page.
+
+**INTERFACE: run `fleet sup-spawn` with `state/tasks/lens/sup-brief-wave7.md`. Three workers are mid-flight and their results are durable.** This is exactly the maneuver the graceful-succession target exists to make one command instead of three -- and I am, once again, the evidence for it.
+
+## 2026-07-27T17:42:07Z RELEASED inc=inc-20260727T165406Z-e4e1 sid=3dd0782d-1f2e-48ae-9c6c-bd241e0436e9
+
+released cleanly: at the 200k hard ceiling (sup-context: 198,767). Wave 6 closed: tombstone MERGED + 11.3 ratified edit, main=d543691 pushed, 2600/11 both floors. 3 workers still RUNNING (gate-idxq-rb, succession-spec, autoclean-catchup) -- results durable. Released rather than attempt a 4th stillborn handoff; sup-spawn is the working route. SUCCESSOR BRIEF: state/tasks/lens/sup-brief-wave7.md
+
+## 2026-07-27T17:55:36Z BOOT inc=inc-20260727T175536Z-6c3c sid=d04e0c45-931d-43f2-8df5-95e2dd3da11d
+
+fresh claim: predecessor inc-20260727T165406Z-e4e1 released cleanly -- fresh claim, no seizure
+
+## 2026-07-27T17:56:29Z CHECKPOINT inc=inc-20260727T175536Z-6c3c sid=d04e0c45-931d-43f2-8df5-95e2dd3da11d
+
+W7-A. BOOT. Fresh claim (VERDICT: claim) -- predecessor inc-20260727T165406Z-e4e1 released cleanly at the 200k ceiling; no seizure, no transfer, no anomaly. Boot bundle read in full and DELETED from disk (claim-nonce 5.8/5.9 -- generation carried in working context only).
+
+Interface brief received: WAVE 7 = INTERFACE PREPEND, four corrections that postdate my predecessor's 206-line sup-brief-wave7.md. Reading order is mandated: prepend first, wave7 brief second, and the two fork-steers BEFORE the workers' results.
+
+1. RECONCILE, DO NOT RESTART. Three workers were mid-flight at the release -- gate-idxq-rb, succession-spec, autoclean-catchup -- results durable. The interface has already fork-steered two of them since the release, so their current task is NOT what the wave-7 brief says; steers live at state/tasks/lens/iface-autoclean-redirect.md and state/tasks/lens/iface-succession-narrow.md. Grading a result against a withdrawn premise is the failure mode being pre-empted.
+2. WITHDRAWN by the operator: the post-reboot arm. No fleet-side restart path, no widening of the succession signal to fire 'whatever the cause'. The fleet revives when the operator relaunches the interface session -- now step 5 of the startup ritual in skills/fleet/SKILL.md (c318224). Generalising ground: when the honest mechanism would have to be an injection (D7) or an autonomous actor (two live supervisors), put the trigger on the human action that was going to happen anyway.
+3. WITHDRAWN by the operator: fixing StartWhenAvailable. RETIRE THE TIMER INSTEAD. 'fleet autoclean' the verb stays with its section-7 exemption; it is now driven by my watchtower beat and the interface startup ritual (both landed at c318224 -- those docs ARE the spec). Code slice retires fleet init --autoclean / --autoclean-interval-hours / --autoclean-remove, the machine-local install state, docs/specs/autoclean.md, and the doctor scheduler check. ORDERING IS LOAD-BEARING: uninstall the live task on this machine FIRST via --autoclean-remove while the flag still exists, only then delete install+remove paths together. Doctor's check is REPLACED not deleted: 'when did autoclean last run' -- an aged last-run means the beat is not beating, the exact condition that went unnoticed for 18h. Ruling's reason, worth carrying: setting the missing flag was the smaller fix and the worse one. A timer sweeps when the clock says so; a beat sweeps when the fleet is alive, which is the condition that makes sweeping necessary.
+4. VERIFY, do not trust the sentence: my predecessor's tombstone merge already killed part of the succession target. The interface measured the released body's registry row reading 'dead' with no interface action, so the 'middle step only the interface can perform' is GONE for a fleet-launched body and succession is release -> sup-spawn, two steps. succession-spec has been told to re-scope. I must confirm against the CODE -- if the tombstone covers only the clean-release path, the manual step still exists for every other way a body stops, and that difference is the whole design.
+
+Standing orders carried forward: run 'fleet sup-context' at EVERY wave boundary, never estimate by feel (my predecessor measured 198,767 against a ~60k guess -- wrong by 140k, because four gate results at 2-5k output tokens each are most of a body's budget; that single fact is why it released instead of handing off). '--task' takes TEXT; a file is '--task @<path>' -- a bare path is rendered AS the task into state/tasks/<worker>.md, overwriting a brief that lives there with the string naming it, self-referentially and unrecoverably; wc -l the rendered task after every dispatch, because a dispatch that returned a session id has not proven it dispatched a brief. Keep 5-6 builders saturated, push main at every green milestone, report by exception.
+
+## 2026-07-27T18:06:30Z CHECKPOINT inc=inc-20260727T175536Z-6c3c sid=d04e0c45-931d-43f2-8df5-95e2dd3da11d
+
+W7-B. RECONCILED, NOT RESTARTED. Five workers saturated. sup-context measured 131,419 (BELOW-BAND) at this boundary -- measured, not felt.
+
+## THE INTERFACE'S ITEM 4, VERIFIED AGAINST CODE -- and the sentence needed the qualifier
+
+The tombstone is CLEAN-RELEASE-ONLY. `_tombstone_releasing_body` (bin/fleet.py:13054) has EXACTLY ONE caller: `cmd_sup_release` at :13223. Not on the kill path, not on a heartbeat, not on any timer; nothing notices a body that merely stopped. It also abstains, by its own docstring, on three identity non-answers -- UNRESOLVED (not a fleet-launched body), AMBIGUOUS (would retire another body's record), and an unreadable registry, where the shipped code itself prints that 'the manual step is back for this one release'.
+
+So the interface's measurement is real but narrow: succession is release -> sup-spawn, TWO steps, for a fleet-launched body that VOLUNTARILY releases with a readable, unambiguous registry. THE MIDDLE STEP SURVIVES EVERYWHERE ELSE -- a usage-limit park (which by construction can never release, because a parked body never receives another turn), a ceiling death without release, a crash, and a rebooted host with a stale roster. THE TOMBSTONE THEREFORE HELPS LEAST IN EXACTLY THE TWO CASES THE SUCCESSION SIGNAL EXISTS FOR. That is the difference the interface told me to look for, and it is the whole design. Sent to succession-spec as a measured correction: item 3 stands, its justification changes, and the middle step must be IDEMPOTENT so the clean-release case is a no-op rather than an error.
+
+## AUTOCLEAN: THE WORKER WAS BLOCKED BY THE CLAIM GATE AND WAS RIGHT TO STOP
+
+autoclean-catchup reached ordered step 1 and hit the 7 gate: `fleet init --autoclean-remove` is claim-gated and needs --nonce, which is class-4 and never leaves my context. It stopped and reported instead of working around it -- the designed path. I RAN STEP 1 MYSELF from the canonical home: 'scheduled task claude-fleet-autoclean removed', then verified TASK ABSENT via Get-ScheduledTask. Its two pre-checks were confirmed and were the right instinct (task fleet-owned by the canonical home; canonical init rewrites state/worker-settings.json byte-identically). Steered it to step 2 with the ordering constraint now satisfied, so install+remove paths may be deleted TOGETHER. NOTE FOR THE RECORD: a worker slice whose own first ordered step is claim-gated is a brief defect, not a worker defect -- when a slice's step 1 requires a holder verb, the supervisor performs it and hands the receipt over.
+
+## GATE-IDXQ-RB LANDED: ESCALATE. ALL THREE IDX BRANCHES NOW ESCALATE.
+
+F1 CONFIRMED CRITICAL and, crucially, DELTA-OWNED by attribution measured rather than argued. The write half is NOT reachable at base (update_index guards writes by set membership against an os.walk enumeration), so `q --outline` is the first surface in this tool's history that makes the index write OUTSIDE its own root; the unlink half pre-exists at base behind a purely lexical guard and belongs to idx-fix. The precondition the previous brief omitted is the whole reproduction: with cwd == root there is NO escape, because the clean resolved candidate wins. A body following that brief literally would have measured a non-escape and returned CONFIRM-CLEAN on a live CRITICAL, with a filesystem receipt. THE GATE'S OWN LESSON, WHICH I AM ADOPTING: a partial recipe plus an explicit invitation to falsify is MORE dangerous than no recipe, because it manufactures confident negative evidence. Fix verified by the gate with 0 regressions (2724/11 both floors). Also: F2 MAJOR (the double-star hint fires ONLY when selection is empty -- i.e. only when it is not needed), F3 upgraded to MAJOR, the F3xF4 composite where Q_NOTE_CAP deletes the one note naming the competitor and the wrong answer goes FULLY SILENT, F6 (a guard test that passes against 'return True' -- its own oracle), HOLE-6 (OSError swallow leaves 2724 GREEN), and F7 (choke point: 0 calls at build, 164 per un-narrowed query, and DEAD CODE at base -- this delta is what puts idx/core's 21% tear double-read into production). The gate also corrected the inherited F5 counts: 402/401, not 401/400 -- a pasted count reproduced inside the brief written to prevent pasted counts.
+
+## DISPATCHED -- 3 fix waves, briefs in state/tasks/lens/, rendered line counts VERIFIED (103/165/125, not 6-line path strings)
+
+idx-core-fix (fleet-idx-core, idx/core) -- the drive-qualified-rel CRITICAL plus the junction shape the choke point does not fence, the false completeness claim, N15/N9/N10 pins. idx-q-fix (fleet-q-verb, idx/q) -- F1 with its cwd precondition pinned, the F3xF4 chain, the two tests that cannot fail. idx-teach-fix (fleet-q-teach, idx/teach) -- four CRITICALs, and M2, the line-count-neutral fifth dispatch path whose naive injection reddens an UNRELATED citation test and reads as 'caught'.
+
+MY ONE RULING AGAINST A GATE: C4. The gate recommended committing the transcript excerpt into supervisor/JOURNAL.md. I refused it. That file is the supervisor's append-only working file, modified in the main worktree at all times and appended by every incarnation; a branch committing into it conflicts with main on every future merge, on a file where both sides append at the end -- and the receipt would still depend on content that churns by design. Ordered instead: commit the excerpt as its own immutable artifact and re-pin the receipt repo-relative and non-volatile. The requirement is 'a receipt must not depend on an uncommitted live path', and that is satisfied without coupling a spec receipt to my journal.
+
+main = c318224 (the interface pushed docs after my predecessor's brief was written; the brief says d543691). Next: merge wave2/doctor-repair, which is READY and UNGATED and closes the standing CLAUDE.md falsehood that views never quarantine -- true today of the statusline ONLY.
+
+## 2026-07-27T18:43:10Z CHECKPOINT inc=inc-20260727T175536Z-6c3c sid=d04e0c45-931d-43f2-8df5-95e2dd3da11d
+
+W7-C. WAVE 7 CLOSED IN-BAND, NOT AT THE CEILING. Fleet is IN FLIGHT: 3 fix waves running, 2 branches ready to merge. Full successor brief: state/tasks/lens/sup-brief-wave8.md -- that file is the artifact; this entry is its index.
+
+## SHIPPED, PUSHED, MEASURED BY ME
+
+main = ba0c724, origin/main in sync. 2656 passed / 13 skipped, IDENTICAL on 3.13 and 3.10, measured on the merged tree twice (once after the merge, again after folding main).
+
+wave2/doctor-repair MERGED. `fleet doctor --repair` is now the sole path that performs the quarantine rename and `doctor` itself is report-only, which CLOSES THE STANDING FALSEHOOD IN CLAUDE.md -- the "views never take fleet.lock, probe, write, or quarantine" rule was true of the statusline ONLY and is now true of shipped code. I retired the CURRENT-STATE qualifier in the same commit that earned it. Skips went 11 -> 13 and that is CORRECT: test_views_doctrine.py's D4 restatement test now skips BY DESIGN -- its own reason says "this skip IS the green path" -- and test_the_quarantine_detector_can_see_a_quarantine is what stops a broken detector from reaching it. A future body must not "fix" that skip.
+
+Merge notes worth carrying: three of the four bin/fleet.py conflicts were NOT the citation tax. _quarantine_artifacts (HEAD) vs REGISTRY_REPAIR_HINT + _registry_corrupt_reason (branch) was addition-vs-addition at the same offset -- kept BOTH, they answer different questions. The section-9 legacy-upgrade refusal kept HEAD's GATE 2 block and adopted the branch's pointer so the message names `fleet doctor --repair` rather than a bare `fleet doctor`; a hint that drifts from the flag it describes is worse than no hint. THE CITATION TAX BROKE ITS OWN SHORTCUT: all four retired_sids values moved, NON-UNIFORMLY (+97, +97, +155, +168), where the last merge moved only one -- and the citations WRAP ACROSS LINES, so a literal replace of the four-value string matches ZERO times. Replace per token, assert exactly 2 hits each, re-pin to what the test PRINTS. That cost me a cycle and it will cost the next body one too unless it reads this.
+
+Also: my --ff-only was REFUSED because the interface pushed 01e16db mid-merge. I folded main into the stage branch rather than rebasing, then re-ran BOTH floors on the folded tree even though the fold was knowledge/ only. An inherited number is not a measurement.
+
+## TWO BRANCHES READY, UNMERGED -- I ran out of band, not out of confidence
+
+fix/autoclean-catchup @ 8eced09: timer retired, both floors 2521/11, 3 injections all RED. The -79 net IS THE DELIVERABLE -- ~1000 lines of scheduler tests died with the surface they covered, and 14 new pins were added. Its best finding is a live correctness catch: the section-7 exemption was justified in PROSE by "the scheduled task has no session id", but BOTH new callers -- supervisor beat and interface ritual -- ARE sessions with a sid. Had the exemption actually rested on that clause, retiring the timer would have silently gated the sweep behind the very claim it exists to clean up around. It does not: cmd_autoclean never calls _supervisor_gate at all. The code was right and the comment was wrong, and a load-bearing comment that is wrong is one refactor away from being obeyed.
+
+spec/succession-signal: docs/specs/graceful-succession.md, 1278 lines, both floors 2603/11, 14/14 receipts reproduce with 0 unclassified and 0 volatile-skipped. The one verb is sup-recover and it routes EXCLUSIVELY through the sup-spawn path, so it does not depend on the stillborn handoff being repaired. It downgraded its own draft's word PREFERRED for sup-handoff-* to "designed but unrepaired" -- the right call. The operator's ordered sequence is GATE IT DUAL-LENS, THEN BUILD.
+
+## THE TOMBSTONE QUESTION, MEASURED -- do not re-derive
+
+_tombstone_releasing_body (bin/fleet.py:13054) has EXACTLY ONE CALLER, cmd_sup_release. Not on the kill path, not on a heartbeat, not on any timer, and it abstains on three identity non-answers -- on the third the shipped code itself prints that "the manual step is back for this one release". So succession is two steps ONLY for a fleet-launched body that VOLUNTARILY releases with a readable, unambiguous registry. The middle step survives everywhere else: a usage-limit park (which BY CONSTRUCTION can never release, because a parked body never receives another turn), a ceiling death without release, a crash, a rebooted host. THE TOMBSTONE HELPS LEAST IN EXACTLY THE TWO CASES THE SUCCESSION SIGNAL EXISTS FOR. Sent to succession-spec; the spec has it.
+
+## MY MINTED DEFECT -- and the worker caught it, not me
+
+My steer said to retire "the machine-local install state those wrote" as though it were a separate thing. IT IS NOT, and the phrasing invites a wrong action: the only machine-local state the installer ever wrote WAS the Scheduled Task, already removed in step 1. The one file that LOOKS like install state, state/autoclean-last-run.json, is written by the VERB and is now the SOLE INPUT to the replacement doctor check -- a worker reading that bullet literally would have deleted the stamp and blinded the new check on its first run. It also caught that I inherited a wrong baseline commit from my predecessor's brief (d543691 is main~1; main was c318224). "Baseline to beat" must name the commit you actually measured.
+
+## PROCESS RULE LEARNED THIS WAVE
+
+autoclean-catchup's own ordered STEP 1 required a claim-gated verb. It hit the section-7 gate on `fleet init --autoclean-remove` and STOPPED AND REPORTED rather than working around it -- correct behaviour. I ran step 1 myself from the canonical home (scheduled task claude-fleet-autoclean removed, then Get-ScheduledTask -> TASK ABSENT) and handed over the receipt. A WORKER SLICE WHOSE FIRST ORDERED STEP NEEDS A HOLDER VERB IS A BRIEF DEFECT, NOT A WORKER DEFECT: check every slice for --nonce steps at writing time, and have the supervisor perform them.
+
+Also mine and avoidable: doctor's "unacknowledged pending generation" NOTE fired because I spent 32 minutes on git and pytest work without presenting the rotated nonce. Present promptly after each rotation (claim-nonce 5.4(e)).
+
+## STILL RUNNING -- durable, do not assume
+
+idx-core-fix, idx-q-fix, idx-teach-fix. All three dispatched with correct briefs (rendered 103/165/125 lines, VERIFIED by wc -l) into worktrees whose allowlists I checked byte-identical (sha 7a6c925d14ff) before dispatch. All three idx branches ESCALATED at gate; the merge order idx/core -> idx/q -> idx/teach is unchanged.
+
+handoff-autopsy is the INTERFACE'S -- it falsified the dontask theory with two probes (dontask denied Write but ALLOWED Bash; and decisively, a denied worker still produces a TURN, while the stillbirths are working with 0 turns and no transcript, so the failure is upstream of the model). Do not re-dispatch it, do not spend context on it.
+
+## WHY I AM RELEASING AT 170,601 RATHER THAN PUSHING ON
+
+sup-context measured 170,601 -- IN-BAND, soft trigger crossed, ~30k of headroom. Three fix-wave results at 2-5k output tokens each is 15-25k, and the autoclean merge is a REAL conflict: its base 0c6bf23 touches bin/fleet.py, docs/SPEC.md, README.md and commands/doctor.md, all four of which my doctor-repair merge just moved. Starting that merge with 30k left risks dying mid-merge, which is strictly worse than releasing with it queued. Two incarnations before me died at the ceiling with work unmerged; the standing order says hand off at 150k, and I am honouring it while there is still band to hand off WITH.
+
+INTERFACE: run `fleet sup-spawn` with state/tasks/lens/sup-brief-wave8.md. Three workers mid-flight, two branches ready to merge, main green and pushed at ba0c724.
