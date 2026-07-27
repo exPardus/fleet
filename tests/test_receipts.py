@@ -76,10 +76,18 @@ RECEIPT_FLOOR = {
     "three-tier-command.md": 39,
     "native-substrate.md": 6,
     # Enforced 2026-07-27, when M1 + M2's worker-facing surface shipped and the
-    # §11.7 grant-execution experiment was landed. One of its six is `# volatile`
-    # (the live two-arm spawn experiment: one machine, one moment, transcript
-    # outside this repo) and is WARN-only; the other five are pinned greps.
-    "fleet-index.md": 6,
+    # §11.7 grant-execution experiment was landed. Six at first, one of them
+    # `# volatile` and therefore WARN-only and not executed here at all.
+    #
+    # Eight after that day's fix wave, and NONE volatile. The experiment block
+    # was volatile for a reason that turned out to be false in two clauses and
+    # a real defect in the third: it read a LIVE ABSOLUTE PATH into the
+    # supervisor's working journal, so its `# at` pin constrained nothing and
+    # the text it cited had never been committed anywhere -- it reproduced by
+    # accident and was one `git stash` from evaporating. The transcript is now
+    # a committed artifact under `docs/specs/receipts/` and the block is a
+    # normal enforced receipt, which is why this suite executes all eight.
+    "fleet-index.md": 8,
 }
 
 # A commit whose bin/fleet.py predates the me/ul + me/daemon merges, used by the
