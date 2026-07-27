@@ -37,11 +37,29 @@ template's missing `--nonce`, and a spec note on guards that block their own rem
    operator-ORDERED. The main event. Honor §11.7's `[UNVERIFIED]` live-receipt acceptance item and
    the §16 doc-sync list; the worktree recipe includes a manager-side `fleet index init` step.
 2. **`fix/identity-registry-judges` @ `7d33d28`** — confirmed/ESCALATE, decision OPEN.
-3. **`fix/b6-interface-release` @ `2e824ea`** — PARKED and now conflicting in both `bin/fleet.py`
-   and `docs/specs/claim-nonce.md`. Decide rebase-and-gate vs retire-and-re-derive the one mechanism
-   worth keeping (`sup-release` tombstoning its own body). Parking may be the right final answer:
-   the incident it repairs is now forbidden by doctrine, while the case it leaves broken is every
-   ordinary supervisor stand-down.
+3. ~~**`fix/b6-interface-release` @ `2e824ea`**~~ — **RULED RETIRED, 2026-07-27** (supervisor
+   `inc-20260727T003737Z-0ccd`, checkpoint G-C; retirement executed by `inc-20260727T012335Z-0dd8`).
+   **Retired on merit, not on merge cost**: the inherited "conflict too large to resolve in a wave"
+   premise was re-measured against the tree the branch would actually enter and came back at
+   **three hunks** (one `bin/fleet.py`, two `docs/specs/claim-nonce.md`) — false, and recorded as
+   false so the retirement does not rest on it. The grounds that decide it: (a) its founding incident
+   — an interface session running `sup-boot` — is now doctrine-*forbidden*, so its only customer is a
+   forbidden path; (b) `--interface` is **a caller supplying the grounds of its own non-refusal**,
+   which is precisely what the clause ratified 2026-07-27 forbids ("inference may select the SUBJECT
+   of a measurement, but may not supply the GROUNDS of a refusal") — an attestation can only ever be
+   *added*, never withheld by an adversary, so its presence proves nothing; (c) the case it leaves
+   broken is **every ordinary supervisor stand-down**, and that is better served by deleting the
+   condition than by authorising an exception to it.
+   **The ref is NOT deleted** — it holds the reasoning, tests and amendments. Its `claim-nonce.md`
+   and `three-tier-command.md` amendments were marked for operator ratification and die with it
+   unless the re-derived slice needs them, which it largely will not. Worktrees `C:/proga/fleet-b6`,
+   `fleet-b6-rb`, `fleet-b6-rs` removed as litter.
+   **Re-derive instead, as its own slice with its own gate — NOT a rebase of this branch:**
+   **`sup-release` tombstones its own body's registry record as part of releasing.** Then
+   `releaser_live` is FALSE by construction, `sup-boot` claims cleanly, and there is no attestation
+   to forge — it removes the condition instead of trusting what the caller says about itself. It also
+   retires the manual "the interface stops the retired body" step in the succession recipe below,
+   which is where every unproven handoff has died.
 4. The **`[UNBUILT]` sweep** across `docs/specs/**` toward launch-ready (v2-deferred rows stay
    deferred).
 
