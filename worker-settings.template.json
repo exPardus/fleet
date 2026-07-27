@@ -1,4 +1,5 @@
 {
+  "permissions": { "allow": ["Bash(fleet q:*)"] },
   "hooks": {
     "PostToolUse": [{ "hooks": [{ "type": "command",
       "command": "\"{{PYTHON}}\" \"{{FLEET_HOME}}/bin/hooks/posttooluse_mailbox.py\"" }] }],
