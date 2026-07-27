@@ -3810,6 +3810,39 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
 
     task = _read_task_arg(args.task)
 
+    # fix wave C1: COMPOSE BEFORE THE PRE-CLAIM RECORD EXISTS.
+    #
+    # This used to sit between the registry commit below and the rollback
+    # `try:` that guards `dispatch_bg` -- a window with no rollback in it at
+    # all. Measured: with `--context` naming a file whose shard cannot be
+    # written (`.fleet-index/symbols/<dir>` occupied by a plain file), the
+    # `FileExistsError` escaped `cmd_spawn` uncaught and left
+    # `{"status": "working", "session_id": null}` in the registry plus a
+    # `spawned` event -- a live-looking worker that never existed, and one the
+    # launch-in-flight guard pins forever. The control arm (same spawn, no
+    # `--context`) was clean, which is what proves `--context` opened it.
+    #
+    # Hoisting alone is NOT the fix: measured, it converts the phantom into an
+    # uncaught traceback. The `except` below is the other half. Both are here
+    # deliberately; deleting either re-opens a different half of the defect.
+    #
+    # The cost of hoisting is that an invalid/duplicate name now pays one
+    # compose before `validate_name` refuses it -- a few ms of index reads
+    # against a spawn that was going to fail anyway.
+    #
+    # `Exception`, not `BaseException`: a Ctrl-C during compose has no record
+    # to clean up yet and must stay a KeyboardInterrupt.
+    try:
+        prompt, _claim = compose_prompt(args.name, cwd, task, None,
+                                        context=parse_context_arg(
+                                            getattr(args, "context", None)))
+    except FleetCliError:
+        raise
+    except Exception as exc:
+        raise FleetCliError(
+            f"{args.name}: could not compose the spawn prompt -- {exc} "
+            f"({type(exc).__name__}); nothing was registered") from exc
+
     with fleet_lock():
         data = load_registry()
         validate_name(args.name, existing=data["workers"].keys())
@@ -3830,16 +3863,15 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
 
     pre_claim_at = record["last_dispatch_at"]
 
-    # sid=None (pre-claim, no real sid exists yet) -- compose_prompt skips
-    # the mailbox claim entirely and always returns a None claim here.
+    # `prompt` was composed above the lock (fix wave C1). sid=None (pre-claim,
+    # no real sid exists yet) -- compose_prompt skips the mailbox claim
+    # entirely and always returns a None claim here, which is what makes the
+    # hoist safe: there is no claimed mail to restore if the spawn later dies.
     #
     # fleet-index §7: `--context` is spawn-only. The other three compose paths
     # get the §11.8 teach lines but no digest -- the idle-send path composes
     # with no journal at all, so there is nothing to order a digest against
     # there, and a steered worker would re-pay the same digest per dispatch.
-    prompt, _claim = compose_prompt(args.name, cwd, task, None,
-                                    context=parse_context_arg(
-                                        getattr(args, "context", None)))
 
     try:
         result = dispatch_bg(
@@ -8246,6 +8278,83 @@ def _doctor_check_instance_freshness():
     return ("instance-freshness", True, "instance is up to date with the template")
 
 
+def _fleet_grants(settings_data) -> list:
+    """Every `permissions` entry mentioning `fleet`, from every bucket.
+
+    Every bucket, not just `allow`: a `deny` entry naming fleet is equally a
+    divergence from the template, and a check that only read `allow` would
+    call an instance clean while it silently fenced the grant off."""
+    out = []
+    permissions = settings_data.get("permissions") if isinstance(settings_data, dict) else None
+    if not isinstance(permissions, dict):
+        return out
+    for bucket in sorted(permissions):
+        entries = permissions.get(bucket)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if isinstance(entry, str) and "fleet" in entry:
+                out.append(f"{bucket}:{entry}")
+    return out
+
+
+def _doctor_check_instance_grants():
+    """Does the rendered instance still carry the template's fleet grants?
+
+    `instance-freshness` cannot answer this and never could: it compares
+    MTIMES (`instance_freshness_info`), so an instance that is newer than the
+    template but hand-edited reads `[PASS]`. Measured (fleet-index §11.7 item
+    2): widening the instance's grant to `Bash(fleet:*)` -- the KILL grant,
+    which reaches the irreversible `fleet kill` and `fleet clean` -- left
+    `instance-freshness` reporting `[PASS]`, and a second `fleet init` repairs
+    it. Doctor simply never said so. This check is the saying-so.
+
+    Both directions are failures, and they fail differently:
+
+    - **Widened.** A grant the template never issued is reaching every worker
+      on this machine. This is the one that costs something irreversible.
+    - **Missing/narrowed.** Silent, and it lands squarely on §11.9's revert
+      trigger: a worker whose grant has quietly gone missing makes zero
+      `fleet q` calls, which is the exact shape of "the tool did not get
+      adopted" -- fired against a permission bug rather than against the tool.
+
+    Content, not mtime, so it is immune to the limit that produced it. It
+    compares only the FLEET grants: an operator's own unrelated allow entries
+    in the instance are their business, and flagging them would train the
+    operator to ignore this line."""
+    template_path = template_settings_path()
+    instance_path = instance_settings_path()
+    try:
+        template = json.loads(template_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return ("instance-grants", True,
+                f"template unreadable ({exc}) -- grant comparison skipped")
+    try:
+        instance = json.loads(instance_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return ("instance-grants", False,
+                f"{instance_path} missing -- run `fleet init`")
+    except (OSError, json.JSONDecodeError) as exc:
+        return ("instance-grants", False,
+                f"{instance_path} does not parse as JSON: {exc}")
+    want, have = _fleet_grants(template), _fleet_grants(instance)
+    if want == have:
+        return ("instance-grants", True,
+                f"instance fleet grants match the template: {have or 'none'}")
+    extra = [e for e in have if e not in want]
+    lost = [e for e in want if e not in have]
+    detail = []
+    if extra:
+        detail.append(f"instance carries fleet grant(s) the template does not: "
+                      f"{extra} -- a grant nobody issued is reaching every worker")
+    if lost:
+        detail.append(f"instance is missing the template's fleet grant(s): {lost} "
+                      f"-- workers cannot run the tool they are taught")
+    return ("instance-grants", False,
+            "; ".join(detail) + " -- re-run `fleet init` to restore the "
+            "template's grants")
+
+
 def _doctor_check_legacy_settings():
     legacy = FLEET_HOME / "worker-settings.json"
     if legacy.exists():
@@ -9254,6 +9363,9 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
         functools.partial(_doctor_check_pin_version, which=which, run=run),
         functools.partial(_doctor_check_instance_settings),
         functools.partial(_doctor_check_instance_freshness),
+        # Immediately after freshness, because it covers freshness's blind
+        # spot (mtime vs content) and the two read as one answer.
+        functools.partial(_doctor_check_instance_grants),
         functools.partial(_doctor_check_hook_registration),
         functools.partial(_doctor_check_legacy_settings),
         functools.partial(_doctor_check_posttooluse_hook_smoke, run=run),
@@ -11497,8 +11609,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :4990, :5437, :9487,
-    :14038), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :5022, :5469, :9599,
+    :14150), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -12142,8 +12254,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:4990, :5437, :9487,
-    #     :14038) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:5022, :5469, :9599,
+    #     :14150) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -15376,8 +15488,33 @@ INDEX_TEACH_LINES = (
 )
 
 
+def index_teach_verbs() -> tuple:
+    """Every `fleet <verb>` the teach lines name, DERIVED from the constant.
+
+    Derived, not listed: a fifth teach line naming a new verb must not be able
+    to slip past the §11.8 gate below because someone forgot to extend a
+    hand-written tuple."""
+    return tuple(sorted(set(
+        re.findall(r"`fleet ([a-z][a-z0-9-]*)", INDEX_TEACH_LINES))))
+
+
+@functools.lru_cache(maxsize=1)
+def registered_cli_verbs() -> frozenset:
+    """Every subcommand `build_parser()` actually registers.
+
+    Cached: the parser is a pure function of this module, and `build_parser()`
+    costs ~21 ms -- a price §11.8's check would otherwise pay on every
+    dispatch. `registered_cli_verbs.cache_clear()` is the test seam."""
+    parser = build_parser()
+    for action in parser._actions:
+        if action.dest == "command" and action.choices:
+            return frozenset(action.choices)
+    return frozenset()
+
+
 def index_teach_lines(cwd) -> str:
-    """§11.8's preamble lines, or `""` when the dispatch target has no index.
+    """§11.8's preamble lines, or `""` when the dispatch target has no index
+    -- or when this build does not carry the verb the lines teach.
 
     The check is `<--dir>/.fleet-index/`, deliberately NOT §11.1's walk-up:
     §11.8 words it as "the dispatch target's `--dir` contains `.fleet-index/`"
@@ -15388,20 +15525,50 @@ def index_teach_lines(cwd) -> str:
 
     `is_dir()`, not `exists()`: a plain file named `.fleet-index` is not an
     opt-in, and `fleet index init` never produces one.
+
+    **THE SECOND GATE (fix wave C3): the verb must exist.** §11.8's whole
+    argument is that a worker must not be told about a tool that would exit 3
+    in its project. A tool that is not registered on the parser at all is
+    worse -- `fleet q foo` exits **2** with an argparse `invalid choice`, and
+    the worker has spent a turn learning a verb this build does not have. That
+    was live: the teach lines and the `Bash(fleet q:*)` template grant both
+    shipped a slice ahead of `fleet q` itself.
+
+    The gate is unconditional and reads the parser, so it is correct on both
+    sides of that merge with no branch and no flag: the lines stay dark while
+    the verb is missing and light up the moment it is registered. Nothing here
+    knows or asks which slice landed.
     """
     try:
         if not index_dir(cwd).is_dir():
             return ""
     except OSError:
         return ""
+    available = registered_cli_verbs()
+    if any(verb not in available for verb in index_teach_verbs()):
+        return ""
     return INDEX_TEACH_LINES
 
 
 def parse_context_arg(value) -> list:
-    """`--context a.py,b.md` -> `["a.py", "b.md"]`. None/empty -> `[]`."""
+    """`--context a.py,b.md` -> `["a.py", "b.md"]`. None/empty -> `[]`.
+
+    Fix wave M4: duplicates are dropped, first spelling wins. The digest is
+    uncapped by contract (§11.4/§11.1 -- see `render_digest`), so the one
+    thing this layer can honestly do about size is refuse to pay for the same
+    file twice. Measured before this: `--context bin/fleet.py,bin/fleet.py`
+    rendered 27,831 chars twice, for zero additional information.
+
+    Order-preserving, not a `set`: §7's digests appear in the order the
+    manager named them, and a manager reads the composed prompt."""
     if not value:
         return []
-    return [part.strip() for part in str(value).split(",") if part.strip()]
+    out = []
+    for part in str(value).split(","):
+        entry = part.strip()
+        if entry and entry not in out:
+            out.append(entry)
+    return out
 
 
 def compose_context_digests(cwd, context, sleep=None) -> tuple:
@@ -15419,6 +15586,22 @@ def compose_context_digests(cwd, context, sleep=None) -> tuple:
     - **Unknown paths warn and are skipped; they never fail a spawn** (§7,
       §9). Same for a path that escapes `--dir`, a source the config does not
       select, and an orphaned shard.
+
+      Fix wave C1/C2: that sentence is now enforced by a `try` around the
+      whole per-path body, not only by the return codes the body checks.
+      Anything that makes ONE named path unusable -- a rejected path shape, a
+      shard directory that cannot be created, a source that vanishes between
+      the header read and the parse -- is one path's problem, and §7 spells
+      out what one path's problem costs: a warning and a skip. Before this,
+      each of those raised straight out of `compose_prompt` and, on the spawn
+      path, past a registry record that had already been committed.
+
+      The catch is deliberately typed by MEANING, not by class name:
+      `FleetCliError` (every index error class in this module descends from
+      it, including the path-shape guard `_index_posix_rel` grows on
+      `idx/core`), `ValueError` (the natural raise for a rejected path shape)
+      and `OSError` (every filesystem hazard). Naming the classes rather than
+      bare `Exception` keeps a genuine bug in the renderer loud.
     - **A file the index config excludes is skipped rather than indexed.**
       `update_index` refuses these for the reason that applies here too: a
       shard written for an unselected file would be pruned by the very next
@@ -15438,28 +15621,43 @@ def compose_context_digests(cwd, context, sleep=None) -> tuple:
     if not index_dir(root).is_dir():
         return "", [f"--context ignored: {INDEX_NO_INDEX_MESSAGE} "
                     f"(no {INDEX_DIR_NAME}/ in {root.as_posix()})"]
+    # `IndexConfigError` is a `FleetCliError`; naming the base catches a
+    # config-layer guard added later without re-editing this line.
     try:
         config = load_index_config(root)
-    except IndexConfigError as exc:
+    except (FleetCliError, OSError) as exc:
         return "", [f"--context ignored: {exc}"]
     # One walk, reused for every named path: `--context` is a small list and
     # the walk is the expensive part. Membership here is also what rejects an
     # absolute path or a `../` escape, since every selected rel is under root.
-    selected = set(index_source_files(root, config))
+    # The whole-digest arm: an enumeration that cannot run is not one path's
+    # problem, so it takes §9's no-index shape -- nothing injected, one
+    # warning, the spawn proceeds.
+    try:
+        selected = set(index_source_files(root, config))
+    except (FleetCliError, ValueError, OSError) as exc:
+        return "", [f"--context ignored: cannot enumerate the index's sources "
+                    f"under {root.as_posix()} ({exc})"]
     out = []
     for raw in context:
-        rel = _index_posix_rel(raw)
-        if rel not in selected:
-            why = ("not selected by this index's include/exclude"
-                   if (root / rel).is_file()
-                   else f"no such file under the worker's --dir {root.as_posix()}")
-            warnings.append(f"--context {raw}: {why} -- digest skipped")
-            continue
-        result = verified_shard_rows(root, rel, sleep=sleep)
-        if result["status"] != "ok":
-            warnings.append(f"--context {raw}: {result['note']}")
-            continue
-        out.append(render_digest(rel, result["header"], result["rows"]))
+        # The per-path arm. See the docstring: one unusable path is a warning
+        # and a skip, never a raise out of compose.
+        try:
+            rel = _index_posix_rel(raw)
+            if rel not in selected:
+                why = ("not selected by this index's include/exclude"
+                       if (root / rel).is_file()
+                       else f"no such file under the worker's --dir {root.as_posix()}")
+                warnings.append(f"--context {raw}: {why} -- digest skipped")
+                continue
+            result = verified_shard_rows(root, rel, sleep=sleep)
+            if result["status"] != "ok":
+                warnings.append(f"--context {raw}: {result['note']}")
+                continue
+            out.append(render_digest(rel, result["header"], result["rows"]))
+        except (FleetCliError, ValueError, OSError) as exc:
+            warnings.append(f"--context {raw}: {exc} ({type(exc).__name__}) "
+                            f"-- digest skipped")
     return "".join(out), warnings
 
 
