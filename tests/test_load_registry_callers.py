@@ -32,11 +32,23 @@ below is therefore drawn differently:
     from the text of the file would need an interprocedural analysis, and one
     that is wrong in the unsafe direction whenever it guesses.
   * Several sites genuinely READ under `load_registry` and are correct to:
-    `cmd_status`, `cmd_peek`, `cmd_result`, `cmd_wait` are CLI verbs, not the
-    view surface, and quarantining a corrupt registry from a CLI verb the
-    operator invoked directly is the designed behaviour (SPEC §12's view rule
-    binds `status_snapshot` and the statusline, which use
-    `_read_registry_readonly`). So "non-mutating => forbidden" would be false.
+    `cmd_wait` is a CLI verb that persists the transitions it observes, and
+    quarantining a corrupt registry from a verb that is about to write is the
+    designed behaviour. So "non-mutating => forbidden" would be false.
+
+    **THAT PARAGRAPH USED TO NAME FOUR MORE VERBS, AND IT WAS WRONG ABOUT ALL
+    FOUR.** It read: *"`cmd_status`, `cmd_peek`, `cmd_result`, `cmd_wait` are
+    CLI verbs, NOT THE VIEW SURFACE"*. Measured 2026-07-27 in an isolated
+    `FLEET_HOME`: `fleet status`, `fleet peek`, `fleet result` and `fleet
+    doctor` each renamed a corrupt `state/fleet.json` aside -- and
+    `commands/status.md`, `commands/peek.md`, `commands/result.md` and
+    `commands/overview.md` inline-exec exactly those bare verbs, so `/fleet:*`,
+    the surface `docs/specs/terminal-surface.md` D4 names by name, WAS the
+    surface doing the writing. The allowlist did not merely fail to catch it;
+    its own rationale asserted the thing that was false. An allowlist entry is
+    a claim, and this one went unchecked for as long as the prose above it did.
+    `TestTheViewSurfaceIsNotAmongTheCallers` is the pin that makes the return
+    of any of the four loud rather than merely unallowlisted.
 
 So the decidable, load-bearing assertion is the ALLOWLIST ITSELF: the set of
 SCOPES that call `load_registry` -- top-level functions, class methods, class
@@ -181,10 +193,32 @@ ALLOWED = {
     # `_registry_records_or_none`. A detector shipping with a live defect
     # blessed, for a stated reason that was not true, is worse than no detector.
     "_supervisor_lifecycle_target", "_refetch_holder_record", "_holder_is_limited",
-    "_resolve_worker_target",
-    # --- CLI verbs the operator invoked directly ---
-    "cmd_status", "cmd_peek", "cmd_result", "cmd_wait", "wait_for_workers",
+    # `_resolve_worker_target` WAS HERE. It is a PRE-FLIGHT NAME LOOKUP that runs
+    # at the top of every verb -- the three views included -- before any of them
+    # has taken the lock, so it carried the same disqualifier `_supervisor_gate`
+    # did. It hid behind the short-circuit at `bin/fleet.py:2414`: the measured
+    # table was driven with an ordinary worker name, which returns before the
+    # read, so `fleet peek supervisor` was quarantining from a path the table
+    # showed as clean. It now reads via `read_registry_no_repair`; the mutating
+    # verbs that call it still quarantine at their own lock-held load.
+    # --- CLI verbs that persist what they observe ---
+    "cmd_wait", "wait_for_workers",
+    # `cmd_status` keeps ONE call, and it is the merge read inside
+    # `with fleet_lock():` immediately before `save_registry` -- a genuine
+    # mutating-under-lock site, which is the admission rule as written.
+    # terminal-surface D2 is why it is still here at all: *"`fleet status` (no
+    # flag) remains the authoritative, recomputing command."* Its PRE-PROBE read
+    # is now `read_registry_no_repair`, and since that one always runs first, a
+    # corrupt registry refuses before this call is ever reached.
+    # `TestTheViewSurfaceIsNotAmongTheCallers` pins both halves.
+    "cmd_status",
+    # `cmd_doctor` keeps ONE call, on the `--repair` branch only, under
+    # `fleet_lock`. After the 2026-07-27 gate that call IS the quarantine
+    # surface: the operator typed the flag, which is the entire point of the
+    # flag. Default `doctor` reads through `read_registry_no_repair` and reports.
     "cmd_doctor",
+    # `cmd_peek` and `cmd_result` WERE HERE and are gone. Neither writes, neither
+    # locks, and each reads exactly one field.
 }
 
 
@@ -348,6 +382,83 @@ class TestTheDetectorCannotBeWalkedAround:
         assert dead == [], (
             f"allowlisted functions that no longer call `load_registry`: {dead} "
             f"-- delete the entries rather than leaving standing permission")
+
+    def test_the_view_surface_is_not_among_the_callers(self):
+        """THE PIN THE DOCTRINE NEVER HAD. `docs/specs/terminal-surface.md` D4
+        and root `CLAUDE.md` have both said for days that views *"never
+        quarantine a corrupt registry"*, while `fleet status`, `fleet peek`,
+        `fleet result` and `fleet doctor` all did -- measured 2026-07-27. Prose
+        is therefore PROVEN not to be a guard on this surface, and a sentence
+        that has been false for days is worse than no sentence, because every
+        reader downstream of it built on it.
+
+        Named individually rather than left to the allowlist so a revert is
+        LOUD: `test_no_unallowlisted_function_calls_load_registry` would also
+        catch it, but it reports a generic offender, and the next reader's first
+        instinct on that failure is to add the name back to `ALLOWED` -- which
+        is exactly how these four got their standing permission."""
+        callers = _callers()
+        for name in ("cmd_peek", "cmd_result", "_resolve_worker_target"):
+            assert name not in callers, (
+                f"{name} calls `load_registry` again. It is on the VIEW surface: "
+                f"`commands/{name.replace('cmd_', '')}.md` and `/fleet:*` "
+                f"inline-exec it with no permission prompt, and `load_registry` "
+                f"RENAMES a corrupt `state/fleet.json` aside -- destroying the "
+                f"operator evidence, and converting *corrupt* into *absent*, "
+                f"which the §9 legacy-claim upgrade grants on. Use "
+                f"`read_registry_no_repair` (raises, never renames) or "
+                f"`_read_registry_readonly` (never raises).")
+
+    def test_cmd_status_quarantines_ONLY_under_the_lock(self):
+        """`cmd_status` stays allowlisted (terminal-surface D2 keeps it the
+        authoritative recomputing verb), so the allowlist alone cannot say
+        whether its pre-probe read came back. This can: the ONE surviving call
+        must be lexically inside a `with fleet_lock():` block.
+
+        Without this, moving `read_registry_no_repair` back to `load_registry`
+        in the pre-probe read is a one-word edit that no test in this repo
+        notices -- the name is already allowlisted."""
+        tree = ast.parse(SRC)
+        fn = next(n for n in tree.body
+                  if isinstance(n, ast.FunctionDef) and n.name == "cmd_status")
+        locked = {c.lineno for w in ast.walk(fn) if isinstance(w, ast.With)
+                  for item in w.items
+                  if isinstance(item.context_expr, ast.Call)
+                  and isinstance(item.context_expr.func, ast.Name)
+                  and item.context_expr.func.id == "fleet_lock"
+                  for c in ast.walk(w)
+                  if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+                  and c.func.id == "load_registry"}
+        calls = set(_callers().get("cmd_status", []))
+        assert calls, "cmd_status stopped calling load_registry entirely -- if " \
+                      "that is intended, drop it from ALLOWED and delete this test"
+        assert calls == locked, (
+            f"cmd_status calls `load_registry` outside `with fleet_lock():` at "
+            f"{sorted(calls - locked)}. The pre-probe read must be "
+            f"`read_registry_no_repair`: it runs before the lock, on the path "
+            f"`/fleet:status` used to inline-exec, and quarantining there is "
+            f"what made a view a writer.")
+
+    def test_cmd_doctor_quarantines_ONLY_behind_the_repair_flag(self):
+        """Same shape, different guard. `cmd_doctor` keeps its `load_registry`
+        call, but it must sit inside the `if repair:` arm -- otherwise the
+        operator gate's whole answer (*"diagnose by default, quarantine behind
+        `--repair`"*) is one dedent away from being undone silently."""
+        tree = ast.parse(SRC)
+        fn = next(n for n in tree.body
+                  if isinstance(n, ast.FunctionDef) and n.name == "cmd_doctor")
+        guarded = {c.lineno for w in ast.walk(fn) if isinstance(w, ast.If)
+                   and isinstance(w.test, ast.Name) and w.test.id == "repair"
+                   for c in ast.walk(w)
+                   if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+                   and c.func.id == "load_registry"}
+        calls = set(_callers().get("cmd_doctor", []))
+        assert calls, "cmd_doctor stopped calling load_registry entirely -- " \
+                      "`--repair` is then the flag that repairs nothing"
+        assert calls == guarded, (
+            f"cmd_doctor calls `load_registry` outside `if repair:` at "
+            f"{sorted(calls - guarded)}. Default `fleet doctor` must not "
+            f"quarantine the registry it was invoked to diagnose.")
 
     def test_the_identity_surface_is_not_among_the_callers(self):
         """The three sites this fix wave moved OFF `load_registry`, named

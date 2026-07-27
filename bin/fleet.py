@@ -884,10 +884,46 @@ def _quarantine_artifacts() -> list:
         return []
 
 
+# Operator gate 2026-07-27: `fleet doctor --repair` is now the ONE verb that
+# performs the quarantine rename, so it is the one verb every refusal points at.
+# Named once, here, next to the rename it names -- a hint that drifts from the
+# flag it describes is worse than no hint, and this string is asserted verbatim
+# by `tests/test_view_quarantine.py`.
+REGISTRY_REPAIR_HINT = "repair it with `fleet doctor --repair`"
+
+
+def _registry_corrupt_reason(data):
+    """None when `data` is a usable registry object, else a short reason.
+
+    Shared by `load_registry` (which quarantines) and `read_registry_no_repair`
+    (which never does) so the two can never disagree about what CORRUPT MEANS.
+    Two independent validators is how a shape one loader rejects starts sailing
+    through the other, and the view path is exactly where that would be
+    invisible.
+
+    Fuzz-report Finding F2 (HIGH): `data.setdefault("workers", {})` alone only
+    fills in a MISSING "workers" key -- it is a no-op when the key is present
+    but the wrong shape (a list/string/int), which sails through as a "valid"
+    registry and then crashes every subcommand downstream (dict.keys()/.get()/
+    .pop()/`in`/sorted() all raise on a non-dict)."""
+    if not isinstance(data, dict):
+        return "registry was not a JSON object"
+    workers = data.get("workers", {})
+    if not isinstance(workers, dict) or not all(isinstance(v, dict) for v in workers.values()):
+        return "registry 'workers' was not an object of objects"
+    return None
+
+
 def load_registry() -> dict:
     """Load state/fleet.json. Missing file -> {"workers": {}}. An existing
     but corrupt/unreadable file is quarantined (renamed aside) and raises
-    RegistryCorruptError -- callers must abort, not catch-and-continue."""
+    RegistryCorruptError -- callers must abort, not catch-and-continue.
+
+    THE RENAME IS A WRITE, and after the 2026-07-27 gate this is no longer the
+    loader a read reaches for. Every path that is not a lock-holding mutation
+    uses `read_registry_no_repair` (same validation, no rename) or
+    `_read_registry_readonly` (never raises at all).
+    `tests/test_load_registry_callers.py` pins the caller set by name."""
     path = registry_path()
     if not path.exists():
         return {"workers": {}}
@@ -899,24 +935,57 @@ def load_registry() -> dict:
         raise RegistryCorruptError(f"corrupt registry quarantined to {quarantined}")
     except OSError:
         raise RegistryCorruptError(f"registry unreadable: {path}")
-    if not isinstance(data, dict):
+    reason = _registry_corrupt_reason(data)
+    if reason is not None:
         quarantined = _quarantine_registry(path)
-        raise RegistryCorruptError(f"registry was not a JSON object; quarantined to {quarantined}")
-    # Fuzz-report Finding F2 (HIGH): `data.setdefault("workers", {})` alone
-    # only fills in a MISSING "workers" key -- it is a no-op when the key is
-    # present but the wrong shape (a list/string/int), which sails through
-    # as a "valid" registry and then crashes every subcommand downstream
-    # (dict.keys()/.get()/.pop()/`in`/sorted() all raise on a non-dict).
-    # Validate the shape explicitly here -- the one place this module reads
-    # the registry off disk -- so a malformed "workers" value is quarantined
-    # exactly like a decode failure, never allowed to flow downstream.
-    workers = data.get("workers", {})
-    if not isinstance(workers, dict) or not all(isinstance(v, dict) for v in workers.values()):
-        quarantined = _quarantine_registry(path)
-        raise RegistryCorruptError(
-            f"registry 'workers' was not an object of objects; quarantined to {quarantined}"
-        )
-    data["workers"] = workers
+        raise RegistryCorruptError(f"{reason}; quarantined to {quarantined}")
+    data["workers"] = data.get("workers", {})
+    return data
+
+
+def read_registry_no_repair(hint: bool = True) -> dict:
+    """`load_registry()` MINUS THE QUARANTINE. Same missing-file contract
+    (`{"workers": {}}`), same validation, same `RegistryCorruptError` -- but the
+    corrupt file is left exactly where it is, under its own name, and the
+    message names `fleet doctor --repair` instead of performing the rename.
+
+    WHY IT IS A SEPARATE FUNCTION rather than a `quarantine=False` kwarg on
+    `load_registry`: `tests/test_load_registry_callers.py` decides who may
+    quarantine by walking the AST for calls to `load_registry` BY NAME. A
+    keyword argument makes that walk undecidable -- every call site would look
+    identical and the allowlist would stop meaning anything.
+
+    WHY IT IS NOT `_read_registry_readonly`: that one returns the projection
+    `{"workers": ...}` and drops every sibling key. `cmd_status` re-reads under
+    the lock and calls `save_registry(data)`, so a projecting loader on the
+    read side would silently delete any top-level key it did not know about the
+    next time anyone ran `fleet status`. This is a FULL loader.
+
+    Callers: the three views (`cmd_status`'s pre-probe read, `cmd_peek`,
+    `cmd_result`), `_resolve_worker_target`'s name resolution, and `cmd_doctor`
+    without `--repair`.
+
+    `hint=False` suppresses the trailing `REGISTRY_REPAIR_HINT`, for the one
+    caller that says it better itself: `_doctor_check_registry` names the flag
+    AND what it will do AND that every check below it just ran against an empty
+    registry. With the hint left on, the doctor row named `--repair` twice in a
+    single sentence, which reads like a bug and buries the part the operator has
+    not already been told."""
+    path = registry_path()
+    if not path.exists():
+        return {"workers": {}}
+    suffix = f" -- {REGISTRY_REPAIR_HINT}" if hint else ""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise RegistryCorruptError(f"{path} is not valid JSON{suffix}")
+    except OSError:
+        raise RegistryCorruptError(f"registry unreadable: {path}")
+    reason = _registry_corrupt_reason(data)
+    if reason is not None:
+        raise RegistryCorruptError(f"{reason} ({path}){suffix}")
+    data["workers"] = data.get("workers", {})
     return data
 
 
@@ -2524,7 +2593,16 @@ def _resolve_worker_target(name):
     unreadable holder sid, and a holder sid in no record (the stranded-stamp
     window, design §7e) each raise a named FleetCliError -- with no live
     claim, nothing answers to `supervisor`, and mailing a husk would be
-    worse than refusing. Every other name passes through untouched."""
+    worse than refusing. Every other name passes through untouched.
+
+    IT DOES NOT QUARANTINE (2026-07-27). This is a PRE-FLIGHT NAME LOOKUP: it
+    runs at the very top of every verb, views included, before any of them has
+    taken `fleet.lock`. The measured quarantine table was driven with an
+    ordinary worker name, which takes the short-circuit above and never reaches
+    this read -- so `fleet peek supervisor` was renaming `state/fleet.json`
+    aside from a path the table showed as clean. The mutating verbs that call
+    this still quarantine, at their own lock-held `load_registry()`, which is
+    where the rename belonged all along."""
     if name != SUPERVISOR_BODY_NAME:
         return name
     claim = read_incarnation()
@@ -2550,7 +2628,7 @@ def _resolve_worker_target(name):
             "the supervisor claim carries no readable holder sid -- nothing "
             "answers to 'supervisor'; inspect supervisor/INCARNATION "
             "(`fleet sup-status`)")
-    data = load_registry()
+    data = read_registry_no_repair()
     for wname, rec in data.get("workers", {}).items():
         if holder_sid in _record_sids(rec):
             return wname
@@ -4160,14 +4238,25 @@ def cmd_status(args) -> int:
             _print_snapshot_table(snap, args.name)
         return 0
 
-    with fleet_lock():
-        data = load_registry()
-        requested = [args.name] if args.name else sorted(data["workers"])
-        for n in requested:
-            if n not in data["workers"]:
-                raise FleetCliError(f"unknown worker: {n!r}")
-        before_all = {n: data["workers"][n] for n in requested}
-        all_workers = data["workers"]  # snapshot for the epoch check (G9)
+    # D4 (2026-07-27): the PRE-PROBE read no longer quarantines, and no longer
+    # takes the lock to do a single read of an atomically-replaced file. A
+    # corrupt registry now refuses HERE, before the merge below has any chance
+    # to rename it aside -- so `fleet status`, the verb `/fleet:status` shelled
+    # out to, stops being step 2 of the corrupt->absent escalation.
+    #
+    # WHAT DELIBERATELY DID NOT CHANGE, because `docs/specs/terminal-surface.md`
+    # D2 is the source of record and says so verbatim: *"`fleet status` (no
+    # flag) remains the authoritative, recomputing command."* It still probes
+    # the roster and still persists its verdicts under `fleet_lock()` below.
+    # The lock-free, write-free view of the same data is `--stale-ok`
+    # (`status_snapshot`), which is what the `/fleet:*` templates now inline.
+    data = read_registry_no_repair()
+    requested = [args.name] if args.name else sorted(data["workers"])
+    for n in requested:
+        if n not in data["workers"]:
+            raise FleetCliError(f"unknown worker: {n!r}")
+    before_all = {n: data["workers"][n] for n in requested}
+    all_workers = data["workers"]  # snapshot for the epoch check (G9)
 
     names = [n for n in requested if include_archived or not before_all[n].get("archived_at")]
     before = before_all
@@ -4432,11 +4521,18 @@ def cmd_peek(args) -> int:
     comes from the sid's own transcript tail (daemon-hosted sessions have
     no fleet-owned stdout log)."""
     args.name = _resolve_worker_target(args.name)   # ruling 1(ii)
-    with fleet_lock():
-        data = load_registry()
-        if args.name not in data["workers"]:
-            raise FleetCliError(f"unknown worker: {args.name!r}")
-        rec = data["workers"][args.name]
+    # D1/D4 (2026-07-27): `peek` is a VIEW. It reads ONE field -- the sid --
+    # and then prints from the transcript on disk. It took `fleet.lock` to do
+    # that, contending with a live respawn mid-rotation (invariant 6) for a
+    # read the lock does not protect (`save_registry` is atomic, so a lock-free
+    # read of the whole file is already consistent), and it quarantined a
+    # corrupt registry on the way, which is a WRITE from a command whose whole
+    # job is to look at things. Both are gone; `read_registry_no_repair`
+    # refuses loudly and leaves the file for `fleet doctor --repair`.
+    data = read_registry_no_repair()
+    if args.name not in data["workers"]:
+        raise FleetCliError(f"unknown worker: {args.name!r}")
+    rec = data["workers"][args.name]
 
     return _cmd_peek_native(args.name, rec.get("session_id"), args.lines)
 
@@ -4482,11 +4578,12 @@ def cmd_result(args) -> int:
     of the last completed turn, nothing else -- result text lives in the
     Stop-hook outcome store (`latest_outcome`)."""
     args.name = _resolve_worker_target(args.name)   # ruling 1(ii)
-    with fleet_lock():
-        data = load_registry()
-        if args.name not in data["workers"]:
-            raise FleetCliError(f"unknown worker: {args.name!r}")
-        rec = data["workers"][args.name]
+    # D1/D4 (2026-07-27): same conversion as `cmd_peek` directly above, for the
+    # same two reasons -- one field read, no lock, no rename. See there.
+    data = read_registry_no_repair()
+    if args.name not in data["workers"]:
+        raise FleetCliError(f"unknown worker: {args.name!r}")
+    rec = data["workers"][args.name]
 
     return _cmd_result_native(args.name, rec.get("session_id"))
 
@@ -9399,21 +9496,79 @@ def _doctor_check_hook_registration():
             f"all registered hook events known and command paths exist ({registered})")
 
 
+def _doctor_check_registry(error, repaired: bool):
+    """`registry`: could `state/fleet.json` be read at all?
+
+    Registered FIRST, ahead of every other check, and that placement is
+    load-bearing rather than cosmetic: when this row fails, `workers` is empty
+    and every worker-keyed check below it ([PASS] mailboxes, [PASS] stale
+    attaches, [PASS] dead-suspected) is reporting *"nothing to check"* while
+    looking exactly like *"nothing wrong"*. The operator has to meet the reason
+    before they meet the vacuous passes."""
+    if error is None:
+        return ("registry", True, f"{registry_path()} is readable")
+    if repaired:
+        return ("registry", False,
+                f"registry was corrupt and has been quarantined -- {error}")
+    return ("registry", False,
+            f"{error}; every worker-keyed check below ran against an EMPTY "
+            f"registry. Rerun as `fleet doctor --repair` to quarantine it "
+            f"(renames it aside to state/fleet.json.corrupt.<ts>)")
+
+
 def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
     """`fleet doctor` (SPEC §5 doctor row, §7 silent-failure alarm): runs
     every health check below and prints one [PASS]/[FAIL] line each;
     exits nonzero iff any check is not ok.
+
+    REPORT-ONLY BY DEFAULT (operator gate, 2026-07-27, `docs/OPERATOR-GATES.md`).
+    It used to call `load_registry()`, which QUARANTINES -- so the diagnostic
+    verb renamed aside the very file it was invoked to diagnose, and did it
+    before printing a single check line, because the exception went straight
+    out to `main`. Worse, the rename converts *corrupt* into *absent*, and the
+    §9 legacy-claim upgrade abstains on corrupt but is granted on absent; the
+    refusal message that sent the operator here named this command by name.
+
+    STRICTLY READ-ONLY WAS REJECTED at the gate, and the reason is worth
+    keeping: no other repair path exists, so a doctor that never repaired would
+    leave that refusal naming a command that cannot help. Hence the flag.
+    `--repair` performs the quarantine rename (under `fleet_lock`, since it is
+    a write); without it, a corrupt registry becomes its own FAIL row and every
+    OTHER check still runs -- which is strictly more diagnosis than the old
+    behaviour delivered, not less.
 
     Snapshots the registry under one fleet_lock() then runs every check
     OUTSIDE the lock: several checks shell out (claude --version, claude
     agents --json, two real hook-smoke subprocesses) and holding fleet_lock
     across them would starve every concurrent `fleet` command (F4
     doctrine)."""
-    with fleet_lock():
-        data = load_registry()
+    # `getattr` with a False default, not `args.repair`: several suites call
+    # `cmd_doctor(SimpleNamespace())` with no such attribute, and report-only
+    # must never depend on how the caller happened to build its namespace.
+    # The default for an absent attribute is the SAFE one, by construction.
+    repair = bool(getattr(args, "repair", False))
+    registry_error = None
+    try:
+        if repair:
+            with fleet_lock():
+                data = load_registry()          # the ONE quarantine site left
+        else:
+            # hint=False: the row below names `--repair` itself, with more to
+            # say than the generic hint has -- and twice in one sentence reads
+            # like a bug.
+            data = read_registry_no_repair(hint=False)
+    except RegistryCorruptError as exc:
+        # Caught, not propagated -- the one place in this module where that is
+        # right. Everywhere else `RegistryCorruptError` means "abort, you were
+        # about to write against a registry you cannot trust"; here it IS the
+        # finding, and a diagnostic that aborts on its first bad row is not a
+        # diagnostic. Nothing below this line writes.
+        registry_error = str(exc)
+        data = {"workers": {}}
     workers = data.get("workers", {})
 
     check_calls = [
+        functools.partial(_doctor_check_registry, registry_error, repair),
         functools.partial(_doctor_check_claude_version, which=which, run=run),
         functools.partial(_doctor_check_pin_version, which=which, run=run),
         functools.partial(_doctor_check_instance_settings),
@@ -11722,8 +11877,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :5135, :5592, :9651,
-    :14461), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :5232, :5689, :9806,
+    :14629), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -12367,8 +12522,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:5135, :5592, :9651,
-    #     :14461) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:5232, :5689, :9806,
+    #     :14629) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -12910,6 +13065,19 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # as evidence of a SECOND BODY, and filing it here would cry wolf on the
         # holder's own turn. The refusal is loud on stderr and the corrupt
         # registry has its own doctor row.
+        #
+        # THE MESSAGE NAMES `--repair` (2026-07-27 gate), and what that does NOT
+        # fix belongs here rather than in a handoff. Bare `fleet doctor` is now
+        # report-only, so the old text named a verb that cannot help. But
+        # `--repair` QUARANTINES -- it RENAMES the file aside -- so it still turns
+        # *corrupt* into *absent*, and this arm abstains on corrupt while the
+        # `not_initialized` carve-out GRANTS on absent. Putting the rename behind
+        # an explicit flag makes it a deliberate operator act instead of a side
+        # effect of four read-only-looking commands; it does NOT close that door.
+        # The remedy for the door is gating `not_initialized` on the
+        # `fleet.json.corrupt.*` artifact glob (the shape already used by
+        # `_registry_owned_and_protected_sids`), which the gate's own answer
+        # relocated to `main` and which is therefore still owed.
         if _acting_body_is_worker_turn(ident=ident) is not False:
             raise FleetCliError(
                 f"{verb}: refusing -- this is a §9 legacy claim, whose upgrade "
@@ -12917,9 +13085,9 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
                 f"presented, and the registry cannot confirm that this session "
                 f"is not a worker turn ({_identity_abstention_note(ident)}). "
                 f"An upgrade that mints generation 1 needs an affirmative "
-                f"answer, not an abstention. Repair `state/fleet.json` (see "
-                f"`fleet doctor`), or run this from a session the registry can "
-                f"place.")
+                f"answer, not an abstention. Repair `state/fleet.json` "
+                f"(`fleet doctor --repair`), or run this from a session the "
+                f"registry can place.")
         # GATE 2, AND IT IS NOT THE SAME QUESTION AS GATE 1 (gate reviewer
         # CRITICAL, 2026-07-27). Gate 1 asks *"did the registry answer?"*; this
         # asks *"is the registry that answered COMPLETE?"* -- and an affirmative
@@ -15158,7 +15326,13 @@ def build_parser() -> argparse.ArgumentParser:
                              help="explicit FLEET_HOME override; the scheduled task "
                                   "always passes this (Task Scheduler has no operator env)")
 
-    sub.add_parser("doctor", help="run fleet health checks")
+    p_doctor = sub.add_parser("doctor", help="run fleet health checks")
+    p_doctor.add_argument(
+        "--repair", action="store_true",
+        help="quarantine a corrupt state/fleet.json by renaming it aside to "
+             "state/fleet.json.corrupt.<ts>. Without this flag `doctor` only "
+             "reports (operator gate 2026-07-27): a diagnostic verb does not "
+             "mutate the state it was invoked to diagnose")
 
     p_supboot = sub.add_parser("sup-boot", help="supervisor boot ritual: epoch check, claim decision, boot bundle (spec §4)")
     p_supboot.add_argument("--sid", help="override caller session id (default: CLAUDE_CODE_SESSION_ID)")
