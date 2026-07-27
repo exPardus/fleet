@@ -111,7 +111,11 @@ def _spec_section(number):
     lines = SPEC_RAW.splitlines()
     start = None
     for i, line in enumerate(lines):
-        if re.match(rf"^#+\s+{re.escape(number)}\.\s", line):
+        # `## 17. RATIFIED ...` and `### 6.5 D5 ...` are both real heading
+        # shapes in this document, so the number may be followed by a dot OR by
+        # whitespace. Requiring the dot made a citation of a real subsection
+        # report as "not a heading", which is a true-but-misleading RED.
+        if re.match(rf"^#+\s+{re.escape(number)}(?=[.\s])", line):
             start = i
             break
     if start is None:
