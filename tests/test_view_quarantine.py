@@ -490,6 +490,162 @@ class TestTheViewSurfaceCannotRegainTheLock:
             f"mid-rotation (invariant 6) for a read the lock does not protect.")
 
 
+# ---------------------------------------------------------------------------
+# 5. D1's "never probe a PID" clause, in its POST-PIVOT spelling
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def spawn_log(monkeypatch):
+    """Every process spawn, counted at the ONE seam that cannot be evaded.
+
+    `subprocess.run` IS THE WRONG SEAM, and a test built on it passes
+    VACUOUSLY -- measured, not assumed. `_fetch_agents_roster(which=shutil.
+    which, run=subprocess.run)` binds that default AT DEF TIME, so after
+    `monkeypatch.setattr(fleet.subprocess, "run", spy)` the check
+    `_fetch_agents_roster.__defaults__[1] is subprocess.run` is still True and
+    the spy sees nothing. A "no subprocess" assertion built there would be
+    green against a view that spawns on every call.
+
+    `subprocess.run` looks `Popen` up in its OWN module globals at CALL time,
+    so patching the class catches the roster spawn no matter how the default
+    was bound -- and catches anything a future refactor reaches for, which a
+    per-helper patch would not."""
+    seen = []
+    real = fleet.subprocess.Popen
+
+    class _Spy(real):
+        def __init__(self, args, *a, **k):
+            seen.append(list(args) if isinstance(args, (list, tuple)) else [args])
+            raise OSError("spawn blocked: this surface is not allowed to spawn")
+
+    monkeypatch.setattr(fleet.subprocess, "Popen", _Spy)
+    return seen
+
+
+class TestTheViewSurfaceSpawnsNoSubprocess:
+    """D1's four clauses are: never take `fleet.lock`, never probe a PID, never
+    write, never quarantine. The PID probe is GONE -- the native pivot deleted
+    it -- so the clause reads as satisfied and a doc-only check would tick it.
+
+    IT HAS A LIVE SUCCESSOR. `cmd_status` spawns `claude agents --json --all`
+    (`_fetch_agents_roster`, ~1.7 s measured on this box, 30 s timeout). Same
+    D1 violation, post-pivot spelling: a view doing expensive,
+    environment-touching work on a path that refires after every assistant
+    message. The clause survived the pivot unnoticed because its ORIGINAL
+    WORDING went vacuously true.
+
+    So the assertion is written against the PROPERTY (no spawn), never against
+    the obsolete mechanism (no `get_process_info`)."""
+
+    def test_the_seed_bare_status_DOES_spawn_the_roster(self, home, capsys, spawn_log):
+        """The seed, and it is the whole reason the rest is not vacuous. If the
+        counter intercepted nothing, every zero below would be a lie. It also
+        records WHICH subprocess, so a future roster that spawns something else
+        does not silently satisfy this."""
+        _registry({"w1": _rec(status="working")})
+        fleet.cmd_status(fleet.build_parser().parse_args(["status"]))
+        capsys.readouterr()
+        assert len(spawn_log) == 1, spawn_log
+        assert spawn_log[0][1:] == ["agents", "--json", "--all"], spawn_log[0]
+
+    @pytest.mark.parametrize("label,argv", [
+        ("/fleet:status + /fleet:overview", ["status", "--stale-ok"]),
+        ("statusline (--json --stale-ok)", ["status", "--json", "--stale-ok"]),
+        ("/fleet:peek", ["peek", "w1"]),
+        ("/fleet:result", ["result", "w1"]),
+    ])
+    def test_the_view_surface_spawns_nothing(self, home, capsys, spawn_log,
+                                             label, argv):
+        _registry({"w1": _rec(status="working", session_id=None)})
+        try:
+            fleet.main(argv)
+        finally:
+            capsys.readouterr()
+        assert spawn_log == [], f"{label} spawned {spawn_log}"
+
+    def test_status_snapshot_itself_spawns_nothing(self, home, spawn_log):
+        """The statusline IMPORTS this rather than shelling out, so it is the
+        single derivation four surfaces share -- and the one surface D4's
+        sentence was always true of."""
+        _registry({"w1": _rec(status="working")})
+        fleet.status_snapshot()
+        assert spawn_log == []
+
+    def test_no_spawn_helper_is_even_REACHABLE_from_a_view(self):
+        """The static half. The behavioural tests above prove nothing spawned
+        on the paths they happened to walk; this proves there is no path at
+        all, including arms a fixture did not reach (an attached worker, a
+        limited park, an archived record)."""
+        tree = ast.parse(SRC)
+        funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+        spawny = {"_fetch_agents_roster", "resolve_claude_executable"}
+        for entry in ("cmd_peek", "cmd_result", "status_snapshot"):
+            seen, stack = set(), [entry]
+            while stack:
+                fn = stack.pop()
+                if fn in seen or fn not in funcs:
+                    continue
+                seen.add(fn)
+                stack.extend(c.func.id for c in ast.walk(funcs[fn])
+                            if isinstance(c, ast.Call) and isinstance(c.func, ast.Name))
+            assert not (seen & spawny), (
+                f"{entry} can reach {sorted(seen & spawny)} -- a view must not "
+                f"spawn a subprocess (D1). The clause's original wording ('never "
+                f"probe a PID') went vacuous at the native pivot; the roster "
+                f"subprocess is its live successor.")
+            direct = {f for f in seen for c in ast.walk(funcs[f])
+                      if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+                      and getattr(c.func.value, "id", "") == "subprocess"}
+            assert direct == set(), f"{entry} reaches subprocess.* via {sorted(direct)}"
+
+
+class TestTheRosterSpawnIsLoadBearingForBareStatus:
+    """WHY `cmd_status` KEEPS ITS SPAWN, measured rather than argued -- this is
+    the evidence behind the scoped report, and it is a test so the claim cannot
+    quietly stop being true.
+
+    Take the roster away and `fleet status` does not degrade a little: G9's
+    epoch freeze fires, NO record is recomputed, NOTHING is written, and the
+    rows printed are last-committed. That is `--stale-ok` exactly. So removing
+    the spawn does not make the authoritative verb cheaper -- it DELETES the
+    authoritative verb, leaving two spellings of the view. `docs/specs/
+    terminal-surface.md` D2 (*"`fleet status` (no flag) remains the
+    authoritative, recomputing command"*) is the source of record and forbids
+    that, so the spawn stays where it is and the VIEW surface is what moved off
+    it (see the class above: `--stale-ok`, peek, result and the snapshot all
+    spawn zero)."""
+
+    @pytest.mark.parametrize("roster", [(False, []), (True, [])])
+    def test_without_a_roster_status_freezes_and_writes_nothing(
+            self, home, capsys, monkeypatch, roster):
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda *a, **k: roster)
+        _registry({"w1": _rec(status="working")})
+        before = fleet.registry_path().read_text(encoding="utf-8")
+        assert fleet.cmd_status(fleet.build_parser().parse_args(["status"])) == 0
+        out = capsys.readouterr().out
+        assert "EPOCH: roster suspicious" in out
+        assert "verdicts frozen" in out
+        # The row shown is the last-committed one, and the registry is untouched.
+        assert "working" in out
+        assert fleet.registry_path().read_text(encoding="utf-8") == before
+
+    def test_the_frozen_output_carries_the_same_status_as_stale_ok(
+            self, home, capsys, monkeypatch):
+        """The equivalence stated as a measurement: roster-less bare `status`
+        and `--stale-ok` report the same status for the same record. If a
+        future change makes the recompute survive a missing roster, this goes
+        red and the scoped report needs redriving."""
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda *a, **k: (False, []))
+        _registry({"w1": _rec(status="working")})
+        fleet.cmd_status(fleet.build_parser().parse_args(["status"]))
+        bare = capsys.readouterr().out
+        fleet.cmd_status(fleet.build_parser().parse_args(["status", "--stale-ok"]))
+        stale = capsys.readouterr().out
+        assert fleet.status_snapshot()["workers"][0]["status"] == "working"
+        for text in (bare, stale):
+            assert "working" in text
+
+
 class TestTheSlashCommandsUseTheViewPath:
     """D3 names `/fleet:status` and `/fleet:overview` as READ-ONLY inline-exec
     commands, and they shelled out to the bare verb -- which recomputes, takes
