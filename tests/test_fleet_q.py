@@ -399,6 +399,21 @@ class TestOutputFormat:
         assert "ambiguous" in err
         assert "--path" in err and "--kind" in err
 
+    def test_limit_cannot_silence_a_src_ambiguity(self, proj, capsys):
+        # §11.4 says `--src` must resolve to exactly one symbol AFTER FILTERS,
+        # and `--limit` is not a filter -- it caps what is printed. Testing
+        # ambiguity against the limited list instead of the full one would let
+        # `--limit 1` turn a two-hit query into a confident wrong slice, which
+        # is the failure this whole tool exists to prevent. Found by fault
+        # injection: the first version of these tests missed it entirely.
+        rc, out, err = _run(capsys, "alpha", "--src", "--limit", "1")
+        assert rc == 1
+        assert "ambiguous" in err
+        # Pointers only -- not one line of source.
+        assert out.splitlines() == [
+            "src/api.py:6-9\tfunc\talpha\t(x: int) -> str"]
+        assert "def alpha" not in out
+
     def test_an_unreadable_source_at_slice_time_degrades_to_the_pointer(
             self, proj, monkeypatch, capsys):
         # §11.5's "unreadable source at slice time" row: readable when the
