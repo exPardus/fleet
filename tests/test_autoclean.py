@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1444,9 +1445,85 @@ class TestWindowsAdapterSchtasks:
             return types.SimpleNamespace(returncode=0, stdout="ok", stderr="")
         ok, _ = fleet._WindowsPlatform().autoclean_task_install("t", "cmdline", 6, run=run)
         assert ok
-        argv, = seen
-        assert argv == ["schtasks", "/Create", "/F", "/TN", "t", "/TR", "cmdline",
-                        "/SC", "HOURLY", "/MO", "6"]
+        create, _patch = seen
+        assert create == ["schtasks", "/Create", "/F", "/TN", "t", "/TR", "cmdline",
+                          "/SC", "HOURLY", "/MO", "6"]
+
+    # -- catch-up after an outage (StartWhenAvailable) ------------------
+    #
+    # The defect these pin, measured 2026-07-27: the registered task carried
+    # StartWhenAvailable=False, so a 9h14m power cut ate the 08:22Z sweep and
+    # NOTHING ran at boot -- an 18-hour hole in a 6-hourly guard. `schtasks
+    # /Create` cannot express the setting, so the install takes a second step.
+    #
+    # These observe what the REGISTRATION PATH SUBMITS, never this machine's
+    # Task Scheduler: a test that read the live task would pass or fail on
+    # whether someone had run `fleet init --autoclean` on the box, which is
+    # worthless in CI and on a fresh clone.
+
+    def test_install_sets_start_when_available_true(self):
+        seen = []
+
+        def run(argv, **kw):
+            seen.append(argv)
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        ok, msg = fleet._WindowsPlatform().autoclean_task_install(
+            "claude-fleet-autoclean", "cmdline", 6, run=run)
+        assert (ok, msg) == (True, "")
+        assert len(seen) == 2, "install must take the catch-up step, not just /Create"
+        patch = seen[1]
+        assert patch[0] == "powershell"
+        assert "-NoProfile" in patch and "-NonInteractive" in patch
+        script = patch[-1]
+        # The VALUE, not merely the word: a task set to False drops the missed
+        # occurrence exactly as the unfixed one did.
+        assert re.search(r"\$t\.Settings\.StartWhenAvailable\s*=\s*\$true", script), script
+        assert "$false" not in script
+        # Patch the task we just created, in the root folder, not a same-named
+        # one in some other folder.
+        assert "Get-ScheduledTask -TaskName 'claude-fleet-autoclean' -TaskPath '\\'" in script
+        assert "Set-ScheduledTask -TaskName 'claude-fleet-autoclean' -TaskPath '\\'" in script
+
+    def test_install_fails_loudly_when_catch_up_cannot_be_set(self):
+        """A task that exists but drops missed occurrences is the silently
+        degraded guard this path exists to prevent -- the install says so."""
+        def run(argv, **kw):
+            if argv[0] == "schtasks":
+                return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+            return types.SimpleNamespace(
+                returncode=1, stdout="", stderr="Get-ScheduledTask : not recognized")
+        ok, msg = fleet._WindowsPlatform().autoclean_task_install("t", "cmdline", 6, run=run)
+        assert ok is False
+        assert "StartWhenAvailable" in msg and "not recognized" in msg
+        assert "was created" in msg  # the task exists; the operator must know
+
+    def test_install_catch_up_step_survives_no_powershell(self):
+        def run(argv, **kw):
+            if argv[0] == "schtasks":
+                return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+            raise FileNotFoundError("powershell")
+        ok, msg = fleet._WindowsPlatform().autoclean_task_install("t", "cmdline", 6, run=run)
+        assert ok is False and "StartWhenAvailable" in msg and "powershell" in msg
+
+    def test_failed_create_does_not_reach_the_catch_up_step(self):
+        seen = []
+
+        def run(argv, **kw):
+            seen.append(argv[0])
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="denied")
+        ok, msg = fleet._WindowsPlatform().autoclean_task_install("t", "cmdline", 6, run=run)
+        assert (ok, msg) == (False, "denied")
+        assert seen == ["schtasks"]
+
+    def test_task_name_cannot_break_out_of_the_powershell_literal(self):
+        seen = []
+
+        def run(argv, **kw):
+            seen.append(argv)
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        fleet._WindowsPlatform().autoclean_task_install("o'brien", "cmdline", 6, run=run)
+        script = seen[1][-1]
+        assert "'o''brien'" in script
 
     def test_remove_argv_shape(self):
         seen = []
