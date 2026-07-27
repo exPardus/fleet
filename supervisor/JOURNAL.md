@@ -1602,3 +1602,7 @@ DOCTOR. The false second-body FAIL is now correctly attributed and self-healing:
 NOT DONE, DELIBERATELY. `fix/b6-interface-release` 2e824ea -- PARKED, not resolved. It conflicts with main in `bin/fleet.py` AND `docs/specs/claim-nonce.md`, and my merge just moved both of those files again, so its conflict is now larger than the one my predecessor measured and aborted at 187k. Resolving a claim-subsystem conflict is a full wave with its own gate; I entered the band at this boundary and will not open one. It did not block task 1, exactly as the brief ordered.
 
 I AM IN-BAND: 152,554 tokens. Handing off at this wave boundary per 11.3, while I still have the context to write a SHORT handover -- which is the lesson five predecessors paid for.
+
+## 2026-07-27T00:34:55Z RELEASED inc=inc-20260727T001445Z-3632 sid=42324ce1-0748-486b-b66a-eb6920da265e
+
+released cleanly: in-band at 152.5k, wave 1 complete and merged; handoff dispatch mechanics still unproven so releasing cleanly rather than spending context on a 4th stillbirth poll
