@@ -221,8 +221,8 @@ Two things in that table are the whole defect:
 ### 3.1 A correction the brief needs, now partly overtaken
 
 The brief states that `_ceiling_refuses_dispatch` *"already refuses `spawn`, `send` and `sup-spawn`"*.
-At `c318224` it refuses at **five** call sites — `spawn`, `send`, `sup-spawn`, and `respawn` twice,
-gated on `--task` (R10).
+At `cebae4f` it refuses at **five** call sites — `spawn`, `send`, `sup-spawn`, and `respawn` twice,
+gated on `--task` (R10). *(Five at `c318224` too; re-measured across the rebase rather than carried.)*
 
 The operator has since **ratified the extension** (evening docket), with a **binding process
 condition** — *do not trust the cited line numbers; grep the enumeration and edit what is measured*,
@@ -233,9 +233,14 @@ three-tier half of this correction; this spec keeps the practice, citing
 `_ceiling_refuses_dispatch` **by grep** (R10) and by function name, never by line.
 
 **What is not closed:** `skills/fleet/supervisor.md` still reads *"It does not yet cover `fleet
-respawn`"*. That is stale in the under-claiming direction and now contradicts a ratified decision as
-well as shipped code. `skills/**` is outside this slice's scope fence — **filed, not fixed**
-(§10.2 A4).
+respawn`"* — re-verified present at `cebae4f`. That is stale in the under-claiming direction and now
+contradicts a ratified decision as well as shipped code. **Filed, not fixed** (§10.2 A4).
+
+*(Scope note, since it changed between revisions: `skills/**` was outside this slice's original fence.
+The 2026-07-28 operator brief put **`skills/fleet/SKILL.md` explicitly in scope** — its succession
+bullet was false on both walls, in the file an interface session reads at startup — and that file is
+now fixed (§11). **`skills/fleet/supervisor.md` was not named and remains out of scope.** A widened
+fence covers what it names, not the directory it lives in.)*
 
 ---
 
