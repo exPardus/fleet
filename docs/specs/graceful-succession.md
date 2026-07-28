@@ -962,11 +962,11 @@ SUP-RECOVER <arm>: <one line naming the state it resolved>
   action        : dispatching gen-0 body sup|<launch-id>|boot
 SUP-RECOVER-DISPATCHED <name> sid=<sid>
   next          : that body's first act is `fleet sup-boot`. It holds NO claim yet.
-                  HEALTHY = it CLAIMED. `fleet sup-status` reads `succession.needed:
-                  false` against a held claim carrying a NEW incarnation id.
-                  STILLBORN = the claim never moved: `succession.needed` still true,
-                  same cause, `age_seconds` still growing, ~60s after this line.
-                  Then: `fleet peek <name>` (its sid is stamped above) and
+                  HEALTHY = it CLAIMED. `fleet sup-status` reads
+                  `succession.needed: false`.
+                  STILLBORN = the claim never moved: `succession.needed` still
+                  true, same cause, `age_seconds` still growing, ~60s after this
+                  line. Then: `fleet peek <name>` (its sid is stamped above) and
                   `fleet doctor`.
 ```
 
@@ -998,15 +998,23 @@ SUP-RECOVER-DISPATCHED <name> sid=<sid>
 >
 > | | healthy successor | stillborn successor |
 > |---|---|---|
-> | the claim | **moves** — `sup-boot` writes `held` under `fleet_lock` with a NEW incarnation id | **never moves** |
+> | the claim | **moves** — `sup-boot` writes a `held` claim under `fleet_lock` | **never moves** |
 > | `succession.needed` | flips to `false` (§4.8) | stays `true`, same cause, `age_seconds` still climbing |
 > | registry row | `working, 1 turn` | `working, 1 turn` — **identical, and useless** |
-> | roster | joined, stays | joined, then gone in 25–33 s |
+> | roster | joined, stays | joined, then gone |
 >
 > **The registry row is the same on both sides. The claim is not.** That is the whole heuristic, and it
 > is a restatement of the property D-GS1 was chosen for: *the alarm clears when a body **claims**, not
 > when a body is **dispatched*** (§4.8). The operator is being asked to read the same signal this
 > document specifies, which is why it needs no new mechanism and cannot drift out of sync with one.
+>
+> **Two things deliberately NOT said, because they are not true of every arm.** The claim's
+> `incarnation_id` is **not** promised to change — `sup-boot` mints a fresh one on `claim`/`seize`, but
+> `limit-transfer` moves an existing claim to the successor's sid (§4.8), so "look for a new
+> incarnation id" would read as stillborn on a healthy arm-6 recovery. And the roster departure is
+> **not** given a duration: 25–33 s is the measured death window for the `dontask` cause specifically
+> (§10.3), and a body stillborn for some future reason need not die on that schedule. **`needed` is the
+> only line in this table that is true on every arm, which is why it is the one the block prints.**
 >
 > **Why ~60 s and not 300 s.** The `handoff-autopsy` measured stillborn successors dying in **25–33 s**
 > (17/17 mode↔outcome), and a healthy body's `sup-boot` claim is its first act. 60 s is roughly twice
