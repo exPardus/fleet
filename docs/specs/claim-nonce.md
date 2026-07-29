@@ -2056,6 +2056,51 @@ what this spec relies on, and it is unaffected.
 >    rather than creating it. Whether the exemption should still be unconditional under
 >    sid-bearing drivers is **§7's question and therefore the operator's**; it is raised here, not
 >    answered. Nothing was narrowed pending that answer.
+>
+> **RE-GROUNDED 2026-07-28 — four-councilor council, Verdict A, unanimous 4/4
+> (`docs/decisions/W9-section7-council-synthesis.md`, added to `main` in `d034827`; not present on
+> this branch, which predates it). STATUS: PROVISIONAL, PENDING OPERATOR RATIFICATION** — taken by
+> the interface tier under the operator's standing directive 7 while the operator was away. **No box
+> in `docs/OPERATOR-GATES.md` is ticked**; the request raised above stands open. **§7's exempt VERB
+> SET IS UNCHANGED. Only what grounds it changes**, and the arming of the `archive` verb is
+> byte-for-byte what it was.
+>
+> The question the note above raised is answered, and answering it required amending operator-owned
+> text at **three** sites — because *"`autoclean` is structurally exempt"*, four lines up, **could
+> not be read at all** once its disambiguator died:
+>
+> * **"Structurally" was itself the qualification**, not a synonym for "unconditionally". This
+>   sentence never stood alone; it always pointed somewhere else for its content.
+> * The only place that said what "structurally" meant is the third bullet of §7(b) below, and it
+>   keyed the exemption on **the `autoclean` scheduled task's absent `CLAUDE_CODE_SESSION_ID`**.
+>   That task was retired 2026-07-27, so that ground is **void**, not merely dated.
+> * **The verb taxonomy that this same ratified block makes BINDING listed `autoclean` in the
+>   Mutating-lifecycle (GATED) row.** So the ratified text said *exempt* in this line and *gated* in
+>   its own binding table, with nothing surviving to reconcile them. **Re-grounding the bullet alone
+>   would have shipped that contradiction with a better paragraph attached**, so the row moved as
+>   well — see the taxonomy table in §7's *corrected verb taxonomy*, which now carries `autoclean` in
+>   an **Exempt convergent sweep** row. That repair is a *condition* of Verdict A, not a follow-up.
+>
+> **What to read this sentence as from here on:** `autoclean` is exempt because it is a **convergent
+> janitorial sweep with no dispatch, steer or claim authority**. Every action it can take is already
+> conditioned on the target being terminal-state, roster-confirmed-gone, outcome-vouched and past
+> TTL, so a divergent body running it produces byte-for-byte what the legitimate body produces on its
+> next beat; it is structurally incapable of the harm §7 guards, and it **must** run precisely while
+> a claim is held, because a live fleet is the only condition under which husks accumulate. **This is
+> a claim about the sweep's EFFECT. The claim it replaces was about a caller's CONFIGURATION, and a
+> configuration change falsified it in one day** — which is exactly why the replacement is stated as
+> an effect and not as an environment.
+>
+> **Rider 2, binding, and the reason this is not a blank cheque:** the exemption is scoped to the
+> sweep's **current effect set**. Any new tier, or any widening past *terminal + roster-confirmed-gone
+> + outcome-vouched*, **re-opens this question** — the exemption dies at any frame that takes a
+> lifecycle action against a live body. **Rider 1** is the other half: the exemption is *carried
+> explicitly at every frame and never inherited from the call graph*, which is what
+> `cmd_archive`'s `as_autoclean_tier` parameter is for. Neither rider is enforced by this paragraph:
+> rider 1 is enforced by an AST walk over the sweep's entire transitive call graph
+> (`tests/test_autoclean.py::TestTheSweepUnderAHeldClaim::
+> test_no_unsanctioned_frame_under_the_sweep_can_arm_the_gate`), and rider 2 is enforced by the
+> operator, because widening the effect set is not a thing a worker may ratify.
 
 **This spec did not decide this.** v1 did, and the gate unwound it. Three-tier adjudication item 2 is
 re-put here with the cost statement corrected.
@@ -2110,9 +2155,41 @@ callers. The honest accounting:
   `heartbeat_at` on release, so that arm is bounded by the releasing body's roster lifetime and by
   nothing else, and it has no in-fleet disarm. See the operator amendment in the decision block at
   the head of this section.)*
-- Its own primary caller is structurally exempt: the `autoclean` scheduled task has no
+- ~~Its own primary caller is structurally exempt: the `autoclean` scheduled task has no
   `CLAUDE_CODE_SESSION_ID`, so a caller-identity gate can never fire on it, and
-  `docs/specs/autoclean.md:38` records that *the scheduler ignores exit codes* anyway.
+  `docs/specs/autoclean.md:38` records that *the scheduler ignores exit codes* anyway.~~
+  **RE-GROUNDED 2026-07-28 — the struck text was the ONLY sentence in this section that said what
+  *"`autoclean` is structurally exempt"* meant, and it named a caller that no longer exists.** The
+  scheduled task was retired on 2026-07-27; both replacement drivers (the supervisor's watchtower
+  beat, the interface's startup ritual) are sessions WITH a sid, so the clause it keyed on is simply
+  no longer true of any caller. Replaced, per the four-councilor ruling of 2026-07-28
+  (`docs/decisions/W9-section7-council-synthesis.md`, Verdict A, unanimous 4/4), by a ground about
+  the sweep's **effect** rather than its caller's environment:
+
+  > **`autoclean` is exempt because it is a convergent janitorial sweep with no dispatch, steer, or
+  > claim authority.** Every action it can take is already conditioned on the target being
+  > terminal-state, roster-confirmed-gone, outcome-vouched and past TTL, so a divergent body running
+  > it produces byte-for-byte what the legitimate body produces on its next beat. It is structurally
+  > incapable of the harm §7 guards, and it **must** run precisely while a claim is held, because a
+  > live fleet is the only condition under which husks accumulate. The exemption is a property of the
+  > **sweep's effect**, not of the caller's environment.
+
+  Strictly better than what it replaces: *"the scheduled task has no session id"* was a claim about
+  **configuration** and a configuration change falsified it in one day. This is a claim about
+  **effect**, falsifiable only by deliberately widening what the sweep does — which is what rider 2
+  below reserves to the operator. **STATUS: PROVISIONAL — PENDING OPERATOR RATIFICATION.** The
+  ruling was taken by the interface tier under the operator's standing directive 7 while the
+  operator was away; **no box in `docs/OPERATOR-GATES.md` is ticked**, and a ratification request is
+  filed there under `## Open`. Two binding riders ride the re-grounding:
+  1. **The exemption is carried explicitly at every frame and never inherited from the call graph.**
+     `as_autoclean_tier` is the correct shape *because it is a parameter* — visible at the frame
+     where it applies, and the one thing that cannot be silently assumed one frame down. Enforced,
+     not merely stated: `tests/test_autoclean.py::TestTheSweepUnderAHeldClaim::
+     test_no_unsanctioned_frame_under_the_sweep_can_arm_the_gate` walks the sweep's whole transitive
+     call graph.
+  2. **It is scoped to the sweep's current effect set.** Any new tier, or any widening past
+     "terminal + roster-confirmed-gone + outcome-vouched", **re-opens this question**. The exemption
+     dies at any frame that takes a lifecycle action against a live body.
 - It would need the corrected verb taxonomy below, which v1 got wrong.
 
 **(c) Build an authorization input first, as separate scope.** §2.3 prices it: an operator-held value
@@ -2193,10 +2270,24 @@ def cmd_release(args) -> int:
 |---|---|
 | **View** (no lock, no roster, no write) | `status --stale-ok`, `peek`, `result`, `home`, `knowledge`, `sup-status` |
 | **Authoritative read** (lock + roster + registry write, but not a lifecycle action) | `status` (bare), `wait`, `doctor` |
-| **Mutating lifecycle** | `spawn`, `send`, `respawn`, `kill`, `clean`, `interrupt`, `archive`, `autoclean`, `resume-limited`, `init`, **`release`** |
+| **Mutating lifecycle** | `spawn`, `send`, `respawn`, `kill`, `clean`, `interrupt`, `archive`, `resume-limited`, `init`, **`release`** |
+| **Exempt convergent sweep** (mutates, but only toward the state the legitimate body converges on) | `autoclean` |
 | **Refuses under native** | `attach` (@3688 always raises) |
 
-Any gate must be stated against **this** partition, and must say what it does with the middle row —
+**`autoclean` MOVED OUT OF THE MUTATING-LIFECYCLE ROW ON 2026-07-28**, by the four-councilor §7
+ruling recorded in `docs/decisions/W9-section7-council-synthesis.md` (Verdict A, unanimous 4/4, and
+its wave-10 postscript). **PROVISIONAL — pending operator ratification; no gate box is ticked.** It
+had to move, and re-grounding the exemption alone would not have been enough: this table is made
+**binding** by the same ratified decision block that says *"`autoclean` is structurally exempt"*, so
+while the row listed `autoclean` among the gated verbs **the ratified text said exempt in one line and
+gated in its binding table**, and the only sentence that reconciled them described the retired
+scheduled task. A re-grounding that left this row alone would have shipped the same contradiction with
+a better paragraph attached. The new row is deliberately named after the **effect**, matching the
+ground the exemption now rests on — a verb that mutates is not thereby a lifecycle verb, and that
+distinction is the whole content of the ruling. Rider 2 applies to the row as much as to the ground:
+widen what the sweep does and it belongs back above.
+
+Any gate must be stated against **this** partition, and must say what it does with the middle rows —
 which is where v1's error lived.
 
 ### 7.1 PROPOSED taxonomy carve-out — interface `send` to the claim-holder body
