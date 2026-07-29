@@ -10515,7 +10515,9 @@ def nonce_matches(presented, stored) -> bool:
 
 # B4/D6: the fleet mode name the handoff successor is dispatched under when the
 # operator passes no --permission-mode. Deliberately the SAME value
-# `SUP_SPAWN_DEFAULT_MODE` (nine lines below) carries rather than a bespoke one:
+# `SUP_SPAWN_DEFAULT_MODE` carries rather than a bespoke one (this said "nine
+# lines below" and it was eleven -- a line-distance is a self-citation that
+# rots on the next edit, so name the constant and let grep do the walking):
 # both verbs dispatch a SUPERVISOR BODY into FLEET_HOME whose first act is
 # `fleet sup-boot` -- i.e. `fleet` itself, run through Bash.
 #
@@ -10530,8 +10532,23 @@ def nonce_matches(presented, stored) -> bool:
 # Measured, not reasoned (state/events.jsonl `spawned` events + six transcripts
 # read directly, 2026-07-27): 10 successors dispatched under `dontask` were ALL
 # stillborn (2 x `permission-rule` denial, dead in 25-33s, the body's own words
-# "Bash denied, PowerShell denied"); 7 dispatched under `bypass` ALL booted and
-# completed their handoffs (75-122 min alive). 17/17, zero exceptions.
+# "Bash denied, PowerShell denied"); 7 dispatched under `bypass` ALL booted.
+# 17/17, zero exceptions.
+#
+# "Booted and completed" restated to what is reproducible, 2026-07-28. Each of
+# the seven has a `turn_started` in events.jsonl 34-64 s after its `spawned`,
+# and each of those seven timestamps matches a `HANDOFF-COMPLETE` line in
+# supervisor/JOURNAL.md TO THE SECOND -- because `sup-handoff-complete` is what
+# emitted them. So the event is a COMPLETION record, not a boot record, and
+# 7/7 completed. None of the ten `dontask` successors has one. (JOURNAL.md
+# holds 9 HANDOFF-COMPLETE entries; the two extra pre-date Seam #2, which is
+# what began filing a registry record and therefore a `spawned` event at all.)
+#
+# The earlier parenthetical "(75-122 min alive)" is WITHDRAWN, not restated:
+# measured spawned -> first `working`->`idle`, the seven ran 43, 64, 84, 103,
+# 122, 831 and 2254 minutes. The stated range excluded four of its own seven.
+# A range nobody can reproduce from the file it cites is this fix wave's own
+# defect, one register quieter.
 #
 # Do NOT "restore" dontask to close the hang class: it trades a loud wedge for a
 # silent death, which is strictly worse and cost three days. Held as a named
@@ -14218,9 +14235,12 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     -- the SAME value `sup-spawn` uses for a supervisor body, NOT the `dontask`
     a plain worker gets. Read that constant's comment before changing it: the
     fix for the hang class above was originally `dontask`, which closes the
-    prompt (it never asks) and opens a worse one (it DENIES), and every one of
-    the ten successors dispatched under it died at its first Bash call. An
-    explicit `--permission-mode` still wins.
+    prompt (it never asks) and opens a worse one (it DENIES): all ten
+    successors dispatched under it were stillborn, and in the two transcripts
+    that name a cause the cause is a `permission-rule` denial on the first Bash
+    call. Ten-for-ten STILLBIRTH is measured; ten-for-ten death-at-first-Bash is
+    inferred from those two. The constant's own comment states it that way --
+    keep the two in step. An explicit `--permission-mode` still wins.
 
     ONE mode vocabulary (G3 fix wave). `--permission-mode` takes a FLEET mode
     name -- argparse-constrained to `MODE_FLAGS`, the same keyspace `fleet
@@ -14515,21 +14535,36 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     # stamp shape does not hold, because THAT path has no sid yet when it creates
     # the record, while this one is about to PRINT the sid two lines below.
     #
-    # What the NULL cost, measured 2026-07-27: hooks resolve a worker name by
-    # scanning the registry for `session_id == sid` (`stop_outcome.py::
-    # _resolve_name`). With no sid on the record the scan misses, the Stop hook
-    # falls back to `key = sid`, and the turn's outcome is written to
-    # `state/outcomes/<raw-sid>.jsonl` -- where `read_outcomes(name)` never
-    # looks. Ten stillborn successors each stated their own diagnosis in a
-    # result nothing on the fleet side could read. Successful successors escaped
-    # only by accident of timing: `sup-handoff-complete` stamped their sid
-    # within ~45s, before their first Stop.
+    # What the NULL cost, measured 2026-07-27, and state the WHOLE mechanism
+    # because half of it invites a "fix" to a fallback that already exists.
+    # Hooks resolve a worker name by scanning the registry for
+    # `session_id == sid` (`stop_outcome.py::_resolve_name`). With no sid on the
+    # record the scan misses, the Stop hook falls back to `key = sid`, and the
+    # turn's outcome is written to `state/outcomes/<raw-sid>.jsonl`.
+    # `read_outcomes(name)` never opens that path -- but `read_outcomes(name,
+    # sid=sid)` DOES (it appends `outcome_path(sid)` whenever `sid` is truthy),
+    # and 5 of the 7 shipped call sites pass a sid. So the reader-side fallback
+    # for exactly this case was already there. It was starved by THE SAME NULL,
+    # from the other side: callers take the sid off the registry record, the
+    # record's `session_id` was `None`, so `sid` was falsy and the second path
+    # was never even built. One missing field closed both halves at once. Ten
+    # stillborn successors each stated their own diagnosis in a result nothing
+    # on the fleet side could read. Successful successors escaped only by
+    # accident of timing: `sup-handoff-complete` stamped their sid within ~45s,
+    # before their first Stop.
     #
     # `turns` is stamped for the same reason. Every OTHER dispatch commit sets
-    # `turns = 1` when it stamps the sid (`cmd_spawn`, `cmd_respawn`, `send`'s
-    # fresh-session path, `cmd_sup_spawn`); this block is a fourth dispatch site
-    # that set neither, so a successor that had been running for 17 minutes
-    # rendered as `working, 0 turns` -- and that reading was then used as
+    # `turns = 1` when it stamps the sid. Enumerated by grep rather than from
+    # memory, because the first version of this comment named `send`'s
+    # "fresh-session path" and no such site exists -- `send`'s fork-steer goes
+    # through `_restamp_after_steer`, which does `turns + 1`, as does
+    # `_resume_one_limited_native`. Both still stamp AT DISPATCH rather than at
+    # completion, so the doctrine held while the list did not. The real set is
+    # `cmd_spawn`, `_cmd_respawn_native` and `_dispatch_supervisor_body`, each
+    # on both its fast-completion and its joined arm -- six sites. This block
+    # is the seventh dispatch site and set neither field, so a successor that
+    # had been running for 17 minutes rendered as `working, 0 turns` -- and
+    # that reading was then used as
     # evidence that no session had ever started. It is a registry accounting
     # defect, not a fact about the body. The dispatch has returned rc 0 and the
     # roster join has verified this sid live, so the turn HAS started.
@@ -14565,6 +14600,54 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
             data["workers"][name] = succ_rec
             save_registry(data)
             append_event("spawned", name, cwd=str(FLEET_HOME), mode=succ_mode)
+            # `turns = 1` in the registry and NO `turn_started` in the event
+            # log is the same divergence, one layer down, that defect B was
+            # (2026-07-27 fix wave). Every other site that stamps `turns = 1`
+            # emits this beside it -- `cmd_spawn` and `_dispatch_supervisor_
+            # body` each on both their fast-completion and joined arms, and
+            # `send`'s fresh-session path likewise -- and `cmd_sup_handoff_
+            # complete` emits it for THIS successor at its own stamp. Six
+            # sites did, this one did not. Two things turned on the omission,
+            # both measured over `state/events.jsonl` 2026-07-28:
+            #
+            #   * The registry said `working, 1 turn` while the event log held
+            #     no turn for that name at all -- the exact registry/event-log
+            #     tangle the handoff autopsy had to unpick, rebuilt by the fix
+            #     for it.
+            #   * `spawned` carries no `session_id` and never has (157/157
+            #     spawned events since 2026-07-20 are sid-less), so before
+            #     this line the successor's sid entered `_events_sids()` only
+            #     if `sup-handoff-complete` later ran. A successor that died,
+            #     or was aborted, left NO sid in the ownership layer that is
+            #     supposed to survive `fleet clean` removing the registry
+            #     entry.
+            #
+            # READ THIS BEFORE CITING `turn_started` AS A STILLBIRTH SIGNAL.
+            # Over the incident window the event log held 17 successor
+            # `spawned` events (dontask 10, bypass 7) and exactly 7
+            # `turn_started` -- one per `bypass` successor, none for the ten
+            # stillborn. That looks like a boot signal and is not one: all
+            # seven timestamps match a `HANDOFF-COMPLETE` line in
+            # supervisor/JOURNAL.md to the second, because
+            # `cmd_sup_handoff_complete` emitted every one of them. The signal
+            # was COMPLETION, and it discriminated only because a stillborn
+            # successor never reaches a completion.
+            #
+            # This line deliberately BREAKS that coincidence. From here every
+            # successor gets a `turn_started` at dispatch, stillborn ones
+            # included, which is the truthful record -- a turn was started --
+            # and is what defect B's registry stamp already claims one layer
+            # up. A future reader wanting stillbirth must therefore ask the
+            # question that is actually about stillbirth: a `turn_started`
+            # from `begin` with no second one from `complete`, and a
+            # `status_changed` to `dead` behind it.
+            #
+            # Quiet, like its twin in `sup-handoff-complete`: the dispatch has
+            # already happened and the registry commit is already durable when
+            # this runs, so an OSError on a forensics line must not raise past
+            # the `SUCCESSOR-SID:` print below -- that print is the only handle
+            # `sup-handoff-abort --successor-sid` has on a live successor.
+            _append_event_quiet("turn_started", name, session_id=successor_sid)
 
     print(f"SUCCESSOR-INC: {successor_inc}")
     print(f"SUCCESSOR-SID: {successor_sid}")

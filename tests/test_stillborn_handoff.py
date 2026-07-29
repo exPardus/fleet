@@ -43,6 +43,7 @@ places. Every pin here asserts the OBSERVABLE the incident actually turned on:
 the flags on the dispatch argv, the file the outcome lands in, the sentence the
 operator reads. Each has been watched RED against its own defect reverted.
 """
+import ast
 import json
 import os
 import subprocess
@@ -257,10 +258,67 @@ class TestTheSuccessorRecordCarriesTheSidBeginAlreadyHas:
             "a dispatched, roster-verified successor rendered as 'working, "
             "0 turns' -- the reading three supervisors mistook for 'never ran'")
 
+    def test_the_first_turn_is_recorded_in_the_event_log_too(self, sup_home):
+        """Same accounting defect one layer down, and the first pass fixed only
+        the top layer: `turns = 1` went onto the REGISTRY record while
+        `state/events.jsonl` got a `spawned` line and no `turn_started`. So the
+        registry read `working, 1 turn` and the event log held no turn for that
+        name at all -- registry and event log disagreeing about the same
+        dispatch is the tangle the autopsy had to unpick, rebuilt by the fix
+        for it.
+
+        The event line also carries what `spawned` does not. `spawned` has
+        never carried a `session_id` (157/157 events since 2026-07-20 are
+        sid-less, measured 2026-07-28), so `_events_sids()` -- the ownership
+        layer that survives `fleet clean` deleting the registry entry -- learned
+        a successor's sid only if `sup-handoff-complete` later ran. A successor
+        that died or was aborted left none."""
+        _hold()
+        assert _begin(_dispatch_then_roster([])) == 0
+        _name, rec = _successor_record(sup_home)
+        events = [json.loads(l) for l in
+                  (sup_home / "state" / "events.jsonl").read_text(
+                      encoding="utf-8").splitlines() if l.strip()]
+        started = [e for e in events if e["kind"] == "turn_started"]
+        assert len(started) == 1, events
+        assert started[0]["name"] == _name
+        assert started[0]["session_id"] == rec["session_id"], (
+            "the turn_started must carry the sid, or `_events_sids()` still "
+            "cannot claim ownership of this session after a `fleet clean`")
+
 
 # ---------------------------------------------------------------------------
 # C -- the lie: a record-shape fact must not be rendered as a timing claim
 # ---------------------------------------------------------------------------
+
+# The readings `sid is None` is consistent with. Each is a FAMILY of spellings
+# rather than one literal, so an honest reword stays green while a sentence
+# that collapses back to ONE cause goes red -- which is the whole defect.
+#
+# Written this way after the pin below was fault-injected and did NOT hold: it
+# used to gate its assertions behind `if "in flight" in err`, so a reworded
+# single-cause replacement that simply omitted that substring ("the dispatch is
+# most likely still starting up, so give it a few seconds") skipped the entire
+# assertion and left the suite fully green. A pin whose property hangs off a
+# magic substring pins the substring, not the property.
+PEEK_NO_SID_READINGS = {
+    # reassuring: the one the defect always picked
+    "in-flight": ("in flight", "in-flight", "still starting", "starting up",
+                  "hasn't started", "has not started", "give it a few"),
+    # not reassuring: the dispatch never produced a session at all
+    "dispatch-failed": ("failed", "fail", "died", "dead", "crash", "never launched"),
+    # not reassuring: a session IS running and its sid was lost on our side
+    "sid-unrecorded": ("never recorded", "not recorded", "never captured",
+                       "unrecorded", "never stamped", "wasn't recorded"),
+}
+PEEK_REASSURING_READINGS = {"in-flight"}
+
+
+def _readings_offered(err: str) -> set:
+    low = err.lower()
+    return {k for k, toks in PEEK_NO_SID_READINGS.items()
+            if any(t in low for t in toks)}
+
 
 class TestPeekDoesNotTurnANullSidIntoATimingVerdict:
     def test_a_sidless_peek_states_the_record_fact_it_actually_read(self, sup_home, capsys):
@@ -278,15 +336,26 @@ class TestPeekDoesNotTurnANullSidIntoATimingVerdict:
         two seconds after dispatch, 82KB of them, while `peek` said this for 17
         minutes.
 
-        Pinned as a property rather than as a string match, so a reworded
-        single-cause sentence goes RED too: if the output offers `in flight` at
-        all, it must also offer the readings that are NOT reassuring."""
+        Pinned as a property and asserted UNCONDITIONALLY: the output must
+        offer at least TWO of the readings `sid is None` is consistent with,
+        and at least one of them must not be the reassuring one. That is the
+        defect stated as itself -- "does not pick a single cause, and does not
+        pick the comfortable one" -- and it holds against any wording.
+
+        The earlier form of this test gated these assertions behind `if "in
+        flight" in err`, which made the property optional: a replacement
+        sentence that dropped that one substring skipped the whole assertion
+        and defect C was reachable again by reword. See PEEK_NO_SID_READINGS."""
         assert fleet._cmd_peek_native("w1", None, 20) == 1
         err = capsys.readouterr().err
         assert "no transcript yet" not in err
-        if "in flight" in err:
-            assert "failed" in err, err
-            assert "never recorded" in err, err
+        offered = _readings_offered(err)
+        assert len(offered) >= 2, (
+            "the no-sid message offers a SINGLE reading of a fact that has "
+            f"at least three -- {offered or 'none recognised'}: {err!r}")
+        assert offered - PEEK_REASSURING_READINGS, (
+            "the only reading offered is the reassuring one -- that is defect "
+            f"C exactly, in whatever words: {err!r}")
 
     def test_the_resolvable_sid_paths_are_untouched(self, sup_home, capsys):
         """C is scoped to the `sid is None` arm. A record WITH a sid whose
@@ -297,3 +366,98 @@ class TestPeekDoesNotTurnANullSidIntoATimingVerdict:
         err = capsys.readouterr().err
         assert "no session id" not in err.lower()
         assert "sid-real" in err
+
+
+# ---------------------------------------------------------------------------
+# B, generalised: the omission was a MISSING SITE, so the pin is over SITES
+# ---------------------------------------------------------------------------
+
+FLEET_PY = REPO_ROOT / "bin" / "fleet.py"
+TURN_EVENT_EMITTERS = ("append_event", "_append_event_quiet")
+
+
+def _is_turns_one_stamp(node) -> bool:
+    """`<anything>["turns"] = 1` -- the literal first-turn stamp."""
+    if not isinstance(node, ast.Assign):
+        return False
+    if not (isinstance(node.value, ast.Constant) and node.value.value == 1):
+        return False
+    return any(isinstance(t, ast.Subscript)
+               and isinstance(t.slice, ast.Constant)
+               and t.slice.value == "turns"
+               for t in node.targets)
+
+
+def _emits_turn_started(stmts) -> bool:
+    for stmt in stmts:
+        for node in ast.walk(stmt):
+            if not isinstance(node, ast.Call) or not node.args:
+                continue
+            fn = node.func
+            fname = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", None)
+            if fname not in TURN_EVENT_EMITTERS:
+                continue
+            first = node.args[0]
+            if isinstance(first, ast.Constant) and first.value == "turn_started":
+                return True
+    return False
+
+
+def _turns_one_stamp_sites():
+    """(lineno, sibling-statement-list) for every first-turn stamp in fleet.py.
+
+    Scoped to the stamp's OWN statement list, not to its enclosing function: a
+    function with two dispatch arms and one `turn_started` between them would
+    pass a function-scoped check while one arm still emitted nothing."""
+    tree = ast.parse(FLEET_PY.read_text(encoding="utf-8"))
+    sites = []
+    for parent in ast.walk(tree):
+        for field in ("body", "orelse", "finalbody"):
+            body = getattr(parent, field, None)
+            if not isinstance(body, list):
+                continue
+            for stmt in body:
+                if _is_turns_one_stamp(stmt):
+                    sites.append((stmt.lineno, body))
+    return sites
+
+
+class TestEveryFirstTurnStampIsAlsoAnEvent:
+    """The registry and `state/events.jsonl` are two ledgers for one fact, and
+    the handoff autopsy spent its budget on the day they disagreed.
+
+    `cmd_sup_handoff_begin` was found stamping `turns = 1` with no
+    `turn_started` beside it -- one dispatch site out of seven, missed because
+    every existing pin named a specific call site. Pinning only the site that
+    was wrong reproduces the miss for whoever adds the eighth, so this asserts
+    the DOCTRINE over the source: if you stamp the first turn on a record, you
+    say so in the event log, in the same breath."""
+
+    def test_every_turns_equals_one_stamp_sits_beside_a_turn_started_event(self):
+        sites = _turns_one_stamp_sites()
+        assert len(sites) >= 7, (
+            f"only {len(sites)} first-turn stamps found -- the detector has "
+            "stopped seeing them, which would make this pin vacuous")
+        missing = [ln for ln, body in sites if not _emits_turn_started(body)]
+        assert missing == [], (
+            f"bin/fleet.py stamps `turns = 1` with no `turn_started` emitted "
+            f"beside it at line(s) {missing}. A registry that counts a turn "
+            f"the event log never saw is defect B's shape: `working, 1 turn` "
+            f"over an event log holding no turn for that name at all.")
+
+    def test_the_detector_can_see_a_stamp_without_its_event(self):
+        """The seed test for the one above. A property pin that cannot go red
+        proves nothing, and this one is a source scan -- it fails OPEN if the
+        AST shapes it matches ever stop matching (a helper is introduced, the
+        key stops being a literal). Feed it the defect and watch it bite."""
+        tree = ast.parse(
+            "def f():\n"
+            "    if x:\n"
+            "        rec['turns'] = 1\n"
+            "        save_registry(data)\n"
+            "        append_event('spawned', name)\n")
+        body = tree.body[0].body[0].body
+        assert _is_turns_one_stamp(body[0])
+        assert not _emits_turn_started(body)
+        body.append(ast.parse("append_event('turn_started', name)").body[0])
+        assert _emits_turn_started(body)
