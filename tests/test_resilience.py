@@ -1082,13 +1082,103 @@ class TestDoctorHookErrors:
         lines = [f"2026-07-08T00:0{i}:00Z sid-{i} KeyError('boom{i}')" for i in range(6)]
         fleet.hook_errors_path().write_text("\n".join(lines) + "\n", encoding="utf-8")
         name, ok, msg = fleet._doctor_check_hook_errors()
-        # A logged hook error is surfaced, not a hard doctor failure
-        # (hooks keep the exit-0 invariant; this only makes them visible).
-        assert ok is True
+        # 2026-07-28, incident `outcome-surrogate`: this used to assert
+        # `ok is True` -- "a logged hook error is surfaced, not a hard doctor
+        # failure". That reading was wrong and it cost a worker result. The
+        # exit-0 invariant is about the HOOK's exit code (a hook must never
+        # crash the worker's turn); it says nothing about how doctor should
+        # GRADE the wreckage afterwards. See TestSwallowedHookErrorIsNeverPass.
+        assert ok is False
         assert "6" in msg
         # the newest line must appear; the oldest (line 0) is off the tail
         assert "boom5" in msg
         assert "boom0" not in msg
+
+
+class TestSwallowedHookErrorIsNeverPass:
+    """Defect 2 of the `outcome-surrogate` incident (2026-07-27).
+
+    Verbatim from that night's run, after `stop_outcome.py` swallowed a
+    UnicodeEncodeError and wrote NO outcome record at all:
+
+        [PASS] hook-errors: 1 swallowed hook error(s) logged; last 1: ...
+
+    A lost worker result read green. The check found the problem, printed the
+    entire lost payload into the operator's terminal, and graded it a pass.
+
+    RULING: every swallowed hook error is a FAIL. No severity split. The
+    argument is that the split has no mechanical basis -- see the commit
+    message -- and the tests below are written so that reintroducing one is
+    RED rather than silently green:
+
+    - the parametrised cases share NO keyword, NO hook name and NO exception
+      type, so a gate like `if "UnicodeEncodeError" in line` or
+      `if line.split()[1] == "stop_outcome:"` fails at least one of them;
+    - the empty/absent cases still assert PASS, so `return (..., False, ...)`
+      unconditionally is not a way to make the FAIL cases pass either.
+    """
+
+    # Deliberately disjoint: the incident line, a bland KeyError from a
+    # different hook, a line with no recognisable structure at all, and one
+    # whose text argues for its own harmlessness. Nothing here is shared for
+    # a keyword gate to key on.
+    SWALLOWED = [
+        ("2026-07-27T23:57:48Z stop_outcome: UnicodeEncodeError('utf-8', "
+         "'{\"ts\": ...}', 7034, 7035, 'surrogates not allowed')"),
+        "2026-07-08T00:01:00Z sid-3 KeyError('boom')",
+        "2026-01-01T00:00:00Z ? PermissionError(13, 'Access is denied')",
+        "whatever",
+        "2026-02-02T00:00:00Z sid-9 RuntimeError('harmless, ignore me')",
+    ]
+
+    @pytest.mark.parametrize("line", SWALLOWED)
+    def test_any_swallowed_error_fails(self, isolated_home, line):
+        fleet.hook_errors_path().write_text(line + "\n", encoding="utf-8")
+        name, ok, msg = fleet._doctor_check_hook_errors()
+        assert name == "hook-errors"
+        assert ok is False, f"graded PASS: {line!r}"
+
+    def test_absent_log_still_passes(self, isolated_home):
+        """The negative control. Without it, `ok = False` unconditionally
+        satisfies every assertion above and the check stops distinguishing a
+        healthy fleet from a broken one."""
+        name, ok, msg = fleet._doctor_check_hook_errors()
+        assert ok is True
+
+    def test_whitespace_only_log_still_passes(self, isolated_home):
+        fleet.hook_errors_path().write_text("\n  \n\t\n", encoding="utf-8")
+        name, ok, msg = fleet._doctor_check_hook_errors()
+        assert ok is True
+
+    def test_the_message_still_carries_the_tail_and_a_remedy(self, isolated_home):
+        """Grading it FAIL must not cost the operator the evidence -- the tail
+        is the only copy of a payload the hook could not write anywhere else.
+        And because nothing in fleet rotates this log, the FAIL is sticky
+        until the operator acts, so the row has to say how to clear it."""
+        fleet.hook_errors_path().write_text(self.SWALLOWED[0] + "\n", encoding="utf-8")
+        name, ok, msg = fleet._doctor_check_hook_errors()
+        assert "surrogates not allowed" in msg
+        assert "hook-errors.log" in msg
+
+    def test_doctor_exits_nonzero_and_prints_a_FAIL_row(self, isolated_home, capsys,
+                                                        monkeypatch):
+        """End of the wire, not just the check function: the operator's actual
+        signal is the `[FAIL]` row and the exit code. A check that returns
+        ok=False into a runner that ignores it is still a green terminal."""
+        monkeypatch.setattr(fleet, "_doctor_check_claude_version", lambda **kw: ("a", True, "ok"))
+        monkeypatch.setattr(fleet, "_doctor_check_instance_settings", lambda: ("b", True, "ok"))
+        monkeypatch.setattr(fleet, "_doctor_check_instance_freshness", lambda: ("c", True, "ok"))
+        monkeypatch.setattr(fleet, "_doctor_check_legacy_settings", lambda: ("d", True, "ok"))
+        monkeypatch.setattr(fleet, "_doctor_check_posttooluse_hook_smoke", lambda **kw: ("e", True, "ok"))
+        monkeypatch.setattr(fleet, "_doctor_check_stop_hook_smoke", lambda **kw: ("f", True, "ok"))
+        fleet.hook_errors_path().write_text(self.SWALLOWED[0] + "\n", encoding="utf-8")
+
+        args = fleet.build_parser().parse_args(["doctor"])
+        rc = fleet.cmd_doctor(args, which=lambda n: "wt.exe",
+                              run=lambda *a, **k: _FakeResult())
+        out = capsys.readouterr().out
+        assert "[FAIL] hook-errors:" in out
+        assert rc != 0
 
 
 # ---------------------------------------------------------------------------

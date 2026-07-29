@@ -98,9 +98,18 @@ def _log_hook_error(home: Path, message: str) -> None:
         state.mkdir(parents=True, exist_ok=True)
         flat = " ".join(str(message).split())
         ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        with (state / "hook-errors.log").open("a", encoding="utf-8") as f:
+        # errors="replace" + a net wider than OSError: this is the REPORTER,
+        # and it must not become the next thing that raises. `message` reaches
+        # here as repr(exc) today (ASCII-safe), but a future caller passing raw
+        # text with a lone surrogate would raise UnicodeEncodeError -- a
+        # ValueError, which the old `except OSError` did not catch -- out of
+        # the caller's own except block and out of main(), turning a logged
+        # diagnostic into a crashed hook. Belt-and-braces only: the fix for the
+        # lost record is at the _atomic_append_bytes call in main(), not here.
+        with (state / "hook-errors.log").open(
+                "a", encoding="utf-8", errors="replace") as f:
             f.write(f"{ts} stop_outcome: {flat}\n")
-    except OSError:
+    except Exception:  # noqa: BLE001 -- the reporter never changes the exit code
         pass
 
 
@@ -243,7 +252,24 @@ def main() -> int:
                   "cache_read_input_tokens": cache_read,
                   "model": model, "transcript_path": transcript_path}
         line = json.dumps(record, ensure_ascii=False)
-        _atomic_append_bytes(out_dir / f"{key}.jsonl", (line + "\n").encode("utf-8"))
+        # errors="replace", not a bare .encode(): `ensure_ascii=False` keeps
+        # every character of the report verbatim in `line`, and a worker's
+        # result text can contain a LONE SURROGATE -- e.g. U+DC90 inside a
+        # mojibake run, a markdown-table arrow mangled by a
+        # cp1252/utf-8 round-trip in the worker's own tool output. A strict
+        # encode raises UnicodeEncodeError('surrogates not allowed') and the
+        # whole record is lost: 2026-07-27, worker `gate-hf-rb` emitted a
+        # 14,760-character ESCALATE report carrying a CRITICAL finding, this
+        # line raised at offset 7034, the exception was swallowed into
+        # hook-errors.log, and `fleet result` reported "no outcome record".
+        # PRIORITY: the record is always written; the offending character is
+        # sanitised, never truncated (`replace` is one-for-one, so the report's
+        # length and every legitimate non-ASCII character survive). This is the
+        # SAME convention `_transcript_result` already reads with, not a second
+        # one -- and it covers every payload-sourced field in the record
+        # (result_text, transcript_path, model), not just the one that failed.
+        _atomic_append_bytes(out_dir / f"{key}.jsonl",
+                             (line + "\n").encode("utf-8", errors="replace"))
     except Exception as exc:  # noqa: BLE001 -- hooks never crash the turn
         _log_hook_error(home, repr(exc))
     return 0
