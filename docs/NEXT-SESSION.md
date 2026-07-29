@@ -131,7 +131,12 @@ Altai's ratification. Nothing narrowed while it waits. `docs/decisions/W9-sectio
 
 ## Launch-surface debt, measured 2026-07-29 — verify before acting
 
-- **`README.md` badge says `tests-2022 passing`; actual is 2811.** Stale number on the front door.
+- ~~**`README.md` badge says `tests-2022 passing`; actual is 2811.**~~ **CLOSED 2026-07-30**
+  (ULTRAREVIEW P3-18, `fix/docs-drift`). Note the number in this very entry had itself already
+  rotted — 2811 when written on 2026-07-29, 2825 measured on 2026-07-30. That is the argument for
+  the fix that landed: the count is **gone** from the badge rather than reset, since every reset
+  re-arms the drift. A test that re-derives the count from `--collect-only` is the stronger remedy
+  and is still owed; it was out of lane for the docs-only worker that closed this.
 - **macOS is unreceipted** — shares the POSIX backend, no run has ever executed on it. The badge is
   honest; the gap is real.
 - **`docs/ROADMAP.md` opens with a ⛔ SUPERSEDED banner.** A public roadmap whose first line is
