@@ -45,7 +45,7 @@ Confirm the wiring is healthy any time:
 fleet doctor
 ```
 
-`fleet doctor` runs 22 checks — hook registration, version pins, orphaned mailboxes, stale attaches, the autoclean scheduler, the supervisor claim, and more. A clean run means you're ready.
+`fleet doctor` runs 22 checks — hook registration, version pins, orphaned mailboxes, stale attaches, how long since the last autoclean run, the supervisor claim, and more. A clean run means you're ready.
 
 ## Become the manager
 
@@ -140,7 +140,7 @@ fleet clean --dead-only         # remove dead workers + their outcomes/mailboxes
 fleet clean                     # broader sweep (see fleet clean --help for tiers)
 ```
 
-`fleet archive` and the scheduled `fleet autoclean` handle staleness automatically so you rarely have to remember to tidy up. Install the scheduler with `fleet init --autoclean`.
+`fleet archive` and `fleet autoclean` are what keep staleness down. **There is nothing to install and no scheduler** — the timer was retired on 2026-07-27, because a timer sweeps when the clock says so, which on a machine that loses power means it does not sweep at all. Instead the sweep rides on the tiers: a supervisor runs it on its watchtower beat, and the `fleet` skill's startup ritual runs it when a manager session begins. If you are running neither, run `fleet autoclean` yourself now and then — `fleet doctor` tells you how long it has been since the last run.
 
 ## A first real campaign: parallel workers
 
@@ -162,7 +162,7 @@ For dependent or review-style work (one worker builds, another attacks the diff)
 
 | Command | Purpose |
 |---|---|
-| `fleet init` | Render machine-local `worker-settings.json` (add `--statusline`, `--autoclean`) |
+| `fleet init` | Render machine-local `worker-settings.json` (add `--statusline`) |
 | `fleet spawn` | Spawn a new worker session |
 | `fleet status` | Worker status table |
 | `fleet peek` | Digest of the last few substantive transcript records (works mid-turn) |
