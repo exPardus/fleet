@@ -11931,7 +11931,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
     writer appends that record's OWN prior sid alone: :5248, :5705, :9822,
-    :14696), the same safety invariant §7.1's send carve-out rests on. That
+    :14795), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -12576,7 +12576,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
     #     writer appends that record's OWN prior sid alone (:5248, :5705, :9822,
-    #     :14696) -- so the sid union can never make one body answer for another.
+    #     :14795) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -14564,8 +14564,8 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     # on both its fast-completion and its joined arm -- six sites. This block
     # is the seventh dispatch site and set neither field, so a successor that
     # had been running for 17 minutes rendered as `working, 0 turns` -- and
-    # that reading was then used as
-    # evidence that no session had ever started. It is a registry accounting
+    # that reading was then used as evidence that no session had ever
+    # started. It is a registry accounting
     # defect, not a fact about the body. The dispatch has returned rc 0 and the
     # roster join has verified this sid live, so the turn HAS started.
     succ_mode = getattr(args, "permission_mode", None) or SUCCESSOR_DEFAULT_MODE
@@ -14603,19 +14603,33 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
             # `turns = 1` in the registry and NO `turn_started` in the event
             # log is the same divergence, one layer down, that defect B was
             # (2026-07-27 fix wave). Every other site that stamps `turns = 1`
-            # emits this beside it -- `cmd_spawn` and `_dispatch_supervisor_
-            # body` each on both their fast-completion and joined arms, and
-            # `send`'s fresh-session path likewise -- and `cmd_sup_handoff_
-            # complete` emits it for THIS successor at its own stamp. Six
+            # emits this beside it. The set is the one enumerated by AST scan
+            # in the `turns` comment ~60 lines above, and it must stay in step
+            # with that one: `cmd_spawn`, `_cmd_respawn_native` and
+            # `_dispatch_supervisor_body`, each on its fast-completion arm and
+            # again in its nested post-join commit -- six sites. (An earlier
+            # revision of THIS comment named `cmd_spawn`, `_dispatch_
+            # supervisor_body` and `send`'s fresh-session path, which repeated
+            # verbatim the enumeration error the comment above was written to
+            # correct: there is no such `send` site, and `_cmd_respawn_native`
+            # was dropped. Two comments in one function disagreeing about a
+            # grep-able list is worse than either being wrong alone.)
+            # `cmd_sup_handoff_complete` also emits one for THIS successor at
+            # its own stamp, but that is a completion, not a dispatch. Six
             # sites did, this one did not. Two things turned on the omission,
-            # both measured over `state/events.jsonl` 2026-07-28:
+            # both measured over `state/events.jsonl` (2026-07-28, re-measured
+            # 2026-07-30):
             #
             #   * The registry said `working, 1 turn` while the event log held
             #     no turn for that name at all -- the exact registry/event-log
             #     tangle the handoff autopsy had to unpick, rebuilt by the fix
             #     for it.
-            #   * `spawned` carries no `session_id` and never has (157/157
-            #     spawned events since 2026-07-20 are sid-less), so before
+            #   * `spawned` carries no `session_id` and never has. The
+            #     invariant is the RATIO, not the count: 100% of `spawned`
+            #     events since 2026-07-20 are sid-less -- 157/157 when this
+            #     was first measured on 2026-07-28, 169/169 on 2026-07-30,
+            #     because the log grows and a bare count in a comment is a
+            #     number that rots by the next dispatch. So before
             #     this line the successor's sid entered `_events_sids()` only
             #     if `sup-handoff-complete` later ran. A successor that died,
             #     or was aborted, left NO sid in the ownership layer that is
@@ -14640,7 +14654,9 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
             # up. A future reader wanting stillbirth must therefore ask the
             # question that is actually about stillbirth: a `turn_started`
             # from `begin` with no second one from `complete`, and a
-            # `status_changed` to `dead` behind it.
+            # `status_changed` with `"new": "dead"` behind it. (The field is
+            # `new`, not `to` -- checked against the log rather than recalled,
+            # since this paragraph exists to be followed by someone grepping.)
             #
             # Quiet, like its twin in `sup-handoff-complete`: the dispatch has
             # already happened and the registry commit is already durable when

@@ -25,6 +25,11 @@ and this file pins one behaviour per defect.
      about to be printed. Hooks resolve a worker name by scanning the registry
      for `session_id == sid`, so every successor's Stop outcome was written to
      `state/outcomes/<raw-sid>.jsonl`, where `read_outcomes(name)` never looks.
+     State the WHOLE mechanism, because half of it invites a fix to the half
+     that already works: `read_outcomes(name, sid=sid)` DOES open that path,
+     and 5 of its 7 shipped call sites pass a sid. The reader-side fallback
+     existed. It was starved from the other side by the same null -- callers
+     take the sid off the registry record, whose `session_id` was `None`.
      The stillborn successors stated their own diagnosis out loud on day one and
      nothing on the fleet side could hear it. Same block, same class: `turns`
      was never stamped either, so a running successor rendered as `working,
@@ -242,10 +247,20 @@ class TestTheSuccessorRecordCarriesTheSidBeginAlreadyHas:
         "0 turns" was then used as evidence that no session had ever run.
 
         It is a registry accounting defect, not a fact. Every other dispatch
-        commit in fleet.py stamps `turns = 1` at the moment it stamps the sid
-        (`cmd_spawn`, `cmd_respawn`, `send`'s fresh-session path,
-        `cmd_sup_spawn`); this block is a fourth dispatch site and stamped
-        neither. Nothing recomputes `turns` from outcomes afterwards, so a
+        commit in fleet.py stamps `turns = 1` at the moment it stamps the sid.
+        Enumerated by AST scan rather than from memory, because this docstring
+        used to read *"`cmd_spawn`, `cmd_respawn`, `send`'s fresh-session path,
+        `cmd_sup_spawn`"* and three of those four were wrong: there is no
+        `send` fresh-session site (`send`'s fork-steer goes through
+        `_restamp_after_steer`, which increments), the function is
+        `_cmd_respawn_native`, and `cmd_sup_spawn` dispatches through
+        `_dispatch_supervisor_body`. The real six are `cmd_spawn`,
+        `_cmd_respawn_native` and `_dispatch_supervisor_body`, each on its
+        fast-completion arm and again in its nested post-join commit; this
+        block is the seventh and stamped neither field.
+        `TestEveryFirstTurnStampIsAlsoAnEvent` below re-derives that set on
+        every run, which is why the list is allowed to be in prose here.
+        Nothing recomputes `turns` from outcomes afterwards, so a
         successor that never got it here never got it at all.
 
         NOTE for a future reader: fixing the sid alone does NOT fix this. The
@@ -268,8 +283,10 @@ class TestTheSuccessorRecordCarriesTheSidBeginAlreadyHas:
         for it.
 
         The event line also carries what `spawned` does not. `spawned` has
-        never carried a `session_id` (157/157 events since 2026-07-20 are
-        sid-less, measured 2026-07-28), so `_events_sids()` -- the ownership
+        never carried a `session_id` -- 100% of `spawned` events since
+        2026-07-20 are sid-less, 157/157 when first measured on 2026-07-28 and
+        169/169 on 2026-07-30; the ratio is the claim, the count just grows --
+        so `_events_sids()` -- the ownership
         layer that survives `fleet clean` deleting the registry entry -- learned
         a successor's sid only if `sup-handoff-complete` later ran. A successor
         that died or was aborted left none."""
