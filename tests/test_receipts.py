@@ -144,6 +144,14 @@ UNENFORCED = {
     "fleet-index.md": ("M1 built and covered by tests/test_fleet_index.py, M2/M3 "
                        "unbuilt; no fenced receipts by construction -- promote "
                        "when M2 ships."),
+    # Drafting-stage design doc (2026-07-30): its measured claims (the FLEET_HOME
+    # resolution shape, the hook _fleet_home duplicates, the founding-incident
+    # timestamps) are cited by symbol/path in prose, not pasted transcripts, and
+    # its dual-lens gate re-derived them against the tree (mf-rs: 32 claims, 0
+    # ROTTED). Gains pinned receipts when it reaches ready-for-build -- the gate
+    # findings (mf-rb F1/F2/F3) already oblige a redraft before that.
+    "multi-fleet.md": ("Status: drafting; no fenced receipts yet -- receipts land "
+                       "with the ready-for-build revision."),
 }
 
 
