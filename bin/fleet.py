@@ -1455,6 +1455,33 @@ def _worker_env(name: str) -> dict:
 
 STALE_ATTACH_SECONDS = 3 * 3600  # doctor/status nag threshold (SPEC §9)
 
+# Permission-stall threshold. Incident 2026-07-30: a merge worker was dispatched
+# into a worktree whose `.claude/settings.local.json` `deny` list held
+# `Bash(git merge:*)`, took the merge, and sat NINE MINUTES on a prompt that a
+# hard deny had already decided -- a deny beats every permission mode, `bypass`
+# included, so the call was never going to return. It rendered `working` the
+# whole time, and `working` is the one status nobody investigates. A stall that
+# renders as health is the same failure class as the 12h53m outage that
+# `sup-status` reported as RELEASED.
+#
+# WHY 180s AND NOT A CONSTANT THAT ALREADY EXISTS. Both candidates are wrong,
+# and one of them is a trap:
+#   * `LAUNCH_CLAIM_MAX_AGE_SECONDS` (600s) is the obvious reuse -- it is
+#     already the "how long may a native dispatch be in flight" number. It is
+#     also LARGER than the nine-minute founding incident, so a detector keyed on
+#     it would have stayed silent through the outage it was built from.
+#   * `STALE_ATTACH_SECONDS` (3h) is three orders of magnitude past the point
+#     where the operator could still have acted.
+# So this is its own number, and what it debounces is narrow. A background
+# worker's permission prompt has NO answerer: nothing in the fleet answers
+# prompts, and both things that clear one (`fleet attach` and answer it by hand;
+# or fix the rule and `fleet respawn`) require an operator who has to be TOLD
+# first. The threshold is therefore not "how long is a legitimate prompt" --
+# there is no legitimate prompt on an unattended worker -- it is only "long
+# enough not to shout at an operator who is already mid-answer". Three minutes
+# clears that and still fires on the nine-minute incident with 3x margin.
+PERMISSION_STALL_SECONDS = 180.0
+
 
 def _coerce_cost(value):
     """Best-effort coercion of a raw cost value (a `result` event's
@@ -2971,6 +2998,149 @@ def _worker_flags(record: dict) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Permission stalls (incident 2026-07-30). `_worker_flags` above already emits
+# `waiting-permission`, and the incident is the proof that a FLAGS-column entry
+# among token counts is not a signal anybody is obliged to read. These three
+# helpers turn it into one: a duration test, an operator-performable remedy, and
+# a `fleet doctor` row that exits nonzero.
+#
+# THE CONSTRAINT THAT SHAPES ALL OF THIS: `waiting_for_permission` is
+# TRANSIENT. `recompute_worker_native` derives it per call and EVERY persist
+# site strips it before writing (T5 fix wave I1: cmd_status, cmd_wait,
+# cmd_send), so `state/fleet.json` has never contained it and never will.
+# A registry-only detector therefore sees NOTHING, and no file-only view
+# (statusline, `status --stale-ok`, `status_snapshot`) can ever see this at all
+# without breaking terminal-surface D1/D4 by probing. The roster is the only
+# witness, so every caller here hands over roster entries it fetched itself.
+# ---------------------------------------------------------------------------
+
+def _worktree_deny_rules(cwd) -> list:
+    """The `permissions.deny` rule strings in `<cwd>/.claude/settings.local.json`.
+
+    [] for every failure mode -- absent file, unreadable, unparseable, or any
+    shape that is not `{"permissions": {"deny": [str, ...]}}`. This feeds
+    DIAGNOSTICS only, so it must degrade to "nothing to say" and never raise:
+    its callers are already reporting a stall or dispatching a worker, and a
+    crash here would replace a real finding with a traceback.
+
+    Deliberately NOT a permission evaluator. It does not decide whether any
+    given command is denied -- that is claude's own matcher, and a second
+    implementation of it here could disagree with the first, which is a worse
+    failure than saying less. It only NAMES the rules that are present, which is
+    what an operator needs in order to go read the file."""
+    try:
+        raw = (Path(cwd) / ".claude" / "settings.local.json").read_text(encoding="utf-8")
+    except (OSError, ValueError, TypeError):
+        return []
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    perms = data.get("permissions")
+    if not isinstance(perms, dict):
+        return []
+    deny = perms.get("deny")
+    if not isinstance(deny, list):
+        return []
+    return [rule for rule in deny if isinstance(rule, str)]
+
+
+def _permission_stalls(workers: dict, roster_entries: list, now=None) -> list:
+    """[(name, record, elapsed_seconds_or_None, waiting_for)] for every native
+    worker the ROSTER reports parked on a permission prompt whose current turn
+    has been running past `PERMISSION_STALL_SECONDS`.
+
+    `status == "working"` is required, and that excludes `attached` ON PURPOSE:
+    an attached worker has an operator at its keyboard who can answer the
+    prompt, which is the one case that is genuinely not a stall. It is also the
+    exact status the incident rendered as, which is the point.
+
+    Roster evidence is `status == "waiting"`, per the contract's field-presence
+    table (`docs/specs/native-substrate.md`, the `state: "blocked"` pending-on-a-
+    permission-prompt row): `status: "waiting"` + `waitingFor: "permission
+    prompt"`. `state` is never read here -- the literal `"blocked"` means two
+    unrelated things depending on which fields co-occur, and that table says a
+    consumer must inspect both axes rather than `state` alone.
+
+    Elapsed time is `now - last_activity`: the same number `fleet status` prints
+    as MIN-AGO. It is TURN-ELAPSED, not time-spent-waiting -- nothing stamps a
+    `waiting_since`, so the fleet cannot know when the prompt appeared. That
+    over-estimates, i.e. it errs toward reporting, and the over-estimate costs
+    nothing real: a turn 40 minutes in that hits an unanswerable prompt in its
+    final second is just as stalled as one that hit it immediately. An absent or
+    unparseable `last_activity` yields None and is still REPORTED -- the roster
+    has already witnessed the wait, and a missing debounce input must never
+    silence a witnessed stall."""
+    now = now or datetime.now(timezone.utc)
+    stalls = []
+    for name, rec in sorted(workers.items()):
+        if not isinstance(rec, dict) or not is_native(rec):
+            continue
+        if rec.get("archived_at") is not None:
+            continue
+        if rec.get("status") != "working":
+            continue
+        sid = rec.get("session_id")
+        if not isinstance(sid, str) or not sid:
+            continue
+        entry = _roster_entry_for(roster_entries, sid)
+        if not isinstance(entry, dict) or entry.get("status") != "waiting":
+            continue
+        try:
+            elapsed = (now - _parse_iso(rec["last_activity"])).total_seconds()
+        except (KeyError, ValueError, TypeError):
+            elapsed = None
+        if elapsed is not None and elapsed < PERMISSION_STALL_SECONDS:
+            continue
+        waiting_for = entry.get("waitingFor")
+        stalls.append((name, rec, elapsed,
+                       waiting_for if isinstance(waiting_for, str) else None))
+    return stalls
+
+
+def _permission_stall_line(name: str, rec: dict, elapsed, waiting_for) -> str:
+    """One operator-facing sentence per stalled worker: what is stuck, where, and
+    what to DO about it.
+
+    R2 (2026-07-26) governs the remedy: a diagnostic must never name a remedy
+    that cannot work for its audience. The audience is whoever ran `fleet
+    doctor`/`fleet status` on this machine, so every verb named here is one they
+    can run themselves (`fleet peek`, `fleet respawn`, `fleet kill`) and the file
+    named is the worker's OWN worktree, read from its own record -- not a path
+    the reader has to go guess. When the deny rules can actually be read, they
+    are quoted, because "check your settings" is advice and "this file denies
+    Bash(git merge:*)" is a remedy. When they cannot, the line says so rather
+    than asserting a cause it did not verify: a prompt with no local deny rule is
+    a different bug (an inherited settings file, or a mode that genuinely
+    prompts) and sending the operator to an empty file would burn the one
+    reading they were going to do."""
+    age = "age unknown" if elapsed is None else f"{elapsed / 60:.0f}m"
+    detail = f"waitingFor: {waiting_for}" if waiting_for else "no waitingFor reported"
+    cwd = rec.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        cause = "worker record carries no cwd -- inspect its settings by hand"
+    else:
+        # Built through Path so the separators match the platform the operator
+        # is going to paste it into -- an f-string with "/" renders
+        # `C:\proga\wt/.claude/settings.local.json` on Windows.
+        settings = str(Path(cwd) / ".claude" / "settings.local.json")
+        rules = _worktree_deny_rules(cwd)
+        if rules:
+            cause = (f"{settings} denies {', '.join(rules)} -- a deny beats EVERY "
+                     f"permission mode, `bypass` included, so a matching call "
+                     f"never returns")
+        else:
+            cause = (f"no deny rules readable in {settings} -- the prompt is "
+                     f"coming from an inherited settings file or from the "
+                     f"worker's own mode")
+    return (f"{name} (working {age}, {detail}, cwd {cwd or '?'}): {cause}. "
+            f"`fleet peek {name}` shows the pending call; then fix the cause and "
+            f"`fleet respawn {name}`, or `fleet kill {name}`")
+
+
+# ---------------------------------------------------------------------------
 # Phase 1.6 terminal surface (docs/specs/terminal-surface.md): the single
 # read-only derivation every view consumes -- statusline, `status --json
 # --stale-ok`, the SessionStart hook, and (later) watchtower / web UI.
@@ -3844,6 +4014,27 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
     if not cwd.is_dir():
         raise FleetCliError(f"--dir does not exist or is not a directory: {args.dir}")
 
+    # 2026-07-30 incident, dispatch-time half. The supervisor copied a
+    # REVIEW-class allowlist -- which correctly denies `git merge` -- into a
+    # MERGE-class worktree, verified its hash, and concluded it was correct:
+    # verifying provenance is not verifying fitness. This is the narrow,
+    # buildable version of "warn when the deny list would block the brief". It
+    # does NOT try to match the task text against the rules -- the brief is
+    # prose, the commands it implies are unknowable, and a matcher that guessed
+    # would be wrong in both directions. It only says out loud, at the one moment
+    # the dispatcher is still looking, that this worktree has hard denials and
+    # that a hit presents as a HANG rather than an error.
+    #
+    # Advisory only, and it must stay that way: a deny list is usually correct,
+    # most worktrees have none (so this prints nothing), and refusing a spawn
+    # over one would break every legitimately-restricted dispatch.
+    deny_rules = _worktree_deny_rules(cwd)
+    if deny_rules:
+        print(f"note: {Path(cwd) / '.claude' / 'settings.local.json'} denies "
+              f"{', '.join(deny_rules)} -- a deny beats mode {args.mode!r}, so if "
+              f"this task needs one of them the worker will HANG, not error "
+              f"(`fleet doctor` names the stall; `fleet status` flags it)")
+
     if getattr(args, "max_budget_usd", None) is not None:
         raise FleetCliError(
             "no USD budget under native dispatch (contract G3) -- use --token-ceiling"
@@ -4154,6 +4345,23 @@ def cmd_status(args) -> int:
         print(json.dumps(status_snapshot(include_archived=include_archived), indent=2))
     else:
         _print_status_table({"workers": display}, names)
+        # The FLAGS column has printed `waiting-permission` all along, and the
+        # 2026-07-30 incident is the proof that this was not enough: the flag
+        # sits among token counts, reads as decoration, and a worker that was
+        # never going to finish read `working` for nine minutes with nobody
+        # looking. Repeat it BELOW the table as its own line, beside the
+        # hook-errors line -- the place this command already puts "something
+        # needs you".
+        #
+        # NO new work is done for it: same `roster_entries` this command already
+        # fetched (one fetch per invocation, F4), same `display` records it just
+        # rendered, no extra lock, no write. It is added HERE and not to any
+        # file-only view because no file-only view can see this at all -- the
+        # flag is never persisted, and making `status_snapshot`/the statusline
+        # probe for it would break terminal-surface D1/D4. `--json` deliberately
+        # does not get the line: its consumers parse stdout.
+        for stall in _permission_stalls(display, roster_entries):
+            print(f"permission-stall: {_permission_stall_line(*stall)}")
     # Phase1 kernel 1: surface a TOTAL count of swallowed hook errors when
     # nonzero so a silently-failing hook is visible at a glance (`fleet
     # doctor` shows the tail).
@@ -8206,6 +8414,53 @@ def _doctor_check_dead_suspected(workers: dict):
     return ("dead-suspected", True, "no dead-suspected workers")
 
 
+def _doctor_check_permission_stalls(workers: dict, which=shutil.which, run=subprocess.run):
+    """`permission-stalls`: is a worker parked on a permission prompt that nobody
+    is going to answer?
+
+    FAIL, NOT NOTE-ONLY -- a deliberate departure from every worker-keyed check
+    around it (`limited-parks`, `dead-suspected`, `legacy-mix` are all
+    `ok=True`), so it owes an argument. The standing doctrine is that *a
+    permanently-red doctor is a disabled doctor*: three stale FAILs once trained
+    this fleet to ignore the verb, and the ruling was to get it back to one. What
+    earns the exit code here is that this row CANNOT go stale-red:
+
+      * it is derived fresh from the roster on every run, so it vanishes the
+        instant the session does -- nothing about it can persist past the
+        condition, unlike a status label the registry keeps;
+      * it is cleared by the operator's own next action (fix the rule and
+        respawn, or kill), not by waiting -- contrast `limited-parks`, which is
+        expected state that only time can clear, and `autoclean`, which is a fact
+        about the operator's day rather than broken plumbing;
+      * the thing it reports is a worker that will NEVER finish, rendering as
+        `working`. If a session that cannot make progress while advertising
+        health is not worth an exit code, nothing in this file is.
+
+    The counter-argument the brief raised -- a transient prompt on a fast-moving
+    worker -- is answered by the threshold and by the `attached` exclusion in
+    `_permission_stalls`, not by downgrading the row. A prompt answered in 20s
+    never reaches this check.
+
+    A roster that cannot be fetched is a PASS that says "NOT CHECKED", never
+    "nothing wrong": same tolerance as `_doctor_check_claude_agents` (the roster
+    is a foreign CLI surface and its absence is not this fleet's health), and the
+    same anti-vacuity wording rule `_doctor_check_registry` documents -- a row
+    reporting "nothing to check" must not look like "nothing is wrong"."""
+    roster_ok, payload = _fetch_agents_roster(which=which, run=run)
+    if not roster_ok:
+        return ("permission-stalls", True, f"NOT CHECKED -- roster unavailable ({payload})")
+    stalls = _permission_stalls(workers, payload)
+    if not stalls:
+        return ("permission-stalls", True,
+                f"no worker parked on a permission prompt >"
+                f"{PERMISSION_STALL_SECONDS / 60:.0f}m")
+    detail = " | ".join(_permission_stall_line(*stall) for stall in stalls)
+    return ("permission-stalls", False,
+            f"{len(stalls)} worker(s) parked on a permission prompt with nobody "
+            f"to answer it -- these render as `working` and will never finish: "
+            f"{detail}")
+
+
 def _mailbox_first_line(path: Path) -> str:
     """The first non-empty line of a mailbox file (best-effort), for the
     orphaned-mailbox disposition -- enough to identify what mail was stranded
@@ -9113,6 +9368,10 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
         functools.partial(_doctor_check_limited_parks, workers),
         functools.partial(_doctor_check_legacy_mix, workers),
         functools.partial(_doctor_check_dead_suspected, workers),
+        # Registered next to the other "a worker needs you" rows, and
+        # deliberately NOT last: `tzdata` holds that slot by pin
+        # (tests/test_native.py TestCmdDoctorRegistersNewChecks).
+        functools.partial(_doctor_check_permission_stalls, workers, which=which, run=run),
         functools.partial(_doctor_check_orphaned_claims, workers=workers),
         functools.partial(_doctor_check_identity_witness, workers),
         functools.partial(_doctor_check_claude_agents, workers, which=which, run=run),
@@ -11407,8 +11666,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :5043, :5500, :9336,
-    :14166), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :5251, :5708, :9595,
+    :14425), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -12059,8 +12318,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:5043, :5500, :9336,
-    #     :14166) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:5251, :5708, :9595,
+    #     :14425) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
