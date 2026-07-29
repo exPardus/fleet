@@ -121,7 +121,14 @@ def _transcript_stats(transcript_path):
         count = 0
         total = 0
         saw_tokens = False
-        with open(transcript_path, "r", encoding="utf-8") as f:
+        # errors="replace" (incident `outcome-surrogate`, 2026-07-28): these
+        # stats are BEST-EFFORT ('?' is a legal rendering), but a strict decode
+        # of an undecodable transcript raises UnicodeDecodeError -- a
+        # ValueError, which `except OSError` below does NOT catch. It escaped
+        # main() and took the whole landmark with it: a best-effort number
+        # silently killed the mandatory write. Matches stop_outcome.py's
+        # _transcript_result, which has always read transcripts this way.
+        with open(transcript_path, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -183,7 +190,12 @@ def main(state=None):
 
     path = _journal_path(home, key)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
+    # errors="replace" (incident `outcome-surrogate`, 2026-07-28): `trigger` is
+    # interpolated straight from the hook payload, so an unencodable character
+    # there made this write raise and lose the landmark entirely. Same ruling
+    # as stop_outcome.py's record append: the write always happens, the
+    # offending character is sanitised one-for-one, nothing is truncated.
+    with open(path, "a", encoding="utf-8", errors="replace") as f:
         f.write(line)
 
 
