@@ -210,7 +210,7 @@ roster-live holder, fleet.py:9121–9123) — the claim protocol itself is the t
 |--------|-------------|-------------|-----------|
 | Name | operator-supplied, `validate_name(name, existing=...)` (:3204) | minted: `f"sup\|{mint_incarnation_id()}\|boot"`; validated by `_is_supervisor_shaped(name)` assertion + the same existing-key collision check; **`validate_name` is not called** (pipe fails `NAME_RE`, Q5) | fleet.py:714, 1313, 8859 |
 | cwd | `--dir`, must exist (:3191) | forced `FLEET_HOME` (supervisor runs in the fleet repo; handoff-begin precedent fleet.py:10468–10471) | SPEC:1103 |
-| Mode | `--mode`, default `dontask` (:10985) | default `bypass` (§10.2 earned-privilege, SPEC:1103); `--permission-mode` override constrained to `MODE_FLAGS` (G3 vocabulary, cf. successor :11175) | Q6 |
+| Mode | `--mode`, default `dontask` (:10985) | default `bypass` (§10.2 earned-privilege, SPEC:1103); `--permission-mode` override constrained to `MODE_FLAGS` (G3 vocabulary, cf. successor :11175). **2026-07-27: `SUCCESSOR_DEFAULT_MODE` is now `bypass` too** — the asymmetry this row and §6 reasoned from is deleted, see the note below | Q6 |
 | Model | `--model` passthrough | default `resolve_model_for_role("supervisor")`, explicit `--model <tier-alias>` overrides | Q6, SPEC:483–485 |
 | Prompt | `compose_prompt(...)` worker preamble (:3224) | self-composed gen-0 boot task body (Q4); `dispatch_bg` writes it to `task_file_path(name)` (G8, :8232–8242) and dispatches the tiny "Read … and follow it exactly" prompt | fleet.py:8232–8242 |
 | `spawned_by` | caller sid | same — `current_caller_session()` (interface sid, or None from a human shell) | SPEC:1101–1102 |
@@ -367,10 +367,19 @@ tier-policy block is absent. Mode = bypass per §10.2.
 - Mode: default `bypass` (§10.2: "runs under **bypass** permission mode in the fleet repo
   (earned-privilege doctrine) — stated explicitly in GOALS before it ever runs
   unattended", SPEC:1103). Allow `--permission-mode` override through the one `MODE_FLAGS`
-  vocabulary (fleet.py:1244–1260; G3 precedent at the successor parser :11175). Note the
+  vocabulary (fleet.py:1244–1260; G3 precedent at the successor parser :11175). ~~Note the
   deliberate asymmetry with `SUCCESSOR_DEFAULT_MODE = "dontask"` (fleet.py:8570): the
   successor inherits a running campaign mid-handoff and the operator is presumed absent;
-  gen-0 sup-spawn is an operator-attended act, and §10.2 names bypass for it. Design
+  gen-0 sup-spawn is an operator-attended act, and §10.2 names bypass for it.~~
+  **CORRECTED 2026-07-28.** That asymmetry was deleted on 2026-07-27 and this paragraph must
+  not be reasoned from. `SUCCESSOR_DEFAULT_MODE` is `bypass`, equal to `SUP_SPAWN_DEFAULT_MODE`
+  — not because the two verbs stopped differing, but because "the operator is presumed absent"
+  argued for the *opposite* of what `dontAsk` does: `dontAsk` never prompts, it **denies**, and
+  the successor's first act is `fleet sup-boot` through Bash. Measured: 10/10 successors
+  dispatched under `dontask` were stillborn, 7/7 under `bypass` booted and completed. An absent
+  operator is the reason a supervisor body needs a mode that can run its own bootstrap, not the
+  reason to give it one that cannot. The verbs still differ (sup-spawn is operator-attended, a
+  handoff is not); only the values coincide. Design
   rec (not a ruling): warn — do not refuse — when `supervisor/GOALS.md` lacks the
   bypass-permission acknowledgement §13 requires (SPEC:1551); a grep-shaped refusal on an
   operator-owned prose file is too brittle to be a gate.

@@ -60,8 +60,12 @@ terminal-surface command-tier statusline. **All twelve operator gates ruled and 
 - **Succession is now TWO steps**: `sup-release` → `sup-spawn`. `sup-release` tombstones the releasing
   body's own record, so the released-claim refusal no longer arms and nobody has to stop the retired
   body for succession to work. (Stop it anyway to reclaim the session.)
-- **`sup-handoff-begin` is 3-for-3 stillborn** and has eaten context from three incarnations. Three
-  supervisors in a row correctly released at the ceiling instead. **`sup-spawn` is the working route.**
+- **`sup-handoff-begin` was 10-for-10 stillborn under its old `dontask` default** and ate context from
+  three incarnations. Three supervisors in a row correctly released at the ceiling instead. The cause
+  was found and fixed 2026-07-27: `dontAsk` does not prompt, it DENIES, and the successor's first act
+  is `fleet sup-boot` through Bash. Measured over `state/events.jsonl`: 10/10 under `dontask`
+  stillborn, 7/7 under `bypass` booted and completed. **No live drill has run under the fixed
+  default**, so `sup-spawn` remains the route to use until someone drives one green.
 - **`--task` takes TEXT; a file is `--task @<path>`.** A bare path is rendered *as the task* into
   `state/tasks/<worker>.md`, overwriting a brief that lived there with the string naming it —
   unrecoverable from itself. Author briefs in `state/tasks/lens/` and `wc -l` the rendered task after

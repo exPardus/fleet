@@ -1065,3 +1065,78 @@ second half: **buy the measurement from someone who is not you, and let them att
 just your conclusion.** The autopsy brief I wrote handed the worker my falsification as settled
 background; it re-derived it anyway and that is the only reason this was caught in an hour instead of
 being laundered into doctrine. **Write briefs that invite the reader to refute the brief.**
+
+## 2026-07-28 — the gate that found the fix was right and the sentences around it were not {#2026-07-28-claims-vs-code}
+
+Stamp on the entry above (`#2026-07-27-...`, the stillborn-handoff postscript): **the three defects
+A/B/C were fixed on `fix/stillborn-handoff` at `87cbf9a`.** Two independent adversarial lenses — a
+spec lens and a hostile break lens — re-verified all three fixes as correct, and both still returned
+ESCALATE. Not one finding asked for a code change. Every one was a sentence the commit shipped
+*about itself*, or a pin that did not pin what it claimed. That is the lesson.
+
+**A pin gated behind a magic substring pins the substring, not the property.** Defect C's pin read
+`if "in flight" in err: assert "failed" in err`. It was written as a property assertion and described
+in the commit as making *"a reworded single-cause sentence go red too."* The break lens replaced the
+peek message with a line-count-identical, single-cause, *reassuring* sentence that simply did not
+contain `in flight` — "the dispatch is most likely still starting up, so give it a few seconds" — and
+the full suite stayed green at 2667 passed. Reproduced here before fixing it: old pin **10 passed**
+against that injection, new pin red. **Any `if <literal> in output:` wrapping an assertion is an
+opt-out clause the next author gets for free.** The property is now asserted unconditionally: the
+message must offer at least two of the readings a null sid is consistent with, and at least one must
+not be the reassuring one.
+
+**The convergent finding is the one to trust.** Both lenses independently found the same omission —
+`cmd_sup_handoff_begin` stamps `turns = 1` and emits no `turn_started` — from different briefs and
+different angles. Two lenses agreeing on something neither was told to look for is a far stronger
+signal than either lens's confident solo finding, and it was the only MAJOR that survived.
+
+**Fixing the site that was wrong reproduces the miss for the next site.** The obvious repair was one
+`_append_event_quiet` call. The pin that shipped with it is a source scan: *every* `["turns"] = 1` in
+`bin/fleet.py` must have a `turn_started` emitted in its own sibling statement list — scoped to the
+statement list, not the enclosing function, because a function with two dispatch arms and one event
+between them would pass a function-scoped check with one arm still silent. Seven sites; watched red
+by deleting the emit at a site the pin was *not* written for. **Pin the doctrine, not the defect.**
+
+**A coincidence that discriminates is not a discriminator.** The event log held 17 successor `spawned`
+events and exactly 7 `turn_started` — one per `bypass` successor, none for the ten stillborn — which
+reads like a boot signal and is not one. All seven timestamps match a `HANDOFF-COMPLETE` line in
+`supervisor/JOURNAL.md` **to the second**: `sup-handoff-complete` emitted every one of them. The
+signal was *completion*, and it separated the two populations only because a stillborn successor never
+reaches a completion. Emitting `turn_started` at dispatch — the correct fix — **destroys that
+separation**, which is a thing to say out loud rather than discover later. *Before citing a
+correlation as a detector, find the line of code that writes it.*
+
+**"rc=0 and no error log" measures that nothing crashed, not that anything was readable.** `SPEC.md`
+§6.1 documented defect B as a working feature — *"all four hooks degrade cleanly to sid-keyed writes …
+verified empirically"* — and the empirical verification was real, careful, and aimed one inch to the
+left of the question. The hooks did not crash. They wrote to a path no reader opened. **When you
+verify a fallback, assert the READ, never the absence of an exception.**
+
+**Half a mechanism invites a fix to the half that already works.** The shipped comment said the
+outcome landed in `state/outcomes/<raw-sid>.jsonl` *"where `read_outcomes(name)` never looks"* — true,
+and it stops one clause early. `read_outcomes(name, sid=sid)` **does** open that path, and 5 of its 7
+call sites pass a sid. The fallback existed; it was starved because callers read `sid` off the same
+record whose `session_id` was null. One missing field closed both halves at once. Stating only the
+first half would have sent some future author to build a fallback that was already there.
+
+**Enumerations rot faster than the doctrine they illustrate.** The commit — and its comment, and this
+file's ancestor of it — listed *"`cmd_spawn`, `cmd_respawn`, `send`'s fresh-session path,
+`cmd_sup_spawn`"* as the sites that stamp `turns = 1`. There is no such `send` site: `send`'s
+fork-steer goes through `_restamp_after_steer`, which increments. The doctrine survived (every site
+stamps at dispatch, not at completion); the list did not. **Grep the list before you ship it — a
+correct claim with a wrong example is read as a wrong claim.**
+
+**Line-distance self-citations are self-inflicted rot.** *"`SUP_SPAWN_DEFAULT_MODE` (nine lines
+below)"* was eleven. Cosmetic, except it sat in a comment whose closing instruction is *"read that
+constant's comment"*. Name the symbol; let grep do the walking.
+
+**A range you cannot reproduce from the file you cite is the same defect, quieter.** *"7 dispatched
+under bypass ALL booted … (75–122 min alive)"* — re-measured from `state/events.jsonl`, spawned →
+first `working`→`idle`, the seven ran 43, 64, 84, 103, 122, 831 and 2254 minutes. The stated range
+excluded four of its own seven. It was withdrawn rather than restated, and replaced with the
+measurement that is actually reproducible in one grep.
+
+**And the one that is structural: the highest-consequence stale sentence is the one something reads at
+boot.** `skills/fleet/SKILL.md` told every supervisor *"eight stillbirths across two days"* — a number
+that was never right and by then was three days stale in both directions. Docs nobody opens rot
+harmlessly. **A file that is loaded by a process, on a schedule, is code with worse tooling.**
