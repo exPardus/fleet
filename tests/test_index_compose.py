@@ -720,27 +720,36 @@ class TestContextDigest:
         assert "## ../plain" not in prompt
         assert "digest skipped" in capsys.readouterr().err
 
-    def test_the_index_update_verb_keeps_its_own_refusal_wording(self, tmp_path,
-                                                                 monkeypatch):
+    def test_the_index_update_verb_refuses_a_path_outside_the_root(self, tmp_path):
         """C2's SECOND site, which the gate's blast-radius measurement did not
         reach because it ran only this file.
 
         `_index_posix_rel` is shared: `fleet index update --files ../x.py`
-        goes through it too, and a guard that raises there pre-empts
+        goes through it too, so a guard that raises THERE pre-empts
         `_index_files_arg`'s own `startswith("../")` refusal with a different
-        message. Measured: injecting the sibling slice's guard verbatim turned
-        `tests/test_fleet_index.py::TestIndexUpdate::test_a_path_outside_the_root_is_refused`
-        red on the word `outside` alone. The escape is normalised back to this
-        verb's own wording, so the refusal reads the same either way."""
+        message.
 
-        class _PathRejected(fleet.FleetCliError):
-            pass
+        This test used to monkeypatch `_index_posix_rel` into raising a
+        locally-minted error whose text said `escapes the root`, and then
+        assert that `_index_files_arg` re-worded it back to this verb's own
+        phrasing. That pinned the WRAPPER, not the contract -- and the wrapper
+        is the thing `idx/core` rules against: its `_index_posix_rel` is meant
+        to be the single containment guard for every caller, and its own
+        comment records that a second guard at this site "is what let the two
+        spellings drift apart in the first place". A test that fails unless
+        the second site re-words the refusal is a test that forbids the
+        standard this repo has already chosen.
 
-        real = fleet._index_posix_rel
-        monkeypatch.setattr(fleet, "_index_posix_rel", lambda rel: (
-            (_ for _ in ()).throw(_PathRejected(f"escapes the root: {rel}"))
-            if ".." in str(rel) else real(rel)))
+        What survives, and is asserted here, is the CONTRACT a caller can
+        actually rely on: `--files ../x.py` is refused, the refusal is a
+        `FleetCliError`, and it names the index root. That is true whichever
+        layer catches the escape -- this site's own guard, or the
+        canonicaliser's `IndexPathError` (which is a `FleetCliError` and whose
+        message carries the same "outside the index root") -- so the test no
+        longer has an opinion about which one does.
 
+        No monkeypatch: the real escape is passed to the real function. The
+        simulated one is what let the assertion drift from the behaviour."""
         with pytest.raises(fleet.FleetCliError, match="outside the index root"):
             fleet._index_files_arg(tmp_path, "../x.py")
 
@@ -987,21 +996,48 @@ class TestComposeFailureNeverLeavesAPhantomRecord:
 
     # -- arm 1: the shard write. REAL, no monkeypatching at all. -------------
 
-    def test_arm_1_an_unwritable_shard_directory_warns_and_the_spawn_proceeds(
-            self, indexed_project, monkeypatch, capsys):
+    def test_arm_1_an_unwritable_shard_directory_leaves_no_phantom_record(
+            self, indexed_project, monkeypatch):
         """The arm that reproduced the phantom, constructed on the real
         filesystem: occupy `.fleet-index/symbols/src` with a plain FILE, so
-        `write_shard_atomic`'s `mkdir` raises `FileExistsError`."""
+        `write_shard_atomic`'s `mkdir` cannot make the shard's directory.
+
+        WHAT THIS ARM MAY ASSERT CHANGED, and the change is not this branch's
+        to argue with. It used to assert `digest skipped` on stderr, because
+        on THIS branch the `FileExistsError` escapes `write_shard_atomic` and
+        the C1 per-path wrapper turns it into a warning. `idx/core` moved that
+        degradation one layer DOWN: its `write_shard_atomic` catches EVERY
+        `OSError` and returns False, and `verified_shard_rows` then answers
+        `status: ok` from this run's own parse with only `written` False. So
+        on a tree carrying `idx/core` there is no warning to observe and the
+        digest is served -- the old assertion was not merely rotted, its
+        subject had ceased to exist.
+
+        Both spellings of the failure are real, and the property this arm was
+        BUILT for is common to them: an unwritable shard directory must not
+        leave `{"status": "working", "session_id": null}` behind, and the
+        spawn must proceed. That is what is asserted, and it holds whichever
+        layer absorbs the error -- so this test does not encode which branch
+        it is standing on.
+
+        Honest residual: where `write_shard_atomic` swallows the error, this
+        arm can no longer reproduce the phantom on its own, and the guard on
+        the C1 hoist is `test_arm_1_produces_no_phantom_even_if_the_skip_is_
+        removed` below, which forces the raise rather than constructing it."""
         shard = fleet.shard_path_for_source(indexed_project, "src/api.py")
         shard.unlink()
         shard.parent.rmdir()
         shard.parent.write_bytes(b"not a directory")
 
         assert self._spawn(indexed_project, monkeypatch, "src/api.py") == 0
-        err = capsys.readouterr().err
-        assert "src/api.py" in err and "digest skipped" in err
+        # The construction held: the shard genuinely could not be written.
+        # Without this the test would still pass on a tree where the occupied
+        # directory was silently repaired, and assert nothing at all.
+        assert not shard.exists()
+        assert shard.parent.is_file()
         rec = fleet.load_registry()["workers"]["w1"]
         assert rec["session_id"] == SID and rec["status"] == "working"
+        assert "spawned" in self._events()
 
     def test_arm_1_produces_no_phantom_even_if_the_skip_is_removed(
             self, indexed_project, monkeypatch):
@@ -1027,13 +1063,22 @@ class TestComposeFailureNeverLeavesAPhantomRecord:
         """`verified_shard_rows` re-reads the source AFTER hashing it, so a
         file that disappears in that gap raises `OSError` from
         `parse_source_symbols`. Forced rather than raced, because the window
-        is a few microseconds wide and a racy test is a flaky test."""
+        is a few microseconds wide and a racy test is a flaky test.
+
+        The stub takes `*args, **kwargs` rather than restating the signature.
+        Spelling it as `(source_path, lang=None)` pinned a SIGNATURE this test
+        does not care about: `idx/core` grew a `raw=` parameter (so the choke
+        point calls `parse_source_symbols(source, lang, raw=raw)`), the stub
+        raised `TypeError` instead of the `OSError` under test, and the C1
+        wrapper turned that into a `FleetCliError` that refused the spawn --
+        a red test measuring nothing about its own subject. A stub that
+        forwards whatever it was handed cannot rot that way again."""
         real = fleet.parse_source_symbols
 
-        def _boom(source_path, lang=None):
+        def _boom(source_path, *args, **kwargs):
             if str(source_path).endswith("api.py"):
                 raise OSError("source vanished between header and parse")
-            return real(source_path, lang)
+            return real(source_path, *args, **kwargs)
 
         monkeypatch.setattr(fleet, "parse_source_symbols", _boom)
         # Force the re-parse: a fresh shard would be served without one.
