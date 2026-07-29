@@ -422,3 +422,129 @@ class TestEveryMutatingVerbIsGatedByTheWedge:
         monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (
             True, [{"sessionId": "sid-releaser", "status": "idle", "pid": 4242}]))
         assert fleet.main(_gated_argv(verb, gate_home)) == fleet.SUPERVISOR_CONTINUITY_RC
+
+
+class TestTheRefusalNeverNamesAnUnreachableRemedy:
+    """**R2 (ruling 2026-07-26): a named remedy that always fails is a defect.**
+    §7's refusal shipped one for 24 hours and the docket did not report it; the
+    four-councilor §7 council found it on 2026-07-28 and classified it a *live
+    R2 violation*, not a convenience defect.
+
+    THE DEFECT, precisely, because the precise form is what the fix has to
+    match. `_supervisor_gate` is armed with the verb string **of the frame**,
+    which is not necessarily the command the caller ran. Tier 1 of the autoclean
+    sweep IS `cmd_archive`, so a beat-driven `fleet autoclean` was refused with
+    *"archive: refusing ... Present the current generation with `--nonce`"* --
+    and `fleet autoclean` declares no `--nonce` at all (`autoclean --help |
+    grep -c nonce` -> 0, against `archive --help` -> 2). Both real drivers were
+    told to do the one thing neither could: the interface tier holds no
+    generation **by design** (§7.1), and the supervisor's beat had no flag to
+    present one through. The remedy named was unreachable for its whole audience.
+
+    WHAT THIS COVERS AND WHAT IT DOES NOT, stated rather than implied. The
+    exemption (`as_autoclean_tier`) fixed that *instance*. What recurs is the
+    *shape*, because rider 1 makes the exemption per-frame: any future frame that
+    arms the gate under a nonce-less entry point re-creates the same unreachable
+    remedy. This class pins the half that is statically decidable -- **no verb
+    the gate names may lack the flag the refusal names** -- and
+    `fleet.GATE_VERBS_ACCEPTING_NONCE` makes the message tell the truth when one
+    does. The other half, a gated frame reached from an unflagged *command*, is
+    invisible here and is pinned instead by the AST walk in
+    `tests/test_autoclean.py::TestTheSweepUnderAHeldClaim::
+    test_no_unsanctioned_frame_under_the_sweep_can_arm_the_gate`. Two halves, two
+    mechanisms, neither pretending to be the other."""
+
+    @staticmethod
+    def _verbs_declaring_nonce():
+        """Verbs whose SUBPARSER really declares `--nonce`, read out of
+        `build_parser()` rather than restated. Derived, so it cannot rot the way
+        a hand-kept list does -- this repo's named recurring defect."""
+        import argparse
+        parser = fleet.build_parser()
+        out = set()
+        for action in parser._actions:
+            if not isinstance(action, argparse._SubParsersAction):
+                continue
+            for name, sub in action.choices.items():
+                if any("--nonce" in getattr(a, "option_strings", ())
+                       for a in sub._actions):
+                    out.add(name)
+        return out
+
+    def test_the_walk_can_see_a_nonce_flag_at_all(self):
+        """SEED CHECK, not optional: a derivation that resolved nothing would
+        make both assertions below pass VACUOUSLY, which is the failure this repo
+        re-learns every wave. `archive` is the council's own measured example."""
+        declared = self._verbs_declaring_nonce()
+        assert "archive" in declared, (
+            "the parser walk cannot see `--nonce` on `archive`, which the "
+            "council measured as declaring it twice -- the walk rotted and the "
+            "assertions it feeds were vacuous")
+        assert len(declared) >= 10, (
+            f"only {len(declared)} verbs seen to declare `--nonce` -- the "
+            f"subparser walk rotted (19 at the time of writing)")
+
+    def test_no_gated_verb_lacks_the_flag_its_refusal_names(self):
+        """THE R2 ASSERTION. Every verb `_supervisor_gate` can refuse must
+        actually accept the `--nonce` its refusal tells the caller to present.
+
+        Asserted as a set difference on purpose: the interesting failure is
+        *which* verb, and a future editor arming the gate on a new one is told
+        here rather than in production."""
+        missing = set(GATED_VERBS) - self._verbs_declaring_nonce()
+        assert not missing, (
+            f"§7 arms its gate on {sorted(missing)}, whose refusal names "
+            f"`--nonce` as the remedy -- and their parsers declare no such flag. "
+            f"That is R2's forbidden shape (a named remedy that always fails), "
+            f"the exact defect the autoclean sweep shipped for 24h.")
+
+    def test_the_constant_is_exactly_the_gated_verbs_that_declare_the_flag(self):
+        """`GATE_VERBS_ACCEPTING_NONCE` is what the refusal branches on, so it is
+        only worth having if it matches reality. Equality in BOTH directions: an
+        entry with no flag re-opens the R2 violation, and a flagged gated verb
+        missing from it prints *"this is a bug, report it"* for a refusal the
+        caller could in fact satisfy -- the mirror image, and just as
+        misleading."""
+        expected = set(GATED_VERBS) & self._verbs_declaring_nonce()
+        assert fleet.GATE_VERBS_ACCEPTING_NONCE == expected, (
+            f"GATE_VERBS_ACCEPTING_NONCE is "
+            f"{sorted(fleet.GATE_VERBS_ACCEPTING_NONCE)}; the gated verbs that "
+            f"really declare `--nonce` are {sorted(expected)}. Extra entries name "
+            f"a flag that does not exist; missing entries call a satisfiable "
+            f"refusal a fleet bug.")
+
+    def test_a_nonce_less_gated_frame_is_told_the_truth(self, gate_home, monkeypatch):
+        """FAULT INJECTION, and it is the one a future editor would actually
+        cause: not "delete the flag from `archive`" (nobody does that) but **arm
+        the gate at a frame whose entry point has no flag** -- precisely how the
+        autoclean defect happened, one frame down from a verb that could not
+        carry a nonce.
+
+        Driven through the real `_supervisor_gate` with a verb string outside the
+        accepting set, exactly as a new nonce-less delegate would appear."""
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-third-body")
+        _fresh_claim()
+        with pytest.raises(fleet.SupervisorClaimGateError) as exc:
+            fleet._supervisor_gate("tombstone-expiry")
+        msg = str(exc.value)
+        assert "--nonce <value>" not in msg, (
+            "the refusal still names `--nonce` for a verb that has no such flag "
+            "-- R2's forbidden shape, unfixed")
+        assert "declares no" in msg
+        assert "REPORT IT" in msg, (
+            "the refusal dropped the unreachable remedy without naming a "
+            "reachable one, which is R2's other half")
+
+    def test_a_flagged_gated_verb_still_gets_the_real_remedy(
+            self, gate_home, monkeypatch):
+        """The CONTROL for the injection above, and the reason it is evidence at
+        all: same gate, same claim, a verb that DOES declare the flag still names
+        it. Without this, the test above would pass just as well if the `--nonce`
+        remedy had been deleted for everyone."""
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-third-body")
+        _fresh_claim()
+        with pytest.raises(fleet.SupervisorClaimGateError) as exc:
+            fleet._supervisor_gate("archive")
+        msg = str(exc.value)
+        assert "--nonce <value>" in msg
+        assert "REPORT IT" not in msg

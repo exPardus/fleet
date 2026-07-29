@@ -761,6 +761,119 @@ class TestSchedulerSurfaceIsRetired:
         assert "_supervisor_gate" not in inspect.getsource(fleet.cmd_autoclean)
 
 
+# --- the sweep's transitive call graph (MEDIUM-1, 2026-07-28) --------------
+#
+# `_supervisor_gate`'s docstring used to carry a STANDING OBLIGATION in prose:
+# *"Anything else the sweep ever delegates to must carry the exemption the same
+# way."* Nothing checked it. That is the same shape as the defect it was written
+# about -- a claim about a call graph, defended by a sentence -- and the nearest
+# behavioural pin could only ever cover the tiers whose fixtures happen to run
+# (tier 3 is flag-gated and did not run in any of them).
+#
+# This is the static form, and it is total over the graph rather than over the
+# tiers: walk every call out of `cmd_autoclean`, transitively, and assert that
+# the ONLY reachable function that names `_supervisor_gate` is the one sanctioned
+# delegate, whose gate call is guarded by the exemption parameter at that frame.
+#
+# That is exactly council rider 1 of 2026-07-28
+# (`docs/decisions/W9-section7-council-synthesis.md`, Verdict A, unanimous 4/4):
+# *"the exemption is carried explicitly at every frame and never inherited from
+# the call graph."* The rider states the rule; this is what enforces it.
+#
+# ATTRIBUTION RULE, same as `tests/test_load_registry_callers.py`: every call
+# anywhere inside a top-level function -- nested closures included -- is
+# attributed to that top-level function, so a gate call hidden in a closure
+# cannot walk around this. Attribute calls (`x.foo()`) contribute `foo`, which
+# over-reaches rather than under-reaches: a module-level `foo` that is never
+# actually reached that way is treated as reachable, which can only make this
+# assertion stricter. WHAT IT CANNOT SEE, stated rather than implied:
+# `getattr(module, "_supervisor_gate")()` is not statically decidable, exactly
+# as the load_registry detector documents for its own walk.
+def _fleet_call_graph(source=None):
+    """{top-level function or Class.method -> set of names it calls}."""
+    src = source if source is not None else Path(fleet.__file__).read_text(
+        encoding="utf-8")
+
+    def _called(fn):
+        out = set()
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Call):
+                name = (getattr(node.func, "id", None)
+                        or getattr(node.func, "attr", None))
+                if name:
+                    out.add(name)
+        return out
+
+    graph = {}
+    for node in ast.parse(src).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            graph[node.name] = _called(node)
+        elif isinstance(node, ast.ClassDef):
+            for sub in node.body:
+                if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    graph[f"{node.name}.{sub.name}"] = _called(sub)
+    return graph
+
+
+def _reachable_from(graph, entry):
+    """Transitive closure of `entry` over `graph`, `entry` included."""
+    seen, stack = set(), [entry]
+    while stack:
+        cur = stack.pop()
+        if cur in seen:
+            continue
+        seen.add(cur)
+        stack.extend(c for c in graph.get(cur, ()) if c in graph and c not in seen)
+    return seen
+
+
+def _gate_callers_reachable_from(entry, source=None):
+    """Sorted names of functions reachable from `entry` that call the gate."""
+    graph = _fleet_call_graph(source)
+    return sorted(n for n in _reachable_from(graph, entry)
+                  if "_supervisor_gate" in graph.get(n, ()))
+
+
+def _exemption_guard_report(fn_source, param):
+    """How one function's SOURCE carries §7's exemption at its own frame:
+    `(param_is_really_a_parameter, guarded_gate_calls, total_gate_calls)`.
+
+    "Guarded" is parsed structure, not a substring: an `if not <param>:` whose
+    BODY contains the `_supervisor_gate` call. *"The parameter is mentioned
+    somewhere"* is satisfied by a docstring, which is how a decorative exemption
+    would read as a real one.
+
+    TAKES SOURCE, NOT A LIVE FUNCTION, AND THAT IS THE POINT. The first cut of
+    this pin had the reachability walk parameterised over source (so it could be
+    fault-injected) and the guard check hard-wired to `inspect.getsource(
+    getattr(fleet, name))` -- so the half that decides whether a NEW delegate is
+    admissible was the half nobody could drive red. That is this repo's own rule
+    biting the pin that quotes it: *a pin written against the mechanism you fixed
+    misses the one you introduced.* The allowlist plus this guard check IS the
+    introduced mechanism, and
+    `test_a_second_delegate_cannot_be_admitted_by_editing_the_allowlist` breaks
+    it here."""
+    tree = ast.parse(textwrap.dedent(fn_source))
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
+    spec = fn.args
+    names = {a.arg for a in (list(getattr(spec, "posonlyargs", []))
+                             + list(spec.args) + list(spec.kwonlyargs))}
+
+    def _gate_calls(nodes):
+        return [c for node in nodes for c in ast.walk(node)
+                if isinstance(c, ast.Call)
+                and getattr(c.func, "id", None) == "_supervisor_gate"]
+
+    guarded = [node for node in ast.walk(fn)
+               if isinstance(node, ast.If)
+               and isinstance(node.test, ast.UnaryOp)
+               and isinstance(node.test.op, ast.Not)
+               and getattr(node.test.operand, "id", None) == param
+               and _gate_calls(node.body)]
+    return param in names, len(guarded), len(_gate_calls([fn]))
+
+
 class TestTheSweepUnderAHeldClaim:
     """REGRESSION PIN (2026-07-28, `fix/autoclean-archive-gate`). The whole
     defect is that THE CONDITION WAS NEVER IN THE TEST.
@@ -818,8 +931,8 @@ class TestTheSweepUnderAHeldClaim:
                               "kind": "result", "result_text": "done"})
         return rec
 
-    def _sweep(self):
-        return fleet.cmd_autoclean(_autoclean_args(),
+    def _sweep(self, **kw):
+        return fleet.cmd_autoclean(_autoclean_args(**kw),
                                    run=fake_run_factory([]),
                                    which=lambda _: "claude")
 
@@ -856,13 +969,22 @@ class TestTheSweepUnderAHeldClaim:
 
     def test_no_gate_refusal_can_reach_the_sweeps_error_channel(
             self, claimed_home, monkeypatch):
-        """The general form, so this cannot regress for a tier nobody wrote a
-        fixture for: NO tier of the sweep may report a §7 refusal, whatever the
-        caller's sid. Named by class, not by message, so a reworded refusal
-        still trips it."""
+        """The BEHAVIOURAL general form: no tier of the sweep may report a §7
+        refusal, whatever the caller's sid. Named by class, not by message, so a
+        reworded refusal still trips it.
+
+        It is only as general as the tiers it actually RUNS, and it used to run
+        two of three. `_autoclean_args()` defaults `expire_tombstones_hours` to
+        `None`, and `cmd_autoclean` skips tier 3 entirely on `None`
+        (`bin/fleet.py`'s `if expire_hours is not None`), so this test advertised
+        "no tier" while never executing the tombstone tier at all -- a gated
+        delegate planted under tier 3 left it green. `expire_tombstones_hours=1`
+        is the cheap half of the fix (all three tiers now execute here); the
+        general form that does not depend on any fixture reaching any tier is
+        `test_nothing_reachable_from_the_sweep_can_arm_the_gate` below."""
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", self.INTERFACE_SID)
         self._seed_archivable()
-        self._sweep()
+        self._sweep(expire_tombstones_hours=1)
         stamp = json.loads(fleet.autoclean_stamp_path().read_text(encoding="utf-8"))
         assert not [e for e in stamp["errors"]
                     if fleet.SupervisorClaimGateError.__name__ in e], stamp["errors"]
@@ -885,10 +1007,18 @@ class TestTheSweepUnderAHeldClaim:
     def test_the_exemption_is_explicit_and_not_an_accident_of_call_order(self):
         """The brief's condition on this shape: *"the exemption must be
         explicit and pinned, not an accident of which function calls which."*
-        The old exemption WAS such an accident -- it held only because
+        The original exemption WAS such an accident -- it held only because
         `cmd_autoclean` happened not to name the gate, while the function it
-        delegates to did. Pin the named parameter, so deleting it is a test
-        failure and not a silent re-arming.
+        delegates to did.
+
+        RATIFIED AS THE CORRECT SHAPE, 2026-07-28, by the four-councilor §7
+        council (`docs/decisions/W9-section7-council-synthesis.md`, Verdict A
+        rider 1, unanimous 4/4): *"The exemption is carried explicitly at every
+        frame and never inherited from the call graph. `as_autoclean_tier` is
+        the correct shape BECAUSE IT IS A PARAMETER -- a thing a reader can see
+        at the frame where it applies, and the one thing that cannot be silently
+        assumed one frame down."* So this test is no longer only a regression
+        pin on a choice; it pins a binding rider.
 
         Parsed with `ast`, NOT matched as a substring. The first cut of this
         test asserted `"as_autoclean_tier=True" in
@@ -939,6 +1069,269 @@ class TestTheSweepUnderAHeldClaim:
         assert ok, "note-only: doctor stays report-only"
         assert "last run 0.0h ago" in msg          # fresh...
         assert "tier-1 exploded" in msg            # ...and NOT green
+
+    # --- MEDIUM-1: the standing obligation, enforced ----------------------
+
+    # The one function under the sweep that may name `_supervisor_gate`, and the
+    # parameter that must guard the call when it does. An entry here is a claim
+    # that the frame carries the exemption EXPLICITLY (council rider 1), and
+    # `test_no_unsanctioned_frame_under_the_sweep_can_arm_the_gate` checks the
+    # guard rather than taking the entry's word for it.
+    SANCTIONED_GATED_DELEGATES = {"cmd_archive": "as_autoclean_tier"}
+
+    def test_no_unsanctioned_frame_under_the_sweep_can_arm_the_gate(self):
+        """THE GENERAL FORM, and the one that does not need a fixture per tier.
+        **It enforces council rider 1 of 2026-07-28**
+        (`docs/decisions/W9-section7-council-synthesis.md`, Verdict A, unanimous
+        4/4): *"the exemption is carried explicitly at every frame and never
+        inherited from the call graph."*
+
+        `_supervisor_gate`'s docstring carried that as an obligation in prose --
+        *"anything else the sweep ever delegates to must carry the exemption the
+        same way"* -- and **nothing enforced it**. The behavioural pins above are
+        the strongest evidence available for the tiers they run, and they are
+        bounded by exactly that: a gated delegate planted under a tier no fixture
+        reaches leaves every one of them green. Tier 3 is that tier -- it is
+        flag-gated and, as the council measured, *neither driver passes
+        `--expire-tombstones-hours`*. Which is this branch's own defect class one
+        level up: `fix/autoclean-catchup` cleared itself on *"`cmd_autoclean`
+        never calls `_supervisor_gate` at all"* -- a true statement about one
+        frame, offered as a statement about a call graph.
+
+        THE FORM PINNED IS "ONE SANCTIONED DELEGATE, AND ITS GATE CALL IS
+        GUARDED", not "zero". Zero is not available under the ratified shape and
+        pretending otherwise would be the wrong pin: rider 1 ratifies the
+        exemption as a PARAMETER, so tier 1 necessarily reaches a function that
+        names the gate, and what makes that safe is the `if not
+        as_autoclean_tier:` guard at that frame. An allowlist of one is a real
+        risk -- it is an invitation to a second entry -- so it is priced down two
+        ways: the allowlist is asserted by EQUALITY (a second entry is a test
+        failure, not a silent addition), and each entry must prove its guard.
+        A future delegate cannot be admitted by editing a set; it has to bring a
+        frame-local exemption parameter with it, which is the rider."""
+        graph = _fleet_call_graph()
+        gated = set(_gate_callers_reachable_from("cmd_autoclean"))
+        assert gated == set(self.SANCTIONED_GATED_DELEGATES), (
+            f"the set of gate-arming functions reachable from `cmd_autoclean` "
+            f"changed: {sorted(gated)} vs sanctioned "
+            f"{sorted(self.SANCTIONED_GATED_DELEGATES)}. §7 exempts `autoclean`, "
+            f"but THE EXEMPTION IS NOT TRANSITIVE -- a gate armed at an "
+            f"unguarded frame under the sweep refuses every beat-driven run, "
+            f"because both drivers are sessions with a sid and the supervisor's "
+            f"beat runs only while a fresh claim is held. `fleet autoclean` has "
+            f"no `--nonce`, so the refusal names a remedy no caller can execute "
+            f"(a live R2 violation, council 2026-07-28). A new delegate must "
+            f"carry its own frame-local exemption parameter -- council rider 1 "
+            f"-- and be added here WITH it.")
+
+        # Each sanctioned frame must actually carry the exemption, and the gate
+        # call must be UNDER it. Checked as parsed structure: an `if not <param>:`
+        # somewhere in the function with the gate call inside its body -- not as
+        # "the parameter is mentioned", which a docstring satisfies.
+        for fn_name, param in sorted(self.SANCTIONED_GATED_DELEGATES.items()):
+            fn = getattr(fleet, fn_name)
+            has_param, guarded, total = _exemption_guard_report(
+                inspect.getsource(fn), param)
+            assert has_param, (
+                f"{fn_name} is sanctioned to arm the gate under the sweep but "
+                f"has no `{param}` parameter to carry the exemption at its frame")
+            assert guarded == 1, (
+                f"{fn_name}'s `_supervisor_gate` call is not guarded by "
+                f"`if not {param}:` -- the exemption is not expressible at the "
+                f"frame it applies to, so tier 1 is gated again")
+            # ...and no gate call OUTSIDE that guard, or the guard is decoration.
+            assert total == 1, (
+                f"{fn_name} arms §7's gate {total} times; only the one inside "
+                f"`if not {param}:` can be exempted, so any other is "
+                f"unconditional and re-breaks the sweep")
+            assert "_supervisor_gate" in graph.get(fn_name, ()), (
+                "the call-graph walk disagrees with the source parse about "
+                f"{fn_name} -- one of the two rotted")
+
+    def test_the_reachability_walk_can_see_a_gate_at_all(self):
+        """THE SEED CHECK, and it is not optional: a walk that resolved nothing
+        would make the assertion above pass VACUOUSLY, which is the failure this
+        repo re-learns every wave. Two independent halves.
+
+        Half one, on the REAL source: the same walk from `cmd_send` -- a verb
+        with nothing to do with archival -- must find `cmd_send` itself, because
+        it arms the gate too. A live control that needs no planted fixture: it
+        goes red if the walk rots or if `_supervisor_gate` is renamed, and it is
+        deliberately NOT `cmd_archive`, so it stays honest even if the sweep's
+        one sanctioned delegate ever changes.
+
+        Half two: the reach must be BROAD. A walk that resolved only the entry
+        point would report an empty offender set for the right reason and the
+        wrong cause. 71 functions were reachable from `cmd_autoclean` when this
+        was written; the floor is set well under that so ordinary refactors do
+        not trip it, and far above 1."""
+        assert "cmd_send" in _gate_callers_reachable_from("cmd_send"), (
+            "the walk cannot see `_supervisor_gate` even from a plainly gated "
+            "verb -- it rotted, and the assertion it guards was vacuous")
+        reach = _reachable_from(_fleet_call_graph(), "cmd_autoclean")
+        assert len(reach) >= 30, (
+            f"only {len(reach)} functions reachable from `cmd_autoclean` -- the "
+            f"call-graph walk rotted (71 at the time of writing)")
+
+    def test_the_walk_finds_a_gate_planted_UNDER_TIER_THREE(self):
+        """FAULT INJECTION on the new pin, as source rather than as narrative --
+        and planted under **tier 3** specifically, because tier 3 is the one no
+        behavioural fixture reached. `expire_tombstones_hours` defaults to
+        `None`, `cmd_autoclean` skips the tier on `None`, so before this pin a
+        gated delegate here was invisible to every test in this file.
+
+        Three plants, each a route the prose obligation could be lost by:
+        directly in the tier's own helper, one frame deeper, and inside a nested
+        closure (the attribution rule's own case). A pin nobody broke is a
+        claim."""
+        src = Path(fleet.__file__).read_text(encoding="utf-8")
+        # control: the un-planted source yields exactly the sanctioned delegate.
+        assert (set(_gate_callers_reachable_from("cmd_autoclean", src))
+                == set(self.SANCTIONED_GATED_DELEGATES))
+        expected = sorted(self.SANCTIONED_GATED_DELEGATES)
+
+        # 1. the tier-3 helper itself arms the gate.
+        direct = src.replace(
+            "def _expire_tombstones(expire_hours: float, dry_run: bool) -> list:\n",
+            "def _expire_tombstones(expire_hours: float, dry_run: bool) -> list:\n"
+            "    _supervisor_gate('expire')\n", 1)
+        assert direct != src, "the tier-3 plant did not apply -- fixture rotted"
+        assert _gate_callers_reachable_from("cmd_autoclean", direct) == sorted(
+            expected + ["_expire_tombstones"]), (
+            "a gate planted in tier 3 was not seen")
+
+        # 2. one frame DEEPER than the tier: a helper the tier calls.
+        deeper = src.replace(
+            "def _registry_owned_and_protected_sids(workers: dict) -> tuple:\n",
+            "def _registry_owned_and_protected_sids(workers: dict) -> tuple:\n"
+            "    _supervisor_gate('deep')\n", 1)
+        assert deeper != src, "the deep plant did not apply -- fixture rotted"
+        assert "_registry_owned_and_protected_sids" in _gate_callers_reachable_from(
+            "cmd_autoclean", deeper), "a gate two frames down was not seen"
+
+        # 3. inside a nested CLOSURE, which is the attribution rule's own case
+        #    and the way a source-substring check would still have been green
+        #    while the walk lost it.
+        closure = src.replace(
+            "def _expire_tombstones(expire_hours: float, dry_run: bool) -> list:\n",
+            "def _gated_helper():\n"
+            "    def _inner():\n"
+            "        _supervisor_gate('closure')\n"
+            "    return _inner()\n\n\n"
+            "def _expire_tombstones(expire_hours: float, dry_run: bool) -> list:\n", 1)
+        closure = closure.replace(
+            "    tombstones = []\n", "    tombstones = _gated_helper()\n", 1)
+        assert "_gated_helper" in closure
+        assert "_gated_helper" in _gate_callers_reachable_from(
+            "cmd_autoclean", closure), (
+            "a gate call inside a nested closure walked around the pin -- the "
+            "attribution rule is not holding")
+
+    def test_a_second_delegate_cannot_be_admitted_by_editing_the_allowlist(self):
+        """FAULT INJECTION ON THE MECHANISM THIS PIN *INTRODUCED*, which is not
+        the same thing as the mechanism it fixed.
+
+        The tier-3 plants above break the *reachability walk* -- the half that
+        replaced a prose obligation. But the pin also introduced
+        `SANCTIONED_GATED_DELEGATES` plus a guard check, and this repo's rule is
+        that **a pin written against the mechanism you fixed misses the one you
+        introduced.** An allowlist of one is an invitation to a second entry, and
+        the realistic future edit is not "plant a gate under tier 3" -- nobody
+        does that on purpose. It is: *a delegate is added, the equality assertion
+        goes red, and the editor makes it green by adding a line to the set.* If
+        that alone sufficed, this pin would certify an UNGUARDED frame as exempt
+        -- the original defect, readmitted through the test written to prevent
+        it, with a green suite vouching for it.
+
+        So the guard check has to go RED for a delegate that IS in the allowlist
+        and does not carry the exemption. Driven over source -- which is the
+        whole reason `_exemption_guard_report` takes source rather than a live
+        function -- in the three shapes an editor's half-fix actually takes."""
+        # a. admitted, arms the gate, no exemption parameter at all.
+        has_param, guarded, total = _exemption_guard_report(
+            "def _new_delegate(args):\n"
+            "    _supervisor_gate('new')\n"
+            "    return 0\n", "as_autoclean_tier")
+        assert (has_param, guarded, total) == (False, 0, 1), (
+            "a delegate with no exemption parameter reads as guarded -- then a "
+            "one-line edit to SANCTIONED_GATED_DELEGATES is enough to bless it")
+
+        # b. the parameter EXISTS but guards nothing: the "I added the parameter
+        #    and threaded it through" half-fix, which is the likeliest of the
+        #    three because it looks exactly like the ratified shape in a diff.
+        has_param, guarded, total = _exemption_guard_report(
+            "def _new_delegate(args, as_autoclean_tier=False):\n"
+            "    _supervisor_gate('new')\n"
+            "    return 0\n", "as_autoclean_tier")
+        assert (has_param, guarded, total) == (True, 0, 1), (
+            "a parameter that guards nothing reads as a guard -- `if not "
+            "<param>:` around the call is the assertion, never the parameter's "
+            "mere presence in the signature")
+
+        # c. guarded call PLUS a second unconditional one -- what a merge
+        #    produces, and it still refuses every beat-driven sweep.
+        has_param, guarded, total = _exemption_guard_report(
+            "def _new_delegate(args, as_autoclean_tier=False):\n"
+            "    if not as_autoclean_tier:\n"
+            "        _supervisor_gate('new')\n"
+            "    _supervisor_gate('again')\n"
+            "    return 0\n", "as_autoclean_tier")
+        assert (has_param, guarded, total) == (True, 1, 2), (
+            "a second unconditional gate call outside the guard is invisible -- "
+            "the guard is decoration and tier 1 is refused again")
+
+        # CONTROL, without which the three above merely describe a checker that
+        # rejects everything: the REAL shipped shape must report clean.
+        ok = _exemption_guard_report(
+            inspect.getsource(fleet.cmd_archive), "as_autoclean_tier")
+        assert ok == (True, 1, 1), (
+            f"the shipped `cmd_archive` does not report as correctly guarded "
+            f"({ok}) -- this checker rejects the very shape rider 1 ratified")
+
+    def test_no_cli_surface_can_reach_the_exemption_parameter(self):
+        """`cmd_archive`'s docstring claims *"Nothing reaches this parameter from
+        `build_parser` -- there is no `--as-autoclean-tier`"*, and the branch's
+        whole non-narrowing argument leans on it. **Nothing enforced it.** In
+        this repo that is the difference between a property and a sentence, and
+        the §7 defect this branch exists to fix was precisely a true claim about
+        one frame offered as a claim about a system.
+
+        Why it is load-bearing rather than tidy: under rider 1 the parameter IS
+        the exemption. A flag that set it would let ANY sid-bearing caller run
+        `fleet archive` exempt from §7 -- not a narrowing of the exempt verb set
+        but a silent WIDENING of it, which §7 reserves to the operator, and the
+        one edit that would make this branch's "arming byte-for-byte unchanged"
+        claim false.
+
+        Two independent halves, because either alone is weak: no subparser
+        declares such an option under any spelling *or* dest, and the `archive`
+        dispatch hands the namespace over POSITIONALLY, so there is no
+        `**vars(args)` route by which a stray key could set the keyword."""
+        parser = fleet.build_parser()
+        offenders = []
+        for action in parser._actions:
+            if not isinstance(action, argparse._SubParsersAction):
+                continue
+            for name, sub in action.choices.items():
+                for act in sub._actions:
+                    if getattr(act, "dest", None) == "as_autoclean_tier":
+                        offenders.append(f"{name}: dest=as_autoclean_tier")
+                    if any("autoclean-tier" in opt or "autoclean_tier" in opt
+                           for opt in getattr(act, "option_strings", ())):
+                        offenders.append(f"{name}: {act.option_strings}")
+        assert not offenders, (
+            f"a CLI surface reaches `as_autoclean_tier`: {offenders}. That is a "
+            f"WIDENING of §7's exempt set -- any sid-bearing caller could then "
+            f"run `fleet archive` exempt -- and §7 is operator-owned. The "
+            f"parameter is reachable from `cmd_autoclean` and nowhere else, by "
+            f"design (council rider 1).")
+
+        src = Path(fleet.__file__).read_text(encoding="utf-8")
+        assert "return cmd_archive(args)" in src, (
+            "the `archive` dispatch is no longer the positional "
+            "`cmd_archive(args)` this pin assumes. If it now splats a namespace "
+            "(`**vars(args)`), a stray key could set the exemption and the "
+            "option-string check above would not see it.")
 
 
 class TestParser:
