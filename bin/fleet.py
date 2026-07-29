@@ -8961,15 +8961,47 @@ def _daemon_wedge_degraded_verdict(pid, refusals):
 
 def _doctor_check_hook_errors():
     """Phase1 kernel 1: surface the TAIL of state/hook-errors.log when it is
-    nonempty (the swallowed-hook-exception log). Never a hard failure -- a
-    logged error means a hook hit an exception but still exited 0 (SPEC
-    invariant 2); doctor's job here is to make that visible, not to fail."""
+    nonempty (the swallowed-hook-exception log).
+
+    A nonempty log is a FAIL (incident `outcome-surrogate`, 2026-07-28). It
+    used to be an unconditional PASS on the reasoning that "a logged error
+    means a hook hit an exception but still exited 0 (SPEC invariant 2);
+    doctor's job here is to make that visible, not to fail." That reasoning
+    conflated two different things and it cost a worker's entire result:
+    invariant 2 governs the HOOK's exit code -- a hook must never crash the
+    worker's turn -- and says nothing about how doctor should grade the
+    wreckage afterwards. On 2026-07-27 `stop_outcome.py` swallowed a
+    UnicodeEncodeError, wrote NO outcome record for a 14,760-character
+    ESCALATE report carrying a CRITICAL finding, and doctor printed the whole
+    lost payload under `[PASS] hook-errors:`.
+
+    No severity split, and that is deliberate. Every line in this file is,
+    by construction, a hook that reached its `except` and abandoned the one
+    durable write it exists to perform -- a mailbox delivery, a journal
+    landmark, or a terminal outcome. There is no known-benign class: the four
+    hooks log NOTHING on any normal or degraded-but-handled path (verified
+    empirically at M-E: all four run with the sid absent from the registry,
+    rc=0 on each, no hook-errors.log), so FAIL-on-nonempty has no
+    false-positive class to trade against. Any split would have to be
+    mechanical, and the only mechanical keys available -- the hook name or the
+    exception type in the line's text -- are exactly the shape that let this
+    defect hide: a guard written against the case you noticed does not cover
+    the case you didn't.
+
+    The FAIL is sticky (nothing in fleet rotates this log), so the row names
+    the file the operator clears once they have acted on the tail. That is the
+    intended cost: an unread record loss should not be able to age out of the
+    report on its own."""
     lines = _hook_error_lines()
     if not lines:
         return ("hook-errors", True, "no swallowed hook errors logged")
     tail = lines[-_HOOK_ERROR_TAIL:]
-    return ("hook-errors", True,
-            f"{len(lines)} swallowed hook error(s) logged; last {len(tail)}: " + " | ".join(tail))
+    return ("hook-errors", False,
+            f"{len(lines)} swallowed hook error(s) logged -- a hook abandoned a "
+            f"durable write (mailbox delivery, journal landmark or worker RESULT) "
+            f"and exited 0 anyway; last {len(tail)}: " + " | ".join(tail)
+            + " -- act on these, then clear state/hook-errors.log to return "
+              "this row to PASS")
 
 
 _KNOWN_HOOK_EVENTS = frozenset({"PostToolUse", "Stop", "PostCompact"})
@@ -11407,8 +11439,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :5043, :5500, :9336,
-    :14166), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :5043, :5500, :9368,
+    :14198), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -12059,8 +12091,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:5043, :5500, :9336,
-    #     :14166) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:5043, :5500, :9368,
+    #     :14198) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the

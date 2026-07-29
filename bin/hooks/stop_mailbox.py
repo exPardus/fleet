@@ -99,7 +99,12 @@ def _current_tokens(transcript_path):
         return None
     try:
         total = 0
-        with open(transcript_path, "r", encoding="utf-8") as f:
+        # errors="replace": a strict decode raises UnicodeDecodeError (a
+        # ValueError, NOT caught by the `except OSError` below), which escapes
+        # main() and skips the entire mailbox drain -- pending mail is left
+        # undelivered by a failure in a best-effort token count. Same ruling as
+        # postcompact_journal.py::_transcript_stats.
+        with open(transcript_path, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -147,9 +152,16 @@ def _claim(mailbox_file):
 
 
 def _read_and_discard(claimed_file):
-    """Read the claimed file's contents then delete it (best-effort)."""
+    """Read the claimed file's contents then delete it (best-effort).
+
+    errors="replace" (incident `outcome-surrogate`, 2026-07-28): by the time
+    this runs, `_claim` has ALREADY renamed the mailbox and the `finally`
+    below will delete it -- so a strict decode raising UnicodeDecodeError does
+    not defer the message, it DESTROYS it. Same class as the lost outcome
+    record: an irreversible step had already happened when the codec raised.
+    A mangled byte costs one character; a strict decode costs the message."""
     try:
-        with open(claimed_file, "r", encoding="utf-8") as f:
+        with open(claimed_file, "r", encoding="utf-8", errors="replace") as f:
             contents = f.read()
     finally:
         try:
