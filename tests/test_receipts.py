@@ -75,6 +75,19 @@ RECEIPT_FLOOR = {
     "claim-nonce.md": 59,
     "three-tier-command.md": 39,
     "native-substrate.md": 6,
+    # Enforced 2026-07-27, when M1 + M2's worker-facing surface shipped and the
+    # §11.7 grant-execution experiment was landed. Six at first, one of them
+    # `# volatile` and therefore WARN-only and not executed here at all.
+    #
+    # Eight after that day's fix wave, and NONE volatile. The experiment block
+    # was volatile for a reason that turned out to be false in two clauses and
+    # a real defect in the third: it read a LIVE ABSOLUTE PATH into the
+    # supervisor's working journal, so its `# at` pin constrained nothing and
+    # the text it cited had never been committed anywhere -- it reproduced by
+    # accident and was one `git stash` from evaporating. The transcript is now
+    # a committed artifact under `docs/specs/receipts/` and the block is a
+    # normal enforced receipt, which is why this suite executes all eight.
+    "fleet-index.md": 8,
     # Joined the enforced set in the 2026-07-27 `unbuilt-sweep` pass (see
     # UNENFORCED below). Floor is the count the harness extracts today.
     "autoclean.md": 6,
@@ -136,19 +149,14 @@ UNENFORCED = {
     "phase-3-telegram.md": "predates the convention; no fenced receipts.",
     "phase-4-webui.md": "predates the convention; no fenced receipts.",
     "phase-5-intelligence.md": "predates the convention; no fenced receipts.",
-    # M1's shard layer and the `fleet index` CLI are BUILT (`idx/core`); M2's
-    # `fleet q` and M3 are not. The document stays receipt-free by construction
-    # -- no `$ `-prefixed lines in any fence, and every format example uses
-    # synthetic placeholders rather than this repo's real symbols. Its
-    # adversarial review (docs/reviews/IDX-ADVERSARIAL-2026-07-22.md) failed an
-    # earlier draft for exactly the opposite: hand-written output that looked
-    # like a transcript and encoded six wrong coordinates. What re-executes M1's
-    # claims today is `tests/test_fleet_index.py`, which drives the real CLI
-    # rather than quoting it. Promote to pinned receipts when M2 ships and a
-    # `fleet q` transcript is worth pasting.
-    "fleet-index.md": ("M1 built and covered by tests/test_fleet_index.py, M2/M3 "
-                       "unbuilt; no fenced receipts by construction -- promote "
-                       "when M2 ships."),
+    # fleet-index.md was UNENFORCED here while it specced unbuilt behaviour --
+    # `fleet index` did not exist, so there was nothing to re-execute, and the
+    # entry's own reason string was flagged in that spec's §16 as something that
+    # would rot the moment anything built. It did. M1's shard layer and M2's
+    # worker-facing surface shipped 2026-07-26/27, the §11.7 grant-execution
+    # experiment was landed as a receipt, and the spec moved to the ENFORCED set
+    # above (RECEIPT_FLOOR). Promoting rather than rewording is the point: a
+    # document that gains receipts and keeps its exclusion proves nothing.
     # Drafting-stage design doc (2026-07-30): its measured claims (the FLEET_HOME
     # resolution shape, the hook _fleet_home duplicates, the founding-incident
     # timestamps) are cited by symbol/path in prose, not pasted transcripts, and

@@ -1,0 +1,56 @@
+fleet-index.md §11.7 item 1 — the grant-execution experiment, 2026-07-27
+=======================================================================
+
+WHAT THIS FILE IS. A committed, immutable excerpt of the transcript that
+`docs/specs/fleet-index.md` §11.7 item 1 cites as its execution receipt. The
+experiment itself ran once, on one machine, at one moment; this file is the
+record of it, not a reproduction of it.
+
+WHY IT IS A FILE OF ITS OWN, AND NOT A POINTER. The §11.7 receipt used to
+`sed` a LIVE ABSOLUTE PATH into the supervisor's working journal under the
+fleet home. Three things were wrong with that, and only the third is obvious:
+the path was outside any materialised tree, so the receipt's `# at <sha>` pin
+constrained nothing; the cited text had never been committed anywhere, so the
+receipt reproduced only by accident and was one `git stash` from evaporating;
+and the file it read is the supervisor's append-only working file, rewritten
+by every checkpoint, so even committing it would have left a spec receipt
+resting on content that churns by design (and would conflict with `main` on
+every future merge, on a file where both sides append at the end).
+
+An excerpt committed next to the spec that cites it fixes all three: it is in
+the tree the verifier materialises, it is immutable, and changing it is a
+reviewable diff rather than an invisible drift.
+
+WHAT IT PROVES, AND WHAT IT DOES NOT. It proves the MECHANISM: an `allow`
+entry in the rendered `state/worker-settings.json` that `dispatch_bg` passes
+via `--settings` reaches a default-spawned `dontask` `--bg` worker with no
+per-worktree `.claude/` present, for a multi-token `Bash(<prefix>:*)` grant.
+It does NOT execute the literal string `Bash(fleet q:*)` — `fleet q` did not
+exist when the experiment ran, so the SHAPE was what was measured, not the
+subcommand. It is also a single machine at a single `claude --version`, the
+standing caveat every vendor-behaviour fact in this repo carries
+(`docs/specs/native-substrate.md`).
+
+Committing the excerpt does not make the experiment re-runnable. It makes the
+CITATION verifiable, which is the property the receipt convention is actually
+about.
+
+PROVENANCE. Supervisor checkpoint G-B, incarnation `inc-20260727T003737Z-0ccd`,
+session `3fb1127d-1514-4e5d-8830-e42d7fec508b`, timestamped
+`2026-07-27T00:59:55Z`. Two arms, one variable — same task file, same cwd,
+same mode (`dontask`), same model, same everything except the grant. The cwd
+was a scratch directory with no `.claude/` in it at all, confirmed by `ls -a`
+showing only `./` and `../`. The grant was
+`"permissions": {"allow": ["Bash(py -3.13 -c:*)"]}` and the probed command was
+`py -3.13 -c "print('PROBE-OK-7748')"`.
+
+TRANSCRIPT EXCERPT (verbatim)
+-----------------------------
+
+  ARM B, CONTROL (no grant anywhere), worker probe-nogrant, dontask, sonnet:
+    PROBE-DENIED Permission to use Bash has been denied because Claude Code is running in don't ask mode.
+
+  ARM A, TREATMENT (one subcommand-scoped allow added to state/worker-settings.json only), worker probe-grant, dontask, sonnet:
+    PROBE-EXECUTED PROBE-OK-7748
+
+END OF EXCERPT
