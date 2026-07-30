@@ -1230,15 +1230,40 @@ def restore_mailbox_claim(claim: Path | None) -> None:
 
 
 def append_mailbox(sid: str, message: str) -> None:
-    """Append `message` to mailbox/<sid>.md (SPEC §7): a small
-    open(..., "a") write, matching the hooks' own append discipline exactly
-    -- multiple sends accumulate in one file and the next claim drains all
-    of them (`fleet send` while working/attached, SPEC §5 send row)."""
+    """Append `message` to mailbox/<sid>.md (SPEC §7): multiple sends
+    accumulate in one file and the next claim drains all of them (`fleet
+    send` while working/attached, SPEC §5 send row).
+
+    Written through `_atomic_append_bytes` for exactly the reason
+    `append_event` is (ULTRAREVIEW-2026-07-30 P1-5). This was a buffered
+    `open(..., "a")` until then, justified by a docstring claiming it
+    "matches the hooks' own append discipline" -- a precedent that does not
+    exist: no hook ever appends to a mailbox (`posttooluse_mailbox.py` and
+    `stop_mailbox.py` only os.replace-claim and read it; their appends
+    target state/hook-errors.log). The mailbox has genuinely concurrent
+    writers -- two of `_cmd_send_native`'s three call sites append while
+    holding `fleet_lock`, the fork-steer one deliberately appends after
+    releasing it -- so the lock serialises nothing here, and the CRT's
+    O_APPEND emulation drops whole messages with no error at all. Measured
+    on this machine, 4 threads x 250 mailbox-shaped records: 961-969 of 1000
+    survived per run, zero exceptions; the same test through this primitive
+    keeps 1000/1000. The lost record is an operator instruction, and both
+    `fleet send` invocations still print "message queued" and exit 0.
+
+    Atomicity, not the lock, is the fix: every message lands whole, so the
+    unlocked fork-steer append stays where the F6 pattern needs it.
+
+    errors="replace" (incident `outcome-surrogate`, 2026-07-28): `message`
+    comes straight from argv, which Windows decodes with surrogatepass, so a
+    lone surrogate used to raise UnicodeEncodeError -- and at the fork-steer
+    site that raise lands OUTSIDE `fleet_lock` and outside the rollback's
+    try block, stranding the worker pre-claimed `working`. Same ruling as
+    postcompact_journal's landmark write: the write always happens, the
+    offending character is sanitised one-for-one, nothing is truncated."""
     d = mailbox_dir()
     d.mkdir(parents=True, exist_ok=True)
     path = d / f"{sid}.md"
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(message.rstrip("\n") + "\n\n")
+    _atomic_append_bytes(path, (message.rstrip("\n") + "\n\n").encode("utf-8", "replace"))
 
 
 _PREAMBLE_TEMPLATE = """You are fleet worker `{name}` in `{cwd}`.
@@ -10040,16 +10065,20 @@ def _migrate_residual_mailbox(old_sid: str, new_sid: str) -> None:
     follow the worker, not be stranded under a sid the registry will never
     reference again. Best-effort: any OSError here must never fail a steer
     commit that has already succeeded, and a missing/empty old mailbox is
-    the overwhelmingly common case (no-op)."""
+    the overwhelmingly common case (no-op).
+
+    The carry goes through `append_mailbox` rather than re-implementing the
+    append (ULTRAREVIEW-2026-07-30 P1-5): this had its own buffered
+    open(..., "a"), and the destination mailbox is precisely the file a
+    concurrent sender may be appending to at this instant -- the whole
+    premise of this function. One appender, one atomic primitive."""
     old_path = mailbox_dir() / f"{old_sid}.md"
     try:
         if not old_path.exists():
             return
         content = old_path.read_text(encoding="utf-8", errors="replace")
         if content.strip():
-            new_path = mailbox_dir() / f"{new_sid}.md"
-            with open(new_path, "a", encoding="utf-8") as f:
-                f.write(content.rstrip("\n") + "\n\n")
+            append_mailbox(new_sid, content)
         old_path.unlink()
     except OSError:
         pass
@@ -12174,8 +12203,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :5488, :5945, :10025,
-    :15106), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :5513, :5970, :10050,
+    :15135), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -12865,8 +12894,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:5488, :5945, :10025,
-    #     :15106) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:5513, :5970, :10050,
+    #     :15135) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
