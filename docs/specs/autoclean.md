@@ -49,10 +49,53 @@ Scheduler mechanics live in the platform adapter (`autoclean_task_install/query/
 > are deleted, not stubbed. **Callers are now two, both of them alive fleet tiers** (supervisor beat,
 > interface startup ritual), plus an operator by hand — still one code path. D1's *rejection of the
 > opportunistic piggyback* stands unamended and is why the beat is an explicit step in a ritual rather
-> than a hook riding on other verbs. `fleet autoclean` remains structurally exempt from §7's claim
-> gate, which is now load-bearing rather than incidental: both new callers are sessions WITH a session
-> id, so an exemption that had rested on "the scheduled task has no sid" would have silently gated the
-> sweep behind the very claim it exists to clean up around.
+> than a hook riding on other verbs. `fleet autoclean` remains exempt from §7's claim gate, which is
+> now load-bearing rather than incidental: both new callers are sessions WITH a session id, so an
+> exemption that had rested on "the scheduled task has no sid" would have silently gated the sweep
+> behind the very claim it exists to clean up around.
+>
+> **CORRECTION 2026-07-28 (`fix/autoclean-archive-gate`) — it did, for 24 hours.** The paragraph above
+> called the exemption "structural" and stopped there. `cmd_autoclean` genuinely does not call
+> `_supervisor_gate` — but **the exemption is not transitive**, and tier 1 delegates to `cmd_archive`,
+> which does. Measured one hour after the merge, from a supervisor beat holding a fresh claim (the
+> observation is quoted at column 0 below, since it is a live-fleet observation and not repo-derived).
+>
+> The named remedy was unreachable: `fleet autoclean` has no `--nonce` flag. **The fix is a `--nonce`
+> on nothing and an explicit parameter instead** — `cmd_archive(..., as_autoclean_tier=True)` — because
+> a nonce could only ever have fixed the supervisor caller: the interface tier's startup ritual holds
+> no nonce by design (claim-nonce §7.1, the same seam that forced the `send`-to-the-holder carve-out).
+> The `archive` VERB stays gated unchanged, so §7's arming is untouched. Pinned by
+> `tests/test_autoclean.py::TestTheSweepUnderAHeldClaim`, which is the first autoclean test to run
+> **with a claim held** — the condition was never in the test, which is the whole reason a check that
+> read `cmd_autoclean`'s source could report the sweep exempt while the sweep was refused.
+>
+> **Open for the operator, not decided here:** §7 ratified this exemption on the accounting that *"the
+> `autoclean` scheduled task has no `CLAUDE_CODE_SESSION_ID`, so a caller-identity gate can never fire
+> on it."* That accounting is void — both callers have a sid — so the exempt surface is now reachable
+> by any sid-bearing body, a divergent one included. That widening arrived with the timer's
+> retirement (tiers 2 and 3 were already reachable that way); this correction adds tier 1 to the same
+> set rather than creating it.
+
+**The observation is deliberately NOT pasted here as a receipt, and that is itself a finding.**
+`tools/verify_receipts.py` RE-EXECUTES every command in a classified block. A first draft of this
+correction pasted the `fleet autoclean` transcript verbatim; the harness duly ran the mutating verb
+three times against the machine's live fleet home (`~/.claude/fleet-home`) and archived six real
+worker records. **A receipt must never quote a mutating verb** — see the note appended to §17 of
+`docs/SPEC.md`. What the live run reported, quoted as prose so nothing executes it:
+
+- `fleet autoclean`, from a beat holding `inc-20260727T184603Z-f054`, printed
+  *"autoclean: archive tier failed: archive: refusing -- a supervisor claim ... is held and fresh, and
+  this call did not prove continuity on it (claim-nonce §7)"*, then
+  *"husks_removed=0 husks_deferred=0 tombstones_expired=0 errors=1"*. The event it wrote survives in
+  `state/events.jsonl` as the `autoclean_run` record at `2026-07-27T19:07:03Z`, which is the durable
+  form of this evidence and needs no paste.
+- `fleet doctor` reported *"[PASS] autoclean: last run 0.0h ago; last run reported 1 error(s):
+  archive: SupervisorClaimGateError ..."* — the D4 amendment's `errors`-array pass-through doing
+  exactly its job, and the reason this was caught in one run instead of in eighteen hours.
+
+The reproducible forms live in the suite, where they belong:
+`tests/test_autoclean.py::TestTheSweepUnderAHeldClaim` (the refusal, against a synthetic fresh claim)
+and `::test_a_real_tier_failure_still_reaches_the_stamp_and_the_doctor_note` (the doctor note).
 
 <!-- ac-tiers -->
 **D2 — three tiers; only the reversible two are default-on.**
