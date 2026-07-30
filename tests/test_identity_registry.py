@@ -395,6 +395,42 @@ class TestSiteACeiling:
         self._occ(monkeypatch, 400000)
         assert fleet._ceiling_refuses_dispatch("spawn") is None
 
+    @pytest.mark.parametrize("blank", ["", " ", "\t", "\n", "  \t\n "])
+    def test_a_BLANK_FLEET_WORKER_exempts_exactly_like_an_absent_one(
+            self, id_home, monkeypatch, blank):
+        """The equivalence class the exemption actually keys on, pinned.
+
+        `:2620` reads `not (os.environ.get("FLEET_WORKER") or "").strip()`, so
+        the exemption is granted to `""`, `" "`, `"\\t"`, `"\\n"` exactly as it
+        is to unset. The twin site `_doctor_check_identity_witness` already has
+        this pinned (`test_a_blanked_witness_reddens_it_too`); the CEILING is
+        the site where the collapse has a safety consequence, and it had no pin.
+
+        This is a CHARACTERIZATION pin, not an endorsement. ND4(c) is ratified
+        and says "absent", and ND1 forbids preventing the self-inflicted escape
+        -- so this asserts what the ceiling does today, and exists so that any
+        future re-grounding of ND4(c) has to change it deliberately rather than
+        discover the blank case in production.
+
+        The scenario is refusable by construction: same registered, resolved,
+        over-ceiling claim-holder as
+        `test_a_resolved_holder_over_the_ceiling_is_refused`, which is asserted
+        inline below rather than assumed -- a control that is not verified is
+        worse than no control."""
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-holder")
+        fleet.write_incarnation(_held("sid-holder"))
+        _registry({"sup|inc-x|boot": _rec("sid-holder", status="working")})
+        self._occ(monkeypatch, 400000)
+        # Control: a NON-blank stamp on this exact scenario must refuse. If it
+        # does not, the blank assertion below proves nothing.
+        monkeypatch.setenv("FLEET_WORKER", "sup|inc-x|boot")
+        assert fleet._ceiling_refuses_dispatch("spawn") is not None, (
+            "control failed: this scenario is not refusable, so the blank-stamp "
+            "assertion would be vacuous")
+        monkeypatch.setenv("FLEET_WORKER", blank)
+        assert fleet._ceiling_refuses_dispatch("spawn") is None, (
+            f"a blank stamp {blank!r} did not exempt like an absent one")
+
     def test_a_donated_FLEET_WORKER_costs_a_session_the_structural_exemption(
             self, id_home, monkeypatch):
         """The accepted cost of ND4(c), inverted from its predecessor
