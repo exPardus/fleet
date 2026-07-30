@@ -1137,3 +1137,59 @@ the first was offered as the second.** The distance between them was one functio
   Open`"*. The file's header forbids exactly this (*"neither the manager nor any worker may tick a
   box"*). **An author cannot discharge the gate its own work raised, and the tell is a doc that
   contradicts its own sibling edit in the same dirty tree.**
+
+## 2026-07-30 — pin tier re-run at claude 2.1.220: green, and the stamp that lied by being historical {#2026-07-30-pin220}
+
+`tests/integration/test_native_pin.py` was re-run at the live `claude --version` of
+**`2.1.220 (Claude Code)`** on both interpreters, serially, from a `--bg` worker vantage:
+**6/6 PASSED on `py -3.13` (121.86s) and 6/6 on `py -3.10` (120.36s), zero skips on either.**
+No pin was RED, so nothing was fixed and nothing was weakened. The 2.1.212 native contract
+holds at 2.1.220: the closed 9-key roster schema drew no drift, `claude rm` removed every
+archived sid from `--all`, the rm taxonomy is still rc=1 + `no job matching`, and G2b
+fork-steer / G10 no-Stop-hook-on-external-stop / the Stop-hook outcome record all stand.
+
+**THE lesson: a dated historical stamp is not a current-state stamp, and this project's
+current-state pin stamp is invisible from the repo.** The lane that produced this entry was
+commissioned on the premise *"the vendor moved and nobody has looked — the pin tier has not
+been run at 2.1.220."* **The premise was false.** The tier had already been run green at
+2.1.220 on 2026-07-26 and `record_pin_pass('2.1.220')` called
+(`supervisor/JOURNAL.md:825`; `state/pin-pass.json` reads
+`{"claude_version": "2.1.220", "passed_at": "2026-07-26T17:03:45Z"}`). The evidence offered
+for the premise was `knowledge/INDEX.md`'s *"Pin tier 6/6 green + stamped at claude
+2.1.218"* — which is **correct prose inside the dated `#2026-07-23-three-tier-ratified`
+entry**, describing what *that* campaign did. It was read as present tense.
+
+- **The structural cause is that the only authoritative pin stamp lives in gitignored machine
+  state.** `state/pin-pass.json` is the record `fleet doctor`'s `pin-version` row reads, and
+  `state/` is gitignored — so **no reader of the repository can answer "what version is the
+  native contract verified at" from the repository.** Every git-tracked mention of a pin
+  version is by construction a historical one. Given that, mistaking history for state is not
+  a careless read; it is the only read the repo affords.
+- **The remedy is NOT to edit the dated line.** Rewriting `2.1.218` to `2.1.220` inside a
+  2026-07-23 entry falsifies a lesson to fix a lookup problem, and the lesson is the more
+  load-bearing artifact. A dated entry is a record of an act, and *an append is the only
+  honest edit to a record of an act.*
+- **The vendor-bump gate itself worked.** `doctor` FAILed with
+  `[FAIL] pin-version: claude 2.1.220 != 2.1.218 at last pin pass (2026-07-23)`, a supervisor
+  saw it, ran the tier, and stamped only after. The machinery caught the bump on schedule; the
+  **documentation surface** is what misled a later reader. *A mechanism can be working while
+  the surface describing it is the thing that generates false work.*
+- **A green pin tier does not clear the doctor row, by design** — step 6 stamps the suite's
+  throwaway temp `FLEET_HOME`, so `record_pin_pass` against the real home stays a separate
+  deliberate act. Correct, and worth restating every time: it means someone must have actually
+  run it. Not re-stamped by this run, because 2.1.220 was already stamped and the version has
+  not moved — re-stamping would have refreshed a timestamp, not recorded a fact.
+- **A `--bg` worker still cannot observe the dead-daemon path** (M-D's probe-context lesson,
+  4th restatement). Zero skips is a *positive* result for the live-daemon branch and says
+  nothing about the dead-daemon one: `_NATIVE_CLI_TRANSIENT_RE`'s "background service may be
+  restarting" string remains **uncaptured** (M4, now three waves unobserved), and the only
+  vantage that could capture it is an interactive session on a quiet machine. Reaching it from
+  a dispatched worker would require a machine-wide daemon stop across ~70 live worktrees, so
+  it was handed up rather than forced.
+- Version-drift receipt re-confirmed as designed: `docs/specs/native-substrate.md:246`
+  (`# volatile`, pinned `@ 2d58eba`) reports `2.1.207` expected vs `2.1.220` actual as a
+  **WARN, exit 0** — `verify_receipts.py:684` routes volatile drift to `warnings`, never
+  `failures`. `--self-test --strict` green on both seed classes (paraphrase caught, extraction
+  evasion reported); 5/6 reproduce exactly, 0 unclassified.
+- Floors, this worktree, both interpreters: **2970 passed / 14 skipped, 2984 collected** —
+  identical on 3.13 and 3.10, and `passed + skipped == collected` on both.
