@@ -4145,6 +4145,19 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
         # completion scan can also find the Stop hook's sid-keyed
         # fallback file, not just a name-keyed one that production never
         # produces during this exact race (see _fast_completion_sid).
+        #
+        # W16 P0-2: NO `exclude_sids` here, deliberately. `record` was just
+        # minted by `new_worker_record(None, ...)`, so its `retired_sids` is
+        # `[]` BY CONSTRUCTION -- passing it would be an unfalsifiable
+        # decoration that no test could ever turn red. What actually protects
+        # this call site is P0-2 filters (1)/(3) inside the helper, which is
+        # what closes the residual hole here: `validate_name` refuses an
+        # existing name, so a stale `outcomes/<name>.jsonl` can only survive
+        # a name whose registry entry is gone -- `fleet clean` and `archive`
+        # both sweep/move that file, but BEST-EFFORT (a failed unlink still
+        # removes the entry). So this site is safe by ACCIDENT of those two
+        # sweeps, never by construction; the record-level short-id filter
+        # makes it safe by construction.
         fast_sid = _fast_completion_sid(args.name, pre_claim_at,
                                         short_id=getattr(exc, "short_id", None))
         if fast_sid is not None:
@@ -5805,7 +5818,15 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
         # the already-composed/drained prompt) whenever join expiry raised
         # WITH a short_id, so finalize (not restore) the claim on the found
         # branch, mirroring the try block's own success path.
-        fast_sid = _fast_completion_sid(name, pre_claim_at, short_id=getattr(exc, "short_id", None))
+        # W16 P0-2: pass the witness this frame ALREADY HOLDS -- the record's
+        # own retired set, written at `new_record["retired_sids"]` above and
+        # therefore known here without a re-read. Without it the old
+        # session's farewell result (name-keyed, inside the backward slack
+        # window) was an eligible "fast completion" and this handler re-bound
+        # the record to the sid it had just retired.
+        fast_sid = _fast_completion_sid(name, pre_claim_at,
+                                        short_id=getattr(exc, "short_id", None),
+                                        exclude_sids=new_record["retired_sids"])
         if fast_sid is not None:
             finalize_mailbox_claim(claim)
             with fleet_lock():
@@ -9858,7 +9879,8 @@ def _migrate_residual_mailbox(old_sid: str, new_sid: str) -> None:
         pass
 
 
-def _fast_completion_sid(name: str, since_iso: str, short_id: str | None = None):
+def _fast_completion_sid(name: str, since_iso: str, short_id: str | None = None,
+                         exclude_sids=()):
     """T4 fix wave (Critical C1): cmd_spawn's fast-completion check on a
     NativeDispatchError, keeping dispatch_bg opaque (no message parsing)
     per the brief's own suggested alternative -- but the exception now
@@ -9885,12 +9907,43 @@ def _fast_completion_sid(name: str, since_iso: str, short_id: str | None = None)
        sid always startswith its own short id (the short id IS a prefix
        of the sid, per _parse_bg_short_id/_join_roster_by_short_id), so
        this glob is the only way to locate that file without already
-       knowing the sid -- which is the whole point of scanning for it."""
+       knowing the sid -- which is the whole point of scanning for it.
+
+    W16 P0-2 (ULTRAREVIEW-2026-07-30, critical): candidacy used to rest on
+    `kind` and freshness ALONE, and the freshness window reaches BACKWARD
+    (`- OUTCOME_FRESH_SLACK_SECONDS`) past the caller's pre-claim. Since
+    `outcomes/<name>.jsonl` is keyed by NAME, is never truncated by a
+    respawn, and is where the Stop hook writes the farewell record of every
+    ESTABLISHED session (its `_resolve_name` scan matches once the sid is
+    stamped), the previous session's own last result was an eligible
+    "fast completion" for the session that had just retired it -- so a
+    respawn silently re-bound the record to a sid already sitting in its
+    own `retired_sids`, printed success, and left the real new session
+    (if any) an untracked orphan. Three IDENTITY-grounded filters close it;
+    none of them is a timing or configuration tweak, and each fails
+    independently, so each is pinned separately in TestFastCompletionSid:
+
+    (1) `short_id` is enforced on the RECORD in the name-keyed scan, not
+        only on the FILENAME in the sid-keyed one. A record about some other
+        session is not evidence about the session we just dispatched.
+    (2) `exclude_sids` -- sids the CALLER already knows are retired for this
+        record. Passed EXPLICITLY at the frame (the respawn path has
+        `prior_retired + [old_sid]` in hand before it ever calls here); this
+        function never re-reads the registry to discover them, so the guard
+        cannot drift out of step with the write that retired them.
+    (3) No `short_id` at all means `NativeDispatchError` was raised by one of
+        its pre-dispatch causes (bad name, missing exe, task-file write,
+        dispatch subprocess failure -- see its docstring): nothing was ever
+        launched, so nothing can have fast-completed, and every match on
+        that path is necessarily somebody else's record. Return None."""
+    if not short_id:
+        return None
     try:
         since = _parse_iso(since_iso)
     except (ValueError, TypeError):
         return None
     threshold = since - timedelta(seconds=OUTCOME_FRESH_SLACK_SECONDS)
+    excluded = {str(s) for s in (exclude_sids or ())}
     best_sid, best_ts = None, None
 
     def _consider(rec):
@@ -9901,12 +9954,21 @@ def _fast_completion_sid(name: str, since_iso: str, short_id: str | None = None)
         # Only a Stop-hook-written kind=="result" record counts.
         if rec.get("kind") != "result":
             return
+        sid = rec.get("session_id")
+        if not sid:
+            return
+        # P0-2 filters (1) and (2). Both are properties of the RECORD, so
+        # both apply to BOTH sources: a retired sid's own sid-keyed file
+        # prefix-matches its own short id, which is exactly why the
+        # filename check cannot substitute for either of these.
+        if str(sid) in excluded or not str(sid).startswith(short_id):
+            return
         try:
             ts = _parse_iso(str(rec.get("ts", "")))
         except (ValueError, TypeError):
             return
-        if ts >= threshold and rec.get("session_id") and (best_ts is None or ts > best_ts):
-            best_sid, best_ts = rec.get("session_id"), ts
+        if ts >= threshold and (best_ts is None or ts > best_ts):
+            best_sid, best_ts = sid, ts
 
     for rec in read_outcomes(name):
         _consider(rec)
@@ -11899,8 +11961,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :5317, :5774, :9828,
-    :14713), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :5330, :5787, :9849,
+    :14780), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -12590,8 +12652,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:5317, :5774, :9828,
-    #     :14713) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:5330, :5787, :9849,
+    #     :14780) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -14082,6 +14144,11 @@ def _dispatch_supervisor_body(campaign, mode, model, *, run=subprocess.run,
             run=run, which=which, sleep=sleep, clock=clock,
         )
     except NativeDispatchError as exc:
+        # W16 P0-2: no `exclude_sids`, same reasoning as cmd_spawn's -- and
+        # stronger here: the gen-0 name is `sup|<minted launch id>|boot` and
+        # 13912 above refuses a collision, so no PRIOR session ever bore this
+        # name and no outcome file for it can pre-exist. Filters (1)/(3) in
+        # the helper cover it regardless.
         fast_sid = _fast_completion_sid(name, pre_claim_at,
                                         short_id=getattr(exc, "short_id", None))
         if fast_sid is not None:
