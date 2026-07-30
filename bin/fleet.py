@@ -587,6 +587,60 @@ SUPERVISOR_BODY_NAME = "supervisor"
 RESERVED_NAMES = frozenset({SUPERVISOR_BODY_NAME})
 
 
+# P1-8 (ULTRAREVIEW 2026-07-30): the Win32 reserved CHARACTER DEVICE names.
+# Win32 resolves these in ANY directory and with ANY extension, so
+# `state/tasks/nul.md` IS the NUL device -- and every on-disk artifact a
+# worker owns is built by interpolating its name into a stem
+# (`task_file_path`, `journal_file_path`, `outcome_path`; `name_fs_stem` maps
+# `|`->`~` and nothing else). Measured on this machine (py 3.13, Win10
+# 19045), writing `<dir>/<name>.md`:
+#
+#   nul   write OK, exists() True, read back '', listdir shows nothing
+#   con   write OK, exists() True, read BLOCKS on console input
+#   aux / prn / com1 / lpt1   FileNotFoundError [Errno 2]
+#
+# `nul`/`con` are the dangerous half: `dispatch_bg`'s task write is guarded
+# only by `except OSError`, so the write REPORTS SUCCESS, no rollback fires,
+# and the worker is launched against an empty task file -- an unconstrained
+# session with zero instructions under the default campaign mode. `con` also
+# hangs the MANAGER: `compose_prompt`'s respawn arm does
+# `journal_path.exists()` (True for con.md with nothing ever written) then
+# `read_text()`, which blocks on the console device.
+#
+# The other 18 fail loudly today and are refused anyway: this is a name-SHAPE
+# rule like the F6 uuid refusal, and a half-rule ("only the two that vanish
+# silently on this Windows build") leaves a split that depends on the OS
+# version, the filesystem and the path prefix -- for a set of names that can
+# never work on the platform this tool primarily runs on.
+#
+# EXACT stem matching, never a prefix test: this is the choke point for every
+# worker name, so `console`, `connector`, `nulls`, `com0`, `com10`,
+# `auxiliary` and `prn-1` all stay legal.
+_WIN32_DEVICE_STEMS = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{d}" for d in range(1, 10)}
+    | {f"lpt{d}" for d in range(1, 10)})
+
+
+def _is_win32_device_name(name) -> bool:
+    """True if `name` denotes a Win32 reserved character device.
+
+    Unconditional, like every other name-shape refusal here -- deliberately
+    NOT a per-OS branch (SPEC §14 confines every one of those to the PLATFORM
+    adapter, enforced by a source-scan test). A name minted on POSIX is read
+    back on Windows by the same registry, and a name that is unusable on the
+    primary platform should not be representable on any of them.
+
+    Normalises the way Win32 does when it resolves a path component: the
+    extension is ignored (`nul.md` is NUL) and trailing dots/spaces are
+    stripped (`nul.`, `nul ` are NUL). `validate_name` can never see those
+    shapes -- NAME_RE forbids `.`, uppercase and whitespace -- but
+    `dispatch_bg`'s defence-in-depth guard reuses this predicate, so it
+    answers about the path component rather than about NAME_RE's leftovers."""
+    stem = str(name).strip().rstrip(". ").split(".", 1)[0].strip().lower()
+    return stem in _WIN32_DEVICE_STEMS
+
+
 def validate_name(name: str, existing=()) -> None:
     """Raise ValueError unless name matches [a-z0-9-]+ and isn't in `existing`.
 
@@ -612,6 +666,13 @@ def validate_name(name: str, existing=()) -> None:
         raise ValueError(
             f"invalid worker name {name!r}: uuid-shaped names are reserved "
             f"for session ids (F6)")
+    if _is_win32_device_name(name):
+        raise ValueError(
+            f"invalid worker name {name!r}: Win32 reserves this as a device "
+            f"name, and every artifact this worker owns is a file named after "
+            f"it -- state/tasks/{name}.md IS the {name.upper()} device, so its "
+            f"task file, journal and outcome records would vanish into it "
+            f"(P1-8). Reserved: con, prn, aux, nul, com1-com9, lpt1-lpt9")
     if name in RESERVED_NAMES:
         raise ValueError(
             f"invalid worker name {name!r}: reserved as the supervisor's "
@@ -10397,6 +10458,15 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
             f"invalid worker name: {name!r} (must match {NAME_RE.pattern} or "
             f"the supervisor family {_SUPERVISOR_SHAPED_WORKER_RE.pattern}; "
             f"uuid-shaped names are reserved for session ids, F6)")
+    # P1-8: a Win32 device name passes every check above -- `nul` matches
+    # NAME_RE and is not sid-shaped -- and escapes tasks_dir() in the one way
+    # the guard below cannot detect afterwards: the write into the device
+    # SUCCEEDS. Same predicate as `validate_name`'s refusal, held here for the
+    # same reason the rest of this guard is: a future direct caller.
+    if _is_win32_device_name(name):
+        raise NativeDispatchError(
+            f"invalid worker name: {name!r} (Win32 reserved device name -- the "
+            f"task file write would report success and vanish, P1-8)")
     if roster_fetch is None:
         roster_fetch = lambda: _fetch_agents_roster(which=which, run=run)  # noqa: E731
     try:
@@ -12174,8 +12244,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :5488, :5945, :10025,
-    :15106), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :5549, :6006, :10086,
+    :15176), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -12865,8 +12935,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:5488, :5945, :10025,
-    #     :15106) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:5549, :6006, :10086,
+    #     :15176) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
