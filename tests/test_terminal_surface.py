@@ -828,8 +828,27 @@ class TestCommandFiles:
     # decided the dead workers were untidy, and -- fully within permissions --
     # killed a working worker and cleaned five journals. 2026-07-09, real
     # data loss. The grant must name the subcommand, never the whole CLI.
+    #
+    # The last four entries landed 2026-07-31 (multi-fleet slice 0), from the
+    # operator's 2026-07-30 ratification making "`doctor --repair` absent from
+    # every destructive enumeration" a slice condition. The report named
+    # `doctor --repair`; the list was missing FOUR of the five verbs
+    # `docs/specs/multi-fleet.md` §5 ratified as destructive, so fixing the
+    # reported site alone would have reproduced the miss three more times.
+    # `tests/test_round7_defect_pins.py` derives that comparison every run, so
+    # this list cannot fall behind the ratified table again.
+    #
+    # `doctor --repair`, not bare `doctor`: the flag is the destructive
+    # capability. `commands/doctor.md` legitimately grants `Bash(fleet doctor)`
+    # for the read-only invocation its own body inlines, and a bare entry would
+    # fail it for doing the right thing. This substring lint is defence in
+    # depth behind `test_read_only_grants_are_no_wider_than_the_body_invokes`,
+    # which is the derived pin and remains the primary one (see the
+    # "THE PIN IS THE PROPERTY, NOT THE STRING" note above).
     DESTRUCTIVE_VERBS = ("kill", "clean", "respawn", "interrupt", "spawn",
-                         "send", "attach", "release", "resume-limited")
+                         "send", "attach", "release", "resume-limited",
+                         "archive", "autoclean", "doctor --repair",
+                         "sup-handoff-abort")
 
     @pytest.mark.parametrize("name", sorted(READ_ONLY_COMMANDS))
     def test_read_only_grants_never_cover_the_whole_fleet_cli(self, name):
