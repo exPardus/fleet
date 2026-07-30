@@ -6593,7 +6593,38 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"({claim.get('incarnation_id', '?')}) carries no readable holder sid, so "
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
-    for wname, rec in load_registry().get("workers", {}).items():
+    # P1-6: `read_registry_no_repair`, NOT `load_registry`. This is a PRE-FLIGHT
+    # resolution that runs from `cmd_kill:6488` / `cmd_respawn:6230`, before
+    # either verb has taken `fleet.lock` -- and `load_registry` QUARANTINES a
+    # corrupt registry, i.e. RENAMES IT ASIDE, which is a write. An unlocked
+    # write races every other fleet command, and it destroys the evidence the
+    # operator needs for the fault it is about to be told about.
+    # `_registry_records_or_none`'s docstring states the boundary: *"Quarantining
+    # stays where it belongs: the lock-holding verbs."*
+    #
+    # THE REFUSAL BELOW MUST NOT BE THE ONE THAT ANSWERS A CORRUPT REGISTRY, and
+    # this is why the corrupt case is caught here rather than allowed to fall
+    # through an empty roster. "holder sid matches no registry record" is a
+    # claim about the registry's CONTENTS; made by a caller that could not read
+    # the registry, it is the same misreport class P1-6 is about, merely
+    # relocated. A MISSING registry is different and still lands there
+    # correctly: `read_registry_no_repair` keeps `load_registry`'s missing-file
+    # contract (`{"workers": {}}`), and a registry that does not exist genuinely
+    # holds no record for this sid.
+    #
+    # `hint=False` because the sentence below names `--repair` itself; the
+    # loader's generic hint would name the same flag twice in one message.
+    try:
+        _records = read_registry_no_repair(hint=False)
+    except RegistryCorruptError as exc:
+        raise SupervisorLifecycleRefusal(
+            f"{verb} supervisor: refusing -- the registry is unreadable "
+            f"({exc}), so the claim holder's record cannot be identified. A "
+            f"destructive verb never decides blind -- the same posture this "
+            f"function takes on an unreadable claim above, and the same rc. "
+            f"Nothing was renamed or written: repair it with "
+            f"`fleet doctor --repair`, then re-run.", rc=3)
+    for wname, rec in _records.get("workers", {}).items():
         if holder_sid in _record_sids(rec):
             return (wname, rec, claim)
     raise SupervisorLifecycleRefusal(
@@ -6623,8 +6654,26 @@ def _supervisor_lifecycle_target(verb, name):
     `_supervisor_husk_respawn_target` for the one thing respawn still owes it."""
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
+    # P1-6: `read_registry_no_repair` -- `load_registry` MINUS the rename, with
+    # the same missing-file contract, the same validator and the same
+    # `RegistryCorruptError`, so the arm below is unchanged. This read runs from
+    # `cmd_kill:6488` / `cmd_respawn:6230`, ahead of either verb's `fleet_lock`,
+    # and quarantining here did two things: it wrote without the lock, and it
+    # STOLE the quarantine from the lock-held read that was designed to perform
+    # it. `cmd_respawn:6254-6256` spells out that design -- *"resolve under the
+    # lock so a corrupt registry surfaces through load_registry's quarantine"* --
+    # and the theft is what falsified it: by the time the lock-held read ran the
+    # file was ABSENT rather than corrupt, so `{"workers": {}}` came back and the
+    # operator was told `unknown worker` about a worker that was in the registry.
+    #
+    # None IS THE RIGHT ANSWER ON AN UNREADABLE REGISTRY, and it is not a
+    # proceed-on-empty shrug: returning None means "not the claim holder, stay on
+    # the ordinary worker path", and the very next thing on that path is the
+    # LOCK-HELD `load_registry` which quarantines and reports the corruption
+    # accurately. The verb still refuses; the refusal simply comes from the site
+    # entitled to make it.
     try:
-        rec = load_registry().get("workers", {}).get(name)
+        rec = read_registry_no_repair().get("workers", {}).get(name)
     except RegistryCorruptError:
         return None
     if rec is None:
@@ -6756,9 +6805,21 @@ def _refetch_holder_record(name, fallback):
     silently returned the PRE-STEER SNAPSHOT on failure: the exact value CRIT-1
     had just proved dangerous. Two reachable ways to get there:
 
-      * the registry is corrupt -- `load_registry` QUARANTINES and
+      * the registry is unreadable -- the loader raises and the record cannot
+        be seen at all.
+
+        THIS BULLET USED TO READ *"`load_registry` QUARANTINES and
         reinitialises it, so the read succeeds against an EMPTY registry and
-        the record simply is not there;
+        the record simply is not there"*, and it was wrong twice over (P1-6).
+        `load_registry` RAISES on the corrupt read -- it never returns the
+        empty registry it just created -- so the described path was the
+        `except` arm below, not a successful read; and the rename it named was
+        an UNLOCKED WRITE from a mutating verb (`_cmd_kill_supervisor` and
+        `_cmd_respawn_supervisor`, neither under `fleet_lock`), destroying
+        the operator's `state/fleet.json` on a re-fetch whose whole job is to
+        find out what is still true. The read is now
+        `read_registry_no_repair`: identical contract, identical exception, no
+        rename;
       * the record vanished mid-choreography -- arm 1 releases the claim, which
         drops the §7.2 gate-0 protection, after which `autoclean`/`clean` may
         legitimately remove a dead-looking record.
@@ -6774,7 +6835,7 @@ def _refetch_holder_record(name, fallback):
     terminal line), respawn halts before the successor dispatch decision -- the
     B6 gate cannot pass on state nobody can verify."""
     try:
-        rec = load_registry().get("workers", {}).get(name)
+        rec = read_registry_no_repair().get("workers", {}).get(name)
     except RegistryCorruptError:
         return (fallback, False)
     if not isinstance(rec, dict):
@@ -12465,8 +12526,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :5630, :6087, :10303,
-    :15397), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :5630, :6087, :10364,
+    :15458), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -13156,8 +13217,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:5630, :6087, :10303,
-    #     :15397) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:5630, :6087, :10364,
+    #     :15458) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
