@@ -1190,6 +1190,40 @@ class TestHomeResolution:
         assert not hasattr(fleet, "_doctor_check_fleet_home_marker")
 
 
+class TestCmdShimDoesNotResolveOutOfTheCurrentDirectory:
+    """P1-9: `bin/fleet.cmd` invokes a bare `py`, and cmd.exe searches the
+    CURRENT DIRECTORY before PATH. Measured on this machine, from a scratch
+    directory holding a `py.cmd` of `@echo HIJACKED %*`:
+
+        cmd /c callit.cmd                       -> HIJACKED -3.13 -c "print(1)"
+        with NoDefaultCurrentDirectoryInExePath -> REAL PYTHON
+
+    That is the whole CLI hijacked before `fleet.py` -- and therefore before
+    `resolve_claude_executable`'s guard -- ever runs. The POSIX shim needs no
+    equivalent: `sh` resolves bare commands off PATH only, with no implicit
+    current-directory entry.
+    """
+
+    def test_the_opt_out_is_set_before_the_interpreter_is_invoked(self):
+        lines = [ln.strip() for ln in
+                 (REPO / "bin" / "fleet.cmd").read_text(encoding="utf-8").splitlines()
+                 if ln.strip() and not ln.strip().lower().startswith(("rem ", "@echo off"))]
+        guard = [i for i, ln in enumerate(lines)
+                 if "NoDefaultCurrentDirectoryInExePath=1" in ln.replace('"', "")]
+        invoke = [i for i, ln in enumerate(lines) if ln.startswith("py ")]
+        assert guard and invoke, lines
+        assert guard[0] < invoke[0], (
+            "the current-directory opt-out must be set BEFORE the bare `py` "
+            f"line it protects: {lines}")
+
+    def test_the_posix_shim_still_execs_run_py_sh(self):
+        # The guard is cmd.exe-specific; pin that it was not copied into the
+        # POSIX entry point as a cargo-culted `export`.
+        text = (REPO / "bin" / "fleet").read_text(encoding="utf-8")
+        assert "NoDefaultCurrentDirectoryInExePath" not in text
+        assert 'exec sh "$here/hooks/run_py.sh"' in text
+
+
 class TestKnowledgeCommand:
     """`/fleet` inlines `!`fleet knowledge``. It used to inline bash parameter
     expansion, which a PowerShell-backed inline exec printed as garbage."""
