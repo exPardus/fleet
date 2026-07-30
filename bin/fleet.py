@@ -736,7 +736,7 @@ def _quarantine_artifacts() -> list:
       * `_doctor_check_autoclean` (:9628) -- a lingering artifact means the
         sweep above is refusing itself, which is how a bricked sweep reads
         green-and-fresh.
-      * `_require_claim_holder`'s §9 arm (:14051) -- the legacy upgrade mints
+      * `_require_claim_holder`'s §9 arm (:14052) -- the legacy upgrade mints
         generation 1 on bare sid equality, so it needs the registry that
         cleared it to be COMPLETE, not merely readable. See there.
 
@@ -752,7 +752,7 @@ def _quarantine_artifacts() -> list:
         §6.5 worker-turn gate, which refuses on `True` alone, so poisoning a
         HEALTHY read here would let a real worker turn through §6.5 -- closing
         the §9 door by opening a wider one. Rule 1 lives at the §9 arm instead.
-      * `_identity_abstention_note` (:13772) -- the same distinction, in words,
+      * `_identity_abstention_note` (:13773) -- the same distinction, in words,
         because the generic note names `fleet doctor` and doctor is what MADE
         this state.
 
@@ -2536,7 +2536,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     -- reads `ok` while MISSING every record the artifact holds, and the §9 arm
     read that thinness as an affirmative *"you are provably not a worker"*. The
     presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:14051`), where it costs the §6.5 gate nothing.
+    (`:14052`), where it costs the §6.5 gate nothing.
 
     An artifact can also outlive its incident by days -- `_sweep_husks` tells the
     operator to restore the file first and delete the artifact second -- so that
@@ -10210,6 +10210,7 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
         functools.partial(_doctor_check_autoclean),
         functools.partial(_doctor_check_hook_errors),
         functools.partial(_doctor_check_supervisor_claim),
+        functools.partial(_doctor_check_supervisor_wedge, which=which, run=run),
         functools.partial(_doctor_check_supervisor_handoff),
         functools.partial(_doctor_check_pending_decision),
         functools.partial(_doctor_check_tzdata),
@@ -12650,7 +12651,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     is wrong -- *"matching against `session_id` alone fails open on it
     (ND4a)"* -- for the twelve other sites that already key on the union
     (`:2288, :2332, :2593, :2743, :6676, :6993, :7260, :7474, :7561, :7784,
-    :8565, :12520`). B6 was the one
+    :8565, :12521`). B6 was the one
     roster comparison that did not, and §G-G measured it failing open exactly
     as predicted: the releaser fork-steered, so its record was eagerly
     restamped (`session_id` = post-fork, pre-fork sid pushed into
@@ -12662,8 +12663,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :5678, :6135, :10426,
-    :15686), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :5678, :6135, :10427,
+    :15687), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -13353,8 +13354,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:5678, :6135, :10426,
-    #     :15686) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:5678, :6135, :10427,
+    #     :15687) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -13387,7 +13388,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         #     file aside (`:814`), which is a write. Routing the identity read
         #     through it made `fleet send` shred the operator's evidence from a
         #     path that promises to touch nothing; the helper exists for exactly
-        #     this and names this gate as its reason (`:12448`). A `None` here
+        #     this and names this gate as its reason (`:12449`). A `None` here
         #     still fails toward the gate -- an unreadable registry is reported
         #     by its own doctor row, and is never a reason to decide blind.
         #     MERGE NOTE (2026-07-27): main and `fix/identity-registry-judges`
@@ -16150,6 +16151,96 @@ def _doctor_check_supervisor_claim():
     except Exception:  # noqa: BLE001 -- doctor row: evidence must not break health
         pass
     return ("supervisor-claim", ok, " | ".join(parts))
+
+
+def _doctor_check_supervisor_wedge(which=shutil.which, run=subprocess.run):
+    """FAIL on the released-claim wedge (2026-07-26): a `released` claim whose
+    releaser is still roster-live. In that state `fleet sup-boot` REFUSES (§6.1
+    rule 1 / B6), so the fleet has no supervisor AND cannot get one -- and every
+    other surface reports a clean, healthy release. It went unnoticed until a
+    booting body hit exit 2.
+
+    IT DOES NOT RE-IMPLEMENT THE PREDICATE. It hands the same claim, the same
+    `_roster_live_sids` set and the same registry to `supervisor_claim_decision`
+    and reports what B6 itself says, so doctor and `sup-boot` cannot disagree on
+    the same input -- a second copy of the rule is a second thing to drift, and
+    this file's own history (`fleet.py` grew two liveness heuristics once
+    already) is why. FI-5 pins it.
+
+    THE REGISTRY IS SUPPLIED, and that is a change from the version of this
+    check written on 2026-07-26 (branch `fix/b6-interface-release`, never
+    merged). Rule 1's B6 arm now keys the releaser through the sid UNION and the
+    tombstone arm (ND4a), both of which need the records; `cmd_sup_boot` passes
+    them at its own call site. Omitting them here would make this row answer the BARE
+    comparison while `sup-boot` answers the union -- doctor and boot disagreeing
+    on identical input, which is the one property this check exists to provide.
+    `_registry_records_or_none` is the read-safe accessor for it: it is NOT
+    `load_registry` and therefore never quarantines, which is what lets a
+    diagnostic row read the registry at all (D4).
+
+    FAIL, not a NOTE: the standing lesson from the daemon-wedge check is that a
+    note which does not move the verdict is invisible. `fleet doctor` exiting 0
+    on a fleet that cannot boot a supervisor is exactly the silent-failure class
+    SPEC §7 exists for.
+
+    The roster probe is tolerated HERE and nowhere else on the read surfaces:
+    doctor already shells out to `claude` in four checks, and `sup-status` -- a
+    no-probe view -- can only state the condition."""
+    claim = read_incarnation()
+    if claim is None or claim.get("state") != "released":
+        return ("supervisor-wedge", True, "no released claim -- B6 cannot be wedged")
+    inc = claim.get("incarnation_id", "?")
+    released_by = claim.get("released_by_sid")
+    # NO early return for a record naming no releaser, deliberately: v1 of this
+    # check short-circuited that here and THAT was a second copy of the
+    # predicate -- the delegation below became decorative, and FI-5's mutation
+    # (re-implementing the rule inline) passed every test. Everything past the
+    # `released` state check is decided by `supervisor_claim_decision` and
+    # nothing else. The cost is one roster probe on a record doctor could have
+    # cleared locally; the benefit is that "doctor and sup-boot cannot disagree"
+    # is a property of the code rather than of two implementations that happen
+    # to match today.
+    roster_ok, payload = _fetch_agents_roster(which=which, run=run)
+    if not roster_ok:
+        # Same direction as every other roster-dependent decision in this file:
+        # never assert a verdict blind. Not a FAIL -- an unavailable roster is
+        # an environment fault with its own doctor row, and failing here would
+        # double-count it.
+        return ("supervisor-wedge", True,
+                f"{inc} released by sid {released_by}; roster unavailable ({payload}) -- "
+                f"cannot evaluate B6, `fleet sup-boot` reports the authoritative verdict")
+    live_sids = _roster_live_sids(payload)
+    registry = _registry_records_or_none()
+    verdict, reason = supervisor_claim_decision(claim, live_sids, None, registry=registry)
+    if verdict != "refuse":
+        return ("supervisor-wedge", True,
+                f"{inc} released and `fleet sup-boot` claims fresh -- {reason}")
+    age_txt = "unknown"
+    try:
+        age = (datetime.now(timezone.utc) - _parse_iso(claim["released_at"])).total_seconds()
+        age_txt = f"{age / 3600:.1f}h" if age >= 3600 else f"{age:.0f}s"
+    except (KeyError, TypeError, ValueError):
+        pass
+    # THE REMEDY NAMES ONLY EXITS THAT EXECUTE (R2: a named remedy that always
+    # fails is a defect -- `GATE_VERBS_ACCEPTING_NONCE` holds the same doctrine
+    # for `--nonce`). The 2026-07-26 version of this row named
+    # `fleet sup-release --interface`; that flag was killed 4-0 by council the
+    # same day and does not exist, so naming it here would be the R2 defect
+    # verbatim. The sids printed are the LIVE ones, never `released_by_sid`
+    # alone (break-lens MAJ-1): on the union arm the releaser's own sid is
+    # roster-GONE by construction, so "stop session <released_by>" is a remedy
+    # that always no-ops.
+    still = ", ".join(sorted(_releaser_live_sids(claim, live_sids, registry=registry))) or "?"
+    return ("supervisor-wedge", False,
+            f"SUPERVISOR CLAIM WEDGED: {reason}. Released {age_txt} ago and the releaser has "
+            f"been live throughout, so `fleet sup-boot` exits 2 and no supervisor can be "
+            f"booted. Remedy: stop session(s) {still} -- those are the live ones, and sid "
+            f"{released_by} may already be gone; any `sup-boot` then claims fresh. A release "
+            f"performed by current code tombstones the releasing body and self-heals, so a "
+            f"wedge here means the release predates that or the record was re-armed by a "
+            f"deletion. A record whose releaser can no longer re-release it (the released "
+            f"record carries no session_id, so `sup-release` refuses) is an OPERATOR "
+            f"escalation -- claim-nonce §5.7, never a hand-edit by an agent")
 
 
 def _doctor_check_supervisor_handoff():
