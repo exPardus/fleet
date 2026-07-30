@@ -66,15 +66,31 @@ def _vanished(monkeypatch):
     _steer_then(monkeypatch, lambda name: _delete_record(name))
 
 
-def _quarantined(monkeypatch):
-    """`load_registry` QUARANTINES a corrupt file and REINITIALISES it, so
-    subsequent reads SUCCEED against an empty registry -- the record is simply
-    gone. That is the shape the re-fetch has to survive; the raising shape is
-    covered at unit level in TestRefetchReportsVerification."""
-    def _wipe(_name):
-        monkeypatch.setattr(fleet, "load_registry",
-                            lambda *a, **k: {"workers": {}, "version": 1})
-    _steer_then(monkeypatch, _wipe)
+def _unreadable(monkeypatch):
+    """The re-fetch cannot read the registry mid-choreography.
+
+    THIS PATCHED `fleet.load_registry` UNTIL P1-6 (2026-07-30), and its
+    docstring read *"`load_registry` QUARANTINES a corrupt file and
+    REINITIALISES it, so subsequent reads SUCCEED against an empty registry"*.
+    Both halves are now wrong. `load_registry` RAISES on the corrupt read
+    rather than returning the empty registry it just made, so the empty-dict
+    stub simulated a state no corrupt registry ever produces; and
+    `_refetch_holder_record` no longer calls `load_registry` at all, because
+    the rename was an UNLOCKED WRITE from a mutating verb. Left pointed at the
+    old name, this helper would have gone INERT -- the patch would apply to a
+    function the code under test no longer calls, the re-fetch would read the
+    healthy fixture registry, and `test_corrupt_registry_degrades_loudly`
+    would have gone green while testing nothing. That is this repo's recorded
+    failure mode ("a pin written against the mechanism you fixed misses the one
+    you introduced"), so the helper is re-pointed AND re-shaped: it now raises
+    the real exception from the real loader, which is what a corrupt registry
+    actually does on this path."""
+    def _break(_name):
+        def _raise(*a, **k):
+            raise fleet.RegistryCorruptError(
+                "state/fleet.json is not valid JSON -- run `fleet doctor --repair`")
+        monkeypatch.setattr(fleet, "read_registry_no_repair", _raise)
+    _steer_then(monkeypatch, _break)
 
 
 class TestRefetchReportsVerification:
@@ -95,15 +111,31 @@ class TestRefetchReportsVerification:
         assert verified is False
         assert fresh is rec                      # the snapshot, and flagged as such
 
-    def test_unverified_when_the_registry_is_corrupt(self, native_home, monkeypatch):
+    def test_unverified_when_the_registry_is_corrupt(self, native_home):
+        """P1-6: driven against a REAL corrupt `state/fleet.json` instead of a
+        `monkeypatch.setattr(fleet, "load_registry", _raise)`. The stub named
+        the loader this function no longer calls, so it would have gone inert
+        and this test would have passed against a healthy registry -- green,
+        and about nothing. A real corrupt file cannot go inert whichever loader
+        the code reaches for."""
         rec = _seed_pipe_worker()
-
-        def _raise(*a, **k):
-            raise fleet.RegistryCorruptError("quarantined")
-        monkeypatch.setattr(fleet, "load_registry", _raise)
+        fleet.registry_path().write_text("{ this is not json", encoding="utf-8")
         fresh, verified = fleet._refetch_holder_record(SUP_PIPE, rec)
         assert verified is False
         assert fresh is rec
+
+    def test_the_corrupt_read_leaves_the_operators_registry_on_disk(self, native_home):
+        """The other half of P1-6, and the reason the site moved off
+        `load_registry` at all: this re-fetch runs from
+        `_cmd_kill_supervisor`/`_cmd_respawn_supervisor`, NEITHER of which holds
+        `fleet_lock`, so the quarantine rename here was an unlocked write that
+        destroyed the evidence for the very fault it was reporting."""
+        rec = _seed_pipe_worker()
+        fleet.registry_path().write_text("{ this is not json", encoding="utf-8")
+        fleet._refetch_holder_record(SUP_PIPE, rec)
+        assert fleet.registry_path().exists(), "the re-fetch renamed the registry aside"
+        assert fleet.registry_path().read_text(encoding="utf-8") == "{ this is not json"
+        assert list((fleet.FLEET_HOME / "state").glob("fleet.json.corrupt.*")) == []
 
 
 class TestUnverifiedRefetchKill:
@@ -129,7 +161,7 @@ class TestUnverifiedRefetchKill:
 
     def test_corrupt_registry_degrades_loudly(self, native_home, monkeypatch, capsys):
         stops = self._seed(monkeypatch)
-        _quarantined(monkeypatch)
+        _unreadable(monkeypatch)
         rc = fleet.cmd_kill(_kill_args(), **_timed())
         cap = capsys.readouterr()
         assert rc == 1
@@ -187,7 +219,7 @@ class TestUnverifiedRefetchRespawn:
 
     def test_corrupt_registry_halts_before_dispatch(self, native_home, monkeypatch):
         self._seed(monkeypatch)
-        _quarantined(monkeypatch)
+        _unreadable(monkeypatch)
         with pytest.raises(fleet.SupervisorLifecycleRefusal) as exc:
             fleet.cmd_respawn(_respawn_args(), **_timed())
         assert "SUP-RESPAWN-HALTED-UNVERIFIED" in str(exc.value)
