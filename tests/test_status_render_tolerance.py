@@ -350,7 +350,7 @@ class TestTheSnapshotRowContractTheOtherRenderersRestOn:
 
     # Every key those two functions subscript without a `.get`.
     REQUIRED = {"name", "status", "turns", "cost_usd", "mail", "stale_seconds",
-                "resume_eligible", "dispatch_kind"}
+                "resume_eligible", "dispatch_kind", "unknown_fields"}
 
     @pytest.mark.parametrize("field", BASELINE_FIELDS)
     def test_every_row_carries_the_keys_those_renderers_subscript(
@@ -402,5 +402,11 @@ def test_the_two_tables_use_the_same_placeholder(home, capsys):
         assert _column(out, "w1", "COST") == UNKNOWN, (
             f"{label}: COST cell is not {UNKNOWN!r} for a record carrying no "
             f"cost_usd -- rendered:\n{out}")
+        # Same for TURNS: `status_snapshot` defaults an absent turn count to 0,
+        # which is the right answer for a consumer doing arithmetic and the
+        # wrong one for a cell claiming this worker has taken no turns.
+        assert _column(out, "w1", "TURNS") == UNKNOWN, (
+            f"{label}: TURNS cell is not {UNKNOWN!r} for a record carrying no "
+            f"turns -- rendered:\n{out}")
         assert "unknown" not in _rows(out, ["w1"])["w1"].lower(), (
             f"{label} used a SECOND spelling of the placeholder")

@@ -1499,6 +1499,80 @@ def _registry_cost(value) -> float:
     return coerced if coerced is not None else 0.0
 
 
+# ---------------------------------------------------------------------------
+# Status-table cells (W15 `status-crash`): a view must never raise.
+#
+# `new_worker_record`'s docstring states this file's additive-schema doctrine --
+# "readers everywhere use .get(..., None) so a record written before these
+# fields existed loads cleanly". `status_snapshot` obeys it; the two table
+# printers did not, and direct-subscripted baseline fields instead. A registry
+# record that predates a field, was hand-edited, or was written short crashed
+# `fleet status` with a KeyError -- header printed, ZERO rows. Measured
+# 2026-07-30 at 2e23582 against the registry recovered at
+# state/fleet.json.testpollution.20260729T225839Z.
+#
+# That is the same harm as a view that quarantines (docs/specs/terminal-surface.md
+# D4): the operator loses the surface that tells them what the fleet is doing at
+# exactly the moment something is already wrong. `unknown` is a RENDERED WORD,
+# never silence and never a traceback
+# (knowledge/lessons.md#2026-07-27-day5-surface).
+#
+# Every cell the tables format goes through one of these. Pinned by
+# tests/test_status_render_tolerance.py, which parametrizes over
+# `new_worker_record()` at runtime -- a field added to the schema tomorrow is
+# covered the day it is added.
+# ---------------------------------------------------------------------------
+
+UNKNOWN_CELL = "?"
+"""THE placeholder for any status-table cell that cannot be rendered honestly.
+
+One token, and not a new invention: `_print_status_table` already rendered "?"
+for an unparseable `last_activity`, `_print_snapshot_table` already rendered it
+for an unknown age, and `status_snapshot` already used it as its `status`
+fallback. Deliberately NOT the word "unknown": these are fixed-width numeric
+columns 6-9 chars wide, and a token that overflows its field shifts every
+column to its right."""
+
+
+def _cost_cell(value, width: int = 9) -> str:
+    """The COST column for one record: `value` as a dollar figure, or `?`.
+
+    `?` when the record carried no cost at all, and equally when it carried one
+    `_coerce_cost` refuses (a string that will not parse, NaN, Infinity, a
+    negative, a JSON true). Rendering `nan`, `-5.00` -- or the 0.0 that
+    `_registry_cost` substitutes -- would assert a measurement this file's own
+    coercer says is untrustworthy, and a confident wrong number in a status
+    table is worse than an honest `?`.
+
+    `_registry_cost`'s 0.0-fallback semantics are deliberately NOT touched: it
+    is the right answer for a value being summed into a total (SPEC: a total
+    must stay a number), and the wrong answer for a cell being shown to an
+    operator. Two callers, two needs; both read through `_coerce_cost`."""
+    cost = _coerce_cost(value)
+    if cost is None:
+        return f"{UNKNOWN_CELL:>{width}}"
+    return f"{cost:>{width}.2f}"
+
+
+def _int_cell(value, width: int) -> str:
+    """A right-aligned integer column (TURNS, MAIL), or `?`.
+
+    bool is rejected even though it is an int subclass -- a JSON true in the
+    turn counter is corruption, not a count of one."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return f"{UNKNOWN_CELL:>{width}}"
+    return f"{value:>{width}}"
+
+
+def _text_cell(value, width: int) -> str:
+    """A left-aligned text column (NAME, STATUS), or `?`.
+
+    A non-string is not coerced with str(): a status of `7` or `None` is a
+    corrupt record, and printing `7` in the STATUS column would read as a
+    status the fleet actually has."""
+    return f"{value if isinstance(value, str) else UNKNOWN_CELL:<{width}}"
+
+
 def _native_cumulative_tokens(name: str) -> int:
     """Sum input_tokens+output_tokens across every kind=="result" outcome
     record for this native worker (all past sids/turns) -- the lifetime-
@@ -2931,18 +3005,28 @@ def _attach_age_seconds(record: dict):
 
 
 def _worker_flags(record: dict) -> list:
+    # W15: `.get`, not a subscript. This helper was the MASKED site of the
+    # missing-key crash class -- it direct-subscripted record["status"] five
+    # times and record["session_id"] once, and never surfaced in a
+    # command-level sweep because cmd_status's own status compare raised on the
+    # same record first. Guarding only the sites such a sweep can see would
+    # have left this one armed behind the guard that landed upstream of it.
+    # An absent status matches no branch below, which is the right answer: the
+    # record earns no flag it cannot be shown to deserve.
+    status = record.get("status")
+    sid = record.get("session_id")
     flags = []
-    if record["status"] == "idle" and _pending_mail_count(record["session_id"]) > 0:
+    if status == "idle" and sid and _pending_mail_count(sid) > 0:
         flags.append("idle+mail")
-    if record["status"] == "attached":
+    if status == "attached":
         age = _attach_age_seconds(record)
         if age is not None and age > STALE_ATTACH_SECONDS:
             flags.append("stale-attach")
-    if record["status"] == "dead":
+    if status == "dead":
         flags.append("dead")
     # M-B T5: dead-suspected is a native-only, non-sticky verdict -- surface
     # it as an operator prompt to look, never an auto-respawn trigger.
-    if record["status"] == "dead-suspected":
+    if status == "dead-suspected":
         flags.append("investigate: no outcome record")
     # M-B T5: recompute_worker_native sets this transient field (never part
     # of new_worker_record's base schema) when the roster reports the native
@@ -2951,13 +3035,13 @@ def _worker_flags(record: dict) -> list:
         flags.append("waiting-permission")
     # Kernel 10 (F12=M24): surface the fleet-side token-ceiling refusal in
     # `fleet status`, mirroring how over_budget shows up as its own status.
-    if record["status"] == "over_ceiling":
+    if status == "over_ceiling":
         flags.append("over-ceiling")
     # UL1 (item 11 / F31): surface a parked worker's reset horizon and, once
     # the horizon has passed, its resume-eligibility -- a read-only FLAG only,
     # never an auto-launch (invariant 1 daemonless: status derives views, it
     # does not start turns; the operator runs `fleet resume-limited`).
-    if record["status"] == "limited":
+    if status == "limited":
         reset = record.get("limit_reset_at")
         flags.append(f"limited (resets {reset})" if reset else "limited (reset unknown)")
         if _limit_reset_passed(record):
@@ -3087,6 +3171,25 @@ def status_snapshot(now=None, include_archived: bool = False) -> dict:
         sid = rec.get("session_id") or ""
         mail = _pending_mail_count(sid) if sid else 0
         cost = _registry_cost(rec.get("cost_usd"))
+        # W15: which of this row's numeric fields are SUBSTITUTES rather than
+        # measurements. `cost_usd` and `turns` both carry a default when the
+        # registry record has none -- 0.0 and 0 -- and that default is right
+        # for `totals` (a total must stay a number, and
+        # `test_missing_additive_fields_default` pins the 0.0) but wrong for a
+        # cell an operator reads. Without this, a record that never recorded a
+        # cost rendered a confident `0.00` here while `fleet status` rendered
+        # `?` for the same record: one registry, two views, two stories.
+        #
+        # Additive and derived file-only -- exactly like `dispatch_kind` below,
+        # for the same table and the same column. `cost_usd` stays a float and
+        # `turns` keeps its default, so no existing consumer or total moves. A
+        # LIST rather than one flag per field: the next formatted field that
+        # gains a default joins it without a new key.
+        unknown_fields = []
+        if _coerce_cost(rec.get("cost_usd")) is None:
+            unknown_fields.append("cost_usd")
+        if "turns" not in rec:
+            unknown_fields.append("turns")
         try:
             stale = (now - _parse_iso(rec["last_activity"])).total_seconds()
         except (ValueError, TypeError, KeyError):
@@ -3100,6 +3203,7 @@ def status_snapshot(now=None, include_archived: bool = False) -> dict:
             "status": status,
             "turns": rec.get("turns", 0),
             "cost_usd": cost,
+            "unknown_fields": unknown_fields,
             "mail": mail,
             "stale_seconds": stale,
             "limit_reset_at": rec.get("limit_reset_at"),
@@ -4129,17 +4233,24 @@ def cmd_status(args) -> int:
             if persisted_after != current:
                 data["workers"][n] = persisted_after
                 changed = True
-                if persisted_after["status"] != current["status"]:
-                    append_event("status_changed", n, old=current["status"], new=persisted_after["status"])
+                # W15: `.get`, not a subscript, on both sides. A record with no
+                # `status` at all raised HERE -- before the table was reached,
+                # so `fleet status` AND `fleet status --json` both died on it.
+                # `.get` makes absent-vs-present a legible transition rather
+                # than a crash: None != "idle" fires the event with old=None,
+                # which is the honest description of what happened.
+                if persisted_after.get("status") != current.get("status"):
+                    append_event("status_changed", n, old=current.get("status"),
+                                 new=persisted_after.get("status"))
                     # M-B T5: a verdict landing on limited/dead-suspected
                     # also gets its own named event -- guarded on the same
                     # old!=new transition above, so a dead-suspected record
                     # that stays dead-suspected across reruns never re-fires.
-                    if persisted_after["status"] == "limited":
+                    if persisted_after.get("status") == "limited":
                         append_event("limited_suspected", n,
                                     limit_reset_at=persisted_after.get("limit_reset_at"),
                                     limit_kind=persisted_after.get("limit_kind"))
-                    elif persisted_after["status"] == "dead-suspected":
+                    elif persisted_after.get("status") == "dead-suspected":
                         append_event("dead_suspected", n)
             display[n] = after[n]
         if changed:
@@ -4170,16 +4281,24 @@ def _print_snapshot_table(snap: dict, name=None) -> None:
         print("fleet: not initialized" if snap["reason"] == "not_initialized"
               else "fleet: registry unreadable")
         return
-    rows = [w for w in snap["workers"] if name is None or w["name"] == name]
+    rows = [w for w in snap["workers"] if name is None or w.get("name") == name]
     if name is not None and not rows:
         raise FleetCliError(f"unknown worker: {name!r}")
     print(f"{'NAME':<20} {'STATUS':<12}{'TURNS':>6}{'COST':>9}{'AGE':>9}{'MAIL':>6}  FLAGS")
     for w in rows:
-        age = "?" if w["stale_seconds"] is None else f"{w['stale_seconds'] / 60:.0f}m"
+        # W15: every cell through a tolerant renderer. `status_snapshot` is the
+        # only production caller and its rows always carry these keys -- but it
+        # passes `turns` through from the registry UNCOERCED (`rec.get("turns",
+        # 0)`), so a record holding `null` or a string crashed this printer at
+        # the f-string below even though nothing was missing. A view must not
+        # depend on the shape of a file it does not control.
+        stale = w.get("stale_seconds")
+        age = UNKNOWN_CELL if not isinstance(stale, (int, float)) or isinstance(stale, bool) \
+            else f"{stale / 60:.0f}m"
         flags = []
-        if w["status"] == "idle" and w["mail"]:
+        if w.get("status") == "idle" and w.get("mail"):
             flags.append("idle+mail")
-        if w["resume_eligible"]:
+        if w.get("resume_eligible"):
             flags.append("resume-eligible")
         if w.get("archived_at"):
             flags.append("archived")
@@ -4188,11 +4307,24 @@ def _print_snapshot_table(snap: dict, name=None) -> None:
         # _print_status_table, instead of a stale/always-zero dollar
         # figure. Nativeness comes from the row's own dispatch_kind field
         # (no roster fetch -- this view is file-only, per CLAUDE.md).
-        cost_s = f"{'-':>9}" if w["dispatch_kind"] == "bg" else f"{w['cost_usd']:>9.2f}"
+        # `unknown_fields` names the cells whose value is a SUBSTITUTE, not a
+        # measurement -- render the same `?` `_print_status_table` renders for
+        # the same record. Absent (a hand-built row: several tests build one)
+        # means "everything here is real", so those keep printing numbers.
+        unknown = set(w.get("unknown_fields") or ())
+        if w.get("dispatch_kind") == "bg":
+            cost_s = f"{'-':>9}"
+        elif "cost_usd" in unknown:
+            cost_s = f"{UNKNOWN_CELL:>9}"
+        else:
+            cost_s = _cost_cell(w.get("cost_usd"))
+        turns_s = (f"{UNKNOWN_CELL:>6}" if "turns" in unknown
+                   else _int_cell(w.get("turns"), 6))
         # A name at or past the column width must never swallow the separator.
         print(
-            f"{w['name']:<20} {w['status']:<12}{w['turns']:>6}{cost_s}"
-            f"{age:>9}{w['mail']:>6}  {','.join(flags) or '-'}"
+            f"{_text_cell(w.get('name'), 20)} {_text_cell(w.get('status'), 12)}"
+            f"{turns_s}{cost_s}"
+            f"{age:>9}{_int_cell(w.get('mail'), 6)}  {','.join(flags) or '-'}"
         )
     print("(stale-ok: last-committed state, not probed)")
 
@@ -4227,7 +4359,10 @@ def _print_status_table(data: dict, names) -> None:
             mins_s = f"{mins:.0f}"
         except (ValueError, TypeError, KeyError):
             mins_s = "?"
-        mail = _pending_mail_count(rec["session_id"])
+        # W15: `.get`, matching `status_snapshot`'s reader for the same field.
+        # An absent session_id is no mailbox, not a KeyError.
+        sid = rec.get("session_id")
+        mail = _pending_mail_count(sid) if isinstance(sid, str) and sid else 0
         attach_age = _attach_age_seconds(rec)
         attach_s = f"{attach_age / 3600:.1f}h" if attach_age is not None else "-"
         flag_list = _worker_flags(rec)
@@ -4239,10 +4374,16 @@ def _print_status_table(data: dict, names) -> None:
             if tok:
                 flag_list = flag_list + [tok]
         else:
-            cost_s = f"{rec['cost_usd']:>9.2f}"
+            cost_s = _cost_cell(rec.get("cost_usd"))
         flags = ",".join(flag_list) or "-"
+        # W15: the reported crash was here -- `rec['cost_usd']` on a record that
+        # did not carry one. Every cell now renders `?` rather than raising, and
+        # crucially the LOOP CONTINUES: the observed harm was a printed header
+        # followed by zero rows, so one short record took every healthy worker
+        # off the operator's screen with it.
         print(
-            f"{n:<20}{rec['status']:<10}{rec['turns']:>6}{cost_s}"
+            f"{n:<20}{_text_cell(rec.get('status'), 10)}"
+            f"{_int_cell(rec.get('turns'), 6)}{cost_s}"
             f"{mins_s:>9}{mail:>6}{attach_s:>9}  {flags}"
         )
 
@@ -11494,8 +11635,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :5043, :5500, :9423,
-    :14308), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :5184, :5641, :9564,
+    :14449), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -12185,8 +12326,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:5043, :5500, :9423,
-    #     :14308) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:5184, :5641, :9564,
+    #     :14449) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
