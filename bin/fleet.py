@@ -7315,7 +7315,8 @@ def _archive_move(src: Path, dest: Path, name: str) -> None:
         print(f"fleet: {name}: could not archive {src.name}: {exc}", file=sys.stderr)
 
 
-def cmd_archive(args, run=subprocess.run, which=shutil.which) -> int:
+def cmd_archive(args, run=subprocess.run, which=shutil.which,
+                as_autoclean_tier: bool = False) -> int:
     """`fleet archive [name] [--ttl-hours F] [--dry-run]` (SPEC §5.1.2):
     auto-retire terminal-state (idle/dead/interrupted) native workers whose
     current sid is confirmed gone-or-dead from the roster, has an outcome
@@ -7369,8 +7370,54 @@ def cmd_archive(args, run=subprocess.run, which=shutil.which) -> int:
     caller while a fresh claim is held. `--dry-run` mutates nothing, but the
     gate is a policy on the CALLER, not on the effect, so it applies uniformly
     (a divergent body previewing is still a divergent body); the bypass is the
-    same `--nonce` / no-session route."""
-    _supervisor_gate("archive", nonce=getattr(args, "nonce", None))
+    same `--nonce` / no-session route.
+
+    `as_autoclean_tier` (2026-07-28, `fix/autoclean-archive-gate`) IS THE ONE
+    EXCEPTION, and it is a parameter rather than an accident of the call graph
+    because the accident is what broke.
+
+    §7's ratified decision block says, unqualified, that *"`autoclean` is
+    structurally exempt"* -- and `cmd_autoclean` really does not call
+    `_supervisor_gate`. But **the exemption is not transitive**: tier 1 of the
+    sweep IS this function, so before this parameter existed the sweep re-armed
+    the gate one frame down and was refused every single time the supervisor's
+    watchtower beat ran it -- the beat runs *while a supervisor holds a fresh
+    claim*, which is the only condition under which the beat runs at all.
+    `fleet autoclean` has no `--nonce` flag, so the refusal named a remedy no
+    caller could execute. Measured one hour after the timer was retired.
+
+    WHY A FLAG AND NOT A `--nonce` ON `autoclean`. A nonce is the caller
+    proving continuity, which is the gate working as designed -- and it would
+    fix the supervisor beat, which holds a generation. It cannot fix the second
+    caller. The interface tier's startup ritual sweeps too (so a fleet with no
+    supervisor still gets swept) and **the interface holds no nonce by design**
+    (claim-nonce §7.1) -- there is no value it could present. The project has
+    already met this exact seam once, for `fleet send supervisor`, and answered
+    it with a structural carve-out for the same reason (Seam #1 in
+    `_supervisor_gate`). This is that answer, second instance.
+
+    WHY THIS IS NOT A NARROWING OF §7, which is operator-owned and which a
+    supervisor may not narrow. The set of gate-armed VERBS is unchanged: `fleet
+    archive` run as a verb by a sid-bearing caller under a fresh claim is
+    refused exactly as before (pinned:
+    `TestTheSweepUnderAHeldClaim::test_the_archive_verb_itself_stays_gated`).
+    Nothing reaches this parameter from `build_parser` -- there is no
+    `--as-autoclean-tier`; the only caller is `cmd_autoclean`. What changes is
+    that `autoclean` becomes exempt in fact as well as in the ratified
+    sentence, restoring the behaviour the retired Scheduled Task had (it ran
+    with no sid and passed the gate on that path).
+
+    WHAT THE OPERATOR SHOULD KNOW ANYWAY, because the accounting the exemption
+    was ratified on is void: §7 priced `autoclean`'s exemption as harmless on
+    the grounds that *"the `autoclean` scheduled task has no
+    CLAUDE_CODE_SESSION_ID, so a caller-identity gate can never fire on it."*
+    Both current callers HAVE a sid, so the exempt surface is now reachable by
+    any sid-bearing body, a divergent one included. That widening arrived with
+    the timer's retirement, not with this parameter -- tiers 2 and 3 (husk
+    `claude rm`, tombstone expiry) were already reachable that way -- and this
+    adds tier 1 to the same set. Flagged for the operator; not decided here."""
+    if not as_autoclean_tier:
+        _supervisor_gate("archive", nonce=getattr(args, "nonce", None))
     name = getattr(args, "name", None)
     ttl_hours = getattr(args, "ttl_hours", None)
     if ttl_hours is None:
@@ -7805,7 +7852,15 @@ def cmd_autoclean(args, run=subprocess.run, which=shutil.which) -> int:
     archive_rc = None
     try:
         archive_args = argparse.Namespace(name=None, ttl_hours=ttl_hours, dry_run=dry_run)
-        archive_rc = cmd_archive(archive_args, run=run, which=which)
+        # `as_autoclean_tier=True` carries §7's `autoclean` exemption ACROSS the
+        # frame boundary. Without it the sweep is refused by the very claim it
+        # exists to clean up around, because both of its drivers -- the
+        # supervisor's watchtower beat and the interface's startup ritual -- are
+        # sessions WITH a sid, and the beat runs only while a fresh claim is
+        # held. See `cmd_archive` for why this is a parameter and not a
+        # `--nonce`: one of the two callers holds no nonce by design.
+        archive_rc = cmd_archive(archive_args, run=run, which=which,
+                                 as_autoclean_tier=True)
         if archive_rc != 0:
             errors.append(f"archive: exit {archive_rc}")
     except RegistryCorruptError:
@@ -11439,8 +11494,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :5043, :5500, :9368,
-    :14198), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :5043, :5500, :9423,
+    :14308), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -11957,6 +12012,38 @@ def _wedged_release_gate(verb, claim):
         f"bypassable by anyone who can run this command without a session id.")
 
 
+GATE_VERBS_ACCEPTING_NONCE = frozenset({
+    "init", "spawn", "send", "resume-limited", "interrupt", "release",
+    "respawn", "kill", "clean", "archive", "sup-spawn",
+})
+"""The gated verbs whose parser actually declares `--nonce`, i.e. the ones the
+refusal below may honestly name that flag to (R2, ruling 2026-07-26: **a named
+remedy that always fails is a defect**).
+
+This exists because §7 shipped one. `_supervisor_gate` is armed with the verb
+string of the FRAME, which is not necessarily the command the caller ran: the
+autoclean sweep's tier 1 is `cmd_archive`, so between 2026-07-27 and 2026-07-28
+a beat-driven `fleet autoclean` was refused with *"archive: refusing ... present
+`--nonce`"* while **`fleet autoclean` has no `--nonce` flag at all**
+(`autoclean --help | grep -c nonce` -> 0; `archive --help` -> 2). Both real
+drivers were told to do something neither could do -- the interface tier holds
+no generation by design (§7.1) and the supervisor's beat had no flag to present
+one through. Found by the four-councilor §7 council, 2026-07-28, which
+classified it a live R2 violation rather than a convenience defect.
+
+The exemption fixed that instance. **This set fixes the shape**, which rider 1
+says will recur: an exemption is carried per-frame, so any future frame that
+arms the gate under a nonce-less entry point re-creates exactly this refusal.
+When the verb is not in here the refusal says so and names a remedy its audience
+can perform (report the bug) instead of a flag that does not exist.
+
+NOT hand-maintained truth: `tests/test_supervisor_gate.py::
+TestTheRefusalNeverNamesAnUnreachableRemedy` derives the real set from
+`build_parser()` and from the `_supervisor_gate` call sites and asserts equality
+both ways, so a verb added to the gate without a flag, or a flag removed from a
+gated verb, is a test failure and not a silently unreachable remedy."""
+
+
 def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     """claim-nonce §7 -- THE GATE (option (b), ratified 2026-07-23). Raises
     `SupervisorClaimGateError` when a mutating lifecycle verb is run by ANY
@@ -11986,14 +12073,21 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         be the divergent supervisor body a fork produced. This covers a human
         shell, and it used to cover `autoclean`'s scheduled task (which ran
         with no operator env at all).
-        `autoclean`'s exemption does NOT depend on that clause and never did:
-        the verb is simply not wired to call this function (§7). That is load-
-        bearing since the timer was retired on 2026-07-27 -- the sweep is now
-        called BY the supervisor's beat and BY the interface's startup ritual,
-        both of which are sessions WITH a sid, and both must be able to sweep
-        with no `--nonce` while a claim is held. Had the exemption rested on
-        "no sid", retiring the timer would have silently gated the sweep
-        behind the very claim it exists to clean up around.
+        `autoclean`'s exemption is §7's own, and since the four-councilor ruling
+        of 2026-07-28 it is grounded on the SWEEP'S EFFECT -- *"a convergent
+        janitorial sweep with no dispatch, steer or claim authority, bounded to
+        terminal state"* -- not on this clause, which was the dead ground the
+        retired scheduled task supplied. It is not free-standing either, and
+        that difference cost a regression. CORRECTED 2026-07-28: it used to be
+        described here as holding because "the verb is simply not wired to call
+        this function". That is true of `cmd_autoclean` and FALSE OF THE SWEEP.
+        Tier 1 delegates to `cmd_archive`, which calls this function, so the
+        exemption stopped at the frame boundary and the sweep was refused every
+        time -- the timer's retirement (2026-07-27) made both drivers sessions
+        WITH a sid, and the supervisor's beat runs only while a fresh claim is
+        held. It now travels explicitly, as `cmd_archive`'s `as_autoclean_tier`
+        parameter -- council rider 1 ratifies that shape. **Anything reachable
+        from the sweep must carry it at its OWN frame**, pinned by an AST walk.
       * no held claim -> nothing to gate against.
       * a released claim whose releaser is roster-GONE -> nothing to gate
         against; release+stop completed and the claim is open.
@@ -12091,8 +12185,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:5043, :5500, :9368,
-    #     :14198) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:5043, :5500, :9423,
+    #     :14308) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -12143,12 +12237,28 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         if (resolved_rec is not None
                 and _record_is_supervisor_claim_holder(resolved_rec, claim=claim) is True):
             return
+    # R2 (ruling 2026-07-26): never name a remedy this caller cannot perform.
+    # `verb` is the FRAME's label, not necessarily the command that was run, so
+    # a gate armed under a nonce-less entry point would otherwise print
+    # "present --nonce" for a verb that has no such flag -- which is what §7 did
+    # to the autoclean sweep for 24 hours. See GATE_VERBS_ACCEPTING_NONCE.
+    if verb in GATE_VERBS_ACCEPTING_NONCE:
+        remedy = ("Present the current generation with `--nonce <value>` "
+                  "(the value the last `sup-*` verb printed), or escalate to "
+                  "the supervisor session.")
+    else:
+        remedy = (f"THERE IS NOTHING YOU CAN PRESENT: `fleet {verb}` declares no "
+                  f"`--nonce` flag, so this refusal cannot be satisfied by any "
+                  f"caller and must not be routed around. It is a BUG IN FLEET "
+                  f"-- §7's gate armed at a frame reached from a verb with no way "
+                  f"to prove continuity, which is what claim-nonce §7 rider 1 "
+                  f"(the exemption is carried explicitly at every frame, never "
+                  f"inherited from the call graph) exists to prevent. REPORT IT.")
     raise SupervisorClaimGateError(
         f"{verb}: refusing -- a supervisor claim ({claim.get('incarnation_id', '?')}) "
         f"is held and fresh, and this call did not prove continuity on it "
-        f"(claim-nonce §7). Present the current generation with `--nonce <value>` "
-        f"(the value the last `sup-*` verb printed), or escalate to the supervisor "
-        f"session. This is a SPEED-BUMP, not a security boundary: it is bypassable "
+        f"(claim-nonce §7). {remedy} This is a SPEED-BUMP, "
+        f"not a security boundary: it is bypassable "
         f"by anyone who can run this command without a session id, and it is armed "
         f"only while the claim's heartbeat is fresh.")
 

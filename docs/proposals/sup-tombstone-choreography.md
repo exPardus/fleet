@@ -377,9 +377,13 @@ either direction; ordering does the work.
 
 **Autoclean (fleet.py:6204-6293).** Tier 1 archive-TTL and tier 2 husk sweep inherit the
 gates above; tier 3 `_expire_tombstones` is opt-in and only pops the registry tombstone
-(fleet.py:6169-6199). Autoclean is structurally exempt from `_supervisor_gate`
-(no operator sid env, fleet.py:9418-9420) — safe, because protection lives in gate 0 /
-the sweep's protected set, not in the gate. SEQ/NO-OP throughout.
+(fleet.py:6169-6199). Autoclean is exempt from `_supervisor_gate` — safe, because
+protection lives in gate 0 / the sweep's protected set, not in the gate. SEQ/NO-OP
+throughout. *(Corrected 2026-07-28: the parenthetical here read "no operator sid env",
+which was the retired Scheduled Task's shape and never the grounds of the exemption.
+Both current drivers are sessions WITH a sid, and the exemption is carried explicitly
+into tier 1 as `cmd_archive(..., as_autoclean_tier=True)` — it is NOT transitive across
+a call. See `docs/specs/autoclean.md`.)*
 
 **Archive exemption (§7.2 holder-alone, SPEC:903-913; amended 2026-07-24, built
 `5a8860b` — note: the task brief attributed the amendment commit as `6a25d10`; the spec's

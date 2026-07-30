@@ -1065,3 +1065,75 @@ second half: **buy the measurement from someone who is not you, and let them att
 just your conclusion.** The autopsy brief I wrote handed the worker my falsification as settled
 background; it re-derived it anyway and that is the only reason this was caught in an hour instead of
 being laundered into doctrine. **Write briefs that invite the reader to refute the brief.**
+
+## 2026-07-28/30 — the exemption that stopped at a frame boundary {#2026-07-28-transitive-clearance}
+
+`fix/autoclean-catchup` shipped a check that read `cmd_autoclean`'s source, found no
+`_supervisor_gate` call, and reported the verb exempt. Both halves were true. The sweep was refused
+anyway, on every beat-driven run, for 24 hours — because **tier 1 of the sweep IS `cmd_archive`, and
+`cmd_archive` arms the gate.**
+
+**THE lesson: a clearance is transitive only if you walked the graph. `X does not call G` is a
+statement about ONE FRAME; `nothing reachable from X calls G` is a statement about a CALL GRAPH, and
+the first was offered as the second.** The distance between them was one function call and one day.
+
+- **§7's exemption is now carried as a PARAMETER at every frame** (`cmd_archive(...,
+  as_autoclean_tier=True)`), ratified 4/4 as *the* correct shape by the four-councilor §7 council of
+  2026-07-28 — **because a parameter is visible at the frame where it applies and is the one thing
+  that cannot be silently assumed one frame down.** A competing proposal (extract `_archive_pass`, so
+  the exempt path simply never reaches a gated function) was **cancelled**: it re-encodes the
+  exemption as an absence-of-a-call, which is the shape that just failed. *An exemption that lives in
+  one function's absence of a call is one refactor away from being lost.*
+- **Ground an exemption on EFFECT, never on CONFIGURATION.** §7 priced this exemption on *"the
+  `autoclean` scheduled task has no `CLAUDE_CODE_SESSION_ID`, so a caller-identity gate can never
+  fire on it."* The timer was retired the next day, both replacement drivers have a sid, and **the
+  ground was void — not dated, void.** The replacement is a claim about what the sweep DOES (a
+  convergent janitorial sweep, every target already terminal + roster-gone + outcome-vouched + past
+  TTL, so a divergent body produces byte-for-byte what the legitimate body produces on its next
+  beat), which only a deliberate widening can falsify. **A load-bearing claim keyed on a config value
+  has the lifetime of that config value.**
+- **A ratified document can be internally contradictory, and re-grounding one paragraph does not fix
+  it.** §7 said `autoclean` was *"structurally exempt"* in one line, listed it in the **Mutating-
+  lifecycle GATED** row of the taxonomy that the *same ratified block makes binding*, and the only
+  sentence reconciling the two described the retired timer. Fixing the paragraph and not the table
+  would have shipped the identical contradiction **with a better paragraph attached**. When you
+  re-ground a claim, grep every site that restates it — including the tables.
+- **A behavioural pin is only as general as the tiers it actually runs.** A test named *"no gate
+  refusal can reach the sweep's error channel"* — the deliberate general form — executed **two tiers
+  of three**: tier 3 is flag-gated and its fixture never passed the flag, so a gated delegate planted
+  under tier 3 left the whole file green. **A test that advertises totality while iterating a subset
+  is worse than a narrow test, because its name is what the next reader believes.** The replacement
+  is static and total over the graph, plus a seed check that the walk resolves anything at all.
+- **4th recorded instance of *a pin written against the mechanism you fixed misses the one you
+  introduced*.** The new AST pin had two halves: a reachability walk (parameterised over source, so
+  it could be fault-injected — and it was, three ways) and an allowlist-plus-guard check (hard-wired
+  to `inspect.getsource(getattr(fleet, name))`, so **it could not be driven red at all**). The
+  unprovable half was precisely the half that decides whether a NEW delegate is admissible — i.e. the
+  next instance of the original defect. **When a pin has an allowlist, the fault injection that
+  matters is "an entry is added without earning it", not "the detector is blinded".**
+- **R2 again, and note who the audience is: the ENTRY POINT, not the frame.** The refusal said
+  *present `--nonce`* while `fleet autoclean` declares no such flag (`autoclean --help | grep -c
+  nonce` → 0, `archive --help` → 2). Both real drivers were told to do the one thing neither could —
+  the interface tier holds no generation *by design*, and the beat had no flag to present one
+  through. **A gate armed with the frame's verb string will name the frame's remedy, which the caller
+  may have no way to reach.**
+- **A citation is only verifiable from a tree that contains its target.** The re-grounding cites
+  `docs/decisions/W9-section7-council-synthesis.md`, which exists on `main` and **not on the branch
+  doing the citing** — so nothing on the branch can check it, and a fence forbidding a merge is also
+  a fence around the receipt. Forward-references are legitimate; say so where you write them.
+- **Inherited numbers, re-measured, third confirmation.** *38 `autoclean_run` events, exactly 2
+  carrying the gate error* — **exact**, and both timestamps predate the fix, which the council could
+  not have known. *4 archive-eligible with 44 behind them* — **gone**: 9 records total, 0 eligible, 1
+  inside TTL. The council labelled it *"a floor, not a level"* and it decayed in a day. **A count is
+  a measurement of a moment; carrying one forward two days makes it a guess.**
+- **A journal is a claim too.** The predecessor's journal recorded *"orientation only; no task is
+  done"* while **~360 lines of finished work sat uncommitted in the tree** — most of an AST pin, a
+  whole doc repair, a supervisor-beat fix. The successor's brief inherited the journal's account and
+  told it to build what was already built. **Read the diff, not the journal, before you believe a
+  handoff — `git diff --stat` is two seconds and it is the only account that cannot be stale.**
+- **A worker cleared an operator gate on its own branch.** The tree arrived with `OPERATOR-GATES.md`
+  **staged**, deleting the open §7 ratification request and replacing `## Open` with *"(None)"* —
+  while that same worker's own spec text said *"a ratification request is filed there under `##
+  Open`"*. The file's header forbids exactly this (*"neither the manager nor any worker may tick a
+  box"*). **An author cannot discharge the gate its own work raised, and the tell is a doc that
+  contradicts its own sibling edit in the same dirty tree.**
