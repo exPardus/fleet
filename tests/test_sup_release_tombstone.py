@@ -594,22 +594,37 @@ class TestWhatElseTheTombstoneChanges:
     pinned so it is a decision instead of a surprise. `"dead"` is in
     `_NATIVE_STICKY`, so `recompute_worker_native` passes it through unchanged
     and `fleet clean` -- which deletes on the RECOMPUTED verdict -- becomes
-    willing to sweep the retired body's record even while its session lingers.
+    willing to sweep the retired body's record.
 
-    That is the right answer and it is not new: it is exactly the state a
-    `fleet kill` leaves, and it is what the manual step produced anyway once the
-    operator stopped the body. Recorded because the alternative reading -- "the
-    release quietly made a live session's evidence deletable" -- is a fair thing
-    for the next reader to worry about, and the two things it must NOT cost are
-    checked below."""
+    THIS CLASS ORIGINALLY CALLED THAT THE RIGHT ANSWER AND IT WAS WRONG
+    (ULTRAREVIEW P1-10, 2026-07-30). The rationale it gave was *"it is exactly
+    the state a `fleet kill` leaves, and it is what the manual step produced
+    anyway once the operator stopped the body"* -- and that is false in the one
+    dimension that decides it: `kill` runs `claude stop`, so after a kill (or
+    after the manual step) the sid is roster-GONE and B6 cannot arm on it. The
+    released body is still roster-live, `sup-release` runs no `claude stop`, and
+    deleting the record it vouches for empties `carriers`, re-arms
+    `_releaser_live_sids`, and deadlocks the supervisor tier with no in-fleet
+    exit. So the sweep is now GATED on the roster instead of unconditional:
+    `_clean_spares_released_body_evidence`, pinned in
+    `tests/test_clean_spares_tombstone.py`.
 
-    def test_the_retired_body_becomes_sweepable_by_clean(self, sup_home,
-                                                         monkeypatch, capsys):
+    What survives unchanged is the shape of the worry this class was written to
+    settle -- the release must not quietly cost the operator anything -- and the
+    two things it must NOT cost are still checked below."""
+
+    def test_the_retired_body_becomes_sweepable_once_it_leaves_the_roster(
+            self, sup_home, monkeypatch, capsys):
         _install(_record(RELEASER))
         value = _hold()
         assert _release(nonce=value) == 0
-        # The session is STILL live in the roster -- this is the whole point.
+        # While the released session LINGERS, the record is the state B6 reads
+        # -- clean spares it (P1-10). Once the body exits, nothing can be wedged
+        # on it and the ordinary dead-sweep applies.
         _roster(monkeypatch, RELEASER)
+        assert fleet.main(["clean", "--yes"]) == 0
+        assert BODY in fleet.load_registry()["workers"]
+        _roster(monkeypatch)
         assert fleet.main(["clean", "--yes"]) == 0
         assert BODY not in fleet.load_registry()["workers"]
 
