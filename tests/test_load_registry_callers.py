@@ -183,7 +183,7 @@ ALLOWED = {
     "_sweep_husks", "_expire_tombstones",
     # --- supervisor lifecycle: all inside `fleet_lock()` ---
     "cmd_sup_handoff_begin", "cmd_sup_handoff_complete", "_dispatch_supervisor_body",
-    "_cmd_respawn_supervisor", "_resolve_supervisor_lifecycle_target",
+    "_cmd_respawn_supervisor",
     # `_supervisor_gate` WAS HERE, and it was the seventh instance of the very
     # class this file exists to stop (fix wave 2, MAJOR 1). It was listed under
     # "all inside `fleet_lock()`", which is false -- it takes no lock and its
@@ -192,7 +192,35 @@ ALLOWED = {
     # disqualifiers applied at the entry. The call now goes through
     # `_registry_records_or_none`. A detector shipping with a live defect
     # blessed, for a stated reason that was not true, is worse than no detector.
-    "_supervisor_lifecycle_target", "_refetch_holder_record", "_holder_is_limited",
+    # `_supervisor_lifecycle_target`, `_resolve_supervisor_lifecycle_target` and
+    # `_refetch_holder_record` WERE HERE, and they were three more instances of
+    # the class this file exists to stop (P1-6, 2026-07-30). All three sat under
+    # the "all inside `fleet_lock()`" heading, and for all three that was FALSE:
+    # the first two are
+    # the PRE-FLIGHT holder lookup `cmd_kill`/`cmd_respawn` run at `:6488`/`:6230`
+    # -- before either verb takes the lock -- and the third is called from
+    # `_cmd_kill_supervisor`/`_cmd_respawn_supervisor`, neither of which holds it
+    # either. Measured: `fleet kill w1` over a corrupt registry RENAMED
+    # `state/fleet.json` aside from the unlocked read and then reported
+    # `unknown worker: 'w1'`, stderr byte-identical to a genuinely mistyped name
+    # against a healthy registry. All three now read via
+    # `read_registry_no_repair`; `tests/test_unlocked_quarantine.py` is the
+    # behavioural pin and also pins the LOCK axis this file declines to decide.
+    #
+    # This is the second heading in this file whose stated rationale was the
+    # thing that was false (see `_supervisor_gate` above). An allowlist entry is
+    # a claim, and grouping three entries under one unchecked sentence is how
+    # three of them shipped at once.
+    #
+    # `_holder_is_limited` SURVIVES the same audit, and its reason is written here
+    # rather than left to inherit the heading above -- inheriting a heading is
+    # precisely what the paragraph above is about. It is NOT lexically inside
+    # `fleet_lock()`; it is lock-held by its ONE caller, `cmd_sup_boot`, whose
+    # `with fleet_lock():` block encloses the call.
+    # `tests/test_unlocked_quarantine.py::test_holder_is_limited_really_is_lock_held_by_its_caller`
+    # re-derives that from the AST on every run, so the entry stops being a claim
+    # nobody checks the moment the call moves out of the block.
+    "_holder_is_limited",
     # `_resolve_worker_target` WAS HERE. It is a PRE-FLIGHT NAME LOOKUP that runs
     # at the top of every verb -- the three views included -- before any of them
     # has taken the lock, so it carried the same disqualifier `_supervisor_gate`
