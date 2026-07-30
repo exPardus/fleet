@@ -5123,3 +5123,76 @@ PREDICTED 3518/14/1 BEFORE RUNNING AND HIT IT EXACTLY, identical on py 3.13 (292
 THE CONFLICT COUNT AGAIN DID NOT PREDICT THE RE-PIN COUNT -- wave 33's lesson, third wave running. 7 conflict hunks, ALL of them pure line-number self-citations with zero semantic content. Resolved every one toward HEAD, then re-pinned FORWARD from the pins' own derivations, NEVER hand-picked: SEVEN distinct numbers across NINE occurrences (:14051->:14052 x2, :13772->:13773, :12448->:12449, :12520->:12521, :10426->:10427 x2, :15686->:15687 x2). AND THE ITERATION IS THE POINT: only three were visible on the first pin run. :12520 appeared only after those three were fixed, and :10426/:15686 only after that -- assertion ordering MASKS later citation rot, so a single green-or-red read of the pin file understates the work. Zero conflict markers was NOT treated as evidence; the floors and the pins are the evidence.
 
 BAND: 143.5k, below the 150k soft trigger but one merge away from the ceiling. Taking merge 2 (w34/mf-slice0 @ 94a549b, 3 commits) now and checkpointing FIRST so the plan is durable if I am parked mid-merge. If merge 2 lands me in-band I release at that boundary with both lanes still working and hand them to a successor with full runway -- that is a better split than stranding merge 2 for a third wave.
+
+## 2026-07-30T22:41:31Z CHECKPOINT inc=inc-20260730T215012Z-534c sid=7e5912ef-cb90-43d6-8e53-5908aef63927
+
+W35 CLOSING AT A CLEAN BOUNDARY. BOTH ORDERED MERGES LANDED AND PUSHED; two lanes still working and handed forward with their price already measured.
+
+MERGES, IN THE ORDERED SEQUENCE, BOTH READ BACK BYTE-IDENTICAL: main 0726914 -> 67b95b9 (journal fold) -> b881cfa (w34/b6gate) -> 467b72d (w34/mf-slice0) -> 5fdb4ac (knowledge). Parents proved arithmetically at both merges, never inferred from 'the merge succeeded': b881cfa^1=67b95b9 ^2=346a747; 467b72d^1=b881cfa ^2=94a549b -- the two briefed tips exactly. Floors: baseline RE-MEASURED at 3499/14/1 (agrees with wave 34's number, which makes it a measurement that agrees, not an inheritance), then 3518/14/1, then 3579/14/1 -- EACH PREDICTED BEFORE RUNNING AND HIT EXACTLY, identical on py 3.13 and py 3.10, four full floor runs. Receipts 68/68 reproduce with --self-test at both merges, 0 failures 0 warnings. I derived both predictions rather than inheriting wave 34's arithmetic as ordered: +19 proved by --collect-only on the new file (16 defs, one parametrized x4), +61 proved by whole-suite collect (3594 = 3533 + 61).
+
+THE WAVE'S DEFECT IS MINE AND IT WENT GREEN BEFORE IT WENT RIGHT. I auto-resolved the '_sweep_husks spells presence-only' self-citation to :762 -- the FIRST line matching its anchor text, an unrelated docstring at the top of the file -- when the real occurrence is :8586, inside _sweep_husks (spans 8543+). THE FULL SUITE PASSED ON IT, 3579 green. The anchor assertion for that site checks only whether the cited line CONTAINS the string; there is no span check tying it to the function the citation NAMES, so the substring was the entire gate. That is 2026-07-28's 'a pin gated behind a magic substring pins the substring, not the property' arriving on the CITATION side. Caught only because the number looked implausible for the function cited, and corrected to :8586. A RE-PIN SCRIPT THAT TAKES THE FIRST GREP HIT IS A CITATION GENERATOR, NOT A CITATION FIXER.
+
+CONFLICT COUNT DID NOT PREDICT RE-PIN COUNT, THIRD WAVE RUNNING -- and the mechanism now has a name. 19 conflict hunks across the two merges, EVERY ONE a pure line-number self-citation with zero semantic content, yet 20 DISTINCT NUMBERS needed re-pinning, discovered over SIX iterative pin runs. Only 3 of merge 1's 7 were visible on the first run; :12520 appeared only after those were fixed, :10426/:15686 only after that. ASSERTION ORDERING MASKS LATER CITATION ROT, so a single red/green read of the pin file is a LOWER BOUND, never a census -- run it to fixpoint. Also: w34/mf-slice0's side carried cmd_respawn:6308-6256, a BACKWARD range, where HEAD had 6302-6304, so resolving toward HEAD was right ON MERIT and not merely by convention. Read the sides before trusting 'take either'.
+
+TWO LANES ARE STILL WORKING AND ARE THE SUCCESSOR'S FIRST BUSINESS.
+- w35-nd4c    sid 66f1b53a, branch w35/nd4c, ND4(c) ruling A implementation. GATED LANE: the brief requires ADVERSARIAL REVIEW before merge. Not yet reviewed, not yet merged.
+- w35-respawn sid 84e02e28, branch w35/respawn-trunc, respawn-truncation root cause (already committed at least one commit, ee2a210 seen).
+BOTH ARE BASED ON 0726914 WHILE MAIN IS NOW 5fdb4ac, AND I AM THE REASON: my two merges moved bin/fleet.py by +109 and +139 lines. THEIR MERGES WILL HIT THE SAME CITATION-ROT TAX I JUST PAID -- price by what MOVED, run tests/test_self_citations.py TO FIXPOINT, take what it prints, and expect more rounds than conflicts. Do not inherit my 20 numbers; they are already stale for a third base.
+
+I DISPATCHED BY spawn WITH FRESHLY WRITTEN TASK FILES, NEVER respawn, because respawn is the verb under investigation and I will not dispatch through it. That paid a free measurement: dispatch rewrote both briefs with the preamble prepended and BOTH SURVIVED AT FULL LENGTH (116 and 129 lines), reproducing wave 34's discriminator on new data before lane B ran a test. I also armed lane B with a shallow root cause: cmd_respawn's OWN DOCSTRING says it prompts with the task 'truncated per the registry schema', the cap is bin/fleet.py 'task': task[:200], and dispatch_bg then CLOBBERS the full task file via task_path.write_text(prompt_body). So the file is never read-then-reused. THE DEFECT MAY BE DOCTRINE RATHER THAN CODE -- every document that told a supervisor 'respawn reuses the task file', including my own boot task file, was wrong -- AND IT MAY BE A REGRESSION OF A KNOWN FINDING: lessons.md#2026-07-23-overnight-dogfood already root-caused 'respawn/send truncation' to this same cap three days ago. If so the sharper lesson is that A ROOT CAUSE RECORDED IN knowledge/ IS NOT A FIX AND NOTHING RE-EXECUTES IT.
+
+DOCTOR IS 2 FAIL AND I CAUSED ONE OF THEM. (1) identity-witness -- the DOCKETED one, and it returned at exactly the boot my predecessor predicted it would; a successful forward prediction is now behind the ratified substitution model. Note the row's own remedy text is NOW STALE: it says the ND4(c) re-grounding is 'BLOCKED on an operator ruling' that has since been made, which is the named-remedy-that-always-fails defect (R2) forming a THIRD time, this time by EXPIRY rather than by never being valid -- I made repairing it an explicit edit of lane A's brief. (2) instance-freshness, NEW AND CAUSED BY MY MERGE 2: w34/mf-slice0 changed worker-settings.template.json, so the installed instance is now older than the template. THE REMEDY IS  AND I DELIBERATELY DID NOT TAKE IT -- slice 0 SPLIT THE INSTALL PLANE, and re-running init right after that merge with two live workers is a deploy-with-live-workers, which GOALS names an OPERATOR GATE. Escalating rather than improvising, which is the same discipline that produced the ND4(c) ruling this wave implements.
+
+WORKTREE SWEEP DONE AS ORDERED, AND IT HAS A THIRD FAILURE MODE NOBODY HAD RECORDED. Killed w34-rulings/w34-b6gate/w34-mf0 -- and  REFUSED all three first as 'worker(s) this session did not spawn', demanding --yes, which is the ownership guard working correctly on a roster a fresh incarnation inherited. Removed w34-b6gate and w34-mf0. w34-rulings came back 'is not a working tree' WHILE ITS DIRECTORY STILL EXISTS ON DISK -- deregistered but not deleted, therefore invisible to C:/proga/claude-fleet           5fdb4ac [main]
+C:/proga/_g3_inj2               573a905 (detached HEAD)
+C:/proga/_g3_merge              3e47642 (detached HEAD)
+C:/proga/fleet-absguard         3476a70 (detached HEAD)
+C:/proga/fleet-council          67dd53a (detached HEAD)
+C:/proga/fleet-docwait          d034827 [fix/doctor-waiting-permission]
+C:/proga/fleet-ga-rb            badd568 (detached HEAD)
+C:/proga/fleet-ga-rs            badd568 (detached HEAD)
+C:/proga/fleet-hs-rb            a9d2c64 (detached HEAD)
+C:/proga/fleet-hs-rs            a9d2c64 (detached HEAD)
+C:/proga/fleet-id-c             7d33d28 (detached HEAD)
+C:/proga/fleet-id-rb            3649baf (detached HEAD)
+C:/proga/fleet-id-rs            3649baf (detached HEAD)
+C:/proga/fleet-mfrb4            632653f (detached HEAD)
+C:/proga/fleet-mfrb6            68c70a9 (detached HEAD)
+C:/proga/fleet-mfrb7            1149775 (detached HEAD)
+C:/proga/fleet-mfrs4            632653f (detached HEAD)
+C:/proga/fleet-mfrs6            68c70a9 (detached HEAD)
+C:/proga/fleet-mfrs7            1149775 (detached HEAD)
+C:/proga/fleet-rule-c1          8dee4b8 (detached HEAD)
+C:/proga/fleet-rule-c2          8dee4b8 (detached HEAD)
+C:/proga/fleet-rule-c3          8dee4b8 (detached HEAD)
+C:/proga/fleet-rule-c4          8dee4b8 (detached HEAD)
+C:/proga/fleet-succ-rb          417eacb (detached HEAD)
+C:/proga/fleet-succ-rs          417eacb (detached HEAD)
+C:/proga/fleet-succession       c4c6637 [spec/succession-signal]
+C:/proga/fleet-w18-findc        4d3bd0e [fix/index-digest-cap]
+C:/proga/fleet-wt/w29-outcount  214c76d [fix/outcount-timing]
+C:/proga/fleet-wt/w35-nd4c      0726914 [w35/nd4c]
+C:/proga/fleet-wt/w35-respawn   500d4c1 [w35/respawn-trunc], so the 27-list-only-worktree census UNDERCOUNTS BY CONSTRUCTION. I did not rm it: the recoverable-untracked-*.md rule applies. 30 registered worktrees remain.
+
+BEAT: autoclean run twice (archived 0, skipped 81 then 83 -- nothing eligible). Decision slot consumed and cleared. Ruling-B bypass event fired on all three pushes exactly as ratified -- expected, not a violation, 8th/9th/10th measurement, no new decision needed.
+
+BAND: 180.7k, IN-BAND, ~19k under the hard ceiling. Every ordered merge is landed and pushed, knowledge is written and pushed, both remaining lanes are dispatched and working with their merge price measured for whoever takes them. THIS IS THE WAVE BOUNDARY THE STANDING DIRECTIVE NAMES. Releasing.
+
+## 2026-07-30T22:43:11Z CHECKPOINT inc=inc-20260730T215012Z-534c sid=7e5912ef-cb90-43d6-8e53-5908aef63927
+
+W35 CORRECTION -- MY PREVIOUS CHECKPOINT WAS MANGLED BY MY OWN SHELL, AND THE MANGLING IS A NEW REFUSAL CLASS WORTH MORE THAN THE ENTRY IT DAMAGED.
+
+WHAT HAPPENED. I passed the closing checkpoint body as a DOUBLE-QUOTED bash string. Journal prose in this project is dense with code spans in backticks, and bash performs COMMAND SUBSTITUTION inside double quotes. Three spans in that entry were therefore EXECUTED rather than recorded, and their stdout was spliced into the journal in their place:
+  - the git worktree list span ran and injected ~30 lines of worktree paths into the middle of a sentence, which is the visible damage;
+  - the fleet init span and the fleet kill span ran, wrote to STDERR, and so substituted as EMPTY -- which is why the previous entry now reads "and  REFUSED all three first" and "THE REMEDY IS  AND I DELIBERATELY DID NOT TAKE IT". Those two sentences are missing the very verbs they are about.
+Read the previous entry with those three holes patched: the ownership guard that refused was fleet kill; the remedy I declined to take was fleet init; the census surface that undercounts is git worktree list.
+
+NOTHING MUTATED, AND THE REASON IS THE GATE. The accidental fleet init was REFUSED by the claim-nonce section 7 continuity gate -- "a supervisor claim is held and fresh, and this call did not prove continuity on it" -- because the substituted call carried no --nonce. I verified the effect rather than trusting the message: state/worker-settings.json is still dated 2026-07-30T08:12:18Z, unchanged, still older than the template, exactly as the doctor row says. The accidental fleet kill exited on "the following arguments are required: name" and killed nothing. git worktree list is read-only. So the blast radius is one damaged journal entry and zero state.
+
+THE FINDING, AND IT IS THE SHARPEST THING THIS WAVE PRODUCED. A speed-bump built to prove CONTINUITY caught an ACCIDENT it was never designed for. Section 7 is documented as a speed-bump, not a security boundary, and it is: anyone who can run the command without a session id bypasses it. But its armed form is "prove you are the current generation", and a command substitution fired from the claim holder's own shell cannot present a generation it does not know it is running under. THE GATE THAT STOPPED ME WAS THE ONE I HAD JUST DELIBERATELY DECLINED TO WORK AROUND -- I had refused fleet init one minute earlier as a deploy-with-live-workers operator gate, and then invoked it by accident and was refused again, mechanically. That is defence in depth arriving from a direction nobody drew on the diagram.
+
+REFUSAL CLASS 5, AND THE FIX IS A VERB THAT ALREADY EXISTS. The known nonce refusal classes were about piping sup-boot output through head/tail. This is a different shape: NEVER PASS JOURNAL OR CHECKPOINT PROSE THROUGH A DOUBLE-QUOTED SHELL STRING. Every code span in this project's prose is a latent command, and a checkpoint is the single largest block of backtick-dense prose a supervisor ever emits. fleet sup-checkpoint already accepts an @file body -- that is the correct channel and it touches no shell at all. This entry is being delivered that way. The same hazard applies to fleet send, fleet spawn --task and fleet sup-release --reason, all of which take prose; all of them should be given @file or a single-quoted heredoc, never a double-quoted string.
+
+WHY THIS IS AN APPEND AND NOT AN EDIT. The journal is append-only and single-writer, and this project already ruled on exactly this temptation: the remedy is an append, never an edit to the dated line, because rewriting the record of an act to fix a lookup problem falsifies the record to save the index. The mangled entry stays. This correction is what makes it readable.
+
+EVERYTHING ELSE IN THE PREVIOUS ENTRY STANDS AS WRITTEN AND WAS VERIFIED BEFORE IT WAS WRITTEN: both merges landed and pushed, main at 5fdb4ac read back byte-identical, floors 3499 then 3518 then 3579 each predicted before running and hit exactly on both interpreters, receipts 68/68 at both merges, two lanes still working and handed forward with their merge price measured, doctor 2 FAIL both explained and one of them mine.
