@@ -180,6 +180,13 @@ def render_statusline(snap: dict, color: bool = True,
     if not snap.get("ok"):
         if snap.get("reason") == "not_initialized":
             return f"{head}: not initialized"
+        # P1-13: the rename makes absence ambiguous, so `not initialized` was
+        # what a just-quarantined fleet printed too -- byte-identical to a box
+        # that never ran `fleet init`, on the one surface the operator reads
+        # continuously. `status_snapshot` distinguishes the two now; this is a
+        # render, and renders nothing new of its own.
+        if snap.get("reason") == "quarantined":
+            return f"{head}: registry quarantined"
         return f"{head}: registry unreadable"
 
     workers = snap["workers"]

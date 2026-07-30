@@ -720,20 +720,47 @@ class RegistryCorruptError(Exception):
     """Raised when state/fleet.json exists but cannot be trusted as-is
     (parse failure, non-dict content, or unreadable). Never silently
     degrade to an empty registry in this case -- that would let a later
-    save_registry() overwrite live worker records with nothing (F2)."""
+    save_registry() overwrite live worker records with nothing (F2).
+
+    `.quarantined` IS THE OUTCOME, and it is on the exception because the
+    outcome is not derivable anywhere else. Three arms of `load_registry` raise
+    this and only TWO of them rename: `registry unreadable` (the OSError arm)
+    never attempts one, and the other two can still LOSE the rename to a win32
+    sharing violation. `_doctor_check_registry` used to key its *"has been
+    quarantined"* wording on the `--repair` flag the operator typed, so both of
+    those announced a rename that did not happen (P1-7 == P2-8).
+
+    NOT `_quarantine_artifacts()`, which is what both review sections proposed:
+    that glob is non-empty on any home carrying an artifact from an EARLIER
+    incident, so a rename that just failed would still look successful. Pinned
+    by `test_a_prior_artifact_does_not_make_a_failed_quarantine_look_successful`.
+
+    `Path` when this raise renamed the file aside, `None` when it did not."""
+
+    def __init__(self, message, quarantined=None):
+        super().__init__(message)
+        self.quarantined = quarantined
 
 
-def _quarantine_registry(path: Path) -> Path:
-    """Rename a corrupt registry aside (best-effort) and emit an event
-    (best-effort). Returns the quarantine path regardless of whether the
-    rename actually succeeded."""
+def _quarantine_registry(path: Path):
+    """Rename a corrupt registry aside and emit an event (best-effort).
+
+    Returns the quarantine `Path` when the rename SUCCEEDED, else `None`. It
+    used to return the path unconditionally, with the failure swallowed by a
+    bare `except OSError: pass` -- so `load_registry` printed *"corrupt registry
+    quarantined to <path>"* naming a file that was never created, and every
+    artifact-keyed refusal downstream went on not firing because the glob was
+    still empty. `_replace_with_retry` records win32 sharing violations on this
+    exact file as observed live, so the losing branch is reachable, not
+    theoretical."""
     quarantined = path.with_name(f"fleet.json.corrupt.{now_iso().replace(':', '')}")
     try:
         path.rename(quarantined)
     except OSError:
-        pass
+        quarantined = None
     try:
-        append_event("registry_corrupt", "fleet", path=str(quarantined))
+        append_event("registry_corrupt", "fleet",
+                     path=str(quarantined if quarantined is not None else path))
     except OSError:
         pass
     return quarantined
@@ -748,15 +775,21 @@ def _quarantine_artifacts() -> list:
     MISSING file rather than a broken one, so nothing else on disk can tell a
     repaired incident from a fresh install.
 
-    ITS FIVE READERS ASK **TWO** DIFFERENT QUESTIONS, and an earlier revision of
-    this docstring claimed they asked one -- *"three separate questions turn out
-    to be the same question ... one rule with one remedy, so it gets one
+    ITS NINE READERS ASK **THREE** DIFFERENT QUESTIONS, and an earlier revision
+    of this docstring claimed they asked one -- *"three separate questions turn
+    out to be the same question ... one rule with one remedy, so it gets one
     function"*. That was false, and the falsehood was load-bearing: it made a
     reader that had been given the WEAKER of the two rules look like it was
     already carrying the stronger one, which is how the §9 upgrade shipped with
     a hole the sibling reader had been fixed for eight days earlier (gate
-    reviewer CRITICAL, 2026-07-27). The two rules are spelled out here rather
-    than unified because they genuinely differ.
+    reviewer CRITICAL, 2026-07-27). The rules are spelled out here rather than
+    unified because they genuinely differ.
+
+    RULE 3 arrived with the P1-13/P1-12 lane (2026-07-31) and it is the reason
+    the count moved from five to nine. Do not fold it into rule 2: rule 2
+    CLASSIFIES an absence, rule 3 merely NAMES the artifact for an operator who
+    has already been told which absence this is, and a reader that names without
+    classifying carries no gate at all.
 
     RULE 1 -- *"is the state/ directory still CARRYING an unresolved
     incident?"* Presence-only, registry present or not. Every REFUSAL reads
@@ -765,33 +798,54 @@ def _quarantine_artifacts() -> list:
     registry is always newer -- an "artifact newer than the registry"
     comparison would never fire on the recreation bypasses it exists to stop.
 
-      * `_sweep_husks` (:8593) -- a rename can hide live worker records from
+      * `_sweep_husks` (:8711) -- a rename can hide live worker records from
         the roster sweep, so a thin registry would rm sessions it still owns.
-      * `_doctor_check_autoclean` (:9687) -- a lingering artifact means the
+      * `_doctor_check_autoclean` (:9805) -- a lingering artifact means the
         sweep above is refusing itself, which is how a bricked sweep reads
         green-and-fresh.
-      * `_require_claim_holder`'s §9 arm (:14111) -- the legacy upgrade mints
+      * `_require_claim_holder`'s §9 arm (:14287) -- the legacy upgrade mints
         generation 1 on bare sid equality, so it needs the registry that
         cleared it to be COMPLETE, not merely readable. See there.
 
     RULE 2 -- *"is this particular ABSENCE a fresh install, or an incident
     wearing a different name?"* Presence **and** `state/fleet.json` absent.
-    These two are not refusals at all; they are how an absent registry gets
+    These four are not refusals at all; they are how an absent registry gets
     read and described, and the question only arises when there is no file to
     answer for itself.
 
-      * `_acting_worker_identity` (:2620) -- `not_initialized` stays the
+      * `_acting_worker_identity` (:2700) -- `not_initialized` stays the
         affirmative *"there are no records"* only with no artifact beside it.
         SCOPED TO THE ABSENT CASE ON PURPOSE: this resolver is shared with the
         §6.5 worker-turn gate, which refuses on `True` alone, so poisoning a
         HEALTHY read here would let a real worker turn through §6.5 -- closing
         the §9 door by opening a wider one. Rule 1 lives at the §9 arm instead.
-      * `_identity_abstention_note` (:13832) -- the same distinction, in words,
+      * `_identity_abstention_note` (:14008) -- the same distinction, in words,
         because the generic note names `fleet doctor` and doctor is what MADE
         this state.
+      * `_read_registry_readonly` (:3604) -- the VIEW surface's copy of the same
+        question, and the last reader to get it (P1-13, 2026-07-31). Until then
+        every view described a just-quarantined fleet with the identical string
+        a never-initialised box prints, so the two states were not
+        distinguishable from the read surface at all. A `Path.glob` is a read,
+        so this costs the views doctrine nothing.
+      * `_doctor_check_registry` (:10333) -- doctor graded only on whether the
+        LOADER RAISED, and the loader returns `{"workers": {}}` for a missing
+        file, so the row called a renamed-away path *"is readable"* and doctor
+        exited 0 with every row green (P1-12). A bare absence stays a PASS: no
+        `save_registry` runs in `cmd_init`, so a healthy fresh install has no
+        registry file and FAILing it would leave doctor permanently red.
+
+    RULE 3 -- *"WHICH artifact, by name?"* Presence, read purely to render. No
+    branch turns on it: rule 2 has already decided what this absence IS, and
+    these two only spell the filename, because an operator cannot restore a file
+    whose name they were never told.
+
+      * `_print_snapshot_table` (:4925) -- `fleet status --stale-ok`.
+      * `_tombstone_releasing_body` (:14444) -- `sup-release`, whose registry
+        arm previously swallowed the quarantined case in silence.
 
     The operator clears the artifact (after restoring what it holds), which
-    re-arms every reader at once. One remedy, two rules."""
+    re-arms every reader at once. One remedy, three rules."""
     try:
         return sorted(state_dir().glob("fleet.json.corrupt.*"))
     except OSError:
@@ -828,6 +882,28 @@ def _registry_corrupt_reason(data):
     return None
 
 
+def _corrupt_error(path: Path, reason: str, quarantined) -> RegistryCorruptError:
+    """Build the `RegistryCorruptError` that DESCRIBES WHAT ACTUALLY HAPPENED --
+    the two quarantining arms of `load_registry` said *"quarantined to <path>"*
+    unconditionally, including when the rename lost to a sharing violation.
+
+    IT DOES NOT PERFORM THE RENAME, and that is a constraint rather than a
+    style choice: `tests/test_views_doctrine.py::test_the_rename_has_exactly_one_
+    caller` walks the AST and requires `_quarantine_registry` to be called from
+    `load_registry` ALONE, because root `CLAUDE.md`'s D4 paragraph cites that
+    single caller as the reason the rename is a property of the LOADER and not
+    of any verb. Calling it from here took that pin RED. So the caller performs
+    the quarantine and hands the outcome in; this only chooses words."""
+    if quarantined is None:
+        return RegistryCorruptError(
+            f"{reason} and could NOT be quarantined -- it is still at {path}. "
+            f"Something holds the file open or denies the rename (win32 sharing "
+            f"violation, deny-write ACL); no fleet.json.corrupt.<ts> artifact "
+            f"exists, so no artifact-keyed refusal downstream will fire either.")
+    return RegistryCorruptError(f"{reason}; quarantined to {quarantined}",
+                                quarantined=quarantined)
+
+
 def load_registry() -> dict:
     """Load state/fleet.json. Missing file -> {"workers": {}}. An existing
     but corrupt/unreadable file is quarantined (renamed aside) and raises
@@ -845,14 +921,18 @@ def load_registry() -> dict:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except (json.JSONDecodeError, UnicodeDecodeError):
-        quarantined = _quarantine_registry(path)
-        raise RegistryCorruptError(f"corrupt registry quarantined to {quarantined}")
+        raise _corrupt_error(path, "registry is not valid JSON",
+                             _quarantine_registry(path))
     except OSError:
+        # NO quarantine attempt on this arm, and that is correct: an unreadable
+        # file is not a file we know to be broken, so renaming it aside would
+        # destroy evidence on a path (deny-read ACL, exclusive handle, I/O
+        # error) whose remedy is usually to fix the environment. What was NOT
+        # correct is announcing a quarantine for it -- hence `quarantined=None`.
         raise RegistryCorruptError(f"registry unreadable: {path}")
     reason = _registry_corrupt_reason(data)
     if reason is not None:
-        quarantined = _quarantine_registry(path)
-        raise RegistryCorruptError(f"{reason}; quarantined to {quarantined}")
+        raise _corrupt_error(path, reason, _quarantine_registry(path))
     data["workers"] = data.get("workers", {})
     return data
 
@@ -2570,7 +2650,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     -- reads `ok` while MISSING every record the artifact holds, and the §9 arm
     read that thinness as an affirmative *"you are provably not a worker"*. The
     presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:14111`), where it costs the §6.5 gate nothing.
+    (`:14287`), where it costs the §6.5 gate nothing.
 
     An artifact can also outlive its incident by days -- `_sweep_husks` tells the
     operator to restore the file first and delete the artifact second -- so that
@@ -2586,7 +2666,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     THE READ IS NEVER `load_registry`, and that distinction is the whole reason
     `_registry_records_or_none` exists (this site uses its `(ok, reason, data)`
     source directly, for the paragraph above). `load_registry`
-    QUARANTINES a corrupt registry -- it RENAMES the file aside (`:848`) -- and
+    QUARANTINES a corrupt registry -- it RENAMES the file aside (`:925`) -- and
     its docstring is explicit that *"callers must abort, not catch-and-
     continue."* The first version of this function did catch and continue: the
     exception was swallowed, the rename was not, so on a corrupt registry every
@@ -3491,9 +3571,38 @@ def _permission_stall_line(name: str, rec: dict, elapsed, waiting_for) -> str:
 def _read_registry_readonly() -> tuple:
     """(ok, reason, data). Never writes, never quarantines, never raises.
 
-    reason is None when ok, else "not_initialized" | "unreadable"."""
+    reason is None when ok, else "not_initialized" | "quarantined" | "unreadable".
+
+    `"quarantined"` EXISTS BECAUSE THE RENAME MAKES ABSENCE AMBIGUOUS (P1-13).
+    `_quarantine_registry` renames rather than deletes, so *"absent"* is
+    precisely what a repaired incident looks like from here, and this function
+    is the single derivation every view consumes. Measured before the fix, on
+    one home with the artifact present and then removed: `fleet status
+    --stale-ok` and the statusline printed BYTE-IDENTICAL strings for a fleet
+    whose roster had just been renamed aside and for a box that had never run
+    `fleet init`. The operator's continuously-read surfaces could not tell an
+    incident from a fresh machine.
+
+    IT IS A PURE READ, which is the only reason it is allowed here.
+    `_quarantine_artifacts()` is a `Path.glob` that swallows OSError into `[]`
+    -- no lock, no probe, no subprocess, no write, never raises -- so the views
+    doctrine holds (root `CLAUDE.md`; `docs/specs/terminal-surface.md` D4, which
+    already permits a view to REPORT corruption and simply had no word for the
+    state the rename leaves behind). A fix that made the statusline honest by
+    making it PROBE would violate a ratified rule; this one does not probe.
+
+    THE THIRD VALUE HAS THREE OTHER CONSUMERS and they were edited with it, not
+    after it: `_print_snapshot_table`, `bin/fleet_statusline.py`, and
+    `cmd_sup_release`'s `reason != "not_initialized"` arm -- which previously
+    swallowed this case in silence and, had it printed, would have told the
+    operator the registry *"was NOT quarantined"*. `_acting_worker_identity`
+    needs no change: its rule-2 gate already reads `reason == "not_initialized"
+    and not _quarantine_artifacts()`, and the artifact case no longer reaches
+    the first clause at all."""
     path = registry_path()
     if not path.exists():
+        if _quarantine_artifacts():
+            return (False, "quarantined", {"workers": {}})
         return (False, "not_initialized", {"workers": {}})
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -4810,8 +4919,17 @@ def _print_snapshot_table(snap: dict, name=None) -> None:
     """Human table for `fleet status --stale-ok` (D2): last-committed status
     with an age column, never a probed one."""
     if not snap["ok"]:
-        print("fleet: not initialized" if snap["reason"] == "not_initialized"
-              else "fleet: registry unreadable")
+        if snap["reason"] == "quarantined":
+            # Named, not merely flagged: the artifact IS the roster, and the
+            # operator cannot restore a file whose name they were never told.
+            art = _quarantine_artifacts()
+            where = f"state/{art[-1].name}" if art else "state/fleet.json.corrupt.<ts>"
+            print(f"fleet: registry quarantined -- {where}. Restore what it "
+                  f"holds, then remove it; until then this fleet tracks nothing")
+        elif snap["reason"] == "not_initialized":
+            print("fleet: not initialized")
+        else:
+            print("fleet: registry unreadable")
         return
     rows = [w for w in snap["workers"] if name is None or w.get("name") == name]
     if name is not None and not rows:
@@ -6696,7 +6814,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # P1-6: `read_registry_no_repair`, NOT `load_registry`. This is a PRE-FLIGHT
-    # resolution that runs from `cmd_kill:6590` / `cmd_respawn:6332`, before
+    # resolution that runs from `cmd_kill:6708` / `cmd_respawn:6450`, before
     # either verb has taken `fleet.lock` -- and `load_registry` QUARANTINES a
     # corrupt registry, i.e. RENAMES IT ASIDE, which is a write. An unlocked
     # write races every other fleet command, and it destroys the evidence the
@@ -6759,10 +6877,10 @@ def _supervisor_lifecycle_target(verb, name):
     # P1-6: `read_registry_no_repair` -- `load_registry` MINUS the rename, with
     # the same missing-file contract, the same validator and the same
     # `RegistryCorruptError`, so the arm below is unchanged. This read runs from
-    # `cmd_kill:6590` / `cmd_respawn:6332`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:6708` / `cmd_respawn:6450`, ahead of either verb's `fleet_lock`,
     # and quarantining here did two things: it wrote without the lock, and it
     # STOLE the quarantine from the lock-held read that was designed to perform
-    # it. `cmd_respawn:6356-6358` spells out that design -- *"resolve under the
+    # it. `cmd_respawn:6474-6476` spells out that design -- *"resolve under the
     # lock so a corrupt registry surfaces through load_registry's quarantine"* --
     # and the theft is what falsified it: by the time the lock-held read ran the
     # file was ABSENT rather than corrupt, so `{"workers": {}}` came back and the
@@ -10168,7 +10286,7 @@ def _doctor_check_hook_registration():
             f"all registered hook events known and command paths exist ({registered})")
 
 
-def _doctor_check_registry(error, repaired: bool):
+def _doctor_check_registry(error, repaired: bool, quarantined=None):
     """`registry`: could `state/fleet.json` be read at all?
 
     Registered FIRST, ahead of every other check, and that placement is
@@ -10176,12 +10294,65 @@ def _doctor_check_registry(error, repaired: bool):
     and every worker-keyed check below it ([PASS] mailboxes, [PASS] stale
     attaches, [PASS] dead-suspected) is reporting *"nothing to check"* while
     looking exactly like *"nothing wrong"*. The operator has to meet the reason
-    before they meet the vacuous passes."""
+    before they meet the vacuous passes.
+
+    TWO DEFECTS WERE FIXED HERE AND THEY ARE NOT THE SAME DEFECT. Both were
+    filed against `d019066` and both live in this function, which is most of why
+    the ultrareview read the whole area as one root cause. They share a row;
+    they share nothing else.
+
+    P1-12 -- THE `error is None` ARM GRADED ABSENCE AS HEALTH. The loader
+    returns `{"workers": {}}` for a missing file, so `error` stays None after a
+    quarantine and this row printed *"<path> is readable"* naming a file that
+    had just been RENAMED AWAY. Measured: a fully-initialised home, corrupt
+    registry, `--repair`, and the very next `fleet doctor` exits 0 with zero
+    FAIL rows. The distinction the rename destroys is recoverable from
+    `_quarantine_artifacts()` -- rule 2, exactly as `_acting_worker_identity`
+    already asks it.
+
+    A BARE ABSENCE IS STILL A PASS, and that is a deliberate departure from the
+    finding's own proposed fix (*"a plain `not initialized -- run `fleet init``
+    note otherwise"*, with `ok=False`). `cmd_init` writes no `state/fleet.json`
+    -- the first `save_registry` does -- so a correctly-initialised fleet that
+    has not yet spawned a worker has no registry file, and FAILing it would make
+    `doctor` permanently red on a healthy new install. The operator's 2026-07-27
+    ruling names that cost directly: *"leaving a resolved flag standing makes
+    `doctor` permanently red, which trains everyone to ignore a red `doctor`"*.
+    What the arm owes is honesty, not alarm: it stops calling a nonexistent path
+    readable.
+
+    P1-7 == P2-8 -- THE MESSAGE KEYED ON THE FLAG, NOT THE OUTCOME. `repaired`
+    is `bool(args.repair)`, the flag the operator typed. `load_registry` raises
+    from three arms and only two rename, so `registry unreadable` (the OSError
+    arm) was announced as quarantined with the file untouched and no artifact.
+    `quarantined` is now the observed outcome, carried on the exception."""
     if error is None:
-        return ("registry", True, f"{registry_path()} is readable")
-    if repaired:
+        path = registry_path()
+        if path.exists():
+            return ("registry", True, f"{path} is readable")
+        artifacts = _quarantine_artifacts()
+        if artifacts:
+            return ("registry", False,
+                    f"{path} does NOT exist -- it was quarantined aside to "
+                    f"state/{artifacts[-1].name}, so every worker-keyed check "
+                    f"below ran against an EMPTY registry and passed VACUOUSLY. "
+                    f"Any session that registry tracked is now untracked. "
+                    f"Restore what the artifact holds, then remove it (the same "
+                    f"remedy the husk sweep asks for)")
+        return ("registry", True,
+                f"{path} does not exist yet -- no worker has been spawned on "
+                f"this home. Every worker-keyed check below has nothing to check")
+    if quarantined is not None:
         return ("registry", False,
                 f"registry was corrupt and has been quarantined -- {error}")
+    if repaired:
+        return ("registry", False,
+                f"--repair ran and quarantined NOTHING -- {error}. "
+                f"{registry_path()} is still there under its own name and no "
+                f"state/fleet.json.corrupt.<ts> artifact was created, so this "
+                f"is not a corrupt registry to rename aside; fix what is "
+                f"denying the read (an ACL, a process holding the file open, "
+                f"an I/O error) and rerun")
     return ("registry", False,
             f"{error}; every worker-keyed check below ran against an EMPTY "
             f"registry. Rerun as `fleet doctor --repair` to quarantine it "
@@ -10220,6 +10391,9 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
     # The default for an absent attribute is the SAFE one, by construction.
     repair = bool(getattr(args, "repair", False))
     registry_error = None
+    # The OUTCOME of the repair, not the request for one. See
+    # `_doctor_check_registry` (P1-7 == P2-8) and `RegistryCorruptError`.
+    registry_quarantined = None
     try:
         if repair:
             with fleet_lock():
@@ -10236,11 +10410,13 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
         # finding, and a diagnostic that aborts on its first bad row is not a
         # diagnostic. Nothing below this line writes.
         registry_error = str(exc)
+        registry_quarantined = getattr(exc, "quarantined", None)
         data = {"workers": {}}
     workers = data.get("workers", {})
 
     check_calls = [
-        functools.partial(_doctor_check_registry, registry_error, repair),
+        functools.partial(_doctor_check_registry, registry_error, repair,
+                          registry_quarantined),
         functools.partial(_doctor_check_claude_version, which=which, run=run),
         functools.partial(_doctor_check_pin_version, which=which, run=run),
         functools.partial(_doctor_check_instance_settings),
@@ -12517,12 +12693,12 @@ def _registry_records_or_none():
 
     IT MUST NOT BE `load_registry`, and that is the whole reason this function
     exists rather than a bare try/except at each site. `load_registry`
-    QUARANTINES a corrupt registry -- it renames the file aside (`:848`) --
+    QUARANTINES a corrupt registry -- it renames the file aside (`:925`) --
     which is a WRITE. `_supervisor_gate` promises "READ-ONLY: no lock, no mint,
     no write" and runs at the top of every mutating verb, so routing its
     identity read through `load_registry` would let a speed-bump shred operator
     evidence on a path that documents itself as touching nothing. This is D4's
-    rule for the view path (`:3486`) applied to the one other reader that has
+    rule for the view path (`:3566`) applied to the one other reader that has
     no business quarantining. Quarantining stays where it belongs: the
     lock-holding verbs, `cmd_sup_boot` included via `_holder_is_limited`."""
     ok, _reason, data = _read_registry_readonly()
@@ -12709,8 +12885,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     live_sids` is what shipped, and `_record_sids`' own docstring says why it
     is wrong -- *"matching against `session_id` alone fails open on it
     (ND4a)"* -- for the twelve other sites that already key on the union
-    (`:2322, :2366, :2627, :2777, :6730, :7050, :7317, :7531, :7618, :7841,
-    :8622, :12580`). B6 was the one
+    (`:2402, :2446, :2707, :2857, :6848, :7168, :7435, :7649, :7736, :7959,
+    :8740, :12756`). B6 was the one
     roster comparison that did not, and §G-G measured it failing open exactly
     as predicted: the releaser fork-steered, so its record was eagerly
     restamped (`session_id` = post-fork, pre-fork sid pushed into
@@ -12722,8 +12898,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :5732, :6189, :10486,
-    :15752), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :5850, :6307, :10662,
+    :15943), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -13413,8 +13589,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:5732, :6189, :10486,
-    #     :15752) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:5850, :6307, :10662,
+    #     :15943) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -13444,10 +13620,10 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         #   * `_registry_records_or_none`, NEVER `load_registry`. This gate
         #     documents itself "READ-ONLY: no lock, no mint, no write" and
         #     `load_registry` QUARANTINES a corrupt registry -- it RENAMES the
-        #     file aside (`:848`), which is a write. Routing the identity read
+        #     file aside (`:925`), which is a write. Routing the identity read
         #     through it made `fleet send` shred the operator's evidence from a
         #     path that promises to touch nothing; the helper exists for exactly
-        #     this and names this gate as its reason (`:12508`). A `None` here
+        #     this and names this gate as its reason (`:12684`). A `None` here
         #     still fails toward the gate -- an unreadable registry is reported
         #     by its own doctor row, and is never a reason to decide blind.
         #     MERGE NOTE (2026-07-27): main and `fix/identity-registry-judges`
@@ -14089,7 +14265,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # A worker whose own record sits inside the artifact upgrades the claim.
         #
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as `_sweep_husks`
-        # spells it at `:8586`. Not an mtime comparison: `os.rename` preserves
+        # spells it at `:8704`. Not an mtime comparison: `os.rename` preserves
         # mtime, so the artifact's mtime is the PRE-corruption write time and any
         # recreated registry is always newer -- the comparison would never fire
         # on the one bypass it exists to stop.
@@ -14258,7 +14434,22 @@ def _tombstone_releasing_body(caller: str, inc: str):
     supervisor journal's `RELEASED` entry is the durable record of WHY."""
     ok, reason, data = _read_registry_readonly()
     if not ok:
-        if reason != "not_initialized":
+        if reason == "quarantined":
+            # Split out when `_read_registry_readonly` gained the third value
+            # (P1-13). This case used to arrive as `not_initialized` and be
+            # swallowed in SILENCE -- the releasing body's record was renamed
+            # aside, not absent, and the operator was told nothing. The
+            # `unreadable` wording below cannot be reused: it says the registry
+            # "was NOT quarantined", which is exactly false here.
+            art = _quarantine_artifacts()
+            where = f"state/{art[-1].name}" if art else "state/fleet.json.corrupt.<ts>"
+            print(f"fleet: sup-release: the registry was quarantined aside to "
+                  f"{where} -- the releasing body's own record could NOT be "
+                  f"tombstoned and now exists only inside that artifact. Claim "
+                  f"{inc} IS released; until this session leaves the roster a "
+                  f"successor `sup-boot` still refuses (B6). Restore the "
+                  f"artifact, then stop this session.", file=sys.stderr)
+        elif reason != "not_initialized":
             print(f"fleet: sup-release: registry {reason} -- the releasing body's own "
                   f"record could NOT be tombstoned (and was NOT quarantined). Claim "
                   f"{inc} IS released; until this session leaves the roster a "
