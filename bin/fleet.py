@@ -7279,6 +7279,97 @@ def _remove_worker_files(name: str, sid: str, retired_sids: list = ()) -> list:
     return removed
 
 
+def _released_claim_body_sid(claim):
+    """The sid of the body a RELEASED claim was released by, or None.
+
+    Named once so `cmd_clean` and its pins spell "there is a released claim
+    naming a body" the same way. A HELD claim answers None -- it wedges nothing,
+    and B6 never reads it -- and so does a `released_by_sid` a drifted file left
+    as anything but a non-empty string, which can match no record's sid union.
+    Same keyed-on-a-non-empty-string rule `_releaser_is_roster_live` states at
+    length, for the same reason."""
+    if not isinstance(claim, dict) or claim.get("state") != "released":
+        return None
+    sid = claim.get("released_by_sid")
+    return sid if isinstance(sid, str) and sid else None
+
+
+def _clean_spares_released_body_evidence(record, released_by, live_sids) -> bool:
+    """P1-10: True iff DELETING `record` could re-arm the released-claim wedge,
+    which is `fleet clean`'s reason not to.
+
+    THE DEFECT IT CLOSES. `sup-release` tombstones the releasing body's own
+    record, and that tombstone is the whole of the succession slice:
+    `_releaser_body_is_tombstoned` reads it and B6 stands down, so a successor
+    boots without anyone stopping the retired session first. But `"dead"` is in
+    `_NATIVE_STICKY`, so `recompute_worker_native` hands it back without ever
+    consulting the roster, and `cmd_clean` deletes on the recomputed status
+    alone. One `fleet clean` inside the release window pops the record;
+    `carriers` goes EMPTY, the tombstone stops counting, `released_by_sid in
+    live_sids` re-arms, and every mutating verb plus `sup-boot` refuses with no
+    in-fleet exit. Measured end to end in
+    `tests/test_clean_spares_tombstone.py`.
+
+    IT IS THE EVIDENCE THAT IS PROTECTED, NOT A NEW REFUSAL. Nothing here
+    decides whether the fleet is wedged -- `_releaser_live_sids` remains the ONE
+    predicate that does. This only stops an irreversible deletion from
+    destroying the state that predicate reads.
+
+    WHY NOT FIX IT IN THE PREDICATE (make an ABSENT record read as "not a live
+    releaser"). That would make ABSENCE load-bearing, this project's named
+    class, and here it is not merely inelegant but wrong: the three arms on
+    which `_tombstone_releasing_body` legitimately ABSTAINS -- identity
+    UNRESOLVED, identity AMBIGUOUS, an unreadable registry (R-c) -- also leave
+    no carrier record, and those are exactly the releases B6 must still refuse.
+    Absence cannot tell "fleet retired that body" from "fleet never resolved
+    it", and one of the two has to refuse. A guard against two live supervisors
+    fails toward refusal or it is not a guard.
+
+    WHY NOT `_archive_eligible` GATE 3b's SPELLING, which is the same class of
+    protection one verb over. That gate asks *"is this record wedging the fleet
+    right now"* (`_releaser_live_sids` over a one-record registry) -- and for
+    the release tombstone the answer is NO, precisely BECAUSE the record exists.
+    The question a deleter has to ask is counterfactual: would the wedge arm
+    once this record is gone? So this keys on the record CARRYING a released
+    body whose sids are still roster-live, which covers both directions of the
+    hazard -- the tombstoned record (P1-10, delete it and the wedge re-arms) and
+    the un-tombstoned record gate 3b protects (delete it and a LIVE wedge
+    silently disarms, letting a second supervisor boot). Archive needed only 3b
+    because its gate 3 already refuses every roster-live record; `clean` has no
+    such gate, which is why it was the one hole.
+
+    KEYED ON THE SID UNION (`_record_sids`), for the reason every other identity
+    comparison in this file is: a fork-steered releaser proves continuity under
+    its post-fork sid while the claim still names the pre-fork one (ND4a).
+
+    IT SELF-RELEASES. The condition is the roster, so the moment the released
+    body exits, the record is sweepable again -- a retired supervisor record
+    never becomes permanently unsweepable, and `clean` keeps working exactly as
+    it does after a `fleet kill` (which runs `claude stop`, so the sid is
+    roster-GONE and this can never fire).
+
+    `live_sids=None` -- THE ROSTER COULD NOT BE READ -- SPARES, because sparing
+    is reversible and deleting is not: run `clean` again. G9's epoch freeze
+    already covers non-archived records on a failed fetch, but an ARCHIVED
+    record is ALWAYS doomed in `cmd_clean` and never enters the freeze at all,
+    so that route needs its own abstain.
+
+    An ABSENT or UNREADABLE claim answers None upstream (`read_incarnation`
+    collapses both), and that is deliberately not an abstain: `sup-boot` reads
+    the claim through the same function and gets the same None, so it returns
+    `claim` and there is no wedge to protect. Freezing every sweep on an
+    unreadable INCARNATION would brick an unrelated verb on one corrupt file --
+    the class D4 exists for."""
+    if not released_by:
+        return False
+    sids = _record_sids(record)
+    if released_by not in sids:
+        return False
+    if live_sids is None:
+        return True
+    return bool(sids & live_sids)
+
+
 def cmd_clean(args, run=subprocess.run, which=shutil.which) -> int:
     """`fleet clean` (SPEC §5): recompute every worker's status; any that
     resolve to "dead" are removed from the registry along with their
@@ -7321,6 +7412,17 @@ def cmd_clean(args, run=subprocess.run, which=shutil.which) -> int:
     `--tombstones` sweeps ONLY archived tombstones -- no recompute,
     nothing else touched. Default remains both.
 
+    P1-10 -- THE ONE RECORD THIS VERB MAY NOT DELETE: the record that carries a
+    RELEASED claim's `released_by_sid` while that body's sids are still
+    roster-live. `sup-release`'s tombstone is the state B6 reads to let a
+    successor boot, and `"dead"` is sticky, so without this gate the routine
+    dead-sweep destroys it and deadlocks the supervisor tier. Both routes to the
+    deletion are gated -- the recomputed-verdict one AND the archived-is-always-
+    doomed one -- and the gate releases the moment the body leaves the roster.
+    The argument, and why it is not fixed in the predicate instead, is in
+    `_clean_spares_released_body_evidence`; the behaviour is pinned in
+    `tests/test_clean_spares_tombstone.py`.
+
     §7 THE GATE: a mutating lifecycle verb (irreversible deletion), gated for a
     sid-bearing caller while a fresh claim is held."""
     _supervisor_gate("clean", nonce=getattr(args, "nonce", None))
@@ -7340,14 +7442,35 @@ def cmd_clean(args, run=subprocess.run, which=shutil.which) -> int:
     if tombstones_only:
         live_names = []
 
+    # P1-10: read the claim ONCE per invocation -- the shape `_archive_eligible`
+    # already uses for its two claim-keyed gates, and for the same reason (a
+    # second read per record would be no new information and would let two
+    # decisions run against different snapshots of it).
+    claim = read_incarnation()
+    released_by = _released_claim_body_sid(claim)
+    carriers = [n for n in names
+                if released_by and released_by in _record_sids(before[n])]
+
     # ONE roster fetch per invocation, outside the lock (F4 doctrine), only
-    # when a non-archived worker is actually in the registry.
+    # when a non-archived worker is actually in the registry -- or when some
+    # record carries a released body's sid, because whether that record may be
+    # deleted is a question only the roster can answer, and the ARCHIVED route
+    # to deletion never fetches otherwise (`--tombstones` empties live_names).
     roster_entries = []
+    roster_ok = False
     epoch_frozen = False
-    if live_names:
+    if live_names or carriers:
         roster_ok, payload = _fetch_agents_roster(which=which, run=run)
         roster_entries = payload if roster_ok else []
-        epoch_frozen = native_epoch_suspicious(roster_ok, roster_entries, before)
+        if live_names:
+            epoch_frozen = native_epoch_suspicious(roster_ok, roster_entries, before)
+
+    # None means "the roster is unknown", which SPARES -- see the predicate.
+    live_sids = _roster_live_sids(roster_entries) if roster_ok else None
+    spared = [n for n in carriers
+              if _clean_spares_released_body_evidence(before[n], released_by,
+                                                      live_sids)]
+    doomed_archived_names = [n for n in doomed_archived_names if n not in spared]
 
     after = {}
     if live_names and not epoch_frozen:
@@ -7373,9 +7496,12 @@ def cmd_clean(args, run=subprocess.run, which=shutil.which) -> int:
             if epoch_frozen:
                 continue  # G9: no record recomputed or written this invocation
             verdict = after[n]
-            if verdict["status"] in _NATIVE_CLEAN_DELETABLE:
+            if verdict["status"] in _NATIVE_CLEAN_DELETABLE and n not in spared:
                 doomed_now.append((n, before[n]))
                 continue
+            # A spared record falls THROUGH to the persist branch rather than
+            # skipping out: sparing it from deletion is not a reason to withhold
+            # a status the recompute just decided.
             persisted = dict(verdict)
             persisted.pop("waiting_for_permission", None)
             if persisted != current:
@@ -7388,6 +7514,16 @@ def cmd_clean(args, run=subprocess.run, which=shutil.which) -> int:
 
     if epoch_frozen:
         print("EPOCH: roster suspicious -- verdicts frozen (G9); nothing cleaned this pass")
+
+    # A record `clean` declined to delete, with nothing printed, reads as
+    # "there was nothing to clean" -- and the operator never learns that fleet
+    # is holding load-bearing evidence on their behalf.
+    for n in spared:
+        why = (f"session {released_by} is still in the roster"
+               if live_sids is not None else "the roster could not be read")
+        print(f"spared {n}: it vouches for released claim "
+              f"{claim.get('incarnation_id', '?')} -- {why}; deleting it would "
+              f"re-arm the refusal that stops a successor booting (B6)")
 
     # §5.1: this is the moment `clean` knows exactly which workers it will
     # DELETE (registry entry + on-disk artifacts -- irreversible; the claude
@@ -7433,7 +7569,7 @@ def cmd_clean(args, run=subprocess.run, which=shutil.which) -> int:
         _remove_worker_files(n, sid, retired_sids=retired)
         print(f"removed {n} (session {sid})")
 
-    if not removed:
+    if not removed and not spared:
         print("nothing to clean -- no dead workers")
     return 0
 
@@ -12329,8 +12465,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :5630, :6087, :10167,
-    :15261), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :5630, :6087, :10303,
+    :15397), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -13020,8 +13156,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:5630, :6087, :10167,
-    #     :15261) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:5630, :6087, :10303,
+    #     :15397) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
