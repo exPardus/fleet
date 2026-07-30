@@ -174,6 +174,20 @@ namespace copy CLOBBERS a global-position `--fleet-home` when the verb also defi
 one parser object or reconcile the two dests explicitly, and its pin drives the exact
 global-position invocation that silently dropped the flag.
 
+> **CORRECTION — measured in slice 0, 2026-07-31, both interpreters. The word `today` is
+> false; the defect is LATENT, not shipped.** Driven against `build_parser()` at `09995f9`:
+> `['--fleet-home','H','autoclean']` exits 2 with *"argument command: invalid choice: 'H'"* on
+> `py -3.13` and `py -3.10` alike, and `['autoclean','--fleet-home','H']` yields `'H'`. There is
+> no global `--fleet-home` to clobber: of the 32 subparsers `autoclean` is the only one that
+> defines it, and the top-level parser declares no options beyond `-h/--help`. The **mechanism**
+> is exactly as rb7 stated and is reproduced on a synthetic parser in the pin — the clobber is
+> created by the act of promoting the flag in slice (a), so the sentence above is a correct
+> instruction to the flag-promotion slice and a wrong description of shipped code. Nothing in
+> the ratification changes: the pin exists, one slice early, as a lint that makes the clobbering
+> shape unlandable (`tests/test_round7_defect_pins.py`). Recorded rather than deleted, because
+> the *shipped-defect* framing is what made this a slice condition and a reader needs to know
+> the framing was measured wrong without losing why the condition stands.
+
 **Hooks**: `--fleet-home` argv baked per-home (survived six rounds; both `--settings` sites).
 **Statusline**: blob sid → same lookup; single-home short-circuit; words, exit 0; resolver
 pure-function; capture experiment gates the slice. **Refusals print facts + the `fleet homes`
