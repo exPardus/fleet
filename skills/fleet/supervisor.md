@@ -29,15 +29,36 @@ Soul = `supervisor/GOALS.md` (operator-owned) + `supervisor/JOURNAL.md`
    next supervisor verb AND on every mutating lifecycle verb (§7's gate), and
    the presenter obligation binds you: **present the most recent generation you
    were given.** `NONCE: unchanged` means the outstanding one still stands.
+   - **The obligation binds only verbs that HAVE the flag — three do not.**
+     Measured against the shipped parser: **`sup-context`**, **`sup-status`**
+     and **`autoclean`** declare no `--nonce` at all, so passing one is an
+     argparse error, not a courtesy. They are reads or structurally exempt.
+     Every other `sup-*` verb (`sup-boot`, `sup-spawn`, `sup-checkpoint`,
+     `sup-heartbeat`, `sup-release`, `sup-decision`, `sup-handoff-begin`,
+     `sup-handoff-complete`, `sup-handoff-abort`) takes it, as do the mutating
+     lifecycle verbs (`spawn`, `send`, `interrupt`, `respawn`, `resume-limited`,
+     `kill`, `clean`, `archive`). **Read "every supervisor verb" as "every
+     supervisor verb that accepts it" and check for the flag before assuming a
+     refusal is a gate refusal** — on these three it is a typo.
 4. Reconcile workers from the bundle's fleet-status section. `fleet status`
    runs the outcome discriminator and the silent-limit transcript scan, so
    the verdicts there are measured, not registry guesses (M-B, shipped).
 5. **Check your own `FLEET_WORKER` against your registry name.** The daemon
    donates the FIRST dispatch's env to every later session, so the value you
-   inherit is often a stale launch id from an earlier body. Supervisor-shaped
-   is benign (the §6.5 exemption still resolves) and is not a stop condition;
-   **worker-shaped is malignant** — that body takes the claim and can then
-   never beat, checkpoint or release it. Record which variant you are in.
+   inherit is often a stale launch id from an earlier body. **Three variants,
+   not two:**
+   - **ABSENT / empty — BENIGN, and this is the NORM, not an edge case.**
+     Measured absent on **eight of eight** supervisor bodies to date (`FLEET_WORKER`
+     empty, `FLEET_HOME` empty). Nothing was donated, so there is no stale id to
+     mismatch: the §6.5 exemption still resolves. **Record it and proceed** — do
+     not treat an empty value as a failed check or go looking for the variable.
+   - **Supervisor-shaped — benign** (the §6.5 exemption still resolves) and not a
+     stop condition.
+   - **Worker-shaped — MALIGNANT.** That body takes the claim and can then never
+     beat, checkpoint or release it.
+
+   Record which variant you are in. Absent and supervisor-shaped both continue;
+   only worker-shaped is a stop condition.
 
 ### Gen-0 body via `fleet sup-spawn` (three-tier §10.1)
 
@@ -76,9 +97,29 @@ idle/dead/interrupted native workers past the TTL into tombstoned history,
 then `fleet resume-limited` for any worker whose reset horizon has passed,
 then a checkpoint/heartbeat (below).
 
+**THE BEAT'S VERBS SPLIT ON THE §7 GATE. Do not run them as one undifferentiated
+list — two of them are opposites and the difference is a refusal:**
+
+| beat verb | §7 claim gate | what you pass |
+|---|---|---|
+| `fleet status` | not gated (read) | nothing |
+| **`fleet autoclean`** | **EXEMPT — structurally** | **nothing. It has NO `--nonce` flag; passing one is an argparse error.** |
+| `fleet archive` / `fleet archive --dry-run` | **GATE-ARMED** | `--nonce <value>`. **`--dry-run` does NOT exempt it** — §7 is a policy on the caller proving continuity, not on the effect, so a preview is gated exactly like the real run. |
+| **`fleet resume-limited`** | **GATE-ARMED** | **`--nonce <value>`. REFUSED without it.** |
+| `sup-checkpoint` / `sup-heartbeat` | gate-armed | `--nonce <value>` |
+
+Measured: a supervisor that followed the beat literally, without presenting its
+generation, got *"a supervisor claim ... is held and fresh, and this call did not
+prove continuity on it (claim-nonce §7)"* from `resume-limited`, then succeeded
+once it presented its generation. **`autoclean` and `resume-limited` sit in the
+same sentence above and behave oppositely** — exempt-with-no-flag versus
+armed-and-refusing. Check the row before you call the verb.
+
 **`fleet autoclean` is YOUR job, not a timer's** (operator ruling
-2026-07-27). It used to run from a Windows Scheduled Task every 6h; that is
-being retired. A timer sweeps when the clock says so, which on a machine
+2026-07-27). It used to run from a Windows Scheduled Task every 6h; that task
+**is gone** — the timer was deleted, not reconfigured, along with the
+`fleet init --autoclean` flags that installed it. A timer sweeps when the clock
+says so, which on a machine
 that loses power means **it does not sweep at all** -- the task carried
 `StartWhenAvailable: False`, so the missed occurrence was dropped and
 nothing caught up at boot, leaving an 18-hour gap in a 6-hourly guard that
@@ -156,13 +197,14 @@ Old incarnation:
    `sup-boot --handoff-inc <INC> --handoff-token <TOK>`). Timeout T = 300s.
 4. On handshake: `fleet sup-handoff-complete --expect-inc <INC> [--expect-sid <SID>] --nonce <value>`,
    then EXIT the session. `--nonce` is your continuity proof — like every
-   `sup-*` verb, complete refuses without it. `--expect-sid` is OPTIONAL — the
+   gate-armed `sup-*` verb (step 3's carve-out), complete refuses without it.
+   `--expect-sid` is OPTIONAL — the
    token verifies the successor; a sid mismatch is a warning naming the fork,
    not a refusal.
 5. On timeout / dispatch failure:
    `fleet sup-handoff-abort --successor-sid <SID> --nonce <value>`
    — abort is NOT exempt from the continuity gate; without
-   `--nonce` it exits 4 like every other `sup-*` verb (a runbook copy that
+   `--nonce` it exits 4 like every other gate-armed `sup-*` verb (a runbook copy that
    omitted it cost two refusals mid-succession on 2026-07-24). You resume duty;
    doctor flags the abort until the operator clears
    `state/supervisor-handoff-aborted.json`. Both complete and abort unlink the
