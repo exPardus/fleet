@@ -736,7 +736,7 @@ def _quarantine_artifacts() -> list:
       * `_doctor_check_autoclean` (:9566) -- a lingering artifact means the
         sweep above is refusing itself, which is how a bricked sweep reads
         green-and-fresh.
-      * `_require_claim_holder`'s §9 arm (:13910) -- the legacy upgrade mints
+      * `_require_claim_holder`'s §9 arm (:13983) -- the legacy upgrade mints
         generation 1 on bare sid equality, so it needs the registry that
         cleared it to be COMPLETE, not merely readable. See there.
 
@@ -752,7 +752,7 @@ def _quarantine_artifacts() -> list:
         §6.5 worker-turn gate, which refuses on `True` alone, so poisoning a
         HEALTHY read here would let a real worker turn through §6.5 -- closing
         the §9 door by opening a wider one. Rule 1 lives at the §9 arm instead.
-      * `_identity_abstention_note` (:13637) -- the same distinction, in words,
+      * `_identity_abstention_note` (:13710) -- the same distinction, in words,
         because the generic note names `fleet doctor` and doctor is what MADE
         this state.
 
@@ -2515,7 +2515,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     -- reads `ok` while MISSING every record the artifact holds, and the §9 arm
     read that thinness as an affirmative *"you are provably not a worker"*. The
     presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:13910`), where it costs the §6.5 gate nothing.
+    (`:13983`), where it costs the §6.5 gate nothing.
 
     An artifact can also outlive its incident by days -- `_sweep_husks` tells the
     operator to restore the file first and delete the artifact second -- so that
@@ -11567,6 +11567,15 @@ def unlink_handoff_task_file(successor_inc, context="") -> bool:
 
 HANDOFF_PENDING_KEY = "handoff_pending"
 HANDOFF_SUPERSEDED_KEY = "superseded_at"
+# P1-4: WHY an entry was superseded, when the answer is not "a later begin".
+# `superseded_by` names an incarnation; a release supersedes by ending the
+# succession, and there is no incarnation to name. Without this the R9 refusal
+# would tell a released-out successor that "the predecessor began another
+# handoff after dispatching you" -- a statement that is simply false on this
+# path, and a refusal that lies about its own grounds is the defect class this
+# repo keeps re-filing.
+HANDOFF_SUPERSEDED_REASON_KEY = "superseded_reason"
+HANDOFF_SUPERSEDED_BY_RELEASE = "predecessor-released"
 
 # R3's three entry states, published by the view and consumed by abort, plus
 # R9's fourth.
@@ -11874,6 +11883,56 @@ def _carry_handoff_pending(old_claim, new_claim) -> None:
         new_claim[HANDOFF_PENDING_KEY] = carried
 
 
+def _carry_handoff_pending_on_release(old_claim, new_claim) -> None:
+    """P1-4: R5 at the ONE claim transition it never reached, plus R9 on what
+    that transition carries.
+
+    `sup-release` builds its released claim as an enumerated LITERAL (§6.3),
+    and the literal never named `handoff_pending` -- so a release run while a
+    handoff was in flight erased the successor at exactly the moment the
+    succession path exists for. Measured end to end against a temp FLEET_HOME:
+    rc 0, `handoff_pending` and `handoff_token_hash` both gone, `sup-status`
+    listing no pending successor, `fleet doctor` reporting `[PASS] no handoff
+    in flight` over a live dispatched body, the next `sup-boot` sweeping the
+    successor's only input file, and every abort handle -- `--successor-inc`,
+    `--successor-sid`, `--force`, `--retire-all` -- refusing from the next
+    holder because nothing named the successor any more.
+
+    SUPERSEDED, not merely carried, and that half is load-bearing. A release
+    drops `handoff_token_hash` (correctly -- R4: the hash is the only thing
+    keeping the stranded plaintext token in the task file alive), so NO carried
+    attempt can ever complete: `sup-handoff-complete` refuses an absent
+    expected hash by construction. R9's SUPERSEDED is exactly that state --
+    not bootable, still abortable by either handle, retirable AT ONCE by
+    `--retire-all` instead of only on age. Carrying without the mark would
+    leave the entry `awaiting-handshake`, which is below the doctor's
+    verdict-moving threshold and, worse, is not a `handoff_boot_refusal`, so
+    the successor would still write a HANDSHAKE onto a released claim.
+
+    The token hash is NOT carried, and this is the review's own proposed fix
+    refused on purpose: carrying it would keep a bearer secret valid on a claim
+    with no holder to spend it.
+
+    R4's invariant survives in the direction that matters. R4 says the LAST
+    entry retiring takes the hash with it; here the hash goes while entries
+    stand, which only ever makes a stranded token deader. `drop_handoff_entry`
+    already `pop`s a hash that is not there.
+
+    RAW members (rb-MIN-7): a torn member that fails to cross a transition
+    takes its file's protection with it. An entry a LATER BEGIN already
+    superseded keeps its own `superseded_by` -- that supersession really was by
+    a later attempt, and overwriting it would falsify the record."""
+    members = handoff_pending_members(old_claim)
+    if not members:
+        return
+    stamp = now_iso()
+    for member in members:
+        if isinstance(member, dict) and not member.get(HANDOFF_SUPERSEDED_KEY):
+            member[HANDOFF_SUPERSEDED_KEY] = stamp
+            member[HANDOFF_SUPERSEDED_REASON_KEY] = HANDOFF_SUPERSEDED_BY_RELEASE
+    new_claim[HANDOFF_PENDING_KEY] = members
+
+
 def resolve_handoff_abort(claim, handshake, successor_sid=None, successor_inc=None,
                           now=None, timeout_seconds=None, force=False) -> dict:
     """R3: what `sup-handoff-abort` may do, decided as a PURE function.
@@ -12129,8 +12188,22 @@ def handoff_boot_refusal(claim, successor_inc, now=None, timeout_seconds=None):
                 f"clobbers the live attempt. TERMINATE: take no fleet actions and "
                 f"end your turn with the final message HANDOFF-ORPHAN "
                 f"{successor_inc}")
-    if any(handoff_entry_state(e, now=now, timeout_seconds=timeout_seconds)
-           == HANDOFF_SUPERSEDED for e in mine):
+    superseded = [e for e in mine
+                  if handoff_entry_state(e, now=now, timeout_seconds=timeout_seconds)
+                  == HANDOFF_SUPERSEDED]
+    if any(e.get(HANDOFF_SUPERSEDED_REASON_KEY) == HANDOFF_SUPERSEDED_BY_RELEASE
+           for e in superseded):
+        # P1-4. Same terminal answer, an honest reason: nothing began another
+        # handoff here. The predecessor RELEASED, which took the token hash
+        # this body's HANDSHAKE would have to match, so the transfer cannot be
+        # completed by anyone.
+        return (f"{successor_inc} cannot boot: the predecessor RELEASED the supervisor "
+                f"claim after dispatching you, and the release took the handoff token "
+                f"with it -- no body can complete your transfer, and a HANDSHAKE "
+                f"written now is one no verb can act on. TERMINATE: take no fleet "
+                f"actions and end your turn with the final message HANDOFF-ORPHAN "
+                f"{successor_inc}")
+    if superseded:
         newer = next((e.get("superseded_by") for e in mine if e.get("superseded_by")),
                      "a later attempt")
         return (f"{successor_inc} was SUPERSEDED by {newer}: the predecessor began "
@@ -12515,7 +12588,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     is wrong -- *"matching against `session_id` alone fails open on it
     (ND4a)"* -- for the twelve other sites that already key on the union
     (`:2288, :2332, :2572, :2722, :6628, :6945, :7212, :7426, :7513, :7736,
-    :8517, :12385`). B6 was the one
+    :8517, :12458`). B6 was the one
     roster comparison that did not, and §G-G measured it failing open exactly
     as predicted: the releaser fork-steered, so its record was eagerly
     restamped (`session_id` = post-fork, pre-fork sid pushed into
@@ -12528,7 +12601,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
     writer appends that record's OWN prior sid alone: :5630, :6087, :10364,
-    :15523), the same safety invariant §7.1's send carve-out rests on. That
+    :15618), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -13219,7 +13292,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
     #     writer appends that record's OWN prior sid alone (:5630, :6087, :10364,
-    #     :15523) -- so the sid union can never make one body answer for another.
+    #     :15618) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -13252,7 +13325,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         #     file aside (`:814`), which is a write. Routing the identity read
         #     through it made `fleet send` shred the operator's evidence from a
         #     path that promises to touch nothing; the helper exists for exactly
-        #     this and names this gate as its reason (`:12313`). A `None` here
+        #     this and names this gate as its reason (`:12386`). A `None` here
         #     still fails toward the gate -- an unreadable registry is reported
         #     by its own doctor row, and is never a reason to decide blind.
         #     MERGE NOTE (2026-07-27): main and `fix/identity-registry-judges`
@@ -14107,6 +14180,18 @@ def cmd_sup_release(args) -> int:
     A literal cannot carry a field a future spec adds to the live claim by
     accident; a filtered copy can.
 
+    P1-4 -- the literal's ONE deliberate exception, and why the rule survives
+    it. `handoff_pending` is carried (see `_carry_handoff_pending_on_release`),
+    because release is a CLAIM TRANSITION and R5 requires every transition to
+    carry the pending set forward: releasing mid-handoff otherwise erased the
+    in-flight successor at exactly the moment the succession path exists for.
+    It is added CONDITIONALLY and by an explicit call, not by filtering, so an
+    ordinary release still writes exactly the enumerated key set and the §9
+    hazard above is untouched -- `handoff_pending` decides no holdership.
+    NOTE FOR THE OPERATOR: claim-nonce §6.3 enumerates the post-release key set
+    exhaustively and does not list this key. The amendment is REQUIRED and is
+    not made here; spec promotion is an operator gate.
+
     No mint, and notices discarded, for the reason `sup-handoff-complete`
     already carries one layer over: the claim this call validates ceases to
     exist inside this same lock section, so a generation minted for it would
@@ -14162,6 +14247,16 @@ def cmd_sup_release(args) -> int:
                     "state": "released"}
         if reason:
             released["reason"] = reason
+        # P1-4: the ONE thing this literal may carry, and the reason the rule
+        # above is not violated by it. `handoff_pending` is not a holdership
+        # field -- no branch decides who holds the claim from it -- so it
+        # cannot make a released record honorable by sid the way a leftover
+        # `session_id` could. What it does carry is the record of a successor
+        # this body dispatched and did not resolve, which is the only thing
+        # that keeps that successor abortable, visible to `fleet doctor`, and
+        # protected from the task-file sweep. Conditional, so an ordinary
+        # release still writes exactly §6.3's seven keys.
+        _carry_handoff_pending_on_release(claim, released)
         write_incarnation(released)
         # AFTER the claim write, never before -- see the ORDER note above.
         retired = _tombstone_releasing_body(caller, inc)
@@ -16010,21 +16105,29 @@ def _doctor_check_supervisor_handoff():
         stranded = [(e, s) for e, s in stranded
                     if s in (HANDOFF_RESOLVABLE_STALE, HANDOFF_SUPERSEDED)]
         torn = handoff_pending_torn(claim)
+        # P1-4: `--retire-all` needs a HOLDER to present a generation to, and
+        # the path that most often leaves these entries behind is a release --
+        # after which there is no holder and the recipe refuses. Say the extra
+        # step here rather than making the operator learn it from a refusal.
+        recipe = ("`fleet sup-handoff-abort --retire-all --nonce <value>`"
+                  if not (isinstance(claim, dict) and claim.get("state") == "released")
+                  else "`fleet sup-boot` (the claim is RELEASED -- there is no holder to "
+                       "present a nonce to), then `fleet sup-handoff-abort --retire-all "
+                       "--nonce <value>`")
         if stranded:
             ok = False
             parts.append(
                 f"{len(stranded)} pending successor(s) awaiting retirement ("
                 + ", ".join(f"{e.get('successor_inc')}[{s}]" for e, s in stranded)
                 + ") -- each pins a task file whose plaintext handoff token is LIVE "
-                  "while the claim holds its hash. Retire them: `fleet "
-                  "sup-handoff-abort --retire-all --nonce <value>`")
+                  "while the claim holds its hash. Retire them: " + recipe)
         if torn:
             ok = False
             parts.append(
                 f"{len(torn)} unreadable pending member(s) in the claim -- they name "
                 f"no successor this code can identify, so the handoff-file sweep "
                 f"protects EVERY task file while they stand (fail-closed). Clear "
-                f"them: `fleet sup-handoff-abort --retire-all --nonce <value>`")
+                f"them: " + recipe)
     except Exception:  # noqa: BLE001 -- doctor row: evidence must not break health
         pass
     if handoff_abort_flag_path().exists():
