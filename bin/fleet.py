@@ -37,6 +37,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -44,7 +45,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 # The interpreter floor, in ONE place (posix-port campaign, follow-up 2).
 # Everything else that states it -- this module's docstring, the
@@ -319,7 +320,8 @@ def statusline_script_path() -> Path:
 # from its own location. That hook is gone (terminal-surface D7) and the
 # marker had no other reader -- `fleet.py`, `fleet_statusline.py` and both
 # shell shims resolve $FLEET_HOME, else their own location, and the autoclean
-# scheduled task carries an explicit `--fleet-home <path>`.
+# scheduled task carried an explicit `--fleet-home <path>` (that task was
+# retired 2026-07-27; `--fleet-home` remains for any headless caller).
 #
 # It is deleted rather than kept, because it was fleet's only unconditional
 # write to global machine state: plain `fleet init` stamped `~/.claude/`
@@ -343,15 +345,22 @@ def now_iso() -> str:
 #
 # This is the ONLY section of fleet.py permitted to branch on os.name /
 # sys.platform, read subprocess creation flags, or shell out to an
-# OS-specific tool (schtasks/crontab, ctypes/kernel32). Every other
-# function in this module calls through the PLATFORM singleton below
-# instead of doing any of that itself. Two implemented backends:
-# _WindowsPlatform (schtasks scheduling, FILE_APPEND_DATA outcome append)
-# and _PosixPlatform (crontab scheduling, O_APPEND outcome append --
-# macOS + Linux, the posix-port branch). UnsupportedPlatformError remains
-# the contract for any future genuinely-unportable operation. A
-# source-scan test (test_steering.py) enforces that no other function in
-# this module references os.name/sys.platform.
+# OS-specific tool (ctypes/kernel32). Every other function in this module
+# calls through the PLATFORM singleton below instead of doing any of that
+# itself. Two implemented backends: _WindowsPlatform (FILE_APPEND_DATA
+# outcome append) and _PosixPlatform (O_APPEND outcome append -- macOS +
+# Linux, the posix-port branch). UnsupportedPlatformError remains the
+# contract for any future genuinely-unportable operation. A source-scan test
+# (test_steering.py) enforces that no other function in this module
+# references os.name/sys.platform.
+#
+# The scheduler surface (schtasks on Windows, crontab on POSIX) lived here
+# until 2026-07-27, when the operator retired the autoclean timer: the sweep
+# is driven by the supervisor's watchtower beat and the interface's startup
+# ritual instead, so fleet installs no OS-scheduler state on any platform and
+# the whole per-OS scheduling seam -- with its ownership predicate, its
+# fail-closed query and its two path-comparison dialects -- is gone rather
+# than ported. Deleting the class of problem beat fixing one instance of it.
 # ---------------------------------------------------------------------------
 
 _FILE_APPEND_DATA = 0x0004
@@ -361,114 +370,24 @@ _OPEN_ALWAYS = 4
 _FILE_ATTRIBUTE_NORMAL = 0x80
 
 
-class AutocleanTaskQueryError(Exception):
-    """The scheduler could not say whether the autoclean task exists (F3:
-    transient failure, access denied, timeout). Raised by BOTH backends --
-    schtasks on Windows, `crontab -l` on POSIX -- since both can fail in a
-    way that is not an answer. Callers fail CLOSED -- treating this as "task
-    absent" would let an install clobber a foreign task of the same name on a
-    hiccup (schtasks `/Create /F`, or a crontab rewrite that drops the
-    foreign line)."""
-
-
 class UnsupportedPlatformError(NotImplementedError):
     """A PLATFORM operation this OS has no implementation for.
 
     NOT raised by any adapter method today: both backends implement the whole
-    surface (the posix port filled in what _PosixPlatform once stubbed). It is
-    the reserved contract for a genuinely-unportable FUTURE operation -- one
-    where some OS has no equivalent primitive at all, as opposed to a
-    different tool for the same job (schtasks vs crontab, FILE_APPEND_DATA vs
+    surface. It is the reserved contract for a genuinely-unportable FUTURE
+    operation -- one where some OS has no equivalent primitive at all, as
+    opposed to a different tool for the same job (FILE_APPEND_DATA vs
     O_APPEND), which is what the adapter exists to absorb silently.
 
-    Two handlers stay wired, and must: `_doctor_check_autoclean` catches it
-    around `PLATFORM.autoclean_task_query` and degrades that tier to a
-    "unsupported on this platform -- skipped" PASS-note rather than failing
-    doctor; `main()` lists it in the top-level except so any other unportable
-    call exits 1 with a `fleet: <message>` line instead of a traceback. A new
-    unportable method inherits the second for free on the OS that lacks it."""
+    One handler stays wired, and must: `main()` lists it in the top-level
+    except so any unportable call exits 1 with a `fleet: <message>` line
+    instead of a traceback. (`_doctor_check_autoclean` caught it too, around
+    the scheduler query, until the timer was retired on 2026-07-27 -- that
+    check now reads only the run stamp and has nothing unportable to call.)"""
 
 
 class _WindowsPlatform:
     """Windows implementation of every OS-specific fleet operation."""
-
-    # Path-comparison semantics for scheduled-task ownership (D8, closed by
-    # the posix-port campaign). NTFS/ReFS compare paths case-insensitively
-    # and `\` is THE separator -- and schtasks XML round-trips genuinely
-    # emit both spellings of one path -- so folding both variances is
-    # required here for `_fleet_task_is_ours` to recognise fleet's own task.
-    task_paths_are_case_insensitive = True
-    task_paths_use_backslash_separator = True
-
-    def autoclean_task_query(self, task_name: str, run=subprocess.run):
-        """None ONLY when the task is definitively absent; its command
-        string when installed ("" if the XML is unparseable); raises
-        AutocleanTaskQueryError when existence cannot be determined (F3:
-        callers must fail CLOSED -- reading a transient failure as
-        "absent" licensed /Create /F over a foreign task).
-
-        Two locale-safe steps: existence via the full `/FO CSV` listing
-        (a targeted /TN query's not-found error string is locale-
-        translated and indistinguishable from access-denied by exit code;
-        the listing's exit code + name presence are not), then the
-        command via `/XML` (element names are not translated either)."""
-        try:
-            listing = run(["schtasks", "/Query", "/FO", "CSV"],
-                          capture_output=True, text=True, timeout=30)
-        except Exception as exc:
-            raise AutocleanTaskQueryError(f"schtasks listing failed: {exc}")
-        if listing.returncode != 0:
-            raise AutocleanTaskQueryError(
-                f"schtasks listing exit {listing.returncode}: "
-                f"{(listing.stderr or '').strip()[:200]}")
-        if f'"\\{task_name}"' not in (listing.stdout or ""):
-            return None  # definitively absent
-        try:
-            proc = run(["schtasks", "/Query", "/TN", task_name, "/XML"],
-                       capture_output=True, text=True, timeout=15)
-        except Exception as exc:
-            raise AutocleanTaskQueryError(f"schtasks XML query failed: {exc}")
-        if proc.returncode != 0:
-            raise AutocleanTaskQueryError(
-                f"schtasks XML query exit {proc.returncode}: "
-                f"{(proc.stderr or '').strip()[:200]}")
-        xml = proc.stdout or ""
-        parts = []
-        for tag in ("Command", "Arguments"):
-            m = re.search(rf"<{tag}>(.*?)</{tag}>", xml, re.S)
-            if m:
-                text = m.group(1).strip()
-                for ent, ch in (("&quot;", '"'), ("&lt;", "<"),
-                                ("&gt;", ">"), ("&amp;", "&")):
-                    text = text.replace(ent, ch)
-                parts.append(text)
-        return " ".join(p for p in parts if p)
-
-    def autoclean_task_install(self, task_name: str, command: str,
-                               interval_hours: int, run=subprocess.run):
-        """(ok, message). `/F` makes re-install idempotent -- the caller is
-        responsible for the refuse-foreign-task check BEFORE calling this."""
-        try:
-            proc = run(["schtasks", "/Create", "/F", "/TN", task_name,
-                        "/TR", command, "/SC", "HOURLY", "/MO", str(int(interval_hours))],
-                       capture_output=True, text=True, timeout=30)
-        except Exception as exc:
-            return (False, str(exc))
-        if proc.returncode != 0:
-            return (False, (proc.stderr or proc.stdout or "").strip()[:300])
-        return (True, "")
-
-    def autoclean_task_remove(self, task_name: str, run=subprocess.run):
-        """(ok, message). Missing task counts as failure -- the caller
-        reports it; nothing here raises."""
-        try:
-            proc = run(["schtasks", "/Delete", "/TN", task_name, "/F"],
-                       capture_output=True, text=True, timeout=30)
-        except Exception as exc:
-            return (False, str(exc))
-        if proc.returncode != 0:
-            return (False, (proc.stderr or proc.stdout or "").strip()[:300])
-        return (True, "")
 
     def atomic_append_bytes(self, path: Path, data: bytes) -> None:
         """Single-syscall atomic append. Opens the file for FILE_APPEND_DATA
@@ -523,115 +442,13 @@ class _WindowsPlatform:
 class _PosixPlatform:
     """POSIX backend (posix-port): macOS + Linux.
 
-    Autoclean scheduling uses the user crontab on both OSes -- macOS still
-    ships cron, and one crontab backend is strictly simpler than a
-    launchd-plist/cron split (launchd can become a refinement if cron's
-    macOS sandboxing ever bites; fleet's autoclean only touches user-owned
-    FLEET_HOME paths, which cron may). The fleet-owned entry is found by a
-    trailing `# <task_name>` tag, never by parsing schedules -- the same
-    "match our own marker, refuse to guess" doctrine as the schtasks
-    backend's task-name match."""
-
-    # Path-comparison semantics for scheduled-task ownership (D8, closed by
-    # the posix-port campaign). The mirror image of the Windows declaration:
-    # ext4/APFS-case-sensitive compare paths byte-for-byte, and `\` is an
-    # ordinary filename character, not a separator. Folding either variance
-    # here would make two GENUINELY DIFFERENT paths compare equal -- a false
-    # MATCH on a predicate that decides whether a scheduled job may be
-    # overwritten. See `_normalize_task_token` and
-    # `TestTaskPathSemanticsFollowTheFilesystem`.
-    #
-    # macOS note: HFS+/APFS are usually case-INSENSITIVE, so this
-    # declaration is conservative there rather than exact -- it can only
-    # produce the safe error (refusing a task that is provably the
-    # operator's, recoverable with `--force`), never the dangerous one
-    # (adopting a task that is not ours). Case-sensitivity is a per-volume
-    # property on macOS, not a per-OS one, so no static declaration can be
-    # exact; erring toward refusal is the whole doctrine of this predicate.
-    task_paths_are_case_insensitive = False
-    task_paths_use_backslash_separator = False
-
-    def _cron_tag(self, task_name: str) -> str:
-        return f"# {task_name}"
-
-    def _read_crontab(self, run):
-        """(lines, error). lines is None on failure; [] means 'user has no
-        crontab', a DEFINITIVE absence (crontab -l exits nonzero for it,
-        so it must be told apart from access failures by message -- cron
-        implementations do not localize 'no crontab', unlike schtasks'
-        locale-translated not-found error that forced the CSV dance on
-        Windows)."""
-        try:
-            proc = run(["crontab", "-l"], capture_output=True, text=True,
-                       timeout=30)
-        except Exception as exc:
-            return (None, f"crontab listing failed: {exc}")
-        if proc.returncode == 0:
-            return ((proc.stdout or "").splitlines(), "")
-        if "no crontab" in (proc.stderr or "").lower():
-            return ([], "")
-        return (None, f"crontab listing exit {proc.returncode}: "
-                      f"{(proc.stderr or '').strip()[:200]}")
-
-    def _write_crontab(self, lines, run):
-        """(ok, message). Installs the given lines as the user crontab."""
-        text = "\n".join(lines) + ("\n" if lines else "")
-        try:
-            proc = run(["crontab", "-"], input=text, capture_output=True,
-                       text=True, timeout=30)
-        except Exception as exc:
-            return (False, str(exc))
-        if proc.returncode != 0:
-            return (False, (proc.stderr or proc.stdout or "").strip()[:300])
-        return (True, "")
-
-    def autoclean_task_query(self, task_name: str, run=subprocess.run):
-        """None ONLY when the entry is definitively absent; its command
-        string when installed ("" if the line is unparseable); raises
-        AutocleanTaskQueryError when existence cannot be determined (F3:
-        callers must fail CLOSED, same contract as the schtasks backend)."""
-        lines, err = self._read_crontab(run)
-        if lines is None:
-            raise AutocleanTaskQueryError(err)
-        tag = self._cron_tag(task_name)
-        for line in lines:
-            if line.rstrip().endswith(tag):
-                body = line.rsplit(tag, 1)[0].strip()
-                # five schedule fields, then the command
-                parts = body.split(None, 5)
-                return parts[5] if len(parts) == 6 else ""
-        return None
-
-    def autoclean_task_install(self, task_name: str, command: str,
-                               interval_hours: int, run=subprocess.run):
-        """(ok, message). Idempotent re-install: any existing fleet-tagged
-        line is replaced -- the caller is responsible for the
-        refuse-foreign-task check BEFORE calling this (same split as the
-        schtasks backend's /F)."""
-        # % is a line separator inside a crontab command field; a command
-        # containing one would be silently mangled, not run.
-        if "%" in command or "\n" in command:
-            return (False, "command contains a character cron cannot "
-                           "carry literally (% or newline)")
-        lines, err = self._read_crontab(run)
-        if lines is None:
-            return (False, err)
-        tag = self._cron_tag(task_name)
-        kept = [ln for ln in lines if not ln.rstrip().endswith(tag)]
-        kept.append(f"0 */{int(interval_hours)} * * * {command} {tag}")
-        return self._write_crontab(kept, run)
-
-    def autoclean_task_remove(self, task_name: str, run=subprocess.run):
-        """(ok, message). Missing entry counts as failure -- the caller
-        reports it; nothing here raises."""
-        lines, err = self._read_crontab(run)
-        if lines is None:
-            return (False, err)
-        tag = self._cron_tag(task_name)
-        kept = [ln for ln in lines if not ln.rstrip().endswith(tag)]
-        if kept == lines:
-            return (False, f"no crontab entry tagged {tag!r}")
-        return self._write_crontab(kept, run)
+    Was also the crontab scheduling backend for autoclean until the timer was
+    retired on 2026-07-27. Note what retirement bought here specifically: cron
+    has no catch-up concept AT ALL (that is anacron's job, which is not
+    installed by default on macOS and not guaranteed on Linux), so the POSIX
+    side could not have been given the missed-run behaviour the Windows task
+    was missing. The defect was never Windows-specific -- it was
+    timer-specific."""
 
     def atomic_append_bytes(self, path: Path, data: bytes) -> None:
         """Single-syscall atomic append via O_APPEND. POSIX specifies that
@@ -826,10 +643,105 @@ def _quarantine_registry(path: Path) -> Path:
     return quarantined
 
 
+def _quarantine_artifacts() -> list:
+    """Every `state/fleet.json.corrupt.<ts>` artifact `_quarantine_registry`
+    has left behind, sorted by name (oldest first). Empty list, never a raise.
+
+    THE ONE SPELLING OF THE GLOB. It is named because the artifact is the only
+    evidence a quarantine leaves: the rename means the very next load sees a
+    MISSING file rather than a broken one, so nothing else on disk can tell a
+    repaired incident from a fresh install.
+
+    ITS FIVE READERS ASK **TWO** DIFFERENT QUESTIONS, and an earlier revision of
+    this docstring claimed they asked one -- *"three separate questions turn out
+    to be the same question ... one rule with one remedy, so it gets one
+    function"*. That was false, and the falsehood was load-bearing: it made a
+    reader that had been given the WEAKER of the two rules look like it was
+    already carrying the stronger one, which is how the §9 upgrade shipped with
+    a hole the sibling reader had been fixed for eight days earlier (gate
+    reviewer CRITICAL, 2026-07-27). The two rules are spelled out here rather
+    than unified because they genuinely differ.
+
+    RULE 1 -- *"is the state/ directory still CARRYING an unresolved
+    incident?"* Presence-only, registry present or not. Every REFUSAL reads
+    this one, and presence-only is deliberate: `os.rename` PRESERVES mtime, so
+    the artifact's mtime is the pre-corruption WRITE time and any recreated
+    registry is always newer -- an "artifact newer than the registry"
+    comparison would never fire on the recreation bypasses it exists to stop.
+
+      * `_sweep_husks` (:7530) -- a rename can hide live worker records from
+        the roster sweep, so a thin registry would rm sessions it still owns.
+      * `_doctor_check_autoclean` (:8783) -- a lingering artifact means the
+        sweep above is refusing itself, which is how a bricked sweep reads
+        green-and-fresh.
+      * `_require_claim_holder`'s §9 arm (:12702) -- the legacy upgrade mints
+        generation 1 on bare sid equality, so it needs the registry that
+        cleared it to be COMPLETE, not merely readable. See there.
+
+    RULE 2 -- *"is this particular ABSENCE a fresh install, or an incident
+    wearing a different name?"* Presence **and** `state/fleet.json` absent.
+    These two are not refusals at all; they are how an absent registry gets
+    read and described, and the question only arises when there is no file to
+    answer for itself.
+
+      * `_acting_worker_identity` (:2352) -- `not_initialized` stays the
+        affirmative *"there are no records"* only with no artifact beside it.
+        SCOPED TO THE ABSENT CASE ON PURPOSE: this resolver is shared with the
+        §6.5 worker-turn gate, which refuses on `True` alone, so poisoning a
+        HEALTHY read here would let a real worker turn through §6.5 -- closing
+        the §9 door by opening a wider one. Rule 1 lives at the §9 arm instead.
+      * `_identity_abstention_note` (:12491) -- the same distinction, in words,
+        because the generic note names `fleet doctor` and doctor is what MADE
+        this state.
+
+    The operator clears the artifact (after restoring what it holds), which
+    re-arms every reader at once. One remedy, two rules."""
+    try:
+        return sorted(state_dir().glob("fleet.json.corrupt.*"))
+    except OSError:
+        return []
+
+
+# Operator gate 2026-07-27: `fleet doctor --repair` is now the ONE verb that
+# performs the quarantine rename, so it is the one verb every refusal points at.
+# Named once, here, next to the rename it names -- a hint that drifts from the
+# flag it describes is worse than no hint, and this string is asserted verbatim
+# by `tests/test_view_quarantine.py`.
+REGISTRY_REPAIR_HINT = "repair it with `fleet doctor --repair`"
+
+
+def _registry_corrupt_reason(data):
+    """None when `data` is a usable registry object, else a short reason.
+
+    Shared by `load_registry` (which quarantines) and `read_registry_no_repair`
+    (which never does) so the two can never disagree about what CORRUPT MEANS.
+    Two independent validators is how a shape one loader rejects starts sailing
+    through the other, and the view path is exactly where that would be
+    invisible.
+
+    Fuzz-report Finding F2 (HIGH): `data.setdefault("workers", {})` alone only
+    fills in a MISSING "workers" key -- it is a no-op when the key is present
+    but the wrong shape (a list/string/int), which sails through as a "valid"
+    registry and then crashes every subcommand downstream (dict.keys()/.get()/
+    .pop()/`in`/sorted() all raise on a non-dict)."""
+    if not isinstance(data, dict):
+        return "registry was not a JSON object"
+    workers = data.get("workers", {})
+    if not isinstance(workers, dict) or not all(isinstance(v, dict) for v in workers.values()):
+        return "registry 'workers' was not an object of objects"
+    return None
+
+
 def load_registry() -> dict:
     """Load state/fleet.json. Missing file -> {"workers": {}}. An existing
     but corrupt/unreadable file is quarantined (renamed aside) and raises
-    RegistryCorruptError -- callers must abort, not catch-and-continue."""
+    RegistryCorruptError -- callers must abort, not catch-and-continue.
+
+    THE RENAME IS A WRITE, and after the 2026-07-27 gate this is no longer the
+    loader a read reaches for. Every path that is not a lock-holding mutation
+    uses `read_registry_no_repair` (same validation, no rename) or
+    `_read_registry_readonly` (never raises at all).
+    `tests/test_load_registry_callers.py` pins the caller set by name."""
     path = registry_path()
     if not path.exists():
         return {"workers": {}}
@@ -841,24 +753,57 @@ def load_registry() -> dict:
         raise RegistryCorruptError(f"corrupt registry quarantined to {quarantined}")
     except OSError:
         raise RegistryCorruptError(f"registry unreadable: {path}")
-    if not isinstance(data, dict):
+    reason = _registry_corrupt_reason(data)
+    if reason is not None:
         quarantined = _quarantine_registry(path)
-        raise RegistryCorruptError(f"registry was not a JSON object; quarantined to {quarantined}")
-    # Fuzz-report Finding F2 (HIGH): `data.setdefault("workers", {})` alone
-    # only fills in a MISSING "workers" key -- it is a no-op when the key is
-    # present but the wrong shape (a list/string/int), which sails through
-    # as a "valid" registry and then crashes every subcommand downstream
-    # (dict.keys()/.get()/.pop()/`in`/sorted() all raise on a non-dict).
-    # Validate the shape explicitly here -- the one place this module reads
-    # the registry off disk -- so a malformed "workers" value is quarantined
-    # exactly like a decode failure, never allowed to flow downstream.
-    workers = data.get("workers", {})
-    if not isinstance(workers, dict) or not all(isinstance(v, dict) for v in workers.values()):
-        quarantined = _quarantine_registry(path)
-        raise RegistryCorruptError(
-            f"registry 'workers' was not an object of objects; quarantined to {quarantined}"
-        )
-    data["workers"] = workers
+        raise RegistryCorruptError(f"{reason}; quarantined to {quarantined}")
+    data["workers"] = data.get("workers", {})
+    return data
+
+
+def read_registry_no_repair(hint: bool = True) -> dict:
+    """`load_registry()` MINUS THE QUARANTINE. Same missing-file contract
+    (`{"workers": {}}`), same validation, same `RegistryCorruptError` -- but the
+    corrupt file is left exactly where it is, under its own name, and the
+    message names `fleet doctor --repair` instead of performing the rename.
+
+    WHY IT IS A SEPARATE FUNCTION rather than a `quarantine=False` kwarg on
+    `load_registry`: `tests/test_load_registry_callers.py` decides who may
+    quarantine by walking the AST for calls to `load_registry` BY NAME. A
+    keyword argument makes that walk undecidable -- every call site would look
+    identical and the allowlist would stop meaning anything.
+
+    WHY IT IS NOT `_read_registry_readonly`: that one returns the projection
+    `{"workers": ...}` and drops every sibling key. `cmd_status` re-reads under
+    the lock and calls `save_registry(data)`, so a projecting loader on the
+    read side would silently delete any top-level key it did not know about the
+    next time anyone ran `fleet status`. This is a FULL loader.
+
+    Callers: the three views (`cmd_status`'s pre-probe read, `cmd_peek`,
+    `cmd_result`), `_resolve_worker_target`'s name resolution, and `cmd_doctor`
+    without `--repair`.
+
+    `hint=False` suppresses the trailing `REGISTRY_REPAIR_HINT`, for the one
+    caller that says it better itself: `_doctor_check_registry` names the flag
+    AND what it will do AND that every check below it just ran against an empty
+    registry. With the hint left on, the doctor row named `--repair` twice in a
+    single sentence, which reads like a bug and buries the part the operator has
+    not already been told."""
+    path = registry_path()
+    if not path.exists():
+        return {"workers": {}}
+    suffix = f" -- {REGISTRY_REPAIR_HINT}" if hint else ""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise RegistryCorruptError(f"{path} is not valid JSON{suffix}")
+    except OSError:
+        raise RegistryCorruptError(f"registry unreadable: {path}")
+    reason = _registry_corrupt_reason(data)
+    if reason is not None:
+        raise RegistryCorruptError(f"{reason} ({path}){suffix}")
+    data["workers"] = data.get("workers", {})
     return data
 
 
@@ -2168,27 +2113,34 @@ def _record_is_supervisor_claim_holder(record, claim=None):
 # and `_doctor_check_identity_witness` reports a witness that disagrees with the
 # registry as the leak it is.
 #
-# [PROPOSED -- NOT RATIFIED DOCTRINE. See docs/specs/claim-nonce.md §16.4 item 3.]
-# A CANDIDATE INVARIANT THIS SURFACE WAS DRAFTED UNDER. "An identity inference
-# derived from the environment may never be the SOLE basis of a refusal; the
-# nonce and the claim refuse, inference may only inform and announce."
+# RATIFIED DOCTRINE -- claim-nonce §17 (Altai, 2026-07-27). THE INVARIANT THIS
+# SURFACE IS DRAFTED UNDER, quoted so the code and the corpus can be diffed:
 #
-# Its provenance, stated because prescriptive voice in a comment is how a
-# proposal becomes doctrine by accident: it originates in a supervisor's task
-# brief, it appears in the ratified corpus ONLY inside the unratified §16
-# amendment this work adds, and nothing in `docs/SPEC.md`,
-# `docs/specs/three-tier-command.md` or ratified `claim-nonce` states it.
-# Whether it becomes doctrine is the operator's call. Read strictly it also
-# condemns more than it was aimed at -- the 200k ceiling refusal at
-# `_ceiling_refuses_dispatch` rests on an environment-derived identity too --
-# and one standard cannot be right at one site and wrong at the other; that
-# tension is filed for the operator, not resolved here.
+#     "Inference may select the SUBJECT of a measurement, but may not supply
+#     the GROUNDS of a refusal. Donation can only ever ADD a `FLEET_WORKER`
+#     stamp and nothing anywhere removes one, therefore presence of the stamp
+#     is unsound evidence and absence is sound."
+#
+# Both sentences are the clause; the second is the SCOPE, not a gloss on the
+# first. `tests/test_doctrine_citations.py` re-derives this citation and the
+# two below out of this file on every run and checks that §17 exists, is
+# ratified, and says what is quoted here -- because the defect being closed is
+# a comment in prescriptive voice citing something nobody can open.
+#
+# SUPERSEDED, and named so nobody re-derives it: the unscoped form *"an
+# identity inference derived from the environment may never be the SOLE basis
+# of a refusal"*, which originated in a supervisor's task brief and appeared in
+# `docs/specs/**` only inside the unratified §16 amendment. Read strictly it
+# condemned the 200k ceiling refusal too (`_ceiling_refuses_dispatch` rests on
+# an environment-derived identity), i.e. one standard right at one site and
+# wrong at the other. §17's second sentence is what resolves that: the ceiling
+# reads ABSENCE and is permitted, the old claim guard read PRESENCE and was not.
 #
 # WHERE THE CODE ACTUALLY STANDS: the worker-turn GATE in
-# `_require_claim_holder` DOES refuse on a registry-judged identity, because
-# ratified claim-nonce §6.5 D5 requires that refusal to exist and SPEC.md:196
-# constrains only its key. So this proposal is not what the shipped guard
-# obeys; it is a live question about whether the guard should exist at all.
+# `_require_claim_holder` DOES refuse on a registry-judged identity, and §17
+# does not condemn it -- ratified claim-nonce §6.5 D5 requires that refusal to
+# exist and SPEC.md:196 constrains only its key. The gate's limit is coverage,
+# not legitimacy.
 #
 # WHAT IS FACTUAL RATHER THAN PROPOSED. `FLEET_WORKER` and
 # `CLAUDE_CODE_SESSION_ID` are read from the SAME medium -- the donated daemon
@@ -2280,6 +2232,53 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     stays the short way at this helper's siblings, whose questions do not need
     the bit.
 
+    UNLESS A QUARANTINE ARTIFACT SITS BESIDE IT -- and that clause is the whole
+    of the corrupt->absent fix (gate reviewer, 2026-07-27). Absent and corrupt
+    are not two independent hazards, they are a SEQUENCE, because fleet's own
+    repair verb walks the one into the other:
+
+      1. corrupt registry -> the §9 arm below REFUSES, and its refusal text
+         says *"Repair `state/fleet.json` (see `fleet doctor`)"*.
+      2. `fleet doctor` -> `_quarantine_registry` RENAMES the file aside, so
+         there is now NO `state/fleet.json` at all.
+      3. the SAME call -> rc 0, `nonce_seq == 1`, a `NONCE:` printed, no
+         `--nonce` ever passed. The abstention became the affirmative verdict
+         the arm was waiting for, and the refusal named the command that did it.
+
+    So `not_initialized` is affirmative only when it means *"nothing was ever
+    written here"*. `_quarantine_artifacts()` is how the two absences are told
+    apart: no artifact = a fresh install, still an affirmative *"there are no
+    records"*; an artifact = a registry that was corrupt moments ago wearing a
+    different name, which abstains exactly as corrupt does.
+
+    IT IS NOT *"make `not_initialized` abstain"*, which is the obvious fix and
+    is wrong: mutant W11 measured that refusing the §9 upgrade on every fresh
+    install kills 39 tests. The fresh-install lane must stay open.
+
+    THE GATE HERE IS ON `not_initialized` ALONE, never on `ok`, AND THAT IS NOT
+    THE WHOLE OF THE ARTIFACT RULE -- it is `_quarantine_artifacts`' rule 2 (see
+    there). A healthy registry answers for itself at THIS site, because this
+    resolver is shared: the §6.5 worker-turn gate refuses on `True` alone, so an
+    artifact that degraded a healthy read into an abstention would stop §6.5
+    seeing a real worker. Measured, not assumed --
+    `test_an_artifact_beside_a_valid_registry_still_RESOLVES_a_worker` goes RED
+    on exactly that change.
+
+    WHAT THAT LEAVES OPEN IS CLOSED AT THE §9 ARM, NOT HERE, and an earlier
+    revision's failure to say so was the CRITICAL. `ok` is not the same claim as
+    *"complete"*: `_quarantine_registry` RENAMES, so a registry recreated after a
+    quarantine -- by a routine spawn, or by an operator "recreating" an empty one
+    -- reads `ok` while MISSING every record the artifact holds, and the §9 arm
+    read that thinness as an affirmative *"you are provably not a worker"*. The
+    presence-only refusal that closes it lives in `_require_claim_holder`
+    (`:12702`), where it costs the §6.5 gate nothing.
+
+    An artifact can also outlive its incident by days -- `_sweep_husks` tells the
+    operator to restore the file first and delete the artifact second -- so that
+    in-between state is EXPECTED. It does not lock anyone out of anything except
+    the one grant that mints a generation with no generation presented. Pinned by
+    `tests/test_identity_quarantine_glob.py`.
+
     Read-only: it runs on the dispatch hot path, inside `_require_claim_holder`,
     and inside a doctor row. A corrupt or unreadable registry degrades to
     UNRESOLVED -- "I do not know who I am" -- which every caller already has an
@@ -2318,7 +2317,8 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
         return ident                    # no read happened: `registry_read` False
     if registry is None:
         ok, reason, data = _read_registry_readonly()
-        registry = data if (ok or reason == "not_initialized") else None
+        registry = data if (ok or (reason == "not_initialized"
+                                   and not _quarantine_artifacts())) else None
     ident["registry_read"] = isinstance(registry, dict)
     workers = registry.get("workers") if isinstance(registry, dict) else None
     if not isinstance(workers, dict):
@@ -2438,7 +2438,16 @@ def _resolve_worker_target(name):
     unreadable holder sid, and a holder sid in no record (the stranded-stamp
     window, design §7e) each raise a named FleetCliError -- with no live
     claim, nothing answers to `supervisor`, and mailing a husk would be
-    worse than refusing. Every other name passes through untouched."""
+    worse than refusing. Every other name passes through untouched.
+
+    IT DOES NOT QUARANTINE (2026-07-27). This is a PRE-FLIGHT NAME LOOKUP: it
+    runs at the very top of every verb, views included, before any of them has
+    taken `fleet.lock`. The measured quarantine table was driven with an
+    ordinary worker name, which takes the short-circuit above and never reaches
+    this read -- so `fleet peek supervisor` was renaming `state/fleet.json`
+    aside from a path the table showed as clean. The mutating verbs that call
+    this still quarantine, at their own lock-held `load_registry()`, which is
+    where the rename belonged all along."""
     if name != SUPERVISOR_BODY_NAME:
         return name
     claim = read_incarnation()
@@ -2464,7 +2473,7 @@ def _resolve_worker_target(name):
             "the supervisor claim carries no readable holder sid -- nothing "
             "answers to 'supervisor'; inspect supervisor/INCARNATION "
             "(`fleet sup-status`)")
-    data = load_registry()
+    data = read_registry_no_repair()
     for wname, rec in data.get("workers", {}).items():
         if holder_sid in _record_sids(rec):
             return wname
@@ -2544,9 +2553,16 @@ def _ceiling_refuses_dispatch(verb, now=None):
     wording below therefore does NOT tell the caller that the interface tier can
     never see it, because with a donated stamp it can.
 
-    DIRECTION OF TRAVEL: at this site the inference only ever EXEMPTS. The
-    refusal's sole basis stays the measured occupancy of the acting transcript;
-    identity only selects whose transcript to measure.
+    DIRECTION OF TRAVEL -- RATIFIED DOCTRINE -- claim-nonce §17 (Altai,
+    2026-07-27): *"Inference may select the SUBJECT of a measurement, but may
+    not supply the GROUNDS of a refusal. Donation can only ever ADD a
+    `FLEET_WORKER` stamp and nothing anywhere removes one, therefore presence
+    of the stamp is unsound evidence and absence is sound."* At this site the
+    inference only ever EXEMPTS, and it only ever selects WHOSE transcript to
+    measure; the grounds of the refusal stay the measured occupancy of the
+    acting transcript. That is the PERMITTED half of the clause rather than an
+    exception to it, and the second sentence is why (c)'s read of `FLEET_WORKER`
+    ABSENCE is blessed rather than merely tolerated (§17.2).
 
     ONE SCOPE NOTE (rs S-9). Past (c), the verdict is
     `_caller_holds_supervisor_claim`'s, which resolves through each record's sid
@@ -3013,6 +3029,51 @@ def _read_registry_readonly() -> tuple:
     return (True, None, {"workers": workers})
 
 
+def _supervisor_tier_snapshot(now=None) -> dict:
+    """The command tier, projected for VIEWS (three-tier §3).
+
+    File-only by the same mandate as `supervisor_status_line`: no lock, no
+    roster read, no probe, no subprocess -- every supervisor state file is
+    written atomically, so a lock-free read is safe, and the terminal-surface
+    doctrine forbids a view taking `fleet.lock`.
+
+    NEVER RAISES. This is called from `status_snapshot`, which the statusline
+    refires after every assistant message; an exception here would blank the
+    operator's statusline via the exit-0 guard and give no reason why. Every
+    failure degrades to `state: "unknown"`, which renders as a visible word
+    rather than as silence -- absence is not evidence on this substrate, so a
+    view must not present "cannot read the claim" as "no supervisor".
+
+    `state` is the CLAIM's state, not a body's liveness:
+      * `none`     -- GOALS active, no claim file. Nobody holds command.
+      * `held`     -- a claim exists and is not released.
+      * `released` -- cleanly stood down (claim-nonce §6.3). The next
+                      `sup-boot` claims fresh; note §6.3 strips
+                      `heartbeat_at`, so `heartbeat_age_seconds` is None here
+                      BY DESIGN and its absence must never read as staleness.
+      * `unknown`  -- the claim could not be read or projected.
+    """
+    out = {"goals_active": False, "state": "none",
+           "incarnation_id": None, "heartbeat_age_seconds": None}
+    try:
+        out["goals_active"] = bool(supervisor_goals_active())
+        claim = read_incarnation()
+        if claim is None:
+            return out
+        out["incarnation_id"] = claim.get("incarnation_id")
+        out["state"] = "released" if claim.get("state") == "released" else "held"
+        if now is None:
+            now = datetime.now(timezone.utc)
+        try:
+            out["heartbeat_age_seconds"] = (
+                now - _parse_iso(claim["heartbeat_at"])).total_seconds()
+        except (KeyError, TypeError, ValueError):
+            out["heartbeat_age_seconds"] = None
+    except Exception:  # noqa: BLE001 -- a view never surfaces a traceback
+        out["state"] = "unknown"
+    return out
+
+
 def status_snapshot(now=None, include_archived: bool = False) -> dict:
     """Read-only fleet snapshot. See the module comment above for why this
     exists alongside cmd_status rather than reusing it.
@@ -3031,6 +3092,13 @@ def status_snapshot(now=None, include_archived: bool = False) -> dict:
         "generated_at": now_iso(),
         "totals": {"workers": 0, "mail": 0, "cost_usd": 0.0, "by_status": {}},
         "workers": [],
+        # three-tier §3: the tiers are not derivable from the worker table
+        # alone -- a supervisor BODY is a registry row like any other, and the
+        # claim that makes one of them THE supervisor lives in a different
+        # file. Views that render "the fleet" without this project two tiers
+        # as one and count husks of a retired command tier as workers.
+        # File-only, never raises: see `_supervisor_tier_snapshot`.
+        "supervisor": _supervisor_tier_snapshot(now),
     }
     if not ok:
         return snap
@@ -3073,6 +3141,13 @@ def status_snapshot(now=None, include_archived: bool = False) -> dict:
             # is_native's full record shape.
             "dispatch_kind": rec.get("dispatch_kind"),
             "archived_at": rec.get("archived_at"),
+            # three-tier §3/§10.1: which TIER this row's session occupies.
+            # Derived from the name family `sup|<inc>|<role>` via fleet's own
+            # predicate, so no consumer re-implements the shape. "supervisor"
+            # here means "a supervisor-shaped BODY", NOT "holds the claim" --
+            # a released or seized body keeps its name. `snap["supervisor"]`
+            # is the claim; this is the body.
+            "tier": "supervisor" if _is_supervisor_shaped(name) else "worker",
         })
 
     snap["workers"] = rows
@@ -3685,18 +3760,24 @@ def cmd_init(args) -> int:
     (hooks run outside fleet.py, spawned by `claude`, so they cannot fall
     back to a bare `py`/`python3` on PATH).
 
-    N1 (re-review, MED): the home guard is evaluated BEFORE anything is
-    written. With --autoclean, a guard problem refuses the WHOLE init before
-    any write, so a worktree never gets a scheduled task pinned to it;
-    --force overrides. Plain `fleet init` writes only inside the fleet home
-    and needs no guard.
+    `fleet init` writes NOTHING outside the repo except `--statusline`, which
+    is what that flag is for. It once also stamped the global
+    `~/.claude/fleet-home` marker (removed 2026-07-22 with the marker's only
+    reader) and once installed a Scheduled Task under `--autoclean`.
 
-    Since 2026-07-22 plain `fleet init` writes NOTHING outside the repo. It
-    used to also stamp the global `~/.claude/fleet-home` marker, which is why
-    this guard once had a second condition and this docstring once described
-    a marker-repointing hazard; both went with the marker's only reader (see
-    the note above `_home_guard_problems`). `--statusline` remains the one
-    flag that touches `~/.claude/`, which is what it is for.
+    THE TIMER IS RETIRED (operator ruling 2026-07-27). `--autoclean`,
+    `--autoclean-interval-hours` and `--autoclean-remove` are gone, and with
+    them the home guard (N1) that existed only to keep a scheduled task from
+    being pinned at a linked worktree it would outlive. `init` now creates no
+    state that outlives the shell, so there is nothing left for that guard to
+    protect. The `fleet autoclean` VERB is untouched: the supervisor runs it
+    on its watchtower beat and the interface runs it in its startup ritual
+    (`skills/fleet/supervisor.md`, `skills/fleet/SKILL.md`). Rationale: a
+    timer sweeps when the clock says so, which on a machine that loses power
+    means it does not sweep at all -- a 9h14m power cut dropped the 08:22Z
+    sweep and nothing caught up at boot, an 18-hour hole in a 6-hourly guard.
+    A beat sweeps when the fleet is ALIVE, which is the condition that makes
+    sweeping necessary in the first place.
 
     §7 THE GATE: `init` is a mutating lifecycle verb, so a supervisor-shaped
     caller must prove continuity while a fresh claim is held (bypassable, see
@@ -3704,14 +3785,6 @@ def cmd_init(args) -> int:
     with a session id acting against a live supervisor -- a human at a plain
     shell (no sid) is unaffected, which is how init is run at setup."""
     _supervisor_gate("init", nonce=getattr(args, "nonce", None))
-    force = getattr(args, "force", False)
-    guard_problems = _home_guard_problems()
-    if getattr(args, "autoclean", False) and guard_problems and not force:
-        raise FleetCliError(
-            "fleet init --autoclean refused before writing anything (N1): "
-            + "; ".join(guard_problems)
-            + " -- run from the canonical fleet home, or rerun with --force")
-
     template_path = template_settings_path()
     if not template_path.exists():
         raise FleetCliError(
@@ -3731,11 +3804,6 @@ def cmd_init(args) -> int:
     if getattr(args, "statusline", False):
         _install_statusline(force=getattr(args, "force", False),
                             chain=getattr(args, "chain", False))
-    if getattr(args, "autoclean", False):
-        _install_autoclean_task(getattr(args, "autoclean_interval_hours", None),
-                                force=getattr(args, "force", False))
-    if getattr(args, "autoclean_remove", False):
-        _remove_autoclean_task(force=getattr(args, "force", False))
     return 0
 
 
@@ -4047,14 +4115,25 @@ def cmd_status(args) -> int:
             _print_snapshot_table(snap, args.name)
         return 0
 
-    with fleet_lock():
-        data = load_registry()
-        requested = [args.name] if args.name else sorted(data["workers"])
-        for n in requested:
-            if n not in data["workers"]:
-                raise FleetCliError(f"unknown worker: {n!r}")
-        before_all = {n: data["workers"][n] for n in requested}
-        all_workers = data["workers"]  # snapshot for the epoch check (G9)
+    # D4 (2026-07-27): the PRE-PROBE read no longer quarantines, and no longer
+    # takes the lock to do a single read of an atomically-replaced file. A
+    # corrupt registry now refuses HERE, before the merge below has any chance
+    # to rename it aside -- so `fleet status`, the verb `/fleet:status` shelled
+    # out to, stops being step 2 of the corrupt->absent escalation.
+    #
+    # WHAT DELIBERATELY DID NOT CHANGE, because `docs/specs/terminal-surface.md`
+    # D2 is the source of record and says so verbatim: *"`fleet status` (no
+    # flag) remains the authoritative, recomputing command."* It still probes
+    # the roster and still persists its verdicts under `fleet_lock()` below.
+    # The lock-free, write-free view of the same data is `--stale-ok`
+    # (`status_snapshot`), which is what the `/fleet:*` templates now inline.
+    data = read_registry_no_repair()
+    requested = [args.name] if args.name else sorted(data["workers"])
+    for n in requested:
+        if n not in data["workers"]:
+            raise FleetCliError(f"unknown worker: {n!r}")
+    before_all = {n: data["workers"][n] for n in requested}
+    all_workers = data["workers"]  # snapshot for the epoch check (G9)
 
     names = [n for n in requested if include_archived or not before_all[n].get("archived_at")]
     before = before_all
@@ -4319,11 +4398,18 @@ def cmd_peek(args) -> int:
     comes from the sid's own transcript tail (daemon-hosted sessions have
     no fleet-owned stdout log)."""
     args.name = _resolve_worker_target(args.name)   # ruling 1(ii)
-    with fleet_lock():
-        data = load_registry()
-        if args.name not in data["workers"]:
-            raise FleetCliError(f"unknown worker: {args.name!r}")
-        rec = data["workers"][args.name]
+    # D1/D4 (2026-07-27): `peek` is a VIEW. It reads ONE field -- the sid --
+    # and then prints from the transcript on disk. It took `fleet.lock` to do
+    # that, contending with a live respawn mid-rotation (invariant 6) for a
+    # read the lock does not protect (`save_registry` is atomic, so a lock-free
+    # read of the whole file is already consistent), and it quarantined a
+    # corrupt registry on the way, which is a WRITE from a command whose whole
+    # job is to look at things. Both are gone; `read_registry_no_repair`
+    # refuses loudly and leaves the file for `fleet doctor --repair`.
+    data = read_registry_no_repair()
+    if args.name not in data["workers"]:
+        raise FleetCliError(f"unknown worker: {args.name!r}")
+    rec = data["workers"][args.name]
 
     return _cmd_peek_native(args.name, rec.get("session_id"), args.lines)
 
@@ -4369,11 +4455,12 @@ def cmd_result(args) -> int:
     of the last completed turn, nothing else -- result text lives in the
     Stop-hook outcome store (`latest_outcome`)."""
     args.name = _resolve_worker_target(args.name)   # ruling 1(ii)
-    with fleet_lock():
-        data = load_registry()
-        if args.name not in data["workers"]:
-            raise FleetCliError(f"unknown worker: {args.name!r}")
-        rec = data["workers"][args.name]
+    # D1/D4 (2026-07-27): same conversion as `cmd_peek` directly above, for the
+    # same two reasons -- one field read, no lock, no rename. See there.
+    data = read_registry_no_repair()
+    if args.name not in data["workers"]:
+        raise FleetCliError(f"unknown worker: {args.name!r}")
+    rec = data["workers"][args.name]
 
     return _cmd_result_native(args.name, rec.get("session_id"))
 
@@ -5383,6 +5470,16 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
     worker -- the operator keeps a registry entry pointing at the old
     (possibly already-stopped) session instead of losing the name outright.
     """
+    # three-tier §11.3, same arming as `cmd_respawn`'s call site: a
+    # `--task`-bearing respawn is a new-task dispatch and is refused over the
+    # 200k ceiling; a bare respawn is §11.4 recovery and is not. Repeated here
+    # rather than left to the caller so a direct call into this body -- the
+    # shape that let a supervisor dispatch a wave at 224,321 tokens -- cannot
+    # slip past the ceiling by entering below it.
+    if getattr(args, "task", None):
+        _ceiling_refusal = _ceiling_refuses_dispatch("respawn")
+        if _ceiling_refusal is not None:
+            raise FleetCliError(_ceiling_refusal)
     name = args.name
     if getattr(args, "max_budget_usd", None) is not None:
         raise FleetCliError(
@@ -5584,6 +5681,18 @@ def cmd_respawn(args, run=subprocess.run, which=shutil.which,
     held. Ahead of the destructive-guard prompt: the gate is the outer policy,
     the ownership prompt the inner one."""
     _supervisor_gate("respawn", nonce=getattr(args, "nonce", None))
+    # three-tier §11.3: `respawn` is TWO verbs wearing one name, and only one of
+    # them is a dispatch. WITH `--task` it starts a new worker turn on new work,
+    # exactly like `spawn`/`send`, so the 200k ceiling applies. WITHOUT it, this
+    # is §11.4 recovery -- the lever that FIXES an over-band worker -- and it
+    # stays permitted over the ceiling: a guard whose refusal set contains its
+    # own remedy is a circular dependency (`docs/specs/claim-nonce.md` §7.2),
+    # and refusing here would make the ceiling self-sealing at the one state it
+    # exists for. `_cmd_respawn_native` carries the same pair for direct calls.
+    if getattr(args, "task", None):
+        _ceiling_refusal = _ceiling_refuses_dispatch("respawn")
+        if _ceiling_refusal is not None:
+            raise FleetCliError(_ceiling_refusal)
     _require_instance_settings()
     # three-tier §10.4: the claim holder routes into the tombstone
     # choreography (release-steer -> stop -> fresh gen-0 body), never into the
@@ -7445,25 +7554,44 @@ def cmd_archive(args, run=subprocess.run, which=shutil.which) -> int:
 
 # ---------------------------------------------------------------------------
 # Autoclean (docs/specs/autoclean.md): staleness cleaned up without anyone
-# remembering. One mutating command, three callers (the Scheduled Task
-# `fleet init --autoclean` installs, a supervisor beat, an operator by
-# hand). Tier 1 = the existing archive TTL pass; tier 2 = daemon-husk
-# removal under a sid-based default-deny ownership discriminator; tier 3
-# (default-OFF) = registry tombstone expiry, never file deletion --
-# `fleet clean` stays the only deleter.
+# remembering. One mutating command, now TWO callers, both of them alive
+# fleet tiers: the supervisor's watchtower beat (`skills/fleet/supervisor.md`)
+# and the interface's startup ritual (`skills/fleet/SKILL.md`) -- plus an
+# operator by hand, as always. Tier 1 = the existing archive TTL pass; tier 2
+# = daemon-husk removal under a sid-based default-deny ownership
+# discriminator; tier 3 (default-OFF) = registry tombstone expiry, never file
+# deletion -- `fleet clean` stays the only deleter.
+#
+# THE THIRD CALLER IS GONE (operator ruling 2026-07-27). A Windows Scheduled
+# Task installed by `fleet init --autoclean` used to drive this every 6h. A
+# timer sweeps when the CLOCK says so, which on a machine that loses power
+# means it does not sweep at all: the task carried `StartWhenAvailable=False`,
+# so a 9h14m power cut dropped the 08:22Z occurrence, nothing caught up at
+# boot, and an 18-hour hole opened in a 6-hourly guard with nobody noticing.
+# Setting that flag was the smaller fix and the worse one -- a beat sweeps
+# when the FLEET IS ALIVE, which is the condition that makes sweeping
+# necessary in the first place, and retiring the timer deletes the whole class
+# of problem (no scheduler, no machine-local install state, no missed-run
+# policy, nothing to re-verify per machine) instead of patching one instance.
 # ---------------------------------------------------------------------------
 
-AUTOCLEAN_TASK_NAME = "claude-fleet-autoclean"
-AUTOCLEAN_INTERVAL_HOURS_DEFAULT = 6
-AUTOCLEAN_STALE_RUN_HOURS = 48.0
+# How old the last `autoclean` run may get before doctor says the beat is not
+# beating. Derived from the BEAT CADENCE, not from the retired 6h timer: a
+# supervisor must keep its heartbeat younger than 60 min
+# (`skills/fleet/supervisor.md`, S = 3600s) and sweeps once per beat, so an
+# hour is the expected spacing and 3h is three missed beats -- long enough not
+# to fire on one slow beat, short enough that the 18-hour hole would have been
+# on screen before breakfast. It is deliberately far tighter than the 48h it
+# was under the timer: a timer that had not fired in 47h was plausible, a
+# fleet that has not swept in 3h is not being run by anyone.
+AUTOCLEAN_STALE_RUN_HOURS = 3.0
 # ND-3 (re-review MD-CONTRACT-REVIEW-2026-07-17.md): how many CONSECUTIVE
 # husk-deferring autoclean runs before doctor calls it starvation rather than
 # routine. A single deferral is the normal case at 2.1.212 -- the daemon is
 # transient and this tier is the one most likely to meet it dead (§Q2) -- so
-# noting the first one is cry-wolf. The scheduled task's floor is hourly
-# (`--autoclean-interval-hours` is 1..23), so 3 in a row is >=3h of an
-# unreachable daemon: long past any idle-exit, and short enough that a genuinely
-# broken daemon surfaces the same day.
+# noting the first one is cry-wolf. Beat spacing is about an hour (above), so
+# 3 in a row is >=3h of an unreachable daemon: long past any idle-exit, and
+# short enough that a genuinely broken daemon surfaces the same day.
 AUTOCLEAN_DEFERRAL_STREAK_THRESHOLD = 3
 
 
@@ -7544,8 +7672,10 @@ def _sweep_husks(dry_run: bool, run=subprocess.run, which=shutil.which) -> tuple
     M1 fix wave (review MD-CONTRACT-REVIEW-2026-07-17.md): `deferred` used
     to be a local that died at the return, so a dead-daemon-starved sweep
     was byte-identical to a clean one at every durable surface (stamp,
-    `autoclean_run` event, exit code) -- and the scheduled task is headless,
-    so the stderr roll-up went to a console nobody owns. A permanently dead
+    `autoclean_run` event, exit code) -- and the caller was a headless
+    scheduled task, so the stderr roll-up went to a console nobody owns.
+    (The timer is retired; a beat caller has a reader, but the durable
+    surfaces are still the ones doctor can see, so this stays.) A permanently dead
     daemon could starve this tier for weeks while `fleet doctor` read
     green-and-fresh. The reviewer proved the gap by deleting the roll-up
     with the full suite still green. Deferred sids now reach the caller.
@@ -7582,7 +7712,7 @@ def _sweep_husks(dry_run: bool, run=subprocess.run, which=shutil.which) -> tuple
     # would never fire on exactly the spawn-recreation bypass it exists to
     # stop. Presence-only is the sound superset; the operator clears the
     # artifact (after restoring what it holds) to re-arm the sweep.
-    quarantine_artifacts = sorted(state_dir().glob("fleet.json.corrupt.*"))
+    quarantine_artifacts = _quarantine_artifacts()
     if quarantine_artifacts:
         raise FleetCliError(
             f"husk sweep refused: quarantine artifact present "
@@ -7656,7 +7786,8 @@ def _sweep_husks(dry_run: bool, run=subprocess.run, which=shutil.which) -> tuple
                   f"{_rm_outcome_note(outcome)}", file=sys.stderr)
     if deferred:
         # Loud, non-fatal, and honest about the retry. The stderr line alone is
-        # NOT enough (M1): it is invisible to the headless scheduled task, so
+        # NOT enough (M1): it was invisible to the headless scheduled task, and
+        # is still no use to a beat that does not read stderr closely, so
         # `deferred` is returned to the caller, which carries it into the run
         # stamp and the autoclean_run event -- the surfaces doctor reads.
         print(f"husk: {len(deferred)} husk(s) left on the roster for the next "
@@ -7713,8 +7844,12 @@ def cmd_autoclean(args, run=subprocess.run, which=shutil.which) -> int:
     registry, the exact fail-open the reviewer repro'd.
 
     `--fleet-home` (F2): overrides the module FLEET_HOME before anything
-    reads a path -- the scheduled task carries it because Task Scheduler
-    provides no operator environment for the env-var route."""
+    reads a path. It existed because the scheduled task ran with no operator
+    environment for the env-var route; the timer is retired (2026-07-27) and
+    both beat callers inherit a real environment, but the flag stays -- it is
+    the only way any future headless or cross-home caller can name the home
+    it means, and removing it would be a second surface change riding on
+    this one."""
     fleet_home_override = getattr(args, "fleet_home", None)
     if fleet_home_override:
         # NEW-2 (re-review, LOW): resolve + validate, never use verbatim --
@@ -7791,300 +7926,6 @@ def cmd_autoclean(args, run=subprocess.run, which=shutil.which) -> int:
           f"tombstones_expired={len(tombstones)}"
           f" errors={len(errors)}{' (dry-run)' if dry_run else ''}")
     return 1 if errors else 0
-
-
-def _autoclean_script_path() -> Path:
-    """The fleet.py the scheduled task will pin. A seam (monkeypatchable)
-    so tests can model canonical-vs-worktree installs without moving files."""
-    return Path(__file__).resolve()
-
-
-def _autoclean_task_command() -> str:
-    """The Scheduled Task's command line: the exact interpreter running
-    this `fleet init` plus this fleet.py -- mirroring cmd_init's own
-    sys.executable-as-{{PYTHON}} doctrine (a scheduled task cannot fall
-    back to a bare `py` on PATH either).
-
-    F2 (adversarial review, HIGH): FLEET_HOME is embedded EXPLICITLY as an
-    argv flag -- Task Scheduler runs with no operator environment, so
-    without it fleet.py falls back to script-location resolution and the
-    task sweeps whatever repo copy it happens to live in (a worktree's
-    empty state/, forever, doctor green) instead of the operator's home."""
-    py = Path(sys.executable).resolve()
-    script = _autoclean_script_path()
-    home = Path(FLEET_HOME).resolve()
-    return f'"{py}" "{script}" autoclean --fleet-home "{home}"'
-
-
-def _home_guard_problems() -> list:
-    """N1: the home-guard subset that protects state OUTLIVING this shell --
-    now exactly one condition, the resolved home being a linked git worktree.
-    A scheduled task pinned at a worktree keeps running after `git worktree
-    remove` deletes the tree out from under it.
-
-    Used by `_install_autoclean_task` (which adds its own script-location
-    check on top) and by `cmd_init --autoclean`, which must evaluate it
-    BEFORE writing anything. Deliberately EXCLUDES the script check: a
-    sandboxed or relocated home with no `.git` file is a legitimate target.
-
-    Was `_marker_guard_problems` and carried a second condition -- an existing
-    `~/.claude/fleet-home` marker pointing elsewhere. Both the marker and that
-    check were removed on 2026-07-22 with their only reader (see the note
-    where the marker helpers used to live, above)."""
-    home = Path(FLEET_HOME).resolve()
-    problems = []
-    if (home / ".git").is_file():
-        problems.append(f"{home} is a linked git worktree (.git is a file) -- "
-                        "a task pinned here dies with the worktree")
-    return problems
-
-
-# A scheduled task's command line, as it comes back from the platform
-# adapter: `"<py>" "<script>" <verb> --fleet-home "<home>"`. Quoted runs are
-# single tokens (paths contain spaces); everything else splits on whitespace.
-# `--flag="quoted value"` is one token too, split on the `=` afterwards.
-# Platform-neutral by construction -- it only ever sees a string.
-_TASK_ARG_RE = re.compile(r'[^\s"]*"[^"]*"|\S+')
-
-
-def _normalize_task_token(value) -> str:
-    """Normalize one scheduled-task command-line token for comparison, under
-    the running filesystem's own path-equality rules.
-
-    Two of the three normalizations are PLATFORM-DECLARED, not universal
-    (D8, closed by the posix-port campaign -- previously applied
-    unconditionally and filed as a Phase-1.5 note while the POSIX scheduler
-    backend was still hypothetical):
-
-      - case folding: correct on Windows (schtasks XML round-trips emit
-        case-varied spellings of one path, and NTFS considers them the same
-        file); a false MATCH on a case-sensitive filesystem, where
-        `/opt/Fleet` and `/opt/fleet` are two different directories.
-      - backslash-to-slash: correct on Windows (`\\` is the separator, and
-        schtasks round-trips vary it against `/`); a false MATCH on POSIX,
-        where `\\` is an ordinary filename character, so `/opt/my\\fleet`
-        and `/opt/my/fleet` are two different directories.
-
-    Both wrong directions are the DANGEROUS one. `_fleet_task_is_ours` is
-    what decides whether a scheduled job belongs to this fleet and may
-    therefore be replaced; a false MATCH means overwriting somebody else's
-    job, where a false MISS costs one `--force`.
-
-    The third normalization is universal and stays unconditional: strip a
-    trailing separator (B2 -- a directory argument that round-trips through
-    schtasks XML can pick one up). `/` is a separator on every platform;
-    a trailing `\\` is stripped only where `\\` is a separator, which the
-    branch above has already converted."""
-    text = str(value).strip()
-    if PLATFORM.task_paths_use_backslash_separator:
-        text = text.replace("\\", "/")
-    if PLATFORM.task_paths_are_case_insensitive:
-        text = text.lower()
-    return text.rstrip("/") or text
-
-
-def _strip_task_quotes(raw: str) -> str:
-    if len(raw) >= 2 and raw.startswith('"') and raw.endswith('"'):
-        return raw[1:-1]
-    return raw
-
-
-def _task_command_tokens(command: str) -> list:
-    """Normalized tokens of a scheduled task's command line, quotes stripped.
-
-    One token in, one token out -- this never SYNTHESIZES a token (G2). An
-    earlier revision split `--flag=value` into two tokens here so that
-    index-based lookup saw one shape either way; the cost was that
-    `--exclude=--fleet-home <home>` manufactured a `--fleet-home` token the
-    command never carried, and the ownership predicate read it as ours. A
-    predicate that can be *fed* an argument it was never given is the same
-    shape as the untested-parser defect that preceded it. The `=` spelling is
-    resolved where it is consumed instead -- see `_task_flag_value`."""
-    return [_normalize_task_token(_strip_task_quotes(raw))
-            for raw in _TASK_ARG_RE.findall(command or "")]
-
-
-def _task_flag_value(tokens: list, flag: str):
-    """Value of `flag` in a tokenized task command, or None if absent.
-
-    Accepts both spellings fleet's own argparse accepts: `--flag value` (two
-    tokens) and `--flag=value` (one). Only a token that IS the flag, or that
-    starts with `flag=`, can supply a value -- so no other argument's value can
-    stand in for it. The `=` value is re-normalized after its quotes come off,
-    because the enclosing token ended in a quote and so escaped the trailing-
-    separator rule the first time through."""
-    want = _normalize_task_token(flag)
-    prefix = want + "="
-    for i, tok in enumerate(tokens):
-        if tok == want:
-            return tokens[i + 1] if i + 1 < len(tokens) else None
-        if tok.startswith(prefix):
-            return _normalize_task_token(_strip_task_quotes(tok[len(prefix):]))
-    return None
-
-
-def _fleet_task_is_ours(command: str, subcommand: str) -> bool:
-    """F4 ownership, by FULL identity: the task runs OUR resolved fleet.py,
-    with THIS subcommand, against THIS fleet home.
-
-    The predicate used to match the script path alone, which made it say
-    "ours" for every fleet-owned scheduled task regardless of verb or home --
-    so the moment a second one exists (the three-tier adjudication's
-    `fleet init --supervisor-beat` is the concrete near-term case),
-    `fleet init --autoclean` would silently /Create /F over it. Latent while
-    only one task exists; data loss the day a second lands.
-
-    F4 doctrine is intact and tightened: matching is on whole, quote-stripped
-    tokens, never a bare substring -- a foreign `C:/tools/autoclean.exe`
-    task still refuses, and now so does a task that merely mentions the word
-    somewhere. Slash/case normalization is kept (schtasks XML round-trips
-    carry both variances). An absent `--fleet-home` is NOT ours: `fleet`
-    embeds it in every task it installs (F2), so a command without one was
-    installed by something else. (B11: that includes a task installed by a
-    fleet build older than F2 -- it has no `--fleet-home` and is refused
-    rather than overwritten. Safe direction, `--force` recovers, and the
-    refusal message names all three identity components.)
-
-    QUOTING (B1 fix wave). Accepted: every form fleet itself renders, either
-    path quoted or bare, slash- or case-varied, and `--fleet-home=VALUE` (which
-    fleet's own argparse accepts, so a hand-edited task may carry it).
-    Refused, deliberately: a command whose paths contain spaces and carry NO
-    quotes at all -- that is genuinely undecidable, not merely unhandled -- and
-    sh-style single quotes. The POSIX scheduler backend now exists, so that
-    refusal no longer rests on "no dialect to validate against"; it rests on
-    what it always really meant. `_autoclean_task_command` renders DOUBLE
-    quotes on both backends and cron stores that command field verbatim, so a
-    single-quoted command is never one fleet wrote -- while `'` is a legal
-    Windows filename character (`C:\\Users\\O'Brien\\...`) that a single-quote
-    alternation would mis-tokenize. Both refusals are the SAFE direction: the cost is one
-    `--force` on a task that is provably the operator's, where the opposite
-    error is `/Create /F` over somebody else's scheduled task. Pinned by
-    `TestOwnershipQuotingVariants`, which fixes each verdict as a decision.
-
-    NOT constrained: the interpreter (argv[0]). A contrived command that runs
-    a foreign wrapper but still names our fleet.py, the `autoclean` verb and
-    our `--fleet-home` reads as ours (B7). Recorded so it is not re-filed as
-    new; it is strictly narrower than the pre-fix substring predicate, and
-    every realistic shape answers correctly.
-
-    Portability (invariant 8): pure string work over a command string plus
-    `Path(...).resolve()`, with the two filesystem-dependent path-equality
-    rules DECLARED BY THE ADAPTER rather than assumed -- see
-    `_normalize_task_token`. D8 (CLOSED, posix-port campaign): both
-    normalizations used to be applied unconditionally, which on a
-    case-sensitive filesystem made two genuinely different paths compare
-    EQUAL. The old note here called `.lower()` a "false MISS" risk; it is
-    the opposite, and a false MATCH is the dangerous direction for a
-    predicate that licenses replacing a scheduled job.
-
-    Reachable, not theoretical: the crontab backend finds fleet's line by a
-    CONSTANT `# claude-fleet-autoclean` tag, so two fleet homes under one
-    user account -- differing only in path case, or one carrying a literal
-    backslash -- write same-tagged lines, and this predicate is the only
-    thing stopping the second install from overwriting the first's job.
-    Pinned end-to-end through the real crontab backend by
-    `TestTaskPathSemanticsFollowTheFilesystem`, which drives both adapters
-    on both operating systems."""
-    tokens = _task_command_tokens(command)
-    try:
-        script_at = tokens.index(_normalize_task_token(_autoclean_script_path()))
-    except ValueError:
-        return False
-    # The verb is the argument immediately after the script path -- fleet.py's
-    # own parser takes the subcommand first, so anything else is a different
-    # task even if the word appears later in the line.
-    if tokens[script_at + 1:script_at + 2] != [_normalize_task_token(subcommand)]:
-        return False
-    home = _task_flag_value(tokens, "--fleet-home")
-    return home is not None and home == _normalize_task_token(Path(FLEET_HOME).resolve())
-
-
-def _autoclean_task_is_ours(command: str) -> bool:
-    """F4 for the autoclean task specifically -- see `_fleet_task_is_ours`.
-    Kept as a named seam so the sole consumer (`_install_autoclean_task`)
-    reads the same as before and a second fleet task gets its own one-liner."""
-    return _fleet_task_is_ours(command, "autoclean")
-
-
-def _install_autoclean_task(interval_hours, force: bool) -> None:
-    if interval_hours is None:
-        interval_hours = AUTOCLEAN_INTERVAL_HOURS_DEFAULT
-    interval_hours = int(interval_hours)
-    if not 1 <= interval_hours <= 23:
-        raise FleetCliError("--autoclean-interval-hours must be 1..23 (schtasks /SC HOURLY /MO)")
-
-    # F2 home guards: a scheduled task outlives this shell -- refuse to pin
-    # it to a fleet.py that is not the target home's own copy, or to a linked
-    # git worktree (dies with the worktree). --force overrides both. A third
-    # guard (a home contradicting the machine's fleet-home marker) went with
-    # the marker on 2026-07-22.
-    home = Path(FLEET_HOME).resolve()
-    script = _autoclean_script_path()
-    problems = []
-    if script.parent.parent != home:
-        problems.append(f"this fleet.py ({script}) is not the target home's copy ({home})")
-    problems += _home_guard_problems()
-    if problems and not force:
-        raise FleetCliError(
-            "autoclean install refused (F2): " + "; ".join(problems) +
-            " -- run from the canonical fleet home, or rerun with --force")
-
-    command = _autoclean_task_command()
-    try:
-        existing = PLATFORM.autoclean_task_query(AUTOCLEAN_TASK_NAME)
-    except AutocleanTaskQueryError as exc:
-        # F3: fail closed -- unknown existence must not become /Create /F.
-        if not force:
-            raise FleetCliError(
-                f"cannot determine whether task {AUTOCLEAN_TASK_NAME!r} already "
-                f"exists ({exc}) -- retry, or rerun with --force to install anyway")
-        existing = None
-    if existing is not None and not _autoclean_task_is_ours(existing) and not force:
-        raise FleetCliError(
-            f"scheduled task {AUTOCLEAN_TASK_NAME!r} exists and is not "
-            f"fleet-owned by THIS identity -- ownership is all three of: this "
-            f"fleet.py ({_autoclean_script_path()}), the `autoclean` "
-            f"subcommand, and --fleet-home {Path(FLEET_HOME).resolve()}. "
-            f"Found {existing[:120]!r} -- rerun with --force to overwrite. "
-            f"(A task installed by a fleet build older than F2 carries no "
-            f"--fleet-home and lands here; --force is safe if the fleet.py "
-            f"path above is yours.)")
-    ok, msg = PLATFORM.autoclean_task_install(AUTOCLEAN_TASK_NAME, command, interval_hours)
-    if not ok:
-        raise FleetCliError(f"scheduler create failed: {msg}")
-    print(f"fleet init: scheduled task {AUTOCLEAN_TASK_NAME!r} installed "
-          f"(every {interval_hours}h)")
-    print(f"  command:   {command}")
-    print(f"  uninstall: fleet init --autoclean-remove")
-
-
-def _remove_autoclean_task(force: bool = False) -> None:
-    # Residual 4 (carried): removal is guarded by the SAME ownership predicate
-    # the install runs. Deleting purely by task name would silently remove a
-    # FOREIGN scheduled task that happens to carry our name -- the exact
-    # asymmetry the create side already refuses. F3 fail-closed too: an
-    # indeterminate query must refuse, never blind-delete, unless --force.
-    try:
-        existing = PLATFORM.autoclean_task_query(AUTOCLEAN_TASK_NAME)
-    except AutocleanTaskQueryError as exc:
-        if not force:
-            raise FleetCliError(
-                f"cannot determine whether task {AUTOCLEAN_TASK_NAME!r} is "
-                f"fleet-owned ({exc}) -- retry, or rerun with --force to remove "
-                f"anyway")
-        existing = None
-    if existing is not None and not _autoclean_task_is_ours(existing) and not force:
-        raise FleetCliError(
-            f"scheduled task {AUTOCLEAN_TASK_NAME!r} exists and is not "
-            f"fleet-owned by THIS identity -- ownership is all three of: this "
-            f"fleet.py ({_autoclean_script_path()}), the `autoclean` "
-            f"subcommand, and --fleet-home {Path(FLEET_HOME).resolve()}. "
-            f"Found {existing[:120]!r} -- refusing to delete a foreign task of "
-            f"the same name; rerun with --force to remove anyway.")
-    ok, msg = PLATFORM.autoclean_task_remove(AUTOCLEAN_TASK_NAME)
-    if not ok:
-        raise FleetCliError(f"scheduler delete failed: {msg}")
-    print(f"fleet init: scheduled task {AUTOCLEAN_TASK_NAME!r} removed")
 
 
 # ---------------------------------------------------------------------------
@@ -8793,10 +8634,24 @@ def _autoclean_deferral_streak() -> tuple:
     return (streak, husks, since)
 
 
-def _doctor_check_autoclean(run=subprocess.run):
-    """Note-only (docs/specs/autoclean.md D4): reports scheduler-task state
-    (installed/missing) and last-run staleness from the run stamp. Never
-    turns doctor red -- a missing task is a choice, not broken plumbing.
+def _doctor_check_autoclean():
+    """Note-only (docs/specs/autoclean.md D4): WHEN DID `autoclean` LAST RUN.
+    Never turns doctor red -- a fleet nobody is running is a fact about the
+    operator's day, not broken plumbing.
+
+    It used to ask "is the scheduled task installed", which stopped being an
+    answerable question on 2026-07-27 when the operator retired the timer.
+    The honest signal now that a beat drives the sweep is the RUN STAMP'S AGE:
+    `autoclean` is called by the supervisor's watchtower beat and by the
+    interface's startup ritual, so a last run older than
+    `AUTOCLEAN_STALE_RUN_HOURS` means neither tier has beaten in that window --
+    i.e. THE BEAT IS NOT BEATING. That is the condition that went unnoticed for
+    18 hours on 2026-07-27, and it is strictly more informative than the old
+    question: an installed task said nothing about whether it ever fired, which
+    is exactly how a dropped occurrence read as green.
+
+    The message names the tier that is supposed to be running it, because
+    "stale" is only actionable if the reader knows who was meant to act.
 
     LOW advisory (confirmation pass): a fresh timestamp alone can lie --
     the stamp's `errors` array and a lingering fleet.json.corrupt.*
@@ -8832,14 +8687,12 @@ def _doctor_check_autoclean(run=subprocess.run):
     nothing-to-do pass, and therefore is not by itself proof that the daemon was
     reachable. See `_autoclean_deferral_streak` for why that is still the right
     rule."""
-    stamp_note, stale, run_errors = "no run recorded yet", False, []
+    age_h, run_errors = None, []
     husks_deferred = 0
     try:
         raw = json.loads(autoclean_stamp_path().read_text(encoding="utf-8"))
         last = _parse_iso(raw.get("ts"))
         age_h = (datetime.now(timezone.utc) - last).total_seconds() / 3600.0
-        stamp_note = f"last run {age_h:.1f}h ago"
-        stale = age_h > AUTOCLEAN_STALE_RUN_HOURS
         errs = raw.get("errors")
         if isinstance(errs, list):
             run_errors = [str(e) for e in errs if e]
@@ -8864,57 +8717,29 @@ def _doctor_check_autoclean(run=subprocess.run):
             f"no session holds it open), but {streak} in a row means this tier "
             f"is starving: the husks stay on the roster and nothing is "
             f"reclaiming them. Check `claude daemon status`")
-    try:
-        artifacts = sorted(state_dir().glob("fleet.json.corrupt.*"))
-    except OSError:
-        artifacts = []
+    artifacts = _quarantine_artifacts()
     if artifacts:
         extras.append(f"quarantine artifact present ({artifacts[-1].name}) -- "
                       f"husk sweep is refusing itself (NEW-1); restore the "
                       f"quarantined data, then remove the artifact")
     suffix = ("; " + "; ".join(extras)) if extras else ""
 
-    try:
-        existing = PLATFORM.autoclean_task_query(AUTOCLEAN_TASK_NAME, run=run)
-    except UnsupportedPlatformError:
+    # Who was supposed to have run it. A staleness note is only actionable if
+    # the reader knows whose job it was -- under the timer the answer was "the
+    # machine", which is nobody.
+    drivers = ("the supervisor runs it on its watchtower beat, the interface "
+               "in its startup ritual")
+    if age_h is None:
         return ("autoclean", True,
-                f"scheduler query unsupported on this platform -- skipped{suffix}")
-    except AutocleanTaskQueryError as exc:
+                f"no run recorded yet ({autoclean_stamp_path().name} absent or "
+                f"unreadable) -- {drivers}{suffix}")
+    if age_h > AUTOCLEAN_STALE_RUN_HOURS:
         return ("autoclean", True,
-                f"scheduler query failed ({exc}) -- state unknown; {stamp_note}{suffix}")
-    if existing is None:
-        return ("autoclean", True,
-                f"no scheduled task installed (fleet init --autoclean) -- "
-                f"staleness sweeps are manual; {stamp_note}{suffix}")
-    # F2: a task pinned to a deleted worktree's fleet.py fails silently on
-    # every trigger -- flag it (note-only, but actionable).
-    #
-    # B6/D9: tokenize through `_task_command_tokens`, the same splitter the
-    # ownership predicate uses. This scan previously required QUOTED tokens
-    # (`re.findall(r'"([^"]+)"', existing)`), so an unquoted script path --
-    # a shape a schtasks XML round-trip can produce, and one the predicate
-    # accepts -- made the check silently no-op and doctor read green on a
-    # task pinned to a deleted worktree. Two tokenizers over the same string
-    # is exactly the drift this branch exists to remove. Note the tokens come
-    # back slash/case-normalized; `Path.exists()` is fine with forward slashes
-    # on Windows, and this check is note-only either way.
-    # Only an ABSOLUTE token can be proven dead: a relative `fleet.py` resolves
-    # against the scheduler's working directory, which is not ours to know, so
-    # `Path(tok).exists()` would answer against the WRONG cwd. The old
-    # quoted-only scan excluded those by accident (fleet always quotes an
-    # absolute path); this makes the exclusion the stated rule, and keeps the
-    # check to claims it can actually support.
-    for tok in _task_command_tokens(existing):
-        if (tok.endswith("fleet.py") and Path(tok).is_absolute()
-                and not Path(tok).exists()):
-            return ("autoclean", True,
-                    f"task installed but pinned to a missing path ({tok}) -- "
-                    f"reinstall from the canonical home: fleet init --autoclean{suffix}")
-    if stale:
-        return ("autoclean", True,
-                f"task installed but {stamp_note} (> {AUTOCLEAN_STALE_RUN_HOURS:.0f}h) "
-                f"-- scheduler may be stale{suffix}")
-    return ("autoclean", True, f"task installed; {stamp_note}{suffix}")
+                f"last run {age_h:.1f}h ago, past the "
+                f"{AUTOCLEAN_STALE_RUN_HOURS:.0f}h beat window -- THE BEAT IS "
+                f"NOT BEATING: {drivers}, so neither tier has run in that "
+                f"window. Check `fleet sup-status`{suffix}")
+    return ("autoclean", True, f"last run {age_h:.1f}h ago{suffix}")
 
 
 def _doctor_check_tzdata():
@@ -9279,15 +9104,47 @@ def _daemon_wedge_degraded_verdict(pid, refusals):
 
 def _doctor_check_hook_errors():
     """Phase1 kernel 1: surface the TAIL of state/hook-errors.log when it is
-    nonempty (the swallowed-hook-exception log). Never a hard failure -- a
-    logged error means a hook hit an exception but still exited 0 (SPEC
-    invariant 2); doctor's job here is to make that visible, not to fail."""
+    nonempty (the swallowed-hook-exception log).
+
+    A nonempty log is a FAIL (incident `outcome-surrogate`, 2026-07-28). It
+    used to be an unconditional PASS on the reasoning that "a logged error
+    means a hook hit an exception but still exited 0 (SPEC invariant 2);
+    doctor's job here is to make that visible, not to fail." That reasoning
+    conflated two different things and it cost a worker's entire result:
+    invariant 2 governs the HOOK's exit code -- a hook must never crash the
+    worker's turn -- and says nothing about how doctor should grade the
+    wreckage afterwards. On 2026-07-27 `stop_outcome.py` swallowed a
+    UnicodeEncodeError, wrote NO outcome record for a 14,760-character
+    ESCALATE report carrying a CRITICAL finding, and doctor printed the whole
+    lost payload under `[PASS] hook-errors:`.
+
+    No severity split, and that is deliberate. Every line in this file is,
+    by construction, a hook that reached its `except` and abandoned the one
+    durable write it exists to perform -- a mailbox delivery, a journal
+    landmark, or a terminal outcome. There is no known-benign class: the four
+    hooks log NOTHING on any normal or degraded-but-handled path (verified
+    empirically at M-E: all four run with the sid absent from the registry,
+    rc=0 on each, no hook-errors.log), so FAIL-on-nonempty has no
+    false-positive class to trade against. Any split would have to be
+    mechanical, and the only mechanical keys available -- the hook name or the
+    exception type in the line's text -- are exactly the shape that let this
+    defect hide: a guard written against the case you noticed does not cover
+    the case you didn't.
+
+    The FAIL is sticky (nothing in fleet rotates this log), so the row names
+    the file the operator clears once they have acted on the tail. That is the
+    intended cost: an unread record loss should not be able to age out of the
+    report on its own."""
     lines = _hook_error_lines()
     if not lines:
         return ("hook-errors", True, "no swallowed hook errors logged")
     tail = lines[-_HOOK_ERROR_TAIL:]
-    return ("hook-errors", True,
-            f"{len(lines)} swallowed hook error(s) logged; last {len(tail)}: " + " | ".join(tail))
+    return ("hook-errors", False,
+            f"{len(lines)} swallowed hook error(s) logged -- a hook abandoned a "
+            f"durable write (mailbox delivery, journal landmark or worker RESULT) "
+            f"and exited 0 anyway; last {len(tail)}: " + " | ".join(tail)
+            + " -- act on these, then clear state/hook-errors.log to return "
+              "this row to PASS")
 
 
 _KNOWN_HOOK_EVENTS = frozenset({"PostToolUse", "Stop", "PostCompact"})
@@ -9344,21 +9201,79 @@ def _doctor_check_hook_registration():
             f"all registered hook events known and command paths exist ({registered})")
 
 
+def _doctor_check_registry(error, repaired: bool):
+    """`registry`: could `state/fleet.json` be read at all?
+
+    Registered FIRST, ahead of every other check, and that placement is
+    load-bearing rather than cosmetic: when this row fails, `workers` is empty
+    and every worker-keyed check below it ([PASS] mailboxes, [PASS] stale
+    attaches, [PASS] dead-suspected) is reporting *"nothing to check"* while
+    looking exactly like *"nothing wrong"*. The operator has to meet the reason
+    before they meet the vacuous passes."""
+    if error is None:
+        return ("registry", True, f"{registry_path()} is readable")
+    if repaired:
+        return ("registry", False,
+                f"registry was corrupt and has been quarantined -- {error}")
+    return ("registry", False,
+            f"{error}; every worker-keyed check below ran against an EMPTY "
+            f"registry. Rerun as `fleet doctor --repair` to quarantine it "
+            f"(renames it aside to state/fleet.json.corrupt.<ts>)")
+
+
 def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
     """`fleet doctor` (SPEC §5 doctor row, §7 silent-failure alarm): runs
     every health check below and prints one [PASS]/[FAIL] line each;
     exits nonzero iff any check is not ok.
+
+    REPORT-ONLY BY DEFAULT (operator gate, 2026-07-27, `docs/OPERATOR-GATES.md`).
+    It used to call `load_registry()`, which QUARANTINES -- so the diagnostic
+    verb renamed aside the very file it was invoked to diagnose, and did it
+    before printing a single check line, because the exception went straight
+    out to `main`. Worse, the rename converts *corrupt* into *absent*, and the
+    §9 legacy-claim upgrade abstains on corrupt but is granted on absent; the
+    refusal message that sent the operator here named this command by name.
+
+    STRICTLY READ-ONLY WAS REJECTED at the gate, and the reason is worth
+    keeping: no other repair path exists, so a doctor that never repaired would
+    leave that refusal naming a command that cannot help. Hence the flag.
+    `--repair` performs the quarantine rename (under `fleet_lock`, since it is
+    a write); without it, a corrupt registry becomes its own FAIL row and every
+    OTHER check still runs -- which is strictly more diagnosis than the old
+    behaviour delivered, not less.
 
     Snapshots the registry under one fleet_lock() then runs every check
     OUTSIDE the lock: several checks shell out (claude --version, claude
     agents --json, two real hook-smoke subprocesses) and holding fleet_lock
     across them would starve every concurrent `fleet` command (F4
     doctrine)."""
-    with fleet_lock():
-        data = load_registry()
+    # `getattr` with a False default, not `args.repair`: several suites call
+    # `cmd_doctor(SimpleNamespace())` with no such attribute, and report-only
+    # must never depend on how the caller happened to build its namespace.
+    # The default for an absent attribute is the SAFE one, by construction.
+    repair = bool(getattr(args, "repair", False))
+    registry_error = None
+    try:
+        if repair:
+            with fleet_lock():
+                data = load_registry()          # the ONE quarantine site left
+        else:
+            # hint=False: the row below names `--repair` itself, with more to
+            # say than the generic hint has -- and twice in one sentence reads
+            # like a bug.
+            data = read_registry_no_repair(hint=False)
+    except RegistryCorruptError as exc:
+        # Caught, not propagated -- the one place in this module where that is
+        # right. Everywhere else `RegistryCorruptError` means "abort, you were
+        # about to write against a registry you cannot trust"; here it IS the
+        # finding, and a diagnostic that aborts on its first bad row is not a
+        # diagnostic. Nothing below this line writes.
+        registry_error = str(exc)
+        data = {"workers": {}}
     workers = data.get("workers", {})
 
     check_calls = [
+        functools.partial(_doctor_check_registry, registry_error, repair),
         functools.partial(_doctor_check_claude_version, which=which, run=run),
         functools.partial(_doctor_check_pin_version, which=which, run=run),
         functools.partial(_doctor_check_instance_settings),
@@ -9380,7 +9295,7 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
         functools.partial(_doctor_check_identity_witness, workers),
         functools.partial(_doctor_check_claude_agents, workers, which=which, run=run),
         functools.partial(_doctor_check_daemon_wedge),
-        functools.partial(_doctor_check_autoclean, run=run),
+        functools.partial(_doctor_check_autoclean),
         functools.partial(_doctor_check_hook_errors),
         functools.partial(_doctor_check_supervisor_claim),
         functools.partial(_doctor_check_supervisor_handoff),
@@ -11478,9 +11393,68 @@ def _registry_records_or_none():
     return data if ok else None
 
 
+def _releaser_body_is_tombstoned(released_by, registry) -> bool:
+    """True iff fleet itself has RETIRED the body that released the claim --
+    i.e. every registry record carrying `released_by` is tombstoned.
+
+    THE POINT OF THE WHOLE SLICE. `sup-release` tombstones the releasing body's
+    own record (`_tombstone_releasing_body`), so `_releaser_live_sids` below is
+    false BY CONSTRUCTION for the body that just released and the succession
+    recipe loses its out-of-fleet middle step ("the interface stops the retired
+    body so its sid leaves the roster"). Every unproven handoff this project has
+    had died at a step that lives outside the fleet.
+
+    WHY THIS IS NOT AN ATTESTATION, which is the retired road (`--interface`,
+    `fix/b6-interface-release` @ `2e824ea`, ruled dead 4-0 on 2026-07-27).
+    Ratified doctrine (§17): *"inference may select the SUBJECT of a
+    measurement, but may not supply the GROUNDS of a refusal"* -- because a
+    flag by which a caller swears something about itself can only ever be
+    ADDED by an adversary, never withheld, so its presence proves nothing.
+    A tombstone is a different KIND of fact: nothing the caller SAID, but a
+    state change fleet performed under the lock, on the record fleet resolved
+    from continuity the caller had already proven. This function reads no field
+    the caller could have supplied -- not the claim, only the registry.
+
+    IT IS THE SAME SPELLING §10.4 ALREADY USES and deliberately not a new one.
+    `_cmd_kill_native` flips `status` to `"dead"`; `_record_is_live`
+    is the predicate that reads it and `archived_at` both. Two spellings of one
+    state is how this repo grows the defects it later names, so the disarm keys
+    on the predicate rather than on a field of its own.
+
+    RESOLVES TOWARD THE GATE, exactly as the union arm below does. A record must
+    CARRY the sid for its tombstone to count (`bool(carriers)`), so a fleet in
+    which some unrelated worker was killed does not disarm B6 fleet-wide; and if
+    a drifted registry has several carriers, ONE live carrier keeps the gate
+    armed. `registry=None` -- unreadable, or a caller that has none -- answers
+    False: a tombstone fleet cannot SEE is never ASSUMED, which leaves the
+    refusal standing, the abstaining direction.
+
+    Keyed on the sid UNION through `_record_sids`, for the reason
+    `_releaser_is_roster_live` states at length: a fork-steered releaser proves
+    continuity under its post-fork sid while INCARNATION still carries the
+    pre-fork one, and the bare `session_id` fails open on exactly that window
+    (ND4a). Without the union here, the one case ND4a exists for would be the
+    one case that still needed the manual step."""
+    if not isinstance(registry, dict):
+        return False
+    workers = registry.get("workers")
+    if not isinstance(workers, dict):
+        return False
+    carriers = [rec for rec in workers.values()
+                if released_by in _record_sids(rec)]
+    return bool(carriers) and not any(_record_is_live(rec) for rec in carriers)
+
+
 def _releaser_live_sids(claim, live_sids: set, registry=None) -> set:
     """THE WEDGED STATE as a SET: every roster-live sid that answers for the
     body which released this claim. An EMPTY set means "not wedged".
+
+    THE TOMBSTONE ARM RUNS FIRST AND DOMINATES THE ROSTER
+    (`_releaser_body_is_tombstoned`, whose docstring holds the argument). A body
+    whose registry record fleet has retired is not a live releaser however long
+    its session lingers in `claude agents` -- `sup-release` never runs `claude
+    stop`, so the roster cannot be the thing that changes. This is the one arm
+    that makes a supervisor able to complete its own stand-down.
 
     This is the comparison itself; `_releaser_is_roster_live` below is its
     boolean spelling and the name §6.1 row 1 and §7.2 both cite. It hands back
@@ -11540,6 +11514,8 @@ def _releaser_live_sids(claim, live_sids: set, registry=None) -> set:
     released_by = claim.get("released_by_sid")
     if not isinstance(released_by, str) or not released_by:
         return set()
+    if _releaser_body_is_tombstoned(released_by, registry):
+        return set()            # fleet retired that body: not a live releaser
     if released_by in live_sids:
         return {released_by}
     if not isinstance(registry, dict):
@@ -11609,8 +11585,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :5022, :5469, :9599,
-    :14150), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :5109, :5566, :9514,
+    :14344), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -12153,10 +12129,17 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
 
     THE ARMING CONDITIONS, and why each disarms:
       * no `CLAUDE_CODE_SESSION_ID` -> not armed. A caller with no sid cannot
-        be the divergent supervisor body a fork produced. This is also the
-        STRUCTURAL exemption for `autoclean`'s scheduled task (no operator env)
-        and for a human shell; `autoclean` additionally is not wired to call
-        this at all (§7).
+        be the divergent supervisor body a fork produced. This covers a human
+        shell, and it used to cover `autoclean`'s scheduled task (which ran
+        with no operator env at all).
+        `autoclean`'s exemption does NOT depend on that clause and never did:
+        the verb is simply not wired to call this function (§7). That is load-
+        bearing since the timer was retired on 2026-07-27 -- the sweep is now
+        called BY the supervisor's beat and BY the interface's startup ritual,
+        both of which are sessions WITH a sid, and both must be able to sweep
+        with no `--nonce` while a claim is held. Had the exemption rested on
+        "no sid", retiring the timer would have silently gated the sweep
+        behind the very claim it exists to clean up around.
       * no held claim -> nothing to gate against.
       * a released claim whose releaser is roster-GONE -> nothing to gate
         against; release+stop completed and the claim is open.
@@ -12254,8 +12237,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:5022, :5469, :9599,
-    #     :14150) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:5109, :5566, :9514,
+    #     :14344) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -12582,8 +12565,20 @@ def _identity_abstention_note(ident) -> str:
     """Why the registry declined to judge this body, in one clause, for a
     refusal that is CAUSED by the abstention (the §9 legacy upgrade). An
     operator told only *"the registry cannot confirm"* cannot tell a corrupt
-    file from two records sharing a sid, and those have different remedies."""
+    file from two records sharing a sid, and those have different remedies.
+
+    THE QUARANTINED CASE IS A THIRD REMEDY and gets its own clause, because the
+    generic one sends the operator in a circle: it names `fleet doctor`, and
+    doctor is precisely what MADE this state -- it renamed the corrupt registry
+    aside. Running it again finds nothing to repair. The way out is to restore
+    what the artifact holds."""
     if not ident.get("registry_read"):
+        artifacts = _quarantine_artifacts()
+        if artifacts and not registry_path().exists():
+            return (f"state/fleet.json is GONE and {artifacts[-1].name} sits "
+                    f"beside it -- a corrupt registry was quarantined, so this "
+                    f"absence is a repaired incident and not a fresh install; "
+                    f"restore the quarantined file, then remove the artifact")
         return "state/fleet.json could not be read"
     if ident["verdict"] == IDENTITY_AMBIGUOUS:
         names = ", ".join(repr(n) for n in ident["candidates"])
@@ -12701,12 +12696,20 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
     # re-word a refusal the nonce had already made -- reasoning that a registry
     # lookup keyed by an env-supplied sid is still an environment-derived
     # inference, and that such an inference may never be the sole basis of a
-    # refusal (the PROPOSED invariant, claim-nonce §16.4 item 3). The demotion
-    # buys something only under the hypothesis that the daemon donates the SID
-    # as well as the stamp, and claim-nonce:2573 records that hypothesis as
-    # OPEN. Trading a ratified control away to insure against an unresolved
-    # hypothesis is the operator's call to make, not this file's; the question
-    # is filed, and the ratified shape ships meanwhile.
+    # refusal. THAT WAS THE UNSCOPED FORM, AND IT IS NOT WHAT WAS RATIFIED.
+    # RATIFIED DOCTRINE -- claim-nonce §17 (Altai, 2026-07-27): *"Inference may
+    # select the SUBJECT of a measurement, but may not supply the GROUNDS of a
+    # refusal. Donation can only ever ADD a `FLEET_WORKER` stamp and nothing
+    # anywhere removes one, therefore presence of the stamp is unsound evidence
+    # and absence is sound."* This gate grounds its refusal on what the REGISTRY
+    # says, never on the presence of a donated stamp, so §17 does not condemn
+    # it, and §6.5 D5 requires the refusal to exist (§17.2). The demotion would
+    # have bought one further thing -- that a worker-shaped body presenting a
+    # valid nonce also passes -- and that is worth something only under the
+    # hypothesis that the daemon donates the SID as well as the stamp, which
+    # claim-nonce §16.3 records as OPEN. The gate's real limit is COVERAGE: it
+    # is absent where the registry cannot be read, and that is being extended
+    # rather than traded away.
     #
     # UNRESOLVED still ABSTAINS -- it is every body's dispatch window, including
     # the supervisor's own, and `sup-handoff-begin` registers the successor as
@@ -12777,6 +12780,19 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # as evidence of a SECOND BODY, and filing it here would cry wolf on the
         # holder's own turn. The refusal is loud on stderr and the corrupt
         # registry has its own doctor row.
+        #
+        # THE MESSAGE NAMES `--repair` (2026-07-27 gate), and what that does NOT
+        # fix belongs here rather than in a handoff. Bare `fleet doctor` is now
+        # report-only, so the old text named a verb that cannot help. But
+        # `--repair` QUARANTINES -- it RENAMES the file aside -- so it still turns
+        # *corrupt* into *absent*, and this arm abstains on corrupt while the
+        # `not_initialized` carve-out GRANTS on absent. Putting the rename behind
+        # an explicit flag makes it a deliberate operator act instead of a side
+        # effect of four read-only-looking commands; it does NOT close that door.
+        # The remedy for the door is gating `not_initialized` on the
+        # `fleet.json.corrupt.*` artifact glob (the shape already used by
+        # `_registry_owned_and_protected_sids`), which the gate's own answer
+        # relocated to `main` and which is therefore still owed.
         if _acting_body_is_worker_turn(ident=ident) is not False:
             raise FleetCliError(
                 f"{verb}: refusing -- this is a §9 legacy claim, whose upgrade "
@@ -12784,9 +12800,65 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
                 f"presented, and the registry cannot confirm that this session "
                 f"is not a worker turn ({_identity_abstention_note(ident)}). "
                 f"An upgrade that mints generation 1 needs an affirmative "
-                f"answer, not an abstention. Repair `state/fleet.json` (see "
-                f"`fleet doctor`), or run this from a session the registry can "
-                f"place.")
+                f"answer, not an abstention. Repair `state/fleet.json` "
+                f"(`fleet doctor --repair`), or run this from a session the "
+                f"registry can place.")
+        # GATE 2, AND IT IS NOT THE SAME QUESTION AS GATE 1 (gate reviewer
+        # CRITICAL, 2026-07-27). Gate 1 asks *"did the registry answer?"*; this
+        # asks *"is the registry that answered COMPLETE?"* -- and an affirmative
+        # answer from a registry that is missing records is not an answer at all.
+        #
+        # The first version of this fix keyed the whole rule on registry-file
+        # ABSENCE inside `_acting_worker_identity`, which is the exact shape
+        # `TestQuarantineArtifactGuard` (NEW-1) had already ruled insufficient
+        # for `_sweep_husks` -- the sibling reader of the SAME helper -- and it
+        # failed here for the same two repro'd reasons. `_quarantine_registry`
+        # RENAMES, so the records it carried are gone from `state/fleet.json`
+        # while the sids they vouched for are still live:
+        #
+        #   probe D -- a routine spawn recreates fleet.json with one record
+        #   probe F -- an operator "recreates" an EMPTY registry
+        #
+        # Either way the file is PRESENT and thin, `_read_registry_readonly`
+        # returns `ok`, no record carries the caller's sid, and gate 1 reads
+        # that thinness as the affirmative *"you are provably not a worker"*
+        # this arm demands. Both were driven end to end: rc 0, `nonce_seq == 1`,
+        # a `NONCE:` printed, no `--nonce` ever passed, artifact still on disk.
+        # A worker whose own record sits inside the artifact upgrades the claim.
+        #
+        # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as `_sweep_husks`
+        # spells it at `:7578`. Not an mtime comparison: `os.rename` preserves
+        # mtime, so the artifact's mtime is the PRE-corruption write time and any
+        # recreated registry is always newer -- the comparison would never fire
+        # on the one bypass it exists to stop.
+        #
+        # AFTER gate 1, deliberately: a registry that is abstaining RIGHT NOW
+        # gets the precise note its own state earns (`fleet doctor` really is
+        # the remedy for a present-but-corrupt file), and only a registry that
+        # gave an affirmative answer reaches the question of whether it was
+        # entitled to. Pinned both ways by
+        # `tests/test_identity_quarantine_glob.py`.
+        #
+        # SCOPED TO THIS ARM, and that scope is the fix. The same clause inside
+        # `_acting_worker_identity` would poison the shared read: the §6.5 gate
+        # refuses on `True` ALONE, so degrading a healthy registry's worker
+        # verdict to an abstention lets a REAL worker turn through §6.5. That
+        # was measured -- it takes `test_an_artifact_beside_a_valid_registry_
+        # still_RESOLVES_a_worker` RED -- so the §9 door does not get closed by
+        # opening the §6.5 one.
+        legacy_artifacts = _quarantine_artifacts()
+        if legacy_artifacts:
+            raise FleetCliError(
+                f"{verb}: refusing -- this is a §9 legacy claim, whose upgrade "
+                f"is granted on sid equality alone with no generation "
+                f"presented, and {legacy_artifacts[-1].name} sits in state/. A "
+                f"corrupt registry was renamed aside, so the registry that just "
+                f"placed this session is missing whatever that file held -- "
+                f"including, possibly, the record that would call this session a "
+                f"worker. An upgrade that mints generation 1 needs a COMPLETE "
+                f"registry, not merely a readable one. Restore the quarantined "
+                f"file, then remove the artifact -- the same remedy the husk "
+                f"sweep asks for.")
         value = mint_nonce()
         claim["nonce_hash"] = nonce_digest(value)
         claim["nonce_seq"] = 1
@@ -12862,6 +12934,98 @@ def cmd_sup_heartbeat(args) -> int:
     return 0
 
 
+def _tombstone_releasing_body(caller: str, inc: str):
+    """Retire the RELEASING BODY'S OWN registry record. Returns the name it
+    tombstoned, or None when it declined to. CALLER MUST HOLD `fleet_lock`, and
+    must already have committed the released claim -- see the ORDER note in
+    `cmd_sup_release`.
+
+    ONLY ITS OWN RECORD, AND ONLY ITS OWN, and that is structural rather than
+    checked: the target is whatever `_acting_worker_identity` resolves the
+    CALLER'S OWN sid to, through the same sid union (`_record_sids`) every other
+    identity question in this file uses. No name is taken from the caller and no
+    record is searched for by shape, so there is no input by which a release
+    could be aimed at another body's record. The safety property is the one the
+    `retired_sids` invariant rests on -- no foreign sid ever enters another
+    record's state -- and it holds here for the same reason: the only sid
+    consulted is the one continuity was proven with.
+
+    IT ABSTAINS RATHER THAN GUESSING, on all three of identity's non-answers:
+
+      * UNRESOLVED -- no record carries this sid. That is *"I am not a
+        fleet-launched body"* (the interface tier, a human shell), and it is not
+        an error: such a body is not in the roster either, so nothing was ever
+        wedged by it. Nothing to tombstone, nothing to say.
+      * AMBIGUOUS -- two or more records carry it, which is itself a leak
+        signature. The first match is NOT silently taken; guessing here would
+        tombstone some other body's record, the one thing this must never do.
+      * a registry that will not read -- the release is ALREADY COMMITTED by the
+        time this runs, so an unreadable registry must not make `sup-release`
+        report failure. It degrades to the pre-slice behaviour and says so: B6
+        stays armed until the body leaves the roster, i.e. the manual step is
+        back for this one release.
+
+    THE READ IS `_read_registry_readonly`, NEVER `load_registry`, and the first
+    draft of this function got that wrong -- caught by
+    `tests/test_identity_fixwave.py::TestNoSupervisorVerbQuarantinesTheRegistry`,
+    which parametrizes `sup-release` and byte-compares the file. `load_registry`
+    QUARANTINES a corrupt registry: it renames `state/fleet.json` aside, which is
+    a WRITE, and it would have happened on a path the operator reached by
+    standing a supervisor down. That is the exact recurring class
+    `tests/test_load_registry_callers.py` was built to stop, on its eighth
+    sighting. The write below is reached ONLY on `ok`, so F2 -- *"never silently
+    degrade to an empty registry; a later `save_registry()` would overwrite live
+    worker records with nothing"* -- cannot fire either: an unreadable registry
+    abstains before anything is saved. `{"workers": ...}` is the whole top-level
+    schema (SPEC §4), so round-tripping through this read drops no sibling key.
+
+    THE WRITE IS §10.4's, NOT A NEW ONE: `status = "dead"`, the same field and
+    literal `_cmd_kill_native` writes, read by the same `_record_is_live`.
+    Cited by NAME and not by line: a bare pointer nobody re-derives is this
+    repo's named recurring defect, and the claim that the two sites are one
+    spelling is pinned behaviourally instead
+    (`test_the_release_tombstone_and_the_kill_tombstone_are_one_predicate`). `status_changed` is likewise the existing event kind
+    every other status writer in this file uses -- a registry flip with no event
+    is an audit hole, and a NEW event kind for this one would be a second
+    spelling of a transition that already has one.
+
+    NO STOP OUTCOME IS WRITTEN, deliberately. `write_tombstone_outcome`'s kinds
+    (`killed`/`interrupted`/`stopped`) all assert that fleet ENDED the session;
+    `sup-release` runs no `claude stop` -- the body is told to exit itself -- so
+    writing one would be a receipt for something that did not happen. The
+    supervisor journal's `RELEASED` entry is the durable record of WHY."""
+    ok, reason, data = _read_registry_readonly()
+    if not ok:
+        if reason != "not_initialized":
+            print(f"fleet: sup-release: registry {reason} -- the releasing body's own "
+                  f"record could NOT be tombstoned (and was NOT quarantined). Claim "
+                  f"{inc} IS released; until this session leaves the roster a "
+                  f"successor `sup-boot` still refuses (B6). Run `fleet doctor`, "
+                  f"then stop this session.", file=sys.stderr)
+        return None
+    ident = _acting_worker_identity(sid=caller, registry=data)
+    if ident["verdict"] == IDENTITY_AMBIGUOUS:
+        print(f"fleet: sup-release: registry identity is AMBIGUOUS for sid {caller} "
+              f"({', '.join(ident['candidates'])}) -- NOT tombstoning any of them, "
+              f"because guessing would retire another body's record. Claim {inc} IS "
+              f"released; a successor `sup-boot` refuses until this session leaves "
+              f"the roster. Run `fleet doctor`.", file=sys.stderr)
+        return None
+    if ident["verdict"] != IDENTITY_RESOLVED:
+        return None                     # not a fleet-launched body: nothing to retire
+    name = ident["name"]
+    rec = data["workers"].get(name)
+    if not isinstance(rec, dict):
+        return None
+    if not _record_is_live(rec):
+        return name                     # already a tombstone -- never re-stamp one
+    old = rec.get("status")
+    rec["status"] = "dead"
+    save_registry(data)
+    append_event("status_changed", name, old=old, new="dead")
+    return name
+
+
 def cmd_sup_release(args) -> int:
     """`fleet sup-release [--reason TEXT] [--nonce N] [--sid S]` -- claim-nonce
     §6.3 / D3. The verb that produces a RELEASED claim.
@@ -12888,9 +13052,34 @@ def cmd_sup_release(args) -> int:
     be dead on delivery -- and it would be the only `NONCE:` line a supervisor
     ever reads that it must not present.
 
+    IT ALSO TOMBSTONES ITS OWN BODY'S REGISTRY RECORD, and that is what lets a
+    supervisor complete its own stand-down. Before this, `sup-release` left the
+    releasing body in the registry and the roster, so B6 saw a LIVE RELEASER and
+    refused the next `sup-boot`: the succession recipe had a middle step that
+    lived outside the fleet ("the interface stops the retired body"), and every
+    unproven handoff this project has had died at a step outside the fleet. With
+    the tombstone, `_releaser_live_sids` is false BY CONSTRUCTION for the body
+    that just released. See `_tombstone_releasing_body` for own-record-only and
+    `_releaser_body_is_tombstoned` for why this is not the retired `--interface`
+    attestation.
+
+    ORDER IS LOAD-BEARING AND IT IS RELEASE-THEN-TOMBSTONE. These are two state
+    changes, so name what a death between them leaves. THIS order leaves
+    `released` + a live untombstoned releaser -- precisely today's B6 refusal,
+    which is the ABSTAINING state and self-heals the moment that session exits
+    the roster. The reverse order would leave a HELD claim owned by a record
+    fleet had already retired: the frozen-claim shape that no in-fleet verb can
+    clear. A half-released claim must fail toward refusal, never toward a free
+    claim, and the ordering is the whole of that guarantee -- there is no
+    two-write transaction here to lean on.
+
+    BOTH WRITES COMMIT INSIDE ONE `fleet_lock` SECTION, so no concurrent verb
+    ever observes the intermediate state; only a process death can.
+
     Doctrine (`skills/fleet/supervisor.md`): release, THEN stop. The window
     between the two commands is real, which is why §6.1 rule 1 refuses to
-    consume a released record whose releaser is still roster-live (B6)."""
+    consume a released record whose releaser is still roster-live (B6) -- and
+    why the tombstone above closes it from inside the fleet instead."""
     with fleet_lock():
         claim, caller, _ = _require_claim_holder(
             getattr(args, "sid", None), nonce=getattr(args, "nonce", None),
@@ -12913,9 +13102,14 @@ def cmd_sup_release(args) -> int:
         if reason:
             released["reason"] = reason
         write_incarnation(released)
+        # AFTER the claim write, never before -- see the ORDER note above.
+        retired = _tombstone_releasing_body(caller, inc)
+    tail = (f"This body's registry record ({retired}) is tombstoned, so the next "
+            f"`fleet sup-boot` claims immediately -- nobody has to stop this "
+            f"session first." if retired else
+            f"The next body claims fresh via `fleet sup-boot` (no seizure, no page).")
     print(f"claim {inc} released. Nothing holds the supervisor claim now -- this "
-          f"incarnation must EXIT: take no further fleet actions. The next body "
-          f"claims fresh via `fleet sup-boot` (no seizure, no page).")
+          f"incarnation must EXIT: take no further fleet actions. {tail}")
     return 0
 
 
@@ -14712,8 +14906,23 @@ INDEX_SHARD_SUFFIX = ".tsv"
 # five and a row is parsed by a plain `split("\t")` with no quoting rules.
 SHARD_KINDS = ("func", "class", "method", "const", "section")
 
-# §8. `.fleet-index/` is ALWAYS gitignored; `init` writes this entry
-# unconditionally and committing the index is documented-unsupported.
+# §5. How many hex digits of the source SHA-256 the header carries.
+#
+# 16, not the 8 an earlier draft specified, and the four extra bytes are not
+# paranoia -- 8 hex is 32 bits, and a measured search over 109,096 two-line
+# modules (well inside a second) produced a colliding pair with an IDENTICAL
+# line count, which is the rest of the staleness key. Swapping those two files
+# serves the wrong file's symbols with `refreshed: False` while `index status`
+# reports nothing stale: the exact silent-wrong-coordinate failure §8 calls the
+# single most important property in the spec. `TestShaWidth` pins the width
+# against that measured pair. 64 bits puts a chance collision out of reach for
+# any repo, at 8 bytes per shard.
+INDEX_SHA_HEX_LEN = 16
+
+# §8. `.fleet-index/` is ALWAYS ignored; `init` writes this pattern
+# unconditionally and committing the index is documented-unsupported. WHERE it
+# is written is `_ensure_index_excluded`'s decision -- `$GIT_COMMON_DIR/info/
+# exclude`, not the tracked `.gitignore`.
 INDEX_GITIGNORE_ENTRY = INDEX_DIR_NAME + "/"
 
 INDEX_CONFIG_KEYS = ("include", "exclude")
@@ -14745,6 +14954,34 @@ class IndexConfigError(FleetCliError):
     believing a mode is in force that no code implements."""
 
 
+class IndexPathError(FleetCliError):
+    """A path handed to the index that does not name a file INSIDE the root.
+
+    TWO guards raise it, and they are two because containment is two separate
+    questions -- one about the spelling of a rel, one about where that spelling
+    lands on a real filesystem. Neither can answer the other's:
+
+    - `_index_posix_rel` is the STRING guard, and it is the one function every
+      index path passes through. It rejects a `..` segment anywhere and any rel
+      that is not relative. The alternative was measured and it deletes data:
+      with the check spelled separately on each entry surface, `--files` and
+      the `verified_shard_rows` choke point each grew a guard that rejected
+      only a LEADING `../`, an interior `..` reached `_index_prune_shard`, and
+      the prune unlinked a file outside the index root and rmdir'd its way out
+      of the tree -- printing "orphan shard pruned" and exiting 0. One
+      rejection, at the one place a rel becomes canonical, is why there is no
+      second spelling to keep in step.
+    - `_index_require_inside` is the FILESYSTEM guard. A rel made of entirely
+      ordinary segments still leaves the root when one of those segments is a
+      symlink or a win32 junction, and no amount of string analysis can see
+      that. `index_source_files` has fenced the build walk against it since
+      wave 2; the choke point had not, and served a file outside the root at
+      `status: ok`.
+
+    A caller that wants both -- and every caller does -- takes them together
+    from `_index_entry_paths`."""
+
+
 # --- paths ------------------------------------------------------------------
 
 def index_dir(root) -> Path:
@@ -14765,15 +15002,113 @@ def _index_posix_rel(rel) -> str:
 
     Normalising backslashes here is not cosmetic -- without it the same win32
     source file reachable as `bin\\fleet.py` and `bin/fleet.py` would get TWO
-    shards, and each would look stale to the other's reader."""
+    shards, and each would look stale to the other's reader.
+
+    A `..` segment ANYWHERE raises `IndexPathError`, not just a leading one.
+    An interior `..` is the same escape wearing a disguise -- `a/../../x`
+    leaves the root exactly as `../x` does -- and this is the single guard for
+    every caller, because a rel that survives here goes on to name a file the
+    prune path will unlink.
+
+    A rel that is not RELATIVE raises too, and that half is what a `..` check
+    alone misses entirely: `C:/victim/x.py` carries no `..`, so it came back
+    unchanged, and `root / rel` and `symbols / (rel + '.tsv')` are joins --
+    pathlib REPLACES on an absolute right-hand side instead of appending.
+    Measured through the choke point: a file outside the root overwritten with
+    shard bytes, and a shard materialised outside the root answering
+    `status: ok`.
+
+    The test is `drive or root`, NOT `is_absolute()`, and that is not a
+    stylistic choice -- `PureWindowsPath('C:x.py').is_absolute()` is False
+    while `Path('D:/root') / 'C:x.py'` is `C:x.py`. A drive-relative rel is not
+    absolute and still escapes, so `is_absolute()` leaves the hole open.
+
+    It is asked of `PureWindowsPath` on EVERY platform, deliberately. A rel is
+    the shard's identity and it is persisted; an index built on posix can be
+    read on win32, so a rel that is inert here and absolute there has to be
+    refused where it is created, not where it detonates. `PureWindowsPath` is
+    pure -- it parses win32 syntax without touching a win32 filesystem -- so
+    this is a syntax question answered the same way everywhere, not an OS
+    branch (invariant 8). The posix half needs no separate spelling: a leading
+    `/` is already dropped as an empty segment above."""
     parts = [p for p in str(rel).replace("\\", "/").split("/") if p not in ("", ".")]
-    return "/".join(parts)
+    if ".." in parts:
+        raise IndexPathError(
+            f"index path {str(rel)!r} is outside the index root -- a '..' "
+            f"segment never names a file this index describes")
+    out = "/".join(parts)
+    spelled = PureWindowsPath(out)
+    if spelled.drive or spelled.root:
+        named = spelled.drive or spelled.root
+        raise IndexPathError(
+            f"index path {str(rel)!r} is outside the index root -- an index "
+            f"path is relative to the root, and this one names {named!r} of "
+            f"its own")
+    return out
 
 
 def shard_path_for_source(root, rel) -> Path:
     """`.fleet-index/symbols/<source-path>.tsv` -- the shard mirrors the
     source path, which is why the source path is not a column (§5)."""
     return index_symbols_dir(root) / (_index_posix_rel(rel) + INDEX_SHARD_SUFFIX)
+
+
+def _index_require_inside(base, path, rel, what) -> None:
+    """Refuse `path` unless it RESOLVES strictly inside `base`.
+
+    The companion to `_index_posix_rel`, and the half a string guard cannot
+    cover. `link/secret.py` is an ordinary rel by every spelling rule -- no
+    `..`, no drive -- and when `link` is a symlink or a `mklink /J` junction it
+    names a file outside the root anyway. `index_source_files` fences the build
+    walk against exactly that shape (§11.1) and `_index_prune_shard` fences the
+    delete; measured before this existed, the choke point in between fenced
+    neither and answered `status: ok` with rows for a file outside the root.
+
+    BOTH sides are resolved, never just the candidate. `base in path.parents`
+    on unresolved paths is a comparison of spellings, which is the bug, and
+    resolving only the candidate breaks the ordinary case instead: a root
+    reached through a link (a `/tmp` symlink, a substed drive) would stop
+    containing its own files. Strictly inside, so `rel == ''` -- the root
+    itself, which is a directory and never a source file -- is refused rather
+    than admitted by an `==` arm nobody needs."""
+    try:
+        real_base = Path(base).resolve()
+        real = Path(path).resolve()
+    except OSError as exc:
+        raise IndexPathError(
+            f"index path {rel!r}: its {what} cannot be resolved ({exc}), so "
+            f"nothing can say whether it is inside the index root")
+    if real_base not in real.parents:
+        raise IndexPathError(
+            f"index path {rel!r} escapes the index root -- its {what} resolves "
+            f"to {real}, which is not inside {real_base}. A path that is "
+            f"spelled inside the root and lives outside it is a reparse point")
+
+
+def _index_entry_paths(root, rel) -> tuple:
+    """`(rel, source, shard)` -- the three things one index entry is, with BOTH
+    containment guards applied.
+
+    Every surface that takes a rel from a CALLER goes through here, so there is
+    one place that knows what a trustworthy index entry is: `verified_shard_rows`
+    (the read choke point) and `_index_refresh_one` (the write choke point).
+    `build_index` reaches the latter with rels from `index_source_files`, which
+    fenced them already, so the guards are a no-op on that path -- measured at
+    1.2% of a full build (0.079s of 6.594s over this repo's tree), which is the
+    price of not having a second definition of "inside the root" to keep in
+    step with this one."""
+    root = Path(root)
+    rel = _index_posix_rel(rel)
+    source = root / rel
+    shard = index_symbols_dir(root) / (rel + INDEX_SHARD_SUFFIX)
+    _index_require_inside(root, source, rel, "source file")
+    # The shard half is guarded for the same reason the PRUNE half already is:
+    # a junction inside the mirror tree redirects the atomic replace, which
+    # turns "may write in .fleet-index/" into "may overwrite any file on this
+    # machine". Guarding the unlink and not the write would leave the two
+    # spellings of one rule to drift apart, which is how this file got here.
+    _index_require_inside(index_symbols_dir(root), shard, rel, "shard")
+    return rel, source, shard
 
 
 def source_rel_from_shard(root, shard_path) -> str:
@@ -14813,16 +15148,45 @@ def _index_tsv_field(value) -> str:
     return str(value).replace("\r", "").replace("\n", "").replace("\t", "\\t")
 
 
-def _index_split_lines(text) -> list:
-    """Split on `\\n` only, dropping the trailing empty element.
+_INDEX_LINE_BREAK_RE = re.compile(r"\r\n|\r|\n")
 
-    Not `str.splitlines()`: that also breaks on \\x0b, \\x0c and \\u2028, so a
-    source file containing a form feed would get a line COUNT from the header
-    (which counts `\\n` bytes) that disagreed with the parser's line NUMBERS."""
-    lines = text.split("\n")
+
+def _index_split_lines(text) -> list:
+    """Split on the three real line terminators -- `\\r\\n`, `\\r`, `\\n` --
+    dropping the trailing empty element.
+
+    This is exactly `bytes.splitlines()`'s rule, and it has to be, because the
+    header's line COUNT is taken from the bytes while the parsers' line
+    NUMBERS come from here; any disagreement between the two rules ships a
+    shard whose own rows cite a line past its stated end.
+
+    Deliberately NOT `str.splitlines()`, which additionally breaks on \\x0b,
+    \\x0c, \\x1c-\\x1e, \\x85, \\u2028 and \\u2029 -- none of which `bytes`
+    (or `ast`, or an editor, or git) treats as a line break. A markdown file
+    with a form feed in it would get coordinates nothing else in the toolchain
+    agrees with.
+
+    Nor is it a plain `split("\\n")`: a CR-only file then counts as one line
+    while `ast` numbers its symbols 1..N, so the header claimed 1 line and its
+    own rows cited line 5."""
+    lines = _INDEX_LINE_BREAK_RE.split(text)
     if lines and lines[-1] == "":
         lines.pop()
     return lines
+
+
+def _index_row_key(row):
+    """THE row order, defined once (§5).
+
+    Once, because it was defined twice: `render_shard` sorted, the parser
+    returned parse order, and the two agreed on every file without a
+    `(line, end)` tie. On `ZED = ALPHA = 1` they disagreed, so
+    `verified_shard_rows` handed back `[ZED, ALPHA]` when it had just
+    refreshed and `[ALPHA, ZED]` when it read the shard -- the shard BYTES
+    were reproducible and the returned ROWS were not, which is the half a
+    caller can actually see."""
+    name, line, end = row[0], row[1], row[2]
+    return (line, end, name)
 
 
 def render_shard(header: dict, rows) -> str:
@@ -14830,9 +15194,12 @@ def render_shard(header: dict, rows) -> str:
     tab-separated and sorted by line number.
 
     Sorted by line rather than by name so a source edit perturbs a contiguous
-    region of the shard instead of scattering hunks across it."""
-    out = ["#\t{}\t{}\t{}".format(header["sha8"], header["lines"], header["lang"])]
-    for name, line, end, kind, sig in sorted(rows, key=lambda r: (r[1], r[2], r[0])):
+    region of the shard instead of scattering hunks across it. The sort is a
+    no-op for rows straight from `parse_source_symbols`, which already emits
+    `_index_row_key` order; it stays here because §5's format promise is about
+    the bytes, and this is where the bytes are made."""
+    out = ["#\t{}\t{}\t{}".format(header["sha"], header["lines"], header["lang"])]
+    for name, line, end, kind, sig in sorted(rows, key=_index_row_key):
         out.append(f"{name}\t{line}\t{end}\t{kind}\t{sig}")
     return "\n".join(out) + "\n"
 
@@ -14867,8 +15234,11 @@ def read_shard(shard_path):
     head = lines[0].split("\t")
     if len(head) != 4 or head[0] != "#":
         return None
-    sha8, count, lang = head[1], head[2], head[3]
-    if len(sha8) != 8 or not set(sha8) <= _INDEX_HEX:
+    sha, count, lang = head[1], head[2], head[3]
+    # Exactly INDEX_SHA_HEX_LEN, not "at least": a shard written by the
+    # 8-hex draft is not readable here, so it takes the stale path and is
+    # repaired on first read. That is the whole migration.
+    if len(sha) != INDEX_SHA_HEX_LEN or not set(sha) <= _INDEX_HEX:
         return None
     if not count.isdigit():
         return None
@@ -14883,7 +15253,7 @@ def read_shard(shard_path):
         if kind not in SHARD_KINDS:
             return None
         rows.append((name, int(s_line), int(s_end), kind, sig))
-    return {"sha8": sha8, "lines": int(count), "lang": lang}, rows
+    return {"sha": sha, "lines": int(count), "lang": lang}, rows
 
 
 def _index_unlink_quiet(path) -> None:
@@ -14906,21 +15276,33 @@ def write_shard_atomic(shard_path, header: dict, rows, sleep=None) -> bool:
     commit -- `_replace_with_retry`, deliberately reused rather than a second
     policy -- and on exhaustion the write is ABANDONED with the old shard left
     in place. Stale is safe (the header hash detects it and the next read
-    repairs it); torn is not. Any other error unwinds the temp file and
-    propagates, because it is not a hazard this layer knows how to survive."""
+    repairs it); torn is not.
+
+    EVERY `OSError` degrades to False, not just the sharing violation. This
+    function is called from the `verified_shard_rows` choke point, so an
+    escaping exception is a crash in the primitive M2's `q --outline <path>`
+    hands a caller-supplied path to -- and a caller-supplied path reaches
+    shapes the build never does (`nul.py` on win32 renders a shard path
+    `os.replace` refuses with `FileExistsError`, not `PermissionError`). The
+    outcome for all of them is the one this layer already has a safe answer
+    for: the old shard stays, the caller is answered from this run's parse.
+    A non-OSError still unwinds the temp file and propagates -- it is not a
+    hazard this layer knows how to survive."""
     shard_path = Path(shard_path)
-    shard_path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=str(shard_path.parent),
-                                    prefix=".idx.", suffix=".tmp")
+    try:
+        shard_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(dir=str(shard_path.parent),
+                                        prefix=".idx.", suffix=".tmp")
+    except OSError:
+        return False
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(render_shard(header, rows))
-        try:
-            _replace_with_retry(tmp_name, str(shard_path), sleep=sleep)
-        except PermissionError:
-            _index_unlink_quiet(tmp_name)
-            return False
+        _replace_with_retry(tmp_name, str(shard_path), sleep=sleep)
         return True
+    except OSError:
+        _index_unlink_quiet(tmp_name)
+        return False
     except BaseException:
         _index_unlink_quiet(tmp_name)
         raise
@@ -14928,23 +15310,31 @@ def write_shard_atomic(shard_path, header: dict, rows, sleep=None) -> bool:
 
 # --- parsers (§6) -----------------------------------------------------------
 
-def source_header(source_path, rel) -> dict:
-    """The staleness key for one source file: `sha256[:8]` of its BYTES, its
-    line count, and its language (§5/§8).
+def header_for_bytes(raw, rel) -> dict:
+    """The staleness key for one buffer of source BYTES: `sha256` truncated to
+    `INDEX_SHA_HEX_LEN` hex, the line count, and the language (§5/§8).
 
     Bytes, not decoded text: a CRLF/LF difference is a real difference to
-    every line-number consumer, so it must invalidate the shard."""
-    raw = Path(source_path).read_bytes()
-    lines = raw.count(b"\n") + (1 if raw and not raw.endswith(b"\n") else 0)
-    return {"sha8": hashlib.sha256(raw).hexdigest()[:8],
-            "lines": lines,
+    every line-number consumer, so it must invalidate the shard -- and a file
+    that is not valid UTF-8 at all still has to get a header, because that is
+    how staleness keeps tracking it.
+
+    Takes bytes rather than a path so the header and the parse can be made
+    from the SAME buffer; see `verified_shard_rows`."""
+    return {"sha": hashlib.sha256(raw).hexdigest()[:INDEX_SHA_HEX_LEN],
+            "lines": len(raw.splitlines()),
             "lang": source_lang(rel)}
 
 
-def _index_read_text(path):
+def source_header(source_path, rel) -> dict:
+    """`header_for_bytes` over the file at `source_path`. One read."""
+    return header_for_bytes(Path(source_path).read_bytes(), rel)
+
+
+def _index_decode(raw):
     try:
-        return Path(path).read_bytes().decode("utf-8")
-    except (OSError, UnicodeDecodeError):
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
         return None
 
 
@@ -14986,8 +15376,8 @@ def _index_py_symbols(body, prefix, rows, module_level) -> None:
                 rows.append((node.target.id, node.lineno, node.end_lineno, "const", ""))
 
 
-def _index_parse_python(source_path) -> list:
-    text = _index_read_text(source_path)
+def _index_parse_python(raw) -> list:
+    text = _index_decode(raw)
     if text is None:
         return []
     try:
@@ -15005,7 +15395,7 @@ _MD_HEADING_RE = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.*)$")
 _MD_CLOSING_HASHES_RE = re.compile(r"\s+#+\s*$")
 
 
-def _index_parse_markdown(source_path) -> list:
+def _index_parse_markdown(raw) -> list:
     """ATX headings as `kind=section`, with §11.4's `end` computed HERE, at
     parse time, so `--src` never has to re-derive it at query time.
 
@@ -15013,7 +15403,7 @@ def _index_parse_markdown(source_path) -> list:
     a spec's ```` ``` ```` block routinely contains `# comment` lines, and
     without fence tracking every one of those becomes a phantom section that
     swallows the range of the real heading above it."""
-    text = _index_read_text(source_path)
+    text = _index_decode(raw)
     if text is None:
         return []
     lines = _index_split_lines(text)
@@ -15044,22 +15434,36 @@ def _index_parse_markdown(source_path) -> list:
     return rows
 
 
-def parse_source_symbols(source_path, lang=None) -> list:
-    """Parse ONE source file into shard rows (§6). Never raises for a bad
-    source file: an unparseable, unreadable or undecodable file yields no rows
-    and therefore a header-only shard, so the build continues and staleness
-    still tracks the file."""
+def parse_source_symbols(source_path, lang=None, raw=None) -> list:
+    """Parse ONE source file into shard rows (§6), in `_index_row_key` order.
+    Never raises for a bad source file: an unparseable, unreadable or
+    undecodable file yields no rows and therefore a header-only shard, so the
+    build continues and staleness still tracks the file.
+
+    `raw` lets a caller that has ALREADY read the bytes hand them over instead
+    of paying a second read -- which is not an optimisation. A caller that
+    hashes one read and parses another can persist a shard describing file A
+    with the symbols of file B, and once the tree returns to A that shard
+    verifies clean forever. Measured at 2,037 torn shards in 9,811 refreshes
+    under a concurrent writer, with no injection at all."""
     source_path = Path(source_path)
     if lang is None:
         lang = source_lang(source_path.name)
+    if raw is None:
+        try:
+            raw = source_path.read_bytes()
+        except OSError:
+            return []
     if lang == "python":
-        rows = _index_parse_python(source_path)
+        rows = _index_parse_python(raw)
     elif lang == "markdown":
-        rows = _index_parse_markdown(source_path)
+        rows = _index_parse_markdown(raw)
     else:
         rows = []
-    return [(_index_tsv_field(name), line, end, kind, _index_tsv_field(sig))
-            for name, line, end, kind, sig in rows]
+    return sorted(
+        ((_index_tsv_field(name), line, end, kind, _index_tsv_field(sig))
+         for name, line, end, kind, sig in rows),
+        key=_index_row_key)
 
 
 # --- config (§8) ------------------------------------------------------------
@@ -15203,6 +15607,35 @@ def render_digest(rel, header: dict, rows) -> str:
 
 # --- index discovery (§11.1) ------------------------------------------------
 
+def _index_is_repo_boundary(directory) -> bool:
+    """A directory holding a `.git` ENTRY -- file or directory (§11.1).
+
+    ONE predicate, used in both directions: `find_index_root` walking UP so a
+    worker cannot resolve a parent checkout's index, and `index_source_files`
+    walking DOWN so a build cannot index a nested checkout's files. The
+    downward half was missing, and a parent `fleet index init` indexed
+    `.claude/worktrees/w1/*.py` -- shards for files on another branch, in a
+    tree with an index of its own."""
+    return (Path(directory) / ".git").exists()
+
+
+def _index_is_reparse_point(path) -> bool:
+    """A symlink or, on win32, a junction/mount point.
+
+    `os.path.islink` alone is not enough: a `mklink /J` junction carries
+    `IO_REPARSE_TAG_MOUNT_POINT`, not the symlink tag, so `islink` is False,
+    `os.walk` descends it happily, and a junction pointed anywhere leaks files
+    from outside the root into the index. `st_reparse_tag` is win32-only and
+    read through `getattr`, so this is an attribute probe, not an OS branch
+    (invariant 8). An unstattable entry answers True: the index has nothing to
+    gain by descending something it cannot even inspect."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return True
+    return bool(stat.S_ISLNK(st.st_mode) or getattr(st, "st_reparse_tag", 0))
+
+
 def find_index_root(start=None):
     """The nearest `.fleet-index/` at or above `start`, or None (§11.1).
 
@@ -15222,7 +15655,7 @@ def find_index_root(start=None):
     for directory in (current, *current.parents):
         if (directory / INDEX_DIR_NAME).is_dir():
             return directory
-        if (directory / ".git").exists():
+        if _index_is_repo_boundary(directory):
             return None
     return None
 
@@ -15256,15 +15689,24 @@ def verified_shard_rows(root, rel, no_write=False, sleep=None) -> dict:
       to "withheld" there would turn a Windows sharing violation into a
       user-visible failure for no safety gain.
     - `no_write` withholds rather than serving. A read-only mount or a
-      `git bisect` is not a reason to relax the verification rule."""
-    rel = _index_posix_rel(rel)
+      `git bisect` is not a reason to relax the verification rule.
+
+    ONE read of the source, and the parse works off that same buffer. Reading
+    twice -- once to hash, once to parse -- opens a window in which a write
+    lands between them, and the shard that gets persisted then carries file
+    A's header over file B's rows. That shard is not detectably wrong: as soon
+    as the tree returns to A it verifies clean, and this function answers
+    `status: ok`, `refreshed: False`, `note: None` with coordinates for a file
+    it does not describe. It is the exact silent-wrong-coordinate failure the
+    docstring above says this function exists to prevent, and it needed no
+    injection to reproduce -- 21% of refreshes under a concurrent writer, i.e.
+    under the manager-builds-while-worker-edits pattern this fleet runs."""
     root = Path(root)
-    source = root / rel
-    shard = shard_path_for_source(root, rel)
+    rel, source, shard = _index_entry_paths(root, rel)
     result = {"rel": rel, "status": "ok", "header": None, "rows": [],
               "refreshed": False, "written": False, "note": None}
     try:
-        header = source_header(source, rel)
+        raw = source.read_bytes()
     except OSError as exc:
         result["status"] = "orphan"
         if source.exists():
@@ -15278,6 +15720,7 @@ def verified_shard_rows(root, rel, no_write=False, sleep=None) -> dict:
             result["written"] = True
             result["note"] += "; orphan shard pruned"
         return result
+    header = header_for_bytes(raw, rel)
     existing = read_shard(shard)
     if existing is not None and existing[0] == header:
         result["header"], result["rows"] = existing
@@ -15287,7 +15730,7 @@ def verified_shard_rows(root, rel, no_write=False, sleep=None) -> dict:
         result["note"] = (f"{rel}: shard is stale or unreadable and no-write mode "
                           f"forbids repairing it -- hits withheld")
         return result
-    rows = parse_source_symbols(source, header["lang"])
+    rows = parse_source_symbols(source, header["lang"], raw=raw)
     result["header"] = header
     result["rows"] = rows
     result["refreshed"] = True
@@ -15307,21 +15750,41 @@ def _index_selects(rel, include, exclude) -> bool:
 
 
 def index_source_files(root, config=None) -> list:
-    """Every source path the index covers, as sorted forward-slash relatives."""
+    """Every source path the index covers, as sorted forward-slash relatives.
+
+    The walk is fenced on BOTH counts §11.1 fences the reader's walk-up on:
+
+    - **A nested repository boundary is not descended.** A checkout inside the
+      root -- a vendored clone, or one of this fleet's own campaign worktrees
+      under `.claude/worktrees/` -- describes a different tree, usually on a
+      different branch, and has an index of its own. Measured: without this, a
+      parent `index init` wrote shards for `.claude/worktrees/w1/*.py`. `root`
+      itself is exempt (it is nearly always a checkout); only entries BELOW it
+      are tested, which is what filtering `dirnames` rather than `dirpath`
+      does.
+    - **Reparse points are not followed.** `os.walk` does not follow POSIX
+      symlinks, but it does descend a win32 junction, so a `mklink /J` inside
+      the root pulled a file from outside it into the index -- with a shard
+      path claiming it lives here. Files are tested too: a symlinked file is
+      the same leak one entry smaller."""
     root = Path(root)
     if config is None:
         config = load_index_config(root)
     include, exclude = config["include"], config["exclude"]
     out = []
     for dirpath, dirnames, filenames in os.walk(str(root)):
-        dirnames[:] = [d for d in dirnames if d not in INDEX_SKIP_DIR_NAMES]
         base = Path(dirpath)
+        dirnames[:] = [d for d in dirnames
+                       if d not in INDEX_SKIP_DIR_NAMES
+                       and not _index_is_repo_boundary(base / d)
+                       and not _index_is_reparse_point(base / d)]
         for name in filenames:
             # `relative_to(...).as_posix()`, not a separator substitution:
             # invariant 8 confines OS branching to the platform adapter, and
             # pathlib already yields forward slashes everywhere (§11.2, §14).
             rel = (base / name).relative_to(root).as_posix()
-            if _index_selects(rel, include, exclude):
+            if _index_selects(rel, include, exclude) and not _index_is_reparse_point(
+                    base / name):
                 out.append(rel)
     return sorted(out)
 
@@ -15340,15 +15803,29 @@ def index_shard_rels(root) -> list:
 
 
 def _index_prune_shard(root, rel) -> bool:
+    """Delete one shard, then the mirror directories it emptied.
+
+    Every path here is RESOLVED before it is trusted. `stop in current.parents`
+    is a string comparison: it says the shard's path is spelled inside the
+    shard tree, not that the bytes it unlinks live there. A symlinked or
+    junctioned mirror directory satisfies the spelling and fails the fact, and
+    the walk-up then rmdir's its way straight out of the root -- measured on
+    this primitive, reported as "orphan shard pruned", exit 0."""
     shard = shard_path_for_source(root, rel)
+    try:
+        stop = index_symbols_dir(root).resolve()
+        real = shard.resolve()
+    except OSError:
+        return False
+    if real == stop or stop not in real.parents:
+        return False
     try:
         shard.unlink()
     except OSError:
         return False
     # Leave no empty mirror directories behind, or the shard tree slowly
     # accumulates the skeleton of every directory a project ever had.
-    stop = index_symbols_dir(root)
-    current = shard.parent
+    current = real.parent
     while current != stop and stop in current.parents:
         try:
             current.rmdir()
@@ -15364,23 +15841,36 @@ def _new_index_report() -> dict:
 
 
 def _index_refresh_one(root, rel, force, sleep, report) -> None:
+    # Canonicalised and fenced HERE, not only at the callers. `build_index`
+    # hands over an already-canonical rel from `index_source_files` and
+    # `update_index` canonicalises its own before it can compare them against
+    # the selection -- but "the one function every index path passes through"
+    # is a claim the code has to make true, not one a comment can assert on its
+    # behalf, and a caller-supplied rel reaching a write path uncanonicalised
+    # is exactly the shape that shipped. Canonicalisation is a fixpoint, so the
+    # second application costs a string walk and changes nothing.
     root = Path(root)
-    source = root / rel
+    rel, source, shard = _index_entry_paths(root, rel)
     try:
-        header = source_header(source, rel)
+        # One read, hashed and parsed -- the build path tears exactly the way
+        # `verified_shard_rows` does, and it is the one a manager runs WHILE a
+        # worker edits the tree, so it is the likelier of the two to meet a
+        # concurrent writer.
+        raw = source.read_bytes()
     except OSError as exc:
         report["failed"] += 1
         report["warnings"].append(f"{rel}: unreadable ({exc}) -- skipped")
         return
+    header = header_for_bytes(raw, rel)
     if not force:
-        existing = read_shard(shard_path_for_source(root, rel))
+        existing = read_shard(shard)
         if existing is not None and existing[0] == header:
             report["skipped"] += 1
             return
     # §6/§9: an unparseable file yields no rows, so it becomes a header-only
     # shard and the build carries on. It is never a build failure.
-    rows = parse_source_symbols(source, header["lang"])
-    if write_shard_atomic(shard_path_for_source(root, rel), header, rows, sleep=sleep):
+    rows = parse_source_symbols(source, header["lang"], raw=raw)
+    if write_shard_atomic(shard, header, rows, sleep=sleep):
         report["indexed"] += 1
         report["indexed_rels"].append(rel)
     else:
@@ -15413,8 +15903,17 @@ def build_index(root, force=False, sleep=None) -> dict:
 
 def update_index(root, rels, force=False, sleep=None) -> dict:
     """Refresh exactly the named files -- the cheap path on a large tree,
-    where a full `build` walk is the expensive part."""
+    where a full `build` walk is the expensive part.
+
+    Canonicalised UP FRONT, before anything is compared or written. `selected`
+    holds canonical rels, so an uncanonicalised caller rel -- `./a.py`,
+    `a\\b.py`, or a drive-qualified one -- missed the selection test and fell
+    through to a branch that then joined it onto the root anyway. Refusing the
+    whole invocation rather than the one entry is deliberate and matches
+    `--files`: a batch that names an out-of-root path is a caller that has the
+    root wrong, and half-applying its intent is worse than applying none."""
     root = Path(root)
+    rels = [_index_posix_rel(rel) for rel in rels]
     selected = set(index_source_files(root))
     report = _new_index_report()
     for rel in rels:
@@ -15668,6 +16167,17 @@ def compose_context_digests(cwd, context, sleep=None) -> tuple:
 # printed -- a cap nobody is told about reads as "that was everything".
 INDEX_LIST_CAP = 20
 
+# `failed > 0` is a DISTINCT outcome from "the command refused to run", and
+# collapsing both onto 1 threw away the only difference a script cares about:
+# after exit 1 from `_require_index` nothing was indexed and the operator runs
+# `init`, while after `failed 3` an index exists, most of it is current, and
+# the operator retries the three. main() collapses every `FleetCliError` to 1,
+# so the partial outcome -- the new one, and the narrower one -- takes the new
+# code rather than displacing a convention every other verb shares. 2 and 3 are
+# `SupervisorLifecycleRefusal`'s REFUSE/FREEZE grades, 4 is
+# SUPERVISOR_CONTINUITY_RC and 5 is SUPERVISOR_BOOT_HANDOFF_REFUSED_RC.
+INDEX_FAILED_RC = 6
+
 
 def _index_root_arg(args) -> Path:
     """`--path DIR` names the INDEX ROOT on all four verbs, defaulting to cwd.
@@ -15715,15 +16225,18 @@ def _index_files_arg(root, raw) -> list:
                 raise FleetCliError(
                     f"--files entry {entry!r} is outside the index root {root}")
         else:
-            try:
-                rel = _index_posix_rel(entry)
-            except (FleetCliError, ValueError) as exc:
-                raise FleetCliError(
-                    f"--files entry {entry!r} is outside the index root "
-                    f"{root} ({exc})") from exc
-        if rel == ".." or rel.startswith("../"):
-            raise FleetCliError(
-                f"--files entry {entry!r} is outside the index root {root}")
+            # No containment check of its own: `_index_posix_rel` refuses a
+            # `..` segment AND a non-relative rel for every caller. A second
+            # guard here is what let the two spellings drift apart in the first
+            # place -- this one rejected a LEADING `../` while the canonicaliser
+            # waved an interior one through to the prune path.
+            #
+            # Note what the `is_absolute()` arm above does NOT catch, and why
+            # this branch cannot be trusted to be the relative one: `C:x.py` is
+            # drive-relative, so `Path.is_absolute()` is False and it lands
+            # here -- and it still escapes a root on another drive. The
+            # canonicaliser is what refuses it.
+            rel = _index_posix_rel(entry)
         if rel and rel not in rels:
             rels.append(rel)
     if not rels:
@@ -15731,13 +16244,67 @@ def _index_files_arg(root, raw) -> list:
     return rels
 
 
-def _ensure_index_gitignore(root) -> bool:
-    """§8: `init` writes the `.gitignore` entry UNCONDITIONALLY -- committing
+def _index_git_common_dir(root):
+    """`$GIT_COMMON_DIR` for `root`, or None when `root` is not a checkout.
+
+    `.git` is a DIRECTORY in an ordinary checkout and a FILE holding
+    `gitdir: <path>` in a linked worktree. `info/` is one of git's COMMON
+    paths, so a linked worktree's `info/exclude` is the parent clone's -- the
+    worktree's own gitdir names it in a `commondir` file, which is what the
+    second hop reads. Resolved with pathlib rather than by shelling out to
+    `git`: `fleet index init` must not grow a subprocess dependency, and a
+    missing or malformed pointer answers None, never a wrong directory."""
+    dot = Path(root) / ".git"
+    if dot.is_dir():
+        return dot
+    try:
+        text = dot.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    gitdir = ""
+    for line in text.splitlines():
+        if line.startswith("gitdir:"):
+            gitdir = line[len("gitdir:"):].strip()
+            break
+    if not gitdir:
+        return None
+    path = Path(gitdir)
+    if not path.is_absolute():
+        path = Path(root) / path
+    try:
+        common = (path / "commondir").read_bytes().decode("utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return path
+    if not common:
+        return path
+    candidate = Path(common)
+    return candidate if candidate.is_absolute() else path / candidate
+
+
+def _ensure_index_excluded(root):
+    """§8: `init` writes the ignore entry UNCONDITIONALLY -- committing
     `.fleet-index/` is documented-unsupported, and the entry covers
     `config.toml` too, so the config needs no entry of its own. Idempotent:
     "unconditionally" means not conditional on any mode or config, not that
-    the line is appended twice."""
-    path = Path(root) / ".gitignore"
+    the line is appended twice. Returns `(path, added)`.
+
+    The entry goes to `$GIT_COMMON_DIR/info/exclude`, NOT to `.gitignore`.
+    `.gitignore` is a TRACKED file, and §8 also mandates `fleet index init
+    --path <worktree>` for every campaign worktree -- so writing there dirtied
+    a tracked file in every worktree fleet creates, and `git worktree remove`
+    then refused it with "contains modified or untracked files". §13 finding
+    2b disposed that hazard as unreachable once tracked mode was cut. It is
+    reachable, measured, and this is the repair. `info/exclude` is git's own
+    per-clone ignore list: untracked by construction, so nothing is dirtied,
+    and common to every worktree of the clone -- which is exactly the scope of
+    the claim being made ("this clone never commits `.fleet-index/`").
+
+    A project that is not a checkout at all falls back to `.gitignore`: there
+    is no tracked file to dirty there, and a later `git init` then starts out
+    already ignoring the index."""
+    common = _index_git_common_dir(root)
+    path = (common / "info" / "exclude") if common is not None \
+        else (Path(root) / ".gitignore")
     try:
         text = path.read_bytes().decode("utf-8")
     except FileNotFoundError:
@@ -15746,14 +16313,18 @@ def _ensure_index_gitignore(root) -> bool:
         raise FleetCliError(f"{path}: cannot read to add the index entry ({exc})")
     if any(line.strip() in (INDEX_GITIGNORE_ENTRY, INDEX_DIR_NAME)
            for line in text.splitlines()):
-        return False
+        return path, False
     if text and not text.endswith("\n"):
         text += "\n"
-    path.write_bytes((text + INDEX_GITIGNORE_ENTRY + "\n").encode("utf-8"))
-    return True
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes((text + INDEX_GITIGNORE_ENTRY + "\n").encode("utf-8"))
+    except OSError as exc:
+        raise FleetCliError(f"{path}: cannot write the index entry ({exc})")
+    return path, True
 
 
-def _print_index_report(report) -> None:
+def _print_index_report(report) -> int:
     for rel in report["indexed_rels"][:INDEX_LIST_CAP]:
         print(f"  + {rel}")
     hidden = len(report["indexed_rels"]) - INDEX_LIST_CAP
@@ -15768,6 +16339,12 @@ def _print_index_report(report) -> None:
           "failed {failed}".format(**report))
     for warning in report["warnings"]:
         print(f"fleet: {warning}", file=sys.stderr)
+    # A file this run could not index is a file the index does not describe.
+    # Exiting 0 on `failed 3` reads as success to every caller that checks a
+    # return code instead of parsing the count line back out of stdout --
+    # and exiting 1 reads as "the command did not run at all", which is the
+    # collision `INDEX_FAILED_RC` exists to break.
+    return INDEX_FAILED_RC if report["failed"] else 0
 
 
 def cmd_index_init(args) -> int:
@@ -15776,25 +16353,24 @@ def cmd_index_init(args) -> int:
     config = index_config_path(root)
     if not config.exists():
         config.write_bytes(INDEX_CONFIG_DEFAULT_TOML.encode("utf-8"))
-    added = _ensure_index_gitignore(root)
+    path, added = _ensure_index_excluded(root)
     print(f"index root: {root}")
-    print(".gitignore: " + ("entry added" if added else "entry already present"))
-    _print_index_report(build_index(root))
-    return 0
+    print(f"git exclude: {path} "
+          + ("(entry added)" if added else "(entry already present)"))
+    return _print_index_report(build_index(root))
 
 
 def cmd_index_build(args) -> int:
     root = _index_root_arg(args)
     _require_index(root)
-    _print_index_report(build_index(root, force=args.force))
-    return 0
+    return _print_index_report(build_index(root, force=args.force))
 
 
 def cmd_index_update(args) -> int:
     root = _index_root_arg(args)
     _require_index(root)
-    _print_index_report(update_index(root, _index_files_arg(root, args.files)))
-    return 0
+    return _print_index_report(
+        update_index(root, _index_files_arg(root, args.files)))
 
 
 def cmd_index_status(args) -> int:
@@ -15841,17 +16417,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="with --statusline: keep an existing foreign statusline and print "
                              "fleet's row beneath it")
     p_init.add_argument("--force", action="store_true",
-                        help="with --statusline/--autoclean: overwrite a foreign statusline / "
-                             "scheduled task")
-    p_init.add_argument("--autoclean", action="store_true",
-                        help="install/update the Windows Scheduled Task that runs "
-                             "`fleet autoclean` on an interval")
-    p_init.add_argument("--autoclean-interval-hours", type=int, default=None,
-                        dest="autoclean_interval_hours",
-                        help=f"with --autoclean: run interval in hours, 1-23 "
-                             f"(default {AUTOCLEAN_INTERVAL_HOURS_DEFAULT})")
-    p_init.add_argument("--autoclean-remove", action="store_true", dest="autoclean_remove",
-                        help="uninstall the autoclean scheduled task")
+                        help="with --statusline: overwrite a foreign statusline")
+    # `--autoclean`, `--autoclean-interval-hours` and `--autoclean-remove`
+    # were removed on 2026-07-27 with the Scheduled Task itself (operator
+    # ruling; see the autoclean banner). Deliberately NOT kept as accepted
+    # no-ops: a flag that silently does nothing is how an operator believes a
+    # sweep is installed when none is. `fleet autoclean` the verb is unchanged.
 
     p_spawn = sub.add_parser("spawn", help="spawn a new worker session")
     p_spawn.add_argument("name")
@@ -15985,8 +16556,8 @@ def build_parser() -> argparse.ArgumentParser:
                                   "this; files in logs/archive/ are never deleted")
     p_autoclean.add_argument("--dry-run", action="store_true", dest="dry_run")
     p_autoclean.add_argument("--fleet-home", dest="fleet_home", default=None,
-                             help="explicit FLEET_HOME override; the scheduled task "
-                                  "always passes this (Task Scheduler has no operator env)")
+                             help="explicit FLEET_HOME override for a caller whose "
+                                  "environment does not carry one")
 
     # fleet-index M1 (docs/specs/fleet-index.md §6). Opt-in per project and
     # strictly additive: no registry read or write, no fleet.lock, no mailbox,
@@ -16010,7 +16581,13 @@ def build_parser() -> argparse.ArgumentParser:
         p_ix.add_argument("--path", default=None,
                           help="index root (default: the current directory)")
 
-    sub.add_parser("doctor", help="run fleet health checks")
+    p_doctor = sub.add_parser("doctor", help="run fleet health checks")
+    p_doctor.add_argument(
+        "--repair", action="store_true",
+        help="quarantine a corrupt state/fleet.json by renaming it aside to "
+             "state/fleet.json.corrupt.<ts>. Without this flag `doctor` only "
+             "reports (operator gate 2026-07-27): a diagnostic verb does not "
+             "mutate the state it was invoked to diagnose")
 
     p_supboot = sub.add_parser("sup-boot", help="supervisor boot ritual: epoch check, claim decision, boot bundle (spec §4)")
     p_supboot.add_argument("--sid", help="override caller session id (default: CLAUDE_CODE_SESSION_ID)")

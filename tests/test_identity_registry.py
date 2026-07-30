@@ -25,11 +25,17 @@ sid returned exactly one record and it was the right one; resolving it from
 `FLEET_WORKER` returned a different, idle worker. The registry was right and the
 environment was wrong, simultaneously.
 
-THE HARD INVARIANT (§5 of the build brief), pinned by `TestInferenceNeverRefuses`:
+THE HARD INVARIANT -- RATIFIED DOCTRINE, `docs/specs/claim-nonce.md` §17
+(Altai, 2026-07-27). It is quoted here in the form that was ratified, which is
+SCOPED; the unscoped form this file was originally written against (*"an
+identity inference derived from the environment may never be the sole basis of
+a refusal"*) came from a supervisor's task brief, was never in the ratified
+corpus, and is superseded:
 
-    An identity inference derived from the environment may never be the sole
-    basis of a refusal. The nonce and the claim refuse; inference may only
-    inform and announce.
+    Inference may select the SUBJECT of a measurement, but may not supply the
+    GROUNDS of a refusal. Donation can only ever ADD a `FLEET_WORKER` stamp and
+    nothing anywhere removes one, therefore presence of the stamp is unsound
+    evidence and absence is sound.
 
 Both `FLEET_WORKER` and `CLAUDE_CODE_SESSION_ID` are read from the same medium
 -- the donated daemon environment. Re-keying onto "registry lookup by the acting
@@ -37,9 +43,11 @@ sid" improves blame-assignment but does not escape that medium: whether the sid
 itself can be donated is an OPEN question (`_worker_env` pops it before
 `Popen(env=...)`, so the live measurement is equally consistent with "the vendor
 stamps a fresh sid" and "the vendor passes the env through and there was nothing
-to pass"). The invariant is what makes the design sound under both: a
-misidentification can cost a wrong measurement or a spurious announcement, never
-a wrongly-refused claim verb.
+to pass"). The clause is what makes the design sound under both, and its second
+sentence is what makes it decidable: the 200k ceiling reads the stamp's ABSENCE
+and is permitted, the old claim guard read its PRESENCE and was not. The
+citations in `bin/fleet.py` are re-derived and checked against §17 on every run
+by `tests/test_doctrine_citations.py`.
 """
 import json
 from types import SimpleNamespace
@@ -289,15 +297,18 @@ class TestSiteACeiling:
           tokens whose sid no record carries was exempt, and so was one whose
           `state/fleet.json` was corrupt.
 
-    THE ASYMMETRY THAT MAKES ND4(c) SOUND, which the re-key missed. The daemon
-    leak DONATES a `FLEET_WORKER` stamp to sessions it never launched. Donation
-    can only ADD a stamp; nothing removes one. So PRESENCE is unsound evidence
-    and ABSENCE is sound -- and ND4(c) reads absence. The claim guard (Site B)
-    read presence, which is why SPEC.md:196 names that guard and not this one.
+    THE ASYMMETRY THAT MAKES ND4(c) SOUND, which the re-key missed, and which
+    is now the second sentence of ratified claim-nonce §17. The daemon leak
+    DONATES a `FLEET_WORKER` stamp to sessions it never launched. Donation can
+    only ADD a stamp; nothing removes one. So PRESENCE is unsound evidence and
+    ABSENCE is sound -- and ND4(c) reads absence. The claim guard (Site B) read
+    presence, which is why SPEC.md:196 names that guard and not this one.
 
-    Direction of travel still matters here: at this site the inference only
-    ever EXEMPTS, and the refusal's sole basis stays the measured occupancy of
-    the acting transcript."""
+    Direction of travel still matters here, and §17's first sentence is the
+    name for it: inference may select the SUBJECT of a measurement but may not
+    supply the GROUNDS of a refusal. At this site it only ever EXEMPTS and only
+    ever picks whose transcript to read; the grounds stay the measured
+    occupancy of the acting transcript."""
 
     def _occ(self, monkeypatch, occupancy):
         monkeypatch.setattr(fleet, "find_transcript_path",
@@ -513,7 +524,7 @@ class TestSiteAFailsTowardTheBand:
 
 
 # --------------------------------------------------------------------------
-# 4. Site B -- `_require_claim_holder`, under the §5 invariant.
+# 4. Site B -- `_require_claim_holder`, under ratified claim-nonce §17.
 # --------------------------------------------------------------------------
 
 class TestInferenceNeverRefuses:
@@ -521,9 +532,14 @@ class TestInferenceNeverRefuses:
 
     This class was written under the reading that the worker-turn arm must stop
     being a gate and become a CLASSIFIER, because an identity inference derived
-    from the environment may never be the SOLE basis of a refusal (the PROPOSED
-    invariant, claim-nonce §16.4 item 3, which originates in a supervisor
-    instruction and is in NO ratified document).
+    from the environment may never be the SOLE basis of a refusal. That was the
+    UNSCOPED form -- a supervisor's task-brief instruction, in no ratified
+    document. The operator ratified the SCOPED form on 2026-07-27 (claim-nonce
+    §17): inference may select the SUBJECT of a measurement but may not supply
+    the GROUNDS of a refusal, and since donation can only ADD a `FLEET_WORKER`
+    stamp, presence is unsound evidence and absence is sound. This gate grounds
+    its refusal on the REGISTRY rather than on a donated stamp, so §17 does not
+    reach it.
 
     THE GATE IS RESTORED and the cure survives it, which is the point this
     class now pins. The §1 wedge -- a legitimate claim-holder refused its own
@@ -533,7 +549,7 @@ class TestInferenceNeverRefuses:
     refusal now decides nothing. The demotion bought a second thing on top --
     that a worker-shaped body presenting a valid nonce also passes -- and that
     is only valuable under the OPEN hypothesis that the daemon donates the SID
-    as well as the stamp (claim-nonce:2573). Ratified §6.5 D5 requires the
+    as well as the stamp (claim-nonce §16.3). Ratified §6.5 D5 requires the
     refusal to exist; SPEC.md:196 constrains only its KEY; a registry-keyed
     gate satisfies both, so nothing had to be traded away."""
 

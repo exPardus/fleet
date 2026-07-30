@@ -88,6 +88,91 @@ class TestStatusSnapshot:
         assert snap["totals"]["mail"] == 1
         assert snap["totals"]["cost_usd"] == 1.25
 
+    def test_rows_carry_the_tier_they_occupy(self, home):
+        # three-tier 3: a supervisor BODY is a registry row like any other, so
+        # a consumer that does not get the tier from here has to re-implement
+        # the `sup|<inc>|<role>` name family (invariant 9's whole point).
+        _write_registry(home, {"pmbot": _rec(),
+                               "sup|inc-1|boot": _rec(session_id="sid-2"),
+                               "sup|inc-2|successor": _rec(session_id="sid-3")})
+        tiers = {r["name"]: r["tier"] for r in fleet.status_snapshot()["workers"]}
+        assert tiers == {"pmbot": "worker",
+                         "sup|inc-1|boot": "supervisor",
+                         "sup|inc-2|successor": "supervisor"}
+
+    def test_the_tier_is_the_body_shape_not_the_claim(self, home):
+        # A released or seized supervisor keeps its name. The row says which
+        # tier the body belongs to; `snap["supervisor"]` says who holds command.
+        _write_registry(home, {"sup|inc-1|boot": _rec(status="dead")})
+        assert fleet.status_snapshot()["workers"][0]["tier"] == "supervisor"
+
+    def test_the_snapshot_projects_the_command_tier(self, home):
+        _write_registry(home, {})
+        sup = fleet.status_snapshot()["supervisor"]
+        assert set(sup) == {"goals_active", "state", "incarnation_id",
+                            "heartbeat_age_seconds"}
+
+    def test_the_command_tier_is_projected_even_on_an_unreadable_registry(self, home):
+        # The claim lives in a different file. A corrupt worker table must not
+        # take the one field that says whether anything can be dispatched.
+        (home / "state" / "fleet.json").write_text("{not json", encoding="utf-8")
+        snap = fleet.status_snapshot()
+        assert snap["ok"] is False
+        assert isinstance(snap["supervisor"], dict)
+
+    def test_an_unreadable_claim_reads_unknown_never_none(self, home, monkeypatch):
+        # Absence is not evidence on this substrate: "cannot read the claim"
+        # must never render as "no supervisor".
+        _write_registry(home, {})
+        monkeypatch.setattr(fleet, "supervisor_goals_active", lambda: True)
+        monkeypatch.setattr(fleet, "read_incarnation",
+                            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+        sup = fleet.status_snapshot()["supervisor"]
+        assert sup["state"] == "unknown"
+
+    def test_the_projection_never_raises_out_of_status_snapshot(self, home, monkeypatch):
+        # The statusline refires this after every assistant message and swallows
+        # exceptions into a BLANK line with no reason. Nothing here may throw.
+        _write_registry(home, {})
+        monkeypatch.setattr(fleet, "supervisor_goals_active",
+                            lambda: (_ for _ in ()).throw(OSError("disk")))
+        assert fleet.status_snapshot()["supervisor"]["state"] == "unknown"
+
+    def test_a_released_claim_reads_released_with_no_heartbeat(self, home, monkeypatch):
+        # claim-nonce 6.3 strips `heartbeat_at` on release; a None age here is
+        # by design, not staleness.
+        _write_registry(home, {})
+        monkeypatch.setattr(fleet, "supervisor_goals_active", lambda: True)
+        monkeypatch.setattr(fleet, "read_incarnation",
+                            lambda *a, **k: {"incarnation_id": "inc-9",
+                                             "state": "released"})
+        sup = fleet.status_snapshot()["supervisor"]
+        assert sup["state"] == "released"
+        assert sup["incarnation_id"] == "inc-9"
+        assert sup["heartbeat_age_seconds"] is None
+
+    def test_a_held_claim_reads_held_with_its_heartbeat_age(self, home, monkeypatch):
+        _write_registry(home, {})
+        monkeypatch.setattr(fleet, "supervisor_goals_active", lambda: True)
+        monkeypatch.setattr(fleet, "read_incarnation",
+                            lambda *a, **k: {"incarnation_id": "inc-9",
+                                             "heartbeat_at": "2026-07-09T11:00:00Z"})
+        now = fleet._parse_iso("2026-07-09T12:00:00Z")
+        sup = fleet.status_snapshot(now=now)["supervisor"]
+        assert sup["state"] == "held"
+        assert sup["heartbeat_age_seconds"] == 3600.0
+
+    def test_the_projection_is_read_only(self, home, monkeypatch):
+        # Terminal-surface D1/D4: a view takes no lock and writes nothing.
+        monkeypatch.setattr(fleet, "supervisor_goals_active", lambda: True)
+        monkeypatch.setattr(fleet, "read_incarnation",
+                            lambda *a, **k: {"incarnation_id": "inc-9",
+                                             "heartbeat_at": "2026-07-09T11:00:00Z"})
+        _write_registry(home, {})
+        before = sorted(p.name for p in (home / "state").iterdir())
+        fleet.status_snapshot()
+        assert sorted(p.name for p in (home / "state").iterdir()) == before
+
     def test_empty_mailbox_file_counts_as_no_mail(self, home):
         _write_registry(home, {"pmbot": _rec()})
         (home / "mailbox" / "sid-1.md").write_text("", encoding="utf-8")
@@ -261,7 +346,7 @@ class TestStatuslineRender:
         base.update(over)
         return base
 
-    def test_counts_and_cost(self, statusline):
+    def test_counts(self, statusline):
         snap = self._snap([
             self._w(name="a", status="working", cost_usd=1.02),
             self._w(name="b", status="idle", cost_usd=0.41),
@@ -270,7 +355,15 @@ class TestStatuslineRender:
         line = statusline.render_statusline(snap, color=False)
         assert "work 1" in line
         assert "idle 1" in line
-        assert "$2.14" in line
+
+    def test_the_line_carries_no_cost_field(self, statusline):
+        # Removed 2026-07-27 by operator decision. The snapshot still TOTALS
+        # cost -- `fleet status` renders it -- so a regression here is a live
+        # possibility rather than an impossibility, which is why it is pinned.
+        snap = self._snap([self._w(name="a", status="working", cost_usd=1.02)])
+        line = statusline.render_statusline(snap, color=False)
+        assert "$" not in line
+        assert "1.02" not in line
 
     def test_idle_with_mail_gets_its_own_bucket(self, statusline):
         snap = self._snap([self._w(name="b", status="idle", mail=1)])
@@ -348,11 +441,11 @@ class TestStatuslineRender:
                  ("working", "idle+mail", "idle", "attached", "limited", "dead")]
         assert len(set(codes)) == len(codes)
 
-    def test_age_and_cost_carry_their_own_colours(self, statusline):
-        # Every field is legible on its own; the age and the money are not
-        # allowed to share a hue with a status or with each other.
-        codes = [statusline._AGE, statusline._COST, statusline._NAME]
-        assert len(set(codes)) == 3
+    def test_non_status_fields_carry_their_own_colours(self, statusline):
+        # Every field is legible on its own; the age, the nameplate and the two
+        # command-tier fields may not share a hue with a status or each other.
+        codes = [statusline._AGE, statusline._NAME, statusline._SUP, statusline._ALARM]
+        assert len(set(codes)) == 4
         assert not set(codes) & set(statusline._STATUS_COLOR.values())
 
     def test_grey_is_reserved_for_dead(self, statusline):
@@ -379,6 +472,126 @@ class TestStatuslineRender:
         assert "[7m" not in line and ";4" not in statusline._NAME
         # ...and degrades to a bare bracketed word when colour is off.
         assert statusline.render_statusline(snap, color=False).startswith("[fleet]  ")
+
+
+class TestStatuslineCommandTier:
+    """three-tier §3 on the statusline: the claim is a field, live supervisor
+    BODIES are not workers, and a second live body is an alarm."""
+
+    def _snap(self, workers, supervisor=None):
+        snap = {"ok": True, "reason": None, "workers": workers,
+                "totals": {"workers": len(workers), "mail": 0,
+                           "cost_usd": 0.0, "by_status": {}}}
+        if supervisor is not None:
+            snap["supervisor"] = supervisor
+        return snap
+
+    def _w(self, **over):
+        base = {"name": "w", "status": "working", "turns": 1, "cost_usd": 0.0,
+                "mail": 0, "stale_seconds": 5.0, "limit_reset_at": None,
+                "limit_kind": None, "resume_eligible": False,
+                "attached_since": None, "tier": "worker"}
+        base.update(over)
+        return base
+
+    def _sup(self, **over):
+        base = {"goals_active": True, "state": "held",
+                "incarnation_id": "inc-x", "heartbeat_age_seconds": 10.0}
+        base.update(over)
+        return base
+
+    def test_a_snapshot_with_no_supervisor_key_still_renders(self, statusline):
+        # Forward/backward compatibility: an older fleet.py, or any consumer
+        # building a snapshot by hand, must not blank the operator's line.
+        line = statusline.render_statusline(self._snap([self._w()]), color=False)
+        assert "work 1" in line and "sup" not in line
+
+    def test_dormant_goals_puts_no_supervisor_field_on_the_line(self, statusline):
+        # A fleet not running supervisor doctrine should not carry a permanent
+        # scold about a supervisor it was never supposed to have.
+        snap = self._snap([self._w()], supervisor=self._sup(goals_active=False,
+                                                            state="none"))
+        assert "sup" not in statusline.render_statusline(snap, color=False)
+
+    @pytest.mark.parametrize("state,expected", [
+        ("held", "sup held"), ("released", "sup released"),
+        ("none", "sup none"), ("unknown", "sup ?"),
+    ])
+    def test_every_claim_state_renders_a_word(self, statusline, state, expected):
+        # Including `unknown`: a view that cannot read the claim must SAY so.
+        # Absence is not evidence here -- silence would read as "no supervisor".
+        snap = self._snap([self._w()], supervisor=self._sup(state=state))
+        assert expected in statusline.render_statusline(snap, color=False)
+
+    def test_the_tier_field_leads_the_worker_buckets(self, statusline):
+        snap = self._snap([self._w()], supervisor=self._sup())
+        line = statusline.render_statusline(snap, color=False)
+        assert line.index("sup held") < line.index("work 1")
+
+    def test_a_stale_heartbeat_shows_its_age(self, statusline):
+        snap = self._snap([self._w()],
+                          supervisor=self._sup(heartbeat_age_seconds=2400.0))
+        assert "sup held 40m" in statusline.render_statusline(snap, color=False)
+
+    def test_a_released_claim_never_renders_an_age(self, statusline):
+        # claim-nonce 6.3 strips `heartbeat_at` from a released claim, so any
+        # age on that field would be invented staleness on a correct stand-down.
+        snap = self._snap([self._w()],
+                          supervisor=self._sup(state="released",
+                                               heartbeat_age_seconds=99999.0))
+        line = statusline.render_statusline(snap, color=False)
+        assert "sup released" in line and "sup released 2" not in line
+
+    def test_a_live_supervisor_body_is_not_counted_as_a_worker(self, statusline):
+        snap = self._snap([self._w(name="a", status="working"),
+                           self._w(name="sup|inc-1|boot", status="working",
+                                   tier="supervisor")],
+                          supervisor=self._sup())
+        assert "work 1" in statusline.render_statusline(snap, color=False)
+
+    def test_a_dead_supervisor_body_stays_in_the_grey_tail(self, statusline):
+        # A corpse is a corpse whatever tier it died in; splitting the tail
+        # would put a second grey field on the line.
+        snap = self._snap([self._w(name="a", status="working"),
+                           self._w(name="sup|inc-1|boot", status="dead",
+                                   tier="supervisor")],
+                          supervisor=self._sup())
+        line = statusline.render_statusline(snap, color=False)
+        assert "work 1" in line and "+1 dead" in line
+
+    def test_one_live_body_raises_no_alarm(self, statusline):
+        snap = self._snap([self._w(name="sup|inc-1|boot", status="working",
+                                   tier="supervisor")],
+                          supervisor=self._sup())
+        assert "bodies" not in statusline.render_statusline(snap, color=False)
+
+    def test_two_live_bodies_are_an_alarm_with_a_count(self, statusline):
+        snap = self._snap([self._w(name="sup|inc-1|boot", status="working",
+                                   tier="supervisor"),
+                           self._w(name="sup|inc-2|boot", status="idle",
+                                   tier="supervisor")],
+                          supervisor=self._sup())
+        line = statusline.render_statusline(snap, color=False)
+        assert "2 bodies" in line
+        line = statusline.render_statusline(snap, color=True)
+        assert statusline._ALARM + "2 bodies" in line
+
+    def test_a_fleet_of_only_supervisor_bodies_still_says_no_live_workers(self, statusline):
+        # The regression this guards: `sup held` is not a worker, so it must not
+        # satisfy the "did anything render" test and retire this message.
+        snap = self._snap([self._w(name="sup|inc-1|boot", status="working",
+                                   tier="supervisor")],
+                          supervisor=self._sup())
+        assert "no live workers" in statusline.render_statusline(snap, color=False)
+
+    def test_the_tier_fields_are_pure_ascii(self, statusline):
+        snap = self._snap([self._w(name="sup|inc-1|boot", status="working",
+                                   tier="supervisor"),
+                           self._w(name="sup|inc-2|boot", status="idle",
+                                   tier="supervisor")],
+                          supervisor=self._sup(state="unknown"))
+        statusline.render_statusline(snap, color=True).encode("ascii")
+        statusline.render_statusline(snap, color=False).encode("ascii")
 
 
 class TestStatuslineMain:

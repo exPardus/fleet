@@ -469,10 +469,14 @@ class TestTheGateFiresAheadOfTheCeiling:
     The brief asks whether the same released early-out at `:2005`
     (`_caller_holds_supervisor_claim`) wrongly strips band/ceiling recognition
     in the wedged state. It cannot be shown to, because that predicate's only
-    consumer is `_ceiling_refuses_dispatch`, and every one of its three call
-    sites (`spawn` :3380, `send` :4479, `sup-spawn` :11527) runs strictly AFTER
-    `_supervisor_gate`. In the wedged state the gate refuses first and harder,
-    so the dormant ceiling is unreachable. Not widened on speculation."""
+    consumer is `_ceiling_refuses_dispatch`, and every one of its five call
+    sites (`spawn` :3769, `send` :4868, `_cmd_respawn_native` :5326, `respawn`
+    :5539, `sup-spawn` :13329) runs strictly AFTER `_supervisor_gate` -- the
+    respawn pair by way of `cmd_respawn`'s own `_supervisor_gate("respawn")`,
+    which is the only route into `_cmd_respawn_native`. In the wedged state the
+    gate refuses first and harder, so the dormant ceiling is unreachable. Not
+    widened on speculation. (`respawn`'s two sites arm only on `--task`; see
+    `tests/test_respawn_ceiling.py`.)"""
 
     def test_a_wedged_spawn_is_refused_by_the_gate_not_the_ceiling(
             self, wedge_home, monkeypatch):

@@ -848,3 +848,220 @@ Same autonomous session as `#2026-07-23-overnight-dogfood` (survived a ~10h host
 **Alarm hygiene**: the handoff template hands the successor a `sup-checkpoint` with no `--nonce`, so the normal handoff path files a continuity refusal and lights `fleet doctor`'s second-body alarm — **an alarm fired by the happy path trains the operator to ignore the row that will one day be real.** Also found: `fleet spawn` SILENTLY OVERWRITES an operator-authored `state/tasks/<workername>.md`, so four councilor briefs became stubs telling each councilor to read the file it was already reading — never author a brief at that path.
 
 **Three-tier, live**: first successful supervisor handoffs since day 3 (three clean band handoffs in a row), and the first live §10.4 respawn-of-holder — which **stalls silently waiting on the holder's own release with no phase surface**, so a timeout-bound caller sees a hang, and the successor was never dispatched when that client died. Retirement and succession are not atomic. Working succession recipe: `sup-release` → **the interface stops the retired body** → fresh `sup-spawn`, because a fleet-launched body never leaves the roster on its own and therefore cannot complete its own stand-down. Standing rule from the whole arc: **the claim belongs to a role, not a body; an interface session must never run `sup-boot`.**
+
+## 2026-07-27 — the docket cleared: all eight operator gates ruled in one pass {#2026-07-27-operator-decisions}
+
+All eight open gates in `docs/OPERATOR-GATES.md` were put to Altai one at a time in a single interface session and ruled. Each entry there carries its own full reasoning; this is the index plus what the pass itself taught.
+
+- **`fix/identity-registry-judges` → A, merge now and fix on `main`.** The surviving MAJOR is not a regression — the branch strictly narrows a door standing wide open on `main` — and the remedy is small: gate `not_initialized` on the `fleet.json.corrupt.*` artifact glob (as fleet already does at `:7518`), NOT closing the carve-out, which a mutant proved kills 39 tests. **Owed on `main`: that glob gate.** The supervisor's own named tension was accepted, not waved off — this relocates wave 3, it does not avoid it.
+- **§6.5 worker-turn gate → no demotion, registry-keyed gate stands.** The contradiction that motivated demotion does not exist: `SPEC.md:196` constrains the *key*, ratified §6.5 D5 requires the refusal to *exist*, and a registry-keyed gate satisfies both. **Doctrine: a coverage limit is fixed by extending coverage, never by deleting the covered half.** Demoting would also have silently reversed ratified §6.1 D1.
+- **Identity invariant → becomes doctrine, with a scope clause.** Binding: *inference may select the **subject of a measurement** but may not supply the **grounds of a refusal**; donation only ever ADDS a `FLEET_WORKER` stamp and nothing removes one, so **presence is unsound evidence and absence is sound**.* Chosen because it rests on a mechanical property rather than on who authored it, and because it was verified by driving. This is the same asymmetry day-4 reached from the other side ("absence is not evidence on this substrate") — the two are reconciled by *which direction* the inference runs.
+- **`fleet respawn` ceiling gap → close it, on the `--task` discriminator.** `--task` absent = §11.4 recovery, permitted over the ceiling; `--task` supplied = §11.3 dispatch, refused. Exempting would have made the 200k ceiling **bypassable by verb choice**, reducing the other three call sites to decoration.
+- **`fleet doctor` quarantine → flag-gated.** Diagnose by default; `fleet doctor --repair` does the rename; the `:11947` refusal restated to name the flag. Read-only was rejected because that message would then point at a command that no longer repairs.
+- **`SPEC.md:196` → restated** after checking source rather than softening prose. `FLEET_WORKER` is load-bearing at two sites in **opposite directions** (absence exempts the interface from the §11.3 ceiling; presence refuses the supervisor claim) and is **not** load-bearing for the destructive-command guard at all — that keys on caller sid/ownership, pinned by `TestAWorkerIsNotExempt`.
+- **§7 arming envelope → stands, with the missing disarm as owed work.** The released-claim arm has no heartbeat to age out of (§6.3 strips it) and is bounded only by roster lifetime. Ratified because the alternative leaves `fleet clean --yes` reachable from any third body in the `released` window. **The "no in-fleet exit" finding is recorded as a scheduled defect, explicitly NOT ratified as a property of the design.**
+- **`docs/specs/providers.md` → parked**, not re-based and not deleted. Obsolete twice over; `docs/longcat-fleet-usage.md` is the working alternative of record. Kept as the record of what was tried.
+
+**Two defects the pass itself surfaced, both invisible from any single gate:**
+
+**A test asserted the docket is never empty.** `TestOperatorGatesFile` carried `assert open_gates, "no open gates parse out of the shipped file"` — so clearing every gate turned a *correct* file RED. **A cleared docket is this file's SUCCESS state.** The assertion encoded "there is always pending work" as a format invariant. Replaced with the two things actually worth pinning — open gates are questions, settled gates carry an answer and a date — the second added so relaxing the first cannot let an empty file pass. Same class as the day-4 allowlist lesson: *the first thing to check about a check is not what it catches but what it assumes.*
+
+**Two stale line pointers, and the file contradicted itself.** The §7 gate cited `claim-nonce.md:1817` / `:1866` as the false sentences; those lines are `sup-handoff-abort` arms and supersession — the real sites are §7's decision block and the accounting bullet beneath it. **Line-number citations in prose rot silently and nothing tests them** (the receipt harness covers fenced blocks, not inline `:NNNN` refs). Separately, the gates file's own format section said settled gates stay "in place" while its closing line said "move it here", and every settled gate followed the closing line — corrected to match practice. **Doctrine reaffirmed by both: verify a cited location before restating what it says; the gate text is a claim like any other.**
+
+## 2026-07-27 — day-5 interface tier: the surface lied about the shape of the system {#2026-07-27-day5-surface}
+
+Interface-tier session, operator away and explicitly autonomous. Two operator asks — align the fleet
+skill/plugin docs with three-tier, and align the statusline with it while removing the cost field —
+turned into a drift audit, because **you cannot align a description without measuring the thing**.
+
+**THE lesson: a document describing a CLI must be re-derived from `--help`, never from memory or from
+the last person who edited it.** `skills/fleet/SKILL.md` — the file every fleet session actually reads —
+was missing **four shipped verbs entirely** (`sup-spawn`, `sup-context`, `sup-decision`, `knowledge`),
+and its startup ritual told an interface session to *become* the supervisor, which is precisely the
+maneuver that wedged a claim for hours on day 4. `supervisor.md` carried **two `[UNBUILT]` tags on
+features that are built** (the 200k ceiling — three call sites, measured — and §10.4 kill/respawn).
+One `fleet --help` and two greps found all six. Nothing tests prose against `add_parser`, so this rots
+by default; the `[UNBUILT]` sweep now has a demonstrated yield rather than a hypothetical one.
+
+**A flat view of a tiered system is a lying view.** The statusline rendered one roster, so a fleet
+with one worker and fourteen retired `sup|…|boot` husks read as fifteen workers, while the field that
+decides whether anything can be dispatched — *does anyone hold the claim* — was not on the line at
+all. The fix is a projection, not a filter: `status_snapshot()` now carries `workers[].tier` (the
+BODY, from fleet's own `_is_supervisor_shaped` — a released or seized supervisor keeps its name) and
+`snap["supervisor"]` (the CLAIM). **They are different questions and a view that conflates them will
+report a husk as command.** First live render immediately paid: `sup held 14m  8 bodies  work 1
+idle 24  +9 dead` — the eight-body alarm is true, and was invisible before.
+
+**`unknown` must be a rendered word, never silence.** The claim projection never raises, because the
+statusline swallows exceptions into a *blank line with no reason*; every failure degrades to
+`unknown`. Day-4's "absence is not evidence on this substrate" applied to a view: **"cannot read the
+claim" must never present as "there is no supervisor".** Same reasoning kills the age on a `released`
+claim — §6.3 strips `heartbeat_at`, so rendering an age there invents staleness out of a correct
+stand-down.
+
+**Removing a field is a doctrine change, so say why in the code.** The cost counter went because
+under the Max-20x cap doctrine the plan limits spend, fleet enforces no dollar ceiling, and native
+dispatch records no cost at all — it summed rows that report nothing. Pinned by a test, because
+`fleet status` still totals cost and the field is one edit from coming back.
+
+**Line-number citations are a recurring tax and the remedy is mechanical.** Adding ~59 lines above the
+four `retired_sids` writers turned both floors red — the *second* time in two days, the first being a
+merge. `TestRetiredSidWritersAreWhereTheyAreCited` did exactly its job: re-pin and move on. **Budget
+the re-pin into any edit that inserts above line ~4600 of `bin/fleet.py`**, and warn the supervisor
+before it hits the same red on the merged tree, so it re-pins forward instead of reverting your numbers.
+
+**Process, and it is a real miss: the §8 routing surface exists — use it.** I relayed five settled
+operator gates to the supervisor as a `fleet send` steer. It was right and it acted on it, but it had
+to *record the answer itself* via `sup-decision --answer` to stop `sup-status` asserting "needs
+operator" about a question the operator had answered. **The interface answers a parked decision through
+`fleet sup-decision --answer`, not through prose in a steer** — otherwise the routing state and the
+truth diverge, and the divergence is only visible from `sup-status`.
+
+**Steering that worked, cheaply:** the queue reorder that put `fix/identity-registry-judges` *ahead*
+of the fleet-q merge — enter the tree you were gated against, not the tree the next campaign leaves
+behind — and telling the supervisor which files the interface was holding dirty, with the expected
+red and its remedy. It had already staged the merge in a scratch worktree and fast-forwarded the
+moment the commit landed. **Naming the collision beats discovering it.**
+
+**Open, found by a worker and worth more than the slice that found it:** `id-glob` measured that
+`fleet status` / `peek` / `result` *do* rename a corrupt registry aside — so terminal-surface D4 and
+the CLAUDE.md rule *"views never quarantine"* are both false of shipped code. Ordered out of the
+doctor slice into its own commit with the driven receipt: the two disagree about what today's default
+behaviour even is, and a doc that is wrong about the default cannot review a change to it.
+
+## 2026-07-27 evening — the fleet stopped for 15h and nobody knew {#2026-07-27-evening-outage}
+
+Found on an operator's "status update": **zero workers running, no claim held**. The last supervisor
+had released *correctly* at 04:00:41Z over the ceiling after three stillborn handoffs — and nothing
+restarted it. Twenty-nine commits of finished work sat unpushed the whole time.
+
+**MEASURE THE OUTAGE BEFORE YOU DRAW THE LESSON FROM IT.** My first report said "~15 hours", read off
+worker staleness. The operator knew a power cut covered part of it, so it got measured against the
+Windows event log (6008 unexpected shutdown, 41 dirty reboot, 6005 log service start) rather than
+inferred:
+
+| window | span |
+|---|---|
+| total dark (release → new claim) | **12h 53m** |
+| power cut (06:10:40Z → 15:25:07Z) | 9h 14m |
+| up-but-stopped A (release 04:00:41Z → shutdown) | **2h 09m** |
+| up-but-stopped B (reboot 15:25:07Z → restart 16:54:06Z) | **1h 28m** |
+| **genuinely uncovered** | **3h 38m** |
+
+The corrected number is *worse* for the design, not better. **3h38m is the part no amount of hardware
+explains** — and window B is the sharper of the two, because the machine came back *healthy* with the
+fleet still dead and nothing anywhere said so.
+
+**THE lesson: a clean shutdown with no reader is indistinguishable from a healthy fleet.** Every
+mechanism worked. The release was clean, the journal entry was excellent, the reason was recorded,
+`sup-status` said `RELEASED` the entire time. **None of it was addressed to anyone.** The statusline
+rendered `sup released` in the same calm white as `sup held` — the outage was *on screen* and read as
+a resting state. **A signal nobody is obliged to read is not a signal**, and the fix is not more
+recording: it is making the pull surfaces render an outage AS an outage.
+
+**FLEET HAS NO POST-REBOOT RESTART PATH, and window B is its receipt.** Durable-sessions-survive-
+reboots was designed and is true of *workers*; the command tier is not, so a box that comes back has
+a full roster and nobody in charge. **The operator refused a fleet-side mechanism for this and was
+right:** any watcher would either fire in a session nobody asked to be fleet-aware (D7) or dispatch a
+replacement with no operator in the loop, which is how two live supervisors happen. **The revival
+trigger is the operator relaunching their interface session**, so the restart path is a step in the
+skill's startup ritual — revive when GOALS is active and no supervisor is live, and say so out loud.
+The general form: *when the honest mechanism would have to be an injection or an autonomous actor,
+the right place for the trigger is the human action that was going to happen anyway.*
+
+**The staleness sweep silently skipped the outage too — and the fix was to delete the timer, not to
+configure it.** `claude-fleet-autoclean` carried `StartWhenAvailable: False`, so the missed
+occurrence was dropped rather than run at boot: last run 02:22Z, the 08:22Z occurrence lost to the
+power cut, no catch-up when the machine returned, next fire 20:22Z — an 18-hour gap in a 6-hourly
+guard, found only because the outage prompted a look. My proposed fix was to set the flag in the
+`fleet init --autoclean` code path. **The operator retired the timer instead**: `fleet autoclean`
+becomes a step on the supervisor's watchtower beat and in the interface's startup ritual. **A timer
+sweeps when the clock says so; a beat sweeps when the fleet is alive — which is the condition that
+makes sweeping necessary in the first place.** It also deletes a whole class of problem rather than
+patching one instance of it: no Task Scheduler, no machine-local install state, no missed-run policy
+to get wrong, and nothing to re-verify per machine. **Fixing the setting would have been the smaller
+change and the worse one.**
+
+**Operator's four rulings (evening pass, recorded in `docs/OPERATOR-GATES.md`):** extend §11.3 to name
+task-bearing `respawn` + `sup-spawn` (with a binding *grep-don't-trust-the-line-numbers* condition);
+clear the resolved abort flag; delete the two token-free orphan successor files; and build succession
+as **a loud pull signal plus one verb, explicitly not a hook and explicitly not auto-spawn**.
+
+**A hook was the obvious answer and the wrong one, for the second time.** The ask was "a hook so the
+interface can bring up a new supervisor". But the interface is an ordinary Claude Code session — a
+hook that reaches it fires in **every** session on the machine, which is exactly the D7 leak deleted
+on 2026-07-22. Same shape as that day's lesson: *the question is not "make this injection smaller",
+it is "is this injection the plugin's to make"*. The buildable version is pull-only: record a
+machine-readable succession-needed fact **with its cause** (ceiling AND usage-limit park — `sup-release`
+records prose nobody parses), render it loudly on statusline/`sup-status`/`doctor`, and collapse the
+three-step maneuver into one verb — **including the middle step only the interface can perform**,
+since B6 refuses a released claim whose releaser is still roster-live, so a supervisor can never
+complete its own stand-down. Auto-spawn refused: a body dispatching its own replacement with nobody
+in the loop is how two live supervisors happen.
+
+**`doctor` was 3 FAIL and two of them were stale.** A resolved abort flag and an answered decision
+both kept failing. **A permanently-red doctor is a disabled doctor** — the operator's stated ground
+for clearing. Cleared: 3 FAIL → 1, and the survivor ages out on its own.
+
+**Measure before deleting, even when the record says it is safe.** The two orphan successor files were
+documented as carrying *"spent plaintext tokens"*; grepped before deletion, they carried a
+`handoff_token_hash` **reference**, not a token. The §5.9 hazard did not apply. The record was
+pessimistic rather than wrong, but the deletion was authorised on the measurement, not the record.
+
+**The §8 channel exists and I skipped it in the morning, then used it in the evening.** A decision
+parked with `sup-decision --raise` was answered by the operator through `--answer` this time, so the
+routing state and the truth agree and `doctor` flipped to PASS on its own. In the morning the same
+class of answer went as prose in a `send`, and the supervisor had to record it itself to stop
+`sup-status` asserting "needs operator" about a settled question. **Answer parked decisions through
+the channel that parked them.**
+
+**Inherited numbers are not measurements.** The outgoing body claimed 2563/11 both floors; re-ran it
+before pushing and it was exactly right — which is the point, the verification cost two minutes and
+converted a claim into a fact before 29 commits went to a remote.
+
+### Postscript, same evening — I "falsified" a TRUE hypothesis with a confounded experiment, and a worker caught me
+
+The stillborn-handoff theory (`sup-handoff-begin` defaults to `--permission-mode dontask`, the
+successor's first act is a Bash call, the call is denied, the body cannot start) had ridden two days
+and three incarnations, labelled honestly by its author as *"a hypothesis, not a finding"*. I ran two
+one-shot probes, declared it dead, **committed that to this file, and steered the supervisor off it.**
+`handoff-autopsy` then refuted me with better evidence than I had. **The hypothesis was correct.**
+
+Both of my arguments failed, and each failed in a way worth keeping:
+
+1. **My probe tested the one pre-allowed command.** `probe-dt` ran `py -3.13 --version` — character-
+   for-character an entry in `.claude/settings.local.json`'s allow-list. Its `Write` was denied in the
+   same turn, which I read as an aside instead of as the actual signal. **A control that isn't
+   controlled is worse than no experiment**: it manufactures confidence and it travels further than a
+   hedge would, because I wrote it up as settled. Before claiming a permission mode allows something,
+   check the command against the allow-list — the fleet's own dogfood repo is the most allow-listed
+   directory on the machine, which makes it the *worst* place to probe permissions.
+2. **"The stillbirths have zero turns" was false.** Transcripts exist — 82KB each, 26–27 messages,
+   Stop hooks fired clean. **"0 turns" is a registry accounting defect, not a fact about the session.**
+   I reasoned from an artifact produced by the very system under investigation and treated it as
+   ground truth. *When the evidence for a defect comes from the component suspected of being broken,
+   that is not evidence.*
+
+The successor had said the diagnosis out loud on day one — *"Blocked. Cannot start. … Bash denied,
+PowerShell denied — session in 'don't ask mode', no shell permission"* — into an orphaned outcome
+file nothing reads.
+
+**Three defects, and the two nobody was looking for cost more than the one everybody was:**
+
+- **A, the cause:** `SUCCESSOR_DEFAULT_MODE = "dontask"`. The `dontask` default was reasoned from
+  avoiding a headless prompt-hang — **correct about hangs, wrong about denials, never tested against a
+  non-allow-listed command.**
+- **B, the silencer:** `sup-handoff-begin` creates the record with `session_id=None` *while the sid is
+  in hand and being printed*, so `stop_outcome.py` files the outcome under the raw sid where
+  `read_outcomes(name)` never looks. Successful successors escaped only because `sup-handoff-complete`
+  stamped their sid within ~45s, before their first Stop.
+- **C, the lie:** `peek` prints *"no transcript yet — dispatch may still be in flight"* whenever
+  `sid is None`. The transcript existed 2 seconds after dispatch. That sentence is what a journal
+  records a supervisor believing for 17 minutes.
+
+**THE lesson, and it survives the reversal intact: when a blocker outlives one incarnation, stop
+reasoning and buy the measurement.** That was right — I just bought a bad one. The correction is the
+second half: **buy the measurement from someone who is not you, and let them attack your setup, not
+just your conclusion.** The autopsy brief I wrote handed the worker my falsification as settled
+background; it re-derived it anyway and that is the only reason this was caught in an hour instead of
+being laundered into doctrine. **Write briefs that invite the reader to refute the brief.**

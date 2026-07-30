@@ -32,7 +32,7 @@ These are the constraints the design is built on. A builder must not assume othe
 ### Architectural constraints
 
 - **stdlib only, no pip deps** (SPEC §14). `fleet_statusline.py` obeys the same rule as `fleet.py` (as did the SessionStart hook, while it existed).
-- **No view writes.** Nothing in this phase writes `state/fleet.json`, `state/events.jsonl`, or takes `state/fleet.lock`. The single exception in the whole phase is `fleet init --statusline` writing `~/.claude/settings.json` — outside `state/`, once, explicitly, with a backup.
+- **No view writes.** Nothing in this phase writes `state/fleet.json`, `state/events.jsonl`, or takes `state/fleet.lock`. The single exception in the whole phase is `fleet init --statusline` writing `~/.claude/settings.json` — outside `state/`, once, explicitly, with a backup. **This constraint is met by the statusline and NOT met by the read-only `/fleet:*` commands, which inline the bare CLI verbs — see D4's CURRENT STATE.**
 - **No view probes.** No surface here calls `PLATFORM.get_process_info` or spawns any subprocess on a refresh path.
 - **One derivation, many entry points.** All four surfaces read `fleet.status_snapshot()`. The statusline **imports** it rather than shelling out, so registry-schema knowledge stays inside `fleet.py` and the additive-schema rule (SPEC §4) binds exactly one reader.
 - **Views degrade, never fail.** A view exits 0 on every error path and prints degraded output. It never mutates state to repair itself (§5).
@@ -61,7 +61,18 @@ Direct control is preserved — `/fleet:kill pmbot` still kills `pmbot` — it m
 **Enforced by test, not convention:** a lint asserts no mutating command file contains `` !` ``.
 
 <!-- ts-corrupt-registry -->
-**D4 — a view reports registry corruption; it does not quarantine.** SPEC §11 requires the single writer to quarantine an unparseable `fleet.json` to `fleet.json.corrupt.<ts>`, append a `registry_corrupt` event, and exit 1 loudly. A view must do **none** of that: quarantine is a write, and a statusline refiring every 10 s would quarantine in a loop, shredding operator evidence. Views print `[fleet]: registry unreadable` and exit 0. The next real `fleet` command performs the quarantine. Direct consequence of invariant 6.
+**D4 — a view reports registry corruption; it does not quarantine.** *(A REQUIREMENT, not a description: VIOLATED by every read-only `/fleet:*` command at `02bf276`. Read both halves below before citing this decision.)*
+
+**THE REQUIREMENT — binding, unchanged, and correct.** SPEC §11 requires the single writer to quarantine an unparseable `fleet.json` to `fleet.json.corrupt.<ts>`, append a `registry_corrupt` event, and exit 1 loudly. A view must do **none** of that: quarantine is a write, and a statusline refiring every 10 s would quarantine in a loop, shredding operator evidence. A view prints `[fleet]: registry unreadable` and exits 0. The next real `fleet` command performs the quarantine. Direct consequence of invariant 6.
+
+**THE CURRENT STATE — the requirement is MET by the statusline and VIOLATED by every read-only `/fleet:*` command.** Measured 2026-07-27 at `02bf276`; the receipts are in *Receipts — D4 measured against shipped code* below, and this paragraph is not to be deleted until they say something else.
+- `bin/fleet_statusline.py` honours D4 on every clause: no lock, no quarantine, `[fleet]: registry unreadable`, exit 0. The sentence that names the statusline first is true of the statusline.
+- `fleet status` (bare), `fleet peek`, `fleet result` and `fleet doctor` each take `fleet_lock()` and then `load_registry()`, and `load_registry()` **renames a corrupt `state/fleet.json` aside** (`bin/fleet.py`, `_quarantine_registry`). They quarantine and they contend for the lock. Only the `--stale-ok` snapshot path, `fleet sup-status` and `fleet knowledge` are clean.
+- `commands/{status,peek,result,overview}.md` inline the **bare** verbs — so `/fleet:status`, `/fleet:peek`, `/fleet:result` and `/fleet:overview`, the exact surface D4 governs, are the surface that writes. `/fleet:doctor` likewise.
+
+Why this is more than a wording defect: each of those verbs performs **step 2 of the privilege-escalation repro** — a corrupt registry refuses, the rename converts *corrupt* into *absent*, and absent reads downstream as an affirmative "not a worker" answer. An operator whose registry is corrupt and whose first move is `/fleet:status` walks that step and is told nothing about it.
+
+**Closing the gap is the `doctor-repair` slice's job, not this document's.** The remedy is a code change — route the read-only verbs through the D4-compliant `status_snapshot()` read path, or give `load_registry()` a non-quarantining mode for them — and it is deliberately out of scope here, which is why this decision now reads as REQUIREMENT plus measured CURRENT STATE rather than as a description of shipped behaviour. `tests/test_views_doctrine.py` pins the pair: while a view still quarantines, this spec and root `CLAUDE.md` may not restate D4 unqualified; when `doctor-repair` lands, that pin goes green on its own and nothing has to be deleted.
 
 <!-- ts-worker-suppression -->
 **D5 — the SessionStart hook suppresses itself inside workers.** **[SUPERSEDED — D7, 2026-07-22: the hook is gone, so there is nothing left to suppress. The `FLEET_WORKER` stamp D5 introduced stays, for the reasons in D7.]** A globally-enabled fleet plugin fires its SessionStart hook in **every** Claude Code session on the machine, including every worker turn — injecting a fleet briefing into worker context, wasting tokens and confusing the worker about its role. Guard: `launch_turn` stamps `FLEET_WORKER=<name>` into the child environment; the hook returns empty context when it sees that variable. This is the one `fleet.py` change outside the read path.
@@ -101,31 +112,40 @@ mailbox/*.md ──────┘             │
 
 Every consumer on this diagram is **pulled** by the operator or by a surface they installed on purpose (D7). Nothing here is pushed into a session that did not ask.
 
-Mutating `/fleet:*` commands bypass this path entirely: they invoke the ordinary CLI, which takes `fleet.lock` and recomputes exactly as before. The read surface and the write surface never contend for a lock, because the read surface never takes one.
+Mutating `/fleet:*` commands bypass this path entirely: they invoke the ordinary CLI, which takes `fleet.lock` and recomputes exactly as before. The read surface and the write surface were to never contend for a lock, because the read surface would never take one — **and that is the requirement, not the shipped behaviour.** The read-only `/fleet:*` commands do not use this diagram: they inline `fleet status` / `fleet peek` / `fleet result` / `fleet doctor`, all of which take `fleet.lock` and quarantine a corrupt registry. Only the statusline is actually on the arrow. See D4's CURRENT STATE.
 
 ## Components
 
 ### 4.1 `fleet.status_snapshot()` — the single derivation
 
-Signature: `status_snapshot(home: Path | None = None) -> dict`
+Signature: `status_snapshot(now: datetime | None = None, include_archived: bool = False) -> dict`
 
-Reads `state/fleet.json`; counts `mailbox/<sid>.md` per worker. Never opens `fleet.lock`, never calls `PLATFORM.*`, never writes. Returns:
+Reads `state/fleet.json`; counts `mailbox/<sid>.md` per worker; reads the supervisor claim file. Never opens `fleet.lock`, never calls `PLATFORM.*`, never writes. Returns:
 
 ```python
 {
   "ok": True,                      # False if registry missing/unreadable
   "reason": None,                  # "not_initialized" | "unreadable" when ok=False
   "generated_at": "2026-07-09T…Z",
-  "totals": {"workers": 3, "working": 1, "idle": 1, "limited": 1,
-             "attached": 0, "dead": 0, "mail": 2, "cost_usd": 2.14},
+  "totals": {"workers": 3, "mail": 2, "cost_usd": 2.14, "by_status": {…}},
+  "supervisor": {"goals_active": True, "state": "held",
+                 "incarnation_id": "inc-…", "heartbeat_age_seconds": 42.0},
   "workers": [
     {"name": "pmbot", "status": "working", "turns": 7, "cost_usd": 1.02,
      "mail": 0, "stale_seconds": 12, "limit_reset_at": None, "limit_kind": None,
-     "attached_since": None},
+     "attached_since": None, "tier": "worker", "dispatch_kind": "native",
+     "archived_at": None},
     …
   ],
 }
 ```
+
+**The tier fields (three-tier §3).** One flat roster carries two tiers: a supervisor body is a registry row like any other, and the claim that makes one of them *the* supervisor lives in a different file. A view that reads only `workers` therefore projects two tiers as one and counts husks of a retired command tier as workers.
+
+- `workers[].tier` is `"supervisor"` or `"worker"`, derived from the `sup|<inc>|<role>` name family through fleet's own `_is_supervisor_shaped` — no consumer re-implements the shape (invariant 9). It describes the **body**, never the claim: a released or seized supervisor keeps its name.
+- `snap["supervisor"]` is the **claim**. `state` ∈ `held` | `released` | `none` | `unknown`. It is present on every path, `ok=False` included — the claim lives in a different file, so a corrupt worker table must not take the one field that says whether anything can be dispatched.
+- `heartbeat_age_seconds` is `None` on a `released` claim **by design** (claim-nonce §6.3 strips `heartbeat_at`); a view must not render that as staleness.
+- `unknown` is a rendered word, not silence. **Absence is not evidence on this substrate** — "the claim could not be read" must never present as "there is no supervisor". The projection never raises: every failure degrades to `unknown`.
 
 Honours the additive-schema rule: every field read with a default (`cost_baseline` → `0.0`, `limit_reset_at`/`limit_kind`/`max_budget_usd`/`setting_sources` → `None`). Unknown keys ignored, never dropped (it does not write, so round-trip preservation is trivially satisfied).
 
@@ -144,13 +164,18 @@ Bare `fleet status` behaviour — the human table, the recompute, the anomaly fl
 - Renders **one line**, ANSI-coloured:
 
 ```
-[fleet]  work 3  mail 1  lim 1 resets 14:20  idle 1 15m  +4 dead  $2.14
+[fleet]  sup held  work 3  mail 1  lim 1 resets 14:20  idle 1 15m  +4 dead
 ```
 
+- **The command tier leads the line** (three-tier §3). `sup held` / `sup released` / `sup none` / `sup ?`, rendered only while `supervisor.goals_active` — a fleet not running supervisor doctrine carries no permanent scold. A `held` claim whose heartbeat is older than the D2 threshold appends its age (` sup held 2h`); a `released` one never does, because §6.3 leaves it no heartbeat to age.
+- **A live supervisor body is not a worker.** Rows with `tier == "supervisor"` and a non-`dead` status leave the worker buckets entirely. A **dead** one rejoins the flat roster for the grey tail: a corpse is a corpse whatever tier it died in, and a second grey field would break the grey-means-inert rule below.
+- **More than one live supervisor body is an alarm**, rendered `N bodies` in a reserved bold red — the count, not a boolean, because 2 and 9 are different incidents. This is the one condition three-tier exists to prevent.
+- The tier fields are **not** live workers: an all-supervisor fleet still renders `no live workers`, so going live with GOALS.md never silently retires that message.
+- **No cost field** (removed 2026-07-27, operator's call). Under the Max-20x cap doctrine the plan limits spend, fleet enforces no dollar ceiling, and native dispatch records no cost at all — so the running total summed rows that report nothing, and it was not something the operator could act on. `fleet status` still totals it.
 - Rows/states not present are omitted. `limited` workers append ` resets 14:20` from `limit_reset_at`, or ` reset?` when it is null. A worker whose `limit_reset_at` has passed renders `resume-eligible` — a **flag only**, never a launch (invariant 1: a view does not start turns; SPEC §5 `status` row states this same rule).
 - A bucket whose every worker has `stale_seconds > 300` appends the freshest ` <age>` (D2). The age is coloured, **not** dimmed: dimming the whole chunk rendered grey-on-dark counts that the operator could not read.
 - **Buckets appear in a fixed order** (`work · mail · att · lim · budget · ceiling · idle`), never count-sorted — a count-sorted line reshuffles between refreshes, forcing a re-read, and lets a pile of corpses outrank the one live worker. `dead` is not a bucket at all: it collapses into a `+N dead` tail counter.
-- **Colour is the second channel and it is exclusive.** One hue per status, plus a distinct hue each for the `[fleet]` nameplate, the age, and the cost. **Grey is reserved for `dead`** — nothing else on the line may use it, or "greyed out" stops meaning "inert".
+- **Colour is the second channel and it is exclusive.** One hue per status, plus a distinct hue each for the `[fleet]` nameplate, the age, the command-tier field, and the second-body alarm. **Grey is reserved for `dead`** — nothing else on the line may use it, or "greyed out" stops meaning "inert".
 - **The line is pure ASCII by construction** — no glyphs, no box drawing. A cp1252 console cannot encode geometric glyphs; `print()` then raises `UnicodeEncodeError`, the exit-0 guard swallows it, and the operator gets a permanently **blank** statusline. Colour and word already carry the whole signal, so the glyphs bought nothing but width and that failure mode. Asserted by test, not convention.
 - `NO_COLOR` env (or a non-tty) → no escapes; the same words, unpainted.
 - **Exit 0 on every path.** On any exception: print nothing, exit 0. This is the statusline analogue of invariant 2 (exit-0 hooks) — a traceback in a statusline is rendered under the operator's input box on every keystroke-adjacent refresh.
@@ -238,7 +263,7 @@ The SessionStart-hook column is dropped here with the hook itself (D7).
 | `mailbox/` missing | mail counts = 0 | idem |
 | any unexpected exception | print nothing, exit 0 | CLI's own handling |
 
-The corrupt-registry row is D4: views report, the writer quarantines.
+The corrupt-registry row is D4: views report, the writer quarantines. The `/fleet:*` column of that row is written as the CLI's behaviour because it *is* the CLI — those commands inline the bare verbs, so a `/fleet:status` on a corrupt registry quarantines and exits 1 rather than reporting and exiting 0. That is the D4 violation, stated in the table rather than hidden by it; the statusline column is the only one D4 currently holds for. See D4's CURRENT STATE and the receipts below.
 
 ## Testing
 
@@ -259,7 +284,7 @@ Tier-3 live suite (`FLEET_LIVE=1`): **unaffected.** This phase adds no claude in
 Cites the numbered "Architectural invariants" section of `docs/SPEC.md`. All four are **preserved**; none is modified.
 
 - **1 daemonless launch** — every surface here is optional and additive. The CLI works fully with the statusline uninstalled, the plugin absent, and the hook unregistered. The statusline *flags* a resume-eligible `limited` worker; it never launches the resume turn (that stays the explicit `fleet resume-limited` sweep, SPEC §5).
-- **6 single-writer registry** — no surface in this phase writes `fleet.json` or `events.jsonl`, and none takes `fleet.lock`. D4 is this invariant made literal: even registry *corruption* is not repaired from a view.
+- **6 single-writer registry** — the requirement is that no surface in this phase writes `fleet.json` or `events.jsonl` and none takes `fleet.lock`. D4 is this invariant made literal: even registry *corruption* is not to be repaired from a view. **Shipped code holds this for the statusline only.** The read-only `/fleet:*` commands inline `fleet status` / `fleet peek` / `fleet result` / `fleet doctor`, each of which takes `fleet.lock` and quarantine-renames a corrupt registry — so this invariant is presently violated through the slash-command surface, measured at `02bf276` (receipts below). The invariant itself is unmodified and binding; `doctor-repair` is the slice that closes the gap.
 - **8 platform-adapter-only OS branching** — the new files add no `os.name`/`sys.platform` branch; the boundary lint is extended to cover them. The Windows PowerShell probe stays where it already is, inside the adapter, untouched. [SUPERSEDED (mechanism only) — native-substrate pivot 2026-07-13: that probe is going away with PID-liveness (`docs/SPEC.md` §6); the invariant itself — no OS branching outside the adapter — is unaffected and stays binding.]
 - **9 one-state-many-views** — `status_snapshot()` is the single derivation; the statusline, the slash commands, and (later) watchtower and the web UI are views of it holding no independent state. Removing a view (the SessionStart hook, D7) cost nothing elsewhere, which is the invariant paying out. The statusline importing `fleet.py` rather than re-parsing `fleet.json` is this invariant applied to code, not just to data.
 
@@ -270,6 +295,102 @@ Cites the numbered "Architectural invariants" section of `docs/SPEC.md`. All fou
 - **No** session — worker, manager, or a session in an unrelated project — receives any fleet-injected context. The plugin manifest declares no hooks (D7). *(Originally: a worker receives no briefing, D5 verified against a real spawn. Widened to every session when the leak into unrelated projects was found, 2026-07-22.)*
 - `fleet init --statusline` refuses to clobber a pre-existing foreign statusline.
 - Unit tier green on all three OSes in CI; `TestPlatformAdapterBoundary` green unmodified in spirit (extended file list only).
+
+## Receipts — D4 measured against shipped code
+
+Added 2026-07-27 by the `views-doctrine` slice. D4 stood as a description of shipped behaviour for days while shipped behaviour violated it, and prose is not a guard — so the gap is pinned here as re-executable evidence rather than asserted. Every block runs against the materialised tree of `02bf276` (`tools/verify_receipts.py`), creates its own throwaway `FLEET_HOME` in a `.probe/` directory inside that temp tree, and removes it. **Nothing here touches a live fleet's `state/`**, and no block is `# volatile` or `# live`: the probes are self-contained and deterministic, so they are ordinary pinned receipts.
+
+Interpreter resolution goes through the repo's own `bin/hooks/run_py.sh` rather than a hardcoded `py -3.13`, for the reason §4.5.1 already records: `py` is Windows-only and a receipt hardcoding it would be unreproducible for anyone else.
+
+**Quarantine.** A corrupt `state/fleet.json`, one surface per row; `survives` means the file is still there afterwards, `RENAMED ASIDE` means `load_registry()` quarantined it:
+
+```
+# at 02bf276
+$ for v in "status" "status --json --stale-ok" "peek w" "result w" "doctor" "sup-status" "knowledge"; do rm -rf .probe; mkdir -p .probe/state; printf 'not json {{{' > .probe/state/fleet.json; FLEET_HOME=.probe sh bin/hooks/run_py.sh bin/fleet.py $v >/dev/null 2>&1; [ -f .probe/state/fleet.json ] && r=survives || r="RENAMED ASIDE"; printf '%-32s %s\n' "fleet $v" "$r"; done; rm -rf .probe; mkdir -p .probe/state; printf 'not json {{{' > .probe/state/fleet.json; echo '{}' | FLEET_HOME=.probe sh bin/hooks/run_py.sh bin/fleet_statusline.py >/dev/null 2>&1; [ -f .probe/state/fleet.json ] && r=survives || r="RENAMED ASIDE"; printf '%-32s %s\n' "statusline" "$r"; rm -rf .probe
+fleet status                     RENAMED ASIDE
+fleet status --json --stale-ok   survives
+fleet peek w                     RENAMED ASIDE
+fleet result w                   RENAMED ASIDE
+fleet doctor                     RENAMED ASIDE
+fleet sup-status                 survives
+fleet knowledge                  survives
+statusline                       survives
+```
+
+`sup-status` and `knowledge` are on this table because `/fleet:overview` shells out to all four of `sup-status`, `status`, `doctor` and `knowledge`; two of the four quarantine.
+
+**Lock contention.** D4's sibling clause. A `state/fleet.lock` is pre-created (a live holder), the registry is valid, and the surface is run: a lock-free surface answers, a contending one blocks for `LOCK_TIMEOUT_SECONDS` and dies on `timed out waiting for lock`. This block is the slowest thing in the receipt suite (~20 s) precisely because four of these surfaces really do wait on a lock they are documented never to take:
+
+```
+# at 02bf276
+$ for v in "status" "status --json --stale-ok" "peek w" "result w" "doctor" "sup-status"; do rm -rf .probe; mkdir -p .probe/state; printf '{"workers": {}}' > .probe/state/fleet.json; printf 'held-by-another-process' > .probe/state/fleet.lock; o=$(FLEET_HOME=.probe sh bin/hooks/run_py.sh bin/fleet.py $v 2>&1); case "$o" in *"timed out waiting for lock"*) r="TAKES fleet.lock";; *) r="lock-free";; esac; printf '%-32s %s\n' "fleet $v" "$r"; done; rm -rf .probe; mkdir -p .probe/state; printf '{"workers": {}}' > .probe/state/fleet.json; printf 'held-by-another-process' > .probe/state/fleet.lock; o=$(echo '{}' | FLEET_HOME=.probe sh bin/hooks/run_py.sh bin/fleet_statusline.py 2>&1); case "$o" in *"timed out waiting for lock"*) r="TAKES fleet.lock";; *) r="lock-free";; esac; printf '%-32s %s\n' "statusline" "$r"; rm -rf .probe
+fleet status                     TAKES fleet.lock
+fleet status --json --stale-ok   lock-free
+fleet peek w                     TAKES fleet.lock
+fleet result w                   TAKES fleet.lock
+fleet doctor                     TAKES fleet.lock
+fleet sup-status                 lock-free
+statusline                       lock-free
+```
+
+**The call sites.** The behaviour above is not incidental — the three read-only verbs each open with the same two lines:
+
+```
+# at 02bf276
+$ grep -n "^def cmd_status\|^def cmd_peek\|^def cmd_result\|^def load_registry\|^def _quarantine_registry" bin/fleet.py
+812:def _quarantine_registry(path: Path) -> Path:
+828:def load_registry() -> dict:
+3646:def cmd_status(args) -> int:
+3941:def cmd_peek(args) -> int:
+3992:def cmd_result(args) -> int:
+```
+
+```
+# at 02bf276
+$ awk 'NR==3675||NR==3676||NR==3947||NR==3948||NR==3997||NR==3998 {print NR": "$0}' bin/fleet.py
+3675:     with fleet_lock():
+3676:         data = load_registry()
+3947:     with fleet_lock():
+3948:         data = load_registry()
+3997:     with fleet_lock():
+3998:         data = load_registry()
+```
+
+The quarantine is a rename, which is why it destroys the operator's evidence rather than merely annotating it:
+
+```
+# at 02bf276
+$ grep -n "path.rename(quarantined)" bin/fleet.py
+818:        path.rename(quarantined)
+```
+
+**The surface D4 names by name.** Every read-only slash command inlines a bare verb; none of them goes through `status_snapshot()`:
+
+```
+# at 02bf276
+$ grep -n '^!`fleet ' commands/status.md commands/peek.md commands/result.md commands/overview.md commands/doctor.md
+commands/status.md:6:!`fleet status`
+commands/peek.md:7:!`fleet peek $ARGUMENTS`
+commands/result.md:7:!`fleet result $1`
+commands/overview.md:10:!`fleet sup-status`
+commands/overview.md:14:!`fleet status`
+commands/overview.md:18:!`fleet doctor`
+commands/overview.md:22:!`fleet knowledge`
+commands/doctor.md:6:!`fleet doctor`
+```
+
+**On the "never probe a PID" clause of the doctrine sentence.** PID probing no longer exists anywhere in `bin/fleet.py` — the native-substrate pivot deleted it (D1's superseded marker), so that clause is now vacuously true of every surface. Its live successor is the roster subprocess, and `cmd_status` does spawn one:
+
+```
+# at 02bf276
+$ grep -n "_fetch_agents_roster()" bin/fleet.py
+3699:        roster_ok, payload = _fetch_agents_roster()
+4041:            roster_ok, payload = _fetch_agents_roster()
+4134:            roster_ok, payload = _fetch_agents_roster()
+11506:    roster_ok, payload = _fetch_agents_roster()
+```
+
+`3699` is inside `cmd_status`, so `/fleet:status` spawns a subprocess on a path D1 forbids one on. That is the same gap in its post-pivot spelling and it closes with the same fix.
 
 ## Notes for the builder
 

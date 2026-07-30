@@ -49,7 +49,13 @@ _BOLD = "\x1b[1m"
 _GREY = "\x1b[90m"
 _NAME = "\x1b[1;94m"       # bold bright blue -- the fleet nameplate
 _AGE = "\x1b[33m"          # yellow: a clock, distinct from every status hue
-_COST = "\x1b[1;37m"       # bold white: money
+# The command tier (three-tier §3). Bold bright white: the line's first field
+# after the nameplate, and the one whose absence is itself the news.
+_SUP = "\x1b[1;97m"
+# Reserved for the one condition three-tier exists to prevent: more than one
+# live supervisor-shaped body. Bold red, distinct from `over_budget`'s plain
+# bright red, because this is not a spend state -- it is a command state.
+_ALARM = "\x1b[1;91m"
 # Distinct hue per status, bright variants so they separate on a dark terminal.
 _STATUS_COLOR = {
     "working": "\x1b[92m",       # bright green  -- burning tokens
@@ -99,6 +105,51 @@ def _bucket(worker: dict) -> str:
     return worker["status"]
 
 
+# --- the command tier ------------------------------------------------------
+#
+# three-tier §3 splits one flat roster into three tiers, and the flat render
+# hid the split: a supervisor body is a registry row, so a fleet with one
+# worker and fourteen retired supervisor husks rendered as fifteen workers.
+# Worse, the field that actually decides whether anything can be dispatched --
+# does someone hold the claim -- was not on the line at all.
+#
+# Two rules, both deliberate:
+#   * LIVE supervisor-shaped bodies leave the worker buckets. They are the
+#     command tier, counted separately, and never inflate `work`/`idle`.
+#   * DEAD ones stay in the grey tail. A corpse is a corpse whatever tier it
+#     died in, and splitting the tail would put a second grey field on the
+#     line, which `test_grey_is_reserved_for_dead` forbids for good reason.
+
+_SUP_STATE_LABEL = {"held": "sup held", "released": "sup released",
+                    "none": "sup none", "unknown": "sup ?"}
+
+
+def _supervisor_chunk(snap: dict, paint, stale_after: int):
+    """The tier field, or None when there is nothing to say.
+
+    Silent when GOALS.md is dormant/absent: a fleet with no supervisor doctrine
+    running should not carry a permanent `sup none` scold on every refresh.
+    """
+    sup = snap.get("supervisor")
+    if not isinstance(sup, dict) or not sup.get("goals_active"):
+        return None
+    state = sup.get("state") or "unknown"
+    chunk = paint(_SUP_STATE_LABEL.get(state, "sup ?"), _SUP)
+    # D2 applied to the claim: an aged heartbeat is exactly the evidence a
+    # seizure would one day rest on, so the operator sees it before fleet does.
+    # `released` carries no heartbeat BY DESIGN (claim-nonce §6.3) -- rendering
+    # an age there would invent staleness out of a correct stand-down.
+    age = sup.get("heartbeat_age_seconds")
+    if state == "held" and age is not None and age > stale_after:
+        chunk += paint(f" {_fmt_age(age)}", _AGE)
+    return chunk
+
+
+def _live_supervisor_bodies(workers) -> int:
+    return sum(1 for w in workers
+               if w.get("tier") == "supervisor" and w.get("status") != "dead")
+
+
 def _bucket_order(buckets) -> list:
     """Fixed order for the buckets present, unknown statuses last, `dead` never
     among them -- it is collapsed into the tail counter by the caller."""
@@ -129,7 +180,27 @@ def render_statusline(snap: dict, color: bool = True,
 
     buckets: dict = {}
     for w in workers:
+        # A live supervisor body is the command tier, not a worker. A dead one
+        # rejoins the flat roster for the grey tail -- see the block comment
+        # above `_supervisor_chunk`.
+        if w.get("tier") == "supervisor" and w.get("status") != "dead":
+            continue
         buckets.setdefault(_bucket(w), []).append(w)
+
+    # The tier fields lead, and they are kept OUT of `parts` until the worker
+    # buckets have decided whether the fleet is all-dead: `sup held` is not a
+    # live worker, and letting it satisfy the "did anything render" test would
+    # silently retire the `no live workers` message the moment GOALS went live.
+    lead = []
+    sup_chunk = _supervisor_chunk(snap, paint, stale_after)
+    if sup_chunk:
+        lead.append(sup_chunk)
+    bodies = _live_supervisor_bodies(workers)
+    if bodies > 1:
+        # Never two live supervisors over one GOALS.md. The line says so before
+        # the operator has to go looking, and it says the COUNT because "2" and
+        # "9" are different incidents.
+        lead.append(paint(f"{bodies} bodies", _ALARM))
 
     parts = []
     for bucket in _bucket_order(buckets):
@@ -165,11 +236,16 @@ def render_statusline(snap: dict, color: bool = True,
     if dead:
         parts.append(paint(f"+{dead} dead", _STATUS_COLOR["dead"]))
 
-    cost = snap["totals"].get("cost_usd", 0.0)
-    parts.append(paint(f"${cost:.2f}", _COST))
+    # NO COST FIELD (removed 2026-07-27, operator's call). It was a running
+    # total the operator cannot act on: under the Max-20x cap doctrine the plan
+    # limits spend, fleet enforces no dollar ceiling, and native dispatch
+    # carries no cost field at all -- so the number was increasingly a sum over
+    # rows that report nothing. `fleet status` still totals it for anyone who
+    # wants it; the statusline is for what you would act on.
+    #
     # Two spaces between fields: wide enough to group `label count age` as one
     # unit without a separator glyph, which would cost width and ASCII purity.
-    return "  ".join([head] + parts)
+    return "  ".join([head] + lead + parts)
 
 
 def _want_color() -> bool:
