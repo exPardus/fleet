@@ -1816,3 +1816,199 @@ class TestForceConsultsTheAgeItClaimsToHaveConsulted(_HandoffBase):
         assert self._abort(nonce=gen, retire_all=True, force=True) == 0
         assert self._incs() == []
         assert not (sup_home / "state" / f"supervisor-handoff-{inc}.md").exists()
+
+
+class TestReleaseMidHandoffDoesNotStrandTheSuccessor(_HandoffBase):
+    """P1-4. `sup-release` is a CLAIM TRANSITION, and it was the one transition
+    R5 never reached: `cmd_sup_boot`'s two literals carry the pending set and
+    `sup-handoff-complete` hand-rolls the same carry, while release built its
+    released literal from nothing and dropped it.
+
+    Reproduced end to end against a temp FLEET_HOME with the real verbs: the
+    release returns 0, `handoff_pending` and `handoff_token_hash` both vanish,
+    `sup-status` stops listing the successor, `doctor` reports
+    `[PASS] no handoff in flight` over a live dispatched body, the next
+    `sup-boot` sweeps the successor's only input file, and no handle names the
+    successor any more -- `--successor-inc`, `--successor-sid`, `--force` and
+    `--retire-all` all refuse it from the next holder.
+
+    The upstream Fix text proposed carrying `handoff_token_hash` too. That is
+    refused here: R4 makes the hash the ONE thing that keeps a stranded
+    plaintext token alive, and `sup-handoff-complete` deliberately does not
+    carry it either. Dropping it is correct; carrying the ENTRIES is the fix.
+    """
+
+    def _release(self, nonce=None, sid="sid-old", reason="standing down"):
+        return fleet.cmd_sup_release(
+            SimpleNamespace(sid=sid, nonce=nonce, reason=reason))
+
+    def _boot(self, sup_home, sid="sid-new", entries=None):
+        args = SimpleNamespace(sid=sid, handoff_inc=None, nonce=None)
+        payload = entries if entries is not None else [{"sessionId": sid, "status": "busy"}]
+        def roster(argv, **kw):
+            return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+        return fleet.cmd_sup_boot(args, which=_fake_which, run=roster)
+
+    def test_the_release_carries_the_pending_successor(self, sup_home, capsys):
+        self._hold()
+        _rc, gen = self._begin(capsys)
+        inc = self._incs()[0]
+        assert self._release(nonce=gen) == 0
+        claim = fleet.read_incarnation()
+        assert claim["state"] == "released"
+        assert [e["successor_inc"]
+                for e in fleet.handoff_pending_entries(claim)] == [inc]
+
+    def test_the_release_marks_the_carried_successor_superseded(self, sup_home, capsys):
+        """Nothing can complete this attempt: the release destroyed the token
+        hash its HANDSHAKE would have to match. SUPERSEDED is exactly that
+        state -- not bootable, still abortable, retirable at once rather than
+        on age -- so the successor is refused at its own boot instead of
+        writing a HANDSHAKE no verb can act on."""
+        self._hold()
+        _rc, gen = self._begin(capsys)
+        assert self._release(nonce=gen) == 0
+        entry = fleet.handoff_pending_entries(fleet.read_incarnation())[0]
+        assert fleet.handoff_entry_state(entry) == fleet.HANDOFF_SUPERSEDED
+
+    def test_the_release_still_does_not_carry_the_handoff_token(self, sup_home, capsys):
+        """R4, and the review's proposed fix refused explicitly. The plaintext
+        token in the successor's task file must DIE with the release."""
+        self._hold()
+        _rc, gen = self._begin(capsys)
+        assert self._release(nonce=gen) == 0
+        assert "handoff_token_hash" not in fleet.read_incarnation()
+
+    def test_the_release_carries_a_torn_pending_member(self, sup_home, capsys):
+        """rb-MIN-7's fail-closed rule crosses this transition too: a member
+        this code cannot read names a file it cannot name, and dropping it
+        un-protects every task file at once."""
+        self._hold()
+        _rc, gen = self._begin(capsys)
+        claim = fleet.read_incarnation()
+        claim[fleet.HANDOFF_PENDING_KEY].append("unreadable-member")
+        fleet.write_incarnation(claim)
+        assert self._release(nonce=gen) == 0
+        assert fleet.handoff_pending_torn(fleet.read_incarnation()) == \
+            ["unreadable-member"]
+
+    def test_the_stranded_successor_cannot_write_a_handshake(self, sup_home, capsys):
+        """`handoff_boot_refusal` fails OPEN on a claim with no pending entry,
+        and its own docstring names this case: 'a claim whose pending set was
+        lost before R5 carried it'. Before the fix the successor booted, wrote
+        HANDSHAKE on a RELEASED claim and waited for a transfer no body could
+        ever perform."""
+        self._hold()
+        _rc, gen = self._begin(capsys)
+        inc = self._incs()[0]
+        token = _token_of(sup_home, inc)
+        assert self._release(nonce=gen) == 0
+        capsys.readouterr()
+        rc = _boot_successor("succ0001-full", inc, token=token)
+        out = capsys.readouterr().out
+        assert rc == fleet.SUPERVISOR_BOOT_HANDOFF_REFUSED_RC, out
+        assert f"HANDOFF-ORPHAN {inc}" in out
+        assert not fleet.handshake_path().exists()
+
+    def test_the_refusal_does_not_blame_a_handoff_that_never_happened(
+            self, sup_home, capsys):
+        """The R9 supersession message says the predecessor 'began another
+        handoff after dispatching you'. On this path it did not -- it released
+        the claim -- and a refusal that states a falsehood about why is the
+        defect class this repo keeps re-filing."""
+        self._hold()
+        _rc, gen = self._begin(capsys)
+        inc = self._incs()[0]
+        assert self._release(nonce=gen) == 0
+        refusal = fleet.handoff_boot_refusal(fleet.read_incarnation(), inc)
+        assert refusal is not None
+        assert "began another handoff" not in refusal
+        assert "released" in refusal.lower()
+
+    def test_doctor_fails_on_the_successor_the_release_stranded(
+            self, sup_home, capsys):
+        """The blind row is half the defect: a fleet that cannot REPORT a
+        stranded successor cannot be told to go and retire it."""
+        self._hold()
+        _rc, gen = self._begin(capsys)
+        inc = self._incs()[0]
+        assert self._release(nonce=gen) == 0
+        name, ok, detail = fleet._doctor_check_supervisor_handoff()
+        assert name == "supervisor-handoff"
+        assert ok is False, detail
+        assert inc in detail
+
+    def test_the_next_boot_does_not_sweep_the_stranded_task_file(
+            self, sup_home, capsys):
+        """R2: the successor's whole prompt is `Read <task_path> and follow it
+        exactly`. A body that may still be reading it must not lose it."""
+        self._hold()
+        _rc, gen = self._begin(capsys)
+        inc = self._incs()[0]
+        task_file = sup_home / "state" / f"supervisor-handoff-{inc}.md"
+        _age_file(task_file, 10 * T)
+        assert self._release(nonce=gen) == 0
+        capsys.readouterr()
+        assert self._boot(sup_home) == 0
+        capsys.readouterr()
+        assert task_file.exists()
+
+    def _reboot(self, sup_home, capsys):
+        """`fleet sup-boot` from a NEW body after the release, returning its
+        generation -- the step every post-release refusal points at."""
+        capsys.readouterr()
+        assert self._boot(sup_home) == 0
+        out = capsys.readouterr().out
+        return re.findall(r"^NONCE: (?!unchanged)(\S+)$", out, re.M)[0]
+
+    def test_the_next_holder_can_stop_the_stranded_successor_by_sid(
+            self, sup_home, capsys):
+        """The recipe every refusal prints -- `fleet sup-boot`, then abort --
+        has to actually work from the other end. An entry that recorded a sid
+        is stopped by handle; `--retire-all` deliberately will not touch one,
+        because stopping a session is a per-body decision."""
+        self._hold()
+        _rc, gen = self._begin(capsys)
+        inc = self._incs()[0]
+        assert self._release(nonce=gen) == 0
+        gen2 = self._reboot(sup_home, capsys)
+        assert self._incs() == [inc]
+        calls = []
+        assert self._abort(run=_stop_ok(calls), sid="sid-new", nonce=gen2,
+                           successor_sid="succ0001-full") == 0
+        assert any(argv[1:] == ["stop", "succ0001"] for argv in calls), calls
+        assert self._incs() == []
+        assert not (sup_home / "state" / f"supervisor-handoff-{inc}.md").exists()
+
+    def test_the_next_holder_can_retire_a_sidless_stranded_successor_at_once(
+            self, sup_home, capsys):
+        """The DOA begin -- no sid was ever recorded, so nothing can be
+        stopped and `--retire-all` is the whole recovery. Without the
+        supersession mark the carried entry is `joining` and `--retire-all`
+        answers `nothing to retire` until a full handoff timeout has passed."""
+        self._hold()
+        gen = self._begin_doa(capsys)
+        inc = self._incs()[0]
+        assert self._release(nonce=gen) == 0
+        gen2 = self._reboot(sup_home, capsys)
+        assert self._incs() == [inc]
+        assert self._abort(sid="sid-new", nonce=gen2, retire_all=True) == 0
+        assert self._incs() == []
+        assert not (sup_home / "state" / f"supervisor-handoff-{inc}.md").exists()
+
+    def test_the_released_key_set_is_unchanged_when_nothing_is_pending(
+            self, sup_home, capsys):
+        """claim-nonce §6.3 enumerates the released key set as a LITERAL. The
+        carry is CONDITIONAL, so an ordinary release still writes exactly the
+        enumerated seven keys and no eighth."""
+        self._hold()
+        _rc, gen = self._begin(capsys)
+        inc = self._incs()[0]
+        assert self._abort(nonce=gen, successor_sid="succ0001-full") == 0
+        capsys.readouterr()
+        assert self._incs() == []
+        assert self._release(nonce=gen) == 0
+        assert set(fleet.read_incarnation()) == {
+            "incarnation_id", "lineage_id", "claimed_via", "released_at",
+            "released_by_sid", "reason", "state"}
+        assert inc not in json.dumps(fleet.read_incarnation())
