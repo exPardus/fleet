@@ -1,244 +1,150 @@
-# Next session — handoff (written 2026-07-29 by the interface session)
+# Next session — handoff (written 2026-07-30 ~13:20Z by the interface session, waves 11–32)
 
-## THE LONG-TERM GOAL, set by the operator 2026-07-29
+## THE LONG-TERM GOAL, unchanged, and where it now stands
 
-**Get fleet to launch-ready, and the completion criterion is MULTI-FLEET: independent fleets scoped
-per session, per repo, or per dir.** Today there is exactly one fleet on this machine. That is the
-gap between where the tool is and where it ships.
+**Launch-ready; completion criterion is MULTI-FLEET.** That work is no longer a stub: it is
+`docs/specs/multi-fleet.md` **v8, seven adversarial gate rounds complete (14 lens reports,
+every finding measured or refuted by execution), DOCKETED for the operator** — the top open
+item in `docs/OPERATOR-GATES.md`. The gate loop does not terminate itself (every round returned
+GATING while the kill surface shrank from architecture to mechanics), so the operator is the
+terminus. **Your multi-fleet job is: carry the docket; when Altai rules ready-for-build, the
+build slices are the spec's own Sequencing §3 (slice 0 install/home split first; the global
+`--fleet-home` flag lands in or before the arming slice). If a round 8 is ordered, fence all
+14 prior reports (`state/journals/mf-r*`) BY FILENAME RE-DERIVED FROM DISK.** Do not redesign;
+the architecture (registry-lookup resolution, homes list, verb-effect tier) survived five
+consecutive rounds and three directed attacks.
 
-**It is a future-item stub, not a spec.** Derive it yourself — do not inherit a design from this
-handoff, because there isn't one and anything I invented here would travel as authority without
-evidence, which is the failure this repo has paid for twice this week. Where to start reading, in
-this order:
+## TWO HARD RULES, unchanged
 
-- `docs/ROADMAP.md` **Phase 6 — Reach**, the `F26`/`M25` multi-machine bullet. It is the closest
-  ratified precedent and it already ruled the shape of the adjacent problem:
-  *"per-machine registries with a read-only federation view — never a shared writable `fleet.json`
-  or git-synced `state/`."* Multi-machine is not multi-fleet, but the reasoning transfers and the
-  refusal it encodes is load-bearing.
-- `docs/SPEC.md` — the **numbered nine-invariant section**. Three bind this hardest: **(6)
-  single-writer registry, (7) one-live-claude-per-session, (9) one-state-many-views.** Every phase
-  stub carries a mandatory `## Invariants touched` section citing numbers and saying why each is
-  preserved. Yours must too.
-- `docs/ROADMAP.md` "Review disciplines" — **flag, not subsystem** (re-vet for a flag-sized
-  alternative delivering 80%), **check the graveyard first** (`docs/IDEA-FORGE-REPORT.md` §5, ten
-  dead ideas with causes of death), and the soak/demand-check rule: **specs always run; BUILD is
-  what's gated.**
+1. **Never run `fleet sup-boot`** — sup-spawn a body; the claim belongs to a role, not to you.
+2. **Never directly drive a worker.** The supervisor owns every worker. You own the plan, the
+   operator channel, and read-only verbs. Councils/lenses dispatch THROUGH the supervisor via
+   `send supervisor @file` steers specifying independence.
+   *One boundary note from this session:* `env -u CLAUDE_CODE_SESSION_ID … kill <dead-sup-husk>`
+   was used ONCE, on a dead claim-holder whose nonce died with it — the documented §7.2 escape,
+   for supervisor-tier wedges only. It is not a worker-driving precedent.
 
-**Process, non-negotiable and already ratified: GATE THEN BUILD.** Spec it, dual-lens gate it, put
-it to the operator, then build. A 1278-line spec that cleared neither lens is sitting in the queue
-right now as the standing example of what happens otherwise.
+## FIRST ACT — the fleet is MID-RECOVERY, not idle
 
-**Advertising is downstream of this and is NOT yours to execute.** Preparing assets is fine.
-Publishing anything outward — a post, a landing page, a release — is irreversible and needs the
-operator's explicit go-ahead each time. Prepare, then ask.
+At handoff time: **wave-32 attempt 2 (`sup|inc-20260730T131736Z-a61b|boot`) was just dispatched
+into an open seize window.** The machine restarted ~12:5xZ, killing wave-31 mid-merge and the
+previous interface process. Sequence for you:
 
-## THE SECOND GOAL: THIS IS A STRESS TEST OF THE ARCHITECTURE
+1. `fleet sup-status` — if a NEW incarnation holds the claim with a fresh heartbeat, wave 32
+   seized and is recovering; watch (`fleet wait <name> --any` in background Bash).
+2. If the claim still names `inc-20260730T121408Z-8b77` (dead sid `ef093d27`) and no body is
+   working: the wave-32 body hit `freeze` again — heartbeat must exceed 3600s before a boot can
+   seize; `fleet sup-spawn --task @state/tasks/lens/sup-brief-wave32.md` once `sup-status` says
+   seizable.
+3. **The fleet home working tree is deliberately MID-MERGE**: branch `stage-w31`, MERGE_HEAD
+   `bacf939` (`w30/cites`), `UU bin/fleet.py` with ZERO conflict markers (resolution done,
+   never staged), `tests/test_self_citations.py` added, JOURNAL dirty with wave-31's
+   uncommitted checkpoints. **Do not reset it; do not finish it yourself.** The recovery
+   runbook is `state/tasks/lens/sup-brief-wave32.md`: pins print the truth
+   (`TestRetiredSidWritersAreWhereTheyAreCited` + the new self-citations test), floors both
+   interpreters, commit, push.
 
-**Can ONE overhead session clear this job?** That is a live question about the three-tier design, and
-you are the experiment. Wave 10 hit the 200k ceiling in 31 minutes and merged nothing. Wave 9 lasted
-32 minutes and merged one branch. If one interface session cannot hold the plan across a queue this
-size, that is a finding about the architecture — **report it as a result, not as a personal failure.**
+**Wedge runbook, proven twice this session:** dead claim holder → `fleet kill <its record>`
+(no-sid form if the gate is armed) → body tombstoned, claim FROZEN → wait until
+`sup-status` says "seizable in 0s" (heartbeat >3600s) → `sup-spawn` seizes. A `freeze` boot
+verdict means you spawned before the window opened; the body stops itself correctly — just
+re-spawn after.
 
-Track it deliberately: your own context burn against work cleared, how many supervisor incarnations
-the queue costs, and where the overhead actually goes. **Deliver an honest verdict at the end.**
-"One overhead session is not enough, here is the measurement" is a valid and valuable outcome.
+## Operator's standing directives (unchanged)
 
-## YOU ARE THE INTERFACE TIER — AND YOU DO NOT TOUCH WORKERS
+Work fully autonomously; push main at every green milestone; keep builders saturated via the
+supervisor; short interactive steers; 4-councilor council (through the supervisor) for
+operator-gated blocking items; you own the plan.
 
-Two hard rules. The second is a **correction to how the previous session ran**, so do not copy the
-pattern you will find in this session's transcript or commits.
+## State at handoff — RE-MEASURE, never inherit
 
-**1. Never run `fleet sup-boot`.** Bootstrap with `fleet sup-spawn --task @<brief>`; steer with
-`fleet send supervisor @<file>`. `sup-boot` claims the supervisor identity for *your* body, and an
-interface session never exits, so its claim never clears. **The claim belongs to a role, not a body.**
+- `main` = **`a934a10`** local == origin at last successful fetch. **Network is FLAPPING**
+  (per-attempt stochastic: DNS-fail / TCP-timeout / success — retry, read no trend from
+  either direction, push unpiped, `ls-remote` read-back).
+- Suite at a934a10: **3472 passed / 14 skipped / 1 xfailed**, identical both floors
+  (`py -3.13` AND `py -3.10`, serially — floors run SERIALLY, the concurrent-run anomaly was
+  never characterised).
+- Session total: **~85 commits on main since `09dcc2c`**, suite 2811→3472. Merged this
+  session: the whole inherited queue + ultrareview P0-2, P1-3/5/6/8/9/10/14, fleet q M2
+  (stage-w10a), succession-signal, the out= root-cause fix, the CLAUDE.md quarantine-clause
+  correction, and more. Ultrareview remaining: **P1-4 (branch `w30/p14` @ 3d2f24e READY —
+  read `fleet result w30-p14` first, it is lossless), P1-13+P1-12, P1-7(=P2-8, review
+  double-counted), P2/P3 tiers.**
+- Roster ~60 rows, mostly idle husks; three `resid-probe*` workers are DOCKET EVIDENCE — do
+  not sweep. `fix/b6-interface-release` (2e824ea) is OPERATOR-GATED by its own commit
+  message. `fix/outcome-usage-provenance` is a DECOY branch pointing at main (the real work
+  merged; wave-27's release note explains).
 
-**2. NEVER DIRECTLY DRIVE A WORKER.** No `fleet spawn`, no `fleet send <worker>`, no `respawn`, no
-`kill` against any worker. **The supervisor owns every worker without exception.** You own the plan
-and the operator channel; it owns execution. If a worker needs dispatching, steering, unsticking or
-retiring, you tell the supervisor and *it* acts.
+## WORKTREE HELL — operator-ordered cleanup (2026-07-30, in-session)
 
-The previous session broke this — it spawned four councilors, two builders, and steered a stuck
-worker directly. It worked, and that is exactly why the rule needs stating: **a shortcut that works
-is the one that gets copied.** It also contaminates the stress test above, because an interface doing
-the supervisor's job is not a measurement of the supervisor tier.
+**~80+ worktrees have accumulated** (counted 64→66→69→~80 across one day by four different
+measurers; `git worktree list | wc -l` for today's truth) and the operator has ordered the
+next session to fix it. Shape of the fix — a supervisor lane, not interface hand-work:
 
-**Read-only verbs stay yours** — `status`, `peek`, `result`, `sup-status`, `doctor`, `autoclean`.
-Watch everything; drive only the supervisor.
+1. **Census + classify**: for each worktree, (a) is its branch an ancestor of `main`
+   (`git merge-base --is-ancestor`)? (b) is its tree clean? (c) does it hold anything
+   unpushed/uncommitted (the wave-31 lesson: a "stale" worktree held finished work)?
+   Ancestry answers a different question than content — grep introduced symbols for anything
+   suspicious, per the wave-25 lesson.
+2. **Remove clean+landed ones** (`git worktree remove`, then `git worktree prune`); list-only
+   for anything dirty or unlanded — those go to the operator or a recovery lane, never
+   silently deleted. Known keeps until their work lands: `C:/proga/fleet-wt/w30-p14`
+   (P1-4, ready-unmerged), anything wave 32 is actively using.
+3. **Standing rule to adopt so this never recurs**: a lane that merges a branch REMOVES its
+   worktree in the same wave; lens worktrees are removed at harvest once the report is
+   persisted to `state/journals/`. Put it in every supervisor brief until it sticks.
 
-**Tension you must resolve rather than route around: the 4-councilor council needs workers.** Under
-this rule you cannot spawn them, so the supervisor dispatches the council at your request and returns
-the verdicts. Independence is the council's whole value, so specify it explicitly in what you hand
-the supervisor: no shared context between councilors, no visibility of each other's verdicts. If the
-council is adjudicating the supervisor's *own* work, say so and decide how to keep it honest — that
-is a real design question this handoff is deliberately not pre-answering.
+## OPEN OPERATOR GATES — carry these, nothing narrows while they wait
 
-## FIRST ACT, EVERY TIME: REVIVE THE FLEET IF IT IS DEAD.
+1. **Multi-fleet v8 ratification** (top of OPERATOR-GATES): ratify / round 8 / overturn.
+2. **Identity clause** (2026-07-27 "absence is sound" falsified; CONFIRM-A addendum: sid-
+   donation closed safe by counting; two-media model — sid trustworthy, stamp not).
+3. **§7 exemption envelope** (pre-existing, council-ruled, awaiting ratification).
+4. **Branch-protection vs merge doctrine** — occupies the single `sup-decision` slot, FIVE
+   measured bypass reproductions, options A/B/C in its text. Because the slot is single,
+   outcount2's poll-bound question (needs a probe hook in every worker's settings —
+   operator-shaped) is QUEUED BEHIND it in wave release notes.
 
-`fleet sup-status`. If GOALS is active and no supervisor holds the claim, **the fleet is stopped and
-cannot start itself** — `sup-spawn` one immediately, then say what you found and what you started.
+## The revive loop (how this session ran 21 waves)
 
-**This is now four dark windows: 3h38m, ~4h, 12h53m, and 46h.** The 46h one is live as you read
-this. Every time, every mechanism worked perfectly and the fleet sat dead because nobody was
-reading. There is deliberately no fleet-side watcher — it would fire in sessions nobody asked to be
-fleet-aware (D7), or dispatch with no operator in the loop, which is how two live supervisors
-happen. **You are the restart path. There is no other one.**
+`sup-spawn --task @state/tasks/lens/sup-brief-waveNN.md` → background `fleet wait <name> --any`
+→ on notification read `fleet sup-status` head (the release note IS the handoff) → author the
+next brief from it → spawn. **Supervisors often leave no successor brief — author one, one
+page, ACT FIRST, merge-before-read, ending with "WHAT THIS BRIEF GOT WRONG — assume it
+contains an error and go find it" (paid in 14 consecutive lanes).** Briefs live in
+`state/tasks/lens/`, never at `state/tasks/<name>.md`.
 
-## Operator's standing directives
+## Measured doctrine from this session — reuse, don't re-learn
 
-1. **Work fully autonomously** when the operator is away. Never stall waiting for them.
-2. **PUSH `main` TO ORIGIN AS WORK COMPLETES** — at every green milestone, not at session end.
-3. **Keep 6–8 builders saturated.** An idle roster is the defect, not a rest state. Slice by disjoint
-   FILE SETS; merge `bin/fleet.py` slices ONE AT A TIME, re-running both floors after each.
-4. **Keep making fleet better.** We build fleet with fleet, so its own failures are the best defect
-   reports on the machine — mine them. Two of this session's best slices came from watching it break.
-5. **Steer interactively** — short waits, frequent `status`/`peek`, correct drift immediately.
-6. **YOU own the plan; the supervisor slices, dispatches, gates, merges.** Pull it back if it re-plans.
-7. **4-councilor council** (risk / delivery / strategist / incident) + synthesis for anything
-   operator-gated and genuinely blocking. Act on the synthesis; record it; file the ratification.
-
-## State — RE-MEASURE, never inherit these numbers
-
-`main` = **`7b9c9d8`**, pushed, `origin` in sync (verified with `git ls-remote`, not the tracking
-ref). Last measured suite was **2811 passed / 13+1 skipped** identical on both floors — but that was
-at `b7c5c85`, two commits back. **Measure it yourself.** The `+1` skip is the win32 symlink reparse
-pin and skips LOUDLY by design — do not "fix" it.
-
-**Fleet is DEAD** — supervisor released `2026-07-28T00:30:57Z` at the hard ceiling (refused at
-201,149 tokens against 200,000; the ceiling worked). Six of seven workers read `dead-suspected`
-"no outcome record" and **one idle** (`succ-spec-fix`, real result). **Do not trust
-`dead-suspected` before checking `state/hook-errors.log`** — see the recovery pattern below.
-
-**One operator gate is OPEN**: the §7 exemption envelope, ruled provisionally by council, awaiting
-Altai's ratification. Nothing narrowed while it waits. `docs/decisions/W9-section7-council-synthesis.md`.
-
-## Queue
-
-1. **Merge queue, order FIXED:** `idx/q` (`bd1191b`) → `idx/teach` (`573a905`) →
-   `fix/stillborn-handoff` (`87cbf9a`) → `fix/autoclean-archive-gate` (`e4a0730`).
-   `fix/outcome-surrogate` is disjoint and slottable anywhere — **verify it exists as a branch; its
-   worker died before reporting.** Hazard, already characterised, do not re-derive: the `M1_DEFECT`
-   characterisation test lives ONLY on `idx/q`, so the red at core→q is resolved by RETIRING that
-   test, never by weakening core.
-2. **`state/tasks/lens/w10-permstall.md`** (140 lines) — written, worktree created, allow-listed,
-   never dispatched. The ceiling refused the dispatch. **Free work, first act.**
-3. **Verify the `:2174` repair landed** on the acgate branch (Task 6) — it is a *condition* of the
-   council's Verdict A, not a follow-up.
-4. **Sever the succession spec**: Parts 1+2 (~460 of 1278 lines, no gate content) are buildable now;
-   the CRITICAL-1 quarantines to Part 3, which waits on the operator.
-5. Then `fleet q` M2, the `[UNBUILT]` sweep (10 tags in `SPEC.md` + 3 shipped defects at `:344`),
-   and the multi-fleet spec above.
-
-## Launch-surface debt, measured 2026-07-29 — verify before acting
-
-- ~~**`README.md` badge says `tests-2022 passing`; actual is 2811.**~~ **CLOSED 2026-07-30**
-  (ULTRAREVIEW P3-18, `fix/docs-drift`). Note the number in this very entry had itself already
-  rotted — 2811 when written on 2026-07-29, 2825 measured on 2026-07-30. That is the argument for
-  the fix that landed: the count is **gone** from the badge rather than reset, since every reset
-  re-arms the drift. A test that re-derives the count from `--collect-only` is the stronger remedy
-  and is still owed; it was out of lane for the docs-only worker that closed this.
-- **macOS is unreceipted** — shares the POSIX backend, no run has ever executed on it. The badge is
-  honest; the gap is real.
-- **`docs/ROADMAP.md` opens with a ⛔ SUPERSEDED banner.** A public roadmap whose first line is
-  "superseded" is a bad front door.
-- **Root-level scratch files** — `FIX-WAVE-*.md`, `REVIEW-INPUT-*.md` sit in the repo root.
-- **No packaging** — no `pyproject.toml`/`setup.py`; install is clone + `fleet init`.
-- **Succession is TWO steps ON THE CLEAN-RELEASE PATH and THREE on both walls**: `sup-release` →
-  `sup-spawn`. `sup-release` tombstones the releasing body's own record, so the released-claim
-  refusal no longer arms and nobody has to stop the retired body — *but only when a release
-  actually ran*. On a usage-limit park, a ceiling death, a crash, or a release where
-  `_tombstone_releasing_body` abstained, the record stays roster-live, B6 refuses, and somebody
-  must stop that session first. (Stop it anyway to reclaim the session.) See
-  `skills/fleet/SKILL.md` and `docs/specs/graceful-succession.md` §5.1.1 — this bullet was
-  merged in its unqualified form and corrected here in the same commit, because shipping the
-  correction in one file and the uncorrected claim in another is how a doc contradicts itself.
-- **`sup-handoff-begin` was 10-for-10 stillborn under its old `dontask` default** and ate context from
-  three incarnations. Three supervisors in a row correctly released at the ceiling instead. The cause
-  was found and fixed 2026-07-27: `dontAsk` does not prompt, it DENIES, and the successor's first act
-  is `fleet sup-boot` through Bash. Measured over `state/events.jsonl`: 10/10 under `dontask`
-  stillborn, 7/7 under `bypass` booted and completed. **No live drill has run under the fixed
-  default**, so `sup-spawn` remains the route to use until someone drives one green.
-- **`--task` takes TEXT; a file is `--task @<path>`.** A bare path is rendered *as the task* into
-  `state/tasks/<worker>.md`, overwriting a brief that lived there with the string naming it —
-  unrecoverable from itself. Author briefs in `state/tasks/lens/` and `wc -l` the rendered task after
-  every dispatch. **A dispatch that returned a session id has not proven it dispatched a brief.**
-- **Write steers to a file and `send @file`.** Bash eats backticks as command substitution and
-  PowerShell mangles quotes; I lost a steer to this today after documenting the rule the same day.
-- **`env -u CLAUDE_CODE_SESSION_ID py -3.13 bin/fleet.py …`** clears §7's gate when a verb is refused
-  by the wedge it would clear (claim-nonce §7.2, load-bearing infrastructure).
-- **Answer a parked decision through `fleet sup-decision --answer`**, never as prose in a steer —
-  otherwise routing state and truth diverge and only `sup-status` shows it.
-- **Keep briefs SHORT.** Five supervisors each burned a full context on long handovers and merged
-  nothing; the one given a one-page "act first, read second" brief merged the blocker on turn 1.
-
-## Patterns that worked this session — reuse these
-
-Most are **brief-writing** patterns. You still write briefs; they now go to the supervisor, and the
-brief-quality rules propagate down when you require the supervisor to apply them to its own workers.
-
-- **Every brief ends with "WHAT THIS BRIEF GOT WRONG — assume it contains an error and go find it."**
-  Hit rate this session: **4 of 4 councilors** found real errors, including a line number rotted by
-  316 lines that four separate documents had propagated. Single highest-value line in a brief.
-  **Require the supervisor to put it in every worker brief it writes.**
-- **Councilors get NO shared context and are told not to guess each other's verdicts.** Two of them
-  independently killed a false claim the whole chain had been carrying. Independence bought that —
-  so make it an explicit instruction to whoever dispatches them, not an assumption.
-- **Require driving, not arguing.** "Verify the diff yourself, do not take the description." The risk
-  lens confirmed a non-narrowing claim by reading it; the incident lens drove a refusal from a third
-  independent caller to escape *"evidence from the broken component is not evidence."*
-- **Require RED-then-GREEN on every pin.** A test that would have passed before the change proves
-  nothing. And: *break your own pin the way a future editor would, not the way the defect did* — this
-  session's CRITICAL was a pin gated behind `if "in flight" in err:` that stayed green under a
-  line-count-identical reword.
-- **When a result is missing, check `state/hook-errors.log` before believing a worker died.** A hook
-  that cannot write an outcome logs the whole payload verbatim. Recovered 14,760 characters of a gated
-  review this way. `fleet result` returning empty is not evidence of failure — this is read-only and
-  stays yours, and it is worth teaching the supervisor.
-- **Verify the rendered brief with `wc -l` after `sup-spawn`.** A returned session id has not proven a
-  brief was dispatched. Require the supervisor to do the same for every worker it dispatches, and to
-  **verify a worktree's HEAD sha as a separate step before spawning into it** — it lost two dispatches
-  that way this week.
-- **`--task` takes TEXT; a file is `--task @<path>`.** A bare path renders *itself* as the task.
-  Author briefs in `state/tasks/lens/`, never at `state/tasks/<workername>.md` — dispatch overwrites
-  that exact path.
-- **Write steers to a file and `send supervisor @file`.** Bash eats backticks; PowerShell mangles quotes.
-- **`env -u CLAUDE_CODE_SESSION_ID py -3.13 bin/fleet.py …`** clears §7's gate when a `sup-*` verb is
-  refused by the wedge it would clear. You will need it.
-- **Answer a parked decision through `fleet sup-decision --answer`**, never as prose in a steer. It
-  takes TEXT with no `@file` form — use shell command substitution.
-- **Publish provisional rulings rather than holding them.** The wave-10 supervisor overturned part of
-  mine within the hour and was right. A ruling that survives a hostile read is worth more than one
-  nobody tested.
-- **Keep briefs SHORT and act-first.** Five supervisors in a row each burned a full context reading
-  long handovers and merged nothing; the one handed a one-page "merge first, read second" brief merged
-  the blocker on its first turn. A long handover is not thoroughness, it is the named failure mode —
-  and it is the direct enemy of the stress test above.
-
-## Doctrine worth not re-learning
-
-- **A clean shutdown with no reader is indistinguishable from a healthy fleet.**
-- **A claim gains authority at every hop and evidence at none.** Twice this week: "0 turns" (a
-  registry accounting defect — 82KB transcripts existed all along) and the handoff "inversion"
-  (false; `cmd_sup_release` writes a fresh dict that never copies the token). When a claim arrives
-  pre-endorsed by three documents, that is a reason to measure it, not to trust it.
-- **The exemption is not transitive.** A clearance argued at one level of a call graph says nothing
-  about the level below. When a finding says "I checked and we are safe", ask WHICH FRAME.
-- **Verifying provenance is not verifying fitness.** A worker hung nine minutes on a hash-verified,
-  known-good allow-list that was tuned for review workers and hard-denied `git merge`. **A hard deny
-  beats bypass mode**, and a denial presents as a hang while status reads `working`.
-- **A guard's postcondition must be satisfiable by every legitimate caller class**, and **a verb that
-  clears a state must not be gated on that state.** Both are DESCRIPTIVE/UNRATIFIED — cite the
-  measurement, never these sentences, as authority.
-- **A doc describing a CLI must be re-derived from `--help`, never from memory.**
-- **Measure the incident before drawing the lesson** — "~15h dark" was 12h53m; the corrected number
-  was worse.
-- **Fix waves mint defects: 7 of 7.** Re-gate everything; ESCALATE beats a third wave.
-- **`sup-context` after any UNPLANNED unit of work, not only at wave boundaries** — wave 10's own
-  rule, learned by hitting the ceiling when a mid-wave council ruling reshaped its plan.
-- **Absence is not evidence on this substrate.** `git log` is the only truth a turn landed.
+- **`sup-context` reads the WHOLE window** (~85–110k at boot, spread 24k across four bodies);
+  runway to the 150k trigger is ~40–65k. Dispatch in the first 30k, merge before reading.
+- **Merge pricing recipe (three refinements deep):** (1) FILE-SET comparison
+  (`git diff --stat base..branch`) — empty intersection terminates pricing; (2) hunk-range
+  overlap counts CONFLICTS; (3) EXECUTABILITY counts COST — citation-comment conflicts are
+  computable (resolve either side, run the pin, re-pin to what it PRINTS — never hand-pick).
+  Clean ≈31–40k; conflicted ≈60–65k; disjoint file sets ≈ free.
+- **One writing worker per working tree** — two writers collided in wave 27 (worktree add
+  `--detach`, since main is checked out). ~80 worktrees exist; use them.
+- **`fleet doctor` at supervisor boot** (two supervisors misfiled a live FAIL about their own
+  body); the absent-FLEET_WORKER identity-witness FAIL is a KNOWN docketed condition.
+- **out= is wrong evidence** (spec'd as final-message tokens; was publishing second-to-last
+  message's usage 73% of turns — fix merged, now withholds). Verify report files on disk.
+- **Lens fences: deny READS + PUSH, never writes** (a dontask fence denied the deliverable
+  itself); enumerate fence files from `ls`/`find`, not memory (15 named, 19 found).
+- **Background waits die with host restarts and can be reaped** — verify fleet state fresh on
+  every wake; a killed task still notifies, which still wakes you.
+- **529 storms**: two stillborn supervisor boots in a row = back off 3m/10m/20m, then retry
+  the same brief. A dead mid-turn body with a held claim = the wedge runbook above.
+- **Absence-keyed guards**: 88 sites censused (report `state/journals/absguard.md`), one
+  confirmed live fail-open universal (ND4c — rides the identity gate). Lane candidates listed
+  in wave-25's release note.
 
 ## Ledgers
 
-`knowledge/lessons.md`, `docs/decisions/W9-section7-council-synthesis.md`,
-`docs/AUTONOMOUS-2026-07-26.md`. `supervisor/JOURNAL.md` — **last two CHECKPOINTs only**, never the
-whole file (3000+ lines; reading it whole costs your context for no gain).
+`knowledge/lessons.md#2026-07-30-interface-stress` (the full postmortem + stress-test verdict:
+one session clears the queue only because the harness compacts — 471k measured against the
+200k ceiling; supervisor boot cost is the binding constraint). `knowledge/INDEX.md` first
+entry. Persistent memory: `MEMORY.md` → `multi-fleet-docket-pending`, `interface-tier-runbook`.
+Supervisor journal: last TWO release notes only (`fleet sup-status` head is cheaper than the
+file). The ultrareview: `docs/reviews/ULTRAREVIEW-2026-07-30.md` (its line numbers are rotted
+~85 commits — re-derive from code, always).
