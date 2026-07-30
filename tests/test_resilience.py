@@ -528,6 +528,7 @@ class TestCmdDoctorOrchestration:
         monkeypatch.setattr(fleet, "_doctor_check_claude_version", lambda **kw: ("a", True, "ok"))
         monkeypatch.setattr(fleet, "_doctor_check_instance_settings", lambda: ("b", True, "ok"))
         monkeypatch.setattr(fleet, "_doctor_check_instance_freshness", lambda: ("c", True, "ok"))
+        monkeypatch.setattr(fleet, "_doctor_check_instance_grants", lambda: ("g", True, "ok"))
         monkeypatch.setattr(fleet, "_doctor_check_legacy_settings", lambda: ("d", True, "ok"))
         monkeypatch.setattr(fleet, "_doctor_check_posttooluse_hook_smoke", lambda **kw: ("e", True, "ok"))
         monkeypatch.setattr(fleet, "_doctor_check_stop_hook_smoke", lambda **kw: ("f", True, "ok"))

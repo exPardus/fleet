@@ -8552,6 +8552,16 @@ def _doctor_check_instance_settings():
 
 def _doctor_check_instance_freshness():
     info = instance_freshness_info()
+    if not info["template_exists"]:
+        # `instance_freshness_info` deliberately does not flag this case
+        # itself (see its docstring) -- ABSENT is not the same claim as
+        # STALE, and folding it into `stale` would make a missing,
+        # git-tracked template read as "instance is up to date with the
+        # template" (`[PASS]`), which is the fail-open this check exists
+        # to close. This IS that policy.
+        return ("instance-freshness", False,
+                f"{template_settings_path()} missing -- can't verify the "
+                f"instance against it; restore the template")
     if info["stale"]:
         if not info["instance_exists"]:
             return ("instance-freshness", False, "worker-settings.json instance missing -- run `fleet init`")
@@ -8608,6 +8618,14 @@ def _doctor_check_instance_grants():
     instance_path = instance_settings_path()
     try:
         template = json.loads(template_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        # Absent is not the same claim as unreadable-but-present: the
+        # template is git-tracked, so a missing file means a broken
+        # checkout, not a transient read error -- distinguishable, not a
+        # silent skip that reads as green.
+        return ("instance-grants", False,
+                f"{template_path} missing -- can't verify the instance's "
+                f"fleet grants against it; restore the template")
     except (OSError, json.JSONDecodeError) as exc:
         return ("instance-grants", True,
                 f"template unreadable ({exc}) -- grant comparison skipped")
@@ -12155,8 +12173,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :5487, :5944, :10006,
-    :15087), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :5487, :5944, :10024,
+    :15105), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -12846,8 +12864,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:5487, :5944, :10006,
-    #     :15087) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:5487, :5944, :10024,
+    #     :15105) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
