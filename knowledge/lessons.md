@@ -1482,3 +1482,16 @@ merged p14) cleared the whole open docket:
 
 Process note: the docket cleared in ~minutes once put as structured questions with a
 recommendation each — the queue was never the operator's latency, it was nobody asking.
+
+
+## 2026-07-31 — ND4(c) ruled: A, the claim-holder is never exempt {#2026-07-31-nd4c-ruled}
+
+Operator (Altai, in-session) ruled the ND4(c)/ND4(b) collision raised by `w34-rulings`:
+**A — narrow (c) so the claim-holder is subject to the 200k ceiling whatever its stamp.**
+Predicate reads the claim file, not the environment — no sound env channel needed, never
+enters ND4(b)'s bucket; ND4(b) untouched. Accepted costs ratified with it: the runs-first/
+no-sid ordering property goes, one pinned test flips, an interface that ever took the claim
+becomes ceiling-subject (escape = sup-handoff-begin, already exempt). Closes the live hole
+(claim-holding supervisor on unstamped cold daemon exempt from a HARD ceiling, 4/4 bodies).
+Owed: three-tier §11.3 ND4(c) + claim-nonce §18.4 edits; implementation is a normal gated
+lane. Answered through `fleet sup-decision --answer` in the same tick; gate moved to Settled.
