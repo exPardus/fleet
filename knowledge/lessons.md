@@ -1350,3 +1350,89 @@ rather than by the review's list is what surfaced it.
   `--repair` inside the inline-exec spans and says that scoping is deliberate. It is — but
   `allowed-tools` widens the model's **own** Bash calls for the turn, which is the mechanism the
   2026-07-09 incident rode in on. The other mechanism to the same capability was still open.
+
+## 2026-07-30 — the conflict count did not predict the damage count {#2026-07-30-w33-p14}
+
+Wave 33 merged `w30/p14` at `ce64557` (main `8313f34` → `1466f38`, pushed and
+read back byte-identical). Floors `3498 passed / 14 skipped / 1 xfailed` = 3513
+collected, predicted before running and hit exactly on BOTH interpreters
+(py 3.13 245.45s, py 3.10 216.65s). Receipts strict + self-test over
+`docs/specs`, rc=0, 0 failures.
+
+**THE lesson: the number of CONFLICT HUNKS does not predict the number of
+ROTTED CITATIONS, and a brief that prices the first has not priced the second.**
+Wave 32 priced this merge to the line and got the conflict exactly right — two
+hunks, both pure prose, the `retired_sids` comment pair — then named ONE pin
+(`TestRetiredSidWritersAreWhereTheyAreCited`) as the mechanism that would
+re-derive the answer. The merge in fact needed **seven** citation sites re-pinned
+across **five** distinct numbers, and **five of the seven were found by
+`tests/test_self_citations.py`, not by the pin the brief named**. The two sets
+differ by construction: a CONFLICT is where both sides edited the same line; a
+ROT is wherever *either* side moved a line that *any* citation points at. The
+second set is strictly larger, and nothing in a `git merge` report shows it.
+Price a merge by what MOVED, not by what collided.
+
+**Zero conflict markers is still not evidence of a correct resolution** — second
+consecutive wave to restate this by experiment: markers gone, 6 tests red in
+0.70s.
+
+**Every stale number was correct at its own base, and that was measured before
+anything was touched.** All five (`:13910`, `:13637`, `:12385`, `:15523`,
+`:12313`) resolved exactly right at pre-merge HEAD `38b2e8c`, so "the citation is
+stale" is a measurement rather than an assumption. Corrections `13910→13983`,
+`13637→13710`, `12385→12458` (+73 each) and `15523→15618` (+95) all came out of
+the pins' own derivations — **no number was hand-picked**.
+
+**Wave 30's prediction landed as written.** It said merging `cites` FIRST would
+catch every later lane's citation rot for free. `p14` is the first lane caught,
+and the wider net found 5 of the 7 sites the narrow pin would have missed.
+
+**Enumerate the census in ONE pass by walking the pin modules' own data
+structures** (wave 32's lesson, applied deliberately and paid again): pytest
+showed 6 failures; importing `test_self_citations` + `test_retired_sid_citations`
+and walking `BY_CITATION` / `DERIVATIONS` / `BY_SITE` printed all 11 defects
+across six classes at once, turning three fix-run-fix cycles into one.
+
+**Prove both parents arithmetically, never from "the merge succeeded"**:
+worktree-vs-`ce64557` = 176/-24, identical to HEAD-vs-base; worktree-vs-HEAD =
+329/-12 against p14-vs-base 324/-7, the +5/-5 delta being exactly the five
+re-pins on main-owned lines. Every number accounted for.
+
+### The worktree purge (89 → 28), and where the two censuses disagreed
+
+Operator-ordered. A worker censused all 89 read-only; **the removable set was
+re-derived independently rather than inherited**, because a false REMOVABLE is
+unrecoverable and a false LIST-ONLY costs one line of attention. Worker said
+63/24/2; the independent pass said 61/27/1. **Every disagreement was resolved
+toward keeping.**
+
+- **`git cherry` beats ancestry in BOTH directions, and neither settles the
+  question.** Four trees (`fleet-succ-rb/rs`, `fleet-id-rb/rs`) sit ahead of main
+  by ancestry with *no ref containing them*, yet `git cherry` marks every commit
+  `-`: rebased and landed. Ancestry alone would have called them six-alarm;
+  ancestry alone would also have been wrong. **But patch-equivalence proves the
+  CONTENT landed, not that the REF is disposable** — removing the worktree
+  removes the only handle on a detached HEAD, so they stayed LIST-ONLY.
+- **A scratch-looking name held the machine's largest uncommitted body**:
+  `_g3_merge` reads like a throwaway dir and is an abandoned mid-conflict merge
+  with markers still in `bin/fleet.py` and 1371 lines of staged new tests.
+- **`M .claude/settings.json` on three trees was a CRLF/stat-cache artifact** —
+  identical blob, empty content diff, git's only output the "LF will be replaced
+  by CRLF" warning on *stderr*. Diagnosed correctly by the worker; kept anyway.
+- **The brief's guards pointed at empty space**: `fix/b6-interface-release` and
+  `fix/outcome-usage-provenance` are branches with NO worktree, and
+  `resid-probe*` has neither ref nor worktree (those are registry *workers*). The
+  purge could never have reached any of them. *A protection aimed at something
+  that does not exist reads, in a release note, exactly like a protection that
+  worked.*
+- **A path list written by Python text-mode on Windows embeds CRLF, and all 61
+  `git worktree remove` calls refused with `fatal: 'C:/proga/x?' is not a working
+  tree`.** It **failed safe** — nothing was removed — but the error names the
+  path, not the encoding, so the CR is invisible in the message reporting it.
+  Pipe through `tr -d '\r'`; and prefer a failure mode that refuses 61 times over
+  one that half-succeeds.
+
+**Fifth consecutive bypass event** (`remote: Bypassed rule violations for
+refs/heads/main`, exit 0) — the evidence base under the operator's open
+branch-protection decision is now five measurements across five incarnations,
+and nothing has been added to the slot (tenth wave).

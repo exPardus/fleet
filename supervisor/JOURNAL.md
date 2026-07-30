@@ -4941,3 +4941,53 @@ I VERIFIED MY BRIEF'S THREE LOAD-BEARING NUMBERS BEFORE ACTING ON ANY OF THEM, A
   WORKTREES: 'git worktree list | wc -l' = 89 from disk, matching the brief's ~89.
 
 PLAN: dispatch the worktree census lane READ-ONLY first (it writes only to state/, which is gitignored, so it cannot collide with my index), then merge w30/p14 at ce64557 in the main tree myself -- one writer per tree, and the removals are ordered only after the merge lands. BAND: booted low.
+
+## 2026-07-30T14:09:47Z CHECKPOINT inc=inc-20260730T134712Z-3b40 sid=18a6adf6-6aa4-403c-a037-ff5a3415b7fc
+
+W33-B. BRIEF ITEM 1 IS DONE AND PUSHED. main 8313f34 -> 1466f38, read back from origin byte-identical (origin/main == local main == 1466f386700304b98ab3bfde9977c3f8c5780f93).
+
+THE BRIEF WAS RIGHT THIS TIME AND I CHECKED ALL THREE OF ITS NUMBERS BEFORE TRUSTING ANY. Tip really is ce64557 (two commits: 3d2f24e fix + ce64557 pin); merge-base really is b3ec8d7; the conflict really was ONE file, TWO hunks, BOTH PURE PROSE -- the same retired_sids citation comment pair as wave 30's stack. Main HAD moved (a934a10 -> 8313f34) but all three intervening commits were docs/journal with zero code, so the 3498 prediction's base survived; I verified that by reading WHAT moved, not by concluding from the sha that the pricing was stale.
+
+FOUR COMMITS: 38b2e8c (journal backlog: wave 32's RELEASED entry + my boot checkpoint, 25 insertions 0 deletions, append-only), 1466f38 (the merge, both parents intact: 38b2e8c + ce64557).
+
+THE RESOLUTION WENT RED AND THAT WAS THE PIN DOING ITS JOB, NOT A MIS-RESOLUTION. Zero conflict markers after resolving; 6 tests still failed in 0.70s -- wave 32's lesson 1 restated by experiment: ZERO MARKERS IS NOT EVIDENCE OF A CORRECT RESOLUTION.
+
+I ENUMERATED THE WHOLE CENSUS IN ONE PASS RATHER THAN FIX-RUN-FIX (wave 32's lesson 2, applied deliberately). Imported both pin modules, walked their own data structures, printed every defect class at once: A=0 orphans, B=1 blank target, C=7 anchor rots, D=0 function-qualified, E=3 enumeration mismatches, F=0 one_of. Eleven defects, SEVEN distinct citing sites, FIVE distinct number corrections. pytest had shown 6 failures and would have surfaced them three cycles deep.
+
+EVERY OLD NUMBER WAS CORRECT AT ITS OWN BASE AND I MEASURED THAT BEFORE TOUCHING IT. All five resolved EXACTLY right at pre-merge HEAD 38b2e8c (13910/13637 -> _quarantine_artifacts(), 12385 -> _record_sids(, 15523 -> [retired_sids] =, 12313 -> def _registry_records_or_none():). So 'the citation is stale' is MEASURED, not assumed. Corrections: 13910->13983, 13637->13710, 12385->12458 (+73 each) and 15523->15618 (+95). NO NUMBER WAS HAND-PICKED -- every one came out of the pin's own derivation over the merged source, exactly as my brief ordered.
+
+WAVE 30'S PREDICTION LANDED AS WRITTEN. It said merging cites FIRST would catch every later lane's citation rot for free. p14 is the first lane caught: test_self_citations.py found 5 of the 7 sites; the older retired_sid pin found the other 2 alone. The wider net paid on its first customer.
+
+STRUCTURAL PROOF BOTH PARENTS ARE PRESENT, not inferred from 'the merge succeeded': worktree-vs-ce64557 = 176/-24, IDENTICAL to HEAD-vs-base; worktree-vs-HEAD = 329/-12 against p14-vs-base 324/-7, and the +5/-5 delta is EXACTLY my five re-pins on main-owned lines (the other two re-pinned lines were already inside p14's own hunks). Every number accounted for.
+
+FLOORS PREDICTED BEFORE RUNNING AND HIT EXACTLY, BOTH INTERPRETERS SERIALLY: 3498 passed / 14 skipped / 1 xfailed = 3513 collected, py 3.13 in 245.45s and py 3.10 in 216.65s, identical counts. Receipts strict + self-test over docs/specs: rc=0, 0 failures, extraction and paraphrase self-tests PASSED on every file that has a mutable receipt.
+
+BYPASS EVENT FIRED A FIFTH TIME ('remote: Bypassed rule violations for refs/heads/main', exit 0). The evidence base under the operator's open branch-protection decision is now FIVE measurements across five incarnations. I ADDED NOTHING TO THE SLOT -- tenth consecutive wave.
+
+ITEM 2 IN FLIGHT: w33-wtcensus (opus, read-only fences, writes only under gitignored state/) returned a 301-line census. 89 worktrees on disk, matching the brief. Its verdicts: REMOVABLE 63, LIST-ONLY 24, KEEP 2, UNKNOWN 0. I am NOT removing on its say-so -- re-deriving the REMOVABLE set independently first, because a false REMOVABLE is unrecoverable and a false LIST-ONLY costs one line of operator attention.
+
+## 2026-07-30T14:17:00Z CHECKPOINT inc=inc-20260730T134712Z-3b40 sid=18a6adf6-6aa4-403c-a037-ff5a3415b7fc
+
+W33-C. WAVE CLOSED AT A CLEAN BOUNDARY. BOTH BRIEF ITEMS DONE. Item 3 deliberately NOT started.
+
+ITEM 1 -- MERGED AND PUSHED. main 8313f34 -> 1466f38, read back from origin byte-identical. Floors 3498 passed / 14 skipped / 1 xfailed = 3513 collected, PREDICTED BEFORE RUNNING AND HIT EXACTLY on py 3.13 (245.45s) and py 3.10 (216.65s). Receipts strict + self-test over docs/specs, rc=0, 0 failures.
+
+ITEM 2 -- PURGE EXECUTED. 89 worktrees -> 28 (61 removed, 0 refused, prune clean). Census persisted to state/journals/worktree-census.md (465 lines) BEFORE anything was removed, as ordered. Doctor's FAIL set is UNCHANGED after the purge (same two known rows), so the removals introduced nothing.
+
+WHAT MY BRIEF GOT WRONG -- I FOUND IT, AND IT IS NOT ONE OF THE THREE NUMBERS IT TOLD ME TO DOUBT. Tip ce64557: RIGHT. Floor base: main HAD moved 8313f34 but all three intervening commits were docs/journal with zero code, so the prediction survived -- and I established that by reading WHAT moved rather than concluding from the sha. Worktree count 89: RIGHT. The brief's actual error is in its REMEDY, and it is the wave's lesson:
+THE CONFLICT COUNT DID NOT PREDICT THE DAMAGE COUNT. The brief priced the conflict perfectly -- two hunks, both pure prose, the retired_sids pair -- and then named ONE pin as the mechanism that would re-derive the answer. The merge needed SEVEN sites re-pinned across FIVE distinct numbers, and FIVE OF THE SEVEN WERE FOUND BY tests/test_self_citations.py, NOT by the pin the brief named. The sets differ by construction: a CONFLICT is where both sides edited the same line; a ROT is wherever EITHER side moved a line that ANY citation points at. The second set is strictly larger and no merge report shows it. PRICE A MERGE BY WHAT MOVED, NOT BY WHAT COLLIDED.
+SECOND BRIEF ERROR, smaller and worth naming because of how it reads: the standing constraints guard fix/b6-interface-release, fix/outcome-usage-provenance and the resid-probes as if they were worktrees. NONE OF THEM HAS A WORKTREE -- the first two are branches only, resid-probe* has neither ref nor worktree (they are registry WORKERS). The purge could never have reached any of them. A PROTECTION AIMED AT SOMETHING THAT DOES NOT EXIST READS, IN A RELEASE NOTE, EXACTLY LIKE A PROTECTION THAT WORKED.
+
+I DID NOT INHERIT THE CENSUS WORKER'S VERDICTS. It said REMOVABLE 63 / LIST-ONLY 24 / KEEP 2; I re-derived from disk without reading its verdicts and got 61 / 27 / 1. EVERY DISAGREEMENT RESOLVED TOWARD KEEPING, because a false REMOVABLE is unrecoverable and a false LIST-ONLY costs one line of operator attention.
+  git cherry BEATS ANCESTRY IN BOTH DIRECTIONS AND SETTLES NEITHER. fleet-succ-rb/rs and fleet-id-rb/rs sit ahead of main by ancestry with NO ref containing them, yet every commit is patch-equivalent (cherry '-'): rebased and landed. Ancestry alone would have screamed; ancestry alone would also have been wrong. BUT PATCH-EQUIVALENCE PROVES THE CONTENT LANDED, NOT THAT THE REF IS DISPOSABLE -- removing the worktree removes the only handle on a detached HEAD, so all four stayed LIST-ONLY. The worker's cherry analysis was CORRECT; my stricter rule is a different question, not a correction of it.
+  The three 'M .claude/settings.json' trees ARE a CRLF/stat-cache artifact -- I measured it directly, empty content diff, git's only output the LF/CRLF warning on STDERR. The worker was right. Kept anyway; 3 trees is not worth an irreversible call on a dirty-looking tree.
+  _g3_merge reads like a throwaway scratch dir and holds the machine's largest uncommitted body: live conflict markers in bin/fleet.py plus 1371 staged lines of new tests.
+
+THE FAILURE THAT FAILED SAFE, AND IS WORTH MORE THAN A CLEAN RUN. My first removal pass refused ALL 61 with 'fatal: C:/proga/x? is not a working tree'. Cause: the path list was written by Python in text mode on Windows, so every line carried a CR; bash read it into the path. NOTHING WAS REMOVED -- the failure mode was refuse-61-times, not half-succeed. But the message names the PATH and not the ENCODING, so the CR is invisible in the very message reporting it. Fixed with tr -d, then cross-checked every path against git worktree list before re-running.
+
+KNOWLEDGE LOOP CLOSED: lessons.md#2026-07-30-w33-p14 + INDEX.md pointer, committed this wave rather than left owed.
+
+BAND: sup-context read 161,435 -- IN-BAND, past the 150k soft trigger, ~39k under the hard ceiling. My brief gates item 3 on exactly this trigger, so I am NOT starting the P1-13/P1-12 refutation lane. I hold a doctor identity-witness LEAK, so the §11.3 ND4c exemption keying on stamp ABSENCE is unavailable to me and I said at boot I would treat the ceiling as applying. Both ordered items are complete and pushed: THIS IS THE WAVE BOUNDARY THE STANDING DIRECTIVE NAMES.
+
+STILL OWED, IN ORDER: (1) P1-13 + P1-12 -- the ultrareview's 'one root cause' claim has NEVER been verified; dispatch a worker to REFUTE it, not confirm it. (2) P1-7 (= P2-8; the review double-counted it, one lane). (3) The 27 LIST-ONLY worktrees, itemised in state/journals/worktree-census.md -- the cheapest unblock is copying untracked *.md out of the 16 output-only trees, which converts them to removable in one pass and leaves 5 genuinely blocking.
+UNTOUCHED, AS ORDERED: the three resid-probes, fix/b6-interface-release, the decoy branch, the operator's decision slot, no round 8, no --repair, no clean, no kill.
