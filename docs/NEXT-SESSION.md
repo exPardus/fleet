@@ -143,6 +143,33 @@ Altai's ratification. Nothing narrowed while it waits. `docs/decisions/W9-sectio
   "superseded" is a bad front door.
 - **Root-level scratch files** — `FIX-WAVE-*.md`, `REVIEW-INPUT-*.md` sit in the repo root.
 - **No packaging** — no `pyproject.toml`/`setup.py`; install is clone + `fleet init`.
+- **Succession is TWO steps ON THE CLEAN-RELEASE PATH and THREE on both walls**: `sup-release` →
+  `sup-spawn`. `sup-release` tombstones the releasing body's own record, so the released-claim
+  refusal no longer arms and nobody has to stop the retired body — *but only when a release
+  actually ran*. On a usage-limit park, a ceiling death, a crash, or a release where
+  `_tombstone_releasing_body` abstained, the record stays roster-live, B6 refuses, and somebody
+  must stop that session first. (Stop it anyway to reclaim the session.) See
+  `skills/fleet/SKILL.md` and `docs/specs/graceful-succession.md` §5.1.1 — this bullet was
+  merged in its unqualified form and corrected here in the same commit, because shipping the
+  correction in one file and the uncorrected claim in another is how a doc contradicts itself.
+- **`sup-handoff-begin` was 10-for-10 stillborn under its old `dontask` default** and ate context from
+  three incarnations. Three supervisors in a row correctly released at the ceiling instead. The cause
+  was found and fixed 2026-07-27: `dontAsk` does not prompt, it DENIES, and the successor's first act
+  is `fleet sup-boot` through Bash. Measured over `state/events.jsonl`: 10/10 under `dontask`
+  stillborn, 7/7 under `bypass` booted and completed. **No live drill has run under the fixed
+  default**, so `sup-spawn` remains the route to use until someone drives one green.
+- **`--task` takes TEXT; a file is `--task @<path>`.** A bare path is rendered *as the task* into
+  `state/tasks/<worker>.md`, overwriting a brief that lived there with the string naming it —
+  unrecoverable from itself. Author briefs in `state/tasks/lens/` and `wc -l` the rendered task after
+  every dispatch. **A dispatch that returned a session id has not proven it dispatched a brief.**
+- **Write steers to a file and `send @file`.** Bash eats backticks as command substitution and
+  PowerShell mangles quotes; I lost a steer to this today after documenting the rule the same day.
+- **`env -u CLAUDE_CODE_SESSION_ID py -3.13 bin/fleet.py …`** clears §7's gate when a verb is refused
+  by the wedge it would clear (claim-nonce §7.2, load-bearing infrastructure).
+- **Answer a parked decision through `fleet sup-decision --answer`**, never as prose in a steer —
+  otherwise routing state and truth diverge and only `sup-status` shows it.
+- **Keep briefs SHORT.** Five supervisors each burned a full context on long handovers and merged
+  nothing; the one given a one-page "act first, read second" brief merged the blocker on turn 1.
 
 ## Patterns that worked this session — reuse these
 

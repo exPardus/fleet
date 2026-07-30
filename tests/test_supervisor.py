@@ -2918,14 +2918,20 @@ class TestHandoff:
         assert list((sup_home / "state").glob("supervisor-handoff-*.md")) == []
 
     def test_successor_dispatch_always_carries_a_permission_mode(self, sup_home):
-        """B4/D6: `dispatch_bg` ends every worker argv with `mode_flags(mode)`
-        and every worker defaults to `dontask`. The successor emitted a
+        """B4/D6: `dispatch_bg` ends every worker argv with `mode_flags(mode)`,
+        and `fleet spawn --mode` defaults to `dontask` -- which is STILL its
+        default and is still right for a plain worker. The successor emitted a
         permission flag ONLY when the operator typed `--permission-mode`
         (argparse default None), so the default path ran under claude's own
         default mode -- and the successor's bootstrap opens with a Bash call,
         which in a headless `--bg` session hangs forever on an unanswerable
         permission prompt. That is the T12 wedge class this repo already paid
-        for once."""
+        for once.
+
+        This test asserts nothing about WHICH mode: it asserts that whatever
+        `SUCCESSOR_DEFAULT_MODE` is, its flags reach the argv. Only the
+        SUCCESSOR default moved to `bypass` on 2026-07-27; `fleet spawn`'s did
+        not, and the two are separate constants for that reason."""
         self._hold()
         run = self._dispatch_then_roster()
         args = SimpleNamespace(sid="sid-old", model=None, permission_mode=None)
@@ -2936,7 +2942,11 @@ class TestHandoff:
         assert expected, "the successor default mode must emit at least one flag"
         for flag in expected:
             assert flag in dispatch
-        # same default the worker choke point uses -- not a bespoke one
+        # The successor default must be a name from the ONE mode vocabulary
+        # `fleet spawn --mode` draws from -- not a bespoke string, and not a
+        # raw claude spelling. It is NOT required to be the same VALUE as
+        # `fleet spawn`'s default, and since 2026-07-27 it is not: that is
+        # `dontask`, this is `bypass`. Shared keyspace, separate defaults.
         assert fleet.SUCCESSOR_DEFAULT_MODE in fleet.MODE_FLAGS
 
     def test_explicit_permission_mode_overrides_the_successor_default(self, sup_home):
