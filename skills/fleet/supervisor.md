@@ -29,6 +29,17 @@ Soul = `supervisor/GOALS.md` (operator-owned) + `supervisor/JOURNAL.md`
    next supervisor verb AND on every mutating lifecycle verb (§7's gate), and
    the presenter obligation binds you: **present the most recent generation you
    were given.** `NONCE: unchanged` means the outstanding one still stands.
+   - **The obligation binds only verbs that HAVE the flag — three do not.**
+     Measured against the shipped parser: **`sup-context`**, **`sup-status`**
+     and **`autoclean`** declare no `--nonce` at all, so passing one is an
+     argparse error, not a courtesy. They are reads or structurally exempt.
+     Every other `sup-*` verb (`sup-boot`, `sup-spawn`, `sup-checkpoint`,
+     `sup-heartbeat`, `sup-release`, `sup-decision`, `sup-handoff-begin`,
+     `sup-handoff-complete`, `sup-handoff-abort`) takes it, as do the mutating
+     lifecycle verbs (`spawn`, `send`, `interrupt`, `respawn`, `resume-limited`,
+     `kill`, `clean`, `archive`). **Read "every supervisor verb" as "every
+     supervisor verb that accepts it" and check for the flag before assuming a
+     refusal is a gate refusal** — on these three it is a typo.
 4. Reconcile workers from the bundle's fleet-status section. `fleet status`
    runs the outcome discriminator and the silent-limit transcript scan, so
    the verdicts there are measured, not registry guesses (M-B, shipped).
@@ -192,13 +203,14 @@ Old incarnation:
    `sup-boot --handoff-inc <INC> --handoff-token <TOK>`). Timeout T = 300s.
 4. On handshake: `fleet sup-handoff-complete --expect-inc <INC> [--expect-sid <SID>] --nonce <value>`,
    then EXIT the session. `--nonce` is your continuity proof — like every
-   `sup-*` verb, complete refuses without it. `--expect-sid` is OPTIONAL — the
+   gate-armed `sup-*` verb (step 3's carve-out), complete refuses without it.
+   `--expect-sid` is OPTIONAL — the
    token verifies the successor; a sid mismatch is a warning naming the fork,
    not a refusal.
 5. On timeout / dispatch failure:
    `fleet sup-handoff-abort --successor-sid <SID> --nonce <value>`
    — abort is NOT exempt from the continuity gate; without
-   `--nonce` it exits 4 like every other `sup-*` verb (a runbook copy that
+   `--nonce` it exits 4 like every other gate-armed `sup-*` verb (a runbook copy that
    omitted it cost two refusals mid-succession on 2026-07-24). You resume duty;
    doctor flags the abort until the operator clears
    `state/supervisor-handoff-aborted.json`. Both complete and abort unlink the

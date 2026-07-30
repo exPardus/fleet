@@ -75,10 +75,14 @@ draft builds the three tiers on that fixed foundation.
 - **Workers are native `--bg` sessions** — durable, daemon-hosted, survive host restarts, but run only
   when a turn is dispatched. Nothing self-continues (`ScheduleWakeup`, the one native self-wake
   primitive, dies on `claude stop`; native-substrate G7).
-- **The scheduler bridge is already generalized** (M-C autoclean + M-E hardening): a platform adapter
-  with `autoclean_task_query/install/remove(task_name, command, interval)` on both a Windows
-  (schtasks) and a POSIX (crontab) backend, and an F4 ownership predicate that is now full-identity,
-  not path-only. A supervisor beat task would reuse it verbatim (§6).
+- ~~**The scheduler bridge is already generalized**~~ **[SUPERSEDED 2026-07-27 — THE SEAM IS DELETED,
+  not merely retired. See §6's banner.]** This bullet read: *a platform adapter with
+  `autoclean_task_query/install/remove(task_name, command, interval)` on both a Windows (schtasks) and
+  a POSIX (crontab) backend, and an F4 ownership predicate that is now full-identity, not path-only. A
+  supervisor beat task would reuse it verbatim (§6).* The operator retired the timer and the code was
+  deleted with it: there is no adapter method and no `_fleet_task_is_ours` at HEAD. **A supervisor beat
+  cannot reuse anything verbatim — there is nothing to reuse, and the beat-vs-timer ruling has to be
+  re-argued before an OS scheduler is reintroduced at all.**
 - **Fleet is pull-only** (terminal-surface D7): the plugin injects nothing into any session. Every
   tier boundary in this design is therefore an explicit `fleet` call or a file the next tier reads,
   never an injected briefing.
@@ -781,14 +785,44 @@ nonce, is what bounds the damage such a body can do.
 
 ---
 
-## 6. Item 6 — scheduler bridge through the platform adapter, generalized (largely SHIPPED)
+## 6. Item 6 — scheduler bridge through the platform adapter, generalized ~~(largely SHIPPED)~~
+
+> ### ⛔ SUPERSEDING BANNER — 2026-07-27 OPERATOR RULING. THE SEAM DESCRIBED BELOW NO LONGER EXISTS.
+>
+> **All of §6 was written when the OS-scheduler adapter was shipped code. The operator retired the
+> timer on 2026-07-27 and the machinery was deleted, not stubbed.** See `docs/specs/autoclean.md`
+> *AMENDMENT 2026-07-27 — THE TIMER IS RETIRED* and `docs/SPEC.md:254` (*Scheduler bridge — RETIRED
+> 2026-07-27, kept as record*). Measured at HEAD:
+>
+> - `PLATFORM.autoclean_task_install/query/remove` — **gone from both backends.**
+> - `_fleet_task_is_ours` / `_autoclean_task_is_ours` — **gone.**
+> - `fleet init --autoclean`, `--autoclean-interval-hours`, `--autoclean-remove` — **gone**
+>   (`fleet: error: unrecognized arguments: --autoclean`).
+>
+> The receipts in §6.1/§6.2/§6.3 are pinned at `235421e5` and still verify — **correctly, as history.**
+> A green receipt here is evidence about that commit and says nothing about HEAD. That is precisely
+> what made this drift hard to see, and it is why this banner exists rather than a re-pin.
+>
+> **What survives, and binds any future work:** the F2/F3/F4 **ownership reasoning** — home embedded in
+> the command, refuse worktree/mismatched-fleet.py homes, fail-closed on a query error, and ownership by
+> full identity (resolved `fleet.py` path **and** subcommand **and** `--fleet-home`, matched on whole
+> normalized tokens, never a substring). Any future scheduled task inherits that as a requirement.
+>
+> **What does NOT survive: the assumption that a supervisor beat is an OS-scheduler task at all.** The
+> ruling's reason was that *a timer sweeps when the clock says so; a beat sweeps when the fleet is
+> alive* — a 9h14m power cut dropped a sweep with no catch-up, an 18-hour hole in a 6-hourly guard.
+> A builder picking up §9.1 must **re-decide beat-vs-timer against that ruling first**, and must not
+> read §6.1 as an existing seam to wire into. Reintroducing an OS scheduler would reintroduce exactly
+> the missed-occurrence class the ruling deleted.
 
 **Adjudication item 6** binds a generic installer (`task_name`+`command`+`interval`), the fix to the
 `_autoclean_task_is_ours` path-only predicate, three backends or an explicit `UnsupportedPlatformError`
 seam, a doctor check for the new task, multi-flag refusal semantics, and reconciliation with the
 `ScheduleWakeup` primitive the draft never mentioned.
 
-### 6.1 The generic installer already exists
+### 6.1 ~~The generic installer already exists~~ — IT DID AT `235421e5`; IT IS DELETED AT HEAD
+
+**[SUPERSEDED — see §6's banner. Present tense below is as-of `235421e5`, not as-of HEAD.]**
 
 The platform adapter method is already generic over `task_name`, `command`, `interval_hours`:
 
@@ -806,7 +840,11 @@ task is installed by calling the same three methods with `task_name="claude-flee
 `command=<fleet beat argv>`; the method name (`autoclean_task_*`) is now a misnomer for a generic
 scheduler seam — a **rename to `scheduled_task_*` is `[UNBUILT]` cosmetic cleanup**, not a blocker.
 
-### 6.2 The path-only ownership hole is already fixed (M-E)
+### 6.2 The path-only ownership hole is already fixed (M-E) — ~~and the predicate is now deleted~~
+
+**[SUPERSEDED — see §6's banner. `_fleet_task_is_ours` no longer exists; the *reasoning* below is the
+part that survives, as a requirement any future scheduled task inherits. Present tense is as-of
+`235421e5`.]**
 
 Item 6's `_autoclean_task_is_ours` path-only defect — which would let `fleet init --autoclean`
 `/Create /F` over a second fleet task — was fixed in M-E. Ownership is now full-identity (resolved
@@ -837,7 +875,31 @@ future `--supervisor-beat` in one invocation must install both idempotently or r
 per-task ownership predicate makes independent install/refuse safe; the combined-flag CLI wiring is
 `[UNBUILT]`.
 
+**[SUPERSEDED 2026-07-27 — the whole "coexists with the autoclean task" consequence is void: there is
+no autoclean task to coexist with, and no predicate to coexist by. The multi-flag refusal item is moot
+for the same reason — `--autoclean` does not exist, so no invocation can carry both flags. What a
+future builder inherits is only the *requirement*: if two fleet-owned scheduled tasks ever exist again,
+ownership must be per-task and full-identity, because path-only ownership voided F4 the moment a second
+task appeared.]**
+
 ### 6.3 The doctor check, and reconciliation with `ScheduleWakeup`
+
+> **[SUPERSEDED 2026-07-27 — and this subsection's conclusion is now MECHANISM-LESS, which a builder
+> must not skim past.]** §6.3 below rules *`ScheduleWakeup` out* in favour of an external OS-scheduler
+> dispatch. The 2026-07-27 ruling then ruled *the OS scheduler out* as well. **Both candidate
+> mechanisms for an autonomous beat are therefore excluded by a standing decision, and no third one is
+> specified here.** That is not an oversight to be patched by picking either one back up: it is the
+> open question. `ScheduleWakeup`'s disqualifier (`claude stop` kills the loop) and the timer's
+> disqualifier (a clock-driven sweep misses its occurrence when the machine is off, with no catch-up)
+> are *different* failures, and the beat that gets built has to answer both. The autoclean verb's own
+> answer — run it from a tier that is only alive when the fleet is alive — is the shape that survived;
+> whether that generalizes to a supervisor beat is undecided.
+>
+> The doctor-check bullet below is likewise moot in its current form: `_doctor_check_supervisor_beat`
+> would have checked "task present and still ours", and there is no task. Its live analogue is
+> `_doctor_check_autoclean`, which was **replaced rather than deleted** — it now reports the run
+> stamp's AGE, on the reasoning that an installed task said nothing about whether it ever fired, which
+> is exactly how a dropped occurrence read as green. A future beat check should be modelled on that.
 
 - **Doctor check for the beat task** = `[UNBUILT — owned by the three-tier build slice]`: a
   `_doctor_check_supervisor_beat` mirroring the autoclean/wedge checks — task present when
@@ -1058,9 +1120,16 @@ deferred until a campaign demonstrably stalls for want of one.* So the poll's **
 schtasks/crontab task running `fleet beat` every N hours) is **v2**, not v1. When a campaign
 demonstrably stalls for want of an autonomous beat, the v2 build is:
 
-- `fleet init --supervisor-beat N` installs a `claude-fleet-supervisor-beat` task via the §6.1 adapter,
-  `command = fleet beat` (never `fleet send`, §4.3/§5.2), owned via `_fleet_task_is_ours(…, "beat")`
-  (§6.2), with `N` constrained so `S > N·3600 + margin` (§7.1).
+- ~~`fleet init --supervisor-beat N` installs a `claude-fleet-supervisor-beat` task via the §6.1
+  adapter, `command = fleet beat` (never `fleet send`, §4.3/§5.2), owned via
+  `_fleet_task_is_ours(…, "beat")` (§6.2), with `N` constrained so `S > N·3600 + margin` (§7.1).~~
+  **[SUPERSEDED 2026-07-27 — see §6's banner. There is no §6.1 adapter to install through and no
+  `_fleet_task_is_ours` to own by; both were deleted with the timer. Do not treat this bullet as a
+  wiring task. The prerequisite is a DECISION, not code: the same operator ruling that deleted the
+  seam holds that a clock-driven task is the wrong mechanism for keeping a fleet swept, and §6.3 now
+  records that the alternative (`ScheduleWakeup`) is separately disqualified. What still stands from
+  this bullet: `command = fleet beat` never `fleet send` (§4.3/§5.2), and the `S > N·3600 + margin`
+  constraint if any periodic mechanism is chosen.]**
 - The beat-worker split (§5.2) becomes the cost answer: a claimless cheap-tier session that only decides
   "wake the supervisor?" — its own spawn at the third/cheap tier, because model is spawn-immutable and
   `send` has no `--model` (§5.2 receipt).
@@ -1676,9 +1745,11 @@ them** — listed for the build slice / a doc-sync pass:
   become 150–200k; §4 registry (a `supervisor`-named worker record + reserved-name rule); §6 the new
   `sup-spawn` choke-point; a new scheduled-task family beyond autoclean (§6); the operator-gate state
   file (§8). Fold in when built.
-- **`docs/specs/autoclean.md`** — the generic scheduler adapter now serves a second task family
-  (§6.1); the `_fleet_task_is_ours(…, "beat")` coexistence (§6.2); and the supervisor archive/husk
-  exemption (§7.2).
+- **`docs/specs/autoclean.md`** — ~~the generic scheduler adapter now serves a second task family
+  (§6.1); the `_fleet_task_is_ours(…, "beat")` coexistence (§6.2);~~ **[both VOID 2026-07-27 — the
+  adapter and the predicate are deleted; autoclean.md's own AMENDMENT is now the authority and this
+  document is the one that needed folding, in the opposite direction]** and the supervisor
+  archive/husk exemption (§7.2).
 - **`docs/OPERATOR-GATES.md`** — the three-tier build slice is itself an open gate (`M-F shape and
   budget`); this spec's own design gate is the next step.
 - **`knowledge/lessons.md#2026-07-23-three-tier-inputs`** — the manager's tier-based / provider-agnostic
