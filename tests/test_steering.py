@@ -40,6 +40,28 @@ def _blank_out_function(source: str, func_name: str) -> str:
     raise AssertionError(f"no top-level def {func_name}() to exempt")
 
 
+def _function_code(source: str, func_name: str) -> str:
+    """The CODE of top-level `func_name` -- signature and docstring excluded.
+    `ast` for the same reason `_blank_out_function` uses it, plus one the
+    mailbox lint below needs specifically: that lint asks "is there still a
+    buffered append in here?", and the docstring of the very function that
+    replaced one necessarily QUOTES `open(..., "a")` while explaining why it
+    is gone. A text scan over the whole function would read its own
+    correction as the defect. Raises if the function is absent -- a renamed
+    appender fails loudly rather than silently linting nothing."""
+    tree = ast.parse(source)
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func_name:
+            body = node.body
+            if (body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                body = body[1:]
+            assert body, f"{func_name}() has no code, only a docstring"
+            return "\n".join(ast.unparse(stmt) for stmt in body)
+    raise AssertionError(f"no top-level def {func_name}() in bin/fleet.py")
+
+
 @pytest.fixture(autouse=True)
 def isolated_home(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet, "FLEET_HOME", tmp_path)
@@ -78,6 +100,125 @@ class TestAppendMailbox:
         assert "first" in content
         assert "second" in content
         assert content.index("first") < content.index("second")
+
+    # -----------------------------------------------------------------
+    # ULTRAREVIEW-2026-07-30 P1-5: the mailbox carries the operator's
+    # steering text and has genuinely concurrent writers (two of the three
+    # `append_mailbox` call sites in `_cmd_send_native` hold `fleet_lock`,
+    # the fork-steer one deliberately does not), so it must use the same
+    # single-syscall append `append_event`/`append_outcome` were migrated
+    # onto. A buffered `open(..., "a")` here drops whole messages on
+    # Windows with no error at all.
+    # -----------------------------------------------------------------
+
+    _MAILBOX_APPENDERS = ("append_mailbox", "_migrate_residual_mailbox")
+
+    def test_append_routes_through_the_atomic_primitive(self, isolated_home, monkeypatch):
+        seen = []
+        real = fleet._atomic_append_bytes
+        monkeypatch.setattr(fleet, "_atomic_append_bytes",
+                            lambda path, data: (seen.append(path), real(path, data))[1])
+        # A message already on disk, as a concurrent sender would have left it.
+        fleet.append_mailbox("sid-1", "already queued")
+        seen.clear()
+        fleet.append_mailbox("sid-1", "revert the migration")
+        assert seen == [fleet.mailbox_dir() / "sid-1.md"]
+        content = (fleet.mailbox_dir() / "sid-1.md").read_text(encoding="utf-8")
+        assert "already queued" in content, "the earlier message was clobbered"
+        assert "revert the migration" in content
+
+    def test_no_mailbox_appender_uses_a_buffered_open(self):
+        """Source lint, mirroring tests/test_hooks.py's stop_outcome pin: the
+        routing test above still passes if a SECOND, buffered write is added
+        beside the atomic one, and `_migrate_residual_mailbox` (which had its
+        own appender) could regrow one. Neither appender's CODE may open a
+        file at all."""
+        source = Path(fleet.__file__).read_text(encoding="utf-8")
+        for func in self._MAILBOX_APPENDERS:
+            code = _function_code(source, func)
+            assert "open(" not in code, (
+                f"{func}() opens a file directly -- mailbox appends must go "
+                f"through _atomic_append_bytes (ULTRAREVIEW P1-5); a buffered "
+                f"open(..., 'a') silently drops whole messages on Windows")
+        assert "_atomic_append_bytes" in _function_code(source, "append_mailbox")
+
+    def test_no_hook_appends_to_a_mailbox(self):
+        """The buffered append survived review behind a docstring justifying
+        it as "matching the hooks' own append discipline exactly". That
+        precedent does not exist -- the hooks only os.replace-claim and read
+        a mailbox; every `open(..., "a")` in them targets hook-errors.log or
+        a journal. Pinned as a fact about the hooks rather than as a string
+        match on the docstring: if a hook ever DOES grow a mailbox append,
+        this fails and the (now atomic) append discipline has to be carried
+        into that hook too, exactly as stop_outcome.py already carries it."""
+        # Sanctioned appenders, by (file, enclosing function): the error log
+        # every hook carries, and postcompact_journal's landmark write.
+        sanctioned = {("*", "_log_hook_error"),
+                      ("postcompact_journal.py", "main")}
+        root = Path(fleet.__file__).resolve().parent.parent
+        hooks = sorted(root.glob("bin/hooks/*.py"))
+        assert len(hooks) >= 4, hooks
+        found = 0
+        for path in hooks:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                for call in ast.walk(node):
+                    if (isinstance(call, ast.Call)
+                            and isinstance(call.func, ast.Name)
+                            and call.func.id == "open"
+                            and any(isinstance(a, ast.Constant) and a.value == "a"
+                                    for a in call.args)):
+                        found += 1
+                        assert (("*", node.name) in sanctioned
+                                or (path.name, node.name) in sanctioned), (
+                            f"{path.name}::{node.name}() appends to a file. If "
+                            f"that file is a mailbox it must use the atomic "
+                            f"append (ULTRAREVIEW P1-5) -- stop_outcome.py "
+                            f"already carries the primitive for hooks that "
+                            f"cannot import fleet.py.")
+        assert found >= 4, "the lint found no appends at all -- it is scanning nothing"
+
+    def test_concurrent_appends_lose_no_message(self, isolated_home):
+        """The defect itself, measured. On Windows a buffered `open(..., "a")`
+        loses 3-4% of records here (4 threads x 250: 961-969 of 1000 intact,
+        measured 2026-07-30 on this repo's own probe) with zero exceptions and
+        zero decode errors -- silent loss of operator instructions. On POSIX
+        the CRT emulation race does not exist and this passes either way; it
+        is the Windows regression pin."""
+        import threading
+        threads, per_thread = 4, 250
+        message = "revert the migration"
+        start = threading.Barrier(threads)
+
+        def worker():
+            start.wait()
+            for _ in range(per_thread):
+                fleet.append_mailbox("sid-race", message)
+
+        ts = [threading.Thread(target=worker) for _ in range(threads)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        content = (fleet.mailbox_dir() / "sid-race.md").read_text(encoding="utf-8")
+        assert content.count(message + "\n\n") == threads * per_thread
+
+    def test_an_unencodable_message_still_reaches_the_mailbox(self, isolated_home):
+        """A lone surrogate can ride in from argv on Windows (sys.argv is
+        decoded with surrogatepass), and the buffered `open(..., encoding=
+        "utf-8")` this replaces raised UnicodeEncodeError on it -- from the
+        fork-steer call site, which sits OUTSIDE `fleet_lock` and outside the
+        rollback's try block, so the worker stayed pre-claimed `working`
+        forever and the send died with a traceback. Same ruling as incident
+        `outcome-surrogate` (2026-07-28, bin/hooks/postcompact_journal.py):
+        the write always happens, the offending character is sanitised
+        one-for-one, nothing is truncated."""
+        fleet.append_mailbox("sid-1", "bump \ud800 the version")
+        content = (fleet.mailbox_dir() / "sid-1.md").read_text(encoding="utf-8")
+        assert content.startswith("bump ")
+        assert "the version" in content
 
 
 def _seed_worker(name, status=None):
