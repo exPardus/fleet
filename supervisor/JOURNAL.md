@@ -4995,3 +4995,44 @@ UNTOUCHED, AS ORDERED: the three resid-probes, fix/b6-interface-release, the dec
 ## 2026-07-30T14:17:49Z RELEASED inc=inc-20260730T134712Z-3b40 sid=18a6adf6-6aa4-403c-a037-ff5a3415b7fc
 
 released cleanly: Wave 33 closed at a clean boundary with BOTH ordered items done and pushed, in-band at 161.4k against a 150k soft trigger. (1) w30/p14 MERGED at ce64557 -- main 8313f34 -> 1466f38 -> 77bf2ba, read back byte-identical; floors 3498/14/1 predicted before running and hit exactly on both interpreters; receipts rc=0. The brief priced the CONFLICT right (2 hunks, pure prose) and UNDER-priced the DAMAGE: 7 sites re-pinned across 5 numbers, 5 of them caught by a pin the brief did not name. Every stale number was verified correct at its own base first; none was hand-picked. (2) WORKTREE PURGE 89 -> 28, 61 removed, 0 refused, census persisted to state/journals/worktree-census.md before anything was deleted, doctor's FAIL set unchanged after. I re-derived the removable set instead of inheriting the census worker's (63/24/2 vs my 61/27/1) and resolved EVERY disagreement toward keeping. OWED NEXT, IN ORDER: P1-13 + P1-12 (dispatch a worker to REFUTE the ultrareview's never-verified 'one root cause' claim, not confirm it); then P1-7 (= P2-8, one lane, the review double-counted it); then the 27 LIST-ONLY worktrees itemised in the census -- 16 of them are output-only and become removable by copying their untracked *.md out. NOT started: item 3, gated on the 150k trigger I am past. UNTOUCHED as ordered: the three resid-probes, fix/b6-interface-release, the decoy branch, the operator's branch-protection slot (10th wave; the bypass event fired twice more this wave, so the evidence base is now six measurements and the decision is still the operator's alone).
+
+## 2026-07-30T14:33:22Z BOOT inc=inc-20260730T143322Z-3263 sid=526c51ed-e041-4a76-b919-2fa7292feb82
+
+fresh claim: predecessor inc-20260730T134712Z-3b40 released cleanly -- fresh claim, no seizure
+
+## 2026-07-30T14:35:12Z CHECKPOINT inc=inc-20260730T143322Z-3263 sid=526c51ed-e041-4a76-b919-2fa7292feb82
+
+W34-A BOOT. Fresh claim (VERDICT: claim), predecessor inc-20260730T134712Z-3b40 released cleanly -- no seizure, no transfer. Bundle read from the redirected file, NONCE grepped from the FILE never off the stream tail, bundle deleted and verified (0 boot-bundle files remain).
+
+DOCTOR AT BOOT. ONE FAIL, down from two -- and the one that went away is the news. identity-witness FAILs again (SEVENTH consecutive sighting, LEAK variant, third consecutive): FLEET_WORKER names 'sup|inc-20260730T131459Z-84c5|boot' (a different live registry record, status idle) while the registry resolves my sid 526c51ed to 'sup|inc-20260730T143254Z-2168|boot'. supervisor-pending-decision is GONE -- the operator's docket pass cleared the branch-protection slot, so the slot is free for the first time in ten waves. I am NOT putting anything in it unless I measure something that needs it.
+
+THE DOCTOR ROW CONFIRMED ITEM 1'S PREMISE LIVE, BEFORE I DISPATCHED ANYTHING. Its remedy text really does end on 'if something outside fleet ever blanks one, the ceiling's exemption is granted on a false premise' -- the stripper hunt the ruling calls unfounded. The brief did not have to be trusted on that one; I read it off the running verb.
+
+UNDER THE NEW IDENTITY CLAUSE MY OWN LEAK READS DIFFERENTLY THAN IT DID LAST WAVE. Wave 33 accepted the ND4c exemption as unavailable because the exemption keys on stamp ABSENCE and I have a stamp. The 2026-07-30 ruling says the stamp is evidence about the daemon's cold-starter, not about me -- so the old grounding was never sound in either direction. I still treat the 200k ceiling as APPLYING and will read runway via 'fleet sup-context', because the re-grounding is OWED WORK, not yet shipped, and a supervisor does not get to apply a ruling to its own exemption before the code carries it.
+
+BRIEF NUMBERS VERIFIED BEFORE ACTING ON ANY OF THEM. main tip = 581c48e, origin/main == local main == 581c48e (brief RIGHT). b6 tip = 2e824ea (brief RIGHT). Worktrees = 28, matching wave 33's post-purge count.
+
+WHAT MY BRIEF GOT WRONG -- FOUND ONE ALREADY, AND IT IS A PRICING ERROR ON THE LANE IT MATTERS MOST FOR. The brief says b6's 'target tree moved ~90 commits'. MEASURED: merge-base is a2358f2 and main is 232 COMMITS AHEAD of it, not ~90. 2.5x the stated drift. b6 carries 3 commits / 891 insertions over 4 files.
+SECOND, WORSE, AND THE BRIEF DOES NOT MENTION IT AT ALL: b6 edits docs/specs/three-tier-command.md (+46) and docs/specs/claim-nonce.md (+116) -- THE SAME TWO RATIFIED SPECS LANE 1 IS ORDERED TO EDIT. The brief hands lanes 1 and 2 out as if they were disjoint. They are not: lane 1 re-grounds three-tier 11.3 ND4c and replaces the identity clause, and lane 2 rebases 891 lines across those same files. This is wave 33's lesson arriving one wave early -- price a merge by what MOVED, not by what collided -- so I am sequencing the merges 1-then-2 and telling lane 2 explicitly that its spec targets will move under it.
+
+PLAN: dispatch items 1, 2, 3 as three parallel worker lanes in separate worktrees (one writer per tree), then merge in brief order. BAND: booted low.
+
+## 2026-07-30T20:29:39Z SEIZED inc=inc-20260730T202939Z-08db sid=ce3b0182-ed86-4ece-859a-933f1576208e
+
+seized from inc-20260730T143322Z-3263: holder roster-gone, heartbeat stale (21267s > 3600s)
+
+## 2026-07-30T20:31:58Z CHECKPOINT inc=inc-20260730T202939Z-08db sid=ce3b0182-ed86-4ece-859a-933f1576208e
+
+W34-RETRY BOOT. SEIZED, and the seizure is the expected path this wave, not an anomaly: predecessor inc-20260730T143322Z-3263 died with the machine's login expiry at zero work, heartbeat stale 21267s >> 3600s, holder roster-gone. My incarnation inc-20260730T202939Z-08db. Bundle read from the redirected file, NONCE grepped from the FILE never off the stream tail, bundle deleted and verified (0 remain).
+
+DOCTOR AT BOOT: ZERO FAIL. That is the first all-PASS doctor of this campaign and one row is genuine news -- identity-witness PASSES: FLEET_WORKER and the registry BOTH name 'sup|inc-20260730T202915Z-4726|boot' for my sid ce3b0182. The LEAK is gone after SEVEN consecutive sightings, and the mechanism explains itself: the login expiry killed the daemon, daemon.lock is held by a NEW pid 41212 since 20:29:17Z, and MY dispatch is the first dispatch of that fresh daemon generation -- so the donated env is my own. This is the day-4 wedge-2 mechanism confirmed from the clean side: the daemon donates the FIRST dispatch's env, and this time the first dispatch was me. It is NOT a fix, and lane 1's ABSENT-stamp/substitution work is unaffected: the next body dispatched under this daemon inherits MY stamp and the leak returns.
+
+DECISION SLOT CONSUMED. Branch protection ANSWERED B by Altai in-session 2026-07-30: policy is made to agree with doctrine -- the operator drops/scopes the 'changes must be made through a pull request' rule on exPardus/fleet; merge doctrine stays byte-identical (stage branch, --ff-only, direct push, floors before push); until the settings change lands, bypass events remain EXPECTED and are not violations; no PR path added. I will clear the slot after this checkpoint. My merges this wave proceed unchanged under that ruling.
+
+BRIEF NUMBERS VERIFIED BEFORE ACTING ON ANY OF THEM. main tip = 581c48e, origin/main == local main == 581c48e (RIGHT). b6 tip = 2e824ea, merge-base a2358f2, main 232 ahead of it, b6 = 3 commits / 4 files / 891 insertions / 7 deletions (RIGHT, and it matches what my predecessor wrote into the lane-2 task file). All three inherited worktrees exist, are CLEAN, and sit at 581c48e on w34/rulings, w34/b6gate, w34/mf-slice0 (RIGHT). 31 worktrees total. Uncommitted: supervisor/JOURNAL.md only -- the wave-33 RELEASED entry plus my predecessor's boot checkpoint, to fold into my first journal commit as ordered.
+
+I READ BOTH INHERITED TASK FILES RATHER THAN TRUSTING THAT THEY SAY WHAT THE MISSION ORDERS. They do, and lane 2's is better than the campaign brief that produced it -- my predecessor had already caught and written IN the b6 pricing error (232 not ~90) and the lane-1/lane-2 spec collision (both edit docs/specs/three-tier-command.md and docs/specs/claim-nonce.md) before it died. Both files carry fences, floor-on-both-interpreters, predict-before-running, and their own WHAT-THIS-BRIEF-GOT-WRONG sections. REUSING BOTH AS-IS via respawn. The mf0 lane was never spawned; I write and dispatch it fresh.
+
+AUTOCLEAN IS 6.3h STALE (doctor: 'THE BEAT IS NOT BEATING') -- expected, nobody was alive to beat. On my beat this wave.
+
+PLAN: respawn lanes 1 and 2, spawn lane 3 fresh, merge in order 1 -> 2 -> 3 as they green. BAND: booted low.
