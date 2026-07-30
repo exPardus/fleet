@@ -1193,6 +1193,38 @@ entry**, describing what *that* campaign did. It was read as present tense.
   evasion reported); 5/6 reproduce exactly, 0 unclassified.
 - Floors, this worktree, both interpreters: **2970 passed / 14 skipped, 2984 collected** —
   identical on 3.13 and 3.10, and `passed + skipped == collected` on both.
+
+**CORRECTION APPENDED 2026-07-30 (wave 22 measured, wave 23 recorded) — the floor line directly
+above DOES NOT REPRODUCE AT ITS OWN COMMIT, and it is appended-to here rather than edited
+because this entry's own THE-lesson says rewriting the record of an act to fix a lookup problem
+falsifies the lesson to save the index.** Wave 22 predicted a merge floor from the `2970 / 14 =
+2984` figure above and missed by 8. Chasing the miss refuted both of its hypotheses and found
+the cause upstream of the arithmetic: it checked out `ae94e07` — *the very commit this entry is
+attributed to* — and measured **2996 collected**, not 2984. So the recorded number is not a
+measurement of the tree it names. **Why this surface and not another: `tools/verify_receipts.py`
+covers `docs/specs/**` ONLY, so nothing in this repo re-executes a number that lives under
+`knowledge/`** — the index is precisely where an unexecuted figure can sit dated, specific and
+authoritative for as long as nobody predicts against it. *"Inherited numbers are not
+measurements" just bit the index that carries the lesson.*
+
+Measured floors, for whoever predicts next — each a full serial run on BOTH interpreters:
+
+| commit | passed | skipped | collected | note |
+|---|---|---|---|---|
+| `ae94e07` | — | — | **2996** | collect-only; refutes the 2984 above at its own commit |
+| `981c64a` | **2982** | 14 | **2996** | wave 22, `fix/docs-drift` merge |
+| `747402d` | **2996** | 14 | **3010** | wave 23, `fix/stillborn-handoff` merge; predicted exactly before running |
+
+The `747402d` row is the one to copy the METHOD from, not just the number: 2996/14/3010 was
+**predicted before the run** from `981c64a`'s measured 2982/14/2996 plus a count of the test
+functions the branch actually added (`git diff <merge-base>..<branch> -- tests/ | grep -c
+'^+\s*def test_'` → 14 added, 0 removed, no `parametrize`). It landed exact on both
+interpreters. **A green run you predicted is evidence; one you merely observed is a vibe** — and
+the prediction is also what would have caught this defect years earlier, since predicting is the
+only act that ever reads these numbers back. Note the branch report's own claim of "10 new tests
++ 1" was **wrong by 3**: it was written at `87cbf9a`, three commits behind the tip it shipped.
+Count the tests at the TIP you are merging, not at the sha the report names.
+
 ## 2026-07-28 — the gate that found the fix was right and the sentences around it were not {#2026-07-28-claims-vs-code}
 
 Stamp on the entry above (`#2026-07-27-...`, the stillborn-handoff postscript): **the three defects
