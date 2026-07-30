@@ -7,6 +7,8 @@ pytest tmp_path (autouse fixture below), same discipline as test_core.py.
 """
 import io
 import json
+import os
+import shutil
 import threading
 import uuid
 from contextlib import contextmanager
@@ -309,6 +311,95 @@ class TestResolveClaudeExecutable:
     def test_missing_raises_clear_error(self):
         with pytest.raises(fleet.ClaudeNotFoundError):
             fleet.resolve_claude_executable(which=lambda n: None)
+
+
+class TestResolveClaudeExecutableRefusesTheCurrentDirectory:
+    """P1-9 (ULTRAREVIEW 2026-07-30): `shutil.which` prefers a `claude.cmd`
+    sitting in the CURRENT DIRECTORY on Windows, and the result is executed
+    with the operator's full inherited environment.
+
+    Measured on this machine, in a scratch dir holding a planted `claude.cmd`:
+
+        py 3.10.1  shutil.which('claude') -> '.\\claude.CMD'
+                   -- WITH NoDefaultCurrentDirectoryInExePath=1 set; 3.10/3.11
+                      insert os.curdir unconditionally, so the OS opt-out does
+                      not help on the DECLARED FLOOR (fleet.MIN_PYTHON_VERSION)
+        py 3.13    same once the var is unset (its default state on Windows;
+                   it is persisted at neither User nor Machine scope here)
+        subprocess.run(['.\\claude.CMD']) with NO cwd= -> rc 0, stdout 'PWNED'
+
+    The call sites that pass no `cwd=` -- `_fetch_agents_roster` (reached by
+    `fleet status`, the most-run verb), doctor's `--version` and `agents`
+    probes, the `rm`/`stop` paths -- run it against the MANAGER's cwd.
+
+    Nothing here executes anything: the planted file is only ever resolved."""
+
+    def _plant(self, tmp_path, monkeypatch, name="claude.CMD"):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / name).write_text("@echo PWNED\n", encoding="utf-8")
+
+    def test_refuses_a_curdir_relative_resolution(self, tmp_path, monkeypatch):
+        self._plant(tmp_path, monkeypatch)
+        planted = os.path.join(os.curdir, "claude.CMD")   # what which() returns
+        with pytest.raises(fleet.ClaudeNotFoundError, match="current directory"):
+            fleet.resolve_claude_executable(which=lambda _n: planted)
+
+    def test_refuses_a_bare_relative_name_that_exists_in_the_cwd(self, tmp_path, monkeypatch):
+        # An empty PATH entry makes which() return an unprefixed relative name;
+        # CreateProcessW then searches the cwd for it, same hijack.
+        self._plant(tmp_path, monkeypatch, name="claude.EXE")
+        with pytest.raises(fleet.ClaudeNotFoundError, match="current directory"):
+            fleet.resolve_claude_executable(which=lambda _n: "claude.EXE")
+
+    def test_refuses_a_relative_subdir_resolution_under_the_cwd(self, tmp_path, monkeypatch):
+        # A relative PATH entry (`tools`) is the same hazard one level down.
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "tools").mkdir()
+        (tmp_path / "tools" / "claude.CMD").write_text("@echo PWNED\n", encoding="utf-8")
+        with pytest.raises(fleet.ClaudeNotFoundError, match="current directory"):
+            fleet.resolve_claude_executable(
+                which=lambda _n: os.path.join("tools", "claude.CMD"))
+
+    def test_absolute_resolution_is_untouched(self, tmp_path, monkeypatch):
+        # An ABSOLUTE PATH entry is an explicit operator decision, even when it
+        # names the cwd. The defect is the IMPLICIT curdir insert, and only it.
+        self._plant(tmp_path, monkeypatch)
+        real = str(tmp_path / "claude.CMD")
+        assert fleet.resolve_claude_executable(which=lambda _n: real) == real
+
+    def test_the_which_seam_is_intact(self, tmp_path, monkeypatch):
+        """The DI seam pin. ~100 existing tests inject `which=lambda _: "claude"`
+        -- a SINGLE-POSITIONAL-ARG callable returning a name that exists
+        nowhere. The guard must not add a second argument to the `which(...)`
+        call, and must not reject a relative result that is not actually in the
+        cwd: a fake resolves to nothing and hijacks nothing."""
+        monkeypatch.chdir(tmp_path)
+        seen = []
+
+        def one_arg_double(name):
+            seen.append(name)
+            return "claude"
+
+        assert fleet.resolve_claude_executable(which=one_arg_double) == "claude"
+        assert seen == ["claude"]
+        import inspect
+        params = inspect.signature(fleet.resolve_claude_executable).parameters
+        assert params["which"].default is shutil.which
+
+    @pytest.mark.skipif(os.name != "nt",
+                        reason="the curdir insert being defended against is win32-only")
+    def test_the_real_shutil_which_is_what_gets_refused(self, tmp_path, monkeypatch):
+        """The stdlib link, with NO injection: the default `which` really does
+        hand back the planted file, on both supported interpreters. Without
+        this the guard could be defending against a shape `shutil.which` never
+        produces. `NoDefaultCurrentDirectoryInExePath` is removed because that
+        is its state in an ordinary operator cmd.exe/PowerShell -- and on the
+        3.10 floor it makes no difference either way."""
+        monkeypatch.delenv("NoDefaultCurrentDirectoryInExePath", raising=False)
+        self._plant(tmp_path, monkeypatch)
+        assert shutil.which("claude") == os.path.join(os.curdir, "claude.CMD")
+        with pytest.raises(fleet.ClaudeNotFoundError, match="current directory"):
+            fleet.resolve_claude_executable()
 
 
 # ---------------------------------------------------------------------------

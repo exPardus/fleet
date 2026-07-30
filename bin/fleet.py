@@ -1426,15 +1426,71 @@ class ClaudeNotFoundError(Exception):
     """Raised when the `claude` executable cannot be resolved on PATH."""
 
 
+def _resolved_from_current_directory(exe: str) -> bool:
+    """True if `exe` is a resolution the CURRENT DIRECTORY produced.
+
+    P1-9 (ULTRAREVIEW 2026-07-30). `shutil.which` inserts `os.curdir` at the
+    FRONT of the search path on win32, so a `claude.cmd` in the process's
+    current directory wins over the real install. Measured here: py 3.10.1
+    returns `'.\\claude.CMD'` even with `NoDefaultCurrentDirectoryInExePath=1`
+    in the environment (3.10/3.11 insert curdir unconditionally -- the
+    `_win_path_needs_curdir` gate only landed in 3.12), and 3.13 does the same
+    whenever that variable is unset, which is its state in an ordinary
+    operator shell. `MIN_PYTHON_VERSION` is (3, 10), so the interpreter the OS
+    opt-out cannot protect is a SUPPORTED configuration.
+
+    The test is written on the returned path rather than on the platform,
+    which keeps it free of a per-OS branch (SPEC §14) and covers the POSIX
+    spelling of the same hazard, a `.` entry on PATH:
+
+      * an ABSOLUTE result is trusted. An absolute PATH entry is an explicit
+        operator decision even when it happens to name the cwd; the defect is
+        the IMPLICIT curdir insert, and only it.
+      * a RELATIVE result is refused when it actually resolves to something
+        under the cwd -- which is the only way a real `which` can return one,
+        since it only returns paths that passed an access check. A relative
+        result that resolves to nothing is a test double, not a hijack, and
+        that is what keeps the `which=` injection seam usable."""
+    if not exe or os.path.isabs(exe):
+        return False
+    try:
+        return os.path.exists(os.path.join(os.getcwd(), exe))
+    except OSError:
+        return False
+
+
 def resolve_claude_executable(which=shutil.which) -> str:
     """Resolve the real claude executable (claude.cmd/claude.exe on Windows)
     via shutil.which -- subprocess.run needs the concrete path, not the bare
-    name."""
+    name.
+
+    Refuses a resolution that came out of the current directory (P1-9). The
+    resolved path is executed with the operator's full inherited environment,
+    and several call sites pass no `cwd=` at all -- `_fetch_agents_roster`
+    (reached by `fleet status`, the most-run verb), doctor's `--version` and
+    `agents` probes, the `rm`/`stop` session paths -- so a planted
+    `claude.cmd` in whatever directory the manager happens to be sitting in is
+    arbitrary code execution as the operator.
+
+    `which` stays a one-argument injection seam: the guard reads the RESULT
+    rather than passing a sanitised `path=`, both because ~100 tests inject
+    single-parameter doubles and because an explicit `path=` does not help --
+    the curdir insert happens on the 3.10 floor regardless of it."""
     exe = which("claude")
     if not exe:
         raise ClaudeNotFoundError(
             "claude executable not found on PATH (checked via shutil.which('claude'); "
             "expected claude.cmd or claude.exe on this machine)"
+        )
+    if _resolved_from_current_directory(exe):
+        raise ClaudeNotFoundError(
+            f"refusing to execute {exe!r}: it resolved out of the current "
+            f"directory ({os.getcwd()!r}), not off PATH. On Windows "
+            f"shutil.which searches the current directory FIRST, so a "
+            f"claude.cmd sitting in this directory shadows the real install "
+            f"-- and fleet would run it with your full environment (P1-9). "
+            f"Run fleet from a directory that does not contain a claude "
+            f"executable, or remove the one that does."
         )
     return exe
 
@@ -12244,8 +12300,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :5549, :6006, :10086,
-    :15176), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :5605, :6062, :10142,
+    :15232), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -12935,8 +12991,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:5549, :6006, :10086,
-    #     :15176) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:5605, :6062, :10142,
+    #     :15232) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
