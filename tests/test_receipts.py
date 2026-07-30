@@ -85,6 +85,11 @@ RECEIPT_FLOOR = {
     # materialised pinned tree, so they stay hermetic and never touch a live
     # fleet's state/.
     "terminal-surface.md": 7,
+    # The graceful-succession slice (2026-07-27). Its whole subject is a fleet
+    # asserting a state nothing measured -- `sup-release` recorded an accurate
+    # free-text reason and no surface parsed it -- so every CURRENT-STATE claim
+    # it makes about shipped code is a pinned receipt rather than a sentence.
+    "graceful-succession.md": 14,
 }
 
 # A commit whose bin/fleet.py predates the me/ul + me/daemon merges, used by the
