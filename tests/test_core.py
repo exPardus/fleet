@@ -45,9 +45,15 @@ class TestPaths:
         got = _fleet_home_in_fresh_interpreter(env_override=None)
         assert got == str(fleet.Path(fleet.__file__).resolve().parent.parent)
 
-    def test_template_and_instance_settings_paths_derive_from_fleet_home(self, isolated_home):
-        assert fleet.template_settings_path() == isolated_home / "worker-settings.template.json"
+    def test_the_template_follows_the_install_and_the_instance_follows_the_home(self, isolated_home):
+        """multi-fleet slice 0: these two paths used to derive from the same
+        root, which is the whole defect. The TEMPLATE is git-tracked source and
+        follows INSTALL_ROOT; the rendered INSTANCE is per-fleet state and
+        follows FLEET_HOME. Moving the home must move exactly one of them."""
+        assert fleet.template_settings_path() == (
+            fleet.INSTALL_ROOT / "worker-settings.template.json")
         assert fleet.instance_settings_path() == isolated_home / "state" / "worker-settings.json"
+        assert fleet.template_settings_path().parent != fleet.instance_settings_path().parent
 
 
 def _fleet_home_in_fresh_interpreter(env_override):

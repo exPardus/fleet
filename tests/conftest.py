@@ -51,6 +51,91 @@ def _never_touch_the_real_home(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _never_touch_the_real_install(tmp_path_factory, monkeypatch):
+    """The code-plane twin of `_never_touch_the_real_home`, and it exists
+    because the multi-fleet slice-0 split BROKE THE SANDBOX AND THE SUITE PROVED
+    IT IMMEDIATELY.
+
+    Before the split, `template_settings_path()` resolved under `FLEET_HOME`, so
+    every test that fixtured a template was sandboxed for free by monkeypatching
+    the home. The split re-points it at `INSTALL_ROOT` -- correctly: the template
+    is git-tracked source, not one fleet's state -- and `INSTALL_ROOT` is
+    deliberately NOT overridable by env, so nothing redirected it. The first full
+    run after the change overwrote the developer's real
+    `worker-settings.template.json` with fixture bytes, which is the same class as
+    the 2026-07-29T22:58:39Z incident in `docs/specs/multi-fleet.md`'s opening
+    (fleet run inside the repo overwrote the real registry with fixture data),
+    reached through the code plane instead of the data plane.
+
+    §7 of that spec pins test isolation for the HOME only. This is the missing
+    half, and it is deliberately the same SHAPE as the home's: redirect the
+    plane's root, not the individual helpers, so every install-plane path added
+    later lands in the sandbox by default instead of needing to be remembered.
+
+    The default is therefore an EMPTY install, which is byte-for-byte the
+    contract tests had before the split: `isolated_home` was an empty tmp dir, so
+    `template_settings_path()` and the hook scripts were absent unless the test
+    created them. Tests that need the real code plane opt in with
+    `monkeypatch.setattr(fleet, "INSTALL_ROOT", _REAL_REPO_ROOT)` -- which is
+    exactly what the hook-smoke tests already did to FLEET_HOME, for exactly this
+    reason. Their docstring said so: *"FLEET_HOME must point at the real repo root
+    here (where bin/hooks/*.py actually live)"*. That sentence was the conflation,
+    written down in a test."""
+    import fleet
+    monkeypatch.setattr(fleet, "INSTALL_ROOT", tmp_path_factory.mktemp("fake-install"))
+
+
+def code_plane_files(root):
+    """The git-tracked install-plane files the suite must never modify.
+
+    Module-level and parameterised on `root` so
+    `tests/test_install_home_split.py` can seed the guard below -- a
+    before/after hash comparison is the shape that passes vacuously when its
+    file list silently goes empty."""
+    return sorted(
+        [root / "worker-settings.template.json"]
+        + list((root / "bin").rglob("*.py"))
+        + list((root / "bin").rglob("*.sh"))
+    )
+
+
+def code_plane_snapshot(root):
+    import hashlib
+    out = {}
+    for path in code_plane_files(root):
+        try:
+            out[path] = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            out[path] = "<unreadable>"
+    return out
+
+
+def code_plane_drift(root, before):
+    return sorted(str(p.relative_to(root)) for p, h in code_plane_snapshot(root).items()
+                  if before.get(p) != h)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _the_real_install_plane_is_byte_identical_afterwards():
+    """The sandbox above is a redirect, and a redirect only covers the paths it
+    knows about. This is the proof that it covered them all: hash the git-tracked
+    code plane before and after the whole run and fail loudly on any drift.
+
+    Without it, the next install-plane path someone writes through is caught by a
+    developer noticing a dirty `git status`, which is how the incident this
+    fixture documents was actually caught."""
+    root = Path(__file__).resolve().parents[1]
+    before = code_plane_snapshot(root)
+    yield
+    changed = code_plane_drift(root, before)
+    assert not changed, (
+        f"the test suite modified git-tracked install-plane files: {changed}. "
+        f"Something resolved a WRITE through INSTALL_ROOT without going via the "
+        f"`_never_touch_the_real_install` sandbox. Redirect it there rather than "
+        f"fixing the one test -- the sandbox is what makes this a class.")
+
+
+@pytest.fixture(autouse=True)
 def _no_inherited_claude_session(monkeypatch):
     """Run every test as a HUMAN SHELL, not as whichever Claude session invoked
     pytest.

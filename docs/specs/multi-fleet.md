@@ -83,6 +83,43 @@ the `render_worker_settings_template` call, the template's hook-command placehol
 (`{{FLEET_INSTALL}}/...`). Doctor legacy-settings check stays home-plane. Re-grep before
 touching.
 
+**BUILT 2026-07-31** (`INSTALL_ROOT`, `tests/test_install_home_split.py`). The symbol list
+was accurate and complete: re-grepped, all eight sites existed as named, "the two doctor
+hook-smoke checks" were exactly two, and the legacy-settings check was correctly left alone.
+The count is now pinned by derivation rather than by list — `test_no_bin_path_is_still_
+resolved_from_the_home` fails on any surviving `FLEET_HOME / "bin"`. Four measured
+disagreements with this section, none of them changing what was ratified:
+
+1. **"four dead hooks" is exactly right, and it undercounts the damage.** Derived from the
+   template (4 declared hook commands, 4 rooted at the home) and driven against a data-only
+   home: all 4 dead — `posttooluse_mailbox`, `stop_outcome`, `stop_mailbox`,
+   `postcompact_journal`. The statusline dies the same way; this section already names it
+   separately, so the arithmetic is consistent, but "four" is the hook count and not the
+   casualty count.
+2. **The four hooks are NOT textually unified, deliberately.** This section says slice 0
+   "unifies them". `bin/hooks/stop_outcome.py`'s own module docstring records the opposite as
+   established doctrine — *"Standalone, stdlib only. Never imports bin/fleet.py — duplicates
+   its own tiny helpers (`_fleet_home`, `_log_hook_error`, `_resolve_name`) per the
+   established pattern"* — so collapsing them means the first cross-module import in a plane
+   whose invariant is exit-0 hooks, to save nine lines. Built instead as **behavioural**
+   unification: the four are driven and required to agree with each other *and with
+   `fleet.py`'s own resolution*, which a shared hook module would not have covered. Their
+   `__file__` fallback still derives the home from the install; that is not fixable here —
+   a hook learns its home only when the dispatch tells it, which is slice (c)'s baked argv.
+3. **§7's test-isolation pins have no code-plane half, and the split needs one.** Pointing
+   `template_settings_path()` at the install removed the sandbox those tests had for free
+   from monkeypatching the home; the first full run **overwrote this repo's real, git-tracked
+   `worker-settings.template.json` with `{}`** — the same class as the incident receipt at
+   the top of this document, reached through the code plane instead of the data plane.
+   `conftest.py` gains an `INSTALL_ROOT` redirect (same shape as the home's, so later
+   install-plane paths land in it by default) plus a session-scoped drift guard over the
+   git-tracked code plane, with a seed. §7 should be read as owing this half.
+4. **`{{FLEET_HOME}}` is kept as a legal placeholder alongside `{{FLEET_INSTALL}}`**, and
+   `render_worker_settings_template` defaults its new `fleet_install` argument to the home.
+   Not in this section, and it is what makes the legacy layout byte-identical rather than
+   merely equivalent: every existing 3-argument caller and any out-of-tree template still
+   written against `{{FLEET_HOME}}` renders exactly what it rendered before.
+
 ## §4. The homes list
 
 `~/.claude/fleet-homes.list`. Append-only forever (rewrite reading measured 95–100% loss;
