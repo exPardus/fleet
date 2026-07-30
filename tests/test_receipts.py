@@ -88,6 +88,16 @@ RECEIPT_FLOOR = {
     # a committed artifact under `docs/specs/receipts/` and the block is a
     # normal enforced receipt, which is why this suite executes all eight.
     "fleet-index.md": 8,
+    # Joined the enforced set in the 2026-07-27 `unbuilt-sweep` pass (see
+    # UNENFORCED below). Floor is the count the harness extracts today.
+    "autoclean.md": 6,
+    # Enforced by the views-doctrine slice (2026-07-27): D4 asserted a rule as
+    # if it were shipped behaviour for days while shipped behaviour violated it.
+    # Its receipts are the first in this corpus that EXECUTE fleet rather than
+    # grep it -- each builds a throwaway FLEET_HOME under `.probe/` inside the
+    # materialised pinned tree, so they stay hermetic and never touch a live
+    # fleet's state/.
+    "terminal-surface.md": 7,
 }
 
 # A commit whose bin/fleet.py predates the me/ul + me/daemon merges, used by the
@@ -120,8 +130,14 @@ UNENFORCED = {
     # -- it lives outside the repo and a `--bg` worker cannot reproduce it -- and
     # the three dead-daemon `RATIFICATION WITHHELD` strings are deliberately NOT
     # receipted (no honest reproduction exists; see that spec's receipts section).
-    "autoclean.md": "predates the convention; no fenced receipts.",
-    "terminal-surface.md": "predates the convention; no fenced receipts.",
+    # autoclean.md was ENFORCED by the 2026-07-27 `unbuilt-sweep` pass: correcting
+    # its stale `ready-for-build` status line to BUILT required a grep receipt for
+    # the claim, so it gained a "Build receipt" section with pinned blocks and left
+    # this list. `test_every_spec_is_classified`'s `stale` assertion is what names
+    # this edit as the remedy -- a spec that grows receipts must not stay listed.
+    # terminal-surface.md was ENFORCED by the views-doctrine slice (2026-07-27):
+    # its D4 read as a description of shipped behaviour that measurement showed
+    # false, so the measurement now lands as pinned receipts. See RECEIPT_FLOOR.
     "providers.md": "predates the convention; no fenced receipts.",
     "phase1-hardening-kernels.md": "predates the convention; no fenced receipts.",
     "phase-2-watchtower.md": "predates the convention; no fenced receipts.",
@@ -136,6 +152,14 @@ UNENFORCED = {
     # experiment was landed as a receipt, and the spec moved to the ENFORCED set
     # above (RECEIPT_FLOOR). Promoting rather than rewording is the point: a
     # document that gains receipts and keeps its exclusion proves nothing.
+    # Drafting-stage design doc (2026-07-30): its measured claims (the FLEET_HOME
+    # resolution shape, the hook _fleet_home duplicates, the founding-incident
+    # timestamps) are cited by symbol/path in prose, not pasted transcripts, and
+    # its dual-lens gate re-derived them against the tree (mf-rs: 32 claims, 0
+    # ROTTED). Gains pinned receipts when it reaches ready-for-build -- the gate
+    # findings (mf-rb F1/F2/F3) already oblige a redraft before that.
+    "multi-fleet.md": ("Status: drafting; no fenced receipts yet -- receipts land "
+                       "with the ready-for-build revision."),
 }
 
 

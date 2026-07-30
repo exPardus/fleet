@@ -407,8 +407,7 @@ class TestStarvationIsVisible:
             "ts": fleet.now_iso(), "dry_run": False, "archive_rc": 0,
             "husks_removed": 0, "husks_deferred": 3, "tombstones_expired": 0,
             "errors": []}), encoding="utf-8")
-        name, ok, note = fleet._doctor_check_autoclean(
-            run=lambda *a, **k: types.SimpleNamespace(returncode=1, stdout="", stderr=""))
+        name, ok, note = fleet._doctor_check_autoclean()
         assert (name, ok) == ("autoclean", True), "still note-only, never red"
         assert "3 husk" in note.lower() and "daemon" in note.lower(), note
 
@@ -416,8 +415,7 @@ class TestStarvationIsVisible:
         fleet.autoclean_stamp_path().write_text(json.dumps({
             "ts": fleet.now_iso(), "husks_removed": 2, "husks_deferred": 0,
             "errors": []}), encoding="utf-8")
-        _n, _ok, note = fleet._doctor_check_autoclean(
-            run=lambda *a, **k: types.SimpleNamespace(returncode=1, stdout="", stderr=""))
+        _n, _ok, note = fleet._doctor_check_autoclean()
         assert "defer" not in note.lower(), note
 
 
@@ -474,8 +472,7 @@ class TestDeferralStreakThreshold:
             "tombstones_expired": 0, "errors": []}), encoding="utf-8")
 
     def _doctor(self):
-        return fleet._doctor_check_autoclean(
-            run=lambda *a, **k: types.SimpleNamespace(returncode=1, stdout="", stderr=""))
+        return fleet._doctor_check_autoclean()
 
     def test_streak_counts_consecutive_deferring_runs(self, home):
         for _ in range(3):
