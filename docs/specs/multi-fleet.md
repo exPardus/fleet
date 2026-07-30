@@ -1,291 +1,267 @@
 # Multi-fleet: independent fleets scoped per session, per repo, or per dir
 
-Status: drafting v2 (2026-07-30, interface tier) — v1 (`35cd7b7`) took a dual-lens gate the same
-day: **RESTRUCTURE** (break lens `mf-rb`, 10 findings, 4 gating) + 10 of 32 claims FALSE (verify
-lens `mf-rs`). Reports: `state/journals/mf-rb-REPORT.md`, `mf-rs-REPORT.md` (state-plane, not
-committed; summaries and every load-bearing measurement are folded below). v2 is the fold.
-GATE THEN BUILD: v2 takes its own gate round before any operator docket entry.
+Status: drafting v3 (2026-07-30, interface tier). History: v1 gated same-day → RESTRUCTURE
+(`mf-rb`/`mf-rs`); v2 gated same-day → RESTRUCTURE again (`mf-rb2` B1–B14 / `mf-rs2` 48-of-60,
+reports under `state/journals/`); v3 follows a fresh-context design consult and **replaces v2's
+central mechanism** — the `.fleet-home` marker is deleted (§9 records why). GATE THEN BUILD:
+v3 takes a round-3 gate before any operator docket entry. All code references are **by symbol**
+— v2's line anchors were measured stale 35 minutes after it was written, suite green (mf-rs2).
 
 ## Why this exists
 
 Operator launch goal (2026-07-29): fleet ships when a machine can run **independent fleets** —
-per session, per repo, or per directory — instead of exactly one. Today there is one fleet because
-`FLEET_HOME` is **two variables wearing one name** (mf-rb F1, measured): the *data plane* this
-spec calls the home, and the *install locator* that finds `bin/hooks/*.py`, `bin/fleet.py`,
-`bin/fleet_statusline.py` and `worker-settings.template.json`. Nine shipped sites conflate them
-(`bin/fleet.py` @272, @313, @6225, @8057, @8083, @8105, @13399, @13618 — cite by symbol, the
-numbers rot — plus the `{{FLEET_HOME}}/bin/hooks/...` commands the worker-settings template
-bakes into every worker). Driven at v1's gate: `fleet init` against a data-only home **refuses**
-("template not found"), and after hand-patching, `fleet doctor` emits **five FAILs** including
-both hook smoke tests — a fleet-B worker would run with four dead hooks, silently, because hooks
-exit 0. Splitting the two roles is not a flag on a working mechanism; **the split is the work.**
+per session, per repo, or per directory — instead of exactly one. Today there is one fleet
+because `FLEET_HOME` is **two variables wearing one name**: the *data plane* (the home) and the
+*install locator* that finds hook scripts, `fleet.py`, the statusline and the worker-settings
+template. Measured at v1's gate: `fleet init` against a data-only home refuses; after
+hand-patching, `fleet doctor` emits five FAILs including both hook smoke tests — a fleet-B
+worker would run with four dead hooks, silently, because hooks exit 0. **The split is the work.**
 
-The coupling also has an incident receipt: on 2026-07-29T22:58:39Z something ran fleet code from
-inside the repo with no `FLEET_HOME` set and overwrote the real `state/fleet.json` +
-`supervisor/INCARNATION` with fixture data (quarantine artifacts:
-`state/*.testpollution.20260729T225839Z`; the rename was manual — no code emits that suffix). The
-forensics slice that finds the culprit is **owed and not yet dispatched** (v1 claimed it live;
-false at the gate's read). Decoupling narrows this class **for any caller that names a home** —
-not "structurally"; §1.4 keeps the legacy default and §7 states its exit criteria honestly.
+Incident receipt for the coupling: 2026-07-29T22:58:39Z, something ran fleet code from inside
+the repo with no `FLEET_HOME` set and overwrote the real `state/fleet.json` +
+`supervisor/INCARNATION` with fixture data (quarantine: `state/*.testpollution.20260729T225839Z`;
+the rename was manual). The forensics lane ran in wave 13; the isolation pins are §7.
 
 ## Definitions
 
-- **Install** — the directory holding `bin/fleet.py`, `bin/hooks/`, `bin/fleet_statusline.py`,
-  `worker-settings.template.json`, `docs/`, `tests/`. Code plane. Resolved as `INSTALL_ROOT =
-  Path(__file__).resolve().parent.parent` — **never overridable** by flag, env, or marker.
-  Named limitation: under a plugin-marketplace cache copy, `__file__`'s grandparent is the cache,
-  not an install — running fleet from a plugin cache is unsupported and must refuse loudly (the
-  deleted `~/.claude/fleet-home` marker existed to serve exactly that caller; see §3 history).
+- **Install** — the code plane: `bin/fleet.py`, `bin/hooks/`, `bin/fleet_statusline.py`,
+  `worker-settings.template.json`, `docs/`, `tests/`. `INSTALL_ROOT =
+  Path(__file__).resolve().parent.parent`, **never overridable** by flag, env, or list.
+  A marketplace plugin-cache copy is structurally indistinguishable from an install (measured,
+  mf-rs2: the cache dir on this machine is a full install *and* a full home with 5 worker
+  records) — so no "cache refusal" exists; what governs is home-list membership (§4), and a
+  cache copy's home simply is not listed.
 - **Home** — one fleet's soul and state: `state/`, `logs/`, `mailbox/`, `knowledge/`,
-  `supervisor/GOALS.md` + `JOURNAL.md` + `INCARNATION`. Data plane. One per fleet.
-- Today install == home for the dogfood fleet; that identity stays legal (back-compat) and stops
-  being required.
-- The four worker hooks each carry their own standalone `_fleet_home()` (**quadruplicated**, not
-  triplicated — and `stop_outcome.py`'s copy already diverges: `Path.resolve()` vs
-  `os.path.abspath`, which pick different homes under a symlinked install). Slice 0 unifies four
-  call sites plus `bin/fleet_statusline.py:25-29`, which conflates both planes in one variable at
-  import time.
+  `supervisor/GOALS.md` + `JOURNAL.md` + `INCARNATION`. One per fleet. Install == home stays
+  legal forever (the dogfood fleet today); it stops being required.
+- The four worker hooks each carry a standalone `_fleet_home()` (quadruplicated; the
+  `stop_outcome.py` copy already diverges — `Path.resolve()` vs `os.path.abspath`). Slice 0
+  unifies four copies plus the statusline's import-time conflation.
+- **Path comparison rule, everywhere a home path is compared**: compare
+  `os.path.normcase(str(Path(p).resolve()))` on both sides. pathlib equality is a hidden OS
+  branch (mf-rb2 B7: case-insensitive match on Windows, case-sensitive miss on POSIX/APFS —
+  a refusal predicate must not give per-platform answers to identical input).
 
 ## M1 — scope
 
-The flag-not-subsystem re-vet was run and **failed honestly**: v1 sized M1 as flag-shaped on the
-premise "the `FLEET_HOME` env mechanism already works", and the gate measured that premise false.
-There is no flag-sized alternative to a variable that must become two variables. M1 is the
-minimal decoupling: the split, explicit selection, scaffolding, and pins. Still excluded:
-federation, discovery, cross-fleet views (§8).
+Honest sizing: not a flag. The v1 "mechanism already works" premise was measured false and the
+flag-not-subsystem re-vet failed on the merits. M1 = the split (slice 0), the homes list, the
+resolution order, `init --home`, `adopt`, and pins. Still excluded: federation views, cross-home
+operations of any kind (§10).
 
-### 0. The install/home split (new slice, ahead of everything)
+### Slice 0 — the install/home split
 
-Introduce `INSTALL_ROOT` (definition above) and re-point the nine conflation sites; the template
-gains a second placeholder — hook commands become `{{FLEET_INSTALL}}/bin/hooks/...` while
-`{{FLEET_HOME}}` keeps meaning the home. The template itself moves to the install plane
-(`template_settings_path` currently reads it from the *home* root). The four hook
-`_fleet_home()` copies unify on one behaviour (resolve symlinks; return `Path`). The statusline
-splits its import anchor (own script dir) from the rendered home and **deletes** its
-`sys.path.insert(0, <home>/bin)` — under a home that is itself a repo clone, that insert imports
-the wrong `fleet.py` at every refresh, silently (mf-rb F7 residue; the crash attack itself
-failed and is reported in the mf-rb report so nobody re-runs it).
+Re-point the install-locator sites at `INSTALL_ROOT` — by symbol: `template_settings_path`,
+`statusline_script_path`, the lifecycle-steer render, the two doctor hook-smoke checks
+(`_doctor_check_*` hook rows), `_render_sup_spawn_task`, `_render_successor_task`, the
+`render_worker_settings_template` call, and the template's own hook-command placeholder (becomes
+`{{FLEET_INSTALL}}/bin/hooks/...`). Correction from mf-rs2 carried forward: the doctor
+*legacy-settings* check is **home-plane** and must NOT be re-pointed; the list above is the
+gate-measured set minus that row — the build slice re-greps `FLEET_HOME /` before touching
+anything (v2's list was wrong in both directions once already).
 
-### 1. Resolution precedence — shared resolution, per-surface failure handling
+## §4. The homes list
 
-For the CLI, the statusline, and the hooks alike, in order:
+`~/.claude/fleet-homes.list`: one absolute home path per line, UTF-8, append-only, atomic line
+append, deduplicated on `normcase(resolve())`. Written by exactly two verbs — `fleet init
+--home` (registration is part of scaffolding) and `fleet adopt` (§6) — **never by session
+plumbing, hooks, or dispatch.**
 
-1. **Explicit argument** — CLI: `--fleet-home <path>` promoted from autoclean-only to a global
-   flag, applied in `main()` **before dispatch** (today's `cmd_autoclean`-internal application is
-   the opposite precedent; its validation semantics — resolve, `is_dir()`, refusal naming raw and
-   resolved forms — lift verbatim). Hooks: a `--fleet-home` argv baked by the worker-settings
-   render (§3).
-2. **`.fleet-home` marker walk-up from cwd** (§2) — the donation-immune channel.
-3. **`FLEET_HOME` env** — the per-session scope, kept for the interface shell and operator
-   one-liners. Ranked BELOW the marker deliberately: env is the one channel the machine-wide
-   daemon can donate across fleets (§3), and v1 ranking env above marker meant a fleet-B worker
-   with B's marker under its feet still resolved A — the corpse hazard arriving through the
-   daemon (mf-rb F2). A marker/env disagreement is logged (hook-errors.log shape), env loses.
-4. **Install root** — the legacy default. Load-bearing today (install == home for the dogfood
-   fleet, and until slice 0 lands the *code* is found through it). Exit criteria in §7.
+**Why this is not the deleted corpse** (`~/.claude/fleet-home`, deleted 2026-07-22): the corpse
+was an *authority* — a mutable pointer whose stale value would have redirected `clean`/`kill` at
+another fleet's registry, which is exactly why giving it a reader was refused. The list is a
+**search space**: a hit requires the caller's sid to be present in that home's live registry
+(§5), so a stale, wrong, or malicious line can only produce a *miss* or an *ambiguity refusal*
+— there is no input that turns a bad line into a wrong-home resolution. Failure modes, enumerated
+at the consult: dead/moved line → miss (harmless — a re-inited path has a sid-disjoint registry);
+copied home present in the list → sid in two registries → **loud ambiguity refusal naming both**
+(fail-closed; remedied via the `fleet homes` view + dedupe + a doctor NOTE row); unreadable list
+→ **refusal for sid-carrying mutating callers, never a fall-through to env** (that fall-through
+is v2's B12 returning).
 
-**Failure handling is per-surface, and saying "one rule" about it was false (mf-rb F6):**
-*resolution* is shared; the *response* to an invalid marker or home is: CLI **refuses loudly**
-naming file and remedy; hooks **log to `state/hook-errors.log` and exit 0** (invariant 2); the
-statusline **renders `[fleet]: bad marker` and exits 0** (its contract forbids refusal — and its
-`BaseException` swallow means the resolver must be a pure function under unit test, not trusted
-to the render path). An **uninitialized** home is a rendered word everywhere — today
-`fleet status` against an empty home prints a header row and silence, which under multi-fleet is
-indistinguishable from a mis-resolved home; "not initialized" becomes a printed line (the
-repo's unknown-is-a-word rule), with a pin.
+Honesty item: this is a second fleet-written file outside any home. The shipped claim that
+`~/.claude/settings.json` is "the ONLY file outside FLEET_HOME that fleet writes"
+(`user_settings_path` docstring) is restated in the same slice.
 
-### 2. The marker
+## §5. Resolution
 
-Format (each item is a branch someone would otherwise write by guess — mf-rb F9): UTF-8, no BOM;
-one line, whitespace-stripped; an **absolute** path (a relative path is invalid, not resolved —
-"against which cwd" has two defensible answers, so neither is taken); native or forward slashes;
-must be a regular file; empty, unreadable, or directory-shaped is invalid (per-surface handling
-above); symlinks in the target are resolved; a target that is the install root, inside another
-home's `state/`, or not a directory is invalid. No `~` expansion.
+**Sid-carrying callers** (workers, supervisors, and adopted interface sessions — any process
+holding `CLAUDE_CODE_SESSION_ID`):
 
-**The walk is bounded and placement is policed (mf-rb F3):**
+1. **`--fleet-home` flag** (global; applied in `main()` before dispatch; validation = resolve,
+   `is_dir`, **initialized** — an existing-but-empty dir is a refusal, not a phantom home; v2's
+   gate demonstrated today's autoclean flag creating `state/` under `--dry-run` and reporting
+   `rc=0`, byte-identical to a clean fleet). If the flag disagrees with the lookup's answer,
+   mutating verbs refuse without `--yes` and write a witness line.
+2. **sid→home lookup** over the list (plus the legacy install-root home while §8 lives): probe
+   each listed home's registry with the quarantine-free tolerant reader — **never
+   `load_registry`**, whose corrupt-registry quarantine rename against a *foreign* home would be
+   a cross-fleet mutation from a read path (views doctrine, pinned by
+   `tests/test_views_doctrine.py`). Match against **live records' current `session_id` plus the
+   `INCARNATION` holder's sid — nothing else.** Excluding `retired_sids` is what closes the
+   stale-identity channel (a live session cannot legitimately present a retired sid — that match
+   is a *forensic refusal*, not a resolution); excluding `spawned_by` is what keeps a manager
+   from being ambiguous across every fleet it manages. **This membership set is pinned by a
+   dedicated test.** Exactly one hit → resolved. Two-plus hits → refusal naming all (accepted
+   cost: an operator who `adopt`s one session into two fleets flags per call). Miss → mutating
+   verbs refuse; read verbs fall through to (3) **with the resolution provenance rendered in
+   their output**.
+3. **Validated env → legacy default** (reads only, per above): `FLEET_HOME` must resolve to an
+   initialized home directory (same validation as the flag, minus list membership — an unlisted
+   temp home is the test suite's and any ad-hoc probe's legitimate shape). Once the list holds
+   ≥2 homes, destructive verbs resolved via env additionally require the flag.
+4. **TOCTOU closed mechanically**: every mutating verb, after taking the resolved home's
+   `fleet.lock`, re-asserts caller sid ∈ that home's membership set before acting.
 
-- The walk stops at the **enclosing git repository root** (the first ancestor containing `.git`),
-  else after a fixed ceiling of directory levels. It never reaches the filesystem root.
-- A marker at `$HOME`, `$HOME/.claude`, or a drive/filesystem root is **refused by path** — those
-  placements are the deleted corpse under a new name; the lint checks placement, not just the
-  filename (v1's lint checked the name, which is not the property that distinguishes this design
-  from the corpse).
-- **A committed `.fleet-home` is a defect, documented as such.** `git worktree add` and `git
-  clone` copy a committed marker everywhere — measured on this machine: 64 worktrees, 60 sharing
-  the real home's parent — which reproduces the founding incident at scale, through the fix. The
-  scaffold's `.gitignore` lists `.fleet-home`; per-repo scope means an **untracked** marker each
-  clone opts into explicitly. What this costs — a fresh clone does not inherit fleet scope — is
-  accepted and stated.
-- **Worker worktrees get their marker written by dispatch** (§3), so the bound-walk never has to
-  reach across a repo boundary to serve a worker.
+**Sid-less callers** (a human at a plain shell): flag → validated env → install-root legacy
+default (§8). This class keeps today's ergonomics entirely; `_confirm_destructive`'s deliberate
+sid-less early-out stays as-is because the channels this class can use are both explicit.
 
-**A marker may select a home; it may not suffice to destroy one.** `_confirm_destructive` returns
-early when the caller has no session id — the human-at-a-shell is exempt from confirmation *by
-design*, and the human at a shell in a project directory is exactly the marker's audience (mf-rb
-F3c). So `fleet kill` / `fleet clean` whose home resolved **via marker** and whose caller is
-sid-less require the home named explicitly (`--fleet-home`); the refusal prints the one-liner to
-re-run. Costs nothing at the dogfood home (resolves via §1.4, not a marker).
+**Hooks**: `--fleet-home` argv baked per-home into the rendered worker-settings (survived both
+gates unchanged; exactly two `--settings` construction sites exist — `dispatch_bg` and
+`cmd_sup_handoff_begin` — and the build touches both or pins the second separately). Witness on
+argv/env disagreement: argv wins, one line to `hook-errors.log`; env absent is the *normal* case
+and logs nothing.
 
-**History, stated precisely (mf-rs 2.5):** `~/.claude/fleet-home` was deleted on 2026-07-22
-because its only reader (the plugin SessionStart hook) was removed and stamping it was fleet's
-only unconditional write to global machine state; the *redirect hazard* is on record as the
-reason the **rescue** — giving it a reader — was refused. §1–§2 are that rescue re-proposed with
-the global axis removed: directory-scoped, bounded upward, placement-refused at the global
-points, never fleet-written at machine scope, and insufficient alone for destruction.
+**Statusline**: takes its sid from the vendor stdin blob — not from its (donated) env — and runs
+the same lookup; renders words, exits 0, never quarantines, resolver is a pure function under
+unit test (its `BaseException` swallow makes the render path unpinnable). Whether the blob
+carries `session_id` and `cwd` is **unverified** — the capture experiment (temporary delegate
+dumps payload + `os.getcwd()` from two directories) **gates this slice**; v2 stating "cwd is
+reachable" while scheduling the experiment to find out was caught as self-contradiction (mf-rs2
+K3).
 
-### 3. Dispatch: the home is explicit at every frame
+**Arming**: multi-fleet resolution activates only when the list holds a **second** home (the
+repo's gate-arm precedent). With zero or one listed home, every caller class resolves exactly as
+today — single-fleet installs and the dogfood fleet cannot regress.
 
-- **Hook commands carry `--fleet-home <home>` argv**, baked per-home by the worker-settings
-  render. Fence rationale, stated honestly (mf-rs 2.8): the daemon env-donation hazard is
-  **plausible, not measured** — the measured leak is the single variable `FLEET_WORKER`
-  (`skills/fleet/supervisor.md` doctrine; live capture in `docs/specs/claim-nonce.md` §16.2,
-  which is explicitly not a receipt), and `bin/fleet.py` @2119-2129 records "does the daemon
-  donate arbitrary env vars" as OPEN by the same argument it makes about the sid. The argv fence
-  is chosen because it is **correct under either answer**, not because the general case is
-  measured. Pin what is pinnable today: a hook's argv home beats a disagreeing env home.
-- **Dispatch writes the worker's `.fleet-home` marker into its cwd** (if absent), so `fleet`
-  verbs run *from inside the session* — the actual destructive surface, where no argv exists —
-  resolve by the donation-immune channel. v1 instead stamped `FLEET_HOME` into the child env;
-  the gate killed that: the stamp reaches a session only when that dispatch started the daemon,
-  and otherwise *manufactures the donation payload* it feared (mf-rb F2). **No `FLEET_HOME` env
-  stamp.** Env remains an operator channel, not a fence.
-- **The witness has three outcomes, specified** (v1's two-valued divergence witness could not
-  fire in its own scenario — the common case is one side absent, mf-rb F2b): argv present + env
-  absent → normal, log nothing; argv + env equal → normal; argv + env differ → argv wins, one
-  witness line to `hook-errors.log`. No env observation — present or absent — is treated as
-  evidence about *this body*; the registry sid union is the sound identity channel. (The
-  falsification of the ratified "absence is sound" clause that this rests on is filed as its own
-  operator gate — `docs/OPERATOR-GATES.md`, 2026-07-30 — because a spec may not inherit a premise
-  its own gate falsified, and may not re-ratify one either.)
-- **Every dispatch shape is covered, and one is named because it bypasses the choke point:** all
-  worker/supervisor `--bg` launches route through `dispatch_bg`, whose `--settings` comes from
-  the resolved home's `instance_settings_path()` — except the handoff successor
-  (`cmd_sup_handoff_begin` builds its own `run(...)`), which passes the same settings path today
-  but will not inherit a future `dispatch_bg` edit. The build touches both sites or pins the
-  successor path separately (mf-rb Target 2 table).
+**Refusal texts print facts and the `fleet homes` view — never a paste-ready command with a
+chosen home.** v2's destruction guard died partly by printing its own bypass with the wrong home
+pre-filled; a remedy that trains flag-by-habit permanently disarms the disagreement check in (1).
 
-### 4. `fleet init --home <path>` — a scaffold verb, not a re-pointing
+## §6. `fleet adopt`
 
-Sized honestly (mf-rs 2.2): today's `fleet init` writes exactly one file
-(`state/worker-settings.json`) and requires the template at the home root. Six of the seven
-artifacts are new work: `state/` `logs/` `mailbox/` `knowledge/INDEX.md` (seed),
-`supervisor/GOALS.md` (stub, tier-policy block commented), a `.gitignore` (ignoring `state/`,
-`logs/`, `mailbox/`, `.fleet-home`), and the worker-settings render — from the **install's**
-template (slice 0), with both placeholders. Refuses a path inside another home, inside the
-install's `state/`, or equal to the install root. Whether a home is a git repo is the operator's
-business.
+Registers the calling session into a home: writes the caller's sid into that home's registry
+under its `fleet.lock` (a first-class membership record, not a worker), and appends the home to
+the list if absent. The fleet skill's startup ritual runs it once per session; operators run it
+explicitly. This makes membership a **registry fact for every caller class** — the lookup
+becomes total, and the manager tier stops being the coverage hole (the consult's Q1.7: an
+interface session's sid otherwise lives only in `spawned_by`, which the membership set must
+exclude). One verb, no new subsystem; without it the manager class would fall through to env
+forever, which is the hole v1 died of.
 
-### 5. Test isolation pins (founding incident: 2026-07-29T22:58:39Z)
+## §7. Test isolation pins
 
-- Session-scoped autouse conftest fixture exports `FLEET_HOME=<tmp>` into `os.environ` — the
-  current `_never_touch_the_real_home` patches only in-process helpers, and the founding
-  incident proves the subprocess path is real. (It also keeps `fleet init` reachable in tests at
-  all: `cmd_init` opens with the §7 supervisor gate, and only a claim-less temp home passes it —
-  mf-rs brief-error 5.)
-- A guard pin watches the **dogfood home anchored at the install tree** (`INSTALL_ROOT/state/` +
-  `supervisor/INCARNATION` — the incident touched both; v1 watched one file, mf-rb F4): asserts
-  mtimes unchanged across the suite. Where no `state/` exists (64 of 65 checkouts on this
-  machine are worktrees without one) it **skips LOUDLY by design**, the win32-symlink-skip
-  precedent — its habitat is the real checkout, which is where the hazard lives. Landed RED
-  first: a test writes to the watched path and the pin must catch it, before the fence is
-  trusted.
-- The argv-beats-env hook pin (§3).
-- The statusline resolver pure-function pin (§1).
-- The root-cause fix for the escape itself rides the forensics lane; this spec does not wait for
-  it and no longer claims it is dispatched.
+- Autouse conftest fixture exports `FLEET_HOME=<tmp>` into `os.environ` (subprocess-inheriting;
+  the founding incident proves the subprocess path). Function-scoped override available — a
+  session-scoped-only fixture makes the §5 "not initialized" rendering untestable after the
+  first `init` (mf-rb2 B13). Env stays a valid read channel for sid-less test subprocesses
+  (§5.3), so this fence is not defeated by the lookup — and with the marker deleted, v2's B2
+  (marker-beats-fixture) is structurally gone.
+- Founding-incident guard: a **content-hash canary**, not an mtime window — the watched files
+  belong to a live fleet that writes in bursts on a minutes cadence, so an mtime pin is
+  intermittently RED with no test at fault, which is how fences get xfail'd (mf-rb2's measured
+  165s/240s/558s ages against a 219s suite). Watches every **listed** home plus the legacy
+  install-root home — anchoring at `INSTALL_ROOT/state/` alone would make §8's completion
+  (moving the dogfood home out) silently disarm the guard forever (mf-rb2 B6a). Landed RED
+  first.
+- The §5.2 membership-set pin (live `session_id` + INCARNATION holder, nothing else).
+- The §5 arming pin: in a ≥2-home config, a sid-less, flag-less, env-less mutating invocation
+  from inside the install **refuses** rather than resolving to install-root — falsifiable,
+  unlike v2's "no path silently falls back to `parent.parent`" criterion, whose forbidden
+  expression is also `INSTALL_ROOT`'s correct definition (mf-rb2 B6b).
+- "Not initialized" is a **rendered word** on every read surface, pinned (today: header row then
+  silence, measured).
 
-### 6. Statusline (slice, ordering constraints measured — mf-rs soft-spot c)
+## §8. The legacy default's exit criteria
 
-cwd **is** reachable: the vendor stdin blob is already read in full at
-`bin/fleet_statusline.py:333` and forwarded to delegates unparsed. Two mechanical constraints:
-`_FLEET_HOME` is computed at import and used for `sys.path` before stdin exists, so slice 0's
-variable split must land first; and marker resolution must run inside `main()` and **rebind
-`fleet.FLEET_HOME` after import** (every path helper re-reads the global per call, so a late
-rebind works — the module comment @74-84 says so). The blob's schema is unreceipted anywhere in
-the repo: **the build gate for this slice requires the capture experiment** (temporary delegate
-dumps payload + `os.getcwd()`, refresh from two directories, diff) — if neither channel carries
-cwd, the marker scope does not exist for the statusline and the §"audit" row below changes.
+Install-root fallback (sid-less class, and the lookup's legacy probe) is kept in M1 and
+removable when ALL of: (1) slice 0 done — no code path uses `FLEET_HOME` to find code; (2) the
+dogfood home physically moves out of the install and is **listed** — the §7 canary follows the
+list, so the watch moves with it; (3) the shims, statusline, and skill pass a **plane-naming
+lint** (an enumerable artifact: each `$FLEET_HOME`/`fleet home` consumer is tagged
+install-plane or home-plane in a checked table — v2's "audited" had no falsifiable artifact);
+(4) the §7 arming pin extended to the sid-less class. Removal is an operator decision against
+these criteria.
+
+## §9. The marker, deleted — record
+
+v2's `.fleet-home` marker + bounded walk-up died at round 2 on four demonstrated findings: the
+dogfood configuration made the dispatch-written marker invalid by the marker's own rules (B1);
+"stops at the enclosing git root" is two mutually exclusive designs that disagree on 65 of 66
+checkouts here, and the git-semantics-correct reading makes parent markers unreachable — the
+walk-up did no work at all (B3); "write if absent" silently serves fleet A's stale marker to
+fleet B's worker (B9); and dispatch would plant untracked files in 66 project trees, in a repo
+with documented untracked-add accidents (B10). The residual audience — a sid-less human wanting
+per-directory scope — is served by flag and validated env. Anyone re-proposing a
+marker-in-the-tree answers B1/B3/B9/B10 first; this section exists so they are answered once.
 
 ## Cross-fleet interference audit
 
-| Surface | Status under multi-fleet |
+| Surface | Status |
 |---|---|
-| `claude` session namespace | Shared by nature. Safe: husk-sweep ownership is per-home evidence, default-deny — fleet B cannot `claude rm` a session absent from B's own evidence. `doctor`'s fleet-unknown check stays NOTE-only; wording gains "or another fleet's". |
-| Native daemon env donation | Plausible-not-measured (§3); fenced by argv + worker-local marker; env demoted below marker. |
-| Statusline (`~/.claude/settings.json` — the one file fleet writes outside home) | One global statusLine; script resolves per §1 from its own stdin/cwd context (§6). `init --statusline` still refuses to clobber a foreign one. |
-| Plugin/skill | Pull-only (D7). **Build item, not an audit note (mf-rs 2.6):** the skill ritual reads `$(fleet home)/docs/OPERATOR-GATES.md` and `$(fleet home)/knowledge/INDEX.md`; under the split, `docs/` is install-plane and `knowledge/` home-plane — SKILL.md steps 1/3 need a `fleet install`-vs-`fleet home` split (or a companion verb), else they break the moment the planes diverge. |
-| OS scheduler | None since 2026-07-27; the retired task's F2/F3/F4 ownership rules bind any future scheduled anything. |
-| `fleet.lock`, registry, mailbox, claims | Home-relative already; N homes = N independent single-writer domains. The F26/M25 refusal ("never a shared writable `fleet.json`") transfers verbatim. |
+| `claude` session namespace | Shared. Husk-sweep ownership stays per-home evidence, default-deny; `doctor` fleet-unknown check stays NOTE-only, wording gains "or another fleet's". |
+| Daemon env donation | Substitution model (docketed 2026-07-30, `docs/OPERATOR-GATES.md`). Env demoted to read-only fall-through with validation; hooks on argv; statusline on blob sid; CLI on registry lookup. **Inherited residual, stated**: the lookup keys on `CLAUDE_CODE_SESSION_ID`, and sid-donation is recorded OPEN in the shipped code's own comment (`_record_sids` block) — bounded because `_worker_env` pops the sid (a fleet-started daemon has none to donate) and every measured body shows the vendor stamping each session's own sid; a daemon cold-started by a non-fleet sid-holding launcher is unmeasured. This spec inherits the docketed premise; it does not open a new one. Mitigation in-design: retired/dead-sid matches refuse forensically. |
+| Homes list | New fleet-written global file: search-space-not-authority (§4); written only by two explicit verbs; a bad line can only miss. |
+| Statusline settings entry | Unchanged; `init --statusline` still refuses to clobber a foreign one. |
+| Plugin/skill | Pull-only (D7). Ritual gains `fleet adopt` (§6) and the install-vs-home split for its step-1/step-3 reads (SKILL.md currently reads `docs/` — install-plane — through `$(fleet home)`). |
+| `fleet.lock`, registry, mailbox, claims | Home-relative; N homes = N single-writer domains. Lookup reads foreign registries lock-free with the tolerant reader and never writes them; the F26/M25 refusal ("never a shared writable `fleet.json`") transfers verbatim. |
 
-## Invariants touched (SPEC §16 — all nine checked, six argued; §16's tenth is UNBUILT/M-F-owned and untouched)
+## Invariants touched (SPEC §16 — all nine checked, six argued; §16's tenth is UNBUILT/M-F-owned, untouched)
 
-1. **daemonless** — preserved: no new resident anything; a home is directories.
-2. **exit-0 hooks** — preserved: hooks gain an argv and a witness line, refuse nothing, exit 0.
-6. **single-writer registry** — preserved and multiplied: one `fleet.lock` per home; no M1 verb
-   opens two homes in one invocation (federation would; that is why it is M2, gated).
-7. **one live session per name** — preserved per home; the sid, not the name, is the
-   daemon-facing key, and sids never collide.
-8. **platform-adapter-only OS branching** — untouched: resolution is pathlib; the marker's
-   case-sensitivity/symlink surface on POSIX is flagged for the gate's POSIX pass, not a new seam.
-9. **one-state-many-views** — preserved per home: `status_snapshot()` unchanged; the statusline
-   change is which home it reads, not how.
+1. **daemonless** — preserved; a home is directories, the list is a text file.
+2. **exit-0 hooks** — preserved (argv + witness line; hooks refuse nothing).
+6. **single-writer registry** — preserved per home. The lookup **reads** foreign registries
+   (lock-free, tolerant, quarantine-free — the established views pattern); the only cross-home
+   *write* surface in the whole design is `adopt`, which writes exactly one home under exactly
+   that home's lock.
+7. **one live session per name** — preserved per home; sids are the daemon-facing key.
+8. **platform-adapter-only OS branching** — the Definitions comparison rule (`normcase` +
+   `resolve` both sides) is stated once and used everywhere precisely so no refusal predicate
+   hides a per-platform branch (the v2 defect class). No new adapter seam.
+9. **one-state-many-views** — preserved; the lookup and `fleet homes` are derivations over
+   registries, never a second source of truth.
 
-(3 mailbox, 4 journal-injection, 5 cwd-scoped dispatch: home-relative already; unaffected.)
+## Graveyard check
 
-## Graveyard check (IDEA-FORGE §5)
-
-No corpse re-proposed. Corpse 10's "brittle sniffing": §1 sniffs nothing — explicit argument,
-bounded marker, env, else legacy default. The `~/.claude/fleet-home` lessons-corpse is §2's
-history paragraph; the honest statement is that §1–§2 *are* the refused rescue, rebuilt without
-the properties that made it refusable.
-
-## §7. The legacy default's exit criteria (v1's open question 1, answered — mf-rb F5)
-
-§1.4 is kept in M1 and is removable when ALL of: (1) slice 0 is done — no code path uses
-`FLEET_HOME` to find code; (2) **the dogfood home physically moves out of the install** (e.g. a
-sibling directory) so install ≠ home is the dogfooded configuration — NOT by committing a marker
-into the fleet repo, which detonates in every worktree (mf-rb F3a); (3) the shims
-(`bin/fleet`, `bin/fleet.cmd`), the statusline, and the skill are audited to name which plane
-each means; (4) a loud refusal replaces the fallback, with a pin that goes RED if any path
-silently falls back to `parent.parent`. Removal is an operator decision **at that point**,
-against these criteria.
+Corpse re-check for the list is §4's paragraph (search space vs authority — the axis that made
+the 2026-07-22 deletion right is absent here by construction). Corpse 10's "brittle sniffing":
+resolution consults no `--help`, no version strings, no heuristics — a registry hit is a fact
+dispatch wrote under a lock.
 
 ## M2 — read-only federation view (demand-gated, NOT M1)
 
-`fleet status --all-fleets` over an operator-maintained read-only list of homes, consulted by
-VIEWS ONLY — never by resolution, never by a mutating verb. F26/M25 reasoning unchanged. Build
-on demand evidence; specs always run, BUILD is gated.
+`fleet status --all-fleets` over the same list, views only. Unchanged from v2.
 
 ## Open questions
 
-1. **Worker-local marker teardown**: dispatch writes `.fleet-home` into a worker cwd (§3); who
-   removes it, and is a stale one harmful? (A worktree's marker names the fleet that ran it —
-   correct ownership even stale; but say so after the gate attacks it.)
-2. **Plugin-cache refusal shape** (Definitions): what exactly distinguishes a cache copy from an
-   install at runtime? Needs one measurement on a machine with the marketplace cache populated.
-3. **`--setting-sources` under `--bg`** is unobserved (vendor): if worker settings can compose
-   from sources beyond `--settings`, the argv fence's exclusivity is unestablished. Carried as a
-   vendor-contract gap, not blocking (the marker fence does not depend on it).
-4. **`knowledge/` for non-repo homes**: scaffolded plain; learning-loop commits apply only when
-   the home is a repo. Accepted for M1.
+1. **`adopt` record shape**: a first-class membership record vs a zero-turn pseudo-worker row —
+   pick at build gate; the membership-set pin constrains either.
+2. **Sid-donation residual** (audit table): closes only with the docketed identity-clause
+   ruling; if the operator orders a re-measure, the decisive experiment is a cold daemon started
+   by a non-fleet sid-holding launcher.
+3. **WSL/Windows dual-view** of one filesystem: two runtimes, two `~/.claude` dirs, two lists —
+   effectively two machines sharing homes. Cross-runtime home sharing is out of M1 scope; say so
+   in the operator docket (the v2 marker had the same problem unstated).
+4. **`knowledge/` for non-repo homes**: scaffolded plain; learning-loop commits apply when the
+   home is a repo. Accepted for M1.
 
 ## Sequencing
 
-1. v2 → **second gate round** (fresh dual lens, no shared context, neither saw round 1;
-   priority: attack the worker-local marker (§3), the bounded walk (§2), and the §7 exit
-   criteria).
-2. Findings folded → **operator docket entry**: ratify scope, precedence, the marker design, and
-   §7. (The F2b identity-clause falsification is already docketed separately.)
-3. Build slices, disjoint: (0) install/home split; (a) resolution + global flag + rendered
-   "not initialized"; (b) `init --home` scaffold; (c) hook argv + witness + dispatch marker;
-   (d) statusline (behind its capture experiment); (e) isolation pins. Each RED-then-GREEN, both
-   floors, serially (the 235-missing-tests concurrency anomaly is uncharacterised).
+1. v3 → **round-3 gate**: fresh dual lens, no shared context, no access to prior rounds'
+   verdicts. Priority attack surface: §4 list mechanics (append/dedupe/unreadable), the §5
+   membership set and its exclusions, the arming rule's single-fleet no-regression claim, §6
+   `adopt` (does registering the manager create a new hazard class?), and the §5.2 tolerant
+   reader against a corrupt foreign registry.
+2. Findings folded → **operator docket entry**: scope, resolution order, `adopt`, §8 criteria,
+   and the two accepted costs (ambiguity refusals for dual-adopted sessions; no cross-runtime
+   sharing).
+3. Build slices, disjoint: (0) split; (a) list + lookup + arming + `fleet homes` view;
+   (b) `init --home` + `adopt`; (c) hook argv + witness; (d) statusline (gated on the capture
+   experiment); (e) pins. RED-then-GREEN, both floors, serially.
 
-WHAT THIS SPEC GOT WRONG — assume it contains an error and go find it. v1's soft-spot list was
-under-weighted by its own gate briefs and one of its three items unravelled the largest finding;
-v2's known soft spots: the nine-site conflation list is v1-gate-measured and will rot as main
-moves (re-grep at build time); the bounded-walk ceiling ("git root else fixed depth") has an
-unstated interaction with worktrees whose `.git` is a *file*, not a directory; and §3's claim
-that the successor dispatch "passes the same settings path today" was verified at `35cd7b7`,
-one merge queue ago.
+WHAT THIS SPEC GOT WRONG — assume it contains an error and go find it. Named soft spots: the
+slice-0 symbol list is inherited from a gate one merge queue back (re-grep before build); the
+"vendor stamps each session's own sid" premise rides a docketed, unratified replacement clause;
+and §5's claim that read-verb fall-through renders provenance assumes every read surface HAS a
+provenance line to render — the compact status table may not.
