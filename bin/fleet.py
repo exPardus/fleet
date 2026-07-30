@@ -12466,7 +12466,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
     writer appends that record's OWN prior sid alone: :5630, :6087, :10303,
-    :15397), the same safety invariant §7.1's send carve-out rests on. That
+    :15461), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -13157,7 +13157,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
     #     writer appends that record's OWN prior sid alone (:5630, :6087, :10303,
-    #     :15397) -- so the sid union can never make one body answer for another.
+    #     :15461) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -13309,6 +13309,17 @@ def _append_nonce_rejection(kind, verb, caller_sid, claim: dict, presented) -> N
     different wrong values", which is the question an operator actually asks,
     without making the log a place a generation can be recovered from.
 
+    `incarnation_id`/`lineage_id` NAME THE CLAIM THIS REFUSAL WAS MEASURED
+    AGAINST (W30 `drill`). Without them the record says a body was refused but
+    not what it was refused BY, so `_doctor_check_supervisor_claim` counted
+    refusals belonging to claims this fleet had long since replaced as evidence
+    of a second body of the CURRENT lineage -- measured 2026-07-30, where the
+    row was red for a day on two records left behind by a review agent's
+    escaped scratch pytest (`tests/test_doctor_claim_provenance.py` carries the
+    incident). Both values are read off the claim the refusal path already
+    loaded from disk, never from anything the caller supplies: a provenance
+    field the caller could set would let the accused write their own alibi.
+
     Best-effort. The record is EVIDENCE, not the refusal -- if it cannot be
     written the caller must still be refused, because a body that learns "I
     could not be logged" instead of "stop and escalate" is the worst of
@@ -13318,6 +13329,8 @@ def _append_nonce_rejection(kind, verb, caller_sid, claim: dict, presented) -> N
         "kind": kind,
         "verb": verb,
         "caller_sid": caller_sid,
+        "incarnation_id": claim.get("incarnation_id"),
+        "lineage_id": claim.get("lineage_id"),
         "expected_seq": claim.get("nonce_seq"),
         "pending_at": claim.get("pending_at"),
         "presented_prefix": nonce_digest(presented)[:8] if isinstance(presented, str)
@@ -13391,6 +13404,57 @@ def _recent_nonce_rejections(now=None, window=NONCE_REJECTION_WINDOW_SECONDS) ->
         except (ValueError, TypeError, KeyError):
             continue
     return out
+
+
+def _rejection_is_about_current_claim(rec: dict, claim) -> bool:
+    """Is this refusal evidence about the claim the operator holds RIGHT NOW?
+
+    W30 `drill`. `_doctor_check_supervisor_claim` says *"a second body of this
+    LINEAGE may be acting"* and then counted every `refused` record in the
+    window, including ones measured against claims that no longer exist. On
+    2026-07-30 that made the row red for a day on two records an escaped
+    scratch pytest left in the fleet home, and the census the row demanded was
+    of sessions that had never existed. A row that cries wolf on schedule is a
+    row nobody reads, and this is one of only two that would report a real
+    split-brain supervisor -- so the false alarm is paid for in the true one.
+
+    THE DISCRIMINATOR IS THE CLAIM'S IDENTITY, NEVER THE CALLER'S. "The sid
+    looks synthetic" is a string heuristic the next drill evades by choosing a
+    plausible uuid, and a `kind`/provenance flag set by the caller is an alibi
+    written by the accused. Both values compared here are read by the WRITER
+    off the on-disk claim, under the refusal path, from data no caller supplies.
+
+      * `lineage_id` equality, when the record and the claim both carry one.
+        This is the key the row's own sentence already asserts, and it is
+        deliberately lineage rather than incarnation: a lineage is carried
+        ACROSS a handoff (claim-nonce §5.7's table), so evidence raised under
+        the predecessor still counts for the successor. It is re-minted on a
+        seize, which is correct -- a seize is a declared discontinuity.
+      * otherwise the `claimed_at` boundary. A record written before the
+        current claim existed cannot be evidence about it. In real operation
+        the claim is always on disk before a refusal can be recorded against
+        it, so this arm CANNOT fire on a genuine current-claim refusal; it
+        fires only on residue inherited from a claim since replaced. Inclusive
+        (`>=`) because `now_iso()` truncates to the second and the first
+        refusal after a boot can share its timestamp.
+
+    INDETERMINATE STAYS ARMED -- no claim on disk, or a timestamp neither side
+    can parse. Ratified direction (`knowledge/lessons.md`, 2026-07-30:
+    fail-armed indeterminacy), and the asymmetry is the whole point: a false
+    alarm costs a census, a missed split-brain costs the control plane.
+
+    PURE and total -- it decides nothing and reads nothing. Its caller is a
+    doctor row, so it must never raise."""
+    if not isinstance(claim, dict):
+        return True
+    rec_lineage = rec.get("lineage_id")
+    claim_lineage = claim.get("lineage_id")
+    if rec_lineage and claim_lineage:
+        return rec_lineage == claim_lineage
+    try:
+        return _parse_iso(rec["ts"]) >= _parse_iso(claim["claimed_at"])
+    except (KeyError, TypeError, ValueError):
+        return True
 
 
 def _nonce_presentation(claim: dict, nonce):
@@ -15801,8 +15865,19 @@ def _doctor_check_supervisor_claim():
     ok = True
     try:
         recent = _recent_nonce_rejections()
-        refused = [r for r in recent if r.get("kind") == "refused"]
         superseded = [r for r in recent if r.get("kind") == "superseded-pending"]
+        # W30 `drill`: a refusal is evidence of a second body of THIS lineage
+        # only if it was measured against the claim this fleet currently holds.
+        # The rest are kept on the surface as a NOTE and never counted -- see
+        # `_rejection_is_about_current_claim` for why the scope is the claim's
+        # identity and not the caller's sid.
+        held = read_incarnation()
+        refused, foreign = [], []
+        for rec in recent:
+            if rec.get("kind") != "refused":
+                continue
+            (refused if _rejection_is_about_current_claim(rec, held)
+             else foreign).append(rec)
         if refused:
             ok = False
             last = refused[-1]
@@ -15812,6 +15887,21 @@ def _doctor_check_supervisor_claim():
                 f"at {last.get('ts')}, expected generation {last.get('expected_seq')}) -- "
                 f"a second body of this lineage may be acting; census the sessions "
                 f"(state/{nonce_rejection_log_path().name})")
+        if foreign:
+            # NOT silence. `unknown` is a RENDERED WORD
+            # (knowledge/lessons.md#2026-07-27-day5-surface): the operator is
+            # told the records exist, how many, and where, so scoping the row
+            # never reads as deleting the evidence. A cluster here is itself
+            # worth a look -- it means something on this machine is presenting
+            # generations against claims this fleet has replaced.
+            last = foreign[-1]
+            parts.append(
+                f"NOTE: {len(foreign)} further continuity refusal(s) in the window "
+                f"belong to a claim this fleet no longer holds (latest: "
+                f"{last.get('verb')} at {last.get('ts')}, incarnation "
+                f"{last.get('incarnation_id') or 'unrecorded'}) -- not evidence about "
+                f"the current lineage, so not counted above; kept in "
+                f"state/{nonce_rejection_log_path().name}")
         if superseded:
             # Break-gate residual F3: a `superseded-pending` record CANNOT be
             # produced by a protocol-conforming single body -- that body would
