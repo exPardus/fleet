@@ -705,6 +705,63 @@ class TestFastCompletionSid:
                                            short_id="aaaabbbb")
         assert found == SID
 
+    # ------------------------------------------------------------------
+    # W16 P0-2 (ULTRAREVIEW-2026-07-30, critical): the candidate set was
+    # filtered on kind + freshness and NOTHING ELSE, so a PREVIOUS session's
+    # own final result -- sitting in the name-keyed outcomes/<name>.jsonl,
+    # which no respawn ever truncates -- was an eligible "fast completion"
+    # for the session that had just replaced it. Three filters close it, and
+    # each has its own pin below because each fails independently.
+    # ------------------------------------------------------------------
+
+    def test_excluded_sid_is_never_returned(self, native_home):
+        """P0-2 filter (2): a sid the CALLER already knows is retired can
+        never come back as "the session that just fast-completed". The
+        witness is passed at the frame -- the function never re-reads the
+        registry to discover it."""
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": SID,
+                                    "kind": "result"})
+        # Control: without the witness this record IS a legal candidate (it
+        # matches the short id), so the None below is caused by the exclusion
+        # and by nothing else.
+        assert fleet._fast_completion_sid(
+            "w1", _iso(NOW - timedelta(seconds=1)), short_id="aaaabbbb") == SID
+        assert fleet._fast_completion_sid(
+            "w1", _iso(NOW - timedelta(seconds=1)), short_id="aaaabbbb",
+            exclude_sids=(SID,)) is None
+
+    def test_excluded_sid_is_also_barred_from_the_sid_keyed_scan(self, native_home):
+        """The exclusion is a property of the RECORD, so it must hold on both
+        sources. A retired sid's own sid-keyed file still prefix-matches its
+        own short id, so the filename check cannot catch it."""
+        fleet.append_outcome(SID, {"ts": _iso(NOW), "session_id": SID,
+                                   "kind": "result"})
+        assert fleet._fast_completion_sid(
+            "w1", _iso(NOW - timedelta(seconds=1)), short_id="aaaabbbb",
+            exclude_sids=(SID,)) is None
+
+    def test_name_keyed_record_must_match_the_short_id(self, native_home):
+        """P0-2 filter (1): the sid-keyed branch already enforces the short id
+        on the FILENAME; the name-keyed branch must enforce it on the RECORD.
+        A stale record for a wholly different session is not a candidate for
+        the session we just dispatched, retired or not."""
+        stale = "deadbeef-0000-1111-2222-333344445555"
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": stale,
+                                    "kind": "result"})
+        assert fleet._fast_completion_sid(
+            "w1", _iso(NOW - timedelta(seconds=1)), short_id="aaaabbbb") is None
+
+    def test_absent_short_id_means_nothing_was_dispatched(self, native_home):
+        """P0-2 filter (3): NativeDispatchError carries short_id=None only for
+        the pre-dispatch causes (bad name, missing exe, task-file write,
+        dispatch subprocess failure -- its own docstring). No session was ever
+        launched, so no session can have fast-completed; every match on that
+        path is necessarily somebody else's record."""
+        fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": SID,
+                                    "kind": "result"})
+        assert fleet._fast_completion_sid(
+            "w1", _iso(NOW - timedelta(seconds=1))) is None
+
     def test_end_to_end_real_stop_hook_writes_sid_keyed_fallback(self, native_home, monkeypatch):
         """Adversarial Trap 1 repro, pinned as a regression test: cmd_spawn
         pre-claims a record (session_id=None). Mid-join-poll, the REAL
@@ -3231,6 +3288,109 @@ class TestCmdRespawnNative:
         assert rec["session_id"] == old_sid
         assert rec["status"] == "idle"
         assert "respawn_failed" in _events_kinds(native_home)
+
+    # -----------------------------------------------------------------
+    # W16 P0-2 (ULTRAREVIEW-2026-07-30, critical). The canonical shape:
+    # `fleet wait w1` returns the instant the Stop hook writes the OLD
+    # session's kind="result" into the name-keyed outcomes/w1.jsonl, the
+    # supervisor immediately respawns, and dispatch_bg then fails. The
+    # freshness window reaches BACKWARD past the new pre-claim, so the old
+    # session's own farewell record was an eligible "fast completion" for
+    # the session that had just retired it -- committing session_id = a sid
+    # that is simultaneously in retired_sids. Nothing downstream can see
+    # that: every consumer reads the session_id-union-retired_sids set.
+    # -----------------------------------------------------------------
+    def test_join_expiry_never_rebinds_the_sid_it_just_retired(
+            self, native_home, monkeypatch):
+        old_sid = "deadbeef-0000-1111-2222-333344445555"
+        seed_native_worker(native_home, sid=old_sid, status="idle")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
+        # The OLD session's own final result, NAME-keyed -- which is what the
+        # real Stop hook writes for an established session, whose registry
+        # record already carries session_id == sid so `_resolve_name` matches
+        # (bin/hooks/stop_outcome.py). `now_iso()` puts it inside this
+        # respawn's backward slack window. No sid-keyed file exists: nothing
+        # ever fast-completed, because nothing was ever joined.
+        fleet.append_outcome("w1", {"ts": fleet.now_iso(), "session_id": old_sid,
+                                    "kind": "result",
+                                    "result_text": "the PREVIOUS turn's answer"})
+        clock = _FakeClock()
+        with pytest.raises(fleet.FleetCliError, match="native respawn failed"):
+            fleet.cmd_respawn(
+                _respawn_args(),
+                run=_fake_run_factory(stdout="backgrounded · aaaabbbb · fleet|w1|t\n"),
+                which=lambda _: "claude", sleep=lambda s: clock.advance(s), clock=clock,
+            )
+        rec = fleet.load_registry()["workers"]["w1"]
+        # The invariant that separates a clean rollback from the defect: a
+        # record's live sid is never also one of its retired ones. Under the
+        # defect both of these held -- session_id == old_sid AND old_sid in
+        # retired_sids -- and the respawn printed success.
+        assert rec["session_id"] not in rec["retired_sids"]
+        assert rec["session_id"] == old_sid   # rolled back to `before`
+        assert rec["status"] == "idle"
+        assert rec["turns"] == 0
+        assert "respawn_failed" in _events_kinds(native_home)
+
+    def test_join_expiry_call_site_passes_the_retired_witness(self, native_home,
+                                                              monkeypatch):
+        """Pins the CALL SITE's `exclude_sids` argument, which the test above
+        does NOT: there the retired sid has a different short id, so filter (1)
+        alone bars it and dropping the witness at :5745 stays green. Found by
+        fault-injecting the code this fix ADDED rather than only the code it
+        repaired.
+
+        The one thing the witness -- and only the witness -- protects against is
+        a retired sid that SHARES the newly dispatched session's 8-char short
+        id. `dispatch_bg` identifies the session it just launched by that short
+        id alone (`_join_roster_by_short_id`), so a prefix collision makes the
+        old session indistinguishable from the new one by every filter grounded
+        in identity-by-prefix. The record's own `retired_sids` is the only
+        witness that still tells them apart, and the respawn frame already
+        holds it."""
+        # Same short id as the dispatched session (SID = aaaabbbb-1111-...),
+        # different sid.
+        old_sid = "aaaabbbb-0000-0000-0000-000000000000"
+        assert old_sid[:8] == SID[:8] and old_sid != SID
+        seed_native_worker(native_home, sid=old_sid, status="idle")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
+        fleet.append_outcome("w1", {"ts": fleet.now_iso(), "session_id": old_sid,
+                                    "kind": "result", "result_text": "previous"})
+        clock = _FakeClock()
+        with pytest.raises(fleet.FleetCliError, match="native respawn failed"):
+            fleet.cmd_respawn(
+                _respawn_args(),
+                run=_fake_run_factory(stdout="backgrounded · aaaabbbb · fleet|w1|t\n"),
+                which=lambda _: "claude", sleep=lambda s: clock.advance(s), clock=clock,
+            )
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["session_id"] not in rec["retired_sids"]
+        assert rec["session_id"] == old_sid
+        assert rec["turns"] == 0
+
+    def test_join_expiry_still_commits_a_genuine_fast_completion_when_retired_present(
+            self, native_home, monkeypatch):
+        """The P0-2 guard must not swallow the race it was built to recover.
+        Both records are inside the window; only the retired one is barred."""
+        old_sid = "deadbeef-0000-1111-2222-333344445555"
+        seed_native_worker(native_home, sid=old_sid, status="idle")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
+        fleet.append_outcome("w1", {"ts": fleet.now_iso(), "session_id": old_sid,
+                                    "kind": "result", "result_text": "previous"})
+        fleet.append_outcome(SID, {"ts": fleet.now_iso(), "session_id": SID,
+                                   "kind": "result", "result_text": "already done"})
+        clock = _FakeClock()
+        rc = fleet.cmd_respawn(
+            _respawn_args(),
+            run=_fake_run_factory(stdout="backgrounded · aaaabbbb · fleet|w1|t\n"),
+            which=lambda _: "claude", sleep=lambda s: clock.advance(s), clock=clock,
+        )
+        assert rc == 0
+        rec = fleet.load_registry()["workers"]["w1"]
+        assert rec["session_id"] == SID
+        assert rec["session_id"] not in rec["retired_sids"]
+        assert old_sid in rec["retired_sids"]
+        assert rec["status"] == "idle"
 
 
 def _kill_args(name="w1", yes=True):
