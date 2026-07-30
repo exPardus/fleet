@@ -663,13 +663,79 @@ class TestTheSlashCommandsUseTheViewPath:
             f"`fleet status` is the authoritative RECOMPUTING verb (D2) and "
             f"takes `fleet.lock`")
 
+    def _grants(self, name):
+        fm = (COMMANDS_DIR / f"{name}.md").read_text(encoding="utf-8").split("---\n", 2)[1]
+        return {g.strip() for g in re.findall(r"Bash\(([^)]*)\)", fm)}
+
+    @staticmethod
+    def _grant_allows(grants, command):
+        """The measured `allowed-tools` matcher: `X:*` is a PREFIX over the
+        whole command string, a bare rule is exact. Driven against the real
+        thing (claude 2.1.220, `-p --permission-mode default --allowedTools`)
+        rather than inferred from the spelling -- the truth table and its
+        negative control are recorded in `tests/test_terminal_surface.py`
+        above `_grants_the_body_needs`."""
+        for g in grants:
+            if g.endswith(":*"):
+                stem = g[:-2]
+                if command == stem or command.startswith(stem + " "):
+                    return True
+            elif command == g:
+                return True
+        return False
+
     def test_the_grant_still_matches(self):
-        """`Bash(fleet status:*)` must still cover the flagged spelling --
-        a lint that changed the body and broke the grant would make the
-        command prompt for permission on a read-only view."""
+        """The grant must still cover the flagged spelling -- a lint that
+        changed the body and broke the grant would make the command prompt for
+        permission on a read-only view.
+
+        THIS USED TO ASSERT THE LITERAL `"Bash(fleet status:*)"`, and the
+        string it pinned was itself the defect (P1-3/P1-14, 2026-07-30). `X:*`
+        is a prefix match, so that spelling ALSO pre-approved bare
+        `fleet status` -- the lock-taking RECOMPUTING verb (D2) whose avoidance
+        is the entire subject of the test directly above this one. A pin keyed
+        on a magic substring pins the substring, not the property; the property
+        is that the grant covers what the body inlines and refuses what it
+        deliberately does not."""
         for name in ("status", "overview"):
-            text = (COMMANDS_DIR / f"{name}.md").read_text(encoding="utf-8")
-            assert "Bash(fleet status:*)" in text.split("---\n", 2)[1]
+            grants = self._grants(name)
+            assert self._grant_allows(grants, "fleet status --stale-ok"), (
+                f"commands/{name}.md: {sorted(grants)} does not cover the "
+                f"probe-free read its body inlines")
+            assert not self._grant_allows(grants, "fleet status"), (
+                f"commands/{name}.md: {sorted(grants)} pre-approves BARE "
+                f"`fleet status`, which recomputes under `fleet.lock` and "
+                f"writes -- the very call the body avoids by inlining "
+                f"`--stale-ok`")
+
+    def test_no_read_only_grant_pre_approves_the_repair_flag(self):
+        """The companion to `test_no_read_only_command_inline_execs_repair`,
+        at the other mechanism.
+
+        That test bans `--repair` inside the `` !`...` `` spans, and its
+        docstring says the scoping is deliberate. It is -- but the inline span
+        is not the only way the flag runs without a prompt. `allowed-tools`
+        also widens the MODEL'S OWN Bash calls for the turn (that is the
+        mechanism the 2026-07-09 kill/clean incident rode in on), so a grant
+        matching `fleet doctor --repair` hands the model the quarantine the
+        2026-07-27 gate reserved for a human -- while the body's prose politely
+        asks it not to. Two guards are not one guard: when you write a rule
+        about one mechanism, check the other mechanism reaching the same
+        capability."""
+        for name in ("doctor", "overview", "status", "peek", "result"):
+            grants = self._grants(name)
+            assert not self._grant_allows(grants, "fleet doctor --repair"), (
+                f"commands/{name}.md: {sorted(grants)} pre-approves "
+                f"`fleet doctor --repair` with no permission prompt")
+
+    def test_the_seed_the_pre_fix_grant_is_caught(self):
+        """Both assertions above are negatives over a hand-written matcher,
+        which is the shape that passes vacuously when the matcher rots. Feed it
+        the grants that shipped before the fix and prove it still says yes."""
+        assert self._grant_allows({"fleet doctor:*"}, "fleet doctor --repair")
+        assert self._grant_allows({"fleet status:*"}, "fleet status")
+        assert not self._grant_allows({"fleet doctor"}, "fleet doctor --repair")
+        assert self._grant_allows({"fleet doctor"}, "fleet doctor")
 
     def test_no_read_only_command_inline_execs_repair(self):
         """`/fleet:doctor` and `/fleet:overview` inline-exec their command with
