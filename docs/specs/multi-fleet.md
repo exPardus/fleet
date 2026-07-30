@@ -1,15 +1,16 @@
 # Multi-fleet: independent fleets scoped per session, per repo, or per dir
 
-Status: drafting v7 (2026-07-30, interface tier). History: v1→v2 RESTRUCTUREs (marker, §9);
-v3 registry-lookup core (held ever since); v4–v5 mechanics; v6 deleted `adopt` (§6); round 6
-(`mf-rb6`/`mf-rs6`, both GATING, convergent): **the miss-refusal refused the manager class the
-deletion was supposed to serve, and the hosted/interactive predicate it forced is not decidable
-by the resolver** (rb6 C-1/C-2, rs6 C-1/C-5). v7 removes both: no miss-refusal, no runtime
-class predicate — **the guard tiers on irreversibility instead**. Round 6 also delivered
-CONFIRM-A: the sid-donation question is CLOSED in the safe direction by counting, so the core
-lookup is *sounder* than v6 claimed. Reports: `state/journals/mf-r{b,s}{,2,3}.md`, `mf-rb4.md`,
-`mf-rs4.md`, `mf-r{b,s}5.md`, `mf-r{b,s}6.md`. GATE THEN BUILD: round-7 gate before the
-operator docket. Code references by symbol.
+Status: **drafting v8 — SEVEN GATE ROUNDS COMPLETE, AWAITING OPERATOR RULING** (2026-07-30,
+interface tier; docket entry filed in `docs/OPERATOR-GATES.md` the same day). History: v1→v2
+RESTRUCTUREs (marker, §9); v3 registry-lookup core (held ever since); v4–v5 mechanics; v6
+deleted `adopt`; v7 deleted the miss-refusal and the class predicate, tiering the guard on
+irreversibility; round 7 (`mf-rb7`/`mf-rs7`, both GATING) killed v7's one-line destructive
+criterion (it did not generate its own list — failed on `kill`), omitted supervisor tier,
+undefined terminus, and DISCOVERED two shipped defects (global-position `--fleet-home`
+silently clobbered by `autoclean`'s subparser; `doctor --repair` unenumerated). v8 folds all
+of it: the verb-effect table, the terminus, the supervisor tier + successor argv, the
+measured pre-claim windows. Reports: `state/journals/mf-r{b,s}{,2,3}.md`, `mf-r{b,s}4.md`,
+`mf-r{b,s}5.md`, `mf-r{b,s}6.md`, `mf-r{b,s}7.md`. Code references by symbol.
 
 ## Why this exists
 
@@ -109,27 +110,59 @@ below). Search-space-not-authority argument and honesty items unchanged from v6.
 3. **Validated env** — `FLEET_HOME` resolving to an initialized home. Serves the manager
    (interactive sessions set it or inherit it from their shell), the suite (tmp homes), and
    the pre-claim window. On a hosted body this value is the daemon donor's (two-media model)
-   — which is exactly why step 4's tier exists instead of a class predicate.
+   — which is exactly why step 5's tier exists instead of a class predicate.
 4. **Legacy install-root default** (until §8).
+5. **Terminus, defined (rs7 C-1 — v7 had none):** when no step resolves — post-§8 with no
+   flag, no membership, no valid env; or pre-§8 when step 4 yields an uninitialized directory
+   (a plugin-cache copy is exactly this) — **mutating verbs refuse with the named remedy
+   (`--fleet-home` or `FLEET_HOME`), and views render `[fleet]: no home` and exit 0.** No
+   step falls off the end of the list silently, on any surface.
 
-**The destructive tier (replaces both the miss-refusal and the class predicate; discharges
-mfgate-read N4):** verbs are *destructive* when their effect is not recoverable by a respawn
-or a re-run — `kill`, `clean`, `archive`, `autoclean` (tier 2+), `respawn --force`; the spec
-enumerates and a lint keeps the list exhaustive against `_confirm_destructive` call sites.
-**When armed, a destructive verb whose home resolved via env or legacy requires the flag.**
-Ordinary mutations (`spawn`, `send`, bare `respawn`, `init`) proceed on env — a wrong-home
-spawn is recoverable and visible; a wrong-home clean is neither. Guard grounded on the
-EFFECT, not on caller configuration — the standard three council rulings in this repo's
-gates already demand. Accepted residual, stated: on an armed machine, a hosted body in the
-pre-claim window could spawn into the donor fleet's home until its row lands; the window is
-seconds, the effect is recoverable and evented, and closing it costs the predicate round 6
-proved undecidable.
+**The verb-effect table (replaces v7's one-line criterion, which did not generate its own
+list — rs7 C-2 killed it on `kill`, this repo's own contract for which is respawn-recoverable):**
+verbs classify by their **worst irreversible effect in the wrong home**, enumerated per verb:
+
+| Class | Verbs | Wrong-home effect |
+|---|---|---|
+| **destructive** — destroys evidence or sessions; nothing recovers it | `clean` (journals, outcomes, records), `archive` + `autoclean` tier 2+/3 (`claude rm`, tombstone drop), `doctor --repair` (registry renamed aside — rb7 C-3), `sup-handoff-abort` (stops a successor session), any future verb whose implementation calls `claude rm`, deletes evidence files, or renames registry/claim state — **the lint keys on those effect sites** (`claude rm` invocations, unlink/rename of `state/`/`supervisor/`/`logs/` paths), NOT on `_confirm_destructive`, which is an ownership guard whose call sites neither contain nor are contained by this list (rs7 C-3 measured the disjointness) |
+| **disruptive** — recoverable but harms a live foreign fleet | `kill`, `interrupt`, `send`, `respawn` (all forms), `release` |
+| **ordinary** | `spawn`, `init`, `status`/`peek`/`result`/views, `homes --add/--retire` (list-reversible) |
+
+**When armed: destructive via env/legacy requires the flag; disruptive via env/legacy
+proceeds but renders its resolution provenance in output** (a wrong-home kill is loud where a
+wrong-home clean would have been fatal); ordinary flows. Lookup-hit resolutions are exempt
+from both — membership is affirmative evidence. Guard grounded on the EFFECT, not on caller
+configuration.
+
+**The supervisor tier is in scope (rb7 C-1 — v7 named it once, in passing):** `supervisor/`
+is home-relative, claim seizure + HANDSHAKE overwrite/unlink are irreversible, and the
+**successor class has the widest measured pre-claim window** (33.0–63.1s, 7 of 7 over 30s, vs
+0.7s median for workers) while its task render carries **no `--fleet-home`** — so
+`_render_successor_task` gains the same baked argv the hooks have, in slice (c). The
+`handoff_boot_refusal` fail-open (`if not entries: return None`, its own docstring admits it)
+is filed to the absence-keyed lane, not this spec.
+
+Accepted residual, now MEASURED (wave-26 live drive, n=3, + two lenses read-only n=316/286,
+agreeing): a hosted body's registry row holds `session_id=None` for **6.8–10.6s** (worker
+class) after dispatch — during which, on an armed machine, it could spawn into the donor
+fleet's home. Recoverable, evented, accepted. NOT accepted silently for the successor class:
+its 33–63s window plus an unenumerated irreversible first act is exactly why the tier above
+now covers it. The bound is **unbounded when `last_activity` is missing** — that shape joins
+the absence-keyed lane.
 
 **Arming — fails ARMED in every direction (rb6 CRITICAL-3 family, rs6 J-1/J-9):** armed when
 the population holds ≥2 distinct homes counting valid AND unreadable; **an unreadable list, an
 unreadable home, or any indeterminate population state arms** — indeterminacy never selects
 the permissive branch. With a determinate population of <2: byte-identical to today
-(baseline `12c6521`).
+(baseline `12c6521`). **§4's unreadable-list sentence defers to this paragraph** — one
+normative rule (destructive via env/legacy requires the flag; a lookup hit stays exempt);
+rs7 C-4 measured v7's two statements disagreeing on the lookup-hit case, and this one wins.
+
+**Shipped-defect slice condition (rb7 C-2, measured both interpreters):** argparse's subparser
+namespace copy CLOBBERS a global-position `--fleet-home` when the verb also defines one —
+`['--fleet-home','H','autoclean'] → None` today. The flag-promotion slice must either share
+one parser object or reconcile the two dests explicitly, and its pin drives the exact
+global-position invocation that silently dropped the flag.
 
 **Hooks**: `--fleet-home` argv baked per-home (survived six rounds; both `--settings` sites).
 **Statusline**: blob sid → same lookup; single-home short-circuit; words, exit 0; resolver
@@ -196,23 +229,30 @@ is a fact dispatch wrote under a lock.
 2. **`knowledge/` for non-repo homes** — scaffolded plain; accepted for M1.
 (The sid-donation question is closed — CONFIRM-A — and removed from this list.)
 
-## Sequencing
+## Sequencing — with failure outcomes (rs7 C-5: v7's arrows had none)
 
-1. v7 → **round-7 gate**: fresh dual lens, all twelve prior reports fenced by file name.
-   Priority: the destructive tier's enumeration (is any irreversible verb outside the list?
-   is `send` to a wrong home truly recoverable?); the pre-claim-window residual's real width
-   (drive a dispatch and measure seconds-to-row); arming's indeterminacy clause against a
-   population that is *empty because the list is unreadable AND legacy is retired* (post-§8
-   state); and the two-media model's counting argument (find a fifth body that breaks it).
-2. Fold → **operator docket entry** (also carries: `fix/b6-interface-release` ratification,
-   the CONFIRM-A update to the identity gate, WSL scoping).
-3. Build slices, disjoint, flag in/before arming: (0) split; (a) `read_registry_at` + list +
-   lookup + arming + destructive tier + `fleet homes` + global flag; (b) `init --home`;
-   (c) hook argv + witness; (d) statusline (capture-gated); (e) pins.
+1. **Seven gate rounds are COMPLETE** (v1→v8; reports enumerated in the Status line). Rounds
+   6 and 7 killed enumeration mechanics and DISCOVERED two shipped defects, while every
+   architectural element has held since round 5 and three contested folds were vindicated by
+   later rounds' failed attacks. **The gate's terminus is the operator, not a lens loop that
+   structurally always returns findings** — v8 goes to the docket as-is. Failure outcome: if
+   the operator orders a round 8, its verdict routes back here; if the operator rejects the
+   architecture, the record above is the map of what was tried.
+2. **Operator docket entry (BLOCKING for step 3)** — carries the spec, the two accepted
+   residuals (pre-claim window 6.8–10.6s worker / 33–63s successor, dual-adopt-era ambiguity
+   costs), the destructive/disruptive table, §8's criteria, WSL out-of-scope,
+   `fix/b6-interface-release` ratification, and the CONFIRM-A identity-gate update. **No
+   build slice dispatches before the operator rules.** The §8 exit is a second, later
+   operator decision, separately blocking for the retirement it governs.
+3. Build slices, disjoint, flag in/before arming, each RED-then-GREEN both floors serially,
+   any slice failing its gate returns here rather than proceeding: (0) split;
+   (a) `read_registry_at` + list + lookup + arming + verb-effect table + `fleet homes` +
+   global flag (with the rb7 C-2 argparse pin); (b) `init --home`; (c) hook argv + witness +
+   `_render_successor_task` argv; (d) statusline (capture-gated); (e) pins.
 
 WHAT THIS SPEC GOT WRONG — assume it contains an error and go find it. Named soft spots: the
-destructive-verb enumeration is drafted from memory of `_confirm_destructive` call sites and
-the lint is what makes it honest — grep before build; "the window is seconds" in the §5
-residual is asserted, not measured (round 7 is asked to measure it); and the claim that
-ordinary wrong-home mutations are "visible and evented" assumes the wrong home's operator
-reads their own events — true of fleets with supervisors, vacuous for an abandoned home.
+verb-effect table's rows are drafted against wave-26-era shipped verbs — the lint against
+effect sites is what keeps it honest as verbs are added; the successor-window numbers are
+n=7 from one machine's history plus one live n=3 drive; and the "views render `[fleet]: no
+home`" terminus assumes every view has a render path that reaches the resolver's answer —
+the compact status table and the statusline do, `fleet result`'s error path is unchecked.
