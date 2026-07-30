@@ -1,273 +1,218 @@
 # Multi-fleet: independent fleets scoped per session, per repo, or per dir
 
-Status: drafting v6 (2026-07-30, interface tier). History: v1 → RESTRUCTURE; v2 → RESTRUCTURE
-(marker deleted, §9); v3 registry-lookup core; round 3 held the core; round 4 (2 GATING) →
-v5; round 5 (`mf-rb5` break / `mf-rs5` soundness, both GATING): **converged on §6 `adopt` as
-the failure locus** — and vindicated v5's most contested fold (rb5 attempted the stale-identity
-attack the withdrawn forensic arm supposedly enabled and **could not build it**, four reasons
-checked against shipped code). v6 therefore **deletes `adopt`** (§6 is now a record, like §9)
-and simplifies membership again. Reports: `state/journals/mf-r{b,s}{,2,3}.md`, `mf-rb4.md`,
-`mf-rb5.md`, `mf-rs5.md`. GATE THEN BUILD: round-6 gate before the operator docket. Code
-references by symbol.
+Status: drafting v7 (2026-07-30, interface tier). History: v1→v2 RESTRUCTUREs (marker, §9);
+v3 registry-lookup core (held ever since); v4–v5 mechanics; v6 deleted `adopt` (§6); round 6
+(`mf-rb6`/`mf-rs6`, both GATING, convergent): **the miss-refusal refused the manager class the
+deletion was supposed to serve, and the hosted/interactive predicate it forced is not decidable
+by the resolver** (rb6 C-1/C-2, rs6 C-1/C-5). v7 removes both: no miss-refusal, no runtime
+class predicate — **the guard tiers on irreversibility instead**. Round 6 also delivered
+CONFIRM-A: the sid-donation question is CLOSED in the safe direction by counting, so the core
+lookup is *sounder* than v6 claimed. Reports: `state/journals/mf-r{b,s}{,2,3}.md`, `mf-rb4.md`,
+`mf-rs4.md`, `mf-r{b,s}5.md`, `mf-r{b,s}6.md`. GATE THEN BUILD: round-7 gate before the
+operator docket. Code references by symbol.
 
 ## Why this exists
 
-Operator launch goal (2026-07-29): fleet ships when a machine can run **independent fleets** —
-per session, per repo, or per directory — instead of exactly one. Today there is one fleet
-because `FLEET_HOME` is **two variables wearing one name**: the *data plane* (the home) and the
-*install locator* that finds hook scripts, `fleet.py`, the statusline and the worker-settings
-template. Measured at round 1 and re-driven since: a data-only home yields four dead hooks,
-silently, because hooks exit 0. **The split is the work.**
+Operator launch goal (2026-07-29): independent fleets per session/repo/dir instead of exactly
+one. Today there is one fleet because `FLEET_HOME` is two variables wearing one name: the home
+(data plane) and the install locator. Measured repeatedly: a data-only home yields four dead
+hooks, silently. **The split is the work.**
 
-Incident receipt for the coupling: 2026-07-29T22:58:39Z — fleet code run from inside the repo
-with no `FLEET_HOME` set overwrote the real `state/fleet.json` + `supervisor/INCARNATION` with
-fixture data (quarantine: `state/*.testpollution.20260729T225839Z`). Isolation pins are §7.
+Incident receipt: 2026-07-29T22:58:39Z — fleet code run from inside the repo with no
+`FLEET_HOME` overwrote the real registry + INCARNATION with fixture data. **Honest scope
+(rb6 CRITICAL-3): the §1.4 legacy fallback means this class closes only for callers that name
+a home, plus the §7 pins for the suite; full closure is §8's exit, not M1's.** A lens body
+measured its own import resolving to its own worktree this round — the class is live until §8.
 
 ## Definitions
 
-- **Install** — the code plane. `INSTALL_ROOT = Path(__file__).resolve().parent.parent`, never
-  overridable. A plugin-cache copy is structurally indistinguishable from an install
-  (measured); what governs is §4 membership.
+- **Install** — code plane. `INSTALL_ROOT = Path(__file__).resolve().parent.parent`, never
+  overridable. Plugin-cache copies are structurally indistinguishable from installs; §4
+  membership governs.
 - **Home** — one fleet's soul and state. Install == home stays legal forever.
-- **Hosted vs interactive, load-bearing:** a *daemon-hosted* session (`--bg`) receives the
-  daemon's substituted environment — its env is evidence about the daemon's first dispatch,
-  not about itself (docketed substitution model). An *interactive* session's environment is
-  its own: donation is a **daemon** property, and no measurement in five gate rounds has shown
-  an interactive session with a substituted env. This split is what lets each caller class
-  have a sound channel without `adopt` (§5, §6).
-- The four worker hooks each carry a standalone `_fleet_home()` (quadruplicated; one copy
-  diverges). Slice 0 unifies them plus the statusline's import-time conflation.
-- **Home-path comparison**: filesystem identity (`samefile`) when both exist, exception-wrapped
-  — never allowed to raise out of resolution; `normcase(resolve())` string fallback for
-  nonexistent paths, named in refusals that turn on it; identity values compared within one
-  process only, never persisted (`st_dev` differs across floors — measured).
+- **The two-media model, structural (rb6 CRITICAL-2, measured):** a daemon-hosted (`--bg`)
+  session's environment is the daemon's frozen first-dispatch environment **plus a per-session
+  `CLAUDE_CODE_SESSION_ID` override**. Proof by counting: the daemon is a singleton (its lock
+  says so), one frozen env holds exactly one sid, and four live bodies read four distinct
+  correct sids. Consequences: **the sid is trustworthy; every other env var on a hosted body
+  is evidence about the daemon's cold-starter, not the body**; the previously-OPEN sid-donation
+  question is **closed in the safe direction** (CONFIRM-A) — the audit row and open question
+  carrying it are retired this revision, and the docketed identity gate gains this receipt.
+  v6's hosted/interactive env-soundness *classification* is retired with them: `claude attach`
+  makes a hosted session interactive-driven, so the class boundary was never decidable at
+  runtime (rb6 MAJOR-10, rs6 C-5) — **v7 no longer needs it anywhere**.
+- The four worker hooks each carry a standalone `_fleet_home()`; slice 0 unifies them plus the
+  statusline's import-time conflation.
+- **Home-path comparison**: `samefile` when both exist, exception-wrapped, never raising out
+  of resolution; `normcase(resolve())` fallback for nonexistent; identity values never
+  persisted.
+- **Initialized home, defined** (rs6 C-3 — v6 used the term undefined): a directory whose
+  `state/fleet.json` exists and parses as a registry by the tolerant reader. The no-`mkdir`
+  rule binds **resolution and read paths**; verbs whose contract is creation (`init --home`)
+  create, and mutating verbs on a resolved-but-uninitialized home refuse before any write
+  layer (shipped `save_registry` mkdirs — the refusal must sit above it).
 
 ## M1 — scope
 
-Not a flag. M1 = slice 0, the homes list, resolution, `init --home`, `fleet homes`
-(view + `--add`/`--retire`), pins. Excluded: federation views, cross-home operations (§10) —
-and with `adopt` gone, **the design contains zero cross-home writes**. Build reality: no
-shipped registry reader takes a path — slice (a) contains `read_registry_at(home)` (driven
-through 12 corruption shapes at round 3: zero quarantines, zero raises).
+Not a flag. M1 = slice 0, the homes list, resolution, the destructive-verb tier, `init
+--home`, `fleet homes` (view/`--add`/`--retire`), pins. Zero cross-home writes. Zero runtime
+session classification. Build reality: **the tolerant path-parameterized reader is NEW work**
+— rs6 C-4 corrects v6's "zero raises": that property was driven on a round-3 *prototype*; the
+shipped reader raises, and `read_registry_at` must be built to the driven contract, with the
+prototype's 12 corruption shapes as its RED-first fixture set.
 
-**Sequencing constraint, binding (both round-5 lenses independently):** the global
-`--fleet-home` flag ships **in or before the slice that ships arming** — arming is what makes
-the flag mandatory, so a slice order that arms first strands every refusal it mints. Flag
-before arming, not merely "flag before adopt".
+**Binding slice constraint (both round-5 lenses, unchanged):** the global `--fleet-home` flag
+ships in or before the arming slice.
 
 ### Slice 0 — the install/home split
 
-Re-point the install-locator sites at `INSTALL_ROOT` — by symbol: `template_settings_path`,
-`statusline_script_path`, the lifecycle-steer render, the two doctor hook-smoke checks,
-`_render_sup_spawn_task`, `_render_successor_task`, the `render_worker_settings_template` call,
-and the template's hook-command placeholder (`{{FLEET_INSTALL}}/bin/hooks/...`). The doctor
-legacy-settings check is home-plane — NOT re-pointed. Re-grep `FLEET_HOME /` before touching
-anything.
+Re-point by symbol: `template_settings_path`, `statusline_script_path`, the lifecycle-steer
+render, the two doctor hook-smoke checks, `_render_sup_spawn_task`, `_render_successor_task`,
+the `render_worker_settings_template` call, the template's hook-command placeholder
+(`{{FLEET_INSTALL}}/...`). Doctor legacy-settings check stays home-plane. Re-grep before
+touching.
 
 ## §4. The homes list
 
-`~/.claude/fleet-homes.list`. **Append-only, forever** — the file lives outside every home, no
-`fleet.lock` can serialize a rewrite (the rewrite reading was measured at 95–100% loss under
-contention), and a no-rewrite lint pins it. Records, one per line: a home path, or a
-retirement `!<home path>`. **The fold is a sequence fold, last record wins per identity**
-(stated because the set-difference reading makes retire-then-re-add unrecoverable — mf-rs5
-MAJOR-6): `add A · retire A · add A` folds to member. Re-adding after retirement is
-`fleet homes --add` (rb5 B2's re-list gap closes with the verb, not a special case).
+`~/.claude/fleet-homes.list`. Append-only forever (rewrite reading measured 95–100% loss;
+no-rewrite lint). Records: home path, or `!<home path>` retirement; **sequence fold, last
+record wins per identity** — `add·retire·add` = member. Writers: `fleet init --home`,
+`fleet homes --add`, `fleet homes --retire`; never hooks, never dispatch, never
+session-implicit. Appends via adapter `atomic_append_bytes` (precedent `851e15f`, `a4f0079`);
+read-side verify verifies the **folded membership**, not the line. Read grammar: tolerant
+decode (`EF BB BF`/`FF FE`/`FE FF`; no-BOM non-UTF-8 → `mbcs`/`latin-1` + doctor NOTE);
+absolute by the spec's own grammar (drive-letter/UNC on Windows, leading `/` POSIX — never
+`os.path.isabs`, floor-divergent); no `..`; must name an initialized home at read time (also
+retires torn prefixes). Invalid lines never invalidate others. **Unreadable list ⇒ treated as
+armed-with-unknown-population: destructive verbs require the flag; nothing falls silently to
+single-fleet behavior** (the round-6 arming-fails-open family, closed in the arming paragraph
+below). Search-space-not-authority argument and honesty items unchanged from v6.
 
-**Writers**: `fleet init --home` (scaffold registers itself), `fleet homes --add <path>`
-(validates initialized), `fleet homes --retire <path>` — never hooks, never dispatch, and with
-`adopt` gone, never anything session-implicit. All appends via the adapter's
-`atomic_append_bytes` (win32 `FILE_APPEND_DATA`; precedent `851e15f`, extended `a4f0079`),
-newline-terminated; POSIX half `O_APPEND` single `write()`. **Read-side verify verifies the
-FOLDED MEMBERSHIP, not the line** (a verify that greps its own line passes while a concurrent
-retirement wins the fold — mf-rs5): after append, re-read, fold, assert the intended state.
+## §5. Resolution — one order for every caller, guard tiered by irreversibility
 
-**Read grammar**: decode tolerantly — `EF BB BF`, `FF FE`, `FE FF` honored; **no-BOM non-UTF-8
-falls back to `mbcs` (Windows) / `latin-1` with a doctor NOTE naming the encoding** (an
-ANSI-written non-ASCII path must not brick the list — the round-4 fix re-created its own
-hazard one encoding over, mf-rs5 MAJOR-7); only truly undecodable refuses. Per line: strip,
-skip empty; `!` prefix = retirement. A path line is valid iff (a) absolute by the spec's own
-grammar — drive-letter root `X:\`/`X:/` or UNC `\\server\share` on Windows, leading `/` on
-POSIX; never `os.path.isabs` (diverges between the declared floors — measured); (b) no `..`
-segment; (c) naming an **initialized home** at read time (also retires torn-prefix lines).
-Invalid lines never invalidate other lines.
+1. **`--fleet-home` flag** — global, applied in `main()` before dispatch (**to be built**).
+   Validation: resolve, `is_dir`, initialized; no side-effect `mkdir`. Flag/lookup
+   disagreement → mutating verbs refuse without `--yes` + witness line.
+2. **sid→home lookup** (sid-carrying callers). Population: folded list ∪ legacy install-root
+   home while §8 lives (§8 completion removes the term). Per home, one lock-free snapshot via
+   `read_registry_at`, tri-state hit/miss/unreadable. Membership: the home-level union this
+   spec defines — per-record `session_id` ∪ `retired_sids` over the home's records;
+   `spawned_by` never grants membership (pinned). Exactly one member-home → resolved (TOCTOU:
+   mutating verbs re-assert membership under that home's `fleet.lock`). Two+ → refuse naming
+   all. **Miss → fall through, for every verb class.** v6's miss-refusal is DELETED: it
+   refused the manager class in flat contradiction with the step below (rb6 C-1 traced eight
+   of fourteen slash commands dead), it refused every freshly dispatched body in the pre-claim
+   window (`session_id=None` until the roster join — rs6 C-2), and repairing it required a
+   hosted/interactive predicate nothing can compute (rs6 C-5). Unreadable homes: reported in
+   provenance, counted by arming, and any lookup that *would* have matched only an unreadable
+   home is indistinguishable from a miss — which is why the destructive tier below exists.
+3. **Validated env** — `FLEET_HOME` resolving to an initialized home. Serves the manager
+   (interactive sessions set it or inherit it from their shell), the suite (tmp homes), and
+   the pre-claim window. On a hosted body this value is the daemon donor's (two-media model)
+   — which is exactly why step 4's tier exists instead of a class predicate.
+4. **Legacy install-root default** (until §8).
 
-**Why this is not the deleted corpse**: the corpse was an authority — a stale pointer would
-redirect `clean`/`kill`. The list is a **search space**: a hit requires the caller's sid in
-that home's registry (§5); a stale, wrong, duplicated or torn line can only miss, skip, or
-refuse. Unreadable file → refusal for sid-carrying mutating callers, never fall-through to env.
+**The destructive tier (replaces both the miss-refusal and the class predicate; discharges
+mfgate-read N4):** verbs are *destructive* when their effect is not recoverable by a respawn
+or a re-run — `kill`, `clean`, `archive`, `autoclean` (tier 2+), `respawn --force`; the spec
+enumerates and a lint keeps the list exhaustive against `_confirm_destructive` call sites.
+**When armed, a destructive verb whose home resolved via env or legacy requires the flag.**
+Ordinary mutations (`spawn`, `send`, bare `respawn`, `init`) proceed on env — a wrong-home
+spawn is recoverable and visible; a wrong-home clean is neither. Guard grounded on the
+EFFECT, not on caller configuration — the standard three council rulings in this repo's
+gates already demand. Accepted residual, stated: on an armed machine, a hosted body in the
+pre-claim window could spawn into the donor fleet's home until its row lands; the window is
+seconds, the effect is recoverable and evented, and closing it costs the predicate round 6
+proved undecidable.
 
-Honesty items: a second fleet-written file outside any home (`user_settings_path`'s "ONLY
-file" docstring restated in the same slice); resolution performs cross-home registry READS
-(lock-free, write-free, quarantine-free — pinned).
+**Arming — fails ARMED in every direction (rb6 CRITICAL-3 family, rs6 J-1/J-9):** armed when
+the population holds ≥2 distinct homes counting valid AND unreadable; **an unreadable list, an
+unreadable home, or any indeterminate population state arms** — indeterminacy never selects
+the permissive branch. With a determinate population of <2: byte-identical to today
+(baseline `12c6521`).
 
-## §5. Resolution
+**Hooks**: `--fleet-home` argv baked per-home (survived six rounds; both `--settings` sites).
+**Statusline**: blob sid → same lookup; single-home short-circuit; words, exit 0; resolver
+pure-function; capture experiment gates the slice. **Refusals print facts + the `fleet homes`
+view, never a paste-ready command with a chosen home.**
 
-**Sid-carrying callers**:
+## §6. `adopt` and the class predicate, deleted — record
 
-1. **`--fleet-home` flag** — global, applied in `main()` before dispatch (**to be built**;
-   `autoclean`-only today). Validation: resolve, `is_dir`, initialized; refusal otherwise; no
-   code path may `mkdir` into an uninitialized target. Flag/lookup disagreement → mutating
-   verbs refuse without `--yes` + witness line.
-2. **sid→home lookup.** Population: listed homes (post-fold) ∪ the legacy install-root home
-   **while §8 lives — §8's completion removes the legacy term** (v5's "regardless of listing"
-   left a migrated single-fleet machine permanently armed — rb5 B4). Per home, ONE lock-free
-   snapshot via `read_registry_at`, tri-state: hit / miss / unreadable. **Membership in a home
-   is a home-level concept this spec defines** (rs5 correction: shipped `_record_sids` is
-   per-record; no home-level union previously existed and this section stops implying one):
-   the union over that home's registry records of each record's `_record_sids`-style identity
-   (current `session_id` ∪ `retired_sids`). **No `INCARNATION` term** — v5 added one to a
-   concept whose shipped form deliberately refuses to trust `INCARNATION`, and it is
-   redundant: every supervisor body has a `sup|…|boot` registry row, so its sid is in the
-   union already. `spawned_by` never grants membership (pinned). Exactly one member-home →
-   resolved. Two+ → refusal naming all. Miss everywhere → mutating verbs refuse (naming
-   unreadable homes); reads fall through to (3) with provenance rendered.
-3. **Validated env → legacy default.** `FLEET_HOME` must resolve to an initialized home. For an
-   **interactive** caller this channel is sound (Definitions: donation is a daemon property).
-   For a **hosted** caller it is fall-through only, and when armed, destructive verbs resolved
-   via env require the flag. A hosted session outside every registry (someone's manual
-   `claude --bg`) gets miss → refusal → flag: explicit, correct, rare.
-4. **TOCTOU**: mutating verbs re-assert caller sid ∈ that home's membership after taking its
-   `fleet.lock`.
-
-**Sid-less callers**: flag → validated env → install-root legacy default (§8).
-
-**The manager tier needs no registration** (this is what replaced `adopt`): an interactive
-manager resolves by env/flag — its env is its own; a *dispatched* supervisor has a registry
-row. The class `adopt` existed to serve — a daemon-hosted manager with no row — is the manual
-`claude --bg` case above, served explicitly by the flag. (§6 records why `adopt` died.)
-
-**Hooks**: `--fleet-home` argv baked per-home into rendered worker-settings (survived five
-rounds; both `--settings` construction sites — `dispatch_bg`, `cmd_sup_handoff_begin`).
-Argv/env disagreement: argv wins, one witness line; env-absent normal and silent.
-
-**Statusline**: sid from the vendor stdin blob, same lookup; words, exit 0, never quarantines;
-resolver pure-function under test; blob schema unverified — capture experiment gates the
-slice. **Cost bound (rb5 B5):** the statusline refires per assistant message, so: population
-of one (post-fold, the overwhelmingly common machine) short-circuits with **zero** foreign
-registry reads; multi-home machines pay one lock-free JSON read per listed home per refresh,
-N small by construction — stated as an accepted cost, and the fold itself is O(lines) over a
-file two verbs append to.
-
-**Arming — fails ARMED**: multi-fleet behavior activates per invocation when the population
-holds ≥2 distinct homes that are valid **or unreadable** (a transient exclusive handle must
-not disarm the flag requirement mid-window — measured round 4). Distinctness per Definitions.
-With <2: byte-identical to today (baseline captured at `12c6521`).
-
-**Refusals print facts and the `fleet homes` view — never a paste-ready command with a chosen
-home.**
-
-## §6. `adopt`, deleted — record
-
-v5's `fleet adopt` died at round 5 with both lenses converging on it independently: (rs5
-GATE-1, CRITICAL) its `adopted` event made the adopter's sid husk-sweep-**owned** by the
-foreign home, so a fleet the operator merely adopted could `claude rm` the operator's own
-manager session — and `adopt --remove` stripped the only protection; (rs5 GATE-2)
-`kind: "member"` is not a shipped registry concept — `data["workers"]` is one undiscriminated
-namespace every sweeper and renderer iterates, so "registry-native, no worker semantics" was
-unachievable as written; (rs5 GATE-3) for any session already a member somewhere, adopt
-manufactures permanent ambiguity; (rb5 B1) writing the adopter into the target's registry
-makes it a *worker turn* in that home under shipped `_require_claim_holder`/`cmd_sup_boot`
-rules, so an adopter could never again hold that home's claim — the "authority-neutral by
-equivalence" claim was false in every slice order; (rb5 B2) adopt-after-retire silently
-reported success against a permanently retired list line. The need it served is dissolved by
-the Definitions' hosted/interactive split — see §5's manager paragraph. Anyone re-proposing a
-session-registration verb answers GATE-1 first: **membership records that feed the husk sweep
-are ownership grants, and ownership of a manager session must never be grantable to a foreign
-fleet.**
+v5's `adopt` died at round 5 (foreign husk-sweep ownership of the operator's manager session —
+GATE-1; unshippable member-kind; ambiguity for existing members; claim-holder lockout; silent
+retire-shadowing). v6's replacement — a hosted/interactive env-soundness split behind a
+miss-refusal — died at round 6: the refusal refused the manager before the sound channel could
+serve it, and the predicate it forced is undecidable (`claude attach` is a hosted session
+driven interactively; `FLEET_WORKER` is unusable in both directions per the two-media model).
+v7 serves every class with one order and tiers the guard by irreversibility. Anyone
+re-proposing session registration answers GATE-1; anyone re-proposing a class predicate
+answers MAJOR-10/C-5.
 
 ## §7. Test isolation pins
 
-- Autouse conftest fixture exports `FLEET_HOME=<tmp>` (subprocess-inheriting), function-scope
-  override available.
-- **The homes-list path helper is monkeypatched by the same autouse fixture** + a pin asserts
-  the real `~/.claude/fleet-homes.list` is untouched across a full suite run (the 2026-07-09
-  incident class).
-- Founding-incident guard: canary armed only against **quiescent** homes, loud skip otherwise;
-  the list pin and env fence carry live-home protection. RED first, in a quiescent fixture
-  home. If the dogfood home is never quiescent in practice, delete the canary and say the list
-  pin is the fence — a permanent skip is worse than an honest absence.
-- The §5.2 membership pin: union membership + the `spawned_by` exclusion + **fold semantics**
-  (add·retire·add = member), driven through a real fork-steer restamp window, asserting
-  member-no-flap.
-- The arming pin: 2 valid → refusal fires; 1 valid + 1 unreadable → still armed; <2 →
-  byte-identical to baseline.
-- The §4 writer pin: N concurrent appenders, zero lost homes; the no-rewrite lint; and a
-  fold-order pin (interleaved add/retire from two appenders converges to last-record-wins).
-- "Not initialized" is a rendered word on every read surface; no verb `mkdir`s into a
-  non-home.
+Unchanged from v6 (env fixture + homes-list path helper monkeypatch + real-list-untouched pin;
+quiescent-home canary with loud skip, delete-if-never-quiescent; membership + fold pins;
+writer contention pin; no-rewrite lint; rendered "not initialized") plus: the **destructive
+tier pin** — armed machine, env-resolved `clean` refuses naming the flag; env-resolved `spawn`
+proceeds; and the **arming indeterminacy pin** — unreadable list arms. The arming pin's <2
+baseline comparison stays.
 
-## §8. The legacy default's exit criteria
+## §8. Legacy default exit criteria — unchanged from v6
 
-Kept in M1; removable when ALL of: (1) slice 0 done; (2) the dogfood home physically moves out
-of the install **and is listed** — completion **removes the legacy term from the §5
-population** (a migrated single-fleet machine must end at population 1, unarmed; v5's
-permanent legacy term armed it forever — rb5 B4); (3) the plane-naming lint passes; (4) the
-arming pin extended to the sid-less class. Operator decision against these criteria.
+(1) slice 0; (2) dogfood home moves out + listed, completion removes the legacy population
+term; (3) plane-naming lint; (4) arming pin extended to sid-less class. Operator decision.
 
-## §9. The marker, deleted — record
-
-v2's `.fleet-home` marker + walk-up died at round 2 on four demonstrated findings (invalid in
-the dogfood config by its own rules; "enclosing git root" = two designs disagreeing on
-all-but-one checkout, with the git-correct reading making parent markers unreachable; stale
-markers served cross-fleet; untracked files planted in ~69 project trees). Anyone re-proposing
-a marker answers those first.
+## §9. The marker, deleted — record (unchanged)
 
 ## Cross-fleet interference audit
 
 | Surface | Status |
 |---|---|
-| `claude` session namespace | Shared; husk-sweep ownership per-home, default-deny — and with `adopt` gone, **nothing can ever add a foreign sid to a home's ownership evidence**; doctor fleet-unknown stays NOTE-only + "or another fleet's". |
-| Daemon env donation | Substitution model (docketed). Hosted callers: registry lookup + hook argv + blob sid. Interactive callers: their env is their own. Inherited residual (sid-donation OPEN) ties to the docketed identity gate; bounded as before. |
-| Homes list | Fleet-written global file: search space, not authority; append-only + retirement records, sequence fold; adapter atomic append; tolerant decode incl. no-BOM fallback; three explicit writer verbs. |
-| Cross-home READS | Resolution reads foreign registries (`read_registry_at`: lock-free, write-free, quarantine-free — pinned). **Cross-home writes: none exist in the design.** |
-| Statusline settings entry | Unchanged; `init --statusline` refuses to clobber foreign. |
-| Plugin/skill | Pull-only (D7). Ritual gains the install-vs-home split for step-1/step-3 reads; no adopt step (deleted). |
-| `fleet.lock`, registry, mailbox, claims | Home-relative; N single-writer domains. F26/M25 refusal transfers verbatim. |
+| `claude` session namespace | Shared; per-home default-deny ownership; nothing can add a foreign sid to a home's ownership evidence. |
+| Daemon env | **Two-media model, structural** (Definitions): frozen donor env + per-session sid override. Sid trustworthy — CONFIRM-A closes the donation question in the safe direction (docketed gate updated with the receipt). Hosted bodies' other env vars are donor facts; fenced by hook argv, blob sid, the lookup, and the destructive tier. |
+| Homes list | Search space, not authority; append-only + retirements, sequence fold; adapter atomic append; tolerant decode; unreadable ⇒ arms. |
+| Cross-home READS | `read_registry_at` (to be built to the driven tolerant contract — rs6 C-4): lock-free, write-free, quarantine-free, pinned. Cross-home writes: none. |
+| Statusline settings entry | Unchanged. |
+| Plugin/skill | Pull-only (D7); ritual gains the install-vs-home split for step-1/step-3 reads. |
+| `fleet.lock`, registry, mailbox, claims | Home-relative; N single-writer domains; F26/M25 refusal transfers verbatim. |
 
-## Invariants touched (SPEC §16 — all nine checked, six argued; the tenth UNBUILT/M-F-owned, untouched)
+## Invariants touched (SPEC §16 — all nine checked, six argued; tenth UNBUILT/M-F-owned, untouched)
 
-1. **daemonless** — preserved. 2. **exit-0 hooks** — preserved. 6. **single-writer registry**
-— preserved per home; the lockless list is append-only by rule with a lint; **no cross-home
-write exists**. 7. **one live session per name** — preserved per home. 8. **platform-adapter-
-only OS branching** — list writes ride `atomic_append_bytes`; path semantics via wrapped
-`samefile`; absolute-path grammar is the spec's own. 9. **one-state-many-views** — preserved.
+1 daemonless — preserved. 2 exit-0 hooks — preserved. 6 single-writer — preserved per home;
+lockless list append-only with lint; no cross-home writes. 7 one-live-per-name — preserved.
+8 adapter-only OS branching — list rides `atomic_append_bytes`; path semantics via wrapped
+`samefile`; grammar the spec's own. 9 one-state-many-views — preserved.
 
 ## Graveyard check
 
-§4's corpse paragraph; §6 and §9 are this spec's own graveyard entries, kept in-document so
-the next proposer answers the recorded kills. Corpse 10 "brittle sniffing": a registry hit is
-a fact dispatch wrote under a lock.
+§4 corpse paragraph; §6 and §9 are in-document graveyard entries. No sniffing: a registry hit
+is a fact dispatch wrote under a lock.
 
 ## M2 — read-only federation view (demand-gated, NOT M1)
 
-`fleet status --all-fleets` over the same list, views only.
-
 ## Open questions
 
-1. **Sid-donation residual** — closes with the docketed identity ruling.
-2. **WSL/Windows dual-view** — two runtimes, two lists = two machines sharing homes; out of
-   M1; named in the docket.
-3. **`knowledge/` for non-repo homes** — scaffolded plain; accepted for M1.
+1. **WSL/Windows dual-view** — two runtimes, two lists = two machines; out of M1; docketed.
+2. **`knowledge/` for non-repo homes** — scaffolded plain; accepted for M1.
+(The sid-donation question is closed — CONFIRM-A — and removed from this list.)
 
 ## Sequencing
 
-1. v6 → **round-6 gate**: fresh dual lens, all TEN prior reports fenced by name. Priority:
-   the Definitions' hosted/interactive env-soundness claim (is there ANY measured path to a
-   substituted env in an interactive session?); the sequence-fold under interleaved
-   append/retire from concurrent writers; the §5 manager paragraph's coverage (what caller
-   class, if any, is left with neither row nor sound env nor flag?); the statusline
-   single-home short-circuit's correctness when the fold and the legacy term disagree.
-2. Fold → **operator docket entry**.
-3. Build slices, disjoint, **flag lands in or before the arming slice**: (0) split;
-   (a) `read_registry_at` + list + lookup + arming + `fleet homes --add/--retire` + global
-   flag; (b) `init --home`; (c) hook argv + witness; (d) statusline (gated on capture
-   experiment); (e) pins. RED-then-GREEN, both floors, serially.
+1. v7 → **round-7 gate**: fresh dual lens, all twelve prior reports fenced by file name.
+   Priority: the destructive tier's enumeration (is any irreversible verb outside the list?
+   is `send` to a wrong home truly recoverable?); the pre-claim-window residual's real width
+   (drive a dispatch and measure seconds-to-row); arming's indeterminacy clause against a
+   population that is *empty because the list is unreadable AND legacy is retired* (post-§8
+   state); and the two-media model's counting argument (find a fifth body that breaks it).
+2. Fold → **operator docket entry** (also carries: `fix/b6-interface-release` ratification,
+   the CONFIRM-A update to the identity gate, WSL scoping).
+3. Build slices, disjoint, flag in/before arming: (0) split; (a) `read_registry_at` + list +
+   lookup + arming + destructive tier + `fleet homes` + global flag; (b) `init --home`;
+   (c) hook argv + witness; (d) statusline (capture-gated); (e) pins.
 
 WHAT THIS SPEC GOT WRONG — assume it contains an error and go find it. Named soft spots: the
-"no measured substituted env in an interactive session" claim is absence-of-evidence and round
-6 should attack it directly; the fold's last-record-wins needs its concurrency story told
-against `atomic_append_bytes` interleaving (two appenders' records land in SOME total order —
-the fold is deterministic per file state, but the verify-then-act window is not); and the §5
-manager paragraph quietly assumes the interface session never runs under `--bg`, which is true
-of every observed body but is a deployment convention, not a mechanism.
+destructive-verb enumeration is drafted from memory of `_confirm_destructive` call sites and
+the lint is what makes it honest — grep before build; "the window is seconds" in the §5
+residual is asserted, not measured (round 7 is asked to measure it); and the claim that
+ordinary wrong-home mutations are "visible and evented" assumes the wrong home's operator
+reads their own events — true of fleets with supervisors, vacuous for an abandoned home.
