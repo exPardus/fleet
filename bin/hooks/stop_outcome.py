@@ -131,6 +131,37 @@ def _valid_token(value):
     return True
 
 
+def _read_stdin_payload() -> str:
+    """The hook payload as text, decoded as UTF-8 -- NOT with the process
+    locale.
+
+    `sys.stdin.read()` decodes with the locale encoding, which on this
+    machine is cp1252. The harness sends UTF-8. Every non-ASCII character in
+    the payload therefore arrived double-decoded: U+2014 EM DASH (UTF-8
+    `e2 80 94`) was stored in the outcome record as the three characters
+    `â€”`. Measured across the 130 live sessions in
+    `state/outcomes` on 2026-07-30: of the 124 records whose `result_text`
+    was comparable against its own transcript, **76 differed from the
+    transcript by exactly this transform and nothing else** -- undoing
+    cp1252->utf-8 made them byte-identical.
+
+    That corruption is a defect in its own right (the operator reads a
+    mangled report), and it is also what made the transcript-vs-payload
+    comparison in `main` impossible to do exactly. Both are fixed here, in
+    one place: read BYTES and decode UTF-8 explicitly.
+
+    `errors="replace"` (not strict) keeps the hook's never-crash contract:
+    an undecodable payload yields a record with a sanitised character, never
+    a lost turn. The `getattr` fallback keeps the function working when
+    `sys.stdin` has been replaced by a text object with no `.buffer` (tests
+    that drive `main()` in-process)."""
+    buf = getattr(sys.stdin, "buffer", None)
+    raw = buf.read() if buf is not None else sys.stdin.read()
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="replace")
+    return raw
+
+
 def _resolve_name(home: Path, sid: str):
     """READ-ONLY registry lookup (invariant 6: hooks never write fleet.json).
 
@@ -183,6 +214,17 @@ def _transcript_result(transcript_path):
         raw = Path(transcript_path).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return text, tokens_in, tokens_out, cache_creation, cache_read, model
+    # ONE assistant message is written as SEVERAL transcript records -- one per
+    # content block (thinking, then tool_use, then text) -- all carrying the
+    # same `message.id` and the same `message.usage`. The previous loop tracked
+    # `text` and the usage fields INDEPENDENTLY: `text` only advanced on a
+    # record that had a text block, while usage advanced on every assistant
+    # record. So the returned text and the returned numbers routinely described
+    # two DIFFERENT messages, and the caller had no way to tell. Group by
+    # `message.id` instead, and reset the text when the id changes, so
+    # everything returned describes the LAST assistant message in the file and
+    # `main` can check whether that is the message the turn actually ended on.
+    last_id = _NO_ID = object()
     for line in raw.splitlines():
         line = line.strip()
         if not line:
@@ -196,6 +238,14 @@ def _transcript_result(transcript_path):
         msg = rec.get("message")
         if not isinstance(msg, dict):
             continue
+        msg_id = msg.get("id")
+        # A new message starts: nothing carried over from the previous one.
+        # `None` ids (a transcript shape that omits them) are treated as
+        # always-new, which is the conservative reading -- it can only make
+        # the text more recent, never staler.
+        if last_id is _NO_ID or msg_id is None or msg_id != last_id:
+            last_id = msg_id
+            text = None
         parts = [c.get("text") for c in msg.get("content") or []
                  if isinstance(c, dict) and c.get("type") == "text" and c.get("text")]
         if parts:
@@ -214,7 +264,7 @@ def _transcript_result(transcript_path):
 def main() -> int:
     home = _fleet_home()
     try:
-        payload = json.loads(sys.stdin.read() or "{}")
+        payload = json.loads(_read_stdin_payload() or "{}")
         sid = payload.get("session_id")
         if not sid:
             return 0
@@ -230,6 +280,50 @@ def main() -> int:
         if transcript_path:
             (t_text, tokens_in, tokens_out,
              cache_creation, cache_read, model) = _transcript_result(transcript_path)
+            # THE TOKEN COUNTS ARE PUBLISHED ONLY IF THEY CAN BE PROVED TO
+            # DESCRIBE THE MESSAGE THE TURN ENDED ON.
+            #
+            # This hook reads the transcript FILE, which the harness is still
+            # appending to: the record for the final assistant message is
+            # frequently not there yet when the hook reads. Measured over the
+            # 130 live sessions in `state/outcomes` on 2026-07-30, comparing
+            # each session's final outcome record against its own completed
+            # transcript: 95 of 130 (73%) carried the usage of the
+            # SECOND-TO-LAST message, 35 carried the final one. Nothing in the
+            # record said which -- so `out=` in `fleet status` was an
+            # arbitrary earlier message's output, rendered as this turn's, and
+            # the resulting ratio to any real quantity was unbounded and
+            # unpatterned (9.5x-89x across four workers).
+            #
+            # The payload is NOT subject to that race: `last_assistant_message`
+            # is handed to the hook by the harness, and over those same 130
+            # sessions it matched the transcript's final assistant message in
+            # every comparable case (124/124; 5 more were truncated at
+            # RESULT_TEXT_MAX and 1 was corrupted beyond comparison by the
+            # cp1252 stdin defect `_read_stdin_payload` now fixes). So the
+            # payload text is the authority on WHICH message is last, and
+            # comparing it against the text of the message the usage came from
+            # is an exact test -- no tolerance, no heuristic -- of whether this
+            # hook saw the end of the turn.
+            #
+            # Compare BEFORE the RESULT_TEXT_MAX truncation below, or every
+            # report longer than 20,000 characters would fail the check for
+            # the wrong reason.
+            #
+            # Unproved -> the four token fields stay None. Both consumers
+            # already handle None correctly and neither needs a change:
+            # `_native_token_summary` omits the `out=`/`in=` part entirely
+            # (fleet.py: `if outcome.get("output_tokens") is not None`), and
+            # `_native_cumulative_tokens` skips non-int values. An absent
+            # counter is a true statement; a stale one is not.
+            #
+            # `model` is deliberately NOT withheld -- see the report; it is
+            # not a magnitude and it is stable across the messages of a
+            # session, so the previous message's model is still the right
+            # answer where the previous message's token count is not.
+            if not (isinstance(text, str) and isinstance(t_text, str)
+                    and text == t_text):
+                tokens_in = tokens_out = cache_creation = cache_read = None
             if text is None:
                 text = t_text
         if isinstance(text, str) and len(text) > RESULT_TEXT_MAX:
