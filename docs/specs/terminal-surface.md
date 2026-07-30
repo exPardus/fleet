@@ -190,7 +190,7 @@ Installed via `settings.json` with `refreshInterval: 10`.
 
 ### 4.4 `commands/` — the slash-command set
 
-Read-only (inline `` !` ``, `allowed-tools: Bash(fleet:*)`):
+Read-only (inline `` !` ``, `allowed-tools` granting **exactly what the body inlines** — an exact rule for a fixed span, `Bash(fleet <verb>:*)` only where a `$ARGUMENTS`/`$1` placeholder makes the literal unknowable). `Bash(fleet:*)` as written here originally is the grant that caused the 2026-07-09 kill/clean incident, and `X:*` is a **prefix** match, so even a per-verb `Bash(fleet doctor:*)` reaches `fleet doctor --repair` (P1-3/P1-14, 2026-07-30). Pinned by `tests/test_terminal_surface.py::TestCommandFiles::test_read_only_grants_are_no_wider_than_the_body_invokes`:
 
 | Command | Body |
 |---|---|
