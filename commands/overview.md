@@ -1,6 +1,6 @@
 ---
 description: 'Fleet overview — command tier, status table, health warnings, and the knowledge index in one screen.'
-allowed-tools: 'Bash(fleet status:*), Bash(fleet doctor:*), Bash(fleet knowledge:*), Bash(fleet sup-status:*)'
+allowed-tools: 'Bash(fleet sup-status), Bash(fleet status --stale-ok), Bash(fleet doctor), Bash(fleet knowledge)'
 ---
 
 # Fleet overview

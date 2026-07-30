@@ -1,6 +1,6 @@
 ---
 description: 'Fleet health check — claude version, hook wiring, stale attaches, orphaned mailboxes, limited parks, autoclean last-run age.'
-allowed-tools: 'Bash(fleet doctor:*)'
+allowed-tools: 'Bash(fleet doctor)'
 ---
 
 !`fleet doctor`

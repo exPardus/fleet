@@ -1312,3 +1312,41 @@ measurement that is actually reproducible in one grep.
 boot.** `skills/fleet/SKILL.md` told every supervisor *"eight stillbirths across two days"* — a number
 that was never right and by then was three days stale in both directions. Docs nobody opens rot
 harmlessly. **A file that is loaded by a process, on a schedule, is code with worse tooling.**
+
+## 2026-07-30 — the same grant, one level down: `Bash(fleet doctor:*)`
+
+ULTRAREVIEW P1-3/P1-14. `commands/doctor.md` and `commands/overview.md` carried
+`allowed-tools: 'Bash(fleet doctor:*)'`. The 2026-07-09 rule — *"grant the subcommand, never
+the CLI"* — was obeyed to the letter and the hole reopened one level down: `X:*` is a **prefix**
+match over the whole command string, so a per-subcommand grant still reaches every **flag** of
+that subcommand, including `fleet doctor --repair`, the verb the 2026-07-27 gate put behind a
+flag so that a human types it.
+
+**The matcher was measured, not read.** The finding asserted prefix semantics from looking at the
+string. Driven against the real thing (claude 2.1.220, `-p --permission-mode default
+--allowedTools <rule>`), with a negative control, it holds — but the first probe was worthless
+and looked fine: an `echo` surrogate was auto-approved even under an unrelated rule, because the
+harness safe-lists `echo`. A permission probe without a negative control measures nothing. A
+second trap: project `.claude/settings.json` allow-entries are **silently dropped in an untrusted
+workspace** (`Ignoring 1 permissions.allow entry … this workspace has not been trusted`) — the
+evidence was on stderr, which the first harness threw away.
+
+**Fixing the two cited files would have missed the live one next door.** `Bash(fleet status:*)`
+pre-approved **bare `fleet status`** — the lock-taking RECOMPUTING verb (D2) whose avoidance is
+the entire reason `commands/status.md` and `commands/overview.md` inline `fleet status --stale-ok`.
+Same class, open at the same moment, in neither finding. Enumerating by grep over `commands/`
+rather than by the review's list is what surfaced it.
+
+- **The pin is now the property, not the string:** a read-only command's `allowed-tools` must
+  equal the narrowest rule set its own inline `` !`…` `` spans need — exact for a fixed span,
+  prefix only where a `$ARGUMENTS`/`$1` placeholder makes the literal unknowable. Derived from
+  the file, so a new command, flag or verb is covered the day it lands. The verb-level
+  `DESTRUCTIVE_VERBS` substring lint was green against this the whole time.
+- **A pin keyed on a magic substring pins the substring.** `test_view_quarantine.py`'s
+  `test_the_grant_still_matches` asserted the literal `"Bash(fleet status:*)"` while its docstring
+  claimed the property *"the grant still covers the flagged spelling"*. The string it pinned **was**
+  the defect. It now asserts both halves: the grant covers `--stale-ok` and refuses bare `status`.
+- **Two guards are not one guard, again.** `test_no_read_only_command_inline_execs_repair` bans
+  `--repair` inside the inline-exec spans and says that scoping is deliberate. It is — but
+  `allowed-tools` widens the model's **own** Bash calls for the turn, which is the mechanism the
+  2026-07-09 incident rode in on. The other mechanism to the same capability was still open.
