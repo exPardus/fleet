@@ -1,7 +1,17 @@
 # Multi-fleet: independent fleets scoped per session, per repo, or per dir
 
-Status: **drafting v8 — SEVEN GATE ROUNDS COMPLETE, AWAITING OPERATOR RULING** (2026-07-30,
-interface tier; docket entry filed in `docs/OPERATOR-GATES.md` the same day). History: v1→v2
+**Status:** **v8 — ratified ready-for-build by Altai 2026-07-30** (in-session, docket pass;
+docket entry ticked in `docs/OPERATOR-GATES.md` §Settled, *"Multi-fleet spec v8 — ratify
+ready-for-build, order round 8, or overturn?"*). The ruling, verbatim: *"**RATIFIED
+ready-for-build.** What was ratified: the §5 resolution order + verb-effect table; the two
+accepted residuals (pre-claim window 6.8–63s; wrong-home disruptive verbs proceed loudly rather
+than refuse); §8's four exit criteria for the legacy default stay a second, later decision; WSL
+dual-view out of scope for M1; build slices 0/a–e with the round-7 defect pins (the
+silently-dropped `['--fleet-home','H','autoclean']` flag; `doctor --repair` absent from every
+destructive enumeration) as slice conditions. Build starts at Sequencing §3 slice 0
+(install/home split). The gate loop's non-termination was accepted as the reason the operator is
+the terminus — no round 8."* The author never promoted this spec; the ratification is the
+operator's act and this status line is a transcription of it, not a promotion. History: v1→v2
 RESTRUCTUREs (marker, §9); v3 registry-lookup core (held ever since); v4–v5 mechanics; v6
 deleted `adopt`; v7 deleted the miss-refusal and the class predicate, tiering the guard on
 irreversibility; round 7 (`mf-rb7`/`mf-rs7`, both GATING) killed v7's one-line destructive
@@ -72,6 +82,43 @@ render, the two doctor hook-smoke checks, `_render_sup_spawn_task`, `_render_suc
 the `render_worker_settings_template` call, the template's hook-command placeholder
 (`{{FLEET_INSTALL}}/...`). Doctor legacy-settings check stays home-plane. Re-grep before
 touching.
+
+**BUILT 2026-07-31** (`INSTALL_ROOT`, `tests/test_install_home_split.py`). The symbol list
+was accurate and complete: re-grepped, all eight sites existed as named, "the two doctor
+hook-smoke checks" were exactly two, and the legacy-settings check was correctly left alone.
+The count is now pinned by derivation rather than by list — `test_no_bin_path_is_still_
+resolved_from_the_home` fails on any surviving `FLEET_HOME / "bin"`. Four measured
+disagreements with this section, none of them changing what was ratified:
+
+1. **"four dead hooks" is exactly right, and it undercounts the damage.** Derived from the
+   template (4 declared hook commands, 4 rooted at the home) and driven against a data-only
+   home: all 4 dead — `posttooluse_mailbox`, `stop_outcome`, `stop_mailbox`,
+   `postcompact_journal`. The statusline dies the same way; this section already names it
+   separately, so the arithmetic is consistent, but "four" is the hook count and not the
+   casualty count.
+2. **The four hooks are NOT textually unified, deliberately.** This section says slice 0
+   "unifies them". `bin/hooks/stop_outcome.py`'s own module docstring records the opposite as
+   established doctrine — *"Standalone, stdlib only. Never imports bin/fleet.py — duplicates
+   its own tiny helpers (`_fleet_home`, `_log_hook_error`, `_resolve_name`) per the
+   established pattern"* — so collapsing them means the first cross-module import in a plane
+   whose invariant is exit-0 hooks, to save nine lines. Built instead as **behavioural**
+   unification: the four are driven and required to agree with each other *and with
+   `fleet.py`'s own resolution*, which a shared hook module would not have covered. Their
+   `__file__` fallback still derives the home from the install; that is not fixable here —
+   a hook learns its home only when the dispatch tells it, which is slice (c)'s baked argv.
+3. **§7's test-isolation pins have no code-plane half, and the split needs one.** Pointing
+   `template_settings_path()` at the install removed the sandbox those tests had for free
+   from monkeypatching the home; the first full run **overwrote this repo's real, git-tracked
+   `worker-settings.template.json` with `{}`** — the same class as the incident receipt at
+   the top of this document, reached through the code plane instead of the data plane.
+   `conftest.py` gains an `INSTALL_ROOT` redirect (same shape as the home's, so later
+   install-plane paths land in it by default) plus a session-scoped drift guard over the
+   git-tracked code plane, with a seed. §7 should be read as owing this half.
+4. **`{{FLEET_HOME}}` is kept as a legal placeholder alongside `{{FLEET_INSTALL}}`**, and
+   `render_worker_settings_template` defaults its new `fleet_install` argument to the home.
+   Not in this section, and it is what makes the legacy layout byte-identical rather than
+   merely equivalent: every existing 3-argument caller and any out-of-tree template still
+   written against `{{FLEET_HOME}}` renders exactly what it rendered before.
 
 ## §4. The homes list
 
@@ -164,6 +211,20 @@ namespace copy CLOBBERS a global-position `--fleet-home` when the verb also defi
 one parser object or reconcile the two dests explicitly, and its pin drives the exact
 global-position invocation that silently dropped the flag.
 
+> **CORRECTION — measured in slice 0, 2026-07-31, both interpreters. The word `today` is
+> false; the defect is LATENT, not shipped.** Driven against `build_parser()` at `09995f9`:
+> `['--fleet-home','H','autoclean']` exits 2 with *"argument command: invalid choice: 'H'"* on
+> `py -3.13` and `py -3.10` alike, and `['autoclean','--fleet-home','H']` yields `'H'`. There is
+> no global `--fleet-home` to clobber: of the 32 subparsers `autoclean` is the only one that
+> defines it, and the top-level parser declares no options beyond `-h/--help`. The **mechanism**
+> is exactly as rb7 stated and is reproduced on a synthetic parser in the pin — the clobber is
+> created by the act of promoting the flag in slice (a), so the sentence above is a correct
+> instruction to the flag-promotion slice and a wrong description of shipped code. Nothing in
+> the ratification changes: the pin exists, one slice early, as a lint that makes the clobbering
+> shape unlandable (`tests/test_round7_defect_pins.py`). Recorded rather than deleted, because
+> the *shipped-defect* framing is what made this a slice condition and a reader needs to know
+> the framing was measured wrong without losing why the condition stands.
+
 **Hooks**: `--fleet-home` argv baked per-home (survived six rounds; both `--settings` sites).
 **Statusline**: blob sid → same lookup; single-home short-circuit; words, exit 0; resolver
 pure-function; capture experiment gates the slice. **Refusals print facts + the `fleet homes`
@@ -238,12 +299,18 @@ is a fact dispatch wrote under a lock.
    structurally always returns findings** — v8 goes to the docket as-is. Failure outcome: if
    the operator orders a round 8, its verdict routes back here; if the operator rejects the
    architecture, the record above is the map of what was tried.
-2. **Operator docket entry (BLOCKING for step 3)** — carries the spec, the two accepted
+2. **Operator docket entry — DISCHARGED 2026-07-30.** It carried the spec, the two accepted
    residuals (pre-claim window 6.8–10.6s worker / 33–63s successor, dual-adopt-era ambiguity
    costs), the destructive/disruptive table, §8's criteria, WSL out-of-scope,
-   `fix/b6-interface-release` ratification, and the CONFIRM-A identity-gate update. **No
-   build slice dispatches before the operator rules.** The §8 exit is a second, later
-   operator decision, separately blocking for the retirement it governs.
+   `fix/b6-interface-release` ratification, and the CONFIRM-A identity-gate update. Altai
+   ruled **"RATIFIED ready-for-build"** in-session on the 2026-07-30 docket pass, and
+   **"Build starts at Sequencing §3 slice 0 (install/home split)"** — so the block this item
+   used to state (*"No build slice dispatches before the operator rules"*) is discharged and
+   step 3 is open. The rider was ruled separately, as the docket asked:
+   `fix/b6-interface-release` (2e824ea) gets a **GATE LANE, MERGE ON GREEN**. Still NOT
+   discharged and still blocking what it governs: **the §8 exit is a second, later operator
+   decision**, quoted from the same ruling — *"§8's four exit criteria for the legacy default
+   stay a second, later decision"*.
 3. Build slices, disjoint, flag in/before arming, each RED-then-GREEN both floors serially,
    any slice failing its gate returns here rather than proceeding: (0) split;
    (a) `read_registry_at` + list + lookup + arming + verb-effect table + `fleet homes` +

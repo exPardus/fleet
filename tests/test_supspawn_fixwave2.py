@@ -152,7 +152,9 @@ class TestRenderedCommandQuoting:
 
     def test_fleet_py_quoted_in_every_command(self, native_home, monkeypatch):
         _, text = _spawned_task_text(native_home, monkeypatch)
-        fleet_py = (fleet.FLEET_HOME / "bin" / "fleet.py").as_posix()
+        # multi-fleet slice 0: the rendered command names the INSTALL's
+        # fleet.py, not the home's -- a data-only home has no bin/.
+        fleet_py = (fleet.INSTALL_ROOT / "bin" / "fleet.py").as_posix()
         assert f'"{fleet_py}" sup-boot' in text
         assert f'"{fleet_py}" sup-checkpoint' in text
         assert f' {fleet_py} sup' not in text      # unquoted form gone
@@ -162,10 +164,16 @@ class TestRenderedCommandQuoting:
         # template render -- no spawn choreography needed for a string pin.
         home = tmp_path / "fleet home"
         monkeypatch.setattr(fleet, "FLEET_HOME", home)
+        # multi-fleet slice 0 widened this fixture rather than moving it: the
+        # rendered command now draws the bundle path from the HOME and fleet.py
+        # from the INSTALL, so a space in only one of them would leave the other
+        # half of the quoting pin untested.
+        install = tmp_path / "fleet install"
+        monkeypatch.setattr(fleet, "INSTALL_ROOT", install)
         name = SUP_PIPE
         text = fleet._render_sup_spawn_task(name, "inc-1", "camp")
         bundle = fleet.boot_bundle_path(name).as_posix()
-        fleet_py = (home / "bin" / "fleet.py").as_posix()
+        fleet_py = (install / "bin" / "fleet.py").as_posix()
         assert " " in bundle and " " in fleet_py    # the fixture really has a space
         assert f'> "{bundle}" 2>&1' in text
         assert f'grep -E "^(VERDICT|INCARNATION|NONCE):" "{bundle}"' in text
