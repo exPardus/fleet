@@ -155,6 +155,21 @@ def task_file_path(name: str) -> Path:
     return tasks_dir() / f"{name_fs_stem(name)}.md"
 
 
+def briefs_dir() -> Path:
+    """The BRIEF store (wave 35): a worker's task text as the operator wrote
+    it, kept apart from the per-dispatch payload in `tasks_dir()`.
+
+    NOT under `tasks_dir()`, deliberately. `dispatch_bg` passes
+    `--add-dir tasks_dir()` to every worker, so every task file is writable by
+    every worker; a brief is a dispatch INPUT and must not sit inside a
+    directory fleet hands out write access to."""
+    return state_dir() / "briefs"
+
+
+def brief_file_path(name: str) -> Path:
+    return briefs_dir() / f"{name_fs_stem(name)}.md"
+
+
 def boot_bundle_path(name: str) -> Path:
     """The gen-0 boot ritual's redirect target (fix wave 2, NEW-1): the one
     place `sup-boot`'s output -- including the minted nonce plaintext --
@@ -1418,6 +1433,149 @@ def compose_prompt(name: str, cwd, task: str, sid: str | None, journal_path=None
                 parts.append(f"## Journal from previous session\n{journal_text}\n")
 
     return "\n".join(parts), claim
+
+
+# ---------------------------------------------------------------------------
+# The brief store (wave 35) -- `state/briefs/<name>.md`
+# ---------------------------------------------------------------------------
+#
+# THE DEFECT THIS EXISTS FOR, measured wave 34 and reproduced byte-exactly:
+# `state/tasks/<name>.md` was doing two incompatible jobs at once. It was the
+# worker's BRIEF (what the operator wrote; `dispatch_bg`'s tiny prompt is
+# literally `Read <that file> and follow it exactly`, so it is the worker's
+# entire input) AND the per-dispatch PAYLOAD (`dispatch_bg` overwrites it on
+# every launch). Every dispatch therefore destroyed the brief and replaced it
+# with whatever that dispatch happened to compose:
+#
+#   * `respawn` recomposed from `new_worker_record`'s `task[:200]` snapshot, so
+#     two lanes' briefs became 784 and 783 bytes, cut mid-sentence. Both
+#     workers recovered from the operator record independently, which is what
+#     made it invisible in every outcome the fleet records.
+#   * `send`'s fork-steer and `resume-limited` compose with `task=""` (F6:
+#     the message rides the mailbox), so they replaced the brief with a
+#     preamble and a mail block.
+#   * `archive` then copied that stub forward as the worker's `task.md`.
+#
+# Filed as a fix candidate on 2026-07-23 ("store full task text ... in the
+# registry") and never built; `git log -S 'task[:200]'` shows the cap is
+# untouched since the first commit. Splitting the two jobs is what dissolves
+# the class -- raising the cap would have fixed `respawn` alone and left the
+# steer paths, the archive copy, and the next dispatch path added.
+#
+# The registry `task` field KEEPS its cap and stays a provenance remnant: it is
+# never a dispatch input again (see `read_brief`). That is deliberate -- the
+# registry is on the hot read path for every view and the statusline, and a
+# second full copy of every brief there buys nothing this file does not.
+
+LEGACY_TASK_SNAPSHOT_CHARS = 200
+"""`new_worker_record`'s cap. A snapshot AT the cap cannot be distinguished
+from a complete task of exactly that length, so `read_brief` treats it as a
+remnant and refuses rather than dispatching it -- a truncated brief must fail
+loudly, never dispatch silently."""
+
+
+def write_brief(name: str, task: str) -> None:
+    """Record `task` as the worker's brief. Called only where the task text is
+    AUTHORITATIVE -- a spawn, or an explicit `--task` override -- never from a
+    dispatch that is merely re-composing a prompt."""
+    if not task or not task.strip():
+        return
+    try:
+        briefs_dir().mkdir(parents=True, exist_ok=True)
+        brief_file_path(name).write_text(task, encoding="utf-8")
+    except OSError as exc:
+        raise FleetCliError(
+            f"{name}: could not record the brief at {brief_file_path(name)}: {exc}"
+        ) from exc
+
+
+def _recovered_brief(name: str, rec: dict) -> str | None:
+    """One-shot recovery of a PRE-wave-35 worker's brief out of its payload
+    file, or None when it cannot be recovered EXACTLY.
+
+    Exact-prefix arithmetic only, no parser and no heuristic: at spawn the
+    payload is `compose_prompt`'s `preamble + "\\n" + task`, and the preamble is
+    regenerable from the record. Anything that does not match that shape
+    byte-for-byte returns None and takes the loud path, because a guess here
+    would hand a worker a brief that is subtly not its brief -- the failure
+    mode this whole module exists to end.
+    """
+    payload = task_file_path(name)
+    try:
+        body = payload.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    cwd = rec.get("cwd") or ""
+    prefix = (_PREAMBLE_TEMPLATE.format(
+        name=name, cwd=cwd, journal_target=journal_file_path(name).as_posix())
+        + index_teach_lines(cwd) + "\n")
+    if not body.startswith(prefix):
+        return None
+    rest = body[len(prefix):]
+    # A steer payload carries mail where the task would be, and there is no
+    # sound way to tell where the mail ends -- refuse rather than guess.
+    if rest.startswith("<MANAGER MESSAGE>"):
+        return None
+    marker = "\n## Journal from previous session\n"
+    cut = rest.find(marker)
+    if cut != -1:
+        rest = rest[:cut]
+    if not rest.strip():
+        return None
+    # The payload of an already-truncated respawn reproduces the remnant
+    # exactly. Recovering that would launder a truncation into a "brief".
+    snapshot = rec.get("task") or ""
+    if len(snapshot) >= LEGACY_TASK_SNAPSHOT_CHARS and rest == snapshot:
+        return None
+    return rest
+
+
+def read_brief(name: str, rec: dict) -> str:
+    """The worker's brief, or a REFUSAL. Never a truncation.
+
+    Order: the brief file; then a one-shot exact recovery from a pre-wave-35
+    payload (written back, so it is paid once); then the registry snapshot --
+    but ONLY when that snapshot is provably complete (shorter than the cap).
+    A snapshot at the cap is a remnant and raises, naming the remedy."""
+    try:
+        text = brief_file_path(name).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    if text.strip():
+        return text
+    recovered = _recovered_brief(name, rec)
+    if recovered is not None:
+        write_brief(name, recovered)
+        return recovered
+    snapshot = rec.get("task") or ""
+    if len(snapshot) >= LEGACY_TASK_SNAPSHOT_CHARS:
+        raise FleetCliError(
+            f"{name}: no brief on file and the registry holds only a "
+            f"{len(snapshot)}-char snapshot, which is the capped remnant -- "
+            f"dispatching it would hand the session a task cut mid-sentence. "
+            f"Re-supply the brief: `--task @<path-to-brief>` "
+            f"(it is recorded at {brief_file_path(name)} from then on)."
+        )
+    return snapshot
+
+
+def assert_brief_carried(name: str, brief: str, prompt_body: str) -> None:
+    """THE BACKSTOP: a dispatch that is supposed to carry the brief must carry
+    ALL of it. Checked on the composed body, before anything launches.
+
+    No threshold and no caller exemption -- "materially shorter" would fire on
+    a legitimately short `--task` and miss a truncation that a long carried
+    journal padded back over the line. The predicate is identity: the exact
+    text `read_brief` returned appears contiguously in what will be written."""
+    if not brief or not brief.strip():
+        return
+    if brief not in prompt_body:
+        raise FleetCliError(
+            f"{name}: refusing to dispatch -- the composed prompt "
+            f"({len(prompt_body)} chars) does not carry the whole brief "
+            f"({len(brief)} chars). A truncated brief must fail loudly, not "
+            f"dispatch silently."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -4396,6 +4554,9 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
         raise FleetCliError(
             f"{args.name}: could not compose the spawn prompt -- {exc} "
             f"({type(exc).__name__}); nothing was registered") from exc
+    # Wave 35 backstop, above the pre-claim exactly like the compose it checks:
+    # a body that has already lost the brief must not reach a registry write.
+    assert_brief_carried(args.name, task, prompt)
 
     with fleet_lock():
         data = load_registry()
@@ -4428,6 +4589,14 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
     # there, and a steered worker would re-pay the same digest per dispatch.
 
     try:
+        # Wave 35: the operator's text, recorded ONCE, where no later dispatch
+        # rewrites it (`record["task"]` is a 200-char provenance remnant and is
+        # never read back as a brief again). INSIDE the try on purpose: this is
+        # past the pre-claim commit, and the same fix-wave-C1 reasoning that
+        # hoisted `compose_prompt` applies -- an unwritable brief store must
+        # roll the pre-claim back, not leave `{"status": "working",
+        # "session_id": null}` behind as a worker that never existed.
+        write_brief(args.name, task)
         result = dispatch_bg(
             args.name, cwd, prompt, args.mode, model=args.model,
             category=args.category, hint=task,
@@ -6071,7 +6240,20 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
                      else before.get("token_ceiling"))
     cost_usd = _registry_cost(before.get("cost_usd", 0.0))
     task_override = _read_task_arg(args.task) if getattr(args, "task", None) else None
-    task_for_record = task_override if task_override is not None else before.get("task", "")
+    # WAVE 35 -- THE SITE THAT ATE THE BRIEF. This read `before.get("task", "")`,
+    # i.e. `new_worker_record`'s 200-char snapshot, and `dispatch_bg` then
+    # overwrote `state/tasks/<name>.md` with a prompt recomposed from it. The
+    # brief is read from the brief store now; a `--task` override is the
+    # operator supplying new text on purpose and REPLACES the recorded brief.
+    #
+    # `args.task` is deliberately NOT populated from the brief: the token-ceiling
+    # arming above keys on its presence, and doing so would convert every bare
+    # recovery respawn -- §11.4's whole purpose -- into a refused dispatch.
+    if task_override is not None:
+        task_for_record = task_override
+        write_brief(name, task_override)
+    else:
+        task_for_record = read_brief(name, before)
     prior_retired = list(before.get("retired_sids", []))
     spawned_by = before.get("spawned_by")
     # §6.2: provenance is carried across respawn exactly as `spawned_by` is --
@@ -6149,6 +6331,13 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
     journal_path = journal_file_path(name)
     prompt, claim = compose_prompt(name, cwd, task_for_record, old_sid, journal_path=journal_path)
     try:
+        # Wave 35 backstop, INSIDE the rollback envelope: a respawn dispatches a
+        # session with NO prior context (no `--resume` -- the reset is the
+        # point), so the composed body is everything the new body will ever know
+        # about its task. Raising here lands in the `except BaseException` arm
+        # below, which restores the mailbox claim and the pre-respawn record --
+        # a refusal must not stack a stranded pre-claim on top of the defect.
+        assert_brief_carried(name, task_for_record, prompt)
         result = dispatch_bg(
             name, cwd, prompt, mode, model=model, category=category,
             hint=task_for_record, setting_sources=setting_sources,
@@ -7155,6 +7344,20 @@ def _cmd_respawn_supervisor(args, name, rec, claim, *, run, which, sleep, clock)
     old_sid = rec.get("session_id")
     inc = claim.get("incarnation_id", "?") if claim else None
 
+    # Wave 35: resolve the campaign FIRST, at the top, because `read_brief`
+    # can refuse (an unrecoverable remnant) and this function's contract is
+    # that an abort is "side-effect-free by CONSTRUCTION, not by cleanup".
+    # Resolved below the release-steer and the dead-marking, that refusal would
+    # leave the old supervisor released, stopped and dead with no successor
+    # dispatched -- a refusal that costs the fleet its supervisor is worse than
+    # the truncation it exists to prevent.
+    task_override = _read_task_arg(args.task) if getattr(args, "task", None) else None
+    # The SECOND reader of the same 200-char remnant, and one the `dispatch_bg`
+    # census cannot see: this path rebuilds a supervisor CAMPAIGN and hands it
+    # to `_dispatch_supervisor_body`, which renders its own body.
+    campaign = (task_override if task_override is not None
+                else read_brief(name, rec))
+
     if claim is not None:
         if not old_sid:
             _supervisor_abort("stop-precondition",
@@ -7293,8 +7496,8 @@ def _cmd_respawn_supervisor(args, name, rec, claim, *, run, which, sleep, clock)
         append_event("respawned", name, old_session_id=old_sid,
                      new_session_id=None, stopped=stopped_ok)
 
-    task_override = _read_task_arg(args.task) if getattr(args, "task", None) else None
-    campaign = task_override if task_override is not None else rec.get("task", "")
+    # `campaign` was resolved at the top of this function -- see the wave-35
+    # comment there for why it may not be resolved here.
     mode = getattr(args, "permission_mode", None) or rec.get("mode") or SUP_SPAWN_DEFAULT_MODE
     model = getattr(args, "model", None) or rec.get("model")
     # A FRESH gen-0 body, not a same-name swap: the new record is
@@ -7345,6 +7548,10 @@ def _remove_worker_files(name: str, sid: str, retired_sids: list = ()) -> list:
         outcome_path(name),
         outcome_path(sid),
         task_file_path(name),
+        # Wave 35: the brief store is per-worker state like everything else
+        # here -- a removed worker must not leave its brief behind for a
+        # later worker that happens to reuse the name.
+        brief_file_path(name),
         # Fix wave 2 NEW-1 belt: an abandoned boot bundle retains the minted
         # nonce plaintext at rest (claim-nonce §5.8/§5.9) -- sweep it with the
         # rest of the worker's task-file litter.
@@ -7835,6 +8042,11 @@ def _archive_file_pairs(name: str, sid: str, retired: list) -> list:
         (journal_file_path(name), "journal.md"),
         (outcome_path(name), outcome_path(name).name),
         (task_file_path(name), "task.md"),
+        # Wave 35: `task.md` is the LAST DISPATCH's payload, which for a steered
+        # worker is a preamble and a mail block -- archiving only that filed a
+        # stub as the worker's task. The brief is the evidence that answers
+        # "what was this worker asked to do".
+        (brief_file_path(name), "brief.md"),
         # Fix wave 2 NEW-1 belt: the boot ritual deletes its own bundle, but
         # an interrupted body can abandon one -- and it holds the minted nonce
         # plaintext (claim-nonce §5.8/§5.9), so archive must not strand it at
@@ -14931,6 +15143,14 @@ def _dispatch_supervisor_body(campaign, mode, model, *, run=subprocess.run,
     prompt = _render_sup_spawn_task(name, launch_id, campaign)
 
     try:
+        # Wave 35, both inside the try for the same reason `cmd_spawn`'s are:
+        # the pre-claim is already committed, so a refusal here must roll back
+        # rather than strand a gen-0 record for a body that never launched.
+        # The campaign is this body's brief, recorded under the MINTED gen-0
+        # name so a later `respawn supervisor` reads it back whole instead of
+        # rebuilding it from the record's capped snapshot.
+        write_brief(name, campaign)
+        assert_brief_carried(name, campaign, prompt)
         result = dispatch_bg(
             name, cwd, prompt, mode, model=model,
             category=None, hint="",
