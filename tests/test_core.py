@@ -301,6 +301,66 @@ class TestNameValidation:
         assert "allow_reserved" not in inspect.signature(fleet.validate_name).parameters
 
 
+class TestWindowsDeviceNameRefusal:
+    """P1-8 (ULTRAREVIEW 2026-07-30): Win32 reserved DEVICE names are refused
+    at the single creation choke point.
+
+    Win32 resolves a reserved device name in ANY directory and with ANY
+    extension, so `state/tasks/nul.md` IS the NUL device. Measured on this
+    machine (py 3.13, Windows 10 19045), writing `<dir>/<name>.md`:
+
+        nul   write OK   exists() True    read back ''   listdir: absent
+        con   write OK   exists() True    read blocks on console input
+        aux   FileNotFoundError [Errno 2]      (loud -- an OSError)
+        prn   FileNotFoundError [Errno 2]      (loud)
+        com1  FileNotFoundError [Errno 2]      (loud)
+        lpt1  FileNotFoundError [Errno 2]      (loud)
+        com0  ordinary file                    (NOT a device -- must pass)
+
+    `nul`/`con` are the silent-void half: `dispatch_bg`'s guarded
+    `task_path.write_text(...)` SUCCEEDS, so no rollback fires and the worker
+    launches against an empty task file. The rest fail loudly today, but they
+    are refused here too: the refusal is a name-SHAPE rule like the F6 uuid
+    rule, and half a rule leaves a platform- and Windows-version-dependent
+    split for the next reader to re-derive.
+
+    The blast-radius half of this class matters as much as the refusal half:
+    this is the choke point for EVERY worker name, so the predicate is exact
+    stem matching, never a prefix test."""
+
+    @pytest.mark.parametrize("name", [
+        "nul", "con", "aux", "prn",
+        "com1", "com5", "com9", "lpt1", "lpt5", "lpt9",
+    ])
+    def test_reserved_device_names_refused(self, name):
+        with pytest.raises(ValueError, match="device"):
+            fleet.validate_name(name, existing=set())
+
+    @pytest.mark.parametrize("name", [
+        # Prefix/substring lookalikes: a `startswith` guard would eat all of
+        # these, and every one of them is a legitimate worker name.
+        "console", "connector", "con-worker", "conjure", "content",
+        "nulls", "null", "nul-1", "nullable",
+        "auxiliary", "aux-2", "prn-1", "printer",
+        "com", "com0", "com10", "com1-b", "lpt", "lpt0", "lpt10",
+        "combine", "company", "commit", "lptest",
+    ])
+    def test_device_lookalikes_still_accepted(self, name):
+        fleet.validate_name(name, existing=set())  # must not raise
+
+    def test_predicate_normalises_extension_case_and_trailing_junk(self):
+        # NAME_RE already forbids `.`, uppercase and spaces, so validate_name
+        # can never see these shapes -- but the predicate is the thing other
+        # callers reuse (dispatch_bg's defence-in-depth guard), so it must be
+        # honest about how Win32 actually resolves a path component: the
+        # extension is ignored and trailing dots/spaces are stripped.
+        for token in ["nul.md", "NUL", "Con.MD", "nul.", "nul ", " nul",
+                      "com1.jsonl", "LPT9.md"]:
+            assert fleet._is_win32_device_name(token), token
+        for token in ["nulls.md", "com0.md", "connector", "", "-", "com10.md"]:
+            assert not fleet._is_win32_device_name(token), token
+
+
 class TestLockContention:
     def test_second_acquirer_blocks_then_succeeds_after_release(self, isolated_home):
         order = []

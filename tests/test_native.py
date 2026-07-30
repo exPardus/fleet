@@ -385,6 +385,20 @@ class TestDispatchBg:
         argv = calls[0][0]
         assert argv[argv.index("--resume") + 1] == "old-sid"
 
+    def test_device_name_refused_by_the_defence_in_depth_guard(self, native_home):
+        # P1-8: the choke point is `validate_name`, but this guard exists so a
+        # future direct caller cannot escape tasks_dir() -- and a Win32 device
+        # name escapes it in the worst way, into a device that eats the write
+        # and reports success. `nul` fails NO other check here: it matches
+        # NAME_RE, is not sid-shaped, and the task write RETURNS OK on
+        # Windows, so without this arm dispatch proceeds and the worker is
+        # launched against an empty task file.
+        for bad in ("nul", "con", "com1"):
+            with pytest.raises(fleet.NativeDispatchError, match="device"):
+                fleet.dispatch_bg(bad, "C:/proj", "b", "accept",
+                                  run=_fake_run_factory(), which=lambda _: "claude",
+                                  sleep=lambda s: None, roster_fetch=_roster_with())
+
     def test_nonzero_exit_raises(self, native_home):
         with pytest.raises(fleet.NativeDispatchError):
             fleet.dispatch_bg("w1", "C:/proj", "b", "accept",
