@@ -88,6 +88,31 @@ FLEET_HOME = (
     else Path(__file__).resolve().parent.parent
 )
 
+# THE CODE PLANE (multi-fleet slice 0, docs/specs/multi-fleet.md Definitions).
+#
+# `FLEET_HOME` above is two variables wearing one name: the HOME (one fleet's
+# state -- registry, journals, mailbox, supervisor) and the INSTALL LOCATOR
+# (where fleet's own code lives). They are the same directory in the legacy
+# single-fleet layout and nowhere else, so every path that means "fleet's code"
+# silently followed the home when the home moved. Measured, and driven again in
+# `tests/test_install_home_split.py`: pointing FLEET_HOME at a data-only home
+# yields FOUR DEAD HOOKS -- `bin/hooks/{posttooluse_mailbox,stop_outcome,
+# stop_mailbox,postcompact_journal}.py`, the exact four the git-tracked template
+# declares -- plus an unreachable statusline. Nothing raises: `claude` swallows a
+# hook command that does not exist, so every worker turn runs with no mailbox
+# delivery, no outcome record and no journal reminder, and the fleet looks fine.
+#
+# NEVER OVERRIDABLE by environment or flag, unlike FLEET_HOME. There is no
+# `FLEET_INSTALL` env var and there must not be one: the install is not a
+# preference, it is wherever the interpreter found this file. `--fleet-home` and
+# `$FLEET_HOME` move the home and never the install -- that separation is the
+# whole point of the split, and an env override would hand it straight back.
+#
+# Tests may still monkeypatch this attribute (`fleet.INSTALL_ROOT = tmp`) exactly
+# as they do FLEET_HOME, which is why every helper below re-reads the global on
+# each call rather than caching a Path at import.
+INSTALL_ROOT = Path(__file__).resolve().parent.parent
+
 
 def state_dir() -> Path:
     return FLEET_HOME / "state"
@@ -268,9 +293,14 @@ def lock_path() -> Path:
 
 def template_settings_path() -> Path:
     """Git-tracked hook-wiring TEMPLATE (SPEC §14): worker-settings.template.json
-    at the fleet-home root, with {{PYTHON}}/{{FLEET_HOME}} placeholders.
-    `fleet init` renders it into instance_settings_path()."""
-    return FLEET_HOME / "worker-settings.template.json"
+    at the INSTALL root, with {{PYTHON}}/{{FLEET_INSTALL}} placeholders.
+    `fleet init` renders it into instance_settings_path().
+
+    CODE PLANE (multi-fleet slice 0). The template is a git-tracked file that
+    ships with fleet's source; a data-only home does not contain one, and before
+    the split `fleet init` against such a home failed to find it. Read from the
+    install, rendered into the home."""
+    return INSTALL_ROOT / "worker-settings.template.json"
 
 
 def instance_settings_path() -> Path:
@@ -311,7 +341,11 @@ def claude_daemon_log_path() -> Path:
 
 
 def statusline_script_path() -> Path:
-    return FLEET_HOME / "bin" / "fleet_statusline.py"
+    # CODE PLANE (multi-fleet slice 0): `bin/fleet_statusline.py` is fleet's own
+    # source, not one fleet's state. `fleet init --statusline` writes this path
+    # into ~/.claude/settings.json, so resolving it against a data-only home
+    # installed a statusline pointing at a file that does not exist.
+    return INSTALL_ROOT / "bin" / "fleet_statusline.py"
 
 
 # The `~/.claude/fleet-home` marker lived here until 2026-07-22. It recorded
@@ -731,12 +765,12 @@ def _quarantine_artifacts() -> list:
     registry is always newer -- an "artifact newer than the registry"
     comparison would never fire on the recreation bypasses it exists to stop.
 
-      * `_sweep_husks` (:8488) -- a rename can hide live worker records from
+      * `_sweep_husks` (:8545) -- a rename can hide live worker records from
         the roster sweep, so a thin registry would rm sessions it still owns.
-      * `_doctor_check_autoclean` (:9566) -- a lingering artifact means the
+      * `_doctor_check_autoclean` (:9625) -- a lingering artifact means the
         sweep above is refusing itself, which is how a bricked sweep reads
         green-and-fresh.
-      * `_require_claim_holder`'s §9 arm (:13983) -- the legacy upgrade mints
+      * `_require_claim_holder`'s §9 arm (:14042) -- the legacy upgrade mints
         generation 1 on bare sid equality, so it needs the registry that
         cleared it to be COMPLETE, not merely readable. See there.
 
@@ -746,13 +780,13 @@ def _quarantine_artifacts() -> list:
     read and described, and the question only arises when there is no file to
     answer for itself.
 
-      * `_acting_worker_identity` (:2565) -- `not_initialized` stays the
+      * `_acting_worker_identity` (:2599) -- `not_initialized` stays the
         affirmative *"there are no records"* only with no artifact beside it.
         SCOPED TO THE ABSENT CASE ON PURPOSE: this resolver is shared with the
         §6.5 worker-turn gate, which refuses on `True` alone, so poisoning a
         HEALTHY read here would let a real worker turn through §6.5 -- closing
         the §9 door by opening a wider one. Rule 1 lives at the §9 arm instead.
-      * `_identity_abstention_note` (:13710) -- the same distinction, in words,
+      * `_identity_abstention_note` (:13769) -- the same distinction, in words,
         because the generic note names `fleet doctor` and doctor is what MADE
         this state.
 
@@ -2515,7 +2549,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     -- reads `ok` while MISSING every record the artifact holds, and the §9 arm
     read that thinness as an affirmative *"you are provably not a worker"*. The
     presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:13983`), where it costs the §6.5 gate nothing.
+    (`:14042`), where it costs the §6.5 gate nothing.
 
     An artifact can also outlive its incident by days -- `_sweep_husks` tells the
     operator to restore the file first and delete the artifact second -- so that
@@ -2531,7 +2565,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     THE READ IS NEVER `load_registry`, and that distinction is the whole reason
     `_registry_records_or_none` exists (this site uses its `(ok, reason, data)`
     source directly, for the paragraph above). `load_registry`
-    QUARANTINES a corrupt registry -- it RENAMES the file aside (`:814`) -- and
+    QUARANTINES a corrupt registry -- it RENAMES the file aside (`:848`) -- and
     its docstring is explicit that *"callers must abort, not catch-and-
     continue."* The first version of this function did catch and continue: the
     exception was swallowed, the rename was not, so on a corrupt registry every
@@ -3590,10 +3624,21 @@ def status_snapshot(now=None, include_archived: bool = False) -> dict:
 _TEMPLATE_PLACEHOLDER_RE = re.compile(r"\{\{[A-Za-z0-9_]+\}\}")
 
 
-def render_worker_settings_template(template_text: str, python_exe, fleet_home) -> str:
+def render_worker_settings_template(template_text: str, python_exe, fleet_home,
+                                    fleet_install=None) -> str:
     """Pure render step for `fleet init` (SPEC §14): substitute
-    {{PYTHON}} -> absolute forward-slash path to python_exe and
-    {{FLEET_HOME}} -> absolute forward-slash path to fleet_home.
+    {{PYTHON}} -> absolute forward-slash path to python_exe,
+    {{FLEET_INSTALL}} -> absolute forward-slash path to fleet_install (the CODE
+    plane: where bin/hooks/*.py actually live), and {{FLEET_HOME}} -> the same
+    for fleet_home (the DATA plane).
+
+    `fleet_install` defaults to `fleet_home`, which is what makes this change
+    invisible to the legacy single-home layout: install == home there, so every
+    existing caller renders byte-identical output and `{{FLEET_HOME}}` keeps
+    meaning what it has always meant. Both placeholders stay supported forever --
+    a template that hardcodes hook paths under the home is wrong now, but it is a
+    template someone may still be carrying, and silently re-pointing it would be
+    the failure mode this split exists to remove.
 
     Forward slashes only (matches SPEC §7's hook-command rule: Git Bash's
     `sh -c` eats backslashes in unquoted strings on Windows; POSIX shells
@@ -3608,12 +3653,16 @@ def render_worker_settings_template(template_text: str, python_exe, fleet_home) 
     """
     python_path = Path(python_exe).resolve().as_posix()
     fleet_home_path = Path(fleet_home).resolve().as_posix()
-    rendered = template_text.replace("{{PYTHON}}", python_path).replace("{{FLEET_HOME}}", fleet_home_path)
+    install_path = (fleet_home_path if fleet_install is None
+                    else Path(fleet_install).resolve().as_posix())
+    rendered = (template_text.replace("{{PYTHON}}", python_path)
+                             .replace("{{FLEET_INSTALL}}", install_path)
+                             .replace("{{FLEET_HOME}}", fleet_home_path))
     leftover = _TEMPLATE_PLACEHOLDER_RE.search(rendered)
     if leftover:
         raise ValueError(
             f"unrendered placeholder {leftover.group(0)!r} in worker-settings template "
-            "-- only {{PYTHON}} and {{FLEET_HOME}} are supported"
+            "-- only {{PYTHON}}, {{FLEET_INSTALL}} and {{FLEET_HOME}} are supported"
         )
     return rendered
 
@@ -4205,10 +4254,15 @@ def cmd_init(args) -> int:
     template_path = template_settings_path()
     if not template_path.exists():
         raise FleetCliError(
-            f"worker-settings template not found: {template_path} -- expected it at the fleet-home root"
+            f"worker-settings template not found: {template_path} -- expected it at the "
+            f"fleet INSTALL root (it is git-tracked source, not per-home state)"
         )
     template_text = template_path.read_text(encoding="utf-8")
-    rendered = render_worker_settings_template(template_text, sys.executable, FLEET_HOME)
+    # DATA plane for {{FLEET_HOME}}, CODE plane for {{FLEET_INSTALL}}: the
+    # rendered hook commands must name the installed scripts, while anything
+    # naming state stays with the home. Identical in the legacy layout.
+    rendered = render_worker_settings_template(
+        template_text, sys.executable, FLEET_HOME, fleet_install=INSTALL_ROOT)
 
     instance_path = instance_settings_path()
     instance_path.parent.mkdir(parents=True, exist_ok=True)
@@ -6594,7 +6648,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # P1-6: `read_registry_no_repair`, NOT `load_registry`. This is a PRE-FLIGHT
-    # resolution that runs from `cmd_kill:6488` / `cmd_respawn:6230`, before
+    # resolution that runs from `cmd_kill:6542` / `cmd_respawn:6284`, before
     # either verb has taken `fleet.lock` -- and `load_registry` QUARANTINES a
     # corrupt registry, i.e. RENAMES IT ASIDE, which is a write. An unlocked
     # write races every other fleet command, and it destroys the evidence the
@@ -6657,10 +6711,10 @@ def _supervisor_lifecycle_target(verb, name):
     # P1-6: `read_registry_no_repair` -- `load_registry` MINUS the rename, with
     # the same missing-file contract, the same validator and the same
     # `RegistryCorruptError`, so the arm below is unchanged. This read runs from
-    # `cmd_kill:6488` / `cmd_respawn:6230`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:6542` / `cmd_respawn:6284`, ahead of either verb's `fleet_lock`,
     # and quarantining here did two things: it wrote without the lock, and it
     # STOLE the quarantine from the lock-held read that was designed to perform
-    # it. `cmd_respawn:6254-6256` spells out that design -- *"resolve under the
+    # it. `cmd_respawn:6308-6256` spells out that design -- *"resolve under the
     # lock so a corrupt registry surfaces through load_registry's quarantine"* --
     # and the theft is what falsified it: by the time the lock-held read ran the
     # file was ABSENT rather than corrupt, so `{"workers": {}}` came back and the
@@ -6878,7 +6932,10 @@ def _steer_supervisor_release(name, reason, *, run, which, sleep):
     raised -- deciding what a refused steer MEANS is the caller's job, and it
     is exactly where the two verbs diverge."""
     py = Path(sys.executable).as_posix()
-    fleet_py = (FLEET_HOME / "bin" / "fleet.py").as_posix()
+    # CODE PLANE (multi-fleet slice 0): the rendered command must invoke the
+    # fleet.py that is running right now, not one under whatever home the
+    # caller resolved -- a data-only home has no bin/.
+    fleet_py = (INSTALL_ROOT / "bin" / "fleet.py").as_posix()
     message = (
         f"FLEET LIFECYCLE STEER ({reason}).\n"
         f"Stop what you are doing. Release the supervisor claim yourself -- fleet "
@@ -9022,7 +9079,8 @@ def _doctor_check_posttooluse_hook_smoke(run=subprocess.run):
     real PostToolUse hook script as a real subprocess with synthetic
     stdin + a scratch temp FLEET_HOME (mirrors tests/test_hooks.py's own
     technique), assert it emits valid hookSpecificOutput JSON."""
-    script = FLEET_HOME / "bin" / "hooks" / "posttooluse_mailbox.py"
+    # CODE PLANE (multi-fleet slice 0): smoke-fire the INSTALLED hook script.
+    script = INSTALL_ROOT / "bin" / "hooks" / "posttooluse_mailbox.py"
     if not script.exists():
         return ("posttooluse-hook-smoke", False, f"{script} not found")
     with tempfile.TemporaryDirectory() as tmp:
@@ -9044,7 +9102,8 @@ def _doctor_check_posttooluse_hook_smoke(run=subprocess.run):
 def _doctor_check_stop_hook_smoke(run=subprocess.run):
     """Same as _doctor_check_posttooluse_hook_smoke but for the Stop hook
     (SPEC §5/§7): asserts a {"decision": "block", ...} JSON response."""
-    script = FLEET_HOME / "bin" / "hooks" / "stop_mailbox.py"
+    # CODE PLANE (multi-fleet slice 0): smoke-fire the INSTALLED hook script.
+    script = INSTALL_ROOT / "bin" / "hooks" / "stop_mailbox.py"
     if not script.exists():
         return ("stop-hook-smoke", False, f"{script} not found")
     with tempfile.TemporaryDirectory() as tmp:
@@ -12395,12 +12454,12 @@ def _registry_records_or_none():
 
     IT MUST NOT BE `load_registry`, and that is the whole reason this function
     exists rather than a bare try/except at each site. `load_registry`
-    QUARANTINES a corrupt registry -- it renames the file aside (`:814`) --
+    QUARANTINES a corrupt registry -- it renames the file aside (`:848`) --
     which is a WRITE. `_supervisor_gate` promises "READ-ONLY: no lock, no mint,
     no write" and runs at the top of every mutating verb, so routing its
     identity read through `load_registry` would let a speed-bump shred operator
     evidence on a path that documents itself as touching nothing. This is D4's
-    rule for the view path (`:3404`) applied to the one other reader that has
+    rule for the view path (`:3438`) applied to the one other reader that has
     no business quarantining. Quarantining stays where it belongs: the
     lock-holding verbs, `cmd_sup_boot` included via `_holder_is_limited`."""
     ok, _reason, data = _read_registry_readonly()
@@ -12587,8 +12646,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     live_sids` is what shipped, and `_record_sids`' own docstring says why it
     is wrong -- *"matching against `session_id` alone fails open on it
     (ND4a)"* -- for the twelve other sites that already key on the union
-    (`:2288, :2332, :2572, :2722, :6628, :6945, :7212, :7426, :7513, :7736,
-    :8517, :12458`). B6 was the one
+    (`:2322, :2366, :2606, :2756, :6682, :7002, :7269, :7483, :7570, :7793,
+    :8574, :12517`). B6 was the one
     roster comparison that did not, and §G-G measured it failing open exactly
     as predicted: the releaser fork-steered, so its record was eagerly
     restamped (`session_id` = post-fork, pre-fork sid pushed into
@@ -12600,8 +12659,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :5630, :6087, :10364,
-    :15618), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :5684, :6141, :10423,
+    :15683), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -13291,8 +13350,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:5630, :6087, :10364,
-    #     :15618) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:5684, :6141, :10423,
+    #     :15683) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -13322,10 +13381,10 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         #   * `_registry_records_or_none`, NEVER `load_registry`. This gate
         #     documents itself "READ-ONLY: no lock, no mint, no write" and
         #     `load_registry` QUARANTINES a corrupt registry -- it RENAMES the
-        #     file aside (`:814`), which is a write. Routing the identity read
+        #     file aside (`:848`), which is a write. Routing the identity read
         #     through it made `fleet send` shred the operator's evidence from a
         #     path that promises to touch nothing; the helper exists for exactly
-        #     this and names this gate as its reason (`:12386`). A `None` here
+        #     this and names this gate as its reason (`:12445`). A `None` here
         #     still fails toward the gate -- an unreadable registry is reported
         #     by its own doctor row, and is never a reason to decide blind.
         #     MERGE NOTE (2026-07-27): main and `fix/identity-registry-judges`
@@ -13961,7 +14020,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # A worker whose own record sits inside the artifact upgrades the claim.
         #
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as `_sweep_husks`
-        # spells it at `:8481`. Not an mtime comparison: `os.rename` preserves
+        # spells it at `:8538`. Not an mtime comparison: `os.rename` preserves
         # mtime, so the artifact's mtime is the PRE-corruption write time and any
         # recreated registry is always newer -- the comparison would never fire
         # on the one bypass it exists to stop.
@@ -14730,7 +14789,10 @@ def _render_sup_spawn_task(name: str, launch_id: str, campaign: str) -> str:
     `_archive_file_pairs` for a body that dies before its rm. NEW-2: every
     rendered path is double-quoted -- a space under FLEET_HOME must not split
     the command."""
-    fleet_py = (FLEET_HOME / "bin" / "fleet.py").as_posix()
+    # CODE PLANE (multi-fleet slice 0): the rendered command must invoke the
+    # fleet.py that is running right now, not one under whatever home the
+    # caller resolved -- a data-only home has no bin/.
+    fleet_py = (INSTALL_ROOT / "bin" / "fleet.py").as_posix()
     # The interpreter running fleet right now, not a hardcoded launcher --
     # same doctrine as `_render_successor_task`.
     py = Path(sys.executable).as_posix()
@@ -14954,7 +15016,10 @@ def _render_successor_task(successor_inc: str, old_inc: str, handoff_token: str)
     complete/abort (§5.9). The successor hashes the token into HANDSHAKE so the
     predecessor can verify the body it dispatched without a sid comparison a
     fork-steer would break."""
-    fleet_py = (FLEET_HOME / "bin" / "fleet.py").as_posix()
+    # CODE PLANE (multi-fleet slice 0): the rendered command must invoke the
+    # fleet.py that is running right now, not one under whatever home the
+    # caller resolved -- a data-only home has no bin/.
+    fleet_py = (INSTALL_ROOT / "bin" / "fleet.py").as_posix()
     # The interpreter that is running fleet right now, not a hardcoded
     # `py -3.13` (a Windows-only launcher): the successor must invoke the
     # same Python this incarnation was launched with, on any platform.

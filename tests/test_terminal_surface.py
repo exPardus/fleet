@@ -1277,13 +1277,50 @@ class TestHomeResolution:
     What these pin now is the resolution rule that remains, and the fact that
     no reader has crept back."""
 
-    def test_shipped_scripts_resolve_the_home_the_same_way(self):
-        """Both entry points: $FLEET_HOME, else the script's own repo root.
-        One rule, so a collaborator's clone behaves the same at both."""
-        for rel in ("bin/fleet.py", "bin/fleet_statusline.py"):
-            src = (REPO / rel).read_text(encoding="utf-8")
-            assert 'Path(os.environ["FLEET_HOME"]) if os.environ.get("FLEET_HOME")' in src, rel
-            assert "Path(__file__).resolve().parent.parent" in src, rel
+    def test_fleet_py_is_the_only_entry_point_that_resolves_a_home(self):
+        """ONE home resolver, not two that agree (multi-fleet slice 0).
+
+        This used to require BOTH entry points to carry the same
+        `$FLEET_HOME else my own repo root` expression, on the reasoning that one
+        rule makes a collaborator's clone behave the same at both. The rule was
+        right and the implementation was the conflation: the statusline was
+        reading the DATA plane to locate the CODE plane -- `sys.path.insert(0,
+        $FLEET_HOME/bin)` -- so a home with no `bin/` in it named a directory
+        holding no `fleet.py`, and the import survived only because a script's
+        own directory is already `sys.path[0]`.
+
+        Two agreeing copies of a resolution rule is still two copies. The
+        statusline now derives only its INSTALL from `__file__` and imports
+        fleet, which resolves the home once, for everyone."""
+        fleet_src = (REPO / "bin" / "fleet.py").read_text(encoding="utf-8")
+        assert 'Path(os.environ["FLEET_HOME"]) if os.environ.get("FLEET_HOME")' in fleet_src
+        assert "Path(__file__).resolve().parent.parent" in fleet_src
+
+        statusline_src = (REPO / "bin" / "fleet_statusline.py").read_text(encoding="utf-8")
+        assert "Path(__file__).resolve().parent.parent" in statusline_src, (
+            "the statusline must still locate its own install from __file__")
+        assert 'os.environ.get("FLEET_HOME")' not in statusline_src, (
+            "the statusline read $FLEET_HOME again. It has no business resolving "
+            "a home: fleet.py does that on import, and the only thing the "
+            "statusline needs from its own location is where fleet.py IS.")
+        assert 'os.environ["FLEET_HOME"]' not in statusline_src
+
+    def test_the_statusline_locates_fleet_by_install_not_by_home(self):
+        """The mechanism, not the spelling: whatever the statusline puts on
+        `sys.path` must be install-derived. Driven rather than read -- run it in
+        a subprocess with `$FLEET_HOME` pointed at a directory containing no
+        `bin/` at all, and it must still import fleet and exit 0."""
+        import os
+        import subprocess
+        import tempfile
+        with tempfile.TemporaryDirectory() as data_only_home:
+            proc = subprocess.run(
+                [sys.executable, str(REPO / "bin" / "fleet_statusline.py")],
+                input='{"session_id": "sid-x"}', capture_output=True, text=True,
+                env={**os.environ, "FLEET_HOME": data_only_home}, timeout=60)
+        assert proc.returncode == 0, proc.stderr
+        assert "ModuleNotFoundError" not in proc.stderr
+        assert "Traceback" not in proc.stderr
 
     def test_no_shipped_code_references_the_marker(self):
         """Reintroducing it as a resolution input would let a stale marker
@@ -1400,25 +1437,28 @@ class TestInitStatusline:
         return argparse.Namespace(**base)
 
     def test_plain_init_never_touches_user_settings(self, home, settings, capsys):
-        (home / "worker-settings.template.json").write_text('{"hooks":{}}', encoding="utf-8")
+        # multi-fleet slice 0: the template is CODE plane. It used to sit at
+        # `home/`; `cmd_init` now reads it from the install and renders into
+        # the home, so a test seeding one seeds the install.
+        fleet.template_settings_path().write_text('{"hooks":{}}', encoding="utf-8")
         fleet.cmd_init(self._args())
         assert not settings.exists()
 
     def test_statusline_creates_settings_when_absent(self, home, settings, capsys):
-        (home / "worker-settings.template.json").write_text('{"hooks":{}}', encoding="utf-8")
+        fleet.template_settings_path().write_text('{"hooks":{}}', encoding="utf-8")
         assert fleet.cmd_init(self._args(statusline=True)) == 0
         payload = json.loads(settings.read_text(encoding="utf-8"))
         assert "fleet_statusline.py" in payload["statusLine"]["command"]
         assert payload["statusLine"]["type"] == "command"
 
     def test_statusline_command_uses_forward_slashes(self, home, settings):
-        (home / "worker-settings.template.json").write_text('{"hooks":{}}', encoding="utf-8")
+        fleet.template_settings_path().write_text('{"hooks":{}}', encoding="utf-8")
         fleet.cmd_init(self._args(statusline=True))
         cmd = json.loads(settings.read_text(encoding="utf-8"))["statusLine"]["command"]
         assert "\\" not in cmd
 
     def test_statusline_backs_up_and_preserves_siblings(self, home, settings):
-        (home / "worker-settings.template.json").write_text('{"hooks":{}}', encoding="utf-8")
+        fleet.template_settings_path().write_text('{"hooks":{}}', encoding="utf-8")
         settings.parent.mkdir(parents=True)
         settings.write_text(json.dumps({"model": "opus", "env": {"A": "1"}}), encoding="utf-8")
 
@@ -1431,7 +1471,7 @@ class TestInitStatusline:
         assert list(settings.parent.glob("settings.json.bak.*"))
 
     def test_statusline_refuses_a_foreign_statusline(self, home, settings):
-        (home / "worker-settings.template.json").write_text('{"hooks":{}}', encoding="utf-8")
+        fleet.template_settings_path().write_text('{"hooks":{}}', encoding="utf-8")
         settings.parent.mkdir(parents=True)
         settings.write_text(json.dumps(
             {"statusLine": {"type": "command", "command": "ccusage statusline"}}), encoding="utf-8")
@@ -1443,7 +1483,7 @@ class TestInitStatusline:
         assert "ccusage" in settings.read_text(encoding="utf-8")
 
     def test_force_overwrites_a_foreign_statusline(self, home, settings):
-        (home / "worker-settings.template.json").write_text('{"hooks":{}}', encoding="utf-8")
+        fleet.template_settings_path().write_text('{"hooks":{}}', encoding="utf-8")
         settings.parent.mkdir(parents=True)
         settings.write_text(json.dumps(
             {"statusLine": {"type": "command", "command": "ccusage statusline"}}), encoding="utf-8")
@@ -1452,14 +1492,14 @@ class TestInitStatusline:
         assert "fleet_statusline.py" in settings.read_text(encoding="utf-8")
 
     def test_reinstall_over_fleets_own_statusline_is_idempotent(self, home, settings):
-        (home / "worker-settings.template.json").write_text('{"hooks":{}}', encoding="utf-8")
+        fleet.template_settings_path().write_text('{"hooks":{}}', encoding="utf-8")
         fleet.cmd_init(self._args(statusline=True))
         first = json.loads(settings.read_text(encoding="utf-8"))
         assert fleet.cmd_init(self._args(statusline=True)) == 0
         assert json.loads(settings.read_text(encoding="utf-8")) == first
 
     def test_corrupt_user_settings_refuses_rather_than_clobbering(self, home, settings):
-        (home / "worker-settings.template.json").write_text('{"hooks":{}}', encoding="utf-8")
+        fleet.template_settings_path().write_text('{"hooks":{}}', encoding="utf-8")
         settings.parent.mkdir(parents=True)
         settings.write_text("{not json", encoding="utf-8")
         with pytest.raises(fleet.FleetCliError):
@@ -1475,7 +1515,7 @@ class TestInitStatusline:
         assert args.chain is True
 
     def test_refusal_message_offers_both_chain_and_force(self, home, settings):
-        (home / "worker-settings.template.json").write_text('{"hooks":{}}', encoding="utf-8")
+        fleet.template_settings_path().write_text('{"hooks":{}}', encoding="utf-8")
         settings.parent.mkdir(parents=True)
         settings.write_text(json.dumps(
             {"statusLine": {"type": "command", "command": "ccusage statusline"}}), encoding="utf-8")
@@ -1500,7 +1540,7 @@ class TestStatuslineChainInstall:
         return argparse.Namespace(**base)
 
     def _with_foreign(self, home, settings, command="caveman-statusline.ps1"):
-        (home / "worker-settings.template.json").write_text('{"hooks":{}}', encoding="utf-8")
+        fleet.template_settings_path().write_text('{"hooks":{}}', encoding="utf-8")
         settings.parent.mkdir(parents=True)
         settings.write_text(json.dumps(
             {"statusLine": {"type": "command", "command": command}}), encoding="utf-8")
@@ -1518,7 +1558,7 @@ class TestStatuslineChainInstall:
     def test_chain_never_captures_fleets_own_statusline(self, home, settings):
         # Re-running --chain against a fleet-owned statusline must not make
         # fleet's statusline invoke itself once per refresh, forever.
-        (home / "worker-settings.template.json").write_text('{"hooks":{}}', encoding="utf-8")
+        fleet.template_settings_path().write_text('{"hooks":{}}', encoding="utf-8")
         fleet.cmd_init(self._args())                      # install fleet's
         assert fleet.cmd_init(self._args(chain=True)) == 0  # re-run with --chain
         assert not fleet.statusline_chain_path().exists()
