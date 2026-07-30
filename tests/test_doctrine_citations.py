@@ -8,15 +8,34 @@ code. It did not: it originated in a supervisor's own task brief, and the only
 place it appeared in `docs/specs/**` was inside the unratified §16 amendment
 this branch adds. A supervisor instruction wearing the clothes of doctrine.
 
-The operator ruled on 2026-07-27 (`docs/OPERATOR-GATES.md`) and the clause is
-now doctrine, **scoped**:
+The operator ruled on 2026-07-27 (`docs/OPERATOR-GATES.md`) and the clause
+became doctrine, **scoped**, at `docs/specs/claim-nonce.md` §17:
 
     Inference may select the SUBJECT of a measurement, but may not supply the
     GROUNDS of a refusal. Donation can only ever ADD a `FLEET_WORKER` stamp and
     nothing anywhere removes one, therefore presence of the stamp is unsound
     evidence and absence is sound.
 
-It lives in the ratified corpus at `docs/specs/claim-nonce.md` §17.
+**RE-PINNED 2026-07-30: the second sentence was falsified and replaced.** The
+daemon does not ADD to a hosted session's environment, it SUBSTITUTES that
+environment wholesale, so absence is produced routinely by an unstamped
+cold-starter and nothing strips anything. The operator replaced the scope half
+in the same docket pass; §17's HEAD sentence survives, §17 stays in the corpus
+as the record, and the ratified clause the code now cites lives at
+`docs/specs/claim-nonce.md` §18:
+
+    The daemon substitutes the session environment wholesale, therefore no
+    `FLEET_WORKER` observation, present or absent, is evidence about this body.
+    The sid is trustworthy: the vendor stamps each hosted session's own sid over
+    the substituted environment, closed in the safe direction by counting, and
+    every other env observation on a hosted body is evidence about the daemon's
+    cold-starter, not about the body; the registry sid union is the only sound
+    identity channel.
+
+Re-pinning `CLAUSE_HEAD`/`CLAUSE_SCOPE` after an operator ruling is the same
+kind of deliberate edit as re-pinning a receipt's `# at <sha>`: the constants
+below are the third independent copy, so changing them is what makes the new
+ruling checkable rather than merely asserted.
 
 This file is the reason the citation cannot rot back into an assertion. It is
 deliberately of the same shape as `tests/test_retired_sid_citations.py` and
@@ -31,8 +50,9 @@ re-runs it. It asserts, on every run:
      sentence is what the ratified section actually says -- so re-pointing a
      citation at a different clause is caught;
   5. the SCOPE half travels with it -- a citation that keeps the headline and
-     drops "absence is sound" is the unscoped form again, which read strictly
-     condemns the whole 200k ceiling refusal;
+     drops the registry-sid-union sentence has taken the environment away
+     without naming what replaces it, which leaves every guard in the file
+     grounded on nothing;
   6. no site still cites the unratified amendment or the `[PROPOSED]` marker.
 
 Re-pinning `EXPECTED_SITES` after deliberately adding or removing a citing site
@@ -61,11 +81,21 @@ _MARKER_RE = re.compile(r"RATIFIED DOCTRINE -- claim-nonce §(\d+(?:\.\d+)*)")
 # The ratified clause, held here as an INDEPENDENT third copy -- neither the
 # code's nor the spec's. Two copies that agree because one was derived from the
 # other prove nothing.
-CLAUSE_HEAD = ("Inference may select the SUBJECT of a measurement, but may not "
-               "supply the GROUNDS of a refusal.")
-CLAUSE_SCOPE = ("Donation can only ever ADD a FLEET_WORKER stamp and nothing "
-                "anywhere removes one, therefore presence of the stamp is "
-                "unsound evidence and absence is sound.")
+CLAUSE_HEAD = ("The daemon substitutes the session environment wholesale, "
+               "therefore no FLEET_WORKER observation, present or absent, is "
+               "evidence about this body.")
+CLAUSE_SCOPE = ("The sid is trustworthy: the vendor stamps each hosted "
+                "session's own sid over the substituted environment, closed in "
+                "the safe direction by counting, and every other env "
+                "observation on a hosted body is evidence about the daemon's "
+                "cold-starter, not about the body; the registry sid union is "
+                "the only sound identity channel.")
+
+# The clause this one REPLACED. Nothing may cite it as current doctrine again:
+# it is the falsified half, and its shape (an asymmetry argument about
+# donation) is exactly what a re-derivation from first principles produces.
+SUPERSEDED_SCOPE = ("therefore presence of the stamp is unsound evidence and "
+                    "absence is sound")
 
 # How much normalised text after a marker counts as that site's citation.
 _WINDOW = 700
@@ -173,9 +203,14 @@ class TestTheDoctrineCitationsNameARatifiedClause:
             assert "RATIFIED" in body, (
                 f"bin/fleet.py:{line} cites claim-nonce §{number}, which "
                 f"carries no RATIFIED marker")
-            assert "2026-07-27" in body, (
-                f"bin/fleet.py:{line} cites claim-nonce §{number}, which "
-                f"names no ratification date")
+            # The DATE is derived, not hardcoded: pinning a literal date here
+            # meant that re-pointing the citations at a later ruling (2026-07-30
+            # replaced this clause once already) went RED for the wrong reason
+            # and taught the next editor to loosen the assertion instead.
+            assert re.search(r"RATIFIED by \w+, \d{4}-\d{2}-\d{2}", _norm(body)), (
+                f"bin/fleet.py:{line} cites claim-nonce §{number}, which names "
+                f"no ratification date in the form 'RATIFIED by <who>, "
+                f"<YYYY-MM-DD>'")
             assert "REQUIRES OPERATOR RATIFICATION" not in body, (
                 f"bin/fleet.py:{line} cites claim-nonce §{number}, which is "
                 f"still awaiting ratification")
@@ -220,15 +255,35 @@ class TestTheDoctrineCitationsNameARatifiedClause:
             "bin/fleet.py still cites claim-nonce §16.4 item 3 -- the OPEN "
             "QUESTION, not the answer to it")
 
-    def test_the_ratified_section_is_not_inside_the_amendment(self):
-        """§17 must sit AFTER §16, not within it.
+    def test_no_citation_quotes_the_superseded_scope_half(self):
+        """The 2026-07-30 direction: the dead clause must not come back.
+
+        *"Presence of the stamp is unsound evidence and absence is sound"* was
+        falsified by measurement -- the daemon SUBSTITUTES the environment
+        rather than adding to it -- and it is exactly the sentence a
+        re-derivation from first principles reproduces. §17 still contains it,
+        as the record of what was ratified in 2026-07-27; a CITING SITE must
+        not.
+        """
+        for line, number, window in _citation_windows():
+            assert _norm(SUPERSEDED_SCOPE) not in window, (
+                f"bin/fleet.py:{line} cites claim-nonce §{number} and quotes "
+                f"the SUPERSEDED scope half -- replaced 2026-07-30 by the "
+                f"substitution model (§18)")
+
+    def test_every_cited_section_sits_after_the_amendment(self):
+        """A cited section must sit AFTER §16, not within it.
 
         A ratified clause filed inside a document region headed *"not ratified:
         an author does not ratify their own amendment"* would be checkable and
-        still wrong.
+        still wrong. Derived per citation rather than pinned to one section
+        number, so re-pointing the citations at a later ruling keeps the check.
         """
         amendment = SPEC_RAW.index("\n## 16. ")
-        ratified = SPEC_RAW.index("\n## 17. ")
-        assert ratified > amendment, (
-            "claim-nonce §17 does not follow §16 -- the ratified clause "
-            "is filed inside the unratified amendment")
+        for line, number in _cited_sections():
+            heading = re.search(rf"^#+\s+{re.escape(number)}(?=[.\s])",
+                                SPEC_RAW, re.M)
+            assert heading is not None and heading.start() > amendment, (
+                f"claim-nonce §{number}, cited from bin/fleet.py:{line}, does "
+                f"not follow §16 -- the ratified clause is filed inside the "
+                f"unratified amendment")
