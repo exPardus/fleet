@@ -2059,11 +2059,24 @@ what this spec relies on, and it is unaffected.
 >
 > **RE-GROUNDED 2026-07-28 — four-councilor council, Verdict A, unanimous 4/4
 > (`docs/decisions/W9-section7-council-synthesis.md`, added to `main` in `d034827`; not present on
-> this branch, which predates it). STATUS: PROVISIONAL, PENDING OPERATOR RATIFICATION** — taken by
-> the interface tier under the operator's standing directive 7 while the operator was away. **No box
-> in `docs/OPERATOR-GATES.md` is ticked**; the request raised above stands open. **§7's exempt VERB
-> SET IS UNCHANGED. Only what grounds it changes**, and the arming of the `archive` verb is
-> byte-for-byte what it was.
+> this branch, which predates it). STATUS: RATIFIED by Altai, 2026-07-30**, in-session operator
+> docket — *"RATIFIED as ruled, WITH the `:2174` repair as a CONDITION of Verdict A"*
+> (`docs/OPERATOR-GATES.md`, the §7-envelope gate). The re-grounding was originally taken by the
+> interface tier under the operator's standing directive 7 while the operator was away and shipped
+> PROVISIONAL for two days; **that provisional status is now discharged.** The condition is
+> satisfied: the taxonomy row moved in the same edit that landed the re-grounding, and it moved
+> before the ratification rather than after it — see *the verb taxonomy, corrected* below. **§7's
+> exempt VERB SET IS UNCHANGED. Only what grounds it changes**, and the arming of the `archive` verb
+> is byte-for-byte what it was.
+>
+> **What the same ruling did NOT settle, recorded here so no one reads the tick as covering it:**
+> Verdict B was ratified only in part — relief on **arm 5** only; arms 2/4/7/9 were already disarmed
+> and needed nothing; **arm 3 stays OPEN for the operator separately** (dispatch over a live beating
+> claim-holder — the two-live-supervisors condition, which no ruling covers); **arm 6 is deferred**
+> (contested 2–2, and both lenses that granted it named it their own weakest half). §5.7's token
+> refusal stays. The live R2 violation named in the same gate is repair work in this scope and is
+> fixed in shipped code — see `GATE_VERBS_ACCEPTING_NONCE` in `bin/fleet.py` and the note at the end
+> of *the verb taxonomy, corrected*.
 >
 > The question the note above raised is answered, and answering it required amending operator-owned
 > text at **three** sites — because *"`autoclean` is structurally exempt"*, four lines up, **could
@@ -2177,10 +2190,11 @@ callers. The honest accounting:
   Strictly better than what it replaces: *"the scheduled task has no session id"* was a claim about
   **configuration** and a configuration change falsified it in one day. This is a claim about
   **effect**, falsifiable only by deliberately widening what the sweep does — which is what rider 2
-  below reserves to the operator. **STATUS: PROVISIONAL — PENDING OPERATOR RATIFICATION.** The
-  ruling was taken by the interface tier under the operator's standing directive 7 while the
-  operator was away; **no box in `docs/OPERATOR-GATES.md` is ticked**, and a ratification request is
-  filed there under `## Open`. Two binding riders ride the re-grounding:
+  below reserves to the operator. **STATUS: RATIFIED by Altai, 2026-07-30** (in-session operator
+  docket; the gate is ticked and moved to `## Settled` in `docs/OPERATOR-GATES.md`). It shipped
+  PROVISIONAL for two days because the interface tier took it under the operator's standing directive
+  7 while the operator was away; the ratification discharges that, **with the `:2174` taxonomy repair
+  as its stated condition** — satisfied below. Two binding riders ride the re-grounding:
   1. **The exemption is carried explicitly at every frame and never inherited from the call graph.**
      `as_autoclean_tier` is the correct shape *because it is a parameter* — visible at the frame
      where it applies, and the one thing that cannot be silently assumed one frame down. Enforced,
@@ -2276,7 +2290,9 @@ def cmd_release(args) -> int:
 
 **`autoclean` MOVED OUT OF THE MUTATING-LIFECYCLE ROW ON 2026-07-28**, by the four-councilor §7
 ruling recorded in `docs/decisions/W9-section7-council-synthesis.md` (Verdict A, unanimous 4/4, and
-its wave-10 postscript). **PROVISIONAL — pending operator ratification; no gate box is ticked.** It
+its wave-10 postscript). **RATIFIED by Altai, 2026-07-30 — and this row is the CONDITION the
+ratification named**, not a follow-up to it: the operator ratified Verdict A *"WITH the `:2174`
+repair as a CONDITION"*, `:2174` being where this row sat when the contradiction was surfaced. It
 had to move, and re-grounding the exemption alone would not have been enough: this table is made
 **binding** by the same ratified decision block that says *"`autoclean` is structurally exempt"*, so
 while the row listed `autoclean` among the gated verbs **the ratified text said exempt in one line and
@@ -2286,6 +2302,20 @@ a better paragraph attached. The new row is deliberately named after the **effec
 ground the exemption now rests on — a verb that mutates is not thereby a lifecycle verb, and that
 distinction is the whole content of the ruling. Rider 2 applies to the row as much as to the ground:
 widen what the sweep does and it belongs back above.
+
+**The R2 violation the same gate named is fixed, and it was fixed at the SHAPE rather than at the
+instance.** The council found `fleet autoclean` being refused with *"archive: refusing ... present
+`--nonce`"* while `fleet autoclean` declares no `--nonce` flag at all — a named remedy no caller
+could perform, which the 2026-07-26 R2 ruling classes as a defect in its own right. The instance died
+with the exemption (`cmd_archive(..., as_autoclean_tier=True)`). The shape is closed by
+`GATE_VERBS_ACCEPTING_NONCE` in `bin/fleet.py`: `_supervisor_gate` is armed with the label of the
+FRAME, not of the command the caller ran, so rider 1 guarantees this recurs at any future frame
+reached from a nonce-less entry point. When the verb is not in that set the refusal says so and names
+a remedy its audience can actually perform (report the bug) instead of a flag that does not exist.
+The set is not hand-maintained truth: `tests/test_supervisor_gate.py::
+TestTheRefusalNeverNamesAnUnreachableRemedy` derives it from `build_parser()` and from the
+`_supervisor_gate` call sites and asserts equality both ways, so a gated verb with no flag — or a
+flag removed from a gated verb — is a test failure rather than a silently unreachable remedy.
 
 Any gate must be stated against **this** partition, and must say what it does with the middle rows —
 which is where v1's error lived.
@@ -3304,6 +3334,19 @@ decidable and the file says so instead of implying totality.
 
 ## 17. RATIFIED — inference selects the SUBJECT of a measurement, never the GROUNDS of a refusal
 
+> **SECOND SENTENCE SUPERSEDED 2026-07-30 BY §18 — read that section first.** The operator replaced
+> this clause's SCOPE half (*"presence of the stamp is unsound evidence and absence is sound"*) with
+> the substitution model, on a measurement that falsified it: the daemon does not ADD to a hosted
+> session's environment, it SUBSTITUTES that environment wholesale, so absence is produced routinely
+> by a cold daemon nothing stripped anything from. **The head sentence survives** — inference still
+> selects the subject of a measurement and still may not supply the grounds of a refusal — but what
+> makes it decidable is now §18's registry-sid-union channel, not the donation asymmetry below.
+>
+> **This section is left standing rather than rewritten, and that is deliberate.** It is the record of
+> what was ratified on 2026-07-27 and of the accounting it was ratified on; editing a record to agree
+> with a later ruling falsifies it, which is the rule §17.3 states two screens down and applies to
+> itself here. Everything below is the 2026-07-27 text, unchanged.
+>
 > **RATIFIED by Altai, 2026-07-27**, in-session operator docket. The ruling is recorded verbatim in
 > `docs/OPERATOR-GATES.md` (the identity-invariant gate), where the same clause is rendered with bold
 > where this section uses capitals.
@@ -3419,3 +3462,142 @@ that each names a section that **exists**, is **ratified**, and states the claus
 quotes — both halves. Re-pointing a citation at a different clause, or dropping the scope sentence
 from this section, turns it RED. That test is the answer to the specific defect this section exists
 to close: a citation nobody can check is indistinguishable from an assertion.
+
+*(The three sites now carry `RATIFIED DOCTRINE -- claim-nonce §18` and quote §18's clause; the test
+follows the citation rather than this paragraph, so it moved with them. §17 keeps this subsection
+because it is the record of where the citations pointed and why.)*
+
+---
+
+## 18. RATIFIED — the daemon SUBSTITUTES the environment; the registry sid union is the only sound identity channel
+
+> **RATIFIED by Altai, 2026-07-30**, in-session operator docket (`docs/OPERATOR-GATES.md`, the
+> identity-clause gate; `knowledge/lessons.md#2026-07-30-operator-docket`). It **replaces the scope
+> half of §17**, which stays in place as the record of the 2026-07-27 ruling.
+>
+> **This section is not an amendment and is not its author's own.** The clause below is the
+> operator's, transcribed; the ratification is recorded in the gates file, and no worker or manager
+> ticked a box to produce it.
+
+### 18.1 The clause
+
+> **The daemon substitutes the session environment wholesale, therefore no `FLEET_WORKER` observation,
+> present or absent, is evidence about this body. The sid is trustworthy: the vendor stamps each
+> hosted session's own sid over the substituted environment, closed in the safe direction by counting,
+> and every other env observation on a hosted body is evidence about the daemon's cold-starter, not
+> about the body; the registry sid union is the only sound identity channel.**
+
+Both sentences are the clause, in the same sense §17's two were: the first says what is worthless, the
+second says what is left, and a citation that keeps only the first has removed the channel every guard
+in this file now resolves identity through.
+
+### 18.2 What falsified §17's scope half, and why re-measuring was rejected
+
+§17 rested on a **mechanical asymmetry**: *donation can only ever ADD a stamp; nothing anywhere
+removes one.* That is true of donation and it is not what the daemon does. The daemon **substitutes**
+the hosted session's environment with its own frozen first-dispatch environment (§16.2), so a stamp is
+not removed from this dispatch's env — this dispatch's env never reaches the session at all. Absence
+is therefore produced routinely, by nothing more exotic than a daemon a stamp-less launcher
+cold-started, and *"nothing removes a stamp"* stops implying *"absence proves no fleet dispatch"*.
+
+**The falsifying instrument was the shipped detector.** Run from inside worker `mf-rb` on 2026-07-30,
+`_doctor_check_identity_witness` returned FAIL and said *"a fleet dispatch DID launch this body and the
+stamp it wrote is gone"* — of a body whose own sid is its registry sid, i.e. provably a `fleet spawn`
+dispatch, with `FLEET_WORKER` absent anyway. **Observed on four bodies in one wave** (both wave-11
+supervisor bodies, the wave-12 supervisor, lens `mf-rb`): the common case, not an edge.
+
+**The sid half is closed in the safe direction by counting, which is why the ordered re-measure was
+cancelled.** §16.3 recorded *"can the daemon donate a SID?"* as OPEN, and the experiment that would
+settle it required restarting the machine-wide daemon from a process holding a sid, killing every live
+session. It is settled without that: the daemon is a **singleton**, one frozen environment holds
+**exactly one** sid, and four live bodies read **four distinct correct** sids. One frozen value cannot
+be four different right answers, so the vendor stamps each hosted session's own sid over the
+substituted environment. Two media, not one: a frozen donor environment, plus a per-session sid
+override. (Round-6 lens `mf-rb6` CONFIRM-A, and wave-19's `envstamp` independently.)
+
+### 18.3 What it decides, exactly
+
+- **§17's head sentence survives, re-scoped.** Inference may still select the subject of a measurement
+  and may still not supply the grounds of a refusal. What changed is what makes it decidable: the
+  sound channel is the registry sid union, not the stamp's absence.
+- **`_require_claim_holder` (§6.5) is untouched and is strengthened.** It already grounds its refusal
+  on what the REGISTRY says, which is exactly the channel this clause names sound. Its limit remains
+  coverage, not legitimacy.
+- **`_ceiling_refuses_dispatch` keeps its permitted status** at the exemption arm: the identity read
+  there still only ever selects whose transcript is measured, and the grounds of the refusal stay the
+  measured occupancy.
+- **`three-tier-command.md` §11.3 ND4(c) loses its premise and is NOT yet re-grounded.** §18.4 is the
+  one place this ruling could not be executed: the grounding it implies collides with ratified ND4(b)
+  on the identical input. The guard is unchanged, the hole is live and documented, and the choice
+  between three priced candidates is the operator's.
+- **`_doctor_check_identity_witness` keeps its FAIL row and loses its remedy.** Registry-RESOLVED +
+  witness-gone is still worth reddening — it is a real disagreement between two channels — but the
+  remedy *"inspect what strips FLEET_WORKER from this environment"* directed the operator to hunt a
+  **stripper that does not exist**. Under substitution the cause is a daemon cold-started by an
+  unstamped launcher, and the row's meaning is *"the witness is stale, believe the registry"*, not
+  *"something on this box is tampering with your environment"*.
+- **`FLEET_WORKER` is still WRITTEN and still worth writing.** `_worker_env` stamps it; it remains a
+  witness whose disagreement with the registry is diagnostic. What it stops being is an input to any
+  decision, in either direction.
+
+### 18.4 ND4(c) — the premise is falsified, the ordered re-grounding is BLOCKED, and the decision is owed
+
+**This subsection is the one place this ruling could not be executed, and it is filed as an open
+question rather than an edit.** Everything else §18 owed is done; ND4(c) is not, and the reason is
+measured.
+
+**The hole is live.** Ratified `three-tier-command.md` §11.3 ND4(c) exempts the interface from the
+200k dispatch ceiling on the **absence** of `FLEET_WORKER`, and §17.2 called that exemption
+*"blessed, not tolerated"* on the strength of the scope half. With that half falsified the exemption
+is granted to **any body whose daemon was cold-started unstamped** — on the 2026-07-30 measurement,
+four of four live bodies, two of them supervisors the ceiling exists to slow down. A supervisor at
+500,000 tokens with an unstamped daemon is exempt from a HARD ceiling today.
+
+**The ordered re-grounding contradicts a different ratified binding, on the same input.** The ruling
+names the sound channel and the derived grounding is *"the caller's sid is absent from the registry
+sid union"*. That predicate is, definitionally, `_acting_worker_identity` returning
+**IDENTITY_UNRESOLVED** — and ratified **ND4(b) already governs that exact input with the opposite
+outcome**: *"an unresolvable identity must never be the reason a ceiling stays dormant"*, i.e. apply
+the ceiling. One input, two ratified bindings, opposite verdicts. The old ground escaped the collision
+only because stamp-absence is an **independent** signal, orthogonal to registry resolution; every
+registry-keyed grounding collapses into ND4(b)'s input and inherits the contradiction.
+
+It is not a corner case. `tests/test_supervisor_ceiling.py::TestCeiling::
+test_indeterminate_identity_fails_toward_band` pins ND4(b) on precisely this shape, and its comment
+carries the end-to-end receipt from the last time this function was re-keyed onto the registry:
+`fleet spawn` at 999,999 tokens returning rc=0.
+
+**No discriminator exists.** In the indeterminate bucket the two bodies ND4(c) must tell apart are
+*the interface* (no record, correctly exempt) and *a claim-holder whose own record has gone missing
+from a readable registry* — post-fork-steer, so its caller sid differs from the stale claim's holder
+sid (the ND4(a) window), over a registry recreated thin after a quarantine, which reads `ok` while
+missing every record. **Both present as "sid absent from the union", and the missing record is
+precisely the evidence that would distinguish them.**
+
+**What was NOT done, deliberately:** `_ceiling_refuses_dispatch` is byte-for-byte unchanged. Shipping
+the re-grounding as ordered would re-open a measured defect; shipping any of the alternatives below
+would be a worker choosing between ratified bindings. Both are refused here. What DID change is that
+the code and this corpus no longer *assert* the falsified premise as sound — the guard now documents
+itself as a live hole with this section as its accounting.
+
+**The three candidates, priced for the ruling that is owed:**
+
+| Candidate | Closes the measured hole | Cost |
+|---|---|---|
+| **A — narrow (c): the CLAIM-HOLDER is never exempt, whatever its stamp** | Yes — the four measured bodies were claim-holders, and holdership is read from the claim file (`caller_sid == holder_sid`), not from the environment | Amends ND4(c)'s *"first, with no sid at all"* ordering only; leaves ND4(b)'s bucket untouched, so no contradiction. Changes one pinned test: an interface session that took the claim via `sup-boot` becomes subject to the ceiling (its escape is `sup-handoff-begin`, already exempt) |
+| **B — subordinate ND4(b) to a registry-keyed (c), as literally ordered** | Yes | Re-opens the 999,999-token bypass ND4(b) exists for; requires amending ND4(b), which the ruling did not touch |
+| **C — retire (c) entirely** | Yes | The interface loses its exemption whenever identity is indeterminate — a refusal the human channel cannot escape, which ND1 forbids |
+
+**A is the narrowest and is the recommendation**, on the ground that it does not use the environment
+at all and therefore does not need §18's sound channel: holdership is read from `supervisor/
+INCARNATION`, which §18 neither demotes nor mentions. It is recorded as a recommendation and not
+taken.
+
+### 18.5 Where the code cites this section
+
+The three `RATIFIED DOCTRINE -- claim-nonce §18` markers in `bin/fleet.py` are the identity block
+above `_acting_worker_identity`, `_ceiling_refuses_dispatch` and `_require_claim_holder` — the same
+three sites §17.4 named, re-pointed. `tests/test_doctrine_citations.py` re-derives them out of
+`bin/fleet.py` on every run and checks that the cited section exists, is ratified, names its own
+ratification date, and states both halves of the clause the citing comment quotes. Re-pointing a
+citation at a different clause, or dropping the second sentence from this section, turns it RED.

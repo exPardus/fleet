@@ -43,12 +43,25 @@ Soul = `supervisor/GOALS.md` (operator-owned) + `supervisor/JOURNAL.md`
 4. Reconcile workers from the bundle's fleet-status section. `fleet status`
    runs the outcome discriminator and the silent-limit transcript scan, so
    the verdicts there are measured, not registry guesses (M-B, shipped).
-5. **Check your own `FLEET_WORKER` against your registry name.** The daemon
-   donates the FIRST dispatch's env to every later session, so the value you
-   inherit is often a stale launch id from an earlier body. Supervisor-shaped
-   is benign (the §6.5 exemption still resolves) and is not a stop condition;
-   **worker-shaped is malignant** — that body takes the claim and can then
-   never beat, checkpoint or release it. Record which variant you are in.
+5. **Check your own `FLEET_WORKER` against your registry name — as a WITNESS,
+   never as an answer.** The daemon SUBSTITUTES the first dispatch's whole env
+   into every later session, so the value you inherit is often a stale launch
+   id from an earlier body, or missing entirely. **Three variants, and the
+   third is the common one:**
+   - **supervisor-shaped** — benign (the §6.5 exemption still resolves), not a
+     stop condition;
+   - **worker-shaped** — **malignant**: that body takes the claim and can then
+     never beat, checkpoint or release it;
+   - **absent** — **benign, and expected**: a daemon cold-started by an
+     unstamped launcher produces it, nothing stripped anything, and it says
+     NOTHING about what you are. Do not go looking for a stripper and do not
+     conclude you are the interface tier. Measured on four of four live bodies
+     in one wave (2026-07-30).
+
+   **Your identity is `fleet status` / the registry, not this variable**
+   (claim-nonce §18, ratified 2026-07-30: the registry sid union is the only
+   sound identity channel). Record which variant you are in, because a
+   worker-shaped stamp is still worth knowing about, and move on.
 
 ### Gen-0 body via `fleet sup-spawn` (three-tier §10.1)
 
