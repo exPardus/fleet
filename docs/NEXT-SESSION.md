@@ -96,14 +96,42 @@ next session to fix it. Shape of the fix — a supervisor lane, not interface ha
 
 ## OPEN OPERATOR GATES — carry these, nothing narrows while they wait
 
-1. **Multi-fleet v8 ratification** (top of OPERATOR-GATES): ratify / round 8 / overturn.
-2. **Identity clause** (2026-07-27 "absence is sound" falsified; CONFIRM-A addendum: sid-
-   donation closed safe by counting; two-media model — sid trustworthy, stamp not).
-3. **§7 exemption envelope** (pre-existing, council-ruled, awaiting ratification).
-4. **Branch-protection vs merge doctrine** — occupies the single `sup-decision` slot, FIVE
-   measured bypass reproductions, options A/B/C in its text. Because the slot is single,
-   outcount2's poll-bound question (needs a probe hook in every worker's settings —
-   operator-shaped) is QUEUED BEHIND it in wave release notes.
+**THE DOCKET CLEARED 2026-07-30.** All four items below were ruled in-session by Altai and are
+in `docs/OPERATOR-GATES.md` under `## Settled`; `## Open` is now empty, which is a legitimate
+state and not a parse failure. Kept here, struck, because the *follow-ups* they created are
+live work:
+
+1. ~~**Multi-fleet v8 ratification**~~ — **RATIFIED ready-for-build.** Build starts at
+   Sequencing §3 slice 0 (install/home split), with the round-7 defect pins as slice
+   conditions. Rider ruled separately: `fix/b6-interface-release` gets a gate lane, merge on
+   green.
+2. ~~**Identity clause**~~ — **REPLACED by the substitution model**, ratified as
+   `docs/specs/claim-nonce.md` §18. §17 stays as the record of the 2026-07-27 ruling; its head
+   sentence survives, its scope half is falsified. Owed follow-ups DONE in wave 34: the three
+   `bin/fleet.py` citations, `_doctor_check_identity_witness`'s remedy (it hunted a stripper
+   that does not exist), `DAEMON_ENV_LEAK_REMEDY`, `skills/fleet/supervisor.md` step 5 and
+   `skills/fleet/SKILL.md` (the ABSENT-stamp third variant, which is the common case).
+3. ~~**§7 exemption envelope**~~ — **RATIFIED as ruled, with the `:2174` repair as a
+   condition** (satisfied: the taxonomy row moved 2026-07-28). Three PROVISIONAL markers in
+   §7 discharged in wave 34. Still open and NOT covered by the tick: **arm 3** (dispatch over a
+   live beating claim-holder) and **arm 6** (deferred, contested 2–2).
+4. ~~**Branch-protection vs merge doctrine**~~ — **answered: B** (drop/scope the GitHub rule so
+   policy agrees with doctrine; the settings change is the operator's own shell action). The
+   `sup-decision` slot is FREE, so outcount2's poll-bound question can take it.
+
+## ONE NEW GATE OWED, raised by wave 34 and not yet put to the operator
+
+**ND4(c) cannot be re-grounded as ordered — the ruling collides with ratified ND4(b).** The
+2026-07-30 identity ruling ordered three-tier §11.3 ND4(c) re-grounded off `FLEET_WORKER`
+absence and onto "caller sid absent from the registry sid union". That predicate is
+definitionally `IDENTITY_UNRESOLVED`, and ND4(b) already governs that exact input with the
+opposite verdict (*"an unresolvable identity must never be the reason a ceiling stays
+dormant"*). `_ceiling_refuses_dispatch` was therefore left **byte-for-byte unchanged** rather
+than improvised on, and the hole is live: a claim-holding supervisor whose daemon was
+cold-started unstamped is exempt from the 200k HARD ceiling today (four of four measured
+bodies). Three candidates are priced in **claim-nonce §18.4**, with A (narrow (c) so the
+claim-holder is never exempt whatever its stamp) recommended — it reads the claim file, not the
+environment, so it needs no sound env channel and does not touch ND4(b)'s bucket.
 
 ## The revive loop (how this session ran 21 waves)
 

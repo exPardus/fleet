@@ -1611,6 +1611,43 @@ Note (b) and (c) compose safely rather than fighting: (c) exempts the interface 
 fail-toward-the-band default can catch it, so failing closed for the supervisor does not silence the
 human's control channel (ND1).
 
+> **ND4(c)'s PREMISE IS FALSIFIED — RE-GROUNDING ORDERED 2026-07-30 AND NOT YET DONE. (c) is a LIVE
+> HOLE and the code is unchanged.** The identity clause (c) rests on was replaced by the operator on
+> 2026-07-30 (`docs/OPERATOR-GATES.md`; the clause is `docs/specs/claim-nonce.md` §18) and the
+> re-grounding of this bullet was ratified as owed work in the same ruling. It could not be executed
+> without amending a *different* ratified binding, so it is filed as an open decision. **The
+> paragraph and receipt above stand as the record of what was ratified on 2026-07-23 and why**; the
+> receipt remains true of the commit it names. Full accounting, with three priced candidates and a
+> recommendation: **claim-nonce §18.4.**
+>
+> **What is falsified.** (c) rested on *"donation can only ever ADD a stamp, so absence is sound"*.
+> The daemon does not add to a hosted session's environment, it **substitutes** that environment
+> wholesale with its own frozen first-dispatch copy, so `FLEET_WORKER` is absent on any body whose
+> daemon was cold-started by an unstamped launcher — measured on **four of four live bodies in one
+> wave on 2026-07-30**, two of them supervisors. So (c) hands the interface's structural exemption
+> from the 200k HARD ceiling to the exact bodies the ceiling exists to slow down. A claim-holding
+> supervisor at 500,000 tokens with an unstamped daemon is exempt today.
+>
+> **Why the obvious re-grounding is refused rather than shipped.** The ruling names the registry sid
+> union as the only sound identity channel, which yields *"exempt when the caller's sid is absent
+> from the union"*. That predicate is definitionally `IDENTITY_UNRESOLVED` — and **(b) above already
+> governs that exact input with the opposite verdict**: *"an unresolvable identity must never be the
+> reason a ceiling stays dormant."* One input, two ratified bindings, opposite outcomes. The old
+> ground escaped this only because stamp-absence is an **independent** signal, orthogonal to registry
+> resolution; every registry-keyed grounding collapses into (b)'s input. `tests/
+> test_supervisor_ceiling.py::TestCeiling::test_indeterminate_identity_fails_toward_band` pins (b) on
+> exactly this shape, with the receipt from the last attempt: `fleet spawn` at 999,999 tokens
+> returning rc=0.
+>
+> **And no discriminator exists.** In the indeterminate bucket the two bodies (c) must tell apart are
+> the interface (no record, correctly exempt) and a claim-holder whose own record has gone missing
+> from a readable registry — and the missing record is precisely the evidence that would distinguish
+> them. Both present as "sid absent from the union".
+>
+> **Status: (b) is intact, (c) is unchanged and unsound, and the decision between narrowing (c) to
+> exempt-unless-claim-holder, subordinating (b), or retiring (c) is the operator's** — each amends
+> ratified text, which is not a worker's to choose.
+
 ### 11.4 The worker arm of the band (operator, wave 3)
 
 Workers observe the same 150–200k band: a worker self-monitors its context and, **on entering the band,

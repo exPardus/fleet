@@ -25,29 +25,41 @@ sid returned exactly one record and it was the right one; resolving it from
 `FLEET_WORKER` returned a different, idle worker. The registry was right and the
 environment was wrong, simultaneously.
 
-THE HARD INVARIANT -- RATIFIED DOCTRINE, `docs/specs/claim-nonce.md` §17
-(Altai, 2026-07-27). It is quoted here in the form that was ratified, which is
-SCOPED; the unscoped form this file was originally written against (*"an
-identity inference derived from the environment may never be the sole basis of
-a refusal"*) came from a supervisor's task brief, was never in the ratified
-corpus, and is superseded:
+THE HARD INVARIANT -- RATIFIED DOCTRINE, `docs/specs/claim-nonce.md` §18
+(Altai, 2026-07-30):
 
-    Inference may select the SUBJECT of a measurement, but may not supply the
-    GROUNDS of a refusal. Donation can only ever ADD a `FLEET_WORKER` stamp and
-    nothing anywhere removes one, therefore presence of the stamp is unsound
-    evidence and absence is sound.
+    The daemon substitutes the session environment wholesale, therefore no
+    `FLEET_WORKER` observation, present or absent, is evidence about this body.
+    The sid is trustworthy: the vendor stamps each hosted session's own sid over
+    the substituted environment, closed in the safe direction by counting, and
+    every other env observation on a hosted body is evidence about the daemon's
+    cold-starter, not about the body; the registry sid union is the only sound
+    identity channel.
 
-Both `FLEET_WORKER` and `CLAUDE_CODE_SESSION_ID` are read from the same medium
--- the donated daemon environment. Re-keying onto "registry lookup by the acting
-sid" improves blame-assignment but does not escape that medium: whether the sid
-itself can be donated is an OPEN question (`_worker_env` pops it before
-`Popen(env=...)`, so the live measurement is equally consistent with "the vendor
-stamps a fresh sid" and "the vendor passes the env through and there was nothing
-to pass"). The clause is what makes the design sound under both, and its second
-sentence is what makes it decidable: the 200k ceiling reads the stamp's ABSENCE
-and is permitted, the old claim guard read its PRESENCE and was not. The
-citations in `bin/fleet.py` are re-derived and checked against §17 on every run
-by `tests/test_doctrine_citations.py`.
+TWO EARLIER FORMS, both superseded and both named so nobody re-derives them.
+(1) The UNSCOPED form this file was originally written against -- *"an identity
+inference derived from the environment may never be the sole basis of a
+refusal"* -- came from a supervisor's task brief and was never in the ratified
+corpus. (2) The SCOPED form ratified 2026-07-27 as §17: *"Inference may select
+the SUBJECT of a measurement, but may not supply the GROUNDS of a refusal.
+Donation can only ever ADD a `FLEET_WORKER` stamp and nothing anywhere removes
+one, therefore presence of the stamp is unsound evidence and absence is
+sound."* Its HEAD sentence survives; its second sentence was falsified by
+measurement on 2026-07-30 and replaced by §18. Donation is not the mechanism --
+the daemon SUBSTITUTES a hosted session's environment wholesale, so absence is
+produced routinely by an unstamped cold-starter and nothing strips anything.
+
+WHAT THAT CHANGES FOR THIS FILE: nothing about the gate it tests, and that is
+the point. The re-key onto "registry lookup by the acting sid" was the right
+move for a better reason than the one recorded here before. The two variables
+are NOT read from one medium: §18.2 closes the once-OPEN sid question in the
+safe direction by counting -- a singleton daemon holds one frozen environment
+with exactly one sid, yet four live bodies read four distinct correct sids, so
+the vendor stamps each hosted session's own sid over the substituted
+environment. The registry lookup therefore escapes the donated medium outright,
+which is why §18 names it the only sound identity channel and why this gate is
+blessed rather than tolerated. The citations in `bin/fleet.py` are re-derived
+and checked against §18 on every run by `tests/test_doctrine_citations.py`.
 """
 import json
 from types import SimpleNamespace
@@ -572,10 +584,12 @@ class TestInferenceNeverRefuses:
     UNSCOPED form -- a supervisor's task-brief instruction, in no ratified
     document. The operator ratified the SCOPED form on 2026-07-27 (claim-nonce
     §17): inference may select the SUBJECT of a measurement but may not supply
-    the GROUNDS of a refusal, and since donation can only ADD a `FLEET_WORKER`
-    stamp, presence is unsound evidence and absence is sound. This gate grounds
-    its refusal on the REGISTRY rather than on a donated stamp, so §17 does not
-    reach it.
+    the GROUNDS of a refusal. **Its second sentence (donation only ADDS a
+    stamp, so absence is sound) was falsified 2026-07-30 and replaced by §18:
+    the daemon SUBSTITUTES the environment, so no stamp observation is evidence
+    about this body, and the registry sid union is the only sound identity
+    channel.** This gate grounds its refusal on exactly that channel, so §18
+    blesses it rather than merely failing to reach it.
 
     THE GATE IS RESTORED and the cure survives it, which is the point this
     class now pins. The §1 wedge -- a legitimate claim-holder refused its own
@@ -584,8 +598,10 @@ class TestInferenceNeverRefuses:
     and the donated worker-shaped `FLEET_WORKER` that used to decide the
     refusal now decides nothing. The demotion bought a second thing on top --
     that a worker-shaped body presenting a valid nonce also passes -- and that
-    is only valuable under the OPEN hypothesis that the daemon donates the SID
-    as well as the stamp (claim-nonce §16.3). Ratified §6.5 D5 requires the
+    was only valuable under the hypothesis that the daemon donates the SID as
+    well as the stamp. §16.3 recorded that as OPEN; claim-nonce §18.2 CLOSES it
+    in the safe direction by counting, so the demotion now buys nothing at all.
+    Ratified §6.5 D5 requires the
     refusal to exist; SPEC.md:196 constrains only its KEY; a registry-keyed
     gate satisfies both, so nothing had to be traded away."""
 
@@ -946,13 +962,35 @@ class TestDoctorAnnouncesTheLeak:
         _name, ok, _msg = self._check()
         assert ok is True
 
-    def test_the_remedy_text_stops_being_silent_about_REMOVAL(self):
-        """`DAEMON_ENV_LEAK_REMEDY` said the one decision keyed on this variable
-        keys on the stamp's ABSENCE, *"which donation cannot manufacture"*. True
-        of donation and silent about removal -- and removal is the half that
-        matters, because absence is what grants the exemption."""
-        assert "donation cannot manufacture" in fleet.DAEMON_ENV_LEAK_REMEDY
-        assert "remove" in fleet.DAEMON_ENV_LEAK_REMEDY.lower()
+    def test_the_remedy_text_names_SUBSTITUTION_and_not_removal(self):
+        """RE-PINNED 2026-07-30 (claim-nonce §18): this test used to require the
+        remedy to talk about REMOVAL.
+
+        It said the one decision keyed on this variable keys on the stamp's
+        ABSENCE, *"which donation cannot manufacture"*, and this test pinned
+        that the text also account for something REMOVING a stamp -- because
+        under the donation model, removal was the only way absence could lie.
+        The model is wrong. The daemon SUBSTITUTES the hosted session's
+        environment wholesale, so absence needs no remover at all: an unstamped
+        cold-starter produces it, measured on four of four live bodies. A remedy
+        that sends the operator hunting a remover sends them after something
+        that does not exist, so the requirement is inverted rather than
+        loosened.
+        """
+        remedy = fleet.DAEMON_ENV_LEAK_REMEDY
+        assert "SUBSTITUTES" in remedy, (
+            "the remedy must name the mechanism that actually produces this "
+            "state (substitution), not donation")
+        assert "donation cannot manufacture" not in remedy, (
+            "the remedy still asserts the falsified donation asymmetry")
+        # And it must be honest about the guard that STILL keys on the stamp.
+        # ND4(c) was ordered re-grounded in the same ruling and could not be
+        # (it collides with ND4(b) on the same input, claim-nonce §18.4), so
+        # `_ceiling_refuses_dispatch` is unchanged and the exemption is a live
+        # hole. A remedy that says "nothing decides on this any more" would be
+        # the comfortable sentence rather than the true one.
+        assert "LIVE HOLE" in remedy
+        assert "ND4c" in remedy and "18.4" in remedy
 
     def test_an_agreeing_witness_passes(self, id_home, monkeypatch):
         monkeypatch.setenv("FLEET_WORKER", "w1")
