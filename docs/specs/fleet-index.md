@@ -169,7 +169,7 @@ A digest is a rendering of the shard, not a stored artifact:
 - L40   Beta.run(self, y) -> bool
 ```
 
-**`--context` path resolution:** paths resolve against the worker's `--dir`, never the manager's cwd. This preserves invariant 5 (cwd-scoped dispatch) by keeping a single cwd frame. Unknown paths warn and are skipped; they never fail a spawn.
+**`--context` path resolution:** paths resolve against the worker's `--dir`, never the manager's cwd. This preserves invariant 5 (cwd-scoped dispatch) by keeping a single cwd frame. Unknown paths warn and are skipped; **no individual path ever fails a spawn.** The one thing that does is the whole digest crossing the hard ceiling below — a property of the list, not of any path in it, and the only way `--context` can exit non-zero.
 
 **Built 2026-07-27**, as a spawn-only flag:
 
@@ -179,9 +179,54 @@ $ grep -n '"--context"' bin/fleet.py
 15673:    p_spawn.add_argument("--context", default=None,
 ```
 
-**What an uncapped digest costs, measured 2026-07-27.** §11.4's 400-line cap is `q --outline`'s alone and §11.1 states the two renderings differ only when that cap truncates, so the spawn-time digest is **not capped** — and an uncapped thing owes a measurement rather than an adjective. `--context bin/fleet.py` (16,075 source lines) renders **539 digest lines / 27,835 chars**; fifty distinct files of that size render **~1.39 MB** into a single prompt. There is no budget: **the manager's `--context` list is the budget.** No cap was added here — capping would silently impose `q`'s limit on a path this spec exempts, which is a spec decision, not a fix-wave one — so the cost is pinned by measurement instead (`tests/test_index_compose.py::test_the_uncapped_digest_cost_is_pinned_by_measurement`, which pins the *shape* of the growth: one row per indexed symbol, no truncation at any size, linear in distinct files).
+**What a digest costs, measured.** An uncapped thing owes a measurement rather than an adjective, and the per-file rendering is still uncapped: `render_digest` emits one row per indexed symbol at any size and **never truncates.** Measured 2026-07-27: `--context bin/fleet.py` (16,075 source lines) rendered **539 digest lines / 27,835 chars**, and fifty distinct files of that size render **~1.39 MB** into a single prompt. Re-measured 2026-07-30 over this repo's 177 default-selected sources, staged into a temp root and indexed, then `compose_context_digests` called per path:
 
-**Duplicates are dropped, first spelling wins.** `--context a.py,a.py` used to render `a.py` twice, for zero additional information and 27,835 wasted chars in the worst case measured above. `parse_context_arg` now dedupes, order-preserving — §7's digests appear in the order the manager named them, and a manager reads the composed prompt. This is not a cap and does not touch the uncapped contract; it is the one size reduction available without changing what the digest promises.
+| measurement | rendered digest |
+| --- | --- |
+| largest single-file digest (`tests/test_native.py`, 478 symbols) | **40,993 chars** |
+| `bin/fleet.py`'s own digest (543 symbols) | 27,741 chars |
+| median single-file digest | 893 chars |
+| mean single-file digest | 2,783 chars |
+| the 13 largest files together | 246,919 chars |
+| the 14 largest files together | 255,236 chars |
+| every selected source (177 files, 5,794 argv chars) | **492,570 chars / 6,812 lines** |
+| eight *spellings* of one file, pre-dedupe (180 argv chars) | **327,944 chars — 8.00x** |
+
+The last row is not a hypothetical: it is FINDING C, and it is the reason there is now a cap. Note also what it says about proxies — 180 argv chars produced 327,944 digest chars, **1,822 digest chars per argv char.** Argv length, file count and any settings flag are three orders of magnitude away from the thing that lands in the worker's context, so the cap is counted on the **rendered digest's own chars, as produced,** and on nothing else.
+
+**The cap: warn at a threshold, REFUSE above a ceiling, NEVER truncate** (FINDING C, supervisor-tier spec decision, 2026-07-30 — this supersedes this section's earlier *"No cap was added here"*). Two grades and no third:
+
+| grade | rendered digest chars | behaviour |
+| --- | --- | --- |
+| — | ≤ `INDEX_DIGEST_WARN_CHARS` (50,000) | served, silent |
+| warn | > 50,000 | served **in full**, one warning naming the measured size and the ceiling |
+| refuse | > `INDEX_DIGEST_REFUSE_CHARS` (250,000) | `IndexDigestTooLargeError`, exit 1, nothing registered |
+
+**Built 2026-07-30:**
+
+```
+# at b7a3500
+$ grep -n '^INDEX_DIGEST_\|^class IndexDigestTooLargeError' bin/fleet.py
+15354:class IndexDigestTooLargeError(FleetCliError):
+16026:INDEX_DIGEST_WARN_CHARS = 50_000
+16027:INDEX_DIGEST_REFUSE_CHARS = 250_000
+```
+
+`IndexDigestTooLargeError` is a `FleetCliError`, so `main()` renders it and exits 1. On the spawn path that lands in the window fix wave C1 opened on purpose — `cmd_spawn` composes *above* the registry commit — so a refused spawn leaves no phantom `{"status": "working", "session_id": null}` record. That ordering is load-bearing for the refusal and is pinned twice: by C1's own `test_compose_runs_before_the_registry_commit` and by `TestTheDigestSizeCap::test_a_refused_digest_leaves_no_phantom_registry_record`.
+
+**Why refusing rather than truncating, and why that is not the cap the parking sentence declined.** The sentence this replaces reasoned that "capping would silently impose `q`'s limit on a path this spec exempts" — and against a *truncating* cap that reasoning was right, and it is the reasoning §11.1 rests on. Warn-plus-refuse is a different instrument and it imposes nothing of `q`'s: the digest a worker receives is always complete or absent, never trimmed. The asymmetry is the whole argument. **A truncated symbol table is indistinguishable from a complete one** — a worker that reads one concludes the symbol does not exist and re-implements it, silently, and nothing in the transcript says why. Refusing costs the manager one retyped `--context`. So §11.1's "the two renderings differ only when the cap truncates" survives intact: this cap never truncates, so the two renderings still differ only there.
+
+**Where both numbers come from.** WARN sits above the largest single-file digest measured above (40,993), so naming **one** file never warns and a warning genuinely means *"this costs more than the biggest file in this repo."* That headroom is also what keeps the cost pin below green — it asserts `warnings == []` for `bin/fleet.py` alone, and `bin/fleet.py` grows every wave. REFUSE sits in the measured gap between the largest plausible ask (the 13 largest files in this repo, 246,919) and the pathology the cap exists to stop (327,944): a manager naming a dozen of this repo's largest files, or ~280 median ones, is served in full, while both the blowup and the whole-repo ask (492,570) are refused. The gap is real and it is where the ceiling was placed; neither number was invented. Re-measure both if this repo's shape changes materially — `tests/test_index_compose.py::TestTheDigestSizeCap`'s last two tests fail loudly, by name, when either number stops matching its grounding.
+
+The cost of "uncapped" is still pinned by measurement rather than by adjective (`tests/test_index_compose.py::test_the_uncapped_digest_cost_is_pinned_by_measurement` — the M4 pin, which pins the *shape* of the growth: one row per indexed symbol, no truncation at any size, linear in distinct files).
+
+**What that pin does not do, measured 2026-07-30 rather than assumed:** it does **not** catch a truncating cap, and a ruling that leans on it to do so is relying on a coincidence of fixture size. Injected both ways: truncating at the **ceiling** (`digest[:250_000]`) leaves M4 **green** — M4's fixture is `bin/fleet.py` alone (27,741 chars) plus two copies of it (~55,482), so a 250,000-char trim never fires inside it — while truncating at the **warn threshold** (`digest[:50_000]`) does red M4, because its two-copies assertion crosses 50,000. So M4 reds only for a cap that trims below ~55,500 chars, and the more plausible wrong implementation slips straight past it. The pins that actually catch truncation are `TestTheDigestSizeCap::test_a_digest_over_the_hard_ceiling_is_refused_not_truncated` (the ceiling must **raise**, not return something shorter) and `::test_a_digest_over_the_warn_threshold_warns_and_is_served_in_full` (digest row count compared against the **shard**, never against the digest itself).
+
+**Duplicates are dropped on the CANONICAL rel, first spelling wins** (FINDING C — this corrects the wave-M4 claim it replaces). `--context a.py,a.py` used to render `a.py` twice; M4 fixed that in `parse_context_arg`, which compares **raw argv strings**. Canonicalisation happens one layer down, in `_index_posix_rel`, and it folds away `./`, `\`, `//` and an interior `/./` — so `a.py` and `./a.py` remained two keys to the dedupe and one file to everything downstream, and the digest was rendered once per **spelling**. That is the 8.00x row in the table above, and **raw-string dedup ahead of canonicalisation was the entire blowup.**
+
+The dedupe now keys on the canonical rel, at the choke point that pays the cost (`compose_context_digests`), and folds the moment a rel is canonicalised — ahead of the include/exclude test, ahead of `verified_shard_rows`' re-hash of the source, and ahead of the size measurement, so eight spellings of a file that fits are **served**, not refused. It stays order-preserving: §7's digests appear in the order the manager named them, and the fold keeps the first spelling's position. A folded spelling is **warned about**, not silent — it is a path the manager typed and did not get its own digest for, and §7 already spends a warning on every one of those.
+
+It is deliberately **not** in `parse_context_arg`, and the reason is a trap worth recording: `_index_posix_rel` raises on an escape, and it raises *inside* the per-path `try` that fix wave C1/C2 built for §7's warn-and-skip. Canonicalising in the argv parser would have converted `--context ../x.py` from a warning into a failed spawn.
 
 **Journal ordering is preserved on the paths that carry one.** Digest material is inserted ahead of the task, never between journal and turn. Note the honest limit: the idle-send path (`_cmd_send_native`, `bin/fleet.py:4174`) composes with no `journal_path` at all, so there is no journal to order against there — `--context` is a spawn-time flag and M1 injects digests on spawn only.
 

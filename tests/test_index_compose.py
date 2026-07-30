@@ -891,6 +891,371 @@ class TestContextDigest:
         assert fleet.parse_context_arg(" a.py , , b.md ") == ["a.py", "b.md"]
 
 
+# ---------------------------------------------------------------------------
+# FINDING C -- the canonicalisation dedupe bug, and the digest size cap
+# ---------------------------------------------------------------------------
+
+# One filler symbol, rendered. `def digest_filler_symbol_000123():` becomes the
+# digest row `- L1234 digest_filler_symbol_000123()`. 38 is a deliberate
+# UNDER-estimate of that row's width, so a symbol count derived from it always
+# overshoots its char target rather than falling short -- a fixture that fell
+# short would leave the load-bearing witness unrun while the test still passed.
+# Every test below states the precondition that proves its fixture landed on
+# the right side of the threshold it is about.
+_FILLER_ROW_CHARS = 38
+
+
+def _bulky_source(symbols):
+    return "".join(f"def digest_filler_symbol_{i:06d}():\n    return {i}\n\n\n"
+                   for i in range(symbols))
+
+
+def _bulky_project(root, symbols, rel="bulk.py"):
+    """An indexed project holding one source with `symbols` module functions."""
+    _write(root / rel, _bulky_source(symbols))
+    fleet.index_symbols_dir(root).mkdir(parents=True, exist_ok=True)
+    fleet.build_index(root)
+    return root
+
+
+def _symbols_for_chars(target_chars):
+    """Enough filler symbols to render MORE than `target_chars`, with 30%
+    headroom over the under-estimated row width."""
+    return int(target_chars / _FILLER_ROW_CHARS * 1.3) + 1
+
+
+class TestTheCanonicalisationDedupeBug:
+    """FINDING C part (a). A plain bug, and the whole 8x digest blowup.
+
+    `parse_context_arg` dropped duplicates by comparing the RAW argv string.
+    Canonicalisation happens later and elsewhere -- `_index_posix_rel`, inside
+    `compose_context_digests` -- and it folds `./`, `\\`, `//` and interior
+    `/./` away. So `src/api.py` and `./src/api.py` were two distinct keys to
+    the dedupe and one single file to everything downstream, and the digest was
+    rendered once per SPELLING.
+
+    Measured on this repo before the fix (`bin/fleet.py` staged into a temp
+    root and indexed): eight spellings of `tests/test_native.py`, 180 argv
+    chars, rendered **327,944 digest chars -- exactly 8.00x** the 40,993-char
+    single digest, 1,822 digest chars per argv char.
+
+    The fix is at the CHOKE POINT that pays the cost, not at the argv parser:
+    `compose_context_digests` already canonicalises every entry, and it is the
+    only place that knows what a digest costs. Fixing it there also protects
+    the three tests and any future caller that reach `compose_context_digests`
+    without going through `parse_context_arg` at all.
+    """
+
+    _SPELLINGS = ["src/api.py", "./src/api.py", "src\\api.py",
+                  "src//api.py", "./src\\api.py", ".\\src/api.py",
+                  "src/./api.py", "././src/api.py"]
+
+    def test_the_construction_holds_eight_spellings_one_canonical_rel(self):
+        """The precondition every test in this class rests on. Without it a
+        green suite would prove only that the fixture had stopped colliding."""
+        assert len({fleet._index_posix_rel(s) for s in self._SPELLINGS}) == 1
+        assert len(set(self._SPELLINGS)) == 8, "the spellings stopped being distinct"
+
+    def test_eight_spellings_of_one_source_are_paid_for_once(self, indexed_project):
+        digest, _warnings = fleet.compose_context_digests(
+            indexed_project, self._SPELLINGS)
+        one, _w = fleet.compose_context_digests(indexed_project, ["src/api.py"])
+        assert digest.count("## src/api.py") == 1, (
+            f"{digest.count('## src/api.py')} digests for one source -- the "
+            f"dedupe is still comparing raw argv strings")
+        assert len(digest) == len(one)
+
+    def test_the_fold_is_reported_rather_than_silent(self, indexed_project):
+        """A folded spelling is a path the manager TYPED and did not get its
+        own digest for. That is nothing like a truncated symbol table -- the
+        symbol table is complete -- but it is still a divergence between what
+        was asked for and what was served, and §7 already spends a warning on
+        every one of those."""
+        _digest, warnings = fleet.compose_context_digests(
+            indexed_project, ["src/api.py", "./src/api.py"])
+        assert len(warnings) == 1, warnings
+        assert "./src/api.py" in warnings[0] and "src/api.py" in warnings[0]
+
+    def test_one_spelling_alone_never_warns(self, indexed_project):
+        """The control. An over-eager fold would warn on a clean list, and the
+        M4 cost pin asserts `warnings == []` for exactly this shape."""
+        _digest, warnings = fleet.compose_context_digests(
+            indexed_project, ["src/api.py"])
+        assert warnings == []
+
+    def test_two_genuinely_distinct_sources_are_both_served(self, indexed_project):
+        """The other control: an over-eager fold that swallowed everything
+        after the first entry."""
+        digest, warnings = fleet.compose_context_digests(
+            indexed_project, ["src/api.py", "docs/DESIGN.md"])
+        assert warnings == []
+        assert digest.count("## src/api.py") == 1
+        assert digest.count("## docs/DESIGN.md") == 1
+
+    def test_two_sources_sharing_a_BASENAME_are_both_served(self, indexed_project):
+        """The fold key must be the WHOLE canonical rel, not the last segment.
+
+        **This test exists because its absence was measured.** The injection
+        `_base = rel.rsplit("/", 1)[-1]` -- fold on the basename -- left the
+        ENTIRE suite green, including the test above, because the two files it
+        names (`src/api.py`, `docs/DESIGN.md`) do not share a basename. A
+        control that cannot fail for the mechanism it claims to control is the
+        4th-instance lesson exactly: the pin was written against the bug that
+        was fixed and was blind to the one a fix could introduce."""
+        _write(indexed_project / "lib" / "api.py", API_PY)
+        fleet.build_index(indexed_project)
+        digest, warnings = fleet.compose_context_digests(
+            indexed_project, ["src/api.py", "lib/api.py"])
+        assert warnings == []
+        assert digest.count("## src/api.py") == 1
+        assert digest.count("## lib/api.py") == 1
+
+    def test_the_fold_preserves_the_order_the_manager_named(self, indexed_project):
+        """§7's digests appear in the order the manager named them; the fold
+        keeps the FIRST spelling's position, not the last."""
+        digest, _w = fleet.compose_context_digests(
+            indexed_project, ["docs/DESIGN.md", "./src/api.py", "docs//DESIGN.md"])
+        assert digest.index("## docs/DESIGN.md") < digest.index("## src/api.py")
+
+    def test_a_spelling_that_cannot_be_canonicalised_still_warns_and_skips(
+            self, indexed_project):
+        """§7's contract for a rejected path shape, unchanged by the fold.
+
+        This is the trap the fix had to avoid: `_index_posix_rel` RAISES on an
+        escape, and it raises inside the per-path `try` that §7's warn-and-skip
+        depends on (fix wave C1/C2). A dedupe that canonicalised in
+        `parse_context_arg` -- outside that protection -- would have converted
+        `--context ../x.py` from a warning into a failed spawn."""
+        digest, warnings = fleet.compose_context_digests(
+            indexed_project, ["../x.py", "src/api.py"])
+        assert digest.count("## src/api.py") == 1
+        assert len(warnings) == 1
+        assert "../x.py" in warnings[0]
+
+    def test_the_blowup_is_gone_on_the_real_spawn_path(self, indexed_project):
+        """End to end through `parse_context_arg` and `compose_prompt`, the way
+        `fleet spawn --context` actually reaches it."""
+        ctx = fleet.parse_context_arg(",".join(self._SPELLINGS))
+        prompt = _compose("w1", indexed_project, context=ctx)
+        assert prompt.count("## src/api.py") == 1
+
+
+class TestTheDigestSizeCap:
+    """FINDING C part (b). WARN at a measured threshold, REFUSE above a
+    measured hard ceiling, and NEVER TRUNCATE.
+
+    **Never truncate** is the load-bearing half. The digest is a SYMBOL TABLE,
+    and a truncated symbol table is indistinguishable from a complete one: a
+    worker that reads one concludes the symbol does not exist and
+    re-implements it. Refusing costs the manager one retyped command; silently
+    truncating costs a duplicated implementation nobody knows is duplicated.
+    So the cap has exactly two grades and no third.
+
+    **The M4 pin does NOT catch a truncating cap, and the ruling that says it
+    does is wrong.** This was measured both ways rather than assumed:
+
+      * truncate at the CEILING (`digest[:250_000]`) -- M4 stays **GREEN**.
+        M4's fixture is `bin/fleet.py` alone (27,741 chars) plus two copies of
+        it (~55,482); neither reaches 250,000, so the truncation never fires
+        in M4 at all. Four tests in THIS class caught it; M4 saw nothing.
+      * truncate at the WARN threshold (`digest[:50_000]`) -- M4 goes RED,
+        because its two-copies assertion (`len(both) > 2 * len(digest) - 200`)
+        does cross 50,000.
+
+    So M4 reds only for a cap that trims below ~55,500 chars, and the more
+    plausible wrong implementation -- trim at the ceiling -- slips past it
+    entirely. Anyone leaning on "M4 will catch it" is relying on a coincidence
+    of fixture size. What actually catches truncation is
+    `test_a_digest_over_the_hard_ceiling_is_refused_not_truncated` (the refusal
+    must RAISE, not return something shorter) and
+    `test_a_digest_over_the_warn_threshold_warns_and_is_served_in_full` (row
+    count compared against the SHARD, not against the digest itself).
+
+    **Both numbers are measured, and measured on the EFFECT** -- rendered
+    digest chars as produced -- never on a proxy. A proxy fails here by three
+    orders of magnitude: 180 argv chars produced 327,944 digest chars. The
+    measurements behind the two constants are recorded at their definition in
+    `bin/fleet.py`; the two tests at the end of this class re-derive the ones
+    that can be re-derived from the repo itself.
+    """
+
+    def test_the_two_grades_are_ordered_and_counted_in_digest_chars(self):
+        assert 0 < fleet.INDEX_DIGEST_WARN_CHARS < fleet.INDEX_DIGEST_REFUSE_CHARS
+
+    def test_a_digest_under_the_warn_threshold_is_silent(self, tmp_path):
+        root = _bulky_project(tmp_path / "small", 200)
+        digest, warnings = fleet.compose_context_digests(root, ["bulk.py"])
+        assert len(digest) < fleet.INDEX_DIGEST_WARN_CHARS, (
+            f"fixture is {len(digest)} chars, at or over the "
+            f"{fleet.INDEX_DIGEST_WARN_CHARS}-char warn threshold -- this test "
+            f"was measuring the wrong side of it")
+        assert warnings == []
+
+    def test_a_digest_over_the_warn_threshold_warns_and_is_served_in_full(
+            self, tmp_path):
+        """The whole point of a warn grade: the manager is told the number and
+        still gets every symbol. Truncation is checked here, not only at the
+        ceiling, because a cap that trims at the WARN line would leave the
+        refusal test green and still hand a worker a lying symbol table."""
+        symbols = _symbols_for_chars(fleet.INDEX_DIGEST_WARN_CHARS)
+        root = _bulky_project(tmp_path / "warn", symbols)
+        digest, warnings = fleet.compose_context_digests(root, ["bulk.py"])
+        assert fleet.INDEX_DIGEST_WARN_CHARS < len(digest) \
+            < fleet.INDEX_DIGEST_REFUSE_CHARS, (
+                f"fixture is {len(digest)} chars, not between the warn "
+                f"threshold {fleet.INDEX_DIGEST_WARN_CHARS} and the ceiling "
+                f"{fleet.INDEX_DIGEST_REFUSE_CHARS}")
+        assert len(warnings) == 1, warnings
+        assert str(len(digest)) in warnings[0].replace(",", ""), (
+            f"the warning does not name the measured size: {warnings[0]!r}")
+        # Never truncated: one row per indexed symbol, and the LAST symbol in
+        # the file is present. A cap that trimmed the tail passes a row count
+        # taken from the digest itself, so the row count is compared against
+        # the SHARD.
+        _hdr, shard_rows = fleet.read_shard(
+            fleet.shard_path_for_source(root, "bulk.py"))
+        rows = [l for l in digest.splitlines() if l.startswith("- L")]
+        assert len(rows) == len(shard_rows) == symbols
+        assert f"digest_filler_symbol_{symbols - 1:06d}()" in digest
+        assert "truncat" not in digest.lower()
+
+    def test_a_digest_over_the_hard_ceiling_is_refused_not_truncated(self, tmp_path):
+        symbols = _symbols_for_chars(fleet.INDEX_DIGEST_REFUSE_CHARS)
+        root = _bulky_project(tmp_path / "refuse", symbols)
+        with pytest.raises(fleet.FleetCliError) as excinfo:
+            fleet.compose_context_digests(root, ["bulk.py"])
+        message = str(excinfo.value)
+        # The refusal names the MEASURED size and the ceiling it crossed. This
+        # doubles as the fixture's precondition: a fixture that came in under
+        # the ceiling would not have raised at all.
+        digits = [int(n) for n in re.findall(r"\d[\d,]*", message.replace(",", ""))]
+        assert fleet.INDEX_DIGEST_REFUSE_CHARS in digits, message
+        assert any(n > fleet.INDEX_DIGEST_REFUSE_CHARS for n in digits), message
+
+    def test_the_refusal_tells_the_manager_what_to_do_instead(self, tmp_path):
+        """A refusal that does not say how to proceed is a wall. It must name
+        the paths it was asked for, so the manager can drop one."""
+        symbols = _symbols_for_chars(fleet.INDEX_DIGEST_REFUSE_CHARS)
+        root = _bulky_project(tmp_path / "advice", symbols)
+        with pytest.raises(fleet.FleetCliError, match="bulk.py"):
+            fleet.compose_context_digests(root, ["bulk.py"])
+
+    def test_the_refusal_is_a_refusal_and_never_a_partial_prompt(self, tmp_path):
+        """`compose_prompt` must not return a prompt carrying a partial
+        digest. The refusal propagates; there is no half-served arm."""
+        symbols = _symbols_for_chars(fleet.INDEX_DIGEST_REFUSE_CHARS)
+        root = _bulky_project(tmp_path / "prompt", symbols)
+        with pytest.raises(fleet.FleetCliError):
+            _compose("w1", root, context=["bulk.py"])
+
+    def test_the_ceiling_counts_the_WHOLE_digest_not_one_file(self, tmp_path):
+        """The blowup that motivated the cap was one file named eight times,
+        so a per-file ceiling would have missed it entirely. Two files, each
+        comfortably under the ceiling, together over it."""
+        half = _symbols_for_chars(fleet.INDEX_DIGEST_REFUSE_CHARS) // 2 + 200
+        root = tmp_path / "pair"
+        _write(root / "a.py", _bulky_source(half))
+        _write(root / "b.py", _bulky_source(half))
+        fleet.index_symbols_dir(root).mkdir(parents=True, exist_ok=True)
+        fleet.build_index(root)
+        one, warnings = fleet.compose_context_digests(root, ["a.py"])
+        assert len(one) < fleet.INDEX_DIGEST_REFUSE_CHARS, (
+            f"each half is {len(one)} chars, already over the ceiling -- this "
+            f"test would pass without ever summing the two")
+        assert len(one) * 2 > fleet.INDEX_DIGEST_REFUSE_CHARS
+        with pytest.raises(fleet.FleetCliError):
+            fleet.compose_context_digests(root, ["a.py", "b.py"])
+
+    def test_a_refused_digest_leaves_no_phantom_registry_record(
+            self, indexed_project, tmp_path, monkeypatch):
+        """FIX WAVE C1's property, applied to the new refusal. The refusal is a
+        `FleetCliError` raised out of `compose_prompt`, and `cmd_spawn`
+        composes ABOVE the registry commit precisely so that any such raise
+        cannot see a committed record. If the hoist were ever undone, this is
+        one of the tests that says so."""
+        symbols = _symbols_for_chars(fleet.INDEX_DIGEST_REFUSE_CHARS)
+        root = _bulky_project(tmp_path / "phantom", symbols)
+        monkeypatch.setattr(fleet, "dispatch_bg", lambda name, cwd, prompt, mode, **kw: {
+            "session_id": SID, "short_id": SID.partition("-")[0]})
+        args = SimpleNamespace(
+            name="w1", dir=str(root), task="the task", mode="dontask",
+            model=None, max_budget_usd=None, setting_sources=None,
+            token_ceiling=None, category=None, context="bulk.py")
+        with pytest.raises(fleet.FleetCliError):
+            fleet.cmd_spawn(args, run=lambda *a, **k: None,
+                            which=lambda _: "claude", sleep=lambda s: None,
+                            clock=lambda: 0.0)
+        assert fleet.load_registry()["workers"] == {}
+
+    def test_the_dedupe_fold_happens_BEFORE_the_size_is_measured(self, tmp_path):
+        """Order matters and it is not cosmetic. Eight spellings of a file
+        whose single digest sits under the ceiling must be SERVED, because
+        after the fold there is one digest. Measuring before folding would
+        refuse a request that costs one file's digest -- the cap punishing the
+        very input the dedupe fix makes free."""
+        symbols = _symbols_for_chars(fleet.INDEX_DIGEST_WARN_CHARS)
+        root = _bulky_project(tmp_path / "order", symbols)
+        one, _w = fleet.compose_context_digests(root, ["bulk.py"])
+        spellings = ["bulk.py", "./bulk.py", ".\\bulk.py", "././bulk.py",
+                     "./bulk.py", "bulk.py", "././/bulk.py", "./bulk.py"]
+        assert len(one) * len(spellings) > fleet.INDEX_DIGEST_REFUSE_CHARS, (
+            "the un-folded cost no longer crosses the ceiling, so this test "
+            "would pass whether or not the fold ran first")
+        digest, _warnings = fleet.compose_context_digests(root, spellings)
+        assert len(digest) == len(one)
+
+    # -- the grounding, re-derived from this repo rather than quoted ---------
+
+    def test_the_warn_threshold_clears_this_repo_s_largest_module(self, tmp_path):
+        """The WARN number's stated grounding: it sits ABOVE the largest
+        single-file digest this repo produces, so naming ONE file never warns
+        and a warning genuinely means "more than the biggest file here".
+
+        Re-derived against `bin/fleet.py`, the file the M4 cost pin uses and
+        the one that grows every wave. Measured 2026-07-30: 27,741 chars.
+        `tests/test_native.py` is actually this repo's largest digest at
+        40,993 chars -- also under the threshold -- but it is not staged here,
+        because this test's job is to guarantee the M4 pin's `warnings == []`
+        keeps holding as `bin/fleet.py` grows."""
+        root = tmp_path / "real"
+        _write(root / "bin" / "fleet.py",
+               Path(fleet.__file__).read_text(encoding="utf-8"))
+        fleet.index_symbols_dir(root).mkdir(parents=True, exist_ok=True)
+        fleet.build_index(root)
+        digest, warnings = fleet.compose_context_digests(root, ["bin/fleet.py"])
+        assert warnings == [], (
+            f"bin/fleet.py's own digest is {len(digest)} chars and now trips "
+            f"the {fleet.INDEX_DIGEST_WARN_CHARS}-char warn threshold. The "
+            f"threshold was measured against a 27,741-char digest; re-measure "
+            f"it and move it, and move the M4 pin's docstring with it")
+        assert len(digest) < fleet.INDEX_DIGEST_WARN_CHARS
+
+    def test_the_ceiling_serves_a_dozen_of_this_repo_s_largest_files(self):
+        """The REFUSE number's grounding from BELOW, stated as arithmetic over
+        numbers measured on this repo (2026-07-30, 177 selected sources):
+
+            largest single digest       40,993 chars  tests/test_native.py
+            median single digest           893 chars
+            13 largest files together  246,919 chars
+            14 largest files together  255,236 chars
+            every selected source      492,570 chars / 6,812 lines
+            the pre-dedupe blowup      327,944 chars from 180 argv chars
+
+        The ceiling sits in the measured gap between the largest plausible ask
+        (246,919) and the pathology it exists to stop (327,944). This test is
+        the cheap arithmetic half -- that the ceiling still admits a dozen of
+        the largest files and hundreds of median ones, and still refuses the
+        whole-repo ask and the blowup. Re-staging and re-indexing 177 sources
+        to re-derive the six numbers costs ~40 s, which is why they are
+        recorded rather than recomputed per run; the harness that produced
+        them is described in `docs/specs/fleet-index.md`."""
+        ceiling = fleet.INDEX_DIGEST_REFUSE_CHARS
+        assert ceiling > 246_919, "the ceiling no longer serves 13 large files"
+        assert ceiling // 893 >= 200, "the ceiling no longer serves 200 median files"
+        assert ceiling < 327_944, "the ceiling no longer refuses the 8x blowup"
+        assert ceiling < 492_570, "the ceiling no longer refuses the whole-repo ask"
+
+
 class TestDigestNeverServesAnUnverifiedCoordinate:
     """§8's single most important property, applied to the digest path."""
 
