@@ -15725,6 +15725,29 @@ class IndexPathError(FleetCliError):
     from `_index_entry_paths`."""
 
 
+class IndexDigestTooLargeError(FleetCliError):
+    """§7's `--context` digest crossed `INDEX_DIGEST_REFUSE_CHARS` (FINDING C).
+
+    A REFUSAL, deliberately, and never a truncation. The digest is a SYMBOL
+    TABLE: a truncated one is indistinguishable from a complete one, so a
+    worker handed the trimmed version concludes a symbol does not exist and
+    re-implements it. Refusing costs one retyped `--context`; truncating costs
+    a duplicated implementation nobody knows is duplicated.
+
+    It is a `FleetCliError`, so `main()` renders it and exits 1. On the spawn
+    path that lands in the window fix wave C1 opened on purpose: `cmd_spawn`
+    composes ABOVE the registry commit, so this raise cannot leave a phantom
+    `{"status": "working", "session_id": null}` record behind. That ordering is
+    load-bearing for this class and is pinned twice -- by C1's own
+    `test_compose_runs_before_the_registry_commit` and by this cap's
+    `test_a_refused_digest_leaves_no_phantom_registry_record`.
+
+    It must NOT be raised from inside `compose_context_digests`' per-path
+    `try`, which converts every `FleetCliError` into §7's warning-and-skip.
+    Whole-digest size is not one path's problem and a warning is not a
+    refusal."""
+
+
 # --- paths ------------------------------------------------------------------
 
 def index_dir(root) -> Path:
@@ -16335,11 +16358,61 @@ def _index_glob_match(path, pattern) -> bool:
 
 # --- digest rendering (§7) --------------------------------------------------
 
+# The §7 digest size cap (FINDING C). TWO GRADES AND NO THIRD: warn, then
+# refuse. There is no truncating grade and there must never be one -- the
+# digest is a SYMBOL TABLE, and a truncated symbol table is indistinguishable
+# from a complete one, so a worker reading one concludes a symbol does not
+# exist and re-implements it. Refusing is the smaller failure.
+#
+# BOTH NUMBERS ARE COUNTED ON THE EFFECT: rendered digest chars, as produced,
+# summed across every path in one `--context`. Never on a proxy. A proxy fails
+# here by three orders of magnitude -- measured, 180 argv chars produced
+# 327,944 digest chars, 1,822 digest chars per argv char -- so argv length,
+# file count and any settings flag carry no usable information about the thing
+# that lands in the worker's context. It is the WHOLE digest and not one file's
+# because the pathology that motivated the cap was ONE file named eight times.
+#
+# Measured 2026-07-30 by staging this repo's 177 default-selected sources into
+# a temp root, `build_index`, then `compose_context_digests` per path:
+#
+#   largest single-file digest      40,993 chars / 478 rows  tests/test_native.py
+#   bin/fleet.py's own digest       27,741 chars / 543 rows
+#   median single-file digest          893 chars
+#   mean single-file digest          2,783 chars
+#   the 13 largest files together  246,919 chars
+#   the 14 largest files together  255,236 chars
+#   every selected source          492,570 chars / 6,812 lines (177 files)
+#   the pre-dedupe 8x blowup       327,944 chars from 180 argv chars
+#
+# WARN sits above the largest single-file digest measured here, so naming ONE
+# file never warns and a warning genuinely means "this costs more than the
+# biggest file in this repo". That headroom is also what keeps the M4 cost pin
+# (`test_the_uncapped_digest_cost_is_pinned_by_measurement`, which asserts
+# `warnings == []` for `bin/fleet.py` alone) green as `bin/fleet.py` grows.
+#
+# REFUSE sits in the measured gap between the largest plausible ask (the 13
+# largest files in this repo, 246,919) and the pathology the cap exists to stop
+# (327,944). So a manager naming a dozen of this repo's largest files, or ~280
+# median ones, is served in full; the blowup and the whole-repo ask are
+# refused. Re-measure both if this repo's shape changes materially; the two
+# tests at the end of `TestTheDigestSizeCap` fail loudly when either number
+# stops matching its grounding.
+INDEX_DIGEST_WARN_CHARS = 50_000
+INDEX_DIGEST_REFUSE_CHARS = 250_000
+
+
 def render_digest(rel, header: dict, rows) -> str:
-    """§7's digest for one file. UNCAPPED by contract: the 400-line cap on
-    `q --outline` is the caller's concern (§11.4), and the spawn-time
-    `--context` digest is not capped at all -- so capping here would silently
-    impose `q`'s limit on a path the spec exempts."""
+    """§7's digest for one file. NEVER TRUNCATED, at any size: one row per
+    indexed symbol, always. The 400-line cap on `q --outline` is the caller's
+    concern (§11.4) and §11.1 states the two renderings differ only when that
+    cap truncates, so trimming here would silently impose `q`'s limit on a path
+    the spec exempts -- and would hand a worker a symbol table that lies.
+
+    Size is governed one layer up instead, and by refusing rather than
+    trimming: `compose_context_digests` sums what this function produced across
+    the whole `--context` and warns or raises `IndexDigestTooLargeError`
+    (FINDING C). That is deliberately where the cap lives -- this function sees
+    one file and the cost is a property of the list."""
     out = [f"## {rel} ({header['lines']} lines, {header['lang']})"]
     for name, line, _end, kind, sig in rows:
         indent = "  " if kind == "method" else ""
@@ -16795,11 +16868,21 @@ def index_teach_lines(cwd) -> str:
 def parse_context_arg(value) -> list:
     """`--context a.py,b.md` -> `["a.py", "b.md"]`. None/empty -> `[]`.
 
-    Fix wave M4: duplicates are dropped, first spelling wins. The digest is
-    uncapped by contract (§11.4/§11.1 -- see `render_digest`), so the one
-    thing this layer can honestly do about size is refuse to pay for the same
-    file twice. Measured before this: `--context bin/fleet.py,bin/fleet.py`
-    rendered 27,831 chars twice, for zero additional information.
+    An ARGV SPLITTER, and nothing more. It drops entries that are byte-identical
+    after stripping -- `a.py,a.py` -- because that costs nothing to do here, but
+    **this is not the dedupe that defends the digest's size, and FINDING C is
+    what that mistake looked like.** This layer compares RAW STRINGS.
+    Canonicalisation lives in `_index_posix_rel`, one layer down, and it folds
+    away `./`, `\\`, `//` and an interior `/./` -- so `a.py` and `./a.py` were
+    two keys here and one file to everything downstream, and the digest was
+    rendered once per SPELLING. Measured: eight spellings of one 40,993-char
+    digest, 180 argv chars in, 327,944 digest chars out, exactly 8.00x.
+
+    The real dedupe is on the canonical rel, at the choke point that pays the
+    cost -- see `compose_context_digests`. Deliberately not here: this function
+    has no canonical rel to compare, and `_index_posix_rel` RAISES on an escape,
+    so canonicalising in the argv parser would have converted §7's warn-and-skip
+    for `--context ../x.py` into a failed spawn (fix wave C1/C2's contract).
 
     Order-preserving, not a `set`: §7's digests appear in the order the
     manager named them, and a manager reads the composed prompt."""
@@ -16848,10 +16931,40 @@ def compose_context_digests(cwd, context, sleep=None) -> tuple:
       `update_index` refuses these for the reason that applies here too: a
       shard written for an unselected file would be pruned by the very next
       `build`, so writing it is a promise this index cannot keep.
-    - **Not capped.** §11.4's 400-line cap is `q --outline`'s alone; §11.1
-      states the two renderings differ only when that cap truncates, so
-      capping here would silently impose `q`'s limit on a path the spec
-      exempts.
+    - **The same source spelled two ways is paid for ONCE** (FINDING C). The
+      dedupe key is the CANONICAL rel `_index_posix_rel` returns, not the raw
+      argv string, and the fold happens the moment a rel is canonicalised --
+      ahead of the `selected` membership test, ahead of `verified_shard_rows`'
+      re-hash of the source, and ahead of the size measurement below. Before
+      this, `./a.py` and `a.py` were two keys and one file: measured, eight
+      spellings of one 40,993-char digest rendered 327,944 chars from 180 argv
+      chars, exactly 8.00x. The fold is WARNED about rather than silent -- a
+      folded spelling is a path the manager typed and did not get its own
+      digest for, and §7 already spends a warning on every one of those.
+
+      It is here and not in `parse_context_arg` for two reasons: this is the
+      only layer that has a canonical rel, and this is the layer that pays. The
+      cheap-looking alternative is a trap -- `_index_posix_rel` raises on an
+      escape, and it raises INSIDE the per-path `try` above, so canonicalising
+      in the argv parser would have turned `--context ../x.py` from §7's
+      warning into a failed spawn.
+    - **Never truncated; warned about, then REFUSED** (FINDING C). §11.4's
+      400-line cap is `q --outline`'s alone and §11.1 states the two renderings
+      differ only when that cap truncates, so trimming here would silently
+      impose `q`'s limit on a path the spec exempts -- and, worse, hand a
+      worker a symbol table indistinguishable from a complete one. Size is
+      governed by two grades instead, both counted on the rendered digest's own
+      chars (`INDEX_DIGEST_WARN_CHARS`, `INDEX_DIGEST_REFUSE_CHARS`, where the
+      measurements behind them are recorded): over the threshold, one warning
+      naming the measured size and the full digest; over the ceiling,
+      `IndexDigestTooLargeError`.
+
+      The refusal is raised AFTER the loop, outside the per-path `try` -- which
+      catches every `FleetCliError` and would demote it to a warn-and-skip.
+      Whole-digest size is not one path's problem, and a warning is not a
+      refusal. It is measured after the loop rather than short-circuited inside
+      it so the message can name the true total: a partial sum would understate
+      what the manager actually asked for.
 
     No index at all is the §9 no-index row: one warning, nothing injected, the
     spawn proceeds. That is also the expected state for most projects.
@@ -16881,11 +16994,26 @@ def compose_context_digests(cwd, context, sleep=None) -> tuple:
         return "", [f"--context ignored: cannot enumerate the index's sources "
                     f"under {root.as_posix()} ({exc})"]
     out = []
+    # FINDING C: canonical rel -> the FIRST spelling that named it. Recorded
+    # the moment canonicalisation succeeds, before the `selected` test and
+    # before any shard work, so a repeated spelling costs neither a digest nor a
+    # source re-hash. Recorded even for a path that then fails to serve: the
+    # first spelling already carries the warning that says WHY, and folding the
+    # rest into "already named" is one line instead of N copies of the same
+    # reason.
+    first_spelling = {}
     for raw in context:
         # The per-path arm. See the docstring: one unusable path is a warning
         # and a skip, never a raise out of compose.
         try:
             rel = _index_posix_rel(raw)
+            if rel in first_spelling:
+                warnings.append(
+                    f"--context {raw}: the same source was already named as "
+                    f"{first_spelling[rel]!r} -- one digest is rendered for "
+                    f"{rel}, not one per spelling")
+                continue
+            first_spelling[rel] = raw
             if rel not in selected:
                 why = ("not selected by this index's include/exclude"
                        if (root / rel).is_file()
@@ -16900,7 +17028,30 @@ def compose_context_digests(cwd, context, sleep=None) -> tuple:
         except (FleetCliError, ValueError, OSError) as exc:
             warnings.append(f"--context {raw}: {exc} ({type(exc).__name__}) "
                             f"-- digest skipped")
-    return "".join(out), warnings
+    digest = "".join(out)
+    # The size grades. OUTSIDE the per-path `try` on purpose -- see the
+    # docstring: that `try` demotes every `FleetCliError` to a warn-and-skip,
+    # and a refusal that becomes a warning is not a refusal.
+    size = len(digest)
+    lines = digest.count("\n")
+    if size > INDEX_DIGEST_REFUSE_CHARS:
+        named = ", ".join(sorted(first_spelling))
+        raise IndexDigestTooLargeError(
+            f"--context refused: the digest for {len(out)} source(s) renders "
+            f"{size:,} chars ({lines:,} lines), over the "
+            f"{INDEX_DIGEST_REFUSE_CHARS:,}-char ceiling. It is NOT truncated "
+            f"to fit -- a truncated symbol table reads exactly like a complete "
+            f"one, so a worker given a trimmed digest concludes a symbol does "
+            f"not exist and re-implements it. Name fewer paths and re-run; "
+            f"nothing was registered. Asked for: {named}")
+    if size > INDEX_DIGEST_WARN_CHARS:
+        warnings.append(
+            f"--context is large: {len(out)} source(s) render {size:,} digest "
+            f"chars ({lines:,} lines), over the "
+            f"{INDEX_DIGEST_WARN_CHARS:,}-char threshold; the worker re-reads "
+            f"this once per dispatch. Served IN FULL -- nothing is truncated. "
+            f"The ceiling is {INDEX_DIGEST_REFUSE_CHARS:,} chars")
+    return digest, warnings
 
 
 # --- `fleet index` CLI (§6) -------------------------------------------------
