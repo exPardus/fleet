@@ -1938,6 +1938,24 @@ class TestReleaseMidHandoffDoesNotStrandTheSuccessor(_HandoffBase):
         assert ok is False, detail
         assert inc in detail
 
+    def test_the_doctor_recipe_names_the_boot_a_released_claim_needs(
+            self, sup_home, capsys):
+        """`--retire-all` presents a generation to a HOLDER, and a released
+        claim has none -- so the row that prescribes it must name the
+        `fleet sup-boot` step rather than leave the operator to discover it
+        from a refusal. The ordinary held-claim row must NOT grow that step."""
+        self._hold()
+        _rc, gen = self._begin(capsys)
+        assert self._release(nonce=gen) == 0
+        _n, ok, released_detail = fleet._doctor_check_supervisor_handoff()
+        assert ok is False
+        assert "`fleet sup-boot`" in released_detail
+        self._reboot(sup_home, capsys)
+        _n, ok, held_detail = fleet._doctor_check_supervisor_handoff()
+        assert ok is False, held_detail
+        assert "`fleet sup-boot`" not in held_detail
+        assert "sup-handoff-abort --retire-all --nonce <value>" in held_detail
+
     def test_the_next_boot_does_not_sweep_the_stranded_task_file(
             self, sup_home, capsys):
         """R2: the successor's whole prompt is `Read <task_path> and follow it
