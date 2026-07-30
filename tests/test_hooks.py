@@ -870,7 +870,12 @@ class TestStopOutcome:
              "message": {"usage": {"input_tokens": 11, "output_tokens": 7,
                                    "cache_creation_input_tokens": 40000,
                                    "cache_read_input_tokens": 90000},
-                         "content": [{"type": "text", "text": "done"}]}},
+                         # Must equal `_payload`'s default last_assistant_message:
+                         # the hook now publishes usage only when the transcript's
+                         # final message is provably the one the turn ended on
+                         # (see TestOutcomeUsageProvenance). This test is about the
+                         # cache summands, so it must present a NON-stale read.
+                         "content": [{"type": "text", "text": "All done."}]}},
         ])
         run_hook(STOP_OUTCOME, self._payload(tmp_path, transcript=t), tmp_path)
         rec = json.loads((tmp_path / "state" / "outcomes" / "w1.jsonl")

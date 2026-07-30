@@ -1779,3 +1779,91 @@ class TestDoctorSaysSoWhenTheInstanceGrantDiverges:
             "_doctor_check_instance_grants is defined but never run by "
             "`fleet doctor` -- the finding was that doctor stays silent, and a "
             "check that is not in the list is exactly that, one layer down")
+
+
+class TestDoctorDoesNotGreenOnAnAbsentTemplate:
+    """"absence is not evidence" applied to the one template `fleet doctor`
+    depends on: `worker-settings.template.json` (git-tracked, so its
+    absence means a broken checkout, not a normal steady state -- unlike
+    e.g. the autoclean stamp or tzdata, which are legitimately-absent PASS-
+    notes by design).
+
+    Before this fix wave, a missing template read `[PASS]` on BOTH checks
+    that read it: `instance_freshness_info()`'s `stale` flag stays False
+    when there is nothing to compare against (a deliberate, narrow
+    read-probe decision -- its own docstring says the policy belongs here),
+    and `instance-grants` caught `FileNotFoundError` in the same
+    `except (OSError, json.JSONDecodeError)` arm as a genuinely-corrupt-
+    but-present template, so ABSENT and UNREADABLE-BUT-PRESENT read
+    identically as a skip-and-PASS.
+
+    Fixed: absent template is now its own `False` branch on both checks,
+    distinguishable in the message from HEALTHY, STALE and DIVERGED alike
+    -- never a mutation, `fleet doctor` stays report-only."""
+
+    def test_freshness_fails_when_template_is_absent(self, isolated_home):
+        instance = fleet.instance_settings_path()
+        instance.parent.mkdir(parents=True, exist_ok=True)
+        instance.write_text("{}", encoding="utf-8")
+        assert not fleet.template_settings_path().exists()
+
+        name, ok, detail = fleet._doctor_check_instance_freshness()
+        assert (name, ok) == ("instance-freshness", False)
+        assert "missing" in detail
+
+    def test_grants_fails_when_template_is_absent(self, isolated_home):
+        instance = fleet.instance_settings_path()
+        instance.parent.mkdir(parents=True, exist_ok=True)
+        instance.write_text(
+            json.dumps({"permissions": {"allow": ["Bash(fleet q:*)"]}}),
+            encoding="utf-8")
+        assert not fleet.template_settings_path().exists()
+
+        name, ok, detail = fleet._doctor_check_instance_grants()
+        assert (name, ok) == ("instance-grants", False)
+        assert "missing" in detail
+
+    def test_grants_still_pass_notes_a_present_but_corrupt_template(self, isolated_home):
+        """Non-vacuity in the other direction, and the boundary of this fix
+        wave: a template that EXISTS but fails to parse is a different claim
+        than ABSENT (e.g. a concurrent editor's half-written save), and
+        keeps the pre-existing PASS-note skip -- only the FileNotFoundError
+        arm changed, not the shared OSError/JSONDecodeError one."""
+        template = fleet.template_settings_path()
+        template.parent.mkdir(parents=True, exist_ok=True)
+        template.write_text("{not json", encoding="utf-8")
+        instance = fleet.instance_settings_path()
+        instance.parent.mkdir(parents=True, exist_ok=True)
+        instance.write_text("{}", encoding="utf-8")
+
+        name, ok, detail = fleet._doctor_check_instance_grants()
+        assert (name, ok) == ("instance-grants", True)
+        assert "skipped" in detail
+
+    def test_both_template_reading_checks_are_exercised_absent(self, isolated_home, monkeypatch, capsys):
+        """The trap this project has fallen into before: a pin that claims
+        more than its body visits. This fix touches exactly two checks
+        (`instance-freshness`, `instance-grants` -- the only two doctor
+        checks that call `template_settings_path()`); this test drives both
+        by name, through the same absent-template FLEET_HOME, and prints the
+        visited set so the count is measured, not asserted."""
+        instance = fleet.instance_settings_path()
+        instance.parent.mkdir(parents=True, exist_ok=True)
+        instance.write_text(
+            json.dumps({"permissions": {"allow": ["Bash(fleet q:*)"]}}),
+            encoding="utf-8")
+        missing_template = fleet.FLEET_HOME / "does-not-exist.template.json"
+        monkeypatch.setattr(fleet, "template_settings_path", lambda: missing_template)
+
+        results = {
+            "instance-freshness": fleet._doctor_check_instance_freshness(),
+            "instance-grants": fleet._doctor_check_instance_grants(),
+        }
+        print(f"visited template-reading doctor checks: {sorted(results)} "
+              f"(2 of 2 known)")
+        captured = capsys.readouterr()
+        assert "visited template-reading doctor checks" in captured.out
+        assert set(results) == {"instance-freshness", "instance-grants"}
+        for name, (_, ok, detail) in results.items():
+            assert ok is False, f"{name} read green with the template absent: {detail!r}"
+            assert str(missing_template) in detail
