@@ -24,6 +24,19 @@ until something re-runs it. It asserts three things:
 
 Re-pinning after an edit that moves those lines is a deliberate one-line change,
 exactly as re-pinning a receipt's `# at <sha>` is.
+
+SCOPE, AND WHERE THE REST OF THE CLASS LIVES. This file resolves the FOUR
+`retired_sids` citations and nothing else, and that is narrower than its name
+suggests: the scoping mechanism is the citing SENTENCE, not the writers. Both
+`_cited_line_numbers` and `_CITATION_RE` anchor on the literal phrase *"OWN
+prior sid alone"*, so a self-citation written in any other sentence is
+invisible here -- which is how 19 of `bin/fleet.py`'s 27 self-citations were
+stale at `b3ec8d7` while this file was green. `tests/test_self_citations.py`
+covers the general property (every line number the file cites about ITSELF
+resolves), including these four. What stays HERE is the part that generalises
+to nothing: the invariant in `test_no_writer_appends_a_foreign_sid`, and the
+both-directions writer census that makes a NEW writer impossible to add
+silently.
 """
 import re
 from pathlib import Path
