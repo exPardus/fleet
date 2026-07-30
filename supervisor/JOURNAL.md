@@ -4916,3 +4916,28 @@ THE THREE THINGS THIS WAVE LEARNED THAT ARE WORTH MORE THAN THE MERGE.
 1. ZERO CONFLICT MARKERS IS NOT EVIDENCE OF A CORRECT RESOLUTION. The tree I inherited had none and was still 8 defects from green. "Done" was inferred from the absence of a marker; the pins are what actually adjudicate, and they took 0.70 seconds to say so.
 2. AN ASSERT LOOP REPORTS ONE DEFECT, NOT THE SET. pytest showed ONE of the three anchor rots; the other two were hidden behind the first assert. I enumerated the whole census by importing the pin module and walking its own data structures, which turned three sequential fix-run-fix cycles into one. DO THIS ON ANY PIN THAT ITERATES.
 3. THE SHARED-TREE CLASS RECURRED, AND THE SECOND WRITER WAS THE INTERFACE TIER. One-writer-per-worktree is not just a rule for workers. The interface reported it itself, accurately and unprompted, and stood down -- which is the behaviour that made it cheap. What made it CHEAPER was refusing to inherit its remediation: it said "nothing has verified this tree yet" and ordered a full re-verification; `git diff HEAD` was empty against the exact content I had just floored twice, so I corrected the claim and skipped 440 seconds of suite. INHERIT NOBODY'S NUMBER INCLUDING A CLAIM THAT NOTHING HAS BEEN MEASURED.
+
+## 2026-07-30T13:43:39Z RELEASED inc=inc-20260730T131759Z-fc5b sid=edf8e89d-45cd-41d4-ad28-ac7d07ba9c5d
+
+released cleanly: Wave 32 closed at a clean boundary, in-band at 178.5k against a 150k soft trigger. Recovered wave 31's mid-merge tree, merged w30/cites, pushed main a934a10 -> 8313f34, read back byte-identical. w30/p14 is fully priced in the final checkpoint (tip is ce64557, NOT the 3d2f24e my brief named); the merge is a two-site non-executable citation conflict. Standing down rather than starting a 60-65k merge with 21k of runway.
+
+## 2026-07-30T13:47:12Z BOOT inc=inc-20260730T134712Z-3b40 sid=18a6adf6-6aa4-403c-a037-ff5a3415b7fc
+
+fresh claim: predecessor inc-20260730T131759Z-fc5b released cleanly -- fresh claim, no seizure
+
+## 2026-07-30T13:48:36Z CHECKPOINT inc=inc-20260730T134712Z-3b40 sid=18a6adf6-6aa4-403c-a037-ff5a3415b7fc
+
+W33-A BOOT. Fresh claim (VERDICT: claim), predecessor inc-20260730T131759Z-fc5b released cleanly -- no seizure, no transfer. Bundle read from the redirected file, NONCE grepped from the FILE never off the stream tail, bundle deleted and verified (0 boot-bundle files remain in state/tasks).
+
+DOCTOR AT BOOT, AS ORDERED. Two FAILs, both docketed, neither mine.
+(1) identity-witness: SIXTH consecutive sighting, LEAK variant again (second consecutive). FLEET_WORKER names 'sup|inc-20260730T131459Z-84c5|boot' (a different live registry record, status idle) while the registry resolves my sid 18a6adf6 to 'sup|inc-20260730T134649Z-fbc2|boot'. Both supervisor-shaped => benign per boot ritual step 5, NOT a stop condition. Consequence I am accepting rather than waving off: the 200k-ceiling exemption (three-tier 11.3 ND4c) keys on stamp ABSENCE, so it is NOT available to me. I treat the ceiling as APPLYING and will read runway via 'fleet sup-context', not by feel.
+(2) supervisor-pending-decision: branch-protection, OPEN since 2026-07-30T00:24:14Z. NINTH consecutive wave of adding nothing to the operator's slot.
+supervisor-claim PASS, handoff PASS, autoclean 0.0h, daemon no wedge signature, pin-version PASS at 2.1.220.
+
+I VERIFIED MY BRIEF'S THREE LOAD-BEARING NUMBERS BEFORE ACTING ON ANY OF THEM, AS ORDERED. All three hold this time:
+  TIP: 'git -C C:/proga/fleet-wt/w30-p14 log --oneline -3' = ce64557 (test(handoff): pin the doctor recipe a released claim needs) over 3d2f24e over b3ec8d7. The brief's ce64557 is RIGHT and wave 32's correction of its own brief carried forward correctly. Merge-base is b3ec8d7, as priced.
+  FLOOR BASE: main HAS moved past the pricing -- a934a10 -> 8313f34 -- but the three commits since are 26748d6 (docs/NEXT-SESSION.md), b9957f7 and 8313f34 (both chore(journal) on supervisor/JOURNAL.md). ZERO code files, so the 3486 base and the 3498/14/1 = 3513 prediction stand unchanged. I checked the CONTENT of the movement rather than concluding from the sha that the prediction was stale.
+  ORIGIN: origin/main == local main == 8313f34. Wave 32's push is real and read back.
+  WORKTREES: 'git worktree list | wc -l' = 89 from disk, matching the brief's ~89.
+
+PLAN: dispatch the worktree census lane READ-ONLY first (it writes only to state/, which is gitignored, so it cannot collide with my index), then merge w30/p14 at ce64557 in the main tree myself -- one writer per tree, and the removals are ordered only after the merge lands. BAND: booted low.
