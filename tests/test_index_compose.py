@@ -984,13 +984,31 @@ class TestTheCanonicalisationDedupeBug:
         assert warnings == []
 
     def test_two_genuinely_distinct_sources_are_both_served(self, indexed_project):
-        """The other control, and the one that fails if the fold keys on
-        something coarser than the canonical rel (a basename, say)."""
+        """The other control: an over-eager fold that swallowed everything
+        after the first entry."""
         digest, warnings = fleet.compose_context_digests(
             indexed_project, ["src/api.py", "docs/DESIGN.md"])
         assert warnings == []
         assert digest.count("## src/api.py") == 1
         assert digest.count("## docs/DESIGN.md") == 1
+
+    def test_two_sources_sharing_a_BASENAME_are_both_served(self, indexed_project):
+        """The fold key must be the WHOLE canonical rel, not the last segment.
+
+        **This test exists because its absence was measured.** The injection
+        `_base = rel.rsplit("/", 1)[-1]` -- fold on the basename -- left the
+        ENTIRE suite green, including the test above, because the two files it
+        names (`src/api.py`, `docs/DESIGN.md`) do not share a basename. A
+        control that cannot fail for the mechanism it claims to control is the
+        4th-instance lesson exactly: the pin was written against the bug that
+        was fixed and was blind to the one a fix could introduce."""
+        _write(indexed_project / "lib" / "api.py", API_PY)
+        fleet.build_index(indexed_project)
+        digest, warnings = fleet.compose_context_digests(
+            indexed_project, ["src/api.py", "lib/api.py"])
+        assert warnings == []
+        assert digest.count("## src/api.py") == 1
+        assert digest.count("## lib/api.py") == 1
 
     def test_the_fold_preserves_the_order_the_manager_named(self, indexed_project):
         """§7's digests appear in the order the manager named them; the fold
@@ -1031,9 +1049,27 @@ class TestTheDigestSizeCap:
     worker that reads one concludes the symbol does not exist and
     re-implements it. Refusing costs the manager one retyped command; silently
     truncating costs a duplicated implementation nobody knows is duplicated.
-    So the cap has exactly two grades and no third, and a truncating cap would
-    also RED `test_the_uncapped_digest_cost_is_pinned_by_measurement` (M4) --
-    which is the signal that the wrong thing was built.
+    So the cap has exactly two grades and no third.
+
+    **The M4 pin does NOT catch a truncating cap, and the ruling that says it
+    does is wrong.** This was measured both ways rather than assumed:
+
+      * truncate at the CEILING (`digest[:250_000]`) -- M4 stays **GREEN**.
+        M4's fixture is `bin/fleet.py` alone (27,741 chars) plus two copies of
+        it (~55,482); neither reaches 250,000, so the truncation never fires
+        in M4 at all. Four tests in THIS class caught it; M4 saw nothing.
+      * truncate at the WARN threshold (`digest[:50_000]`) -- M4 goes RED,
+        because its two-copies assertion (`len(both) > 2 * len(digest) - 200`)
+        does cross 50,000.
+
+    So M4 reds only for a cap that trims below ~55,500 chars, and the more
+    plausible wrong implementation -- trim at the ceiling -- slips past it
+    entirely. Anyone leaning on "M4 will catch it" is relying on a coincidence
+    of fixture size. What actually catches truncation is
+    `test_a_digest_over_the_hard_ceiling_is_refused_not_truncated` (the refusal
+    must RAISE, not return something shorter) and
+    `test_a_digest_over_the_warn_threshold_warns_and_is_served_in_full` (row
+    count compared against the SHARD, not against the digest itself).
 
     **Both numbers are measured, and measured on the EFFECT** -- rendered
     digest chars as produced -- never on a proxy. A proxy fails here by three
