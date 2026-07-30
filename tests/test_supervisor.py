@@ -2557,10 +2557,19 @@ class TestDoctorSeesTheRejections:
         return (datetime.now(timezone.utc)
                 - timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    # W30 `drill` re-pins the three fixtures below FORWARD by one field. A
+    # refusal now names the claim it was measured against, and the row counts
+    # only refusals belonging to the claim currently held -- so a record with
+    # no `lineage_id` and a `ts` older than this fixture's own
+    # `claimed_at` (which `_claim` stamps at NOW) is inherited residue, which
+    # is what these fixtures accidentally described. `lineage_id` is added to
+    # match what `_append_nonce_rejection` actually writes; the assertions are
+    # untouched, and the legacy no-lineage shape stays pinned in both
+    # directions by `tests/test_doctor_claim_provenance.py`.
     def test_a_refused_record_in_the_window_flips_ok_to_False(self, sup_home):
         self._claim()
         self._log({"kind": "refused", "ts": self._ago(60), "verb": "sup-checkpoint",
-                   "expected_seq": 1})
+                   "expected_seq": 1, "lineage_id": "lin-x"})
         name, ok, detail = fleet._doctor_check_supervisor_claim()
         assert name == "supervisor-claim"
         assert ok is False
@@ -2608,7 +2617,8 @@ class TestDoctorSeesTheRejections:
     def test_a_superseded_note_does_not_mask_a_real_refusal(self, sup_home):
         self._claim()
         self._log({"kind": "superseded-pending", "ts": self._ago(90), "verb": "sup-heartbeat"},
-                  {"kind": "refused", "ts": self._ago(60), "verb": "sup-checkpoint"})
+                  {"kind": "refused", "ts": self._ago(60), "verb": "sup-checkpoint",
+                   "lineage_id": "lin-x"})
         _, ok, detail = fleet._doctor_check_supervisor_claim()
         assert ok is False
         assert "superseded-pending" in detail
@@ -2654,8 +2664,13 @@ class TestDoctorSeesTheRejections:
         # output on the same surface as the view.
         claim_hash = fleet.nonce_digest(fleet.mint_nonce())
         self._claim(nonce_hash=claim_hash)
-        self._log({"kind": "refused", "ts": self._ago(60), "verb": "sup-checkpoint"})
-        _, _, detail = fleet._doctor_check_supervisor_claim()
+        # `lineage_id` so this still asserts redaction of the COUNTED-refusal
+        # message. Without it W30's scoping routes the record to the quiet NOTE
+        # and the pin would keep passing while covering a different string.
+        self._log({"kind": "refused", "ts": self._ago(60), "verb": "sup-checkpoint",
+                   "lineage_id": "lin-x"})
+        _, ok, detail = fleet._doctor_check_supervisor_claim()
+        assert ok is False, "the refusal must be COUNTED for this to pin anything"
         assert claim_hash not in detail
 
 
