@@ -2,6 +2,7 @@
 import argparse
 import io
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -745,6 +746,68 @@ def _body(path: Path) -> str:
     return path.read_text(encoding="utf-8").split("---\n", 2)[2]
 
 
+# --- P1-3 / P1-14 (2026-07-30): a grant is as wide as its widest match --------
+#
+# `allowed-tools` is a permission grant over the MODEL'S OWN Bash calls for the
+# whole turn, not merely over the inline `` !`...` `` span -- that mechanism is
+# what the 2026-07-09 incident quoted below rode in on.
+#
+# THE MATCHER WAS MEASURED, NOT READ. The finding that started this asserted
+# prefix semantics from looking at the string, which is the unverified premise
+# this project keeps getting burned by. Driven against the real matcher
+# (claude 2.1.220, `-p`, `--permission-mode default`, `--allowedTools <rule>`,
+# against an executable that is NOT on the harness's safe-command list -- an
+# `echo` surrogate was auto-approved even under an unrelated rule and proved
+# nothing):
+#
+#   rule                          command attempted               verdict
+#   Bash(true)                    ./zq doctor --repair            BLOCKED  (control)
+#   Bash(./zq doctor:*)           ./zq doctor --repair            ALLOWED
+#   Bash(./zq doctor)             ./zq doctor --repair            BLOCKED
+#   Bash(./zq doctor)             ./zq doctor                     ALLOWED
+#   Bash(./zq status --stale-ok)  ./zq status --stale-ok          ALLOWED
+#   Bash(./zq peek:*)             ./zq peek w && ./zq kill w      BLOCKED  (split)
+#
+# So `X:*` is a PREFIX match over the whole command string and reaches every
+# flag of that subcommand; a bare `Bash(X)` is exact and a flag inside the
+# literal is fine. Two live consequences, both fixed with this test:
+#   * `Bash(fleet doctor:*)` pre-approved `fleet doctor --repair`, the one
+#     verb the 2026-07-27 gate put behind a flag so a human types it.
+#   * `Bash(fleet status:*)` pre-approved BARE `fleet status` -- the lock-taking
+#     RECOMPUTING verb (D2) that these very bodies avoid by inlining
+#     `--stale-ok`. The review named only the first; the second was the next
+#     site, open at the same moment, in the same class.
+#
+# THE PIN IS THE PROPERTY, NOT THE STRING. A lint keyed on `doctor --repair`
+# pins today's mutating flag and misses tomorrow's, exactly as the verb-level
+# `DESTRUCTIVE_VERBS` substring lint above missed this one. The decidable
+# property is that a read-only command grants NOTHING WIDER THAN THE INVOCATION
+# ITS OWN BODY MAKES -- derived from the file, so a new command file, a new
+# flag or a new subcommand is covered on the day it lands.
+_GRANT = re.compile(r"Bash\(([^)]*)\)")
+_PLACEHOLDER = re.compile(r"\$(?:ARGUMENTS|\d+)")
+
+
+def _grants(path: Path) -> set:
+    """The `Bash(...)` rules a command file declares."""
+    return {g.strip() for g in _GRANT.findall(_frontmatter(path).get("allowed-tools", ""))}
+
+
+def _grants_the_body_needs(path: Path) -> set:
+    """The narrowest rule set that still permits every inline exec in `path`.
+
+    A span with no argument placeholder is a fixed literal, so the exact rule
+    suffices. A span carrying `$ARGUMENTS`/`$1` expands to text this file does
+    not know, so it needs the prefix rule -- and only up to the placeholder.
+    """
+    needed = set()
+    for span in re.findall(r"!`([^`]*)`", _body(path)):
+        span = span.strip()
+        hole = _PLACEHOLDER.search(span)
+        needed.add((span[:hole.start()].strip() + ":*") if hole else span)
+    return needed
+
+
 class TestCommandFiles:
     def test_every_expected_command_exists(self):
         found = {p.stem for p in COMMANDS_DIR.glob("*.md")}
@@ -781,6 +844,41 @@ class TestCommandFiles:
         grant = _frontmatter(COMMANDS_DIR / f"{name}.md").get("allowed-tools", "")
         for verb in self.DESTRUCTIVE_VERBS:
             assert f"fleet {verb}" not in grant, f"{name} may invoke `fleet {verb}`"
+
+    @pytest.mark.parametrize("name", sorted(READ_ONLY_COMMANDS))
+    def test_read_only_grants_are_no_wider_than_the_body_invokes(self, name):
+        path = COMMANDS_DIR / f"{name}.md"
+        declared, needed = _grants(path), _grants_the_body_needs(path)
+        assert declared == needed, (
+            f"commands/{name}.md: allowed-tools must be exactly the rules its "
+            f"own inline execs need.\n  declared: {sorted(declared)}\n  "
+            f"needed:   {sorted(needed)}\nA `foo:*` rule is a PREFIX match: it "
+            f"pre-approves every flag of `foo` for the model's own Bash calls, "
+            f"with no permission prompt.")
+
+    def test_the_seed_a_prefix_grant_over_a_fixed_invocation_is_caught(self, tmp_path):
+        """The assertion above is an equality over two derived sets, which is
+        the shape that passes vacuously when a derivation rots. Plant the exact
+        pre-fix `commands/doctor.md` frontmatter and prove both halves still
+        see it: the widened rule must be flagged, the narrow one must not."""
+        planted = tmp_path / "doctor.md"
+        head = "---\ndescription: 'x'\nallowed-tools: '{}'\n---\n\n!`fleet doctor`\n"
+        planted.write_text(head.format("Bash(fleet doctor:*)"), encoding="utf-8")
+        assert _grants_the_body_needs(planted) == {"fleet doctor"}
+        assert _grants(planted) == {"fleet doctor:*"} != _grants_the_body_needs(planted)
+        planted.write_text(head.format("Bash(fleet doctor)"), encoding="utf-8")
+        assert _grants(planted) == _grants_the_body_needs(planted)
+
+    def test_the_seed_a_placeholder_span_still_earns_its_prefix_rule(self, tmp_path):
+        """The other half of the derivation: a span with `$ARGUMENTS` CANNOT be
+        pinned to a literal, so the prefix rule is the narrowest legal one. A
+        derivation that forgot placeholders would demand an impossible exact
+        rule and make `/fleet:peek` prompt for permission on a read-only view."""
+        planted = tmp_path / "peek.md"
+        planted.write_text(
+            "---\ndescription: 'x'\nallowed-tools: 'Bash(fleet peek:*)'\n---\n\n"
+            "!`fleet peek $ARGUMENTS`\n", encoding="utf-8")
+        assert _grants_the_body_needs(planted) == {"fleet peek:*"} == _grants(planted)
 
     @pytest.mark.parametrize("name", sorted(MUTATING_COMMANDS))
     def test_mutating_commands_never_inline_exec(self, name):
