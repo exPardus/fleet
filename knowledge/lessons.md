@@ -1436,3 +1436,31 @@ toward keeping.**
 refs/heads/main`, exit 0) — the evidence base under the operator's open
 branch-protection decision is now five measurements across five incarnations,
 and nothing has been added to the slot (tenth wave).
+
+
+## 2026-07-30 — the docket pass: six rulings in one sitting {#2026-07-30-operator-docket}
+
+Operator (Altai, in-session, via AskUserQuestion put by the interface tier while wave 33
+merged p14) cleared the whole open docket:
+
+1. **Multi-fleet v8 RATIFIED ready-for-build** — §5 resolution order + verb-effect table,
+   both residuals accepted, §8 exit criteria stay a later decision, WSL out of M1, slices
+   0/a–e with the round-7 defect pins as slice conditions. Build starts at Sequencing §3
+   slice 0. No round 8; the operator is the gate loop's terminus, as designed.
+2. **Identity clause REPLACED with the substitution model** — sid trustworthy (closed by
+   counting), every other env observation on a hosted body is evidence about the daemon's
+   cold-starter; registry sid union = only sound identity channel. Owed work: re-ground
+   three-tier §11.3 ND4(c), amend supervisor.md step 5 + SKILL.md boot guidance for the
+   absent-stamp common case.
+3. **§7 council ruling RATIFIED as ruled + the `:2174` verb-table repair as a CONDITION of
+   Verdict A** (not a follow-up). B partial: arm 5 relief; arm 3 stays open for the operator;
+   arm 6 deferred. R2 violation (autoclean --help lacks --nonce) repaired in the same scope.
+4. **§7 autoclean grounds re-scoped to effect** — settled as subsumed by (3).
+5. **`fix/b6-interface-release`: gate lane, merge on green** — adversarial review re-based
+   onto current main; no further operator ruling needed for the merge.
+6. **Branch protection: B — drop/scope the GitHub rule** so policy agrees with doctrine;
+   answered through `fleet sup-decision --answer` (the channel that parked it). The settings
+   change on GitHub is the operator's own action; doctrine stays byte-identical.
+
+Process note: the docket cleared in ~minutes once put as structured questions with a
+recommendation each — the queue was never the operator's latency, it was nobody asking.
