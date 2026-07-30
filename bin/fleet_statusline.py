@@ -22,11 +22,19 @@ import subprocess
 import sys
 from pathlib import Path
 
-_FLEET_HOME = (
-    Path(os.environ["FLEET_HOME"]) if os.environ.get("FLEET_HOME")
-    else Path(__file__).resolve().parent.parent
-)
-sys.path.insert(0, str(_FLEET_HOME / "bin"))
+# THE IMPORT-TIME CONFLATION, SPLIT (multi-fleet slice 0, docs/specs/
+# multi-fleet.md "Slice 0"). This used to read `$FLEET_HOME` and insert
+# `$FLEET_HOME/bin` on sys.path -- using the DATA plane to locate the CODE
+# plane. Point FLEET_HOME at a data-only home and that insert names a directory
+# with no `fleet.py` in it; the import survived only because a script's own
+# directory is already sys.path[0], i.e. by an accident this file did not state
+# and an `import fleet_statusline` (not a run) does not get.
+#
+# The install is where THIS FILE is, always, and cannot be moved by an env var.
+# The home is fleet.py's business: it re-reads $FLEET_HOME itself, so nothing
+# here needs to know about it.
+_INSTALL_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_INSTALL_ROOT / "bin"))
 
 import fleet  # noqa: E402
 

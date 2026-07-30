@@ -385,17 +385,17 @@ class TestDoctorHookSmoke:
         tmp_path sandbox; the smoke test's own scratch temp FLEET_HOME
         (passed to the hook subprocess's env) is unrelated and still
         isolated."""
-        monkeypatch.setattr(fleet, "FLEET_HOME", _REAL_REPO_ROOT)
+        monkeypatch.setattr(fleet, "INSTALL_ROOT", _REAL_REPO_ROOT)
         name, ok, msg = fleet._doctor_check_posttooluse_hook_smoke()
         assert ok is True, msg
 
     def test_stop_smoke_real_subprocess_passes(self, isolated_home, monkeypatch):
-        monkeypatch.setattr(fleet, "FLEET_HOME", _REAL_REPO_ROOT)
+        monkeypatch.setattr(fleet, "INSTALL_ROOT", _REAL_REPO_ROOT)
         name, ok, msg = fleet._doctor_check_stop_hook_smoke()
         assert ok is True, msg
 
     def test_posttooluse_smoke_missing_script_fails(self, isolated_home, monkeypatch):
-        monkeypatch.setattr(fleet, "FLEET_HOME", isolated_home / "nonexistent-fleet-home")
+        monkeypatch.setattr(fleet, "INSTALL_ROOT", isolated_home / "nonexistent-install")
         name, ok, msg = fleet._doctor_check_posttooluse_hook_smoke()
         assert ok is False
 
