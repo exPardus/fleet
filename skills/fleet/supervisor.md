@@ -45,20 +45,10 @@ Soul = `supervisor/GOALS.md` (operator-owned) + `supervisor/JOURNAL.md`
    the verdicts there are measured, not registry guesses (M-B, shipped).
 5. **Check your own `FLEET_WORKER` against your registry name.** The daemon
    donates the FIRST dispatch's env to every later session, so the value you
-   inherit is often a stale launch id from an earlier body. **Three variants,
-   not two:**
-   - **ABSENT / empty — BENIGN, and this is the NORM, not an edge case.**
-     Measured absent on **eight of eight** supervisor bodies to date (`FLEET_WORKER`
-     empty, `FLEET_HOME` empty). Nothing was donated, so there is no stale id to
-     mismatch: the §6.5 exemption still resolves. **Record it and proceed** — do
-     not treat an empty value as a failed check or go looking for the variable.
-   - **Supervisor-shaped — benign** (the §6.5 exemption still resolves) and not a
-     stop condition.
-   - **Worker-shaped — MALIGNANT.** That body takes the claim and can then never
-     beat, checkpoint or release it.
-
-   Record which variant you are in. Absent and supervisor-shaped both continue;
-   only worker-shaped is a stop condition.
+   inherit is often a stale launch id from an earlier body. Supervisor-shaped
+   is benign (the §6.5 exemption still resolves) and is not a stop condition;
+   **worker-shaped is malignant** — that body takes the claim and can then
+   never beat, checkpoint or release it. Record which variant you are in.
 
 ### Gen-0 body via `fleet sup-spawn` (three-tier §10.1)
 
