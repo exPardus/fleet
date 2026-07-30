@@ -235,6 +235,23 @@ class TestNoAbsentFieldCrashesAStatusView:
         fleet._attach_age_seconds(rec)    # must not raise
         fleet.is_native(rec)              # must not raise
 
+    def test_a_record_with_no_session_id_does_not_claim_another_files_mail(
+            self, home):
+        """The `sid and` guard in `_worker_flags`, made falsifiable.
+
+        Found by fault injection: deleting that guard reddened NOTHING, because
+        `_pending_mail_count` interpolates whatever it is given and a missing
+        file simply counts 0. The guard is still load-bearing -- without it an
+        absent sid formats to the literal string "None" and the flag is decided
+        by whether `mailbox/None.md` happens to exist. An unpinned guard is a
+        guard the next author deletes as dead code, so here is the file.
+        """
+        (home / "mailbox" / "None.md").write_text("stray", encoding="utf-8")
+        rec = dict(_full(), session_id=None, status="idle")
+        assert "idle+mail" not in fleet._worker_flags(rec), (
+            "a record with no session_id was flagged idle+mail on the strength "
+            "of mailbox/None.md -- it read another file's mail")
+
 
 # ---------------------------------------------------------------------------
 # The value-corruption arm: field PRESENT, but not something you can format.
@@ -279,6 +296,21 @@ class TestNoUnformattableValueCrashesAStatusView:
         out = capsys.readouterr().out
         assert rc == 0, f"`status --stale-ok` did not exit 0 with {field}={value!r}"
         assert "w1" in _rows(out, ["w1"]), f"row vanished -- rendered:\n{out}"
+
+    @pytest.mark.xfail(strict=True, reason=(
+        "OUT OF SCOPE FOR W15, AND DELIBERATELY LEFT VISIBLE. A non-string "
+        "session_id crashes `fleet status` and `status --json` with "
+        "AttributeError: 'int' object has no attribute 'replace' at "
+        "bin/fleet.py:140 -- `name_fs_stem`, reached from recompute via the "
+        "outcomes path. That is a PATH-layer type confusion, not a render one: "
+        "the same helper maps task files, outcomes, tombstones, journals, logs "
+        "and archive dirs, and a mis-mapped stem WRITES to the wrong file. "
+        "Deciding what it does with a non-string is a write-path decision this "
+        "lane was not scoped for. strict=True so whoever fixes it is forced "
+        "back here rather than leaving a stale xfail."))
+    def test_a_non_string_session_id_does_not_crash_the_view(self, home):
+        _write(home, {"w1": dict(_full(), session_id=7)})
+        assert fleet.cmd_status(_args()) == 0
 
     def test_a_cost_the_coercer_refuses_renders_the_placeholder_not_the_number(
             self, home, capsys):
@@ -374,10 +406,47 @@ class TestTheSnapshotRowContractTheOtherRenderersRestOn:
         assert isinstance(totals["cost_usd"], float), (
             "_render_boot_bundle formats totals['cost_usd'] with :.2f")
 
+    @pytest.mark.parametrize("field", BASELINE_FIELDS)
+    def test_stale_seconds_is_always_none_or_a_number(self, home, field):
+        """`_print_snapshot_table` divides it by 60. `_render_boot_bundle`'s
+        neighbours read it too. `status_snapshot` derives it inside a
+        try/except, so this holds -- written down because the age cell's guard
+        rests on it."""
+        rec = _full()
+        del rec[field]
+        _write(home, {"w1": rec})
+        stale = fleet.status_snapshot()["workers"][0]["stale_seconds"]
+        assert stale is None or (isinstance(stale, (int, float))
+                                 and not isinstance(stale, bool)), repr(stale)
+
     def test_the_boot_bundle_renders_a_short_record(self, home):
         _write(home, {"w1": dict(FIXTURE_SHAPE)})
         text = fleet._render_boot_bundle([], fleet.status_snapshot(), [])
         assert "w1" in text
+
+    def test_the_snapshot_table_survives_a_hand_built_row(self, home, capsys):
+        """`_print_snapshot_table` is called directly, with hand-built rows, by
+        tests in this repo (tests/test_terminal_surface.py builds one, so does
+        tests/test_native.py) -- so "status_snapshot always fills these in" is
+        not the whole story about what reaches it.
+
+        Found by fault injection: the age cell's guard reddened nothing,
+        because the only production producer can never emit a non-numeric
+        `stale_seconds`. This is the input that does reach it.
+        """
+        snap = {"ok": True, "reason": None,
+                "totals": {"workers": 1, "mail": 0, "cost_usd": 0.0,
+                           "by_status": {}},
+                "workers": [{"name": "w1", "status": "idle", "turns": 1,
+                             "cost_usd": 0.5, "mail": 0,
+                             "stale_seconds": "soon", "resume_eligible": False,
+                             "dispatch_kind": None}]}
+        fleet._print_snapshot_table(snap)          # must not raise
+        out = capsys.readouterr().out
+        assert _column(out, "w1", "AGE") == UNKNOWN, out
+        # ...and a row with no `unknown_fields` at all still shows its numbers.
+        assert _column(out, "w1", "COST") == "0.50", out
+        assert _column(out, "w1", "TURNS") == "1", out
 
 
 # ---------------------------------------------------------------------------
