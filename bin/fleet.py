@@ -731,12 +731,12 @@ def _quarantine_artifacts() -> list:
     registry is always newer -- an "artifact newer than the registry"
     comparison would never fire on the recreation bypasses it exists to stop.
 
-      * `_sweep_husks` (:8536) -- a rename can hide live worker records from
+      * `_sweep_husks` (:8556) -- a rename can hide live worker records from
         the roster sweep, so a thin registry would rm sessions it still owns.
-      * `_doctor_check_autoclean` (:9628) -- a lingering artifact means the
+      * `_doctor_check_autoclean` (:9659) -- a lingering artifact means the
         sweep above is refusing itself, which is how a bricked sweep reads
         green-and-fresh.
-      * `_require_claim_holder`'s §9 arm (:14051) -- the legacy upgrade mints
+      * `_require_claim_holder`'s §9 arm (:14082) -- the legacy upgrade mints
         generation 1 on bare sid equality, so it needs the registry that
         cleared it to be COMPLETE, not merely readable. See there.
 
@@ -746,13 +746,13 @@ def _quarantine_artifacts() -> list:
     read and described, and the question only arises when there is no file to
     answer for itself.
 
-      * `_acting_worker_identity` (:2586) -- `not_initialized` stays the
+      * `_acting_worker_identity` (:2592) -- `not_initialized` stays the
         affirmative *"there are no records"* only with no artifact beside it.
         SCOPED TO THE ABSENT CASE ON PURPOSE: this resolver is shared with the
         §6.5 worker-turn gate, which refuses on `True` alone, so poisoning a
         HEALTHY read here would let a real worker turn through §6.5 -- closing
         the §9 door by opening a wider one. Rule 1 lives at the §9 arm instead.
-      * `_identity_abstention_note` (:13772) -- the same distinction, in words,
+      * `_identity_abstention_note` (:13803) -- the same distinction, in words,
         because the generic note names `fleet doctor` and doctor is what MADE
         this state.
 
@@ -2416,14 +2416,20 @@ def _record_is_supervisor_claim_holder(record, claim=None):
 # before `Popen(env=...)` is consistent with this and no longer the only
 # evidence. (Round-6 lens `mf-rb6` CONFIRM-A; wave-19 `envstamp` independently.)
 #
-# WHAT THAT COSTS ND4(c), because it is the one guard the old asymmetry carried:
-# the 200k ceiling's interface exemption reads the stamp's ABSENCE, so it is now
-# granted on a falsified premise to any body whose daemon was cold-started
-# unstamped -- a LIVE HOLE, not a wording defect. The re-grounding the same
-# ruling ordered ("caller sid absent from the registry sid union") is the same
-# predicate ratified ND4(b) already governs with the OPPOSITE outcome, so it is
-# BLOCKED on an operator ruling rather than improvised. The code is unchanged;
-# the accounting is in `_ceiling_refuses_dispatch` and claim-nonce §18.4.
+# WHAT THAT COST ND4(c), AND HOW IT WAS PAID (2026-07-31). ND4(c) is the one
+# guard the old asymmetry carried: the 200k ceiling's interface exemption reads
+# the stamp's ABSENCE, so once the premise fell it was granted to any body whose
+# daemon was cold-started unstamped -- a LIVE HOLE, not a wording defect. The
+# re-grounding the 2026-07-30 ruling ordered ("caller sid absent from the
+# registry sid union") is the same predicate ratified ND4(b) governs with the
+# OPPOSITE outcome, so it was refused rather than improvised, and the operator
+# ruled the collision on 2026-07-31: ND4(c) narrows onto the CLAIM FILE --
+# whoever holds the supervisor claim is subject to the ceiling regardless of
+# stamp or registry state. That predicate reads neither the environment nor the
+# registry, so it needs no sound env channel and never enters ND4(b)'s bucket,
+# and ND4(b) stands untouched. The hole is closed for the claim-holder; what an
+# absent stamp still buys is the NON-holder's exemption, which is ND1's human
+# channel. Accounting: `_ceiling_refuses_dispatch` and claim-nonce §18.4.
 # ---------------------------------------------------------------------------
 
 IDENTITY_RESOLVED = "resolved"
@@ -2536,7 +2542,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     -- reads `ok` while MISSING every record the artifact holds, and the §9 arm
     read that thinness as an affirmative *"you are provably not a worker"*. The
     presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:14051`), where it costs the §6.5 gate nothing.
+    (`:14082`), where it costs the §6.5 gate nothing.
 
     An artifact can also outlive its incident by days -- `_sweep_husks` tells the
     operator to restore the file first and delete the artifact second -- so that
@@ -2765,17 +2771,19 @@ def _ceiling_refuses_dispatch(verb, now=None):
     the supervisor claim-holder and its OWN live context occupancy is at or
     above `BAND_HARD_TOKENS`; returns None when the dispatch may proceed.
 
-    Applies to EXACTLY ONE caller -- the supervisor claim-holder (ND1). Three
-    exemptions, in this order so they compose (ND4's closing note):
+    Applies to EXACTLY ONE caller -- the supervisor claim-holder (ND1). Every
+    exemption below is now GATED on one question asked first, and the gate is
+    the ruling of 2026-07-31 (below): **is the CLAIM FILE's own `session_id`
+    this caller's sid?** If it is, nothing here exempts. If it is not, the
+    exemptions compose in this order (ND4's closing note):
 
-      (c) STRUCTURAL interface exemption, FIRST, before any sid work: the
+      (c) STRUCTURAL interface exemption, ahead of any REGISTRY work: the
           interface is not a fleet-launched child, so `FLEET_WORKER` is absent
-          from its environment. That absence exempts it unconditionally -- a
-          refusal it could never escape (it is outside fleet's launch surface,
-          §3.1) must never be raisable against it. This runs ahead of (b) so
-          the fail-toward-the-band default can never catch the human channel.
-          **ITS PREMISE IS FALSIFIED -- see below. The code is unchanged and the
-          re-grounding is BLOCKED pending an operator ruling.**
+          from its environment. That absence exempts it -- a refusal it could
+          never escape (it is outside fleet's launch surface, §3.1) must never
+          be raisable against it. This runs ahead of (b) so the
+          fail-toward-the-band default can never catch the human channel.
+          **NARROWED 2026-07-31: it can no longer exempt the claim-holder.**
       * no sid at all -> a human shell, which cannot be the claim-holder BODY.
       * a caller that holds no claim (`_caller_holds_supervisor_claim` -> False)
         is never subject -- a worker calls neither verb, but if it did, it is
@@ -2784,60 +2792,59 @@ def _ceiling_refuses_dispatch(verb, now=None):
           the ceiling applies: an unresolvable identity must never be the reason
           a ceiling stays dormant (ND4b), mirroring §11.2's fail-toward-band.
           This covers the unplaceable sid, the corrupt registry, and the claim
-          with no readable holder sid alike.
+          with no readable holder sid alike. **UNTOUCHED by the 2026-07-31
+          ruling**, which is the whole reason candidate A was the one taken.
 
-    THE PREMISE IS FALSIFIED AND (c) IS A LIVE HOLE (claim-nonce §18, ratified
-    2026-07-30). (c) reads the stamp's ABSENCE on the ratified premise that
-    donation can only ever ADD a stamp and nothing removes one. The daemon does
-    not add: it SUBSTITUTES a hosted session's environment wholesale with its
-    own frozen first-dispatch copy, so absence is produced routinely by a daemon
-    an unstamped launcher cold-started. Measured on FOUR OF FOUR live bodies in
-    one wave (2026-07-30), two of them supervisors. So (c) currently hands the
-    human channel's exemption from a 200k HARD ceiling to the exact bodies the
-    ceiling exists to slow down, and the wording below telling such a caller it
-    must be a donated stamp is wrong about the mechanism.
+    WHY (c) IS GATED ON THE CLAIM FILE -- OPERATOR RULING, ALTAI, 2026-07-31,
+    in-session, `docs/OPERATOR-GATES.md` (pricing: claim-nonce §18.4 candidate
+    A; amended bullet: three-tier §11.3 ND4(c)). Verbatim:
 
-    WHY THE ORDERED RE-GROUNDING IS NOT IMPLEMENTED HERE, MEASURED RATHER THAN
-    ASSERTED. The 2026-07-30 ruling ordered the exemption re-grounded on the
-    only channel it names sound: *"the caller's sid is absent from the registry
-    sid union"*. That predicate is, definitionally, `_acting_worker_identity` ->
-    IDENTITY_UNRESOLVED. And ratified ND4(b) already governs that exact input
-    with the OPPOSITE outcome: *"an unresolvable identity must never be the
-    reason a ceiling stays dormant"* -- apply the ceiling. So on one input, one
-    ratified binding says EXEMPT and the other says REFUSE. The old ground
-    escaped the collision only because stamp-absence is an INDEPENDENT signal,
-    orthogonal to registry resolution; every registry-keyed grounding collapses
-    into ND4(b)'s input and inherits the contradiction.
+        *"Whoever holds the supervisor claim is subject to the 200k dispatch
+        ceiling regardless of stamp or registry state; the predicate reads the
+        claim file, not the environment, so it needs no sound env channel and
+        never enters ND4(b)'s bucket. ND4(b) stands untouched."*
 
-    It is not a corner: `tests/test_supervisor_ceiling.py::TestCeiling::
-    test_indeterminate_identity_fails_toward_band` pins ND4(b) on precisely this
-    shape, with an end-to-end receipt in its comment (`fleet spawn` at 999,999
-    tokens returning rc=0 when an earlier registry re-key of this function
-    inverted it). Implementing the re-grounding as ordered re-opens that.
+    WHAT IT CLOSES, MEASURED RATHER THAN ARGUED. (c) read the stamp's ABSENCE on
+    the premise that donation can only ever ADD a stamp and nothing removes one.
+    The daemon does not add: it SUBSTITUTES a hosted session's environment
+    wholesale with its own frozen first-dispatch copy, so absence is produced
+    routinely by a daemon an unstamped launcher cold-started -- FOUR OF FOUR
+    live bodies in one wave (2026-07-30), two of them supervisors. Unnarrowed,
+    (c) handed the human channel's exemption from a 200k HARD ceiling to the
+    exact bodies the ceiling exists to slow down. That is now closed for the one
+    body that matters: the claim-holder.
 
-    NOR CAN A DISCRIMINATOR BE BUILT. In the indeterminate bucket the two bodies
-    (c) must tell apart are the interface (no record, correctly exempt) and a
-    claim-holder whose own record is missing from a readable registry -- and the
-    missing record IS the evidence that would distinguish them. Both present as
-    "sid absent from the union".
+    WHY THE PREDICATE IS THE CLAIM FILE AND NOT THE REGISTRY. The 2026-07-30
+    ruling had ordered (c) re-grounded on the only channel IT named sound --
+    *"the caller's sid is absent from the registry sid union"* -- and that
+    predicate is definitionally `_acting_worker_identity` -> IDENTITY_UNRESOLVED,
+    which ratified ND4(b) already governs with the OPPOSITE outcome. One input,
+    two ratified bindings, opposite verdicts; and no discriminator exists inside
+    that bucket, because the two bodies to tell apart are the interface (no
+    record) and a claim-holder whose record has gone missing, and the missing
+    record IS the evidence that would separate them. `caller_sid == the claim's
+    own session_id` sidesteps the collision entirely: it is TOTAL (True/False,
+    never None), it reads `supervisor/INCARNATION` and nothing else, and so it
+    never lands in ND4(b)'s bucket. That is why A was ruled and B was not.
 
-    SO THIS FUNCTION IS UNCHANGED and the decision is the operator's: the
-    candidates priced for that ruling (narrow (c) so the CLAIM-HOLDER is never
-    exempt whatever its stamp, which closes the measured hole without touching
-    ND4(b)'s bucket; or subordinate ND4(b) to a registry-keyed (c); or retire
-    (c) and accept the ND1 cost) each amend ratified text, and a worker may not
-    choose between them. Full accounting: claim-nonce §18.4.
+    WHAT THE RULING COST, RATIFIED WITH IT RATHER THAN DISCOVERED AFTER.
+      * (c) loses its *"first, with no sid at all"* ordering property: the
+        caller's own sid is now needed before (c) can answer.
+      * The pin encoding the old shape FLIPS. It was
+        `test_the_interface_CAN_be_the_claim_holder_and_is_still_exempt`; it is
+        now `TestTheClaimHolderIsNeverExempt` in the same module.
+      * An interface session that ever took the claim (`fleet sup-boot` is
+        runnable from one) becomes ceiling-subject. Its escape is
+        `sup-handoff-begin`, already exempt -- and doctrine forbids the
+        interface taking the claim at all.
 
-    THE COST OF LEAVING IT, RECORDED RATHER THAN HIDDEN. A claim-holder that
-    unsets `FLEET_WORKER` escapes this ceiling, and so does one whose daemon was
-    merely cold-started unstamped -- which is now known to be the common case
-    rather than a self-inflicted escape. The ceiling is a speed-bump by
-    construction, and buying protection against the deliberate version costs the
-    human control channel, which ND1 forbids. SPEC.md:196's prohibition is
-    unaffected: it governs *"a future guard enforcing `a worker turn must never
-    hold the supervisor claim`"*, which is `_require_claim_holder`, not this
-    function -- this is an occupancy ceiling whose identity read was always an
-    EXEMPTION for the human channel, never a refusal of a worker turn.
+    WHAT DID NOT CHANGE. ND4(b) is byte-for-byte the same rule on the same
+    input. The residual (c) still covers is the one it exists for: an unstamped
+    session that does NOT hold the claim stays exempt however unplaceable its
+    sid, so ND1's human channel keeps a refusal it could never escape out of
+    reach. And SPEC.md:196's prohibition is untouched either way -- it governs
+    *"a future guard enforcing `a worker turn must never hold the supervisor
+    claim`"*, which is `_require_claim_holder`, not this function.
 
     DIRECTION OF TRAVEL -- RATIFIED DOCTRINE -- claim-nonce §18 (Altai,
     2026-07-30): *"The daemon substitutes the session environment wholesale,
@@ -2849,10 +2856,11 @@ def _ceiling_refuses_dispatch(verb, now=None):
     sid union is the only sound identity channel."* At this site the inference
     only ever EXEMPTS, and it only ever selects WHOSE transcript to measure; the
     grounds of the refusal stay the measured occupancy of the acting transcript.
-    That is the permitted half of §17's surviving head sentence, and it is why
-    this function keeps its shape while (c)'s GROUND is in dispute: what §18
-    took away is the evidentiary weight of the `FLEET_WORKER` read, not the
-    legitimacy of an occupancy ceiling (§18.3, §18.4).
+    That is the permitted half of §17's surviving head sentence. What §18 took
+    away is the evidentiary weight of the `FLEET_WORKER` read, not the
+    legitimacy of an occupancy ceiling (§18.3, §18.4) -- and the 2026-07-31
+    ruling above is what stops that weightless read reaching the one caller the
+    ceiling is aimed at.
 
     ONE SCOPE NOTE (rs S-9). Past (c), the verdict is
     `_caller_holds_supervisor_claim`'s, which resolves through each record's sid
@@ -2877,17 +2885,26 @@ def _ceiling_refuses_dispatch(verb, now=None):
     refuses, never "plenty of room". Between 150k and 200k the ceiling does NOT
     refuse -- that band is a standing directive (§5.2), enforced only at the
     hard top."""
-    # (c) STRUCTURAL interface exemption -- ahead of any sid resolution, and
-    # therefore ahead of any registry read: an exempt caller never touches
-    # `state/fleet.json` at all, so it cannot quarantine one either.
-    # UNCHANGED ON PURPOSE 2026-07-30 -- see THE PREMISE IS FALSIFIED above.
-    if not (os.environ.get("FLEET_WORKER") or "").strip():
-        return None
+    # THE CLAIM-FILE GATE (operator ruling A, 2026-07-31). Bare equality against
+    # the HELD claim's own `session_id`: no environment read, no registry read,
+    # and TOTAL -- there is no third answer to fall into ND4(b)'s bucket. A
+    # released claim owns nobody, so it yields no holder.
     caller = current_caller_session()
-    if caller is None:
-        return None                     # no sid -> cannot be the claim-holder body
-    if _caller_holds_supervisor_claim(caller) is False:
-        return None                     # a claim is held, this is not its holder
+    claim = read_incarnation()
+    holder_sid = (claim.get("session_id")
+                  if isinstance(claim, dict) and claim.get("state") != "released"
+                  else None)
+    holds_the_claim = bool(caller) and caller == holder_sid
+    if not holds_the_claim:
+        # (c) STRUCTURAL interface exemption -- ahead of any REGISTRY read, so
+        # an exempt caller never touches `state/fleet.json` and cannot
+        # quarantine one either.
+        if not (os.environ.get("FLEET_WORKER") or "").strip():
+            return None
+        if caller is None:
+            return None                 # no sid -> cannot be the claim-holder body
+        if _caller_holds_supervisor_claim(caller, claim=claim) is False:
+            return None                 # a claim is held, this is not its holder
     # holder (True) or indeterminate (None, ND4b fail-toward-band): apply the
     # ceiling. Occupancy is the caller's own transcript (never the claim's sid).
     occupancy = _transcript_occupancy(find_transcript_path(None, caller))
@@ -2901,11 +2918,14 @@ def _ceiling_refuses_dispatch(verb, now=None):
         f"the in-flight wave finish and READ its outcomes (`fleet status`/"
         f"`result`/`peek`/`wait`), then hand off (`fleet sup-handoff-begin`). "
         f"The handoff verbs are exempt from this refusal. (Fleet-enforced, not "
-        f"discretion. A session with no `FLEET_WORKER` stamp is exempt "
-        f"structurally, three-tier §11.3 ND4c -- so if you believe you are the "
-        f"interface tier and are reading this, the hosting daemon substituted "
-        f"an environment carrying a stamp into a session it never launched: "
-        f"`fleet doctor` names that leak.)")
+        f"discretion. Whoever holds the supervisor claim is subject to this "
+        f"ceiling whatever its `FLEET_WORKER` stamp -- three-tier §11.3 ND4c as "
+        f"narrowed by the operator ruling of 2026-07-31; only a session that "
+        f"does NOT hold the claim is exempt structurally. So if you believe you "
+        f"are the interface tier and are reading this, either you hold the "
+        f"supervisor claim, which `fleet sup-status` will tell you, or the "
+        f"hosting daemon substituted a stamped environment into a session it "
+        f"never launched, which `fleet doctor` names.)")
 
 
 def _record_time(rec: dict):
@@ -6642,7 +6662,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # P1-6: `read_registry_no_repair`, NOT `load_registry`. This is a PRE-FLIGHT
-    # resolution that runs from `cmd_kill:6536` / `cmd_respawn:6278`, before
+    # resolution that runs from `cmd_kill:6556` / `cmd_respawn:6298`, before
     # either verb has taken `fleet.lock` -- and `load_registry` QUARANTINES a
     # corrupt registry, i.e. RENAMES IT ASIDE, which is a write. An unlocked
     # write races every other fleet command, and it destroys the evidence the
@@ -6705,10 +6725,10 @@ def _supervisor_lifecycle_target(verb, name):
     # P1-6: `read_registry_no_repair` -- `load_registry` MINUS the rename, with
     # the same missing-file contract, the same validator and the same
     # `RegistryCorruptError`, so the arm below is unchanged. This read runs from
-    # `cmd_kill:6536` / `cmd_respawn:6278`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:6556` / `cmd_respawn:6298`, ahead of either verb's `fleet_lock`,
     # and quarantining here did two things: it wrote without the lock, and it
     # STOLE the quarantine from the lock-held read that was designed to perform
-    # it. `cmd_respawn:6302-6304` spells out that design -- *"resolve under the
+    # it. `cmd_respawn:6322-6324` spells out that design -- *"resolve under the
     # lock so a corrupt registry surfaces through load_registry's quarantine"* --
     # and the theft is what falsified it: by the time the lock-held read ran the
     # file was ABSENT rather than corrupt, so `{"workers": {}}` came back and the
@@ -9315,13 +9335,15 @@ DAEMON_ENV_LEAK_REMEDY = (
     "NO OBSERVATION OF THIS VARIABLE IS EVIDENCE ABOUT THIS BODY, IN EITHER "
     "DIRECTION (claim-nonce §18, ratified 2026-07-30) -- it is a WITNESS: "
     "worth reporting when it disagrees with the registry, never worth "
-    "believing over it. EXACTLY ONE GUARD STILL KEYS ON IT AND THAT IS A KNOWN "
-    "LIVE HOLE, not a sound read: three-tier §11.3 ND4c exempts a session with "
-    "no stamp from the 200k dispatch ceiling, so a body whose daemon was "
-    "cold-started unstamped is exempt from a ceiling that applies to it. The "
-    "re-grounding is ordered and BLOCKED on an operator ruling (it collides "
-    "with ND4b on the same input); the accounting and the three candidates are "
-    "in claim-nonce §18.4. The sid itself is NOT affected -- the vendor stamps "
+    "believing over it. EXACTLY ONE GUARD STILL READS IT, AND SINCE 2026-07-31 "
+    "IT CAN NO LONGER EXCUSE THE BODY THE CEILING IS AIMED AT: three-tier §11.3 "
+    "ND4c exempts a stamp-less session from the 200k dispatch ceiling, but the "
+    "operator narrowed it (claim-nonce §18.4, candidate A) so the exemption is "
+    "gated on the CLAIM FILE -- whoever holds the supervisor claim is subject "
+    "to the ceiling whatever its stamp, so a daemon cold-started unstamped no "
+    "longer buys a claim-holder an exemption. What an absent stamp still does "
+    "is exempt a session that does NOT hold the claim, which is the human "
+    "channel ND4c exists for. The sid itself is NOT affected -- the vendor stamps "
     "each hosted session's own sid over the substituted environment (§18.2, "
     "closed by counting), which is what makes the registry union readable at "
     "all")
@@ -9381,10 +9403,17 @@ def _doctor_check_identity_witness(workers: dict):
         # which one to believe. The row stays FAIL because a stale witness on a
         # body the registry can name is exactly the state that made four waves
         # of readers mis-attribute themselves. What it no longer says is that
-        # anything is TAMPERING, and it no longer claims the 200k exemption
-        # rides on this -- since the ND4(c) re-grounding it does not. Everything
-        # else stays green: UNRESOLVED with no stamp is the interface session
-        # and every non-fleet shell, which is the common case.
+        # anything is TAMPERING. Everything else stays green: UNRESOLVED with no
+        # stamp is the interface session and every non-fleet shell, which is the
+        # common case.
+        #
+        # AND ITS REMEDY NO LONGER NAMES A DEAD BLOCKER (2026-07-31). The row
+        # used to close with *"the re-grounding is ordered and BLOCKED on an
+        # operator ruling"*. That ruling has been made -- ND4(c) is narrowed
+        # onto the claim file -- so the sentence named a blocker that no longer
+        # existed while the finding around it stayed correct. That is R2, the
+        # named-remedy-that-always-fails class, which `knowledge/lessons.md`
+        # already records twice; this is the edit that stops the third.
         if verdict == IDENTITY_RESOLVED:
             return ("identity-witness", False,
                     f"no FLEET_WORKER stamp in this environment, but the "
@@ -9397,14 +9426,16 @@ def _doctor_check_identity_witness(workers: dict):
                     f"hosts, so a daemon cold-started by an unstamped launcher "
                     f"produces exactly this, and no observation of "
                     f"FLEET_WORKER (present, absent or blank) is evidence about "
-                    f"this body (claim-nonce §18). WHAT IT STILL COSTS, and it "
-                    f"is why this row is red rather than a note: three-tier "
-                    f"§11.3 ND4c exempts a stamp-less session from the 200k "
-                    f"dispatch ceiling, so until that exemption is re-grounded "
-                    f"this body is exempt from a ceiling the registry says "
-                    f"applies to it. The re-grounding is ordered and BLOCKED on "
-                    f"an operator ruling (claim-nonce §18.4). Remedy for the "
-                    f"witness itself: let the daemon idle-exit so the next "
+                    f"this body (claim-nonce §18). WHY THIS IS RED RATHER THAN "
+                    f"A NOTE: two channels disagree about who this body is, and "
+                    f"that is the state four waves of readers mis-attributed "
+                    f"themselves on. WHAT IT NO LONGER COSTS: the 200k ceiling "
+                    f"used to ride on this read, and since the operator ruling "
+                    f"of 2026-07-31 it does not -- three-tier §11.3 ND4c's "
+                    f"exemption is gated on the CLAIM FILE, so a missing stamp "
+                    f"cannot exempt the supervisor claim-holder (claim-nonce "
+                    f"§18.4). Remedy for the witness itself, and it is the "
+                    f"whole remedy: let the daemon idle-exit so the next "
                     f"dispatch starts a fresh one.")
         return ("identity-witness", True,
                 f"no FLEET_WORKER stamp in this environment; registry verdict "
@@ -12462,7 +12493,7 @@ def _registry_records_or_none():
     no write" and runs at the top of every mutating verb, so routing its
     identity read through `load_registry` would let a speed-bump shred operator
     evidence on a path that documents itself as touching nothing. This is D4's
-    rule for the view path (`:3452`) applied to the one other reader that has
+    rule for the view path (`:3472`) applied to the one other reader that has
     no business quarantining. Quarantining stays where it belongs: the
     lock-holding verbs, `cmd_sup_boot` included via `_holder_is_limited`."""
     ok, _reason, data = _read_registry_readonly()
@@ -12649,8 +12680,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     live_sids` is what shipped, and `_record_sids`' own docstring says why it
     is wrong -- *"matching against `session_id` alone fails open on it
     (ND4a)"* -- for the twelve other sites that already key on the union
-    (`:2288, :2332, :2593, :2743, :6676, :6993, :7260, :7474, :7561, :7784,
-    :8565, :12520`). B6 was the one
+    (`:2288, :2332, :2599, :2749, :6696, :7013, :7280, :7494, :7581, :7804,
+    :8585, :12551`). B6 was the one
     roster comparison that did not, and §G-G measured it failing open exactly
     as predicted: the releaser fork-steered, so its record was eagerly
     restamped (`session_id` = post-fork, pre-fork sid pushed into
@@ -12662,8 +12693,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :5678, :6135, :10426,
-    :15686), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :5698, :6155, :10457,
+    :15717), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -13353,8 +13384,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:5678, :6135, :10426,
-    #     :15686) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:5698, :6155, :10457,
+    #     :15717) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -13387,7 +13418,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         #     file aside (`:814`), which is a write. Routing the identity read
         #     through it made `fleet send` shred the operator's evidence from a
         #     path that promises to touch nothing; the helper exists for exactly
-        #     this and names this gate as its reason (`:12448`). A `None` here
+        #     this and names this gate as its reason (`:12479`). A `None` here
         #     still fails toward the gate -- an unreadable registry is reported
         #     by its own doctor row, and is never a reason to decide blind.
         #     MERGE NOTE (2026-07-27): main and `fix/identity-registry-judges`
@@ -14029,7 +14060,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # A worker whose own record sits inside the artifact upgrades the claim.
         #
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as `_sweep_husks`
-        # spells it at `:8529`. Not an mtime comparison: `os.rename` preserves
+        # spells it at `:8549`. Not an mtime comparison: `os.rename` preserves
         # mtime, so the artifact's mtime is the PRE-corruption write time and any
         # recreated registry is always newer -- the comparison would never fire
         # on the one bypass it exists to stop.

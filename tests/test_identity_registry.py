@@ -320,7 +320,16 @@ class TestSiteACeiling:
     name for it: inference may select the SUBJECT of a measurement but may not
     supply the GROUNDS of a refusal. At this site it only ever EXEMPTS and only
     ever picks whose transcript to read; the grounds stay the measured
-    occupancy of the acting transcript."""
+    occupancy of the acting transcript.
+
+    TWICE SUPERSEDED SINCE, AND THE TESTS BELOW ARE THE CURRENT RULE -- read
+    them, not this header. (1) 2026-07-30, claim-nonce §18: the asymmetry
+    argument above is FALSIFIED. The daemon SUBSTITUTES a hosted session's
+    environment rather than adding to it, so absence needs no remover and is not
+    sound evidence either. (2) 2026-07-31, operator ruling A, three-tier §11.3
+    ND4(c): the exemption is now GATED on the claim file, so it can no longer
+    reach the claim-holder whatever its stamp. What survives unchanged is the
+    direction-of-travel paragraph and the SPEC.md:196 scoping."""
 
     def _occ(self, monkeypatch, occupancy):
         monkeypatch.setattr(fleet, "find_transcript_path",
@@ -380,68 +389,87 @@ class TestSiteACeiling:
         self._occ(monkeypatch, 205000)
         assert fleet._ceiling_refuses_dispatch("spawn") is not None
 
-    def test_an_absent_FLEET_WORKER_EXEMPTS_because_ND4c_says_so(
+    def test_an_absent_FLEET_WORKER_NO_LONGER_EXEMPTS_THE_HOLDER(
             self, id_home, monkeypatch):
-        """THE PIN THIS FIX WAVE INVERTED, and why.
+        """THE PIN THAT HAS NOW BEEN INVERTED TWICE, and the second inversion is
+        an operator ruling rather than a builder's reasoning.
 
-        Its predecessor -- `test_an_absent_FLEET_WORKER_no_longer_exempts_the_
-        holder` -- asserted the opposite, on the reasoning that the environment
-        has no standing to excuse a registered, resolved, over-ceiling
-        claim-holder. That reasoning is sound in the abstract and it is not the
-        ratified rule: `three-tier-command.md` §11.3 ND4(c) exempts on
-        `FLEET_WORKER`-absence *unconditionally* and *independent of any sid
-        resolution*, and SPEC.md:196 -- the citation the re-key was built on --
-        constrains only the guard enforcing *"a worker turn must never hold the
-        supervisor claim"*, which this site is not.
+        ROUND 1 (the fix wave). Its predecessor --
+        `test_an_absent_FLEET_WORKER_no_longer_exempts_the_holder` -- asserted
+        what this test asserts again today, on the reasoning that the
+        environment has no standing to excuse a registered, resolved,
+        over-ceiling claim-holder. That reasoning was sound in the abstract and
+        was NOT the ratified rule, so the fix wave correctly reverted it:
+        `three-tier-command.md` §11.3 ND4(c) exempted on `FLEET_WORKER`-absence
+        *unconditionally* and *independent of any sid resolution*. The pin then
+        recorded the residual as a known cost: *a claim-holder that unsets
+        `FLEET_WORKER` escapes the 200k ceiling.*
 
-        THE RESIDUAL HOLE THIS RATIFIES, stated so it is a known cost and not a
-        surprise: a claim-holder that unsets `FLEET_WORKER` escapes the 200k
-        ceiling. That is a self-inflicted escape by the one body the ceiling
-        exists to slow down, not an attack surface -- and the ceiling is
-        explicitly *"a speed-bump, not a security boundary"*. Buying protection
-        against it costs the human control channel, which ND1 forbids."""
+        ROUND 2 (2026-07-31, Altai, in-session). That residual stopped being
+        self-inflicted: the daemon SUBSTITUTES a hosted session's environment,
+        so an unstamped cold-starter produces the same absence with nobody
+        choosing it -- four of four live bodies, two of them supervisors. The
+        operator amended ND4(c) rather than the builder guessing at it: the
+        claim-holder is never exempt, whatever its stamp, on a predicate that
+        reads the claim file. So the assertion returns to what round 1 wanted,
+        with the authority round 1 lacked. SPEC.md:196 is unaffected either way
+        -- it constrains only the guard enforcing *"a worker turn must never
+        hold the supervisor claim"*, which this site is not."""
         monkeypatch.delenv("FLEET_WORKER", raising=False)
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-holder")
         fleet.write_incarnation(_held("sid-holder"))
         _registry({"sup|inc-x|boot": _rec("sid-holder", status="working")})
         self._occ(monkeypatch, 400000)
-        assert fleet._ceiling_refuses_dispatch("spawn") is None
+        assert fleet._ceiling_refuses_dispatch("spawn") is not None
 
     @pytest.mark.parametrize("blank", ["", " ", "\t", "\n", "  \t\n "])
-    def test_a_BLANK_FLEET_WORKER_exempts_exactly_like_an_absent_one(
+    def test_a_BLANK_FLEET_WORKER_is_still_the_same_class_as_an_absent_one(
             self, id_home, monkeypatch, blank):
-        """The equivalence class the exemption actually keys on, pinned.
+        """The equivalence class the exemption keys on, pinned -- and the pin
+        that the 2026-07-31 narrowing had to change DELIBERATELY, which is
+        exactly what it was written for.
 
-        `:2620` reads `not (os.environ.get("FLEET_WORKER") or "").strip()`, so
-        the exemption is granted to `""`, `" "`, `"\\t"`, `"\\n"` exactly as it
-        is to unset. The twin site `_doctor_check_identity_witness` already has
-        this pinned (`test_a_blanked_witness_reddens_it_too`); the CEILING is
-        the site where the collapse has a safety consequence, and it had no pin.
+        `_ceiling_refuses_dispatch` reads
+        `not (os.environ.get("FLEET_WORKER") or "").strip()`, so `""`, `" "`,
+        `"\\t"`, `"\\n"` collapse into "absent". The twin site
+        `_doctor_check_identity_witness` already has this pinned
+        (`test_a_blanked_witness_reddens_it_too`); the CEILING is the site where
+        the collapse has a safety consequence.
 
-        This is a CHARACTERIZATION pin, not an endorsement. ND4(c) is ratified
-        and says "absent", and ND1 forbids preventing the self-inflicted escape
-        -- so this asserts what the ceiling does today, and exists so that any
-        future re-grounding of ND4(c) has to change it deliberately rather than
-        discover the blank case in production.
+        WHAT THE ORIGINAL PIN SAID, and it said it on purpose: *"this asserts
+        what the ceiling does today, and exists so that any future re-grounding
+        of ND4(c) has to change it deliberately rather than discover the blank
+        case in production."* The re-grounding happened (operator ruling A,
+        2026-07-31) and this is that deliberate change: the equivalence class is
+        UNCHANGED -- blank still reads as absent -- but the class no longer
+        reaches the claim-holder, so the scenario below now refuses for every
+        member of it. The blank case did not have to be rediscovered.
 
-        The scenario is refusable by construction: same registered, resolved,
-        over-ceiling claim-holder as
-        `test_a_resolved_holder_over_the_ceiling_is_refused`, which is asserted
-        inline below rather than assumed -- a control that is not verified is
-        worse than no control."""
-        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-holder")
+        The control is inverted with it: a NON-blank stamp must ALSO refuse on
+        this scenario now, so it is no longer a discriminating control and the
+        discriminating one moved to `TestTheClaimHolderIsNeverExempt` in
+        `tests/test_supervisor_ceiling.py`, where a non-holder holds the two
+        arms apart. What is asserted inline here instead is that the class is
+        still collapsed at all -- measured on the ONE body that can still be
+        exempted by it, the non-holder."""
         fleet.write_incarnation(_held("sid-holder"))
-        _registry({"sup|inc-x|boot": _rec("sid-holder", status="working")})
+        _registry({"other": _rec("sid-else", status="working")})
         self._occ(monkeypatch, 400000)
-        # Control: a NON-blank stamp on this exact scenario must refuse. If it
-        # does not, the blank assertion below proves nothing.
-        monkeypatch.setenv("FLEET_WORKER", "sup|inc-x|boot")
+        # Control, on a body the registry can place nowhere: a NON-blank stamp
+        # must refuse (ND4b, fail toward the band). Without that the blank
+        # assertion below would be vacuous.
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-mystery")
+        monkeypatch.setenv("FLEET_WORKER", "sup|inc-x|successor")
         assert fleet._ceiling_refuses_dispatch("spawn") is not None, (
-            "control failed: this scenario is not refusable, so the blank-stamp "
-            "assertion would be vacuous")
+            "control failed: a stamped, unplaceable non-holder must fail toward "
+            "the band, so this scenario is not refusable and proves nothing")
         monkeypatch.setenv("FLEET_WORKER", blank)
         assert fleet._ceiling_refuses_dispatch("spawn") is None, (
             f"a blank stamp {blank!r} did not exempt like an absent one")
+        # And the claim-file holder is refused for every member of the class.
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-holder")
+        assert fleet._ceiling_refuses_dispatch("spawn") is not None, (
+            f"a blank stamp {blank!r} exempted the claim-file holder")
 
     def test_a_donated_FLEET_WORKER_costs_a_session_the_structural_exemption(
             self, id_home, monkeypatch):
@@ -483,7 +511,12 @@ class TestSiteACeiling:
         reason = fleet._ceiling_refuses_dispatch("send")
         assert reason is not None                    # it IS subject
         assert "never subject" not in reason
-        assert "FLEET_WORKER" in reason              # names the escape it has
+        # It names the stamp -- but since 2026-07-31 only to say the stamp is
+        # NOT this caller's escape. The escape it has is `sup-handoff-begin`,
+        # which the message already names; a message that offered the stamp
+        # instead would be R2's named-remedy-that-always-fails.
+        assert "FLEET_WORKER" in reason
+        assert "sup-handoff-begin" in reason
 
 
 class TestSiteAFailsTowardTheBand:
@@ -983,14 +1016,24 @@ class TestDoctorAnnouncesTheLeak:
             "state (substitution), not donation")
         assert "donation cannot manufacture" not in remedy, (
             "the remedy still asserts the falsified donation asymmetry")
-        # And it must be honest about the guard that STILL keys on the stamp.
-        # ND4(c) was ordered re-grounded in the same ruling and could not be
-        # (it collides with ND4(b) on the same input, claim-nonce §18.4), so
-        # `_ceiling_refuses_dispatch` is unchanged and the exemption is a live
-        # hole. A remedy that says "nothing decides on this any more" would be
-        # the comfortable sentence rather than the true one.
-        assert "LIVE HOLE" in remedy
+        # And it must be honest about the guard that STILL reads the stamp.
+        # ND4(c) was ordered re-grounded on 2026-07-30, could not be as ordered
+        # (it collided with ND4(b) on the same input), and was RULED on
+        # 2026-07-31: the claim-holder is never exempt, predicate on the claim
+        # file. So the guard survives and the hole it named does not.
         assert "ND4c" in remedy and "18.4" in remedy
+        assert "claim" in remedy, (
+            "the remedy must name what the exemption is gated on now -- the "
+            "claim file -- or a reader still thinks the stamp decides alone")
+        # R2, the named-remedy-that-always-fails class: the remedy used to close
+        # with "the re-grounding is ordered and BLOCKED on an operator ruling".
+        # That ruling exists. A remedy naming a dead blocker is the third
+        # instance of a defect `knowledge/lessons.md` already records twice.
+        assert "LIVE HOLE" not in remedy, (
+            "the remedy still calls the ND4c exemption a live hole -- it was "
+            "closed for the claim-holder by the 2026-07-31 ruling")
+        assert "BLOCKED" not in remedy, (
+            "the remedy still names a blocker that no longer exists")
 
     def test_an_agreeing_witness_passes(self, id_home, monkeypatch):
         monkeypatch.setenv("FLEET_WORKER", "w1")
@@ -1140,7 +1183,17 @@ class TestTheWitnessIsStillWritten:
 
         So the pin now asserts what actually holds: the reads are exactly the
         two ALLOWLISTED non-predicate/structural sites, and the claim guard is
-        not one of them."""
+        not one of them.
+
+        THE ASYMMETRY PARAGRAPH ABOVE IS FALSIFIED (2026-07-30, claim-nonce
+        §18) AND THE ND4(c) QUOTE IS AMENDED (2026-07-31, operator ruling A) --
+        but the ALLOWLIST is unchanged, which is why this assertion still
+        stands. The daemon substitutes rather than donates, so absence is not
+        the sound direction either; and ND4(c) no longer exempts *"with no sid
+        at all"* -- it now asks the claim file first and never exempts the
+        claim-holder. `_ceiling_refuses_dispatch` therefore still READS the
+        stamp, and still only to exempt a body that is not the claim-holder,
+        which is what keeps it out of SPEC.md:196's scope."""
         from pathlib import Path
         import re
         lines = Path(fleet.__file__).read_text(encoding="utf-8").splitlines()

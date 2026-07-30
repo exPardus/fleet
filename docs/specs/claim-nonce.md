@@ -3526,10 +3526,12 @@ override. (Round-6 lens `mf-rb6` CONFIRM-A, and wave-19's `envstamp` independent
 - **`_ceiling_refuses_dispatch` keeps its permitted status** at the exemption arm: the identity read
   there still only ever selects whose transcript is measured, and the grounds of the refusal stay the
   measured occupancy.
-- **`three-tier-command.md` §11.3 ND4(c) loses its premise and is NOT yet re-grounded.** §18.4 is the
-  one place this ruling could not be executed: the grounding it implies collides with ratified ND4(b)
-  on the identical input. The guard is unchanged, the hole is live and documented, and the choice
-  between three priced candidates is the operator's.
+- **`three-tier-command.md` §11.3 ND4(c) lost its premise, and was re-grounded by a SECOND ruling.**
+  §18.4 was the one place this ruling could not be executed — the grounding it implies collides with
+  ratified ND4(b) on the identical input — so it was escalated rather than improvised. Altai ruled
+  the collision on **2026-07-31**: candidate **A**, the claim-holder is never exempt whatever its
+  stamp, predicate on the claim file. §18.4 records the ruling and what shipped under it; the hole is
+  closed for the claim-holder and ND4(b) is untouched.
 - **`_doctor_check_identity_witness` keeps its FAIL row and loses its remedy.** Registry-RESOLVED +
   witness-gone is still worth reddening — it is a real disagreement between two channels — but the
   remedy *"inspect what strips FLEET_WORKER from this environment"* directed the operator to hunt a
@@ -3540,13 +3542,54 @@ override. (Round-6 lens `mf-rb6` CONFIRM-A, and wave-19's `envstamp` independent
   witness whose disagreement with the registry is diagnostic. What it stops being is an input to any
   decision, in either direction.
 
-### 18.4 ND4(c) — the premise is falsified, the ordered re-grounding is BLOCKED, and the decision is owed
+### 18.4 ND4(c) — the premise was falsified, the ordered re-grounding was BLOCKED, and the operator ruled it
 
-**This subsection is the one place this ruling could not be executed, and it is filed as an open
-question rather than an edit.** Everything else §18 owed is done; ND4(c) is not, and the reason is
-measured.
+**RULED 2026-07-31 by Altai, in-session: candidate A — the claim-holder is never exempt, whatever its
+stamp.** *(Recorded here as the pricing record's outcome. The decision is Altai's; this transcription
+is not a ratification. Canonical text: the top Settled entry of `docs/OPERATOR-GATES.md`; ledger
+entry: `knowledge/lessons.md#2026-07-31-nd4c-ruled`. Raised by worker `w34-rulings` on branch
+`w34/rulings`, answered through `fleet sup-decision --answer` — the channel that parked it — in the
+same tick. Built on branch `w35/nd4c`.)*
 
-**The hole is live.** Ratified `three-tier-command.md` §11.3 ND4(c) exempts the interface from the
+Ruled verbatim: *"ND4(c) narrows: whoever holds the supervisor claim is subject to the 200k dispatch
+ceiling regardless of stamp or registry state; the predicate reads the claim file, not the
+environment, so it needs no sound env channel and never enters ND4(b)'s bucket. ND4(b) stands
+untouched."*
+
+**Costs accepted with the ruling — ratified, not defects:**
+
+- (c) loses its *"runs first, with no sid at all"* ordering property: the caller's own sid is needed
+  before (c) can answer at all.
+- The pinned test encoding the old shape **flips** — `tests/test_supervisor_ceiling.py::TestCeiling::
+  test_the_interface_CAN_be_the_claim_holder_and_is_still_exempt` asserted the interface stays exempt
+  *"whether or not it happens to hold the claim"*; it now asserts the opposite and is renamed
+  `..._is_NO_LONGER_exempt`. The new pin is `TestTheClaimHolderIsNeverExempt` in the same module.
+- An interface session that ever took the claim (`fleet sup-boot` is runnable from one) becomes
+  ceiling-subject. Its escape is `sup-handoff-begin`, already exempt — and doctrine forbids the
+  interface taking the claim at all.
+
+**What shipped**, so the ruling and the code can be diffed: `_ceiling_refuses_dispatch` resolves the
+caller's sid, reads `supervisor/INCARNATION`, and asks bare equality against the **held** claim's own
+`session_id` — no environment, no registry, and **total** (True or False, never None, so it cannot
+land in ND4(b)'s indeterminate bucket). A caller that answers True reaches its occupancy measurement
+with no exemption available. A caller that answers False meets (c) and the other two exemptions
+exactly as before, (c) still ahead of any registry read — so an exempt caller still never opens
+`state/fleet.json` and still cannot quarantine one. **ND4(b) is byte-for-byte the same rule on the
+same input**, which is the property that made A the narrowest of the three.
+
+**What A does NOT close, stated so it is a known residual rather than a surprise.** Holdership here
+is the claim file's own `session_id`, so a supervisor inside the un-restamped fork-steer window
+(ND4a: the body carries a NEW sid while the claim still carries the OLD one) is not caught by this
+gate. It is caught by the arms below it — `_caller_holds_supervisor_claim` bridges that window
+through the record's sid union — **unless** it also has no `FLEET_WORKER` stamp, in which case (c)
+exempts it as it always did. That is strictly narrower than the pre-ruling behaviour and identical to
+it in that corner; closing it would require a registry-keyed predicate, which is exactly the
+collision A exists to avoid.
+
+**The record of why A rather than B or C follows, unchanged.** It is the pricing the ruling was made
+from.
+
+**The hole was live.** Ratified `three-tier-command.md` §11.3 ND4(c) exempts the interface from the
 200k dispatch ceiling on the **absence** of `FLEET_WORKER`, and §17.2 called that exemption
 *"blessed, not tolerated"* on the strength of the scope half. With that half falsified the exemption
 is granted to **any body whose daemon was cold-started unstamped** — on the 2026-07-30 measurement,
@@ -3574,13 +3617,14 @@ sid (the ND4(a) window), over a registry recreated thin after a quarantine, whic
 missing every record. **Both present as "sid absent from the union", and the missing record is
 precisely the evidence that would distinguish them.**
 
-**What was NOT done, deliberately:** `_ceiling_refuses_dispatch` is byte-for-byte unchanged. Shipping
-the re-grounding as ordered would re-open a measured defect; shipping any of the alternatives below
-would be a worker choosing between ratified bindings. Both are refused here. What DID change is that
-the code and this corpus no longer *assert* the falsified premise as sound — the guard now documents
-itself as a live hole with this section as its accounting.
+**What was NOT done at the time, deliberately, and why the escalation was the right move:**
+`_ceiling_refuses_dispatch` was left byte-for-byte unchanged. Shipping the re-grounding as ordered
+would have re-opened a measured defect; shipping any of the alternatives below would have been a
+worker choosing between ratified bindings. Both were refused, the pricing below was filed instead,
+and the operator ruled off it in one tick — which is the loop this document is arguing for.
 
-**The three candidates, priced for the ruling that is owed:**
+**The three candidates, priced for the ruling that was owed. A was ruled 2026-07-31; the table is
+kept verbatim as the basis the decision was made from:**
 
 | Candidate | Closes the measured hole | Cost |
 |---|---|---|
@@ -3588,10 +3632,12 @@ itself as a live hole with this section as its accounting.
 | **B — subordinate ND4(b) to a registry-keyed (c), as literally ordered** | Yes | Re-opens the 999,999-token bypass ND4(b) exists for; requires amending ND4(b), which the ruling did not touch |
 | **C — retire (c) entirely** | Yes | The interface loses its exemption whenever identity is indeterminate — a refusal the human channel cannot escape, which ND1 forbids |
 
-**A is the narrowest and is the recommendation**, on the ground that it does not use the environment
+**A is the narrowest and was the recommendation**, on the ground that it does not use the environment
 at all and therefore does not need §18's sound channel: holdership is read from `supervisor/
-INCARNATION`, which §18 neither demotes nor mentions. It is recorded as a recommendation and not
-taken.
+INCARNATION`, which §18 neither demotes nor mentions. It was recorded as a recommendation and **not
+taken by its author** — **the operator took it on 2026-07-31**, and it is built. The recommendation
+being right did not make it a worker's to adopt, which is the process point worth keeping: three
+candidates each amending ratified text is an escalation, not a design choice.
 
 ### 18.5 Where the code cites this section
 

@@ -8,15 +8,18 @@ that holds no claim is never subject, the identity gate resolves through
 and an unresolvable identity fails TOWARD the band (ND4b). Occupancy is the
 caller's OWN transcript (B2/B3).
 
-ND4c's KEY CHANGED (SPEC.md:196, `tests/test_identity_registry.py`). It read
-*"no `FLEET_WORKER` in its env"*; the machine-wide daemon donates that stamp to
-sessions it never launched, so its presence and its absence say equally little
-about the acting body. The structural question is now asked of the registry --
-*"does any record claim my own sid, and am I the claim-holder"* -- and ND4b
-narrows to match: an identity fleet cannot place at all abstains and exempts
-(it is the interface, a human shell, or a body inside its own dispatch window,
-and a newborn body cannot be at 200k tokens), while a REGISTERED body whose
-holder-ness is merely indeterminate still fails toward the band.
+ND4c IS NARROWED, AND THIS PARAGRAPH HAS BEEN WRONG BEFORE -- read the tests,
+not it. An earlier revision re-keyed (c) onto the registry (*"does any record
+claim my own sid"*) and rewrote this header to match; the fix wave reverted the
+code and left the header describing a shape that `TestCeiling::
+test_indeterminate_identity_fails_toward_band` in this very file contradicts.
+Restated 2026-07-31 against shipped code: (c) still keys on `FLEET_WORKER`'s
+ABSENCE and still runs ahead of ND4b, but it is now GATED -- operator ruling A,
+2026-07-31 -- on a claim-file question asked first: `caller_sid ==
+INCARNATION.session_id` of a HELD claim. The holder is never exempt, whatever
+its stamp and whatever the registry says. ND4b is untouched: a stamped,
+unplaceable, non-holder body still fails toward the band. See
+`TestTheClaimHolderIsNeverExempt` below.
 """
 import json
 from types import SimpleNamespace
@@ -129,27 +132,34 @@ class TestCeiling:
         self._occ(monkeypatch, 500000)
         assert fleet._ceiling_refuses_dispatch("send") is None
 
-    def test_the_interface_CAN_be_the_claim_holder_and_is_still_exempt(
+    def test_the_interface_CAN_be_the_claim_holder_and_is_NO_LONGER_exempt(
             self, ceil_home, monkeypatch):
-        """rb's reachability correction, pinned so the false impossibility
-        cannot be re-recorded.
+        """THE PIN THE 2026-07-31 RULING FLIPPED, and the flip is the ruling.
 
-        An intervening revision rewrote the test above away from the shape
-        "interface carrying the HOLDER's own sid", with the comment that it is
-        *"not a shape the fleet can produce -- the interface is a human's
-        session and the holder is a `--bg` supervisor body"*. That is false:
-        `fleet sup-boot` is runnable from an interface session and stamps THAT
-        session's sid into the claim. So the shape is reachable, it is exactly
-        the case ND4(c) has to survive, and (c) still exempts it -- an
-        unstamped session is outside fleet's launch surface whether or not it
-        happens to hold the claim."""
+        rb's reachability correction is kept, because it is still what makes
+        this shape worth a test. An intervening revision had rewritten the test
+        above away from "interface carrying the HOLDER's own sid" with the
+        comment that it is *"not a shape the fleet can produce -- the interface
+        is a human's session and the holder is a `--bg` supervisor body"*. That
+        is false: `fleet sup-boot` is runnable from an interface session and
+        stamps THAT session's sid into the claim, so the shape is reachable.
+
+        WHAT CHANGED IS THE VERDICT, not the reachability. This test asserted
+        *"(c) still exempts it -- an unstamped session is outside fleet's launch
+        surface whether or not it happens to hold the claim"*. Operator ruling
+        A (Altai, in-session 2026-07-31) says the opposite and named this flip
+        as an accepted cost before it was made: an interface session that ever
+        took the claim becomes ceiling-subject, and its escape is
+        `sup-handoff-begin`, which is exempt. Doctrine forbids the interface
+        taking the claim at all, so the body that lands here has already
+        departed from it."""
         monkeypatch.delenv("FLEET_WORKER", raising=False)
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-interface")
         _write_incarnation(_held("sid-interface"))
         _write_registry({})
         self._occ(monkeypatch, 500000)
         assert fleet._caller_holds_supervisor_claim("sid-interface") is True
-        assert fleet._ceiling_refuses_dispatch("send") is None
+        assert fleet._ceiling_refuses_dispatch("send") is not None
 
     def test_interface_is_exempt_even_when_nothing_places_either_sid(
             self, ceil_home, monkeypatch):
@@ -271,6 +281,138 @@ class TestCeiling:
         monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
         self._occ(monkeypatch, 400000)
         assert fleet._ceiling_refuses_dispatch("spawn") is None
+
+
+# --------------------------------------------------------------------------
+# ND4(c) AS NARROWED -- operator ruling A, 2026-07-31.
+# --------------------------------------------------------------------------
+class TestTheClaimHolderIsNeverExempt:
+    """*"Whoever holds the supervisor claim is subject to the 200k dispatch
+    ceiling regardless of stamp or registry state; the predicate reads the claim
+    file, not the environment, so it needs no sound env channel and never enters
+    ND4(b)'s bucket. ND4(b) stands untouched."* -- Altai, in-session
+    2026-07-31, `docs/OPERATOR-GATES.md`; the pricing is claim-nonce §18.4
+    candidate A and the amended bullet is three-tier §11.3 ND4(c).
+
+    WHAT THIS CLOSES, and it was measured live rather than argued: a
+    claim-holding supervisor whose daemon was cold-started by an unstamped
+    launcher reads no `FLEET_WORKER` and was therefore exempt from a HARD
+    ceiling. Four of four live bodies in one wave (2026-07-30), two of them
+    supervisors -- the common case, not an edge.
+
+    THE SHAPE OF THE NARROWING. (c) still exempts, and it still exempts
+    structurally without resolving a sid against the registry -- but it may no
+    longer exempt the claim-file holder. The holdership predicate is bare
+    equality against `supervisor/INCARNATION`'s own `session_id`, which is
+    total (never None) and reads neither the environment nor `state/fleet.json`,
+    so it cannot land in ND4(b)'s indeterminate bucket and cannot quarantine
+    anything.
+
+    WHAT IT COSTS, ratified with the ruling: (c) loses its *"runs first, with no
+    sid at all"* ordering property, because the caller's own sid is now needed
+    to answer the question at all."""
+
+    def _occ(self, monkeypatch, occupancy):
+        monkeypatch.setattr(fleet, "find_transcript_path",
+                            lambda name, sid: "/fake" if sid else None)
+        monkeypatch.setattr(fleet, "_transcript_occupancy", lambda p: occupancy)
+
+    def test_the_holder_with_NO_stamp_over_the_ceiling_is_REFUSED(
+            self, ceil_home, monkeypatch):
+        # THE MEASURED LIVE HOLE, closed. Before the ruling this returned None.
+        monkeypatch.delenv("FLEET_WORKER", raising=False)
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-holder")
+        _write_incarnation(_held("sid-holder"))
+        _write_registry({"sup|inc-x|boot": {"session_id": "sid-holder",
+                                            "retired_sids": []}})
+        self._occ(monkeypatch, 500000)
+        reason = fleet._ceiling_refuses_dispatch("spawn")
+        assert reason is not None
+        assert "200,000" in reason and "11.3" in reason
+
+    @pytest.mark.parametrize("blank", ["", " ", "\t", "\n", "  \t\n "])
+    def test_a_BLANK_stamp_no_longer_buys_the_holder_an_exemption(
+            self, ceil_home, monkeypatch, blank):
+        # The stamp's equivalence class (absent == "" == whitespace) is
+        # unchanged; what changed is that the holder is outside it.
+        monkeypatch.setenv("FLEET_WORKER", blank)
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-holder")
+        _write_incarnation(_held("sid-holder"))
+        _write_registry({"sup|inc-x|boot": {"session_id": "sid-holder",
+                                            "retired_sids": []}})
+        self._occ(monkeypatch, 500000)
+        assert fleet._ceiling_refuses_dispatch("spawn") is not None, (
+            f"a blank stamp {blank!r} exempted the claim-file holder")
+
+    def test_the_holder_is_refused_on_a_CORRUPT_registry_TOO(
+            self, ceil_home, monkeypatch):
+        # *"regardless of stamp OR REGISTRY STATE"*. The claim file alone
+        # decides holdership, so an unreadable `state/fleet.json` cannot buy the
+        # holder an exemption -- and the read must still not quarantine one
+        # (a ceiling check is a read).
+        monkeypatch.delenv("FLEET_WORKER", raising=False)
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-holder")
+        _write_incarnation(_held("sid-holder"))
+        fleet.registry_path().write_text("{ not json", encoding="utf-8")
+        self._occ(monkeypatch, 500000)
+        assert fleet._ceiling_refuses_dispatch("spawn") is not None
+        assert fleet.registry_path().read_text(encoding="utf-8") == "{ not json"
+        assert not list(fleet.registry_path().parent.glob("fleet.json.corrupt*"))
+
+    def test_a_RELEASED_claim_has_no_holder_to_catch(self, ceil_home, monkeypatch):
+        # A released claim is terminal and owns nobody, so the body that
+        # released it is an ordinary unstamped session again -- exempt by (c)
+        # exactly as before. The narrowing is to the HELD claim's holder.
+        monkeypatch.delenv("FLEET_WORKER", raising=False)
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-holder")
+        _write_incarnation({"incarnation_id": "inc-x", "session_id": "sid-holder",
+                            "state": "released", "released_at": fleet.now_iso()})
+        _write_registry({})
+        self._occ(monkeypatch, 500000)
+        assert fleet._ceiling_refuses_dispatch("spawn") is None
+
+    def test_ND1_SURVIVES_a_non_holder_with_no_stamp_is_still_exempt(
+            self, ceil_home, monkeypatch):
+        # The half (c) exists for, and the half candidate C would have cost:
+        # an unstamped session that does NOT hold the claim is exempt even when
+        # nothing places either sid, so ND4(b)'s fail-toward-band still cannot
+        # reach the human channel with a refusal it could never escape (§3.1).
+        monkeypatch.delenv("FLEET_WORKER", raising=False)
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-interface")
+        _write_incarnation(_held("sid-ghost"))
+        _write_registry({})
+        self._occ(monkeypatch, 500000)
+        assert fleet._ceiling_refuses_dispatch("spawn") is None
+
+    def test_ND4b_IS_UNTOUCHED_the_indeterminate_stamped_body_still_refuses(
+            self, ceil_home, monkeypatch):
+        # The fence on this lane, asserted rather than promised. The caller is
+        # NOT the claim-file holder, so the new predicate declines and the
+        # verdict is still ND4(b)'s: stamped, unplaceable, fail toward the band.
+        monkeypatch.setenv("FLEET_WORKER", "sup|inc-x|successor")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-mystery")
+        _write_incarnation(_held("sid-ghost"))
+        _write_registry({"other": {"session_id": "sid-else", "retired_sids": []}})
+        self._occ(monkeypatch, 300000)
+        assert fleet._caller_holds_supervisor_claim("sid-mystery") is None
+        assert fleet._ceiling_refuses_dispatch("spawn") is not None
+
+    def test_the_refusal_does_not_promise_an_escape_the_holder_does_not_have(
+            self, ceil_home, monkeypatch):
+        # R2, the named-remedy-that-always-fails class, third instance averted.
+        # The shipped wording told a refused caller that a session with no
+        # `FLEET_WORKER` stamp is exempt structurally -- which, for the one
+        # caller that can read this string, is now false. It must name the
+        # escape the holder actually has (`sup-handoff-begin`, exempt).
+        monkeypatch.delenv("FLEET_WORKER", raising=False)
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-holder")
+        _write_incarnation(_held("sid-holder"))
+        _write_registry({})
+        self._occ(monkeypatch, 500000)
+        reason = fleet._ceiling_refuses_dispatch("spawn")
+        assert reason is not None
+        assert "no `FLEET_WORKER` stamp is exempt structurally" not in reason
+        assert "sup-handoff-begin" in reason
 
 
 # --------------------------------------------------------------------------

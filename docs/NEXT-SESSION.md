@@ -119,19 +119,22 @@ live work:
    policy agrees with doctrine; the settings change is the operator's own shell action). The
    `sup-decision` slot is FREE, so outcount2's poll-bound question can take it.
 
-## ONE NEW GATE OWED, raised by wave 34 and not yet put to the operator
+## ~~ONE NEW GATE OWED~~ — RULED 2026-07-31 AND BUILT
 
-**ND4(c) cannot be re-grounded as ordered — the ruling collides with ratified ND4(b).** The
+**ND4(c) could not be re-grounded as ordered — and the operator ruled the collision.** The
 2026-07-30 identity ruling ordered three-tier §11.3 ND4(c) re-grounded off `FLEET_WORKER`
 absence and onto "caller sid absent from the registry sid union". That predicate is
 definitionally `IDENTITY_UNRESOLVED`, and ND4(b) already governs that exact input with the
 opposite verdict (*"an unresolvable identity must never be the reason a ceiling stays
 dormant"*). `_ceiling_refuses_dispatch` was therefore left **byte-for-byte unchanged** rather
-than improvised on, and the hole is live: a claim-holding supervisor whose daemon was
-cold-started unstamped is exempt from the 200k HARD ceiling today (four of four measured
-bodies). Three candidates are priced in **claim-nonce §18.4**, with A (narrow (c) so the
-claim-holder is never exempt whatever its stamp) recommended — it reads the claim file, not the
-environment, so it needs no sound env channel and does not touch ND4(b)'s bucket.
+than improvised on, three candidates were priced in **claim-nonce §18.4**, and the gate was
+raised instead. **Altai ruled it in-session on 2026-07-31: candidate A — the claim-holder is
+never exempt whatever its stamp, on a predicate that reads the CLAIM FILE, so it needs no sound
+env channel and never enters ND4(b)'s bucket; ND4(b) untouched.** Built on branch `w35/nd4c`:
+the gate is `caller_sid == the held claim's own session_id`, ahead of (c)'s stamp read; the
+pinned test encoding the old shape flipped as the ruling said it would; `fleet doctor`'s
+identity-witness remedy stopped naming the now-dead blocker. Record: `docs/OPERATOR-GATES.md`
+top Settled entry, `knowledge/lessons.md#2026-07-31-nd4c-ruled`, claim-nonce §18.4.
 
 ## The revive loop (how this session ran 21 waves)
 
@@ -164,8 +167,9 @@ contains an error and go find it" (paid in 14 consecutive lanes).** Briefs live 
 - **529 storms**: two stillborn supervisor boots in a row = back off 3m/10m/20m, then retry
   the same brief. A dead mid-turn body with a held claim = the wedge runbook above.
 - **Absence-keyed guards**: 88 sites censused (report `state/journals/absguard.md`), one
-  confirmed live fail-open universal (ND4c — rides the identity gate). Lane candidates listed
-  in wave-25's release note.
+  confirmed live fail-open universal (ND4c — rides the identity gate). **That one is closed for
+  the claim-holder as of 2026-07-31** (the exemption is gated on the claim file); the census
+  method and the other 87 sites stand. Lane candidates listed in wave-25's release note.
 
 ## Ledgers
 

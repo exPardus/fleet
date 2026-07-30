@@ -1495,3 +1495,22 @@ becomes ceiling-subject (escape = sup-handoff-begin, already exempt). Closes the
 (claim-holding supervisor on unstamped cold daemon exempt from a HARD ceiling, 4/4 bodies).
 Owed: three-tier §11.3 ND4(c) + claim-nonce §18.4 edits; implementation is a normal gated
 lane. Answered through `fleet sup-decision --answer` in the same tick; gate moved to Settled.
+
+**BUILT 2026-07-31, branch `w35/nd4c` (appended, not edited into the line above).** The gate is
+`caller_sid == the HELD claim's own session_id`, resolved before (c)'s stamp read and before any
+registry read; total by construction, so it cannot land in ND4(b)'s bucket. Costs landed exactly
+as ratified: one pinned test flipped
+(`test_the_interface_CAN_be_the_claim_holder_and_is_still_exempt` →
+`..._is_NO_LONGER_exempt`). **THREE THINGS THE OWED-EDITS LIST DID NOT NAME, and each was a
+document asserting something the ruling made false:** `fleet doctor`'s identity-witness FAIL row
+and `DAEMON_ENV_LEAK_REMEDY` both closed on *"the re-grounding is ordered and BLOCKED on an
+operator ruling"* — a **dead blocker inside a still-correct finding**, R2's third instance, and
+the only one caught by the brief rather than by a test; `docs/NEXT-SESSION.md` still carried the
+gate under *"not yet put to the operator"*; and `docs/SPEC.md`'s restatement of what
+`FLEET_WORKER` is load-bearing for still described the un-narrowed arm. **Restates the
+2026-07-30 lesson in a new place: a ratification lands in as many documents as name it, and the
+ones that hurt are not the spec — they are the RUNNING SURFACES (a doctor row, a session-start
+index) that keep telling an operator to wait for a decision already made.** Also measured: the
+old blank-stamp characterization pin, written *"so that any future re-grounding of ND4(c) has to
+change it deliberately rather than discover the blank case in production"*, did exactly that job
+— **a characterization pin pays off at the moment it becomes wrong.**

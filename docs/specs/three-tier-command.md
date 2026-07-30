@@ -1611,42 +1611,61 @@ Note (b) and (c) compose safely rather than fighting: (c) exempts the interface 
 fail-toward-the-band default can catch it, so failing closed for the supervisor does not silence the
 human's control channel (ND1).
 
-> **ND4(c)'s PREMISE IS FALSIFIED — RE-GROUNDING ORDERED 2026-07-30 AND NOT YET DONE. (c) is a LIVE
-> HOLE and the code is unchanged.** The identity clause (c) rests on was replaced by the operator on
-> 2026-07-30 (`docs/OPERATOR-GATES.md`; the clause is `docs/specs/claim-nonce.md` §18) and the
-> re-grounding of this bullet was ratified as owed work in the same ruling. It could not be executed
-> without amending a *different* ratified binding, so it is filed as an open decision. **The
-> paragraph and receipt above stand as the record of what was ratified on 2026-07-23 and why**; the
-> receipt remains true of the commit it names. Full accounting, with three priced candidates and a
-> recommendation: **claim-nonce §18.4.**
+> **ND4(c) IS AMENDED — RULED BY THE OPERATOR 2026-07-31 AND BUILT. (c) NOW READS THE CLAIM FILE
+> FIRST, AND THE CLAIM-HOLDER IS NEVER EXEMPT.** The premise (c) was ratified on — *"donation can
+> only ever ADD a stamp, so absence is sound"* — was falsified on 2026-07-30 and its re-grounding
+> ordered; that re-grounding could not be executed as ordered, was escalated rather than improvised,
+> and Altai ruled the collision in-session on 2026-07-31 (`docs/OPERATOR-GATES.md`; pricing and the
+> three priced candidates: **claim-nonce §18.4**, candidate **A**). **The paragraph and receipt above
+> stand as the record of what was ratified on 2026-07-23 and why**; the receipt remains true of the
+> commit it names, and the amendment below is what binds today.
 >
-> **What is falsified.** (c) rested on *"donation can only ever ADD a stamp, so absence is sound"*.
-> The daemon does not add to a hosted session's environment, it **substitutes** that environment
-> wholesale with its own frozen first-dispatch copy, so `FLEET_WORKER` is absent on any body whose
-> daemon was cold-started by an unstamped launcher — measured on **four of four live bodies in one
-> wave on 2026-07-30**, two of them supervisors. So (c) hands the interface's structural exemption
-> from the 200k HARD ceiling to the exact bodies the ceiling exists to slow down. A claim-holding
-> supervisor at 500,000 tokens with an unstamped daemon is exempt today.
+> **The amended (c), as ruled, verbatim.** *"Whoever holds the supervisor claim is subject to the
+> 200k dispatch ceiling regardless of stamp or registry state; the predicate reads the claim file,
+> not the environment, so it needs no sound env channel and never enters ND4(b)'s bucket. ND4(b)
+> stands untouched."*
 >
-> **Why the obvious re-grounding is refused rather than shipped.** The ruling names the registry sid
-> union as the only sound identity channel, which yields *"exempt when the caller's sid is absent
-> from the union"*. That predicate is definitionally `IDENTITY_UNRESOLVED` — and **(b) above already
-> governs that exact input with the opposite verdict**: *"an unresolvable identity must never be the
-> reason a ceiling stays dormant."* One input, two ratified bindings, opposite outcomes. The old
-> ground escaped this only because stamp-absence is an **independent** signal, orthogonal to registry
-> resolution; every registry-keyed grounding collapses into (b)'s input. `tests/
-> test_supervisor_ceiling.py::TestCeiling::test_indeterminate_identity_fails_toward_band` pins (b) on
-> exactly this shape, with the receipt from the last attempt: `fleet spawn` at 999,999 tokens
-> returning rc=0.
+> **Operationally**, `_ceiling_refuses_dispatch` now asks one question before any exemption:
+> is the caller's own `CLAUDE_CODE_SESSION_ID` equal to the `session_id` of the **held** claim in
+> `supervisor/INCARNATION`? If yes, nothing exempts it and its occupancy decides. If no, (c) exempts
+> on `FLEET_WORKER`'s absence exactly as before, still ahead of any registry read — so an exempt
+> caller still never touches `state/fleet.json` and still cannot quarantine one.
 >
-> **And no discriminator exists.** In the indeterminate bucket the two bodies (c) must tell apart are
-> the interface (no record, correctly exempt) and a claim-holder whose own record has gone missing
-> from a readable registry — and the missing record is precisely the evidence that would distinguish
-> them. Both present as "sid absent from the union".
+> **What is falsified, and why the hole was real.** The daemon does not add to a hosted session's
+> environment, it **substitutes** that environment wholesale with its own frozen first-dispatch copy,
+> so `FLEET_WORKER` is absent on any body whose daemon was cold-started by an unstamped launcher —
+> measured on **four of four live bodies in one wave on 2026-07-30**, two of them supervisors. Before
+> this amendment (c) handed the interface's structural exemption from the 200k HARD ceiling to the
+> exact bodies the ceiling exists to slow down: a claim-holding supervisor at 500,000 tokens with an
+> unstamped daemon was exempt.
 >
-> **Status: (b) is intact, (c) is unchanged and unsound, and the decision between narrowing (c) to
-> exempt-unless-claim-holder, subordinating (b), or retiring (c) is the operator's** — each amends
-> ratified text, which is not a worker's to choose.
+> **Why the predicate is the claim file and not the registry.** The 2026-07-30 ruling named the
+> registry sid union as the only sound identity channel, which yields *"exempt when the caller's sid
+> is absent from the union"*. That predicate is definitionally `IDENTITY_UNRESOLVED` — and **(b)
+> above already governs that exact input with the opposite verdict**: *"an unresolvable identity must
+> never be the reason a ceiling stays dormant."* One input, two ratified bindings, opposite outcomes;
+> and no discriminator exists inside that bucket, because the two bodies (c) must tell apart are the
+> interface (no record, correctly exempt) and a claim-holder whose own record has gone missing from a
+> readable registry — the missing record is precisely the evidence that would distinguish them.
+> `caller_sid == the held claim's own session_id` sidesteps it: **total** (True or False, never
+> indeterminate), reading `supervisor/INCARNATION` and nothing else. `tests/
+> test_supervisor_ceiling.py::TestCeiling::test_indeterminate_identity_fails_toward_band` still pins
+> (b) unchanged, with the receipt from the last attempt to re-key this function: `fleet spawn` at
+> 999,999 tokens returning rc=0.
+>
+> **Accepted costs, ratified with the ruling rather than discovered after it.** (c) loses its *"first,
+> with no sid at all"* ordering property — the caller's own sid is now needed before (c) can answer.
+> The pin encoding the old shape flips (`tests/test_supervisor_ceiling.py::TestCeiling::
+> test_the_interface_CAN_be_the_claim_holder_and_is_NO_LONGER_exempt`, with
+> `TestTheClaimHolderIsNeverExempt` in the same module as the new pin). And an interface session that
+> ever took the claim — `fleet sup-boot` is runnable from one — becomes ceiling-subject; its escape
+> is `sup-handoff-begin`, which is already exempt, and doctrine forbids the interface taking the
+> claim at all.
+>
+> **Status: (b) is intact and untouched, (c) is amended as above and built, and the residual (c)
+> still covers is ND1's:** an unstamped session that does **not** hold the claim stays exempt however
+> unplaceable its sid, so the human control channel keeps a refusal it could never escape out of
+> reach.
 
 ### 11.4 The worker arm of the band (operator, wave 3)
 
