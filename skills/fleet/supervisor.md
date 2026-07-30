@@ -97,29 +97,9 @@ idle/dead/interrupted native workers past the TTL into tombstoned history,
 then `fleet resume-limited` for any worker whose reset horizon has passed,
 then a checkpoint/heartbeat (below).
 
-**THE BEAT'S VERBS SPLIT ON THE §7 GATE. Do not run them as one undifferentiated
-list — two of them are opposites and the difference is a refusal:**
-
-| beat verb | §7 claim gate | what you pass |
-|---|---|---|
-| `fleet status` | not gated (read) | nothing |
-| **`fleet autoclean`** | **EXEMPT — structurally** | **nothing. It has NO `--nonce` flag; passing one is an argparse error.** |
-| `fleet archive` / `fleet archive --dry-run` | **GATE-ARMED** | `--nonce <value>`. **`--dry-run` does NOT exempt it** — §7 is a policy on the caller proving continuity, not on the effect, so a preview is gated exactly like the real run. |
-| **`fleet resume-limited`** | **GATE-ARMED** | **`--nonce <value>`. REFUSED without it.** |
-| `sup-checkpoint` / `sup-heartbeat` | gate-armed | `--nonce <value>` |
-
-Measured: a supervisor that followed the beat literally, without presenting its
-generation, got *"a supervisor claim ... is held and fresh, and this call did not
-prove continuity on it (claim-nonce §7)"* from `resume-limited`, then succeeded
-once it presented its generation. **`autoclean` and `resume-limited` sit in the
-same sentence above and behave oppositely** — exempt-with-no-flag versus
-armed-and-refusing. Check the row before you call the verb.
-
 **`fleet autoclean` is YOUR job, not a timer's** (operator ruling
-2026-07-27). It used to run from a Windows Scheduled Task every 6h; that task
-**is gone** — the timer was deleted, not reconfigured, along with the
-`fleet init --autoclean` flags that installed it. A timer sweeps when the clock
-says so, which on a machine
+2026-07-27). It used to run from a Windows Scheduled Task every 6h; that is
+being retired. A timer sweeps when the clock says so, which on a machine
 that loses power means **it does not sweep at all** -- the task carried
 `StartWhenAvailable: False`, so the missed occurrence was dropped and
 nothing caught up at boot, leaving an 18-hour gap in a 6-hourly guard that
