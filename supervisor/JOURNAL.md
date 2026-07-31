@@ -5324,3 +5324,31 @@ CONTEXT: entered the band at 156k after the second gate; closing at ~168k, under
 ## 2026-07-31T02:15:24Z RELEASED inc=inc-20260731T005119Z-7b48 sid=1791b26b-3e4a-4396-8c21-57c6570b109d
 
 released cleanly: @C:/Users/Techn/.claude/jobs/1791b26b/tmp/release.md
+
+## 2026-07-31T02:16:52Z BOOT inc=inc-20260731T021652Z-4f31 sid=5358084c-3662-4adf-b492-3029a5e725f0
+
+fresh claim: predecessor inc-20260731T005119Z-7b48 released cleanly -- fresh claim, no seizure
+
+## 2026-07-31T02:19:30Z CHECKPOINT inc=inc-20260731T021652Z-4f31 sid=5358084c-3662-4adf-b492-3029a5e725f0
+
+W38 BOOT. FRESH CLAIM. THE PREPPED MERGE'S FIRST PARENT IS TWO COMMITS STALE — THE BRIEF DID NOT KNOW, AND COULD NOT HAVE.
+
+BOOT: verdict `claim`, exit 0, predecessor inc-20260731T005119Z-7b48 released cleanly — no seizure, no transfer, no anomaly. Nonce held in working context only; boot bundle read once and deleted in the same turn (class-4 doctrine, §5.8/§5.9). Checkpoint delivered through an @file body, which is the wave-35 refusal-class-5 remedy rather than a style choice.
+
+WHAT THE BRIEF GOT WRONG, MEASURED BEFORE SPENDING ANYTHING ON IT — AND IT IS THE SAME SHAPE AS LAST WAVE'S. The brief's baseline says "3579/14/1 at 2fd0d15 (wave-36-measured)". Main is at `a1047b2`, FOUR commits past 2fd0d15: fe49597, 5bb7945, 6505bb5, a1047b2. All four are `chore(journal)`. That is a baseline inherited across four commits it was never measured against — and it is the second consecutive wave where the brief's baseline commit was already behind at boot, because a brief is written from the state that its own closing journal entry then changes.
+
+THE FINDING THAT MATTERS, AND IT IS ABOUT THE PREPPED MERGE ITSELF. The READY sha the lane reported is EXACTLY RIGHT: `4459d9b8c0be52e5124ddd54a5fb414fe38468a3` exists on `w37/stage-respawn`, and its SECOND parent is `461cd02b30e40cb9f589db9e9e9de354ce1e0511`, which is `w35/respawn-trunc`'s current tip. Both halves of the merge identity check out. But its FIRST parent is `5bb794515fb46b30618a3c30419e6e385cfcc318` — main as it stood when the lane was dispatched — and main has since advanced two commits (`6505bb5`, `a1047b2`), BOTH of them my predecessor's own wave-37 journal entries, written AFTER it dispatched the merge-prep lane. So `git merge-base --is-ancestor main w37/stage-respawn` answers NO: the stage branch is NOT fast-forwardable onto main, and a supervisor who trusted "READY" and pushed would have been refused, or worse, would have force-pushed away two journal commits.
+
+THIS IS THE MERGE-PREP EXPERIMENT'S FIRST REAL DEFECT AND IT IS STRUCTURAL, NOT A LANE ERROR. The lane did nothing wrong: it merged onto the main it was given. The defect is in the PATTERN — a fenced prep lane resolves against a snapshot of main, and the supervisor that dispatched it keeps writing to main (the journal) while the lane works. Every merge-prep lane is therefore racing its own dispatcher. The in-body merge the pattern replaces cannot have this defect, because the body resolving the merge is the same body writing the journal. That cost has to go in the experiment's verdict alongside the token savings.
+
+IT IS ALSO CHEAPLY SURVIVABLE HERE, AND I MEASURED THAT RATHER THAN ASSUMING IT. The whole main-side delta `5bb7945..a1047b2` is `supervisor/JOURNAL.md`, +52/-0, one file. The stage merge `5bb7945..4459d9b` touches eight files and `supervisor/JOURNAL.md` is NOT among them (bin/fleet.py, docs/PLAN.md, docs/SPEC.md, knowledge/INDEX.md, knowledge/lessons.md, skills/fleet/SKILL.md, tests/test_brief_preservation.py, tests/test_index_compose.py; +1200/-37). Disjoint file sets, and the one main-side file is append-only by construction. So the landing is a second merge commit on main whose tree is provably stage's tree plus main's JOURNAL.md — not a rebase, which would rewrite a merge commit whose resolution is the entire artifact under audit.
+
+NO CONFLICT MARKERS SURVIVE IN THE STAGE TREE (`git grep` for the three marker forms at 4459d9b returns nothing). I am recording that as NOT evidence: this repo's own wave-30 lesson is that markers-gone came with six red in 0.70s. The floors are the evidence and they are not run yet.
+
+DOCTOR: THREE FAIL, EXACTLY THE THREE BRIEFED, NONE TAKEN. instance-freshness (would need `fleet init`, fenced), identity-witness (LEAK — the stamp names `sup|inc-20260730T202915Z-4726|boot`, a DEAD record, while the registry resolves my sid to `sup|inc-20260731T021626Z-19d8|boot`; §18 says the registry is the judge, so this is a WITNESS I am recording and not believing), and supervisor-pending-decision, which is the predecessor's ND4(c) Option B raise still waiting on Altai. The slot is OCCUPIED; the wave-37 four-clause text fix stays queued in my release note rather than overwriting it.
+
+MY FLEET_WORKER VARIANT, FOR THE RECORD: worker-shaped-but-stale — it names a supervisor-shaped DEAD record from a body that ran at 20:29Z. Per the boot ritual's three variants this is the substituted-env case, benign for my own operation because I resolve my identity from the registry, and it is the day-4 wedge-2 mechanism re-confirmed at yet another boot.
+
+UNCOMMITTED JOURNAL WORK PRESENT AT BOOT: `supervisor/JOURNAL.md` is modified in the worktree. Folding it into my first journal commit, per standing order.
+
+STATE ENTERING THE WAVE: w37-mp-respawn idle 50m (holds the prep + its derivations, to be audited not adopted), w37-rev-refute idle 80m (holds all 16 mutants, to be RE-SENT not respawned), w36-refute still WORKING at 5m idle — so section 2's re-gate is genuinely not ready yet and the brief was right that it is in flight.
