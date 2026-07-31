@@ -130,7 +130,8 @@ Reads `state/fleet.json`; counts `mailbox/<sid>.md` per worker; reads the superv
 ```python
 {
   "ok": True,                      # False if registry missing/unreadable
-  "reason": None,                  # "not_initialized" | "unreadable" when ok=False
+  "reason": None,                  # "not_initialized" | "quarantined" | "unreadable"
+                                   # when ok=False
   "generated_at": "2026-07-09T…Z",
   "totals": {"workers": 3, "mail": 2, "cost_usd": 2.14, "by_status": {…}},
   "supervisor": {"goals_active": True, "state": "held",
@@ -262,11 +263,14 @@ The SessionStart-hook column is dropped here with the hook itself (D7).
 
 | Condition | statusline | `/fleet:*` |
 |---|---|---|
-| `fleet.json` missing | `[fleet]: not initialized` | CLI's own message |
+| `fleet.json` missing, no `fleet.json.corrupt.*` beside it | `[fleet]: not initialized` | CLI's own message |
+| `fleet.json` missing, a `fleet.json.corrupt.*` artifact STANDS | `[fleet]: registry quarantined` | `fleet status --stale-ok` names the artifact and the remedy, exit 0; `fleet doctor` FAILs the registry row |
 | `fleet.json` unparseable | `[fleet]: registry unreadable` | reports + leaves the file in place; `/fleet:status` exits 0, `/fleet:peek`/`/fleet:result`/`/fleet:doctor` exit 1 with the `--repair` hint |
 | `FLEET_HOME` unresolvable | print nothing, exit 0 | CLI error |
 | `mailbox/` missing | mail counts = 0 | idem |
 | any unexpected exception | print nothing, exit 0 | CLI's own handling |
+
+**The two missing-`fleet.json` rows used to be one row, and that was the defect** (P1-13, fixed 2026-07-31). `_quarantine_registry` RENAMES rather than deletes, so from the operator's side a repaired incident and a box that never ran `fleet init` are both *"absent"* — and both surfaces printed the identical string for them. Measured on one home with the artifact present and then removed, the statusline and `fleet status --stale-ok` were byte-identical across the two states, so the read surface could not distinguish them at all. The split is derived from `_quarantine_artifacts()`, a `Path.glob` that swallows `OSError` into `[]` — no lock, no probe, no write, never raises — so **D4 is preserved: the honest render is reachable from a pure read.** A fix that made the statusline truthful by making it *probe* would have violated D4 and invariant 6; this one does not.
 
 The corrupt-registry row is D4: views report, the writer quarantines. The `/fleet:*` column of that row is written as the CLI's behaviour because it *is* the CLI — and since `doctor-repair`, D4 holds for both columns: a `/fleet:status` on a corrupt registry reports and exits 0, and `/fleet:peek`/`/fleet:result`/`/fleet:doctor` refuse without renaming anything. The only surface reachable from the read path that still quarantines is `fleet doctor --repair`, which is the operator's explicit repair verb and not a view — the lock-holding mutating verbs still quarantine too, and are not in this row's scope. *(At `02bf276` this row read "CLI quarantines + exits 1 (§11)" and was correct: the read verbs inlined the bare CLI and did quarantine. That was the D4 violation, stated in the table rather than hidden by it. See D4's CURRENT STATE and both receipt sets below.)*
 
