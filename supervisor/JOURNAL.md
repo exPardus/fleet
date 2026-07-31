@@ -5475,3 +5475,38 @@ FLOORS ON THE MERGED MAIN ARE RUNNING ON BOTH INTERPRETERS AND I HAVE NOT PUSHED
 ## 2026-07-31T04:14:45Z RELEASED inc=inc-20260731T031417Z-3840 sid=7279378e-6861-49cc-aabb-121783d797b4
 
 released cleanly: @C:/Users/Techn/.claude/jobs/7279378e/tmp/release.md
+
+## 2026-07-31T04:15:59Z BOOT inc=inc-20260731T041559Z-6bf4 sid=e9fdfc6e-731f-4e9f-90f2-8fcba0bf2564
+
+fresh claim: predecessor inc-20260731T031417Z-3840 released cleanly -- fresh claim, no seizure
+
+## 2026-07-31T04:19:36Z CHECKPOINT inc=inc-20260731T041559Z-6bf4 sid=e9fdfc6e-731f-4e9f-90f2-8fcba0bf2564
+
+W40 BOOT. FRESH CLAIM. THE BRIEF'S FOUR SELF-FLAGGED FACTS ALL CHECK OUT — AND THE ERROR IS SOMEWHERE IT DID NOT THINK TO LOOK: A RETRIEVAL POINTER ITS OWN AUTHOR DESTROYED IN THE SAME WAVE THAT WROTE IT.
+
+BOOT: verdict `claim`, exit 0, predecessor inc-20260731T031417Z-3840 released cleanly -- no seizure, no transfer, no anomaly. Incarnation inc-20260731T041559Z-6bf4. Nonce held in working context only; boot bundle read once and deleted in the same turn (class-4 doctrine, §5.8/§5.9). This checkpoint delivered through an @file body -- the wave-35 refusal-class-5 remedy, not a style choice.
+
+I VERIFIED ALL FOUR FACTS THE BRIEF FLAGGED AND EVERY ONE IS RIGHT, WHICH IS ITSELF THE NEWS. Three consecutive waves have opened by catching a stale brief; this brief was written by a predecessor that pre-empted the defect in advance and it worked.
+
+- SPEC.md anchor: the sentence *"A future guard enforcing 'a worker turn must never hold the supervisor claim' must key on the registry or the claim itself, never on FLEET_WORKER"* resolves at `docs/SPEC.md:204`. Re-derived fresh, not inherited. The brief's CORRECTED target is right and its warning that it had moved twice in three days is right.
+- rc-fix line: `tools/verify_receipts.py:856` is EXACTLY `if args.self_test and not self_test(text, root):` with `rc = 1` on 857. Unmoved. The file is 870 lines; nothing touched the tool.
+- Main tip `2ca1f0e`, origin identical (`2ca1f0ed112d2d57be8b3c0b351c229b3f288f93` both sides). Working tree carries only my own boot journal line.
+- Baseline inheritance: `git diff --name-only 2a25bdb HEAD` returns EXACTLY `supervisor/JOURNAL.md`, +4/-0. The stated condition HOLDS, so **3647/14/1 is inherited as CORRECT at `2ca1f0e`**, both interpreters.
+
+AND I TRIED TO REFUTE THE BASELINE ONE LEVEL DEEPER, BECAUSE THE WAVE-39 JOURNAL LEFT IT LOOKING LIKE A PREDICTION. Its last checkpoint reads "floors ARE RUNNING ... prediction 3647/14/1 ... the push waits for the number", and the very next journal event is RELEASED -- exactly the shape of a number that was predicted and then reported as measured. It was not: the release record states the floors were run on the merged tree and came back IDENTICAL on py 3.13 (320.23s) and py 3.10 (292.22s). **My suspicion was wrong and I am recording that it was wrong**, because "I checked whether the measurement happened" is worth as much when it clears as when it catches.
+
+NOW THE ERROR, AND IT IS IN THE ONE INSTRUCTION I WAS ABOUT TO ACT ON. The brief routes lane 2 with "Content in `fleet result w36-refute`". That verb returns, verbatim:
+
+    w36-refute: last turn ended by killed -- no result
+
+One line, no content. The cause is in the predecessor's own release record: "Worktrees retired after ancestry was PROVED ... `w39-mp-refute`, `w39-kfold`, `w36-refute`, `w37-rev-refute` killed then removed." **The supervisor killed the worker whose result its own brief then told its successor to read** -- in the same wave, in the same document set. This is not the familiar true-when-written-false-when-read decay of a line number that drifted underneath somebody. Nothing drifted. The author performed the act that falsified its own pointer, minutes after writing it, and the retirement sweep is a NORMAL, CORRECT, RECOMMENDED part of closing a wave.
+
+THE GENERALISABLE FINDING: **`fleet result` and `fleet kill` are in tension, and a brief that cites a result has a shelf life bounded by the worker's life.** A killed worker's last turn "ended by killed", so `result` reports there is none -- while the transcript, the outcome store and the worker journal all survive intact. Measured on this exact worker: `fleet peek w36-refute` still renders its FIX-WAVE DONE report; `state/outcomes/w36-refute.jsonl` is 14256 bytes; `state/journals/w36-refute.md` is 9818 bytes. **So the content was never lost -- only the ONE retrieval path the brief named was.** A supervisor handing work forward must cite a durable surface (the outcome store, the worker journal, a committed doc), never a verb whose answer depends on how the cited worker died. The campaign already knows "a finished worker result with no reader is indistinguishable from work not done" (w37); this is its successor case -- **a finished worker result with a reader who arrives after the retirement sweep is also indistinguishable from work not done, and the sweep is on the supervisor's own beat.**
+
+I RE-ROUTED THE LANE RATHER THAN RESTORING THE POINTER. The authoritative, git-tracked source is `docs/reviews/ULTRAREVIEW-2026-07-30.md` -- P1-7 at `:575` with full verdict text, and the finding table rows naming `bin/fleet.py:9039` (P1-7) and `bin/fleet.py:9038` (P2-8). Lane 2's brief will carry the substance INLINE plus that citation, so it never depends on a live worker.
+
+DOCTOR: THREE FAIL, EXACTLY THE THREE BRIEFED, NONE TAKEN. instance-freshness (needs `fleet init`, fenced -- operator gate), identity-witness (LEAK), supervisor-pending-decision (still the ND4(c) Option B raise awaiting Altai, raised by inc-20260730T225743Z-5cbd). The decision slot is OCCUPIED; nothing of mine overwrites it. Everything else PASS, including `supervisor-claim: inc-20260731T041559Z-6bf4 live`.
+
+MY FLEET_WORKER VARIANT: supervisor-shaped-but-stale, naming `sup|inc-20260730T202915Z-4726|boot` -- a DEAD record from a body that ran at 20:29Z, while the registry resolves my sid `e9fdfc6e-731f-4e9f-90f2-8fcba0bf2564` to `sup|inc-20260731T041537Z-9633|boot`. **This is the THIRD consecutive incarnation inheriting that same dead 4726 stamp** -- my predecessor and its predecessor both recorded it. The daemon has held `daemon.lock` since 2026-07-30T20:29:17Z, which is the same timestamp as the stamp, so the substitution source is a single long-lived daemon that has not idle-exited in ~8h. Benign for my operation because I resolve identity from the registry. Recorded as a WITNESS and not believed.
+
+STATE ENTERING THE WAVE: 59 registry workers, 0 pending mail, no limited parks, no stale attaches, autoclean last ran 0.1h ago. The parked `w35/nd4c` pair stands untouched. Four lanes to dispatch, ordered by the FILE-SET test rather than by ordering heuristics.
