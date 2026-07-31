@@ -304,13 +304,18 @@ class TestTheClaimHolderIsNeverExempt:
     structurally without resolving a sid against the registry -- but it may no
     longer exempt the claim-file holder. The holdership predicate is bare
     equality against `supervisor/INCARNATION`'s own `session_id`, which is
-    total (never None) and reads neither the environment nor `state/fleet.json`,
-    so it cannot land in ND4(b)'s indeterminate bucket and cannot quarantine
-    anything.
+    total (never None) and reads no REGISTRY, so it cannot land in ND4(b)'s
+    indeterminate bucket and cannot quarantine anything. It reads only the sid
+    channel claim-nonce §18.1 ratifies as trustworthy, plus the claim file --
+    `current_caller_session()` IS an environment read, and an earlier revision
+    of this docstring said the predicate was environment-free.
 
     WHAT IT COSTS, ratified with the ruling: (c) loses its *"runs first, with no
     sid at all"* ordering property, because the caller's own sid is now needed
-    to answer the question at all."""
+    to answer the question at all.
+
+    AND WHAT IT DOES NOT CLOSE: the ND4(a) fork-steer window, pinned below by
+    `test_the_ND4a_fork_steer_residual_is_REAL` rather than left to prose."""
 
     def _occ(self, monkeypatch, occupancy):
         monkeypatch.setattr(fleet, "find_transcript_path",
@@ -396,6 +401,63 @@ class TestTheClaimHolderIsNeverExempt:
         self._occ(monkeypatch, 300000)
         assert fleet._caller_holds_supervisor_claim("sid-mystery") is None
         assert fleet._ceiling_refuses_dispatch("spawn") is not None
+
+    def test_the_ND4a_fork_steer_residual_is_REAL(self, ceil_home, monkeypatch):
+        """WAVE-35 REVIEW F1 — the residual, pinned instead of described.
+
+        THIS TEST ASSERTS A HOLE. That is deliberate and it is the only honest
+        shape available: the residual was stated in one document and DENIED in
+        three, two of them running surfaces an operator reads mid-incident, and
+        prose is what let that happen. A characterization pin turns the
+        disclosure into something that goes RED the day the behaviour changes.
+
+        THE MECHANISM. The claim file carries `session_id` and no
+        `retired_sids`; `_restamp_after_steer` updates the REGISTRY RECORD, not
+        the claim. So inside the un-restamped fork-steer window the body runs
+        under a NEW sid while `INCARNATION.session_id` still holds the OLD one,
+        bare equality does not name it the holder, and the net below --
+        `_caller_holds_supervisor_claim`, which DOES bridge the window through
+        the record's sid union -- is only reached once a `FLEET_WORKER` stamp is
+        present. Unstamped, it is exempt. Read literally, that is the same
+        reading three-tier §11.3 ND4(a) calls *"fails open on exactly the path
+        every supervisor turn starts with"*.
+
+        NOT A REGRESSION: this body was exempt before the ruling too, by the
+        unnarrowed (c). A closes the stamped and the un-steered cases and leaves
+        this corner exactly as it found it.
+
+        WHEN THIS GOES RED, READ IT AS THE DECISION LANDING, NOT AS A BREAK.
+        Closing it is filed as an operator decision: refuse when
+        `_caller_holds_supervisor_claim(caller, claim=claim) is True`, after the
+        bare-equality check and before the stamp read. It is total in the safe
+        direction and never reaches ND4(b)'s bucket. It costs ND4(c)'s ratified
+        *"independent of any sid resolution"* property, which is why a worker
+        did not take it."""
+        monkeypatch.delenv("FLEET_WORKER", raising=False)
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-new")
+        _write_incarnation(_held("sid-old"))            # claim not yet restamped
+        _write_registry({"sup|inc-x|boot": {"session_id": "sid-new",
+                                            "retired_sids": ["sid-old"]}})
+        self._occ(monkeypatch, 500000)
+        # The control, asserted rather than assumed: the registry-bridged
+        # predicate DOES know this body is the holder. Without this the
+        # assertion below would be indistinguishable from "not the holder".
+        assert fleet._caller_holds_supervisor_claim("sid-new") is True, (
+            "control failed: ND4(a)'s sid-union bridge no longer resolves the "
+            "fork-steer window, so this test is not measuring the residual")
+        assert fleet._ceiling_refuses_dispatch("spawn") is None, (
+            "the ND4(a) fork-steer residual is CLOSED. If that was deliberate, "
+            "this pin and four prose statements of the residual go with it: "
+            "three-tier §11.3 ND4(c) closing paragraphs, claim-nonce §18.4, "
+            "`_ceiling_refuses_dispatch`'s docstring, `DAEMON_ENV_LEAK_REMEDY` "
+            "and the doctor identity-witness row")
+        # And the stamped half of the same window still refuses -- the residual
+        # is exactly the unstamped corner, not the whole window.
+        monkeypatch.setenv("FLEET_WORKER", "sup|inc-x|boot")
+        assert fleet._ceiling_refuses_dispatch("spawn") is not None, (
+            "a STAMPED fork-steered holder must still be caught by the arms "
+            "below the claim-file gate -- if it is not, the residual is wider "
+            "than every document says")
 
     def test_the_refusal_does_not_promise_an_escape_the_holder_does_not_have(
             self, ceil_home, monkeypatch):

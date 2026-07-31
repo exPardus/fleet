@@ -3570,21 +3570,44 @@ untouched."*
 
 **What shipped**, so the ruling and the code can be diffed: `_ceiling_refuses_dispatch` resolves the
 caller's sid, reads `supervisor/INCARNATION`, and asks bare equality against the **held** claim's own
-`session_id` — no environment, no registry, and **total** (True or False, never None, so it cannot
-land in ND4(b)'s indeterminate bucket). A caller that answers True reaches its occupancy measurement
+`session_id` — **no registry**, and **total** (True or False, never None, so it cannot land in
+ND4(b)'s indeterminate bucket). It reads only the sid channel **§18.1** ratifies as trustworthy, plus
+the claim file: `current_caller_session()` *is* an environment read, and an earlier revision of this
+sentence said the predicate was environment-free, which is exactly the class of claim §18 exists to
+stop. What §18.1 grants is narrower and sufficient — the sid specifically is trustworthy on a hosted
+body — so a future ruling about the env-substitution class must re-examine this gate rather than
+assume it immune. A caller that answers True reaches its occupancy measurement
 with no exemption available. A caller that answers False meets (c) and the other two exemptions
 exactly as before, (c) still ahead of any registry read — so an exempt caller still never opens
 `state/fleet.json` and still cannot quarantine one. **ND4(b) is byte-for-byte the same rule on the
 same input**, which is the property that made A the narrowest of the three.
 
-**What A does NOT close, stated so it is a known residual rather than a surprise.** Holdership here
-is the claim file's own `session_id`, so a supervisor inside the un-restamped fork-steer window
-(ND4a: the body carries a NEW sid while the claim still carries the OLD one) is not caught by this
-gate. It is caught by the arms below it — `_caller_holds_supervisor_claim` bridges that window
-through the record's sid union — **unless** it also has no `FLEET_WORKER` stamp, in which case (c)
-exempts it as it always did. That is strictly narrower than the pre-ruling behaviour and identical to
-it in that corner; closing it would require a registry-keyed predicate, which is exactly the
-collision A exists to avoid.
+**What A does NOT close — the ND4(a) fork-steer residual, stated so it is a known residual rather
+than a surprise, and MEASURED rather than derived.** Holdership here is the claim file's own
+`session_id`. The claim file carries **no `retired_sids`**, and `_restamp_after_steer` updates the
+REGISTRY RECORD rather than the claim, so a supervisor inside the un-restamped fork-steer window
+(ND4a: the body carries a NEW sid while the claim still carries the OLD one) is not named by this
+gate — indeed `caller_sid == INCARNATION.session_id` read literally is the same reading three-tier
+§11.3 ND4(a) calls *"fails open on exactly the path every supervisor turn starts with"*. It is caught
+by the arms below — `_caller_holds_supervisor_claim` bridges that window through the record's sid
+union — **but those are reached only when a `FLEET_WORKER` stamp is present**, i.e. not in the
+unstamped 4-of-4 case that motivated this ruling, so an unstamped fork-steered holder is exempted by
+(c) exactly as before. Measured: body on `sid-new`, record
+`{session_id: sid-new, retired_sids: [sid-old]}`, `INCARNATION.session_id = sid-old`, no stamp,
+500,000 tokens → **exempt**. Strictly narrower than the pre-ruling behaviour and identical to it in
+that corner, so A regresses nothing.
+
+**Closing it is FILED as an operator decision and is NOT impossible** — an earlier revision of this
+paragraph said it "would require a registry-keyed predicate, which is exactly the collision A exists
+to avoid", and that is wrong: refusing when `_caller_holds_supervisor_claim(caller, claim=claim) is
+True`, placed **after** the bare-equality check and **before** the stamp read, is total in the safe
+direction and never reaches ND4(b)'s bucket, because the bare-equality arm has already answered for
+every input ND4(b) governs. What it genuinely costs is ND4(c)'s **ratified** *"independent of any sid
+resolution"* property — a registry read on the exempt path — which is not a worker's to amend and is
+therefore filed rather than taken. Pinned by `tests/test_supervisor_ceiling.py::
+TestTheClaimHolderIsNeverExempt::test_the_ND4a_fork_steer_residual_is_REAL`: the day the operator
+rules it closed, that pin goes red and this paragraph is edited deliberately rather than discovered
+stale.
 
 **The record of why A rather than B or C follows, unchanged.** It is the pricing the ruling was made
 from.

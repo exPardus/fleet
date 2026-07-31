@@ -1514,3 +1514,36 @@ index) that keep telling an operator to wait for a decision already made.** Also
 old blank-stamp characterization pin, written *"so that any future re-grounding of ND4(c) has to
 change it deliberately rather than discover the blank case in production"*, did exactly that job
 — **a characterization pin pays off at the moment it becomes wrong.**
+
+**FIX WAVE, same day, after an adversarial review returned RED — and it returned RED on the
+TEXT, not the code** (narrowing proved minimal by construction, ND4(b) provably untouched,
+floors identical). **THE LESSON THAT COST THE WAVE: I wrote "the ones that hurt are the RUNNING
+SURFACES, not the specs" in this very entry, and then put a false sentence on two running
+surfaces.** The residual I had correctly discovered and honestly recorded in claim-nonce §18.4
+was DENIED in three other places — three-tier's closing Status line, the `fleet doctor`
+identity-witness row, and `DAEMON_ENV_LEAK_REMEDY` — all in the same direction, all saying the
+narrowing covered more than it does. **Disclosing a residual once does not disclose it: it has
+to be stated everywhere the guard is described, or the places that omit it are the places that
+get read.** Fixed by stating it in all five and pinning it
+(`test_the_ND4a_fork_steer_residual_is_REAL`), so the day it is closed the pin reddens and the
+prose is edited deliberately rather than discovered stale. **Second lesson, doctrinal: I called
+the new predicate "no environment read" one line above `current_caller_session()`, which reads
+`CLAUDE_CODE_SESSION_ID`.** Four surfaces asserted it, and the ratified spec that got it right
+disagreed with the ratified spec that did not. The failure mode is not the wrong word — it is
+that the next ruling made off §18.4 would treat this gate as immune to the env-substitution
+class and never re-examine it, *which is exactly how ND4(c) got here.* Correct framing: it reads
+the ONE env value §18.1 kept (the sid), plus the claim file. **Third: two of my own new
+assertions were adjacent to the property instead of on it** — `assert "claim" in remedy` passes
+on the citation `claim-nonce §18.4` no matter what the remedy says, and the row's only ND4(c)
+assertion (`"200k" in msg`) passes on the word inside a sentence NEGATING it. Both measured with
+mutants that stayed fully green. **An assertion that survives deleting the thing it names is
+prose with an `assert` in front of it.** Fourth: **the shipped `FLEET_WORKER` allowlist was a
+line scan asserting over the SET OF OWNING FUNCTIONS, so a second read inside an already-allowed
+function was invisible** — replaced with an AST walk that counts CALL SITES, plus a new pin on
+the holder verdict's whole environment surface (a `FLEET_NO_CEILING` gate had stayed green).
+Fifth, procedural: **the review's own first-pass "catches" were harness artifacts, and so were
+mine** — line-shifting edits fire `test_self_citations.py`, so a mutant "caught" by a citation
+pin is not caught. Every mutant re-run LINE-NEUTRAL after re-pinning: 5/5 caught, one failure
+each, nothing else moved. Floors 3510 → **3516/14/1 predicted exactly, both interpreters.**
+**And fix (b) was measured, not just priced:** closing the residual breaks exactly one test (the
+residual pin itself), which is evidence for the operator's decision rather than an argument.

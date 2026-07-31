@@ -964,6 +964,49 @@ class TestDoctorAnnouncesTheLeak:
         # The row must name what it costs, or an operator cannot act on it.
         assert "200k" in msg or "ceiling" in msg
 
+    def test_the_RESOLVED_rows_ND4c_accounting_is_TRUE_not_merely_present(
+            self, id_home, monkeypatch):
+        """WAVE-35 REVIEW F2. The assertion above is a substring check, and the
+        row's text is now a NEGATION ("the ceiling used to ride entirely on
+        this read, and it does not") -- so `"200k" in msg` passes on the word
+        appearing inside the sentence that denies it. Two mutants proved it:
+        replacing the ND4(c) sentence with *"the exemption was DELETED outright,
+        so no session anywhere is exempt from the 200k ceiling any more"* left
+        the full suite green at 3510, and replacing the remedy with *"there is
+        nothing you can do about this row and no remedy exists at all"* left it
+        green at 3515.
+
+        So this pins the CLAIM, not its vocabulary: what the exemption is gated
+        on, that the ND4(a) residual is disclosed, that the operator-actionable
+        remedy is present, and -- negatively -- that neither the dead 2026-07-30
+        blocker nor a totality claim about the exemption can come back."""
+        monkeypatch.delenv("FLEET_WORKER", raising=False)
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-w1")
+        _registry({"w1": _rec("sid-w1")})
+        _name, ok, msg = self._check()
+        assert ok is False
+        # 1. What the exemption is gated on since the 2026-07-31 ruling.
+        assert "CLAIM FILE" in msg, (
+            "the row does not say what ND4(c) is gated on, so an operator "
+            "cannot tell whether this body is exempt or not")
+        # 2. The ND4(a) residual, which three surfaces denied before this wave.
+        assert "FORK-STEER" in msg and "retired_sids" in msg, (
+            "the row claims the narrowing without disclosing the fork-steer "
+            "window it does not cover -- R2, a statement that always fails in "
+            "the field, on a running surface")
+        # 3. The remedy exists and is the one fleet cannot perform for you.
+        assert "idle-exit" in msg, "the row names no remedy at all"
+        # 4. NEGATIVE: the dead blocker cannot return.
+        assert "BLOCKED" not in msg, (
+            "the row names a blocker that was ruled on 2026-07-31")
+        # 5. NEGATIVE: it must not claim the exemption is gone altogether --
+        #    it is narrowed, and a body that is not the claim-file holder is
+        #    still exempt.
+        for lie in ("DELETED", "no session anywhere is exempt",
+                    "whole remedy", "no remedy exists"):
+            assert lie not in msg, (
+                f"the row asserts {lie!r}, which is false of shipped code")
+
     def test_a_blanked_witness_reddens_it_too(self, id_home, monkeypatch):
         """`FLEET_WORKER=""`, `"   "`, `"\\t"`, `"\\n"` are not merely
         falsy-absent, they are `.strip()`-absent -- all four grant the
@@ -1022,9 +1065,16 @@ class TestDoctorAnnouncesTheLeak:
         # 2026-07-31: the claim-holder is never exempt, predicate on the claim
         # file. So the guard survives and the hole it named does not.
         assert "ND4c" in remedy and "18.4" in remedy
-        assert "claim" in remedy, (
+        # WAVE-35 REVIEW F4: this used to read `assert "claim" in remedy`, which
+        # the citation `claim-nonce §18.4` satisfies on its own -- measured, by
+        # stripping every claim-file sentence out and watching it stay green.
+        # An assertion adjacent to the property is not an assertion on it.
+        assert "CLAIM FILE" in remedy, (
             "the remedy must name what the exemption is gated on now -- the "
-            "claim file -- or a reader still thinks the stamp decides alone")
+            "CLAIM FILE -- or a reader still thinks the stamp decides alone")
+        assert "FORK-STEER" in remedy, (
+            "the remedy states the narrowing without the ND4(a) residual it "
+            "does not cover, which is the shape this whole wave exists to fix")
         # R2, the named-remedy-that-always-fails class: the remedy used to close
         # with "the re-grounding is ordered and BLOCKED on an operator ruling".
         # That ruling exists. A remedy naming a dead blocker is the third
@@ -1142,6 +1192,179 @@ class TestDoctorAnnouncesTheLeak:
 #    has nothing to check if the witness stops being written.
 # --------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------
+# AST helpers for the environment-surface pins below.
+#
+# WHY AST AND NOT A LINE SCAN. The predecessor of
+# `test_FLEET_WORKER_is_not_a_predicate_at_the_CLAIM_GUARD` read `bin/fleet.py`
+# with `splitlines()`, attributed each line to the last `^def` above it, and
+# asserted over the SET OF OWNING FUNCTIONS. A set of owners cannot see a
+# SECOND read inside an already-allowed owner: a third
+# `os.environ.get("FLEET_WORKER")` planted inside `_ceiling_refuses_dispatch`
+# left the whole suite green (measured, wave-35 review). Counting call SITES is
+# the property the pin always meant to assert.
+# --------------------------------------------------------------------------
+
+def _fleet_module_ast():
+    from pathlib import Path
+    import ast
+    return ast.parse(Path(fleet.__file__).read_text(encoding="utf-8"))
+
+
+def _env_key(node):
+    """The literal env var this node reads, `'<dynamic>'` if it reads one
+    through a non-literal key, or None if it is not an environment read.
+
+    `<dynamic>` is a sentinel rather than a None so a computed key can never be
+    silently classified as "not an env read" -- which is how an allowlist
+    stops being one.
+    """
+    import ast
+    if isinstance(node, ast.Call):
+        f = node.func
+        if not isinstance(f, ast.Attribute):
+            return None
+        if f.attr == "get" and isinstance(f.value, ast.Attribute) \
+                and f.value.attr == "environ":
+            args = node.args
+        elif f.attr == "getenv":
+            args = node.args
+        else:
+            return None
+        if args and isinstance(args[0], ast.Constant) \
+                and isinstance(args[0].value, str):
+            return args[0].value
+        return "<dynamic>"
+    if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute) \
+            and node.value.attr == "environ":
+        s = node.slice
+        if isinstance(s, ast.Constant) and isinstance(s.value, str):
+            return s.value
+        return "<dynamic>"
+    return None
+
+
+def _env_read_sites(tree=None):
+    """Every environment read in `bin/fleet.py` as a LIST of
+    (innermost enclosing function or None, env var, line) -- one entry per CALL
+    SITE, so two reads in one function are two entries."""
+    import ast
+    tree = tree or _fleet_module_ast()
+    out = []
+
+    def walk(node, owner):
+        for child in ast.iter_child_nodes(node):
+            nxt = child.name if isinstance(
+                child, (ast.FunctionDef, ast.AsyncFunctionDef)) else owner
+            key = _env_key(child)
+            if key is not None:
+                out.append((nxt, key, getattr(child, "lineno", -1)))
+            walk(child, nxt)
+
+    walk(tree, None)
+    return out
+
+
+def _function_node(name, tree=None):
+    import ast
+    for node in ast.walk(tree or _fleet_module_ast()):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                and node.name == name:
+            return node
+    return None
+
+
+class TestTheEnvironmentSurfaceOfTheCeilingGate:
+    """WAVE-35 REVIEW, the test-suite hole two live mutants walked through.
+
+    Both survived the full suite at 3510 green:
+
+      1. a THIRD `os.environ.get("FLEET_WORKER")` planted inside
+         `_ceiling_refuses_dispatch` -- invisible to an owner-set allowlist;
+      2. `holds_the_claim` gated on a brand-new env var `FLEET_NO_CEILING`,
+         which nothing anywhere pinned, so the claim-file gate could be
+         switched off from the environment it is supposed to be independent of.
+
+    Mutant 2 is the one that matters doctrinally. The whole ground of operator
+    ruling A is that the holder verdict does not rest on the substituted
+    environment; §18.1 grants the SID and nothing else, so any other env value
+    reaching this verdict re-opens exactly the class the ruling closed. That has
+    to be pinned on the property, not asserted in a docstring next to it."""
+
+    TARGET = "_ceiling_refuses_dispatch"
+
+    def test_the_walker_sees_the_reads_it_is_asserting_over(self):
+        """Seed check: an AST walker that matches nothing passes everything."""
+        sites = _env_read_sites()
+        assert sites, "no environment read found in bin/fleet.py at all"
+        assert any(k == "FLEET_WORKER" for _, k, _ in sites), (
+            "the walker no longer recognises the `FLEET_WORKER` read -- every "
+            "assertion in this class is vacuous until it does")
+        assert _function_node(self.TARGET) is not None, (
+            f"`{self.TARGET}` is not a top-level function any more")
+
+    def test_FLEET_WORKER_is_read_at_exactly_two_CALL_SITES(self):
+        """The allowlist, counted by SITE. Adding a second read inside an
+        already-allowed function is what the old owner-set version could not
+        see, so that is the direction asserted first."""
+        sites = [(fn, ln) for fn, k, ln in _env_read_sites()
+                 if k == "FLEET_WORKER"]
+        owners = sorted(fn for fn, _ in sites)
+        assert owners == ["_ceiling_refuses_dispatch",
+                          "_doctor_check_identity_witness"], (
+            f"`FLEET_WORKER` is read at {len(sites)} site(s), owned by "
+            f"{owners}. Exactly two are allowed, ONE EACH: three-tier §11.3 "
+            f"ND4(c)'s structural ceiling exemption and the doctor row that "
+            f"reports the witness/registry disagreement. A second read inside "
+            f"either one is a new predicate wearing an allowed name.")
+
+    def test_the_claim_file_gate_reads_no_env_var_but_FLEET_WORKER(self):
+        """MUTANT 2's pin. Every environment key `_ceiling_refuses_dispatch`
+        touches directly, enumerated -- not `FLEET_WORKER`'s presence, which is
+        what an allowlist keyed on one name would check and would miss."""
+        import ast
+        fn = _function_node(self.TARGET)
+        keys = sorted({k for _, k, _ in _env_read_sites(fn)})
+        assert keys == ["FLEET_WORKER"], (
+            f"`{self.TARGET}` reads {keys} out of the environment. Only "
+            f"`FLEET_WORKER` may be read here: operator ruling A (2026-07-31) "
+            f"grounds the holder verdict on the claim file plus the sid channel "
+            f"claim-nonce §18.1 ratifies, and any other env value reaching this "
+            f"verdict re-opens the substitution class the ruling closed.")
+        # No UNCLASSIFIED environment touch either -- `dict(os.environ)`,
+        # `os.environ.setdefault(...)` and a computed key all bypass the
+        # enumeration above, so they are counted separately rather than
+        # assumed absent.
+        touches = sum(1 for n in ast.walk(fn) if isinstance(n, ast.Attribute)
+                      and n.attr in ("environ", "getenv"))
+        classified = sum(1 for _ in _env_read_sites(fn))
+        assert touches == classified, (
+            f"`{self.TARGET}` touches `os.environ`/`os.getenv` {touches} "
+            f"time(s) but only {classified} are classified reads with a literal "
+            f"key -- an unclassified touch is an env surface this pin cannot "
+            f"see, which is the failure mode it exists for")
+
+    def test_the_sid_channel_is_reached_through_the_one_sanctioned_helper(self):
+        """The gate DOES read the environment -- through
+        `current_caller_session()`, which is `CLAUDE_CODE_SESSION_ID`. Pinned
+        rather than hidden, because the wave-35 review found three surfaces
+        claiming this predicate was environment-free while the call that reads
+        the environment sat one line below the claim."""
+        import ast
+        import inspect
+        fn = _function_node(self.TARGET)
+        called = {n.func.id for n in ast.walk(fn)
+                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+        assert "current_caller_session" in called, (
+            "the ceiling no longer resolves its caller through "
+            "`current_caller_session()` -- if the sid channel moved, the "
+            "environment claims in this file's prose moved with it")
+        assert "CLAUDE_CODE_SESSION_ID" in inspect.getsource(
+            fleet.current_caller_session), (
+            "`current_caller_session` no longer reads CLAUDE_CODE_SESSION_ID, "
+            "so this pin is asserting over the wrong channel")
+
+
 class TestTheWitnessIsStillWritten:
     def test_worker_env_still_stamps_FLEET_WORKER(self, monkeypatch):
         monkeypatch.delenv("FLEET_WORKER", raising=False)
@@ -1194,30 +1417,26 @@ class TestTheWitnessIsStillWritten:
         claim-holder. `_ceiling_refuses_dispatch` therefore still READS the
         stamp, and still only to exempt a body that is not the claim-holder,
         which is what keeps it out of SPEC.md:196's scope."""
-        from pathlib import Path
-        import re
-        lines = Path(fleet.__file__).read_text(encoding="utf-8").splitlines()
-        owner, cur = {}, None
-        for i, ln in enumerate(lines, start=1):
-            m = re.match(r"^(?:def|class)\s+(\w+)", ln)
-            if m:
-                cur = m.group(1)
-            owner[i] = cur
-        reads = {owner[i] for i, ln in enumerate(lines, start=1)
-                 if 'os.environ.get("FLEET_WORKER")' in ln
-                 or "os.environ.get('FLEET_WORKER')" in ln}
-        # The seed check: a reworded read that this matcher misses would make
-        # every assertion below pass vacuously, which is the failure mode
-        # `tools/verify_receipts.py --self-test` exists for.
-        assert reads, "no `FLEET_WORKER` read found at all -- the matcher rotted"
+        sites = _env_read_sites()
+        # The seed check: a matcher that finds nothing makes every assertion
+        # below pass vacuously -- the failure mode
+        # `tools/verify_receipts.py --self-test` exists for one level up.
+        assert any(k == "FLEET_WORKER" for _, k, _ in sites), (
+            "no `FLEET_WORKER` read found at all -- the matcher rotted")
+        reads = {fn for fn, k, _ in sites if k == "FLEET_WORKER"}
         assert reads == {"_ceiling_refuses_dispatch", "_doctor_check_identity_witness"}, (
             f"unexpected `FLEET_WORKER` reader(s): {sorted(reads)}. Only two are "
             f"allowed: three-tier §11.3 ND4(c)'s structural ceiling exemption "
-            f"(absence, the sound direction) and the doctor row that reports the "
-            f"witness/registry disagreement. Anything else is a predicate.")
+            f"and the doctor row that reports the witness/registry disagreement. "
+            f"Anything else is a predicate.")
         assert "_require_claim_holder" not in reads, (
-            "SPEC.md:196: the guard enforcing `a worker turn must never hold the "
+            "SPEC.md:202: the guard enforcing `a worker turn must never hold the "
             "supervisor claim` must key on the registry or the claim itself")
+        # WAS A LINE SCAN, NOW AN AST WALK (wave-35 review). The old version
+        # attributed lines to the last `^def` above them and asserted over the
+        # SET of owners, which is blind to a second read inside an allowed
+        # owner. `TestTheEnvironmentSurfaceOfTheCeilingGate` above counts SITES;
+        # this test keeps the doctrinal assertion the SPEC sentence names.
 
 
 def _nonce_from(out: str):
