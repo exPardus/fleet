@@ -22,13 +22,17 @@ more). So:
   registry cap, a marker misparse, a slice, an off-by-one, and for whatever is
   invented next -- unlike "the file is big enough", which a padded stub passes.
 * Coverage is a CENSUS over every `dispatch_bg` call site in `bin/fleet.py`,
-  re-derived from source on every run, tied by set-equality to the drivers below.
-  A new dispatch path cannot be added without owing an end-to-end driver here --
-  which is what stops the census degenerating into an allowlist, the failure this
-  repo has already paid for once ("the first thing to check about a detector is
-  not what it catches but what it excuses").
+  re-derived from source on every run. It is derived **by AST and compared as
+  COUNTS**, and each driver **proves it reached the site it is keyed under**.
+  All three of those are load-bearing and none of them was true of the first
+  version: a substring scan set-compared over qualnames was blind to an alias
+  (`_launch = dispatch_bg`), to a whitespace variant (`dispatch_bg (`), to a
+  second call inside a function already on the list, and to a driver repointed
+  at a different path -- four planted mutants, four full-suite greens at 3522.
+  A detector is only ever non-vacuous for the shapes someone actually planted
+  against it; see `BRIEF_DRIVERS` for what these three now cover.
 """
-import re
+import sys
 import types
 from pathlib import Path
 from types import SimpleNamespace
@@ -142,16 +146,44 @@ def spawn(name, cwd, task, monkeypatch, sid=SID_1):
     return sid
 
 
+def _respawn_args(name, task=None):
+    return SimpleNamespace(name=name, task=task, force=False, yes=True,
+                           max_budget_usd=None, setting_sources=None,
+                           token_ceiling=None, nonce=None)
+
+
 def respawn(name, monkeypatch, sid=SID_2, task=None):
     monkeypatch.setattr(fleet, "_fetch_agents_roster",
                         _roster((True, []), (True, []), (True, [_entry(sid)])))
-    args = SimpleNamespace(name=name, task=task, force=False, yes=True,
-                           max_budget_usd=None, setting_sources=None,
-                           token_ceiling=None, nonce=None)
-    rc = fleet.cmd_respawn(args, run=_run_for(sid), which=_claude,
-                           sleep=lambda s: None, clock=lambda: 0.0)
+    rc = fleet.cmd_respawn(_respawn_args(name, task), run=_run_for(sid),
+                           which=_claude, sleep=lambda s: None, clock=lambda: 0.0)
     assert rc == 0
     return sid
+
+
+def respawn_refused_by_roster(name, monkeypatch, task=None):
+    """A respawn that aborts BEFORE the pre-claim: the roster cannot be fetched,
+    so liveness is unprovable and respawn refuses outright."""
+    monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (False, []))
+
+    def _never(*a, **kw):
+        raise AssertionError("nothing may dispatch after a roster-fetch refusal")
+    with pytest.raises(fleet.FleetCliError, match="could not fetch the native roster"):
+        fleet.cmd_respawn(_respawn_args(name, task), run=_never, which=_claude,
+                          sleep=lambda s: None, clock=lambda: 0.0)
+
+
+def respawn_refused_by_dispatch(name, monkeypatch, task=None, sid=SID_2):
+    """A respawn that aborts AFTER the pre-claim: the `--bg` launch itself
+    fails, and the rollback restores the pre-respawn record."""
+    monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                        _roster((True, []), (True, []), (True, [_entry(sid)])))
+
+    def _failing_run(argv, **kw):
+        return types.SimpleNamespace(returncode=1, stdout="", stderr="boom")
+    with pytest.raises(fleet.FleetCliError):
+        fleet.cmd_respawn(_respawn_args(name, task), run=_failing_run,
+                          which=_claude, sleep=lambda s: None, clock=lambda: 0.0)
 
 
 def idle_send(name, message, monkeypatch, old_sid, sid=SID_3):
@@ -274,6 +306,148 @@ class TestAFreshSessionReceivesTheWholeBrief:
         assert len(twice) <= len(once) + len(BRIEF) // 4
 
 
+NEW_SCOPE = "TOTALLY-NEW-TASK: a scope this worker was never dispatched on.\n"
+
+
+class TestARefusedRespawnLeavesTheBriefAlone:
+    """F1. `respawn --task X` that REFUSES must not record X.
+
+    The registry rollback restores `before` verbatim on every abort; the brief
+    is part of that state now, so a refusal that keeps X is the wave-34 defect
+    inverted -- days later a routine bare `fleet respawn` hands the worker a
+    scope from a dispatch that never happened, with no event and no warning.
+
+    Both sides of the pre-claim are pinned, because they fail differently: a
+    roster-fetch refusal aborts BEFORE anything is written, and a dispatch
+    failure aborts AFTER, through the `except` arms. A fix that only moves the
+    write inside the `try:` closes the first and leaves the second."""
+
+    def test_a_respawn_refused_before_the_preclaim_does_not_record_the_override(
+            self, project, monkeypatch):
+        spawn("w1", project, BRIEF, monkeypatch)
+        before = fleet.brief_file_path("w1").read_bytes()
+        respawn_refused_by_roster("w1", monkeypatch, task=NEW_SCOPE)
+        assert fleet.brief_file_path("w1").read_bytes() == before, (
+            "a refused respawn recorded its --task anyway -- the next BARE "
+            "respawn will dispatch a scope no respawn ever ran")
+
+    def test_a_respawn_refused_at_dispatch_does_not_record_the_override(
+            self, project, monkeypatch):
+        spawn("w1", project, BRIEF, monkeypatch)
+        before = fleet.brief_file_path("w1").read_bytes()
+        respawn_refused_by_dispatch("w1", monkeypatch, task=NEW_SCOPE)
+        assert fleet.brief_file_path("w1").read_bytes() == before
+
+    def test_the_next_bare_respawn_after_a_refusal_still_gets_the_real_brief(
+            self, project, monkeypatch):
+        """The failure the operator actually experiences, end to end."""
+        spawn("w1", project, BRIEF, monkeypatch)
+        respawn_refused_by_roster("w1", monkeypatch, task=NEW_SCOPE)
+        respawn("w1", monkeypatch)
+        body = delivered("w1")
+        assert NEW_SCOPE.strip() not in body
+        assert SENTINEL in body
+
+
+class TestTheOverrideIsRecordedWhenItSucceeds:
+    """F4. The WRITE side of the brief store at respawn, which was unpinned:
+    deleting the `write_brief` call outright left the whole suite green,
+    because the only override test asserted the delivered body of that SAME
+    dispatch. Assert it through a SECOND, bare respawn -- the read path is the
+    only thing that proves the write happened."""
+
+    def test_a_successful_override_survives_into_the_next_bare_respawn(
+            self, project, monkeypatch):
+        spawn("w1", project, BRIEF, monkeypatch)
+        respawn("w1", monkeypatch, sid=SID_2, task=NEW_SCOPE)
+        respawn("w1", monkeypatch, sid=SID_3)
+        body = delivered("w1")
+        assert NEW_SCOPE.strip() in body, (
+            "the --task override was not recorded, so a bare respawn re-scoped "
+            "the worker BACKWARDS to the brief it was originally spawned on")
+        assert SENTINEL not in body
+
+
+class TestTheBackstopIsIdentityNotAThreshold:
+    """F3. `assert_brief_carried` had no direct test at all, so replacing its
+    containment check with `len(prompt_body) < len(brief) // 2` -- the
+    "materially shorter" threshold its own docstring and `knowledge/lessons.md`
+    both name as unsound in BOTH directions -- left the suite green.
+
+    These four call it directly. The second is the one that kills a threshold:
+    same length, one character different."""
+
+    def test_a_carried_brief_passes(self):
+        brief = "line one\nline two\n"
+        fleet.assert_brief_carried("w1", brief, "PREAMBLE\n" + brief + "\nJOURNAL")
+
+    def test_a_same_length_body_that_is_not_the_brief_is_refused(self):
+        brief = "line one\nline two\n"
+        same_length = brief[:-2] + "X\n"
+        assert len(same_length) == len(brief)
+        with pytest.raises(fleet.FleetCliError, match="does not carry the whole brief"):
+            fleet.assert_brief_carried("w1", brief, same_length)
+
+    def test_a_proper_prefix_of_the_brief_is_refused_however_long_the_body(self):
+        """The exact wave-34 shape, and the one a length threshold misses: a
+        truncated brief padded back over any size bar by a carried journal."""
+        brief = "the whole brief, ending in the part that matters\n"
+        body = "PREAMBLE\n" + brief[:20] + "\n" + ("JOURNAL LINE\n" * 200)
+        assert len(body) > len(brief)
+        with pytest.raises(fleet.FleetCliError, match="does not carry the whole brief"):
+            fleet.assert_brief_carried("w1", brief, body)
+
+    @pytest.mark.parametrize("empty", ["", "   ", "\n\n"])
+    def test_an_empty_brief_is_exempt(self, empty):
+        """The steer paths compose with no task at all (F6); the backstop must
+        not turn that into a refusal."""
+        fleet.assert_brief_carried("w1", empty, "PREAMBLE only")
+
+
+class TestTheCapIsOneNumber:
+    """F8. `read_brief` calls a snapshot AT the cap a remnant and refuses it.
+    That is only sound while the number it compares against is the number
+    `new_worker_record` actually truncates to. They used to be two literals
+    agreeing by luck: raising the record's cap made `read_brief` refuse every
+    COMPLETE task between the old cap and the new one, and the one test that
+    noticed read like a number to update.
+
+    Behavioural, not textual, so it holds however the cap is spelled."""
+
+    def test_the_record_truncates_to_exactly_the_length_read_brief_refuses(self):
+        rec = fleet.new_worker_record("s", "C:/p", "x" * 5000, "bypass")
+        assert len(rec["task"]) == fleet.LEGACY_TASK_SNAPSHOT_CHARS, (
+            f"the registry truncates to {len(rec['task'])} but `read_brief` "
+            f"calls {fleet.LEGACY_TASK_SNAPSHOT_CHARS} the remnant length -- "
+            f"between the two, a COMPLETE task is refused as a remnant")
+
+    def test_a_task_one_char_under_the_cap_is_dispatched_not_refused(
+            self, project, monkeypatch):
+        """The other side of the same equality: the refusal must fire on the
+        remnant and on nothing else."""
+        task = "y" * (fleet.LEGACY_TASK_SNAPSHOT_CHARS - 1)
+        spawn("w1", project, task, monkeypatch)
+        fleet.brief_file_path("w1").unlink()
+        fleet.task_file_path("w1").unlink()
+        respawn("w1", monkeypatch)
+        assert task in delivered("w1")
+
+
+class TestCleanSweepsTheBrief:
+    """F6. The archive half was pinned and the clean half was not, so dropping
+    `brief_file_path` from `_remove_worker_files` left the suite green -- and a
+    name reused after `fleet clean` inherits the dead worker's brief, which a
+    bare respawn then dispatches."""
+
+    def test_removing_a_worker_removes_its_brief(self, project, monkeypatch):
+        sid = spawn("w1", project, BRIEF, monkeypatch)
+        assert fleet.brief_file_path("w1").exists()
+        removed = fleet._remove_worker_files("w1", sid, [])
+        assert fleet.brief_file_path("w1") in removed, (
+            f"the brief was not swept: {[p.name for p in removed]}")
+        assert not fleet.brief_file_path("w1").exists()
+
+
 class TestNoDispatchDestroysTheBrief:
     """The universal half: a `--resume` steer legitimately composes a body with
     no task in it (F6 -- the message rides the mailbox, and the resumed session
@@ -371,6 +545,44 @@ class TestTheRemnantIsNeverDispatched:
         assert SENTINEL in fleet.brief_file_path("w1").read_text(encoding="utf-8"), (
             "the recovery must be written back, or every later respawn re-pays it")
 
+    def test_recovery_refuses_a_context_payload_rather_than_welding_in_a_digest(
+            self, project, monkeypatch):
+        """F5. `compose_prompt` inserts `--context` DIGESTS between the preamble
+        and the task, so a spawn-time prefix test that stops at the preamble
+        still passes and the recovered "brief" starts with a symbol table.
+        `read_brief` writes recovery back, so that stale digest would be welded
+        into the worker's task for every future respawn -- contamination, not
+        truncation, and it survives the very repair that recorded it."""
+        indexed = project / "indexed"
+        (indexed / "src").mkdir(parents=True)
+        (indexed / "src" / "api.py").write_text(
+            "ALPHA = 1\n\n\ndef alpha(x):\n    return str(x)\n", encoding="utf-8")
+        fleet.index_symbols_dir(indexed).mkdir(parents=True, exist_ok=True)
+        fleet.build_index(indexed)
+
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            _roster((True, []), (True, [_entry(SID_1)])))
+        args = SimpleNamespace(name="w1", dir=str(indexed), task=BRIEF,
+                               mode="bypass", model=None, max_budget_usd=None,
+                               setting_sources=None, token_ceiling=None,
+                               category=None, context="src/api.py",
+                               yes=True, nonce=None)
+        assert fleet.cmd_spawn(args, run=_run_for(SID_1), which=_claude,
+                               sleep=lambda s: None, clock=lambda: 0.0) == 0
+        payload = delivered("w1")
+        assert "L1 ALPHA" in payload, (
+            "no digest landed in the payload -- this test is not exercising the "
+            "shape it names")
+
+        fleet.brief_file_path("w1").unlink()          # the pre-wave-35 state
+        rec = fleet.load_registry()["workers"]["w1"]
+        recovered = fleet._recovered_brief("w1", rec)
+        assert recovered is None or not recovered.lstrip().startswith("##"), (
+            f"the recovered brief begins with a --context digest: "
+            f"{recovered[:80]!r}")
+        if recovered is not None:
+            assert recovered.startswith("# The mission")
+
     def test_recovery_refuses_a_steer_stub_rather_than_guessing(
             self, project, monkeypatch):
         """The recovery is exact-prefix arithmetic, never a parser. A payload
@@ -393,7 +605,7 @@ class TestTheRemnantIsNeverDispatched:
 # name, which let a line-count-neutral fifth dispatch path ship green). Two
 # copies of a census resolver is two chances for one of them to rot.
 
-from test_index_compose import _call_sites  # noqa: E402
+from test_index_compose import _call_sites, call_counts  # noqa: E402
 
 
 def _drive_supervisor_body(project, monkeypatch, campaign=BRIEF):
@@ -428,29 +640,73 @@ def _driver_resume_limited(project, monkeypatch):
     return "w1"
 
 
-#: Every `dispatch_bg` call site in `bin/fleet.py`, mapped to a driver that
-#: runs it END TO END. The set-equality test below is what makes this a
-#: contract rather than a list: a new dispatch path cannot be added without
-#: owing a driver here, and a driver that does not preserve the brief fails
-#: behaviourally. Neither half alone is coverage.
+#: Every `dispatch_bg` call site in `bin/fleet.py`, mapped to `(driver, calls)`
+#: -- a driver that runs the site END TO END, and how many times that function
+#: calls `dispatch_bg`.
+#:
+#: THREE things have to hold together, and each covers a hole the other two
+#: leave (all three were planted and left the full suite GREEN at 3522):
+#:   1. the census is derived by AST, so an alias or a whitespace variant is
+#:      still seen (`call_counts`);
+#:   2. it compares COUNTS, so a second call inside a function already listed
+#:      here is seen;
+#:   3. each driver PROVES it reached the site it is keyed under, so a driver
+#:      repointed at another path stops vouching for this one.
+#: Without (3) the table is an allowlist with a citation. This repo has already
+#: paid once for a census that decayed into exactly that.
 BRIEF_DRIVERS = {
-    "cmd_spawn": _driver_spawn,
-    "_cmd_respawn_native": _driver_respawn,
-    "_cmd_send_native": _driver_send,
-    "_resume_one_limited_native": _driver_resume_limited,
-    "_dispatch_supervisor_body": _drive_supervisor_body,
+    "cmd_spawn": (_driver_spawn, 1),
+    "_cmd_respawn_native": (_driver_respawn, 1),
+    "_cmd_send_native": (_driver_send, 1),
+    "_resume_one_limited_native": (_driver_resume_limited, 1),
+    "_dispatch_supervisor_body": (_drive_supervisor_body, 1),
 }
 
 
+@pytest.fixture
+def dispatch_witness(monkeypatch):
+    """Record which `bin/fleet.py` function actually called `dispatch_bg`, and
+    still run the real one -- its unconditional task-file write is the act
+    under test, so a double here would assert against a copy of the defect.
+
+    `co_name`, not `co_qualname`: the interpreter floor is 3.10 and
+    `co_qualname` is 3.11+. A class-method dispatch path would therefore be
+    witnessed by its bare method name, which is why the census above (which
+    DOES resolve qualnames) is the half that catches new shapes."""
+    real = fleet.dispatch_bg
+    seen = []
+
+    def _witness(*a, **kw):
+        seen.append(sys._getframe(1).f_code.co_name)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(fleet, "dispatch_bg", _witness)
+    return seen
+
+
 def test_every_dispatch_site_owes_a_brief_driver():
-    sites = _call_sites("dispatch_bg(", skip_defs=("dispatch_bg",))
-    assert sites == set(BRIEF_DRIVERS), (
-        f"the set of dispatch_bg call sites changed: {sorted(sites)}. Every "
+    sites = call_counts("dispatch_bg")
+    expected = {name: calls for name, (_driver, calls) in BRIEF_DRIVERS.items()}
+    assert sites == expected, (
+        f"the dispatch_bg call census changed: {sorted(sites.items())}. Every "
         f"dispatch overwrites `state/tasks/<name>.md`, which is the file the "
         f"worker is told to read and follow -- decide what the new path does "
-        f"to the brief, add a driver to BRIEF_DRIVERS, and re-pin this set. "
+        f"to the brief, add a driver to BRIEF_DRIVERS, and re-pin this census. "
         f"Fixing only the site that was wrong reproduces the miss at the next "
         f"one; that is exactly how wave 34 happened.")
+
+
+@pytest.mark.parametrize("site", sorted(BRIEF_DRIVERS), ids=lambda s: s)
+def test_each_driver_reaches_the_site_it_is_keyed_under(
+        site, project, monkeypatch, dispatch_witness):
+    """The half that stops the table being an allowlist. Repointing the `send`
+    and `resume-limited` drivers at `_driver_spawn` left 121 tests green: they
+    still passed, still "covered" their sites, and exercised neither."""
+    BRIEF_DRIVERS[site][0](project, monkeypatch)
+    assert site.rpartition(".")[2] in dispatch_witness, (
+        f"the driver keyed under {site} dispatched from {dispatch_witness} -- "
+        f"it never reached {site}, so every property it appears to prove about "
+        f"that path is vacuous")
 
 
 @pytest.mark.parametrize("site", sorted(BRIEF_DRIVERS), ids=lambda s: s)
@@ -460,7 +716,7 @@ def test_no_dispatch_site_leaves_a_brief_it_cannot_read_back(
     file is still the whole brief. Asserted on the LAST LINE, which is what
     makes it mechanism-independent -- a cap, a slice, a marker misparse and an
     off-by-one all lose it, while "the file is big enough" survives them."""
-    name = BRIEF_DRIVERS[site](project, monkeypatch)
+    name = BRIEF_DRIVERS[site][0](project, monkeypatch)
     text = fleet.brief_file_path(name).read_text(encoding="utf-8")
     assert SENTINEL in text, (
         f"{site} left a brief whose last line is gone -- whatever a later "

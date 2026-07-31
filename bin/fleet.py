@@ -160,9 +160,17 @@ def briefs_dir() -> Path:
     it, kept apart from the per-dispatch payload in `tasks_dir()`.
 
     NOT under `tasks_dir()`, deliberately. `dispatch_bg` passes
-    `--add-dir tasks_dir()` to every worker, so every task file is writable by
-    every worker; a brief is a dispatch INPUT and must not sit inside a
-    directory fleet hands out write access to."""
+    `--add-dir tasks_dir()` to every worker, so a task file is PRE-AUTHORIZED
+    for every worker; a brief is a dispatch INPUT and does not belong in a
+    directory fleet grants wholesale.
+
+    THE NARROW CLAIM IS THE TRUE ONE (review F7). This removes the brief from
+    the granted set -- it does NOT make it unreachable. `MODE_FLAGS["bypass"]`
+    is `--dangerously-skip-permissions`, `SUP_SPAWN_DEFAULT_MODE` is `bypass`,
+    and campaigns run bypass, so under the fleet's own default mode NO path
+    inside FLEET_HOME is protected by anything. What this buys is real and
+    bounded: under `accept`/`dontask`/`plan` a worker that wanders into another
+    worker's brief now meets a permission prompt instead of an open door."""
     return state_dir() / "briefs"
 
 
@@ -746,12 +754,12 @@ def _quarantine_artifacts() -> list:
     registry is always newer -- an "artifact newer than the registry"
     comparison would never fire on the recreation bypasses it exists to stop.
 
-      * `_sweep_husks` (:8749) -- a rename can hide live worker records from
+      * `_sweep_husks` (:8850) -- a rename can hide live worker records from
         the roster sweep, so a thin registry would rm sessions it still owns.
-      * `_doctor_check_autoclean` (:9841) -- a lingering artifact means the
+      * `_doctor_check_autoclean` (:9942) -- a lingering artifact means the
         sweep above is refusing itself, which is how a bricked sweep reads
         green-and-fresh.
-      * `_require_claim_holder`'s §9 arm (:14264) -- the legacy upgrade mints
+      * `_require_claim_holder`'s §9 arm (:14365) -- the legacy upgrade mints
         generation 1 on bare sid equality, so it needs the registry that
         cleared it to be COMPLETE, not merely readable. See there.
 
@@ -761,13 +769,13 @@ def _quarantine_artifacts() -> list:
     read and described, and the question only arises when there is no file to
     answer for itself.
 
-      * `_acting_worker_identity` (:2745) -- `not_initialized` stays the
+      * `_acting_worker_identity` (:2824) -- `not_initialized` stays the
         affirmative *"there are no records"* only with no artifact beside it.
         SCOPED TO THE ABSENT CASE ON PURPOSE: this resolver is shared with the
         §6.5 worker-turn gate, which refuses on `True` alone, so poisoning a
         HEALTHY read here would let a real worker turn through §6.5 -- closing
         the §9 door by opening a wider one. Rule 1 lives at the §9 arm instead.
-      * `_identity_abstention_note` (:13985) -- the same distinction, in words,
+      * `_identity_abstention_note` (:14086) -- the same distinction, in words,
         because the generic note names `fleet doctor` and doctor is what MADE
         this state.
 
@@ -973,6 +981,19 @@ def current_caller_session() -> str | None:
     return sid or None
 
 
+LEGACY_TASK_SNAPSHOT_CHARS = 200
+"""The registry `task` snapshot cap, applied by `new_worker_record` below and
+read by `read_brief`.
+
+ONE name for ONE number, because the two readings must agree: a snapshot AT
+the cap cannot be told apart from a complete task of exactly that length, so
+`read_brief` treats it as a remnant and refuses to dispatch it. Written as a
+literal in the record builder and re-declared in the brief store, raising the
+builder's cap alone would have made `read_brief` refuse every COMPLETE task
+between the old cap and the new one -- a truncated brief must fail loudly, but
+a whole one must not fail at all."""
+
+
 def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
                        max_budget_usd=None, setting_sources=None, token_ceiling=None,
                        spawned_by=None, dispatch_kind=None, category=None,
@@ -992,7 +1013,14 @@ def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
     return {
         "session_id": session_id,
         "cwd": str(cwd),
-        "task": task[:200],
+        # THE cap. `read_brief` treats a snapshot AT this length as a remnant
+        # and refuses to dispatch it, so the two must be the same number --
+        # they are now the SAME NAME (fix wave F8). Spelled as a literal here
+        # and documented in the brief store, they agreed only by luck: raising
+        # this one alone made `read_brief` refuse every COMPLETE task between
+        # the old cap and the new one, and the single test that noticed read
+        # like a number to update.
+        "task": task[:LEGACY_TASK_SNAPSHOT_CHARS],
         "mode": mode,
         "model": model,
         "max_budget_usd": max_budget_usd,
@@ -1468,11 +1496,8 @@ def compose_prompt(name: str, cwd, task: str, sid: str | None, journal_path=None
 # registry is on the hot read path for every view and the statusline, and a
 # second full copy of every brief there buys nothing this file does not.
 
-LEGACY_TASK_SNAPSHOT_CHARS = 200
-"""`new_worker_record`'s cap. A snapshot AT the cap cannot be distinguished
-from a complete task of exactly that length, so `read_brief` treats it as a
-remnant and refuses rather than dispatching it -- a truncated brief must fail
-loudly, never dispatch silently."""
+# `LEGACY_TASK_SNAPSHOT_CHARS` is defined above `new_worker_record`, which is
+# the code that APPLIES it -- see fix wave F8 there.
 
 
 def write_brief(name: str, task: str) -> None:
@@ -1488,6 +1513,36 @@ def write_brief(name: str, task: str) -> None:
         raise FleetCliError(
             f"{name}: could not record the brief at {brief_file_path(name)}: {exc}"
         ) from exc
+
+
+def brief_snapshot(name: str) -> bytes | None:
+    """The recorded brief's exact bytes, or None when none is recorded.
+
+    FIX WAVE (F1). A respawn's rollback restores the pre-respawn REGISTRY
+    record verbatim, and the brief is part of that state now: a `respawn
+    --task X` that aborts must not leave X recorded, or a later BARE respawn
+    dispatches a scope from a respawn that never ran -- silent wrong-task
+    dispatch, the wave-34 invisibility class inverted. Bytes, not text, so the
+    restore is byte-exact rather than newline-normalised."""
+    try:
+        return brief_file_path(name).read_bytes()
+    except OSError:
+        return None
+
+
+def restore_brief(name: str, snapshot: bytes | None) -> None:
+    """Put the brief back exactly as `brief_snapshot` found it -- including
+    REMOVING one this attempt created. Best-effort, like every other rollback
+    step here: a failed restore must not mask the error being rolled back."""
+    path = brief_file_path(name)
+    try:
+        if snapshot is None:
+            path.unlink()
+        else:
+            briefs_dir().mkdir(parents=True, exist_ok=True)
+            path.write_bytes(snapshot)
+    except OSError:
+        pass
 
 
 def _recovered_brief(name: str, rec: dict) -> str | None:
@@ -1513,19 +1568,36 @@ def _recovered_brief(name: str, rec: dict) -> str | None:
     if not body.startswith(prefix):
         return None
     rest = body[len(prefix):]
-    # A steer payload carries mail where the task would be, and there is no
-    # sound way to tell where the mail ends -- refuse rather than guess.
-    if rest.startswith("<MANAGER MESSAGE>"):
-        return None
     marker = "\n## Journal from previous session\n"
     cut = rest.find(marker)
     if cut != -1:
         rest = rest[:cut]
     if not rest.strip():
         return None
+    snapshot = rec.get("task") or ""
+    if not snapshot:
+        return None
+    # FIX WAVE (F5): THE REMAINDER MUST BEGIN WITH THE RECORDED SNAPSHOT.
+    #
+    # Stopping the prefix test at the preamble was not the exact arithmetic
+    # this docstring promises: `compose_prompt` emits parts in the order
+    # preamble / DIGESTS / mail / task / journal, so a `--context` spawn's
+    # payload begins `preamble + "\n" + digest`, the prefix test still passed,
+    # and the recovered "brief" started with a stale symbol table --
+    # `'## src/api.py (5 lines, python)\n- L1 ALPHA...'` -- which `read_brief`
+    # then wrote back, welding it into that worker's task for every future
+    # respawn. Contamination rather than truncation, and it survived the very
+    # repair that recorded it.
+    #
+    # The registry snapshot is the head of the real task text, so requiring the
+    # remainder to start with it verifies the whole middle of the prompt in one
+    # comparison, with no parser and no per-part knowledge: a digest, a mail
+    # block, or anything else standing where the task should be fails it. This
+    # subsumes the explicit `<MANAGER MESSAGE>` refusal that used to sit here.
+    if not rest.startswith(snapshot):
+        return None
     # The payload of an already-truncated respawn reproduces the remnant
     # exactly. Recovering that would launder a truncation into a "brief".
-    snapshot = rec.get("task") or ""
     if len(snapshot) >= LEGACY_TASK_SNAPSHOT_CHARS and rest == snapshot:
         return None
     return rest
@@ -1546,7 +1618,14 @@ def read_brief(name: str, rec: dict) -> str:
         return text
     recovered = _recovered_brief(name, rec)
     if recovered is not None:
-        write_brief(name, recovered)
+        # BEST-EFFORT (fix wave). The recovery already succeeded in memory and
+        # this respawn can proceed on it; an unwritable brief store must not
+        # convert a RECOVERABLE respawn into a refusal. The only cost of a
+        # failed write-back is that the next respawn re-derives it.
+        try:
+            write_brief(name, recovered)
+        except FleetCliError:
+            pass
         return recovered
     snapshot = rec.get("task") or ""
     if len(snapshot) >= LEGACY_TASK_SNAPSHOT_CHARS:
@@ -2695,7 +2774,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     -- reads `ok` while MISSING every record the artifact holds, and the §9 arm
     read that thinness as an affirmative *"you are provably not a worker"*. The
     presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:14264`), where it costs the §6.5 gate nothing.
+    (`:14365`), where it costs the §6.5 gate nothing.
 
     An artifact can also outlive its incident by days -- `_sweep_husks` tells the
     operator to restore the file first and delete the artifact second -- so that
@@ -2711,7 +2790,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     THE READ IS NEVER `load_registry`, and that distinction is the whole reason
     `_registry_records_or_none` exists (this site uses its `(ok, reason, data)`
     source directly, for the paragraph above). `load_registry`
-    QUARANTINES a corrupt registry -- it RENAMES the file aside (`:829`) -- and
+    QUARANTINES a corrupt registry -- it RENAMES the file aside (`:837`) -- and
     its docstring is explicit that *"callers must abort, not catch-and-
     continue."* The first version of this function did catch and continue: the
     exception was swallowed, the rename was not, so on a corrupt registry every
@@ -6250,9 +6329,12 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
     # `args.task` is deliberately NOT populated from the brief: the token-ceiling
     # arming above keys on its presence, and doing so would convert every bare
     # recovery respawn -- §11.4's whole purpose -- into a refused dispatch.
+    #
+    # FIX WAVE (F1): the override is only RESOLVED here. Recording it is a
+    # mutation and belongs inside the rollback envelope below -- see the
+    # `write_brief` call beside `assert_brief_carried`.
     if task_override is not None:
         task_for_record = task_override
-        write_brief(name, task_override)
     else:
         task_for_record = read_brief(name, before)
     prior_retired = list(before.get("retired_sids", []))
@@ -6331,7 +6413,20 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
 
     journal_path = journal_file_path(name)
     prompt, claim = compose_prompt(name, cwd, task_for_record, old_sid, journal_path=journal_path)
+    prior_brief = brief_snapshot(name)
     try:
+        # FIX WAVE (F1): RECORDING the override happens here, inside the same
+        # envelope as the pre-claim it belongs with -- not at the resolve site
+        # ~80 lines up, which sits above the roster fetch, the liveness gate,
+        # `fleet_lock` and the pre-claim. Every abort in that stretch (roster
+        # unavailable, old session live without `--force`, a `--force` stop that
+        # fails re-verification) rolled the registry back and left the brief
+        # REPLACED, so a later bare respawn dispatched a scope no respawn ever
+        # ran. Both `except` arms below now `restore_brief`, which covers the
+        # aborts on THIS side of the pre-claim too -- moving the call alone
+        # would have closed only the first half.
+        if task_override is not None:
+            write_brief(name, task_override)
         # Wave 35 backstop, INSIDE the rollback envelope: a respawn dispatches a
         # session with NO prior context (no `--resume` -- the reset is the
         # point), so the composed body is everything the new body will ever know
@@ -6387,6 +6482,11 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
             print(f"{name} {fast_sid} (native bg, fast completion before join)")
             return 0
 
+        # F1: past the fast-completion branch, this IS a rollback -- the brief
+        # goes back with the record. NOT on the branch above: that launch
+        # genuinely happened and consumed this prompt, so its `--task` is the
+        # worker's real brief and restoring it would be the defect in reverse.
+        restore_brief(name, prior_brief)
         restore_mailbox_claim(claim)
         with fleet_lock():
             data = load_registry()
@@ -6397,6 +6497,7 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
                 append_event("respawn_failed", name, error=str(exc), old_session_id=old_sid)
         raise FleetCliError(f"{name}: native respawn failed -- {exc}") from exc
     except BaseException as exc:
+        restore_brief(name, prior_brief)
         restore_mailbox_claim(claim)
         with fleet_lock():
             data = load_registry()
@@ -6832,7 +6933,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # P1-6: `read_registry_no_repair`, NOT `load_registry`. This is a PRE-FLIGHT
-    # resolution that runs from `cmd_kill:6726` / `cmd_respawn:6468`, before
+    # resolution that runs from `cmd_kill:6827` / `cmd_respawn:6569`, before
     # either verb has taken `fleet.lock` -- and `load_registry` QUARANTINES a
     # corrupt registry, i.e. RENAMES IT ASIDE, which is a write. An unlocked
     # write races every other fleet command, and it destroys the evidence the
@@ -6895,10 +6996,10 @@ def _supervisor_lifecycle_target(verb, name):
     # P1-6: `read_registry_no_repair` -- `load_registry` MINUS the rename, with
     # the same missing-file contract, the same validator and the same
     # `RegistryCorruptError`, so the arm below is unchanged. This read runs from
-    # `cmd_kill:6726` / `cmd_respawn:6468`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:6827` / `cmd_respawn:6569`, ahead of either verb's `fleet_lock`,
     # and quarantining here did two things: it wrote without the lock, and it
     # STOLE the quarantine from the lock-held read that was designed to perform
-    # it. `cmd_respawn:6492-6494` spells out that design -- *"resolve under the
+    # it. `cmd_respawn:6593-6595` spells out that design -- *"resolve under the
     # lock so a corrupt registry surfaces through load_registry's quarantine"* --
     # and the theft is what falsified it: by the time the lock-held read ran the
     # file was ABSENT rather than corrupt, so `{"workers": {}}` came back and the
@@ -12670,12 +12771,12 @@ def _registry_records_or_none():
 
     IT MUST NOT BE `load_registry`, and that is the whole reason this function
     exists rather than a bare try/except at each site. `load_registry`
-    QUARANTINES a corrupt registry -- it renames the file aside (`:829`) --
+    QUARANTINES a corrupt registry -- it renames the file aside (`:837`) --
     which is a WRITE. `_supervisor_gate` promises "READ-ONLY: no lock, no mint,
     no write" and runs at the top of every mutating verb, so routing its
     identity read through `load_registry` would let a speed-bump shred operator
     evidence on a path that documents itself as touching nothing. This is D4's
-    rule for the view path (`:3611`) applied to the one other reader that has
+    rule for the view path (`:3690`) applied to the one other reader that has
     no business quarantining. Quarantining stays where it belongs: the
     lock-holding verbs, `cmd_sup_boot` included via `_holder_is_limited`."""
     ok, _reason, data = _read_registry_readonly()
@@ -12862,8 +12963,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     live_sids` is what shipped, and `_record_sids`' own docstring says why it
     is wrong -- *"matching against `session_id` alone fails open on it
     (ND4a)"* -- for the twelve other sites that already key on the union
-    (`:2447, :2491, :2752, :2902, :6866, :7183, :7464, :7682, :7769, :7992,
-    :8778, :12733`). B6 was the one
+    (`:2526, :2570, :2831, :2981, :6967, :7284, :7565, :7783, :7870, :8093,
+    :8879, :12834`). B6 was the one
     roster comparison that did not, and §G-G measured it failing open exactly
     as predicted: the releaser fork-steered, so its record was eagerly
     restamped (`session_id` = post-fork, pre-fork sid pushed into
@@ -12875,8 +12976,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :5848, :6318, :10639,
-    :15907), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :5927, :6400, :10740,
+    :16008), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -13566,8 +13667,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:5848, :6318, :10639,
-    #     :15907) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:5927, :6400, :10740,
+    #     :16008) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -13597,10 +13698,10 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         #   * `_registry_records_or_none`, NEVER `load_registry`. This gate
         #     documents itself "READ-ONLY: no lock, no mint, no write" and
         #     `load_registry` QUARANTINES a corrupt registry -- it RENAMES the
-        #     file aside (`:829`), which is a write. Routing the identity read
+        #     file aside (`:837`), which is a write. Routing the identity read
         #     through it made `fleet send` shred the operator's evidence from a
         #     path that promises to touch nothing; the helper exists for exactly
-        #     this and names this gate as its reason (`:12661`). A `None` here
+        #     this and names this gate as its reason (`:12762`). A `None` here
         #     still fails toward the gate -- an unreadable registry is reported
         #     by its own doctor row, and is never a reason to decide blind.
         #     MERGE NOTE (2026-07-27): main and `fix/identity-registry-judges`
@@ -14242,7 +14343,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # A worker whose own record sits inside the artifact upgrades the claim.
         #
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as `_sweep_husks`
-        # spells it at `:8742`. Not an mtime comparison: `os.rename` preserves
+        # spells it at `:8843`. Not an mtime comparison: `os.rename` preserves
         # mtime, so the artifact's mtime is the PRE-corruption write time and any
         # recreated registry is always newer -- the comparison would never fire
         # on the one bypass it exists to stop.
