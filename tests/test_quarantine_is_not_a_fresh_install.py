@@ -161,12 +161,48 @@ class TestAQuarantinedFleetIsNotAFreshInstall:
         assert not fleet.registry_path().exists()
 
     def test_sup_release_no_longer_calls_a_quarantine_a_fresh_install(self, home, capsys):
-        """`cmd_sup_release`'s `if reason != "not_initialized"` arm swallowed the
-        quarantined case silently AND, if reached, would have told the operator
-        the registry `was NOT quarantined`. Both are false after a rename."""
-        _quarantined(home)
-        ok, reason, _ = fleet._read_registry_readonly()
-        assert (ok, reason) == (False, "quarantined")
+        """`_tombstone_releasing_body`'s registry-failure arm swallowed the
+        quarantined case in SILENCE, and the `unreadable` wording it would
+        otherwise have reused says the registry "was NOT quarantined" -- exactly
+        false after a rename.
+
+        THIS TEST USED TO CALL NOTHING. Its first cut asserted
+        `_read_registry_readonly() == (False, "quarantined")`, which the first
+        test in this class already asserts, and took a `capsys` it never read.
+        It was in the 14-RED set, so it LOOKED like evidence -- but it reddened
+        on the new `reason` value, not on the surface it is named for. Mutant
+        M10 (`"quarantined"` -> `"quarantined_XX"` in this arm) made all
+        thirteen lines of live operator-facing stderr unreachable and the full
+        suite still passed 3599/14/1. Gate lens, 2026-07-31, B2."""
+        art = _quarantined(home)
+        retired = fleet._tombstone_releasing_body("sid-releasing", "inc-1")
+        err = capsys.readouterr().err
+
+        assert retired is None                    # nothing to tombstone
+        assert "sup-release" in err
+        assert "quarantined aside" in err
+        assert art.name in err                    # the artifact, by name
+        assert "was NOT quarantined" not in err   # the `unreadable` wording
+        # The release is already committed; B6 stays armed and says so.
+        assert "B6" in err
+        # Still a view-shaped read: the arm reports and writes nothing.
+        assert art.exists()
+        assert not fleet.registry_path().exists()
+
+    def test_sup_release_stays_silent_on_a_genuine_fresh_install(self, home, capsys):
+        """The other side of the split -- `not_initialized` must NOT start
+        printing an incident report on a box that has simply never spawned."""
+        assert fleet._tombstone_releasing_body("sid-releasing", "inc-1") is None
+        assert capsys.readouterr().err == ""
+
+    def test_sup_release_still_reports_an_unreadable_registry_as_unquarantined(
+            self, home, capsys):
+        """And the pre-existing arm keeps its own wording."""
+        (home / "state" / "fleet.json").mkdir()
+        assert fleet._tombstone_releasing_body("sid-releasing", "inc-1") is None
+        err = capsys.readouterr().err
+        assert "was NOT quarantined" in err
+        assert "quarantined aside" not in err
 
 
 # --------------------------------------------------------------------------
@@ -233,15 +269,106 @@ class TestRepairReportsWhatHappenedNotWhatWasAsked:
         # sharing violation reaches.
         (home / "state" / "fleet.json").mkdir()
 
+    def _row(self, capsys):
+        fleet.cmd_doctor(SimpleNamespace(repair=True))
+        return [l for l in capsys.readouterr().out.splitlines()
+                if "registry:" in l][0]
+
+    def _rename_loses(self, monkeypatch):
+        def _boom(self, target):
+            raise OSError(32, "sharing violation")
+        monkeypatch.setattr(Path, "rename", _boom)
+
+    # -- ARM 3 of 3: no rename was ever attempted -------------------------
+
     def test_a_failed_open_is_not_announced_as_a_quarantine(self, home, capsys):
         self._unreadable(home)
-        fleet.cmd_doctor(SimpleNamespace(repair=True))
-        row = [l for l in capsys.readouterr().out.splitlines()
-               if "registry:" in l][0]
+        row = self._row(capsys)
         assert "has been quarantined" not in row
         assert "registry unreadable" in row
+        assert "attempted NO rename" in row
         assert fleet.registry_path().exists()
         assert fleet._quarantine_artifacts() == []
+
+    def test_the_never_attempted_arm_does_not_vouch_for_the_contents(
+            self, home, capsys):
+        """It used to say the file `is not a corrupt registry to rename aside`.
+        Nothing read the file, so that was an unearned clean bill of health."""
+        self._unreadable(home)
+        row = self._row(capsys)
+        assert "is not a corrupt registry" not in row
+        assert "NOT a claim that its contents are sound" in row
+
+    # -- ARM 2 of 3: attempted, and LOST ----------------------------------
+
+    def test_a_lost_rename_is_reported_as_a_lost_rename(self, home, capsys,
+                                                        monkeypatch):
+        """The B1 defect. `repair=True` + corrupt content + a rename the
+        filesystem denies reached the `never attempted` arm, which called
+        `{ truncated` *"not a corrupt registry to rename aside"* and sent the
+        operator to fix the READ -- in the same sentence that said the RENAME
+        was denied."""
+        fleet.registry_path().write_text("{ truncated", encoding="utf-8")
+        self._rename_loses(monkeypatch)
+        row = self._row(capsys)
+        assert "RENAME" in row and "FAILED" in row
+        assert "has been quarantined" not in row
+        assert "attempted NO rename" not in row
+        assert "is not a corrupt registry" not in row
+        assert "denying the read" not in row      # the misdirected remedy
+        assert "still unparseable" in row
+        assert fleet.registry_path().read_text(encoding="utf-8") == "{ truncated"
+
+    def test_the_three_arms_are_mutually_distinguishable(self, home, capsys,
+                                                         monkeypatch):
+        """One bit cannot hold three states. Drive all three and require each
+        row to carry ITS OWN arm's wording.
+
+        NOT `len(set(rows)) == 3`, which is what this test asserted first and is
+        exactly the mistake B2 was filed for: `{error}` is interpolated into
+        every arm and already differs between the three states, so a
+        set-distinctness assertion stays green with two arms collapsed into one.
+        It would have been red for the wrong reason -- measured, by collapsing
+        the `attempted` arm and watching this test pass."""
+        # never attempted
+        self._unreadable(home)
+        never = self._row(capsys)
+        (home / "state" / "fleet.json").rmdir()
+        # attempted and lost
+        fleet.registry_path().write_text("{ truncated", encoding="utf-8")
+        with monkeypatch.context() as m:
+            def _boom(self, target):
+                raise OSError(32, "sharing violation")
+            m.setattr(Path, "rename", _boom)
+            lost = self._row(capsys)
+        # attempted and won
+        won = self._row(capsys)
+
+        marks = ("attempted NO rename", "RENAME FAILED", "has been quarantined")
+        for row, own in zip((never, lost, won), marks):
+            assert own in row, (own, row)
+            for other in marks:
+                if other != own:
+                    assert other not in row, (other, row)
+
+    def test_the_lost_rename_message_claims_nothing_about_other_artifacts(
+            self, home, monkeypatch):
+        """`_corrupt_error` asserted *"no fleet.json.corrupt.<ts> artifact
+        exists, so no artifact-keyed refusal downstream will fire either"* --
+        two claims about the whole `state/` directory, made without looking, and
+        both false beside a prior artifact. Reading the glob to check would be
+        the inference `RegistryCorruptError` exists to refuse, so the sentence
+        was narrowed to what this call knows instead."""
+        (home / "state" / ARTIFACT).write_text("old incident", encoding="utf-8")
+        fleet.registry_path().write_text("{ truncated", encoding="utf-8")
+        self._rename_loses(monkeypatch)
+        with pytest.raises(fleet.RegistryCorruptError) as exc:
+            fleet.load_registry()
+        msg = str(exc.value)
+        assert "this incident left no" in msg
+        assert "no artifact-keyed refusal" not in msg
+        # ...and the standing artifact really does still make them fire.
+        assert fleet._quarantine_artifacts()
 
     def test_a_real_quarantine_is_still_announced_as_one(self, home, capsys):
         fleet.registry_path().write_text("{ this is not json", encoding="utf-8")
@@ -280,6 +407,7 @@ class TestRepairReportsWhatHappenedNotWhatWasAsked:
         with pytest.raises(fleet.RegistryCorruptError) as exc:
             fleet.load_registry()
         assert exc.value.quarantined is None
+        assert exc.value.attempted is True
         assert "could NOT be quarantined" in str(exc.value)
         assert fleet.registry_path().exists()
 
@@ -288,6 +416,7 @@ class TestRepairReportsWhatHappenedNotWhatWasAsked:
         with pytest.raises(fleet.RegistryCorruptError) as exc:
             fleet.load_registry()
         assert exc.value.quarantined is not None
+        assert exc.value.attempted is True
         assert exc.value.quarantined.name.startswith("fleet.json.corrupt.")
 
     def test_the_unreadable_arm_carries_no_quarantine(self, home):
@@ -295,6 +424,7 @@ class TestRepairReportsWhatHappenedNotWhatWasAsked:
         with pytest.raises(fleet.RegistryCorruptError) as exc:
             fleet.load_registry()
         assert exc.value.quarantined is None
+        assert exc.value.attempted is False
 
 
 # --------------------------------------------------------------------------
