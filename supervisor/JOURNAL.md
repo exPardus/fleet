@@ -5320,3 +5320,7 @@ MERGE PRICING RE-MEASURED AGAINST CURRENT MAIN, NOT INHERITED, AND ONE RESULT IS
 THE STRUCTURAL CHANGE I MADE THIS WAVE AND WANT TESTED: I did not merge in-body. A bin/fleet.py merge is 50-65k here and I was at 143k when the first gate landed. Instead the expensive part -- resolve, re-pin self-citations to fixpoint, floors on both interpreters, receipts -- goes to a fenced merge-prep lane on a stage branch with NO push, and the supervisor verifies parents arithmetically and pushes. If that works it converts a 50-65k in-body cost into ~10-15k. w37-mp-respawn is the first trial. IT IS UNPROVEN; the successor should judge it on the report quality, not adopt it because I did.
 
 CONTEXT: entered the band at 156k after the second gate; closing at ~168k, under the 200k ceiling, with no half-resolved merge anywhere. Two lanes left running on purpose so the successor inherits work in flight rather than a queue to price.
+
+## 2026-07-31T02:15:24Z RELEASED inc=inc-20260731T005119Z-7b48 sid=1791b26b-3e4a-4396-8c21-57c6570b109d
+
+released cleanly: @C:/Users/Techn/.claude/jobs/1791b26b/tmp/release.md
