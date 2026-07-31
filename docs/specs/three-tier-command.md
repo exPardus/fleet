@@ -1666,6 +1666,29 @@ human's control channel (ND1).
 > still covers is ND1's:** an unstamped session that does **not** hold the claim stays exempt however
 > unplaceable its sid, so the human control channel keeps a refusal it could never escape out of
 > reach.
+>
+> **AND ONE RESIDUAL THAT IS NOT ND1'S — the ND4(a) fork-steer window, measured rather than
+> derived, and (a) three paragraphs above is the bullet that names it.** The claim file carries a
+> `session_id` and **no `retired_sids`**, and `_restamp_after_steer` updates the REGISTRY RECORD, not
+> the claim — so a supervisor inside the un-restamped fork-steer window runs under a NEW sid while
+> the claim still carries the OLD one, and bare equality does not name it the holder. Read literally,
+> `caller_sid == INCARNATION.session_id` is the same reading (a) above calls *"fails open on exactly
+> the path every supervisor turn starts with"*. The net below it —
+> `_caller_holds_supervisor_claim`, which **does** bridge the window through the record's sid union —
+> is reached only when a `FLEET_WORKER` stamp is present, i.e. **not** in the unstamped case that
+> motivated this ruling. Measured: body on `sid-new`, record
+> `{session_id: sid-new, retired_sids: [sid-old]}`, `INCARNATION.session_id = sid-old`, no stamp,
+> 500,000 tokens → **exempt**. This is strictly narrower than the pre-ruling behaviour and identical
+> to it in that corner, so the amendment regresses nothing; it is stated here because a guard whose
+> surfaces claim more than it does is how (c) reached this state in the first place.
+>
+> **Closing it is FILED as an operator decision and is NOT impossible.** Refusing when
+> `_caller_holds_supervisor_claim(caller, claim=claim) is True` — after the bare-equality check and
+> before the stamp read — is total in the safe direction and leaves ND4(b)'s bucket untouched. What
+> it costs is (c)'s **ratified** *"ahead of any sid resolution … independent of any sid resolution"*
+> property, which a worker may not amend. Pinned by `tests/test_supervisor_ceiling.py::
+> TestTheClaimHolderIsNeverExempt::test_the_ND4a_fork_steer_residual_is_REAL`, so the day it is
+> closed the pin goes red and this paragraph is edited deliberately.
 
 ### 11.4 The worker arm of the band (operator, wave 3)
 
