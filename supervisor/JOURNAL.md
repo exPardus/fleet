@@ -5388,3 +5388,31 @@ STATE: w36-refute still working -- self-citations at fixpoint, receipts 11/11, p
 ## 2026-07-31T02:42:11Z RELEASED inc=inc-20260731T021652Z-4f31 sid=5358084c-3662-4adf-b492-3029a5e725f0
 
 released cleanly: @C:/Users/Techn/.claude/jobs/5358084c/tmp/release.md
+
+## 2026-07-31T03:14:17Z BOOT inc=inc-20260731T031417Z-3840 sid=7279378e-6861-49cc-aabb-121783d797b4
+
+fresh claim: predecessor inc-20260731T021652Z-4f31 released cleanly -- fresh claim, no seizure
+
+## 2026-07-31T03:17:11Z CHECKPOINT inc=inc-20260731T031417Z-3840 sid=7279378e-6861-49cc-aabb-121783d797b4
+
+W39 BOOT. FRESH CLAIM. THE BRIEF'S BASELINE COMMIT IS STALE FOR THE THIRD CONSECUTIVE WAVE — BUT THIS TIME THE NUMBER SURVIVES, AND I MEASURED WHY RATHER THAN ASSUMING IT.
+
+BOOT: verdict `claim`, exit 0, predecessor inc-20260731T021652Z-4f31 released cleanly — no seizure, no transfer, no anomaly. Nonce held in working context only; boot bundle read once and deleted in the same turn (class-4 doctrine, §5.8/§5.9). This checkpoint delivered through an @file body — the wave-35 refusal-class-5 remedy, not a style choice.
+
+WHAT THE BRIEF GOT WRONG. Its baseline reads "3621/14/1 at 619a3f8". Main is at `dbfdee5`, ONE commit past 619a3f8 — my predecessor's own RELEASED entry, written after it wrote this brief. That is the THIRD consecutive wave whose brief cites a baseline commit that was already behind at boot, and the mechanism is now unmistakable: a brief is written from the state its own closing journal entry then changes. But the useful half is the difference from waves 37 and 38. `git diff --name-only 619a3f8 dbfdee5` returns exactly `supervisor/JOURNAL.md`, +4/-0, and no test reads that path outside a temp FLEET_HOME (wave 38 established this by census). So 3621/14/1 IS the correct baseline at `dbfdee5` — the PIN is stale, the MEASUREMENT is not. Naming a stale pin without checking whether it moved the number is the mirror error of trusting it.
+
+THE MERGE PRICE RE-DERIVED FRESH, WITH THE FORM THAT ACTUALLY EXISTS, AND THE BRIEF IS EXACTLY RIGHT. git 2.34.1 confirmed on this box, so `--write-tree` is unavailable and the three-arg form is the only measurement. Base `2fd0d15f7c65007d18b959fa7ac387b8b26719fa`, `git merge-tree <base> main w36/refute`, rc 0, `grep -c '<<<<<<<'` UNANCHORED = **14**. Branch delta 761/50 across 4 files. Both figures match the brief to the digit. I am recording the rc and the nonzero count deliberately: wave 38's finding is that this command's failure mode is EMPTY OUTPUT READ AS ZERO, so a 14 that came back with rc 0 is the positive control the 0s lacked.
+
+AND THE CONFLICT IS NARROWER THAN THE COUNT SUGGESTS. All 14 hunks are in ONE file — merge-tree reports exactly one `changed in both` (`bin/fleet.py`), with `bin/fleet_statusline.py` and `docs/specs/terminal-surface.md` cleanly `merged` and `tests/test_quarantine_is_not_a_fresh_install.py` add-only on the branch side. `git merge-base --is-ancestor main w36/refute` answers NO, so this is a true merge, not a fast-forward — re-derived at boot rather than inherited, per wave 38's rule that a prep report is a claim about a PARENT.
+
+THE VERIFICATION THE BRIEF ASKED FOR, AND IT CHECKS OUT IN BOTH DIRECTIONS. Refute tip is `3b5d0a0`, and `git log 3b5d0a0..w36/refute` returns ZERO commits — nothing landed after the fix. The re-gate's own report closes with "tree verified clean at `3b5d0a0`", so the GREEN gate reviewed the fix commit itself, not a later one it never saw. `RE-GATE: GREEN`, 0 blocking, both gate-1 findings discharged by RE-PLANTING the mutants rather than reading the diff; 12 injections, 11 caught, all line-count-neutral (19371 → 19371); the one survivor (R12) proved inert by construction, not unpinned.
+
+THE RE-GATE ALSO CORRECTED ITS OWN BRIEF IN THE DIRECTION THAT COSTS IT CREDIT, WHICH IS THE SIGNAL I TRUST MOST. Its brief claimed a gate-1 pin caught a plant it was not written for; the lane measured that NO gate-1 pin did — the two apparent catches were `test_self_citations.py` / `test_retired_sid_citations.py` firing on line-shift noise, and when the injections were redone line-count-neutral BOTH SURVIVED. That is the same reasoning error that made M10 look covered in gate 1, caught by the lane on itself.
+
+BRANCH FLOORS DO NOT TRANSFER TO THE MERGE AND I AM NOT LETTING THEM. The lane measured 3605/14/1 on both interpreters from ITS base 3579. Main is 3621 from that same base (+42, test_brief_preservation.py). Those two deltas are disjoint files, so the merge floor is a PREDICTION to be derived and collected by the merge lane, never the branch's number carried forward — wave 38's rule that a test-count delta must be COLLECTED, never counted from `def test_` lines.
+
+DOCTOR: THREE FAIL, EXACTLY THE THREE BRIEFED, NONE TAKEN. instance-freshness (needs `fleet init`, fenced — operator gate), identity-witness (LEAK), and supervisor-pending-decision, still the predecessor's ND4(c) Option B raise awaiting Altai. The decision slot is OCCUPIED; nothing of mine overwrites it.
+
+MY FLEET_WORKER VARIANT: supervisor-shaped-but-stale, naming `sup|inc-20260730T202915Z-4726|boot` — a DEAD record from a body that ran at 20:29Z, while the registry resolves my sid to `sup|inc-20260731T031352Z-f0e2|boot`. Identical to my predecessor's, at a different boot. This is the day-4 wedge-2 substitution mechanism re-confirmed for the second consecutive incarnation; benign for my operation because I resolve identity from the registry, recorded as a WITNESS and not believed.
+
+STATE ENTERING THE WAVE: w36-refute idle, w37-rev-refute idle, both worktrees standing at `3b5d0a0` (the reviewer is detached at the same sha it reviewed). The parked nd4c pair stands. Merge lane goes out first; the deferred lanes were held precisely to avoid manufacturing conflicts against this merge, so they wait for it to land.
