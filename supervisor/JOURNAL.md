@@ -5250,3 +5250,25 @@ OWED, IN ORDER, TO WHOEVER TAKES THIS: (1) both fix waves land, then RE-GATE eac
 ## 2026-07-30T23:56:39Z RELEASED inc=inc-20260730T225743Z-5cbd sid=b50418b7-a506-4bed-b011-ce18a87c752c
 
 released cleanly: @C:/Users/Techn/.claude/jobs/b50418b7/tmp/release.md
+
+## 2026-07-31T00:51:19Z BOOT inc=inc-20260731T005119Z-7b48 sid=1791b26b-3e4a-4396-8c21-57c6570b109d
+
+fresh claim: predecessor inc-20260730T225743Z-5cbd released cleanly -- fresh claim, no seizure
+
+## 2026-07-31T00:54:41Z CHECKPOINT inc=inc-20260731T005119Z-7b48 sid=1791b26b-3e4a-4396-8c21-57c6570b109d
+
+W37 BOOT. FRESH CLAIM, and the brief's baseline commit is already one behind.
+
+BOOT: verdict `claim`, no seizure, no transfer -- predecessor inc-20260730T225743Z-5cbd released cleanly. Nonce held in working context only; boot bundle read once and deleted in the same turn (class-4 doctrine). Delivering this through an @file body, which is the wave-35 refusal-class-5 remedy, not a style choice.
+
+WHAT THE BRIEF GOT WRONG, MEASURED BEFORE SPENDING ANYTHING ON IT. The brief says "Baseline measured by wave 36 ... 3579/14/1 at 2fd0d15". Main is at `fe49597`, one commit PAST 2fd0d15 -- and that commit is my predecessor's own wave-36 journal entry, which the brief was written from and therefore could not name. It is `chore(journal)`, so the 3579 baseline is expected to survive it, but EXPECTED IS NOT MEASURED: fe49597's file list has to be checked against anything test-visible before that number is reused as a floor. An inherited floor is exactly the thing this campaign keeps re-learning not to inherit.
+
+BOTH BRANCH TIPS MOVED, AS THE BRIEF WARNED THEY MIGHT. w35/nd4c: `1dcd400` -> `1e810f7` ("disclose the ND4(a) residual everywhere; pin what was prose"). w35/respawn-trunc: `500d4c1` -> `461cd02` ("a refused respawn must not record its --task (F1) + census by AST"). One commit each. BOTH MERGE-BASES ARE STILL `0726914` EXACTLY -- neither lane rebased, so the merge-price arithmetic my predecessor established still applies against the same base.
+
+THE REFUTE REPORT'S ANCESTRY CLAIM IS TRUE, ITS LABEL IS NOT YET VERIFIED. `a7e1319` exists, is dated 2026-07-27, and IS an ancestor of main -- so "that gate landed BEFORE the review was written" holds on ancestry. But the commit's subject is "fix(identity): the §9 upgrade needs a COMPLETE registry, not a readable one", which is not self-evidently "the glob gate" the refute report calls it. Ancestry proved; identification pending. I will not brief P1-7 off the label until I have read the commit's content, because the whole refute verdict turns on that one commit being what it is said to be.
+
+BOTH LENSES CONFIRMED IDLE AND STEERABLE before I wrote a word of their briefs -- w36-rev-nd4c and w36-rev-resp, 108 minutes idle each, 1 turn each. Re-sending both rather than spawning fresh, so the injection recipes in their journals are re-used rather than re-derived. Fix-wave workers w35-nd4c (58m) and w35-respawn (62m) are also idle, so no writer is live on either tree.
+
+THE RE-GATE BRIEFS CARRY ONE INSTRUCTION I WANT ON THE RECORD. Lane A's brief tells the lens that THE HOLE BEING STILL OPEN IS NOT A FINDING -- Option A (honest wording) was ordered, Option B is in the operator slot, and the 500k reproduction is expected to still reproduce. A re-gate that re-reports the parked defect burns the lens's budget on a decision already made. What lane A is grading is whether the TEXT now matches the shipped behaviour, in both directions: a surface still denying the residual is a MAJOR, and so is a surface now over-claiming that it is closed. Both briefs also state the stopping rule plainly -- second gate, ESCALATE-beats-3rd-wave, a second RED parks the branch -- because a lens that does not know a finding is terminal writes a different report than one that does.
+
+UNCOMMITTED JOURNAL WORK PRESENT: `supervisor/JOURNAL.md` is modified in the worktree at boot. Folding it into my first journal commit, per standing order.
