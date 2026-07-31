@@ -53,6 +53,7 @@ nothing to do with dispatch paths. That reads as "caught" and it is not. The
 injection that proves the lint is line-count-NEUTRAL, and the proof is that
 THIS file's census goes red.
 """
+import ast
 import json
 import os
 import re
@@ -473,8 +474,82 @@ def _enclosing_qualname(src, n):
     return ".".join(reversed(parts))
 
 
+def _called_name(func):
+    """The bare name a `Call.func` node invokes, or None."""
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def _rebound_names(tree, root):
+    """Every name that `bin/fleet.py` binds to `root` -- `_launch = dispatch_bg`
+    and any chain of further rebinds. Fixpoint, because `a = dispatch_bg` then
+    `b = a` is two passes."""
+    names = {root}
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue
+            value = node.value
+            if not isinstance(value, ast.Name) or value.id not in names:
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id not in names:
+                    names.add(target.id)
+                    changed = True
+    return names
+
+
+def call_counts(root):
+    """`{enclosing qualname: how many times it calls `root`}` in `bin/fleet.py`,
+    derived by AST.
+
+    THIS REPLACES A SUBSTRING SCAN, and the scan's three blind spots were each
+    planted and each left the FULL SUITE GREEN at 3522 (adversarial review of
+    `w35/respawn-trunc`, 2026-07-31):
+
+      1. an ALIAS -- `_launch = dispatch_bg` at module level, then `_launch(...)`
+         -- which contains the literal `dispatch_bg` only on a line that is not
+         a call;
+      2. a WHITESPACE variant, `dispatch_bg (name, ...)`, which is legal Python
+         and does not contain the substring `dispatch_bg(`;
+      3. a SECOND call inside an already-approved function, which set-equality
+         over qualnames cannot see at all.
+
+    So this returns COUNTS, not a set: (3) is only visible as an arity change.
+    Calibration for the whole idea: a plain new module-level `def` calling the
+    function DID red the old scan, which is exactly how a detector earns the
+    description "non-vacuous for the shape its author imagined"."""
+    tree = ast.parse(Path(fleet.__file__).read_text(encoding="utf-8"))
+    names = _rebound_names(tree, root)
+    out = {}
+
+    def visit(node, stack):
+        if isinstance(node, ast.Call) and _called_name(node.func) in names and stack:
+            key = ".".join(stack)
+            out[key] = out.get(key, 0) + 1
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                visit(child, stack + [child.name])
+            else:
+                visit(child, stack)
+
+    visit(tree, [])
+    return out
+
+
 def _call_sites(needle, skip_defs=()):
     """Every enclosing qualname that calls `needle` in `bin/fleet.py`.
+
+    TEXTUAL, and deliberately kept that way: its remaining users census
+    non-call shapes (`.get("task"`, `["task"]`) that no call graph can see. For
+    anything that is a real function call, use `call_counts` -- see the blind
+    spots documented there.
 
     Comment/docstring lines are skipped by the same crude prefix test the
     original census used; `skip_defs` drops the definition itself."""
@@ -560,15 +635,18 @@ def test_the_dispatch_census_reflects_five_paths():
     which census their path belongs in rather than discovering neither
     covered it.
     """
-    dispatchers = _call_sites("dispatch_bg(", skip_defs=("dispatch_bg",))
-    assert dispatchers == {"cmd_spawn", "_cmd_send_native",
-                           "_resume_one_limited_native", "_cmd_respawn_native",
-                           "_dispatch_supervisor_body"}, (
-        f"the set of dispatch_bg call sites changed: {sorted(dispatchers)}. "
+    dispatchers = call_counts("dispatch_bg")
+    assert dispatchers == {"cmd_spawn": 1, "_cmd_send_native": 1,
+                           "_resume_one_limited_native": 1,
+                           "_cmd_respawn_native": 1,
+                           "_dispatch_supervisor_body": 1}, (
+        f"the dispatch_bg call census changed: {sorted(dispatchers.items())}. "
         f"Every dispatch launches a worker session and pays a prompt: decide "
         f"whether the new one composes via compose_prompt (add it to the "
         f"compose census and to TestAllFourComposePaths) or renders its own "
-        f"body (say so here), and re-pin this set.")
+        f"body (say so here), and re-pin this census. Counts, not a set -- a "
+        f"SECOND call inside a function already on this list is a new dispatch "
+        f"path that set-equality cannot see.")
 
 
 def test_the_supervisor_body_does_not_compose_through_compose_prompt():
