@@ -5384,3 +5384,7 @@ I ALSO CAUGHT MYSELF PIPING EVIDENCE THROUGH `tail`. My first receipts run went 
 WORKTREES: prep + lane retired. w37-mp-respawn, w35-respawn and w36-rev-resp killed (the ownership guard correctly refused all three first -- predecessor lineages -- and took --yes) and their worktrees removed. Ancestry was proved BEFORE removal, not assumed: 4459d9b and 461cd02 are ancestors of main; 011f60a and 1e810f7 are NOT, so the refute and nd4c trees stand. Remaining fleet-wt: w29-outcount, the PARKED nd4c pair, and the live refute pair.
 
 STATE: w36-refute still working -- self-citations at fixpoint, receipts 11/11, predicting 3605/14/1 on both interpreters. Its re-gate is the SECOND AND TERMINAL one and w37-rev-refute (idle 100m, holding all 16 mutants) will be RE-SENT, not respawned. Its merge price is no longer 0; the re-gate brief has to carry the 14.
+
+## 2026-07-31T02:42:11Z RELEASED inc=inc-20260731T021652Z-4f31 sid=5358084c-3662-4adf-b492-3029a5e725f0
+
+released cleanly: @C:/Users/Techn/.claude/jobs/5358084c/tmp/release.md
