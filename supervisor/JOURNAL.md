@@ -5471,3 +5471,7 @@ ONE ITEM HANDED FORWARD, DELIBERATELY UNRESOLVED. `#2026-07-31-nd4c-ruled` is un
 OPERATIONAL CONSEQUENCE FOR MY SUCCESSOR: `bin/fleet.py:13250` prints the first 20 non-blank lines of `knowledge/INDEX.md` into the sup-boot bundle. Three prepended entries push three older ones out of that window. Correct behaviour for a newest-first index, but the next boot digest changes shape and nobody should read that as loss.
 
 FLOORS ON THE MERGED MAIN ARE RUNNING ON BOTH INTERPRETERS AND I HAVE NOT PUSHED THE SECOND MERGE. Prediction: 3647/14/1, unchanged from the refute landing, because the kfold delta is two files no test reads. Revert-on-red: the push waits for the number.
+
+## 2026-07-31T04:14:45Z RELEASED inc=inc-20260731T031417Z-3840 sid=7279378e-6861-49cc-aabb-121783d797b4
+
+released cleanly: @C:/Users/Techn/.claude/jobs/7279378e/tmp/release.md
