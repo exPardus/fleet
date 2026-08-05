@@ -4,7 +4,10 @@ before fleet trusts it for a campaign. Six-step ordered sequence against two
 real haiku `--bg` workers in a throwaway temp FLEET_HOME:
 
   1. dispatch + roster contract (closed 9-key schema, field-presence)
-  2. Stop-hook outcome record (result text, tokens, model)
+  2. Stop-hook outcome record (result text, model, and the usage-provenance
+     contract of `tests/pin_usage_contract.py` -- ruling A, 2026-08-05: a
+     withheld counter is RATIFIED behaviour, so step 2 discriminates the
+     withheld case from a vanished usage block instead of demanding a number)
   3. fork-steer (G2b): idle `send` mints a new sid, old retires, hooks fire
      in the fork
   4. `claude stop` + fleet tombstone on a mid-turn interrupt (G10: no Stop
@@ -59,6 +62,19 @@ from pathlib import Path
 import pytest
 
 import fleet
+
+# Step 2's usage assertion is PROVED in tests/test_pin_usage_contract.py -- a
+# deterministic, claude-free gate that drives the real Stop hook and shows the
+# predicate accepts both ratified shapes and rejects the drift that looks like
+# one -- and merely EXERCISED here. It has to be the SAME function, not a copy:
+# this tier is flaky by construction (the hook races the harness's own transcript
+# appends, and a trivial `PIN-OK` turn wins that race often enough that a single
+# green run says almost nothing), so a live run can never be the acceptance
+# evidence for a change to it. `tests/` is not a package; conftest.py's own
+# import already puts it on sys.path, but say so explicitly rather than depend on
+# pytest's import mode.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from pin_usage_contract import check_outcome_usage_contract  # noqa: E402
 
 pytestmark = pytest.mark.live
 
@@ -341,9 +357,48 @@ def test_2_pin_stop_hook_outcome(sandbox: Sandbox):
     )
     rec = matching[-1]
     assert rec.get("result_text") and "PIN-OK" in rec["result_text"], rec
-    assert rec.get("input_tokens") is not None, rec
-    assert rec.get("output_tokens") is not None, rec
     assert rec.get("model") and "haiku" in rec["model"].lower(), rec
+
+    # OPERATOR RULING A (2026-08-05, WITHHOLD): the Stop hook publishes the four
+    # usage fields only when it can prove the transcript message its numbers came
+    # from is the message the turn ended on, and leaves all four None when it
+    # cannot (bin/hooks/stop_outcome.py:324-326). That is RATIFIED behaviour, so
+    # the two assertions that used to stand here --
+    #
+    #     assert rec.get("input_tokens") is not None, rec
+    #     assert rec.get("output_tokens") is not None, rec
+    #
+    # -- are wrong on any racing turn, and they made this tier RED twice in wave
+    # 40-retry against code that was doing the right thing.
+    #
+    # Deleting them is the wrong repair. Withholding and "the vendor stopped
+    # emitting usage" produce the SAME record (model present, four counters
+    # None), so a pin that merely tolerates None cannot fail, and step 2 is the
+    # only thing standing between fleet and that drift. The discriminator is the
+    # transcript the record itself names: `fleet wait` has returned, the turn is
+    # over, and the append race the hook lost is finished, so that file is a
+    # second, RACE-FREE vantage on the same turn. Withheld while this turn's own
+    # message sits on disk carrying a count is ratified; withheld while there is
+    # no count anywhere is drift. See tests/pin_usage_contract.py for the whole
+    # contract and for the read-only census of the real outcome store behind it.
+    #
+    # The lookup is keyed by THIS RECORD'S TEXT, not by the tail of the file, and
+    # that is the difference between a check and a false RED: a transcript is
+    # per-SESSION and keeps growing across turns, so its tail belongs to whatever
+    # turn ran last. Measured on the real store: 38 of 45 records whose text
+    # matched the file's tail still disagreed on usage. Here the pin reads
+    # pin-w1's FIRST and only turn, so the two happen to coincide today -- the
+    # keyed lookup is what stops that coincidence from being load-bearing if this
+    # step ever moves after another turn.
+    #
+    # The verdict is printed, not asserted: which branch a given run lands in is
+    # the coin-flip this tier cannot control (probe, claude 2.1.222: 3 published
+    # / 1 withheld over four samples of unmodified code). Run the tier with `-s`
+    # when sampling, and report the SPLIT over N runs -- never a colour from one.
+    verdict = check_outcome_usage_contract(rec)
+    print(f"\n[pin] step 2 usage-provenance verdict: {verdict} "
+          f"(in={rec['input_tokens']!r} out={rec['output_tokens']!r} "
+          f"model={rec['model']!r})")
 
 
 # ===========================================================================
