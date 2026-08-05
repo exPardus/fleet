@@ -4,7 +4,8 @@
 
 - **Python 3.10+.** The floor is declared once as `fleet.MIN_PYTHON_VERSION` and `TestInterpreterFloor` checks every restatement of it (including the prose in `SPEC.md`) against that constant. This project's dev machine drives `py -3.13`, but 3.13 is a *preference*, not a requirement.
 - `bin/fleet.py` is stdlib-only, single file. No pip dependencies get added to it or to the hook scripts under `bin/hooks/`.
-- Claude Code CLI ≥ 2.1.202 if you're running live-integration tests (pin-tested at 2.1.217).
+- Claude Code CLI ≥ 2.1.202 if you're running live-integration tests. The pin-tested version is whatever `state/pin-pass.json` last recorded (`2.1.220`, stamped 2026-07-26) — read the stamp, don't trust a number pasted into prose. `fleet doctor`'s `pin-version` check warns when your `claude` has moved past it.
+- **On Windows, the `bin\fleet.cmd` shim invokes `py -3.13` with no fallback**, so the CLI needs 3.13 there even though the library floor is 3.10. `bin/fleet` (Git Bash) and `bin/hooks/run_py.sh` both honour the real floor and `$FLEET_PYTHON`. Don't "fix" a 3.10 box by raising the documented floor — the floor is the constant, the shim is the outlier.
 - **Windows and Linux are both supported and both verified.** macOS shares the POSIX backend but has no receipt in this repo yet.
 
 ## Running the tests
@@ -37,6 +38,7 @@ These aren't style preferences — violating them breaks the tool on this platfo
 - **Fleet never injects itself into a session.** The plugin ships no hooks (terminal-surface D7). A plugin hook runs in *every* session on the machine, including every unrelated project — which is exactly how the old SessionStart briefing leaked this fleet's operator gates and worker table into other people's repos. Surfaces are pull-only; a test asserts the manifest has no `hooks` key.
 - **Mutating slash commands are prompt templates, never inline `` !`cmd` ``.** Inline exec substitutes before the model ever sees the prompt — no permission prompt, no confirmation. `fleet kill` and `fleet clean` are irreversible, so the commands that can trigger them must route through the model so the normal permission gate applies. Also lint-enforced in `tests/test_terminal_surface.py`.
 - **A plugin can't ship a `statusLine`** (a Claude Code platform constraint, not fleet's choice). `fleet init --statusline` installs fleet's separately, and refuses to clobber a statusline it doesn't own.
+- **Numbers in the entry docs are derived, never hand-pasted.** The doctor check count, the Python floor and every `fleet <verb>` named in `README.md`, `docs/getting-started.md`, `docs/concepts.md`, `docs/README.md` or this file are pinned to `bin/fleet.py` by `tests/test_doc_claims.py`. This drifted twice — `21`→`23` was fixed by hand in 2026-07-23's doc pass and had rotted to `25`/`22`/`23` against an actual `28` two weeks later. If you add a check or a verb, that test tells you which sentence to update.
 
 `CLAUDE.md` at the repo root carries the authoritative, current version of these rules — if this file and that one ever disagree, `CLAUDE.md` wins and this file has drifted.
 
