@@ -2992,7 +2992,7 @@ reported `FAIL`. Not a defect in the receipts — a defect in **which tree they 
 unpinnable receipt set that must be re-pasted whenever anyone touches `bin/fleet.py` — which makes
 every receipt in every spec a merge-order hostage, turns the shared suite red for reasons unrelated
 to the change under review, and trains people to re-paste without re-reading. It also contradicts what
-a receipt *means*: `docs/SPEC.md:12` already says a claim must be *"verifiable by grep at a stated
+a receipt *means*: `docs/SPEC.md:13` already says a claim must be *"verifiable by grep at a stated
 commit"*. Honouring the stated commit is the reading that makes the existing doctrine work.
 
 **`docs/specs/native-substrate.md` is now in the tree** (me/daemon's 2.1.216 daemon-lock row) and
@@ -3377,12 +3377,12 @@ authored it, and because it was verified by driving rather than by argument.
   comes from; the grounds of the refusal stay the measured occupancy. That is the permitted half of
   the clause, not an exception to it.
 - **It is condemned only where it grounds a refusal on stamp PRESENCE.** That is the direction
-  `SPEC.md:196` already named, and it is the arm that was removed.
+  `SPEC.md:204` already named, and it is the arm that was removed.
 - **`three-tier-command.md` §11.3 ND4(c) is blessed, not tolerated.** ND4(c) exempts the interface on
   the **absence** of `FLEET_WORKER`, which is the sound direction; the clause's second sentence is
   the reason it is sound, stated once here instead of re-derived at each site.
 - **The §6.5 registry-keyed gate STANDS** (ratified the same day, same docket). The contradiction
-  that once motivated demoting it does not exist: `SPEC.md:196` constrains the gate's **key**,
+  that once motivated demoting it does not exist: `SPEC.md:204` constrains the gate's **key**,
   ratified §6.5 D5 requires the refusal to **exist**, and a registry-keyed gate satisfies both. The
   gate's limit is **coverage** — it is absent where the registry cannot be read (§16.3) — and
   coverage is extended elsewhere. This clause is not a licence to delete a refusal.
