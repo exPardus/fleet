@@ -19,8 +19,8 @@ $ fleet spawn migrate-users --dir C:\proga\billing-service --mode bypass \
 migrate-users a1b2c3d4-... (native bg, short id a1b2c3d4)
 
 $ fleet status
-NAME                STATUS       TURNS     COST      AGE  MAIL  FLAGS
-migrate-users        working         1      0.00       2m     0  -
+NAME                STATUS     TURNS     COST  MIN-AGO  MAIL   ATTACH  FLAGS
+migrate-users       working        1     0.00        2     0        -  -
 
 $ fleet send migrate-users "also add a down-migration, I forgot to ask"
 migrate-users: turn running -- message queued to mailbox
@@ -37,7 +37,7 @@ Migrated 0042_users to raw SQL with a matching down-migration. Ran
 `npm test -- migrations` locally: 14 passed. Diff is 2 files, no schema drift.
 ```
 
-One task, one worker, one budget cap, mid-turn steering — and never once attached a terminal. That's the whole loop.
+One task, one worker, one token cap, mid-turn steering — and never once attached a terminal. That's the whole loop.
 
 ## Why an orchestration layer for Claude Code
 
@@ -46,7 +46,7 @@ Claude Code ships its own background agents (`claude --bg`, `claude agents`) —
 - a **named registry** with per-task permission modes,
 - **mid-turn mailbox steering** without attaching,
 - **journals + respawn** so a worker's context can reset without losing its work,
-- **budget and token ceilings** enforced before every turn,
+- **token ceilings** enforced fleet-side before every turn (`--token-ceiling`; note that `--max-budget-usd` is still accepted by the parser but refused at dispatch under the native substrate — contract G3),
 - a **durable manager identity** that survives restarts and hands off cleanly,
 - and a **knowledge base that gets smarter every campaign.**
 
@@ -84,20 +84,24 @@ Every `fleet` command is a short-lived CLI invocation. The registry is the singl
 | **Usage-limit park/resume** | A worker that hits a Claude plan usage limit parks itself (`limited` status, recorded reset horizon) instead of dying silently; `fleet resume-limited` relaunches it once the window passes. |
 | **Durable manager identity** | A boot-claim + heartbeat + hand-off protocol (`fleet sup-boot` / `sup-handoff-*`) so exactly one manager owns the fleet across restarts — and can pass the baton to a successor without dropping a campaign. |
 | **Knowledge loop** | `knowledge/` is git-tracked: an index, playbooks, per-project quirks, and append-only lessons that every manager session reads at startup and writes back to after every campaign. The fleet gets better at running the fleet. |
-| **`fleet doctor`** | 25 health checks in one command — registry readability, hook wiring, stale sessions, orphaned mailboxes, stale attaches, version pins, how long since the last `autoclean` sweep, supervisor claim, and more. Report-only: `--repair` is the one flag that mutates, and it only quarantines a corrupt `state/fleet.json`. |
+| **`fleet doctor`** | 28 health checks in one command — registry readability, hook wiring, stale sessions, orphaned mailboxes, stale attaches, version pins, how long since the last `autoclean` sweep, supervisor claim, and more. Report-only: `--repair` is the one flag that mutates, and it only quarantines a corrupt `state/fleet.json`. |
 | **Terminal surface** | Statusline + `/fleet:*` slash commands, shipped as a normal Claude Code plugin. The statusline is opt-in (`fleet init --statusline`) and is the only ambient surface; the plugin itself registers no hooks and injects nothing. |
 | **Interactive hand-off** | A worker is a real Claude Code session, so you drop into it through Claude Code — the agents menu (Ctrl+T) or `claude attach <session-id>`. `fleet release` hands a stale `attached` record back to headless. *(`fleet attach` itself currently refuses and redirects there; native attach integration is a later milestone.)* |
 | **Crash-safe by design** | A worker is a durable Claude Code session addressed by `--session-id`/`--resume`, not a process fleet has to keep alive. Fleet runs no persistent process of its own — every `fleet` command is a short-lived CLI invocation. |
 
 ## Quickstart
 
-**Runs today on:** Windows 10+ (PowerShell + Git Bash) and Linux, both verified by the test suite; macOS shares the POSIX backend but has no receipt yet. Python **3.10+** — this repo's reference box uses `py -3.13`, but the floor is declared once as `fleet.MIN_PYTHON_VERSION` and the suite runs green at it. Claude Code CLI `2.1.202+` (pin-tested at `2.1.217`).
+**Runs today on:** Windows 10+ (PowerShell + Git Bash) and Linux; macOS shares the POSIX backend but has no receipt yet. Claude Code CLI `2.1.202+` — the floor `fleet doctor` enforces; the pin-tested version is whatever `state/pin-pass.json` last recorded, never a constant pasted here — and a fresh clone has no such file, because `state/` is gitignored and only the `FLEET_LIVE=1` pin tier writes it. `fleet doctor`'s `pin-version` row tells you which case you are in.
+
+**Python 3.10+** is the library floor, declared once as `fleet.MIN_PYTHON_VERSION` and run green at by the suite. **One caveat, and it bites Windows users first:** the `bin\fleet.cmd` shim this quickstart puts on your PATH invokes `py -3.13` with no fallback, so *via that shim* fleet needs 3.13 specifically. The POSIX shim (`bin/fleet`, used from Git Bash and by every hook) selects any interpreter at or above the floor and honours `$FLEET_PYTHON`. Until the shims agree, install 3.13 on Windows or drive fleet from Git Bash.
 
 ```powershell
-# 1. Clone, add bin\ to PATH  (bin\ holds fleet.cmd)
+# 1. Clone, then add the clone's bin\ to PATH  (bin\ holds fleet.cmd)
 git clone https://github.com/exPardus/fleet.git
+cd fleet
+#    fleet resolves its own location -- the clone may live anywhere
 
-# 2. Render machine-local hook wiring
+# 2. Render machine-local hook wiring (writes <FLEET_HOME>\state\worker-settings.json)
 fleet init
 
 # 3. Install the plugin (manager skill + /fleet:* commands; registers no hooks)
@@ -107,9 +111,14 @@ claude plugin install fleet@claude-fleet
 
 # 4. Optional: the always-on statusline (a plugin can't ship one)
 fleet init --statusline
+
+# 5. Confirm the wiring -- all 28 checks should pass
+fleet doctor
 ```
 
-Then open a Claude Code session, say *"become the fleet manager"*, and spawn your first worker. Full install detail — collaborator/multi-machine setup, the `--statusline --chain` composition flag — is in [`docs/SPEC.md`](docs/SPEC.md).
+Then open a Claude Code session and say *"become the fleet manager"* — or run **`/fleet:overview`**, which is a slash command and so triggers deterministically — and spawn your first worker.
+
+Two things this quickstart cannot do for you: step 3's `<path-or-github-repo-of-this-clone>` is a placeholder that has never been resolved to a working literal, and the walkthrough is only executed as far as `fleet doctor`. Both are stated plainly, with everything else that blocks a first use, in **[Launch readiness](docs/launch-readiness.md)**. The step-by-step version with real output is **[Getting started](docs/getting-started.md)**; collaborator/multi-machine setup and the `--statusline --chain` composition flag are in [`docs/SPEC.md`](docs/SPEC.md).
 
 ## CLI
 
@@ -128,12 +137,14 @@ Then open a Claude Code session, say *"become the fleet manager"*, and spawn you
 | `fleet resume-limited` | Relaunch workers parked on a usage limit past their reset horizon |
 | `fleet kill` | Interrupt (if running) and mark a worker dead |
 | `fleet clean` / `archive` / `autoclean` | Tiered cleanup: remove dead workers, archive terminal ones, staleness sweep run by the supervisor's beat and the interface's startup ritual |
-| `fleet doctor [--repair]` | Run the 25 fleet health checks. Report-only unless `--repair` is passed, which quarantines a corrupt `state/fleet.json` by renaming it aside |
-| `fleet sup-*` | Supervisor identity: `boot`, `spawn`, `heartbeat`, `checkpoint`, `status`, `handoff-{begin,complete,abort}` |
+| `fleet doctor [--repair]` | Run the 28 fleet health checks. Report-only unless `--repair` is passed, which quarantines a corrupt `state/fleet.json` by renaming it aside |
+| `fleet home` / `knowledge` | Print the resolved `FLEET_HOME`; print `knowledge/INDEX.md` |
+| `fleet index` / `q` | Opt-in per-project symbol index (`index init/build/update/status`) and the query verb over it |
+| `fleet sup-*` | Supervisor identity: `boot`, `spawn`, `checkpoint`, `heartbeat`, `release`, `status`, `context`, `decision`, `handoff-{begin,complete,abort}` |
 
 ## Roadmap
 
-Shipped: core lifecycle (spawn/steer/respawn/knowledge), the terminal surface (statusline, slash commands, plugin), native background-agent dispatch, a durable supervisor identity with hand-off, and a POSIX platform backend (Linux verified, macOS unreceipted). Specced and unbuilt: SDD drift-control (`M-F`) and the fleet index. Ahead: a watchtower for continuous monitoring, a Telegram bridge, a local web UI, and a "trust ledger" intelligence layer. Full detail: [`docs/ROADMAP.md`](docs/ROADMAP.md).
+Shipped: core lifecycle (spawn/steer/respawn/knowledge), the terminal surface (statusline, slash commands, plugin), native background-agent dispatch, a durable supervisor identity with hand-off, the per-project symbol index (`fleet index` / `fleet q`), and a POSIX platform backend (Linux verified, macOS unreceipted). Specced and unbuilt: SDD drift-control (`M-F`) and the multi-fleet home/install split ([`docs/specs/multi-fleet.md`](docs/specs/multi-fleet.md), ratified ready-for-build 2026-07-30 — until it lands, one fleet home per machine). Ahead: a watchtower for continuous monitoring, a Telegram bridge, a local web UI, and a "trust ledger" intelligence layer. Full detail: [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Why you can trust it
 
@@ -162,6 +173,7 @@ Because the daemon is a moving target, the pin suite re-runs on every `claude` v
 |---|---|
 | **[How claude-fleet works](docs/concepts.md)** | The idea, the problem, and the mechanics — with diagrams. Start here. |
 | **[Getting started](docs/getting-started.md)** | Install → become the manager → run your first campaign. |
+| **[Launch readiness](docs/launch-readiness.md)** | The honest list of what still blocks an external user, measured — and what has not been verified. |
 | **[Roadmap](docs/ROADMAP.md)** | What's shipped, what's next, and the soak-gate discipline behind each phase. |
 | **[SPEC.md](docs/SPEC.md)** | The architecture of record: registry schema, load-bearing invariants, every command's contract. |
 | **[Docs index](docs/README.md)** | Every doc in the repo, tagged by audience (users / contributors / internal). |

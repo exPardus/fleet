@@ -9,18 +9,29 @@ From zero to a running worker in a few minutes. If you haven't yet, skim **[How 
 Fleet runs today on:
 
 - **Windows 10+** with **PowerShell** and **Git Bash** present, **or Linux**
-- **Python 3.10+** — the reference box uses `py -3.13`, but the floor is `fleet.MIN_PYTHON_VERSION` and the suite runs green at it
-- **Claude Code CLI** `2.1.202+` (pin-tested at `2.1.217`)
+- **Python 3.10+** — the floor is declared once as `fleet.MIN_PYTHON_VERSION` and the suite runs green at it. **But read the shim caveat below before you install.**
+- **Claude Code CLI** `2.1.202+` — the floor `fleet doctor` enforces. The pin-tested version is whatever `state/pin-pass.json` last recorded; `fleet doctor` warns when your `claude` has moved past it. A fresh clone has no such file — `state/` is gitignored and only the `FLEET_LIVE=1` pin tier writes it — so until you run that tier, `doctor` reports `no pin-test pass recorded`, which is the expected state and not a fault.
+- **The `claude` CLI on your PATH.** Fleet shells out to it for every dispatch; `fleet doctor`'s `claude-on-path` check reports the resolved binary and its version.
 
 Zero third-party dependencies — `bin/fleet.py` is a single stdlib-only file.
 
-> Windows and Linux are both verified by the test suite. macOS runs the same POSIX backend as Linux but has no receipt yet — treat it as untested, not unsupported. Remaining platform gaps are enumerated at the top of [`SPEC.md`](SPEC.md).
+> **The Python shim caveat.** The floor is 3.10, and the library honours it — but the two entry shims do not agree, and on Windows the mismatch is the one you meet first:
+>
+> | Entry point | Interpreter it selects |
+> |---|---|
+> | `bin\fleet.cmd` (Windows PATH shim) | `py -3.13`, hard-coded, **no fallback** |
+> | `bin/fleet` (Git Bash / POSIX, and every hook via `bin/hooks/run_py.sh`) | first of `py -3.13`, `python3.13`…`python3.10`, honouring `$FLEET_PYTHON` |
+>
+> So on Windows, *through the documented `fleet.cmd` path*, fleet needs Python 3.13 specifically — a 3.10/3.11/3.12 box will fail at the shim even though the code supports it. Install 3.13, or drive `fleet` from Git Bash where the floor genuinely applies. This is a known gap, not a design choice.
+
+> Windows is verified continuously by the suite on the reference box. Linux was verified by a full suite run during the POSIX-port campaign (2026-07-2x, on a real Linux host, not only WSL) — but **this repo has no CI**, so nothing re-verifies Linux on every change; treat it as "verified once, at a much smaller suite." macOS runs the same POSIX backend as Linux but has no receipt at all — untested, not unsupported. Remaining platform gaps are enumerated at the top of [`SPEC.md`](SPEC.md).
 
 ## Install
 
 ```powershell
-# 1. Clone, and add bin\ to your PATH (it holds fleet.cmd)
+# 1. Clone, and add the clone's bin\ to your PATH (it holds fleet.cmd)
 git clone https://github.com/exPardus/fleet.git
+cd fleet
 #    add <repo>\bin to PATH
 
 # 2. Render the machine-local hook wiring
@@ -39,13 +50,31 @@ claude plugin details fleet
 fleet init --statusline
 ```
 
+**Where does it install to?** Nowhere you have to choose. Fleet derives `FLEET_HOME` from `bin/fleet.py`'s own location, so the clone can live anywhere — there is no hard-coded path in the CLI. Set the `FLEET_HOME` environment variable to override it. `fleet home` prints the resolved value:
+
+```console
+$ fleet home
+C:/proga/claude-fleet
+```
+
+Step 2 writes exactly one file, and tells you where:
+
+```console
+$ fleet init
+fleet init: wrote C:\proga\claude-fleet\state\worker-settings.json
+  python:      C:/Users/you/AppData/Local/Programs/Python/Python313/python.exe
+  fleet home:  C:/proga/claude-fleet
+```
+
 Confirm the wiring is healthy any time:
 
 ```powershell
 fleet doctor
 ```
 
-`fleet doctor` runs 22 checks — hook registration, version pins, orphaned mailboxes, stale attaches, how long since the last autoclean run, the supervisor claim, and more. A clean run means you're ready.
+`fleet doctor` runs 28 checks — hook registration, version pins, orphaned mailboxes, stale attaches, how long since the last autoclean run, the supervisor claim, and more. It prints one `[PASS]`/`[FAIL]` row per check and exits nonzero if any failed. It is **report-only**: `--repair` is the only flag that mutates anything, and all it does is rename a corrupt `state/fleet.json` aside.
+
+> **Run `fleet init` before `fleet doctor`, not after.** On a home where `init` has not run, four checks fail by design — `worker-settings-instance`, `instance-freshness`, `instance-grants` and `hook-registration` all report that `worker-settings.json` is missing and tell you to run `fleet init`. That is doctor working, not fleet being broken. After `init`, the same run goes to 28 PASS / 0 FAIL.
 
 ## Become the manager
 
@@ -53,7 +82,11 @@ Open a Claude Code session and say:
 
 > **become the fleet manager**
 
-That triggers the manager skill: the session reads `knowledge/INDEX.md` and the current fleet state, and from then on drives workers on your behalf. You can also run the `fleet` CLI directly in a shell — the manager session and the CLI operate on the exact same files.
+That triggers the manager skill: the session reads `knowledge/INDEX.md` and the current fleet state, and from then on drives workers on your behalf.
+
+> **If nothing happens, the skill didn't match.** Skill activation is semantic, and that exact phrase is *not* one of the triggers `skills/fleet/SKILL.md` declares — its description lists `fleet`, `spawn workers`, `manage sessions`, `dispatch task to <project>`, `check on workers`, `boot a supervisor`. Any of those is a surer trigger, and **`/fleet:overview` is the deterministic one** — it's a slash command, so it cannot fail to match.
+
+You can also run the `fleet` CLI directly in a shell — the manager session and the CLI operate on the exact same files. Nothing is pushed at you either way: fleet injects nothing into a session, so fleet state shows up only when you ask for it.
 
 ## Spawn your first worker
 
@@ -67,11 +100,21 @@ fleet spawn hello --dir C:\path\to\some\project `
 Watch it:
 
 ```powershell
-fleet status              # the table: status, turns, cost, age, pending mail
+fleet status              # the table (columns below)
 fleet peek hello          # ~20-line digest of the current/last turn (works mid-turn)
 fleet wait hello          # block until the turn ends
 fleet result hello        # just the final result text
 ```
+
+`fleet status` prints one row per worker under these columns — `MIN-AGO` is minutes since the last activity, `MAIL` is undelivered messages, `ATTACH` is who holds it interactively:
+
+```console
+$ fleet status
+NAME                STATUS     TURNS     COST  MIN-AGO  MAIL   ATTACH  FLAGS
+hello               working        1     0.00        2     0        -  -
+```
+
+Add `--json` for the machine-readable snapshot (it carries each worker's `session_id`), `--all` to include archived tombstones, and `--stale-ok` for the read-only fast path that takes no lock and probes nothing.
 
 ### Permission modes
 
@@ -175,10 +218,13 @@ For dependent or review-style work (one worker builds, another attacks the diff)
 | `fleet resume-limited` | Relaunch usage-limit-parked workers past their reset |
 | `fleet kill` | Interrupt (if running) and mark dead |
 | `fleet clean` / `archive` / `autoclean` | Tiered cleanup and staleness sweeps |
-| `fleet doctor` | Run the 23 health checks |
-| `fleet sup-*` | Supervisor identity: boot, heartbeat, checkpoint, status, handoff |
+| `fleet doctor` | Run the 28 health checks (`--repair` quarantines a corrupt registry) |
+| `fleet home` | Print the resolved `FLEET_HOME` |
+| `fleet knowledge` | Print `knowledge/INDEX.md` |
+| `fleet index` / `fleet q` | Opt-in per-project symbol index (`index init/build/update/status`) and the query verb over it |
+| `fleet sup-*` | Supervisor identity: `sup-boot`, `sup-spawn`, `sup-checkpoint`, `sup-heartbeat`, `sup-release`, `sup-status`, `sup-context`, `sup-decision`, `sup-handoff-{begin,complete,abort}` |
 
-Every command's exact contract lives in [`SPEC.md`](SPEC.md) §7.
+That is all 32 subcommands `fleet --help` ships, as of `f457a57`. Every command's exact contract lives in [`SPEC.md`](SPEC.md) §7 — and if this table and `fleet --help` ever disagree, `--help` wins and this table has drifted.
 
 ---
 
