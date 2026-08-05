@@ -453,7 +453,7 @@ class TestLimitedHolderTransfer:
         assert v in fleet.SUPERVISOR_BOOT_RC
 
     def test_the_transfer_is_rc_0_and_a_known_verdict(self):
-        # The exit-code contract published at skills/fleet/SKILL.md:37 is
+        # The exit-code contract published at skills/fleet/SKILL.md:54 is
         # unchanged: this is a took-the-claim outcome, which is already the
         # 0-row. A verdict outside SUPERVISOR_BOOT_RC is a KeyError in the
         # boot ritual rather than a safe stop (break-gate residual F2).
@@ -1441,8 +1441,8 @@ class TestWorkerTurnsCannotHoldTheClaim:
     RE-KEYED ONTO THE REGISTRY, 2026-07-26. The council adjudicated this to the
     NARROW arm -- refuse when `FLEET_WORKER` is set and its value is not
     supervisor-shaped -- and that arm faithfully implemented claim-nonce §6.5
-    while violating `docs/SPEC.md:196`, which binds any such guard to *"key on
-    the registry or the claim itself, NEVER on `FLEET_WORKER`"*. SPEC.md:196
+    while violating `docs/SPEC.md:204`, which binds any such guard to *"key on
+    the registry or the claim itself, NEVER on `FLEET_WORKER`"*. SPEC.md:204
     won, on the grounds it predicted: the machine-wide `claude` daemon donates
     the environment of whichever `--bg` dispatch started it to every session it
     hosts afterwards, so `FLEET_WORKER` names a long-dead dispatch and a guard
@@ -1460,7 +1460,7 @@ class TestWorkerTurnsCannotHoldTheClaim:
     registry lookup keyed by the sid inherits the defect one level down. That
     reasoning depends on the daemon donating the SID as well as the stamp,
     which claim-nonce §16.3 records as an OPEN question, and the demotion
-    conceded ratified §6.5 D5 to insure against it. SPEC.md:196 constrains the
+    conceded ratified §6.5 D5 to insure against it. SPEC.md:204 constrains the
     guard's KEY; §6.5 D5 requires the guard to EXIST; a registry-keyed gate is
     both, so there was never a loser to pick. The operator ruled on 2026-07-27
     (claim-nonce §17, the scoped clause): this gate grounds its refusal on the
@@ -2359,7 +2359,7 @@ class TestContinuityExitCode:
 
     def test_the_boot_refusal_verdicts_keep_their_own_codes(self, sup_home, capsys, monkeypatch):
         # §4.13(b)'s codes 2 and 3 are a different contract, published at
-        # skills/fleet/SKILL.md:37, and this slice must not perturb them.
+        # skills/fleet/SKILL.md:54, and this slice must not perturb them.
         fleet.write_incarnation(_claim(sid="sid-holder"))
         monkeypatch.setattr(fleet, "_fetch_agents_roster",
                             lambda **kw: (True, [{"sessionId": "sid-holder", "status": "idle"},
@@ -2367,7 +2367,7 @@ class TestContinuityExitCode:
         assert fleet.main(["sup-boot", "--sid", "sid-me"]) == 2
 
     def test_SKILL_md_publishes_the_new_code(self):
-        # §8 lists `skills/fleet/SKILL.md:37` as this slice's edit, and §11
+        # §8 lists `skills/fleet/SKILL.md:54` as this slice's edit, and §11
         # says the value is a builder detail but "that it needs a seam and a
         # published-contract amendment is not". An exit code nobody documents
         # is an exit code nobody can script against.

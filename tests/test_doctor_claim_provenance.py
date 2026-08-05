@@ -54,7 +54,7 @@ is one the WRITER reads off disk under the refusal path and no caller supplies
   * indeterminate (no claim, or an unreadable timestamp) stays ARMED. Ratified
     direction: fail-armed indeterminacy (`knowledge/lessons.md`, 2026-07-30).
 
-AND IT MUST NOT SUPPRESS. `bin/fleet.py:13824` records what a narrowing of
+AND IT MUST NOT SUPPRESS. `bin/fleet.py:14691-14696` records what a narrowing of
 this exact row cost last time: a revision split the refusal branch and filed
 half of it under a kind the doctor ignored, and "the doctor stayed GREEN
 through exactly the incident it exists to catch". Both directions are pinned
