@@ -182,26 +182,29 @@ workers.
 ## Handoff (context-exhaustion succession)
 
 Trigger band (ratified 2026-07-23, three-tier §11 — supersedes the
-2026-07-14 300–500k band): BEGIN handoff at **150k** tokens of context
-occupancy; **200k** is the hard ceiling. The band binds supervisors AND
-workers (§11.4). Never ride to the compaction wall.
+2026-07-14 300–500k band; **numbers raised by operator ruling 2026-08-05**):
+BEGIN handoff at **350k** tokens of context occupancy; **400k** is the hard
+ceiling. Workers observe a band too, but **not the same one** — theirs is
+250–300k (§11.4). Never ride to the compaction wall.
 
-Swap-trigger rule (three-tier §11.3): at 150k the hand-off directive is
-standing — finish the current wave, then hand off. At 200k the only
+Swap-trigger rule (three-tier §11.3): at 350k the hand-off directive is
+standing — finish the current wave, then hand off. At 400k the only
 permitted work is finishing work already dispatched (read-only
 reconciliation: `status`/`wait`/`result`/`peek`) plus the handoff verbs —
 no new spawns, no steers. The ceiling is **built and enforced** as a
-dispatch refusal for the supervisor claim-holder at three verbs —
-`_ceiling_refuses_dispatch("spawn")`, `("send")`, `("sup-spawn")`. It does
-not yet cover `fleet respawn`; the operator ruled that a gap (2026-07-27)
-and ordered it closed on the `--task` discriminator — `--task` absent is
-§11.4 recovery of an over-band worker and stays permitted over the ceiling,
-`--task` supplied is §11.3 new-task dispatch and is refused. Until that
-lands, respawn-with-`--task` over the ceiling is forbidden by doctrine with
-nothing to refuse it. Do not treat a verb's silence as permission.
+dispatch refusal for the supervisor claim-holder at **five call sites across
+four verbs** — `_ceiling_refuses_dispatch("spawn")`, `("send")`,
+`("sup-spawn")`, and `("respawn")` in **both** `cmd_respawn` and
+`_cmd_respawn_native`. The respawn arm is armed **only when `--task` is
+supplied** (ratified 2026-07-27, shipped at merge `d969de3`): `--task`
+absent is §11.4 recovery of an over-band worker and stays **permitted** over
+the ceiling; `--task` supplied is §11.3 new-task dispatch and is **refused**.
+Do not treat a verb's silence as permission — but do not read this list as
+smaller than it is either: a bare respawn is the one lever the ceiling
+deliberately leaves you.
 
-`fleet sup-context` measures your own occupancy against the band; use it
-rather than estimating.
+`fleet sup-context` measures your own occupancy against **your tier's** band
+and names the tier in its output; use it rather than estimating.
 
 Handoff verifies a one-shot **token**, not a sid (claim-nonce §6.4): a
 successor that forks between HANDSHAKE and complete still holds the token, so
@@ -311,9 +314,10 @@ human at a shell; a refused agent must escalate, never reach for it (§5.7).
 - GOALS.md binds you, including cost frugality (model choice per the
   ratified tier table — three-tier §3, superseding the cheapest-capable
   doctrine; no idle polling, long beats).
-- Workers observe the same 150–200k context band (three-tier §11.4): a
-  worker entering the band hands off / is respawned at its next task
-  boundary. The supervisor enforces the worker arm via `fleet respawn`;
+- Workers observe a **250–300k** context band (three-tier §11.4; raised
+  2026-08-05 — the same mechanism as your 350–400k band, **not** the same
+  numbers): a worker entering its band hands off / is respawned at its next
+  task boundary. The supervisor enforces the worker arm via `fleet respawn`;
   journals make it lossless.
 - Journal is append-only, single-writer, claim-holder-only. Write it via
   `fleet sup-checkpoint` only.

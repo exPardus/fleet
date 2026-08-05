@@ -1,6 +1,7 @@
-"""three-tier-command.md §11.3 -- the 200k hard ceiling (B4).
+"""three-tier-command.md §11.3 -- the supervisor's hard dispatch ceiling (B4),
+**400k since the 2026-08-05 operator ruling** (200k before it).
 
-At and above `BAND_HARD_TOKENS` the dispatch verbs (`fleet spawn`/`fleet send`)
+At and above `SUPERVISOR_BAND_HARD_TOKENS` the dispatch verbs (`fleet spawn`/`fleet send`)
 REFUSE to start new worker turns -- but for EXACTLY ONE caller: the supervisor
 claim-holder (ND1). The interface tier is exempt STRUCTURALLY (ND4c), a caller
 that holds no claim is never subject, the identity gate resolves through
@@ -173,20 +174,22 @@ class TestCeiling:
 
     def test_supervisor_holder_over_ceiling_is_refused(self, ceil_home, monkeypatch):
         self._as_supervisor(monkeypatch)
-        self._occ(monkeypatch, 205000)
+        self._occ(monkeypatch, 405000)
         reason = fleet._ceiling_refuses_dispatch("spawn")
         assert reason is not None
-        assert "spawn" in reason and "200,000" in reason and "11.3" in reason
+        assert "spawn" in reason and "400,000" in reason and "11.3" in reason
 
     def test_supervisor_holder_at_exact_ceiling_is_refused(self, ceil_home, monkeypatch):
         self._as_supervisor(monkeypatch)
-        self._occ(monkeypatch, fleet.BAND_HARD_TOKENS)
+        self._occ(monkeypatch, fleet.SUPERVISOR_BAND_HARD_TOKENS)
         assert fleet._ceiling_refuses_dispatch("spawn") is not None
 
     def test_soft_band_does_not_refuse_dispatch(self, ceil_home, monkeypatch):
-        # 150k <= occ < 200k is a standing directive, NOT a fleet refusal (§11.3).
+        # soft <= occ < hard is a standing directive, NOT a fleet refusal
+        # (§11.3). 375k sits inside the supervisor's 350-400k band, which is
+        # where the old 175k sat inside 150-200k.
         self._as_supervisor(monkeypatch)
-        self._occ(monkeypatch, 175000)
+        self._occ(monkeypatch, 375000)
         assert fleet._ceiling_refuses_dispatch("spawn") is None
 
     def test_below_band_does_not_refuse(self, ceil_home, monkeypatch):
@@ -208,7 +211,7 @@ class TestCeiling:
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-worker")
         _write_incarnation(_held("sid-holder"))
         _write_registry({"w1": {"session_id": "sid-worker", "retired_sids": []}})
-        self._occ(monkeypatch, 400000)
+        self._occ(monkeypatch, 500000)
         assert fleet._ceiling_refuses_dispatch("spawn") is None
 
     def test_indeterminate_identity_fails_toward_band(self, ceil_home, monkeypatch):
@@ -226,13 +229,13 @@ class TestCeiling:
         # that makes `state/fleet.json` unreadable, measured end-to-end as
         # `fleet spawn` at 999,999 tokens returning rc=0. The newborn it was
         # protecting is protected by (c) instead when it has no stamp, and is
-        # merely measured -- not refused, since a newborn cannot be at 200k --
+        # merely measured -- not refused, since a newborn cannot be at 400k --
         # when it has one.
         monkeypatch.setenv("FLEET_WORKER", "sup|inc-x|successor")
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-mystery")
         _write_incarnation(_held("sid-ghost"))
         _write_registry({"other": {"session_id": "sid-else", "retired_sids": []}})
-        self._occ(monkeypatch, 300000)
+        self._occ(monkeypatch, 500000)
         assert fleet._caller_holds_supervisor_claim("sid-mystery") is None
         assert fleet._ceiling_refuses_dispatch("spawn") is not None
 
@@ -250,7 +253,7 @@ class TestCeiling:
         _write_registry({"other": {"session_id": "sid-else", "retired_sids": []},
                          "sup|inc-x|successor": {"session_id": "sid-mystery",
                                                  "retired_sids": []}})
-        self._occ(monkeypatch, 300000)
+        self._occ(monkeypatch, 500000)
         assert fleet._caller_holds_supervisor_claim("sid-mystery") is None
         assert fleet._ceiling_refuses_dispatch("spawn") is not None
 
@@ -263,13 +266,13 @@ class TestCeiling:
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-mystery")
         _write_incarnation(_held("sid-ghost"))
         _write_registry({"other": {"session_id": "sid-else", "retired_sids": []}})
-        self._occ(monkeypatch, 300000)
+        self._occ(monkeypatch, 500000)
         assert fleet._ceiling_refuses_dispatch("spawn") is None
 
     def test_no_session_id_is_not_refused(self, ceil_home, monkeypatch):
         monkeypatch.setenv("FLEET_WORKER", "supervisor")
         monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
-        self._occ(monkeypatch, 400000)
+        self._occ(monkeypatch, 500000)
         assert fleet._ceiling_refuses_dispatch("spawn") is None
 
 
@@ -283,7 +286,7 @@ class TestWiring:
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-holder")
         _write_incarnation(_held("sid-holder"))
         monkeypatch.setattr(fleet, "find_transcript_path", lambda name, sid: "/fake")
-        monkeypatch.setattr(fleet, "_transcript_occupancy", lambda p: 205000)
+        monkeypatch.setattr(fleet, "_transcript_occupancy", lambda p: 405000)
         args = SimpleNamespace(name="w1", dir=str(ceil_home), task="do it",
                                nonce=None, max_budget_usd=None)
         with pytest.raises(fleet.FleetCliError) as ei:
@@ -296,7 +299,7 @@ class TestWiring:
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-holder")
         _write_incarnation(_held("sid-holder"))
         monkeypatch.setattr(fleet, "find_transcript_path", lambda name, sid: "/fake")
-        monkeypatch.setattr(fleet, "_transcript_occupancy", lambda p: 205000)
+        monkeypatch.setattr(fleet, "_transcript_occupancy", lambda p: 405000)
         args = SimpleNamespace(name="w1", message="hi", nonce=None)
         with pytest.raises(fleet.FleetCliError) as ei:
             fleet.cmd_send(args)
