@@ -19,15 +19,47 @@ A number that is derived from code and pasted into prose by hand will drift
 every time the code moves. The lesson was written down and it did not hold,
 because a lesson is not a guard. This file is the guard.
 
-WHAT IT PINS. Three claim shapes, each re-derived from `bin/fleet.py` rather
-than from any document:
+WHAT IT PINS -- and nothing wider. Three claim shapes, each re-derived from
+`bin/fleet.py` rather than from any document, each matched by one regex over
+the six `ENTRY_DOCS`:
 
-  1. every `fleet <verb>` named in an entry doc is a verb `build_parser()`
-     actually ships (the day-5 rule: a doc describing a CLI is re-derived from
-     `--help`, never from memory);
-  2. every "<N> checks" claim about `fleet doctor` equals the number of checks
-     `cmd_doctor` actually registers;
-  3. every Python-floor restatement equals `fleet.MIN_PYTHON_VERSION`.
+  1. a `fleet <verb>` written as a command -- inside a backtick span, or
+     inside a shell-ish fenced block with its comment lines stripped -- names
+     a verb `build_parser()` actually ships (the day-5 rule: a doc describing
+     a CLI is re-derived from `--help`, never from memory);
+  2. a "<N> checks" claim about `fleet doctor`, in that literal phrasing,
+     equals the number of checks `cmd_doctor` actually registers;
+  3. a floor written `Python <M>.<N>+` (or the README badge's
+     `python-<M>.<N>%2B`) equals `fleet.MIN_PYTHON_VERSION`.
+
+WHAT IT DOES NOT PIN. An adversarial pass on 2026-08-05 planted 15 false
+claims across these six docs and all 15 stayed green. Read fairly that is the
+shape of a NARROW pin rather than a broken one -- the three shapes above are
+held in their canonical phrasing, and the seed test proves the detectors fire.
+But a green run here must not be read as a wider promise than it is, so the
+holes are written down rather than left to be rediscovered:
+
+  * ABSENCE. Only claims that are PRESENT get checked. Deleting a whole
+    `fleet kill` row out of a command table is green. This is the hole worth
+    knowing, because omission -- not invention -- is the drift that actually
+    recurred in these docs: the pass that wrote this file found seven shipped
+    verbs missing from the entry surface and zero invented ones.
+  * FLAGS. No flag is ever checked against its verb; `fleet doctor
+    [--frobnicate]` is green.
+  * PHRASING. Canonical forms only, one regex each. Drop the backticks and
+    the claim leaves the pin's view entirely. `28 doctor checks`,
+    `28 PASS / 0 FAIL` and `checks: 28` are not "<N> checks"; `Python 3.13 or
+    newer` and `MIN_PYTHON_VERSION == (3, 13)` are not floor restatements.
+  * DOTTED INVOCATION. `_FLEET_INVOCATION` wants whitespace after the literal
+    `fleet`, and a dot is not whitespace, so `bin/fleet.py <verb>` and
+    `fleet.cmd <verb>` are invisible -- including in this module's own failure
+    message, which is where a reader is taught that form. (`bin/fleet`, the
+    POSIX shim, has no dot and IS seen.)
+  * SUBCOMMANDS. Only the first token after `fleet ` is read, so
+    `fleet index <subcommand>` is unheld.
+  * EVERY OTHER NUMBER. Test counts, file counts and subcommand counts pasted
+    into these docs are hand-derived and unheld here; they will drift the same
+    way `21 checks` did.
 
 WHY AST AND NOT `grep -c "def _doctor_check_"`. `SPEC.md` once pasted exactly
 that grep as its receipt for the check count. It is the wrong measurement: it
@@ -168,8 +200,13 @@ def find_bogus_verbs(text, shipped):
             verb = match.group(1)
             if verb in _NOT_A_VERB or verb in shipped:
                 continue
-            # `fleet sup-*` shorthand and its glob forms
-            if verb.startswith("sup-"):
+            # `fleet sup-*`, the docs' shorthand for the supervisor family:
+            # the glob yields the bare token `sup-`, and only that token is
+            # exempt. A `startswith("sup-")` here exempted all 11 shipped
+            # `sup-*` verbs AND every bogus one alongside them -- measured
+            # 2026-08-05, `fleet sup-frobnicate` in README's own CLI table
+            # was green.
+            if verb == "sup-":
                 continue
             bogus.add(verb)
     return bogus
@@ -198,8 +235,13 @@ def find_python_floor_claims(text):
 # --------------------------------------------------------------------------
 
 @pytest.mark.parametrize("rel", ENTRY_DOCS)
-def test_every_fleet_verb_named_in_an_entry_doc_is_shipped(rel):
+def test_fleet_verbs_written_as_commands_in_entry_docs_are_shipped(rel):
     """A doc describing a CLI is re-derived from `--help`, never from memory.
+
+    Scope, precisely: a `fleet <verb>` inside a backtick span or a shell-ish
+    fence names a verb `build_parser()` ships. PRESENCE ONLY -- a shipped verb
+    the docs never mention is invisible here, and so is every other invocation
+    form. This module's docstring lists the holes.
 
     The expensive precedent (2026-07-27, day-5 interface tier): the manager
     skill was missing four shipped verbs and `supervisor.md` carried two
@@ -286,6 +328,15 @@ def test_the_detector_catches_planted_drift():
     assert find_bogus_verbs(
         "```powershell\n# a comment\nfleet frobnicate\n```\n", shipped
     ) == {"frobnicate"}
+
+    # the `fleet sup-*` exemption is the GLOB TOKEN ONLY, and this is the
+    # assertion that keeps it that way. It was `verb.startswith("sup-")`
+    # until 2026-08-05, which exempted all 11 shipped `sup-*` verbs and every
+    # bogus one with them: `fleet sup-frobnicate` sat green in README's own
+    # CLI table, which is 11 of 32 verbs unheld behind a one-line skip.
+    assert find_bogus_verbs("`fleet sup-*`", shipped) == set()
+    assert find_bogus_verbs("`fleet sup-spawn`", shipped) == set()
+    assert find_bogus_verbs("`fleet sup-frobnicate`", shipped) == {"sup-frobnicate"}
 
     # 2. a check count that disagrees with the code
     assert find_check_count_claims(f"runs {actual + 3} health checks") == [actual + 3]
