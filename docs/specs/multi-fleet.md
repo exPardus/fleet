@@ -239,18 +239,36 @@ effect set matches an already-classified row must now be checked against this gr
 match alone is not a licence.
 
 **The bound on E2: which appends count (operator ruling 2026-08-05, E2).** An irreversible
-append is an irreversible effect, and the record it must land in is one **§4 makes append-only
-and no shipped verb removes an entry from**. MEASURED at the landing tree, **two** records
-satisfy that test, and naming only the first would be an enumeration smaller than reality:
+append is an irreversible effect, and the record it must land in is one **the spec corpus makes
+append-only and from which no shipped verb removes an entry**. **The first conjunct is not
+sourced by this document alone.** An earlier draft of this sentence said *"§4 makes append-only"*
+and that was wrong in a way that mattered: §4 above is `The homes list` and sources the homes
+list and nothing else, so read literally the bound admitted ONE record — and the record it
+excluded is the one carrying the two promotions this same section lands. Each record's
+append-only property is therefore cited below **where it is actually sourced, by section and
+never by line** (the rolling-doc doctrine, `68dcba1`). MEASURED, **two** records satisfy the
+test, and naming only the first would be an enumeration smaller than reality:
 
-1. `supervisor/JOURNAL.md`, reached by exactly six verbs (`sup-boot`, `sup-checkpoint`,
-   `sup-release`, and all three handoff verbs — reverse BFS over the call graph to
-   `supervisor_journal_append`, reproducing the gate's count exactly). Four were already
-   destructive on removal grounds, so **E2 moves exactly two**, and E3 collapses into it.
-2. `~/.claude/fleet-homes.list` — §4's *"append-only forever"* list, whose **retirement is
-   itself an append** (`!<home path>`), so only the FOLD is reversible and no entry is ever
-   removed. Measured: one reader, one writer (`append_home_record`), and a shipped lint
-   forbidding truncate/unlink/rename in any scope naming `homes_list_path`. **Its writer is
+1. `supervisor/JOURNAL.md` — **append-only by `docs/SPEC.md` §12 (*Supervisor protocol*)**,
+   which states it in those words: *"`supervisor/JOURNAL.md` (append-only, claim-holder-only)"*;
+   corroborated by `docs/specs/three-tier-command.md` §3.5.3, which calls it *"the append-only
+   `supervisor/JOURNAL.md`"* while listing what a successor boots from. **Not by §4 of this
+   document, which does not mention it** — §4 governs the homes list only. Reached by exactly
+   six verbs (`sup-boot`, `sup-checkpoint`, `sup-release`, and all three handoff verbs — reverse
+   BFS over the call graph to `supervisor_journal_append`). Four were already destructive on
+   removal grounds, so **E2 moves exactly two**, and E3 collapses into it.
+2. `~/.claude/fleet-homes.list` — **append-only by §4 of THIS document** (*"Append-only
+   forever"*), whose **retirement is itself an append** (`!<home path>`), so only the FOLD is
+   reversible and no entry is ever removed. Measured at this section's landing tree
+   (`bd93691`), at function granularity: one reader function (`read_homes_list`) and one writer
+   function (`append_home_record`, two call sites, both in `cmd_homes`), plus a shipped lint
+   forbidding truncate/unlink/rename in any scope naming `homes_list_path`. **That is a count of
+   functions, not of verbs, and it is deliberately narrower than §4's own writer list** — §4
+   names three writers (`fleet init --home`, `fleet homes --add`, `fleet homes --retire`) and
+   `fleet init --home` does not write the list at this tree (measured: `cmd_init` neither calls
+   `append_home_record` nor names `homes_list_path`). When that writer is built the function
+   count moves and this enumeration must be re-measured; it is unpinned prose, so nothing will
+   catch it. **Its writer is
    `homes --add/--retire`, which the RATIFIED ordinary row calls *ordinary (list-reversible)* —
    so the ground and that row disagree, and THIS LANDING DOES NOT RESOLVE IT.** The ratified row
    stands; the disagreement was opened the same day as its own operator docket item

@@ -327,11 +327,15 @@ SPEC = REPO / "docs" / "specs" / "multi-fleet.md"
 #   * `wait` -> ORDINARY by B3, which also wrote the ground that separates it
 #     from `release` into §5 (their effect-site sets are byte-identical, so
 #     set-equality selected ordinary AND disruptive at once and could not pick);
-#   * `sup-spawn` -> DESTRUCTIVE by E1 (the dispatch is the act). ITS ENTRY IN
-#     THE LINT BELOW IS HAND-MAINTAINED AND CANNOT BE DERIVED -- no static walk
-#     over `bin/fleet.py` sees what a dispatched body will do. Ruled as an
-#     accepted cost; if you are pruning this file, that is the entry with no
-#     mechanical backstop.
+#   * `sup-spawn` -> DESTRUCTIVE by E1 (the dispatch is the act). ITS
+#     CLASSIFICATION IS THE HAND-MAINTAINED THING -- no static walk over
+#     `bin/fleet.py` can derive `sup-spawn = destructive` from its effect sites,
+#     so a ruling had to supply it, and that is the accepted cost the operator
+#     ruled. Its ENTRIES are backstopped like every other name here: an earlier
+#     version of this comment said the lint entry was the unbacked thing, and
+#     that was a level off. Dropping `sup-spawn` from either this tuple or from
+#     `DESTRUCTIVE_VERBS` goes RED naming it. What no test can check is whether
+#     the ruling itself is right.
 #   * `sup-checkpoint`, `sup-release` -> DESTRUCTIVE by E2 (an irreversible
 #     append is an irreversible effect), E3 collapsing into it.
 RATIFIED_DESTRUCTIVE = ("clean", "archive", "autoclean",

@@ -853,12 +853,19 @@ class TestCommandFiles:
     # both land together the spec calls a verb destructive while the binding
     # lint does not know it is -- the spec-says-X / binding-row-says-Y split.
     #
-    # `sup-spawn` IS THE ONE WITH NO MECHANICAL BACKSTOP. It is destructive
-    # because the dispatch is the act (E1), and no static walk over
-    # `bin/fleet.py` can see what a dispatched body does, so this entry is
-    # hand-maintained by ruling. The others are derived and re-derived every run
-    # by `tests/test_round7_defect_pins.py`, which compares this tuple against
-    # the spec's own row -- so this list cannot fall behind the ratified table.
+    # `sup-spawn`'s CLASSIFICATION is the hand-maintained thing -- NOT its entry
+    # here, and the distinction is a level apart. It is destructive because the
+    # dispatch is the act (E1), and no static walk over `bin/fleet.py` can
+    # derive that from its effect sites: supplying it is what the ruling had to
+    # do, and that is the accepted cost the operator ruled.
+    #
+    # THE ENTRY ITSELF IS BACKSTOPPED exactly like the others, and an earlier
+    # version of this comment said otherwise. `sup-spawn` is in
+    # `RATIFIED_DESTRUCTIVE`, which `tests/test_round7_defect_pins.py` re-reads
+    # from the spec's own row in both directions and then forces into this
+    # tuple, so dropping it from here goes RED naming it -- measured, same as
+    # dropping `sup-boot`. So: this list cannot fall behind the ratified table.
+    # What no test can check is whether the table's `sup-spawn` row is RIGHT.
     DESTRUCTIVE_VERBS = ("kill", "clean", "respawn", "interrupt", "spawn",
                          "send", "attach", "release", "resume-limited",
                          "archive", "autoclean", "doctor --repair",
