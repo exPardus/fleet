@@ -1,6 +1,6 @@
 """The registry judges fleet identity; the environment only witnesses.
 
-SPEC.md:196 -- *"A future guard enforcing 'a worker turn must never hold the
+SPEC.md:204 -- *"A future guard enforcing 'a worker turn must never hold the
 supervisor claim' must key on the registry or the claim itself, NEVER on
 `FLEET_WORKER`, or it will refuse the one session whose whole purpose is to
 receive the claim."*
@@ -314,7 +314,7 @@ class TestSiteACeiling:
     DONATES a `FLEET_WORKER` stamp to sessions it never launched. Donation can
     only ADD a stamp; nothing removes one. So PRESENCE is unsound evidence and
     ABSENCE is sound -- and ND4(c) reads absence. The claim guard (Site B) read
-    presence, which is why SPEC.md:196 names that guard and not this one.
+    presence, which is why SPEC.md:204 names that guard and not this one.
 
     Direction of travel still matters here, and §17's first sentence is the
     name for it: inference may select the SUBJECT of a measurement but may not
@@ -390,7 +390,7 @@ class TestSiteACeiling:
         claim-holder. That reasoning is sound in the abstract and it is not the
         ratified rule: `three-tier-command.md` §11.3 ND4(c) exempts on
         `FLEET_WORKER`-absence *unconditionally* and *independent of any sid
-        resolution*, and SPEC.md:196 -- the citation the re-key was built on --
+        resolution*, and SPEC.md:204 -- the citation the re-key was built on --
         constrains only the guard enforcing *"a worker turn must never hold the
         supervisor claim"*, which this site is not.
 
@@ -602,7 +602,7 @@ class TestInferenceNeverRefuses:
     well as the stamp. §16.3 recorded that as OPEN; claim-nonce §18.2 CLOSES it
     in the safe direction by counting, so the demotion now buys nothing at all.
     Ratified §6.5 D5 requires the
-    refusal to exist; SPEC.md:196 constrains only its KEY; a registry-keyed
+    refusal to exist; SPEC.md:204 constrains only its KEY; a registry-keyed
     gate satisfies both, so nothing had to be traded away."""
 
     def test_a_worker_shaped_identity_holding_the_live_nonce_IS_refused(
@@ -787,7 +787,7 @@ class TestTheRoleClassifier:
     def test_the_role_refusal_is_not_logged_as_a_continuity_refusal(
             self, id_home, monkeypatch):
         # A `refused` record makes `fleet doctor` say "a second body of this
-        # lineage may be acting" (SPEC.md:273). A worker turn is not that, and
+        # lineage may be acting" (SPEC.md:281). A worker turn is not that, and
         # must not train the operator to ignore the one signal that does mean
         # two bodies.
         #
@@ -1120,7 +1120,7 @@ class TestTheWitnessIsStillWritten:
         answers "am I a fleet-launched body at all" without resolving a sid is
         `FLEET_WORKER`'s ABSENCE.
 
-        SPEC.md:196's prohibition is NARROWER than this pin read it. Quoted:
+        SPEC.md:204's prohibition is NARROWER than this pin read it. Quoted:
         *"A future guard enforcing `a worker turn must never hold the
         supervisor claim` must key on the registry or the claim itself, never
         on `FLEET_WORKER`."* That is one guard -- the claim guard, Site B --
@@ -1136,7 +1136,7 @@ class TestTheWitnessIsStillWritten:
         that worker" may be a lie), while `FLEET_WORKER` ABSENT is sound ("no
         fleet dispatch is anywhere in my donation chain"). ND4(c) keys on the
         sound direction. The claim guard keyed on the unsound one, and that is
-        the defect SPEC.md:196 records.
+        the defect SPEC.md:204 records.
 
         So the pin now asserts what actually holds: the reads are exactly the
         two ALLOWLISTED non-predicate/structural sites, and the claim guard is
@@ -1163,7 +1163,7 @@ class TestTheWitnessIsStillWritten:
             f"(absence, the sound direction) and the doctor row that reports the "
             f"witness/registry disagreement. Anything else is a predicate.")
         assert "_require_claim_holder" not in reads, (
-            "SPEC.md:196: the guard enforcing `a worker turn must never hold the "
+            "SPEC.md:204: the guard enforcing `a worker turn must never hold the "
             "supervisor claim` must key on the registry or the claim itself")
 
 

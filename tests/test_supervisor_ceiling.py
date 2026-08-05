@@ -8,7 +8,7 @@ that holds no claim is never subject, the identity gate resolves through
 and an unresolvable identity fails TOWARD the band (ND4b). Occupancy is the
 caller's OWN transcript (B2/B3).
 
-ND4c's KEY CHANGED (SPEC.md:196, `tests/test_identity_registry.py`). It read
+ND4c's KEY CHANGED (SPEC.md:204, `tests/test_identity_registry.py`). It read
 *"no `FLEET_WORKER` in its env"*; the machine-wide daemon donates that stamp to
 sessions it never launched, so its presence and its absence say equally little
 about the acting body. The structural question is now asked of the registry --

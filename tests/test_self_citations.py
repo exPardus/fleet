@@ -29,10 +29,10 @@ WHAT IS PINNED HERE, AND WHAT IS NOT -- read this before trusting the name.
 
   NOT PINNED, said plainly:
 
-    * Citations of OTHER documents -- `SPEC.md:196`, `SPEC:1196-1198`,
+    * Citations of OTHER documents -- `SPEC.md:204`, `SPEC:1196-1198`,
       `three-tier-command.md :432-437`, `knowledge/lessons.md:607`,
-      `skills/fleet/SKILL.md:37`, `spike/m0/VERDICTS.md:441`, `CN:1568-1572`,
-      `SPAWN:452-462`. This file resolves line numbers against `bin/fleet.py`
+      `skills/fleet/SKILL.md:54`, `spike/m0/VERDICTS.md:441`, `CN:1671-1675`,
+      `SPAWN:461-471`. This file resolves line numbers against `bin/fleet.py`
       and nothing else. They are classified here only so the scanner can prove
       it has not quietly dropped a self-citation into the "not mine" bucket --
       `test_no_number_is_left_unclassified` is that proof, and it is the only
