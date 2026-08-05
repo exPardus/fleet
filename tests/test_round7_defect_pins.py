@@ -313,10 +313,39 @@ SPEC = REPO / "docs" / "specs" / "multi-fleet.md"
 # Transcribed from the RATIFIED §5 verb-effect table. Keys are the table's own
 # tokens, flag included where the table carries one -- `doctor` is ordinary and
 # `doctor --repair` is destructive, and a verb-only key cannot say that.
+#
+# THE 2026-08-05 §5-CRITERION RULING IS LANDED HERE, IN THE SAME COMMIT AS THE
+# SPEC EDIT IT TRANSCRIBES. `TestRatifiedTableIsTranscribedFaithfully` re-reads
+# the spec's `| **destructive** |` row, so moving this tuple without the spec --
+# or the spec without this tuple -- goes RED in one direction or the other. That
+# coupling is the reason `w42/mf5-verbs` was RED at its own tip: it edited the
+# row and not this file, and disclosed that rather than routing around it.
+#
+# Where the seventeen names went (all four sub-rulings AS RECOMMENDED,
+# `docs/OPERATOR-GATES.md` first settled entry):
+#   * eleven by `w42/mf5`'s own derivations, landing under its gate;
+#   * `wait` -> ORDINARY by B3, which also wrote the ground that separates it
+#     from `release` into §5 (their effect-site sets are byte-identical, so
+#     set-equality selected ordinary AND disruptive at once and could not pick);
+#   * `sup-spawn` -> DESTRUCTIVE by E1 (the dispatch is the act). ITS ENTRY IN
+#     THE LINT BELOW IS HAND-MAINTAINED AND CANNOT BE DERIVED -- no static walk
+#     over `bin/fleet.py` sees what a dispatched body will do. Ruled as an
+#     accepted cost; if you are pruning this file, that is the entry with no
+#     mechanical backstop.
+#   * `sup-checkpoint`, `sup-release` -> DESTRUCTIVE by E2 (an irreversible
+#     append is an irreversible effect), E3 collapsing into it.
 RATIFIED_DESTRUCTIVE = ("clean", "archive", "autoclean",
-                        "doctor --repair", "sup-handoff-abort")
-RATIFIED_DISRUPTIVE = ("kill", "interrupt", "send", "respawn", "release")
-RATIFIED_ORDINARY = ("spawn", "init", "status", "peek", "result", "homes")
+                        "doctor --repair", "sup-handoff-abort",
+                        # [w42/mf5], landed under the same ruling
+                        "sup-boot", "sup-handoff-begin", "sup-handoff-complete",
+                        "sup-decision --clear",
+                        # [w43/s5] E1, then E2/E3
+                        "sup-spawn", "sup-checkpoint", "sup-release")
+RATIFIED_DISRUPTIVE = ("kill", "interrupt", "send", "respawn", "release",
+                       "resume-limited", "sup-heartbeat")
+RATIFIED_ORDINARY = ("spawn", "init", "status", "peek", "result", "homes",
+                     "home", "knowledge", "attach", "wait", "sup-status",
+                     "sup-context", "q", "index")
 
 # Named by the ratified table but NOT YET BUILT. Kept separate so the "the table
 # cites no dead verb" pin cannot be satisfied by an unbuilt name.
@@ -341,23 +370,27 @@ RATIFIED_BUT_UNBUILT = ()
 
 # Verbs `build_parser()` ships that the RATIFIED table classifies nowhere.
 #
-# THIS IS A FINDING, DELIBERATELY NOT A CLASSIFICATION. The spec's own closing
-# paragraph says the table "rows are drafted against wave-26-era shipped verbs";
-# 17 of the 32 shipped verbs fall outside it, several of them plainly not
-# ordinary (`sup-spawn` dispatches, `sup-release` releases a claim,
-# `resume-limited` restarts sessions). Assigning them a tier is a spec edit on a
-# ratified section and is the operator's, not a builder's -- so they are recorded
-# here as unclassified rather than guessed at.
+# THIS IS A FINDING, DELIBERATELY NOT A CLASSIFICATION. It held seventeen names
+# because the spec's own closing paragraph says the table "rows are drafted
+# against wave-26-era shipped verbs", and assigning a tier is a spec edit on a
+# ratified section -- the operator's, not a builder's. So they were recorded here
+# rather than guessed at, and that is exactly how they came to be ruled: the
+# 2026-08-05 §5-criterion gate is the escalation this tuple existed to force.
+#
+# IT IS EMPTY NOW, AND EMPTY IS A REAL STATE, NOT A ROTTED ONE. All seventeen
+# were classified by `w42/mf5` plus the four sub-rulings; the census closes
+# exactly (measured at the landing tree: 33 shipped verbs, and 12 destructive +
+# 7 disruptive + 14 ordinary first-tokens = 33, no verb in two rows).
 #
 # The pin's value is the SHAPE, not the contents: a verb added tomorrow is in
 # neither the table nor this list, so it goes RED until someone dispositions it.
-# That is the "cannot pass silently" the ratification asked for.
-UNCLASSIFIED_BY_THE_RATIFIED_TABLE = (
-    "home", "knowledge", "wait", "attach", "resume-limited", "index", "q",
-    "sup-boot", "sup-spawn", "sup-checkpoint", "sup-heartbeat", "sup-release",
-    "sup-status", "sup-context", "sup-decision", "sup-handoff-begin",
-    "sup-handoff-complete",
-)
+# That is the "cannot pass silently" the ratification asked for, and with this
+# tuple empty `test_every_shipped_verb_is_classified_or_declared_unclassified`
+# is now the ONLY thing standing between a new verb and a silent landing --
+# there is no longer a second place a name could be parked. Its seed
+# (`test_the_seed_a_new_verb_with_no_disposition_is_caught`) is what proves it
+# still fires; do not delete that seed to save a test.
+UNCLASSIFIED_BY_THE_RATIFIED_TABLE = ()
 
 
 def _classified_verbs():
