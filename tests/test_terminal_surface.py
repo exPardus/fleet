@@ -845,10 +845,34 @@ class TestCommandFiles:
     # depth behind `test_read_only_grants_are_no_wider_than_the_body_invokes`,
     # which is the derived pin and remains the primary one (see the
     # "THE PIN IS THE PROPERTY, NOT THE STRING" note above).
+    # The last seven entries landed 2026-08-05 with the operator's §5-criterion
+    # ruling, in the SAME commit as the spec row and the pin tuple it mirrors.
+    # This is the enforcement half of that landing and the half `w42/mf5-verbs`
+    # missed: promoting a verb into the ratified destructive row obliges the
+    # guard that stops a read-only `/fleet:*` command being granted it. Until
+    # both land together the spec calls a verb destructive while the binding
+    # lint does not know it is -- the spec-says-X / binding-row-says-Y split.
+    #
+    # `sup-spawn`'s CLASSIFICATION is the hand-maintained thing -- NOT its entry
+    # here, and the distinction is a level apart. It is destructive because the
+    # dispatch is the act (E1), and no static walk over `bin/fleet.py` can
+    # derive that from its effect sites: supplying it is what the ruling had to
+    # do, and that is the accepted cost the operator ruled.
+    #
+    # THE ENTRY ITSELF IS BACKSTOPPED exactly like the others, and an earlier
+    # version of this comment said otherwise. `sup-spawn` is in
+    # `RATIFIED_DESTRUCTIVE`, which `tests/test_round7_defect_pins.py` re-reads
+    # from the spec's own row in both directions and then forces into this
+    # tuple, so dropping it from here goes RED naming it -- measured, same as
+    # dropping `sup-boot`. So: this list cannot fall behind the ratified table.
+    # What no test can check is whether the table's `sup-spawn` row is RIGHT.
     DESTRUCTIVE_VERBS = ("kill", "clean", "respawn", "interrupt", "spawn",
                          "send", "attach", "release", "resume-limited",
                          "archive", "autoclean", "doctor --repair",
-                         "sup-handoff-abort")
+                         "sup-handoff-abort",
+                         "sup-boot", "sup-handoff-begin", "sup-handoff-complete",
+                         "sup-decision --clear", "sup-spawn", "sup-checkpoint",
+                         "sup-release")
 
     @pytest.mark.parametrize("name", sorted(READ_ONLY_COMMANDS))
     def test_read_only_grants_never_cover_the_whole_fleet_cli(self, name):
