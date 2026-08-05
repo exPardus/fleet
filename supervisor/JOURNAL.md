@@ -6132,3 +6132,181 @@ GATE VERDICT IN, B1 STEERED BACK TO ITS LANE; CEILING-RAISE RULING ARRIVED AND I
 **OPERATOR RULING (via interface, recorded in gates Settled + lessons): ceilings raised — supervisor 200k→400k hard, worker band top 200k→300k, 50k margins (350–400k / 250–300k as interface-transcribed; 400k/300k are the ruling if margin misreads). Shipped 200k governs until the code lands; code is the authority.** Dispatched `w44-ceil` (sid e6c392c7, opus, bypass) on branch `w44/ceiling` at `c5e84c9`, brief `state/tasks/lens/w44-ceil.md`: constant + grep-derived call sites, sup-context band render, three-tier §11.3/§11.4 restatement with dated amendment note, doctrine surfaces by grep (GOALS.md edit is PROPOSAL-only — operator-owned), pins flipped RED→GREEN both floors, fault-injection ordered.
 
 MY OCCUPANCY: 155,739 IN-BAND at last measure. Wave plan under §11.3: land s5 on B1 repair (verify clause + floors both interpreters, predict 3899/14/1 = 3914 collected at merged tree), wave record + lessons + journal commit, HANDOFF. Ceiling lane's adversarial gate + landing = SUCCESSOR QUEUE item 1 (its landing is what raises the ceiling; until then successor operates under 200k). Successor queue also: claim-nonce `:2572` §8 restatement + test docstring (mechanical under ratified rule), N1 pin-coverage follow-up lane.
+
+## 2026-08-05T19:32:48Z CHECKPOINT inc=inc-20260805T173144Z-e447 sid=0a5cc7ab-4809-4b41-ac68-3cb293654ec9
+
+HANDOFF PREP — WAVE 44 CLOSED CLEAN; ONE LANE IN FLIGHT PASSES TO YOU; READ THIS ENTIRE ENTRY, IT IS YOUR CAMPAIGN BRIEF.
+
+## STATE, MEASURED AT HANDOFF
+
+Main `2b064c4` == origin, read-back proven. Floors 3899/14/1 = 3914 collected, BOTH interpreters, measured at `d84a3c1` (wave-record commit on top is docs-only). 16 consecutive ratified bypass events through this incarnation. My occupancy 196,132 at the prep measure — the shipped 200k ceiling still governs YOU until the ceiling lane lands; `sup-context` at every wave boundary, MEASURE never estimate (two incarnations have now written that; the first wrote it after being refused at 223k).
+
+Landed this wave, all pushed with read-back: `5c2e5ac` (E2/homes docket line), `c5e84c9` (claim-nonce `:337` under self-audit gate), `d84a3c1` (§5 ruling + `w42/mf5-verbs` under the `w44-gs5` adversarial gate, B1 one-clause repair steered back to the lane), `2b064c4` (wave record). Full detail: journal checkpoints above + `knowledge/lessons.md#2026-08-06-w44-landing`.
+
+## IN FLIGHT — YOUR QUEUE ITEM 1
+
+**`w44-ceil` (sid e6c392c7, opus, bypass) is WORKING** on branch `w44/ceiling` at `c5e84c9`, brief `state/tasks/lens/w44-ceil.md`: the 2026-08-05 ceiling-raise ruling (supervisor 200k→400k hard / band 350–400k; worker top 300k / band 250–300k; gates Settled first entry + `lessons.md#2026-08-05-ceilings-raised`). When it reports:
+1. Adversarial gate in a DETACHED worktree (pattern: `state/tasks/lens/w44-gs5.md`; a detached body cannot advance the ref it audits). Order the gate to read structure, not just the brief's checklist — B1 was found that way.
+2. Land under green gate only. Its branch base `c5e84c9` is now 4 commits behind — re-derive disjointness MERGE-BASE FORM at landing; s5 landed `tests/test_round7_defect_pins.py` + `tests/test_terminal_surface.py` + `docs/specs/multi-fleet.md`, which the ceiling lane has no business touching; if it did, that is a finding.
+3. Its landing is what raises YOUR ceiling to 400k — land it before anything expensive.
+4. GOALS.md band section (150–200k) is OPERATOR-OWNED: the lane only PROPOSES replacement text; relay the proposal in a checkpoint, do not edit.
+
+## QUEUE 2+, IN ORDER
+
+2. **claim-nonce `:2572` restatement + `tests/test_supervisor.py:2071-2076` docstring** — c337's hand-ups: §8 build table carries the same dead-SessionStart-consumer claim (unnamed-file form, escaped the ruling's three-place search). Mechanical under the RATIFIED deleted-file rule (live-false current-tree claim → restate; receipts/blockquotes stay). Small gated edit, receipts harness green before AND after, pattern: `state/tasks/lens/w43-c337.md`.
+3. **gs5's N1 follow-up lane**: `RATIFIED_DISRUPTIVE`/`RATIFIED_ORDINARY` have NO spec-transcription pin — the gate's M5 moved `wait` between spec rows and the whole suite stayed green. Extend `TestRatifiedTableIsTranscribedFaithfully` (or sibling) to all three rows, fault-inject each direction.
+4. **Multi-fleet a2 slice** (launch axis, operator priority): its brief MUST carry ga1's N5 (relative home reads process CWD — `home_is_initialized` only AFTER resolution), N1 (`homes --add ""` renders view at rc 0), N8 (`RATIFIED_ORDINARY` had no transcription pin — partially addressed by queue 3). See the 2026-08-05 17:29:50Z journal entry.
+
+## FACTS YOU WILL WANT
+
+- Docket Open: E5 wording + E2/homes tension — both operator's, nothing parked on them.
+- Worktree inventory grows: w43 set + `fleet-w44-gs5` (detached, gate done) + `fleet-w44-ceil` (live lane). Sweep is autoclean TTL business, not urgent; NEVER remove a live lane's worktree.
+- Every spawn `--mode bypass`, briefs via `@file` under `state/tasks/lens/`, checkpoints via `@file` (backtick-execution class 5). Merge before reading. Never pipe evidence. Steer a warm lane for repairs instead of a fresh fix wave (B1 receipt this wave).
+- Floors-run discipline from the gate's own disclosure: never start a floor run while a mutant is on disk.
+- FLEET_WORKER witness on this body was supervisor-shaped stale — benign; identity is the registry, not the env (§18).
+
+## WHAT THIS HANDOFF PROBABLY GOT WRONG
+
+Main's sha (the interface commits mid-wave — it did so twice today). The ceiling lane's file-set guess above is a PREDICTION, not a measurement — derive its real diff when it reports. And whether `w44-ceil` survives contact with its brief: it was ordered to report WHERE-THE-BRIEF-WAS-WRONG; read that section first.
+
+STATE: main `2b064c4` == origin. One lane in flight. Claim healthy, heartbeat fresh. Journal entries after `2b064c4` (this one included) remain uncommitted by design — commit them with YOUR wave record.
+
+## 2026-08-05T19:32:55Z HANDOFF-BEGIN inc=inc-20260805T173144Z-e447 sid=0a5cc7ab-4809-4b41-ac68-3cb293654ec9
+
+successor=inc-20260805T193255Z-4ee5 task=C:/proga/claude-fleet/state/supervisor-handoff-inc-20260805T193255Z-4ee5.md
+
+## 2026-08-05T19:33:26Z HANDOFF-COMPLETE inc=inc-20260805T173144Z-e447 sid=0a5cc7ab-4809-4b41-ac68-3cb293654ec9
+
+claim -> inc-20260805T193255Z-4ee5 sid=650837ff-7f18-47f2-bcc0-20bc17a10b66
+
+## 2026-08-05T19:33:33Z CHECKPOINT inc=inc-20260805T193255Z-4ee5 sid=650837ff-7f18-47f2-bcc0-20bc17a10b66
+
+claim received via handoff from inc-20260805T173144Z-e447
+
+## 2026-08-05T19:36:12Z CHECKPOINT inc=inc-20260805T193255Z-4ee5 sid=650837ff-7f18-47f2-bcc0-20bc17a10b66
+
+WAVE 45 OPEN — BOOT COMPLETE, WATCHTOWER UP, CEILING LANE AWAITED.
+
+Boot facts MEASURED: `sup-context` 105,480 BELOW-BAND at first beat. `fleet status` 29 workers, only `w44-ceil` working (34 min at measure); no `limited` workers so resume-limited skipped with cause. `autoclean` ran clean: archived 0, skipped 119, husks 0, errors 0. Claim transferred clean via handoff token; checkpoint 1 was the claim receipt.
+
+DISJOINTNESS CHECK DONE BEFORE ANY PARALLEL DISPATCH: queue-2 (claim-nonce `:2572` restatement + `tests/test_supervisor.py:2071-2076` docstring) is NOT provably disjoint from the ceiling lane — w44-ceil's scope-3/4 grep over `docs/` reaches `docs/specs/claim-nonce.md` (7 hits for 200k, §16/§16.5/§17-adjacent) and could order edits there. Queue-2 stays serialized behind the ceiling landing. tests/test_supervisor.py itself greps CLEAN for band numbers — recorded for the landing-time disjointness re-derivation.
+
+WAITING event-driven, not polling: `fleet wait w44-ceil --timeout 3300` running in background; on its exit I read the lane's WHERE-THE-BRIEF-WAS-WRONG section first, then gate in a DETACHED worktree per `state/tasks/lens/w44-gs5.md` pattern, gate ordered to read structure not checklist. Landing raises my ceiling to 400k; until then shipped 200k governs.
+
+## 2026-08-05T19:54:32Z CHECKPOINT inc=inc-20260805T193255Z-4ee5 sid=650837ff-7f18-47f2-bcc0-20bc17a10b66
+
+CEILING LANE REPORTED DONE; ADVERSARIAL GATE DISPATCHED.
+
+`w44-ceil` returned: one commit `6d19ba2` over `c5e84c9`, porcelain empty, floors 3914/14/1 BOTH interpreters (base 3892/14/1 = 3907 re-derived, +22 all in test_supervisor_context.py 14→36), receipts identical before/after on all three touched specs, 5/5 self-reported mutants caught. Central design call: per-tier constant split claimed FORCED (single pair served both tiers only while numbers were equal) — SUPERVISOR/WORKER_BAND_{SOFT,HARD}_TOKENS, tier REQUIRED in supervisor_band_verdict, band_tier_for_sid through the ceiling's own tri-state, old names GONE not aliased. Disclosed divergence: indeterminate identity → ceiling refuses at 400k, measurement reports worker band — strict both directions, pinned. Report §6: brief wrong 6 ways, biggest = NO worker-band constant existed (§11.4 worker arm still [UNBUILT], branch does not build it) and the self-citation class cost 3 fixpoint passes (31 numbers across 38 tokens). §7 flags: supervisor.md was falsely denying respawn ceiling coverage since 2026-07-27 (corrected in-place), `:10451`/`:10387` ND4(c) contradiction PRE-EXISTING → ND4(c) docket, mf-slice-a pricing was old-band arithmetic → next MF sizing must re-price. GOALS.md §8 replacement text PROPOSED not edited — OPERATOR ACTION OWED, relaying here: exact text in state/journals/w44-ceil.md §8.
+
+GATE DISPATCHED: `w45-gceil` sid b1513ae7, opus, bypass, DETACHED worktree C:/proga/fleet-w45-gceil at 6d19ba2 (verified clean at 6d19ba2 before dispatch). Brief state/tasks/lens/w45-gceil.md: ordered to read DOCUMENT STRUCTURE of every added normative sentence (B1 pattern), re-plant the brief's 2 mutants + ≥2 of its own design, verify cmd_sup_context read-only property by AST against test_load_registry_callers.py, census spot-audit incl. KEEP-side byte-untouched check, disjointness vs current main MERGE-BASE form naming the six s5/5c61ad5 files, no-mutant-during-floors + stash-or-wait fixture warning baked in. Waiting event-driven on fleet wait.
+
+Queue unchanged: land on green gate only → then :2572 lane (serialization confirmed right — ceiling lane DID touch claim-nonce.md §16.5 note) → N1 pins → MF a2.
+
+## 2026-08-05T20:19:52Z CHECKPOINT inc=inc-20260805T193255Z-4ee5 sid=650837ff-7f18-47f2-bcc0-20bc17a10b66
+
+GATE RETURNED GATING — ONE BLOCKER, LANE STEERED WITH MINIMAL REPAIR ORDER.
+
+`w45-gceil` verdict (state/verdicts/w45-gceil.md, detached at 6d19ba2, porcelain empty, all 6 mutants restored, no mutant during floors): B1 BLOCKING — the branch's 31-citation repoint broke the ONE self-citation range in bin/fleet.py (`:7852`, `cmd_respawn:7443-7343`, end left at base value, start moved +102). Structurally invisible: the citation pin discards range ends by construction (non-capturing group), the unclassified-number guard needs a colon, and the lane's own 77-token count control CANNOT see a range end — "control must include the SHAPE of the data" lesson firing again. Gate proved it with a 3-value mutant: shipped/absurd/correct all 18-passed identical. Repair = one token.
+
+CONFIRMED independently: floors 3914/14/1 = 3929 collected BOTH interpreters; 5-site/4-verb AST; ND4(c) arms byte-identical (AST-normalised); cmd_sup_context read-only by call-graph BFS (forbidden set unreached); 263-hit census HOLDS including two lines the gate hunted as misses; receipts clean (sole pre-existing volatile WARN moved again — positive control); disjointness vs main EMPTY merge-base form (main side is SEVEN files, my brief said six — supervisor/JOURNAL.md omitted, verdict unaffected); NOT-scope clean; nothing pushed. Lane report honesty borne out — 4 overstatements of coverage, zero misreporting.
+
+Advisory: A1 mutant D (separate-token band revert in supervisor.md) SURVIVED 493 tests — new pin class covers joined spelling only; A2 §11.3 pointer-note quantifier reaches two KEEP blockquotes; A3 §11 normative surface never discloses the ceiling/measurement divergence (reader concludes 300k refusal, truth 400k) + narrowed "cannot disagree" in test docstring; A4 doctor-string interpolation unpinned (mutant F survived 166).
+
+STEERED w44-ceil (fork 85ba9a12) with state/tasks/lens/w44-ceil-b1.md: B1 REQUIRED (one token), gate recs 3+4 + A3 docstring reword APPROVED TO RIDE (three one-sentence text repairs in the lane's own added text), recs 1/2/5 FORBIDDEN — filed as pin-hardening lane (task 5, sibling of gs5's N1 lane). New commit on top of 6d19ba2, not amend. Receipts before/after on three-tier, floors predicted unchanged 3914/14/1.
+
+NEXT: on repair report — verify B1 clause + diff myself, re-derive disjointness at landing, land, then GOALS.md §8 proposal remains OPERATOR-OWED. Landing raises my ceiling to 400k.
+
+## 2026-08-05T20:45:24Z CHECKPOINT inc=inc-20260805T193255Z-4ee5 sid=650837ff-7f18-47f2-bcc0-20bc17a10b66
+
+CEILING RAISE LANDED — `238a4778` pushed with read-back; 400k SUPERVISOR BAND NOW GOVERNS, MEASURED LIVE.
+
+Landing under my own hand after the w45-gceil gate: repair diff `6d19ba2..cc65dab` read in full — exactly the order's four items (B1 one-token range fix re-derived by the lane via AST; §11 divergence disclosure; §11.3 quantifier narrowed with blockquote exemption; TestTierResolution docstring split read-vs-resolution), nothing else. Disjointness RE-DERIVED at landing: merge-base `c5e84c9`, branch 13 files vs main 7 files, intersection EMPTY. Merge `--no-ff` → `238a4778`, zero conflicts, only supervisor/JOURNAL.md dirty by design.
+
+Floors PREDICTED BEFORE RUNNING: main 3899 + branch 22 = 3921/14/1 = 3936 collected. MEASURED: 3936 collected; 3921/14/1 on py3.13 (334.87s) AND py3.10 (305.58s) — HIT EXACTLY. Receipts at merged tree: three-tier 68/68 0W, claim-nonce 68/69 sole pre-existing volatile mtime WARN, graceful-succession 25/25 — self-tests PASSED both seed classes all three. Pushed; read-back main == origin == `238a4778`; ratified bypass event fired (17th consecutive).
+
+`sup-context` at the shipped tree: 168,251 → BELOW-BAND against the NEW supervisor band 350,000–400,000, tier named in output. The raise is live for this incarnation.
+
+STILL OWED — OPERATOR: `supervisor/GOALS.md` band-section replacement (lane report §8, `state/journals/w44-ceil.md`) — file untouched by branch, gate confirmed. PROPOSAL stands, relayed third time.
+
+QUEUE NEXT (tasks): #2 claim-nonce `:2572` + test_supervisor docstring (now unblocked — ceiling landed); #5 pin-hardening (gate recs 1/2/5: range-END validation in _NAMED_CITATION_RE with the 7443-9999 seed, separate-token band-revert hardening after mutant D survived 493 tests, doctor-string interpolation pin after mutant F survived 166); #3 gs5's N1 transcription pins; #4 MF a2 slice (launch axis, operator priority — brief must carry ga1's N5/N1/N8).
+
+## 2026-08-05T20:50:02Z CHECKPOINT inc=inc-20260805T193255Z-4ee5 sid=650837ff-7f18-47f2-bcc0-20bc17a10b66
+
+THREE WAVE-45 LANES DISPATCHED IN PARALLEL — QUEUE 2/3/5 IN FLIGHT PLUS THE LAUNCH AXIS.
+
+All three at `238a4778` (the ceiling landing), all `--mode bypass --model opus`, briefs @file under state/tasks/lens/, worktrees cut and verified clean before dispatch:
+- `w45-c2572` sid 569781de, branch `w45/c2572`: claim-nonce §8 build-table dead-consumer restatement (locate by CONTENT, `:2572` as-cited) + `tests/test_supervisor.py` docstring — c337's two hand-ups, mechanical under the ratified deleted-file rule, `:765`/`:1799` fenced.
+- `w45-a2` sid bd470f07, branch `w45/mf-a2` (LAUNCH AXIS): MF slice a2 per pricing doc — §5 five-step resolution in main(), global `--fleet-home` flag (discharges flag-before-arming constraint), rb7 C-2 dest reconciliation with the vacuous slice-0 lint proven non-vacuous. Carries ga1's N5 (resolve-then-validate, pinned), N1 rides (empty --add guard), N8 owned by pins lane. a3 guard/arming explicitly fenced out.
+- `w45-pins` sid 2ac4ffac, branch `w45/pin-hardening` (tasks 3+5 folded): four pin gaps with surviving-mutant receipts — gceil rec 1 (citation range-END validation, 7443-9999 seed), rec 2 (separate-token band revert; mutant D survived 493), rec 3 (doctor-string interpolation; mutant F survived 166), gs5 N1 (DISRUPTIVE/ORDINARY transcription rows, M5 re-plant). Test files only; bin/fleet.py explicitly forbidden.
+
+DISJOINTNESS BY CONSTRUCTION: each brief fences the other lanes' files by name (a2 forbidden claim-nonce.md/test_supervisor.py/test_self_citations.py/test_supervisor_context.py/test_round7_defect_pins.py; pins forbidden bin/fleet.py + docs + skills; c2572 fenced to its two files). Cross-lane hazard noted in pins brief: a real defect its new pins find in main is report-and-stop, not fix — bin/fleet.py is a2's this wave.
+
+Waiting `--any` to pipeline landings as they finish (c2572 expected first — self-audit landing per c337 precedent; a2 and pins get adversarial gates). Occupancy ~175k, BELOW the new 350k soft trigger.
+
+## 2026-08-05T21:15:52Z CHECKPOINT inc=inc-20260805T193255Z-4ee5 sid=650837ff-7f18-47f2-bcc0-20bc17a10b66
+
+c2572 LANDED UNDER SELF-AUDIT GATE — `1be5beac` pushed with read-back, 18th consecutive ratified bypass event.
+
+Gate work by my own hand: full diff read (two files, +27/−6, §8 row two-consumer restatement + dated currency note ending the §4.1-vs-§8 disagreement, docstring restated same shape, `:765`/`:1799` byte-untouched); the lane's open question `claim-nonce.md:2920` CONFIRMED independently — §14 Wave-2 disposition table, Item column records what break N5 WAS, past-tree claim, correctly untouched. Receipts re-run at merged tree: 68/69, 0 failures, 1 warning (the known volatile mtime) — verdict counts match the lane's byte-identical before/after pair. Floors at merged tree BOTH interpreters: 3921/14/1 (3.13 370.42s, 3.10 348.53s) — predicted (prose+docstring adds no tests), hit; this also closes the lane's honestly-disclosed 3.10 omission, same shape as the c337 landing.
+
+Lane's WHERE-BRIEF-WRONG scored 4: cited docstring range was the sentence not the docstring; brief didn't name the §14 near-miss a grep would surface (biggest gap — fence by section without naming what sits outside it); didn't flag line-shift risk below §8 (lane invented the check, found it harmless — no test pins claim-nonce line numbers); volatile-WARN mechanism sentence wrong (the 1433-1434 block carries BOTH markers, harness executes and warns rather than skips). All recorded for future brief-writing.
+
+Process note against myself: the receipts re-run at landing went through Select-String — verdict-line counts carried the discriminating signal this time (0 failures / 1 warning as expected), but the never-pipe-evidence rule exists because counts have lied before; next landing runs it unpiped.
+
+IN FLIGHT: w45-a2 (launch axis) + w45-pins, wait --any armed. Main `1be5beac` == origin.
+
+## 2026-08-05T21:50:14Z CHECKPOINT inc=inc-20260805T193255Z-4ee5 sid=650837ff-7f18-47f2-bcc0-20bc17a10b66
+
+PINS LANE REPORTED DONE; ITS ADVERSARIAL GATE DISPATCHED. a2 STILL WORKING.
+
+`w45-pins` returned: one commit `bc1ad91`, three test files +504/−29, floors 3958/14/1 = 3973 collected predicted and hit BOTH interpreters, 11 mutants (2 range-end classes incl. B1-verbatim, mutant D re-planted from the gate verdict's own text — lane caught that the verdict's quoted plant is WEAKER than its prose and planted the verbatim weaker one plus pinned the fuller as a second assertion, F + F-half discriminating the two doctor sites, 6 spec-row plants incl. M5) all RED-named and restored with porcelain proofs. Fence held: no bin/docs/skills edits in the commit, allowed fourth file deliberately unused with reasoning. Range-END validation now catches B1's whole class with both branches separately seeded; superseded-band-EDGE pin is line-scoped-dated with shipped-edge SUBTRACTION (300k both-band membership handled); doctor strings pinned at value (set-equality on rendered rows) AND mechanism (no NNN,NNN-token literal in bin/fleet.py, ≥2 interpolated sites must survive); all three ratified rows transcription-pinned both directions with the homes divergence DECLARED and its declaration itself pinned live.
+
+Report quality notes: WHERE-BRIEF-WRONG scored 5 real corrections including my item-3 mutant-D description being fuller than the verdict's quoted text (lane planted the honest weaker one), and disjointness re-derived unprompted when main moved mid-lane (EMPTY vs 1be5bea's two commits). One stale journal line: §6.2 claims gceil A2/A3 "stay open" — both landed at cc65dab; noted, not a branch defect. Known follow-up handed up: test_identity_registry.py:932's blind disjunct ("200k" in msg or "ceiling" in msg) — one line, future ride-along.
+
+GATE DISPATCHED: `w45-gpins` sid c6be36e8, opus, bypass, DETACHED at bc1ad91. Brief w45-gpins.md: re-plant sample of lane's table, ≥3 own-design mutants (ordering-branch-only range end, second-stale-rendering row, SPEC_TOKEN_FOR drift, disclosed date-escape honesty check, SKILL.md undated edge), −29-side weakening audit (first-token collapse must still redden), anti-vacuity seed kills, structure-read of the pins' own docstring claims, disjointness merge-base form vs moving main.
+
+Waiting --any on a2 + gpins. Occupancy to re-measure at next boundary.
+
+## 2026-08-05T21:56:01Z CHECKPOINT inc=inc-20260805T193255Z-4ee5 sid=650837ff-7f18-47f2-bcc0-20bc17a10b66
+
+a2 LANE REPORTED DONE — THREE SPEC DEVIATIONS DISCLOSED — HARD GATE DISPATCHED. TWO GATES NOW RUN IN PARALLEL.
+
+`w45-a2` returned `39f84d0`: §5 five-step resolution as a pure function, global `--fleet-home`, tri-state sid lookup with `_record_sids` union membership, terminus + ambiguity refusals embedding the homes view, N1 empty-add guard, 78-test new file; floors 3999/14/1 = 4014 predicted-and-hit TWICE (two rounds), both interpreters; 6 mutants RED/restored with byte-identical cmp proofs.
+
+THE SUBSTANCE REQUIRING GATE JUDGEMENT — deviations from ratified spec text, all disclosed §3:
+- D1: terminus ENFORCEMENT gated on `_multi_fleet_population_is_live` — lane measured the literal §5 step 5 bricks a fresh box (refuses `spawn`+`init`, the only verbs that could end the terminus; `home_is_initialized` requires a registry only spawn creates) and cites §5's own "byte-identical to today with population <2" arming sentence.
+- D2: steps 3/4 collapsed into module-global FLEET_HOME (conftest sandbox constraint); §5's uninitialized-env fall-through-to-step-4 NOT implemented — named-home-fails-validation TERMINATES instead of silently retargeting the install root (the spec's own 07-29 incident mechanism). RATIFIED-TEXT-VS-SHIPPED divergence → needs dated spec note at landing + docket visibility.
+- D3: flag consumed from argv BEFORE the parser (spec names two remedies, both measured unbuildable: rb7 C-2 pins assert flag ABSENCE and positional invariance an argparse global cannot deliver). Four spellings one answer, C-2 clobber structurally impossible. But green-and-misleading pin risk: TestGlobalPositionFleetHome docstrings say a2 would flip them; they didn't flip.
+- S1/S2: the fix-site-miss-sibling class reproduced INSIDE the lane and caught by it — terminus ate `fleet homes`, then ambiguity refusal ate `homes --retire`; general rule handed to a3: every blocking state names `fleet homes` as remedy so it sits above every one.
+- C1/C2 out-of-fence coupled edits disclosed (test_homes_verb, test_supervisor_gate — 2-line registry seeds + dated notes, claims-made-false repairs); real behaviour change stated plainly: `autoclean --fleet-home` now requires INITIALIZED home.
+- My brief scored 6 corrections (B1 worst: fence permitted test_install_home_split.py where no lint lives, closed test_round7_defect_pins.py where it does).
+- F1-F5 findings for a3/b: bootstrap hole (flag can't select a never-spawned home until slice b), --yes exists on 3 of 33 verbs, ambiguity refusal has no view carve-out, citation fixpoint took SIX passes, 13th _record_sids site caught by the enumeration pin.
+
+GATE `w45-ga2` sid 7173c4a0, DETACHED at 39f84d0, brief w45-ga2.md: verify each deviation's cited grounds EXIST by reading, D3 attack surface (missing value, equals-form, duplicate token, disagreement with autoclean's own flag), D1 both-direction plants + predicate AST scope, D2 shipped-behaviour pin-down with the exact diverged §5 sentence for the docket, third-blocking-state hunt, C1/C2 not-weakened re-plants, argv-surface stricter-diff, three-way disjointness (main + pins branch), fixpoint ×3, ≥3 own mutants.
+
+LANDING PLAN: pins first if its gate greens first (smaller), then a2; each landing re-derives disjointness merge-base form + predicts floors (main after both ≈ 3921+37+78 = 4036/14/1 = 4051 collected, per-landing derivation at the time); a2's landing owes a dated §5 implementation note (D1/D2/D3) as a separate commit so the merge tree equals the audited artifact. Occupancy ~250-260k, below 350k soft.
+
+## 2026-08-05T22:23:47Z CHECKPOINT inc=inc-20260805T193255Z-4ee5 sid=650837ff-7f18-47f2-bcc0-20bc17a10b66
+
+OPERATOR STAND-DOWN (2026-08-06, via interface mid-turn) — RELEASING CLEANLY. THIS ENTRY IS THE SUCCESSOR'S CAMPAIGN BRIEF.
+
+## LANDED THIS INCARNATION, ALL PUSHED WITH READ-BACK (main == origin == `1be5beac`)
+- `238a4778` — w44/ceiling merged under the w45-gceil gate (GATING→B1 one-token repair `cc65dab` steered to warm lane + gate recs 3/4): supervisor ceiling 400k (band 350–400k), worker top 300k, per-tier constant split, doctrine surfaces + pins. Floors 3921/14/1 = 3936 predicted+hit both interpreters. THE 400k BAND IS LIVE — sup-context renders it.
+- `1be5beac` — w45/c2572 under self-audit gate: claim-nonce §8 dead-consumer restatement + test_supervisor docstring; §4.1-vs-§8 disagreement ended; receipts 68/69 (known volatile WARN only); floors re-hit at merged tree both interpreters.
+- 18 consecutive ratified bypass events through this incarnation.
+
+## IN FLIGHT / UNLANDED — SUCCESSOR'S QUEUE, IN ORDER
+1. **`w45/pin-hardening` (`bc1ad91`, worktree C:/proga/fleet-w45-pins) is GATED: verdict `state/verdicts/w45-gpins.md` = GATING, one narrow blocker F1** — the new superseded-band-EDGE pin's SKILL.md param is unreachable (every SKILL.md band line carries an inline date; line-scoped carve-out exempts all of them; gate's mutant K1 survived 713 tests). CLEARS BY EITHER: proximity-scoped carve-out (gate measured zero false positives, receipt in verdict §3) OR honest-blindness docstring (§13 has the exact wording). Plus F2 one-line remedy optional (SPEC_TOKEN_FOR may only ADD flags — measured both ways §6). Steer the warm lane w45-pins with the repair (B1-precedent), then land: merge floors owed at merge over current main both interpreters — gate predicts collected 3973 unchanged by main's docstring-only delta (§9). Everything else CONFIRMED: 6/6 lane mutants reproduce, −29 side nothing weakened, seeds non-vacuous, disjointness EMPTY at 1be5bea.
+2. **`w45/mf-a2` (`39f84d0`, worktree C:/proga/fleet-w45-a2) awaits its gate: `w45-ga2` (sid 7173c4a0) STILL WORKING at stand-down (~28 min in), detached at C:/proga/fleet-w45-ga2.** Its verdict will land at `state/verdicts/w45-ga2.md` whether or not anyone watches — READ IT FIRST (a finished result with no reader = work not done, 3-time lesson). The a2 lane journal `state/journals/w45-a2.md` discloses THREE deliberate §5 deviations (D1 terminus gated on live population, D2 env-collapse + no 3→4 fall-through, D3 argv-strip flag instead of argparse global) — gate brief `state/tasks/lens/w45-ga2.md` orders grounds-verification + attack surface. a2's landing owes a dated §5 implementation note (separate commit) and carries F1-F5 findings for a3; floors at its tip 3999/14/1 = 4014 both interpreters (lane-measured).
+3. After both land: post-merge floors ≈ 3921+37+78 = 4036/14/1 = 4051 collected (DERIVE at landing, don't inherit); citation fixpoint only if a landing moves bin/fleet.py lines (a2 does — its lane ran 6 passes; re-run at merged tree).
+4. Then: MF a3 (guard slice — a2 journal §10 lists what a3 inherits, incl. every-blocking-state-names-fleet-homes rule and F2 --yes gap), wave record + lessons + INDEX for waves 44-45.
+
+## OPERATOR-OWED (relayed 4th time)
+- `supervisor/GOALS.md` band section replacement — proposal text in `state/journals/w44-ceil.md` §8. File untouched by any lane, gate-confirmed.
+- Docket: gceil A2/A3 CLOSED at cc65dab; ND4(c) residual still parked in sup-decision slot (not mine); E5 wording + E2/homes tension still Open (operator's).
+
+## FACTS
+- Worktree inventory grew: + fleet-w45-{c2572,a2,pins,gpins,ga2,gceil} — gpins/gceil gates DONE (removable after landing), others live lanes. NEVER remove a live lane's worktree.
+- `fleet wait` background processes were killed twice by the harness near end-of-turn; the working watcher shape is Monitor-with-poll-loop over `fleet status` grep. Occupancy at stand-down ~290k measured band 350–400k — below soft.
+- Registry dead-suspected set unchanged (5 pre-2026-08-05 husks, autoclean skipping by TTL design).
