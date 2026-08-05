@@ -478,7 +478,7 @@ class TestSupSpawnCeilingWiring:
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", HOLDER_SID)
         _held_claim()
         monkeypatch.setattr(fleet, "find_transcript_path", lambda name, sid: "/fake")
-        monkeypatch.setattr(fleet, "_transcript_occupancy", lambda p: 205000)
+        monkeypatch.setattr(fleet, "_transcript_occupancy", lambda p: 405000)
         with pytest.raises(fleet.FleetCliError) as ei:
             fleet.cmd_sup_spawn(_sup_args(), run=_fake_run_factory(),
                                 which=lambda _: "claude", sleep=lambda s: None)

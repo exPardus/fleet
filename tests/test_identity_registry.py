@@ -273,9 +273,9 @@ class TestTheReceipt:
         self._leak(monkeypatch)
         fleet.write_incarnation(_held(self.MY_SID))
         monkeypatch.setattr(fleet, "find_transcript_path", lambda name, sid: "/fake")
-        monkeypatch.setattr(fleet, "_transcript_occupancy", lambda p: 300000)
+        monkeypatch.setattr(fleet, "_transcript_occupancy", lambda p: 500000)
         reason = fleet._ceiling_refuses_dispatch("spawn")
-        assert reason is not None and "200,000" in reason
+        assert reason is not None and "400,000" in reason
 
     def test_site_B_does_not_refuse_the_body_the_env_slanders(
             self, id_home, monkeypatch):
@@ -377,7 +377,7 @@ class TestSiteACeiling:
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-holder")
         fleet.write_incarnation(_held("sid-holder"))
         _registry({"sup|inc-x|boot": _rec("sid-holder", status="working")})
-        self._occ(monkeypatch, 205000)
+        self._occ(monkeypatch, 405000)
         assert fleet._ceiling_refuses_dispatch("spawn") is not None
 
     def test_an_absent_FLEET_WORKER_EXEMPTS_because_ND4c_says_so(
@@ -404,7 +404,7 @@ class TestSiteACeiling:
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-holder")
         fleet.write_incarnation(_held("sid-holder"))
         _registry({"sup|inc-x|boot": _rec("sid-holder", status="working")})
-        self._occ(monkeypatch, 400000)
+        self._occ(monkeypatch, 500000)
         assert fleet._ceiling_refuses_dispatch("spawn") is None
 
     @pytest.mark.parametrize("blank", ["", " ", "\t", "\n", "  \t\n "])
@@ -432,7 +432,7 @@ class TestSiteACeiling:
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-holder")
         fleet.write_incarnation(_held("sid-holder"))
         _registry({"sup|inc-x|boot": _rec("sid-holder", status="working")})
-        self._occ(monkeypatch, 400000)
+        self._occ(monkeypatch, 500000)
         # Control: a NON-blank stamp on this exact scenario must refuse. If it
         # does not, the blank assertion below proves nothing.
         monkeypatch.setenv("FLEET_WORKER", "sup|inc-x|boot")

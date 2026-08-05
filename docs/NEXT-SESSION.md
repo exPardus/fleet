@@ -71,6 +71,25 @@ page, ACT-FIRST, ending "WHAT THIS BRIEF GOT WRONG" → spawn. Briefs in
 - Doctor: 3 known FAILs (identity-witness docketed; instance-freshness operator-gated;
   occupied decision slot by design).
 
+## CONTEXT CEILINGS WERE RAISED 2026-08-05 — do not budget a body against 200k
+
+Operator ruling, direct directive (`docs/OPERATOR-GATES.md` §Settled,
+`knowledge/lessons.md#2026-08-05-ceilings-raised`): **supervisor hard dispatch ceiling
+400k (band 350–400k); worker band top 300k (band 250–300k)**. Amends three-tier
+§11.3/§11.4. Grounds: boot costs 85–130k, so 200k produced ~45-minute handoff
+generations.
+
+- **The ruling and the code landed apart.** `5c61ad5` on `main` is docs only; the code
+  lands with branch `w44/ceiling`. **Until that branch is merged, shipped `fleet` still
+  refuses at 200k** — the ruling itself says code is the authority meanwhile.
+- The two tiers no longer share a band: `SUPERVISOR_BAND_*` / `WORKER_BAND_*`, and
+  `fleet sup-context` resolves which one applies to the body running it and prints the
+  tier. An indeterminate tier reports the **worker** band (the strict one).
+- **Re-price anything sized against the old band.** `docs/mf-slice-a-price.md` concluded
+  MF slice (a) "does not fit in one worker's 150–200k band" and drove the a1/a2/a3 split;
+  that arithmetic was against a band that is now 250–300k. The split already shipped —
+  this is a note for the NEXT sizing decision, not a call to unpick a landed one.
+
 ## MEASUREMENT DOCTRINE (hard-won waves 33–40; verbatim into merge briefs)
 
 - `git merge-tree` THREE-ARG form only — `--write-tree` dies at git 2.34.1 and its empty

@@ -552,6 +552,14 @@ freeze exists for.
 
 ### 4.7 Both walls, and how long each takes to surface
 
+> *(**Dated note, 2026-08-05.** This document calls the first wall *"the 200k context ceiling"*
+> throughout, which is what it was called when the shape was ratified on 2026-07-27 and quoted here.
+> The operator raised that ceiling to **400k** on 2026-08-05 (`docs/OPERATOR-GATES.md` §Settled;
+> three-tier §11's amendment note). **The wall is the same wall and every claim about it in this
+> document still holds** — it is loud, self-aware, `sup-context` measures it, `_ceiling_refuses_dispatch`
+> refuses it at five sites, and it ends in a `sup-release`. Only its height moved. The quoted ratified
+> wording is left verbatim, because a quotation edited to match later facts is no longer a quotation.)*
+
 | Wall | How it becomes visible | Latency |
 |---|---|---|
 | **200k context ceiling** | loud and self-aware. The body knows, `fleet sup-context` measures it, `_ceiling_refuses_dispatch` refuses it at five sites (R10). It ends in a `sup-release`, so the signal fires on **row 3** the instant the claim is written. | **immediate** |
