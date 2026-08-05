@@ -4,7 +4,7 @@
 
 - **Python 3.10+.** The floor is declared once as `fleet.MIN_PYTHON_VERSION` and `TestInterpreterFloor` checks every restatement of it (including the prose in `SPEC.md`) against that constant. This project's dev machine drives `py -3.13`, but 3.13 is a *preference*, not a requirement.
 - `bin/fleet.py` is stdlib-only, single file. No pip dependencies get added to it or to the hook scripts under `bin/hooks/`.
-- Claude Code CLI ≥ 2.1.202 if you're running live-integration tests. The pin-tested version is whatever `state/pin-pass.json` last recorded (`2.1.220`, stamped 2026-07-26) — read the stamp, don't trust a number pasted into prose. `fleet doctor`'s `pin-version` check warns when your `claude` has moved past it.
+- Claude Code CLI ≥ 2.1.202 if you're running live-integration tests. The pin-tested version is whatever `state/pin-pass.json` last recorded — read the stamp, don't trust a number pasted into prose. Your clone starts without that file (`state/` is gitignored, and nothing in `bin/fleet.py` writes it); it appears once you run the `FLEET_LIVE=1` pin tier yourself. `fleet doctor`'s `pin-version` check warns when your `claude` has moved past it.
 - **On Windows, the `bin\fleet.cmd` shim invokes `py -3.13` with no fallback**, so the CLI needs 3.13 there even though the library floor is 3.10. `bin/fleet` (Git Bash) and `bin/hooks/run_py.sh` both honour the real floor and `$FLEET_PYTHON`. Don't "fix" a 3.10 box by raising the documented floor — the floor is the constant, the shim is the outlier.
 - **Windows and Linux are both supported and both verified.** macOS shares the POSIX backend but has no receipt in this repo yet.
 

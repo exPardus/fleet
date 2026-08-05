@@ -91,7 +91,7 @@ Every `fleet` command is a short-lived CLI invocation. The registry is the singl
 
 ## Quickstart
 
-**Runs today on:** Windows 10+ (PowerShell + Git Bash) and Linux; macOS shares the POSIX backend but has no receipt yet. Claude Code CLI `2.1.202+` — the floor `fleet doctor` enforces; the pin-tested version is whatever `state/pin-pass.json` last recorded (`2.1.220`, stamped 2026-07-26), never a constant pasted here.
+**Runs today on:** Windows 10+ (PowerShell + Git Bash) and Linux; macOS shares the POSIX backend but has no receipt yet. Claude Code CLI `2.1.202+` — the floor `fleet doctor` enforces; the pin-tested version is whatever `state/pin-pass.json` last recorded, never a constant pasted here — and a fresh clone has no such file, because `state/` is gitignored and only the `FLEET_LIVE=1` pin tier writes it. `fleet doctor`'s `pin-version` row tells you which case you are in.
 
 **Python 3.10+** is the library floor, declared once as `fleet.MIN_PYTHON_VERSION` and run green at by the suite. **One caveat, and it bites Windows users first:** the `bin\fleet.cmd` shim this quickstart puts on your PATH invokes `py -3.13` with no fallback, so *via that shim* fleet needs 3.13 specifically. The POSIX shim (`bin/fleet`, used from Git Bash and by every hook) selects any interpreter at or above the floor and honours `$FLEET_PYTHON`. Until the shims agree, install 3.13 on Windows or drive fleet from Git Bash.
 
