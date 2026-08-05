@@ -17,6 +17,8 @@ Neither the manager nor any worker may tick a box. An author never promotes its 
 
 - [ ] **The ratified §5 destructive row justifies `doctor --repair` with a reason that does not distinguish it from `peek`** *(Opened 2026-08-05 by operator ruling: E5 of the §5-criterion gate, split out as its own item when the other three sub-rulings were settled. A wording defect in ratified text, separable from any branch; no work is parked on it.)* — **how should that justification be restated**?
 
+- [ ] **The ruled E2 ground ("an irreversible append IS an irreversible effect") sits at odds with §5's ratified `homes --add/--retire` = *ordinary (list-reversible)* row: `--add` irreversibly appends to the machine-global `fleet-homes.list` (only the FOLD is reversible), and ORDINARY means a read-only `/fleet:*` grant of `Bash(fleet homes)` reaches `--add`** *(Opened 2026-08-05 by the wave-44 supervisor from the a1 gate's measurement, `state/verdicts/w43-ga1.md`; the a1 branch followed the ratified table and no work is parked on this.)* — **reclassify `homes` under the E2 ground, or keep the ratified ordinary row**?
+
 *(**An empty docket is a legitimate state, not a parse failure:** `TestOperatorGatesFile` previously asserted the file always carries at least one open gate, which encoded the assumption that gates never all clear. That assertion was corrected in the same commit that emptied this section. Seventeen gates have been ruled across four in-session passes — 2026-07-27 morning and evening, the 2026-07-30 docket pass, and the 2026-07-31 ND4(c) ruling — all recorded under Settled below.)*
 
 ## Settled
