@@ -3259,6 +3259,15 @@ land on a legitimate supervisor wearing a worker's registry identity. Symmetrica
 
 ### 16.5 The 200k ceiling — `three-tier-command.md` §11.3 ND4, and what this branch did to it
 
+> *(**Dated note, 2026-08-05.** Every *"200k ceiling"* in this document names the supervisor's hard
+> dispatch ceiling **as it stood when each section was written**. The operator raised it to **400k**
+> on 2026-08-05 — `docs/OPERATOR-GATES.md` §Settled, three-tier §11's amendment note. **Nothing else
+> about the ceiling moved**: not ND4(c)'s falsified premise, not the LIVE hole §18.4 prices, not the
+> three candidates, not which bodies are subject. Only the threshold. The old number is left in place
+> throughout rather than swept, because these sections are the record of what specific branches did
+> to a specific ceiling and a swept record stops being evidence — but a reader arriving here for the
+> current number must take it from §11, not from this page.)*
+
 **This section is new, and its absence was a defect in the first revision:** the site that actually
 broke ratified text was not described at all.
 

@@ -1,7 +1,7 @@
 """three-tier §11.3 -- `fleet respawn` inside the 200k hard ceiling, BOTH ARMS.
 
 The ceiling (`_ceiling_refuses_dispatch`) is a dispatch refusal aimed at exactly
-one caller, the supervisor claim-holder, at or above `BAND_HARD_TOKENS`. It had
+one caller, the supervisor claim-holder, at or above `SUPERVISOR_BAND_HARD_TOKENS`. It had
 three call sites -- `spawn`, `send`, `sup-spawn` -- and `respawn` was not one of
 them. That was an omission, not a designed exemption: a supervisor incarnation
 dispatched a fix wave at 224,321 tokens of occupancy through this path and
@@ -47,7 +47,7 @@ def _held(session_id):
             "nonce_hash": "deadbeef", "nonce_seq": 3, "heartbeat_at": fleet.now_iso()}
 
 
-def _as_over_ceiling_holder(monkeypatch, occupancy=205000):
+def _as_over_ceiling_holder(monkeypatch, occupancy=405000):
     """The one caller the ceiling is aimed at, past the hard top."""
     monkeypatch.setattr(fleet, "_supervisor_gate", lambda *a, **k: None)
     monkeypatch.setenv("FLEET_WORKER", "supervisor")
@@ -84,7 +84,7 @@ class TestRespawnWithATaskIsRefusedOverTheCeiling:
         assert "11.3" in str(ei.value)
 
     def test_the_refusal_fires_at_the_exact_ceiling_too(self, ceil_home, monkeypatch):
-        _as_over_ceiling_holder(monkeypatch, occupancy=fleet.BAND_HARD_TOKENS)
+        _as_over_ceiling_holder(monkeypatch, occupancy=fleet.SUPERVISOR_BAND_HARD_TOKENS)
         with pytest.raises(fleet.FleetCliError) as ei:
             fleet.cmd_respawn(_respawn_args(task="go"))
         assert "11.3" in str(ei.value)
