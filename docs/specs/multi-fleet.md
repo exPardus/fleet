@@ -171,7 +171,7 @@ verbs classify by their **worst irreversible effect in the wrong home**, enumera
 
 | Class | Verbs | Wrong-home effect |
 |---|---|---|
-| **destructive** — destroys evidence or sessions; nothing recovers it | `clean` (journals, outcomes, records), `archive` + `autoclean` tier 2+/3 (`claude rm`, tombstone drop), `doctor --repair` (registry renamed aside — rb7 C-3), `sup-handoff-abort` (stops a successor session), **[w42/mf5]** `sup-boot` (HANDSHAKE unlink + claim seizure), `sup-handoff-begin` (supersedes every unresolved handoff entry — an in-flight successor is left permanently unbootable), `sup-handoff-complete` (HANDSHAKE unlink + claim transfer), `sup-decision --clear` (removes the queued operator decision; no verb restores it), any future verb whose implementation calls `claude rm`, deletes evidence files, or renames registry/claim state — **the lint keys on those effect sites** (`claude rm` invocations, unlink/rename of `state/`/`supervisor/`/`logs/` paths), NOT on `_confirm_destructive`, which is an ownership guard whose call sites neither contain nor are contained by this list (rs7 C-3 measured the disjointness) |
+| **destructive** — destroys evidence or sessions; nothing recovers it | `clean` (journals, outcomes, records), `archive` + `autoclean` tier 2+/3 (`claude rm`, tombstone drop), `doctor --repair` (registry renamed aside — rb7 C-3), `sup-handoff-abort` (stops a successor session), **[w42/mf5]** `sup-boot` (HANDSHAKE unlink + claim seizure), `sup-handoff-begin` (supersedes every unresolved handoff entry — an in-flight successor is left permanently unbootable), `sup-handoff-complete` (HANDSHAKE unlink + claim transfer), `sup-decision --clear` (removes the queued operator decision; no verb restores it), **[w43/s5 — operator ruling 2026-08-05]** `sup-spawn` (**the dispatch is the act** — E1: it dispatches a body that then boots and seizes the claim, which is the cheapest path to seizing a foreign fleet's claim; its own in-process effect set is narrower than that, so no static effect-site walk can see this and **this entry is hand-maintained**, an accepted cost ruled with it), `sup-checkpoint` and `sup-release` (E2: **an irreversible append IS an irreversible effect** — both append to the home-relative append-only `supervisor/JOURNAL.md`, which no shipped verb removes an entry from, so a wrong-home append permanently contaminates a foreign fleet's record; the bound on which appends count is stated below the table), any future verb whose implementation calls `claude rm`, deletes evidence files, or renames registry/claim state — **the lint keys on those effect sites** (`claude rm` invocations, unlink/rename of `state/`/`supervisor/`/`logs/` paths), NOT on `_confirm_destructive`, which is an ownership guard whose call sites neither contain nor are contained by this list (rs7 C-3 measured the disjointness) |
 | **disruptive** — recoverable but harms a live foreign fleet | `kill`, `interrupt`, `send`, `respawn` (all forms), `release`; **[w42/mf5]** `resume-limited`, `sup-heartbeat` |
 | **ordinary** | `spawn`, `init`, `status`/`peek`/`result`/views, `homes --add/--retire` (list-reversible); **[w42/mf5]** `home`, `knowledge`, `attach`, `wait`, `sup-status`, `sup-context`, `q`, `index` (all four leaves) |
 
@@ -189,12 +189,28 @@ criterion already stated here, not new rule: each rests on a transitive effect-s
 to fixpoint from the verb's `cmd_*` entry, no depth limit) and is licensed either by
 set-equality with an already-classified row or by the effects this section's supervisor
 paragraph already calls irreversible. Three verbs (`sup-spawn`, `sup-checkpoint`,
-`sup-release`) are deliberately **left unclassified** — see the proposal block below. Two
+`sup-release`) were deliberately **left unclassified** by that branch — the operator ruled all
+three on 2026-08-05 and they are now carried in the destructive row above; the proposal block
+below is kept as the record of the questions, marked with its answers. Two
 counts in the census are worth carrying: the parser tree holds **36** subparser choices, not
 32, because `index` nests `init|build|update|status` (35 dispatchable leaves), and `cmd_index_init`
-is the only command that creates `.fleet-index/`; and `fleet home` (shipped — prints the
-resolved home) is a **different verb** from `fleet homes` (unbuilt, §4's list manager), so the
-ordinary row's `homes --add/--retire` classifies nothing that ships today.
+is the only command that creates `.fleet-index/`; and `fleet home` (prints the
+resolved home) is a **different verb** from `fleet homes` (§4's list manager).
+
+> **CENSUS RE-MEASURED at the landing tree, 2026-08-05 (`w43/s5`), both interpreters — every
+> number above is stale by exactly one, and one clause of it was false.** The paragraph's
+> counts are TRUE OF ITS OWN PIN and are left standing: driven against `build_parser()`
+> materialised at `f457a57`, the census is exactly **32** top-level subparsers / **36** total
+> choices / **35** dispatchable leaves, and `homes` does not exist there. Driven against the
+> tree this landed on, it is **33 / 37 / 36** — slice a1 built `fleet homes` on 2026-08-05 and
+> moved all three by one. **The clause that had to change rather than be footnoted** was
+> *"`fleet homes` (unbuilt, §4's list manager), so the ordinary row's `homes --add/--retire`
+> classifies nothing that ships today"*: a claim about **today** is a claim about the current
+> tree, and it is false of it — `homes` ships, and the ordinary row classifies a live verb.
+> The counts are claims about a named commit and stay; that split is the 2026-08-05 `:337`
+> ruling (*a reference is only rot when it is a claim about the CURRENT tree*) applied here.
+> Consequence for the 14/15 and 10/15 reproduction figures below: they were derived over the
+> 32-verb tree and are not re-derived here; treat them as pinned to `f457a57` too.
 
 Applying the criterion mechanically over the call graph reproduces only **10 of the existing
 15 rows**. It reproduces **14 of 15** once four exclusions are applied, and each exclusion is
@@ -207,10 +223,43 @@ ratified-disruptive `respawn` is destructive; **X4** `claude rm` of a session th
 just created (`dispatch_bg`'s wedged-dispatch cleanup) — else ratified-ordinary `spawn` is
 destructive. The fifteenth row does not reproduce under any of them; that is E5 below.
 
-> **PROPOSAL — NOT RATIFIED. Operator decisions, raised by `w42/mf5`, landed here as
-> questions only.** Nothing in this block classifies a verb or changes a guard.
+**Set-equality alone does not decide a class — the separating ground (operator ruling
+2026-08-05, B3; MEASURED by the `w43-gmf5` gate and reproduced at the landing tree).** An
+adversarial re-measurement found that `wait`, `status` and `release` have **byte-identical**
+effect-site sets (9 sites each, transitive BFS to fixpoint, raw sites before any exclusion) —
+yet `status` is ratified **ordinary** and `release` is ratified **disruptive**. Set-equality
+therefore selects two classes at once and cannot pick one, and it does so on rows that predate
+this table's completion, so the defect is in the ratified table itself and holds before X1–X4
+are applied. **The ground that separates them, and the second discriminator of this criterion:
+`wait` persists only transitions it observed; `release` alters ownership.** Where two rows
+share an effect set, the class is decided by whether the verb **alters ownership or authority
+over another body's state** (disruptive or worse) or merely **records state it observed**
+(ordinary). Under it `wait` is **ordinary**, which is where the table carries it. A verb whose
+effect set matches an already-classified row must now be checked against this ground too — a
+match alone is not a licence.
+
+**The bound on E2: which appends count (operator ruling 2026-08-05, E2).** An irreversible
+append is an irreversible effect, and the record it must land in is one **§4 makes append-only
+and no shipped verb removes an entry from** — today that is `supervisor/JOURNAL.md`, reached by
+exactly six verbs (`sup-boot`, `sup-checkpoint`, `sup-release`, and all three handoff verbs;
+MEASURED at the landing tree by reverse BFS over the call graph to `supervisor_journal_append`,
+which reproduces the gate's count exactly). **The bound is load-bearing, not tidiness:** read
+without it, the ground reaches the outcome store — whose appending verbs are `kill`, `interrupt`
+and `respawn`, all three ratified **disruptive** — and a ground that promotes three ratified
+rows refutes the table it is required to reproduce. The outcome store is not that record
+because a shipped verb removes from it, and the destructive row names the verb in its own
+words: *"`clean` (journals, outcomes, records)"*. Same footing as X1–X4: **forced by a ratified
+row rather than chosen.** Four of the six were already destructive on removal grounds, so E2
+moves exactly two, and E3 collapses into it as the gate predicted.
+
+> **PROPOSAL — RULED 2026-08-05 by the operator (`docs/OPERATOR-GATES.md`, first settled
+> entry). Kept as the record of the questions, never deleted; each carries its answer.**
+> E1, E2 and E3 are ANSWERED and their consequences are landed in the table above. E4 is still
+> live. E5 was split out as its own **open** docket item and outlives this landing.
 >
-> - **E1 — `sup-spawn`: do out-of-process consequences count?** Its static effect set is a
+> - **E1 — RULED: YES, the dispatch is the act; `sup-spawn` is DESTRUCTIVE.** The
+>   hand-maintained lint entry is an accepted cost, ruled with it. Question as raised:
+>   **`sup-spawn`: do out-of-process consequences count?** Its static effect set is a
 >   strict subset of ratified-ordinary `spawn`'s, which reads *ordinary*. But it dispatches a
 >   **supervisor body**, which then runs `sup-boot` and seizes the claim — the act whose
 >   33.0–63.1s pre-claim window the accepted residual below is entirely about. Reading A
@@ -218,14 +267,22 @@ destructive. The fifteenth row does not reproduce under any of them; that is E5 
 >   destructive. *Recommendation: **destructive*** — B is the reading the residual paragraph
 >   already takes, and a wrong-home `sup-spawn` is the cheapest path to seizing a foreign
 >   fleet's claim.
-> - **E2 — is an irreversible *append* an irreversible effect?** `sup-boot`, `sup-checkpoint`,
+> - **E2 — RULED: YES, an irreversible append IS an irreversible effect.** A wrong-home append
+>   pollutes a foreign fleet's append-only record permanently; over-guarding costs a prompt,
+>   under-guarding corrupts history. Bounded as stated above the block. Question as raised:
+>   **is an irreversible *append* an irreversible effect?** `sup-boot`, `sup-checkpoint`,
 >   `sup-release` and all three handoff verbs append to `supervisor/JOURNAL.md`. Measured: the
 >   seed write is guarded on non-existence, so nothing is clobbered — the append only adds, and
 >   §4's append-only rule means **no shipped verb removes an entry**. The destructive row says
 >   *"destroys evidence"*; an append destroys none, yet permanently contaminates a foreign
 >   fleet's journal. The criterion is silent. *Recommendation: decide it either way, explicitly
 >   — six verbs hang on it.*
-> - **E3 — `sup-checkpoint` and `sup-release` have a derived floor of `disruptive` and a
+> - **E3 — RULED by E2: both are DESTRUCTIVE.** It was E2 wearing two verb names and it fell
+>   out mechanically, exactly as the gate predicted. Its sub-item did NOT fall out and is
+>   carried forward as an open question: `sup-decision --raise`/`--answer` are still
+>   unclassified at flag granularity, while the verb `sup-decision` is classified on the
+>   strength of `--clear` alone. Question as raised: **`sup-checkpoint` and `sup-release` have
+>   a derived floor of `disruptive` and a
 >   ceiling open on E2.** Both do everything `sup-heartbeat` does (heartbeat stamp +
 >   `write_incarnation`), so disruptive is derivable; both also append, so E2 could promote
 >   them. Landing either class would assert an answer to E2, so neither is landed.
@@ -239,7 +296,13 @@ destructive. The fifteenth row does not reproduce under any of them; that is E5 
 >   `claude rm` sites for the whole file while still passing four hand-planted destructive
 >   mutants. The slice-(a) lint needs alias resolution over parameter defaults, or it ships
 >   green and vacuous.
-> - **E5 — the destructive row's stated reason for `doctor --repair` does not distinguish
+> - **E5 — NOT RULED. Split out 2026-08-05 as its own OPEN operator docket item** (*"how should
+>   that justification be restated?"*), separable from any branch, with no work parked on it.
+>   It is untouched by this landing and is not to be repaired here. A third horn the framing
+>   below omits, MEASURED by the gate: the table also maps one identical effect set to two
+>   different classes on `status`/`release` — rows that have nothing to do with X2 — which is
+>   the defect the B3 ground above closes. Question as raised: **the destructive row's stated
+>   reason for `doctor --repair` does not distinguish
 >   `doctor --repair`.** The row justifies it as *"registry renamed aside"*, but the rename
 >   lives in `load_registry`, whose sole caller relationship makes it reachable identically
 >   from `status`, `attach`, `wait`, `kill`, `clean`, `archive` and 12 more — **18 verbs** in

@@ -845,10 +845,27 @@ class TestCommandFiles:
     # depth behind `test_read_only_grants_are_no_wider_than_the_body_invokes`,
     # which is the derived pin and remains the primary one (see the
     # "THE PIN IS THE PROPERTY, NOT THE STRING" note above).
+    # The last seven entries landed 2026-08-05 with the operator's §5-criterion
+    # ruling, in the SAME commit as the spec row and the pin tuple it mirrors.
+    # This is the enforcement half of that landing and the half `w42/mf5-verbs`
+    # missed: promoting a verb into the ratified destructive row obliges the
+    # guard that stops a read-only `/fleet:*` command being granted it. Until
+    # both land together the spec calls a verb destructive while the binding
+    # lint does not know it is -- the spec-says-X / binding-row-says-Y split.
+    #
+    # `sup-spawn` IS THE ONE WITH NO MECHANICAL BACKSTOP. It is destructive
+    # because the dispatch is the act (E1), and no static walk over
+    # `bin/fleet.py` can see what a dispatched body does, so this entry is
+    # hand-maintained by ruling. The others are derived and re-derived every run
+    # by `tests/test_round7_defect_pins.py`, which compares this tuple against
+    # the spec's own row -- so this list cannot fall behind the ratified table.
     DESTRUCTIVE_VERBS = ("kill", "clean", "respawn", "interrupt", "spawn",
                          "send", "attach", "release", "resume-limited",
                          "archive", "autoclean", "doctor --repair",
-                         "sup-handoff-abort")
+                         "sup-handoff-abort",
+                         "sup-boot", "sup-handoff-begin", "sup-handoff-complete",
+                         "sup-decision --clear", "sup-spawn", "sup-checkpoint",
+                         "sup-release")
 
     @pytest.mark.parametrize("name", sorted(READ_ONLY_COMMANDS))
     def test_read_only_grants_never_cover_the_whole_fleet_cli(self, name):
