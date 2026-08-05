@@ -2241,7 +2241,7 @@ def _native_cumulative_tokens(name: str) -> int:
 _LIMIT_RESET_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 
 # The observed production shape instead (M-C park journal 2026-07-16,
-# knowledge/lessons.md:786): a LOCAL wall-clock time + IANA tz name, e.g.
+# knowledge/lessons.md#2026-07-17-mc): a LOCAL wall-clock time + IANA tz name, e.g.
 # "resets 4:40am (Asia/Qyzylorda)" or "resets 12am (Asia/Qyzylorda)" (the
 # hour-only form is the production gap this fallback closes). Only
 # consulted when the ISO regex above finds nothing (ISO keeps precedence).

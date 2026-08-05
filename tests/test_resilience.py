@@ -659,7 +659,7 @@ class TestSettingSourcesPassthrough:
 # ---------------------------------------------------------------------------
 # M-D item 3: local-format ("resets 4:40am (Asia/Qyzylorda)") reset-time
 # fallback in _parse_limit_signal -- production gap, journal 2026-07-16 /
-# knowledge/lessons.md:786.
+# knowledge/lessons.md#2026-07-17-mc.
 # ---------------------------------------------------------------------------
 
 @pytest.mark.skipif(not _tzdata_available(), reason=_TZDATA_SKIP_REASON)
