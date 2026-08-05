@@ -872,12 +872,12 @@ def _quarantine_artifacts() -> list:
     registry is always newer -- an "artifact newer than the registry"
     comparison would never fire on the recreation bypasses it exists to stop.
 
-      * `_sweep_husks` (:9601) -- a rename can hide live worker records from
+      * `_sweep_husks` (:9703) -- a rename can hide live worker records from
         the roster sweep, so a thin registry would rm sessions it still owns.
-      * `_doctor_check_autoclean` (:10695) -- a lingering artifact means the
+      * `_doctor_check_autoclean` (:10799) -- a lingering artifact means the
         sweep above is refusing itself, which is how a bricked sweep reads
         green-and-fresh.
-      * `_require_claim_holder`'s §9 arm (:15202) -- the legacy upgrade mints
+      * `_require_claim_holder`'s §9 arm (:15306) -- the legacy upgrade mints
         generation 1 on bare sid equality, so it needs the registry that
         cleared it to be COMPLETE, not merely readable. See there.
 
@@ -887,22 +887,22 @@ def _quarantine_artifacts() -> list:
     read and described, and the question only arises when there is no file to
     answer for itself.
 
-      * `_acting_worker_identity` (:3017) -- `not_initialized` stays the
+      * `_acting_worker_identity` (:3109) -- `not_initialized` stays the
         affirmative *"there are no records"* only with no artifact beside it.
         SCOPED TO THE ABSENT CASE ON PURPOSE: this resolver is shared with the
         §6.5 worker-turn gate, which refuses on `True` alone, so poisoning a
         HEALTHY read here would let a real worker turn through §6.5 -- closing
         the §9 door by opening a wider one. Rule 1 lives at the §9 arm instead.
-      * `_identity_abstention_note` (:14923) -- the same distinction, in words,
+      * `_identity_abstention_note` (:15027) -- the same distinction, in words,
         because the generic note names `fleet doctor` and doctor is what MADE
         this state.
-      * `_read_registry_readonly` (:3921) -- the VIEW surface's copy of the same
+      * `_read_registry_readonly` (:4023) -- the VIEW surface's copy of the same
         question, and the last reader to get it (P1-13, 2026-07-31). Until then
         every view described a just-quarantined fleet with the identical string
         a never-initialised box prints, so the two states were not
         distinguishable from the read surface at all. A `Path.glob` is a read,
         so this costs the views doctrine nothing.
-      * `_doctor_check_registry` (:11233) -- doctor graded only on whether the
+      * `_doctor_check_registry` (:11337) -- doctor graded only on whether the
         LOADER RAISED, and the loader returns `{"workers": {}}` for a missing
         file, so the row called a renamed-away path *"is readable"* and doctor
         exited 0 with every row green (P1-12). A bare absence stays a PASS: no
@@ -914,8 +914,8 @@ def _quarantine_artifacts() -> list:
     these two only spell the filename, because an operator cannot restore a file
     whose name they were never told.
 
-      * `_print_snapshot_table` (:5750) -- `fleet status --stale-ok`.
-      * `_tombstone_releasing_body` (:15359) -- `sup-release`, whose registry
+      * `_print_snapshot_table` (:5852) -- `fleet status --stale-ok`.
+      * `_tombstone_releasing_body` (:15463) -- `sup-release`, whose registry
         arm previously swallowed the quarantined case in silence.
 
     The operator clears the artifact (after restoring what it holds), which
@@ -2562,14 +2562,39 @@ def find_transcript_path(name: str, sid: str):
     return candidates[0]
 
 
-# three-tier-command.md §11 -- the self-monitored context band (150-200k),
-# supervisor AND workers (§11.4). 150k soft trigger (hand off at the next
-# wave/task boundary); 200k hard ceiling H (finish in-flight, no new work; the
+# three-tier-command.md §11 -- the self-monitored context band, supervisor AND
+# workers (§11.4). Soft trigger = hand off at the next wave/task boundary; hard
+# ceiling H = finish in-flight, no new work (for the supervisor that is the
 # fleet-side dispatch refusal, §11.3). Denominated in CONTEXT OCCUPANCY, never
 # spend (§11.5): its only consequence is HAND OFF, never stop/kill/refuse-until-
 # cheaper. Not a code constant the operator tunes -- an operator-stated band.
-BAND_SOFT_TOKENS = 150_000
-BAND_HARD_TOKENS = 200_000
+#
+# RAISED 2026-08-05 by operator ruling ("Context ceilings -- raise them?",
+# docs/OPERATOR-GATES.md §Settled; knowledge/lessons.md
+# #2026-08-05-ceilings-raised), amending ratified §11.3/§11.4:
+#
+#   supervisor  150k/200k -> 350k/400k      (400k = the hard dispatch ceiling)
+#   worker      150k/200k -> 250k/300k      (300k = the band top)
+#
+# Band entry keeps the ratified 50k margin below each top. Grounds: boot costs
+# 85-130k, so a 200k ceiling produced ~45-minute handoff generations.
+#
+# THE TWO TIERS WERE ONE CONSTANT PAIR (`BAND_SOFT_TOKENS`/`BAND_HARD_TOKENS`)
+# ONLY BECAUSE THEIR NUMBERS WERE EQUAL. The ruling makes them differ, so the
+# pair is split per tier and every consumer must say which band it is asking
+# about. The old tier-agnostic names are deliberately GONE rather than aliased:
+# an alias would let a site keep asking the ambiguous question and get the
+# supervisor's laxer number by accident -- `tests/test_supervisor_context.py`
+# pins their absence.
+SUPERVISOR_BAND_SOFT_TOKENS = 350_000
+SUPERVISOR_BAND_HARD_TOKENS = 400_000
+WORKER_BAND_SOFT_TOKENS = 250_000
+WORKER_BAND_HARD_TOKENS = 300_000
+
+# The tiers `supervisor_band_verdict` accepts. Ordered strictest-first: the
+# worker band is at or below the supervisor band at every occupancy, which is
+# why an INDETERMINATE tier resolves to "worker" (fail toward the band, §11.2).
+BAND_TIERS = ("worker", "supervisor")
 
 # The three per-turn prompt summands whose SUM is context occupancy (B2). A
 # turn's usage may carry any subset; occupancy sums whatever is present.
@@ -2614,30 +2639,60 @@ def _transcript_occupancy(transcript_path):
     return occupancy
 
 
-def supervisor_band_verdict(occupancy):
-    """Map an occupancy (or None) to the band verdict (§11.3). `hand_off` is the
-    single decision a caller acts on:
+def band_thresholds(tier):
+    """`(soft, hard)` for `tier` -- the ONE place a tier name maps to numbers.
 
-      occupancy < 150k          -> below-band       (hand_off False)
-      150k <= occupancy < 200k  -> in-band          (hand_off True: soft trigger)
-      occupancy >= 200k         -> over-band        (hand_off True: hard ceiling)
-      occupancy is None         -> assume-near-band (hand_off True: §11.2 fails
-                                   toward the band -- NEVER below-band on missing
-                                   data, for a ceiling nobody else enforces)"""
+    Raises `ValueError` on an unknown tier rather than defaulting: since the
+    2026-08-05 raise the two bands differ (supervisor 350k/400k, worker
+    250k/300k), so guessing would answer a question the caller did not ask."""
+    if tier == "supervisor":
+        return (SUPERVISOR_BAND_SOFT_TOKENS, SUPERVISOR_BAND_HARD_TOKENS)
+    if tier == "worker":
+        return (WORKER_BAND_SOFT_TOKENS, WORKER_BAND_HARD_TOKENS)
+    raise ValueError(f"unknown context-band tier {tier!r} -- one of {BAND_TIERS}")
+
+
+def supervisor_band_verdict(occupancy, tier):
+    """Map an occupancy (or None) to the band verdict for `tier` (§11.3 for the
+    supervisor arm, §11.4 for the worker arm). `hand_off` is the single decision
+    a caller acts on:
+
+      occupancy < soft            -> below-band       (hand_off False)
+      soft <= occupancy < hard    -> in-band          (hand_off True: soft trigger)
+      occupancy >= hard           -> over-band        (hand_off True: hard ceiling)
+      occupancy is None           -> assume-near-band (hand_off True: §11.2 fails
+                                     toward the band -- NEVER below-band on missing
+                                     data, for a ceiling nobody else enforces)
+
+    `tier` is REQUIRED and has no default. It carried none before the 2026-08-05
+    raise either -- there was one band for both tiers, so the question could not
+    be asked wrong. It can now, and a defaulted tier is how a worker would
+    silently be measured against the supervisor's 100k-higher ceiling.
+
+    The name is historical: this has served the worker arm since wave 3 (§11.4
+    -- `sup-context` is not supervisor-gated), and now says which arm it
+    answered for. The returned `tier`/`soft_threshold`/`hard_threshold` are part
+    of the verdict so no caller re-derives them from the constants."""
+    soft, hard = band_thresholds(tier)
+    common = {"tier": tier, "soft_threshold": soft, "hard_threshold": hard}
     if occupancy is None:
         return {"verdict": "assume-near-band", "hand_off": True,
                 "reason": "occupancy unreadable -- assume near-band, hand off at "
-                          "the next boundary (§11.2 fails toward the band)"}
-    if occupancy >= BAND_HARD_TOKENS:
+                          "the next boundary (§11.2 fails toward the band)",
+                **common}
+    if occupancy >= hard:
         return {"verdict": "over-band", "hand_off": True,
-                "reason": f"occupancy {occupancy} >= hard ceiling {BAND_HARD_TOKENS}: "
-                          "finish in-flight work only, no new dispatches (§11.3)"}
-    if occupancy >= BAND_SOFT_TOKENS:
+                "reason": f"occupancy {occupancy} >= {tier} hard ceiling {hard}: "
+                          "finish in-flight work only, no new dispatches (§11.3)",
+                **common}
+    if occupancy >= soft:
         return {"verdict": "in-band", "hand_off": True,
-                "reason": f"occupancy {occupancy} >= soft trigger {BAND_SOFT_TOKENS}: "
-                          "hand off at the next wave/task boundary (§11.3)"}
+                "reason": f"occupancy {occupancy} >= {tier} soft trigger {soft}: "
+                          "hand off at the next wave/task boundary (§11.3)",
+                **common}
     return {"verdict": "below-band", "hand_off": False,
-            "reason": f"occupancy {occupancy} < soft trigger {BAND_SOFT_TOKENS}"}
+            "reason": f"occupancy {occupancy} < {tier} soft trigger {soft}",
+            **common}
 
 
 def _record_sids(rec) -> set:
@@ -2730,6 +2785,43 @@ def _caller_holds_supervisor_claim(caller_sid, claim=None, registry=None):
         # caller is provably a DIFFERENT body, so it is not the holder.
         return False
     return None                         # neither sid placed -- indeterminate
+
+
+def band_tier_for_sid(sid):
+    """Which context band governs the body `sid` -- "supervisor" or "worker".
+
+    Needed only since the 2026-08-05 raise made the two bands differ; before it,
+    §11 was one band for both tiers and `sup-context` had nothing to decide.
+
+    The discriminator is the SAME tri-state the ceiling is gated on
+    (`_caller_holds_supervisor_claim`, the one identity concept):
+
+      True  (holder)        -> "supervisor"
+      False (not the holder)-> "worker"
+      None  (indeterminate) -> "worker" -- FAIL TOWARD THE BAND (§11.2). The
+            worker band is at or below the supervisor band at every occupancy,
+            so the strict direction on an unreadable claim/registry is to hand
+            off earlier.
+
+    ON `None` THIS AND THE CEILING DELIBERATELY DIVERGE, and saying so is
+    cheaper than a reader discovering it: ND4(b) makes `_ceiling_refuses_dispatch`
+    treat an indeterminate caller AS the supervisor and apply the 400k refusal,
+    while this reports the 300k worker band. Both moves are the strict one for
+    what they do -- a refusal that fires is stricter than one that does not, and
+    a lower advisory band hands off sooner -- so the divergence costs a
+    mis-tiered supervisor an early handoff prompt, never a permitted dispatch it
+    should have been refused. This is a MEASUREMENT and never a refusal; the
+    refusal path resolves identity itself and does not consult this function.
+
+    Read-only and never raises: it reaches the claim file via `read_incarnation`
+    and the registry via `_registry_records_or_none` (never `load_registry`), so
+    it cannot quarantine a corrupt registry from a view.
+
+    The INTERFACE tier resolves to "worker" here (it holds no claim). It has no
+    fleet-enforced band at all (§11.3 ND1) -- `sup-context` on the interface is
+    an unenforced measurement, exactly as it was when both tiers shared one band
+    and it printed 150-200k at a session no ceiling could ever refuse."""
+    return "supervisor" if _caller_holds_supervisor_claim(sid) is True else "worker"
 
 
 def _record_is_supervisor_claim_holder(record, claim=None):
@@ -2848,7 +2940,7 @@ def _record_is_supervisor_claim_holder(record, claim=None):
 # evidence. (Round-6 lens `mf-rb6` CONFIRM-A; wave-19 `envstamp` independently.)
 #
 # WHAT THAT COSTS ND4(c), because it is the one guard the old asymmetry carried:
-# the 200k ceiling's interface exemption reads the stamp's ABSENCE, so it is now
+# the dispatch ceiling's interface exemption reads the stamp's ABSENCE, so it is now
 # granted on a falsified premise to any body whose daemon was cold-started
 # unstamped -- a LIVE HOLE, not a wording defect. The re-grounding the same
 # ruling ordered ("caller sid absent from the registry sid union") is the same
@@ -2967,7 +3059,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     -- reads `ok` while MISSING every record the artifact holds, and the §9 arm
     read that thinness as an affirmative *"you are provably not a worker"*. The
     presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:15202`), where it costs the §6.5 gate nothing.
+    (`:15306`), where it costs the §6.5 gate nothing.
 
     An artifact can also outlive its incident by days -- `_sweep_husks` tells the
     operator to restore the file first and delete the artifact second -- so that
@@ -2990,7 +3082,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     one of `_require_claim_holder`'s seven call sites silently renamed
     `state/fleet.json` aside and returned rc=0. `sup-heartbeat` is the
     highest-frequency supervisor verb there is; `sup-handoff-begin` is the one
-    lever the 200k ceiling exempts. The wrapper's shape composes directly with
+    lever the dispatch ceiling exempts. The wrapper's shape composes directly with
     the `registry=` parameter -- it returns records-or-None and None falls
     straight into the `not isinstance(workers, dict)` abstention below --
     whereas `_read_registry_readonly`'s `(ok, reason, data)` would need
@@ -3191,10 +3283,17 @@ def _resolve_worker_target(name):
 
 
 def _ceiling_refuses_dispatch(verb, now=None):
-    """three-tier §11.3 (B4) -- the 200k hard ceiling. Returns a refusal reason
-    string when `verb` (`spawn`/`send`) MUST be refused because the caller is
-    the supervisor claim-holder and its OWN live context occupancy is at or
-    above `BAND_HARD_TOKENS`; returns None when the dispatch may proceed.
+    """three-tier §11.3 (B4) -- the supervisor's hard dispatch ceiling, 400k
+    since the 2026-08-05 raise (200k before it). Returns a refusal reason string
+    when `verb` (`spawn`/`send`) MUST be refused because the caller is the
+    supervisor claim-holder and its OWN live context occupancy is at or above
+    `SUPERVISOR_BAND_HARD_TOKENS`; returns None when the dispatch may proceed.
+
+    THE SUPERVISOR NUMBER, NOT THE WORKER ONE. The two bands differ since the
+    raise (worker 250-300k) and this predicate is gated on
+    caller-is-the-claim-holder, so the only body it can ever refuse is the
+    supervisor -- a worker reaching here is exempt by identity long before any
+    threshold is compared.
 
     Applies to EXACTLY ONE caller -- the supervisor claim-holder (ND1). Three
     exemptions, in this order so they compose (ND4's closing note):
@@ -3224,9 +3323,12 @@ def _ceiling_refuses_dispatch(verb, now=None):
     own frozen first-dispatch copy, so absence is produced routinely by a daemon
     an unstamped launcher cold-started. Measured on FOUR OF FOUR live bodies in
     one wave (2026-07-30), two of them supervisors. So (c) currently hands the
-    human channel's exemption from a 200k HARD ceiling to the exact bodies the
-    ceiling exists to slow down, and the wording below telling such a caller it
-    must be a donated stamp is wrong about the mechanism.
+    human channel's exemption from a HARD ceiling (200k when this was written,
+    400k since the 2026-08-05 raise) to the exact bodies the ceiling exists to
+    slow down, and the wording below telling such a caller it must be a donated
+    stamp is wrong about the mechanism. THE RAISE DID NOT NARROW OR WIDEN THIS
+    HOLE -- only the threshold moved; the exemption arms are byte-for-byte what
+    the 2026-07-31 ruling left.
 
     WHY THE ORDERED RE-GROUNDING IS NOT IMPLEMENTED HERE, MEASURED RATHER THAN
     ASSERTED. The 2026-07-30 ruling ordered the exemption re-grounded on the
@@ -3305,9 +3407,9 @@ def _ceiling_refuses_dispatch(verb, now=None):
     that the sid read here is the one every other identity surface in this file
     reads, so a donated sid would mis-measure consistently rather than
     inconsistently. An unreadable occupancy fails TOWARD the band (§11.2): None
-    refuses, never "plenty of room". Between 150k and 200k the ceiling does NOT
-    refuse -- that band is a standing directive (§5.2), enforced only at the
-    hard top."""
+    refuses, never "plenty of room". Between the soft trigger and the hard
+    ceiling (350-400k since the 2026-08-05 raise) the ceiling does NOT refuse --
+    that band is a standing directive (§5.2), enforced only at the hard top."""
     # (c) STRUCTURAL interface exemption -- ahead of any sid resolution, and
     # therefore ahead of any registry read: an exempt caller never touches
     # `state/fleet.json` at all, so it cannot quarantine one either.
@@ -3322,12 +3424,12 @@ def _ceiling_refuses_dispatch(verb, now=None):
     # holder (True) or indeterminate (None, ND4b fail-toward-band): apply the
     # ceiling. Occupancy is the caller's own transcript (never the claim's sid).
     occupancy = _transcript_occupancy(find_transcript_path(None, caller))
-    if occupancy is not None and occupancy < BAND_HARD_TOKENS:
+    if occupancy is not None and occupancy < SUPERVISOR_BAND_HARD_TOKENS:
         return None                     # below the hard ceiling -- dispatch allowed
     occ_txt = f"{occupancy:,} tokens" if occupancy is not None else "unreadable"
     return (
         f"{verb}: refusing -- the supervisor claim-holder's context occupancy "
-        f"({occ_txt}) is at or above the {BAND_HARD_TOKENS:,}-token hard ceiling "
+        f"({occ_txt}) is at or above the {SUPERVISOR_BAND_HARD_TOKENS:,}-token hard ceiling "
         f"(three-tier §11.3). Past the ceiling, start NO new worker turns: let "
         f"the in-flight wave finish and READ its outcomes (`fleet status`/"
         f"`result`/`peek`/`wait`), then hand off (`fleet sup-handoff-begin`). "
@@ -7038,7 +7140,7 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
     """
     # three-tier §11.3, same arming as `cmd_respawn`'s call site: a
     # `--task`-bearing respawn is a new-task dispatch and is refused over the
-    # 200k ceiling; a bare respawn is §11.4 recovery and is not. Repeated here
+    # dispatch ceiling; a bare respawn is §11.4 recovery and is not. Repeated here
     # rather than left to the caller so a direct call into this body -- the
     # shape that let a supervisor dispatch a wave at 224,321 tokens -- cannot
     # slip past the ceiling by entering below it.
@@ -7299,7 +7401,7 @@ def cmd_respawn(args, run=subprocess.run, which=shutil.which,
     _supervisor_gate("respawn", nonce=getattr(args, "nonce", None))
     # three-tier §11.3: `respawn` is TWO verbs wearing one name, and only one of
     # them is a dispatch. WITH `--task` it starts a new worker turn on new work,
-    # exactly like `spawn`/`send`, so the 200k ceiling applies. WITHOUT it, this
+    # exactly like `spawn`/`send`, so the dispatch ceiling applies. WITHOUT it, this
     # is §11.4 recovery -- the lever that FIXES an over-band worker -- and it
     # stays permitted over the ceiling: a guard whose refusal set contains its
     # own remedy is a circular dependency (`docs/specs/claim-nonce.md` §7.2),
@@ -7681,7 +7783,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # P1-6: `read_registry_no_repair`, NOT `load_registry`. This is a PRE-FLIGHT
-    # resolution that runs from `cmd_kill:7575` / `cmd_respawn:7317`, before
+    # resolution that runs from `cmd_kill:7677` / `cmd_respawn:7419`, before
     # either verb has taken `fleet.lock` -- and `load_registry` QUARANTINES a
     # corrupt registry, i.e. RENAMES IT ASIDE, which is a write. An unlocked
     # write races every other fleet command, and it destroys the evidence the
@@ -7744,10 +7846,10 @@ def _supervisor_lifecycle_target(verb, name):
     # P1-6: `read_registry_no_repair` -- `load_registry` MINUS the rename, with
     # the same missing-file contract, the same validator and the same
     # `RegistryCorruptError`, so the arm below is unchanged. This read runs from
-    # `cmd_kill:7575` / `cmd_respawn:7317`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:7677` / `cmd_respawn:7419`, ahead of either verb's `fleet_lock`,
     # and quarantining here did two things: it wrote without the lock, and it
     # STOLE the quarantine from the lock-held read that was designed to perform
-    # it. `cmd_respawn:7341-7343` spells out that design -- *"resolve under the
+    # it. `cmd_respawn:7443-7445` spells out that design -- *"resolve under the
     # lock so a corrupt registry surfaces through load_registry's quarantine"* --
     # and the theft is what falsified it: by the time the lock-held read ran the
     # file was ABSENT rather than corrupt, so `{"workers": {}}` came back and the
@@ -10384,7 +10486,8 @@ DAEMON_ENV_LEAK_REMEDY = (
     "worth reporting when it disagrees with the registry, never worth "
     "believing over it. EXACTLY ONE GUARD STILL KEYS ON IT AND THAT IS A KNOWN "
     "LIVE HOLE, not a sound read: three-tier §11.3 ND4c exempts a session with "
-    "no stamp from the 200k dispatch ceiling, so a body whose daemon was "
+    f"no stamp from the {SUPERVISOR_BAND_HARD_TOKENS:,}-token dispatch ceiling, "
+    "so a body whose daemon was "
     "cold-started unstamped is exempt from a ceiling that applies to it. The "
     "re-grounding is ordered and BLOCKED on an operator ruling (it collides "
     "with ND4b on the same input); the accounting and the three candidates are "
@@ -10466,7 +10569,8 @@ def _doctor_check_identity_witness(workers: dict):
                     f"FLEET_WORKER (present, absent or blank) is evidence about "
                     f"this body (claim-nonce §18). WHAT IT STILL COSTS, and it "
                     f"is why this row is red rather than a note: three-tier "
-                    f"§11.3 ND4c exempts a stamp-less session from the 200k "
+                    f"§11.3 ND4c exempts a stamp-less session from the "
+                    f"{SUPERVISOR_BAND_HARD_TOKENS:,}-token "
                     f"dispatch ceiling, so until that exemption is re-grounded "
                     f"this body is exempt from a ceiling the registry says "
                     f"applies to it. The re-grounding is ordered and BLOCKED on "
@@ -13613,7 +13717,7 @@ def _registry_records_or_none():
     no write" and runs at the top of every mutating verb, so routing its
     identity read through `load_registry` would let a speed-bump shred operator
     evidence on a path that documents itself as touching nothing. This is D4's
-    rule for the view path (`:3883`) applied to the one other reader that has
+    rule for the view path (`:3985`) applied to the one other reader that has
     no business quarantining. Quarantining stays where it belongs: the
     lock-holding verbs, `cmd_sup_boot` included via `_holder_is_limited`."""
     ok, _reason, data = _read_registry_readonly()
@@ -13800,8 +13904,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     live_sids` is what shipped, and `_record_sids`' own docstring says why it
     is wrong -- *"matching against `session_id` alone fails open on it
     (ND4a)"* -- for the twelve other sites that already key on the union
-    (`:2719, :2763, :3024, :3174, :7715, :8035, :8316, :8534, :8621, :8844,
-    :9630, :13671`). B6 was the one
+    (`:2774, :2855, :3116, :3266, :7817, :8137, :8418, :8636, :8723, :8946,
+    :9732, :13775`). B6 was the one
     roster comparison that did not, and §G-G measured it failing open exactly
     as predicted: the releaser fork-steered, so its record was eagerly
     restamped (`session_id` = post-fork, pre-fork sid pushed into
@@ -13813,8 +13917,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :6675, :7148, :11577,
-    :16866), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :6777, :7250, :11681,
+    :16977), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -14504,8 +14608,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:6675, :7148, :11577,
-    #     :16866) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:6777, :7250, :11681,
+    #     :16977) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -14538,7 +14642,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         #     file aside (`:1027`), which is a write. Routing the identity read
         #     through it made `fleet send` shred the operator's evidence from a
         #     path that promises to touch nothing; the helper exists for exactly
-        #     this and names this gate as its reason (`:13599`). A `None` here
+        #     this and names this gate as its reason (`:13703`). A `None` here
         #     still fails toward the gate -- an unreadable registry is reported
         #     by its own doctor row, and is never a reason to decide blind.
         #     MERGE NOTE (2026-07-27): main and `fix/identity-registry-judges`
@@ -15180,7 +15284,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # A worker whose own record sits inside the artifact upgrades the claim.
         #
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as `_sweep_husks`
-        # spells it at `:9594`. Not an mtime comparison: `os.rename` preserves
+        # spells it at `:9696`. Not an mtime comparison: `os.rename` preserves
         # mtime, so the artifact's mtime is the PRE-corruption write time and any
         # recreated registry is always newer -- the comparison would never fire
         # on the one bypass it exists to stop.
@@ -15764,16 +15868,22 @@ def cmd_sup_context(args) -> int:
     out-of-band inspection.
 
     Fails toward the band (§11.2): an unresolvable sid or a missing/unreadable
-    transcript yields `assume-near-band` (hand_off True), never `below-band`."""
+    transcript yields `assume-near-band` (hand_off True), never `below-band`.
+
+    Since the 2026-08-05 raise the two arms have DIFFERENT numbers (supervisor
+    350-400k, worker 250-300k), so this resolves the observed body's tier first
+    (`band_tier_for_sid`) and reports that tier's band; `--sid S` tiers S, not
+    the caller. An indeterminate tier reports the WORKER band -- the strict one
+    -- for the same fail-toward-the-band reason. `tier` is in both renderings so
+    the reader never has to infer which band a number came from."""
     sid = getattr(args, "sid", None) or current_caller_session()
     transcript = find_transcript_path(None, sid) if sid else None
     occupancy = _transcript_occupancy(transcript)
-    verdict = supervisor_band_verdict(occupancy)
+    tier = band_tier_for_sid(sid)
+    verdict = supervisor_band_verdict(occupancy, tier)
     info = {
         "sid": sid,
         "occupancy": occupancy,
-        "soft_threshold": BAND_SOFT_TOKENS,
-        "hard_threshold": BAND_HARD_TOKENS,
         "transcript": transcript.as_posix() if transcript else None,
         **verdict,
     }
@@ -15782,7 +15892,8 @@ def cmd_sup_context(args) -> int:
         return 0
     occ = f"{occupancy:,} tokens" if occupancy is not None else "unreadable"
     print(f"context occupancy: {occ}  ->  {verdict['verdict'].upper()}"
-          f"  (band {BAND_SOFT_TOKENS:,}-{BAND_HARD_TOKENS:,})")
+          f"  ({tier} band {verdict['soft_threshold']:,}-"
+          f"{verdict['hard_threshold']:,})")
     print(verdict["reason"])
     if sid is None:
         print("NOTE: no CLAUDE_CODE_SESSION_ID -- run this from the session you "
@@ -20042,7 +20153,8 @@ def build_parser() -> argparse.ArgumentParser:
     # three-tier §11.2: self-monitored context band measurement (read-only).
     p_supctx = sub.add_parser(
         "sup-context",
-        help="read this session's own context occupancy vs the 150-200k band (§11.2)")
+        help="read this session's own context occupancy vs its tier's context "
+             "band -- supervisor 350-400k, worker 250-300k (§11.2)")
     p_supctx.add_argument("--sid", help="override caller session id (out-of-band inspection)")
     p_supctx.add_argument("--json", action="store_true")
 

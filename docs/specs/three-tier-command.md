@@ -1373,6 +1373,54 @@ is the ordering that keeps the window shut.
 
 ## 11. The self-monitored context band — supervisor AND workers (operator req 2026-07-23, extended wave 3)
 
+> ### AMENDED 2026-08-05 by operator ruling — the numbers below are SUPERSEDED, the mechanism is not
+>
+> **Operator ruling, 2026-08-05** (`docs/OPERATOR-GATES.md` §Settled, *"Context ceilings — raise
+> them?"*; `knowledge/lessons.md#2026-08-05-ceilings-raised`), by direct directive, no gate preceded
+> it. It amends §11.3 and §11.4 **on the numbers only**:
+>
+> | | soft trigger | hard top | was |
+> |---|---|---|---|
+> | **supervisor** (§11.3, the fleet-enforced dispatch ceiling) | **350k** | **400k** | 150k / 200k |
+> | **worker** (§11.4, the band top) | **250k** | **300k** | 150k / 200k |
+>
+> Band entry preserves the ratified **50k margin**. The margin is the interface's transcription of the
+> ruling; the ruling's own words make **400k / 300k the hard numbers** if the margin misreads intent.
+>
+> **Grounds, as ruled:** with supervisor boot costing 85–130k, a 200k ceiling produced ~45-minute
+> handoff generations — measured the same day the handoff protocol first went green live (two
+> consecutive successful handoffs, wave 43). Succession churn outweighed the freshness benefit. *The
+> band was priced when boot cost ~40k; a threshold ratified against one cost structure needs
+> re-pricing when the structure moves.*
+>
+> **What did NOT change, stated because a raise is the moment to check:** who is subject (ND1 — the
+> supervisor claim-holder alone), the enumeration of refusing verbs (§11.3: `spawn`, `send`,
+> `sup-spawn`, **task-bearing** `respawn`), the `--task` discriminator, the fail-toward-the-band
+> direction (§11.2/ND4b), ND4(c)'s falsified premise and its LIVE hole, and the §11.5 reconciliation
+> with the cap doctrine (this is still a freshness mechanism, not a budget). **Only the thresholds
+> moved.**
+>
+> **The one structural consequence.** The two tiers shared a single constant pair
+> (`BAND_SOFT_TOKENS`/`BAND_HARD_TOKENS`) *because their numbers were equal*, and §11.2's
+> `sup-context` read is tier-agnostic by design — a worker measures itself with it. With the numbers
+> apart, a single pair can no longer answer honestly, so shipped code splits them per tier
+> (`SUPERVISOR_BAND_*` / `WORKER_BAND_*`) and `sup-context` resolves the observed body's tier through
+> the SAME `_caller_holds_supervisor_claim` tri-state the ceiling is gated on; an **indeterminate**
+> tier reports the WORKER band, which is the strict one at every occupancy. The old tier-agnostic
+> names are removed rather than aliased.
+>
+> **On an indeterminate identity the measurement and the ceiling DELIBERATELY DIVERGE, and saying so
+> is cheaper than a reader discovering it:** ND4(b) makes the §11.3 refusal treat an indeterminate
+> caller AS the supervisor and apply the **400k** ceiling, while `sup-context` reports the **300k**
+> worker band. Both moves are the strict one for what they do — a refusal that fires is stricter than
+> one that does not, and a lower advisory band hands off sooner — so the divergence costs a mis-tiered
+> supervisor an early handoff prompt, never a permitted dispatch that should have been refused. **Do
+> not read the worker band off `sup-context` and conclude the ceiling refuses there: it refuses at
+> 400k.**
+>
+> **The original 150–200k text is left standing below, unedited**, as the record of what was ratified
+> on 2026-07-23 and why. Where it states a number, read this note.
+
 **Operator, binding:** the supervisor self-monitors its context; band **150–200k tokens**. Entering the
 band → hand off at the next wave/task boundary. Past 200k → strongest directive to hand off, but finish
 the current *urgent* task first (no new work). Handoff ritual = the existing sup-handoff machinery
@@ -1390,6 +1438,8 @@ refusal*, which is a different question from *who observes the band*; see §11.4
 ### 11.1 The band replaces the drafted 300–500k band
 
 The drafted band was 300–500k; the operator's is **150–200k**. This spec adopts 150–200k everywhere.
+*(Amended 2026-08-05 — §11's note: 350–400k supervisor / 250–300k worker. "Everywhere" is now
+"everywhere, at the raised numbers"; the sweep this subsection ordered is unchanged in extent.)*
 **Three** live user-facing surfaces still quote the old 300–500k band — `skills/fleet/supervisor.md`,
 `skills/fleet/SKILL.md` (the `sup-handoff` command row), and `docs/SPEC.md §6` (the Handoff row) — all
 **doc-sync collisions** (§12), not changes this write-set makes:
@@ -1483,6 +1533,18 @@ $ sed -n '826,827p' bin/fleet.py
   the `cache_read`-only half the earlier draft named.
 
 ### 11.3 The band drives the existing handoff — with a decidable, fleet-enforced ceiling (B4)
+
+*(**Amended 2026-08-05 by operator ruling — read §11's amendment note first.** Every `150k` / `200k` /
+`H` **stated below as the policy in force** is now **350k** / **400k** / **400k**; shipped code carries
+the raised numbers as `SUPERVISOR_BAND_SOFT_TOKENS` / `SUPERVISOR_BAND_HARD_TOKENS`. **The `>`-quoted
+blockquotes are EXEMPT from that reinterpretation** — the retired ND1 exemption argument and the ND4(c)
+falsification note are quoted records of what was argued and measured at the time, and one of them says
+so itself (*"the paragraph and receipt above stand as the record of what was ratified on 2026-07-23 and
+why"*). Read those the way `bin/fleet.py` writes the same sentence: **200k when it was written, 400k
+since the 2026-08-05 raise** — the raise moved a threshold and neither narrowed nor widened what those
+paragraphs describe. Nothing else in this subsection changed — not ND1, not the verb enumeration, not
+the `--task` discriminator, not ND4. The 2026-07-23 text is left standing as the record of what was
+ratified and why.)*
 
 The operator requirement **stands and is not weakened** (manager ruling, 2026-07-23): 150k → hand off at
 the next wave/task boundary; 200k → finish the current urgent task, no new work. B4's defect is that the
@@ -1649,6 +1711,14 @@ human's control channel (ND1).
 > ratified text, which is not a worker's to choose.
 
 ### 11.4 The worker arm of the band (operator, wave 3)
+
+*(**Amended 2026-08-05 by operator ruling — read §11's amendment note first.** The worker band is
+**250–300k**, no longer the same band as the supervisor's. "The same band" was load-bearing prose here
+and is now false: the two arms share a *mechanism*, not a *number*. Shipped code splits the constants
+(`WORKER_BAND_SOFT_TOKENS` / `WORKER_BAND_HARD_TOKENS`) and `sup-context` resolves which arm a body is
+on — see §11's note. The three differences below are untouched, and so is the fact that the
+**enforcement half of this arm is still `[UNBUILT]`**: the raise moved a number, it did not build the
+supervisor-respawns-an-over-band-worker half.)*
 
 Workers observe the same 150–200k band: a worker self-monitors its context and, **on entering the band,
 hands off / respawns at the next task boundary.** Three differences from the supervisor arm, each
