@@ -67,6 +67,25 @@ green on a document it never checked; this one proves it can fail by mutating a
 single word of a pasted receipt in memory and requiring that the mutation is
 caught. Run it before trusting any green run.
 
+EXIT CODES -- three, because the self-test has three outcomes.
+
+    0  everything checked, and the harness proved it can fail.
+    1  FAILED. A receipt did not reproduce, or the harness did not catch its own
+       seed. Something is wrong.
+    2  INCONCLUSIVE. Every receipt that could be checked reproduced, but the
+       self-test could not be RUN on this document -- no multi-word receipt to
+       paraphrase, no classified block to unfence, or an evasion already present
+       so a seeded one would prove nothing. Nothing is known to be wrong; the
+       harness is simply unproven here.
+
+2 is non-zero on purpose. An unproven verifier is not a verified one, so `set -e`
+and `if rc:` gates both still fire -- what changes is that an operator can now
+tell "your document gave my seed nothing to bite on" apart from "your verifier
+is lying", which used to be the same red. Only 1 ever means a defect, and every
+path that means a defect still returns 1: FAILED outranks INCONCLUSIVE wherever
+the two meet, so an inconclusive self-test can never mask a receipt failure in
+the same run.
+
 KNOWN GAPS -- read these before pointing this tool at a second document.
 
 1. **stderr is never captured or compared.** Only stdout is diffed. A receipt
@@ -147,6 +166,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import enum
 import io
 import os
 import pathlib
@@ -717,12 +737,85 @@ def check(text, root, quiet=False, strict=False, skip_volatile=False,
     return len(receipts), failures, warnings
 
 
+# --- the self-test's three outcomes ----------------------------------------
+#
+# `self_test` used to return a bare bool and `main()` turned every `False` into
+# `rc=1`. Two populations produced that `False`, and they mean opposite things:
+# the harness COULD NOT RUN the check (nothing is known to be wrong), and the
+# harness PROVED ITSELF BROKEN. Collapsing them is over-loud -- pointing
+# `--self-test` at a document with no multi-word receipt to paraphrase read
+# exactly like a verifier caught lying about a green run, so the signal that
+# matters was buried under a red that usually meant nothing.
+#
+# The tempting fix -- let `main()` ignore the falsy return -- is over-QUIET, and
+# that is strictly worse: it converts every genuine failure into silence. So the
+# state is carried through all four functions, and INCONCLUSIVE is quieter than
+# FAILED but never SILENT: it still exits non-zero, because a self-test that
+# could not run has proved nothing, and the doctrine here is that what the
+# harness cannot classify is never a skip.
+#
+# A verdict REFUSES to be coerced to bool. Two of the pins in
+# `tests/test_receipts.py` were `assert self_test(...)` / `assert
+# self_test_extraction(...)`, and any all-truthy tri-state (a string constant, a
+# plain enum) leaves both of them passing on INCONCLUSIVE -- the corpus's two
+# strongest anti-vacuity pins going green-while-blind on the day this landed,
+# which is the same failure class one level up. `TypeError` makes it loud.
+class Verdict(enum.Enum):
+    PASSED = "passed"
+    INCONCLUSIVE = "inconclusive"
+    FAILED = "failed"
+
+    def __bool__(self):
+        raise TypeError(
+            "a self-test Verdict has three states and must not be coerced to a "
+            "bool: `if verdict:` silently folds INCONCLUSIVE into one of the "
+            "other two, which is the collapse this type exists to prevent. "
+            "Compare explicitly -- `verdict is Verdict.FAILED`.")
+
+
+EXIT_OK = 0
+EXIT_FAILED = 1
+EXIT_INCONCLUSIVE = 2
+
+# Worst last. `worse()` replaces the boolean `and` that used to accumulate the
+# two extraction seeds: both seeds still run, and the WORSE verdict wins, so a
+# passing second seed can never bury a failing first one.
+_SEVERITY = {Verdict.PASSED: 0, Verdict.INCONCLUSIVE: 1, Verdict.FAILED: 2}
+
+EXIT_CODE = {
+    Verdict.PASSED: EXIT_OK,
+    Verdict.FAILED: EXIT_FAILED,
+    Verdict.INCONCLUSIVE: EXIT_INCONCLUSIVE,
+}
+
+_VERDICT_NOTE = {
+    Verdict.PASSED:
+        "the harness proved it can fail, on both seed classes.",
+    Verdict.INCONCLUSIVE:
+        ("the harness could not RUN a seed on this document, so this run proves "
+         "nothing about the harness. It is not a claim that any receipt is "
+         "wrong -- the VERDICT line above is what says that. Still non-zero: an "
+         "unproven verifier is not a verified one."),
+    Verdict.FAILED:
+        ("the harness did not catch its own seed. Its green runs mean nothing "
+         "until this passes."),
+}
+
+
+def worse(*verdicts):
+    """The worst of the verdicts given. FAILED > INCONCLUSIVE > PASSED."""
+    return max(verdicts, key=_SEVERITY.__getitem__)
+
+
 def self_test(text, root):
     """Prove the checker can fail: paraphrase one word of a pasted receipt.
 
     Mutates the first word of the first expected-output line of the first
     non-volatile receipt that currently reproduces, and requires that exactly
     that receipt is then reported as a failure.
+
+    Returns a `Verdict`, never a bool. INCONCLUSIVE means this document gave the
+    seed nothing to work with; FAILED means the harness is broken.
     """
     receipts, _unclassified, _blocks = parse(text)
     target = None
@@ -738,8 +831,11 @@ def self_test(text, root):
         if target:
             break
     if target is None:
+        # Nothing is known to be wrong: a document whose receipts are all
+        # volatile, all single-word, or none of which currently reproduce simply
+        # offers no seed target. `check()` below is what reports the last case.
         print("SELF-TEST INCONCLUSIVE: no clean multi-word receipt to mutate")
-        return False
+        return Verdict.INCONCLUSIVE
     r, line = target
     words = line.split(" ")
     for i, w in enumerate(words):
@@ -757,13 +853,31 @@ def self_test(text, root):
     idx = next((i for i in range(r.line, len(doc_lines))
                 if doc_lines[i] == line), None)
     if idx is None:
-        print("SELF-TEST INCONCLUSIVE: could not locate the expected line to seed")
-        return False
+        # FAILED, not inconclusive. `_parse_block` appends expected lines
+        # VERBATIM and `r.line` is the 1-based document line of this receipt's
+        # own `$ ` line, so the 0-based search above starts exactly on its first
+        # expected line; parser and mutator both split the same `text`. The line
+        # is therefore always findable, and reaching here means the harness's own
+        # line accounting is wrong -- something KNOWN to be broken, which is the
+        # very class this self-test exists to surface.
+        print("SELF-TEST FAILED: could not locate the expected line to seed, so "
+              "the parser's line accounting disagrees with the document it just "
+              "parsed. Nothing this harness reports can be trusted until that is "
+              "explained.")
+        return Verdict.FAILED
     doc_lines[idx] = mutated_line
     mutated_text = "\n".join(doc_lines) + "\n"
     if mutated_text == text:
-        print("SELF-TEST INCONCLUSIVE: mutation did not change the document")
-        return False
+        # FAILED, not inconclusive -- and unreachable by construction, which is
+        # why it is labelled loudly. Getting here required `line.strip()` and
+        # `len(line.split()) > 1`, so `line.split(" ")` holds a word with
+        # `w.strip()` truthy, and both mutation arms (`w + "X"`, `"PARAPHRASED"`)
+        # always change that word. A seeder that did not seed has broken the one
+        # thing this function does; it has not merely run out of material.
+        print("SELF-TEST FAILED: mutation did not change the document, so the "
+              "seed never planted anything and any 'caught' verdict below would "
+              "be about the unmutated text.")
+        return Verdict.FAILED
     print(f"seeding a one-word paraphrase into the receipt at line {r.line}")
     print(f"  original: {line.strip()[:100]}")
     print(f"  seeded:   {mutated_line.strip()[:100]}")
@@ -774,30 +888,40 @@ def self_test(text, root):
     if not caught:
         print("SELF-TEST FAILED: the harness did not catch a seeded paraphrase. "
               "Its green runs mean nothing until this passes.")
-        return False
+        return Verdict.FAILED
     _, clean_failures, _ = check(text, root, quiet=True)
     if any(f[0].cmd == r.cmd for f in clean_failures):
         print("SELF-TEST FAILED: the seeded receipt also fails unmutated")
-        return False
+        return Verdict.FAILED
     print("SELF-TEST PASSED: a one-word paraphrase inside a pasted receipt is caught.")
     return self_test_extraction(text, root)
 
 
 def _extraction_seed(name, seeded, before):
+    """One extraction seed's verdict. Returns a `Verdict`, never a bool.
+
+    Returning a bare `False` for the INCONCLUSIVE arm is what poisoned
+    `self_test_extraction`'s accumulator: a seed that could not be planted was
+    indistinguishable there from a harness that failed to report a planted one.
+    """
     doc = parse_doc(seeded)
     after = len(doc.receipts) + len(doc.unclassified)
     evasions = scan_evasions(seeded)
     print(f"  seed [{name}]: receipts {before} -> {after}, "
           f"{len(evasions)} evasion(s) reported")
     if after >= before:
+        # Genuinely inconclusive, and genuinely reachable: deleting a block's two
+        # fence lines re-pairs every LATER fence in the document, so in a
+        # multi-block document the parsed count can stay flat or rise. The seed
+        # did not do what it intended; that is not evidence of a defect.
         print(f"EXTRACTION SELF-TEST INCONCLUSIVE [{name}]: the seed removed no receipt")
-        return False
+        return Verdict.INCONCLUSIVE
     if not evasions:
         print(f"EXTRACTION SELF-TEST FAILED [{name}]: {before - after} receipt(s) "
               f"stopped being parsed and NOTHING was reported. Green runs mean "
               f"nothing until this passes.")
-        return False
-    return True
+        return Verdict.FAILED
+    return Verdict.PASSED
 
 
 def self_test_extraction(text, root):
@@ -808,17 +932,22 @@ def self_test_extraction(text, root):
     that produced the founding incident: a block whose fences are removed, and a
     block pushed behind a `> ` gutter. Both must drop the receipt count AND be
     reported. Structure only; nothing is executed.
+
+    Returns a `Verdict`, never a bool: the worse of the two seeds' verdicts.
     """
     doc = parse_doc(text)
     before = len(doc.receipts) + len(doc.unclassified)
     target = next(((s, e) for s, e, ok in doc.spans if ok), None)
     if target is None or before == 0:
         print("EXTRACTION SELF-TEST INCONCLUSIVE: no classified fenced block to seed")
-        return False
+        return Verdict.INCONCLUSIVE
     if scan_evasions(text):
+        # The document's own evasion is `check(--strict)`'s to fail on, not this
+        # function's: a seeded evasion proves nothing when an unseeded one is
+        # already being reported. Nothing here is known to be wrong.
         print("EXTRACTION SELF-TEST INCONCLUSIVE: the document already carries an "
               "evasion, so a seeded one proves nothing")
-        return False
+        return Verdict.INCONCLUSIVE
     start, end = target
     lines = text.splitlines()
     print(f"seeding an extraction failure into the block at lines {start}-{end}")
@@ -826,12 +955,15 @@ def self_test_extraction(text, root):
                          if n not in (start, end)) + "\n"
     quoted = "\n".join("> " + l if start <= n <= end else l
                        for n, l in enumerate(lines, start=1)) + "\n"
-    ok = _extraction_seed("fences removed", unfenced, before)
-    ok = _extraction_seed("blockquote gutter", quoted, before) and ok
-    if ok:
+    # Both seeds always run -- `worse()` is not short-circuiting, and neither was
+    # the `and` it replaced (the call was evaluated before the conjunction). The
+    # WORSE verdict wins, so a passing second seed cannot bury a failing first.
+    verdict = worse(_extraction_seed("fences removed", unfenced, before),
+                    _extraction_seed("blockquote gutter", quoted, before))
+    if verdict is Verdict.PASSED:
         print("EXTRACTION SELF-TEST PASSED: a receipt that stops being parsed is "
               "reported, not silently dropped.")
-    return ok
+    return verdict
 
 
 def main(argv=None):
@@ -839,7 +971,11 @@ def main(argv=None):
     ap.add_argument("paths", nargs="+", help="markdown file(s) to verify")
     ap.add_argument("--root", default=".", help="cwd for the commands (default: .)")
     ap.add_argument("--self-test", action="store_true",
-                    help="prove the harness can fail, then verify")
+                    help=(f"prove the harness can fail, then verify. Exits "
+                          f"{EXIT_FAILED} if the harness failed its own seed or "
+                          f"any receipt did not reproduce, {EXIT_INCONCLUSIVE} if "
+                          f"the seed could not be RUN on this document (nothing "
+                          f"known to be wrong), {EXIT_OK} otherwise"))
     ap.add_argument("--strict", action="store_true",
                     help="an unclassified receipt fails the run (see gap 2)")
     ap.add_argument("--skip-volatile", action="store_true",
@@ -849,17 +985,42 @@ def main(argv=None):
     global BASH
     BASH = resolve_bash()
     print(f"shell: {BASH}\nroot:  {root}")
-    rc = 0
+    # Two accumulators, deliberately. Folding them into one would let the
+    # printed self-test verdict absorb a receipt failure and read as though the
+    # HARNESS were broken when it is the DOCUMENT that is -- and the operator
+    # acts differently on those two. The exit code takes the worse of the pair,
+    # so an INCONCLUSIVE self-test can never mask a receipt that did not
+    # reproduce: FAILED outranks INCONCLUSIVE, always.
+    self_test_verdict = Verdict.PASSED
+    receipts_failed = False
     for p in args.paths:
         text = pathlib.Path(p).read_text(encoding="utf-8")
         print(f"=== {p} ===")
-        if args.self_test and not self_test(text, root):
-            rc = 1
+        if args.self_test:
+            self_test_verdict = worse(self_test_verdict, self_test(text, root))
         _, failures, _ = check(text, root, strict=args.strict,
                                skip_volatile=args.skip_volatile)
         if failures:
-            rc = 1
-    return rc
+            receipts_failed = True
+    verdict = (worse(self_test_verdict, Verdict.FAILED) if receipts_failed
+               else self_test_verdict)
+    if args.self_test:
+        print(f"\nSELF-TEST VERDICT: {self_test_verdict.name} -- "
+              f"{_VERDICT_NOTE[self_test_verdict]}")
+    # An exit code nobody can read is a number, not a diagnosis -- and it must
+    # name WHICH of the two accumulators produced it. The confusing shape is a
+    # document whose self-test is INCONCLUSIVE and whose receipts also fail:
+    # `SELF-TEST VERDICT: INCONCLUSIVE` sits directly above `EXIT: 1 (FAILED)`,
+    # and without this the reader can only guess that the 1 came from the
+    # receipts rather than from the self-test.
+    causes = []
+    if self_test_verdict is not Verdict.PASSED:
+        causes.append(f"self-test {self_test_verdict.name}")
+    if receipts_failed:
+        causes.append("receipt failure(s)")
+    print(f"EXIT:            {EXIT_CODE[verdict]} ({verdict.name})"
+          + (f" -- from {', '.join(causes)}" if causes else ""))
+    return EXIT_CODE[verdict]
 
 
 if __name__ == "__main__":

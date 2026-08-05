@@ -271,7 +271,11 @@ def test_harness_can_fail(vr):
             break
     if target is None:
         pytest.skip("no non-volatile receipt with expected output to seed")
-    assert vr.self_test(target, REPO), \
+    # `is Verdict.PASSED`, not truthiness. `self_test` returns a tri-state, and
+    # an `assert vr.self_test(...)` here would have passed on INCONCLUSIVE --
+    # this pin would have gone green-while-blind the day the tri-state landed,
+    # which is why `Verdict` refuses to be coerced to a bool at all.
+    assert vr.self_test(target, REPO) is vr.Verdict.PASSED, \
         "the harness did not catch a seeded one-word paraphrase"
 
 
@@ -748,7 +752,7 @@ def test_extraction_seed_rejects_a_seed_that_removes_nothing(vr):
     times; it gets an assertion of its own.
     """
     clean = "```\n# at " + PIN + "\n$ echo seeded\nseeded\n```\n"
-    assert vr._extraction_seed("no-evasion", clean, before=99) is False, \
+    assert vr._extraction_seed("no-evasion", clean, before=99) is vr.Verdict.FAILED, \
         "a seed reporting no evasion must fail, not pass"
 
     # The guard must be what rejects this one. The doc DOES report an evasion
@@ -760,7 +764,11 @@ def test_extraction_seed_rejects_a_seed_that_removes_nothing(vr):
     before = len(receipts) + len(unclassified)
     assert before == 1 and vr.scan_evasions(removes_nothing), \
         "fixture must keep its receipt AND report an evasion, or this is vacuous"
-    assert vr._extraction_seed("no-op", removes_nothing, before=before) is False, \
+    # Both halves of this test used to assert the same `is False`, so the word
+    # INCONCLUSIVE in the message below was prose, not an assertion: this file
+    # baked in the exact conflation the tri-state removes. Now they differ.
+    assert vr._extraction_seed("no-op", removes_nothing, before=before) \
+        is vr.Verdict.INCONCLUSIVE, \
         "a seed that removes no receipt must be INCONCLUSIVE, not a pass"
 
 
@@ -778,12 +786,12 @@ def test_self_test_chains_into_extraction(vr, monkeypatch):
 
     def spy(text, root):
         called.append(text)
-        return False
+        return vr.Verdict.FAILED
 
     monkeypatch.setattr(vr, "self_test_extraction", spy)
     result = vr.self_test(doc, REPO)
     assert called, "self_test() did not chain into self_test_extraction()"
-    assert result is False, \
+    assert result is vr.Verdict.FAILED, \
         "self_test() must return the extraction seed's verdict, not its own"
 
 
@@ -840,5 +848,5 @@ def test_self_test_proves_extraction_completeness(vr):
         "seeded\n"
         "```\n"
     )
-    assert vr.self_test_extraction(doc, REPO), \
+    assert vr.self_test_extraction(doc, REPO) is vr.Verdict.PASSED, \
         "the harness did not notice a receipt that stopped being parsed"
