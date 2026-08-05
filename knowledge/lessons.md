@@ -1345,7 +1345,7 @@ entry**, describing what *that* campaign did. It was read as present tense.
   it was handed up rather than forced.
 - Version-drift receipt re-confirmed as designed: `docs/specs/native-substrate.md:246`
   (`# volatile`, pinned `@ 2d58eba`) reports `2.1.207` expected vs `2.1.220` actual as a
-  **WARN, exit 0** — `verify_receipts.py:684` routes volatile drift to `warnings`, never
+  **WARN, exit 0** — `verify_receipts.py:704` routes volatile drift to `warnings`, never
   `failures`. `--self-test --strict` green on both seed classes (paraphrase caught, extraction
   evasion reported); 5/6 reproduce exactly, 0 unclassified.
 - Floors, this worktree, both interpreters: **2970 passed / 14 skipped, 2984 collected** —
