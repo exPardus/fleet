@@ -5907,3 +5907,228 @@ DISPATCHED, all `--mode bypass`, all opus, all in worktrees:
 - `w43-glaunch` (sid `9249c2ef`), `C:/proga/fleet-w43-glaunch`, detached at `0cefc81`. Mutate-red-restore permitted in its own worktree, clean tree to be proved.
 
 STATE: main `0ab74ed`, nothing landed by me, nothing pushed by me. Two w42 branches still unlanded and now UNDER GATE rather than merely unread. Floors deliberately NOT inherited — every lane re-derives its own baseline, and I will re-derive at each landing rather than predicting off 3741/3756. Open and untouched: the claim-nonce `:337` operator gate, ND4(c) in the sup-decision slot, and the stale `claim-nonce.md` citations to `lessons.md:601`/`:627` which need a semantic search on ratified text and stay deferred.
+
+## 2026-08-05T15:53:42Z CHECKPOINT inc=inc-20260805T151620Z-5c96 sid=b3890822-35ed-43dc-9b4e-d58e4d65afe9
+
+BOTH W42 GATES CAME BACK RED, AND THE TWO REDS ARE DIFFERENT KINDS OF OBJECT — ONE IS A FIXABLE BRANCH, THE OTHER IS A DEFECT IN RATIFIED TEXT THAT THE BRANCH FOUND RATHER THAN CAUSED. I SPLIT THEM INSTEAD OF TREATING THEM ALIKE.
+
+**MAIN IS `93031cd`, PUSHED, ORIGIN BYTE-IDENTICAL** (`git rev-parse` both sides, then `git diff --stat HEAD origin/main` empty — read back, not inferred from "the push printed no error"). 9th consecutive ratified bypass event on push. The commit carries the wave-42 RELEASED entry, my BOOT, my opening checkpoint, and the new operator gate.
+
+**NEITHER GATE CONFIRMED ITS BRIEF, WHICH IS WHAT I ASKED THEM FOR.** Both were told a gate that only confirms its brief is not a gate. Both came back with findings I had not framed, and both told me where I was wrong.
+
+**`w42/mf5-verbs` — RED, PARKED UNLANDED, ESCALATED AS ONE GATE WITH FOUR SUB-RULINGS.** Three blocking findings:
+- **B1: the branch is RED on both floors at its own tip** — `1 failed, 3646 passed, 14 skipped, 1 xfailed`, 3662 collected, identical on `py -3.13` and `py -3.10`. The failing test is `test_the_spec_row_names_no_destructive_verb_this_list_omits`: the branch adds four verbs to §5's destructive row and does not carry them into `RATIFIED_DESTRUCTIVE`. **Not concealed** — the lane's own journal quotes the failure verbatim and calls it one deliberate red test, arguing its amendment should be read as a proposal with evidence attached. I agree with that reading and it is still blocking, because main goes red on landing.
+- **B2: the lane's own stated remedy is INSUFFICIENT, and the gate proved it by planting it.** Mutant A (the remedy verbatim) → 2 failed. Mutant B (all three `RATIFIED_*` tuples) → 1 failed. Mutant C (B + `tests/test_terminal_surface.py:848`'s `DESTRUCTIVE_VERBS` +4) → 0 failed, `3651 passed`. **The surviving failure is the finding**: promoting four verbs into the ratified destructive row obliges extending the lint that stops a read-only `/fleet:*` command being granted a destructive verb. Until it lands, the spec calls `sup-boot`, `sup-handoff-begin`, `sup-handoff-complete`, `sup-decision --clear` destructive while the binding lint does not know they are — the spec-says-X / binding-row-says-Y split I asked the gate to watch for, found in the place I did not point it at. *A remedy is a claim, and this one was testable; the gate ran it instead of reading it.*
+- **B3: `wait` = ORDINARY is a judgement wearing a measurement's clothes, and the lane missed it.** MEASURED by transitive BFS to fixpoint over effect sites: `wait`, `status` and `release` have **byte-identical 9-site effect sets**. `status` is ratified ORDINARY; `release` is ratified DISRUPTIVE. **Set-equality therefore selects two different classes simultaneously and cannot pick one** — and it holds before any exclusion is applied, so this is not about the branch at all. **The ratified table is non-functional on this set.** The lane checked equality against `status` and never asked whether the same set also matched a row of a different class.
+
+**SO I DID NOT ORDER A FIX WAVE ON MF5.** Every remaining question there is a decision about ratified text — E2 (is an irreversible APPEND an irreversible effect; six verbs hang on it), B3, E1 (does a verb's effect cross the process boundary — `sup-spawn`'s in-process effects are a strict subset of ordinary `spawn`'s, but it dispatches a body that seizes a claim), and E5 (the destructive row justifies `doctor --repair` with a reason that does not distinguish it from `peek`). **ESCALATE-beats-3rd-wave, and more to the point: a fix wave cannot answer a question the criterion does not contain.** Filed to `docs/OPERATOR-GATES.md` as ONE gate with four sub-rulings and a recommendation each, plus the revert-the-hunk alternative if the operator would rather not rule now — the 2026-07-30 docket lesson was that the queue was never the operator's latency, it was nobody asking. The `sup-decision` slot still holds ND4(c), so this went through the ratified second channel (gates file + release note), recorded in the same tick as the commit.
+
+**`w42/launch-docs` — RED, AND FIXABLE WITHOUT ANY RULING, SO I DISPATCHED THE FIX.** The load-bearing finding is the one my brief asked for and it came back worse than I framed it: **15 planted false claims, 15 survived, 0 kills** — while four controls (including a SHAPE control proving `docs/README.md` is actually iterated) all went RED, so the instrument was alive. Survivors include the whole `sup-*` family (11 of 32 shipped verbs, skipped by `tests/test_doc_claims.py:172-173`), every flag on every verb, unbackticked mentions, the `bin/fleet.py <verb>` invocation form the pin's own failure message teaches readers to use, and — answering the question I asked — **the pin catches presence only, never absence**: deleting a whole `fleet kill` table row stayed green. **Read fairly that is a NARROW pin, not a broken one, and the gate said so.** What makes it blocking is that three sentences shipped in this same commit assert the WIDE scope, one of them user-facing (`CONTRIBUTING.md:41`), in a commit whose entire purpose is that documentation claims stay true.
+- Second blocker: `docs/launch-readiness.md` gap #6 says the pin is *"two releases behind the installed CLI"* — it is **zero** behind, and the claim **expired 19 minutes after the commit was written** (commit `2026-08-05T14:44:55Z`; `pin-pass.json` stamped `2026-08-05T15:03:55Z` at 2.1.222 — by my own predecessor's stamping act last wave). Four further sites paste `2.1.220`/`2026-07-26`, **three of them inside the very sentence telling the reader not to trust a pasted constant**, all five added by this commit — while the lane's own journal had already recorded that doctrine correctly. *The fix pasted the constant again, one version newer.* And underneath the timing: `state/` is gitignored, so **a stranger who clones this repo has no `pin-pass.json` at all** while three entry docs point them at it. That is a launch-readiness defect on the priority axis, not a formatting nit.
+
+**`w43-lfix` DISPATCHED** (sid `633461c4`), worktree `C:/proga/fleet-w43-lfix`, branch `w43/launch-fix` off `0cefc81` — so the fix branch CONTAINS the branch it fixes and one merge lands both. Scope is exactly the gate's two "what would discharge it" paragraphs and nothing else; I named the non-blocking items as explicitly NOT its scope, because fix-waves-mint-defects is 7/7 in this repo and twice from a supervisor's own ruling. I ordered it to re-measure every figure I relayed, and told it that finding one of my numbers wrong is worth more to me than a clean discharge.
+
+**I MINTED A DEFECT IN MY OWN GATE ENTRY AND CAUGHT IT BY RUNNING THE PIN.** `TestOperatorGatesFile::test_the_shipped_gates_file_parses` requires every open gate line to END with `?`. My first draft ended on a statement; my second ended with `?**` because I had bolded through the question mark. Two RED runs, then green. **I ran that test because I was about to commit a file I had hand-edited — not because I suspected anything** — and it is the same class as everything above: an edit is a claim, and this one had a pin willing to check it. Worth recording that the file's own pin is what stopped a supervisor from shipping a malformed docket entry in the same commit whose subject is a gate.
+
+STATE: main `93031cd`, pushed, origin identical. `w42/mf5-verbs` PARKED, unlanded, four rulings owed. `w42/launch-docs` not landed directly — it lands via `w43/launch-fix` when that gates green. Two lanes in flight: `w43-lfix` and `w43-a1` (still working, dispatched 2026-08-05T20:21Z). My occupancy is in the 150–200k band, so the standing handoff directive is live: I will land `lfix` if it returns in my runway, and a1's gate + landing + the citation re-pin fixpoint belong to my successor. Floors deliberately not predicted — 3651 and 3662 above are the GATE's measurements at the branch tips, not main's, and main's must be re-derived at each landing.
+
+## 2026-08-05T16:47:50Z CHECKPOINT inc=inc-20260805T151620Z-5c96 sid=b3890822-35ed-43dc-9b4e-d58e4d65afe9
+
+HANDOFF PREP — WAVE 43 IS MID-FLIGHT WITH TWO LANES RUNNING, TWO OPERATOR RULINGS JUST ARRIVED, AND I FOUND A FILE COLLISION THAT DECIDES THE LANDING ORDER. I AM AT 178,667 TOKENS AND HANDING OFF RATHER THAN STARTING WORK I CANNOT FINISH.
+
+**READ THIS ENTIRE ENTRY BEFORE ACTING. It is your campaign brief — `sup-handoff-begin` carries no `--task`, so the journal tail is the whole channel.**
+
+## STATE, MEASURED AT HANDOFF
+
+**Main is `e6e2638`, local == origin.** It moved FOUR times under me today (`0ab74ed` → my `93031cd` → the interface's ruling records → `e6e2638`), so **re-derive it before you act on it; do not trust the sha in this sentence.** My own contribution was `93031cd` (journal + the §5 gate filing). Nothing else of mine is on main. `state/pin-pass.json` stamped 2.1.222.
+
+**Branches, tips measured at handoff:**
+- `w43/a1-data` — `c56d00c`, 2 commits, **5 files**, `5 files changed, 2153 insertions(+), 35 deletions(-)` (a TOTAL, not a pair): `bin/fleet.py`, `tests/test_homes_list.py`, `tests/test_homes_verb.py`, `tests/test_read_registry_at.py`, `tests/test_round7_defect_pins.py`. **UNREAD BY ME — I have not opened a line of it.** Under gate now.
+- `w43/launch-fix` — 2 commits on top of `0cefc81` (`42d77d6` *"close the sup-\* hole, and narrow what the pin claims to hold"*, `298a021` *"drop the expired pin constant, and say what a fresh clone has"*), **third commit still uncommitted** (`docs/launch-readiness.md` modified in its worktree). Contains `w42/launch-docs` as an ancestor, so **one merge lands both**.
+- `w42/mf5-verbs` — `37d9534`, UNLANDED, now **UNPARKED by operator ruling**. Still RED at its own tip until the ruling's landing edits are made.
+- `w42/launch-docs` — `0cefc81`, do NOT land directly; it lands via `w43/launch-fix`.
+
+**Lanes in flight (both `--mode bypass`, opus):**
+- `w43-lfix` (sid `633461c4`), worktree `C:/proga/fleet-w43-lfix`, branch `w43/launch-fix`. WORKING, on its third commit. Brief `state/tasks/lens/w43-lfix.md`.
+- `w43-ga1` (sid `e26fac85`), worktree `C:/proga/fleet-w43-ga1`, **detached at `c56d00c`**. Adversarial gate over a1, dispatched minutes before this handoff. Brief `state/tasks/lens/w43-ga1.md`.
+
+**Lanes finished, verdicts on disk, all three read by me:** `w43-gmf5` → `state/verdicts/w43-gmf5.md` (RED). `w43-glaunch` → `state/verdicts/w43-glaunch.md` (RED). `w43-a1` → `state/journals/w43-a1.md` (self-report, UNREAD).
+
+## THE FINDING THAT DECIDES YOUR LANDING ORDER
+
+**`w43/a1-data` and the §5 ruling's landing edit COLLIDE on `tests/test_round7_defect_pins.py`.** a1 touches it (moving `homes` from `RATIFIED_BUT_UNBUILT` to `RATIFIED_ORDINARY`, +134 lines by the stat bar); the operator's §5 ruling requires editing that same file's `RATIFIED_*` tuples plus `tests/test_terminal_surface.py:848`'s `DESTRUCTIVE_VERBS`. **These two cannot be worked in parallel** — I measured this and did NOT dispatch the mf5 ruling-implementation lane because of it. Sequence them: land a1 (under its gate), then dispatch the mf5 lane against the post-a1 tree; or the reverse. **Do not dispatch both at once.** I asked the a1 gate to report exactly which lines of that file a1 touches, so you will have the sequencing data without re-deriving it.
+
+## TWO OPERATOR RULINGS ARRIVED WHILE I WAITED — BOTH CARRY WORK
+
+**1. §5 criterion — all four sub-rulings AS RECOMMENDED** (`docs/OPERATOR-GATES.md` Settled, `knowledge/lessons.md#2026-08-05-s5-criterion-ruled`, pushed at `e6e2638`). E2: an irreversible **append IS** an irreversible effect (six verbs classify accordingly; E3 collapses in). B3: **write the separating ground into §5** — *`wait` persists only transitions it observed; `release` alters ownership* — `wait`=ORDINARY, and the criterion must be decidable from its own text. E1: **the dispatch is the act**, `sup-spawn`=DESTRUCTIVE, hand-maintained lint entry accepted, note it in the spec row. E5 split out as its own OPEN gate (the `doctor --repair` row justification) — **not this branch's problem, do not block on it.** Landing consequence ruled with it: extend BOTH files, predicted **3651/14/1 — verify, don't inherit.** *The operator was explicit: the ruling is not a green light past the gate, only past the criterion.* The branch still lands under a gate.
+
+**2. claim-nonce `:337` — approve the split, restate `:337` ONLY** (pushed at `9b8977c`). Drop the dead SessionStart consumer from the enumeration, KEEP the constraint (`fleet doctor` + `sup-status` still consume the nag, so §6.3's key set is still not a free choice), append a dated note naming D7 as the reason the enumeration shrank. **`:765` (receipt `# at 091d5fa`) and `:1799` (quoted blockquote) MUST NOT BE TOUCHED.** Adversarial check within the wave. Ratified general rule, to be cited in that commit message: *a reference to a deleted file is only rot when it is a claim about the CURRENT tree; a pinned receipt and a quoted argument are claims about a PAST tree and are still true.*
+
+## THE CITATION DEBT, WITH A NUMBER
+
+The interface's two ruling records **inserted 10 lines today at the TOP of `knowledge/lessons.md`** (+6 at `9b8977c`, +4 at `e6e2638`). `lessons.md` is append-at-TOP, so **every line citation into it rots every time**. The four cross-doc re-pins wave 42 made — `bin/fleet.py:2190`, `tests/test_resilience.py`, `tests/test_self_citations.py`, `docs/mf-slice-a-price.md` — are stale by **+10** and **nothing in the suite can see it** (`tests/test_self_citations.py` resolves against `bin/fleet.py` and nothing else, by its own docstring). Landing a1 moves `bin/fleet.py` lines on top of that. **Run the citation pass to FIXPOINT, not once** — a single red/green read is a lower bound. Verify each by READING the cited text, never by arithmetic. Still deliberately deferred and NOT yours to fix blind: `docs/specs/claim-nonce.md`'s citations to `lessons.md:601`/`:627`, which need a semantic search on ratified text.
+
+## WHAT I DID, SO YOU DO NOT REDO IT
+
+Booted fresh (predecessor released cleanly), autoclean 0/107/0. Re-derived disjointness with the merge-base form for every branch I acted on — never the two-endpoint form, which reports the UNION and fails toward false collision. Re-derived `bin/fleet.py:3873`'s uncaught `RecursionError`/`MemoryError` at my own base and confirmed the inherited citation survives at a later commit. Dispatched three lanes in the first 30k, then a fix lane, then a gate. **Gate lanes are DETACHED worktrees** — a detached body cannot advance the ref it audits, which converts a prose fence into a property of the tree; keep doing this. Filed the §5 gate as one question with four sub-rulings and a recommendation each, which the operator cleared in one pass — the 2026-07-30 docket lesson holds. Pushed `93031cd` with read-back (`git diff --stat HEAD origin/main` empty, not "the push printed no error"); 9th consecutive ratified bypass event.
+
+**My own error, caught by a pin I ran on a hunch:** my `docs/OPERATOR-GATES.md` entry broke `TestOperatorGatesFile::test_the_shipped_gates_file_parses` twice — an open gate must END with `?`, and my second draft ended `?**` because I bolded through the question mark. I ran that test because I was about to commit a hand-edit, not because I suspected anything. **A supervisor's own doc edit is code with worse tooling.**
+
+## YOUR QUEUE, IN ORDER
+
+1. **`w43-lfix` finishes** — verify its third commit landed, read `state/journals/w43-lfix.md`, check its discharge against `state/verdicts/w43-glaunch.md`'s two "what would discharge it" paragraphs. **Re-plant the gate's mutant A1 (`fleet sup-frobnicate` in README's CLI table) yourself and watch it go RED** — that one plant is the whole proof of the `sup-*` fix, and fix-waves-mint-defects is 7/7 here. Then merge, re-derive floors BOTH interpreters, push with read-back.
+2. **`w43-ga1` verdict** → land a1 if GREEN, fix-wave or escalate if RED. a1 is the campaign's build lane and the priority axis.
+3. **After a1 lands**: dispatch the §5 ruling-implementation lane (both files, the spec ground-writing for B3, the `sup-spawn` row note), gated, then land. Predicted 3651/14/1 — verify.
+4. **The `:337` restatement** — small gated edit, cite the ratified rule in the commit message.
+5. **Citation fixpoint pass** after every landing that moves `bin/fleet.py` or `lessons.md`.
+
+**Band: 150–200k, hard 200k. Merge before reading. Every spawn `--mode bypass`. Briefs in `state/tasks/lens/`, `@file` everywhere, never pipe evidence** — `verify_receipts.py | tail -8` once read 79/79 where the truth was 192/194. **Re-derive every floor; predict before you run, then compare.** Priority axis is multi-fleet build + launch readiness; self-repair only when it blocks the axis.
+
+## WHAT THIS HANDOFF PROBABLY GOT WRONG
+
+Main's sha (it moves under every body today). The claim that lfix's third commit is small — I never read its diff. My assumption that a1's 2153 insertions are mostly tests. And the sequencing call itself: I asserted a1-then-mf5 is the right order on a file-collision measurement, but if a1 gates RED, mf5 should go first and my ordering becomes wrong the moment that verdict lands. **Re-measure what you act on.**
+
+STATE: main `e6e2638` == origin. Nothing of wave 43's work landed yet. Two lanes in flight, two verdicts read, one self-report unread, two operator rulings live with work attached, one file collision measured, ~10 lines of citation rot outstanding. Releasing at the band rather than riding to the wall.
+
+## 2026-08-05T16:48:04Z HANDOFF-BEGIN inc=inc-20260805T151620Z-5c96 sid=b3890822-35ed-43dc-9b4e-d58e4d65afe9
+
+successor=inc-20260805T164804Z-9019 task=C:/proga/claude-fleet/state/supervisor-handoff-inc-20260805T164804Z-9019.md
+
+## 2026-08-05T16:48:54Z HANDOFF-COMPLETE inc=inc-20260805T151620Z-5c96 sid=b3890822-35ed-43dc-9b4e-d58e4d65afe9
+
+claim -> inc-20260805T164804Z-9019 sid=96a5e1b3-f644-45e0-b129-351e5cd065b4
+
+## 2026-08-05T16:49:06Z CHECKPOINT inc=inc-20260805T164804Z-9019 sid=96a5e1b3-f644-45e0-b129-351e5cd065b4
+
+claim received via handoff from inc-20260805T151620Z-5c96
+
+## 2026-08-05T17:07:06Z CHECKPOINT inc=inc-20260805T164804Z-9019 sid=96a5e1b3-f644-45e0-b129-351e5cd065b4
+
+QUEUE ITEM 1 DONE — `w43/launch-fix` LANDED, AND MAIN ITSELF WAS RED WHEN I ARRIVED AT IT.
+
+**MAIN WAS RED AT `e6e2638`, BOTH INTERPRETERS, BEFORE ANY WORK OF MINE.** My baseline floor runs (started before the merge, as prediction inputs) came back `1 failed, 3740 passed, 14 skipped, 1 xfailed`: `TestOperatorGatesFile::test_the_shipped_gates_file_parses`. Cause measured, not guessed: the interface's E5 open-gate entry (`docs/OPERATOR-GATES.md:18`) appended its provenance annotation AFTER the question mark, so the line ended `)*` where the pin requires a literal trailing `?`. Same defect class as my predecessor's own `?**` incident, third instance of a hand-edited docket line failing its pin — a hand-edited docket line is code with worse tooling. Repaired FORMAT ONLY: annotation moved before the closing question, every word preserved, terminal `**...restated**?` matching the settled entries' pattern. Pin green (3 passed), committed `a1f3f49`.
+
+**LANDED `02ab795`: one merge carries both `w42/launch-docs` (`0cefc81`) and `w43/launch-fix` (`27e659e`).** Before merging I did the three things the handoff ordered rather than trusting the lane's report:
+- **Re-planted mutant A1 myself** in the lfix worktree: `fleet sup-*` → `fleet sup-frobnicate` in README's CLI table → `1 failed, 19 passed`, failure naming `['sup-frobnicate']`; restored → `20 passed`, `git status --porcelain` empty. The sup-* hole closure is proven by my hand.
+- **Re-derived disjointness with the merge-base form**: base `f457a577`, branch side SEVEN files (launch-docs + lfix combined — not the five in the handoff, which counted lfix alone), main side 23+2, intersection EMPTY.
+- **Verified lfix's tip and tree myself**: `27e659e`, clean, three commits as reported.
+
+**A PREDICTION MISS, CAUGHT AND EXPLAINED BEFORE IT COULD BECOME A NUMBER I RELAYED.** I predicted the merged tree collects 3756 (main's 3756 + "branch adds 0"). Actual: **3776**. The +20 is `tests/test_doc_claims.py` — NEW to main, created by w42/launch-docs; lfix's flat 3682→3682 collection was measured against its own base, which already contained the file. A branch's "collection is flat" is a claim about ITS base, not about main. Corrected prediction 3761/14/1 = 3776 — then hit exactly, both interpreters (3.13 in 353.8s, 3.10 in 329.1s).
+
+**PUSHED WITH READ-BACK**: `e6e2638..02ab795`, `git diff --stat HEAD origin/main` empty after fetch. 10th consecutive ratified bypass event.
+
+**No citation pass owed by this landing**: it moved neither `bin/fleet.py` nor `knowledge/lessons.md` (7 entry-doc/test files only).
+
+STATE: main `02ab795` == origin, floors 3761/14/1 = 3776 both interpreters, measured at the pushed tree. `w42/launch-docs` and `w43/launch-fix` both landed; `w43-lfix` idle, its worktree retained until sweep. `w42/mf5-verbs` still parked awaiting the §5 ruling-implementation lane, which waits on a1's landing (file collision on `tests/test_round7_defect_pins.py`). IN FLIGHT: `w43-ga1` (gate over a1, background wait armed). Queue: ga1 verdict → a1 landing → §5 lane → `:337` restatement → citation fixpoint after any landing that moves `bin/fleet.py` or `lessons.md`. Occupancy well under band. Journal edits on disk remain uncommitted until the wave record.
+
+## 2026-08-05T17:29:50Z CHECKPOINT inc=inc-20260805T164804Z-9019 sid=96a5e1b3-f644-45e0-b129-351e5cd065b4
+
+QUEUE ITEMS 2 AND 5 DONE — a1 LANDED UNDER A GREEN GATE, CITATION DEBT CONVERTED TO ANCHORS RATHER THAN RE-PINNED.
+
+**`w43-ga1` RETURNED GREEN** (`state/verdicts/w43-ga1.md`): 21 mutants planted, 19 killed, 2 survivors filed non-blocking (N2 except-breadth unpinned, N3 stat-guard unreached); the automatic blocker (a1 shipping a2's global `--fleet-home`) measured ABSENT; 12-shape fixture set proven non-vacuous (7 of 12 shapes are the only killer of their mutant). Gate's floors at tip: 3872/14/1 = 3887 both interpreters, arithmetic checked against its own 3756 base.
+
+**LANDED `1d8d6e3`**: `w43/a1-data` (c56d00c) merged. Disjointness RE-DERIVED at landing time vs post-lfix main (merge-base `0ab74ed`, intersection empty — the gate's C11 was measured against a main that had since moved; I did not inherit it). Predicted 3907 collected / 3892 passed / 14 / 1 — hit exactly, both interpreters. Pushed with read-back, 11th bypass event.
+
+**CITATION PASS RUN TO FIXPOINT AND PUSHED (`68dcba1`, 12th bypass event).** The handoff's four stale cross-doc re-pins verified BY READING: true shift was **+8, not the estimated +10** (UL-horizon content now at lessons.md:794, interface-stress anchors at :185). Applied the wave-42 rolling-doc doctrine instead of re-pinning numbers: all four sites now cite `#2026-07-17-mc` / `#2026-07-30-interface-stress` — the anchors lessons.md already carries — so this rot class is DEAD at those sites, not deferred a wave. `test_self_citations.py` green three consecutive runs; its docstring example list updated to record the anchor-only rule for lessons.md. Remaining `lessons.md:N` line citations live only in dated review records and `docs/PLAN-PROGRESS.md` history rows — claims about PAST trees, untouched per the ratified deleted-file-reference rule. claim-nonce's `:601`/`:627` stay deferred as ordered. Floors re-derived after the conversion: 3892/14/1 both interpreters, unchanged as predicted.
+
+**SEQUENCING FACTS THE §5 LANE INHERITS (from the a1 gate, written into its brief):** the ruling's tuple edit and `w42/mf5-verbs`' spec edit are ONE landing (`TestRatifiedTableIsTranscribedFaithfully` re-reads the spec's destructive row — both directions RED when split, measured); `RATIFIED_ORDINARY` already carries `homes` so the lane appends `wait` with no conflict; `test_every_shipped_verb_is_classified_or_declared_unclassified` is loud on any dropped verb.
+
+**FOR THE DOCKET (filing with the wave record): the a1 gate measured an E2 tension** — the ruled ground "an irreversible append IS an irreversible effect" sits at odds with §5's ratified `homes --add/--retire` = *ordinary (list-reversible)* row: `--add` irreversibly appends to the machine-global `fleet-homes.list` (only the FOLD is reversible), and `homes` being ORDINARY means a read-only `/fleet:*` grant of `Bash(fleet homes)` reaches `--add`. E5-shaped docket material; the branch follows the ratified table and nothing lands on this question. Also recorded for a2's future brief: N5 (a relative home reads process CWD — `home_is_initialized` must be called AFTER resolution), and N1 (`--add ""` renders the view at rc 0).
+
+NEXT: dispatch `w43-s5` (§5 ruling implementation + mf5 landing, one branch) and `w43-c337` (claim-nonce :337 restatement) in parallel — file-disjoint briefs staged at `state/tasks/lens/`. STATE: main `68dcba1` == origin, floors 3892/14/1 = 3907 both interpreters at the pushed tree. Occupancy mid-band, comfortable.
+
+## 2026-08-05T17:31:36Z CHECKPOINT inc=inc-20260805T164804Z-9019 sid=96a5e1b3-f644-45e0-b129-351e5cd065b4
+
+HANDOFF PREP — WAVE 43'S LANDINGS ARE ALL IN AND PUSHED; THE CEILING CAUGHT ME AT DISPATCH, SO THE TWO NEXT LANES PASS TO YOU UNDISPATCHED, BRIEFS STAGED AND WORKTREES ALREADY CUT.
+
+**READ THIS ENTIRE ENTRY BEFORE ACTING. It is your campaign brief — the journal tail is the whole channel.**
+
+## HOW THIS HANDOFF HAPPENED — a mechanism worked, and my own estimate did not
+
+`fleet spawn w43-s5` was REFUSED: occupancy 223,281 tokens ≥ the 200k hard ceiling (three-tier §11.3, the ND4-A claim-holder-never-exempt predicate, fleet-enforced). **The refusal is the ruling working live** — my stamp is a stale supervisor-shaped one and the predicate read the claim file, exactly as ruled 2026-07-31. My error, on the record: one checkpoint earlier I wrote "occupancy mid-band, comfortable" from feel; the runbook's own line is `sup-context` MEASURES, never estimate. I never ran it. Run it at every wave boundary; the boot window is ~85–110k before you type anything.
+
+## STATE, MEASURED AT HANDOFF
+
+**Main is `68dcba1`, local == origin, read-back proven, floors 3892/14/1 = 3907 collected at that tree on BOTH interpreters** (3.13 and 3.10, measured at every landing this wave — never inherited). Re-derive before acting; the interface commits ruling records mid-wave.
+
+**Landed and pushed this incarnation (12 consecutive ratified bypass events through mine):**
+- `a1f3f49` — gates-file format repair. Main was RED at `e6e2638` on `TestOperatorGatesFile::test_the_shipped_gates_file_parses`, both interpreters: the interface's E5 open-gate line ended with its annotation, not `?`. Format-only fix, content preserved. Third instance of the hand-edited-docket-line class.
+- `02ab795` — `w42/launch-docs` + `w43/launch-fix` landed in ONE merge. Mutant A1 re-planted by my own hand (RED naming `sup-frobnicate`, restored, green). Floors 3761/14/1 = 3776.
+- `1d8d6e3` — multi-fleet slice a1 (`w43/a1-data`, c56d00c) under its GREEN gate (`state/verdicts/w43-ga1.md`: 21 mutants, 19 killed, 2 non-blocking survivors, no blockers). Floors 3907 collected predicted and hit.
+- `68dcba1` — citation pass to fixpoint: the four stale lessons.md cross-doc pins converted to ANCHOR citations (`#2026-07-17-mc`, `#2026-07-30-interface-stress`) per the rolling-doc doctrine. True shift was +8, not the estimated +10 — read, never arithmetic. That rot class is dead at those sites.
+
+**Prediction misses this wave, both caught: mine** (3756 vs actual 3776 — a branch's "collection flat" is a claim about ITS base, not main's), **and the handoff estimate above.** Predict → run → compare → explain, every landing.
+
+## YOUR QUEUE, IN ORDER
+
+1. **Dispatch `w43-s5`** — brief STAGED at `state/tasks/lens/w43-s5.md`, worktree ALREADY CUT at `C:/proga/fleet-w43-s5`, branch `w43/s5-ruling` at `68dcba1`. Implements the §5-criterion ruling AND lands `w42/mf5-verbs` (37d9534) as ONE branch — the gate measured that the spec edit and the tuple edit cannot land apart (`TestRatifiedTableIsTranscribedFaithfully` reads the spec's destructive row; RED both directions when split). `RATIFIED_ORDINARY` already carries `homes` post-a1; the lane appends `wait` conflict-free. `--mode bypass --model opus`.
+2. **Dispatch `w43-c337`** — brief STAGED at `state/tasks/lens/w43-c337.md`, worktree at `C:/proga/fleet-w43-c337`, branch `w43/c337` at `68dcba1`. The claim-nonce `:337` restatement per the settled ruling; `:765`/`:1799` MUST NOT move; commit message cites the ratified deleted-file-reference rule verbatim (it is in the brief). File-disjoint from s5 — dispatch BOTH AT ONCE, first 30k.
+3. **Gate then land both.** s5 gets an adversarial gate (detached worktree — a detached body cannot advance the ref it audits). c337 is small; the ruling says "adversarial check within the wave" — a cheap detached gate or your own diff read with the receipts harness (`py -3.13 tools/verify_receipts.py --self-test --strict docs/specs/claim-nonce.md` must be green before AND after; the lane was ordered to record both in full).
+4. **File the E2/homes tension to the docket** with the wave record: the a1 gate measured that `homes --add` performs an irreversible append to the machine-global `fleet-homes.list` while §5's ratified row calls it *ordinary (list-reversible)* — under the fresh E2 ground ("an irreversible append IS an irreversible effect") those sit visibly at odds, and ORDINARY means a read-only `/fleet:*` grant reaches `--add`. E5-shaped open-gate line, MUST END WITH `?` — run `TestOperatorGatesFile` before committing; it went RED twice on my predecessor and once on the interface.
+5. **Commit the journal + wave record** (supervisor/JOURNAL.md carries my BOOT through this entry, uncommitted by design). Knowledge loop: lessons entry for the wave (the ceiling-refusal live proof, the two prediction misses, the anchor-citation conversion) + INDEX line.
+6. **Citation fixpoint after any landing that moves `bin/fleet.py` or `lessons.md`** — s5 moves neither (spec + two test files), c337 moves neither, but VERIFY from their diffs, don't assume. claim-nonce's `:601`/`:627` citations stay DEFERRED (need semantic search on ratified text — not blind re-pinning).
+
+## FACTS YOU WILL WANT
+
+- **a2's future brief must carry** (from `state/verdicts/w43-ga1.md`): N5 — a relative home argument reads the process CWD; `home_is_initialized` must be called only AFTER resolution, or `--fleet-home .` silently targets the shell's directory. N1 — `homes --add ""` renders the view at rc 0. N8 — `RATIFIED_ORDINARY` has no spec-transcription pin (only DESTRUCTIVE does).
+- **ND4(c) residual still parks in the sup-decision slot** (raised 2026-07-30). Not yours to answer; the interface carries it. `fleet doctor` FAILS while it stands — that is the routing working.
+- Both finished-lane worktrees (`fleet-w43-lfix`, `fleet-w43-ga1`, plus the older w43 set) still exist; sweep is autoclean's TTL business, not urgent.
+- Every spawn `--mode bypass`, briefs via `@file` in `state/tasks/lens/`, never author `state/tasks/<worker>.md` directly. Merge before reading. Never pipe evidence.
+
+## WHAT THIS HANDOFF PROBABLY GOT WRONG
+
+Main's sha (the interface commits mid-wave). The claim that s5/c337 are the only remaining wave-43 work — re-read `docs/OPERATOR-GATES.md` Open section yourself at boot. And the assumption both staged briefs survive contact: each orders the lane to report where the brief is wrong; read those sections first when the reports land.
+
+STATE: main `68dcba1` == origin. Nothing in flight. Two lanes staged undispatched. Claim healthy, heartbeat fresh. Handing off at a fleet-measured 223k, past the ceiling — no further dispatch from this body.
+
+## 2026-08-05T17:31:44Z HANDOFF-BEGIN inc=inc-20260805T164804Z-9019 sid=96a5e1b3-f644-45e0-b129-351e5cd065b4
+
+successor=inc-20260805T173144Z-e447 task=C:/proga/claude-fleet/state/supervisor-handoff-inc-20260805T173144Z-e447.md
+
+## 2026-08-05T17:32:10Z HANDOFF-COMPLETE inc=inc-20260805T164804Z-9019 sid=96a5e1b3-f644-45e0-b129-351e5cd065b4
+
+claim -> inc-20260805T173144Z-e447 sid=0a5cc7ab-4809-4b41-ac68-3cb293654ec9
+
+## 2026-08-05T17:32:56Z CHECKPOINT inc=inc-20260805T173144Z-e447 sid=0a5cc7ab-4809-4b41-ac68-3cb293654ec9
+
+claim received via handoff from inc-20260805T164804Z-9019
+
+## 2026-08-05T17:35:03Z CHECKPOINT inc=inc-20260805T173144Z-e447 sid=0a5cc7ab-4809-4b41-ac68-3cb293654ec9
+
+WAVE 44 OPEN — BOOT VERIFIED, BOTH STAGED LANES DISPATCHED IN FIRST ~92k.
+
+Boot facts, MEASURED not inherited: `sup-context` 90,848 BELOW-BAND (predecessor's miss corrected — measured before dispatch, will measure at every wave boundary). Main `68dcba1` == origin, only supervisor/JOURNAL.md dirty (by design, commits with wave record). Gates Open section re-read per the handoff's own doubt: exactly ONE open item (E5 doctor-repair wording) — the handoff's queue claim holds, no drift. FLEET_WORKER witness: supervisor-shaped stale (`sup|inc-20260805T115735Z-5a11|boot`) — benign variant, recorded per §18, moved on.
+
+DISPATCHED (both `--mode bypass --model opus`, briefs via @file from state/tasks/lens/, rendered task files verified intact at +5-line preamble each):
+- `w43-s5` sid 8636c45f — §5-criterion ruling implementation + `w42/mf5-verbs` (37d9534) as ONE landing. Worktree C:/proga/fleet-w43-s5 verified clean at 68dcba1 on `w43/s5-ruling` before dispatch.
+- `w43-c337` sid 5d56274f — claim-nonce `:337` restatement per the settled split ruling; `:765`/`:1799` fenced MUST-NOT-TOUCH in the brief. Worktree C:/proga/fleet-w43-c337 verified clean at 68dcba1 on `w43/c337`.
+
+Spawn printed no NONCE line on either dispatch — generation stands (presented same gen both spawns, both accepted).
+
+NEXT while lanes run: file the E2/homes tension as an E5-shaped Open docket line (must end `?`, run TestOperatorGatesFile before committing — the class went RED three times). Then: gate s5 (detached worktree), cheap-gate or self-audit c337 with receipts harness green before AND after, land both, wave record + lessons + INDEX, citation fixpoint only if diffs move bin/fleet.py or lessons.md (verify from diffs, both briefs say they don't).
+
+## 2026-08-05T18:35:35Z CHECKPOINT inc=inc-20260805T173144Z-e447 sid=0a5cc7ab-4809-4b41-ac68-3cb293654ec9
+
+c337 LANDED UNDER SELF-AUDIT GATE — `c5e84c9` pushed with read-back, 14th consecutive ratified bypass event.
+
+Gate work done by my own hand, not inherited: diff read in full (one file, +14/−1, row restated + dated currency note, `:765`/`:1799` byte-untouched, commit message quotes the ratified rule verbatim); receipts harness re-run at tip `e1b9275` MYSELF — 68/69 reproduce, EXIT 0, self-test PASSED both seed classes, sole WARN the pre-existing volatile mtime (moved 1422→1435 by the +13-line note, content byte-identical). Lane disclosed a 3.10 gap honestly; closed at landing — floors predicted 3892/14/1 = 3907 collected and HIT on BOTH interpreters at the merged tree (3.13 361.4s, 3.10 330.0s).
+
+Also landed earlier this wave: `5c2e5ac` — E2/homes tension filed as its own Open docket line (queue item 4), TestOperatorGatesFile green both interpreters pre-commit, pushed with read-back (13th bypass event).
+
+TWO FINDINGS HANDED UP by c337, both outside its fence, RECORDED AS OWED WORK not dispatched (launch axis stays priority; this is non-blocking self-repair):
+1. claim-nonce `:2559` (now `:2572`), §8 build table — SAME dead-SessionStart-consumer claim, unnamed file so it escaped the ruling's three-place search; live-false about current tree, so under the RATIFIED deleted-file rule it classifies as rot mechanically — restatement is normal gated work now, no new operator ruling needed. §4.1 and §8 currently disagree.
+2. `tests/test_supervisor.py:2071-2076` docstring repeats the three-consumer enumeration — rides along with the :2572 lane.
+
+IN FLIGHT: `w43-s5` still working (§5 ruling + mf5 landing). Next on its report: adversarial gate in DETACHED worktree, then land with predicted floors (s5 adds tests — derive the prediction from its own collection, remembering a branch's flat-collection claim is about ITS base).
+
+## 2026-08-05T19:00:31Z CHECKPOINT inc=inc-20260805T173144Z-e447 sid=0a5cc7ab-4809-4b41-ac68-3cb293654ec9
+
+GATE VERDICT IN, B1 STEERED BACK TO ITS LANE; CEILING-RAISE RULING ARRIVED AND ITS BUILD LANE IS DISPATCHED.
+
+**`w44-gs5` returned GATING with ONE blocking finding** (`state/verdicts/w44-gs5.md`, gate ran detached at `bd93691`, 6/6 mutants planted+restored, one contaminated 3.10 run disclosed and discarded): B1 — the E2 bound's clause sources BOTH append-only records from multi-fleet §4, but §4 sources only the homes list; `supervisor/JOURNAL.md`'s append-only property lives in `docs/SPEC.md` + `docs/specs/three-tier-command.md`. Applied literally the bound admits one record and un-grounds the two promotions its own commit lands. Everything else reproduced: floors 3899/14/1 both interpreters at tip (collected 3907→3914, all +7 in test_round7_defect_pins.py — terminal_surface adds data not tests), tuple deltas exact, census 32/36/35→33/37/36 derived from both trees, disjointness vs c5e84c9 EMPTY, NOT-scope holds (W2: "no E5 edit" was wrong AS WORDED — the ruling itself mandated E5's bookkeeping edit; not-repaired holds). Non-blocking: N1 (DISRUPTIVE/ORDINARY rows unpinned — pre-existing, follow-up lane), N2/N3 cosmetic.
+
+**Steered `w43-s5` (fork 5eb96584) with the B1 repair order** (`state/tasks/lens/w43-s5-b1.md`): one clause naming each record's actual source, anchor-cited; N2/N3 one-word fixes approved to ride; N1 forbidden. Pin files + receipts harness ordered re-run.
+
+**OPERATOR RULING (via interface, recorded in gates Settled + lessons): ceilings raised — supervisor 200k→400k hard, worker band top 200k→300k, 50k margins (350–400k / 250–300k as interface-transcribed; 400k/300k are the ruling if margin misreads). Shipped 200k governs until the code lands; code is the authority.** Dispatched `w44-ceil` (sid e6c392c7, opus, bypass) on branch `w44/ceiling` at `c5e84c9`, brief `state/tasks/lens/w44-ceil.md`: constant + grep-derived call sites, sup-context band render, three-tier §11.3/§11.4 restatement with dated amendment note, doctrine surfaces by grep (GOALS.md edit is PROPOSAL-only — operator-owned), pins flipped RED→GREEN both floors, fault-injection ordered.
+
+MY OCCUPANCY: 155,739 IN-BAND at last measure. Wave plan under §11.3: land s5 on B1 repair (verify clause + floors both interpreters, predict 3899/14/1 = 3914 collected at merged tree), wave record + lessons + journal commit, HANDOFF. Ceiling lane's adversarial gate + landing = SUCCESSOR QUEUE item 1 (its landing is what raises the ceiling; until then successor operates under 200k). Successor queue also: claim-nonce `:2572` §8 restatement + test docstring (mechanical under ratified rule), N1 pin-coverage follow-up lane.
