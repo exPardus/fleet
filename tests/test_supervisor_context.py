@@ -218,9 +218,14 @@ def _held(session_id):
 
 class TestTierResolution:
     """Which band a body is measured against, since the 2026-08-05 raise made
-    the two differ. The discriminator is the SAME tri-state the ceiling is
-    gated on, so `sup-context` and `_ceiling_refuses_dispatch` cannot disagree
-    about who they are talking to."""
+    the two differ. `sup-context` and `_ceiling_refuses_dispatch` READ the same
+    tri-state (`_caller_holds_supervisor_claim`) — one identity concept, not two
+    — so neither can be looking at evidence the other cannot see.
+
+    What they do with `None` is NOT the same, and deliberately so: the ceiling
+    applies ND4(b) and treats it as the supervisor; the measurement reports the
+    worker band. Same read, different resolution, both in the strict direction.
+    The last test in this class pins exactly that."""
 
     def test_the_claim_holder_is_measured_against_the_supervisor_band(
             self, ctx_home, monkeypatch):

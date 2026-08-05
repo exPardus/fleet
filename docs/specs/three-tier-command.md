@@ -1409,6 +1409,15 @@ is the ordering that keeps the window shut.
 > tier reports the WORKER band, which is the strict one at every occupancy. The old tier-agnostic
 > names are removed rather than aliased.
 >
+> **On an indeterminate identity the measurement and the ceiling DELIBERATELY DIVERGE, and saying so
+> is cheaper than a reader discovering it:** ND4(b) makes the §11.3 refusal treat an indeterminate
+> caller AS the supervisor and apply the **400k** ceiling, while `sup-context` reports the **300k**
+> worker band. Both moves are the strict one for what they do — a refusal that fires is stricter than
+> one that does not, and a lower advisory band hands off sooner — so the divergence costs a mis-tiered
+> supervisor an early handoff prompt, never a permitted dispatch that should have been refused. **Do
+> not read the worker band off `sup-context` and conclude the ceiling refuses there: it refuses at
+> 400k.**
+>
 > **The original 150–200k text is left standing below, unedited**, as the record of what was ratified
 > on 2026-07-23 and why. Where it states a number, read this note.
 
@@ -1525,11 +1534,17 @@ $ sed -n '826,827p' bin/fleet.py
 
 ### 11.3 The band drives the existing handoff — with a decidable, fleet-enforced ceiling (B4)
 
-*(**Amended 2026-08-05 by operator ruling — read §11's amendment note first.** Every `150k` below is
-**350k** and every `200k` / `H` is **400k**; shipped code carries the raised numbers as
-`SUPERVISOR_BAND_SOFT_TOKENS` / `SUPERVISOR_BAND_HARD_TOKENS`. Nothing else in this subsection changed
-— not ND1, not the verb enumeration, not the `--task` discriminator, not ND4. The 2026-07-23 text is
-left standing as the record of what was ratified and why.)*
+*(**Amended 2026-08-05 by operator ruling — read §11's amendment note first.** Every `150k` / `200k` /
+`H` **stated below as the policy in force** is now **350k** / **400k** / **400k**; shipped code carries
+the raised numbers as `SUPERVISOR_BAND_SOFT_TOKENS` / `SUPERVISOR_BAND_HARD_TOKENS`. **The `>`-quoted
+blockquotes are EXEMPT from that reinterpretation** — the retired ND1 exemption argument and the ND4(c)
+falsification note are quoted records of what was argued and measured at the time, and one of them says
+so itself (*"the paragraph and receipt above stand as the record of what was ratified on 2026-07-23 and
+why"*). Read those the way `bin/fleet.py` writes the same sentence: **200k when it was written, 400k
+since the 2026-08-05 raise** — the raise moved a threshold and neither narrowed nor widened what those
+paragraphs describe. Nothing else in this subsection changed — not ND1, not the verb enumeration, not
+the `--task` discriminator, not ND4. The 2026-07-23 text is left standing as the record of what was
+ratified and why.)*
 
 The operator requirement **stands and is not weakened** (manager ruling, 2026-07-23): 150k → hand off at
 the next wave/task boundary; 200k → finish the current urgent task, no new work. B4's defect is that the

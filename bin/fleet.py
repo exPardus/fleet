@@ -7849,7 +7849,7 @@ def _supervisor_lifecycle_target(verb, name):
     # `cmd_kill:7677` / `cmd_respawn:7419`, ahead of either verb's `fleet_lock`,
     # and quarantining here did two things: it wrote without the lock, and it
     # STOLE the quarantine from the lock-held read that was designed to perform
-    # it. `cmd_respawn:7443-7343` spells out that design -- *"resolve under the
+    # it. `cmd_respawn:7443-7445` spells out that design -- *"resolve under the
     # lock so a corrupt registry surfaces through load_registry's quarantine"* --
     # and the theft is what falsified it: by the time the lock-held read ran the
     # file was ABSENT rather than corrupt, so `{"workers": {}}` came back and the
