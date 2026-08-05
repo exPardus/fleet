@@ -316,10 +316,18 @@ SPEC = REPO / "docs" / "specs" / "multi-fleet.md"
 #
 # THE 2026-08-05 §5-CRITERION RULING IS LANDED HERE, IN THE SAME COMMIT AS THE
 # SPEC EDIT IT TRANSCRIBES. `TestRatifiedTableIsTranscribedFaithfully` re-reads
-# the spec's `| **destructive** |` row, so moving this tuple without the spec --
-# or the spec without this tuple -- goes RED in one direction or the other. That
+# ALL THREE of the spec's rows, so moving any of these tuples without the spec --
+# or the spec without the tuple -- goes RED in one direction or the other. That
 # coupling is the reason `w42/mf5-verbs` was RED at its own tip: it edited the
 # row and not this file, and disclosed that rather than routing around it.
+#
+# "ALL THREE" IS TRUE AS OF 2026-08-06 AND WAS NOT BEFORE. Until then the class
+# read `| **destructive** |` and only that row, while this comment sat above all
+# three tuples -- so a reader carried its promise onto two tuples it did not
+# cover. `w44-gs5`'s mutant M5 measured the cost: `wait` moved between the
+# spec's ORDINARY and DISRUPTIVE rows with the tuples untouched, and 245 tests
+# across both pin files plus 232 across the other five files that read
+# `multi-fleet.md` stayed green.
 #
 # Where the seventeen names went (all four sub-rulings AS RECOMMENDED,
 # `docs/OPERATOR-GATES.md` first settled entry):
@@ -402,29 +410,143 @@ def _classified_verbs():
     return {t.split()[0] for t in tokens}
 
 
+# The three tuples keyed by the effect class §5's own row label spells.
+RATIFIED_ROWS = {
+    "destructive": RATIFIED_DESTRUCTIVE,
+    "disruptive": RATIFIED_DISRUPTIVE,
+    "ordinary": RATIFIED_ORDINARY,
+}
+
+# Where a tuple entry and the spec's token for the same verb legitimately
+# differ, DECLARED rather than normalised away.
+#
+# Normalising (comparing first tokens only) would have made all three rows
+# compare cleanly in one line, and would have thrown away the flag distinction
+# that is the whole reason `doctor --repair` is a destructive entry while bare
+# `doctor` is not -- `test_the_repair_flag_is_carried_as_the_flagged_spelling`
+# below depends on that distinction being real. So the comparison stays on FULL
+# tokens and the one divergence is written down. Measured at 238a4778: exactly
+# one, and `test_every_declared_divergence_is_LIVE` is what stops a second
+# appearing here silently or this one outliving the spec text it points at.
+SPEC_TOKEN_FOR = {
+    # §5 classifies the flagged forms (`homes --add/--retire`, "list-reversible")
+    # while the tuple carries the bare verb, because `homes` has no destructive
+    # form to distinguish it from -- unlike `doctor`.
+    "homes": "homes --add/--retire",
+}
+
+
+def _spec_row(effect):
+    """§5's row for one effect class, as raw text. Exactly one must match."""
+    rows = [ln for ln in SPEC.read_text(encoding="utf-8").splitlines()
+            if ln.startswith(f"| **{effect}**")]
+    assert len(rows) == 1, (
+        f"§5's {effect} row is not where this pin looks -- found {len(rows)}")
+    return rows[0]
+
+
+def _spec_row_tokens(effect):
+    """Backticked tokens in that row that name a shipped fleet verb.
+
+    Prose spans in the same row (`claude rm`, `state/`, `_confirm_destructive`,
+    `supervisor/JOURNAL.md`) do not resolve to a subcommand and drop out.
+    """
+    verbs = set(_verbs())
+    return {t for t in re.findall(r"`([^`]+)`", _spec_row(effect))
+            if t.split()[0] in verbs}
+
+
+def _expected_spec_tokens(effect):
+    return {SPEC_TOKEN_FOR.get(t, t) for t in RATIFIED_ROWS[effect]}
+
+
 class TestRatifiedTableIsTranscribedFaithfully:
     """The constants above are a hand copy of a ratified table, which is the
-    shape that rots when the table is edited. These re-read the spec."""
+    shape that rots when the table is edited. These re-read the spec -- ALL
+    THREE ROWS since 2026-08-06, because two of them were unread until then and
+    `w44-gs5`'s M5 moved a verb between the two nobody was reading.
 
-    @pytest.mark.parametrize("token", RATIFIED_DESTRUCTIVE)
-    def test_the_spec_still_lists_each_destructive_token(self, token):
-        row = [ln for ln in SPEC.read_text(encoding="utf-8").splitlines()
-               if ln.startswith("| **destructive**")]
-        assert len(row) == 1, "§5's destructive row is not where this pin looks"
-        assert f"`{token}`" in row[0], (
-            f"`{token}` is no longer in §5's destructive row -- re-transcribe "
-            f"RATIFIED_DESTRUCTIVE from the spec rather than editing this list")
+    Two directions per row, and they are different failures:
 
-    def test_the_spec_row_names_no_destructive_verb_this_list_omits(self):
-        row = next(ln for ln in SPEC.read_text(encoding="utf-8").splitlines()
-                   if ln.startswith("| **destructive**"))
-        # Backticked tokens in the row that name a fleet verb, i.e. resolve to a
-        # shipped subcommand. Prose spans (`claude rm`, `state/`) do not.
-        verbs = set(_verbs())
-        named = {t for t in re.findall(r"`([^`]+)`", row) if t.split()[0] in verbs}
-        assert named == set(RATIFIED_DESTRUCTIVE), (
-            f"§5's destructive row names {sorted(named)}; this file transcribes "
-            f"{sorted(RATIFIED_DESTRUCTIVE)}. The row moved -- re-transcribe.")
+      * a verb DROPPED from the spec row while the tuple keeps it -- the
+        parametrised membership test, which names the one verb;
+      * a verb ADDED to the row, or MOVED into it from another row, while the
+        tuples stand -- the set-equality test, which names both sides.
+
+    A move fires both: it is a drop from the row that lost the verb and an
+    addition to the row that gained it, so M5 turns three assertions red across
+    two rows rather than one.
+    """
+
+    @pytest.mark.parametrize(
+        "effect,token",
+        [(e, t) for e in sorted(RATIFIED_ROWS) for t in RATIFIED_ROWS[e]])
+    def test_the_spec_still_lists_each_token_in_its_own_row(self, effect, token):
+        wanted = SPEC_TOKEN_FOR.get(token, token)
+        assert f"`{wanted}`" in _spec_row(effect), (
+            f"`{wanted}` is no longer in §5's {effect} row -- re-transcribe "
+            f"RATIFIED_{effect.upper()} from the spec rather than editing this "
+            f"list. If it moved to another row, the ruling moved with it.")
+
+    @pytest.mark.parametrize("effect", sorted(RATIFIED_ROWS))
+    def test_the_spec_row_names_no_verb_this_file_omits(self, effect):
+        named = _spec_row_tokens(effect)
+        expected = _expected_spec_tokens(effect)
+        assert named == expected, (
+            f"§5's {effect} row names {sorted(named)}; this file transcribes "
+            f"{sorted(expected)}. Gained: {sorted(named - expected)}; lost: "
+            f"{sorted(expected - named)}. The row moved -- re-transcribe.")
+
+    def test_no_verb_IS_NAMED_BY_TWO_spec_rows(self):
+        """The move direction, read off the spec alone.
+
+        The two tests above compare each row against its tuple; this one asks
+        whether the SPEC is internally consistent, so a verb duplicated into a
+        second row is caught even in the window before anyone transcribes it.
+        The census in the comment above (12 + 7 + 14 = 33 shipped verbs, no verb
+        in two rows) is only true while this holds.
+        """
+        seen = {}
+        for effect in sorted(RATIFIED_ROWS):
+            for token in _spec_row_tokens(effect):
+                seen.setdefault(token.split()[0], []).append(effect)
+        doubled = {v: rows for v, rows in seen.items() if len(rows) > 1}
+        assert not doubled, (
+            f"§5 classifies these verbs in more than one effect row: "
+            f"{doubled}. An effect class is a partition -- a verb in two rows "
+            f"means whichever row a reader finds first decides how it is "
+            f"guarded.")
+
+    def test_every_declared_divergence_is_LIVE(self):
+        """`SPEC_TOKEN_FOR` is a hand list too, so it rots the same way.
+
+        A dead entry silently weakens the comparison it exists to keep exact:
+        the tuple side would keep substituting a spelling the spec no longer
+        uses, and the set-equality test would then fail for a reason nobody can
+        read. Both halves are checked -- the key is a real tuple entry, and the
+        value is really in the row that entry lives in.
+        """
+        tuples = {t: e for e in RATIFIED_ROWS for t in RATIFIED_ROWS[e]}
+        for token, spelling in SPEC_TOKEN_FOR.items():
+            assert token in tuples, (
+                f"`{token}` is declared as diverging from the spec but is in "
+                f"none of the three tuples -- delete the entry")
+            assert f"`{spelling}`" in _spec_row(tuples[token]), (
+                f"`{token}` is declared to appear in §5 as `{spelling}`, and "
+                f"the {tuples[token]} row does not contain that -- the spec "
+                f"re-spelled it, so re-read the row")
+
+    def test_all_three_rows_are_found_and_name_verbs(self):
+        """Seed. `_spec_row_tokens` returning an empty set for a row would make
+        that row's set-equality test assert `set() == set()` the day its tuple
+        emptied, and its membership test is parametrised over the tuple, so an
+        empty row plus an empty tuple is silently total agreement."""
+        for effect in sorted(RATIFIED_ROWS):
+            assert _spec_row_tokens(effect), (
+                f"§5's {effect} row names no shipped verb -- the reader is "
+                f"broken or the row moved, and either way every comparison "
+                f"against it is vacuous")
+            assert RATIFIED_ROWS[effect], f"RATIFIED_{effect.upper()} is empty"
 
 
 class TestEveryShippedVerbHasAnEffectDisposition:
