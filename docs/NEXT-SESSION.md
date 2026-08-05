@@ -1,4 +1,29 @@
-# Next session — handoff (written 2026-08-05 ~12:0xZ by the interface session, waves 33–40r)
+# Next session — handoff
+
+## ⛔ 2026-08-06 STAND-DOWN — read this block first, the rest of this file is a day stale
+
+**The fleet is deliberately STOPPED** (operator needed the machine, 2026-08-06; supervisor
+released cleanly 22:24:12Z). Revival = the fleet skill's startup ritual, as always. First
+reads, in order: the release note in `fleet sup-status` (revival pointer), the stand-down
+checkpoint in `supervisor/JOURNAL.md` (committed at `1a23aee`), then this block.
+
+State at stand-down, session of 2026-08-05/06 (waves 40r–45, ~6 supervisor bodies, first
+THREE consecutive live handoffs proven):
+- **Landed + pushed**: MF slice a1 (`read_registry_at`, homes list, `fleet homes` verb);
+  §5 verb table COMPLETE under the four-part operator ruling; claim-nonce `:337` + §8
+  restated (deleted-file-reference rule ratified); launch-docs + doc-claims pin;
+  verify_receipts tri-state rc; ruling-A pin reconcile + pin-pass stamped 2.1.222;
+  **ceilings raised: supervisor 400k hard (band 350–400k), worker 300k (250–300k)** —
+  landed as `feat(band)!`.
+- **In flight at stop**: pins branch `bc1ad91` gated GATING-F1, needs a one-line repair +
+  landing; a2 branch `39f84d0` awaits the verdict of gate lane `w45-ga2` (was still working
+  at release — read `state/verdicts/w45-ga2.md` first).
+- **Docket open**: E5 (doctor --repair row wording), E2/homes tension (self-opened
+  2026-08-05), ND4(c) Option B (occupies the sup-decision slot), w35/nd4c third wave.
+- Operator directives standing: LAUNCH FOCUS (multi-fleet + launch readiness the priority
+  axis), MORE PARALLELISM (file-set disjointness the only bound, merge-base form).
+
+*(Everything below was written 2026-08-05 ~12:0xZ, before waves 41–45 — historical.)*
 
 ## THE LONG-TERM GOAL and where it stands
 
