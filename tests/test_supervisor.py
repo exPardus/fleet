@@ -2069,11 +2069,16 @@ class TestReleasedClaimIsNotCorruption:
     try/except whose arm says *"heartbeat unreadable -- inspect
     supervisor/INCARNATION"*, and a released claim is not `None`, so the
     no-claim branch is skipped and the KeyError arm fires. Per §4.8 that line
-    is consumed by `fleet doctor`, `sup-status`, and
-    `bin/hooks/sessionstart_fleet.py`, which runs in EVERY Claude Code session
-    on this machine -- so without the branch below, the normal outcome of the
-    doctrine §6.3 introduces is a persistent machine-wide false corruption
-    warning."""
+    is consumed by `fleet doctor` and `sup-status` -- so without the branch
+    below, the normal outcome of the doctrine §6.3 introduces is a persistent
+    false corruption warning on both of them.
+
+    Currency note (2026-08-06, w45-c2572): that enumeration used to name a
+    third consumer, `bin/hooks/sessionstart_fleet.py`, which ran in every
+    Claude Code session on this machine; it was deleted at `36a4c53` (D7,
+    fleet is pull-only), which is why the list is shorter and the blast
+    radius is two verbs rather than machine-wide. The two consumers that
+    remain still read the line, so the branch below is still required."""
 
     RELEASED = {"incarnation_id": "inc-old", "lineage_id": "lin-x",
                 "claimed_via": "fresh", "released_by_sid": "sid-old",

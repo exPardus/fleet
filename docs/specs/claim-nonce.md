@@ -2569,7 +2569,7 @@ below.
 | `docs/SPEC.md` §13 doctor roster | `supervisor-claim` stops being unconditionally `ok=True` for one condition (§5.6); check count stays 21 | this slice |
 | `docs/SPEC.md` §15 destructive guard | the lineage arm of `_worker_is_foreign` | this slice |
 | `docs/SPEC.md` §14 / `terminal-surface.md` | **unchanged in doctrine**, but `cmd_sup_status` becomes a filtered projection (§5.8) — still no lock, no probe, no write | this slice |
-| **`supervisor_status_line`** @7503-7530 | a released-claim branch ahead of the heartbeat read (§6.3). Without it a clean `sup-release` reports as corruption in `fleet doctor`, `sup-status`, **and the SessionStart hook of every Claude Code session on this box**. v2's table omitted this function entirely | this slice |
+| **`supervisor_status_line`** @7503-7530 | a released-claim branch ahead of the heartbeat read (§6.3). Without it a clean `sup-release` reports as corruption in **`fleet doctor` and `sup-status`**. v2's table omitted this function entirely | this slice |
 | **`supervisor/JOURNAL.md:6`** | the live, git-tracked kinds line — never regenerated (§4.7), so `RELEASED` must be added there as well as to the seed | this slice |
 | `_doctor_check_supervisor_handoff` | a NOTE for orphaned `state/supervisor-handoff-*.md` (§5.9) | this slice |
 | `cmd_sup_boot` | out-of-band compaction of `state/supervisor-nonce-rejections.jsonl` under the `fleet_lock` it already holds (§5.9). **The only sweep site this spec authorizes** — `fleet clean` is not one, per §4.13(g). *Superseded for handoff task files by AMENDMENT A2 below (2026-07-24), which adds three more sites and is UNRATIFIED* | this slice |
@@ -2581,6 +2581,22 @@ below.
 | `docs/README.md` | the specs index already lists `claim-nonce.md`; the v1 commit also restored three specs the index had been missing (`native-substrate.md`, `autoclean.md`, `three-tier-command.md`). Recorded here because the v1 table omitted it | done |
 | `docs/specs/native-substrate.md` | **unchanged, including every `[PENDING OPERATOR RATIFICATION]` row** | — |
 | `docs/specs/three-tier-command.md` | **unchanged; stays `PROPOSAL — RESTRUCTURE REQUIRED`** | three-tier slice |
+
+**Currency note (2026-08-06, `w45-c2572`): the `supervisor_status_line` row's consumer list shrank
+from three to two, and the constraint survived the shrink.** The row used to name a third consumer —
+the SessionStart hook of every Claude Code session on this box. That hook was deleted at `36a4c53`
+(*"feat(plugin)!: remove the SessionStart hook -- fleet is pull-only (D7)"*), so as a statement about
+the current tree the enumeration was false and the third consumer is dropped. **What does not change:
+`fleet doctor` and `sup-status` still render that line**, so `supervisor_status_line` still needs the
+released-claim branch this row assigns it — the row's point holds with two consumers. The blast radius
+shrank from machine-wide to two verbs; the requirement did not. **This edit also ends a disagreement
+inside this document:** `w43-c337` restated §4.1's `7516` row the same way at `c5e84c9` while this §8
+row still carried the old three-consumer claim, so §4.1 and §8 said different things about the same
+function; they now agree. Receipts and quoted arguments elsewhere in this document still name the
+deleted hook (§4.8's block pinned `# at 091d5fa`, and §6.3's binding build rule quoting the review)
+and are deliberately **not** amended: a reference to a deleted file is only rot when it is a claim
+about the CURRENT tree; a pinned receipt and a quoted argument are claims about a PAST tree and are
+still true.
 
 **Repo constraints, explicitly.** Stdlib-only and single-file: `secrets`, `hashlib`, `hmac` are stdlib
 (only `json` of the four is currently imported). **3.10 floor** honored — `from __future__ import
