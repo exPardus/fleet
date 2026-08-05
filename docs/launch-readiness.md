@@ -116,19 +116,30 @@ Consequences for a launch:
   **the same suite reports different skip counts per shell**, so even the local number is
   shell-dependent and must be quoted with its shell.
 
-### 6. The Claude Code pin is two releases behind the installed CLI
+### 6. The native-contract pin is a local artefact that a fresh clone does not have
+
+`state/` is gitignored (`.gitignore:1`), so **a clone of this repo carries no `state/pin-pass.json`
+at all** — while `README.md`, `docs/getting-started.md` and `CONTRIBUTING.md` all send the reader to
+that file for the pin-tested `claude` version. What a fresh clone actually gets, measured against an
+empty `FLEET_HOME`:
 
 ```console
-$ cat state/pin-pass.json
-{"claude_version": "2.1.220", "passed_at": "2026-07-26T17:03:45Z"}
-$ claude --version
-2.1.222 (Claude Code)
+$ fleet doctor          # every other row elided; this is the one about the pin
+[PASS] pin-version: no pin-test pass recorded -- run FLEET_LIVE=1 python -m pytest tests/integration/test_native_pin.py
 ```
 
-`fleet doctor`'s `pin-version` check exists precisely to surface this, and the vendor daemon is
-explicitly treated as a moving target. Not a blocker for first use — but the end-to-end dispatch
-path's last live receipt is 10 days and 2 vendor releases old, and that is the receipt a launch
-leans on.
+Nothing in `bin/fleet.py` writes that file — `record_pin_pass()` has no caller in the CLI. Its only
+real writer is `tests/integration/test_native_pin.py`, which `conftest.py` skips unless
+`FLEET_LIVE=1` and which spends real money on two live `haiku` workers. So the pin is re-established
+only when a human deliberately pays for it, there is no CI to do it for them (gap 5), and the vendor
+CLI ships on its own schedule.
+
+**Stated so that it cannot expire:** the distance between the pinned version and the installed one
+is unbounded by construction and unobserved by default. `fleet doctor`'s `pin-version` row is the
+only thing that reports it, and an absent pin is deliberately a PASS-note rather than a FAIL,
+because "not re-verified" is not "broken". Read that row. **Do not paste the current version into
+this document** — an earlier revision of this section did exactly that, and the constant was false
+nineteen minutes after the commit that introduced it.
 
 ### 7. One fleet home per machine
 
@@ -174,7 +185,8 @@ Worth stating, because a gap list read alone is misleading:
 - **An end-to-end `fleet spawn` → `fleet result` on a live worker.** Not executed. Dispatching a
   real `claude --bg` session spends real money and adds a session to the machine-wide daemon; this
   repo gates exactly that behind `FLEET_LIVE=1` for the same reason, and no spend was authorised for
-  this lane. The existing receipt for that path is `state/pin-pass.json` (2.1.220, 2026-07-26) plus
+  this lane. The existing receipt for that path is whatever `state/pin-pass.json` records on the
+  machine that last ran the live tier — a fresh clone has none, see gap 6 — plus
   `tests/integration/test_native_pin.py`. **The install walkthrough is therefore verified from
   `git clone` through `fleet doctor` 28/28, and unverified from `fleet spawn` onward.**
 - **`claude plugin marketplace add` / `plugin install` / `plugin details`.** Mutates this machine's

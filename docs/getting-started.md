@@ -10,7 +10,7 @@ Fleet runs today on:
 
 - **Windows 10+** with **PowerShell** and **Git Bash** present, **or Linux**
 - **Python 3.10+** — the floor is declared once as `fleet.MIN_PYTHON_VERSION` and the suite runs green at it. **But read the shim caveat below before you install.**
-- **Claude Code CLI** `2.1.202+` — the floor `fleet doctor` enforces. The pin-tested version is whatever `state/pin-pass.json` last recorded (`2.1.220`, stamped 2026-07-26); `fleet doctor` warns when your `claude` has moved past it.
+- **Claude Code CLI** `2.1.202+` — the floor `fleet doctor` enforces. The pin-tested version is whatever `state/pin-pass.json` last recorded; `fleet doctor` warns when your `claude` has moved past it. A fresh clone has no such file — `state/` is gitignored and only the `FLEET_LIVE=1` pin tier writes it — so until you run that tier, `doctor` reports `no pin-test pass recorded`, which is the expected state and not a fault.
 - **The `claude` CLI on your PATH.** Fleet shells out to it for every dispatch; `fleet doctor`'s `claude-on-path` check reports the resolved binary and its version.
 
 Zero third-party dependencies — `bin/fleet.py` is a single stdlib-only file.
