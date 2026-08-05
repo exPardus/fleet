@@ -298,6 +298,22 @@ def registry_path() -> Path:
     return state_dir() / "fleet.json"
 
 
+def registry_path_at(home) -> Path:
+    """`registry_path()` for a home this process does not live in (multi-fleet
+    slice a1). `state/fleet.json` under the home you hand it -- no resolution,
+    no `mkdir`, no side effect of any kind.
+
+    KEPT AS A SEPARATE FUNCTION rather than re-expressing `registry_path()` as
+    `registry_path_at(FLEET_HOME)`: `state_dir()` is monkeypatched by name in the
+    suite, and routing the module-global spelling through a parameterized twin
+    would quietly break every test that redirects the state directory without
+    redirecting the home. `tests/test_read_registry_at.py::test_registry_path_at_
+    agrees_with_the_module_global_spelling` is the pin that stops the two
+    spellings of `state/fleet.json` from drifting apart, which is the only real
+    hazard the duplication carries."""
+    return Path(home) / "state" / "fleet.json"
+
+
 def events_path() -> Path:
     return state_dir() / "events.jsonl"
 
@@ -340,6 +356,25 @@ def user_settings_path() -> Path:
     Separate helper so tests can redirect it without touching a developer's
     real settings."""
     return Path.home() / ".claude" / "settings.json"
+
+
+def homes_list_path() -> Path:
+    """`~/.claude/fleet-homes.list` -- the machine's list of fleet homes
+    (multi-fleet §4). The SECOND file outside FLEET_HOME that fleet writes, and
+    only ever through `fleet homes --add/--retire` (and `init --home`, slice b).
+
+    TEST ISOLATION IS NOT AUTOMATIC HERE, and a reader must know it.
+    `tests/conftest.py`'s autouse `_never_touch_the_real_home` claims in its own
+    docstring that *"any new `Path.home()` path added to fleet lands here by
+    default"* -- it does not: it monkeypatches THREE helpers BY NAME
+    (`user_settings_path`, `claude_daemon_lock_path`, `claude_daemon_log_path`),
+    so this one is outside its sandbox. Every test that touches the list
+    redirects THIS name itself, with a seed proving the redirect is in force
+    (`tests/test_homes_list.py::test_the_redirect_is_actually_in_force`).
+    §7's "real-list-untouched pin" wants the conftest half; that is filed rather
+    than smuggled in, because a lane that quietly widens a shared fixture is how
+    the next lane's isolation breaks without anyone reading the diff."""
+    return Path.home() / ".claude" / "fleet-homes.list"
 
 
 def claude_daemon_lock_path() -> Path:
@@ -837,12 +872,12 @@ def _quarantine_artifacts() -> list:
     registry is always newer -- an "artifact newer than the registry"
     comparison would never fire on the recreation bypasses it exists to stop.
 
-      * `_sweep_husks` (:9050) -- a rename can hide live worker records from
+      * `_sweep_husks` (:9601) -- a rename can hide live worker records from
         the roster sweep, so a thin registry would rm sessions it still owns.
-      * `_doctor_check_autoclean` (:10144) -- a lingering artifact means the
+      * `_doctor_check_autoclean` (:10695) -- a lingering artifact means the
         sweep above is refusing itself, which is how a bricked sweep reads
         green-and-fresh.
-      * `_require_claim_holder`'s §9 arm (:14651) -- the legacy upgrade mints
+      * `_require_claim_holder`'s §9 arm (:15202) -- the legacy upgrade mints
         generation 1 on bare sid equality, so it needs the registry that
         cleared it to be COMPLETE, not merely readable. See there.
 
@@ -852,22 +887,22 @@ def _quarantine_artifacts() -> list:
     read and described, and the question only arises when there is no file to
     answer for itself.
 
-      * `_acting_worker_identity` (:2963) -- `not_initialized` stays the
+      * `_acting_worker_identity` (:3017) -- `not_initialized` stays the
         affirmative *"there are no records"* only with no artifact beside it.
         SCOPED TO THE ABSENT CASE ON PURPOSE: this resolver is shared with the
         §6.5 worker-turn gate, which refuses on `True` alone, so poisoning a
         HEALTHY read here would let a real worker turn through §6.5 -- closing
         the §9 door by opening a wider one. Rule 1 lives at the §9 arm instead.
-      * `_identity_abstention_note` (:14372) -- the same distinction, in words,
+      * `_identity_abstention_note` (:14923) -- the same distinction, in words,
         because the generic note names `fleet doctor` and doctor is what MADE
         this state.
-      * `_read_registry_readonly` (:3867) -- the VIEW surface's copy of the same
+      * `_read_registry_readonly` (:3921) -- the VIEW surface's copy of the same
         question, and the last reader to get it (P1-13, 2026-07-31). Until then
         every view described a just-quarantined fleet with the identical string
         a never-initialised box prints, so the two states were not
         distinguishable from the read surface at all. A `Path.glob` is a read,
         so this costs the views doctrine nothing.
-      * `_doctor_check_registry` (:10682) -- doctor graded only on whether the
+      * `_doctor_check_registry` (:11233) -- doctor graded only on whether the
         LOADER RAISED, and the loader returns `{"workers": {}}` for a missing
         file, so the row called a renamed-away path *"is readable"* and doctor
         exited 0 with every row green (P1-12). A bare absence stays a PASS: no
@@ -879,15 +914,34 @@ def _quarantine_artifacts() -> list:
     these two only spell the filename, because an operator cannot restore a file
     whose name they were never told.
 
-      * `_print_snapshot_table` (:5199) -- `fleet status --stale-ok`.
-      * `_tombstone_releasing_body` (:14808) -- `sup-release`, whose registry
+      * `_print_snapshot_table` (:5750) -- `fleet status --stale-ok`.
+      * `_tombstone_releasing_body` (:15359) -- `sup-release`, whose registry
         arm previously swallowed the quarantined case in silence.
 
     The operator clears the artifact (after restoring what it holds), which
-    re-arms every reader at once. One remedy, three rules."""
+    re-arms every reader at once. One remedy, three rules.
+
+    IT IS NOW A THIN CALL ON `_quarantine_artifacts_at`, which holds the literal
+    (multi-fleet slice a1). The delegation, not a second copy, is what keeps
+    `test_the_glob_string_is_written_once_in_the_source` honest once a
+    cross-home reader needs to ask rule 2 about a home that is not this one --
+    and the nine readers above still call THIS name, so the behavioural
+    one-spelling pins that silence `_quarantine_artifacts` still silence them."""
+    return _quarantine_artifacts_at(state_dir())
+
+
+def _quarantine_artifacts_at(state: Path) -> list:
+    """`_quarantine_artifacts`, parameterized on a state directory. Empty list,
+    never a raise -- same contract, one argument.
+
+    THE LITERAL LIVES HERE and nowhere else. Multi-fleet §5.2 makes rule 2 a
+    cross-home question (*"is this listed home's absent registry a fresh home or
+    an incident?"*), and the honest answer needs the same glob against someone
+    else's `state/`. A second inline copy at the cross-home reader is exactly the
+    drift `TestTheArtifactGlobHelper` exists to stop."""
     try:
-        return sorted(state_dir().glob("fleet.json.corrupt.*"))
-    except OSError:
+        return sorted(Path(state).glob("fleet.json.corrupt.*"))
+    except (OSError, ValueError):
         return []
 
 
@@ -2913,7 +2967,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     -- reads `ok` while MISSING every record the artifact holds, and the §9 arm
     read that thinness as an affirmative *"you are provably not a worker"*. The
     presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:14651`), where it costs the §6.5 gate nothing.
+    (`:15202`), where it costs the §6.5 gate nothing.
 
     An artifact can also outlive its incident by days -- `_sweep_husks` tells the
     operator to restore the file first and delete the artifact second -- so that
@@ -2929,7 +2983,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     THE READ IS NEVER `load_registry`, and that distinction is the whole reason
     `_registry_records_or_none` exists (this site uses its `(ok, reason, data)`
     source directly, for the paragraph above). `load_registry`
-    QUARANTINES a corrupt registry -- it RENAMES the file aside (`:973`) -- and
+    QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1027`) -- and
     its docstring is explicit that *"callers must abort, not catch-and-
     continue."* The first version of this function did catch and continue: the
     exception was swallowed, the rename was not, so on a corrupt registry every
@@ -3880,6 +3934,388 @@ def _read_registry_readonly() -> tuple:
     return (True, None, {"workers": workers})
 
 
+def read_registry_at(home) -> tuple:
+    """`(ok, reason, data)` for a home this process does not live in. NEVER
+    RAISES -- not for any input, not for any filesystem state (multi-fleet slice
+    a1, §5 step 2: *"per home, one lock-free snapshot via `read_registry_at`"*).
+
+    reason is None when ok, else "not_initialized" | "quarantined" | "unreadable"
+    -- the same four-way vocabulary `_read_registry_readonly` hands the views,
+    so a cross-home caller and a same-home view describe the same disk state with
+    the same word.
+
+    IT DOES NOT INHERIT THE SIBLING'S EXCEPT CLAUSE, AND THAT IS THE WHOLE
+    REASON IT IS NEW CODE. `_read_registry_readonly` catches
+    `(json.JSONDecodeError, UnicodeDecodeError, OSError)`. Re-measured on this
+    worktree at `0ab74ed`, py 3.13 and py 3.10 alike, on a 200000-deep JSON
+    document::
+
+        _read_registry_readonly()
+        -> RecursionError: maximum recursion depth exceeded while decoding a
+           JSON array
+
+    An oversize document reaches `MemoryError` by the same route. Neither is in
+    that tuple, so both escape a function whose docstring promises *"never
+    raises"*. That was a BOUNDED defect while only your own home was ever read.
+    §5.2 unbounds it: one snapshot per LISTED home on every sid-carrying
+    invocation, so one corrupt or adversarial registry in ANY listed home would
+    take down every verb and every view on the machine -- including the
+    statusline, whose standing rule (root `CLAUDE.md`) is that it always exits 0.
+    `tests/test_read_registry_at.py` drives twelve corruption shapes plus the
+    two injected raises, and proves the two known-missed fixtures actually
+    escape the three-tuple rather than merely passing.
+
+    FIXING THE SIBLING IS DELIBERATELY NOT DONE HERE. It is a view-surface
+    function with its own doctrine and its own caller set; widening its except
+    clause is a separate decision, escalated rather than taken.
+
+    A PURE READ, cross-home edition. No lock (§5.2 says lock-free by name: a
+    lock-taking cross-home read would let one wedged foreign fleet stall every
+    verb on the box), no probe, no `mkdir` (§Definitions: the no-mkdir rule
+    *"binds resolution and read paths"*), and above all NO QUARANTINE -- the
+    rename is a WRITE, and multi-fleet's own interference audit says
+    *"Cross-home writes: none"*. Renaming a file inside someone else's home is
+    the single thing this whole feature must never do.
+
+    `"quarantined"` crosses the home boundary for the same reason P1-13 gave it
+    a word here at all: the rename turns *corrupt* into *absent*, and absent is
+    exactly what a directory that never ran `fleet init` looks like. Under
+    multi-fleet that ambiguity decides whether a listed home counts toward the
+    armed population, so it is answered rather than collapsed."""
+    try:
+        path = registry_path_at(home)
+        exists = path.exists()
+    except (OSError, ValueError):
+        # A path the OS refuses to even stat (illegal characters, a reparse
+        # point loop, a dead network share). Unreadable, not absent: absence is
+        # an affirmative claim here and we did not get to make it.
+        return (False, "unreadable", {"workers": {}})
+    if not exists:
+        if _quarantine_artifacts_at(path.parent):
+            return (False, "quarantined", {"workers": {}})
+        return (False, "not_initialized", {"workers": {}})
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError,
+            RecursionError, MemoryError):
+        # THE TWO ON THE END ARE THE POINT. See the docstring: they are the
+        # rs6 C-4 pair the round-3 sweep missed, and copying the sibling's
+        # three-tuple here is the specific mistake this function exists to
+        # avoid. `tests/test_read_registry_at.py::test_a_raise_from_the_parse_
+        # is_absorbed` is RED the moment either is dropped.
+        return (False, "unreadable", {"workers": {}})
+    if _registry_corrupt_reason(data) is not None:
+        # THE SHARED VALIDATOR, not a fourth copy of the shape rules. Two
+        # independent validators is how a shape one loader rejects starts
+        # sailing through another, and a cross-home read is exactly where that
+        # would be invisible.
+        return (False, "unreadable", {"workers": {}})
+    return (True, None, {"workers": data.get("workers", {})})
+
+
+def home_is_initialized(home) -> bool:
+    """multi-fleet §Definitions, verbatim: *"Initialized home, defined (rs6 C-3
+    -- v6 used the term undefined): a directory whose `state/fleet.json` exists
+    and parses as a registry by the tolerant reader."*
+
+    ONE SPELLING, because three sections need it and they must not drift: §4's
+    read-time membership filter (*"must name an initialized home at read time"*),
+    §5 step 1's `--fleet-home` validation (*"resolve, `is_dir`, initialized"*),
+    and the `fleet homes` view's rendered state word.
+
+    NOTE THE RATIFIED CONSEQUENCE, which is surprising and is pinned rather than
+    softened: `fleet init` writes `state/worker-settings.json` and does NOT
+    create `state/fleet.json` (the registry appears on the first
+    `save_registry`), so a home that has been `fleet init`-ed but never spawned
+    into is NOT initialized by this definition. That is the spec's call. The verb
+    whose contract is creation is `init --home` (slice (b)), and it is the one
+    that must leave a home satisfying this predicate before listing it."""
+    return read_registry_at(home)[0]
+
+
+# ---------------------------------------------------------------------------
+# The homes list (multi-fleet §4): `~/.claude/fleet-homes.list`.
+#
+# APPEND-ONLY FOREVER. §4 states the measurement that forced it -- *"rewrite
+# reading measured 95-100% loss"* -- and asks for a no-rewrite lint, which
+# `tests/test_homes_list.py::test_the_no_rewrite_lint` derives from the AST:
+# any scope naming `homes_list_path` may not truncate, unlink, rename or
+# whole-file-write. Records are appended through `PLATFORM.atomic_append_bytes`,
+# the same single-syscall adapter the outcome store uses, because concurrent
+# writers are the normal case (two shells, a manager and a supervisor) and the
+# CRT's `O_APPEND` emulation on Windows drops whole records silently.
+#
+# THE READ SIDE VERIFIES THE FOLD, NOT THE LINE (§4). A record is a home path,
+# or `!<home path>` for a retirement; the last record per identity wins, so
+# `add·retire·add` is a member. Nothing is ever removed, so the file is its own
+# audit trail.
+# ---------------------------------------------------------------------------
+
+HOMES_LIST_RETIRE_PREFIX = "!"
+
+# §4: *"absolute by the spec's own grammar (drive-letter/UNC on Windows,
+# leading `/` POSIX -- never `os.path.isabs`, floor-divergent)"*.
+#
+# THE BAN IS MEASURED, NOT STYLISTIC. Same machine, same string, the two
+# interpreters this repo must both run on:
+#
+#     py 3.13.12 (nt)  os.path.isabs('/x') -> False   os.path.isabs('\\x') -> False
+#     py 3.10.1  (nt)  os.path.isabs('/x') -> True    os.path.isabs('\\x') -> True
+#
+# 3.13's `ntpath.isabs` requires a drive AND a root. A homes list read on 3.10
+# and on 3.13 would disagree about which of its own records are listable, so the
+# ARMED POPULATION would depend on which interpreter happened to run the verb --
+# and `posixpath.isabs('C:/x')` is False on every version, so the same file read
+# on a POSIX box would drop every Windows home. One regex, one answer, every
+# floor and every platform. `tests/test_homes_list.py::TestTheGrammarIsNotOsPath
+# Isabs` drives both halves and lints the name out of this module.
+_HOMES_LIST_ABSOLUTE = re.compile(
+    r"^(?:"
+    r"[A-Za-z]:[\\/]"                    # drive-letter root:  C:\fleet  C:/fleet
+    r"|[\\/]{2}[^\\/]+[\\/]+[^\\/]+"     # UNC: \\server\share  //server/share
+    r"|/"                                # POSIX root: /srv/fleet
+    r")")
+
+
+def homes_path_is_absolute(text) -> bool:
+    """§4's own absolute-path grammar. See `_HOMES_LIST_ABSOLUTE` for why this
+    is hand-rolled rather than `os.path.isabs`.
+
+    Rejects the two shapes that LOOK absolute and are not: `C:fleet`
+    (drive-relative -- resolves against that drive's current directory) and
+    `\\fleet` (root-relative -- resolves against the current drive). Both are
+    per-process state, which is precisely what a machine-wide list of homes
+    cannot depend on."""
+    return bool(_HOMES_LIST_ABSOLUTE.match(str(text)))
+
+
+def _has_parent_segment(text) -> bool:
+    """§4: *"no `..`"*. SEGMENT-wise, not substring-wise: `C:/a..b/fleet` is a
+    perfectly ordinary directory name and must not be refused."""
+    return ".." in re.split(r"[\\/]", str(text))
+
+
+def home_identity(text) -> str:
+    """The key the fold uses, and the spelling the writer stores.
+
+    Separator-normalized (`\\` -> `/`) and stripped of trailing separators, so
+    `C:\\f`, `C:/f/` and `C:/f` are ONE home -- otherwise
+    `fleet homes --retire C:\\f` would not retire a home added as `C:/f`, and
+    the only escape hatch would depend on how the operator typed a slash.
+
+    DELIBERATELY NOT `Path.resolve()` and DELIBERATELY NOT CASE-FOLDED, and the
+    two omissions have different reasons:
+
+      * `resolve()` would silently rewrite the operator's own path -- expanding
+        symlinks, changing drive-letter case, and on Windows turning a
+        POSIX-shaped record into a drive-letter one -- so the file would stop
+        saying what they typed.
+      * Case folding would need a per-OS branch, which only the PLATFORM
+        adapter may carry (SPEC §14, enforced by a source scan that bans the
+        branching names outright -- so this docstring cannot spell them). The
+        failure
+        directions are not symmetric either: folding `C:/f` and `c:/f` together
+        UNDER-counts the population and selects the permissive branch, while
+        keeping them apart OVER-counts it and ARMS. §5 is explicit that
+        *"indeterminacy never selects the permissive branch"*, so this errs the
+        way the spec errs."""
+    s = str(text).strip().replace("\\", "/")
+    while len(s) > 1 and s.endswith("/"):
+        s = s[:-1]
+    return s
+
+
+def parse_homes_list_line(line) -> tuple:
+    """`(kind, identity)` for one line. kind is
+    "blank" | "invalid" | "add" | "retire".
+
+    "blank" and "invalid" are kept APART on purpose: a blank line is not a
+    defect and must not inflate the count an operator is shown, while an invalid
+    one is evidence that something wrote garbage into an append-only file. §4's
+    *"Invalid lines never invalidate others"* is why neither ever aborts the
+    read."""
+    text = str(line).strip()
+    if not text:
+        return ("blank", None)
+    retired = text.startswith(HOMES_LIST_RETIRE_PREFIX)
+    if retired:
+        text = text[len(HOMES_LIST_RETIRE_PREFIX):].strip()
+    if not text or not homes_path_is_absolute(text) or _has_parent_segment(text):
+        return ("invalid", None)
+    return ("retire" if retired else "add", home_identity(text))
+
+
+def fold_homes_list(text) -> dict:
+    """§4's sequence fold: *"last record wins per identity -- `add·retire·add`
+    = member"*. Pure function over already-decoded text, so the fold can be
+    tested without a filesystem.
+
+    Returns members and retirements in FIRST-APPEARANCE order. Stability is not
+    cosmetic: the view renders this list and a3's refusals embed the view, so an
+    order that reshuffles between reads would make two runs undiffable."""
+    order, state, invalid, records = [], {}, 0, 0
+    for line in str(text).splitlines():
+        kind, ident = parse_homes_list_line(line)
+        if kind == "blank":
+            continue
+        if kind == "invalid":
+            invalid += 1
+            continue
+        records += 1
+        if ident not in state:
+            order.append(ident)
+        state[ident] = (kind == "add")
+    return {"members": [i for i in order if state[i]],
+            "retired": [i for i in order if not state[i]],
+            "invalid_lines": invalid, "records": records}
+
+
+def _decode_homes_list(raw: bytes, path) -> tuple:
+    """`(text, note)`. §4's tolerant decode, in the order §4 names the BOMs.
+
+    A BOM is NOT a defect -- an editor re-saving the file is not an incident --
+    so none of the three produces a note. The note exists for the one case §4
+    singles out: *"no-BOM non-UTF-8 -> `mbcs`/`latin-1` + doctor NOTE"*, where
+    the bytes are being guessed at and a non-ASCII home path may be misread.
+
+    `mbcs` is tried first and its absence is caught rather than branched on:
+    the codec only exists on Windows, and `LookupError` is how this module asks
+    "am I on Windows?" without a per-OS branch, which SPEC §14 reserves for the
+    PLATFORM adapter (and which the §14 source scan forbids naming here). `latin-1` cannot fail on any byte string, so the
+    function is total."""
+    for bom, encoding in ((b"\xef\xbb\xbf", "utf-8"),
+                          (b"\xff\xfe", "utf-16-le"),
+                          (b"\xfe\xff", "utf-16-be")):
+        if raw.startswith(bom):
+            try:
+                # THE BOM BYTES ARE DROPPED BEFORE DECODING, not decoded and
+                # left in. `raw.decode("utf-16-le")` on a BOM-prefixed document
+                # yields a leading U+FEFF, which lands inside the FIRST record
+                # and makes it fail the absolute-path grammar -- one silently
+                # unlistable home per BOM, and only ever the first one.
+                return (raw[len(bom):].decode(encoding), None)
+            except UnicodeDecodeError:
+                break
+    try:
+        return (raw.decode("utf-8"), None)
+    except UnicodeDecodeError:
+        pass
+    for encoding in ("mbcs", "latin-1"):
+        try:
+            text = raw.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
+            continue
+        return (text, f"{path}: not UTF-8 and carries no BOM -- decoded as "
+                      f"{encoding}, so a non-ASCII home path may be misread. "
+                      f"Rewrite the file as UTF-8.")
+    # Unreachable while latin-1 exists; kept as a belt so the function stays
+    # total by construction rather than by an argument about codecs.
+    return (raw.decode("utf-8", errors="replace"),
+            f"{path}: undecodable bytes were replaced")
+
+
+def read_homes_list() -> dict:
+    """The folded homes list. NEVER RAISES, NEVER WRITES, NEVER CREATES.
+
+    Keys: `path`, `ok`, `reason`, `members`, `retired`, `invalid_lines`,
+    `decode_note`.
+
+    `ok`/`reason` answer *"is the population DETERMINATE?"*, which is the
+    question §5's arming paragraph actually asks, and the two negative answers
+    are not the same answer:
+
+      * `(True, "absent")` -- no list on this machine. A determinate population
+        of zero, i.e. an ordinary single-fleet box. This must NOT arm.
+      * `(False, "unreadable")` -- the file exists and could not be read. §4:
+        *"Unreadable list => treated as armed-with-unknown-population"*.
+
+    a1 reports the state and counts nothing; the arming rule itself lands with
+    slice a3, and conflating these two reasons here is exactly how the round-6
+    arming-fails-open family happened."""
+    path = homes_list_path()
+    out = {"path": path, "ok": True, "reason": None, "members": [],
+           "retired": [], "invalid_lines": 0, "decode_note": None}
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        out["reason"] = "absent"
+        return out
+    except (OSError, ValueError):
+        out["ok"] = False
+        out["reason"] = "unreadable"
+        return out
+    text, note = _decode_homes_list(raw, path)
+    out["decode_note"] = note
+    folded = fold_homes_list(text)
+    out["members"] = folded["members"]
+    out["retired"] = folded["retired"]
+    out["invalid_lines"] = folded["invalid_lines"]
+    return out
+
+
+def homes_population() -> dict:
+    """`read_homes_list()` plus each member's READ-TIME state, under key
+    `homes`: a list of `{"path", "ok", "reason"}` in membership order.
+
+    THIS IS WHERE §4's *"must name an initialized home at read time (also
+    retires torn prefixes)"* is answered. A torn append leaves a PREFIX of a
+    real path, which is perfectly grammar-valid -- so the grammar cannot catch
+    it and only reading the home can. Each member keeps its own reason rather
+    than being silently dropped, because §7 asks for a rendered *"not
+    initialized"* and an operator cannot fix a home they were never told about.
+
+    IT COUNTS NOTHING AND ARMS NOTHING. Slice a3 owns the arming rule (">=2
+    distinct homes counting valid AND unreadable; any indeterminate population
+    state arms"), and it will read these reasons. One open question is recorded
+    for it rather than pre-decided here: whether `quarantined` counts with
+    `unreadable` (an incident happened) or with `not_initialized` (no roster is
+    readable either way). a1 keeps them distinct so a3 can rule.
+
+    One lock-free `read_registry_at` snapshot per member (§5.2). O(N-homes),
+    which is why §5.2 says lock-free by name."""
+    out = dict(read_homes_list())
+    homes = []
+    for ident in out["members"]:
+        ok, reason, data = read_registry_at(ident)
+        # `workers` is carried here rather than re-read by the renderer. ONE
+        # snapshot per home per invocation is the contract (§5.2), and the cost
+        # is O(N-homes) on a surface that has been O(1) forever -- a view that
+        # asked twice would double a number nobody has measured yet
+        # (`docs/mf-slice-a-price.md` Risk 3). Pinned by
+        # `tests/test_homes_verb.py::test_the_view_reads_each_home_exactly_once`.
+        homes.append({"path": ident, "ok": ok, "reason": reason,
+                      "workers": len(data["workers"])})
+    out["homes"] = homes
+    return out
+
+
+def append_home_record(home, retire: bool = False) -> str:
+    """Append one record to the homes list and return the identity written.
+
+    THE WRITE SIDE APPLIES THE READ SIDE'S GRAMMAR, and it is not symmetry for
+    its own sake: the file is append-only FOREVER, so a record that the reader
+    would reject is permanent noise that no verb can take back out. Refusing at
+    write time is the only moment the operator can be told.
+
+    IT DOES NOT CHECK THAT THE HOME EXISTS -- that belongs to the caller, and
+    `cmd_homes` deliberately checks it for `--add` and NOT for `--retire`:
+    retiring is exactly what you do to a home you deleted, moved or
+    reformatted, and requiring an initialized directory would make the escape
+    hatch unusable precisely when it is needed."""
+    ident = home_identity(home)
+    if not homes_path_is_absolute(ident) or _has_parent_segment(ident):
+        raise FleetCliError(
+            f"not an absolute home path: {str(home)!r}. The homes list takes a "
+            f"drive-letter (`C:\\fleet`), UNC (`\\\\server\\share\\fleet`) or "
+            f"POSIX (`/srv/fleet`) absolute path with no `..` segment.")
+    path = homes_list_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = (HOMES_LIST_RETIRE_PREFIX if retire else "") + ident + "\n"
+    PLATFORM.atomic_append_bytes(path, line.encode("utf-8"))
+    return ident
+
+
 def _supervisor_tier_snapshot(now=None) -> dict:
     """The command tier, projected for VIEWS (three-tier §3).
 
@@ -4617,6 +5053,121 @@ def _write_text_tolerating_console_encoding(text: str) -> None:
         pass
     encoding = getattr(sys.stdout, "encoding", None) or "ascii"
     sys.stdout.write(text.encode(encoding, errors="backslashreplace").decode(encoding))
+
+
+def render_homes_view() -> str:
+    """The `fleet homes` view, AS A STRING (multi-fleet §4 + M1 scope).
+
+    A PURE FUNCTION ON PURPOSE, and this is the seam that matters later rather
+    than a style preference. §5's refusal contract reads *"Refusals print facts
+    + the `fleet homes` view, never a paste-ready command with a chosen home"* --
+    so slice a3's destructive-tier refusal has to EMBED this text, and a
+    renderer that exists only as a pile of `print()` calls inside a verb cannot
+    be embedded. `tests/test_homes_verb.py::test_the_view_is_renderable_as_a_
+    string_for_a3s_refusals` is the pin that keeps it open.
+
+    A VIEW (root `CLAUDE.md`): no `fleet.lock`, no probe, no write, no
+    quarantine, no `mkdir`, and it renders every state as a WORD rather than
+    falling silent -- absence is not evidence on this substrate, so *"the list
+    could not be read"* must never look like *"no homes"*."""
+    pop = homes_population()
+    out = [f"fleet homes: {pop['path']}"]
+    if pop["reason"] == "unreadable":
+        out.append("  list unreadable -- population unknown")
+    elif not pop["homes"]:
+        out.append("  (no homes listed -- this machine runs a single fleet)")
+    else:
+        width = max(len(h["path"]) for h in pop["homes"])
+        for entry in pop["homes"]:
+            if entry["ok"]:
+                n = entry["workers"]
+                state = f"ok ({n} worker{'' if n == 1 else 's'})"
+            else:
+                state = {"not_initialized": "not initialized"}.get(
+                    entry["reason"], entry["reason"])
+            out.append(f"  {entry['path']:<{width}}  {state}")
+    if pop["retired"]:
+        out.append(f"  ({len(pop['retired'])} retired)")
+    if pop["invalid_lines"]:
+        out.append(f"  note: {pop['invalid_lines']} unparseable line(s) skipped")
+    if pop["decode_note"]:
+        out.append(f"  note: {pop['decode_note']}")
+    return "\n".join(out) + "\n"
+
+
+def cmd_homes(args) -> int:
+    """`fleet homes [--add PATH | --retire PATH]` (multi-fleet M1 scope, §4).
+
+    ORDINARY by §5's verb-effect table -- *"`homes --add/--retire`
+    (list-reversible)"* -- so nothing here is guarded: the list is append-only
+    and a wrong `--add` is undone by a `--retire`. `tests/test_round7_defect_
+    pins.py`'s `RATIFIED_ORDINARY` carries the same classification, and it moved
+    there from `RATIFIED_BUT_UNBUILT` in the commit that built this verb.
+
+    THE TWO WRITERS VALIDATE DIFFERENTLY, AND THE ASYMMETRY IS THE POINT:
+
+      * `--add` demands an absolute grammar-valid path with no `..`, an existing
+        DIRECTORY, and an INITIALIZED home (§Definitions). §4 drops a
+        non-initialized home at read time anyway, so a permissive add would
+        write a permanent record for a home the reader silently ignores -- the
+        operator would see a shorter list than the file and have no way to tell
+        why.
+      * `--retire` demands only the grammar. Retiring is exactly what you do to
+        a home you deleted, moved or reformatted; requiring it to still be an
+        initialized directory would make the only escape hatch unusable
+        precisely when it is needed.
+
+    NO `mkdir` ON THE VALIDATION PATH (§Definitions: the no-mkdir rule binds
+    resolution and read paths). Validation must not manufacture the thing it is
+    validating -- `--add` on a typo'd path refuses, and leaves no directory
+    behind to make the typo look right the second time."""
+    target = getattr(args, "add", None) or getattr(args, "retire", None)
+    if target is None:
+        print(render_homes_view(), end="")
+        return 0
+
+    retire = getattr(args, "retire", None) is not None
+    ident = home_identity(target)
+    if not homes_path_is_absolute(ident) or _has_parent_segment(ident):
+        raise FleetCliError(
+            f"not an absolute home path: {str(target)!r}. The homes list takes "
+            f"a drive-letter (`C:\\fleet`), UNC (`\\\\server\\share\\fleet`) or "
+            f"POSIX (`/srv/fleet`) absolute path with no `..` segment.")
+
+    listed = read_homes_list()
+    if listed["reason"] == "unreadable":
+        raise FleetCliError(
+            f"cannot read {listed['path']} -- refusing to append to a list "
+            f"whose current membership is unknown. Fix the file's readability "
+            f"first; the list is append-only, so nothing has been lost.")
+    member = ident in listed["members"]
+
+    if retire:
+        if not member:
+            print(f"fleet homes: {ident} is not listed -- nothing to retire")
+            return 0
+        append_home_record(ident, retire=True)
+        print(f"fleet homes: retired {ident}")
+        return 0
+
+    if member:
+        print(f"fleet homes: {ident} is already listed")
+        return 0
+    path = Path(ident)
+    if not path.is_dir():
+        raise FleetCliError(
+            f"not a directory: {ident} -- `fleet homes --add` lists an existing "
+            f"fleet home and never creates one.")
+    if not home_is_initialized(path):
+        ok, reason, _ = read_registry_at(path)
+        raise FleetCliError(
+            f"{ident} is not initialized ({reason}) -- an initialized home is "
+            f"one whose `state/fleet.json` exists and parses "
+            f"(docs/specs/multi-fleet.md, Definitions). A home the reader would "
+            f"drop must not become a permanent record in an append-only list.")
+    append_home_record(ident)
+    print(f"fleet homes: added {ident}")
+    return 0
 
 
 def cmd_knowledge(args) -> int:
@@ -7130,7 +7681,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # P1-6: `read_registry_no_repair`, NOT `load_registry`. This is a PRE-FLIGHT
-    # resolution that runs from `cmd_kill:7024` / `cmd_respawn:6766`, before
+    # resolution that runs from `cmd_kill:7575` / `cmd_respawn:7317`, before
     # either verb has taken `fleet.lock` -- and `load_registry` QUARANTINES a
     # corrupt registry, i.e. RENAMES IT ASIDE, which is a write. An unlocked
     # write races every other fleet command, and it destroys the evidence the
@@ -7193,10 +7744,10 @@ def _supervisor_lifecycle_target(verb, name):
     # P1-6: `read_registry_no_repair` -- `load_registry` MINUS the rename, with
     # the same missing-file contract, the same validator and the same
     # `RegistryCorruptError`, so the arm below is unchanged. This read runs from
-    # `cmd_kill:7024` / `cmd_respawn:6766`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:7575` / `cmd_respawn:7317`, ahead of either verb's `fleet_lock`,
     # and quarantining here did two things: it wrote without the lock, and it
     # STOLE the quarantine from the lock-held read that was designed to perform
-    # it. `cmd_respawn:6790-6792` spells out that design -- *"resolve under the
+    # it. `cmd_respawn:7341-7343` spells out that design -- *"resolve under the
     # lock so a corrupt registry surfaces through load_registry's quarantine"* --
     # and the theft is what falsified it: by the time the lock-held read ran the
     # file was ABSENT rather than corrupt, so `{"workers": {}}` came back and the
@@ -13057,12 +13608,12 @@ def _registry_records_or_none():
 
     IT MUST NOT BE `load_registry`, and that is the whole reason this function
     exists rather than a bare try/except at each site. `load_registry`
-    QUARANTINES a corrupt registry -- it renames the file aside (`:973`) --
+    QUARANTINES a corrupt registry -- it renames the file aside (`:1027`) --
     which is a WRITE. `_supervisor_gate` promises "READ-ONLY: no lock, no mint,
     no write" and runs at the top of every mutating verb, so routing its
     identity read through `load_registry` would let a speed-bump shred operator
     evidence on a path that documents itself as touching nothing. This is D4's
-    rule for the view path (`:3829`) applied to the one other reader that has
+    rule for the view path (`:3883`) applied to the one other reader that has
     no business quarantining. Quarantining stays where it belongs: the
     lock-holding verbs, `cmd_sup_boot` included via `_holder_is_limited`."""
     ok, _reason, data = _read_registry_readonly()
@@ -13249,8 +13800,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     live_sids` is what shipped, and `_record_sids`' own docstring says why it
     is wrong -- *"matching against `session_id` alone fails open on it
     (ND4a)"* -- for the twelve other sites that already key on the union
-    (`:2665, :2709, :2970, :3120, :7164, :7484, :7765, :7983, :8070, :8293,
-    :9079, :13120`). B6 was the one
+    (`:2719, :2763, :3024, :3174, :7715, :8035, :8316, :8534, :8621, :8844,
+    :9630, :13671`). B6 was the one
     roster comparison that did not, and §G-G measured it failing open exactly
     as predicted: the releaser fork-steered, so its record was eagerly
     restamped (`session_id` = post-fork, pre-fork sid pushed into
@@ -13262,8 +13813,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :6124, :6597, :11026,
-    :16315), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :6675, :7148, :11577,
+    :16866), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -13953,8 +14504,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:6124, :6597, :11026,
-    #     :16315) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:6675, :7148, :11577,
+    #     :16866) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -13984,10 +14535,10 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         #   * `_registry_records_or_none`, NEVER `load_registry`. This gate
         #     documents itself "READ-ONLY: no lock, no mint, no write" and
         #     `load_registry` QUARANTINES a corrupt registry -- it RENAMES the
-        #     file aside (`:973`), which is a write. Routing the identity read
+        #     file aside (`:1027`), which is a write. Routing the identity read
         #     through it made `fleet send` shred the operator's evidence from a
         #     path that promises to touch nothing; the helper exists for exactly
-        #     this and names this gate as its reason (`:13048`). A `None` here
+        #     this and names this gate as its reason (`:13599`). A `None` here
         #     still fails toward the gate -- an unreadable registry is reported
         #     by its own doctor row, and is never a reason to decide blind.
         #     MERGE NOTE (2026-07-27): main and `fix/identity-registry-judges`
@@ -14629,7 +15180,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # A worker whose own record sits inside the artifact upgrades the claim.
         #
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as `_sweep_husks`
-        # spells it at `:9043`. Not an mtime comparison: `os.rename` preserves
+        # spells it at `:9594`. Not an mtime comparison: `os.rename` preserves
         # mtime, so the artifact's mtime is the PRE-corruption write time and any
         # recreated registry is always newer -- the comparison would never fire
         # on the one bypass it exists to stop.
@@ -19207,6 +19758,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("knowledge", help="print knowledge/INDEX.md")
 
+    # multi-fleet §4 / M1 scope. `--add` and `--retire` are mutually exclusive:
+    # one record per invocation, because `--add X --retire X` has no defined
+    # fold order and would be an operator asking for a coin flip.
+    p_homes = sub.add_parser("homes", help="list, add or retire fleet homes")
+    homes_write = p_homes.add_mutually_exclusive_group()
+    homes_write.add_argument("--add", default=None, metavar="PATH",
+                             help="append <PATH> to ~/.claude/fleet-homes.list "
+                                  "(must be an initialized fleet home)")
+    homes_write.add_argument("--retire", default=None, metavar="PATH",
+                             help="append a retirement record for <PATH> "
+                                  "(the home need not still exist)")
+
     p_init = sub.add_parser("init", help="render the machine-local worker-settings.json instance from the template")
     p_init.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
     p_init.add_argument("--statusline", action="store_true",
@@ -19605,6 +20168,8 @@ def main(argv=None) -> int:
             return cmd_home(args)
         if args.command == "knowledge":
             return cmd_knowledge(args)
+        if args.command == "homes":
+            return cmd_homes(args)
         if args.command == "init":
             return cmd_init(args)
         if args.command == "spawn":
