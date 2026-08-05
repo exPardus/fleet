@@ -5627,3 +5627,27 @@ WHAT IS OWED, PRECISELY. (1) The contract-collision ruling above — operator's.
 ## 2026-08-05T12:18:13Z RELEASED inc=inc-20260805T115801Z-99cd sid=f9cf83c3-df1a-45b5-9346-5a67b57f9a30
 
 released cleanly: @C:/Users/Techn/.claude/jobs/f9cf83c3/tmp/release.md
+
+## 2026-08-05T12:21:19Z BOOT inc=inc-20260805T122119Z-b0aa sid=49ef5e6d-2459-4461-a7d5-43016551401a
+
+fresh claim: predecessor inc-20260805T115801Z-99cd released cleanly -- fresh claim, no seizure
+
+## 2026-08-05T12:23:12Z CHECKPOINT inc=inc-20260805T122119Z-b0aa sid=49ef5e6d-2459-4461-a7d5-43016551401a
+
+WAVE 41 BOOT: FRESH CLAIM, BRIEF VERIFIED ON THREE LOAD-BEARING POINTS, AND THE ONE THING THE BRIEF TOLD ME TO CHECK BEFORE PARKING CAME BACK EMPTY -- WHICH IS ITSELF THE ANSWER.
+
+VERDICT `claim`, no seizure, no transfer: predecessor inc-20260805T115801Z-99cd released cleanly at 12:18:13Z and my boot at 12:21:19Z read that clean release rather than inferring it. Nothing to record under the seizure/limit-transfer arms. Beat run: `fleet autoclean` -> `archived 0, skipped 98; husks_removed=0 husks_deferred=0 tombstones_expired=0 errors=0` -- same zero-husk shape my predecessor measured and declined to explain, and I am likewise not guessing; the count moved 97 -> 98 only because my own boot record joined the roster.
+
+WHAT I RE-DERIVED RATHER THAN INHERITED, BECAUSE THE BRIEF ORDERS ME TO ASSUME ONE OF ITS LINES IS STALE:
+
+(1) **main = origin = `ba5e839`, both sides byte-identical by `git rev-parse`.** Brief correct.
+
+(2) **THE BASELINE CONDITION HOLDS, AND I PROVED IT INSTEAD OF QUOTING IT.** The brief hands me `3647/14/1 at 2a25bdb INHERITED` with the claim that the diff to HEAD touches only journal/handoff files. `git diff --name-only 2a25bdb HEAD` returns exactly two paths -- `docs/NEXT-SESSION.md` and `supervisor/JOURNAL.md` (258 insertions / 175 deletions, all of it prose). No `bin/`, no `tests/`, no `tools/`. **So the inherited floor is sound at `ba5e839` by construction, not by trust**, and every lane this wave can predict against 3647/14/1 without re-measuring it. This is the cheap check that wave 40r's own retraction says nobody ran: the predecessor's post-hoc-ergo-propter-hoc was exactly a floor compared against a stamp whose tree it never verified.
+
+(3) **THE A/B/C RULING HAS NOT ARRIVED, AND THE BRIEF PREDICTED THE OPPOSITE.** "WHAT THIS BRIEF GOT WRONG" names as its likeliest error that the ruling already landed and I would park something already answered. I checked both channels it could arrive on before believing either way. `fleet status` reports **0 pending mail**. The `mailbox/` directory holds exactly one message file, `sid-1.md`, dated **2026-07-28**, whose entire content is the word `newer` -- eight days stale, addressed to a session id that is not mine, and sitting beside its own orphaned `.claimed.44196` marker. That is the orphaned mailbox claim file `doctor` has been naming for waves, not a ruling. And `fleet sup-status` shows the `pending-decision` slot still **OPEN and still occupied by ND4(c) Option B**, Altai's question, untouched by me. **So the brief's self-doubt scored a miss in the safe direction: it warned I might park something already answered, and the truth is nothing was answered.** Recording the negative with the same weight as a positive -- an empty mailbox that was actually READ is evidence; an unchecked one would have been an assumption. `stop_outcome.py` and both colliding tests stay untouched this wave, per brief item 3.
+
+WHAT I AM NOT DOING, NAMED SO IT IS NOT MISTAKEN FOR AN OVERSIGHT: no `state/pin-pass.json` stamp (it still reads 2.1.220 and `doctor`'s `pin-version` FAIL stands -- correct in fact, misleading in attribution, since 40r established the break is fleet-side at `f5b8125` and not the vendor's); no `fleet clean`; no `--repair`; no `fleet init`; no tombstone sweep; no touch on `w35/nd4c` or its two parked worktrees; no overwrite of the operator's decision slot. Lane 2 is CANCELLED as shipped at `3b5d0a0`/`25e27f1` -- I did not re-verify that ancestry because my predecessor did it twice with `--is-ancestor` and the tree cannot be swept, which is that wave's own lesson applied to save a measurement rather than to skip one.
+
+DISPATCH PLAN, AND THE ONE RULE I AM TREATING AS NON-NEGOTIABLE. Four lanes go out in parallel, file-set disjoint, each in its own worktree, and **every single one carries an explicit `--mode bypass`** -- 40r lost an entire lane to the `dontask` default while carrying the lesson that names it, and that lesson has now cost this campaign a lane twice. I am committing and pushing this checkpoint BEFORE any lane branch can exist, so every lane's first parent is the freshest main there is, and I will write nothing further to main while they work (merge-prep standing procedure, and the wave-38 finding that a prep lane races its own dispatcher).
+
+CONTEXT AT DISPATCH: boot cost dominates as the interface-stress lesson predicts. I am dispatching inside my first working 30k per the brief's band rule rather than reading anything further first -- merge before reading, not read before merging.
