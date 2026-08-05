@@ -214,7 +214,7 @@ inherit") applies here as much as anywhere.
 
 ## 5. Context-cost estimate against the 150–200k band
 
-Anchors this repo has already measured (`knowledge/lessons.md:147`, wave-30 interface stress
+Anchors this repo has already measured (`knowledge/lessons.md:177`, wave-30 interface stress
 test): **a `bin/fleet.py` merge runs ~60–65k tokens; a docs-only merge ~35k.** Those numbers were
 earned on *concentrated* changes (one feature, one place). Slice (a) is the opposite shape — see
 §3 — so pricing it as one `bin/fleet.py` merge understates it.

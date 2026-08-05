@@ -5788,3 +5788,45 @@ My previous checkpoint states "Main `28df49b`, unmoved" and builds a landing ord
 **ONE MORE DATUM FOR THE WAVE-42 COLLISION MAP, AND IT CHANGES THE ANSWER.** I told the successor the three planned wave-42 lanes are mutually disjoint. They are. But **`w41/citations` touches `bin/fleet.py`** (citations living in its comments and docstrings) — which is a1's whole file. So the true constraint is sharper than "land before wave 42": **`w41/citations` must land and reach citation fixpoint BEFORE the a1 build lane is dispatched**, or a1's edits will move `bin/fleet.py` lines under a citation repair that is still in flight, and the repair will be correct when written and wrong when read. That is the same shape as the fence I put on lane 3 this wave, one level up.
 
 Nothing else in the previous checkpoint changes: five lanes closed, five branches unpushed, `state/pin-pass.json` still unstamped at 2.1.220 and correctly so until `w41/pin-ruled-a` is ON main.
+
+## 2026-08-05T14:11:55Z RELEASED inc=inc-20260805T122119Z-b0aa sid=49ef5e6d-2459-4461-a7d5-43016551401a
+
+released cleanly: Wave 41 complete, released in-band at the wave boundary. Five lanes closed, five branches unpushed and unlanded, main at f457a57. Ruling A executed on branch w41/pin-ruled-a. The pin tier is FLAKY not RED: 6/6 green at 2.1.222, nine pooled samples split 5 published / 4 withheld. state/pin-pass.json deliberately NOT stamped - the ruled condition is met only on a branch, and stamping would certify a tree that does not exist. Full handoff, landing order, landing arithmetic (3741/14/1 predicted) and the wave-42 collision map are in the last three journal entries, including a correction: main moved under me and w41/citations now collides on two files.
+
+## 2026-08-05T14:14:00Z BOOT inc=inc-20260805T141400Z-00e6 sid=1003fa8d-c6d5-4fba-908e-b9a347be4115
+
+fresh claim: predecessor inc-20260805T122119Z-b0aa released cleanly -- fresh claim, no seizure
+
+## 2026-08-05T14:20:27Z CHECKPOINT inc=inc-20260805T141400Z-00e6 sid=1003fa8d-c6d5-4fba-908e-b9a347be4115
+
+WAVE 42 OPENS. I DISPATCHED TWO LANES BEFORE LANDING ANYTHING, BECAUSE THE DISJOINTNESS TEST SAID I COULD — AND THE FIRST THING I MEASURED WAS THAT MY OWN DISJOINTNESS TEST, AS THE BRIEF SPECIFIED IT, IS THE WRONG TEST.
+
+**THE BRIEF TOLD ME TO RUN `git diff --name-only 28df49b w41/citations`. I RAN THE TWO-ENDPOINT FORM AGAINST MAIN FIRST AND IT LIED BY OVER-REPORTING.** `git diff --name-only f457a57 <branch>` lists files MAIN changed as well as files the BRANCH changed, so all four wave-41 branches appeared to touch `docs/OPERATOR-GATES.md`, `knowledge/INDEX.md`, `knowledge/lessons.md` and `supervisor/JOURNAL.md` — which would have made every lane collide with every other. The correct test is against the merge-base: `git diff --name-only $(git merge-base main $b) $b`. All four branches merge-base at `28df49b`, so the brief's form is right by coincidence of the base, not by construction. **A disjointness test stated as a diff between two tips measures the union of two edit sets and calls it one.** Recording the form, not just the answer, because the next supervisor will inherit the phrasing.
+
+**RE-DERIVED, NOT INHERITED — and the predecessor's correction holds exactly.** Main is `f457a57`, local identical to `origin/main`, nothing moved under me between boot and this checkpoint. `28df49b` is still an ancestor of main (YES). Branch tips all match the handoff to the character: `w41/rc-constant` `1191833`, `w41/pin-ruled-a` `848d9eb`, `w41/mf-slice-a` `8e8f4c3`, `w41/citations` `aec66b1`, `w41/probe` `28df49b` (empty by design).
+
+BRANCH-SIDE file sets, from the merge-base:
+- rc-constant: `tests/test_receipts.py`, `tests/test_verify_receipts_tristate.py`, `tools/verify_receipts.py`
+- pin-ruled-a: `tests/integration/test_native_pin.py`, `tests/pin_usage_contract.py`, `tests/test_pin_usage_contract.py`
+- mf-slice-a: `docs/mf-slice-a-price.md`
+- citations: `bin/fleet.py`, `docs/OPERATOR-GATES.md`, `docs/PLAN-PROGRESS.md`, `docs/specs/claim-nonce.md`, `knowledge/lessons.md`, + 8 test files
+
+MAIN-SIDE since `28df49b`: `docs/OPERATOR-GATES.md`, `knowledge/INDEX.md`, `knowledge/lessons.md`, `supervisor/JOURNAL.md`.
+
+**So citations overlaps main on exactly two files — `docs/OPERATOR-GATES.md` and `knowledge/lessons.md` — which is the predecessor's measurement reproduced independently at a later moment.** rc, pin and mf are disjoint from main-side. The landing order stands as revised: rc, then pin, then mf, then citations last and deliberately.
+
+**I VERIFIED THE ONE NUMBER MY BRIEF ASKED A LANE TO ACT ON, RATHER THAN RELAYING IT.** The brief says "classify the 17 of 32 unclassified verbs" in the multi-fleet §5 verb-effect table. Last wave's headline failure was UNIT DRIFT ACROSS INHERITANCE — a number surviving retelling while its measurand died — so relaying `17 of 32` unmeasured would have been that lesson unlearned in the very next wave. Measured: introspecting `build_parser()` at `f457a57` yields **32 subparsers**; the §5 table names **15** shipped verbs (`clean`, `archive`, `autoclean`, `doctor --repair`, `sup-handoff-abort`, `kill`, `interrupt`, `send`, `respawn`, `release`, `spawn`, `init`, `status`, `peek`, `result`); 32 − 15 = **17**, and the residual enumerates exactly: `attach`, `home`, `index`, `knowledge`, `q`, `resume-limited`, `sup-boot`, `sup-checkpoint`, `sup-context`, `sup-decision`, `sup-handoff-begin`, `sup-handoff-complete`, `sup-heartbeat`, `sup-release`, `sup-spawn`, `sup-status`, `wait`. **The brief's figure is correct.** That is worth stating plainly: this campaign's habit is to find inherited numbers wrong, and an inherited number that survives re-derivation is evidence about the source, not just about the number.
+
+**TWO LANES DISPATCHED, BOTH INSIDE THE FIRST 30K, BOTH FENCED BY FILE SET.**
+- `w42-mf5` (opus, sid `2a3df454`), worktree `C:/proga/fleet-w42-mf5`, branch `w42/mf5-verbs` off `f457a57`, `--mode bypass`. Scope: `docs/specs/multi-fleet.md` ALONE. Touched by no wave-41 branch and by no main-side commit.
+- `w42-launch` (opus, sid `81faec39`), worktree `C:/proga/fleet-w42-launch`, branch `w42/launch-docs` off `f457a57`, `--mode bypass`. Scope: README / getting-started / concepts / CONTRIBUTING / new docs. Touched by no branch either.
+
+**THE MF LANE'S BRIEF CARRIES A CONSTRAINT THE CAMPAIGN BRIEF DID NOT, AND I THINK IT IS THE LOAD-BEARING ONE.** `docs/specs/multi-fleet.md` is RATIFIED. "Classify the 17 verbs" is, read naively, an instruction to add normative content to ratified text — which is the thing this wave's own escalation rule forbids. I resolved it rather than escalating it, because §5 states its rule GENERATIVELY: verbs classify by their worst irreversible effect in the wrong home, and the destructive row already says the lint keys on effect sites. So a classification that falls out of the ratified criterion mechanically is a MEASUREMENT of what the rule already says, and recording it is legitimate; a classification requiring a judgement the criterion does not make is a NEW rule and is escalated, not landed. The lane returns DERIVED or ESCALATED per verb, never a bare class. **I told it that 17/17 DERIVED should be read as evidence it invented a rule somewhere.**
+
+I also gave it a free strong test the campaign brief did not: **its criterion must reproduce the table's existing 15 rows.** A criterion that cannot re-derive `sup-handoff-abort` as destructive is refuted by the table it is extending. And I named the one I expect to be genuinely open — `sup-checkpoint` APPENDS to a home-relative `supervisor/JOURNAL.md`, no fleet verb recovers an append, and the ratified criterion does not say whether append is irreversible.
+
+**BOTH BRIEFS CARRY THE RECEIPT HAZARD AND THE MOVING-VERIFIER WARNING.** `docs/specs/**` is re-executed by `tools/verify_receipts.py`, so any fenced block the MF lane adds becomes a receipt needing `# at <sha>`; and `w41/rc-constant` is about to convert that verifier's rc to a tri-state, moving unenforced specs from rc=1 to rc=2. I told the lane to report the rc it observed with the sha it observed it at, and explicitly NOT to predict the post-landing value. Same wave, same tool, two lanes with different views of it — that is the collision I can see; the one I cannot see is the one to watch for.
+
+**THE FENCES ARE STATED AS "STOP AND REPORT", NOT "AVOID".** Both briefs forbid routing around the fence, because a lane that quietly finds another way to touch `bin/fleet.py` is exactly how the citations repair rots under the a1 builder later this wave.
+
+STATE: main `f457a57`, unpushed by me, nothing landed yet. `supervisor/JOURNAL.md` carries 8 uncommitted lines (predecessor's RELEASED entry + my BOOT entry) — expected, will be committed at wave close, not now. autoclean run: 0 archived, 104 skipped, 0 errors. Five wave-41 branches unlanded. Landing begins next, rc first.
