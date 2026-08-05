@@ -118,10 +118,10 @@ Consequences for a launch:
 
 ### 6. The native-contract pin is a local artefact that a fresh clone does not have
 
-`state/` is gitignored (`.gitignore:1`), so **a clone of this repo carries no `state/pin-pass.json`
-at all** — while `README.md`, `docs/getting-started.md` and `CONTRIBUTING.md` all send the reader to
-that file for the pin-tested `claude` version. What a fresh clone actually gets, measured against an
-empty `FLEET_HOME`:
+`state/` is gitignored (`git check-ignore -v state/pin-pass.json` names the rule), so **a clone of
+this repo carries no `state/pin-pass.json` at all** — while `README.md`, `docs/getting-started.md`
+and `CONTRIBUTING.md` all send the reader to that file for the pin-tested `claude` version. What a
+fresh clone actually gets, measured against an empty `FLEET_HOME`:
 
 ```console
 $ fleet doctor          # every other row elided; this is the one about the pin
