@@ -27,6 +27,16 @@ WHAT IS PINNED HERE, AND WHAT IS NOT -- read this before trusting the name.
   `exactly=` rather than a per-line anchor: at `b3ec8d7` the `_record_sids`
   site said "seven" while TWELVE other sites keyed on the union.
 
+  PINNED (added 2026-08-06): the RANGE END of a `` `func:NNNN-NNNN` ``
+  citation. It used to be discarded by construction -- `_NAMED_CITATION_RE`
+  spelled the range `(?:-\\d+)?`, non-capturing and unvalidated, and the
+  unclassified-number guard is colon-keyed so `-7343` was not even a token to
+  it. Doubly blind, and measured so: gate `w45-gceil` §2 ran the same 18 tests
+  against the backwards `7443-7343` the branch shipped, against the absurd
+  `7443-9999`, and against the correct `7443-7445`, and got an identical green
+  from all three. The end is now captured and must both follow its start and
+  land inside the function the citation names.
+
   NOT PINNED, said plainly:
 
     * Citations of OTHER documents -- `SPEC.md:204`, `SPEC:1196-1198`,
@@ -291,11 +301,43 @@ def _load_registry_quarantine_calls():
             if span and span[0] <= n <= span[1]}
 
 
-_NAMED_CITATION_RE = re.compile(r"`(\w+):(\d+)(?:-\d+)?`")
+# The RANGE END is a capturing group, and that is the whole of the w45-gceil §2
+# repair on the pin side. The backticks are load-bearing for the doc-citation
+# carve-out this file's docstring declares: `bin/fleet.py` writes its document
+# citations UNBACKTICKED -- `(SPEC:1196-1198`, `(SPAWN:461-471(i))`,
+# `CN:1671-1675` -- so widening what is captured INSIDE the backticks cannot
+# start pinning them. Measured at 238a4778: 5 backticked matches on 3 lines,
+# and 7 unbackticked document ranges none of which this regex sees.
+_NAMED_CITATION_RE = re.compile(r"`(\w+):(\d+)(?:-(\d+))?`")
+
+
+def _range_defect(name, start, end):
+    """Why `` `name:start-end` `` is not a resolvable range, or None.
+
+    Two ways a range end rots, and B1 was the second: the end can PRECEDE its
+    start (`7443-7343`, what the ceiling branch shipped when it moved the start
+    by +102 and left the end behind), and the end can land outside the function
+    the citation names (`7443-9999`, and also `7443-7343`, whose end is real
+    code in a different function).
+
+    A pure function of three values on purpose -- the seed below drives it with
+    PERTURBED inputs derived from the live citation, so proving it can fail
+    needs no edit to `bin/fleet.py` and no line number frozen into a test.
+    """
+    if end < start:
+        return (f"the range END :{end} PRECEDES its start :{start} -- a range "
+                f"nobody can follow")
+    span = _function_span(name)
+    if span is None:
+        return f"`{name}` is not a top-level function"
+    if not (span[0] <= end <= span[1]):
+        return (f"the range END :{end} is outside `{name}`, which spans "
+                f"{span[0]}-{span[1]}")
+    return None
 
 
 def _function_qualified_citations():
-    """Citations written `func:NNNN`, where the NAME is part of the claim.
+    """Citations written `func:NNNN` or `func:NNNN-NNNN`, NAME part of the claim.
 
     A bare `:NNNN` says only *"this line"*. `cmd_kill:6488` says *"this line,
     and it is inside cmd_kill"* -- a second claim that is checkable straight
@@ -310,17 +352,23 @@ def _function_qualified_citations():
     functions keeps every anchor and every `exactly` set intact. Measured, not
     assumed: that swap was planted at `bin/fleet.py:6597` and passed the whole
     file before this existed.
+
+    Each entry is `(citing line, name, start, end)`, `end` None for a bare
+    citation. The end is carried rather than dropped so the range checks below
+    have something to check; before 2026-08-06 it was thrown away here.
     """
     found = []
     for i, line in enumerate(SRC, start=1):
         if i in CODE_LINES:
             continue
         for m in _NAMED_CITATION_RE.finditer(line):
-            found.append((i, m.group(1), int(m.group(2))))
+            found.append((i, m.group(1), int(m.group(2)),
+                          int(m.group(3)) if m.group(3) else None))
     return found
 
 
 FUNCTION_QUALIFIED = _function_qualified_citations()
+RANGED_QUALIFIED = [c for c in FUNCTION_QUALIFIED if c[3] is not None]
 
 
 def _supervisor_lifecycle_preflight_calls():
@@ -459,8 +507,12 @@ CITED_SITES = (
          window=0),
 
     # The design sentence P1-6 says the unlocked read STOLE the quarantine from.
-    # Cited as a range (`:6254-6256`); the scan takes the range's first number,
-    # which is the line carrying the sentence itself.
+    # Cited as a range; `SELF_CITATIONS` takes the range's FIRST number (the
+    # `:NNNN` scan is colon-keyed and the end carries no colon), which is the
+    # line holding the sentence itself, so that is what this entry's anchor and
+    # `in_named_function` check. The END is not silently dropped any more --
+    # `_range_defect` checks it through `RANGED_QUALIFIED`, on a separate path
+    # that keys on the backticked shape rather than on this expectation.
     Cite("the lock-held resolve comment P1-6 restores",
          r"`(cmd_\w+):\d+-\d+` spells out that design",
          anchor="resolve under the lock",
@@ -508,6 +560,22 @@ class TestTheScannerActuallySeesSomething:
             f"no `func:NNNN` citation found in {SRC_PATH.name} -- either the "
             f"shape has genuinely left the file, or the scanner stopped seeing "
             f"it. Either way the swap guard is asserting over nothing")
+
+    def test_the_scan_finds_a_RANGED_function_qualified_citation(self):
+        """Without this, both range checks below assert over an empty list.
+
+        This is the vacuity the old regex produced by accident: it matched the
+        range and threw the end away, so a file with ranges and a file with
+        none were indistinguishable downstream. Measured at 238a4778: exactly
+        one `func:NNNN-NNNN` citation exists (`cmd_respawn:7443-7445`), and it
+        is the one the gate's mutant E perturbed three ways to an identical
+        green.
+        """
+        assert RANGED_QUALIFIED, (
+            f"no `func:NNNN-NNNN` citation found in {SRC_PATH.name}. If the "
+            f"last range genuinely left the file, say so deliberately -- until "
+            f"then the range-end checks are asserting over nothing, which is "
+            f"the state that let `7443-9999` pass")
 
     def test_every_expectation_is_live(self):
         """No dead entries: a deleted citing site is noticed, not ignored."""
@@ -626,7 +694,7 @@ class TestEverySelfCitationResolves:
         name is the same shape as a pin gated behind a magic substring: whoever
         writes the next unresolvable name gets a free pass and never learns.
         """
-        for citing_line, named, cited in FUNCTION_QUALIFIED:
+        for citing_line, named, cited, _end in FUNCTION_QUALIFIED:
             span = _function_span(named)
             assert span is not None, (
                 f"{SRC_PATH.name}:{citing_line} cites `{named}:{cited}`, but "
@@ -635,6 +703,51 @@ class TestEverySelfCitationResolves:
                 f"{SRC_PATH.name}:{citing_line} cites `{named}:{cited}`, but "
                 f"`{named}` spans {span[0]}-{span[1]} -- :{cited} is outside "
                 f"it, so the name and the number disagree")
+
+    def test_every_ranged_citation_END_resolves_in_the_same_function(self):
+        """THE B1 GUARD. The start was always checked; the end never was.
+
+        `w45-gceil` §2: the ceiling branch repointed 31 citations, moved this
+        one's START by +102 and left its END at the base value, producing
+        `cmd_respawn:7443-7343` -- an instruction to read a range backwards,
+        whose end is unrelated code in a different function. Two dedicated
+        citation-discipline test files gave it the same green they gave the
+        correct value and the same green they gave `7443-9999`.
+
+        Deliberately NOT scoped to a registered site. Like the swap guard above
+        it fires everywhere the shape occurs, because the claim ("these two
+        numbers bracket a passage inside this function") is checkable straight
+        from the source with no expectation entry behind it.
+        """
+        for citing_line, named, start, end in RANGED_QUALIFIED:
+            defect = _range_defect(named, start, end)
+            assert defect is None, (
+                f"{SRC_PATH.name}:{citing_line} cites `{named}:{start}-{end}`: "
+                f"{defect}")
+
+    def test_the_range_check_catches_BOTH_ways_an_end_rots(self):
+        """A range check that cannot fail proves exactly what the old one did.
+
+        Both perturbations are derived from the LIVE citation, so nothing here
+        rots when `bin/fleet.py` moves: the backwards case is the shipped start
+        minus one (inside the function, so only the ordering check can catch
+        it), and the out-of-function case is one line past the function's own
+        end (ordered correctly, so only the span check can catch it). The
+        second is the class `7443-7343` and `7443-9999` both belong to.
+        """
+        _citing, named, start, end = RANGED_QUALIFIED[0]
+        span = _function_span(named)
+        assert span is not None and span[0] <= start <= span[1]
+
+        assert _range_defect(named, start, end) is None, (
+            "the shipped citation must be clean before its perturbations mean "
+            "anything")
+
+        backwards = _range_defect(named, start, start - 1)
+        assert backwards is not None and "PRECEDES" in backwards, backwards
+
+        outside = _range_defect(named, start, span[1] + 1)
+        assert outside is not None and "outside" in outside, outside
 
     def test_every_enumeration_matches_the_derived_set(self):
         """THE UNDER-COUNTING GUARD, and the reason this file exists twice over.
