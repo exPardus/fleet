@@ -301,7 +301,7 @@ class TestNoUnformattableValueCrashesAStatusView:
         "OUT OF SCOPE FOR W15, AND DELIBERATELY LEFT VISIBLE. A non-string "
         "session_id crashes `fleet status` and `status --json` with "
         "AttributeError: 'int' object has no attribute 'replace' at "
-        "bin/fleet.py:140 -- `name_fs_stem`, reached from recompute via the "
+        "bin/fleet.py:166 -- `name_fs_stem`, reached from recompute via the "
         "outcomes path. That is a PATH-layer type confusion, not a render one: "
         "the same helper maps task files, outcomes, tombstones, journals, logs "
         "and archive dirs, and a mis-mapped stem WRITES to the wrong file. "

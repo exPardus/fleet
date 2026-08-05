@@ -167,7 +167,7 @@ class TestSpawnStampsLineage:
         # and an unreadable transcript fails TOWARD the band. It used to be
         # exempt for an unrelated reason -- `FLEET_WORKER` was absent from the
         # test env -- and that structural exemption is now keyed on the
-        # registry instead (SPEC.md:196). Give the holder a readable, roomy
+        # registry instead (SPEC.md:204). Give the holder a readable, roomy
         # occupancy so this test measures lineage stamping and not the ceiling.
         monkeypatch.setattr(fleet, "find_transcript_path", lambda name, sid: "/fake")
         monkeypatch.setattr(fleet, "_transcript_occupancy", lambda p: 1000)

@@ -1927,7 +1927,7 @@ def resolve_claude_executable(which=shutil.which) -> str:
 # (unit-tested). Held here beside `_worker_env` so the dispatch and the role
 # classifier read ONE shape.
 #
-# 2026-07-26 re-key (SPEC.md:196): the name this is matched against is now the
+# 2026-07-26 re-key (SPEC.md:204): the name this is matched against is now the
 # one the REGISTRY gives the acting session (`_acting_worker_name`), not the
 # `FLEET_WORKER` stamp -- the daemon donates that stamp to sessions it never
 # launched. The E(2) grounding is untouched by the change: it was always about
@@ -1958,7 +1958,7 @@ def _worker_env(name: str) -> dict:
     longer exists (terminal-surface D7, 2026-07-22: fleet injects nothing and
     the plugin manifest declares no hooks), and as of 2026-07-26 nothing keys a
     DECISION on the stamp either -- see the identity block above
-    `_acting_worker_identity`, and SPEC.md:196.
+    `_acting_worker_identity`, and SPEC.md:204.
 
     THE STAMP IS KEPT ANYWAY, and this is the only reason: it is the WITNESS
     `_doctor_check_identity_witness` checks the registry against. The daemon
@@ -2187,7 +2187,7 @@ def _native_cumulative_tokens(name: str) -> int:
 _LIMIT_RESET_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 
 # The observed production shape instead (M-C park journal 2026-07-16,
-# knowledge/lessons.md:607): a LOCAL wall-clock time + IANA tz name, e.g.
+# knowledge/lessons.md:756): a LOCAL wall-clock time + IANA tz name, e.g.
 # "resets 4:40am (Asia/Qyzylorda)" or "resets 12am (Asia/Qyzylorda)" (the
 # hour-only form is the production gap this fallback closes). Only
 # consulted when the ISO regex above finds nothing (ISO keeps precedence).
@@ -2778,7 +2778,7 @@ def _record_is_supervisor_claim_holder(record, claim=None):
 # `_require_claim_holder` DOES refuse on a registry-judged identity, and §18
 # blesses that rather than merely tolerating it -- the registry sid union is the
 # channel it names sound. Ratified claim-nonce §6.5 D5 requires that refusal to
-# exist and SPEC.md:196 constrains only its key. The gate's limit is coverage,
+# exist and SPEC.md:204 constrains only its key. The gate's limit is coverage,
 # not legitimacy.
 #
 # THE SID QUESTION IS CLOSED, IN THE SAFE DIRECTION, BY COUNTING. §16.3 recorded
@@ -3210,7 +3210,7 @@ def _ceiling_refuses_dispatch(verb, now=None):
     merely cold-started unstamped -- which is now known to be the common case
     rather than a self-inflicted escape. The ceiling is a speed-bump by
     construction, and buying protection against the deliberate version costs the
-    human control channel, which ND1 forbids. SPEC.md:196's prohibition is
+    human control channel, which ND1 forbids. SPEC.md:204's prohibition is
     unaffected: it governs *"a future guard enforcing `a worker turn must never
     hold the supervisor claim`"*, which is `_require_claim_holder`, not this
     function -- this is an occupancy ceiling whose identity read was always an
@@ -4141,7 +4141,7 @@ class FleetCliError(Exception):
 
 
 # claim-nonce §4.13(b)/§11: the distinct exit code for a failed continuity
-# proof. `sup-boot` already publishes 0/2/3 (skills/fleet/SKILL.md:37) and
+# proof. `sup-boot` already publishes 0/2/3 (skills/fleet/SKILL.md:54) and
 # main()'s generic arm returns 1, so 4 is the first free value.
 SUPERVISOR_CONTINUITY_RC = 4
 
@@ -7087,7 +7087,7 @@ def _resolve_supervisor_lifecycle_target(verb):
     the same identity concept `_resolve_worker_target` uses for `send`. NEVER
     by shape ((C), rejected): a retired successor husk is supervisor-shaped and
     dead. NEVER a literal `supervisor` record ((B), rejected): no such record
-    ever exists (SPAWN:452-462(i)).
+    ever exists (SPAWN:461-471(i)).
 
     This is a SEPARATE entry point from `_resolve_worker_target` rather than a
     flag on it, because the refusal GRADES differ. `send` collapses everything
@@ -7630,7 +7630,7 @@ def _cmd_respawn_supervisor(args, name, rec, claim, *, run, which, sleep, clock)
     `seize` costs the full `SUPERVISOR_CLAIM_STALE_SECONDS` freeze. Any
     choreography that skips the release buys an up-to-one-hour hole for a
     PLANNED operation (option (B), rejected), and carrying the nonce to the
-    successor is forbidden outright (option (C); CN:1568-1572, §6.5).
+    successor is forbidden outright (option (C); CN:1671-1675, §6.5).
 
     Sequence: resolve -> refuse (matrix) -> release-steer -> bounded wait ->
     stop + `"stopped"` tombstone -> CALLER-SIDE B6 gate -> fresh gen-0 body.
@@ -11831,7 +11831,7 @@ SUPERVISOR_JOURNAL_KINDS = (
     "HANDOFF-BEGIN", "HANDOFF-COMPLETE", "HANDOFF-ABORT",
 )
 
-# The published `sup-boot` exit-code contract (skills/fleet/SKILL.md:37).
+# The published `sup-boot` exit-code contract (skills/fleet/SKILL.md:54).
 # Held as a named constant rather than a dict literal inside cmd_sup_boot so
 # that a verdict outside the set is a KeyError at ONE site a test can name --
 # break-gate residual F2's failure mode is a verdict the map does not carry.
@@ -14348,13 +14348,13 @@ def _worker_turn_note(ident) -> str:
                 f"them is an ordinary worker, so whichever this body is, it is "
                 f"a worker -- and the supervisor claim is not a worker's to "
                 f"hold (claim-nonce §6.5 D5, keyed on the registry per "
-                f"SPEC.md:196). One session cannot be two workers: inspect "
+                f"SPEC.md:204). One session cannot be two workers: inspect "
                 f"those records in state/fleet.json and retire the stale one. "
                 + SPEED_BUMP_NOTE)
     return (f" This is a worker turn: the registry resolves this session to "
             f"worker {ident['name']!r}, and the supervisor claim is not a "
             f"worker's to hold (claim-nonce §6.5 D5, keyed on the registry per "
-            f"SPEC.md:196). " + SPEED_BUMP_NOTE)
+            f"SPEC.md:204). " + SPEED_BUMP_NOTE)
 
 
 def _identity_abstention_note(ident) -> str:
@@ -14461,7 +14461,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
     # role question too. An earlier revision computed the role from
     # `current_caller_session()` two lines above `caller = sid_override or ...`:
     # one function, two caller identities, and the consequence was not cosmetic
-    # (it decided which journal KIND a refusal was filed under, and SPEC.md:273
+    # (it decided which journal KIND a refusal was filed under, and SPEC.md:281
     # makes `refused` the row that flips the doctor as evidence of a second
     # body).
     caller = sid_override or current_caller_session()
@@ -14473,12 +14473,12 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
     # ask what the registry says this body is.
     #
     # Both ratified documents are satisfied at once, so there is no loser to
-    # pick. SPEC.md:196 constrains the KEY -- *"must key on the registry or the
+    # pick. SPEC.md:204 constrains the KEY -- *"must key on the registry or the
     # claim itself, NEVER on `FLEET_WORKER`, or it will refuse the one session
     # whose whole purpose is to receive the claim."* claim-nonce §6.5 D5
     # requires the refusal to EXIST. A registry-keyed gate is exactly the shape
     # both describe; the arm this replaces read `FLEET_WORKER` and so honoured
-    # §6.5 while violating SPEC.md:196.
+    # §6.5 while violating SPEC.md:204.
     #
     # AHEAD OF THE CLAIM READ, deliberately and as `main` had it: the ROLE
     # answer does not depend on whether a claim exists, and a worker turn should
@@ -14578,7 +14578,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # NOT FILED as a `refused` rejection, and that is a choice. The state
         # here is a legacy claim, a caller whose sid EQUALS the holder's, and a
         # registry that cannot be read -- overwhelmingly the real holder plus a
-        # broken file. `refused` is the row SPEC.md:273 makes the doctor fail on
+        # broken file. `refused` is the row SPEC.md:281 makes the doctor fail on
         # as evidence of a SECOND BODY, and filing it here would cry wolf on the
         # holder's own turn. The refusal is loud on stderr and the corrupt
         # registry has its own doctor row.
@@ -14686,7 +14686,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
     else:
         # Rule 5, and the ONLY rule 5. Every caller that reaches here passed the
         # worker-turn gate above, so a failed continuity proof is filed under
-        # ONE kind -- `refused` -- which is the row SPEC.md:273 makes
+        # ONE kind -- `refused` -- which is the row SPEC.md:281 makes
         # `_doctor_check_supervisor_claim` fail on as evidence of a second body.
         # An intervening revision split this branch on the role verdict and
         # filed the role half as kind `worker-turn`; combined with the role
