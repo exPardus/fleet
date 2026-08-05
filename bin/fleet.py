@@ -872,12 +872,12 @@ def _quarantine_artifacts() -> list:
     registry is always newer -- an "artifact newer than the registry"
     comparison would never fire on the recreation bypasses it exists to stop.
 
-      * `_sweep_husks` (:9703) -- a rename can hide live worker records from
+      * `_sweep_husks` (:10241) -- a rename can hide live worker records from
         the roster sweep, so a thin registry would rm sessions it still owns.
-      * `_doctor_check_autoclean` (:10799) -- a lingering artifact means the
+      * `_doctor_check_autoclean` (:11349) -- a lingering artifact means the
         sweep above is refusing itself, which is how a bricked sweep reads
         green-and-fresh.
-      * `_require_claim_holder`'s §9 arm (:15306) -- the legacy upgrade mints
+      * `_require_claim_holder`'s §9 arm (:15859) -- the legacy upgrade mints
         generation 1 on bare sid equality, so it needs the registry that
         cleared it to be COMPLETE, not merely readable. See there.
 
@@ -893,7 +893,7 @@ def _quarantine_artifacts() -> list:
         §6.5 worker-turn gate, which refuses on `True` alone, so poisoning a
         HEALTHY read here would let a real worker turn through §6.5 -- closing
         the §9 door by opening a wider one. Rule 1 lives at the §9 arm instead.
-      * `_identity_abstention_note` (:15027) -- the same distinction, in words,
+      * `_identity_abstention_note` (:15580) -- the same distinction, in words,
         because the generic note names `fleet doctor` and doctor is what MADE
         this state.
       * `_read_registry_readonly` (:4023) -- the VIEW surface's copy of the same
@@ -902,7 +902,7 @@ def _quarantine_artifacts() -> list:
         a never-initialised box prints, so the two states were not
         distinguishable from the read surface at all. A `Path.glob` is a read,
         so this costs the views doctrine nothing.
-      * `_doctor_check_registry` (:11337) -- doctor graded only on whether the
+      * `_doctor_check_registry` (:11887) -- doctor graded only on whether the
         LOADER RAISED, and the loader returns `{"workers": {}}` for a missing
         file, so the row called a renamed-away path *"is readable"* and doctor
         exited 0 with every row green (P1-12). A bare absence stays a PASS: no
@@ -914,8 +914,8 @@ def _quarantine_artifacts() -> list:
     these two only spell the filename, because an operator cannot restore a file
     whose name they were never told.
 
-      * `_print_snapshot_table` (:5852) -- `fleet status --stale-ok`.
-      * `_tombstone_releasing_body` (:15463) -- `sup-release`, whose registry
+      * `_print_snapshot_table` (:6390) -- `fleet status --stale-ok`.
+      * `_tombstone_releasing_body` (:16016) -- `sup-release`, whose registry
         arm previously swallowed the quarantined case in silence.
 
     The operator clears the artifact (after restoring what it holds), which
@@ -3059,7 +3059,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     -- reads `ok` while MISSING every record the artifact holds, and the §9 arm
     read that thinness as an affirmative *"you are provably not a worker"*. The
     presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:15306`), where it costs the §6.5 gate nothing.
+    (`:15859`), where it costs the §6.5 gate nothing.
 
     An artifact can also outlive its incident by days -- `_sweep_husks` tells the
     operator to restore the file first and delete the artifact second -- so that
@@ -4418,6 +4418,530 @@ def append_home_record(home, retire: bool = False) -> str:
     return ident
 
 
+# ---------------------------------------------------------------------------
+# §5. Resolution -- ONE ORDER FOR EVERY CALLER (multi-fleet slice a2).
+#
+#   1. `--fleet-home` flag   2. sid->home lookup   3. validated env
+#   4. legacy install-root default                 5. terminus
+#
+# THE ORDER IS DATA, NOT PROSE: `resolve_home()` below is a pure function over
+# (flag, sid, env, default home, install root, population) and returns the step
+# that answered plus everything the caller needs to say WHY. Nothing in it
+# writes, locks, probes, quarantines or `mkdir`s -- §Definitions binds the
+# no-mkdir rule to *"resolution and read paths"*, and resolution is half of that
+# sentence. A verb that resolves a home has not yet decided to use it.
+#
+# WHY A RESOLVER AND NOT A CHAIN OF `if`s IN `main()`: §5 says *"one order for
+# every caller"*, and the callers are `main()`, the four hooks (slice c), the
+# statusline (slice d) and the suite. Each one that re-spelled the order would
+# be a fifth place for the order to drift, which is the exact defect the four
+# standalone `_fleet_home()` copies already demonstrate.
+# ---------------------------------------------------------------------------
+
+#: §5 step 5's rendered terminus, verbatim from the spec: *"views render
+#: `[fleet]: no home` and exit 0"*.
+NO_HOME_LINE = "[fleet]: no home"
+
+# §5 step 5 splits the surface exactly once -- *"mutating verbs refuse with the
+# named remedy, and views render `[fleet]: no home` and exit 0"* -- so a2 owes
+# that ONE split and nothing finer.
+#
+# THIS IS NOT THE VERB-EFFECT TABLE AND MUST NOT BE READ AS ONE. The
+# destructive/disruptive/ordinary tiering, its arming rule and its guard are
+# slice a3's, and `tests/test_round7_defect_pins.py`'s three RATIFIED_* tuples
+# are where that classification is transcribed. This tuple answers a different
+# question -- *"at the terminus, does this verb WRITE?"* -- and it is
+# deliberately the conservative half of it: every verb not named here refuses,
+# so a verb added tomorrow refuses at the terminus rather than writing into a
+# directory no step selected. `index` is absent on purpose (`index init` creates
+# `.fleet-index/`), and `doctor` is here only without `--repair`.
+TERMINUS_VIEW_VERBS = ("home", "knowledge", "status", "peek", "result",
+                       "doctor", "q", "sup-status", "sup-context")
+
+# The terminus does not apply to these AT ALL -- neither the refusal nor the
+# rendered `[fleet]: no home`. They act on the MACHINE, not on a home.
+#
+# MEASURED, and it was a defect in this file's first draft: with `homes` in the
+# view tuple above, `fleet homes --add C:/somewhere` printed *"[fleet]: no
+# home"* and exited 0 without appending -- the terminus swallowing the one verb
+# whose whole job is to end it. §5 step 5's remedy is *"name a home"*, and
+# `fleet homes` is where a home gets named; a guard that eats its own remedy is
+# a deadlock with a friendly message. Six tests in `tests/test_homes_verb.py`
+# went RED on it, which is what caught it.
+TERMINUS_EXEMPT_VERBS = ("homes",)
+
+
+def homes_are_same(a, b) -> bool:
+    """§Definitions' home-path comparison, verbatim: *"`samefile` when both
+    exist, exception-wrapped, never raising out of resolution; `normcase(
+    resolve())` fallback for nonexistent; identity values never persisted"*.
+
+    NEVER RAISES and returns a bool for any input, because every caller is on a
+    resolution path and §5's own rule is that resolution does not fail on a
+    comparison. A comparison it cannot make answers False -- two homes it cannot
+    prove identical are treated as different, which OVER-counts distinctness and
+    therefore errs toward arming, the direction §5 requires (*"indeterminacy
+    never selects the permissive branch"*).
+
+    `samefile` first because it is the only spelling that sees through a
+    junction, a symlink and a substituted drive; `normcase(resolve())` second
+    because a home that does not exist has no inode to compare. Neither result
+    is ever written down: this answers a question, it does not mint an id."""
+    try:
+        pa, pb = Path(a), Path(b)
+    except (TypeError, ValueError):
+        return False
+    try:
+        if pa.exists() and pb.exists():
+            return pa.samefile(pb)
+    except (OSError, ValueError):
+        pass
+    try:
+        return (os.path.normcase(str(pa.resolve()))
+                == os.path.normcase(str(pb.resolve())))
+    except (OSError, ValueError):
+        return False
+
+
+def validate_named_home(text, source: str = "--fleet-home") -> Path:
+    """§5 step 1's validation, IN THE ORDER §5 WRITES IT: *"resolve, `is_dir`,
+    initialized; no side-effect `mkdir`"*.
+
+    THE ORDER IS THE WHOLE FUNCTION (ga1 N5, MEASURED). `home_is_initialized`
+    reaches `registry_path_at`, whose docstring says *"no resolution"* -- so a
+    RELATIVE argument joins against the process CWD, and `read_registry_at("")`
+    was measured returning the CWD's own roster. Validating before resolving
+    would let `--fleet-home .` pass because the shell happened to be standing in
+    a fleet home, and then hand the verb the string `"."`, whose meaning changes
+    the moment anything chdirs. Resolving first makes the value CWD-independent
+    from the first line onward, and it is what the refusals below can name: an
+    operator told *"`.` is not initialized"* has been told nothing.
+
+    NO `mkdir`, ANYWHERE, INCLUDING THE FAILURE PATHS. `Path.resolve()` is
+    non-strict and creates nothing; `is_dir()` and the tolerant read create
+    nothing. A typo'd `--fleet-home` must leave no directory behind to make the
+    typo look right on the second run.
+
+    `source` names the surface in the refusal so the same validator can serve
+    `FLEET_HOME` and slice (b)'s `init --home` without inventing a second copy of
+    these three checks."""
+    raw = "" if text is None else str(text)
+    if not raw.strip():
+        raise FleetCliError(
+            f"{source} takes a path and was given an empty value. A home is "
+            f"named explicitly or not at all -- an empty one would resolve to "
+            f"the current directory, which is exactly the accident this flag "
+            f"exists to prevent.")
+    try:
+        home = Path(raw).resolve()
+    except (OSError, ValueError) as exc:
+        raise FleetCliError(f"{source}: cannot resolve {raw!r} ({exc})")
+    if not home.is_dir():
+        raise FleetCliError(
+            f"{source} does not exist or is not a directory: {home} "
+            f"(from {raw!r}). Nothing was created -- `{source}` names an "
+            f"existing home and never makes one.")
+    if not home_is_initialized(home):
+        reason = read_registry_at(home)[1]
+        raise FleetCliError(
+            f"{source} {home} is not initialized ({reason}) -- an initialized "
+            f"home is one whose `state/fleet.json` exists and parses "
+            f"(docs/specs/multi-fleet.md, Definitions). Nothing was created.")
+    return home
+
+
+def resolution_population(install=None) -> dict:
+    """§5 step 2's search space: *"folded list u legacy install-root home while
+    §8 lives (§8 completion removes the term)"*.
+
+    The legacy term goes LAST and is flagged in its own key, so the day §8's
+    four exit criteria are met the removal is a one-line deletion whose blast
+    radius is visible rather than a grep for whichever call site remembered.
+
+    Deduplicated by `home_identity` (separator- and trailing-slash-normalized),
+    NOT by `homes_are_same`: this runs before any home is read, and a
+    filesystem-truth comparison here would cost one `stat` per member on every
+    sid-carrying invocation to merge a spelling the writer already normalizes.
+    Two spellings of one directory that survive that normalization (`C:/f` vs
+    `c:/f` -- ga1 N6) stay distinct here and are merged, if at all, by
+    `homes_are_same` on the far smaller HIT set."""
+    if install is None:
+        install = INSTALL_ROOT
+    listed = read_homes_list()
+    legacy = home_identity(install)
+    homes, seen = [], set()
+    for ident in list(listed["members"]) + [legacy]:
+        if ident not in seen:
+            seen.add(ident)
+            homes.append(ident)
+    return {"homes": homes, "legacy": legacy,
+            "list_ok": listed["ok"], "list_reason": listed["reason"],
+            "listed_members": list(listed["members"])}
+
+
+def lookup_home_for_sid(sid, population=None, install=None) -> dict:
+    """§5 step 2, tri-state. Keys: `state`, `home`, `hits`, `unreadable`,
+    `population`, and the list's own readability.
+
+    `state` is one of:
+
+      * `"no_sid"`    -- the caller carries no session id, so step 2 does not
+                         apply to it at all. Falls through exactly like a miss;
+                         kept as its own word because *"nobody asked"* and
+                         *"asked and nothing matched"* are different facts and
+                         a3's provenance line has to be able to say which.
+      * `"hit"`       -- exactly one member home claims this sid. RESOLVED.
+      * `"miss"`      -- no member home claims it. **Falls through, for every
+                         verb class** -- v6's miss-refusal is DELETED (rb6 C-1
+                         traced eight of fourteen slash commands dead behind it,
+                         rs6 C-2 measured it refusing every freshly dispatched
+                         body inside the pre-claim window) and must not be
+                         resurrected here or anywhere downstream.
+      * `"ambiguous"` -- two or more member homes claim it. REFUSED, naming all.
+
+    MEMBERSHIP IS THE UNION, AND `spawned_by` NEVER GRANTS IT (§5.2, pinned).
+    `_record_sids` is the repo's one spelling of *"every sid this record has ever
+    been"* (`session_id` u `retired_sids`) and is reused rather than re-derived:
+    a second copy is how a fork-steered body stops matching its own home. A
+    record's `spawned_by` is the MANAGER's sid, so honouring it would make every
+    manager a member of every home it ever dispatched into -- ambiguity by
+    construction, on the one caller class §5 most needs to serve.
+
+    UNREADABLE HOMES ARE COUNTED, NOT SKIPPED (§5.2: *"any lookup that would
+    have matched only an unreadable home is indistinguishable from a miss --
+    which is why the destructive tier below exists"*). This function cannot
+    close that gap and does not pretend to; it reports the unreadable set so
+    a3's tier can.
+
+    ONE LOCK-FREE SNAPSHOT PER HOME (§5.2), `read_registry_at`, which never
+    raises and never writes."""
+    pop = resolution_population(install) if population is None else population
+    out = {"state": "no_sid", "home": None, "hits": [], "unreadable": [],
+           "population": list(pop["homes"]), "legacy": pop["legacy"],
+           "list_ok": pop["list_ok"], "list_reason": pop["list_reason"]}
+    if not sid or not str(sid).strip():
+        return out
+    for ident in pop["homes"]:
+        ok, reason, data = read_registry_at(ident)
+        if not ok:
+            if reason == "unreadable":
+                out["unreadable"].append(ident)
+            continue
+        if any(sid in _record_sids(rec) for rec in data["workers"].values()):
+            out["hits"].append(ident)
+    hits = out["hits"]
+    if not hits:
+        out["state"] = "miss"
+    elif len(hits) == 1 or all(homes_are_same(hits[0], h) for h in hits[1:]):
+        # Two spellings of ONE directory are one hit, not an ambiguity: §5's
+        # two-plus refusal is about a sid claimed by two FLEETS. `homes_are_same`
+        # is affordable here and not in the population because the hit set is
+        # at most one entry per listed home that actually matched.
+        out["state"], out["home"] = "hit", hits[0]
+    else:
+        out["state"] = "ambiguous"
+    return out
+
+
+def resolve_home(flag=None, sid=None, env=None, default_home=None,
+                 install=None, population=None) -> dict:
+    """§5's five steps, evaluated in order, as a pure function.
+
+    Returns `step` = "flag" | "lookup" | "env" | "legacy" | None, where None IS
+    the terminus (§5 step 5), plus `home`, the full `lookup` record, and
+    `disagreement` (the home the lookup would have chosen when the flag chose
+    another -- §5 step 1's *"flag/lookup disagreement"*).
+
+    RAISES exactly one refusal of its own: §5 step 2's *"two+ -> refuse naming
+    all"*, which is not a verb-class decision and so cannot be deferred to the
+    caller. The terminus and the disagreement ARE verb-class decisions and are
+    returned as data for `apply_resolved_home` to act on.
+
+    STEPS 3 AND 4 ARE EVALUATED AGAINST `default_home`, WHICH IS THE MODULE
+    GLOBAL, AND THAT IS A DELIBERATE DIVERGENCE FROM §5's PROSE. `FLEET_HOME` is
+    computed once at import as *env if set, else the install root* -- steps 3 and
+    4 already, collapsed into one value before `main()` runs -- and it is the
+    attribute the whole suite monkeypatches to sandbox itself. Re-deriving the
+    two steps here from `os.environ` and `INSTALL_ROOT` would resolve every test
+    to an empty fixture install instead of its own tmp home, i.e. it would break
+    the isolation seam that stops the suite writing into the developer's real
+    fleet. The env var is still read, to label WHICH of the two steps produced
+    the value, and `homes_are_same` is what decides that -- a monkeypatched home
+    that no longer matches the env var reads as "legacy", which is the truth.
+
+    THE ONE THING THIS DOES NOT DO IS §5's FALL FROM STEP 3 TO STEP 4. §5 says
+    step 3 requires an *initialized* env home, so an uninitialized one falls
+    through to the install-root default. Implemented literally that means: the
+    operator names a home, the home has no registry yet, and fleet silently
+    writes into the install root instead -- which is the 2026-07-29T22:58:39Z
+    incident at the top of that same spec, reached by the route the spec built
+    to prevent it. A NAMED HOME THAT FAILS VALIDATION TERMINATES HERE rather
+    than retargeting. Reported as a finding rather than taken silently; the
+    faithful branch is one `elif` away if the operator rules the other way."""
+    if env is None:
+        env = os.environ.get("FLEET_HOME")
+    if sid is None:
+        sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if default_home is None:
+        default_home = FLEET_HOME
+    if install is None:
+        install = INSTALL_ROOT
+    default_home = Path(default_home)
+
+    out = {"home": None, "step": None, "sid": (sid or None), "flag": None,
+           "disagreement": None, "default_home": default_home,
+           "lookup": lookup_home_for_sid(sid, population=population,
+                                         install=install)}
+    look = out["lookup"]
+
+    # --- step 1: the flag. Validated BEFORE the lookup's answer is consulted,
+    # so a bad --fleet-home is refused on its own terms rather than being
+    # silently outranked by a membership the operator never mentioned.
+    if flag is not None:
+        home = validate_named_home(flag)
+        out["home"], out["step"], out["flag"] = home, "flag", home
+        if look["state"] == "hit" and not homes_are_same(home, look["home"]):
+            out["disagreement"] = look["home"]
+        return out
+
+    # --- step 2: sid -> home.
+    if look["state"] == "ambiguous":
+        raise FleetCliError(_refuse_ambiguous_lookup(look, sid))
+    if look["state"] == "hit":
+        out["home"], out["step"] = Path(look["home"]), "lookup"
+        return out
+
+    # --- steps 3 and 4, collapsed in the shipped global (see the docstring).
+    if home_is_initialized(default_home):
+        env_named = None
+        if env and str(env).strip():
+            try:
+                env_named = Path(env).resolve()
+            except (OSError, ValueError):
+                env_named = None
+        from_env = env_named is not None and homes_are_same(env_named, default_home)
+        out["home"] = default_home
+        out["step"] = "env" if from_env else "legacy"
+        return out
+
+    # --- step 5: terminus. `step` stays None; nothing else in this function
+    # may invent a home here, which is the whole point of naming the state.
+    return out
+
+
+def _refuse_ambiguous_lookup(look, sid) -> str:
+    """§5 step 2's *"two+ -> refuse naming all"*, rendered under §5's refusal
+    contract: *"Refusals print facts + the `fleet homes` view, never a
+    paste-ready command with a chosen home."*
+
+    ALL of them, not the first two and a count: the operator's next act is to
+    pick one, and a truncated list is a refusal that withholds the input to its
+    own remedy. The view is EMBEDDED rather than referenced, which is what
+    `render_homes_view()` was kept a pure function for -- a refusal that says
+    "run `fleet homes`" makes the operator run a second command to see the facts
+    that stopped the first one."""
+    homes = "\n".join(f"    {h}" for h in look["hits"])
+    return (f"session {sid} is a member of {len(look['hits'])} fleet homes, so "
+            f"no home can be resolved from membership alone:\n{homes}\n"
+            f"Name the one you mean with `--fleet-home <PATH>`.\n\n"
+            f"{render_homes_view()}")
+
+
+def resolution_provenance(res) -> str:
+    """One line naming the step that answered and the home it chose.
+
+    §5 requires disruptive verbs to *"render their resolution provenance in
+    output"* (a3 wires that); a2 owes the RENDERER and uses it for the witness
+    line and the terminus refusal, so a3 inherits one spelling rather than
+    inventing a second."""
+    step = res["step"]
+    if step is None:
+        return f"{NO_HOME_LINE} -- no flag, no membership, no initialized default"
+    where = {"flag": "--fleet-home", "lookup": "session membership",
+             "env": "$FLEET_HOME", "legacy": "the legacy install-root default"}[step]
+    return f"[fleet] home {Path(res['home']).as_posix()} (via {where})"
+
+
+def _terminus_refusal(command: str) -> str:
+    """§5 step 5: *"mutating verbs refuse with the named remedy (`--fleet-home`
+    or `FLEET_HOME`)"*. The remedy is NAMED, never pre-filled -- §5's refusal
+    contract bans *"a paste-ready command with a chosen home"*, because the one
+    thing fleet must not do at the terminus is pick a home for the operator."""
+    return (f"no fleet home resolved, so `{command}` has nowhere to act. No "
+            f"`--fleet-home`, no home whose registry claims this session, and "
+            f"the default home is not initialized (a directory whose "
+            f"`state/fleet.json` exists and parses). Name a home with "
+            f"`--fleet-home <PATH>` or `FLEET_HOME`.\n\n"
+            f"{render_homes_view()}")
+
+
+def _multi_fleet_population_is_live(look) -> bool:
+    """Is this machine in multi-fleet territory at all?
+
+    TRUE when the homes list names at least one home, or when it exists and
+    cannot be read (§4: an unreadable list is *"armed-with-unknown-population"*
+    -- indeterminacy never selects the permissive branch). FALSE on the machine
+    every operator has today: no list, one fleet, one home.
+
+    IT GATES THE TERMINUS ENFORCEMENT, AND ONLY THAT -- not the resolution,
+    which runs identically either way. Two measured reasons, both in the a2
+    report:
+
+      1. §5's arming paragraph binds this whole feature to *"with a determinate
+         population of <2: byte-identical to today (baseline `12c6521`)"*. A
+         refusal that fires on a single-fleet box is not byte-identical to
+         today, and the terminus is a refusal.
+      2. Pre-slice-(b) NOTHING CREATES `state/fleet.json` EXCEPT A SPAWN. A home
+         is "initialized" only once a registry exists, `fleet init` does not
+         write one (`home_is_initialized`'s own docstring pins this as the
+         ratified consequence), and an unconditional terminus therefore refuses
+         the only verb that could ever end the terminus. A fresh home would be
+         permanently unbootable. Slice (b)'s `init --home` is what closes that
+         hole; until it lands, gating here is the difference between a guard and
+         a brick.
+
+    This is NOT the arming rule (a3's): it counts homes and answers a yes/no
+    about which world we are in, it does not tier a verb or require a flag."""
+    if not look["list_ok"]:
+        return True
+    return [h for h in look["population"] if h != look["legacy"]] != []
+
+
+def apply_resolved_home(args, flag=None) -> int:
+    """Wire §5's order into `main()` and return an exit code, or None to let
+    dispatch proceed.
+
+    APPLIED BEFORE DISPATCH (§5 step 1's own words) and after `parse_args`,
+    because the disagreement clause needs `--yes` and the terminus needs to know
+    which verb is being run -- both of which live on the parsed namespace. No
+    `cmd_*` has run when this returns.
+
+    ASSIGNS `FLEET_HOME` ONLY FOR STEPS 1 AND 2. Steps 3 and 4 ARE the module
+    global's own import-time computation, so re-assigning them would be a no-op
+    in production and would overwrite the suite's monkeypatch in every test --
+    see `resolve_home`'s docstring. The invariant a reader should hold: this
+    function moves the home only when something NAMED one.
+
+    TOCTOU (§5.2): a lookup hit is re-asserted under the resolved home's own
+    `fleet.lock` by the mutating verb, not here. This is a lock-free read by
+    construction and says so."""
+    global FLEET_HOME
+    command = getattr(args, "command", None)
+
+    # THE ORDER DOES NOT APPLY TO THE VERBS THAT ACT ON THE MACHINE
+    # (`TERMINUS_EXEMPT_VERBS`), AND THIS CHECK IS FIRST FOR A REASON THAT COST
+    # ONE DRAFT ALREADY. Putting it after `resolve_home` fixed the terminus arm
+    # and left the OTHER deadlock standing: a sid claimed by two homes raises
+    # §5 step 2's ambiguity refusal for every verb, `fleet homes --retire` among
+    # them -- so the state whose only remedy is retiring one of the two homes
+    # would refuse the retirement. Both of the resolver's blocking states have
+    # `fleet homes` as their remedy, so `fleet homes` must sit above both.
+    #
+    # The FLAG is still validated and applied here: step 1's contract is the
+    # flag's, not the verb's, and silently ignoring a `--fleet-home` an operator
+    # typed is its own defect. What is skipped is the lookup, the terminus, and
+    # the two refusals -- none of which can tell this verb anything, because it
+    # does not act on a home.
+    if command in TERMINUS_EXEMPT_VERBS:
+        if flag is not None:
+            FLEET_HOME = validate_named_home(flag)
+        return None
+
+    res = resolve_home(flag=flag)
+
+    if res["step"] in ("flag", "lookup"):
+        if res["disagreement"] is not None:
+            witness = (f"[fleet] WITNESS: --fleet-home names "
+                       f"{Path(res['home']).as_posix()}, but this session is a "
+                       f"member of {Path(res['disagreement']).as_posix()}.")
+            if not getattr(args, "yes", False):
+                raise FleetCliError(
+                    f"{witness}\nRefusing to act on a home the flag and the "
+                    f"registry disagree about. Re-run with `--yes` to act on "
+                    f"the flag's home, or drop `--fleet-home` to act on the "
+                    f"home this session belongs to.\n\n{render_homes_view()}")
+            print(witness)
+        FLEET_HOME = Path(res["home"])
+        return None
+
+    if res["step"] is not None:
+        return None
+
+    # --- terminus (§5 step 5).
+    if not _multi_fleet_population_is_live(res["lookup"]):
+        return None
+    if command in TERMINUS_VIEW_VERBS and not getattr(args, "repair", False):
+        print(NO_HOME_LINE)
+        return 0
+    raise FleetCliError(_terminus_refusal(command))
+
+
+_GLOBAL_HOME_FLAG = "--fleet-home"
+
+
+def strip_global_fleet_home(argv: list) -> tuple:
+    """`(argv_without_the_flag, value_or_None)` -- the rb7 C-2 RECONCILIATION.
+
+    THE DEFECT, RESTATED FROM ITS OWN MEASUREMENT. argparse copies a
+    subparser's namespace over the parent's after parsing, so a dest owned by
+    BOTH the top-level parser and a verb is silently overwritten by the verb's
+    default: `['--fleet-home','H','autoclean']` yields None while
+    `['autoclean','--fleet-home','H']` yields `'H'`. `autoclean` has carried its
+    own `--fleet-home` since the Scheduled-Task era, so promoting a second copy
+    onto the top-level parser is what CREATES the collision -- the defect is
+    latent, not shipped (`tests/test_round7_defect_pins.py` B1, measured on both
+    floors).
+
+    WHY THIS AND NOT A TOP-LEVEL `add_argument`. §5 makes the flag step 1,
+    *"applied in `main()` before dispatch"*, and the pin's own docstring draws
+    the consequence: *"a value that depends on which side of the verb it was
+    typed cannot be step 1 of a resolution order"*. An argparse global CANNOT
+    deliver that -- optionals must precede the subcommand, so `fleet clean
+    --fleet-home H` is a usage error for every verb that does not redefine the
+    flag, which is 32 of 33. Consuming the token before the parser sees it is
+    the only mechanism that makes both spellings mean the same thing, and it
+    makes the collision STRUCTURALLY IMPOSSIBLE rather than merely linted: there
+    is no second dest to clobber, because there is no second dest.
+
+    `autoclean` KEEPS ITS FLAG, and that is not an oversight. It is the same
+    option string reaching the same resolution one layer earlier, so the verb's
+    documented contract still holds for every caller; direct `cmd_autoclean()`
+    callers (the suite, any in-process driver) still get their own override.
+    What can no longer happen is the two dests disagreeing.
+
+    Handles both `--fleet-home V` and `--fleet-home=V`, stops at a bare `--`
+    (argparse's end-of-options marker, after which a token is a value and not a
+    flag), and leaves a TRAILING valueless `--fleet-home` in place for argparse
+    to refuse with its ordinary usage error -- the same choice, for the same
+    reason, that `_absorb_minted_flag_values` makes one screen below.
+
+    Repeating the flag with two different values is REFUSED rather than
+    resolved by position, because picking one would be exactly the
+    luck-of-position semantics this function exists to delete."""
+    out, value, seen = [], None, False
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok == "--":
+            out.extend(argv[i:])
+            break
+        found = None
+        if tok == _GLOBAL_HOME_FLAG and i + 1 < len(argv):
+            found, i = argv[i + 1], i + 2
+        elif tok.startswith(_GLOBAL_HOME_FLAG + "="):
+            found, i = tok.split("=", 1)[1], i + 1
+        else:
+            out.append(tok)
+            i += 1
+            continue
+        if seen and found != value:
+            raise FleetCliError(
+                f"{_GLOBAL_HOME_FLAG} was given twice with different values "
+                f"({value!r} and {found!r}). One invocation names one home.")
+        value, seen = found, True
+    return out, (value if seen else None)
+
+
 def _supervisor_tier_snapshot(now=None) -> dict:
     """The command tier, projected for VIEWS (three-tier §3).
 
@@ -5222,13 +5746,27 @@ def cmd_homes(args) -> int:
     NO `mkdir` ON THE VALIDATION PATH (§Definitions: the no-mkdir rule binds
     resolution and read paths). Validation must not manufacture the thing it is
     validating -- `--add` on a typo'd path refuses, and leaves no directory
-    behind to make the typo look right the second time."""
-    target = getattr(args, "add", None) or getattr(args, "retire", None)
-    if target is None:
+    behind to make the typo look right the second time.
+
+    THE TWO ARGUMENTS ARE READ INDEPENDENTLY, not through an `or` (ga1 N1,
+    MEASURED). `args.add or args.retire` treats an EMPTY `--add` as absent,
+    because `""` is falsy -- so `fleet homes --add ""` fell into the view arm and
+    exited 0, rendering the list instead of refusing a write it never performed.
+    `--retire ""` refused correctly (`None or ""` is `""`), so the two spellings
+    of the same mistake disagreed. On this repo's own doctrine a refused write
+    reporting rc 0 and printing a view is absence presented as evidence."""
+    add, retire_arg = getattr(args, "add", None), getattr(args, "retire", None)
+    if add is None and retire_arg is None:
         print(render_homes_view(), end="")
         return 0
 
-    retire = getattr(args, "retire", None) is not None
+    retire = retire_arg is not None
+    target = retire_arg if retire else add
+    if not str(target).strip():
+        raise FleetCliError(
+            f"`fleet homes --{'retire' if retire else 'add'}` takes a home "
+            f"path and was given an empty value. Nothing was appended -- the "
+            f"list is append-only, so a record written by accident is permanent.")
     ident = home_identity(target)
     if not homes_path_is_absolute(ident) or _has_parent_segment(ident):
         raise FleetCliError(
@@ -7783,7 +8321,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # P1-6: `read_registry_no_repair`, NOT `load_registry`. This is a PRE-FLIGHT
-    # resolution that runs from `cmd_kill:7677` / `cmd_respawn:7419`, before
+    # resolution that runs from `cmd_kill:8215` / `cmd_respawn:7957`, before
     # either verb has taken `fleet.lock` -- and `load_registry` QUARANTINES a
     # corrupt registry, i.e. RENAMES IT ASIDE, which is a write. An unlocked
     # write races every other fleet command, and it destroys the evidence the
@@ -7846,10 +8384,10 @@ def _supervisor_lifecycle_target(verb, name):
     # P1-6: `read_registry_no_repair` -- `load_registry` MINUS the rename, with
     # the same missing-file contract, the same validator and the same
     # `RegistryCorruptError`, so the arm below is unchanged. This read runs from
-    # `cmd_kill:7677` / `cmd_respawn:7419`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:8215` / `cmd_respawn:7957`, ahead of either verb's `fleet_lock`,
     # and quarantining here did two things: it wrote without the lock, and it
     # STOLE the quarantine from the lock-held read that was designed to perform
-    # it. `cmd_respawn:7443-7445` spells out that design -- *"resolve under the
+    # it. `cmd_respawn:7981-7983` spells out that design -- *"resolve under the
     # lock so a corrupt registry surfaces through load_registry's quarantine"* --
     # and the theft is what falsified it: by the time the lock-held read ran the
     # file was ABSENT rather than corrupt, so `{"workers": {}}` came back and the
@@ -9837,7 +10375,19 @@ def cmd_autoclean(args, run=subprocess.run, which=shutil.which) -> int:
     both beat callers inherit a real environment, but the flag stays -- it is
     the only way any future headless or cross-home caller can name the home
     it means, and removing it would be a second surface change riding on
-    this one."""
+    this one.
+
+    SLICE a2 PROMOTED THE FLAG AND THIS BLOCK IS NO LONGER REACHED FROM
+    `main()`. `strip_global_fleet_home` takes `--fleet-home` out of argv from
+    EITHER position before the parser runs, so `args.fleet_home` is always None
+    on the `main()` path and §5's resolution has already moved `FLEET_HOME` by
+    the time this function starts. The subparser's own flag is kept, and this
+    block with it, for the callers that never go through `main()` -- the suite
+    and any in-process driver calling `cmd_autoclean(Namespace(...))` directly.
+    Two consequences worth stating rather than discovering: the two dests can no
+    longer disagree (that IS the rb7 C-2 reconciliation), and the validation an
+    operator now meets is §5 step 1's, which is STRICTER than the `is_dir`
+    below -- a named home must also be INITIALIZED."""
     fleet_home_override = getattr(args, "fleet_home", None)
     if fleet_home_override:
         # NEW-2 (re-review, LOW): resolve + validate, never use verbatim --
@@ -13903,9 +14453,12 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     is councilor 1's half of the same ruling. A bare `released_by_sid in
     live_sids` is what shipped, and `_record_sids`' own docstring says why it
     is wrong -- *"matching against `session_id` alone fails open on it
-    (ND4a)"* -- for the twelve other sites that already key on the union
-    (`:2774, :2855, :3116, :3266, :7817, :8137, :8418, :8636, :8723, :8946,
-    :9732, :13775`). B6 was the one
+    (ND4a)"* -- for the thirteen other sites that already key on the union
+    (`:2774, :2855, :3116, :3266, :4630, :8355, :8675, :8956, :9174, :9261,
+    :9484, :10270, :14325`). The thirteenth is multi-fleet §5 step 2's
+    membership test (slice a2), which is the same argument one plane out: a
+    home whose record was eagerly restamped would stop claiming its own
+    fork-steered body mid-rotation. B6 was the one
     roster comparison that did not, and §G-G measured it failing open exactly
     as predicted: the releaser fork-steered, so its record was eagerly
     restamped (`session_id` = post-fork, pre-fork sid pushed into
@@ -13917,8 +14470,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :6777, :7250, :11681,
-    :16977), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :7315, :7788, :12231,
+    :17530), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -14608,8 +15161,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:6777, :7250, :11681,
-    #     :16977) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:7315, :7788, :12231,
+    #     :17530) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -14642,7 +15195,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         #     file aside (`:1027`), which is a write. Routing the identity read
         #     through it made `fleet send` shred the operator's evidence from a
         #     path that promises to touch nothing; the helper exists for exactly
-        #     this and names this gate as its reason (`:13703`). A `None` here
+        #     this and names this gate as its reason (`:14253`). A `None` here
         #     still fails toward the gate -- an unreadable registry is reported
         #     by its own doctor row, and is never a reason to decide blind.
         #     MERGE NOTE (2026-07-27): main and `fix/identity-registry-judges`
@@ -15284,7 +15837,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # A worker whose own record sits inside the artifact upgrades the claim.
         #
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as `_sweep_husks`
-        # spells it at `:9696`. Not an mtime comparison: `os.rename` preserves
+        # spells it at `:10234`. Not an mtime comparison: `os.rename` preserves
         # mtime, so the artifact's mtime is the PRE-corruption write time and any
         # recreated registry is always newer -- the comparison would never fire
         # on the one bypass it exists to stop.
@@ -19862,7 +20415,17 @@ def cmd_q(args) -> int:
 # ---------------------------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="fleet", description="claude-fleet manager CLI")
+    # `--fleet-home <PATH>` is DELIBERATELY NOT an `add_argument` here, and the
+    # help text carries it instead. See `strip_global_fleet_home`: an argparse
+    # optional on this parser must precede the subcommand, which would make the
+    # flag's meaning depend on which side of the verb it was typed -- the exact
+    # luck-of-position semantics §5 step 1 forbids -- and would collide with
+    # `autoclean`'s own dest (rb7 C-2). `main()` consumes the token from argv
+    # before this parser ever sees it, from either position.
+    parser = argparse.ArgumentParser(
+        prog="fleet", description="claude-fleet manager CLI",
+        epilog="global: --fleet-home <PATH> selects which fleet home to act on "
+               "(accepted in any position; see docs/specs/multi-fleet.md §5)")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("home", help="print the resolved FLEET_HOME path")
@@ -20273,9 +20836,25 @@ def main(argv=None) -> int:
         except (AttributeError, ValueError, OSError):
             pass
     parser = build_parser()
-    args = parser.parse_args(_absorb_minted_flag_values(
-        sys.argv[1:] if argv is None else list(argv)))
+    raw_argv = sys.argv[1:] if argv is None else list(argv)
     try:
+        # §5 step 1 / rb7 C-2: the global home flag is taken out of argv BEFORE
+        # the parser runs, so no subparser dest can clobber it and neither
+        # position wins by luck. FleetCliError from here is caught below like
+        # any other refusal -- which is why the strip is inside the try and the
+        # parse is not (a usage error is argparse's exit 2, not fleet's exit 1).
+        stripped, home_flag = strip_global_fleet_home(raw_argv)
+    except FleetCliError as exc:
+        print(f"fleet: {exc}", file=sys.stderr)
+        return 1
+    args = parser.parse_args(_absorb_minted_flag_values(stripped))
+    try:
+        # §5's resolution order, applied before dispatch. Returns an exit code
+        # only at the terminus (§5 step 5: views render and exit 0); every other
+        # outcome either sets FLEET_HOME or refuses.
+        terminus_rc = apply_resolved_home(args, flag=home_flag)
+        if terminus_rc is not None:
+            return terminus_rc
         if args.command == "home":
             return cmd_home(args)
         if args.command == "knowledge":
