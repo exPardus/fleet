@@ -214,12 +214,29 @@ class TestGlobalPositionFleetHome:
         `--fleet-home` to be resolved in `main()` before dispatch -- a value that
         depends on which side of the verb it was typed cannot be step 1.
 
-        Passes today because the top-level parser owns no dests. It goes RED the
-        moment slice (a) promotes the flag the naive way, which is the only
-        moment it is needed."""
+        IT USED TO BE A NEGATIVE OVER AN EMPTY SET, and slice a1 fixed that
+        without shipping a2's flag. The top-level parser declares no OPTIONS, so
+        the set this iterated was literally empty and the assertion could not
+        fail for any parser whatsoever. But the top level does own one dest --
+        `command`, the subparsers action's own -- and it was being excluded by
+        the very `isinstance` filter that skips the subparsers ACTION. The
+        collision it hides is real and measured on both floors
+        (`test_the_command_dest_clobber_is_real_on_this_interpreter`): a verb
+        that defines `dest="command"` overwrites the verb NAME with its own
+        default, `main()`'s dispatch chain sees `args.command is None`, and the
+        verb becomes unreachable through its own flag.
+
+        So the set is non-empty TODAY, over all shipped verbs, and it grows
+        again the moment a2 promotes `--fleet-home`. Both readings of the
+        round-7 condition are served by one assertion."""
         top = fleet.build_parser()
         top_dests = {a.dest for a in top._actions
                      if not isinstance(a, argparse._SubParsersAction)} - {"help"}
+        top_dests |= {a.dest for a in top._actions
+                      if isinstance(a, argparse._SubParsersAction)} - {"help"}
+        assert top_dests, (
+            "the top-level parser owns no dests at all, so this assertion is "
+            "vacuous -- the subparsers action's own dest should be in here")
         offenders = {verb: sorted(_dests(sp) & top_dests)
                      for verb, sp in _verbs().items() if _dests(sp) & top_dests}
         assert not offenders, (
@@ -228,6 +245,48 @@ class TestGlobalPositionFleetHome:
             f"reconcile the dests explicitly (multi-fleet.md §5); do NOT pin a "
             f"winning position -- a home selector that depends on argv order is "
             f"how a destructive verb runs in the wrong fleet.")
+
+    def test_the_command_dest_clobber_is_real_on_this_interpreter(self):
+        """MEASURED, not asserted -- the reason `command` belongs in the set
+        above. The subparsers action sets the verb name on the namespace FIRST
+        and the subparser's namespace copy runs SECOND, so a verb that owns the
+        same dest overwrites the verb name with its own default.
+
+        Both floors agree; this test is what proves that, since it runs on both.
+        The consequence in this CLI specifically: `main()` dispatches on
+        `args.command`, so the verb would fall through every arm and exit 2 with
+        *"unknown command None"* -- a subcommand made unreachable by one of its
+        own flags."""
+        p = argparse.ArgumentParser(prog="fleet")
+        sub = p.add_subparsers(dest="command", required=True)
+        collides = sub.add_parser("go")
+        collides.add_argument("--command", dest="command", default=None)
+        sub.add_parser("clean")
+
+        assert p.parse_args(["go"]).command is None, (
+            "argparse no longer lets a subparser clobber the subparsers "
+            "action's own dest -- re-derive the lint above before trusting it")
+        assert p.parse_args(["clean"]).command == "clean"
+
+    def test_the_seed_the_detector_can_see_a_command_dest_collision(self, monkeypatch):
+        """THE SECOND SEED, for the half of the detector that is live TODAY.
+        `test_the_seed_the_collision_detector_can_see_a_collision` plants a
+        global `--fleet-home` -- i.e. it seeds the a2 shape. This one plants the
+        shape a1 can already reach: a shipped verb growing a `--command` flag.
+
+        Both seeds matter, because they exercise different halves of the derived
+        set and either half can rot to empty on its own."""
+        real = fleet.build_parser
+
+        def planted():
+            p = real()
+            _subparsers_action(p).choices["status"].add_argument(
+                "--command", dest="command", default=None)
+            return p
+
+        monkeypatch.setattr(fleet, "build_parser", planted)
+        with pytest.raises(AssertionError, match="status"):
+            TestGlobalPositionFleetHome().test_no_subparser_redefines_a_top_level_dest()
 
     def test_the_seed_the_collision_detector_can_see_a_collision(self, monkeypatch):
         """The lint above is a negative over a derived set -- the shape that
@@ -257,11 +316,28 @@ SPEC = REPO / "docs" / "specs" / "multi-fleet.md"
 RATIFIED_DESTRUCTIVE = ("clean", "archive", "autoclean",
                         "doctor --repair", "sup-handoff-abort")
 RATIFIED_DISRUPTIVE = ("kill", "interrupt", "send", "respawn", "release")
-RATIFIED_ORDINARY = ("spawn", "init", "status", "peek", "result")
+RATIFIED_ORDINARY = ("spawn", "init", "status", "peek", "result", "homes")
 
-# Named by the ratified table but NOT YET BUILT (slice (a)). Kept separate so the
-# "the table cites no dead verb" pin cannot be satisfied by an unbuilt name.
-RATIFIED_BUT_UNBUILT = ("homes",)
+# Named by the ratified table but NOT YET BUILT. Kept separate so the "the table
+# cites no dead verb" pin cannot be satisfied by an unbuilt name.
+#
+# `homes` LIVED HERE UNTIL SLICE a1 BUILT IT (2026-08-05) and moved, in the same
+# commit as the verb, to `RATIFIED_ORDINARY` -- §5's table classifies
+# `homes --add/--retire` as *"ordinary (list-reversible)"*, and that row is the
+# authority for where it goes, not this file.
+#
+# WHAT ACTUALLY CAUGHT THE STALENESS, measured before the move rather than
+# assumed: with `homes` shipped and this tuple untouched,
+# `test_every_shipped_verb_is_classified_or_declared_unclassified` went RED --
+# *"these verbs have no effect disposition: ['homes']"*. The pin that reads like
+# it should have caught it, `test_the_ratified_table_cites_no_verb_that_does_not_
+# exist`, did NOT and structurally cannot: it computes
+# `cited - set(_verbs()) - set(RATIFIED_BUT_UNBUILT)`, so every entry in this
+# tuple is subtracted straight back out and the tuple is invisible to it in both
+# directions. That is worth knowing before anyone leans on it for the next
+# unbuilt verb -- `TestRatifiedButUnbuiltIsWatchedBySomething` below pins which
+# assertion is actually load-bearing here.
+RATIFIED_BUT_UNBUILT = ()
 
 # Verbs `build_parser()` ships that the RATIFIED table classifies nowhere.
 #
@@ -356,6 +432,50 @@ class TestEveryShippedVerbHasAnEffectDisposition:
         with pytest.raises(AssertionError, match="obliterate"):
             TestEveryShippedVerbHasAnEffectDisposition() \
                 .test_every_shipped_verb_is_classified_or_declared_unclassified()
+
+
+class TestRatifiedButUnbuiltIsWatchedBySomething:
+    """WHICH ASSERTION ACTUALLY GUARDS `RATIFIED_BUT_UNBUILT`, measured when
+    slice a1 emptied it.
+
+    The tuple's own comment said it was kept separate *"so the 'the table cites
+    no dead verb' pin cannot be satisfied by an unbuilt name"* -- and that pin
+    subtracts the tuple back out of its own comparison, so it is blind to the
+    tuple in both directions. When `homes` shipped with the tuple untouched, the
+    assertion that went RED was `test_every_shipped_verb_is_classified_or_
+    declared_unclassified`. This records that, so the next unbuilt verb is
+    entered here knowing what will and will not notice it going stale."""
+
+    def test_a_stale_unbuilt_entry_is_caught_by_the_disposition_pin(self, monkeypatch):
+        """Plant the exact state a1 was in before its coupled edit: a verb that
+        SHIPS while still being listed as unbuilt and classified nowhere."""
+        real = fleet.build_parser
+
+        def planted():
+            p = real()
+            _subparsers_action(p).add_parser("adopt")
+            return p
+
+        monkeypatch.setattr(fleet, "build_parser", planted)
+        monkeypatch.setattr(__import__(__name__), "RATIFIED_BUT_UNBUILT", ("adopt",))
+        with pytest.raises(AssertionError, match="adopt"):
+            TestEveryShippedVerbHasAnEffectDisposition() \
+                .test_every_shipped_verb_is_classified_or_declared_unclassified()
+
+    def test_the_dead_verb_pin_is_blind_to_the_tuple_in_both_directions(self):
+        """The finding, as an executable statement rather than a comment. If
+        someone strengthens `test_the_ratified_table_cites_no_verb_that_does_
+        not_exist` so that it DOES see the tuple, this goes RED and the comment
+        above it has to be rewritten with it."""
+        import test_round7_defect_pins as me
+        src = Path(__file__).read_text(encoding="utf-8")
+        body = src.split("def test_the_ratified_table_cites_no_verb_that_does_not_exist")[1]
+        body = body.split("\n    def ")[0]
+        assert "- set(RATIFIED_BUT_UNBUILT)" in body and "| set(RATIFIED_BUT_UNBUILT)" in body, (
+            "the dead-verb pin no longer both adds and subtracts "
+            "RATIFIED_BUT_UNBUILT -- it may now be load-bearing for that tuple, "
+            "so re-read the comment on the tuple before trusting this file")
+        assert me.RATIFIED_BUT_UNBUILT == ()
 
 
 class TestDestructiveEnumerationsCarryTheRatifiedClass:
