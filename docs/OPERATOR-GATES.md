@@ -15,7 +15,7 @@ Neither the manager nor any worker may tick a box. An author never promotes its 
 
 ## Open
 
-- [ ] **The ratified §5 destructive row justifies `doctor --repair` with a reason that does not distinguish it from `peek` — how should that justification be restated?** *(Opened 2026-08-05 by operator ruling: E5 of the §5-criterion gate, split out as its own item when the other three sub-rulings were settled. A wording defect in ratified text, separable from any branch; no work is parked on it.)*
+- [ ] **The ratified §5 destructive row justifies `doctor --repair` with a reason that does not distinguish it from `peek`** *(Opened 2026-08-05 by operator ruling: E5 of the §5-criterion gate, split out as its own item when the other three sub-rulings were settled. A wording defect in ratified text, separable from any branch; no work is parked on it.)* — **how should that justification be restated**?
 
 *(**An empty docket is a legitimate state, not a parse failure:** `TestOperatorGatesFile` previously asserted the file always carries at least one open gate, which encoded the assumption that gates never all clear. That assertion was corrected in the same commit that emptied this section. Seventeen gates have been ruled across four in-session passes — 2026-07-27 morning and evening, the 2026-07-30 docket pass, and the 2026-07-31 ND4(c) ruling — all recorded under Settled below.)*
 
