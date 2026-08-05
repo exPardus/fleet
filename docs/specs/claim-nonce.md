@@ -334,10 +334,23 @@ $ grep -n "read_incarnation()" bin/fleet.py
 | 7137 | `cmd_sup_boot`, under `fleet_lock` | §6.1 (verdict order) |
 | 7181 | `_require_claim_holder` | §5.3 (validation) |
 | 7224 | `cmd_sup_status` — a lock-free view | §5.8 (projection) |
-| **7516** | **`supervisor_status_line`** — the nag consumed by `fleet doctor`, `sup-status`, **and the SessionStart hook in every Claude Code session on this machine** (`bin/hooks/sessionstart_fleet.py:126`, §4.8) | **§6.3 — and v2 assigned it to nobody, which is how N5 got in** |
+| **7516** | **`supervisor_status_line`** — the nag consumed by `fleet doctor` and `sup-status` (§4.8) | **§6.3 — and v2 assigned it to nobody, which is how N5 got in** |
 
 `7516` is the reason §6.3's released-claim key set is not a free choice: it is a reader that must
 tolerate the shape §6.3 introduces.
+
+**Currency note (2026-08-05, `w43-c337`): that consumer enumeration shrank from three to two, and the
+constraint survived the shrink.** The row used to name a third consumer — the SessionStart hook of
+every Claude Code session on this machine, cited as `bin/hooks/sessionstart_fleet.py:126`. That hook
+was deleted at `36a4c53` (*"feat(plugin)!: remove the SessionStart hook -- fleet is pull-only (D7)"*),
+so as a statement about the current tree the enumeration was false and the third consumer is dropped.
+**What does not change: `fleet doctor` and `sup-status` still read the nag**, so §6.3's released-claim
+key set is still not a free choice — the row's point holds with two consumers. The blast radius
+shrank from machine-wide to two verbs; the constraint did not. Receipts and quoted arguments
+elsewhere in this document still name the deleted hook (§4.8's block pinned `# at 091d5fa`, and §6.3's
+binding build rule quoting the review) and are deliberately **not** amended: a reference to a deleted
+file is only rot when it is a claim about the CURRENT tree; a pinned receipt and a quoted argument
+are claims about a PAST tree and are still true.
 
 ### 4.2 The sid equalities, and every caller of the claim guard
 
