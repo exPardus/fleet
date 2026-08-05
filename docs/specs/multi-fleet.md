@@ -240,17 +240,30 @@ match alone is not a licence.
 
 **The bound on E2: which appends count (operator ruling 2026-08-05, E2).** An irreversible
 append is an irreversible effect, and the record it must land in is one **§4 makes append-only
-and no shipped verb removes an entry from** — today that is `supervisor/JOURNAL.md`, reached by
-exactly six verbs (`sup-boot`, `sup-checkpoint`, `sup-release`, and all three handoff verbs;
-MEASURED at the landing tree by reverse BFS over the call graph to `supervisor_journal_append`,
-which reproduces the gate's count exactly). **The bound is load-bearing, not tidiness:** read
+and no shipped verb removes an entry from**. MEASURED at the landing tree, **two** records
+satisfy that test, and naming only the first would be an enumeration smaller than reality:
+
+1. `supervisor/JOURNAL.md`, reached by exactly six verbs (`sup-boot`, `sup-checkpoint`,
+   `sup-release`, and all three handoff verbs — reverse BFS over the call graph to
+   `supervisor_journal_append`, reproducing the gate's count exactly). Four were already
+   destructive on removal grounds, so **E2 moves exactly two**, and E3 collapses into it.
+2. `~/.claude/fleet-homes.list` — §4's *"append-only forever"* list, whose **retirement is
+   itself an append** (`!<home path>`), so only the FOLD is reversible and no entry is ever
+   removed. Measured: one reader, one writer (`append_home_record`), and a shipped lint
+   forbidding truncate/unlink/rename in any scope naming `homes_list_path`. **Its writer is
+   `homes --add/--retire`, which the RATIFIED ordinary row calls *ordinary (list-reversible)* —
+   so the ground and that row disagree, and THIS LANDING DOES NOT RESOLVE IT.** The ratified row
+   stands; the disagreement was opened the same day as its own operator docket item
+   (*reclassify `homes` under the E2 ground, or keep the ratified ordinary row?*). Recorded here
+   so the bound is not read as quietly exempting the second record — it does not.
+
+**The bound is load-bearing, not tidiness:** read
 without it, the ground reaches the outcome store — whose appending verbs are `kill`, `interrupt`
 and `respawn`, all three ratified **disruptive** — and a ground that promotes three ratified
 rows refutes the table it is required to reproduce. The outcome store is not that record
 because a shipped verb removes from it, and the destructive row names the verb in its own
 words: *"`clean` (journals, outcomes, records)"*. Same footing as X1–X4: **forced by a ratified
-row rather than chosen.** Four of the six were already destructive on removal grounds, so E2
-moves exactly two, and E3 collapses into it as the gate predicted.
+row rather than chosen.**
 
 > **PROPOSAL — RULED 2026-08-05 by the operator (`docs/OPERATOR-GATES.md`, first settled
 > entry). Kept as the record of the questions, never deleted; each carries its answer.**
