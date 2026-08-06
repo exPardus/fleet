@@ -27,10 +27,19 @@ defining_the_flag`), and the top-level parser defines no options at all beyond
 copy -- argparse refuses the whole invocation instead.
 
 So the defect is **LATENT, not shipped**: it is created by the act of promoting
-`--fleet-home` to a global flag (Sequencing slice (a)) while `autoclean` keeps
-its own. The clobber itself is real and is measured here on a synthetic parser
-rather than asserted, because that measurement is the entire justification for
-the lint below.
+`--fleet-home` to a global **argparse option** (Sequencing slice (a)) while
+`autoclean` keeps its own. The clobber itself is real and is measured here on a
+synthetic parser rather than asserted, because that measurement is the entire
+justification for the lint below.
+
+NOT EVERY PROMOTION TAKES THAT ROUTE, and the sentence above said "global flag"
+until 2026-08-06, which read as though every one did. MEASURED at slice a2's tip
+`39f84d0` (built, and NOT an ancestor of `main` at the time of writing): a2 made
+`--fleet-home` global by consuming the token in `main()` BEFORE the parser runs.
+Its top-level parser still declares only `-h/--help` and `autoclean` is still the
+only verb defining the flag, so a2 creates no second dest and no clobber. The
+latent defect is specific to the argparse route; a future slice can still take
+it, which is why the lint stays.
 
 WHY A LINT AND NOT A FIX. There is nothing to fix in slice 0 -- manufacturing
 the defect in order to fix it would be worse than the defect. What slice 0 owes
@@ -153,13 +162,28 @@ class TestGlobalPositionFleetHome:
         defining = sorted(verb for verb, sp in _verbs().items()
                           if "--fleet-home" in _option_strings(sp))
         assert defining == ["autoclean"], (
-            f"verbs defining --fleet-home: {defining}. If this grew, the global "
-            f"flag was promoted (slice (a)) or a second verb-local copy landed; "
-            f"either way re-read the collision lint below before proceeding.")
+            f"verbs defining --fleet-home: {defining}. If this grew, a second "
+            f"verb-local copy landed, or slice (a) promoted the flag BY ADDING "
+            f"A TOP-LEVEL ARGPARSE OPTION; either way re-read the collision "
+            f"lint below before proceeding. Do NOT read the converse: this "
+            f"census staying at ['autoclean'] is not evidence the flag is "
+            f"unpromoted. MEASURED at slice a2's tip 39f84d0 -- a2 made the "
+            f"flag global by consuming the token in `main()` BEFORE the parser "
+            f"runs, and this census is unchanged there.")
 
     def test_the_top_level_parser_defines_no_fleet_home_flag_today(self):
-        """The load-bearing half of the correction. `--fleet-home` is verb-local,
-        so there is no global value for a subparser namespace to clobber."""
+        """The load-bearing half of the correction. `--fleet-home` is verb-local
+        IN ARGPARSE, so there is no global value for a subparser namespace to
+        clobber -- the clobber needs two dests and there is only one.
+
+        "Verb-local" is a claim about the PARSER and must not be read as a claim
+        about the operator-visible CLI, because the two can already come apart.
+        MEASURED at slice a2's tip `39f84d0`: `--fleet-home` is global in every
+        operator-visible way there (accepted in both positions, and
+        `build_parser()`'s own epilog opens *"global: --fleet-home <PATH>"*)
+        while this assertion still holds, because a2 consumes the token in
+        `main()` instead of adding a top-level option. At `bc1ad91` -- where a2
+        has NOT landed -- both readings agree and both are true."""
         top = fleet.build_parser()
         top_opts = {o for a in top._actions
                     if not isinstance(a, argparse._SubParsersAction)
@@ -170,14 +194,43 @@ class TestGlobalPositionFleetHome:
         (["--fleet-home", "H", "autoclean"], "usage-error"),
         (["autoclean", "--fleet-home", "H"], "H"),
     ])
-    def test_shipped_behaviour_of_both_positions(self, argv, expected, capsys):
-        """What shipped code ACTUALLY does with both spellings, on this
-        interpreter. The global position is refused (exit 2), not silently
-        dropped -- which is the correction to the spec's `-> None today`.
+    def test_the_PARSER_refuses_the_global_position_and_accepts_the_verb_local(
+            self, argv, expected, capsys):
+        """WHAT LAYER THIS BINDS: `build_parser().parse_args()`, and only that.
+        The name says PARSER because the two layers can disagree, and a name is
+        read more often than a docstring.
 
-        This is the pin that flips the day slice (a) promotes the flag without
-        reconciling the dests: `--fleet-home H autoclean` would start PARSING,
-        and yield None."""
+        What the parser does, on this interpreter, both floors: the global
+        position is refused with exit 2, not silently dropped -- which is the
+        correction to the spec's `['--fleet-home','H','autoclean'] -> None
+        today`.
+
+        WHAT THE CLI DOES, which is a different question with a different
+        answer depending on the tree, all three MEASURED on 2026-08-06:
+
+          * at `bc1ad91` (this branch) and at `main` `b431a46` -- whose
+            `bin/fleet.py` blobs are IDENTICAL, `e642864` -- the CLI agrees with
+            the parser: `fleet --fleet-home <H> home` exits 2, because nothing
+            consumes the token before `parse_args`.
+          * at slice a2's tip `39f84d0`, which is NOT an ancestor of `main`, it
+            does not: both positions return rc 0 and resolve the home, because
+            a2's `main()` consumes `--fleet-home` BEFORE the parser runs. The
+            assertions below are untouched by that -- the layer they drive
+            never sees the token -- so this test stays green while the CLI
+            sentence above flips.
+
+        That gap is the point, and it is why the sentences are separated. Gate
+        `w45-ga2` §3 read the pre-2026-08-06 docstring -- *"what shipped code
+        ACTUALLY does ... the global position is refused"* -- against a2's tree
+        and correctly called it false THERE. It was still true here, which is
+        why this is a prose repair and not an assertion repair: a claim about
+        "shipped code" backed by parser-only evidence is one landing away from
+        being false, and the next reader is the one who pays.
+
+        This is also the pin that flips if slice (a) ever promotes the flag the
+        OTHER way -- a real top-level argparse option alongside `autoclean`'s.
+        Then `--fleet-home H autoclean` starts PARSING and yields None, which is
+        the clobber. a2 did not take that route; a future slice still can."""
         parser = fleet.build_parser()
         if expected == "usage-error":
             with pytest.raises(SystemExit) as exc:
@@ -271,8 +324,10 @@ class TestGlobalPositionFleetHome:
     def test_the_seed_the_detector_can_see_a_command_dest_collision(self, monkeypatch):
         """THE SECOND SEED, for the half of the detector that is live TODAY.
         `test_the_seed_the_collision_detector_can_see_a_collision` plants a
-        global `--fleet-home` -- i.e. it seeds the a2 shape. This one plants the
-        shape a1 can already reach: a shipped verb growing a `--command` flag.
+        top-level argparse `--fleet-home` -- the shape a promotion COULD take,
+        and the one a2 measurably did not (see that seed's own note). This one
+        plants the shape a1 can already reach: a shipped verb growing a
+        `--command` flag.
 
         Both seeds matter, because they exercise different halves of the derived
         set and either half can rot to empty on its own."""
@@ -290,8 +345,17 @@ class TestGlobalPositionFleetHome:
 
     def test_the_seed_the_collision_detector_can_see_a_collision(self, monkeypatch):
         """The lint above is a negative over a derived set -- the shape that
-        passes vacuously when the derivation rots. Plant the exact shape slice
-        (a) is about to build and prove the detector still says yes."""
+        passes vacuously when the derivation rots. Plant the collision shape and
+        prove the detector still says yes.
+
+        TENSE REPAIRED 2026-08-06: this said *"the exact shape slice (a) is
+        about to build"*. Slice a2 has since been built and DECLINED it --
+        MEASURED at `39f84d0`, the top-level parser's option strings are
+        `['--help','-h']` and `autoclean` is still the only verb defining
+        `--fleet-home`, because a2 made the flag global in `main()` rather than
+        in the parser. So this is no longer a prediction about a pending slice;
+        it is the shape any FUTURE promotion through argparse would take, and
+        the seed is unchanged and still load-bearing either way."""
         real = fleet.build_parser
 
         def planted():
@@ -531,6 +595,17 @@ class TestRatifiedTableIsTranscribedFaithfully:
             assert token in tuples, (
                 f"`{token}` is declared as diverging from the spec but is in "
                 f"none of the three tuples -- delete the entry")
+            # gpins F2. A divergence may only ADD flags to the tuple's token,
+            # never remove them. Without this the dict is a quiet lever that
+            # dissolves the distinction full-token comparison exists to keep:
+            # declare `"doctor --repair": "doctor"`, collapse §5's row to bare
+            # `doctor`, and both spec pins go green -- MEASURED, 271 passed,
+            # gpins §6's mutant I3. The dict's declared purpose is SPELLING,
+            # and a spelling that drops a flag is a reclassification.
+            assert spelling.startswith(token), (
+                f"`{token}` -> `{spelling}` REMOVES flags. A divergence may "
+                f"only add them; dropping one silently merges two effect "
+                f"classes that §5 keeps apart (gpins F2)")
             assert f"`{spelling}`" in _spec_row(tuples[token]), (
                 f"`{token}` is declared to appear in §5 as `{spelling}`, and "
                 f"the {tuples[token]} row does not contain that -- the spec "
