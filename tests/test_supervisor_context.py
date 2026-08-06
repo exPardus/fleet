@@ -359,6 +359,11 @@ class TestTheDoctrineSurfacesQuoteTheSHIPPEDBand:
     # A dated citation may state a dead number; a live instruction may not.
     _DATED = re.compile(r"\d{4}-\d{2}-\d{2}")
 
+    # Punctuation that ends the clause a date belongs to. The carve-out asks
+    # whether the date is dating THIS NUMBER, and a date on the far side of a
+    # colon, a bracket or a sentence end is dating something else.
+    _CLAUSE_BREAK = re.compile(r"[:;()\[\].!?—]")
+
     def _text(self, rel):
         return (REPO / rel).read_text(encoding="utf-8")
 
@@ -377,17 +382,64 @@ class TestTheDoctrineSurfacesQuoteTheSHIPPEDBand:
         return tuple(sorted(set(cls.SUPERSEDED_BAND_EDGES_K) - live))
 
     @classmethod
+    def _dated_in_the_same_clause(cls, line, edge):
+        """Is some date on this line DATING this particular dead edge?
+
+        True when no clause break sits between the two, in either order --
+        *"the 2026-07-14 300–500k band"* dates its number, *"(ratified
+        2026-07-23 ...): the supervisor enters its band at 150k"* does not.
+        """
+        for d in cls._DATED.finditer(line):
+            if d.end() <= edge.start():
+                between = line[d.end():edge.start()]
+            elif edge.end() <= d.start():
+                between = line[edge.end():d.start()]
+            else:
+                return True                       # overlapping; nothing between
+            if not cls._CLAUSE_BREAK.search(between):
+                return True
+        return False
+
+    @classmethod
     def _stale_edge_hits(cls, body):
         """`(line number, line)` per line stating a dead band edge UNDATED.
 
-        LINE-scoped, and that is the load-bearing choice rather than an
-        implementation detail. `supervisor.md`'s trigger paragraph OPENS with a
-        dated citation of the 2026-07-14 band (`supersedes the 2026-07-14
-        300–500k band`) and mutant D's revert lands one and two lines below it,
-        inside the same paragraph -- so a paragraph-scoped carve-out would wave
-        the mutant through on its neighbour's date. Stated plainly: a revert
-        that also writes a date onto its own line still escapes this, and that
-        is a deliberate act rather than the drift this catches.
+        CLAUSE-scoped since 2026-08-06, and both halves of that scope are
+        load-bearing measurements rather than taste.
+
+        NOT PARAGRAPH-SCOPED. `supervisor.md`'s trigger paragraph OPENS with a
+        dated citation of the 2026-07-14 band and gceil's mutant D lands one and
+        two lines below it, inside the same paragraph. MEASURED over the mutated
+        file: a paragraph scope waves through BOTH reverted lines (186 and 191),
+        not merely the one adjacent to the date.
+
+        NOT LINE-SCOPED EITHER, AND THAT WAS THIS PIN'S OWN GATING DEFECT.
+        Line scoping is what shipped at `bc1ad91`, and gate `w45-gpins` F1
+        measured what it cost: every band-bearing line of `skills/fleet/SKILL.md`
+        carries its ratification date INLINE -- it is a table row and a bullet,
+        so date and instruction share one line by construction -- so all three
+        were exempt and the `[skills/fleet/SKILL.md]` parameter could not fail
+        for the class it was built for. Mutant K1 put *"the supervisor enters
+        its band at **150k** ... hard ceiling **200k**"* on SKILL.md's live
+        trigger row and **713 tests passed**, every test in the tree that reads
+        that file. A green parameter over an uncoverable file reads as coverage
+        and is not.
+
+        So the question is no longer "is this line dated" but "is the date
+        dating THIS NUMBER". MEASURED when choosing the shape: on a clean tree
+        the only dead-edge occurrence on either surface is `supervisor.md:185`'s
+        `500k`, whose date sits 5 characters away with nothing between --
+        exempt under every candidate rule, so zero false positives. Under K1 the
+        nearest date is 41 characters from `150k` with `)` and `:` between.
+        The gate's suggested 40-character proximity rule also catches it, by
+        **one character**; a constant that close to its own mutant is tuned to
+        it. The clause rule needs no constant and names the real distinction.
+
+        THE RESIDUAL, STATED: a revert that writes a date into the SAME CLAUSE
+        as the dead number still escapes -- *"the 2026-08-05 150k ceiling"*
+        reads as dated history to this rule. That is a deliberate act, and
+        unlike the line-scoped residual it is not one the surfaces hand out for
+        free.
         """
         dead = cls._dead_edges()
         if not dead:
@@ -395,8 +447,12 @@ class TestTheDoctrineSurfacesQuoteTheSHIPPEDBand:
         alt = "|".join(str(k) for k in dead)
         # `(?<![\d,])` keeps `2,150,000` from reading as a `150,000`.
         edge = re.compile(rf"(?<![\d,])(?:{alt})(?:k\b|,000(?![\d,]))")
-        return [(i, ln) for i, ln in enumerate(body.splitlines(), start=1)
-                if edge.search(ln) and not cls._DATED.search(ln)]
+        hits = []
+        for i, ln in enumerate(body.splitlines(), start=1):
+            if any(not cls._dated_in_the_same_clause(ln, m)
+                   for m in edge.finditer(ln)):
+                hits.append((i, ln))
+        return hits
 
     @pytest.mark.parametrize("rel", SURFACES)
     def test_the_surface_states_both_shipped_bands(self, rel):
@@ -422,20 +478,27 @@ class TestTheDoctrineSurfacesQuoteTheSHIPPEDBand:
                 f"(operator ruling 2026-08-05 raised it).")
 
     @pytest.mark.parametrize("rel", SURFACES)
-    def test_no_superseded_band_EDGE_is_stated_undated(self, rel):
+    def test_no_superseded_band_EDGE_is_stated_as_live_doctrine(self, rel):
         """The assertion above, but on the spelling the surfaces actually use.
 
         These files write the trigger numbers as SEPARATE bold tokens
         (`**350k**` / `**400k**`), not as a joined band, so the joined-token
         assertion never looked at the sentence a supervisor actually reads.
+
+        NAMED FOR WHAT IT CHECKS, not for the mechanism it checks it with. It
+        was `..._is_stated_undated` while the carve-out was line-scoped; under
+        clause scoping a hit can sit on a line that IS dated (that is mutant
+        K1, and it is the whole of gpins F1), so a name promising "undated"
+        would describe a rule this no longer applies.
         """
         hits = self._stale_edge_hits(self._text(rel))
         assert not hits, (
-            f"{rel} states superseded band edge(s) {self._dead_edges()} on "
-            f"undated line(s) {[n for n, _ in hits]}: "
+            f"{rel} states superseded band edge(s) {self._dead_edges()} as "
+            f"live doctrine on line(s) {[n for n, _ in hits]}: "
             + " | ".join(ln.strip() for _, ln in hits)
-            + f" -- the 2026-08-05 ruling raised the band; a live instruction "
-              f"may not quote a dead edge. If the line is history, date it.")
+            + f" -- the 2026-08-05 ruling raised the band. A date elsewhere on "
+              f"the line does not make the number history: to state a dead "
+              f"edge, date it in the SAME CLAUSE as the number itself.")
 
     def test_the_dead_edge_set_SUBTRACTS_the_shipped_ones(self):
         """The derivation, pinned, because getting it wrong fails both ways.
@@ -486,11 +549,53 @@ class TestTheDoctrineSurfacesQuoteTheSHIPPEDBand:
         fuller = planted.replace("at 350k the hand-off", "at 150k the hand-off")
         assert [n for n, _ in self._stale_edge_hits(fuller)] == [1, 5, 6]
 
-        # The carve-out is real, and it is line-scoped rather than paragraph-
-        # scoped -- the same text with and without a date on its own line.
+        # The carve-out is real: the same numbers with and without a date
+        # dating them.
         assert not self._stale_edge_hits(
             "supersedes the 2026-07-14 300–500k band")
         assert self._stale_edge_hits("supersedes the 300–500k band")
+
+    def test_the_carve_out_does_not_exempt_a_DATED_LINE_that_instructs(self):
+        """MUTANT K1 — gate `w45-gpins` F1, the defect this pin shipped with.
+
+        Built from `SKILL.md`'s OWN live trigger row rather than from a quoted
+        copy, so it cannot drift into a strawman: take the shipped sentence,
+        swap the shipped supervisor edges for the superseded ones, and that is
+        K1. Under the line-scoped rule this survived 713 tests.
+        """
+        line = next(ln for ln in self._text("skills/fleet/SKILL.md").splitlines()
+                    if "enters its band at" in ln)
+        soft, hard = fleet.band_thresholds("supervisor")
+        k1 = (line.replace(f"**{soft // 1000}k**", "**150k**")
+                  .replace(f"**{hard // 1000}k**", "**200k**"))
+        assert k1 != line, (
+            "the substitution changed nothing. Either K1 is ALREADY ON DISK "
+            "(check `git status` -- a plant left behind), or SKILL.md's trigger "
+            "row no longer spells the supervisor edges as bold `**NNNk**` "
+            "tokens, in which case re-derive this seed against the row as it is "
+            "written now. Do not delete it.")
+
+        # The line IS dated, and that is exactly why the old rule let it past.
+        assert self._DATED.search(k1), (
+            "the row carries no inline date, so it is no longer the F1 shape")
+        assert self._stale_edge_hits(k1), (
+            "K1 is not caught: a dated line may not state a dead band edge as "
+            "a live instruction, whatever else the line dates")
+
+        # THE COUNTERFACTUAL THAT NAMES F1, run rather than asserted: the rule
+        # this pin shipped with at `bc1ad91`, applied to the same text.
+        def line_scoped_hits(body):
+            dead = "|".join(str(k) for k in self._dead_edges())
+            edge = re.compile(rf"(?<![\d,])(?:{dead})(?:k\b|,000(?![\d,]))")
+            return [i for i, ln in enumerate(body.splitlines(), start=1)
+                    if edge.search(ln) and not self._DATED.search(ln)]
+
+        assert line_scoped_hits(k1) == [], (
+            "the line-scoped rule no longer exempts K1, so this counterfactual "
+            "has stopped demonstrating F1 -- re-read gpins §3 before editing")
+
+        # And the shipped row, unmutated, stays green under the new rule.
+        assert not self._stale_edge_hits(line)
 
     def test_the_detector_can_see_a_stale_surface(self, tmp_path):
         # A doc-sync pin that cannot fail proves nothing. Seed the exact defect
