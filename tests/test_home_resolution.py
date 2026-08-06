@@ -157,6 +157,29 @@ class TestTheFlagIsValidatedInSpecOrder:
             "a refused --fleet-home must leave no directory behind to make the "
             "typo look right on the second run")
 
+    def test_the_not_a_directory_refusal_also_names_the_resolved_path(
+            self, tmp_path, monkeypatch):
+        """ga2 A8, CLOSED. `validate_named_home` refuses on three branches --
+        empty, not-a-directory, not-initialized -- and ga1 N5's resolve-BEFORE-
+        judge property was pinned on the third and on the success path, never on
+        the second. The gate's `G3-ORDER` mutant moved `is_dir` ahead of
+        `resolve()` so the refusal named the raw string `'nosuchdir'` instead of
+        `<cwd>/nosuchdir`, and 225 targeted tests passed under it.
+
+        THIS IS ga1 N5's OWN DEFECT SURVIVING ON THE SIBLING BRANCH OF THE
+        FUNCTION BUILT TO CLOSE IT -- this repo's named recurring class (fix the
+        reported site, miss the sibling) reappearing inside the fix. The
+        operator harm is the one N5 named: a refusal that says *"`.` is not a
+        directory"* has told the operator nothing, because which directory `.`
+        meant depends on where the shell was standing."""
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(fleet.FleetCliError) as exc:
+            fleet.validate_named_home("nosuchdir")
+        assert (tmp_path / "nosuchdir").resolve().as_posix().replace(
+            "/", os.sep) in str(exc.value).replace("/", os.sep), (
+            "the not-a-directory refusal names the typed string, not the "
+            "resolved path -- `is_dir` is being judged before `resolve()`")
+
     def test_a_nonexistent_path_is_refused_and_nothing_is_created(self, tmp_path):
         missing = tmp_path / "nope" / "deeper"
         with pytest.raises(fleet.FleetCliError, match="does not exist"):
@@ -651,10 +674,85 @@ class TestTheTerminus:
     def test_the_view_set_is_not_the_verb_effect_table(self):
         """a3 owns the ratified tiering. If someone later points this tuple at
         `RATIFIED_ORDINARY`, `spawn` and `init` become views at the terminus and
-        write into a directory no step selected."""
-        for verb in ("spawn", "init", "kill", "clean", "archive", "index",
-                     "respawn", "send", "sup-boot"):
-            assert verb not in fleet.TERMINUS_VIEW_VERBS
+        write into a directory no step selected.
+
+        ga2 A1, CLOSED, AND THE FIX IS THE DERIVATION RATHER THAN A LONGER
+        LIST. This asserted absence for exactly NINE hand-listed verbs, and the
+        gate measured what that left open: adding `"autoclean"` -- a RATIFIED
+        DESTRUCTIVE verb -- to `TERMINUS_VIEW_VERBS` made `fleet autoclean`
+        render `[fleet]: no home` and exit 0 at the terminus while the full
+        suite read `3999 passed, 14 skipped, 1 xfailed`, byte-identical to the
+        clean floor. Nine of the twenty-three classified verbs were watched;
+        ten of the unwatched fourteen were ratified destructive. The tuple's
+        docstring defends the DEFAULT (absence => refuse), which holds; what was
+        unguarded was ADDITION.
+
+        A hand list cannot close that -- a longer hand list is the same defect
+        with a later expiry date, and this repo's named recurring class is
+        exactly an enumeration smaller than reality. The forbidden set is now
+        DERIVED from the tiering itself, so a verb classified destructive or
+        disruptive tomorrow is forbidden here the moment it is classified,
+        without anyone remembering to come back."""
+        tokens = fleet.VERB_EFFECT_DESTRUCTIVE + fleet.VERB_EFFECT_DISRUPTIVE
+        forbidden = {t for t in tokens if " " not in t}
+        assert len(forbidden) >= 17, "the derivation went vacuous"
+        leaked = sorted(forbidden & set(fleet.TERMINUS_VIEW_VERBS))
+        assert not leaked, (
+            f"{leaked} are ratified destructive/disruptive and are in "
+            f"`TERMINUS_VIEW_VERBS`, so at the terminus they would render "
+            f"`{fleet.NO_HOME_LINE}` and exit 0 instead of refusing")
+
+    def test_a_flag_qualified_row_reaches_the_terminus_through_a_carve_out(self):
+        """THE HALF THE DERIVATION ABOVE CANNOT DO, AND IT IS NOT A DETAIL --
+        it is what the ga2 A1 remedy gets wrong if applied literally.
+
+        Two ratified rows carry a FLAG (`doctor --repair`, `sup-decision
+        --clear`), so at verb granularity the derived set forbids `doctor` --
+        and `doctor` is in `TERMINUS_VIEW_VERBS` deliberately and correctly,
+        because `doctor` reports and only `doctor --repair` renames a registry
+        aside. Forbidding the bare verb would delete a2's own pinned split
+        (`test_doctor_repair_is_not_a_view_at_the_terminus`) in the name of
+        closing a gap.
+
+        So the derivation covers the BARE tokens, and this covers the other
+        kind: every flag-qualified row whose verb IS a terminus view must have
+        its dest checked in `apply_resolved_home`, or the flag reaches the view
+        arm and the destructive form renders `[fleet]: no home` and exits 0.
+        Derived from the source, so the third such row is caught the day it is
+        transcribed."""
+        import inspect
+        body = inspect.getsource(fleet.apply_resolved_home)
+        for token in (fleet.VERB_EFFECT_DESTRUCTIVE
+                      + fleet.VERB_EFFECT_DISRUPTIVE):
+            if " " not in token:
+                continue
+            verb, flag = token.split()[0], token.split()[1]
+            if verb not in fleet.TERMINUS_VIEW_VERBS:
+                continue
+            dest = flag.lstrip("-").replace("-", "_")
+            assert f'"{dest}"' in body, (
+                f"`{token}` is ratified destructive/disruptive and `{verb}` is "
+                f"a terminus view, but `apply_resolved_home` never reads "
+                f"`{dest}` -- so `fleet {verb} {flag}` renders "
+                f"`{fleet.NO_HOME_LINE}` and exits 0 at the terminus")
+
+    def test_the_seed_the_derived_forbidden_set_can_see_a_leak(self,
+                                                               monkeypatch):
+        """A negative over a derived set proves nothing until it is shown
+        firing, and the mutant the gate planted is the exact shape to plant:
+        one ratified-destructive verb added to the view tuple."""
+        monkeypatch.setattr(fleet, "TERMINUS_VIEW_VERBS",
+                            fleet.TERMINUS_VIEW_VERBS + ("autoclean",))
+        with pytest.raises(AssertionError, match="autoclean"):
+            TestTheTerminus().test_the_view_set_is_not_the_verb_effect_table()
+
+    def test_the_seed_the_carve_out_check_can_see_a_missing_one(self,
+                                                                monkeypatch):
+        monkeypatch.setattr(fleet, "TERMINUS_VIEW_VERBS",
+                            fleet.TERMINUS_VIEW_VERBS + ("sup-decision",))
+        with pytest.raises(AssertionError, match="sup-decision --clear"):
+            TestTheTerminus() \
+                .test_a_flag_qualified_row_reaches_the_terminus_through_a_carve_out()
 
 
 class TestTheFlagLookupDisagreement:
@@ -697,6 +795,75 @@ class TestTheFlagLookupDisagreement:
         assert b.resolve().as_posix() in out and a.resolve().as_posix() in out
 
 
+class TestTheAmbiguousLookupIsAlsoADisagreement:
+    """ga2 A2, CLOSED. §5 step 1's clause is unconditional -- *"Flag/lookup
+    disagreement -> mutating verbs refuse without `--yes` + witness line"* --
+    and a2 computed `disagreement` only when `look["state"] == "hit"`. The gate
+    measured the consequence: with `--fleet-home C` and a sid claimed by A AND
+    B, `fleet --fleet-home C clean` returned rc 0 with no witness line and no
+    `--yes` required. A session belonging to two homes, told to act on a third,
+    is the strongest disagreement this resolver can see and it was silent.
+
+    WHY THIS IS CLOSED RATHER THAN ESCALATED. The gate called shipped behaviour
+    *"arguably defensible"* because the ambiguity refusal's own remedy text is
+    *"Name the one you mean with `--fleet-home <PATH>`"*, so the flag is the
+    sanctioned escape. That argument licenses exactly one case -- the flag
+    naming ONE OF the claimants -- and the tests below keep that case silent
+    while refusing the case the argument never covered, where the flag names a
+    home no claimant is. Both halves are pinned, so a later reading cannot
+    collapse them into either extreme."""
+
+    def test_a_third_home_is_a_disagreement_naming_every_claimant(
+            self, home, sandboxed_list):
+        a = home("A", {"w": _rec("SID-1")})
+        b = home("B", {"x": _rec("SID-1")})
+        c = home("C")
+        _list(sandboxed_list, a, b)
+        res = fleet.resolve_home(flag=str(c), sid="SID-1", default_home=a)
+        assert res["lookup"]["state"] == "ambiguous"
+        assert res["disagreement"] is not None
+        assert set(res["disagreement_homes"]) == {fleet.home_identity(a),
+                                                  fleet.home_identity(b)}
+
+    def test_a_mutating_verb_refuses_and_the_witness_names_both(
+            self, home, sandboxed_list, monkeypatch, capsys):
+        a = home("A", {"w": _rec("SID-1")})
+        b = home("B", {"x": _rec("SID-1")})
+        c = home("C")
+        _list(sandboxed_list, a, b)
+        monkeypatch.setattr(fleet, "FLEET_HOME", a)
+        assert _run(["--fleet-home", str(c), "clean"], monkeypatch,
+                    sid="SID-1") == 1
+        err = capsys.readouterr().err
+        assert "WITNESS" in err
+        assert a.resolve().as_posix() in err and b.resolve().as_posix() in err
+
+    def test_naming_one_of_the_claimants_is_the_sanctioned_escape(
+            self, home, sandboxed_list, monkeypatch, capsys):
+        """THE HALF THE FIX MUST NOT EAT. The ambiguity refusal tells the
+        operator to name one; if naming one then refused as a disagreement, the
+        refusal's own remedy would be unreachable -- the same shape as the
+        deadlock a2 shipped twice with `fleet homes`."""
+        a = home("A", {"w": _rec("SID-1")})
+        b = home("B", {"x": _rec("SID-1")})
+        _list(sandboxed_list, a, b)
+        monkeypatch.setattr(fleet, "FLEET_HOME", a)
+        res = fleet.resolve_home(flag=str(b), sid="SID-1", default_home=a)
+        assert res["disagreement"] is None
+        assert _run(["--fleet-home", str(b), "home"], monkeypatch,
+                    sid="SID-1") == 0
+        assert capsys.readouterr().out.strip() == b.resolve().as_posix()
+
+    def test_a_miss_is_still_not_a_disagreement(self, home, sandboxed_list):
+        """A sid nothing claims disagrees with nothing. v6's miss-refusal is
+        DELETED and this fix must not smuggle it back in through step 1."""
+        a, b = home("A"), home("B")
+        _list(sandboxed_list, a)
+        res = fleet.resolve_home(flag=str(b), sid="SID-NOBODY", default_home=a)
+        assert res["lookup"]["state"] == "miss"
+        assert res["disagreement"] is None
+
+
 class TestProvenanceRendering:
     @pytest.mark.parametrize("step,needle", [
         ("flag", "--fleet-home"), ("lookup", "session membership"),
@@ -709,6 +876,125 @@ class TestProvenanceRendering:
     def test_the_terminus_renders_the_specs_own_words(self):
         assert fleet.resolution_provenance(
             {"step": None, "home": None}).startswith(fleet.NO_HOME_LINE)
+
+    def test_unreadable_homes_are_reported_in_the_provenance(
+            self, home, sandboxed_list, monkeypatch):
+        """ga2 A3, CLOSED. §5:154-155 is a three-clause sentence -- *"Unreadable
+        homes: reported in provenance, counted by arming, and any lookup that
+        WOULD have matched only an unreadable home is indistinguishable from a
+        miss"* -- and a2 shipped the second and dropped the first: the lookup
+        record carried `unreadable=['U']` while this renderer printed
+        `"[fleet] home .../R (via session membership)"` and never mentioned it.
+
+        It matters more than a missing word. The unreadable home is precisely
+        the one that could have been claiming this session, so a provenance line
+        that omits it presents a resolution as unambiguous when the resolver
+        knows it is not -- and since a2's §10 tells a3 to REUSE this renderer
+        rather than mint a second spelling, following that instruction with the
+        clause unmet would have shipped §5's requirement unimplemented on every
+        surface at once."""
+        r = home("R", {"w": _rec("SID-1")})
+        u = home("U")
+        _list(sandboxed_list, r, u)
+        real = fleet.read_registry_at
+        monkeypatch.setattr(
+            fleet, "read_registry_at",
+            lambda h: (False, "unreadable", {"workers": {}})
+            if fleet.home_identity(h) == fleet.home_identity(u) else real(h))
+        res = fleet.resolve_home(sid="SID-1", default_home=r)
+        line = fleet.resolution_provenance(res)
+        assert res["step"] == "lookup"
+        assert fleet.home_identity(u) in line
+
+    def test_a_record_with_no_lookup_still_renders(self, tmp_path):
+        """The renderer serves hand-built records (the parametrised test above
+        passes one) and is called from a refusal path. A view that raised on a
+        missing key would be a view that fails."""
+        assert "[fleet] home" in fleet.resolution_provenance(
+            {"step": "legacy", "home": tmp_path})
+
+
+class TestTheComparatorErrsTowardArming:
+    """ga2 A9. `homes_are_same`'s docstring claims *"A comparison it cannot make
+    answers False -- two homes it cannot prove identical are treated as
+    different, which OVER-counts distinctness and therefore errs toward arming,
+    the direction §5 requires"*. The gate flipped BOTH `except` arms to `return
+    True` and the full suite stayed `3999 passed, 14 skipped, 1 xfailed`: the
+    claim was made in words and backed by nothing.
+
+    REACHABILITY IS LOW AND THAT IS NOT THE POINT. Every caller today passes
+    strings or `Path`s and `resolve()` rarely raises on Windows -- but this
+    comparator is what merges two spellings of one directory into one hit, so
+    an arm that answers True on an error turns two distinct homes into one and
+    the ambiguity refusal fails open. a3 makes the comparator load-bearing in a
+    second place (arming counts DISTINCT homes), which is why the claim now gets
+    a pin rather than a docstring."""
+
+    def test_an_uncomparable_value_is_not_the_same_home(self):
+        assert fleet.homes_are_same(object(), "C:/f") is False
+
+    class _Planted:
+        """A duck for `fleet.Path`, DELIBERATELY NOT A `Path` SUBCLASS.
+
+        MEASURED, and it is the reason this note exists rather than a neater
+        subclass: `class Exploding(Path)` is fine on py 3.13 and raises
+        `AttributeError` out of `pathlib.py:585` on py 3.10, which does not
+        support subclassing `Path`. Both of these tests passed on 3.13 and
+        failed on 3.10 in that shape -- this repo's floor is `py -3.10` and a
+        green 3.13 certifies nothing. `homes_are_same` only ever calls
+        `exists`, `samefile`, `resolve` and `str`, so a duck covers it on both
+        interpreters."""
+
+        def __init__(self, raw, exists=True, samefile=None, resolve=None):
+            self.raw = str(raw)
+            self._exists = exists
+            self._samefile = samefile
+            self._resolve = resolve
+
+        def __str__(self):
+            return self.raw
+
+        def exists(self):
+            return self._exists
+
+        def samefile(self, other):
+            if self._samefile is not None:
+                raise self._samefile
+            return self.raw == str(other)
+
+        def resolve(self):
+            if self._resolve is not None:
+                raise self._resolve
+            return self.raw
+
+    def test_a_samefile_that_raises_falls_to_the_fallback_not_to_true(
+            self, tmp_path, monkeypatch):
+        """THE FIRST `except` ARM, and the reason it needs two DIFFERENT
+        directories: the arm is a `pass`, so a `samefile()` that raises merely
+        drops through to the `normcase(resolve())` fallback -- which is correct
+        behaviour and answers on its own evidence. What the mutant does is
+        `return True` from there, and only a pair the fallback would call
+        DIFFERENT can tell those two apart. A pair it would call the same
+        passes under both."""
+        monkeypatch.setattr(
+            fleet, "Path",
+            lambda raw: self._Planted(raw, samefile=OSError("planted")))
+        assert fleet.homes_are_same(tmp_path / "a", tmp_path / "b") is False, (
+            "`samefile` raised and the answer was True -- two distinct homes "
+            "merged into one hit, which is the ambiguity refusal failing open")
+
+    def test_a_resolve_that_raises_answers_false(self, monkeypatch):
+        """THE SECOND `except` ARM. Here there is no further fallback, so the
+        docstring's claim is the whole behaviour: a comparison that cannot be
+        made answers False and over-counts distinctness."""
+        monkeypatch.setattr(
+            fleet, "Path",
+            lambda raw: self._Planted(raw, exists=False,
+                                      resolve=OSError("planted")))
+        assert fleet.homes_are_same("C:/f", "C:/f") is False, (
+            "a comparison that could not be made answered True, which merges "
+            "two homes the resolver has not proved identical -- the ambiguity "
+            "refusal failing open")
 
 
 # ---------------------------------------------------------------------------
