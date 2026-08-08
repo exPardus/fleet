@@ -428,3 +428,165 @@ prediction was 6 failures and the measurement was 8.** I scoped the out-of-fence
 the file the brief named instead of from the floor. The fix and its pins are unaffected — the two
 extra failures are the same citation rot, now in §6 — but a lane that mispredicts its own blast
 radius by a third has not earned the gate's trust on the parts of §1 it could only reason about.
+
+---
+
+## 10. The citation re-pin, closed on this branch — MEASURED
+
+§6 left this as an owed landing edit, correctly under the original fence and correctly reasoned:
+the offsets were relative to `e0bdd97` and `bin/fleet.py` was moving. The manager reopened the lane
+on the ground that it has stopped moving. **Verified before acting, not assumed:** `main` is
+`f8c4b81`, the only commit since `e0bdd97` is `docs(w47): journal through the wave-47 close`
+touching `supervisor/JOURNAL.md` (+53) and nothing else, so main's `bin/fleet.py` is byte-identical
+to my base's and nothing shifts under this edit.
+
+### 10a. §6 UNDERCOUNTED THE OWED EDIT BY MORE THAN HALF
+
+**§6 said "+36 to 21 citation numbers across 7 sites". The real population is 43 number rewrites
+across 25 lines and ~20 citing sites.** §6's tables were built from the *failing tests*, and a
+failing-test list is a **lower bound, never a census** — several of those assertions stop at the
+first bad number, so the rot behind them was never printed. §5 already recorded that I scoped the
+blast radius from the brief instead of the floor; this is the same error one level in, and it is
+the second time in this lane that reading a red test list as a census cost me a correct count. The
+population used for the re-pin came from the pin's own classifier instead, which is the only thing
+that enumerates *all* self-citations rather than the ones that happened to fail first.
+
+The undercount also propagated: the manager's re-dispatch says "the 21 numbers across 7 sites"
+because it is quoting §6. The number to carry forward is **43 across 25 lines**.
+
+### 10b. Method — alignment and content, never a constant
+
+`+36` was the right answer for every citation here, and it is still not how the edit was made. A
+constant is a citation *generator*: it emits a number for every input, including inputs whose
+target was deleted, edited, or never correct, so it cannot fail and therefore cannot tell you it
+was wrong. The tool (`repin.py`, throwaway, not committed) instead:
+
+1. **Aligns** base `e0bdd97` against the current file with
+   `difflib.SequenceMatcher(..., autojunk=False)` and builds a base-lineno → current-lineno map
+   from the `equal` opcodes only. `autojunk=False` is load-bearing: at 21k lines the default
+   popularity heuristic treats the thousands of identical blank lines as junk and shreds the
+   alignment. MEASURED: `21403 of 21403 base lines aligned`.
+2. **Seed-tests its own scanner.** The classifier is a copy of the pin's, and a copy that drifts
+   would re-pin a different population than the pin measures — so the tool imports
+   `tests/test_self_citations.py` and asserts its population equals that module's `SELF_CITATIONS`
+   on the current file. MEASURED: `seed test OK: 42 self-citations, identical to the pin's set`.
+   Without this the tool is exactly the scanner-that-finds-nothing this repo built
+   `tools/verify_receipts.py --self-test` to prevent.
+3. **Content-verifies every single rewrite.** The base line's text must be byte-identical to the
+   text now sitting at the mapped line, or the rewrite is REFUSED rather than guessed. MEASURED:
+   `refused: 0`. The premise this rests on is measured, not assumed: at `e0bdd97` the floor was
+   4136 passed / **0 failed**, so every citation was correct at base.
+
+The targets confirm the mapping semantically, not just positionally — the nine
+quarantine-artifact citations all land on `… = _quarantine_artifacts()` call lines, the thirteen
+`_releaser_is_roster_live` citations all land on `_record_sids(…)` reads, and the four
+`retired_sids` citations all land on `…["retired_sids"] = …` writes, which is independently what
+`test_retired_sid_citations.py::_WRITE_RE` requires.
+
+**Neither pin file was edited.** Both derive their expectations from `bin/fleet.py` at run time —
+`test_self_citations.py` says so in its own docstring ("Change the number in `bin/fleet.py`;
+nothing here moves") — so the entire repair is 25 prose lines in `bin/fleet.py`. MEASURED:
+`git diff` on the re-pin is `25 insertions(+), 25 deletions(-)`, every changed line a docstring or
+comment, no code line touched, and the `three-tier-command.md` ranges deliberately untouched.
+
+### 10c. A CRLF hazard the tool would have caused, caught before applying — MEASURED
+
+The working tree is **21438 CRLF, 0 bare LF** (`core.autocrlf=true`), while `git show` returns the
+blob with LF. The first draft of the tool read with `read_text()` (which normalises CRLF → LF) and
+wrote with `newline=""`, which would have **rewritten all 21438 line endings** and buried a
+25-line repair inside a whole-file diff. Fixed by reading and writing with `newline=""` and
+asserting, before the write lands, that the CRLF count and the line count are both unchanged. Any
+later lane doing a mechanical edit to this file on Windows should assume this hazard rather than
+discover it.
+
+### 10d. The ranged form — the manager's warning was live, and there is exactly one
+
+The homes lane's warning applies here. `_NUMBER_RE` is `:(\d+)`, so in `` `name:START-END` `` the
+END carries no colon and **no test has ever seen it**. Swept explicitly:
+
+```
+fleet.py:8879:  `cmd_respawn:8434-8436`   ->  `cmd_respawn:8470-8472`
+```
+
+Verified by the citation's *own quoted text*, which is the strongest content check available
+anywhere in this repair: the sentence quotes *"resolve under the lock so a corrupt registry
+surfaces through load_registry's quarantine"*, and lines 8470-8472 are exactly that three-line
+comment, sitting inside `cmd_respawn` — the function the citation names.
+
+An independent sweep for `:\d+[-–—]\d+` across the whole file found **11** ranged forms. One is the
+self-citation above; the other ten are other-document (`SPEC:1196-1198`, `SPEC:1175-1179`,
+`SPEC:1224-1229`, `CN:1671-1675`, `SPAWN:461-471`, and four `three-tier-command.md` ranges) and are
+correctly excluded by the classifier and correctly absent from the diff. **A `+36` sweep over
+ranged numbers would have corrupted all ten of those**, which is the concrete form of the harm the
+"never add a constant" rule prevents.
+
+### 10e. Fixpoint
+
+Pin files green on pass 1 and re-run to confirm stability: `21 passed` on `py -3.13` (twice) and
+`21 passed` on `py -3.10`. Pass 1 was already clean because the whole population was repaired at
+once rather than only the reported failures — repairing only the failures is precisely what makes
+a landing here need six passes.
+
+One caveat for anyone re-running the tool: it maps *base* numbers to *current* ones, so it is not
+idempotent by design. Running it again after a successful apply would shift the now-correct numbers
+a second time. The fixpoint oracle is the pin files and the floor, not a second run of the tool.
+
+### 10f. Floors after the re-pin — predicted, then measured
+
+Predicted before running, and I agreed with the manager's prediction: collected **4154**, and
+**4139 passed / 14 skipped / 1 xfailed / 0 failed** — the eight citation failures were the only red
+in §5, and changing digits inside comments can neither add nor remove a test.
+
+| | collected | passed | skipped | xfailed | failed |
+|---|---|---|---|---|---|
+| `py -3.13` | **4154** | **4139** | 14 | 1 | **0** (373.27s) |
+| `py -3.10` | **4154** | **4139** | 14 | 1 | **0** (339.25s) |
+
+**Prediction met exactly, on both interpreters, on every field.** Collection re-derived with
+`--collect-only` rather than inferred from the run: `4154 tests collected` on both. The branch is
+green — the lane no longer owes a landing edit, and the merge lands green instead of landing red
+and being repaired in place.
+
+For the record against §5's baseline: base was 4136 passed / 0 failed at 4151 collected; the branch
+is 4139 passed / 0 failed at 4154 collected. **+3 collected, +3 passed, no test changed state in
+any other direction.**
+
+---
+
+## 11. Conclusion
+
+The lane's fix is three lines of behaviour behind twenty-nine of explanation: an
+`except PermissionError` arm that treats a denied open as contention **only when the lock file is
+actually there**, and re-raises immediately when it is not. It removes a real production crash path
+— a raw `OSError` escaping `fleet_lock`'s "acquire, or raise `FleetLockTimeout`" contract and
+taking `clean`/`kill`/`archive`/`spawn`/`send`/`respawn`/`resume-limited` and the `sup-*` family
+with it — without a platform branch, without touching any existing arm, and without converting a
+genuine permissions fault into a slow lie. Both floors are green on both interpreters, and the
+citation re-pin that this work owed is closed on this branch rather than left for the merge.
+
+**The one thing a reader should carry out of this report is not the fix. It is §7.**
+
+`unlink()` on a delete-pending name raises `PermissionError` too — MEASURED, errno 13 / WinError 5,
+on both interpreters. The stale-break arm still does:
+
+```python
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+```
+
+so a lock file that is **both** older than `LOCK_STALE_SECONDS` **and** delete-pending escapes
+`fleet_lock` exactly the way this lane's defect did, three statements further down. It is
+**not a regression** — today that state escapes one statement *earlier*, at the `os.open`, so this
+lane strictly reduces the exposure — and it was left alone deliberately under mandate 4, because
+the fix did not require touching it and that arm belongs to whoever owns it. But the same shape is
+still in the function, it is now the *only* uncaught `PermissionError` left on the acquisition
+path, and the next reader should not have to find it in a numbered appendix. The repair is small
+(widen that `except` and let the loop `continue`, which the deadline already bounds); the reason it
+is not in this diff is fence discipline, not doubt about whether it is real.
+
+Second thing to carry: **twice in this lane I read a red test list as a census and got the count
+wrong** — §5 (predicted 6 failures, measured 8) and §10a (reported 21 owed rewrites, actual 43).
+Both times the fix was to ask the tool that enumerates the whole population instead of the one that
+reports the first failure. That generalises past this lane.
