@@ -106,7 +106,7 @@ The defect is a **conflation**, not a bad directory. Two different artifacts wer
 | Durable? | **no, and that is correct** | **yes, by construction** |
 
 Keeping the journal disposable is deliberate and load-bearing, and it answers the strongest
-objection to the branch-commit shape (§8.2): a lane that dies *before* it writes its report leaves
+objection to the branch-commit shape (§7.2b): a lane that dies *before* it writes its report leaves
 a partial journal at the fleet home, which survives the worktree. The journal is the
 crash-survivable partial record; the report is the durable final artifact. Making journals durable
 too would commit every compaction landmark to git.
@@ -120,7 +120,7 @@ requires the dying process to act is not a durability scheme.
 ### Rejected: "just always write the absolute `$FLEET_HOME/state/journals/` path"
 
 This is the fix someone will propose, it is a genuine improvement, and it is **not enough** — see
-§8.1, where I show the machine-generated preamble already does this and reports still died. It
+§7.1, where I show the machine-generated preamble already does this and reports still died. It
 converts *dies with the worktree* into *dies with the machine*, which is the failure this fleet
 actually suffered. The path is still gitignored, still deleted irreversibly by `fleet clean`, still
 in no commit and no backup. My pin sees through the disguise deliberately: `_normalise()` strips
