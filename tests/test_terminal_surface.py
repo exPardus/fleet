@@ -866,13 +866,20 @@ class TestCommandFiles:
     # tuple, so dropping it from here goes RED naming it -- measured, same as
     # dropping `sup-boot`. So: this list cannot fall behind the ratified table.
     # What no test can check is whether the table's `sup-spawn` row is RIGHT.
+    # `homes --add`/`homes --retire` landed 2026-08-08 with the operator's
+    # E2/homes ruling, in the SAME commit as the spec row and the pin tuple --
+    # the coupling the 2026-08-05 landing established and `w42/mf5-verbs`
+    # missed. FLAGGED, never bare `homes`, exactly as `doctor --repair` is: the
+    # ruling's whole point was that the read stays ORDINARY so a read-only
+    # grant of `Bash(fleet homes)` keeps working, while `--add`'s irreversible
+    # append to the machine-global `~/.claude/fleet-homes.list` does not.
     DESTRUCTIVE_VERBS = ("kill", "clean", "respawn", "interrupt", "spawn",
                          "send", "attach", "release", "resume-limited",
                          "archive", "autoclean", "doctor --repair",
                          "sup-handoff-abort",
                          "sup-boot", "sup-handoff-begin", "sup-handoff-complete",
                          "sup-decision --clear", "sup-spawn", "sup-checkpoint",
-                         "sup-release")
+                         "sup-release", "homes --add", "homes --retire")
 
     @pytest.mark.parametrize("name", sorted(READ_ONLY_COMMANDS))
     def test_read_only_grants_never_cover_the_whole_fleet_cli(self, name):
