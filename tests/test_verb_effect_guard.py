@@ -155,11 +155,12 @@ class TestTheVerbEffectTableIsTheRatifiedOne:
 
 
 class TestTheFlagGranularityTheTableActuallyStates:
-    """Two of the twelve destructive tokens carry a flag -- `doctor --repair`
-    and `sup-decision --clear` -- and one does not (`autoclean`, whose tier 2
-    husk sweep runs by default). The table is transcribed at the granularity it
-    is written at, and the residual (the verb with none of its qualifying flags)
-    is declared with its ground rather than guessed."""
+    """FOUR of the fourteen destructive tokens carry a flag -- `doctor --repair`,
+    `sup-decision --clear`, and `homes --add`/`homes --retire` since the
+    2026-08-08 E2/homes ruling -- and one deliberately does not (`autoclean`,
+    whose tier 2 husk sweep runs by default). The table is transcribed at the
+    granularity it is written at, and the residual (the verb with none of its
+    qualifying flags) is declared with its ground rather than guessed."""
 
     def test_doctor_repair_is_destructive_and_bare_doctor_is_not(self):
         assert fleet.verb_effect_tier("doctor", _ns(repair=True)) == "destructive"
@@ -188,6 +189,165 @@ class TestTheFlagGranularityTheTableActuallyStates:
         """Not `autoclean --something`. The ratified token is bare, because
         tier 2's husk sweep (`claude rm`) runs on a plain `fleet autoclean`."""
         assert fleet.verb_effect_tier("autoclean", _ns()) == "destructive"
+
+    def test_the_homes_writes_are_destructive_and_the_bare_read_is_not(self):
+        """The operator's 2026-08-08 E2/homes ruling, as behaviour.
+
+        *"Split the verb. Reading `fleet homes` stays ORDINARY; `--add`/
+        `--retire` become DESTRUCTIVE."* Both grounds are in
+        `docs/OPERATOR-GATES.md`: `--add` irreversibly appends to the
+        machine-global `~/.claude/fleet-homes.list` (only the FOLD reverses it,
+        which is the ratified E2 ground), and ORDINARY meant a read-only
+        `/fleet:*` grant of `Bash(fleet homes)` reached `--add`.
+
+        Driven through the REAL parser, not a hand-built namespace: the whole
+        mechanism is that argparse's default dests (`add`, `retire`) are what
+        the table's mechanical `--x-y` -> `x_y` rule produces, so a namespace
+        this test invented could agree with the table while the CLI did not."""
+        parser = fleet.build_parser()
+
+        def tier(argv):
+            args = parser.parse_args(argv)
+            return fleet.verb_effect_tier(args.command, args)
+
+        assert tier(["homes"]) == "ordinary"
+        assert tier(["homes", "--add", "C:/some/home"]) == "destructive"
+        assert tier(["homes", "--retire", "C:/some/home"]) == "destructive"
+
+    def test_the_homes_read_is_ordinary_BY_RESIDUAL_not_by_a_second_row(self):
+        """HOW the split is expressed, pinned separately from THAT it holds.
+
+        The tempting shape -- bare `homes` left in `VERB_EFFECT_ORDINARY` while
+        the flagged tokens join `VERB_EFFECT_DESTRUCTIVE` -- produces the same
+        three answers above and is still wrong twice over: it puts one verb in
+        two rows (`test_no_verb_is_in_two_rows`, and its spec-side twin
+        `test_no_verb_IS_NAMED_BY_TWO_spec_rows`, both forbid it), and it
+        degrades fail-OPEN, because dropping the flagged tokens would send the
+        writes back to ORDINARY -- the exact hole the ruling closed. In the
+        residual shape the same slip leaves `homes` in no tuple at all, and an
+        unknown verb is destructive."""
+        assert "homes" not in fleet.VERB_EFFECT_ORDINARY
+        assert "homes" not in fleet.VERB_EFFECT_DISRUPTIVE
+        assert fleet.VERB_EFFECT_RESIDUAL["homes"] == "ordinary"
+        assert "homes --add" in fleet.VERB_EFFECT_DESTRUCTIVE
+        assert "homes --retire" in fleet.VERB_EFFECT_DESTRUCTIVE
+        # and the fail-safe direction, measured rather than argued
+        assert fleet.verb_effect_tier("homes", _ns(add=None, retire=None)) == "ordinary"
+        assert fleet.verb_effect_tier("nosuchverb", _ns()) == "destructive"
+
+    def test_no_homes_entry_is_needed_in_the_residual_flags_escape_hatch(self):
+        """`sup-decision --raise` needed `VERB_EFFECT_RESIDUAL_FLAGS` because
+        argparse maps `--raise` to dest `question`, defeating the mechanical
+        `--x-y` -> `x_y` rule. `--add`/`--retire` override no `dest=`, so they
+        do not. Measured off `build_parser()` so the claim cannot rot."""
+        homes = _subparser(fleet.build_parser(), "homes")
+        dests = {tuple(a.option_strings): a.dest
+                 for a in homes._actions if a.option_strings}
+        assert dests[("--add",)] == "add"
+        assert dests[("--retire",)] == "retire"
+        assert "homes" not in fleet.VERB_EFFECT_RESIDUAL_FLAGS
+
+
+class TestTheWorstMatchingTierWins:
+    """ga3 A-1: *"the worst matching tier wins" is a safety claim nothing can
+    exercise*. The gate planted `max` -> `min` in `verb_effect_tier` and the
+    full suite came back BYTE-IDENTICAL to the clean floor.
+
+    WHY NOTHING CAUGHT IT, and it is not that the rule is wrong: no shipped verb
+    matches two tiers at once. All three flag-qualified verbs express *"bare
+    read ordinary, flagged write destructive"* through `VERB_EFFECT_RESIDUAL`,
+    which yields exactly ONE matched tier per invocation, and `max` of a
+    one-element list is that element whichever comparator you use.
+
+    So the rule is pinned on a CONSTRUCTED two-tier verb. That is not a weaker
+    pin -- `max` is a property of the resolver, not of any particular verb, and
+    a synthetic verb exercises the resolver exactly as a real one would. It also
+    keeps the pin alive on a table whose whole design is to avoid two-tier
+    verbs, which is the shape A-1 would otherwise leave permanently unguarded.
+
+    The class is named in `verb_effect_tier`'s own docstring so the next reader
+    of that `max` finds what stands behind it."""
+
+    @staticmethod
+    def _two_tier(monkeypatch, bare_tier, flagged_tier):
+        """A verb that is `bare_tier` bare and `flagged_tier` under `--purge`."""
+        tup = {"ordinary": "VERB_EFFECT_ORDINARY",
+               "disruptive": "VERB_EFFECT_DISRUPTIVE",
+               "destructive": "VERB_EFFECT_DESTRUCTIVE"}
+        monkeypatch.setattr(fleet, tup[bare_tier],
+                            getattr(fleet, tup[bare_tier]) + ("adopt",))
+        monkeypatch.setattr(fleet, tup[flagged_tier],
+                            getattr(fleet, tup[flagged_tier]) + ("adopt --purge",))
+
+    def test_the_plant_really_creates_two_matching_tiers(self, monkeypatch):
+        """Seed for the seed. If the construction stopped producing a two-tier
+        match -- a renamed tuple, an index that de-duplicates by verb -- every
+        assertion below would pass for the wrong reason, because `max` of one
+        element equals `min` of it. This asserts the precondition itself."""
+        self._two_tier(monkeypatch, "ordinary", "destructive")
+        rows = fleet._verb_effect_index()["adopt"]
+        assert (None, "ordinary") in rows and ("purge", "destructive") in rows
+        args = _ns(purge=True)
+        matched = [t for dest, t in rows
+                   if dest is None or getattr(args, dest, None) not in (None, False)]
+        assert sorted(matched) == ["destructive", "ordinary"], (
+            "the plant no longer produces two matching tiers, so the pins below "
+            "cannot distinguish max from min")
+
+    @pytest.mark.parametrize("bare,flagged,worst", [
+        ("ordinary", "destructive", "destructive"),
+        ("ordinary", "disruptive", "disruptive"),
+        ("disruptive", "destructive", "destructive"),
+    ])
+    def test_a_verb_matching_two_tiers_takes_the_worse(
+            self, monkeypatch, bare, flagged, worst):
+        """THE A-1 PIN. Each row reddens under `max` -> `min`.
+
+        Three rows rather than one because `min` is not the only wrong
+        comparator: a resolver that always returned `destructive` would satisfy
+        row 1 while being just as broken, and row 2 catches it."""
+        self._two_tier(monkeypatch, bare, flagged)
+        assert fleet.verb_effect_tier("adopt", _ns(purge=True)) == worst
+
+    @pytest.mark.parametrize("bare,flagged", [
+        ("ordinary", "destructive"),
+        ("ordinary", "disruptive"),
+    ])
+    def test_the_flag_being_absent_leaves_the_bare_tier(
+            self, monkeypatch, bare, flagged):
+        """The other direction, so `max` cannot be satisfied by a resolver that
+        ignores the flag and always escalates. Only ONE tier matches here, so
+        this row is deliberately green under both comparators -- it is bounding
+        the pin above, not duplicating it."""
+        self._two_tier(monkeypatch, bare, flagged)
+        assert fleet.verb_effect_tier("adopt", _ns(purge=False)) == bare
+
+    def test_the_shipped_table_still_cannot_exercise_this_rule(self):
+        """A-1's FINDING, as an executable statement rather than a comment --
+        this file's idiom for a fact a future change should have to notice.
+
+        Every shipped verb matches at most one tier, which is why the pins above
+        must construct their own. If this goes RED a real two-tier verb has
+        landed: that is not a defect, but `max` has just become load-bearing on
+        the real table, so re-read `verb_effect_tier` and move the named verb
+        into the parametrisation above before deleting this."""
+        multi = {}
+        for verb in _shipped_verbs():
+            rows = list(fleet._verb_effect_index().get(verb, ()))
+            rows += list(fleet.VERB_EFFECT_RESIDUAL_FLAGS.get(verb, ()))
+            # every flag the table keys on, all set at once -- the most
+            # generous possible reading of "could two tiers match?"
+            args = _ns(**{dest: True for dest, _ in rows if dest is not None})
+            matched = {t for dest, t in rows
+                       if dest is None or getattr(args, dest, None) not in (None, False)}
+            if len(matched) > 1:
+                multi[verb] = sorted(matched)
+        assert not multi, (
+            f"these shipped verbs now match two effect tiers at once: {multi}. "
+            f"ga3 A-1 recorded that none did, which is why "
+            f"TestTheWorstMatchingTierWins builds a synthetic verb. `max` in "
+            f"`verb_effect_tier` is now load-bearing on the shipped table -- "
+            f"pin the real verb here.")
 
 
 # ---------------------------------------------------------------------------
@@ -739,4 +899,14 @@ def _shipped_verbs():
     for action in parser._actions:
         if hasattr(action, "choices") and isinstance(action.choices, dict):
             return sorted(action.choices)
+    raise AssertionError("no subparsers action on build_parser()")
+
+
+def _subparser(parser, verb):
+    """The subparser `build_parser()` ships for one verb, so a claim about a
+    flag's dest is measured off the real CLI rather than restated."""
+    for action in parser._actions:
+        if hasattr(action, "choices") and isinstance(action.choices, dict):
+            assert verb in action.choices, f"build_parser() ships no `{verb}`"
+            return action.choices[verb]
     raise AssertionError("no subparsers action on build_parser()")

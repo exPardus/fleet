@@ -277,9 +277,9 @@ verbs classify by their **worst irreversible effect in the wrong home**, enumera
 
 | Class | Verbs | Wrong-home effect |
 |---|---|---|
-| **destructive** — destroys evidence or sessions; nothing recovers it | `clean` (journals, outcomes, records), `archive` + `autoclean` tier 2+/3 (`claude rm`, tombstone drop), `doctor --repair` (registry renamed aside — rb7 C-3; **[w47/e5 — operator ruling 2026-08-08, E5]** RE-GROUNDED ON THE RENAME: it renames the target home's `state/fleet.json` aside — destroying a file the operator may want to inspect — and no shipped verb un-renames it; the ground, its measurement and its one residual are stated below the table), `sup-handoff-abort` (stops a successor session), **[w42/mf5]** `sup-boot` (HANDSHAKE unlink + claim seizure), `sup-handoff-begin` (supersedes every unresolved handoff entry — an in-flight successor is left permanently unbootable), `sup-handoff-complete` (HANDSHAKE unlink + claim transfer), `sup-decision --clear` (removes the queued operator decision; no verb restores it), **[w43/s5 — operator ruling 2026-08-05]** `sup-spawn` (**the dispatch is the act** — E1: it dispatches a body that then boots and seizes the claim, which is the cheapest path to seizing a foreign fleet's claim; its own in-process effect set is narrower than that, so no static effect-site walk can see this and **this entry is hand-maintained**, an accepted cost ruled with it), `sup-checkpoint` and `sup-release` (E2: **an irreversible append IS an irreversible effect** — both append to the home-relative append-only `supervisor/JOURNAL.md`, which no shipped verb removes an entry from, so a wrong-home append permanently contaminates a foreign fleet's record; the bound on which appends count is stated below the table), any future verb whose implementation calls `claude rm`, deletes evidence files, or renames registry/claim state — **the lint keys on those effect sites** (`claude rm` invocations, unlink/rename of `state/`/`supervisor/`/`logs/` paths), NOT on `_confirm_destructive`, which is an ownership guard whose call sites neither contain nor are contained by this list (rs7 C-3 measured the disjointness) |
+| **destructive** — destroys evidence or sessions; nothing recovers it | `clean` (journals, outcomes, records), `archive` + `autoclean` tier 2+/3 (`claude rm`, tombstone drop), `doctor --repair` (registry renamed aside — rb7 C-3; **[w47/e5 — operator ruling 2026-08-08, E5]** RE-GROUNDED ON THE RENAME: it renames the target home's `state/fleet.json` aside — destroying a file the operator may want to inspect — and no shipped verb un-renames it; the ground, its measurement and its one residual are stated below the table), `sup-handoff-abort` (stops a successor session), **[w42/mf5]** `sup-boot` (HANDSHAKE unlink + claim seizure), `sup-handoff-begin` (supersedes every unresolved handoff entry — an in-flight successor is left permanently unbootable), `sup-handoff-complete` (HANDSHAKE unlink + claim transfer), `sup-decision --clear` (removes the queued operator decision; no verb restores it), **[w43/s5 — operator ruling 2026-08-05]** `sup-spawn` (**the dispatch is the act** — E1: it dispatches a body that then boots and seizes the claim, which is the cheapest path to seizing a foreign fleet's claim; its own in-process effect set is narrower than that, so no static effect-site walk can see this and **this entry is hand-maintained**, an accepted cost ruled with it), `sup-checkpoint` and `sup-release` (E2: **an irreversible append IS an irreversible effect** — both append to the home-relative append-only `supervisor/JOURNAL.md`, which no shipped verb removes an entry from, so a wrong-home append permanently contaminates a foreign fleet's record; the bound on which appends count is stated below the table), **[w47/homes — operator ruling 2026-08-08, E2/homes]** `homes --add` and `homes --retire` (**an irreversible append IS an irreversible effect**, the same E2 ground: both append to the machine-global `~/.claude/fleet-homes.list`, which only the FOLD reverses and no verb un-appends; the READ is not here and stays ordinary as the residual — the split, its grant ground and its shape are stated below the table), any future verb whose implementation calls `claude rm`, deletes evidence files, or renames registry/claim state — **the lint keys on those effect sites** (`claude rm` invocations, unlink/rename of `state/`/`supervisor/`/`logs/` paths), NOT on `_confirm_destructive`, which is an ownership guard whose call sites neither contain nor are contained by this list (rs7 C-3 measured the disjointness) |
 | **disruptive** — recoverable but harms a live foreign fleet | `kill`, `interrupt`, `send`, `respawn` (all forms), `release`; **[w42/mf5]** `resume-limited`, `sup-heartbeat` |
-| **ordinary** | `spawn`, `init`, `status`/`peek`/`result`/views, `homes --add/--retire` (list-reversible); **[w42/mf5]** `home`, `knowledge`, `attach`, `wait`, `sup-status`, `sup-context`, `q`, `index` (all four leaves) |
+| **ordinary** | `spawn`, `init`, `status`/`peek`/`result`/views, **[w47/homes — operator ruling 2026-08-08, E2/homes: SUPERSEDED IN PLACE, not deleted — this row read "homes --add/--retire (list-reversible)" and the ruling overturned it; the two writes are DESTRUCTIVE above, and the bare read is ordinary by RESIDUAL, stated below the table. The verb name is deliberately left unbackticked here: the row readers in tests/test_round7_defect_pins.py resolve backticked tokens to verbs, and a backticked "homes" in two rows is exactly the partition breach test_no_verb_IS_NAMED_BY_TWO_spec_rows forbids]**; **[w42/mf5]** `home`, `knowledge`, `attach`, `wait`, `sup-status`, `sup-context`, `q`, `index` (all four leaves) |
 
 **When armed: destructive via env/legacy requires the flag; disruptive via env/legacy
 proceeds but renders its resolution provenance in output** (a wrong-home kill is loud where a
@@ -439,6 +439,72 @@ to the operator rather than quietly fixed. And it carries **no fenced receipt**:
 listed by name in `tests/test_receipts.py`'s `UNENFORCED` set, so one `# at <sha>` line moves it
 into the enforced set and turns that file's own staleness assertion RED — the trap the
 DIVERGENCE RECORD above already measured. The derivation's transcripts live in the lane report.
+
+**The `homes` split (operator ruling 2026-08-08, E2/homes; MEASURED at `e5889fe`, `py -3.13` and
+`py -3.10`).** The ordinary row read *"`homes --add/--retire` (list-reversible)"*; that entry is
+annotated as superseded in place above rather than deleted. The ruling: **split the verb —
+reading `fleet homes` stays ORDINARY, `--add`/`--retire` become DESTRUCTIVE.** Two grounds, both
+the operator's:
+
+* **The E2 ground, already ratified.** `--add` irreversibly appends to the machine-global
+  `~/.claude/fleet-homes.list`, and **only the FOLD reverses it** — a retirement record is
+  another append, not a removal. That is *an irreversible append IS an irreversible effect*
+  applied to the one list that is not home-relative, so a wrong-home append pollutes the
+  MACHINE's record rather than one fleet's. The superseded reason, *"list-reversible"*, was
+  reading the fold as if it undid the write.
+* **The grant ground, which is the security half.** ORDINARY meant a read-only `/fleet:*` grant
+  of `Bash(fleet homes)` **reached `--add`** — the same class as the 2026-07-09 kill/clean fix,
+  where read-only slash commands could reach destructive verbs because the grant covered the
+  whole CLI. Splitting closes that while keeping the read-only grant useful, which a
+  whole-verb reclassification would not.
+
+**The shape is `doctor --repair`'s, and that is load-bearing rather than stylistic.** The two
+FLAGGED tokens are what the destructive row and both pin tuples carry; the bare verb is named by
+no row, and its tier is declared in `fleet.VERB_EFFECT_RESIDUAL` — the same mechanism already
+ratified for `doctor` and `sup-decision`. The alternative (bare `homes` left in the ordinary row,
+flagged tokens added to the destructive one) resolves identically at runtime and is still wrong
+twice: it puts one verb in **two rows**, which this section's own partition pins forbid because
+*whichever row a reader finds first decides how it is guarded*; and it degrades **fail-open**,
+since dropping the flagged tokens would send the writes back to ordinary — the hole this ruling
+closed. In the residual shape the same slip leaves `homes` in no row at all, and an unclassified
+verb is destructive.
+
+**Derived rather than asserted**, by driving `build_parser()` at the commit above — cited by
+symbol, never by line, since `bin/fleet.py` moved roughly 1500 lines this wave:
+
+* `--add` and `--retire` declare **no `dest=` override**, so argparse's defaults (`add`,
+  `retire`) are exactly what the table's mechanical `--x-y` → `x_y` rule produces. Neither needs
+  a `VERB_EFFECT_RESIDUAL_FLAGS` entry, unlike `sup-decision --raise` (argparse maps it to
+  `question`). Measured, not assumed — the two flags are `_StoreAction` with `default=None`.
+* On the pre-ruling table `homes` was a **bare** token in the ordinary tuple, which yields
+  `dest=None` — *"this tier applies however the verb is invoked"* — so **`fleet homes --add`
+  classified `ordinary`**, which is precisely what the ruling forbids. That is the defect, driven
+  through the real parser rather than a hand-built namespace.
+* **`homes` is not in `TERMINUS_VIEW_VERBS`**, so there is no second surface repeating the
+  `doctor --repair` shape here: it sits in the machine-level tuple whose own comment records that
+  putting `homes` in the view tuple once made `fleet homes --add` print *"[fleet]: no home"* and
+  exit 0 without appending.
+* **The grant hole is PROSPECTIVE, not live.** No `commands/homes.md` ships, so no read-only
+  slash command grants `Bash(fleet homes)` today. The two lint entries are what keep it shut when
+  one lands, and bare `homes` is deliberately NOT among them — the lint asserts `fleet <verb>` is
+  absent from the grant, so a bare entry would fail a future read-only command for granting the
+  very read the operator ruled should stay useful.
+
+**The one residual, recorded rather than written around: this ruling does not re-open the other
+ordinary rows, and one of them is adjacent.** `init` is ratified **ordinary** and this section's
+own homes-list commentary names *"`init --home`, slice b"* as a second writer of the same
+machine-global list. If that slice ships an appending `init --home` while `init` is bare-ordinary,
+the E2 ground reaches it exactly as it reached `--add` — the pre-ruling `homes` defect, one verb
+over. **It is REPORTED, not fixed here**: slice b is unbuilt at this commit (`build_parser()`'s
+`init` declares `--nonce`, `--statusline`, `--chain`, `--force`, and no `--home`), so there is no
+shipped contradiction to repair, and reclassifying a ratified row is an operator edit, not a
+lane's. A reader should re-derive this rather than trust the paragraph.
+
+**Two things this note deliberately does not do**, both inherited from the E5 note above. It
+carries **no fenced receipt** — this document is in `tests/test_receipts.py`'s `UNENFORCED` set
+and one `# at <sha>` line moves it into the enforced set, four tests RED, which the DIVERGENCE
+RECORD measured. And it states the verb contrast **below the table** rather than inside a row,
+because the row readers resolve backticked tokens to verbs.
 
 > **PROPOSAL — RULED 2026-08-05 by the operator (`docs/OPERATOR-GATES.md`, first settled
 > entry). Kept as the record of the questions, never deleted; each carries its answer.**
