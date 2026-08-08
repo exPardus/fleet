@@ -59,7 +59,7 @@ flowchart TB
 
 - A **worker** is not a process fleet babysits — it's a durable Claude Code session on disk, addressed by session id. It survives crashes, reboots, and the manager's death.
 - A **turn** is one short-lived unit of a worker's work. Workers do short turns, not marathon sessions. Between turns they sit idle, cheap, resumable.
-- The **manager** is whoever holds the fleet CLI — usually a Claude Code session that has become the fleet manager (say *"become the fleet manager"* and it reads the manager skill).
+- The **manager** is whoever holds the fleet CLI — usually a Claude Code session that has become the fleet manager. `/fleet:overview` is the reliable way in: it is a slash command, so it cannot fail to match. (The phrase *"become the fleet manager"* often works, but it is **not** one of the triggers `skills/fleet/SKILL.md` declares — see [Getting started](getting-started.md#become-the-manager).)
 - The **registry** (`state/fleet.json`) is the one file that decides truth. Only `bin/fleet.py` ever writes it, under a lock. Everything else reads.
 
 ## How it's layered
