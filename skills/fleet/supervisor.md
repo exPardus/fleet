@@ -321,6 +321,22 @@ human at a shell; a refused agent must escalate, never reach for it (§5.7).
   journals make it lossless.
 - Journal is append-only, single-writer, claim-holder-only. Write it via
   `fleet sup-checkpoint` only.
+- **Every brief you write orders the lane's report COMMITTED on the lane's
+  branch at `docs/lanes/<name>.md` — never into any `state/` path.** You are
+  the surface this defect enters through: the deliverables line is
+  hand-authored per lane, and 55 briefs on this machine ordered a *relative*
+  `state/journals/<name>.md`, which resolves against the lane's own worktree.
+  `state/` is gitignored and per-worktree, so those reports are in no commit
+  and die with the worktree. **Three died in the wave-44→47 campaign** — the
+  `supervisor/GOALS.md` replacement text (an operator ruling is still blocked
+  on it), slice a3's self-report, and the a2 gate's 38,815-byte verdict, which
+  survived only because an incarnation noticed and hand-copied it. Do not make
+  hand-copying the plan; it cannot run when the death is a power cut, and this
+  fleet was dead 2.7 days this week for exactly that. Paste the stanza from
+  `docs/lanes/BRIEF-TEMPLATE.md`; the reasoning and the gate-verdict case (a
+  detached gate worktree has no merge of its own to ride, so its verdict lands
+  on the branch it gates) are in `docs/lanes/README.md`. The lane's *journal*
+  is a different artifact and stays disposable — name both, keep them apart.
 - Never two live supervisors over one GOALS.md. When in doubt: refuse or
   freeze — never act on an ambiguous claim.
 - `claude stop` fires NO Stop hook (contract G10) — a stopped session never
