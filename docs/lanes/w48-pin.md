@@ -18,6 +18,12 @@ both. **One pin, `test_3_pin_fork_steer` (G2b), went RED on py3.13 and GREEN on 
 RED is real, reproducible-in-kind, and **not** vendor drift. It exposes a latent reliability defect
 in *fleet's own steer delivery*. I did not weaken the pin and did not touch `bin/fleet.py`.
 
+**§8 is a mid-lane containment audit** the manager ordered after a sibling lane found `FLEET_HOME`
+can be outranked by the sid→home lookup. Result: **nothing I ran touched `C:/proga/claude-fleet`**,
+and `pin-pass.json` was not stamped — but the fence held because `~/.claude/fleet-homes.list` is
+absent, not because the brief's mechanism works. One `fleet homes --add` would make this tier mutate
+the live fleet.
+
 ---
 
 ## 1. WHERE THIS BRIEF WAS WRONG
@@ -125,6 +131,22 @@ nothing to print. For contrast, the ungated baseline in §1b printed exactly one
 Step 5 in particular did **not** take either of its two `ACHIEVABLE-CONTRACT SKIP` branches on
 either interpreter — both are dead-daemon branches, and the daemon was alive throughout (§6).
 That is the branch this vantage can actually certify.
+
+**The whole-suite skip census corroborates it** — MEASURED, `py -3.13 -m pytest -q -rs` on this
+branch, `4139 passed, 14 skipped, 1 xfailed in 403.97s`, exit 0. All 14 skips enumerated:
+
+```
+SKIPPED [6] tests\integration\test_native_pin.py: live tier gated: set FLEET_LIVE=1 …
+SKIPPED [3] tests\integration\test_sup_tombstone_live.py: live tier gated: set FLEET_LIVE=1 …
+SKIPPED [1] tests\test_fleet_index.py:2068: this platform will not create a symlink unprivileged
+SKIPPED [1] tests\test_hooks.py:783: pins the hook's os.write partial-write check; the Win32 sibling below pins WriteFile's
+SKIPPED [1] tests\test_native.py:168: POSIX sibling of the Win32 partial-write pin
+SKIPPED [2] tests\test_views_doctrine.py:247: no view quarantines any more -- D4 is true of shipped code …
+```
+
+This is exactly the number the brief warned about, and it decomposes cleanly: **6 of the 14 are the
+pin tier itself.** That is the arithmetic behind the brief's warning — `4139 passed, 14 skipped` is
+what a completely unrun pin tier looks like. The runs in the table above are what makes those 6 zero.
 
 ---
 
@@ -350,7 +372,112 @@ Checked after **each** of the two live runs, not once at the end.
   solid; the percentages are not.
 - The dead-daemon branch of step 5 remains uncertified from any `--bg` vantage, this wave included.
 
-## 8. VERDICT
+## 8. `FLEET_HOME` FENCE AUDIT — requested mid-lane by the manager
+
+The manager steered mid-lane with a correction: a sibling lane measured that **`FLEET_HOME` is
+silently ignored inside a fleet-launched session** because the sid→home lookup (§5 step 2) outranks
+the validated env var (§5 step 3), so the brief's temp-home fence may have been fencing with
+nothing. I was asked to audit every `fleet` command I ran and disclose any write to the real home.
+
+**Finding: nothing I ran wrote to `C:/proga/claude-fleet`. The fence held — but NOT for the reason
+the brief assumed, and the machine is one command away from the hazard being live.**
+
+### 8a. The mechanism is real; its precondition is not met on this machine — MEASURED
+
+The manager's ordering is structurally correct. `fleet.py:4756-4800`: step 1 is the `--fleet-home`
+flag, **step 2 is the sid→home lookup and it returns before env is ever consulted**, and only on a
+lookup *miss* does control reach the env/legacy branch. So a sid that HITS does outrank `FLEET_HOME`.
+
+The precondition is a population to search. Measured for this session's real sid:
+
+```
+my sid       : 23592cba-af43-4680-8d0c-792662d2acfd
+lookup state : miss
+population   : ['C:/proga/fleet-w48-pin']
+legacy       : C:/proga/fleet-w48-pin
+list_ok      : True | reason: absent
+hits         : []
+homes_list_path exists : False  C:\Users\Techn\.claude\fleet-homes.list
+```
+
+`~/.claude/fleet-homes.list` **does not exist on this machine** (I recorded its absence as a
+baseline before the first run, and it is still absent). With no list, `resolution_population()`
+falls back to the legacy/install home alone — **`C:/proga/claude-fleet` is not even a candidate.**
+Step 2 therefore cannot hit, and env wins every time.
+
+Confirmed behaviourally with the read-only `home` view, run four ways from this session:
+
+| Invocation (sid present unless noted) | Resolves to |
+|---|---|
+| `FLEET_HOME=<temp> fleet home` | `<temp>` — **env honoured** |
+| `FLEET_HOME=<temp> fleet home`, sid+`FLEET_WORKER` stripped | `<temp>` — identical |
+| `fleet --fleet-home <temp> home` | refused: `not initialized (not_initialized) … Nothing was created.` |
+| `fleet home`, no override | `C:/proga/fleet-w48-pin` — my worktree, **not** the real fleet home |
+
+The last row is the direct refutation of the steer's premise for this session: with no override at
+all, my sid does not resolve to `C:/proga/claude-fleet`.
+
+### 8b. Independent evidence that no write reached the real home — MEASURED
+
+I did not rely on the resolver analysis. Four independent checks, all clean:
+
+| Artifact in `C:/proga/claude-fleet` | Result |
+|---|---|
+| `state/worker-settings.json` (what `fleet init` writes) | mtime **2026-07-30 08:12:18**, ten days stale; contains **no** temp path; names only real `C:/proga/claude-fleet/bin/hooks/*` |
+| `state/pin-pass.json` | mtime **2026-08-05 20:03:55 +0500** = the original `15:03:55Z` stamp; content still `2.1.222` |
+| `state/fleet.json` | 141 workers, **zero** named `pin-w*` or `probe-w*` |
+| `state/tasks/`, `state/journals/`, `state/outcomes/`, `logs/archive/` | **no** `pin-w*` / `probe-w*` entries |
+
+A fifth, and the one I trust most because the worker itself produced it: the surviving fork
+transcript records the task-file path the dispatched worker was told to read —
+`C:/Users/Techn/AppData/Local/Temp/fleet-pin-home-35vhv0wq/state/tasks/pin-w1.md`. The **temp**
+home. The tier's dispatches genuinely composed against the sandbox, in the worker's own words.
+
+### 8c. Command-by-command audit
+
+| Commands | Home actually touched | Basis |
+|---|---|---|
+| `sb.fleet("init")` in the tier's module fixture (×2 runs) — the one call made **before** conftest's function-scoped sid-stripping fixture applies, and so the highest-risk call | temp | real `state/worker-settings.json` mtime ten days stale, no temp paths in it |
+| `spawn`/`wait`/`send`/`interrupt`/`archive`/`doctor` inside test bodies (×2 runs) | temp | worker's own prompt names the temp task path; no `pin-w*` in the real registry/state |
+| `record_pin_pass` subprocess (step 6, ×2 runs) | temp | real `pin-pass.json` mtime + content unchanged |
+| my probe's `init`/`spawn`/`wait`/`send` (×3 runs) | temp | probe's `env()` explicitly `pop`s `CLAUDE_CODE_SESSION_ID` and `FLEET_WORKER`; no `probe-w*` in the real registry/state |
+| my four `fleet home` audit calls | read-only view; one named temp, one named my worktree | `home` is in `TERMINUS_VIEW_VERBS` |
+
+**No stamp, no registry mutation, no state file, no spawned worker reached `C:/proga/claude-fleet`.**
+
+### 8d. The finding worth keeping — this is one `fleet homes --add` away from being live
+
+The fence held by luck of configuration, not by design. **My sid IS in the real fleet's registry:**
+
+```
+my sid present in the REAL fleet registry under worker(s): ['w48-pin']
+```
+
+So if `~/.claude/fleet-homes.list` existed and listed `C:/proga/claude-fleet`, `lookup_home_for_sid`
+would return **hit** on that home, step 2 would return before env was read, and **every
+`sb.fleet(...)` call in the pin tier would have acted on the real fleet** — spawning `pin-w1`/`pin-w2`
+into the live registry, archiving into real `logs/`, and **stamping the real `pin-pass.json` at
+step 6.** The tier's containment rests entirely on `FLEET_HOME`, which is the one override that
+step 2 outranks.
+
+Consequences worth routing beyond this lane (BELIEVED — mechanism MEASURED, blast radius reasoned):
+
+1. **The manager's corrected fence is the right one and should be adopted**: `--fleet-home` (step 1)
+   is the only override that outranks the lookup. Note it is also stricter — it *validates* the home
+   and refuses an uninitialized one, which is why my flag probe was refused where the env var was
+   silently accepted. A tier switching to the flag must `fleet init` the temp home first.
+2. **`tests/integration/test_native_pin.py`'s `Sandbox.env()` sets `FLEET_HOME` and does not strip
+   `CLAUDE_CODE_SESSION_ID`.** It is safe today only because the homes list is absent. Populating
+   that list — the multi-fleet slice-0 build is heading exactly there — would silently convert this
+   suite into one that mutates the operator's live fleet. That is a test-isolation hazard of the
+   same class as the two `conftest.py` already documents, and it is not covered by either, because
+   both are in-process monkeypatches and this tier drives fleet as a subprocess.
+3. **Every brief on this machine that fences a lane with `FLEET_HOME` is fencing with something that
+   a future `fleet homes --add` disarms.** Not my slice, reported as asked.
+
+I did not "fix" any of this: no pin file and no `bin/fleet.py` change, per the lane's fence.
+
+## 9. VERDICT
 
 **The native contract at 2.1.226 is intact on every axis this tier can reach from a `--bg` vantage,
 with zero unaccounted skips on two interpreters — except that `fleet send`'s fork-steer can
