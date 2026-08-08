@@ -6375,3 +6375,75 @@ Disjointness by construction: pins → three test files; s5note → one doc; a3 
 ## NEXT
 
 Watch all three (Monitor + poll over `fleet status`, NOT `fleet wait` in background — the harness killed those twice last incarnation). Landing order: pins first (smallest, and B2 gates a2), then a2 + the s5note commit, then derive post-merge floors at the merged tree rather than inheriting `3921+37+78`. Citation fixpoint owed at a2's landing. a3 gets an adversarial gate before it lands. Carried untouched: E5, E2/homes, ND4(c) slot, w35/nd4c park, and the GOALS.md band-section proposal (operator-owed, now relayed a 5th time).
+
+## 2026-08-06T01:09:11Z CHECKPOINT inc=inc-20260806T005348Z-e7a3 sid=b1884778-ad40-4a3a-8521-48e21735f029
+
+WAVE 46 HEALTH PASS — ONE DOCTOR ROW MEASURED FALSE-ALARM, ONE DISPATCHED, GOALS.md GATE FILED AND PUSHED.
+
+## LANDED AND PUSHED THIS TICK
+
+`2c95731` — `docs(gates)`: opened the GOALS.md band gate. main == origin == `2c95731`, read back from the pushed ref. Bypass event fired as ratified (19th consecutive measurement). Format pin `TestOperatorGatesFile` 3 passed; `test_self_citations.py` + `test_receipts.py` + `test_terminal_surface.py` 288 passed / 5 skipped after the edit.
+
+**The gate is sharper than the four previous relays of it, because it carries a pin gap.** MEASURED, not inferred: shipped `fleet.band_thresholds('supervisor')` → `(350000, 400000)`, `('worker')` → `(250000, 300000)`; `supervisor/GOALS.md:69` still reads *"## Context band (150–200k, supervisor AND workers)"*. And `test_supervisor_context.py::test_no_superseded_band_is_stated_as_current` **passes 4/4 while that is true**, because its `SURFACES` tuple is `("skills/fleet/SKILL.md", "skills/fleet/supervisor.md")` and `supervisor/GOALS.md` is not in it. The omission is DEFENSIBLE — GOALS.md is operator-owned, so a pin over it would go RED with nobody permitted to repair it — but it is undocumented, and GOALS.md is the file the boot ritual loads FIRST into every incarnation. *The pin written to catch a superseded band being stated as current does not cover the document that binds the reader.* The gate asks the operator to rule the edit AND whether the file joins `SURFACES` once its lines would be true. Prepared replacement already exists verbatim at `state/journals/w44-ceil.md` §8.
+
+## DOCTOR: 3 FAIL, and one of them is a false alarm I can prove
+
+- **`[FAIL] instance-freshness` — MEASURED FALSE ALARM, and the measurement is the finding.** The row compares MTIMES. Template `worker-settings.template.json` last changed in git at `94a549b` (2026-07-31, slice 0), instance rendered 2026-07-30 — so the row is literally TRUE. But that commit's entire change was `{{FLEET_HOME}}` → `{{FLEET_INSTALL}}` across the four hook commands, and on the legacy single-fleet layout `fleet_install` defaults to `fleet_home`, so both render the same string. Proved by rendering rather than by reasoning: `render_worker_settings_template(template, python, INSTALL_ROOT, INSTALL_ROOT)` vs the live instance → **sha256 `50b048c5…` on both, 846 chars, byte-identical, `RENDERED == INSTANCE: True`**. The remedy the row names (`fleet init`) would write the same bytes. So this row has been RED for six days for a consequence-free reason, and `_doctor_check_instance_grants`'s OWN docstring names the cost: *"flagging them would train the operator to ignore this line."* The blind spot is acknowledged in one direction (an mtime-newer hand-edited instance reads PASS, which is why the grants check exists) and NOT in the other — a false-alarm FAIL. **Remedy for a later lane, NOT taken here: compare the RENDERED template against the instance, not mtimes.** That is strictly stronger — it goes green here and still catches real drift. Filed, not built: self-repair only when it blocks the axis, and this does not.
+- **`[FAIL] pin-version` — DISPATCHED.** claude moved 2.1.222 → **2.1.223**; the native contract is unverified at the new version. This is the vendor-bump gate working, and it is squarely "launch follow-ups" under mission item 4.
+- **`[FAIL] supervisor-pending-decision` — ND4(c) residual, carried untouched.** Operator's slot, not mine, per the brief. Now open in doctor for a 7th wave.
+
+Everything else PASS, including `identity-witness` (agrees with the registry, supervisor-shaped — the benign variant), `daemon-wedge` (no signature), `supervisor-claim` (live, heartbeat fresh), `autoclean` (0.2h). Carried, unchanged and deliberately not swept: 5 dead-suspected husks (autoclean skipping by TTL design), 1 orphaned claimed mailbox file, 1 orphaned mailbox file, 3 orphaned ceiling files — all reachable by `fleet clean`, all irreversible, none blocking; not touching them mid-wave with four lanes live.
+
+## FOURTH LANE DISPATCHED
+
+**`w46-pin223`** (sid afea51b8, worktree `C:/proga/fleet-w46-pin223`, branch `w46/pin223` off `main`). Runs the `FLEET_LIVE=1` integration tier on BOTH interpreters at claude 2.1.223. Fenced to touch NO tracked file and explicitly forbidden the three sibling lanes' files; a RED is REPORTED, never repaired, because a vendor-drift repair is a ratified-contract change that earns its own gated lane. Told **not to stamp** — `record_pin_pass` against the real home is a deliberate supervisor act and the tier's step 6 stamps only a throwaway temp home (2026-07-30 lesson). Told that the SKIP COUNT is the headline, not a footnote: the tier is gated on `FLEET_LIVE=1` and skips *inside* the reported skip count, so a green suite certifies nothing about the native contract unless skips are zero. Prior passes: 6/6 green, zero skips, at 2.1.220 and 2.1.222.
+
+Disjointness holds four ways: pins → 3 test files; s5note → `docs/specs/multi-fleet.md`; a3 → `bin/fleet.py` + `tests/test_home_resolution.py` + new files; pin223 → nothing tracked.
+
+## WATCHER
+
+Monitor `brimylakf`, poll loop over `fleet status` grepping all four lane names, 90s, emitting on every state change and breaking when none are `working`. Deliberately NOT `fleet wait` in a background process — the harness killed those twice last incarnation and the poll-loop shape is the one that survives.
+
+Occupancy last measured 117,698 at dispatch; band 350–400k; re-measure at the next boundary rather than estimating.
+
+## 2026-08-08T17:38:52Z SEIZED inc=inc-20260808T173852Z-5dc6 sid=cabbec9f-d382-4535-927a-8bb500e89675
+
+seized from inc-20260806T005348Z-e7a3: holder roster-gone, heartbeat stale (232181s > 3600s)
+
+## 2026-08-08T17:41:13Z CHECKPOINT inc=inc-20260808T173852Z-5dc6 sid=cabbec9f-d382-4535-927a-8bb500e89675
+
+WAVE 47 BOOT — SEIZED A 2.7-DAY-DEAD PREDECESSOR. GROUND TRUTH RE-DERIVED; THE DISPATCHER'S BRIEF IS ALREADY WRONG ON ONE MEASURABLE POINT.
+
+## SEIZURE (recorded per the boot task's step 4)
+
+`sup-boot` VERDICT: **`seize`** (exit 0) — holder roster-gone, heartbeat stale **232,181s > 3600s**. Predecessor `inc-20260806T005348Z-e7a3` (wave 46) never released: it booted 2026-08-06T00:53:48Z, dispatched four lanes, wrote its last checkpoint at 01:09:11Z, and died. My incarnation is `inc-20260808T173852Z-5dc6`; the `inc-...-c6d4` segment of my worker name is the interface's LAUNCH id, not an incarnation. Bundle read in full (GOALS, journal tail 5, knowledge INDEX 20, roster 121/3-live, fleet status) then DELETED — class-4 nonce doctrine §5.8/§5.9, no durable plaintext copy of the generation on disk. Epoch: ok, 121 entries.
+
+Identity witness (skill step 5): I did not inspect FLEET_WORKER as an answer; the registry is the identity channel (claim-nonce §18). My registry record is `sup|inc-20260808T173831Z-c6d4|boot`, status `working`.
+
+## OUTAGE: NOT DIAGNOSED, DELIBERATELY
+
+The brief orders me not to diagnose it, and I am not going to. Recorded for the successor and the knowledge fold: ~2.7 days of fleet death (2026-08-06T01:09Z last checkpoint → 2026-08-08T17:38Z seizure), no `sup-release`, no journal entry from the dying body, all four wave-46 lanes finished with their work on branches, nothing lost. The shape matches the login-expiry class already in the fleet's memory (waves 34, 40): the whole fleet dies mid-turn and the supervisor cannot journal its own death, exactly as contract G10 predicts. That is a hypothesis I have NOT tested, and I am flagging it as untested rather than folding it in as a cause.
+
+## MEASURED, NOT INHERITED
+
+- main == origin/main == HEAD == `2c95731`. Tree clean except `supervisor/JOURNAL.md` (34 uncommitted insertions — the predecessor's wave-46 lines plus my own SEIZED entry). Commit owed this wave.
+- **All four branch tips confirm the dispatcher EXACTLY**, which is the thing the brief told me was likeliest wrong: `w45/pin-hardening` = `270be43`, `w46/s5-note` = `3f8269e`, `w45/mf-a2` = `39f84d0`, `w46/mf-a3` = `aa578ef`. None of the four is pushed to origin — origin carries 11 branches and none of these are among them, so landing is merge-to-main-plus-push and the branches are local-only handles until then.
+- Roster after `autoclean`: archived 1, skipped 129, **husks_removed=8**, deferred 0, tombstones_expired 0, errors 0. Six records remain, five `dead-suspected` (all ≥12,324 min old, wave 30–31 residue) and one `working` — me. **Nothing is in flight; the brief's claim verified rather than assumed.** Note the four wave-46 lane records are GONE from the roster entirely — archived by an earlier sweep — so `fleet result <lane>` is not available for any of them. That is the reason the next item matters.
+- Occupancy at boot: **93,058 / band 350,000–400,000 → BELOW-BAND**, measured by `sup-context`, not estimated.
+
+## THE BRIEF'S FIRST MEASURABLE ERROR, AND IT IS THE SAME ONE THE PREDECESSOR CAUGHT
+
+The dispatcher writes: *"Read `fleet result w45-ga2` for the full verdict — the verdict FILE is not on the main repo disk."* **Both halves are false now.** `state/verdicts/w45-ga2.md` is on the main tree, 38,815 bytes, dated 2026-08-06 03:37 — my predecessor copied it there in its wave-46 dispatch checkpoint precisely because it had discovered `fleet result w45-ga2` was a 3,117-byte lane-authored summary, not the artifact. And `fleet result w45-ga2` is now unavailable regardless, because the lane's registry record has been archived out. So the brief's instruction points at a channel that is both lower-fidelity and dead, while the high-fidelity artifact sits on disk in the working tree.
+
+This is worth more than a correction. The dispatcher inherited a stale sentence from a wave-46 document written BEFORE the predecessor fixed the problem that sentence describes — the fix and the description of the world it fixed travelled separately. Same class as the 2026-07-31 lesson (*a correction applied at the surface where the wrong number was noticed is not a correction of the number*), arriving one wave later on the artifact-location side. I read the 38,815-byte verdict from the main tree; I do not read the result.
+
+Six other gate verdicts sit beside it (`w43-ga1`, `w43-glaunch`, `w43-gmf5`, `w44-gs5`, `w45-gceil`, `w45-gpins`) — the durable channel is healthy, it was one lane's write that went to a per-worktree gitignored path.
+
+## PLAN THIS WAVE (mission order, unchanged)
+
+1. Commit the journal, then land in sequence with merge-base disjointness and a PREDICTED floor re-derived at each merged tree, never inherited: `w45/pin-hardening` → `w46/s5-note` → `w45/mf-a2`. Both interpreters. Push with read-back. A missed floor prediction STOPS the landing and gates it.
+2. Adversarially gate `w46/mf-a3` before it lands — it is the wrong-home guard, unreviewed, and its own lane reports a mutant that came back GREEN across 296 tests. Re-plant it, re-derive the call-site census by AST rather than believing "1 call site, not ~11", and rule its DECLINED advisory F2 rather than let it pass silently.
+3. Land a3 on green → slice (a) complete end to end. Then citation fixpoint (both slices move `bin/fleet.py`), then the knowledge fold for waves 44–47 including this outage.
+4. Untouched, as ordered: `supervisor/GOALS.md`, the three open gates (E5, E2/homes, GOALS band), ND4(c)'s slot, `w35/nd4c`.
+
+Carried forward from the predecessor's own record and NOT actioned here: the `[FAIL] instance-freshness` doctor row it proved a consequence-free false alarm with a byte-identical render, and the remedy it filed but did not build (compare the RENDERED template to the instance, not mtimes). Self-repair only when it blocks the axis; it does not.
