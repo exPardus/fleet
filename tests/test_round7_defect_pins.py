@@ -410,16 +410,26 @@ SPEC = REPO / "docs" / "specs" / "multi-fleet.md"
 #     the ruling itself is right.
 #   * `sup-checkpoint`, `sup-release` -> DESTRUCTIVE by E2 (an irreversible
 #     append is an irreversible effect), E3 collapsing into it.
+#
+# THE 2026-08-08 E2/homes RULING IS LANDED HERE TOO, same coupling, same commit
+# as its spec edit: *"Split the verb. Reading `fleet homes` stays ORDINARY;
+# `--add`/`--retire` become DESTRUCTIVE."* `homes` therefore LEAVES
+# `RATIFIED_ORDINARY` and arrives in the destructive tuple as its two FLAGGED
+# tokens -- the `doctor --repair` shape, not a second row. The bare read is
+# ordinary via `fleet.VERB_EFFECT_RESIDUAL`, because a verb named by two rows is
+# what `test_no_verb_IS_NAMED_BY_TWO_spec_rows` exists to stop.
 RATIFIED_DESTRUCTIVE = ("clean", "archive", "autoclean",
                         "doctor --repair", "sup-handoff-abort",
                         # [w42/mf5], landed under the same ruling
                         "sup-boot", "sup-handoff-begin", "sup-handoff-complete",
                         "sup-decision --clear",
                         # [w43/s5] E1, then E2/E3
-                        "sup-spawn", "sup-checkpoint", "sup-release")
+                        "sup-spawn", "sup-checkpoint", "sup-release",
+                        # [w47/homes] E2/homes split, operator 2026-08-08
+                        "homes --add", "homes --retire")
 RATIFIED_DISRUPTIVE = ("kill", "interrupt", "send", "respawn", "release",
                        "resume-limited", "sup-heartbeat")
-RATIFIED_ORDINARY = ("spawn", "init", "status", "peek", "result", "homes",
+RATIFIED_ORDINARY = ("spawn", "init", "status", "peek", "result",
                      "home", "knowledge", "attach", "wait", "sup-status",
                      "sup-context", "q", "index")
 
@@ -427,9 +437,12 @@ RATIFIED_ORDINARY = ("spawn", "init", "status", "peek", "result", "homes",
 # cites no dead verb" pin cannot be satisfied by an unbuilt name.
 #
 # `homes` LIVED HERE UNTIL SLICE a1 BUILT IT (2026-08-05) and moved, in the same
-# commit as the verb, to `RATIFIED_ORDINARY` -- §5's table classifies
-# `homes --add/--retire` as *"ordinary (list-reversible)"*, and that row is the
-# authority for where it goes, not this file.
+# commit as the verb, to `RATIFIED_ORDINARY`, because §5's table then classified
+# `homes --add/--retire` as *"ordinary (list-reversible)"*. THAT ROW WAS
+# OVERTURNED on 2026-08-08 (the E2/homes ruling) and `homes` has moved again, to
+# the destructive tuple as two flagged tokens. The point the original note was
+# making survives the move and is the reason it is kept: the SPEC ROW is the
+# authority for where a verb goes, not this file.
 #
 # WHAT ACTUALLY CAUGHT THE STALENESS, measured before the move rather than
 # assumed: with `homes` shipped and this tuple untouched,
@@ -455,8 +468,11 @@ RATIFIED_BUT_UNBUILT = ()
 #
 # IT IS EMPTY NOW, AND EMPTY IS A REAL STATE, NOT A ROTTED ONE. All seventeen
 # were classified by `w42/mf5` plus the four sub-rulings; the census closes
-# exactly (measured at the landing tree: 33 shipped verbs, and 12 destructive +
-# 7 disruptive + 14 ordinary first-tokens = 33, no verb in two rows).
+# exactly (re-measured at the w47/homes landing tree: 33 shipped verbs, and 13
+# destructive + 7 disruptive + 13 ordinary FIRST-tokens = 33, no verb in two
+# rows. The destructive tuple holds 14 TOKENS but 13 first-tokens, because
+# `homes --add` and `homes --retire` are two tokens for one verb; before the
+# E2/homes ruling moved `homes` across it read 12 + 7 + 14).
 #
 # The pin's value is the SHAPE, not the contents: a verb added tomorrow is in
 # neither the table nor this list, so it goes RED until someone dispositions it.
@@ -489,15 +505,23 @@ RATIFIED_ROWS = {
 # that is the whole reason `doctor --repair` is a destructive entry while bare
 # `doctor` is not -- `test_the_repair_flag_is_carried_as_the_flagged_spelling`
 # below depends on that distinction being real. So the comparison stays on FULL
-# tokens and the one divergence is written down. Measured at 238a4778: exactly
-# one, and `test_every_declared_divergence_is_LIVE` is what stops a second
-# appearing here silently or this one outliving the spec text it points at.
-SPEC_TOKEN_FOR = {
-    # §5 classifies the flagged forms (`homes --add/--retire`, "list-reversible")
-    # while the tuple carries the bare verb, because `homes` has no destructive
-    # form to distinguish it from -- unlike `doctor`.
-    "homes": "homes --add/--retire",
-}
+# tokens and every divergence is written down; `test_every_declared_divergence_
+# is_LIVE` is what stops one appearing here silently or outliving the spec text
+# it points at.
+#
+# IT IS EMPTY AS OF THE 2026-08-08 E2/homes RULING, and empty is a real state
+# here for a readable reason. The single entry (measured at 238a4778 as the only
+# one) was `"homes": "homes --add/--retire"`, and its stated ground was that
+# *"`homes` has no destructive form to distinguish it from -- unlike `doctor`"*.
+# The ruling gave it exactly that destructive form. `homes` now carries its
+# flags in the tuple the way `doctor --repair` always has, so the tuple token
+# and the spec token are the same string and there is nothing left to declare.
+#
+# An empty dict makes `test_every_declared_divergence_is_LIVE` VACUOUS -- it
+# loops over the entries -- so `test_the_seed_a_dead_divergence_is_caught` is
+# what proves the loop still fires. Do not delete that seed to save a test:
+# this file says the same thing about the same shape three tuples above.
+SPEC_TOKEN_FOR = {}
 
 
 def _spec_row(effect):
@@ -567,19 +591,60 @@ class TestRatifiedTableIsTranscribedFaithfully:
         The two tests above compare each row against its tuple; this one asks
         whether the SPEC is internally consistent, so a verb duplicated into a
         second row is caught even in the window before anyone transcribes it.
-        The census in the comment above (12 + 7 + 14 = 33 shipped verbs, no verb
-        in two rows) is only true while this holds.
+        The census in the comment above (13 + 7 + 13 = 33 shipped verbs by
+        FIRST token, no verb in two rows) is only true while this holds.
+
+        DISTINCT rows, and it counted TOKENS until the 2026-08-08 E2/homes
+        ruling. `homes --add` and `homes --retire` are two tokens for one verb
+        in ONE row -- a shape the row had never held, since `doctor --repair`
+        and `sup-decision --clear` are one token each -- and the old `list`
+        reported `{'homes': ['destructive', 'destructive']}` as a partition
+        breach. That was this pin misreading its own question: a verb may be
+        spelled by as many flagged tokens as it has destructive flags, and what
+        must not happen is those tokens landing in DIFFERENT classes. Collapsing
+        to a set of effects asks exactly that and is strictly no weaker -- a
+        genuine two-row verb still yields two distinct effects.
         """
         seen = {}
         for effect in sorted(RATIFIED_ROWS):
             for token in _spec_row_tokens(effect):
-                seen.setdefault(token.split()[0], []).append(effect)
-        doubled = {v: rows for v, rows in seen.items() if len(rows) > 1}
+                seen.setdefault(token.split()[0], set()).add(effect)
+        doubled = {v: sorted(rows) for v, rows in seen.items() if len(rows) > 1}
         assert not doubled, (
             f"§5 classifies these verbs in more than one effect row: "
             f"{doubled}. An effect class is a partition -- a verb in two rows "
             f"means whichever row a reader finds first decides how it is "
             f"guarded.")
+
+    @pytest.mark.parametrize("dest_row,ord_row,fires", [
+        # the genuine breach: one verb, two DIFFERENT classes
+        ("`clean`, `homes --add`", "`status`, `homes`", True),
+        # the same verb spelled by two flagged tokens in ONE row -- legal, and
+        # what the token-counting version wrongly rejected
+        ("`clean`, `homes --add`, `homes --retire`", "`status`", False),
+    ])
+    def test_the_seed_a_verb_in_two_rows_is_still_caught(
+            self, monkeypatch, tmp_path, dest_row, ord_row, fires):
+        """Proof that relaxing TOKENS to DISTINCT CLASSES kept the pin's teeth.
+
+        Driven through the real row reader against a planted spec, so both the
+        reader and the predicate are exercised. Row 1 must fire; row 2 must not,
+        and row 2 is the regression that motivated the change -- a seed that
+        only checked the firing direction would have been satisfied by a pin
+        that rejects everything."""
+        planted = tmp_path / "multi-fleet.md"
+        planted.write_text(
+            f"| **destructive** — x | {dest_row} |\n"
+            f"| **disruptive** — x | `kill` |\n"
+            f"| **ordinary** | {ord_row} |\n", encoding="utf-8")
+        monkeypatch.setattr(__import__(__name__), "SPEC", planted)
+        run = TestRatifiedTableIsTranscribedFaithfully() \
+            .test_no_verb_IS_NAMED_BY_TWO_spec_rows
+        if fires:
+            with pytest.raises(AssertionError, match="homes"):
+                run()
+        else:
+            run()
 
     def test_every_declared_divergence_is_LIVE(self):
         """`SPEC_TOKEN_FOR` is a hand list too, so it rots the same way.
@@ -610,6 +675,26 @@ class TestRatifiedTableIsTranscribedFaithfully:
                 f"`{token}` is declared to appear in §5 as `{spelling}`, and "
                 f"the {tuples[token]} row does not contain that -- the spec "
                 f"re-spelled it, so re-read the row")
+
+    @pytest.mark.parametrize("planted,match", [
+        # a key that is in none of the three tuples -- the dead entry
+        ({"obliterate": "obliterate --hard"}, "delete the entry"),
+        # a divergence that REMOVES a flag (gpins F2's lever)
+        ({"doctor --repair": "doctor"}, "REMOVES flags"),
+        # a spelling the row does not actually carry
+        ({"clean": "clean --everything"}, "re-read the row"),
+    ])
+    def test_the_seed_a_dead_divergence_is_caught(self, monkeypatch, planted,
+                                                  match):
+        """`SPEC_TOKEN_FOR` emptied with the 2026-08-08 E2/homes ruling, and the
+        test above is a loop over its entries -- with no entries it asserts
+        nothing at all and would stay green through any future rot. This plants
+        one entry of each of the three shapes that test rejects and proves each
+        still fires, so the loop is known-live while the dict is empty."""
+        monkeypatch.setattr(__import__(__name__), "SPEC_TOKEN_FOR", planted)
+        with pytest.raises(AssertionError, match=match):
+            TestRatifiedTableIsTranscribedFaithfully() \
+                .test_every_declared_divergence_is_LIVE()
 
     def test_all_three_rows_are_found_and_name_verbs(self):
         """Seed. `_spec_row_tokens` returning an empty set for a row would make
@@ -736,3 +821,22 @@ class TestDestructiveEnumerationsCarryTheRatifiedClass:
         listed = set(_sibling("test_terminal_surface").TestCommandFiles.DESTRUCTIVE_VERBS)
         assert "doctor --repair" in listed
         assert "doctor" not in listed
+
+    def test_the_homes_writes_are_carried_as_the_flagged_spellings(self):
+        """The 2026-08-08 E2/homes ruling, in the half that binds.
+
+        This is the ruling's SECOND ground made enforceable: ORDINARY meant a
+        read-only `/fleet:*` grant of `Bash(fleet homes)` reached `--add`, the
+        same class as the 2026-07-09 kill/clean fix. The entries close it for
+        any future `commands/homes.md`.
+
+        BARE `homes` MUST STAY OUT, for the reason bare `doctor` does: the lint
+        asserts `f"fleet {verb}" not in grant`, so a bare entry would fail a
+        read-only command file for granting the read its own body inlines --
+        which is precisely the grant the operator ruled should stay useful.
+
+        MEASURED at this landing: no `commands/homes.md` ships, so the hole is
+        PROSPECTIVE rather than live. The entry is what makes it stay shut."""
+        listed = set(_sibling("test_terminal_surface").TestCommandFiles.DESTRUCTIVE_VERBS)
+        assert "homes --add" in listed and "homes --retire" in listed
+        assert "homes" not in listed
