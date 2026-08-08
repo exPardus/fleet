@@ -4,6 +4,22 @@
 derived by executing something on this machine, not by reading prose. Where a claim could not be
 executed here, it says so and says why.
 
+**Re-measured 2026-08-09 against `fa236cb`** by an install rehearsal run from a throwaway clone
+under the OS temp dir (`docs/lanes/w48-launch.md`). Gaps 1, 3, 4, 6 and 7 reproduced unchanged;
+gap 2a's open question is answered below; gap 5 was not re-checked. That rehearsal also found
+**three blockers this list did not have**, all of them ahead of most of what is below:
+
+- **A bare `fleet init` configures whatever fleet is already on your PATH, not the clone you are
+  standing in.** Measured: from a fresh clone in temp, `fleet home` printed `C:/proga/claude-fleet`.
+  This is the 2026-07-29 incident class, reachable by following the published quickstart exactly.
+- **The quickstart's PATH step is a comment, not a command**, so on a machine with no prior fleet
+  the walkthrough dies at step 2 with `CommandNotFoundException`.
+- **`FLEET_HOME` is silently ignored inside a session fleet launched** — the session-id lookup
+  (multi-fleet §5 step 2) outranks it, and `--fleet-home`, the flag that does win, appears in no
+  user-facing doc.
+
+All three are prose defects, now fixed in `README.md` and `docs/getting-started.md`.
+
 This document exists because the operator's directive is *launch readiness*, not a nicer README.
 The README/`getting-started` corrections that shipped alongside it fix what the docs **said**; this
 is the list of what the repo **is**. Ordered by what blocks a first successful use — not by how hard
@@ -48,10 +64,22 @@ claude plugin marketplace add <path-or-github-repo-of-this-clone>
 the following `claude plugin install fleet@claude-fleet` is right — but the reader has to guess the
 argument that produces that marketplace.
 
-**Unverified here:** resolving it means running `claude plugin marketplace add`, which mutates this
-machine's real plugin configuration. Not run. The two candidate literals are the clone path and the
-`exPardus/fleet` GitHub shorthand; **someone with a throwaway machine must confirm which, and paste
-the working line.** Until then this is a step the user cannot copy.
+**Answered 2026-08-09 — the argument is a directory path to the clone.** Read off the machine's real
+configuration without mutating it:
+
+```console
+$ claude plugin marketplace list
+Configured marketplaces:
+  ❯ claude-fleet
+    Source: Directory (C:\proga\claude-fleet)
+```
+
+That is the source form of a marketplace that demonstrably works, and it agrees with
+`.claude-plugin/marketplace.json`, which declares plugin `fleet` at `"source": "./"`. Both docs now
+give the directory form. **Still unverified:** whether the `exPardus/fleet` GitHub shorthand also
+works — no evidence either way — and `claude plugin marketplace add` itself has still never been
+executed in a rehearsal, because it mutates this machine's real plugin configuration. The grade of
+this answer is *observed source of a working install*, not *command re-executed on a clean box*.
 
 #### 2b. The phrase both docs tell you to say is not a declared trigger
 
@@ -86,6 +114,14 @@ $ fleet knowledge
 under `FLEET_HOME` — so any user who points `FLEET_HOME` somewhere other than the clone gets a hint
 that loops. Harmless to state, but it is the first thing that tells a new user the tool is lying to
 them.
+
+**Re-measured 2026-08-09, with the remedy actually run** — the loop is closed, not merely suspected.
+On a scratch home, `fleet knowledge` → the message above → `fleet init` (exit 0, wrote
+`state\worker-settings.json`) → `fleet knowledge` again → **byte-identical message**. Two details
+this section did not record: `fleet knowledge` **exits 0** on a missing index, so a script that
+checks the return code sees success; and nothing in the message tells the reader that `knowledge/`
+is git-tracked *in the clone*, which is the fact that makes the loop escapable. The message is the
+part worth fixing — the exit code may have callers.
 
 ### 4. `--max-budget-usd` is advertised by `--help` and always refused
 

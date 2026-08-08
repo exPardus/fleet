@@ -23,39 +23,89 @@ Zero third-party dependencies — `bin/fleet.py` is a single stdlib-only file.
 > | `bin/fleet` (Git Bash / POSIX, and every hook via `bin/hooks/run_py.sh`) | first of `py -3.13`, `python3.13`…`python3.10`, honouring `$FLEET_PYTHON` |
 >
 > So on Windows, *through the documented `fleet.cmd` path*, fleet needs Python 3.13 specifically — a 3.10/3.11/3.12 box will fail at the shim even though the code supports it. Install 3.13, or drive `fleet` from Git Bash where the floor genuinely applies. This is a known gap, not a design choice.
+>
+> **The failure names neither fleet nor the shim,** so here it is to search for. On a box without 3.13, every `fleet` command dies as:
+>
+> ```console
+> No suitable Python runtime found
+> Pass --list (-0) to see all detected environments on your machine
+> or set environment variable PYLAUNCHER_ALLOW_INSTALL to use winget
+> or open the Microsoft Store to the requested version.
+> ```
+>
+> That is the Windows `py` launcher refusing the `py -3.13` that `fleet.cmd` hard-codes (exit code 103). The library itself is fine at 3.10 — `py -3.10 bin\fleet.py --help` works.
 
 > Windows is verified continuously by the suite on the reference box. Linux was verified by a full suite run during the POSIX-port campaign (2026-07-2x, on a real Linux host, not only WSL) — but **this repo has no CI**, so nothing re-verifies Linux on every change; treat it as "verified once, at a much smaller suite." macOS runs the same POSIX backend as Linux but has no receipt at all — untested, not unsupported. Remaining platform gaps are enumerated at the top of [`SPEC.md`](SPEC.md).
 
 ## Install
 
 ```powershell
-# 1. Clone, and add the clone's bin\ to your PATH (it holds fleet.cmd)
+# 1. Clone, and put the clone's bin\ on your PATH (it holds fleet.cmd)
 git clone https://github.com/exPardus/fleet.git
 cd fleet
-#    add <repo>\bin to PATH
+$env:PATH = "$PWD\bin;$env:PATH"          # this session only
 
-# 2. Render the machine-local hook wiring
+# 2. Check which fleet you just put in charge, THEN render the hook wiring
+fleet home                                 # must print the clone you are standing in
 #    (fills in this machine's Python path + FLEET_HOME; nothing machine-specific is committed)
 fleet init
 
 # 3. Install the plugin — manager skill + /fleet:* slash commands
 #    (no hooks: installing fleet does not change how any other session starts)
-claude plugin marketplace add <path-or-github-repo-of-this-clone>
+claude plugin marketplace add C:\path\to\this\clone    # a DIRECTORY path, not a URL
 claude plugin install fleet@claude-fleet
 #    restart Claude Code, then verify:
 claude plugin details fleet
 
 # 4. (Optional) install the always-on statusline
 #    (a plugin can't ship one, so it installs separately; it refuses to clobber a foreign one)
+#    This writes ~\.claude\settings.json — your machine-wide Claude Code config, not a repo file.
 fleet init --statusline
 ```
 
-**Where does it install to?** Nowhere you have to choose. Fleet derives `FLEET_HOME` from `bin/fleet.py`'s own location, so the clone can live anywhere — there is no hard-coded path in the CLI. Set the `FLEET_HOME` environment variable to override it. `fleet home` prints the resolved value:
+> **Step 1's PATH line is a command, not a comment — and step 2 depends on it.** Without it, `fleet
+> init` fails with `The term 'fleet' is not recognized ... CommandNotFoundException`. The line above
+> lasts for the current shell only; to make it permanent, add the clone's `bin\` to your user PATH
+> the way you normally would. `setx` is the scriptable form, and it edits your machine-wide user
+> environment — a change outside this repo, worth making deliberately rather than by paste.
+
+> **Step 2's `fleet home` is the step that stops the worst mistake.** `fleet` resolves its home from
+> the location of the `fleet.py` behind whichever shim PATH found — *not* from your current
+> directory. So if a different fleet clone is already on your PATH, standing inside your new clone
+> and typing `fleet init` configures the **other** home and leaves your new one untouched. That has
+> happened here and cost a real incident. `fleet home` is read-only, takes no lock, and prints the
+> home every following command will act on. If the answer is not the clone you just made, fix PATH
+> first.
+
+> **Step 3's argument is a directory path to your clone** (that is the source form a working install
+> reports: `claude plugin marketplace list` → `Source: Directory (...)`). Whether the
+> `owner/repo` GitHub shorthand also works is untested.
+
+**Where does it install to?** Nowhere you have to choose. Fleet derives `FLEET_HOME` from `bin/fleet.py`'s own location, so the clone can live anywhere — there is no hard-coded path in the CLI. `fleet home` prints the resolved value:
 
 ```console
 $ fleet home
 C:/proga/claude-fleet
 ```
+
+**Overriding it — and the one case where the environment variable loses.** Home resolution runs in
+priority order (`docs/specs/multi-fleet.md` §5):
+
+| Priority | Input | Wins when |
+|---|---|---|
+| 1 | `--fleet-home <PATH>` — a global flag, accepted in any position | always, if given |
+| 2 | this session's id, looked up against the registries the install root can see | the session id is claimed by one of them |
+| 3 | the `FLEET_HOME` environment variable | nothing above matched |
+
+For an ordinary user, priority 2 never fires and `FLEET_HOME` behaves exactly as you would expect.
+**Inside a Claude Code session that fleet itself launched, it does not:** that session's id is
+claimed by the registry that launched it, so priority 2 answers first and `FLEET_HOME` is silently
+ignored. If you are scripting against a specific home — and especially if you are testing a second
+clone from inside a fleet-managed session — use `--fleet-home <PATH>`, which outranks both. Note
+that `--fleet-home` requires an *initialized* home, meaning one whose `state/fleet.json` exists;
+`fleet init` writes `worker-settings.json` and does **not** create the registry, which appears on
+the first spawn. A freshly `init`-ed home will therefore be rejected as `not_initialized` until a
+worker has been spawned into it.
 
 Step 2 writes exactly one file, and tells you where:
 
@@ -220,11 +270,12 @@ For dependent or review-style work (one worker builds, another attacks the diff)
 | `fleet clean` / `archive` / `autoclean` | Tiered cleanup and staleness sweeps |
 | `fleet doctor` | Run the 28 health checks (`--repair` quarantines a corrupt registry) |
 | `fleet home` | Print the resolved `FLEET_HOME` |
+| `fleet homes` | List the machine's registered fleet homes. The bare verb is read-only; `--add` / `--retire` mutate the machine-wide homes list |
 | `fleet knowledge` | Print `knowledge/INDEX.md` |
 | `fleet index` / `fleet q` | Opt-in per-project symbol index (`index init/build/update/status`) and the query verb over it |
 | `fleet sup-*` | Supervisor identity: `sup-boot`, `sup-spawn`, `sup-checkpoint`, `sup-heartbeat`, `sup-release`, `sup-status`, `sup-context`, `sup-decision`, `sup-handoff-{begin,complete,abort}` |
 
-That is all 32 subcommands `fleet --help` ships, as of `f457a57`. Every command's exact contract lives in [`SPEC.md`](SPEC.md) §7 — and if this table and `fleet --help` ever disagree, `--help` wins and this table has drifted.
+That is all 33 subcommands `fleet --help` ships, as of `fa236cb`. Every command's exact contract lives in [`SPEC.md`](SPEC.md) §7 — and if this table and `fleet --help` ever disagree, `--help` wins and this table has drifted. To check for yourself, read the `{...}` choice list at the top of `fleet --help`; that is the authority, and it drifted from this table once already (`homes` shipped and went unlisted here for a wave).
 
 ---
 

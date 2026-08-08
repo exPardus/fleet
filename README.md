@@ -96,29 +96,41 @@ Every `fleet` command is a short-lived CLI invocation. The registry is the singl
 **Python 3.10+** is the library floor, declared once as `fleet.MIN_PYTHON_VERSION` and run green at by the suite. **One caveat, and it bites Windows users first:** the `bin\fleet.cmd` shim this quickstart puts on your PATH invokes `py -3.13` with no fallback, so *via that shim* fleet needs 3.13 specifically. The POSIX shim (`bin/fleet`, used from Git Bash and by every hook) selects any interpreter at or above the floor and honours `$FLEET_PYTHON`. Until the shims agree, install 3.13 on Windows or drive fleet from Git Bash.
 
 ```powershell
-# 1. Clone, then add the clone's bin\ to PATH  (bin\ holds fleet.cmd)
+# 1. Clone, then put the clone's bin\ on PATH  (bin\ holds fleet.cmd)
 git clone https://github.com/exPardus/fleet.git
 cd fleet
-#    fleet resolves its own location -- the clone may live anywhere
+$env:PATH = "$PWD\bin;$env:PATH"          # this session only
+#    To make it stick across sessions, use your usual method for editing the
+#    user PATH. `setx` writes your machine-wide user environment -- a real
+#    change outside this repo, so make it deliberately, not by paste.
+#    fleet resolves its own location -- the clone may live anywhere.
 
-# 2. Render machine-local hook wiring (writes <FLEET_HOME>\state\worker-settings.json)
-fleet init
+# 2. Check WHICH fleet you are about to configure, then render the hook wiring
+fleet home                                 # must print the clone you just cd'd into
+fleet init                                 # writes <FLEET_HOME>\state\worker-settings.json
 
 # 3. Install the plugin (manager skill + /fleet:* commands; registers no hooks)
-claude plugin marketplace add <path-or-github-repo-of-this-clone>
+claude plugin marketplace add C:\path\to\this\clone   # a DIRECTORY path, not a URL
 claude plugin install fleet@claude-fleet
 #    restart Claude Code, verify: claude plugin details fleet
 
 # 4. Optional: the always-on statusline (a plugin can't ship one)
+#    This writes ~\.claude\settings.json, your machine-wide Claude Code config.
 fleet init --statusline
 
 # 5. Confirm the wiring -- all 28 checks should pass
 fleet doctor
 ```
 
+> **Step 2's `fleet home` is not ceremony.** If another fleet clone is already on your PATH, a bare
+> `fleet init` configures *that* home, not the one you just cloned — the clone you are standing in
+> has nothing to do with it. `fleet home` is read-only and tells you which home every subsequent
+> command will act on. If it prints something other than your new clone, fix PATH before running
+> `fleet init`.
+
 Then open a Claude Code session and say *"become the fleet manager"* — or run **`/fleet:overview`**, which is a slash command and so triggers deterministically — and spawn your first worker.
 
-Two things this quickstart cannot do for you: step 3's `<path-or-github-repo-of-this-clone>` is a placeholder that has never been resolved to a working literal, and the walkthrough is only executed as far as `fleet doctor`. Both are stated plainly, with everything else that blocks a first use, in **[Launch readiness](docs/launch-readiness.md)**. The step-by-step version with real output is **[Getting started](docs/getting-started.md)**; collaborator/multi-machine setup and the `--statusline --chain` composition flag are in [`docs/SPEC.md`](docs/SPEC.md).
+One thing this quickstart cannot do for you: the walkthrough is only executed as far as `fleet doctor` — nothing from `fleet spawn` onward is covered by a rehearsal receipt. Step 3's marketplace argument is a directory path to the clone; that is the form a known-working install on the maintainer's machine reports, not a form re-executed on a clean box. Both, with everything else that blocks a first use, are stated plainly in **[Launch readiness](docs/launch-readiness.md)**. The step-by-step version with real output is **[Getting started](docs/getting-started.md)**; collaborator/multi-machine setup and the `--statusline --chain` composition flag are in [`docs/SPEC.md`](docs/SPEC.md).
 
 ## CLI
 
@@ -139,6 +151,7 @@ Two things this quickstart cannot do for you: step 3's `<path-or-github-repo-of-
 | `fleet clean` / `archive` / `autoclean` | Tiered cleanup: remove dead workers, archive terminal ones, staleness sweep run by the supervisor's beat and the interface's startup ritual |
 | `fleet doctor [--repair]` | Run the 28 fleet health checks. Report-only unless `--repair` is passed, which quarantines a corrupt `state/fleet.json` by renaming it aside |
 | `fleet home` / `knowledge` | Print the resolved `FLEET_HOME`; print `knowledge/INDEX.md` |
+| `fleet homes` | List the machine's registered fleet homes. Read-only on its own; `--add` / `--retire` mutate the machine-wide homes list |
 | `fleet index` / `q` | Opt-in per-project symbol index (`index init/build/update/status`) and the query verb over it |
 | `fleet sup-*` | Supervisor identity: `boot`, `spawn`, `checkpoint`, `heartbeat`, `release`, `status`, `context`, `decision`, `handoff-{begin,complete,abort}` |
 
