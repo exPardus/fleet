@@ -6447,3 +6447,130 @@ Six other gate verdicts sit beside it (`w43-ga1`, `w43-glaunch`, `w43-gmf5`, `w4
 4. Untouched, as ordered: `supervisor/GOALS.md`, the three open gates (E5, E2/homes, GOALS band), ND4(c)'s slot, `w35/nd4c`.
 
 Carried forward from the predecessor's own record and NOT actioned here: the `[FAIL] instance-freshness` doctor row it proved a consequence-free false alarm with a byte-identical render, and the remedy it filed but did not build (compare the RENDERED template to the instance, not mtimes). Self-repair only when it blocks the axis; it does not.
+
+## 2026-08-08T18:30:14Z CHECKPOINT inc=inc-20260808T173852Z-5dc6 sid=cabbec9f-d382-4535-927a-8bb500e89675
+
+WAVE 47 — TWO LANDINGS, BOTH FLOORS PREDICTED AND HIT ON BOTH INTERPRETERS. THE MISSION'S THREE LANDINGS WERE TWO MERGES, AND A REAL DEFECT SURFACED IN THE LOCK.
+
+## SETTLED BY THE OPERATOR THIS WAVE (both relayed mid-turn, both recorded here)
+
+- **The outage cause is KNOWN and is not a defect: the operator's PC was off.** My boot entry carried the login-expiry class as an explicit untested hypothesis; it is wrong and I am retracting it. This is the 2026-07-27 shape repeating — durable workers survive the machine going down, the command tier does not, and the operator relaunching the interface IS the restart trigger. No investigation owed, none spent.
+- **The whole operator docket cleared** (`a4ea0dc`): E5 re-grounds `doctor --repair` on the RENAME; E2/homes SPLITS the verb (reading `fleet homes` ORDINARY, `--add`/`--retire` DESTRUCTIVE, on the grounds that ORDINARY let a read-only `Bash(fleet homes)` grant reach `--add` — the 2026-07-09 security class); the GOALS band applies the prepared §8 replacement IN FULL with `supervisor/GOALS.md` joining `test_supervisor_context.py`'s `SURFACES`. `OPERATOR-GATES.md ## Open` is now EMPTY. All three are gated lanes AFTER slice (a); none blocks a2/a3. The GOALS one carries a binding authorisation limit I will put in its brief verbatim: **transcription, not authorship — no lane may originate `supervisor/GOALS.md` content.**
+- The five 234h `dead-suspected` husks were killed and archived by the interface (`kill --yes`, no `clean`, journals survive). Roster is me plus the gate.
+
+## LANDING 1 — `w45/pin-hardening` at `663acb9` (B2 DISCHARGED)
+
+Conflicts predicted 0 and measured 0 — **over 49,637 bytes of real merge-tree output, with the control run FIRST and returning 26** on `w35/nd4c`×main. At git 2.34.1 the three-arg form is the only form that measures anything; the control is what separates a zero from an unrun instrument.
+
+Floor **predicted 3974 = 3936 (main) − 80 + 118**, derived by `--collect-only` on the three-file subset rather than by counting `def test_` lines, after proving main had touched none of those three files since the merge-base. **Hit exactly: 3959 passed / 14 skipped / 1 xfailed = 3974, rc=0, both interpreters.** All three merged blobs proved byte-identical to the branch tip by object sha; both parents proved from `rev-list --parents`.
+
+**A coordination fact worth recording:** the interface committed `a4ea0dc` on top of my merge in this same working tree and pushed it, while my 3.13 floor run was in flight — and that commit touches `docs/OPERATOR-GATES.md` and `knowledge/lessons.md`, both of which tests actually read. So my first 3.13 run's tree state was not certain. I re-ran 3.13 at `a4ea0dc` with the sha proved identical before AND after the run: same 3974, rc=0. *A floor is a claim about a tree, and a tree that can move under a running suite makes the claim unfalsifiable — proving the sha on both sides of the run is the cheap fix, and I am adopting it as standing practice.*
+
+## THE MISSION'S ORDERING WAS WRONG, MEASURABLY
+
+The brief ordered three landings: pin-hardening → s5-note → a2. **`w46/s5-note` is branched off a2's tip, so a2 is an ancestor of it** (`git merge-base --is-ancestor 39f84d0 w46/s5-note` → yes; `git log main..w46/s5-note` shows both commits). Landing s5-note lands a2. Landing a2 afterwards would be a no-op.
+
+This is not a defect in the brief so much as a fact it could not see from outside, and it turns out to be the *better* shape: the a2 gate was GATING on B1+B2, and B1 *is* the note. Merging s5-note discharges B1 in the same commit as the code it qualifies, which is exactly the condition the gate asked for — a2 cannot exist on main for even one commit without its divergence record.
+
+## LANDING 2 — `w46/s5-note` carrying a2, at `74a5abf` (B1 DISCHARGED, SLICE a2 LANDED)
+
+Disjoint: main touched none of the five files since the merge-base (main's advance was `docs/NEXT-SESSION.md`, `OPERATOR-GATES.md`, `claim-nonce.md`, `knowledge/INDEX.md`, `lessons.md`, `JOURNAL.md`, and three test files — intersection empty). Conflicts 0 over 91,850 bytes.
+
+Floor **predicted 4052 = 3974 − 76 + 154**, and **cross-checked by a second, independent derivation**: the a2 gate measured 4014 at a2's tip pre-pins, and the pins landing added +38 (118−80); 4014 + 38 = 4052. Two derivations from different bases agreeing is worth more than either alone. **Hit exactly: 4037 / 14 / 1 = 4052, rc=0, both interpreters**, sha proved before and after each run. Merge stat equals the merge-base diff stat exactly (1483 insertions, 29 deletions, 5 files). Receipts: `verify_receipts.py --strict docs/specs/multi-fleet.md` → pass, 0 failures (the note added no fenced blocks).
+
+**The citation fixpoint owed at a2's landing cost ZERO passes, and that is a measurement rather than luck.** a2 moves ~635 lines of `bin/fleet.py`, and the gate warned its own fixpoint took six passes. But main never touched `bin/fleet.py` between the merge-base and here, so no citation into that file moved relative to what a2's own fixpoint already settled. `test_self_citations.py` green in both full runs. *The fixpoint cost is a function of what BOTH sides moved, and a landing where main stood still on the cited file owes nothing.*
+
+## A REAL DEFECT, FOUND BY A RED I DID NOT EXPECT — FILED, NOT REPAIRED
+
+The first full 3.10 run at the a2 merge came back **rc=1**: `tests/test_core.py::TestLockContention::test_second_acquirer_blocks_then_succeeds_after_release`. The collected count still hit 4052 exactly; the outcome did not. Per the brief's own rule I stopped and investigated instead of pushing.
+
+**The finding is in `fleet_lock`, and it is not a test defect.** The contender thread died with:
+
+    PermissionError: [Errno 13] Permission denied: '...\state\fleet.lock'
+    at bin/fleet.py:602, os.open(str(path), O_CREAT | O_EXCL | O_WRONLY)
+
+`fleet_lock`'s acquisition loop catches **only `FileExistsError`**. On Windows, opening a file that is in *delete-pending* state returns `ERROR_ACCESS_DENIED`, which CPython maps to `PermissionError` (errno 13), **not** `FileExistsError` (errno 17). The holder releases by `path.unlink()`; a contender polling at `LOCK_RETRY_INTERVAL_SECONDS` can land precisely in that window. When it does, the exception escapes the contextmanager uncaught — so a caller that is written to handle `FleetLockTimeout` gets a raw `PermissionError` instead, and there is no retry. **Every lock-holding verb inherits this** (`clean`, `kill`, `archive`, `spawn`, `send`, the sup-* family). It is a production crash path that the test merely happened to observe.
+
+**a2 did not cause it, proved rather than argued**: `tests/test_core.py` is byte-identical across the merge (empty diff), and `fleet_lock` itself is byte-identical — I extracted the function from both revisions and hashed it, sha256 `c54382c439a87567` on each side. a2's only appearance anywhere near it is a comment's line-number citations moving (`cmd_kill:7677` → `:8215`). Then: 12/12 green re-running the test alone on 3.10, and the full 3.10 suite re-run at the same sha came back **4037/14/1, rc=0**. So it is a load-dependent race, not a regression — the machine was carrying two long suites plus a working gate lane when it fired.
+
+**Filed for a gated lane, deliberately not fixed here.** It is a change to the single-writer lock guarding every registry mutation; that is core-safety code and it earns its own lane with its own adversarial gate, not an inline edit during a merge. Landing on a disclosed, root-caused, non-regressing flake is the right call; silently re-running until green would have thrown the finding away. *The suite found a real bug in the fleet by being run under load, which is the one condition the fleet actually operates in.*
+
+## a3's SELF-REPORT IS GONE, AND THAT CHANGED THE GATE'S BRIEF
+
+`fleet result w46-a3` does not exist: the lane's registry record was archived during the outage sweep and the result went with it. No report file survives in its worktree, in `state/journals/`, or in `state/outcomes/`. So the four claims the dispatcher relayed (1-call-site chokepoint, 19-of-33 verbs, the `A3-LOOKUP-READS-TWICE` green mutant, the declined F2) are **a relay of a relay, with the original unopenable by anyone**. I wrote that into the gate brief explicitly and told it to treat each as an unsourced rumour to be settled against `bin/fleet.py` by AST.
+
+What DID survive is better: **a3's original mandate**, `state/tasks/lens/w46-a3.md`, 13,376 bytes — the brief-store fix from wave 35 earning its keep. A lane is accountable to its brief, not to its own summary, so the gate has the document that matters.
+
+*New shape for the fold: archiving a lane destroys its result. The 3-time lesson was "a finished result with no reader is work not done"; this is the sharper version — a finished result that WAS read and then archived is unrecoverable for whoever comes next. The durable artifact must be a FILE on the main tree, and the result must be only an index into it.* I have ordered exactly that from the gate, at an absolute main-tree path, because the a2 gate wrote its 38,815-byte verdict into a per-worktree gitignored `state/` and nearly cost this campaign its only review.
+
+## IN FLIGHT
+
+`w47-ga3` (sid 731e971c, worktree `C:/proga/fleet-w47-ga3`, detached at `aa578ef`, opus, bypass) — the adversarial gate over slice a3, the wrong-home guard. Dispatched at 11k of my context with an 11.2k brief that arrived byte-preserved in the brief store. Its verdict goes to `C:/proga/claude-fleet/state/verdicts/w47-ga3.md`.
+
+Occupancy: measure at the next boundary rather than estimating. Band 350–400k.
+
+## NEXT
+
+Gate returns → rule it → land a3 on green (slice (a) complete end to end) → citation fixpoint at that landing (a3 moves ~1009 lines of `bin/fleet.py`, and unlike a2 this one lands onto a main that a2 has just moved, so I expect this fixpoint to cost real passes) → then the three ruled operator lanes and the knowledge fold for waves 44–47. Carried untouched: ND4(c)'s slot, `w35/nd4c`. `supervisor/GOALS.md` untouched by me — the band edit is a lane's transcription job under the operator's binding authorisation.
+
+## 2026-08-08T19:16:33Z CHECKPOINT inc=inc-20260808T173852Z-5dc6 sid=cabbec9f-d382-4535-927a-8bb500e89675
+
+WAVE 47 — THE a3 GATE RETURNED GATING ON TWO FINDINGS, ONE OF THEM A LIVE FAIL-OPEN IN THE GUARD. DISCHARGE DISPATCHED. TWO OPERATOR GATES FILED.
+
+## THE GATE EARNED ITS COST, AND THE HEADLINE IS A SECURITY DEFECT
+
+`w47-ga3` returned **GATING** over `w46/mf-a3` @ `aa578ef`, 42,372 bytes at `state/verdicts/w47-ga3.md` — written to the MAIN tree as ordered, so it cannot die with its worktree the way three lane reports already have this campaign.
+
+**B1 — the wrong-home guard FAILS OPEN on the empty string, on the two flags a3 itself singled out as unruled.** `verb_effect_tier` decides a residual flag is set by TRUTHINESS; `cmd_sup_decision` decides it is writing by PRESENCE. The two predicates agree on every value except `""`. Measured end to end through `main()` on an armed machine, no mutant on disk: `fleet sup-decision --answer yes` → rc 1 REFUSED, but `fleet sup-decision --answer ''` → rc 0 DISPATCHED, reaching the command and read-modify-writing a FOREIGN home's decision file; `--raise ''` likewise; `fleet clean --yes` → rc 1 as the control proving the guard was live in that fixture. The write stamps `answered_at`/`answered_by_sid` with a falsy answer, so the foreign fleet's decision still reads OPEN while carrying a stamp from a session in another fleet — a supervisor parked on it stays parked. And `fleet sup-decision --answer "$DECISION"` with an unset variable is the ordinary field shape of this, not an exotic input.
+
+**Why 4061 tests could not see it, which is the transferable part:** every test of this classification builds an `argparse.Namespace` BY HAND (`_ns(**kw)`) instead of taking one from `build_parser()`, and the parametrised fail-safe test happens to pass two truthy values. *A test that constructs the object under test's input by hand is testing the function, not the program* — the whole defect lives in the seam between the parser and the classifier, which no hand-built namespace can cross. That is the same shape as ga2's B2 (a pin green because it drove `parse_args`, a layer the flag no longer reached), one slice later, in the opposite direction.
+
+**B2 — F2 was half-disposed, and the gate ruled the split rather than letting silence stand.** a3's decline of the destructive-tier half is SUSTAINED: its argument survives in the tree, not merely in my relay (`_refuse_wrong_home_destructive`'s docstring and `test_yes_does_not_buy_past_the_destructive_tier`), and the ratified text backs it. But the half F2 was actually about was left silent and is measurably broken: §5 step 1's disagreement refusal tells the operator to *"Re-run with `--yes`"*, and `--yes` exists on **3 of 33 verbs** — for the other 30 that remedy is `SystemExit(2)`. This is exactly the class a3 built `TestFleetHomesSitsAboveEveryBlockingStateTheResolverEnters` to prevent — *a refusal naming a remedy the machine will not accept* — and a3's own test misses it BY CONSTRUCTION, driving the disagreement row with `clean`, one of the three verbs where `--yes` does exist.
+
+## WHAT THE GATE ALSO SETTLED, AND WHAT IT COST ME NOT TO HAVE TO RE-DERIVE
+
+- **The chokepoint claim is SUSTAINED by AST** — one caller, above all 37 `cmd_*` arms. The relayed "1 call site, not ~11" was true. Census re-derived independently: 33 verbs, 19 tiered.
+- **My relay of a3's four claims was 4 for 4 correct** — the gate says so in its own WHERE-THIS-BRIEF-WAS-WRONG section. I had told it to treat all four as unsourced rumour because a3's self-report was destroyed by archival. That was the right instruction and it still cost nothing: the rumours held.
+- **The landing floor is already measured, and by the one method a branch floor cannot use:** the gate performed a REAL merge into `main` in a throwaway clone and collected **4099/14/1 on 3.13 AND 3.10**. So the citation fixpoint at a3's landing owes **zero further passes** — I predicted this one would cost real passes because a2 had just moved `bin/fleet.py`, and I was wrong, measurably.
+- ga2's A1/A2/A3/A8/A9 genuinely closed with derived tests plus seed tests; A4/A5 ruled and pinned; §7's two pins are pins rather than restatements.
+
+## THE GATE DISCLOSED AN INSTRUMENT FAILURE AGAINST ITSELF, AND IT IS THE WAVE'S BEST LESSON
+
+A plant **refused** — pattern *"matched 0 times"* — and the driver **ran the full suite anyway**. The result was a clean floor that is byte-indistinguishable from a green mutant run, and the gate was one paragraph from shipping a fabricated advisory ("§5's disruptive clause is unpinned") off it. Cause: multi-line patterns written with bare `\n` against **CRLF** files. Round 2 planted correctly → RED, 2 failed, both intended.
+
+*This is the 2026-07-31 lesson — a CLI that turns "I measured nothing" into "I measured zero" — arriving on the MUTATION side rather than the merge side. A planter that cannot fail loudly is a green-mutant generator.* The structural fix is small and belongs in the next gate's kit: **a plant driver must assert its own patch applied before it runs anything.** The gate also downgraded its own A-3 after predicting a hole, planting for it twice, and watching both plants redden — 4 of 7 of its mutant predictions were right, and it published that ratio against itself.
+
+## DISPATCHED
+
+**`w47-a3fix`** (sid eb1fd354, worktree `C:/proga/fleet-w46-a3`, branch `w46/mf-a3` at `aa578ef`, opus, bypass). Discharges B1 + B2 only, both inside a3's fence, commit on top rather than amend. Ordered to read the verdict's B1/B2 sections in full rather than my summary; to watch each RED before each fix; to pin B1 by driving `main(["sup-decision","--answer",""])` on an armed fixture rather than hand-building a namespace, since a hand-built namespace is exactly the blindness that hid the defect; and to plant against its OWN pins in both directions. Explicitly fenced OUT of `tests/test_round7_defect_pins.py` and `tests/test_terminal_surface.py`, which the homes/E2 lane owns. Report to an absolute main-tree path.
+
+**A-1 deliberately NOT sent to that lane.** The gate found *"the worst matching tier wins"* is a safety claim nothing can exercise — the `max`→`min` mutant left the floor byte-identical. I am routing it to the homes/E2 lane instead, because that ruling is what first makes the rule load-bearing: I measured today that `homes` is a bare ORDINARY token, that `homes --add`/`--retire` therefore classify **ordinary** on the shipped a3 table, and that appending the two tokens `"homes --add"`/`"homes --retire"` to `VERB_EFFECT_DESTRUCTIVE` yields exactly the ruled behaviour — bare `homes` ordinary, both write forms destructive — *via the worst-tier-wins rule that nothing currently pins*. So the operator's ruling and the gate's advisory are the same edit's two halves, and splitting them across lanes would land a security-shaped rule on an unexercisable mechanism.
+
+## TWO OPERATOR GATES FILED AND PUSHED THIS WAVE (`ee62ecd`, `4a4684d`)
+
+1. **The prepared `supervisor/GOALS.md` §8 replacement text DOES NOT EXIST.** Ruling 3 orders it pasted verbatim from `state/journals/w44-ceil.md` and forbids any lane originating GOALS.md content — so the lane is unexecutable as written. Measured four ways: the file is absent (56 journals, none named `w44-ceil`); `git log --all -S"Context band (350"` is EMPTY, so it was never committed on any branch; the lane's own worktree has **no `state/` directory at all**; no file on the main tree carries the replacement heading. The pointer is real and was relayed four times (`JOURNAL.md:6200`, `:6230`, and the gceil verdict at `:598`) — the text existed, the ARTIFACT is gone. **Third instance in one wave of one structural defect:** `state/` is gitignored and per-worktree, so a lane report written there dies with the worktree. Recommended a supervisor-drafted reconstruction for operator approval, since the ruling already names the three defects the replacement must fix.
+2. **§5 step 1's `--yes` scope** — promote globally or narrow the clause. Escalated from B2 with the gate's recommendation (narrow) and my concurrence. Not parked on anything: the misleading message is repaired by the discharge lane either way.
+
+Format pin `TestOperatorGatesFile` watched RED then GREEN on the first gate — the line must END with the question, which is the house style every settled gate follows and which I got wrong on the first attempt. 733 citation/receipt/terminal-surface tests green after both edits.
+
+## STATE
+
+main == origin == `4a4684d`. Landed this wave: `663acb9` (pin-hardening, B2), `74a5abf` (a2 + its B1 note). Floors 3974 then 4052, each predicted before running and hit exactly on both interpreters. Filed not fixed: the `fleet_lock` Windows delete-pending EACCES escape (brief ready at `state/tasks/lens/w47-locksafe.md`). Untouched as ordered: `supervisor/GOALS.md`, ND4(c)'s slot, `w35/nd4c`.
+
+## INTERFACE STEER, ARRIVING MID-CHECKPOINT — AND IT CORRECTS THE PROVENANCE OF MY OWN GATE
+
+The interface answered gate 1 with something better than an answer: **the unexecutable half of ruling 3 was the INTERFACE's over-specification, not Altai's decision.** What Altai ruled was *"apply the prepared §8 replacement IN FULL"* rather than numbers-only, with the three named defects as the reason, plus YES to adding `supervisor/GOALS.md` to `SURFACES`. The sentences *"paste verbatim"* and *"no lane may originate GOALS.md content"* were the interface's own safeguard, written in `state/tasks/lens/ruling-docket-20260808.md` around an artifact it believed existed.
+
+*A safeguard around a missing artifact is not a ruling* — and that is the sentence I want the next incarnation to have. My gate was correct that the lane was unexecutable, and correct to refuse to improvise; what I could not see from inside was **which layer the binding clause came from**. The docket relay and the operator's answer are two different documents with two different authorities, and they arrived fused. So: the middle option does not contradict the ruling, and it needs Altai's approval on CONTENT, not on METHOD.
+
+**Instruction taken, with the stop condition preserved:** I draft the §8 replacement against the ruling's own three-defect specification, every number re-derived from shipped code and every build-state claim re-derived by grep at HEAD — inheriting any of it would be repeating the exact `[UNBUILT]` class the replacement exists to fix. The draft goes to a **git-tracked** path and into my release note. **`supervisor/GOALS.md` is NOT modified and `SURFACES` does NOT grow yet**, because the pin must not go RED with the operator away and nobody permitted to repair it. The gate stays OPEN.
+
+## AND THE WAVE'S BEST FINDING IS NOW AN ORDER TO BUILD
+
+The interface ruled that the report-durability defect **blocks the priority axis** — it has already destroyed evidence the multi-fleet build depends on — so it clears the standing "self-repair only when it blocks the axis" bar. Three instances in one wave is no longer a lesson to fold, it is a lane to ship: reports must be durable **by construction**, not by a supervisor remembering to copy them, with committing to the lane's own branch preferred over any copy-on-death scheme (which is one more thing that can be forgotten). Plus a retro-sweep of the live worktrees to rescue any report not yet durable, before any worktree removal.
+
+I am fencing that lane OUT of `bin/fleet.py` while `w47-a3fix` holds that file, and telling it that if it concludes code is genuinely required it reports that rather than taking it. My read is that it does not need code: the durability comes from the branch commit, and the enforcement is a pin over the surfaces that tell a lane where to write.
+
+## NEXT
+
+Discharge returns → verify its two diffs and REDs myself → land a3, predicting **4099/14/1** from the gate's clone measurement → slice (a) complete end to end. Fanning out now, disjointness the only bound: **E5** (`docs/specs/multi-fleet.md` only) and **report-durability** (skill surfaces + a new tracked reports path + its own new test file) both go while `w47-a3fix` holds `bin/fleet.py`. **homes/E2 waits for a3 to land** because it edits a3's `VERB_EFFECT_*` tuples, and it carries A-1's missing pin with it. Then the `fleet_lock` lane, slice (b) per Sequencing §3, and the knowledge fold for waves 44–47.
