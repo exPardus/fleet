@@ -277,7 +277,7 @@ verbs classify by their **worst irreversible effect in the wrong home**, enumera
 
 | Class | Verbs | Wrong-home effect |
 |---|---|---|
-| **destructive** — destroys evidence or sessions; nothing recovers it | `clean` (journals, outcomes, records), `archive` + `autoclean` tier 2+/3 (`claude rm`, tombstone drop), `doctor --repair` (registry renamed aside — rb7 C-3), `sup-handoff-abort` (stops a successor session), **[w42/mf5]** `sup-boot` (HANDSHAKE unlink + claim seizure), `sup-handoff-begin` (supersedes every unresolved handoff entry — an in-flight successor is left permanently unbootable), `sup-handoff-complete` (HANDSHAKE unlink + claim transfer), `sup-decision --clear` (removes the queued operator decision; no verb restores it), **[w43/s5 — operator ruling 2026-08-05]** `sup-spawn` (**the dispatch is the act** — E1: it dispatches a body that then boots and seizes the claim, which is the cheapest path to seizing a foreign fleet's claim; its own in-process effect set is narrower than that, so no static effect-site walk can see this and **this entry is hand-maintained**, an accepted cost ruled with it), `sup-checkpoint` and `sup-release` (E2: **an irreversible append IS an irreversible effect** — both append to the home-relative append-only `supervisor/JOURNAL.md`, which no shipped verb removes an entry from, so a wrong-home append permanently contaminates a foreign fleet's record; the bound on which appends count is stated below the table), any future verb whose implementation calls `claude rm`, deletes evidence files, or renames registry/claim state — **the lint keys on those effect sites** (`claude rm` invocations, unlink/rename of `state/`/`supervisor/`/`logs/` paths), NOT on `_confirm_destructive`, which is an ownership guard whose call sites neither contain nor are contained by this list (rs7 C-3 measured the disjointness) |
+| **destructive** — destroys evidence or sessions; nothing recovers it | `clean` (journals, outcomes, records), `archive` + `autoclean` tier 2+/3 (`claude rm`, tombstone drop), `doctor --repair` (registry renamed aside — rb7 C-3; **[w47/e5 — operator ruling 2026-08-08, E5]** RE-GROUNDED ON THE RENAME: it renames the target home's `state/fleet.json` aside — destroying a file the operator may want to inspect — and no shipped verb un-renames it; the ground, its measurement and its one residual are stated below the table), `sup-handoff-abort` (stops a successor session), **[w42/mf5]** `sup-boot` (HANDSHAKE unlink + claim seizure), `sup-handoff-begin` (supersedes every unresolved handoff entry — an in-flight successor is left permanently unbootable), `sup-handoff-complete` (HANDSHAKE unlink + claim transfer), `sup-decision --clear` (removes the queued operator decision; no verb restores it), **[w43/s5 — operator ruling 2026-08-05]** `sup-spawn` (**the dispatch is the act** — E1: it dispatches a body that then boots and seizes the claim, which is the cheapest path to seizing a foreign fleet's claim; its own in-process effect set is narrower than that, so no static effect-site walk can see this and **this entry is hand-maintained**, an accepted cost ruled with it), `sup-checkpoint` and `sup-release` (E2: **an irreversible append IS an irreversible effect** — both append to the home-relative append-only `supervisor/JOURNAL.md`, which no shipped verb removes an entry from, so a wrong-home append permanently contaminates a foreign fleet's record; the bound on which appends count is stated below the table), any future verb whose implementation calls `claude rm`, deletes evidence files, or renames registry/claim state — **the lint keys on those effect sites** (`claude rm` invocations, unlink/rename of `state/`/`supervisor/`/`logs/` paths), NOT on `_confirm_destructive`, which is an ownership guard whose call sites neither contain nor are contained by this list (rs7 C-3 measured the disjointness) |
 | **disruptive** — recoverable but harms a live foreign fleet | `kill`, `interrupt`, `send`, `respawn` (all forms), `release`; **[w42/mf5]** `resume-limited`, `sup-heartbeat` |
 | **ordinary** | `spawn`, `init`, `status`/`peek`/`result`/views, `homes --add/--retire` (list-reversible); **[w42/mf5]** `home`, `knowledge`, `attach`, `wait`, `sup-status`, `sup-context`, `q`, `index` (all four leaves) |
 
@@ -388,6 +388,57 @@ rows refutes the table it is required to reproduce. The outcome store is not tha
 because a shipped verb removes from it, and the destructive row names the verb in its own
 words: *"`clean` (journals, outcomes, records)"*. Same footing as X1–X4: **forced by a ratified
 row rather than chosen.**
+
+**The ground for `doctor --repair` (operator ruling 2026-08-08, E5; MEASURED at `5a320f1`,
+`py -3.13` and `py -3.10`, byte-identical output).** The row's original reason — *"registry
+renamed aside — rb7 C-3"* — stands above unedited; this is the append that re-grounds it, and
+the defect it repairs is that the reason named an effect `load_registry` produces for many
+verbs and therefore did not generate the row it justified. **The re-grounded reason is the
+rename read as an ACT rather than as a reachable effect: `doctor --repair` renames the target
+home's `state/fleet.json` aside, destroying a file the operator may want to inspect, and no
+shipped verb un-renames it; `peek` only reads.** Same effect-grounded discriminator already
+ratified for E1 (*the dispatch is the act*) and E2 (*an irreversible append IS an irreversible
+effect*), so §5 stays internally consistent.
+
+**Derived rather than asserted**, by AST over `bin/fleet.py` at the commit above — cited by
+symbol and never by line, since that file is being moved by two other lanes in the same wave:
+
+* `_quarantine_registry` has exactly **one** caller, `load_registry`, and it holds the module's
+  only rename of the registry file. The only other writer of `state/fleet.json` is
+  `save_registry`'s atomic tmp→dest replace, which writes fresh content and cannot restore an
+  artifact.
+* **18** `cmd_*` verbs reach `load_registry` transitively — the count E5's own question states,
+  reproduced here rather than trusted.
+* **`peek` is not one of the 18.** It calls `read_registry_no_repair`, and neither it nor its
+  native half reaches the loader, so the rename does separate the two verbs the docket item
+  named. That read-only half is not incidental: it is the views doctrine landed 2026-07-27
+  (`docs/specs/terminal-surface.md` D4).
+* `--repair` is declared on **exactly one** subparser, and it is the only branch of `cmd_doctor`
+  that calls `load_registry`; the unflagged branch calls `read_registry_no_repair`. The flag is
+  the whole discriminator — which is why the ratified row and both pin tuples carry the flagged
+  spelling and not bare `doctor`.
+* **Nothing un-renames.** Every filesystem-moving call site in the module was enumerated —
+  `rename`/`replace`/`move`/`copy*`/`write_*`, plus the `os.*` and `shutil.*` spellings — and
+  none takes a `state/fleet.json.corrupt.<ts>` artifact as its SOURCE; all twelve scopes that
+  name the artifact glob perform zero moves. The way back is an operator restoring the file by
+  hand, which `_identity_abstention_note` says to the operator in those words.
+
+**The one residual, recorded rather than written around: the rename separates `doctor --repair`
+from `peek`, and it does NOT separate it from `status`, `attach` and `wait`** — all three
+ratified **ordinary**, all three among the 18. What keeps those three ordinary is **X2** above
+(the corruption-conditional rename, excluded); what puts `doctor --repair` outside X2 is that
+for it the rename is not scaffolding reached while loading but the act the operator asked for by
+typing the flag. So this ground answers the docket item on its own terms and is **not by itself
+generative** over the other seventeen — X2 is still doing that work, and a reader should
+re-derive both rather than trust this paragraph.
+
+**Two things this note deliberately does not do.** It does not touch the E5 bullet in the
+PROPOSAL block below, which still reads *"E5 — NOT RULED … its own OPEN operator docket item"*
+and is stale as of the ruling above; that bullet sits outside this lane's fence and is reported
+to the operator rather than quietly fixed. And it carries **no fenced receipt**: this document is
+listed by name in `tests/test_receipts.py`'s `UNENFORCED` set, so one `# at <sha>` line moves it
+into the enforced set and turns that file's own staleness assertion RED — the trap the
+DIVERGENCE RECORD above already measured. The derivation's transcripts live in the lane report.
 
 > **PROPOSAL — RULED 2026-08-05 by the operator (`docs/OPERATOR-GATES.md`, first settled
 > entry). Kept as the record of the questions, never deleted; each carries its answer.**
