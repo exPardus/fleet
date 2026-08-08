@@ -6615,3 +6615,56 @@ I know this rule — I have used `@file` for every checkpoint this wave for exac
 homes/E2 dispatches as soon as `w47-e5` lands, because it needs `docs/specs/multi-fleet.md` (E5 holds it) as well as `bin/fleet.py` (now free). **I have already measured its code shape and it is two tokens**: `homes` is a bare ORDINARY token today, so `homes --add`/`--retire` classify **ordinary** on the shipped table; appending `"homes --add"` and `"homes --retire"` to `VERB_EFFECT_DESTRUCTIVE` yields exactly the ruled behaviour — bare ordinary, both write forms destructive — through a3's worst-tier-wins rule. That lane also carries the gate's **A-1**, which is the pin that rule does not have: the `max`→`min` mutant left the floor byte-identical, and the homes rows are what first make the rule load-bearing.
 
 Then the `fleet_lock` lane (brief ready at `state/tasks/lens/w47-locksafe.md`), slice (b) per Sequencing §3, and the knowledge fold for waves 44–47. GOALS §8 draft is parked and pushed at `docs/proposals/2026-08-09-goals-band-section-replacement.md`; `supervisor/GOALS.md` untouched and `SURFACES` unchanged, as ordered.
+
+## 2026-08-08T22:08:27Z CHECKPOINT inc=inc-20260808T173852Z-5dc6 sid=cabbec9f-d382-4535-927a-8bb500e89675
+
+WAVE 47 CLOSING — SIX LANDINGS, SIX EXACT FLOOR PREDICTIONS, SLICE (a) COMPLETE, AND THE ENTIRE RULED DOCKET DISCHARGED EXCEPT THE ONE THING THE OPERATOR MUST ANSWER.
+
+## LANDED AND PUSHED — main == origin == `e0bdd97`
+
+| sha | what | floor predicted → measured |
+|---|---|---|
+| `663acb9` | `w45/pin-hardening` — ga2's B2 + five false prose claims | 3974 → **3974** |
+| `74a5abf` | slice **a2** + its B1 §5 divergence note (one merge, see below) | 4052 → **4052** |
+| `c3ba464` | slice **a3** — the wrong-home guard, under its gate | 4119 → **4119** |
+| `9c15680` | **E5** — §5's `doctor --repair` row re-grounded on the rename | 4119 → **4119** |
+| `e5889fe` | **lane-report durability** — `docs/lanes/`, reports commit on the branch | 4134 → **4134** |
+| `31caff4` | **homes/E2 split** — read ordinary, `--add`/`--retire` destructive | 4151 → **4151** |
+
+**Every floor was written down before the run and hit exactly, on `py -3.13` AND `py -3.10`, with the sha proved identical before and after each run.** Every conflict measurement ran its known-non-zero control first (26, every time) and every measured zero came with a non-empty byte count beside it. Receipts green at each spec-touching landing.
+
+**Multi-fleet slice (a) is complete end to end: a1 + a2 + a3 on main.** And of the operator's three 2026-08-08 rulings, **two are executed and landed** (E5, homes/E2); the third is drafted and parked awaiting his approval on content.
+
+## WHAT EACH LANDING COST AND WHAT IT BOUGHT
+
+- **The mission's three landings were two merges.** `w46/s5-note` was branched off a2's tip, so landing the note landed the code — and that is the *better* shape: the a2 gate was GATING on B1+B2 and the note IS B1, so a2 never existed on main without its divergence record.
+- **a3 landed under an adversarial gate that returned GATING on two findings**, one of them a live fail-open in the guard (`sup-decision --answer ''` classified ordinary and wrote a FOREIGN home's decision file). Discharged at `ce61c53`; **I re-planted the truthiness mutant myself before merging** rather than accept the lane's self-report, per the interface's order to gate B1 on re-plant — 2 pins RED, restore byte-identical.
+- **The homes lane rejected my proposed code shape and was right.** My two tokens put one verb in two rows and reddened both partition pins; worse, that shape fails OPEN if the tokens are ever dropped, where the shipped `doctor --repair` residual idiom fails SAFE. It also carried the gate's A-1 — the `max`→`min` comparator was unexercisable — and pinned it with a constructed two-tier verb after its own routing rationale dissolved. *I gave that lane a measured answer and it gave me back a better one; the brief's instruction to attack my claims is what made that possible.*
+
+## OPEN GATES — THREE, ALL FILED THIS WAVE, ALL WITH RECOMMENDATIONS
+
+1. **The prepared GOALS.md §8 text does not exist** (measured four ways). Draft now parked at `docs/proposals/2026-08-09-goals-band-section-replacement.md`, every number re-derived from `band_thresholds` and every build-state claim re-derived by grep. `supervisor/GOALS.md` untouched, `SURFACES` unchanged — deliberately, so no pin reddens with nobody permitted to repair it.
+2. **§5 step 1's `--yes` scope** — 3 of 33 verbs carry the flag. Recommendation: narrow. The misleading message itself is already repaired.
+3. **`init --home` and the E2 ground** — filed today because slice (b) is the next thing to build and would ship a second writer of the machine-global list. Ruling it before the build is strictly cheaper than retrofitting it.
+
+## DOCTOR — 3 FAIL, and the successor should read them in this order
+
+- **`pin-version`: claude has moved to 2.1.226** (last pin pass 2.1.222). The native contract is unverified at the current version. **This is launch readiness and it is on the priority axis** — wave 46 dispatched a lane for 2.1.223 and the outage ate the wave before it stamped. Highest-value unstarted work.
+- **`instance-freshness`: still the measured FALSE ALARM.** The predecessor proved the rendered template is byte-identical to the live instance (sha256 `50b048c5…`, 846 chars); the row compares mtimes. Remedy filed, not built: compare the RENDERED template, not mtimes.
+- **`supervisor-pending-decision`: ND4(c)**, operator's slot, carried untouched for an 8th wave as ordered.
+
+## IN FLIGHT
+
+**`w47-locksafe`** (sid c7da7c36, branch `w47/locksafe` off `e0bdd97`) — the `fleet_lock` Windows delete-pending defect: the acquisition loop catches only `FileExistsError`, but a contender racing the holder's `unlink()` gets `PermissionError` (EACCES) and escapes the loop entirely, so callers written against `FleetLockTimeout` get a raw OSError. Found by a floor run under load; proved not-a-regression by hashing the extracted function on both sides of the merge. **Dispatched deliberately late**: `docs/lanes/` landed first, so its report is durable by construction and a successor can land it without me. Its brief points at that convention.
+
+## FOR MY SUCCESSOR, IN PRIORITY ORDER
+
+1. Land `w47-locksafe` when it returns — small, fenced to `fleet_lock` + `test_core.py`, gate it on the re-plant rather than the diff.
+2. **The 2.1.226 pin tier** — `FLEET_LIVE=1`, both interpreters. **The SKIP COUNT is the headline**: the tier skips *inside* the reported skip count, so a green suite certifies nothing unless skips are zero. Do not stamp from a temp home; stamping the real home is a deliberate supervisor act.
+3. Slice (b) once gate 3 is answered — and note the homes lane already established the correct idiom for it.
+4. Budget a **self-citation pass on every `bin/fleet.py` edit**: 37 inserted lines cost 7 red tests and 32 re-pinned numbers this wave, and the homes lane found a subtler variant (ranged `name:START-END` citations whose END has no colon, so the number regex never saw it). Map with difflib and content-verify per rewrite; never add a constant.
+5. Six worktrees from this wave are on disk (`fleet-w47-ga3`, `-e5`, `-durable`, `-homes`, `-locksafe`, plus `fleet-w46-a3`). All their reports are either committed to `docs/lanes/` or landed. **Do not remove a live lane's worktree.**
+
+## THE WAVE'S OWN LESSON, ALREADY FOLDED
+
+`knowledge/lessons.md#2026-08-09-w47-slice-a` + INDEX line, landed at `aeab0fa`. The three instrument failures (a planter that refused and ran anyway, a `git check-ignore` detector fed `"<path>\r"`, and my own backtick-dense merge message executed through a double-quoted shell string) share one cause and one cheap remedy: **an instrument must assert it did the thing before anything reads its result.** And REFUSAL CLASS 5's real surface is the SHELL, not the checkpoint verb — the record named the wrong one, and I walked into it at `git merge -m` after using `@file` correctly all wave.
