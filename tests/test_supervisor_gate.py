@@ -382,6 +382,21 @@ class TestEveryMutatingVerbIsGated:
         # entire 24h in which every beat-driven sweep was refused at tier 1.
         # `rc == 0` is what "exempt" actually means, and rc 1 (a tier reported
         # an error) is what a re-armed gate would produce.
+        #
+        # SLICE a2 (2026-08-06): `--fleet-home` is now §5 step 1 of the
+        # multi-fleet resolution order, applied in `main()` from either
+        # position, and step 1's validation is *"resolve, `is_dir`,
+        # initialized"* -- strictly more than `cmd_autoclean`'s own `is_dir`.
+        # `gate_home` writes `state/worker-settings.json` and no
+        # `state/fleet.json`, so it is a directory and NOT an initialized home
+        # (§Definitions), and this line began refusing with *"is not
+        # initialized"* -- rc 1, which is exactly what this assertion is built
+        # to catch. The registry is seeded so the test keeps measuring the GATE
+        # exemption rather than the flag's new validation; that validation is
+        # pinned in `tests/test_home_resolution.py::TestTheFlagIsValidatedIn
+        # SpecOrder`.
+        (gate_home / "state" / "fleet.json").write_text(
+            '{"workers": {}}', encoding="utf-8")
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-sup")
         _fresh_claim()
         monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
