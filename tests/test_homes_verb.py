@@ -352,9 +352,21 @@ class TestTheRestOfTheCliIsUnchanged:
         """a1 ships the data layer and NOTHING ELSE. Resolution is a2, arming
         and the guard are a3 -- so a machine with two listed homes must behave
         byte-identically to one with none until those land. Driven on `status`,
-        the view every surface reads."""
+        the view every surface reads.
+
+        SLICE a2 LANDED, AND THIS TEST'S OWN *"until those land"* CAME DUE
+        (2026-08-06). The home was an UNINITIALIZED directory (`state/` and no
+        `state/fleet.json`), which under §5 step 5 is now the TERMINUS: with a
+        populated list, `status` renders *"[fleet]: no home"* instead of the
+        table, and this assertion went RED naming exactly that. The home is
+        initialized here so the pin keeps asserting what it is FOR -- a
+        populated list does not change an unrelated verb's output -- while the
+        uninitialized case, which is a different claim, is pinned where it now
+        belongs: `tests/test_home_resolution.py::TestTheTerminus`."""
         monkeypatch.setattr(fleet, "FLEET_HOME", tmp_path / "mine")
         (tmp_path / "mine" / "state").mkdir(parents=True)
+        (tmp_path / "mine" / "state" / "fleet.json").write_text(
+            '{"workers": {}}', encoding="utf-8")
 
         rc_before, before = _run(["status"], capsys)
         sandboxed_list.write_text(

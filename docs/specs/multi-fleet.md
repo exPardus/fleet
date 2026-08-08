@@ -165,6 +165,112 @@ below). Search-space-not-authority argument and honesty items unchanged from v6.
    (`--fleet-home` or `FLEET_HOME`), and views render `[fleet]: no home` and exit 0.** No
    step falls off the end of the list silently, on any surface.
 
+> **DIVERGENCE RECORD — steps 3 and 5 above describe behaviour the tree does not have.
+> Measured 2026-08-06 against `39f84d0` (slice a2's landing commit), py 3.13 and py 3.10
+> alike. This note RECORDS the divergence and deliberately does NOT close it:** closing it
+> means choosing between the ratified text and the shipped resolver, and **that choice is the
+> operator's**. The ratified sentences above are unedited and stay unedited — rewriting a
+> record of a ratification to fix a lookup problem falsifies the record to save the index.
+>
+> The diverging sentences are cited **by step number and by their own words, never by line** —
+> the lines move, and a line citation in a rolling document rots. Step 3 reads *"Validated env
+> — `FLEET_HOME` resolving to an initialized home"*; step 5 fires *"pre-§8 when step 4 yields
+> an uninitialized directory"*. Read together, pre-§8 the terminus is triggered by **step 4** —
+> the legacy install root — being uninitialized, while an uninitialized **env** home is a
+> step-3 failure, and a failed step falls to the next one.
+>
+> **What ships**, with `INSTALL_ROOT` initialized and `FLEET_HOME` naming an
+> existing-but-uninitialized directory:
+>
+> | Layer / machine | Result |
+> |---|---|
+> | `resolve_home()` as a pure function | `step = None` — **the terminus**. Provenance: *"[fleet]: no home -- no flag, no membership, no initialized default"* |
+> | through `main()`, **single-fleet** box (no homes list) | `_multi_fleet_population_is_live` is False, so the terminus is disarmed, `apply_resolved_home` returns `None`, and **dispatch proceeds into the uninitialized env home**: `fleet home` prints it, `fleet status` renders the table *and creates `state/` inside it*, and `fleet clean --yes` — a RATIFIED-DESTRUCTIVE verb — runs there to rc 0 |
+> | through `main()`, **multi-fleet** box (list names one other home) | the terminus fires: `fleet status`/`fleet home` print `[fleet]: no home` at rc 0; `fleet init`/`fleet clean --yes` exit 1 naming the remedy |
+> | **what steps 3–4 literally require** | fall 3→4 and resolve to the **initialized install root** — `step="legacy"` — and proceed there |
+>
+> **The text describes one behaviour and the tree has two, neither of them that one** — and
+> which of the two an operator gets is decided by a gate §5 does not mention. (The `w45-ga2`
+> verdict phrases this as *"the shipped tree does none of the three things the spec's text
+> describes"*; re-measured, the count is one described behaviour against two shipped ones, so
+> it is restated here rather than transcribed.)
+>
+> **1. Step 3's fall-through is unimplemented.** A named env home that fails validation
+> terminates inside `resolve_home` rather than retargeting to step 4. What is absent is the
+> FALL, not step 4: measured over four env shapes at this same commit, step 4 is alive and
+> answers `step="legacy"` at the install root whenever the env var is unset, and an
+> initialized env home answers `step="env"`. Only step 3's failure edge is missing.
+>
+> **2. Step 5's pre-§8 trigger is evaluated against the env-collapsed default, not against
+> step 4's install root.** `FLEET_HOME` is computed once at import as *env if set, else the
+> install root*, so steps 3 and 4 are collapsed into one value before `main()` runs, and step
+> 5's *"step 4 yields an uninitialized directory"* is tested against that collapsed value.
+> When the env var is set, the directory tested is the **env home**; the install root's own
+> initialization is never consulted on that path.
+>
+> **3. The population gate makes the OBSERVABLE behaviour a THIRD thing, on every machine that
+> exists today.** `_multi_fleet_population_is_live` gates terminus *enforcement* — not
+> resolution, which runs identically either way — on the machine having a homes list with a
+> member, or an unreadable one. On a single-fleet box it is False and the terminus is disarmed,
+> which is the second row above. **The sentence a2 filed this deviation under — carried in
+> `resolve_home`'s own docstring, so it ships — *"A NAMED HOME THAT FAILS VALIDATION TERMINATES
+> HERE rather than retargeting"* — is therefore true of `resolve_home` and false of the shipped
+> CLI on the machine every operator has today**, where such a home neither terminates nor
+> retargets: it is acted in. That sentence is corrected here, in §5, rather than only in the
+> journal it was written in, because §5 is where the next lane will look.
+>
+> **Why the divergence was nevertheless the right call, and why no code changed.** Implemented
+> literally, step 3's fall-through means the operator names a home, the home has no registry
+> yet, and fleet silently writes into the install root instead — the 2026-07-29T22:58:39Z
+> incident recorded at the top of this document, reached through the mechanism this document
+> was built to prevent. Refusing is the safe direction; a2 took it and reported it rather than
+> editing this section from inside its own fence. **What was owed was the record, not a
+> rewrite,** and this note is that record.
+>
+> **The cost of closing it is larger than the lane estimated, and that is measured.** a2 filed
+> the faithful branch as *"one `elif` away"*. That is true of `resolve_home` and false of the
+> CLI — the same shape as the sentence corrected in item 3. Measured by wrapping
+> `resolve_home` so a terminus answer becomes `step="legacy"` at the install root (exactly what
+> that `elif` would return) and then driving `apply_resolved_home`: **the verb still acts in
+> the uninitialized env home**, because `apply_resolved_home` assigns `FLEET_HOME` only for
+> steps 1 and 2 — *"this function moves the home only when something NAMED one"*, its own
+> docstring — while steps 3 and 4 ARE the module global's import-time computation. The
+> one-line change would ship a resolver whose provenance line names the install root while the
+> verb writes into the env home. Closing this faithfully touches that assignment rule too.
+>
+> **THE OPEN CHOICE — the operator's, and this note does not take it.** Two ways to close the
+> divergence, with the costs as measured here:
+>
+> * **A — narrow §5's text to match the shipped resolver:** say that a named env home which
+>   fails validation terminates rather than falling through, and that pre-§8 the terminus is
+>   triggered by the collapsed default rather than by step 4 specifically. Cost: one prose edit
+>   in this section; no code, no test, no floor movement. On this one edge it also writes down
+>   what §8's completion would make the only rule anyway — post-§8 there is no step 4, so a
+>   failed step 3 terminates by step 5's own post-§8 clause, and what makes it a divergence
+>   today is only that §8 has not completed. **A is incomplete unless it also records the
+>   population gate**: narrowing the resolver's rule alone still leaves the second row — the
+>   behaviour every operator actually has — undescribed by §5.
+> * **B — change the resolver to match §5:** cost is the `elif`, **plus** a change to
+>   `apply_resolved_home`'s steps-1-and-2-only assignment rule (above), **plus** re-opening the
+>   incident route that the refusal closes, **plus** pins for both halves.
+>
+> ***Recommendation: A.*** B's behaviour is the one this document's own opening incident exists
+> to prevent, and a spec that instructs the tree to reach it would be ratifying the failure it
+> was written to close; A costs prose and loses nothing measured. **A recommendation is not a
+> decision** — whichever is chosen, the population gate needs a sentence of its own in §5,
+> because today it is the thing that decides which of two behaviours ships and §5 is silent on
+> it.
+>
+> **Evidence, and why this note carries no fenced receipt.** Every row above was produced by a
+> throwaway harness outside the repo — a tmp install root, a tmp env home, `homes_list_path`
+> redirected — run against this commit's own tree on both interpreters, rather than
+> transcribed from the gate report it discharges. It carries no fenced receipt block because
+> inside its fence it could not: this document is listed by name in `tests/test_receipts.py`'s
+> `UNENFORCED` set, and MEASURED, adding a single pin line to it moves the file into the
+> enforced set — four tests RED and the suite's collection count 4014 → 4017 — which is
+> dischargeable only by editing that test file. **Receipts here land with the trigger that
+> exclusion names, and this note is not it.**
+
 **The verb-effect table (replaces v7's one-line criterion, which did not generate its own
 list — rs7 C-2 killed it on `kill`, this repo's own contract for which is respawn-recoverable):**
 verbs classify by their **worst irreversible effect in the wrong home**, enumerated per verb:
