@@ -523,6 +523,20 @@ def _run(argv, monkeypatch, sid=None):
     return fleet.main(argv)
 
 
+def _shortest_parsing_argv(parser, verb):
+    """The shortest of `[verb]`, `[verb, X]`, `[verb, X, Y]` that argparse
+    accepts, or None when the verb needs named options a mechanical sweep does
+    not supply. Mechanical on purpose: a hand table of per-verb argv would rot
+    exactly the way the three-name list it replaces would."""
+    for tail in ([verb], [verb, "X"], [verb, "X", "Y"]):
+        try:
+            parser.parse_args(tail)
+        except SystemExit:
+            continue
+        return tail
+    return None
+
+
 class TestMainAppliesTheOrderBeforeDispatch:
     def test_the_flag_moves_the_home_from_either_position(
             self, home, monkeypatch, capsys):
@@ -793,6 +807,86 @@ class TestTheFlagLookupDisagreement:
         assert rc == 0
         assert "WITNESS" in out
         assert b.resolve().as_posix() in out and a.resolve().as_posix() in out
+
+    @pytest.fixture
+    def disagreeing(self, home, sandboxed_list, monkeypatch):
+        """The flag names B; the session belongs to A. §5 step 1's own row."""
+        a = home("A", {"w": _rec("SID-1")})
+        b = home("B")
+        _list(sandboxed_list, a)
+        monkeypatch.setattr(fleet, "FLEET_HOME", a)
+        return b
+
+    def _refuse(self, tail, disagreeing, monkeypatch, capsys):
+        capsys.readouterr()   # argparse's own usage text is not this refusal
+        assert _run(["--fleet-home", str(disagreeing), *tail],
+                    monkeypatch, sid="SID-1") == 1
+        return capsys.readouterr().err
+
+    def test_the_refusal_does_not_name_yes_on_a_verb_that_has_no_yes(
+            self, disagreeing, monkeypatch, capsys):
+        """ga3 B2, and ga2's F2 as ga2 actually stated it. `--yes` exists on
+        3 of 33 verbs (`clean`, `kill`, `respawn`); for the other 30 the
+        sentence *"Re-run with `--yes`"* names a remedy that is
+        `SystemExit(2)`, an argparse usage error. That is the exact class
+        `TestFleetHomesSitsAboveEveryBlockingStateTheResolverEnters` was built
+        to prevent -- A REFUSAL THAT NAMES A REMEDY THE MACHINE WILL NOT
+        ACCEPT -- and it missed this one by construction, because it drives
+        the disagreement row with `clean`, one of the three.
+
+        WHAT IS FIXED HERE IS THE MESSAGE, NOT §5. Whether step 1's `--yes`
+        escape should be narrowed in text or `--yes` promoted globally the way
+        `--fleet-home` was is an edit to a ratified section and is filed as an
+        operator gate. This pin only says the sentence must be honest about
+        the tree as it stands."""
+        err = self._refuse(["archive"], disagreeing, monkeypatch, capsys)
+        assert "--yes" not in err
+        assert "drop `--fleet-home`" in err.lower()
+
+    def test_the_refusal_still_names_yes_on_a_verb_that_has_one(
+            self, disagreeing, monkeypatch, capsys):
+        """THE HALF THE FIX MUST NOT EAT. Making the sentence conditional is
+        not licence to delete it: where `--yes` exists it IS the remedy, and
+        `test_yes_proceeds_and_prints_the_witness_line` above proves it
+        works."""
+        err = self._refuse(["clean"], disagreeing, monkeypatch, capsys)
+        assert "--yes" in err
+        assert "drop `--fleet-home`" in err.lower()
+
+    def test_the_yes_sentence_appears_exactly_where_the_verb_takes_it(
+            self, disagreeing, monkeypatch, capsys):
+        """The general form, driven over `build_parser()` rather than over the
+        three verb names that carry `--yes` today, so a later slice that grows
+        or drops one cannot leave the message behind. Argv for each verb is
+        found MECHANICALLY -- the shortest of `[]`, `[X]`, `[X, Y]` that
+        parses -- rather than from a hand table that would rot the same way.
+
+        NOT EVERY VERB IS REACHABLE THIS WAY and the shortfall is asserted
+        rather than swallowed: six verbs need named options to parse (`index`,
+        `spawn`, `sup-checkpoint`, `sup-handoff-complete`, `sup-spawn`,
+        `wait`), so the sweep requires that every `--yes`-carrying verb was
+        actually driven and that the rest of the parser's verbs are accounted
+        for either as driven or as unreachable."""
+        parser = fleet.build_parser()
+        subs = next(a.choices for a in parser._actions
+                    if hasattr(a, "choices") and isinstance(a.choices, dict))
+        wants_yes = {v for v, s in subs.items()
+                     if any(getattr(a, "dest", None) == "yes"
+                            for a in s._actions)}
+        driven, unreachable = set(), set()
+        for verb in sorted(subs):
+            if verb in fleet.TERMINUS_EXEMPT_VERBS:
+                continue
+            tail = _shortest_parsing_argv(parser, verb)
+            if tail is None:
+                unreachable.add(verb)
+                continue
+            err = self._refuse(tail, disagreeing, monkeypatch, capsys)
+            assert ("--yes" in err) is (verb in wants_yes), verb
+            driven.add(verb)
+        assert wants_yes <= driven, f"never exercised: {wants_yes - driven}"
+        assert driven | unreachable | set(fleet.TERMINUS_EXEMPT_VERBS) \
+            == set(subs)
 
 
 class TestTheAmbiguousLookupIsAlsoADisagreement:

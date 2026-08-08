@@ -506,6 +506,28 @@ class TestTheDestructiveTierPin:
         assert _run(["clean", "--yes"], monkeypatch) == 0
         assert log == ["clean"]
 
+    @pytest.mark.parametrize("flag", ["--answer", "--raise"])
+    def test_an_empty_residual_flag_does_not_fail_open(
+            self, flag, armed, monkeypatch):
+        """ga3 B1. The residual-flag rows decided *"is this flag set?"* by
+        TRUTHINESS while `cmd_sup_decision` decides *"am I writing?"* by
+        PRESENCE. The two predicates agree on every value but `""`, which is
+        present and falsy -- so `fleet sup-decision --answer ''` classified
+        ORDINARY, sailed past this guard, and read-modify-wrote a foreign
+        home's pending-decision file, stamping `answered_at` under an answer
+        that still reads OPEN. `fleet sup-decision --answer "$DECISION"` with
+        an unset variable is the field shape of it.
+
+        DRIVEN THROUGH `main()`, NOT THROUGH `_ns()`, AND THAT IS THE POINT.
+        Every other test of this classification hand-builds a namespace, and
+        the parametrised fail-safe test above happens to pass two truthy
+        values -- which is exactly why 4061 tests did not see this. A pin that
+        builds its own `Namespace(answer="")` would be the same weaker shape;
+        this one takes the namespace `build_parser()` actually produces."""
+        log = _reached(monkeypatch, "sup-decision")
+        assert fleet.main(["sup-decision", flag, ""]) == 1
+        assert log == [], "an empty residual flag walked past the guard"
+
 
 class TestTheDisruptiveTierIsLoudAndNotRefused:
     """§5, and the operator ruling that made it non-negotiable
