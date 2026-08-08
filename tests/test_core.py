@@ -474,6 +474,131 @@ class TestLockContention:
         assert lock_path.exists()
         assert lock_path.read_text(encoding="utf-8") == "someone-elses-token"
 
+    # ---- Windows delete-pending (w47-locksafe) --------------------------
+    #
+    # MEASURED on this machine, identically on py 3.10.1 and 3.13.12: a lock
+    # file whose delete disposition is set but whose NAME is still in the
+    # directory answers
+    #     os.open(path, O_CREAT | O_EXCL | O_WRONLY)
+    # with PermissionError(errno 13) -- NOT FileExistsError -- while
+    # Path.exists() on it still returns True. `fleet_lock` releases the lock
+    # with path.unlink(), so a contender polling at LOCK_RETRY_INTERVAL_SECONDS
+    # can land inside that window; uncaught, the raw OSError escapes the
+    # manager's "acquire, or raise FleetLockTimeout" contract.
+    #
+    # These pins INJECT that shape rather than racing for it. Reaching it for
+    # real needs a third party (AV, indexer) holding a non-FILE_SHARE_DELETE
+    # handle, which forces DeleteFileW off its POSIX-semantics fast path onto
+    # the legacy disposition -- which is exactly why the production failure was
+    # a once-in-a-campaign flake and not a reproducible test.
+
+    @staticmethod
+    def _delete_pending_open(lock_path, denials, calls, resolve=True):
+        """Build an os.open replacement that models a delete-pending lock file.
+
+        The name is on disk and the first `denials` opens OF THAT NAME fail the
+        way Windows fails them -- PermissionError(EACCES), not EEXIST. With
+        resolve=True the next call first removes the name, i.e. the holder's
+        unlink finally completed and the lock is free; with resolve=False the
+        denial never clears.
+
+        The 100-attempt trip-wire is not decoration: a fix that retries without
+        honouring the deadline would otherwise spin here forever instead of
+        failing.
+        """
+        real_open = os.open
+
+        def fake_open(path, flags, *args, **kwargs):
+            if str(path) == str(lock_path):
+                calls.append(1)
+                if len(calls) > 100:
+                    raise AssertionError(
+                        "fleet_lock made 100 acquisition attempts without "
+                        "honouring its deadline")
+                if len(calls) <= denials:
+                    raise PermissionError(13, "Permission denied", str(path))
+                if resolve:
+                    try:
+                        lock_path.unlink()
+                    except FileNotFoundError:
+                        pass
+            return real_open(path, flags, *args, **kwargs)
+
+        return fake_open
+
+    def test_delete_pending_lock_is_retried_until_the_name_clears(
+            self, isolated_home, monkeypatch):
+        """A denied open of an EXISTING lock file is contention, so poll on.
+
+        RED against the shipped function, which catches only FileExistsError
+        and lets the PermissionError out of the contextmanager.
+        """
+        lock_path = fleet.state_dir() / "fleet.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text("holder", encoding="utf-8")
+        calls = []
+        monkeypatch.setattr(
+            fleet.os, "open", self._delete_pending_open(lock_path, 3, calls))
+
+        acquired = []
+        with fleet.fleet_lock(timeout=2):
+            acquired.append(True)
+
+        assert acquired == [True]
+        assert len(calls) == 4, "expected 3 denials then an acquisition"
+        assert not lock_path.exists(), "the lock must still be released normally"
+
+    def test_permission_error_with_no_lock_file_is_raised_immediately(
+            self, isolated_home, monkeypatch):
+        """An unwritable state/ is NOT contention -- keep the fast, true error.
+
+        This is the arm the rejected alternative (treat every PermissionError
+        as "contended, retry") converts into a lie: a real permissions fault
+        would spin out the deadline and surface as FleetLockTimeout, naming a
+        cause that is not the cause. It passes against the shipped function
+        too -- its RED is against that alternative, and it is the reason the
+        `path.exists()` discriminator is in the fix at all.
+        """
+        lock_path = fleet.state_dir() / "fleet.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        assert not lock_path.exists()
+        calls = []
+        monkeypatch.setattr(fleet.os, "open", self._delete_pending_open(
+            lock_path, denials=10 ** 6, calls=calls, resolve=False))
+
+        started = time.monotonic()
+        with pytest.raises(PermissionError):
+            with fleet.fleet_lock(timeout=5):
+                pass  # pragma: no cover
+        elapsed = time.monotonic() - started
+
+        assert len(calls) == 1, "a denial no lock file explains must not be retried"
+        assert elapsed < 1.0, (
+            f"took {elapsed:.2f}s -- a genuine permissions fault must not wait "
+            f"out the lock deadline")
+
+    def test_delete_pending_that_never_clears_still_times_out(
+            self, isolated_home, monkeypatch):
+        """The contract is "acquire, or raise FleetLockTimeout" -- both arms.
+
+        RED against the shipped function (raw PermissionError escapes instead)
+        and RED against a fix that retries without honouring the deadline (the
+        trip-wire fires instead).
+        """
+        lock_path = fleet.state_dir() / "fleet.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text("holder", encoding="utf-8")
+        calls = []
+        monkeypatch.setattr(fleet.os, "open", self._delete_pending_open(
+            lock_path, denials=10 ** 6, calls=calls, resolve=False))
+
+        with pytest.raises(fleet.FleetLockTimeout):
+            with fleet.fleet_lock(timeout=0.3):
+                pass  # pragma: no cover
+
+        assert 1 < len(calls) <= 100, (
+            f"expected polling and then a deadline, got {len(calls)} attempts")
+
 
 # ---------------------------------------------------------------------------
 # Events
