@@ -6668,3 +6668,36 @@ WAVE 47 CLOSING — SIX LANDINGS, SIX EXACT FLOOR PREDICTIONS, SLICE (a) COMPLET
 ## THE WAVE'S OWN LESSON, ALREADY FOLDED
 
 `knowledge/lessons.md#2026-08-09-w47-slice-a` + INDEX line, landed at `aeab0fa`. The three instrument failures (a planter that refused and ran anyway, a `git check-ignore` detector fed `"<path>\r"`, and my own backtick-dense merge message executed through a double-quoted shell string) share one cause and one cheap remedy: **an instrument must assert it did the thing before anything reads its result.** And REFUSAL CLASS 5's real surface is the SHELL, not the checkpoint verb — the record named the wrong one, and I walked into it at `git merge -m` after using `@file` correctly all wave.
+
+## 2026-08-08T23:19:55Z CHECKPOINT inc=inc-20260808T173852Z-5dc6 sid=cabbec9f-d382-4535-927a-8bb500e89675
+
+WAVE 47 COMPLETE — SEVEN LANDINGS, SEVEN EXACT FLOOR PREDICTIONS. STANDING DOWN AT THE BAND WITH THE DOCKET DISCHARGED.
+
+## FINAL STATE — main == origin == `f402895`
+
+Seventh landing: `f402895`, the `fleet_lock` Windows EACCES escape. Floor predicted 4154 collected = main's 4151 plus the lane's +3; measured **4139 passed / 14 skipped / 1 xfailed = 4154, rc 0, both interpreters**, sha stable across both runs.
+
+The full wave: `663acb9` pin-hardening → `74a5abf` a2 + its B1 note → `c3ba464` a3 under its gate → `9c15680` E5 → `e5889fe` lane-report durability → `31caff4` homes/E2 → `f402895` the lock fix. Floors 3974, 4052, 4119, 4119, 4134, 4151, 4154 — **every one written down before the run and hit exactly on `py -3.13` and `py -3.10`.** Every conflict measurement ran its known-non-zero control first and returned 26; every measured zero carried a non-empty byte count.
+
+## WHY I AM RELEASING RATHER THAN CONTINUING
+
+`sup-context` puts me at the 350k soft trigger. The standing directive at the band is to finish the current wave and hand off, not to start work I cannot land — and the wave's docket is discharged: multi-fleet slice (a) is complete end to end, both executable operator rulings (E5, homes/E2) are landed, the ordered report-durability build shipped, and the lock defect that surfaced mid-wave was found, gated, and closed inside the same wave. What remains is next-wave work with a clean brief, which is a better handoff than a half-dispatched lane.
+
+Releasing rather than dying: a released claim reads unambiguously at the next boot (`claim`, no seizure, no page), which is exactly what distinguishes an authorised stop from the PC-off outage that opened this wave.
+
+## THE LOCK LANE EARNED ITS LATE DISPATCH TWICE OVER
+
+It corrected my mechanism claim with a measurement: `unlink()` alone does **not** produce delete-pending on Win10 1809+, because `DeleteFileW` prefers POSIX-semantics delete and the name vanishes — the window needs a third party holding a handle without `FILE_SHARE_DELETE`. That explains the flake's rarity far better than my "load" hypothesis, and it also measured `winerror=None`, so a fix keyed on `winerror == 5` could never have fired. *My brief's errno was right and my mechanism was wrong, and only the second one would have misled the fix.*
+
+Its citation re-pin is the cleanest instance of that discipline this campaign: a seed test asserting the population before touching anything, content-verification per rewrite with **zero refusals**, fixpoint clean on pass 1 because it repaired the whole population rather than the reported failures — and two hazards a blind `+36` would have walked into, one ranged `cmd_respawn:8434-8436` self-citation plus **ten other-document ranged forms** that a constant would have corrupted, and a CRLF normalisation that would have buried a 25-line repair inside a 21,438-line whole-file diff. **That is the fourth CRLF-shaped instrument hazard of the wave and the first one caught by an assertion written because of the earlier three.** The remedy propagated.
+
+Left as a disclosed finding, not a regression: `unlink()` on a delete-pending name raises `PermissionError` too, so the stale-break arm carries the same escape shape — now the only uncaught `PermissionError` on the acquisition path.
+
+## SUCCESSOR QUEUE, IN PRIORITY ORDER
+
+1. **The 2.1.226 pin tier.** Doctor has been FAILing `pin-version` since the vendor moved (last pass 2.1.222); wave 46 dispatched a 2.1.223 lane and the outage ate the wave before it stamped. Launch readiness, squarely on the priority axis, and the highest-value unstarted work. `FLEET_LIVE=1`, both interpreters — **the SKIP COUNT is the headline**, because the tier skips *inside* the reported skip count and a green suite certifies nothing unless skips are zero. Do not stamp from a temp home.
+2. **Slice (b)**, once the operator rules the `init --home` gate I filed today. The homes lane already established the correct idiom for it: flagged tokens destructive, bare verb in no tuple, tier in `VERB_EFFECT_RESIDUAL` — fail-safe rather than fail-open.
+3. **Three open gates**, all with recommendations and none blocking each other: the parked GOALS §8 draft (`docs/proposals/2026-08-09-goals-band-section-replacement.md`, needs approval on CONTENT only), §5's `--yes` scope (recommend narrow), and `init --home`.
+4. **`instance-freshness`** is still a measured false alarm; the remedy is filed and unbuilt — compare the RENDERED template to the instance, not mtimes.
+
+Budget a **self-citation pass on every `bin/fleet.py` edit**: it cost 32 numbers on one lane and 21 on another this wave. Six worktrees remain on disk; every lane's report is either committed under `docs/lanes/` or landed, so none of them holds unique evidence — but do not remove a live lane's worktree.
