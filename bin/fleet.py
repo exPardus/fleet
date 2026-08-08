@@ -872,12 +872,12 @@ def _quarantine_artifacts() -> list:
     registry is always newer -- an "artifact newer than the registry"
     comparison would never fire on the recreation bypasses it exists to stop.
 
-      * `_sweep_husks` (:10241) -- a rename can hide live worker records from
+      * `_sweep_husks` (:10652) -- a rename can hide live worker records from
         the roster sweep, so a thin registry would rm sessions it still owns.
-      * `_doctor_check_autoclean` (:11349) -- a lingering artifact means the
+      * `_doctor_check_autoclean` (:11760) -- a lingering artifact means the
         sweep above is refusing itself, which is how a bricked sweep reads
         green-and-fresh.
-      * `_require_claim_holder`'s §9 arm (:15859) -- the legacy upgrade mints
+      * `_require_claim_holder`'s §9 arm (:16270) -- the legacy upgrade mints
         generation 1 on bare sid equality, so it needs the registry that
         cleared it to be COMPLETE, not merely readable. See there.
 
@@ -893,7 +893,7 @@ def _quarantine_artifacts() -> list:
         §6.5 worker-turn gate, which refuses on `True` alone, so poisoning a
         HEALTHY read here would let a real worker turn through §6.5 -- closing
         the §9 door by opening a wider one. Rule 1 lives at the §9 arm instead.
-      * `_identity_abstention_note` (:15580) -- the same distinction, in words,
+      * `_identity_abstention_note` (:15991) -- the same distinction, in words,
         because the generic note names `fleet doctor` and doctor is what MADE
         this state.
       * `_read_registry_readonly` (:4023) -- the VIEW surface's copy of the same
@@ -902,7 +902,7 @@ def _quarantine_artifacts() -> list:
         a never-initialised box prints, so the two states were not
         distinguishable from the read surface at all. A `Path.glob` is a read,
         so this costs the views doctrine nothing.
-      * `_doctor_check_registry` (:11887) -- doctor graded only on whether the
+      * `_doctor_check_registry` (:12298) -- doctor graded only on whether the
         LOADER RAISED, and the loader returns `{"workers": {}}` for a missing
         file, so the row called a renamed-away path *"is readable"* and doctor
         exited 0 with every row green (P1-12). A bare absence stays a PASS: no
@@ -914,8 +914,8 @@ def _quarantine_artifacts() -> list:
     these two only spell the filename, because an operator cannot restore a file
     whose name they were never told.
 
-      * `_print_snapshot_table` (:6390) -- `fleet status --stale-ok`.
-      * `_tombstone_releasing_body` (:16016) -- `sup-release`, whose registry
+      * `_print_snapshot_table` (:6801) -- `fleet status --stale-ok`.
+      * `_tombstone_releasing_body` (:16427) -- `sup-release`, whose registry
         arm previously swallowed the quarantined case in silence.
 
     The operator clears the artifact (after restoring what it holds), which
@@ -3059,7 +3059,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     -- reads `ok` while MISSING every record the artifact holds, and the §9 arm
     read that thinness as an affirmative *"you are provably not a worker"*. The
     presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:15859`), where it costs the §6.5 gate nothing.
+    (`:16270`), where it costs the §6.5 gate nothing.
 
     An artifact can also outlive its incident by days -- `_sweep_husks` tells the
     operator to restore the file first and delete the artifact second -- so that
@@ -4576,6 +4576,11 @@ def resolution_population(install=None) -> dict:
             homes.append(ident)
     return {"homes": homes, "legacy": legacy,
             "list_ok": listed["ok"], "list_reason": listed["reason"],
+            # CARRIED FOR THE ARMING RULE, and it is the whole of ga2 A5's fix
+            # on this side: `ok` says the bytes were readable, which is a
+            # different claim from "this file's home count is knowable". A
+            # record nothing can parse is a home that may not be in `members`.
+            "list_invalid_lines": listed["invalid_lines"],
             "listed_members": list(listed["members"])}
 
 
@@ -4618,11 +4623,28 @@ def lookup_home_for_sid(sid, population=None, install=None) -> dict:
     pop = resolution_population(install) if population is None else population
     out = {"state": "no_sid", "home": None, "hits": [], "unreadable": [],
            "population": list(pop["homes"]), "legacy": pop["legacy"],
-           "list_ok": pop["list_ok"], "list_reason": pop["list_reason"]}
+           "list_ok": pop["list_ok"], "list_reason": pop["list_reason"],
+           "list_invalid_lines": pop.get("list_invalid_lines", 0),
+           # THE PER-HOME CENSUS, ADDED BY a3 FOR ga2 A4. `None` means *"no
+           # home was read"* and is not the same fact as an empty list: this
+           # function returns before reading anything when there is no sid, and
+           # `multi_fleet_arming` has to be able to tell "nobody looked" from
+           # "looked and found nothing" or it would count a population of zero
+           # on every sid-less caller. §5's tri-state is hit/miss/unreadable;
+           # a listed home that is merely UNINITIALIZED is a fourth state the
+           # gate measured as invisible in every one of them, and this is where
+           # it becomes visible.
+           "states": None}
     if not sid or not str(sid).strip():
         return out
+    out["states"] = []
     for ident in pop["homes"]:
         ok, reason, data = read_registry_at(ident)
+        # ONE SNAPSHOT PER HOME (§5.2), so the census is filled from the read
+        # that was already happening rather than by a second pass. A second
+        # `read_registry_at` here would double the cost of every sid-carrying
+        # invocation on a surface that has been O(1) forever.
+        out["states"].append({"home": ident, "ok": ok, "reason": reason})
         if not ok:
             if reason == "unreadable":
                 out["unreadable"].append(ident)
@@ -4689,7 +4711,8 @@ def resolve_home(flag=None, sid=None, env=None, default_home=None,
     default_home = Path(default_home)
 
     out = {"home": None, "step": None, "sid": (sid or None), "flag": None,
-           "disagreement": None, "default_home": default_home,
+           "disagreement": None, "disagreement_homes": [],
+           "default_home": default_home,
            "lookup": lookup_home_for_sid(sid, population=population,
                                          install=install)}
     look = out["lookup"]
@@ -4700,8 +4723,24 @@ def resolve_home(flag=None, sid=None, env=None, default_home=None,
     if flag is not None:
         home = validate_named_home(flag)
         out["home"], out["step"], out["flag"] = home, "flag", home
-        if look["state"] == "hit" and not homes_are_same(home, look["home"]):
-            out["disagreement"] = look["home"]
+        # ga2 A2, CLOSED. §5 step 1's clause is unconditional -- *"flag/lookup
+        # disagreement -> mutating verbs refuse without `--yes` + witness"* --
+        # and a2 computed it only for `state == "hit"`. A session claimed by TWO
+        # homes and told to act on a THIRD is the strongest disagreement this
+        # resolver can see, and it was silent: `fleet --fleet-home C clean`
+        # returned 0 with no witness line.
+        #
+        # THE FLAG NAMING ONE OF THE AMBIGUOUS HOMES IS NOT A DISAGREEMENT, and
+        # that is what keeps the fix from eating its own remedy: the ambiguity
+        # refusal's text is *"Name the one you mean with `--fleet-home
+        # <PATH>`"*, so picking one of them is the sanctioned escape and must
+        # not then be refused as a disagreement. Compared with `homes_are_same`
+        # rather than by string, because two spellings of one directory are one
+        # home everywhere else in this file.
+        claimants = [look["home"]] if look["state"] == "hit" else list(look["hits"])
+        if claimants and not any(homes_are_same(home, h) for h in claimants):
+            out["disagreement"] = claimants[0]
+            out["disagreement_homes"] = list(claimants)
         return out
 
     # --- step 2: sid -> home.
@@ -4753,13 +4792,34 @@ def resolution_provenance(res) -> str:
     §5 requires disruptive verbs to *"render their resolution provenance in
     output"* (a3 wires that); a2 owes the RENDERER and uses it for the witness
     line and the terminus refusal, so a3 inherits one spelling rather than
-    inventing a second."""
+    inventing a second.
+
+    ga2 A3, CLOSED HERE AND NOWHERE ELSE. §5.2's sentence is *"Unreadable homes:
+    reported in provenance, counted by arming, and any lookup that WOULD have
+    matched only an unreadable home is indistinguishable from a miss"* -- three
+    clauses, of which a2 shipped the second and dropped the first: the lookup
+    record carried `unreadable=['U']` and this renderer never mentioned it. That
+    matters more here than it reads, because the unreadable home is precisely
+    the one that could have been claiming this session, so a provenance line
+    that omits it is presenting a resolution as unambiguous when the resolver
+    knows it is not. Since a2's §10 tells a3 to reuse this renderer rather than
+    mint a second spelling, following that instruction with the clause unmet
+    would have shipped §5's requirement unimplemented on every surface at once.
+
+    TOLERANT OF A RECORD WITHOUT A LOOKUP. Callers hand this hand-built dicts
+    (the provenance unit tests do), and a renderer that raised on a missing key
+    would be a view that fails."""
     step = res["step"]
     if step is None:
         return f"{NO_HOME_LINE} -- no flag, no membership, no initialized default"
     where = {"flag": "--fleet-home", "lookup": "session membership",
              "env": "$FLEET_HOME", "legacy": "the legacy install-root default"}[step]
-    return f"[fleet] home {Path(res['home']).as_posix()} (via {where})"
+    line = f"[fleet] home {Path(res['home']).as_posix()} (via {where})"
+    unreadable = (res.get("lookup") or {}).get("unreadable") or []
+    if unreadable:
+        line += (f"; {len(unreadable)} listed home(s) could not be read and "
+                 f"may claim this session: " + ", ".join(unreadable))
+    return line
 
 
 def _terminus_refusal(command: str) -> str:
@@ -4807,6 +4867,348 @@ def _multi_fleet_population_is_live(look) -> bool:
     return [h for h in look["population"] if h != look["legacy"]] != []
 
 
+# ---------------------------------------------------------------------------
+# §5's VERB-EFFECT TABLE and the wrong-home guard (multi-fleet slice a3).
+#
+# §5 states the whole feature in two sentences: *"When armed: destructive via
+# env/legacy requires the flag; disruptive via env/legacy proceeds but renders
+# its resolution provenance in output; ordinary flows. Lookup-hit resolutions
+# are exempt from both -- membership is affirmative evidence."*
+#
+# THE TUPLES ARE A TRANSCRIPTION OF A RATIFIED TABLE, NOT A DERIVATION. §5 says
+# so in its own words: `sup-spawn`'s row *"is hand-maintained"*, an accepted
+# cost ruled with it, because no static effect-site walk can see that the
+# dispatch is the act. `tests/test_round7_defect_pins.py` re-reads §5's rows
+# from the spec file and is the pin that catches the transcription rotting;
+# `tests/test_verb_effect_guard.py` pins that THIS copy and that one are the
+# same copy, so the guard cannot tier a verb differently from the enumeration
+# the read-only-grant lint keys on.
+#
+# WHY PRODUCTION CARRIES ITS OWN COPY AT ALL: the guard runs in `main()` and
+# `bin/fleet.py` is stdlib-only and single-file -- it cannot import a tuple out
+# of the test tree. The alternative is parsing the spec at runtime, which makes
+# a markdown edit a production behaviour change.
+# ---------------------------------------------------------------------------
+
+VERB_EFFECT_DESTRUCTIVE = ("clean", "archive", "autoclean",
+                           "doctor --repair", "sup-handoff-abort",
+                           "sup-boot", "sup-handoff-begin",
+                           "sup-handoff-complete", "sup-decision --clear",
+                           "sup-spawn", "sup-checkpoint", "sup-release")
+VERB_EFFECT_DISRUPTIVE = ("kill", "interrupt", "send", "respawn", "release",
+                          "resume-limited", "sup-heartbeat")
+VERB_EFFECT_ORDINARY = ("spawn", "init", "status", "peek", "result", "homes",
+                        "home", "knowledge", "attach", "wait", "sup-status",
+                        "sup-context", "q", "index")
+
+#: Tier ranking. A verb matching two tokens takes the WORST of them, which is
+#: the only direction §5's *"worst irreversible effect in the wrong home"*
+#: admits.
+VERB_EFFECT_TIERS = ("ordinary", "disruptive", "destructive")
+
+# THE RESIDUAL: what a verb the table names ONLY with a flag qualifier is when
+# that flag is absent. Two verbs are in that shape (`doctor --repair`,
+# `sup-decision --clear`), and neither residual is guessed -- each cites what
+# licenses it, because a wrong `ordinary` here is a destructive verb running
+# unguarded in a foreign home.
+#
+#   * `doctor` -- ORDINARY. Root `CLAUDE.md` states it in those words:
+#     *"`doctor` itself is REPORT-ONLY and surfaces `[FAIL] registry:` for the
+#     operator to act on"*. a2 already ships this exact split at the terminus
+#     (`doctor` is in `TERMINUS_VIEW_VERBS`, and `apply_resolved_home` checks
+#     `--repair` to take it back out), pinned by
+#     `test_doctor_repair_is_not_a_view_at_the_terminus`. This is a second
+#     consumer of a shipped, pinned fact, not a new judgement.
+#   * `sup-decision` -- ORDINARY for the SHOW form only. `cmd_sup_decision`'s
+#     own docstring enumerates its four forms and the flagless one is
+#     *"(no flag)  show the current decision"*, a pure read.
+VERB_EFFECT_RESIDUAL = {"doctor": "ordinary", "sup-decision": "ordinary"}
+
+# ...AND THE FLAGS THAT TAKE A RESIDUAL BACK OUT, which is where §5's own OPEN
+# question lands. E3's sub-item is carried by the ratified text as unresolved:
+# *"`sup-decision --raise`/`--answer` (as distinct from the derived `--clear`)
+# write foreign supervisor decision state and are also unclassified."*
+# UNCLASSIFIED IS NOT ORDINARY. a3 does not rule it -- ruling it is an operator
+# edit to a ratified section -- it guards it in the fail-safe direction §5 names
+# (*"indeterminacy never selects the permissive branch"*) and escalates. Dests
+# are spelled out rather than derived from the option string because argparse
+# maps `--raise` to `question`, so the mechanical `--x-y` -> `x_y` rule that
+# serves the ratified tokens does not serve these.
+VERB_EFFECT_RESIDUAL_FLAGS = {
+    "sup-decision": (("question", "destructive"), ("answer", "destructive")),
+}
+
+
+def _verb_effect_index() -> dict:
+    """`verb -> ((dest_or_None, tier), ...)`, derived from the three tuples.
+
+    A token is `verb` or `verb --flag`; the flag's dest is the option string
+    with the leading dashes dropped and inner dashes underscored, which is
+    argparse's own default and is what both ratified flag-qualified tokens
+    (`--repair`, `--clear`) actually use. A token whose verb carries no flag
+    yields `dest=None`, i.e. *"this tier applies however the verb is invoked"*.
+    """
+    index = {}
+    for tier in VERB_EFFECT_TIERS:
+        tokens = {"ordinary": VERB_EFFECT_ORDINARY,
+                  "disruptive": VERB_EFFECT_DISRUPTIVE,
+                  "destructive": VERB_EFFECT_DESTRUCTIVE}[tier]
+        for token in tokens:
+            parts = token.split()
+            dest = parts[1].lstrip("-").replace("-", "_") if len(parts) > 1 else None
+            index.setdefault(parts[0], []).append((dest, tier))
+    return {verb: tuple(rows) for verb, rows in index.items()}
+
+
+def verb_effect_tier(command, args=None) -> str:
+    """§5's three-tier classification for one invocation. Total: every input
+    returns one of `VERB_EFFECT_TIERS`, never a `KeyError` inside `main()`.
+
+    AN UNKNOWN VERB IS DESTRUCTIVE, and that default is the point rather than a
+    fallback. `tests/test_round7_defect_pins.py` states the harm in its own
+    words -- *"a wrong `ordinary` is a destructive verb running unguarded in a
+    foreign home"* -- and a verb this table has never heard of is that risk with
+    less warning. The pin that makes an unclassified verb RED lives in that
+    file; this is what happens in the field until someone reads it.
+
+    THE WORST MATCHING TIER WINS. §5 classifies *"by their worst irreversible
+    effect in the wrong home"*, so a verb that is ordinary bare and destructive
+    under a flag is destructive whenever that flag is set.
+
+    *"SET"* IS PRESENCE, NOT TRUTH, AND THE `not in (None, False)` IS LOAD-
+    BEARING IN BOTH DIRECTIONS (ga3 B1). Truthiness read `--answer ''` as
+    absent while `cmd_sup_decision` reads it as writing (`is not None`), so an
+    empty string classified ORDINARY and walked past the wrong-home guard into
+    a foreign home's decision file -- a fail-open in the fail-safe direction's
+    own escape hatch, and the ordinary field shape of `--answer "$DECISION"`
+    with an unset variable. The naive repair to `is not None` fails the other
+    way: `--repair`/`--clear` are `store_true` with default `False`, and
+    `False is not None`, which would make bare `doctor` destructive. `""` is
+    neither `None` nor `False` (`"" == False` is False), so this predicate
+    serves both shapes."""
+    rows = list(_verb_effect_index().get(command, ()))
+    rows += list(VERB_EFFECT_RESIDUAL_FLAGS.get(command, ()))
+    if not rows:
+        return "destructive"
+    matched = [tier for dest, tier in rows
+               if dest is None or getattr(args, dest, None) not in (None, False)]
+    if not matched:
+        return VERB_EFFECT_RESIDUAL.get(command, "destructive")
+    return max(matched, key=VERB_EFFECT_TIERS.index)
+
+
+#: A listed home counts toward §5's armed population when its registry is
+#: READABLE or when we could not find out what is in it. `not_initialized` is
+#: the one `read_registry_at` reason that does NOT count -- see
+#: `multi_fleet_arming`'s docstring for the two grounds.
+MULTI_FLEET_ARMING_UNKNOWN_REASONS = ("unreadable", "quarantined")
+
+
+def multi_fleet_arming(look=None, population=None, install=None) -> dict:
+    """§5's Arming paragraph, as a record: *"armed when the population holds >=2
+    distinct homes counting valid AND unreadable; an unreadable list, an
+    unreadable home, or any indeterminate population state arms -- indeterminacy
+    never selects the permissive branch. With a determinate population of <2:
+    byte-identical to today."*
+
+    THE NAME CARRIES THE `multi_fleet_` PREFIX ON PURPOSE
+    (`docs/mf-slice-a-price.md` Risk 4). This module already ships an unrelated
+    "armed" -- claim-nonce's supervisor-claim gate -- and a bare `armed` or
+    `_is_armed` here would put two different concepts one grep apart inside one
+    19.7k-line file. `tests/test_verb_effect_guard.py::TestTheArmingSymbols
+    CannotBeConfusedWithTheClaimGate` is the enforceable form of that note.
+
+    THIS IS NOT `_multi_fleet_population_is_live`, WHICH IS a2's AND ANSWERS A
+    DIFFERENT QUESTION. That one is a yes/no about which world the machine is in
+    and gates the terminus; one listed home makes it True. This is §5's
+    stricter, counted question, and one home is not two.
+
+    Keys: `armed`, `reason`, `indeterminate`, `counted`,
+    `skipped_not_initialized`, `population`.
+
+    `reason` is one of:
+
+      * `"list_unreadable"`             -- §4's *"armed-with-unknown-population"*.
+      * `"list_has_unparseable_records"` -- the ga2 A5 hole, closed here rather
+        than in a1's classifier; see below.
+      * `"population_below_two"`        -- determinate <2. NOT armed.
+      * `"population_at_least_two"`     -- armed by the count.
+
+    ga2 A5, CLOSED, AND THE FIX IS DELIBERATELY IN THE RULE AND NOT IN THE
+    CLASSIFIER. The gate measured `read_homes_list()` on a binary-garbage file
+    returning `{'ok': True, 'members': [], 'invalid_lines': 1}` -- so a list that
+    is 100% unparseable was classified determinate-and-empty and DISARMED the
+    guard. `ok` answers *"could the bytes be read?"* and answers it correctly;
+    what it does not answer is *"how many homes does this file name?"*, and an
+    invalid record is a home we may have failed to see. §4's *"Invalid lines
+    never invalidate others"* stays true -- every good line is still read and
+    still a member -- but an unparseable record makes the population COUNT
+    indeterminate, and §5 sends indeterminacy to the armed branch. A BLANK line
+    is not an unparseable record (`parse_homes_list_line` keeps the two apart on
+    purpose), or every trailing newline on every single-fleet machine would arm.
+
+    ga2 A4, RULED: A LISTED-BUT-UNINITIALIZED HOME DOES NOT COUNT. Two grounds,
+    and neither is *"§5's enumeration omits it"*. (1) It is DETERMINATE: the home
+    was read and gave a complete answer -- no roster. Arming's escape hatch is
+    for what could not be found out, and this was found out. (2) It cannot be
+    the wrong home: `resolve_home` reaches steps 3/4 only through
+    `home_is_initialized`, and a lookup cannot hit a home with no records, so no
+    resolution path can select it. It is still REPORTED under
+    `skipped_not_initialized`, because an operator who listed a home that
+    silently does nothing has to be able to see that.
+
+    `quarantined` COUNTS WITH `unreadable`, which is the open question a1 left
+    here by name (`homes_population`'s docstring: *"whether `quarantined` counts
+    with `unreadable` (an incident happened) or with `not_initialized` (no
+    roster is readable either way)"*). RULED: with `unreadable`. The question
+    arming asks is not *"can this home be used?"* but *"could this home be
+    claiming my session?"*, and a quarantined home HAD a roster which was renamed
+    aside after an incident. Nothing here can say what was in it. That is
+    indeterminacy.
+
+    IT READS NO HOME IT DOES NOT HAVE TO. A population that cannot reach two
+    cannot arm however each member reads, so the <2 case is answered without
+    touching the disk -- which is what keeps §5's *"byte-identical to today"* a
+    cost claim as well as a behaviour claim (`docs/mf-slice-a-price.md` Risk 3:
+    §5.2 turns an O(1) surface into O(N-homes)). When the caller already has a
+    lookup record, its per-home census is REUSED rather than repeated: §5.2's
+    contract is *"per home, ONE lock-free snapshot"*."""
+    if look is None:
+        look = lookup_home_for_sid(None, population=population, install=install)
+    out = {"armed": False, "reason": "population_below_two",
+           "indeterminate": False, "counted": [],
+           "skipped_not_initialized": [],
+           "population": list(look["population"])}
+    if not look.get("list_ok", True):
+        out.update(armed=True, indeterminate=True, reason="list_unreadable")
+        return out
+    if look.get("list_invalid_lines", 0):
+        out.update(armed=True, indeterminate=True,
+                   reason="list_has_unparseable_records")
+        return out
+    if len(out["population"]) < 2:
+        return out
+    states = look.get("states")
+    if states is None:
+        states = homes_population_states(out["population"])
+    for state in states:
+        if state["ok"] or state["reason"] in MULTI_FLEET_ARMING_UNKNOWN_REASONS:
+            out["counted"].append(state["home"])
+        else:
+            out["skipped_not_initialized"].append(state["home"])
+    if len(out["counted"]) >= 2:
+        out.update(armed=True, reason="population_at_least_two")
+    return out
+
+
+def homes_population_states(population) -> list:
+    """`[{"home", "ok", "reason"}, ...]` -- one `read_registry_at` snapshot per
+    home, in population order.
+
+    ONE READ PER HOME PER INVOCATION IS THE CONTRACT (§5.2), which is why this
+    exists as its own function instead of two loops: `lookup_home_for_sid` fills
+    the same shape while it is already reading, and `multi_fleet_arming` uses
+    the lookup's census when there is one rather than reading again."""
+    states = []
+    for ident in population:
+        ok, reason, _data = read_registry_at(ident)
+        states.append({"home": ident, "ok": ok, "reason": reason})
+    return states
+
+
+def _refuse_wrong_home_destructive(command, res, arming) -> str:
+    """§5's destructive tier: *"destructive via env/legacy requires the flag"*.
+
+    THE REMEDY IS THE FLAG, NOT A CONFIRMATION, and that is what makes ga2's F2
+    (*"`--yes` exists for only 3 of 33 verbs"*) not land on this refusal: §5
+    step 1's `--yes` escape belongs to the flag/lookup DISAGREEMENT clause,
+    where the operator has already named a home and is being told the registry
+    disagrees. Here nobody named anything -- the home came from `$FLEET_HOME` or
+    from the install-root default on a machine running more than one fleet --
+    and no amount of confirming makes an unnamed home the right one.
+
+    Rendered under §5's refusal contract: *"Refusals print facts + the `fleet
+    homes` view, never a paste-ready command with a chosen home."* The view is
+    EMBEDDED, not referenced, for the reason `_refuse_ambiguous_lookup` gives:
+    a refusal that says "run `fleet homes`" makes the operator run a second
+    command to see the facts that stopped the first one."""
+    counted = "\n".join(f"    {h}" for h in arming["counted"])
+    why = {"list_unreadable":
+           "the homes list exists and could not be read, so this machine's "
+           "fleet population is unknown",
+           "list_has_unparseable_records":
+           "the homes list carries a record nothing can parse, so this "
+           "machine's fleet population is unknown",
+           "population_at_least_two":
+           f"this machine runs {len(arming['counted'])} fleets"}.get(
+               arming["reason"], "this machine's fleet population is unknown")
+    body = (f"`{command}` destroys evidence or sessions and nothing recovers "
+            f"it, {why}, and no `--fleet-home` and no session membership "
+            f"chose this home:\n"
+            f"{resolution_provenance(res)}\n")
+    if counted:
+        body += f"Homes counted:\n{counted}\n"
+    return (body + f"Name the home you mean with `--fleet-home <PATH>`.\n\n"
+                   f"{render_homes_view()}")
+
+
+def _apply_wrong_home_guard(args, command, res) -> None:
+    """§5's guard, applied to a home that steps 3 or 4 chose.
+
+    STEPS 1 AND 2 NEVER REACH HERE, and that is §5's own carve-out rather than
+    an optimisation: *"Lookup-hit resolutions are exempt from both -- membership
+    is affirmative evidence"*, and step 1 IS the remedy this guard demands, so a
+    flag-resolved home is satisfied by construction. `apply_resolved_home`
+    returns before calling this for both.
+
+    THE DISRUPTIVE ROW PROCEEDS, LOUDLY, AND MUST NOT BE TIGHTENED. It is an
+    operator-ruled residual (`docs/OPERATOR-GATES.md`, quoted in
+    `docs/mf-slice-a-price.md` §2): *"wrong-home disruptive verbs proceed loudly
+    rather than refuse"* -- do not turn this into a refusal during a later
+    hardening pass. §5's own gloss is why: *"a wrong-home kill is loud where a
+    wrong-home clean would have been fatal"*.
+
+    The provenance line is `resolution_provenance`, a2's renderer, reused rather
+    than re-spelled -- a2's §10 asks for exactly that, and a second spelling is
+    how two surfaces start describing one resolution differently."""
+    arming = multi_fleet_arming(res["lookup"])
+    if not arming["armed"]:
+        return
+    tier = verb_effect_tier(command, args)
+    if tier == "destructive":
+        raise FleetCliError(
+            _refuse_wrong_home_destructive(command, res, arming))
+    if tier == "disruptive":
+        print(resolution_provenance(res))
+
+
+def _disagreement_remedy(args) -> str:
+    """§5 step 1's refusal sentence, naming only the remedies the verb in hand
+    will actually accept.
+
+    `--yes` EXISTS ON 3 OF 33 VERBS -- `clean`, `kill`, `respawn` (ga2's F2,
+    measured by ga3 B2). Naming it unconditionally made the FIRST remedy an
+    argparse usage error, `SystemExit(2)`, for the other 30: a refusal that
+    names a remedy the machine will not accept, which is the exact shape
+    `TestFleetHomesSitsAboveEveryBlockingStateTheResolverEnters` was built to
+    prevent -- and which that test missed by construction, because it drives
+    the disagreement row with `clean`, one of the three. Dropping the flag is
+    the remedy that exists for every verb, so it is always printed.
+
+    THIS DOES NOT NARROW §5, AND MUST NOT BE READ AS HAVING RULED IT. Whether
+    step 1's `--yes` escape is universal -- in which case `--yes` gets promoted
+    globally the way a2 promoted `--fleet-home`, and 30 verbs grow it -- or is
+    an escape that exists only where the verb already carries `--yes` is an
+    edit to a ratified section and is filed as an operator gate. What is fixed
+    here is the MESSAGE, so that it is honest about the tree as it stands."""
+    head = "Refusing to act on a home the flag and the registry disagree about."
+    tail = "act on the home this session belongs to."
+    if hasattr(args, "yes"):
+        return (f"{head} Re-run with `--yes` to act on the flag's home, or "
+                f"drop `--fleet-home` to {tail}")
+    return f"{head} Drop `--fleet-home` to {tail}"
+
+
 def apply_resolved_home(args, flag=None) -> int:
     """Wire §5's order into `main()` and return an exit code, or None to let
     dispatch proceed.
@@ -4851,20 +5253,29 @@ def apply_resolved_home(args, flag=None) -> int:
 
     if res["step"] in ("flag", "lookup"):
         if res["disagreement"] is not None:
+            members = res.get("disagreement_homes") or [res["disagreement"]]
+            # ALL of them, for `_refuse_ambiguous_lookup`'s reason: the
+            # operator's next act is to pick one, and a truncated list withholds
+            # the input to the refusal's own remedy. Two homes reach here since
+            # ga2 A2 -- a session claimed by two homes and pointed at a third.
+            named = " and ".join(Path(h).as_posix() for h in members)
             witness = (f"[fleet] WITNESS: --fleet-home names "
                        f"{Path(res['home']).as_posix()}, but this session is a "
-                       f"member of {Path(res['disagreement']).as_posix()}.")
+                       f"member of {named}.")
             if not getattr(args, "yes", False):
                 raise FleetCliError(
-                    f"{witness}\nRefusing to act on a home the flag and the "
-                    f"registry disagree about. Re-run with `--yes` to act on "
-                    f"the flag's home, or drop `--fleet-home` to act on the "
-                    f"home this session belongs to.\n\n{render_homes_view()}")
+                    f"{witness}\n{_disagreement_remedy(args)}"
+                    f"\n\n{render_homes_view()}")
             print(witness)
         FLEET_HOME = Path(res["home"])
         return None
 
     if res["step"] is not None:
+        # --- steps 3 and 4 only. §5's verb-effect guard applies to exactly the
+        # homes nobody named: *"destructive via env/legacy requires the flag;
+        # disruptive via env/legacy proceeds but renders its resolution
+        # provenance in output; ordinary flows."* Steps 1 and 2 returned above.
+        _apply_wrong_home_guard(args, command, res)
         return None
 
     # --- terminus (§5 step 5).
@@ -8321,7 +8732,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # P1-6: `read_registry_no_repair`, NOT `load_registry`. This is a PRE-FLIGHT
-    # resolution that runs from `cmd_kill:8215` / `cmd_respawn:7957`, before
+    # resolution that runs from `cmd_kill:8626` / `cmd_respawn:8368`, before
     # either verb has taken `fleet.lock` -- and `load_registry` QUARANTINES a
     # corrupt registry, i.e. RENAMES IT ASIDE, which is a write. An unlocked
     # write races every other fleet command, and it destroys the evidence the
@@ -8384,10 +8795,10 @@ def _supervisor_lifecycle_target(verb, name):
     # P1-6: `read_registry_no_repair` -- `load_registry` MINUS the rename, with
     # the same missing-file contract, the same validator and the same
     # `RegistryCorruptError`, so the arm below is unchanged. This read runs from
-    # `cmd_kill:8215` / `cmd_respawn:7957`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:8626` / `cmd_respawn:8368`, ahead of either verb's `fleet_lock`,
     # and quarantining here did two things: it wrote without the lock, and it
     # STOLE the quarantine from the lock-held read that was designed to perform
-    # it. `cmd_respawn:7981-7983` spells out that design -- *"resolve under the
+    # it. `cmd_respawn:8392-8394` spells out that design -- *"resolve under the
     # lock so a corrupt registry surfaces through load_registry's quarantine"* --
     # and the theft is what falsified it: by the time the lock-held read ran the
     # file was ABSENT rather than corrupt, so `{"workers": {}}` came back and the
@@ -14454,8 +14865,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     live_sids` is what shipped, and `_record_sids`' own docstring says why it
     is wrong -- *"matching against `session_id` alone fails open on it
     (ND4a)"* -- for the thirteen other sites that already key on the union
-    (`:2774, :2855, :3116, :3266, :4630, :8355, :8675, :8956, :9174, :9261,
-    :9484, :10270, :14325`). The thirteenth is multi-fleet §5 step 2's
+    (`:2774, :2855, :3116, :3266, :4652, :8766, :9086, :9367, :9585, :9672,
+    :9895, :10681, :14736`). The thirteenth is multi-fleet §5 step 2's
     membership test (slice a2), which is the same argument one plane out: a
     home whose record was eagerly restamped would stop claiming its own
     fork-steered body mid-rotation. B6 was the one
@@ -14470,8 +14881,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :7315, :7788, :12231,
-    :17530), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :7726, :8199, :12642,
+    :17941), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -15161,8 +15572,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:7315, :7788, :12231,
-    #     :17530) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:7726, :8199, :12642,
+    #     :17941) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -15195,7 +15606,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         #     file aside (`:1027`), which is a write. Routing the identity read
         #     through it made `fleet send` shred the operator's evidence from a
         #     path that promises to touch nothing; the helper exists for exactly
-        #     this and names this gate as its reason (`:14253`). A `None` here
+        #     this and names this gate as its reason (`:14664`). A `None` here
         #     still fails toward the gate -- an unreadable registry is reported
         #     by its own doctor row, and is never a reason to decide blind.
         #     MERGE NOTE (2026-07-27): main and `fix/identity-registry-judges`
@@ -15837,7 +16248,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # A worker whose own record sits inside the artifact upgrades the claim.
         #
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as `_sweep_husks`
-        # spells it at `:10234`. Not an mtime comparison: `os.rename` preserves
+        # spells it at `:10645`. Not an mtime comparison: `os.rename` preserves
         # mtime, so the artifact's mtime is the PRE-corruption write time and any
         # recreated registry is always newer -- the comparison would never fire
         # on the one bypass it exists to stop.
