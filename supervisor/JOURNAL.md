@@ -6574,3 +6574,44 @@ I am fencing that lane OUT of `bin/fleet.py` while `w47-a3fix` holds that file, 
 ## NEXT
 
 Discharge returns → verify its two diffs and REDs myself → land a3, predicting **4099/14/1** from the gate's clone measurement → slice (a) complete end to end. Fanning out now, disjointness the only bound: **E5** (`docs/specs/multi-fleet.md` only) and **report-durability** (skill surfaces + a new tracked reports path + its own new test file) both go while `w47-a3fix` holds `bin/fleet.py`. **homes/E2 waits for a3 to land** because it edits a3's `VERB_EFFECT_*` tuples, and it carries A-1's missing pin with it. Then the `fleet_lock` lane, slice (b) per Sequencing §3, and the knowledge fold for waves 44–47.
+
+## 2026-08-08T20:10:21Z CHECKPOINT inc=inc-20260808T173852Z-5dc6 sid=cabbec9f-d382-4535-927a-8bb500e89675
+
+WAVE 47 — MULTI-FLEET SLICE (a) IS COMPLETE END TO END. a3 LANDED AT `c3ba464` UNDER ITS GATE, WITH THE SECURITY FINDING RE-PLANTED BY ME BEFORE THE MERGE.
+
+## LANDED
+
+`c3ba464` — slice a3, the wrong-home guard. main == origin, read back from the pushed ref. **a1 + a2 + a3 are all on main; slice (a) is done.**
+
+- Conflicts predicted 0, measured 0 over 96,904 bytes, control 26 (`w35/nd4c`×main) run first at git 2.34.1. Merge-base `39f84d0`; main had touched none of a3's files.
+- **Floor predicted 4119 collected in writing before the merge — 4104 passed / 14 skipped / 1 xfailed, hit EXACTLY on `py -3.13` and `py -3.10`**, sha proved stable before and after each run. Derivation was compositional rather than re-measured: the gate's own clone-merge measured 4114 for `aa578ef`, the discharge added exactly +5, so 4119. Receipts 68/68 across three specs, rc 0.
+- Every floor this wave has now been predicted before running and hit exactly: 3974, 4052, 4119.
+
+## THE DISCHARGE, AND THE ONE THING I DID NOT TAKE ON TRUST
+
+`w47-a3fix` returned `ce61c53` on top of `aa578ef`: three files, fence exact, zero docs touched. B1 fixed with the gate's own predicate (`not in (None, False)`) plus a docstring explaining why neither truthiness nor `is not None` serves; B2 fixed by a `_disagreement_remedy(args)` helper that prints the `--yes` sentence only when the namespace has a `yes` dest, with §5's ratified text untouched. Both REDs watched and quoted first, four plants, all restores byte-identical, floor 4081 predicted and hit on both interpreters.
+
+**The interface ordered B1 gated hard ON RE-PLANT rather than on the fix diff, and I did that myself rather than accept the lane's self-report.** Planted the truthiness mutant into `bin/fleet.py` at `ce61c53`, and — applying the gate's own instrument lesson — **asserted the patch applied before running anything** (`occurrences == 1`, abort otherwise). Result: `test_an_empty_residual_flag_does_not_fail_open` RED on both parametrisations (`--answer` and `--raise`), 2 failed / 49 passed. Restored, sha256 back to `09ef7465…`, worktree clean. **B1 is genuinely pinned, verified by an independent hand.**
+
+## THE LANE FOUND AN OBLIGATION NOBODY HAD NAMED, AND IT IS A STANDING COST
+
+Inserting into `bin/fleet.py` shifts its self-citations. The discharge's edit moved 37 lines and reddened **7 tests** across `test_self_citations.py` and `test_retired_sid_citations.py`; the lane's first full floor came back `7 failed, 4059 passed`. It repaired in-fence by re-pinning **32 numbers**, mapped with difflib against `aa578ef` and content-verified per rewrite — *not* by adding 37 to each, which is the shape that produces a citation generator rather than a citation fixer (wave 35's lesson).
+
+**The gate could not have seen this, structurally**: it restored every mutant byte-identically and therefore never shifted a line. *An adversarial gate that is scrupulous about restoring its plants is blind to the entire class of defect that only appears when lines MOVE.* Budget for it on every `bin/fleet.py` edit for the rest of this campaign.
+
+## I HIT REFUSAL CLASS 5 MYSELF, IN THE LANDING COMMIT
+
+I passed a backtick-dense merge message through a **double-quoted** shell string. Three spans executed: `sup-decision: command not found`, `--answer: command not found`, `--yes: command not found` — and because they wrote to stderr they substituted as EMPTY, leaving three sentences missing the very things they were about. The merge TREE was correct; only the message was damaged, and I caught it because I read the message back rather than trusting the exit code.
+
+I know this rule — I have used `@file` for every checkpoint this wave for exactly this reason. What I had not internalised is that **the rule is about the SHELL, not about the verb**: a commit message is the second-largest block of backtick-dense prose a supervisor emits, and it goes through the same double-quoted string. Amended via a single-quoted heredoc (unpushed at the time, parents unchanged, all three spans verified present). *Recording it because the wave-35 entry frames this as a checkpoint hazard, and it is not — it is a quoted-string hazard, and the next incarnation will meet it at `git commit -m` the way I did.*
+
+## IN FLIGHT
+
+- **`w47-e5`** — fork-steered onto a second turn. First turn landed `63d7bf6` on `w47/e5`: §5's destructive row re-grounded on the rename, +52/−1, all three of the ruling's premises verified by AST, floors zero-delta both interpreters. It found that **the pins parse the raw destructive-row line for backticked verb tokens**, so writing `` `peek` `` into the row — the natural phrasing of the ruled ground — flips two pins RED; the verb contrast therefore lives below the table. Steered to close one stale marker it correctly refused to touch under its fence (§5's PROPOSAL block still reads `E5 — NOT RULED`, false since 2026-08-08).
+- **`w47-durable`** — building the report-durability fix the interface ordered, plus the retro-sweep of live worktrees.
+
+## NEXT
+
+homes/E2 dispatches as soon as `w47-e5` lands, because it needs `docs/specs/multi-fleet.md` (E5 holds it) as well as `bin/fleet.py` (now free). **I have already measured its code shape and it is two tokens**: `homes` is a bare ORDINARY token today, so `homes --add`/`--retire` classify **ordinary** on the shipped table; appending `"homes --add"` and `"homes --retire"` to `VERB_EFFECT_DESTRUCTIVE` yields exactly the ruled behaviour — bare ordinary, both write forms destructive — through a3's worst-tier-wins rule. That lane also carries the gate's **A-1**, which is the pin that rule does not have: the `max`→`min` mutant left the floor byte-identical, and the homes rows are what first make the rule load-bearing.
+
+Then the `fleet_lock` lane (brief ready at `state/tasks/lens/w47-locksafe.md`), slice (b) per Sequencing §3, and the knowledge fold for waves 44–47. GOALS §8 draft is parked and pushed at `docs/proposals/2026-08-09-goals-band-section-replacement.md`; `supervisor/GOALS.md` untouched and `SURFACES` unchanged, as ordered.
