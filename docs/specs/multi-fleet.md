@@ -484,9 +484,16 @@ DIVERGENCE RECORD above already measured. The derivation's transcripts live in t
 >   `claude rm` sites for the whole file while still passing four hand-planted destructive
 >   mutants. The slice-(a) lint needs alias resolution over parameter defaults, or it ships
 >   green and vacuous.
-> - **E5 — NOT RULED. Split out 2026-08-05 as its own OPEN operator docket item** (*"how should
->   that justification be restated?"*), separable from any branch, with no work parked on it.
->   It is untouched by this landing and is not to be repaired here. A third horn the framing
+> - **E5 — RULED 2026-08-08: RE-GROUND IT ON THE RENAME.** `doctor --repair` renames the target
+>   home's `state/fleet.json` aside — destroying a file the operator may want to inspect — and
+>   no shipped verb un-renames it; `peek` only reads. Same effect-grounded discriminator as E1
+>   and E2, so §5 stays internally consistent. The ground is landed on the destructive row and
+>   derived against shipped code in *The ground for `doctor --repair`* above — including the one
+>   thing it does NOT do. **Its earlier state is annotated, never deleted, because the record of
+>   a question is the point of this block: NOT RULED at the 2026-08-05 landing, split out that
+>   day as its own OPEN operator docket item** (*"how should that justification be restated?"*),
+>   separable from any branch, with no work parked on it. It was untouched by that landing and
+>   was not repaired there. A third horn the framing
 >   below omits, MEASURED by the gate: the table also maps one identical effect set to two
 >   different classes on `status`/`release` — rows that have nothing to do with X2 — which is
 >   the defect the B3 ground above closes. Question as raised: **the destructive row's stated
