@@ -13,6 +13,7 @@ two things the old one could not ask: the numbers themselves, and which band a
 given body is measured against.
 """
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -332,6 +333,37 @@ class TestTheDoctrineSurfacesQuoteTheSHIPPEDBand:
 
     SURFACES = ("skills/fleet/SKILL.md", "skills/fleet/supervisor.md")
 
+    # THE SEPARATE-TOKEN HOLE, and the numbers that close it.
+    #
+    # `test_no_superseded_band_is_stated_as_current` below forbids the JOINED
+    # renderings and nothing else, so w45-gceil §3's mutant D reverted BOTH of
+    # `supervisor.md`'s trigger sentences to the old ceiling while writing zero
+    # joined tokens -- `**150k**`, `**200k**`, `at 150k`, `At 200k`. The
+    # required renderings still appeared elsewhere in the file, so the sibling
+    # assertion stayed green too. Measured: 36 passed in this file, and 493
+    # passed across every test in the tree that reads `supervisor.md`. A
+    # booting supervisor was told its hard ceiling was 200k and the whole suite
+    # said nothing.
+    #
+    # A SUPERSEDED band is a historical fact; no constant in `bin/fleet.py`
+    # remembers one, so the history is transcribed here and re-pinning it is a
+    # deliberate edit. What is NOT transcribed is which of them are dead --
+    # `_dead_edges` subtracts the CURRENTLY SHIPPED edges, because `300k` is
+    # half of the 2026-07-14 band AND the live worker ceiling, so a list that
+    # did not subtract would forbid a number shipped code enforces. That
+    # subtraction is also what makes the next raise safe: whatever the operator
+    # raises the band to leaves this list automatically.
+    SUPERSEDED_BAND_EDGES_K = (150, 200,    # ratified 2026-07-23, raised 2026-08-05
+                               300, 500)    # ratified 2026-07-14, superseded 2026-07-23
+
+    # A dated citation may state a dead number; a live instruction may not.
+    _DATED = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+    # Punctuation that ends the clause a date belongs to. The carve-out asks
+    # whether the date is dating THIS NUMBER, and a date on the far side of a
+    # colon, a bracket or a sentence end is dating something else.
+    _CLAUSE_BREAK = re.compile(r"[:;()\[\].!?—]")
+
     def _text(self, rel):
         return (REPO / rel).read_text(encoding="utf-8")
 
@@ -340,6 +372,87 @@ class TestTheDoctrineSurfacesQuoteTheSHIPPEDBand:
         """How doctrine writes a band: `350–400k`, either dash."""
         lo, hi = soft // 1000, hard // 1000
         return (f"{lo}–{hi}k", f"{lo}-{hi}k")
+
+    @classmethod
+    def _dead_edges(cls):
+        """Superseded band edges that are not ALSO a shipped one."""
+        live = set()
+        for tier in ("supervisor", "worker"):
+            live.update(t // 1000 for t in fleet.band_thresholds(tier))
+        return tuple(sorted(set(cls.SUPERSEDED_BAND_EDGES_K) - live))
+
+    @classmethod
+    def _dated_in_the_same_clause(cls, line, edge):
+        """Is some date on this line DATING this particular dead edge?
+
+        True when no clause break sits between the two, in either order --
+        *"the 2026-07-14 300–500k band"* dates its number, *"(ratified
+        2026-07-23 ...): the supervisor enters its band at 150k"* does not.
+        """
+        for d in cls._DATED.finditer(line):
+            if d.end() <= edge.start():
+                between = line[d.end():edge.start()]
+            elif edge.end() <= d.start():
+                between = line[edge.end():d.start()]
+            else:
+                return True                       # overlapping; nothing between
+            if not cls._CLAUSE_BREAK.search(between):
+                return True
+        return False
+
+    @classmethod
+    def _stale_edge_hits(cls, body):
+        """`(line number, line)` per line stating a dead band edge UNDATED.
+
+        CLAUSE-scoped since 2026-08-06, and both halves of that scope are
+        load-bearing measurements rather than taste.
+
+        NOT PARAGRAPH-SCOPED. `supervisor.md`'s trigger paragraph OPENS with a
+        dated citation of the 2026-07-14 band and gceil's mutant D lands one and
+        two lines below it, inside the same paragraph. MEASURED over the mutated
+        file: a paragraph scope waves through BOTH reverted lines (186 and 191),
+        not merely the one adjacent to the date.
+
+        NOT LINE-SCOPED EITHER, AND THAT WAS THIS PIN'S OWN GATING DEFECT.
+        Line scoping is what shipped at `bc1ad91`, and gate `w45-gpins` F1
+        measured what it cost: every band-bearing line of `skills/fleet/SKILL.md`
+        carries its ratification date INLINE -- it is a table row and a bullet,
+        so date and instruction share one line by construction -- so all three
+        were exempt and the `[skills/fleet/SKILL.md]` parameter could not fail
+        for the class it was built for. Mutant K1 put *"the supervisor enters
+        its band at **150k** ... hard ceiling **200k**"* on SKILL.md's live
+        trigger row and **713 tests passed**, every test in the tree that reads
+        that file. A green parameter over an uncoverable file reads as coverage
+        and is not.
+
+        So the question is no longer "is this line dated" but "is the date
+        dating THIS NUMBER". MEASURED when choosing the shape: on a clean tree
+        the only dead-edge occurrence on either surface is `supervisor.md:185`'s
+        `500k`, whose date sits 5 characters away with nothing between --
+        exempt under every candidate rule, so zero false positives. Under K1 the
+        nearest date is 41 characters from `150k` with `)` and `:` between.
+        The gate's suggested 40-character proximity rule also catches it, by
+        **one character**; a constant that close to its own mutant is tuned to
+        it. The clause rule needs no constant and names the real distinction.
+
+        THE RESIDUAL, STATED: a revert that writes a date into the SAME CLAUSE
+        as the dead number still escapes -- *"the 2026-08-05 150k ceiling"*
+        reads as dated history to this rule. That is a deliberate act, and
+        unlike the line-scoped residual it is not one the surfaces hand out for
+        free.
+        """
+        dead = cls._dead_edges()
+        if not dead:
+            return []
+        alt = "|".join(str(k) for k in dead)
+        # `(?<![\d,])` keeps `2,150,000` from reading as a `150,000`.
+        edge = re.compile(rf"(?<![\d,])(?:{alt})(?:k\b|,000(?![\d,]))")
+        hits = []
+        for i, ln in enumerate(body.splitlines(), start=1):
+            if any(not cls._dated_in_the_same_clause(ln, m)
+                   for m in edge.finditer(ln)):
+                hits.append((i, ln))
+        return hits
 
     @pytest.mark.parametrize("rel", SURFACES)
     def test_the_surface_states_both_shipped_bands(self, rel):
@@ -364,6 +477,126 @@ class TestTheDoctrineSurfacesQuoteTheSHIPPEDBand:
                 f"{rel} still states the superseded {dead} band as current "
                 f"(operator ruling 2026-08-05 raised it).")
 
+    @pytest.mark.parametrize("rel", SURFACES)
+    def test_no_superseded_band_EDGE_is_stated_as_live_doctrine(self, rel):
+        """The assertion above, but on the spelling the surfaces actually use.
+
+        These files write the trigger numbers as SEPARATE bold tokens
+        (`**350k**` / `**400k**`), not as a joined band, so the joined-token
+        assertion never looked at the sentence a supervisor actually reads.
+
+        NAMED FOR WHAT IT CHECKS, not for the mechanism it checks it with. It
+        was `..._is_stated_undated` while the carve-out was line-scoped; under
+        clause scoping a hit can sit on a line that IS dated (that is mutant
+        K1, and it is the whole of gpins F1), so a name promising "undated"
+        would describe a rule this no longer applies.
+        """
+        hits = self._stale_edge_hits(self._text(rel))
+        assert not hits, (
+            f"{rel} states superseded band edge(s) {self._dead_edges()} as "
+            f"live doctrine on line(s) {[n for n, _ in hits]}: "
+            + " | ".join(ln.strip() for _, ln in hits)
+            + f" -- the 2026-08-05 ruling raised the band. A date elsewhere on "
+              f"the line does not make the number history: to state a dead "
+              f"edge, date it in the SAME CLAUSE as the number itself.")
+
+    def test_the_dead_edge_set_SUBTRACTS_the_shipped_ones(self):
+        """The derivation, pinned, because getting it wrong fails both ways.
+
+        Forget to subtract and `300k` -- the live worker ceiling, printed by
+        `sup-context` and quoted by both surfaces -- becomes forbidden and the
+        pin above goes red on correct doctrine. Subtract too much and the pin
+        forbids nothing.
+        """
+        dead = self._dead_edges()
+        assert 150 in dead and 200 in dead, (
+            f"the edges mutant D reverted to are not in the dead set: {dead}")
+        assert 300 not in dead, (
+            "300k is the shipped worker hard ceiling -- forbidding it would "
+            "redden correct doctrine")
+        for tier in ("supervisor", "worker"):
+            for shipped in fleet.band_thresholds(tier):
+                assert shipped // 1000 not in dead
+
+    def test_the_edge_detector_sees_mutant_D_and_keeps_the_dated_carve_out(self):
+        """MUTANT D, re-planted VERBATIM from `w45-gceil` §3's own quoted text.
+
+        Verbatim includes its line 5, which the gate left at `350k` while
+        reverting its line 6 -- a partial revert, and therefore the harder of
+        the two to catch. The fuller revert is checked after it.
+        """
+        planted = (
+            "BEGIN handoff at **150k** tokens of context occupancy; **200k** is the hard\n"
+            "ceiling. Workers observe a band too, but **not the same one** — theirs is\n"
+            "250–300k (§11.4). Never ride to the compaction wall.\n"
+            "\n"
+            "Swap-trigger rule (three-tier §11.3): at 350k the hand-off directive is\n"
+            "standing — finish the current wave, then hand off. At 200k the only\n"
+            "permitted work is finishing work already dispatched ...\n")
+
+        # What the OLD assertion sees: nothing. This is the gap, executable.
+        for dead in ("150–200k", "150-200k"):
+            assert dead not in planted, (
+                "mutant D writes zero joined tokens -- if this fires, the "
+                "re-plant has drifted from the one that survived 493 tests")
+
+        assert [n for n, _ in self._stale_edge_hits(planted)] == [1, 6], (
+            "the edge detector must name every reverted line and only those: "
+            "line 3's `250–300k` is the SHIPPED worker band and must stay "
+            "green, and so must line 5, which the gate did not revert")
+
+        # The fuller revert the gate's prose describes (both trigger sentences).
+        fuller = planted.replace("at 350k the hand-off", "at 150k the hand-off")
+        assert [n for n, _ in self._stale_edge_hits(fuller)] == [1, 5, 6]
+
+        # The carve-out is real: the same numbers with and without a date
+        # dating them.
+        assert not self._stale_edge_hits(
+            "supersedes the 2026-07-14 300–500k band")
+        assert self._stale_edge_hits("supersedes the 300–500k band")
+
+    def test_the_carve_out_does_not_exempt_a_DATED_LINE_that_instructs(self):
+        """MUTANT K1 — gate `w45-gpins` F1, the defect this pin shipped with.
+
+        Built from `SKILL.md`'s OWN live trigger row rather than from a quoted
+        copy, so it cannot drift into a strawman: take the shipped sentence,
+        swap the shipped supervisor edges for the superseded ones, and that is
+        K1. Under the line-scoped rule this survived 713 tests.
+        """
+        line = next(ln for ln in self._text("skills/fleet/SKILL.md").splitlines()
+                    if "enters its band at" in ln)
+        soft, hard = fleet.band_thresholds("supervisor")
+        k1 = (line.replace(f"**{soft // 1000}k**", "**150k**")
+                  .replace(f"**{hard // 1000}k**", "**200k**"))
+        assert k1 != line, (
+            "the substitution changed nothing. Either K1 is ALREADY ON DISK "
+            "(check `git status` -- a plant left behind), or SKILL.md's trigger "
+            "row no longer spells the supervisor edges as bold `**NNNk**` "
+            "tokens, in which case re-derive this seed against the row as it is "
+            "written now. Do not delete it.")
+
+        # The line IS dated, and that is exactly why the old rule let it past.
+        assert self._DATED.search(k1), (
+            "the row carries no inline date, so it is no longer the F1 shape")
+        assert self._stale_edge_hits(k1), (
+            "K1 is not caught: a dated line may not state a dead band edge as "
+            "a live instruction, whatever else the line dates")
+
+        # THE COUNTERFACTUAL THAT NAMES F1, run rather than asserted: the rule
+        # this pin shipped with at `bc1ad91`, applied to the same text.
+        def line_scoped_hits(body):
+            dead = "|".join(str(k) for k in self._dead_edges())
+            edge = re.compile(rf"(?<![\d,])(?:{dead})(?:k\b|,000(?![\d,]))")
+            return [i for i, ln in enumerate(body.splitlines(), start=1)
+                    if edge.search(ln) and not self._DATED.search(ln)]
+
+        assert line_scoped_hits(k1) == [], (
+            "the line-scoped rule no longer exempts K1, so this counterfactual "
+            "has stopped demonstrating F1 -- re-read gpins §3 before editing")
+
+        # And the shipped row, unmutated, stays green under the new rule.
+        assert not self._stale_edge_hits(line)
+
     def test_the_detector_can_see_a_stale_surface(self, tmp_path):
         # A doc-sync pin that cannot fail proves nothing. Seed the exact defect
         # (a surface reverted to the old band) and prove the assertions catch
@@ -373,3 +606,115 @@ class TestTheDoctrineSurfacesQuoteTheSHIPPEDBand:
             wanted = self._band_renderings(*fleet.band_thresholds(tier))
             assert not any(w in stale for w in wanted)   # "states both bands" fires
         assert "150\u2013200k" in stale                  # "no superseded band" fires
+
+
+class TestTheDoctorRowsQuoteTheSHIPPEDCeiling:
+    """`fleet doctor`'s identity-witness rows tell an operator which ceiling a
+    stamp-less body escapes, and both build that number by interpolating
+    `SUPERVISOR_BAND_HARD_TOKENS`. Nothing pinned that they keep doing it.
+
+    w45-gceil \u00a76's mutant F hardcoded both rows back to `"200,000-token"` and
+    **166 tests stayed green** across `test_identity_registry`,
+    `test_supervisor_context`, `test_supervisor_ceiling`, `test_doc_claims` and
+    `test_doctor_claim_provenance`. Measured by grep in the same gate: the
+    whole test tree carried exactly two `400,000` assertions and BOTH read the
+    dispatch-REFUSAL message, never either doctor row. The one existing
+    assertion that comes close (`test_identity_registry.py`'s
+    ``assert "200k" in msg or "ceiling" in msg``) is satisfied by the second
+    disjunct and so is blind to the number in both directions.
+
+    HOMED HERE, not in `test_identity_registry.py`, because what is checked is
+    not identity logic: it is the class above, one surface further out. A row
+    an operator reads quotes a ceiling, and the ceiling it quotes has to be the
+    one shipped code enforces. Expected renderings are derived from the
+    constant for the same reason as the class above -- a future raise must not
+    leave this green against a stale string.
+    """
+
+    # Every ceiling rendering in a row, however it got there. `[\d,]+-token`
+    # matches the interpolation's own output and equally matches a hardcode,
+    # which is what makes the comparison two-directional: a row carrying a
+    # number that is not the constant's is RED whether it lost the
+    # interpolation or gained a second one.
+    _RENDERED = re.compile(r"[\d,]+-token")
+
+    @staticmethod
+    def _expected():
+        return f"{fleet.SUPERVISOR_BAND_HARD_TOKENS:,}-token"
+
+    @classmethod
+    def _renderings(cls, text):
+        return set(cls._RENDERED.findall(text))
+
+    @staticmethod
+    def _workers():
+        return {"w1": {"session_id": "sid-w1", "retired_sids": [],
+                       "status": "idle", "archived_at": None}}
+
+    def _row(self, monkeypatch, *, sid, stamp):
+        if stamp is None:
+            monkeypatch.delenv("FLEET_WORKER", raising=False)
+        else:
+            monkeypatch.setenv("FLEET_WORKER", stamp)
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", sid)
+        return fleet._doctor_check_identity_witness(self._workers())
+
+    def test_the_RESOLVED_no_witness_row_quotes_the_shipped_ceiling(
+            self, ctx_home, monkeypatch):
+        """The FAIL row: the registry names this body, its stamp is gone, and
+        the row's whole justification for being red is the ceiling that body is
+        exempt from. Quoting the wrong number there is worse than silence."""
+        _name, ok, msg = self._row(monkeypatch, sid="sid-w1", stamp=None)
+        assert ok is False
+        assert self._renderings(msg) == {self._expected()}, msg
+
+    def test_the_UNRESOLVED_witness_row_quotes_the_shipped_ceiling(
+            self, ctx_home, monkeypatch):
+        """The NOTE row, which appends `DAEMON_ENV_LEAK_REMEDY` -- the second
+        of the two interpolating sites, and the one reached by the common
+        case."""
+        _name, _ok, msg = self._row(monkeypatch, sid="sid-nobody", stamp="ghost")
+        assert fleet.DAEMON_ENV_LEAK_REMEDY in msg
+        assert self._renderings(msg) == {self._expected()}, msg
+
+    def test_no_source_site_HARDCODES_a_token_ceiling(self):
+        """THE MECHANISM, checked where mutant F was planted.
+
+        The pair above pins the VALUE and would catch a raise that left a row
+        behind. This pins the SHAPE: a thousands-separated literal spelled
+        `NNN,NNN-token` anywhere in `bin/fleet.py` is a number that stopped
+        tracking its constant, whether or not it happens to be right today.
+        Measured at 238a4778: zero literals, three interpolations (the refusal
+        message plus the two doctor rows).
+        """
+        # Read through `fleet.__file__` rather than off a repo-relative path,
+        # so the file linted is provably the module the assertions above
+        # rendered their rows from.
+        src = Path(fleet.__file__).read_text(encoding="utf-8")
+        hardcoded = [(i, ln.strip())
+                     for i, ln in enumerate(src.splitlines(), start=1)
+                     if re.search(r"(?<![\d,])\d{1,3},\d{3}-token", ln)]
+        assert not hardcoded, (
+            f"`bin/fleet.py` spells a token ceiling as a literal at "
+            f"{[i for i, _ in hardcoded]}: {[t for _, t in hardcoded]} -- "
+            f"interpolate the constant instead, or the next raise ships a "
+            f"surface quoting a ceiling nothing enforces (w45-gceil \u00a76)")
+        interpolated = re.findall(r"\{SUPERVISOR_BAND_HARD_TOKENS:,\}-token", src)
+        assert len(interpolated) >= 2, (
+            f"only {len(interpolated)} interpolated token ceiling(s) in "
+            f"`bin/fleet.py` -- the two `fleet doctor` rows alone were two, so "
+            f"the assertion above may now be passing over nothing")
+
+    def test_the_detector_can_see_a_row_hardcoded_back_to_the_old_ceiling(
+            self, ctx_home, monkeypatch):
+        """MUTANT F, applied to the rendered row instead of to `bin/fleet.py`.
+
+        A row-content pin that cannot fail proves nothing, and this is the
+        exact substitution the gate made: `400,000-token` -> `200,000-token`,
+        which 166 tests could not see.
+        """
+        _name, _ok, msg = self._row(monkeypatch, sid="sid-w1", stamp=None)
+        assert self._expected() in msg
+        mutated = msg.replace(self._expected(), "200,000-token")
+        assert self._renderings(mutated) == {"200,000-token"}
+        assert self._renderings(mutated) != {self._expected()}

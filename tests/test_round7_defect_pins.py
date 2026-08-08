@@ -27,10 +27,19 @@ defining_the_flag`), and the top-level parser defines no options at all beyond
 copy -- argparse refuses the whole invocation instead.
 
 So the defect is **LATENT, not shipped**: it is created by the act of promoting
-`--fleet-home` to a global flag (Sequencing slice (a)) while `autoclean` keeps
-its own. The clobber itself is real and is measured here on a synthetic parser
-rather than asserted, because that measurement is the entire justification for
-the lint below.
+`--fleet-home` to a global **argparse option** (Sequencing slice (a)) while
+`autoclean` keeps its own. The clobber itself is real and is measured here on a
+synthetic parser rather than asserted, because that measurement is the entire
+justification for the lint below.
+
+NOT EVERY PROMOTION TAKES THAT ROUTE, and the sentence above said "global flag"
+until 2026-08-06, which read as though every one did. MEASURED at slice a2's tip
+`39f84d0` (built, and NOT an ancestor of `main` at the time of writing): a2 made
+`--fleet-home` global by consuming the token in `main()` BEFORE the parser runs.
+Its top-level parser still declares only `-h/--help` and `autoclean` is still the
+only verb defining the flag, so a2 creates no second dest and no clobber. The
+latent defect is specific to the argparse route; a future slice can still take
+it, which is why the lint stays.
 
 WHY A LINT AND NOT A FIX. There is nothing to fix in slice 0 -- manufacturing
 the defect in order to fix it would be worse than the defect. What slice 0 owes
@@ -153,13 +162,28 @@ class TestGlobalPositionFleetHome:
         defining = sorted(verb for verb, sp in _verbs().items()
                           if "--fleet-home" in _option_strings(sp))
         assert defining == ["autoclean"], (
-            f"verbs defining --fleet-home: {defining}. If this grew, the global "
-            f"flag was promoted (slice (a)) or a second verb-local copy landed; "
-            f"either way re-read the collision lint below before proceeding.")
+            f"verbs defining --fleet-home: {defining}. If this grew, a second "
+            f"verb-local copy landed, or slice (a) promoted the flag BY ADDING "
+            f"A TOP-LEVEL ARGPARSE OPTION; either way re-read the collision "
+            f"lint below before proceeding. Do NOT read the converse: this "
+            f"census staying at ['autoclean'] is not evidence the flag is "
+            f"unpromoted. MEASURED at slice a2's tip 39f84d0 -- a2 made the "
+            f"flag global by consuming the token in `main()` BEFORE the parser "
+            f"runs, and this census is unchanged there.")
 
     def test_the_top_level_parser_defines_no_fleet_home_flag_today(self):
-        """The load-bearing half of the correction. `--fleet-home` is verb-local,
-        so there is no global value for a subparser namespace to clobber."""
+        """The load-bearing half of the correction. `--fleet-home` is verb-local
+        IN ARGPARSE, so there is no global value for a subparser namespace to
+        clobber -- the clobber needs two dests and there is only one.
+
+        "Verb-local" is a claim about the PARSER and must not be read as a claim
+        about the operator-visible CLI, because the two can already come apart.
+        MEASURED at slice a2's tip `39f84d0`: `--fleet-home` is global in every
+        operator-visible way there (accepted in both positions, and
+        `build_parser()`'s own epilog opens *"global: --fleet-home <PATH>"*)
+        while this assertion still holds, because a2 consumes the token in
+        `main()` instead of adding a top-level option. At `bc1ad91` -- where a2
+        has NOT landed -- both readings agree and both are true."""
         top = fleet.build_parser()
         top_opts = {o for a in top._actions
                     if not isinstance(a, argparse._SubParsersAction)
@@ -170,14 +194,43 @@ class TestGlobalPositionFleetHome:
         (["--fleet-home", "H", "autoclean"], "usage-error"),
         (["autoclean", "--fleet-home", "H"], "H"),
     ])
-    def test_shipped_behaviour_of_both_positions(self, argv, expected, capsys):
-        """What shipped code ACTUALLY does with both spellings, on this
-        interpreter. The global position is refused (exit 2), not silently
-        dropped -- which is the correction to the spec's `-> None today`.
+    def test_the_PARSER_refuses_the_global_position_and_accepts_the_verb_local(
+            self, argv, expected, capsys):
+        """WHAT LAYER THIS BINDS: `build_parser().parse_args()`, and only that.
+        The name says PARSER because the two layers can disagree, and a name is
+        read more often than a docstring.
 
-        This is the pin that flips the day slice (a) promotes the flag without
-        reconciling the dests: `--fleet-home H autoclean` would start PARSING,
-        and yield None."""
+        What the parser does, on this interpreter, both floors: the global
+        position is refused with exit 2, not silently dropped -- which is the
+        correction to the spec's `['--fleet-home','H','autoclean'] -> None
+        today`.
+
+        WHAT THE CLI DOES, which is a different question with a different
+        answer depending on the tree, all three MEASURED on 2026-08-06:
+
+          * at `bc1ad91` (this branch) and at `main` `b431a46` -- whose
+            `bin/fleet.py` blobs are IDENTICAL, `e642864` -- the CLI agrees with
+            the parser: `fleet --fleet-home <H> home` exits 2, because nothing
+            consumes the token before `parse_args`.
+          * at slice a2's tip `39f84d0`, which is NOT an ancestor of `main`, it
+            does not: both positions return rc 0 and resolve the home, because
+            a2's `main()` consumes `--fleet-home` BEFORE the parser runs. The
+            assertions below are untouched by that -- the layer they drive
+            never sees the token -- so this test stays green while the CLI
+            sentence above flips.
+
+        That gap is the point, and it is why the sentences are separated. Gate
+        `w45-ga2` §3 read the pre-2026-08-06 docstring -- *"what shipped code
+        ACTUALLY does ... the global position is refused"* -- against a2's tree
+        and correctly called it false THERE. It was still true here, which is
+        why this is a prose repair and not an assertion repair: a claim about
+        "shipped code" backed by parser-only evidence is one landing away from
+        being false, and the next reader is the one who pays.
+
+        This is also the pin that flips if slice (a) ever promotes the flag the
+        OTHER way -- a real top-level argparse option alongside `autoclean`'s.
+        Then `--fleet-home H autoclean` starts PARSING and yields None, which is
+        the clobber. a2 did not take that route; a future slice still can."""
         parser = fleet.build_parser()
         if expected == "usage-error":
             with pytest.raises(SystemExit) as exc:
@@ -271,8 +324,10 @@ class TestGlobalPositionFleetHome:
     def test_the_seed_the_detector_can_see_a_command_dest_collision(self, monkeypatch):
         """THE SECOND SEED, for the half of the detector that is live TODAY.
         `test_the_seed_the_collision_detector_can_see_a_collision` plants a
-        global `--fleet-home` -- i.e. it seeds the a2 shape. This one plants the
-        shape a1 can already reach: a shipped verb growing a `--command` flag.
+        top-level argparse `--fleet-home` -- the shape a promotion COULD take,
+        and the one a2 measurably did not (see that seed's own note). This one
+        plants the shape a1 can already reach: a shipped verb growing a
+        `--command` flag.
 
         Both seeds matter, because they exercise different halves of the derived
         set and either half can rot to empty on its own."""
@@ -290,8 +345,17 @@ class TestGlobalPositionFleetHome:
 
     def test_the_seed_the_collision_detector_can_see_a_collision(self, monkeypatch):
         """The lint above is a negative over a derived set -- the shape that
-        passes vacuously when the derivation rots. Plant the exact shape slice
-        (a) is about to build and prove the detector still says yes."""
+        passes vacuously when the derivation rots. Plant the collision shape and
+        prove the detector still says yes.
+
+        TENSE REPAIRED 2026-08-06: this said *"the exact shape slice (a) is
+        about to build"*. Slice a2 has since been built and DECLINED it --
+        MEASURED at `39f84d0`, the top-level parser's option strings are
+        `['--help','-h']` and `autoclean` is still the only verb defining
+        `--fleet-home`, because a2 made the flag global in `main()` rather than
+        in the parser. So this is no longer a prediction about a pending slice;
+        it is the shape any FUTURE promotion through argparse would take, and
+        the seed is unchanged and still load-bearing either way."""
         real = fleet.build_parser
 
         def planted():
@@ -316,10 +380,18 @@ SPEC = REPO / "docs" / "specs" / "multi-fleet.md"
 #
 # THE 2026-08-05 §5-CRITERION RULING IS LANDED HERE, IN THE SAME COMMIT AS THE
 # SPEC EDIT IT TRANSCRIBES. `TestRatifiedTableIsTranscribedFaithfully` re-reads
-# the spec's `| **destructive** |` row, so moving this tuple without the spec --
-# or the spec without this tuple -- goes RED in one direction or the other. That
+# ALL THREE of the spec's rows, so moving any of these tuples without the spec --
+# or the spec without the tuple -- goes RED in one direction or the other. That
 # coupling is the reason `w42/mf5-verbs` was RED at its own tip: it edited the
 # row and not this file, and disclosed that rather than routing around it.
+#
+# "ALL THREE" IS TRUE AS OF 2026-08-06 AND WAS NOT BEFORE. Until then the class
+# read `| **destructive** |` and only that row, while this comment sat above all
+# three tuples -- so a reader carried its promise onto two tuples it did not
+# cover. `w44-gs5`'s mutant M5 measured the cost: `wait` moved between the
+# spec's ORDINARY and DISRUPTIVE rows with the tuples untouched, and 245 tests
+# across both pin files plus 232 across the other five files that read
+# `multi-fleet.md` stayed green.
 #
 # Where the seventeen names went (all four sub-rulings AS RECOMMENDED,
 # `docs/OPERATOR-GATES.md` first settled entry):
@@ -402,29 +474,154 @@ def _classified_verbs():
     return {t.split()[0] for t in tokens}
 
 
+# The three tuples keyed by the effect class §5's own row label spells.
+RATIFIED_ROWS = {
+    "destructive": RATIFIED_DESTRUCTIVE,
+    "disruptive": RATIFIED_DISRUPTIVE,
+    "ordinary": RATIFIED_ORDINARY,
+}
+
+# Where a tuple entry and the spec's token for the same verb legitimately
+# differ, DECLARED rather than normalised away.
+#
+# Normalising (comparing first tokens only) would have made all three rows
+# compare cleanly in one line, and would have thrown away the flag distinction
+# that is the whole reason `doctor --repair` is a destructive entry while bare
+# `doctor` is not -- `test_the_repair_flag_is_carried_as_the_flagged_spelling`
+# below depends on that distinction being real. So the comparison stays on FULL
+# tokens and the one divergence is written down. Measured at 238a4778: exactly
+# one, and `test_every_declared_divergence_is_LIVE` is what stops a second
+# appearing here silently or this one outliving the spec text it points at.
+SPEC_TOKEN_FOR = {
+    # §5 classifies the flagged forms (`homes --add/--retire`, "list-reversible")
+    # while the tuple carries the bare verb, because `homes` has no destructive
+    # form to distinguish it from -- unlike `doctor`.
+    "homes": "homes --add/--retire",
+}
+
+
+def _spec_row(effect):
+    """§5's row for one effect class, as raw text. Exactly one must match."""
+    rows = [ln for ln in SPEC.read_text(encoding="utf-8").splitlines()
+            if ln.startswith(f"| **{effect}**")]
+    assert len(rows) == 1, (
+        f"§5's {effect} row is not where this pin looks -- found {len(rows)}")
+    return rows[0]
+
+
+def _spec_row_tokens(effect):
+    """Backticked tokens in that row that name a shipped fleet verb.
+
+    Prose spans in the same row (`claude rm`, `state/`, `_confirm_destructive`,
+    `supervisor/JOURNAL.md`) do not resolve to a subcommand and drop out.
+    """
+    verbs = set(_verbs())
+    return {t for t in re.findall(r"`([^`]+)`", _spec_row(effect))
+            if t.split()[0] in verbs}
+
+
+def _expected_spec_tokens(effect):
+    return {SPEC_TOKEN_FOR.get(t, t) for t in RATIFIED_ROWS[effect]}
+
+
 class TestRatifiedTableIsTranscribedFaithfully:
     """The constants above are a hand copy of a ratified table, which is the
-    shape that rots when the table is edited. These re-read the spec."""
+    shape that rots when the table is edited. These re-read the spec -- ALL
+    THREE ROWS since 2026-08-06, because two of them were unread until then and
+    `w44-gs5`'s M5 moved a verb between the two nobody was reading.
 
-    @pytest.mark.parametrize("token", RATIFIED_DESTRUCTIVE)
-    def test_the_spec_still_lists_each_destructive_token(self, token):
-        row = [ln for ln in SPEC.read_text(encoding="utf-8").splitlines()
-               if ln.startswith("| **destructive**")]
-        assert len(row) == 1, "§5's destructive row is not where this pin looks"
-        assert f"`{token}`" in row[0], (
-            f"`{token}` is no longer in §5's destructive row -- re-transcribe "
-            f"RATIFIED_DESTRUCTIVE from the spec rather than editing this list")
+    Two directions per row, and they are different failures:
 
-    def test_the_spec_row_names_no_destructive_verb_this_list_omits(self):
-        row = next(ln for ln in SPEC.read_text(encoding="utf-8").splitlines()
-                   if ln.startswith("| **destructive**"))
-        # Backticked tokens in the row that name a fleet verb, i.e. resolve to a
-        # shipped subcommand. Prose spans (`claude rm`, `state/`) do not.
-        verbs = set(_verbs())
-        named = {t for t in re.findall(r"`([^`]+)`", row) if t.split()[0] in verbs}
-        assert named == set(RATIFIED_DESTRUCTIVE), (
-            f"§5's destructive row names {sorted(named)}; this file transcribes "
-            f"{sorted(RATIFIED_DESTRUCTIVE)}. The row moved -- re-transcribe.")
+      * a verb DROPPED from the spec row while the tuple keeps it -- the
+        parametrised membership test, which names the one verb;
+      * a verb ADDED to the row, or MOVED into it from another row, while the
+        tuples stand -- the set-equality test, which names both sides.
+
+    A move fires both: it is a drop from the row that lost the verb and an
+    addition to the row that gained it, so M5 turns three assertions red across
+    two rows rather than one.
+    """
+
+    @pytest.mark.parametrize(
+        "effect,token",
+        [(e, t) for e in sorted(RATIFIED_ROWS) for t in RATIFIED_ROWS[e]])
+    def test_the_spec_still_lists_each_token_in_its_own_row(self, effect, token):
+        wanted = SPEC_TOKEN_FOR.get(token, token)
+        assert f"`{wanted}`" in _spec_row(effect), (
+            f"`{wanted}` is no longer in §5's {effect} row -- re-transcribe "
+            f"RATIFIED_{effect.upper()} from the spec rather than editing this "
+            f"list. If it moved to another row, the ruling moved with it.")
+
+    @pytest.mark.parametrize("effect", sorted(RATIFIED_ROWS))
+    def test_the_spec_row_names_no_verb_this_file_omits(self, effect):
+        named = _spec_row_tokens(effect)
+        expected = _expected_spec_tokens(effect)
+        assert named == expected, (
+            f"§5's {effect} row names {sorted(named)}; this file transcribes "
+            f"{sorted(expected)}. Gained: {sorted(named - expected)}; lost: "
+            f"{sorted(expected - named)}. The row moved -- re-transcribe.")
+
+    def test_no_verb_IS_NAMED_BY_TWO_spec_rows(self):
+        """The move direction, read off the spec alone.
+
+        The two tests above compare each row against its tuple; this one asks
+        whether the SPEC is internally consistent, so a verb duplicated into a
+        second row is caught even in the window before anyone transcribes it.
+        The census in the comment above (12 + 7 + 14 = 33 shipped verbs, no verb
+        in two rows) is only true while this holds.
+        """
+        seen = {}
+        for effect in sorted(RATIFIED_ROWS):
+            for token in _spec_row_tokens(effect):
+                seen.setdefault(token.split()[0], []).append(effect)
+        doubled = {v: rows for v, rows in seen.items() if len(rows) > 1}
+        assert not doubled, (
+            f"§5 classifies these verbs in more than one effect row: "
+            f"{doubled}. An effect class is a partition -- a verb in two rows "
+            f"means whichever row a reader finds first decides how it is "
+            f"guarded.")
+
+    def test_every_declared_divergence_is_LIVE(self):
+        """`SPEC_TOKEN_FOR` is a hand list too, so it rots the same way.
+
+        A dead entry silently weakens the comparison it exists to keep exact:
+        the tuple side would keep substituting a spelling the spec no longer
+        uses, and the set-equality test would then fail for a reason nobody can
+        read. Both halves are checked -- the key is a real tuple entry, and the
+        value is really in the row that entry lives in.
+        """
+        tuples = {t: e for e in RATIFIED_ROWS for t in RATIFIED_ROWS[e]}
+        for token, spelling in SPEC_TOKEN_FOR.items():
+            assert token in tuples, (
+                f"`{token}` is declared as diverging from the spec but is in "
+                f"none of the three tuples -- delete the entry")
+            # gpins F2. A divergence may only ADD flags to the tuple's token,
+            # never remove them. Without this the dict is a quiet lever that
+            # dissolves the distinction full-token comparison exists to keep:
+            # declare `"doctor --repair": "doctor"`, collapse §5's row to bare
+            # `doctor`, and both spec pins go green -- MEASURED, 271 passed,
+            # gpins §6's mutant I3. The dict's declared purpose is SPELLING,
+            # and a spelling that drops a flag is a reclassification.
+            assert spelling.startswith(token), (
+                f"`{token}` -> `{spelling}` REMOVES flags. A divergence may "
+                f"only add them; dropping one silently merges two effect "
+                f"classes that §5 keeps apart (gpins F2)")
+            assert f"`{spelling}`" in _spec_row(tuples[token]), (
+                f"`{token}` is declared to appear in §5 as `{spelling}`, and "
+                f"the {tuples[token]} row does not contain that -- the spec "
+                f"re-spelled it, so re-read the row")
+
+    def test_all_three_rows_are_found_and_name_verbs(self):
+        """Seed. `_spec_row_tokens` returning an empty set for a row would make
+        that row's set-equality test assert `set() == set()` the day its tuple
+        emptied, and its membership test is parametrised over the tuple, so an
+        empty row plus an empty tuple is silently total agreement."""
+        for effect in sorted(RATIFIED_ROWS):
+            assert _spec_row_tokens(effect), (
+                f"§5's {effect} row names no shipped verb -- the reader is "
+                f"broken or the row moved, and either way every comparison "
+                f"against it is vacuous")
+            assert RATIFIED_ROWS[effect], f"RATIFIED_{effect.upper()} is empty"
 
 
 class TestEveryShippedVerbHasAnEffectDisposition:
