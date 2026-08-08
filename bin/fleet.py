@@ -614,6 +614,42 @@ def fleet_lock(timeout: float = LOCK_TIMEOUT_SECONDS):
             if time.monotonic() >= deadline:
                 raise FleetLockTimeout(f"timed out waiting for lock: {path}")
             time.sleep(LOCK_RETRY_INTERVAL_SECONDS)
+        except PermissionError:
+            # Windows delete-pending. MEASURED on 3.10 and 3.13 alike: a lock
+            # file whose delete disposition is set but whose NAME is still in
+            # the directory answers O_CREAT|O_EXCL with ERROR_ACCESS_DENIED ->
+            # PermissionError (errno 13), NOT EEXIST. Release here is
+            # path.unlink(), so a contender polling at LOCK_RETRY_INTERVAL
+            # lands inside that window; uncaught, the raw OSError escaped this
+            # manager's "acquire, or raise FleetLockTimeout" contract and could
+            # kill clean/kill/archive/spawn/send/respawn/resume-limited outright.
+            #
+            # Discriminated by the lock file, not by the platform -- this module
+            # gets exactly one platform branch and it is spent on PLATFORM:
+            #   name present -> the denial is about THAT file: contended. Poll
+            #                   on, under the same deadline as EEXIST.
+            #   name absent  -> the denial is about the DIRECTORY (an unwritable
+            #                   state/). Retrying cannot help, and swallowing it
+            #                   would trade a fast, true error for a slow one
+            #                   naming the wrong cause, so re-raise now.
+            # A no-op on POSIX, where O_EXCL on an existing file is EEXIST, so
+            # EACCES there is always the directory case and is re-raised as
+            # before.
+            #
+            # Deliberately does NOT fall through to the stale-break above:
+            # unlink() on a delete-pending name raises PermissionError too, so
+            # that arm would re-open the same escape. A name that is genuinely
+            # stale is broken on a later poll, once the denial resolves into a
+            # plain EEXIST.
+            #
+            # All three arms -- retried, re-raised, timed out -- are pinned by
+            # TestLockContention in tests/test_core.py; they were RED against
+            # this function before this block existed.
+            if not path.exists():
+                raise
+            if time.monotonic() >= deadline:
+                raise FleetLockTimeout(f"timed out waiting for lock: {path}")
+            time.sleep(LOCK_RETRY_INTERVAL_SECONDS)
     try:
         os.write(fd, token.encode("utf-8"))
     except OSError:
@@ -872,12 +908,12 @@ def _quarantine_artifacts() -> list:
     registry is always newer -- an "artifact newer than the registry"
     comparison would never fire on the recreation bypasses it exists to stop.
 
-      * `_sweep_husks` (:10694) -- a rename can hide live worker records from
+      * `_sweep_husks` (:10730) -- a rename can hide live worker records from
         the roster sweep, so a thin registry would rm sessions it still owns.
-      * `_doctor_check_autoclean` (:11802) -- a lingering artifact means the
+      * `_doctor_check_autoclean` (:11838) -- a lingering artifact means the
         sweep above is refusing itself, which is how a bricked sweep reads
         green-and-fresh.
-      * `_require_claim_holder`'s §9 arm (:16312) -- the legacy upgrade mints
+      * `_require_claim_holder`'s §9 arm (:16348) -- the legacy upgrade mints
         generation 1 on bare sid equality, so it needs the registry that
         cleared it to be COMPLETE, not merely readable. See there.
 
@@ -887,22 +923,22 @@ def _quarantine_artifacts() -> list:
     read and described, and the question only arises when there is no file to
     answer for itself.
 
-      * `_acting_worker_identity` (:3109) -- `not_initialized` stays the
+      * `_acting_worker_identity` (:3145) -- `not_initialized` stays the
         affirmative *"there are no records"* only with no artifact beside it.
         SCOPED TO THE ABSENT CASE ON PURPOSE: this resolver is shared with the
         §6.5 worker-turn gate, which refuses on `True` alone, so poisoning a
         HEALTHY read here would let a real worker turn through §6.5 -- closing
         the §9 door by opening a wider one. Rule 1 lives at the §9 arm instead.
-      * `_identity_abstention_note` (:16033) -- the same distinction, in words,
+      * `_identity_abstention_note` (:16069) -- the same distinction, in words,
         because the generic note names `fleet doctor` and doctor is what MADE
         this state.
-      * `_read_registry_readonly` (:4023) -- the VIEW surface's copy of the same
+      * `_read_registry_readonly` (:4059) -- the VIEW surface's copy of the same
         question, and the last reader to get it (P1-13, 2026-07-31). Until then
         every view described a just-quarantined fleet with the identical string
         a never-initialised box prints, so the two states were not
         distinguishable from the read surface at all. A `Path.glob` is a read,
         so this costs the views doctrine nothing.
-      * `_doctor_check_registry` (:12340) -- doctor graded only on whether the
+      * `_doctor_check_registry` (:12376) -- doctor graded only on whether the
         LOADER RAISED, and the loader returns `{"workers": {}}` for a missing
         file, so the row called a renamed-away path *"is readable"* and doctor
         exited 0 with every row green (P1-12). A bare absence stays a PASS: no
@@ -914,8 +950,8 @@ def _quarantine_artifacts() -> list:
     these two only spell the filename, because an operator cannot restore a file
     whose name they were never told.
 
-      * `_print_snapshot_table` (:6843) -- `fleet status --stale-ok`.
-      * `_tombstone_releasing_body` (:16469) -- `sup-release`, whose registry
+      * `_print_snapshot_table` (:6879) -- `fleet status --stale-ok`.
+      * `_tombstone_releasing_body` (:16505) -- `sup-release`, whose registry
         arm previously swallowed the quarantined case in silence.
 
     The operator clears the artifact (after restoring what it holds), which
@@ -3059,7 +3095,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     -- reads `ok` while MISSING every record the artifact holds, and the §9 arm
     read that thinness as an affirmative *"you are provably not a worker"*. The
     presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:16312`), where it costs the §6.5 gate nothing.
+    (`:16348`), where it costs the §6.5 gate nothing.
 
     An artifact can also outlive its incident by days -- `_sweep_husks` tells the
     operator to restore the file first and delete the artifact second -- so that
@@ -3075,7 +3111,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     THE READ IS NEVER `load_registry`, and that distinction is the whole reason
     `_registry_records_or_none` exists (this site uses its `(ok, reason, data)`
     source directly, for the paragraph above). `load_registry`
-    QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1027`) -- and
+    QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1063`) -- and
     its docstring is explicit that *"callers must abort, not catch-and-
     continue."* The first version of this function did catch and continue: the
     exception was swallowed, the rename was not, so on a corrupt registry every
@@ -8774,7 +8810,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # P1-6: `read_registry_no_repair`, NOT `load_registry`. This is a PRE-FLIGHT
-    # resolution that runs from `cmd_kill:8668` / `cmd_respawn:8410`, before
+    # resolution that runs from `cmd_kill:8704` / `cmd_respawn:8446`, before
     # either verb has taken `fleet.lock` -- and `load_registry` QUARANTINES a
     # corrupt registry, i.e. RENAMES IT ASIDE, which is a write. An unlocked
     # write races every other fleet command, and it destroys the evidence the
@@ -8837,10 +8873,10 @@ def _supervisor_lifecycle_target(verb, name):
     # P1-6: `read_registry_no_repair` -- `load_registry` MINUS the rename, with
     # the same missing-file contract, the same validator and the same
     # `RegistryCorruptError`, so the arm below is unchanged. This read runs from
-    # `cmd_kill:8668` / `cmd_respawn:8410`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:8704` / `cmd_respawn:8446`, ahead of either verb's `fleet_lock`,
     # and quarantining here did two things: it wrote without the lock, and it
     # STOLE the quarantine from the lock-held read that was designed to perform
-    # it. `cmd_respawn:8434-8436` spells out that design -- *"resolve under the
+    # it. `cmd_respawn:8470-8472` spells out that design -- *"resolve under the
     # lock so a corrupt registry surfaces through load_registry's quarantine"* --
     # and the theft is what falsified it: by the time the lock-held read ran the
     # file was ABSENT rather than corrupt, so `{"workers": {}}` came back and the
@@ -14715,12 +14751,12 @@ def _registry_records_or_none():
 
     IT MUST NOT BE `load_registry`, and that is the whole reason this function
     exists rather than a bare try/except at each site. `load_registry`
-    QUARANTINES a corrupt registry -- it renames the file aside (`:1027`) --
+    QUARANTINES a corrupt registry -- it renames the file aside (`:1063`) --
     which is a WRITE. `_supervisor_gate` promises "READ-ONLY: no lock, no mint,
     no write" and runs at the top of every mutating verb, so routing its
     identity read through `load_registry` would let a speed-bump shred operator
     evidence on a path that documents itself as touching nothing. This is D4's
-    rule for the view path (`:3985`) applied to the one other reader that has
+    rule for the view path (`:4021`) applied to the one other reader that has
     no business quarantining. Quarantining stays where it belongs: the
     lock-holding verbs, `cmd_sup_boot` included via `_holder_is_limited`."""
     ok, _reason, data = _read_registry_readonly()
@@ -14907,8 +14943,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     live_sids` is what shipped, and `_record_sids`' own docstring says why it
     is wrong -- *"matching against `session_id` alone fails open on it
     (ND4a)"* -- for the thirteen other sites that already key on the union
-    (`:2774, :2855, :3116, :3266, :4652, :8808, :9128, :9409, :9627, :9714,
-    :9937, :10723, :14778`). The thirteenth is multi-fleet §5 step 2's
+    (`:2810, :2891, :3152, :3302, :4688, :8844, :9164, :9445, :9663, :9750,
+    :9973, :10759, :14814`). The thirteenth is multi-fleet §5 step 2's
     membership test (slice a2), which is the same argument one plane out: a
     home whose record was eagerly restamped would stop claiming its own
     fork-steered body mid-rotation. B6 was the one
@@ -14923,8 +14959,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :7768, :8241, :12684,
-    :17983), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :7804, :8277, :12720,
+    :18019), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -15614,8 +15650,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:7768, :8241, :12684,
-    #     :17983) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:7804, :8277, :12720,
+    #     :18019) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -15645,10 +15681,10 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         #   * `_registry_records_or_none`, NEVER `load_registry`. This gate
         #     documents itself "READ-ONLY: no lock, no mint, no write" and
         #     `load_registry` QUARANTINES a corrupt registry -- it RENAMES the
-        #     file aside (`:1027`), which is a write. Routing the identity read
+        #     file aside (`:1063`), which is a write. Routing the identity read
         #     through it made `fleet send` shred the operator's evidence from a
         #     path that promises to touch nothing; the helper exists for exactly
-        #     this and names this gate as its reason (`:14706`). A `None` here
+        #     this and names this gate as its reason (`:14742`). A `None` here
         #     still fails toward the gate -- an unreadable registry is reported
         #     by its own doctor row, and is never a reason to decide blind.
         #     MERGE NOTE (2026-07-27): main and `fix/identity-registry-judges`
@@ -16290,7 +16326,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # A worker whose own record sits inside the artifact upgrades the claim.
         #
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as `_sweep_husks`
-        # spells it at `:10687`. Not an mtime comparison: `os.rename` preserves
+        # spells it at `:10723`. Not an mtime comparison: `os.rename` preserves
         # mtime, so the artifact's mtime is the PRE-corruption write time and any
         # recreated registry is always newer -- the comparison would never fire
         # on the one bypass it exists to stop.
