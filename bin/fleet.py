@@ -614,6 +614,42 @@ def fleet_lock(timeout: float = LOCK_TIMEOUT_SECONDS):
             if time.monotonic() >= deadline:
                 raise FleetLockTimeout(f"timed out waiting for lock: {path}")
             time.sleep(LOCK_RETRY_INTERVAL_SECONDS)
+        except PermissionError:
+            # Windows delete-pending. MEASURED on 3.10 and 3.13 alike: a lock
+            # file whose delete disposition is set but whose NAME is still in
+            # the directory answers O_CREAT|O_EXCL with ERROR_ACCESS_DENIED ->
+            # PermissionError (errno 13), NOT EEXIST. Release here is
+            # path.unlink(), so a contender polling at LOCK_RETRY_INTERVAL
+            # lands inside that window; uncaught, the raw OSError escaped this
+            # manager's "acquire, or raise FleetLockTimeout" contract and could
+            # kill clean/kill/archive/spawn/send/respawn/resume-limited outright.
+            #
+            # Discriminated by the lock file, not by the platform -- this module
+            # gets exactly one platform branch and it is spent on PLATFORM:
+            #   name present -> the denial is about THAT file: contended. Poll
+            #                   on, under the same deadline as EEXIST.
+            #   name absent  -> the denial is about the DIRECTORY (an unwritable
+            #                   state/). Retrying cannot help, and swallowing it
+            #                   would trade a fast, true error for a slow one
+            #                   naming the wrong cause, so re-raise now.
+            # A no-op on POSIX, where O_EXCL on an existing file is EEXIST, so
+            # EACCES there is always the directory case and is re-raised as
+            # before.
+            #
+            # Deliberately does NOT fall through to the stale-break above:
+            # unlink() on a delete-pending name raises PermissionError too, so
+            # that arm would re-open the same escape. A name that is genuinely
+            # stale is broken on a later poll, once the denial resolves into a
+            # plain EEXIST.
+            #
+            # All three arms -- retried, re-raised, timed out -- are pinned by
+            # TestLockContention in tests/test_core.py; they were RED against
+            # this function before this block existed.
+            if not path.exists():
+                raise
+            if time.monotonic() >= deadline:
+                raise FleetLockTimeout(f"timed out waiting for lock: {path}")
+            time.sleep(LOCK_RETRY_INTERVAL_SECONDS)
     try:
         os.write(fd, token.encode("utf-8"))
     except OSError:
