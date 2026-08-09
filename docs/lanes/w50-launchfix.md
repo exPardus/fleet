@@ -761,3 +761,54 @@ going 27 → 28 when `docs/NEXT-SESSION.md` moved into the held population). 4 +
 
 If it misses, it is reported as a miss and the prediction is not adjusted. The numbers land in the
 next commit.
+
+### 7.5.1 Floors — the result
+
+**MEASURED, and the prediction above is in commit `1d1216a`, which contains no results. This
+paragraph is in a later commit. The ordering is witnessed by git, not asserted by me** — which is
+the repair F8 actually asked for.
+
+```
+py -3.13 -m pytest -q   ->  4290 passed, 14 skipped, 1 xfailed in 401.79s   rc=0
+py -3.10 -m pytest -q   ->  4290 passed, 14 skipped, 1 xfailed in 360.72s   rc=0
+```
+
+| predicted | measured 3.13 | measured 3.10 |
+|---|---|---|
+| 4305 collected | 4305 | 4305 |
+| 4290 passed | **4290** | **4290** |
+| 14 skipped | **14** | **14** |
+| 1 xfailed | **1** | **1** |
+| 0 failed | **0** | **0** |
+
+**Hit on every field, on both interpreters, including the skip and xfail counts this lane declined
+to predict last time.** 4290 + 14 + 1 = 4305.
+
+Working-tree digest over all 242 tracked files, at three points — before 3.13, between the runs,
+after 3.10:
+
+```
+s3-before  tree_sha256=2f29ea43971f5a7d11c040f06d6e8bfbc6a702876b17ef0a2fa4272303b6b319
+s3-mid     tree_sha256=2f29ea43971f5a7d11c040f06d6e8bfbc6a702876b17ef0a2fa4272303b6b319
+s3-after   tree_sha256=2f29ea43971f5a7d11c040f06d6e8bfbc6a702876b17ef0a2fa4272303b6b319
+```
+
+A **content digest over files**, not `git write-tree` — the sibling lane's warning is about the
+latter, which hashes the index and is silent on unstaged changes. `git status --porcelain` was
+empty before the run and after it, and every mutant this turn ran in a throwaway clone, so no
+floor could have started on a mutated tree.
+
+## 7.6 What the discharge did NOT do
+
+- **Did not touch `bin/fleet.py`.** `git diff --name-only 4a62e21..HEAD`: two test modules,
+  `CONTRIBUTING.md`, this report. The one-line fix the gate cleared is byte-identical.
+- **Did not close the remaining census holes** — unannotated parameters, `.format()`/`%`/
+  concatenation/`str.join`, and subscript-assignment sinks. Each is now pinned as a hole
+  (§7.3), so closing one forces the census to be edited in the same commit.
+- **Did not widen shapes 1 and 3** of the doc pin (verbs, Python floor). Still `ENTRY_DOCS`-only,
+  still stated as a known gap, and `CONTRIBUTING.md` now says so where a contributor will read it.
+- **Did not hold `docs/OPERATOR-GATES.md`** (§7.4 F6) — deliberate, and the reason is in the code
+  beside the exemption, not only here.
+- **Did not bring `docs/SPEC.md` under `tools/verify_receipts.py`.** Its `grep -c` receipt text is
+  still unverified; only the number is pinned. Unchanged from §2.7, still a campaign.
+- **Ran no `fleet` verb at all this turn.**
