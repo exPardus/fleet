@@ -150,8 +150,20 @@ def _safe(text, limit: int = _FIELD_LIMIT) -> str:
     the nameplate, not the column. This is not a token blacklist: brackets are
     the nameplate's SYNTAX and no status word needs them, so foreign text simply
     does not get to speak in it. `test_a_forged_all_clear_cannot_be_rendered` is
-    the pin."""
-    out = "".join(ch if 0x20 <= ord(ch) < 0x7f else "?" for ch in str(text))
+    the pin.
+
+    AND IT REFUSES A NON-STRING RATHER THAN STRINGIFYING ONE (gate `w50-gd2`
+    MAJOR 1). This function used to open with `str(text)`, which quietly made it
+    a coercer as well as a sanitiser -- and a sanitiser is not a validator. Its
+    guarantees are all about CHARACTERS; it has none about structure, so
+    `str(["idle"])` handed it a bracket-bearing string the attacker composed and
+    it dutifully rendered `('idle')`, byte-identical to a registry that had
+    written that string outright. Callers narrow the type first
+    (`fleet.registry_status`); this is the backstop for the one that forgets,
+    and it answers with fleet's own word instead of the attacker's."""
+    if not isinstance(text, str):
+        return fleet.TYPE_FAULT
+    out = "".join(ch if 0x20 <= ord(ch) < 0x7f else "?" for ch in text)
     out = out.replace("[", "(").replace("]", ")")
     return out if len(out) <= limit else out[:limit - 1] + "~"
 
@@ -159,7 +171,12 @@ def _safe(text, limit: int = _FIELD_LIMIT) -> str:
 def _reset_clock(iso) -> str:
     """'2026-07-09T14:20:00Z' -> '14:20'. Any other shape -> the raw value,
     SANITISED: `limit_reset_at` is registry text and reaches the screen
-    verbatim through this fallback."""
+    verbatim through this fallback.
+
+    Any other TYPE -> `_safe`'s refusal word, because `limit_reset_at` is only
+    text by convention: nothing validates the field and a foreign home may put
+    an object there. Kept in `_safe` rather than repeated here so there is one
+    place that decides what a wrong-typed field looks like."""
     if not iso:
         return ""
     try:
@@ -169,9 +186,20 @@ def _reset_clock(iso) -> str:
 
 
 def _bucket(worker: dict) -> str:
-    if worker["status"] == "idle" and worker["mail"]:
+    """The bucket key, ALWAYS A STRING (gate `w50-gd2` MAJOR 1).
+
+    A bucket key is a dict key, so an unhashable `status` raised
+    `TypeError: unhashable type` at the `setdefault` below and the exit-0 guard
+    turned that into a silently missing fleet row. `fleet.registry_status` is
+    the one narrowing, shared with `status_snapshot` so the two cannot disagree
+    about what a wrong-typed field renders as. `.get` rather than `[...]` for
+    the same reason one layer down: a row is a dict a caller built, and this
+    render must be total over the rows it is handed, not only over the rows
+    `status_snapshot` happens to build today."""
+    status = fleet.registry_status(worker.get("status"))
+    if status == "idle" and worker.get("mail"):
         return "idle+mail"
-    return worker["status"]
+    return status
 
 
 # --- the command tier ------------------------------------------------------
@@ -219,21 +247,29 @@ def _supervisor_chunk(snap: dict, paint, stale_after: int):
     sup = snap.get("supervisor")
     if not isinstance(sup, dict) or not sup.get("goals_active"):
         return None
-    state = sup.get("state") or "unknown"
+    # `_SUP_STATE_LABEL.get(state, ...)` is a dict lookup, so an unhashable
+    # `state` raises here exactly as `_bucket` did -- the same defect on the
+    # tier field. `_supervisor_tier_snapshot` cannot produce one (it answers
+    # from a fixed four-word vocabulary and swallows everything else into
+    # `unknown`), so this is not attacker-reachable today; it is the same
+    # fail-closed default `_load_delegates` takes, for the same reason.
+    state = sup.get("state")
+    if not isinstance(state, str) or not state:
+        state = "unknown"
     chunk = paint(_SUP_STATE_LABEL.get(state, "sup ?"), _SUP)
     # D2 applied to the claim: an aged heartbeat is exactly the evidence a
     # seizure would one day rest on, so the operator sees it before fleet does.
     # `released` carries no heartbeat BY DESIGN (claim-nonce §6.3) -- rendering
     # an age there would invent staleness out of a correct stand-down.
     age = sup.get("heartbeat_age_seconds")
-    if state == "held" and age is not None and age > stale_after:
+    if state == "held" and isinstance(age, (int, float)) and age > stale_after:
         chunk += paint(f" {_fmt_age(age)}", _AGE)
     return chunk
 
 
 def _live_supervisor_bodies(workers) -> int:
-    return sum(1 for w in workers
-               if w.get("tier") == "supervisor" and w.get("status") != "dead")
+    return sum(1 for w in workers if isinstance(w, dict)
+               and w.get("tier") == "supervisor" and w.get("status") != "dead")
 
 
 def _bucket_order(buckets) -> tuple:
@@ -247,11 +283,23 @@ def _bucket_order(buckets) -> tuple:
     slice (d) that may not be the operator. A registry with 500 distinct hostile
     statuses is 500 buckets, which `_safe`'s per-field limit does not bound --
     this is the axis that does. Known buckets are never capped: they are fleet's
-    own vocabulary and there are eight of them."""
+    own vocabulary and there are eight of them.
+
+    `fleet.TYPE_FAULT` IS NOT CAPPED EITHER, and it is not in `_ORDER`. It is
+    the one bucket name in the unknown region that FLEET authors -- every other
+    one is a string out of a foreign registry. Left in the capped set it could
+    be pushed off the line by three hostile statuses that merely sort earlier,
+    so a foreign home could suppress the very word that says its own record is
+    malformed. Note what this also buys: after the exemption, every name the cap
+    can hide is a name the ATTACKER chose, which is why gate `w50-gd2`'s
+    equivalence argument for mutant X7 -- first three versus last three -- holds
+    on this tree as well as on theirs. It would not have held without this."""
     known = [b for b in _ORDER if b in buckets]
-    unknown = sorted(b for b in buckets if b not in _ORDER and b != "dead")
+    fault = [fleet.TYPE_FAULT] if fleet.TYPE_FAULT in buckets else []
+    unknown = sorted(b for b in buckets
+                     if b not in _ORDER and b not in ("dead", fleet.TYPE_FAULT))
     hidden = max(0, len(unknown) - _MAX_UNKNOWN_BUCKETS)
-    return known + unknown[:_MAX_UNKNOWN_BUCKETS], hidden
+    return known + fault + unknown[:_MAX_UNKNOWN_BUCKETS], hidden
 
 
 def render_statusline(snap: dict, color: bool = True,
@@ -273,12 +321,20 @@ def render_statusline(snap: dict, color: bool = True,
         # render, and renders nothing new of its own.
         return f"{head}: {registry_fault_word(snap.get('reason'))}"
 
-    workers = snap["workers"]
+    # TOTAL OVER THE ROWS IT IS HANDED, not only over the rows
+    # `status_snapshot` builds. `snap["workers"]` was a `KeyError` waiting for
+    # any other caller, and a row that is not a dict has no `.get`; both degrade
+    # to the answer the surface already has a word for rather than to silence.
+    workers = snap.get("workers") or []
+    if not isinstance(workers, list):
+        workers = []
     if not workers:
         return f"{head}: no workers"
 
     buckets: dict = {}
     for w in workers:
+        if not isinstance(w, dict):
+            continue
         # A live supervisor body is the command tier, not a worker. A dead one
         # rejoins the flat roster for the grey tail -- see the block comment
         # above `_supervisor_chunk`.
@@ -316,14 +372,19 @@ def render_statusline(snap: dict, color: bool = True,
         # age gets its own hue -- dimming it (the old behaviour dimmed the whole
         # chunk) put grey-on-dark text on the operator's screen, and grey now
         # means dead.
-        stalest = [w["stale_seconds"] for w in group if w["stale_seconds"] is not None]
+        # A NUMBER OR NOTHING. `min()` compares, and a comparison against a
+        # string or a list is a `TypeError` -- the same erasure as the bucket
+        # key, one field over. `is not None` tested the wrong property: it
+        # admitted every non-null type there is.
+        stalest = [s for s in (w.get("stale_seconds") for w in group)
+                   if isinstance(s, (int, float))]
         if stalest and min(stalest) > stale_after:
             chunk += paint(f" {_fmt_age(min(stalest))}", _AGE)
 
         if bucket == "limited":
-            resets = {_reset_clock(w["limit_reset_at"]) for w in group}
+            resets = {_reset_clock(w.get("limit_reset_at")) for w in group}
             clock = f"resets {sorted(resets)[0]}" if all(resets) else "reset?"
-            if any(w["resume_eligible"] for w in group):
+            if any(w.get("resume_eligible") for w in group):
                 # invariant 1: a view flags resume-eligibility, it never launches.
                 clock = "resume-eligible"
             chunk += paint(f" {clock}", _STATUS_COLOR["limited"])
