@@ -586,10 +586,31 @@ instrument did exactly what it exists to do: it refused to certify a run it coul
 suggestive and is *not* what the bracket claims, so the bracket is reported as void rather than
 explained away. Round 2 below re-establishes it on a frozen tree.
 
-### Round 2 — re-floored with this report, results and all, in the tree
+### Round 2 — re-floored on a FROZEN tree, to replace the bracket I voided
 
-*(Results for round 2 are appended by the commit that follows this one; the tree they were run
-against is the one this paragraph is committed in.)*
+Run at `86246e2` — this file present with round 1's results in it — with nothing in the repository
+edited between the two digests:
+
+```
+== DIGEST BEFORE ==
+2dacd7e1032f9f49b50b139e4d17329305118f6cc592dbae9f0bbf54e0774e84  files=245
+== 3.13 collect ==   4489 tests collected in 1.47s
+== 3.13 full ==      4474 passed, 14 skipped, 1 xfailed in 422.25s (0:07:02)
+== 3.10 collect ==   4489 tests collected in 4.90s
+== 3.10 full ==      4474 passed, 14 skipped, 1 xfailed in 369.95s (0:06:09)
+== DIGEST AFTER ==
+2dacd7e1032f9f49b50b139e4d17329305118f6cc592dbae9f0bbf54e0774e84  files=245
+== git status ==     (empty)
+```
+
+**Identical digest, `files=` included, on a tree that carries this report.** Eight runs across two
+rounds, two interpreters, two trees: **4489 / 4474 / 14 / 1 / 0 every time.**
+
+**What is still not run: this paragraph's own tree.** The commit appending these numbers is a
+docs-only edit to a file under `docs/lanes/`, and the eight 4489s above are the measurement that
+says such a file moves the floor by zero — but that is an inference from the collection rule, not a
+ninth run, and it is recorded as one. This is the same terminus every self-describing report has,
+and naming it is cheaper than another fourteen minutes chasing it round.
 
 ---
 
