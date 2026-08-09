@@ -735,10 +735,41 @@ I am not claiming the 3.13 result is invalid — the suite passed and the delta 
 file that no test reads. I am claiming **I cannot prove it from this run**, which is a different
 statement, and the honest one.
 
-### 7.8b — THE FENCED RE-RUN, ATTEMPT 2: tree frozen, no concurrent edits
+### 7.8b — THE FENCED RE-RUN, ATTEMPT 2: **CLEAN, tree frozen at `e98059b`**
 
-*Filled in by the commit after this one. Everything above is committed first, precisely so there is
-nothing left for me to edit while it runs.*
+MEASURED. Everything above was committed first, precisely so there was nothing left for me to edit
+while it ran, and I touched nothing inside the worktree for its duration (the journal I did update
+lives at `C:/proga/claude-fleet/state/journals/`, outside the digest root).
+
+| interpreter | result | wall |
+|---|---|---|
+| `py -3.13 -m pytest -q` | **`4646 passed, 14 skipped, 1 xfailed`** | 544.91s |
+| `py -3.10 -m pytest -q` | **`4646 passed, 14 skipped, 1 xfailed`** | 496.84s |
+
+**Working-tree digest — before 3.13, between the interpreters, and after 3.10. Three printings, one
+value, `files=` included:**
+
+```
+81284a7b989359163cfaed319d3fa90160c752dd1e5dc8e91b2ce1ac49e3f2f7  files=263  root=C:\proga\fleet-w52-live
+```
+
+`git status --porcelain` was empty before the run and empty after it. **The change-nothing proof now
+covers the run it belongs to**, which neither §7.7 (instrument absent) nor §7.8 (instrument
+defeated by me) could claim.
+
+**Receipt harness, per CLAUDE.md's rule that a verifier without its own seed test proves nothing:**
+
+```
+parsed receipts: 11/11 reproduce exactly (14 fenced blocks, 0 unclassified, 0 volatile-skipped)
+VERDICT:         pass -- 0 failure(s), 0 warning(s)
+SELF-TEST VERDICT: PASSED -- the harness proved it can fail, on both seed classes.
+EXIT:            0 (PASSED)
+```
+
+**Note what this run does and does not add.** The *numbers* were already measured twice (§7.7, §7.8)
+and are unchanged a third time, on both interpreters, across three sessions. What this run adds is
+only the fence — and that is the whole reason it was worth 18 minutes. A result measured three times
+without its guard is still a result nobody proved was measured on the tree it names.
 
 ### 7.9 — THE FLOOR LEDGER, END TO END
 
@@ -750,6 +781,10 @@ nothing left for me to edit while it runs.*
 | `bd463f7` run 3, the discharge (both) — **predicted 4646 passed** | 4661 ✅ | `4646 passed, 14 skipped, 1 xfailed` ✅ |
 
 Net against baseline: **+25 tests, 0 failures, skips and xfails unmoved at 14/1.**
+
+Run 3's numbers were measured **three times** across three sessions — §7.7 (unfenced), §7.8 (fence
+defeated by my own concurrent edit) and §7.8b (clean) — identical on both interpreters every time.
+Only the third is fenced, and only the third is offered as proof.
 
 **Three predictions: two hit, one missed** — and the ledger's shape is the argument. The two hits
 confirm arithmetic. The miss found a regression in my own build that the 15-mutant ledger, the
@@ -826,8 +861,10 @@ does the same for the homes list. All green on every run reported here.
    swallows — but "catch everything" is a real hazard and a gate should press on whether some
    exception class ought to propagate after all (`KeyboardInterrupt` and `SystemExit` do, being
    `BaseException`; that is deliberate and is why the catch is `Exception`, not `BaseException`).
-7. **The digest fence did not run on run 3** (§7.7) and I re-ran fenced rather than reasoning
-   around it. A gate is entitled to treat the unfenced pair as unproven and read only §7.8.
+7. **The digest fence failed twice before it held** (§7.7 absent, §7.8 defeated by my own concurrent
+   edit, §7.8b clean). A gate is entitled to disregard the first two entirely and grade only §7.8b —
+   that is what I would do. The numbers are identical across all three, which is evidence and not
+   proof, and I have not presented it as proof.
 8. **A gate should ask what ELSE became reachable.** §7.2's regression came from a code path being
    newly reached by a verb, not from the code being wrong. I fixed the instance and the class, but
    the honest generalisation is: `_cmd_respawn_native` now calls `_stop_native_session_status`,
