@@ -136,7 +136,7 @@ def indexed_project(tmp_path):
 
 
 def _compose(name, cwd, task="the task", sid=None, **kw):
-    prompt, _claim = fleet.compose_prompt(name, cwd, task, sid, **kw)
+    prompt, _claim, _mail = fleet.compose_prompt(name, cwd, task, sid, **kw)
     return prompt
 
 
@@ -730,7 +730,7 @@ class TestContextDigest:
         sid = SID
         fleet.append_mailbox(sid, "MAIL-MARKER")
         journal = _write(tmp_path / "j.md", "JOURNAL-MARKER\n")
-        prompt, claim = fleet.compose_prompt(
+        prompt, claim, _mail = fleet.compose_prompt(
             "w1", indexed_project, "TASK-MARKER", sid,
             journal_path=journal, context=["src/api.py"])
         fleet.restore_mailbox_claim(claim)
