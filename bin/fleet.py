@@ -908,12 +908,12 @@ def _quarantine_artifacts() -> list:
     registry is always newer -- an "artifact newer than the registry"
     comparison would never fire on the recreation bypasses it exists to stop.
 
-      * `_sweep_husks` (:10730) -- a rename can hide live worker records from
+      * `_sweep_husks` (:10762) -- a rename can hide live worker records from
         the roster sweep, so a thin registry would rm sessions it still owns.
-      * `_doctor_check_autoclean` (:11838) -- a lingering artifact means the
+      * `_doctor_check_autoclean` (:11870) -- a lingering artifact means the
         sweep above is refusing itself, which is how a bricked sweep reads
         green-and-fresh.
-      * `_require_claim_holder`'s §9 arm (:16348) -- the legacy upgrade mints
+      * `_require_claim_holder`'s §9 arm (:16380) -- the legacy upgrade mints
         generation 1 on bare sid equality, so it needs the registry that
         cleared it to be COMPLETE, not merely readable. See there.
 
@@ -929,7 +929,7 @@ def _quarantine_artifacts() -> list:
         §6.5 worker-turn gate, which refuses on `True` alone, so poisoning a
         HEALTHY read here would let a real worker turn through §6.5 -- closing
         the §9 door by opening a wider one. Rule 1 lives at the §9 arm instead.
-      * `_identity_abstention_note` (:16069) -- the same distinction, in words,
+      * `_identity_abstention_note` (:16101) -- the same distinction, in words,
         because the generic note names `fleet doctor` and doctor is what MADE
         this state.
       * `_read_registry_readonly` (:4059) -- the VIEW surface's copy of the same
@@ -938,7 +938,7 @@ def _quarantine_artifacts() -> list:
         a never-initialised box prints, so the two states were not
         distinguishable from the read surface at all. A `Path.glob` is a read,
         so this costs the views doctrine nothing.
-      * `_doctor_check_registry` (:12376) -- doctor graded only on whether the
+      * `_doctor_check_registry` (:12408) -- doctor graded only on whether the
         LOADER RAISED, and the loader returns `{"workers": {}}` for a missing
         file, so the row called a renamed-away path *"is readable"* and doctor
         exited 0 with every row green (P1-12). A bare absence stays a PASS: no
@@ -950,8 +950,8 @@ def _quarantine_artifacts() -> list:
     these two only spell the filename, because an operator cannot restore a file
     whose name they were never told.
 
-      * `_print_snapshot_table` (:6879) -- `fleet status --stale-ok`.
-      * `_tombstone_releasing_body` (:16505) -- `sup-release`, whose registry
+      * `_print_snapshot_table` (:6911) -- `fleet status --stale-ok`.
+      * `_tombstone_releasing_body` (:16537) -- `sup-release`, whose registry
         arm previously swallowed the quarantined case in silence.
 
     The operator clears the artifact (after restoring what it holds), which
@@ -3095,7 +3095,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     -- reads `ok` while MISSING every record the artifact holds, and the §9 arm
     read that thinness as an affirmative *"you are provably not a worker"*. The
     presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:16348`), where it costs the §6.5 gate nothing.
+    (`:16380`), where it costs the §6.5 gate nothing.
 
     An artifact can also outlive its incident by days -- `_sweep_husks` tells the
     operator to restore the file first and delete the artifact second -- so that
@@ -5939,9 +5939,41 @@ def _stash_short_id_note(exc: BaseException, short_id: str) -> None:
 
 
 def statusline_chain_path() -> Path:
-    """state/statusline-chain.json -- delegate statusline commands fleet runs
-    above its own row. Machine-local (gitignored), like every other state file."""
-    return state_dir() / "statusline-chain.json"
+    """`~/.claude/fleet-statusline-chain.json` -- the delegate statusline
+    commands fleet runs above its own row.
+
+    THE MACHINE PLANE, and it MOVED HERE from `state/statusline-chain.json`
+    (i.e. from inside a home) on 2026-08-09. Two reasons, and the second is a
+    security boundary:
+
+      1. The delegate is a MACHINE-scoped fact. Claude Code allows exactly ONE
+         `statusLine` entry, in one `~/.claude/settings.json`, and the delegate
+         is whatever was in that entry before fleet replaced it. It has nothing
+         to do with which fleet a session belongs to, and storing it per home
+         made `init --statusline --chain` on a second install silently lose it
+         (`foreign` is False for another install's fleet statusline, so nothing
+         is captured and the entry is overwritten anyway).
+      2. Multi-fleet slice (d) lets the statusline resolve a home from an
+         UNAUTHENTICATED session-id claim, and `_run_delegate` runs the chain
+         command with `shell=True`. Home-scoped, that let any directory listed
+         in `~/.claude/fleet-homes.list` run a shell command in the operator's
+         session every ten seconds, invisibly (gate `w50-gd` BLOCKING 1, driven
+         end to end). Machine-scoped, a resolved home is never consulted for it
+         and there is nothing to sanitise.
+
+    DERIVED FROM `user_settings_path()` RATHER THAN RE-SPELLING `Path.home()`,
+    deliberately: the file belongs beside the settings entry it was captured
+    from, AND `tests/conftest.py`'s autouse home sandbox redirects
+    `user_settings_path` BY NAME, so this path is sandboxed for free. A fresh
+    `Path.home()` spelling would sit outside that sandbox exactly as
+    `homes_list_path` does -- see its docstring -- and the suite would write the
+    developer's real `~/.claude/`.
+
+    `bin/fleet_statusline.py` still READS the old home-scoped location when this
+    file says nothing, so an install that chained before today keeps working;
+    that read is anchored to the home the statusline was already in, never to a
+    resolved one."""
+    return user_settings_path().with_name("fleet-statusline-chain.json")
 
 
 def _capture_statusline_delegate(command: str) -> None:
@@ -8810,7 +8842,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # P1-6: `read_registry_no_repair`, NOT `load_registry`. This is a PRE-FLIGHT
-    # resolution that runs from `cmd_kill:8704` / `cmd_respawn:8446`, before
+    # resolution that runs from `cmd_kill:8736` / `cmd_respawn:8478`, before
     # either verb has taken `fleet.lock` -- and `load_registry` QUARANTINES a
     # corrupt registry, i.e. RENAMES IT ASIDE, which is a write. An unlocked
     # write races every other fleet command, and it destroys the evidence the
@@ -8873,10 +8905,10 @@ def _supervisor_lifecycle_target(verb, name):
     # P1-6: `read_registry_no_repair` -- `load_registry` MINUS the rename, with
     # the same missing-file contract, the same validator and the same
     # `RegistryCorruptError`, so the arm below is unchanged. This read runs from
-    # `cmd_kill:8704` / `cmd_respawn:8446`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:8736` / `cmd_respawn:8478`, ahead of either verb's `fleet_lock`,
     # and quarantining here did two things: it wrote without the lock, and it
     # STOLE the quarantine from the lock-held read that was designed to perform
-    # it. `cmd_respawn:8470-8472` spells out that design -- *"resolve under the
+    # it. `cmd_respawn:8502-8504` spells out that design -- *"resolve under the
     # lock so a corrupt registry surfaces through load_registry's quarantine"* --
     # and the theft is what falsified it: by the time the lock-held read ran the
     # file was ABSENT rather than corrupt, so `{"workers": {}}` came back and the
@@ -14943,8 +14975,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     live_sids` is what shipped, and `_record_sids`' own docstring says why it
     is wrong -- *"matching against `session_id` alone fails open on it
     (ND4a)"* -- for the thirteen other sites that already key on the union
-    (`:2810, :2891, :3152, :3302, :4688, :8844, :9164, :9445, :9663, :9750,
-    :9973, :10759, :14814`). The thirteenth is multi-fleet §5 step 2's
+    (`:2810, :2891, :3152, :3302, :4688, :8876, :9196, :9477, :9695, :9782,
+    :10005, :10791, :14846`). The thirteenth is multi-fleet §5 step 2's
     membership test (slice a2), which is the same argument one plane out: a
     home whose record was eagerly restamped would stop claiming its own
     fork-steered body mid-rotation. B6 was the one
@@ -14959,8 +14991,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :7804, :8277, :12720,
-    :18034), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :7836, :8309, :12752,
+    :18066), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -15650,8 +15682,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:7804, :8277, :12720,
-    #     :18034) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:7836, :8309, :12752,
+    #     :18066) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -15684,7 +15716,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         #     file aside (`:1063`), which is a write. Routing the identity read
         #     through it made `fleet send` shred the operator's evidence from a
         #     path that promises to touch nothing; the helper exists for exactly
-        #     this and names this gate as its reason (`:14742`). A `None` here
+        #     this and names this gate as its reason (`:14774`). A `None` here
         #     still fails toward the gate -- an unreadable registry is reported
         #     by its own doctor row, and is never a reason to decide blind.
         #     MERGE NOTE (2026-07-27): main and `fix/identity-registry-judges`
@@ -16326,7 +16358,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # A worker whose own record sits inside the artifact upgrades the claim.
         #
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as `_sweep_husks`
-        # spells it at `:10723`. Not an mtime comparison: `os.rename` preserves
+        # spells it at `:10755`. Not an mtime comparison: `os.rename` preserves
         # mtime, so the artifact's mtime is the PRE-corruption write time and any
         # recreated registry is always newer -- the comparison would never fire
         # on the one bypass it exists to stop.
