@@ -22,7 +22,7 @@ Every line below is tagged **MEASURED** (a command was run and its output is pas
 | mutant X4 | **REAL**, closed, re-planted **RED** |
 | mutant X7 | **EQUIVALENT — I agree with the gate**, and §4.2 shows what keeps that true |
 | the third re-pin pass | **31 moved, 43 content-verified, 0 defects**, 170 pins green |
-| floors, `py -3.13` **and** `py -3.10` | **4489 / 4474 / 14 / 1 / 0 — prediction met exactly on both** |
+| floors, `py -3.13` **and** `py -3.10` | **4489 / 4474 / 14 / 1 / 0 — prediction met exactly, four full runs across two trees** |
 | working-tree digest | **identical at all four points**, `files=244` |
 | `~/.claude/fleet-statusline-chain.json` | **ABSENT** after two full floors |
 | one mutant survivor of my own (R9) | found, disclosed, **closed**, prediction revised BEFORE any floor ran |
@@ -80,11 +80,17 @@ xfail or a platform guard. The spec paragraph (`1e5dd66`) adds no collected test
 | command | how many | which home |
 |---|---|---|
 | `bin/fleet.py home` | 3 (one per revision under test) | the temp sandbox home — it printed that path, and it is the GATE the rest of the run was conditioned on |
-| `bin/fleet.py status` | 6 | the temp sandbox home |
+| `bin/fleet.py status` | 5 (3 in the gated probe + 2 in a follow-up that printed the table) | the temp sandbox home |
 | `bin/fleet.py status --all` | 3 | the temp sandbox home |
 | `bin/fleet.py doctor` | 3 | the temp sandbox home |
-| `bin/fleet_statusline.py` (as a subprocess) | 12 | the temp sandbox home, or the temp foreign home the sandboxed homes-list named |
-| `fleet init`, `fleet init --statusline`, `fleet homes --add` | **0** | — |
+| `bin/fleet_statusline.py` (as a subprocess) | 16 (three iterations of the four-cell driver: 3×2 + 2×2 + 2×3) | the temp sandbox home, or the temp foreign home the sandboxed homes-list named |
+| `fleet init`, `fleet init --statusline`, `fleet homes --add`, `fleet doctor --repair` | **0** | — |
+
+The in-process drivers (`fuzz_types.py`, `probe_str_cost.py`) are not CLI invocations; they set
+`FLEET_HOME` and `USERPROFILE`/`HOME` to temp directories **before importing `fleet`**, which is
+when `FLEET_HOME` is read. The mutant sweep runs `pytest`, whose own `conftest.py` sandboxes
+`user_settings_path` by name — and §9 re-asserts the real plane after two full floors rather than
+trusting that.
 
 **Why containment held, not merely that it did.** Three mechanisms, and the third is the one the
 `FLEET_HOME IS NOT A FENCE` stanza exists for:
@@ -653,6 +659,43 @@ PAIR means anything, and all four are inside one checkout.
 
 `~/.claude/fleet-statusline-chain.json` — the file this branch's lineage introduces — is **ABSENT**,
 as it was for `w50/d` and for the gate. The `settings.json` mtime predates this session.
+
+### 9.1 Re-floored with the report in the tree — SAME NUMBERS, and the regress named
+
+The run above was made on the tree at `34bc1b9`, i.e. **before** the report existed. Re-run in full
+on both interpreters at `a93532a`, with the report committed:
+
+```
+py -3.13 --collect-only:  4489 tests collected
+py -3.10 --collect-only:  4489 tests collected
+
+=== FLOOR py -3.13 ===
+working-tree digest BEFORE : 46df3684e666be3420f45b8a0f0ea9085d211107007fce78e20512ec39ce4cbf  files=244
+4474 passed, 14 skipped, 1 xfailed in 475.45s (0:07:55)
+working-tree digest AFTER  : 46df3684e666be3420f45b8a0f0ea9085d211107007fce78e20512ec39ce4cbf  files=244
+
+=== FLOOR py -3.10 ===
+working-tree digest BEFORE : 46df3684e666be3420f45b8a0f0ea9085d211107007fce78e20512ec39ce4cbf  files=244
+4474 passed, 14 skipped, 1 xfailed in 431.95s (0:07:11)
+working-tree digest AFTER  : 46df3684e666be3420f45b8a0f0ea9085d211107007fce78e20512ec39ce4cbf  files=244
+
+~/.claude/fleet-homes.list            exists: False
+~/.claude/fleet-statusline-chain.json exists: False
+~/.claude/settings.json  mtime  2026-08-08 22:34:02.854189800 +0500
+```
+
+Four floors, two trees, two interpreters, the same **4489 / 4474 / 14 / 1 / 0** every time. Note the
+digest legitimately differs between the two trees (`d5c63ab8…` vs `46df3684…`) and is identical
+within each — which is exactly what the instrument claims and all it claims.
+
+**The regress, named rather than hidden.** This paragraph is itself an edit made after the run it
+describes, and the commit carrying it also corrects the `fleet status` count in §1 from 6 to 5 and
+the statusline-subprocess count from 12 to 16 — I had miscounted my own census, which is the kind of
+thing this campaign asks lanes to say out loud. **That final commit is documentation-only**: it
+touches `docs/lanes/w51-dtype.md` and nothing else, it adds no collected test, and the tree it
+describes differs from the four-times-floored tree by exactly this section and those two numbers.
+Chasing that to a fixpoint would take a fifth floor to describe a sixth tree; stating the delta is
+the honest end of the regress.
 
 ---
 
