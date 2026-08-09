@@ -10348,3 +10348,155 @@ run. `pin-pass.json` HELD at 2.1.222. `sup-context` 102k of a 350k soft trigger 
 combining nine orphan merges into one floor run stays diagnosable if it reds; and that I have
 correctly concluded `w48/gc` is landed rather than merely *looking* landed from the one route I
 checked.
+
+## 2026-08-09T22:32:50Z CHECKPOINT inc=inc-20260809T215710Z-4082 sid=be099595-4a4f-423b-9291-3f36f7e8d419
+
+FOURTEEN VERDICTS LANDED AND EVERY FLOOR PREDICTION HIT TO THE DIGIT ON BOTH INTERPRETERS. THE ONE THING MY OWN DISPATCH BRIEF OFFERED AS EVIDENCE TURNS OUT TO BE A DIFFERENT DEFECT, MEASURED AFTER LANDING THE FIX THAT WAS SUPPOSED TO CLOSE IT.
+
+## THE LANDINGS — `main` `0d82460` → pushed at `5dd045b`, then five more
+
+**Round 1, pushed and read back byte-identical (`0d82460..5dd045b`):**
+
+- `w52/launch` — the stranger-clone rehearsal, the operator's own axis, driven six times and gated
+  three.
+- **Nine orphaned gate verdicts**, six named by my brief and **three it did not name**:
+  `w48/glaunch`, `w49/home-witness`, `w50/gd`, `w50/glaunch`, `w50/glive`, `w50/glive2`,
+  `w51/gdtype`, `w51/glaunch2`.
+- `w52/live` — the liveness fix, **the wave's only fully-gated axis**, its discharge graded
+  NOT-GATING by `w52-glive4`.
+
+**Round 2, merged and verified, not yet pushed:** `w52/glaunch3`, `w52/glaunch4`, `w52/glaunch5`,
+`w52/glive3`, `w52/glive4` — five more verdicts, each bringing its verdict file **alone**, because
+their subjects landed in round 1 and the merge-base moved with them.
+
+## THE FLOORS — PREDICTED RESULT-FREE AT `aeeac22`, GRADED HERE
+
+| # | predicted | measured | |
+|---|---|---|---|
+| docs set: collection | `4636` | `4636 collected` | **HIT** |
+| docs set: content pins | PASS | `645 passed, 3 skipped` | **HIT** |
+| + `w52/live`: collection | `4661` (4636 + 25) | `4661 collected` | **HIT** |
+| + `w52/live`: floor, py-3.13 | `4646 passed, 14 skipped, 1 xfailed` | identical, rc 0, 510s | **HIT** |
+| + `w52/live`: floor, py-3.10 | `4646 passed, 14 skipped, 1 xfailed` | identical, rc 0, 447s | **HIT** |
+| round 2: collection | unchanged `4661` | `4661 collected` | **HIT** |
+
+Zero `FAILED` and zero `ERROR` lines on either interpreter. The 3.13 flake my brief warned about had
+nothing to bite on.
+
+**The prediction was split on purpose and the split is the point.** Wave 51 predicted no movement on
+a docs-only landing and missed by 4, so I did not repeat the shape. The per-FILE `parametrize`
+argument proves the **count** pins cannot move — only an *added* non-exempt `.md` grows
+`CHECK_COUNT_DOCS`, and every added file sits under `docs/lanes/`, the first `_HISTORICAL_PREFIXES`
+entry, which I read out of `tests/test_doc_claims.py:445` myself rather than from any sentence about
+it. **It proves nothing about the content pins**, and nine large verdict documents dense with
+`fleet <verb>` invocations and `:NNN` citations are exactly what those read. So I measured them
+separately and **called the 645-test run a cheap early warning rather than a floor**, with the full
+suite still owed and then run. Both halves held; they were different claims and they got different
+evidence.
+
+## LOSSLESSNESS, PROVED BY THE STRONGEST ROUTE AVAILABLE RATHER THAN THE USUAL ONE
+
+For every one of the 19 landed files, `merged blob sha == branch blob sha`. That is decisive and
+costs one `git rev-parse` per file — no digit-masking, no lost-hunk grep whose own sentinel shape can
+betray it (`grep -Fqx` parsing a leading `- ` as a flag is this campaign's own scar). **It is
+available exactly when the change sets are disjoint at file granularity, which is also exactly when a
+conflict count is least informative** — so the two instruments are complementary rather than
+redundant, and I ran both. Control first every time: `w35/nd4c × main` = **25 anchored / 26
+unanchored**, the delta being a prose bullet quoting the marker inside a lesson file.
+
+## THE MERGE I DID NOT MAKE, AND WHY THE CENSUS WOULD HAVE WAVED IT THROUGH
+
+`w48/gc` presented **identically to the nine real orphans**: `+1` commit, one added
+`docs/lanes/w48-gc.md`, **zero conflicts against `main`.** It is already landed — its verdict blob on
+`main` is byte-identical to the branch's (`29c59ddc…`) while the branch is ~26,000 lines stale.
+
+**The zero was the tell and it read as the opposite.** An add/add of identical content produces no
+conflict, so the conflict census scores it *free* when what it means is *redundant*. **A conflict
+count cannot distinguish "nothing collides" from "nothing is there."** The separator costs one
+command per branch — `git cat-file -e main:<path>` — and I now run it before every add-only merge.
+
+## AND THE SAME MECHANISM, POINTING THE OTHER WAY, ON THREE BRANCHES I DID NOT MERGE
+
+A gate branch forks its subject and carries one verdict commit, so **whether merging it is free or
+destructive depends entirely on whether the subject has landed since.** Measured on eight branches of
+identical shape:
+
+- `w52/glive3`, `w52/glive4`, `w52/glaunch3/4/5` → **verdict alone.** Landed.
+- `w52/gdfix`, `w52/gdfix2`, `w52/gfork` → still based at `64b43c2`, so each would bring **the
+  verdict PLUS a stale snapshot of work whose branch has since moved.** **Not merged.** They ride
+  their subject's landing or not at all.
+
+Nothing in any status output distinguishes the two kinds. The file list does, and it is one command.
+
+## THE REMAINING TWO AXES — the order changed, and I derived the reason rather than inheriting it
+
+`w52/dfix` and `w52/fork` are both under re-gate (`w53-gdfix`, `w53-gfork`, both working). With
+`w52/live` landed, **both now conflict with `main` at exactly 12 hunks each**, where both read 0
+before — the sequential-poisoning effect wave 38 measured, arriving on schedule. Every hunk is a pure
+line-number citation inside a docstring, confirmed by reading them rather than by generalising from
+two.
+
+**And the wave-52 census's characterisation of those hunks is wrong in a way that matters.** It
+called them *"a constant +150 offset."* Measured at `5dd045b`:
+
+```
+_identity_abstention_note   :16477 -> :16327    -150
+_doctor_check_registry      :12718 -> :12568    -150
+_print_snapshot_table        :6987 ->  :7032     +45
+```
+
+**Two directions in one hunk set.** A re-pin computed as *either side's value plus a delta* is
+therefore wrong for at least one citation in every merge, and a sample of two cannot see it. The
+correct value is the line the symbol occupies **in the merged tree**, derived there.
+
+**So the remaining order is `fork` before `dfix`** — fork carries `tools/repin_citations.py`, the
+instrument the dfix merge will need — and that is a measured dependency, not my brief's ordering,
+which put fork last because it was GATING when the brief was written. **I did not dispatch the
+merge-prep lane**: I derived the order, the census and the re-pin hazard myself for less than the
+lane would have cost, and a prep is stale the moment a re-gate moves a tip — which is the live risk
+on both of these right now.
+
+## THE CLAIM IN MY OWN BRIEF THAT DID NOT SURVIVE LANDING ITS OWN FIX
+
+My brief offered `w50-glaunch` reading `working` for 15.5 hours as evidence for the defect
+`w52/live` repairs, and said *"the `w52/live` branch below is the fix."* **Landed it, re-measured:
+it is not.**
+
+```
+w50-glaunch   status=working   turns=1   last_activity=2026-08-09T06:21:46Z   (~15.9h stale)
+```
+
+`w52/live` repairs corrupt-registry aborts in the `respawn`/`kill` sweeps — a registry whose
+*content* is malformed. This entry is **well-formed**; its *session* is gone and the outcome
+discriminator never demoted its status. **Two different defects presenting through one symptom, and
+the symptom is what got cited.** The record is unsweepable while it reads `working`
+(`_archive_eligible` will not touch it), so it accumulates exactly like the `dead-suspected` husks
+that reached 234h.
+
+**Not remedied, deliberately.** The remedy is a DESTRUCTIVE verb, the operator is away, four gates
+are open and I was told not to add a fifth. Recorded in `knowledge/` instead, which is where a
+successor will find it without paying to re-derive it.
+
+## A FINDING FROM A GATE STILL IN FLIGHT, VERIFIED BECAUSE IT AIMS AT MY OWN LANDING
+
+`w53-gfork` measured `tools/repin_citations.py` deleting **21,774 CR bytes** — a whole-file CRLF→LF
+rewrite — while reporting `moved 39, writes 39`, because it reads with universal newlines and writes
+`newline=""`. **I verified it myself rather than acting on a peek**, because I am about to run that
+tool: `core.autocrlf=true` here, the committed blob is pure LF, so git normalises the damage and the
+**committed** result is unchanged — which is precisely why nothing caught it, and precisely why a
+clone with `autocrlf=false` is where it bites. **Second corruption class in one tool, both invisible
+to the instruments watching the tool.** The gate owns the grade; what I take from it is that my own
+re-pins get verified by `git diff --numstat` rather than by the tool's own report.
+
+## STATE
+
+`main` local carries round 2 unpushed pending its floor. Working: `w53-gfork`, `w53-gdfix`.
+`autoclean` errors=0. **Four operator gates open, none ticked, no fifth — verified by counting the
+unticked boxes in `docs/OPERATOR-GATES.md` (4 open, 37 settled), not inherited from the digest.**
+`fleet init` not run. `pin-pass.json` HELD at 2.1.222. Wave folded into `knowledge/`.
+`sup-context` ~216k of a 350k soft trigger.
+
+**What I expect to get wrong:** that both re-gates come back landable rather than ordering another
+discharge; that I have budget to land two code axes plus their re-pins after collecting two verdicts;
+and that `fork`-before-`dfix` survives contact with the first re-pin fixpoint, which is the step this
+wave has the most evidence against.
