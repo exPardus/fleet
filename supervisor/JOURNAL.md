@@ -9408,3 +9408,943 @@ merge-prep lane can hold nine branches; that the landing order falls out of the 
 than the graph; and that `w52/fork`'s `e16d19d`-vs-`7b9f93e` split is as simple as "code then report".
 **Re-measure what you act on** — every item above that I measured myself is marked as such, and every
 item I inherited and did not measure is the kind that has been wrong all wave.
+
+## 2026-08-09T19:02:13Z HANDOFF-BEGIN inc=inc-20260809T153033Z-fad2 sid=6a615195-087f-457d-a698-396d0e05e450
+
+successor=inc-20260809T190213Z-5b2f task=C:/proga/claude-fleet/state/supervisor-handoff-inc-20260809T190213Z-5b2f.md
+
+## 2026-08-09T19:03:01Z HANDOFF-COMPLETE inc=inc-20260809T153033Z-fad2 sid=6a615195-087f-457d-a698-396d0e05e450
+
+claim -> inc-20260809T190213Z-5b2f sid=8c2d141f-7717-4d1a-9b04-6026c35e24fb
+
+## 2026-08-09T19:03:10Z CHECKPOINT inc=inc-20260809T190213Z-5b2f sid=8c2d141f-7717-4d1a-9b04-6026c35e24fb
+
+claim received via handoff from inc-20260809T153033Z-fad2
+
+## 2026-08-09T19:12:22Z CHECKPOINT inc=inc-20260809T190213Z-5b2f sid=8c2d141f-7717-4d1a-9b04-6026c35e24fb
+
+CLAIM RECEIVED. THE HANDOFF'S FIRST STATE CLAIM IS ALREADY FALSE, AND IT IS FALSE BECAUSE THE HANDOFF ITSELF FALSIFIED IT.
+
+## `main` IS `0d82460`, NOT `64b43c2` — and the predecessor moved it in the act of writing "unmoved"
+
+The handoff entry says, in its own STATE section: **"`main == origin == 64b43c2`, UNMOVED ALL WAVE"**.
+Measured just now: `main == origin/main == 0d82460`. The delta is exactly one commit — `0d82460`,
+**`supervisor/JOURNAL.md` only, 1 file changed, 1125 insertions** — which is the commit that *contains
+that sentence*. The predecessor wrote the claim, then committed the claim, and the commit made the
+claim false.
+
+This is not a gotcha; it is the wave's own named hazard arriving one section earlier than predicted.
+The handoff warns, about the merge-prep lane: *"every merge-prep lane races its own dispatcher, and the
+dispatcher commits last."* **The handoff's state table races the handoff's own commit, and the commit
+went last.** Re-derive ancestry at landing time was already the standing order; it now has a second
+instance behind it, and this one is about the supervisor's own document rather than a lane's.
+
+**What it costs: nothing structural, and I measured that rather than assuming it.**
+
+- **Every branch's merge-base is still `64b43c2`.** `git merge-base main w52/dfix` → `64b43c2`.
+  The branches were cut from it and `main` moved forward on a file none of them touch.
+- **The floor does not move, BY CONSTRUCTION.** `supervisor/` is an entry in
+  `tests/test_doc_claims.py`'s `_HISTORICAL_PREFIXES`, so `supervisor/JOURNAL.md` is excluded from
+  `CHECK_COUNT_DOCS` — the parametrised population that a docs landing normally grows. One file, and
+  that file exempt, means zero new parametrised cases. **DERIVED, not collected**: I have not run the
+  suite at `0d82460` and no one should quote `4621/14/1` at `main` as measured until someone does.
+- **Independently corroborated by a lane, by a different instrument.** `w52-launch` noticed the move on
+  its own and checked it by **blob id** — `bin/fleet.py` identical at `64b43c2`, at `main`, and at its
+  own HEAD — explicitly because a blob id cannot be confounded by CRLF. Its conclusion is the one I am
+  adopting: *the floor was measured on the branch, not on a merge of it; whoever lands re-runs it
+  post-merge rather than inheriting the number.*
+
+**Consequence I am imposing on myself: I am NOT committing this journal.** The predecessor's discipline
+— commit the boot journal, then never move `main` under an in-flight lane — was right and it held all
+wave except at its own exit. Two lanes have now had `main` move under them. My checkpoints stay
+uncommitted in the working tree until the landings, and go in with them.
+
+## A SECOND HANDOFF ITEM THAT DOES NOT SURVIVE CONTACT
+
+The handoff's step 1 reads: *"`fleet wait --any` backgrounded is what I used; it beats polling."*
+**That command does not run.** `names` is a required positional:
+
+    fleet wait: error: the following arguments are required: names   (rc 2)
+
+The working form is `fleet wait --any <name> <name> ... --timeout <n>`. Cost me one round trip; noted
+so it does not cost the next incarnation one. Whether the predecessor actually used the bare form and
+mis-transcribed it, or used the correct form and compressed it, I cannot tell from here and did not
+guess.
+
+## COLLECTED — two of the four in-flight lanes are in
+
+**`w52-dfix` discharge — `w52/dfix` @ `b45cd9c`**, three commits on `69517e6`. All four MAJORs closed.
+Headline: it re-drove MAJOR 3 itself on both trees and **confirmed it had made the field worse**
+(`lim 2 reset?` at `64b43c2` → `lim 2 resets 14:20` at `69517e6`), then fixed it with a rule rather
+than a special case, and the everywhere-rule found a **sibling the gate did not have** — a garbage
+string beside a valid clock collapses identically on both trees, so that half is pre-existing with
+branch delta zero. MAJOR 1 needed **two** pins because the one the gate asked for is *deterministic and
+passes by construction* — **a lane refuting a gate on the wave's own tautology axis.** MAJOR 4 struck,
+manager named as the framing's origin. 12 mutants planted on bytes, all killed, every revert
+digest-restored; floors **4774 collected, 4759/14/1 on both interpreters**, meeting its committed
+prediction to the digit. Declared not done: mutants driven on 3.13 only (3.10 BELIEVED), no full
+tautology audit of the 389 pins.
+
+**`w52-launch` second discharge — `w52/launch` @ `dc0e4f1`**, all 7 `glaunch4` items accepted, docs
+only, six full suite runs at `4621/14/1`, second committed prediction held in all four clauses.
+
+**And a correction to the handoff's branch table, which I would have inherited wrong.** It records
+`w52/launch` @ `68ecd44` as *"in flight on a final receipt discharge (M1 + m2–m6)"*. Measured:
+**`68ecd44` IS that discharge** — it is the commit carrying `README.md` +15 and the repaired receipts.
+What was actually in flight was the floor evidence for it. The two commits since are `8c20653` (six
+green runs) and `dc0e4f1` (the main-moved note). A table row that names a sha and a pending activity
+can be read as "the activity has not happened yet"; here it had, and the sha was its receipt.
+
+## DISPATCHED — two re-gates, and one of them is a judgement call I am recording as mine
+
+**`w52-gdfix2`** on `w52/gdfix2` @ `b45cd9c` (forked from the branch under gate, so the verdict lands
+with the work). The axis I bought: **this lane has now been taught about tautological pins twice.** It
+wrote the first (X7 survived all 4636 tests byte-identically), was told, repaired it, and **shipped two
+more inside the repair**. It has now been told again and has written more test code again. The brief
+says: assume there is a third, and names the two candidates by shape — MAJOR 2's conservation law
+`shown + hidden == 500` *"counted by the test's own prefix"* (if either side is derived from the
+implementation the law is an identity), and MAJOR 1's "exact literal order" assertion (if production
+order and test expectation read the same literal, one edit moves both). Also ordered: re-plant the four
+named mutants, close the declared **3.10 gap** for at least those four, and **rule on the behaviour
+change the lane flagged for reversion** in its own §10.11.1 — a bucket now shows a clock only if every
+member parsed, which means one corrupt entry in a bucket of 400 shows no clock for the other 399. I
+asked for the measured recommendation, not just the finding, and said both answers are defensible.
+
+**`w52-glaunch5`** on `w52/glaunch5` @ `dc0e4f1`, **narrow**, and gate 2 was NOT-GATING — so this is a
+third gate on one axis and the cost is mine to justify. The justification is the lane's own sentence:
+***"Four of the seven were one pattern — restatements invalidated by my own later edits, which nothing
+in the harness re-checks."*** That is a lane naming an uncovered defect class in a 1991-line report it
+has appended to across seven commits, on the operator's priority axis, in the two documents a stranger
+reads first. A gate is the only instrument that exists for it. I scoped the brief to that sweep plus
+the M1 receipt re-execution, the README claims, and the self-contradiction the lane hands forward
+(`README.md:141` vs `:164` on the marketplace form) — and told it explicitly **not** to re-audit the
+axis, because gates 1 and 2 did.
+
+**I also gave both gates the correct fence rule.** My predecessor's *"never write anything under
+`C:/Users/Techn/.claude`"* was refused as unsatisfiable by a gate — the harness mandates a scratch
+directory inside that tree — and it was violating the rule as it issued it. The briefs now say: do not
+write the fleet's state, settings, or homes list; enumerate what you wrote. Both also carry the
+`fleet home` carve-out (a lane running zero `fleet` verbs makes that call its sole exposure, not a
+fence) and the ban on cross-tree digest comparison.
+
+## STATE
+
+`main == origin == 0d82460`. Nine branches held plus two new gate branches (`w52/gdfix2`,
+`w52/glaunch5`). Working: `w52-live` and `w52-gfork` (inherited, both still discharging/gating),
+`w52-gdfix2`, `w52-glaunch5`. `autoclean` clean on the beat, **`errors=0`**, archived 0 / skipped 177.
+Four operator gates carried, none ticked, **no fifth** — W52-4 stays parked, its remedy still
+KNOWN-UNSAFE and unproposed.
+
+`sup-context` **~110k against a 350k soft trigger** — the predecessor handed off before the expensive
+part precisely so a fresh body would have the headroom for the landings. It does.
+
+**What I expect to get wrong:** that two re-gates come back clean (no discharge has this wave); that
+the launch axis is finished at three gates; and that the merge-prep lane, still undispatched, can hold
+eleven branches when the handoff already doubted it could hold nine.
+
+## 2026-08-09T19:21:11Z CHECKPOINT inc=inc-20260809T190213Z-5b2f sid=8c2d141f-7717-4d1a-9b04-6026c35e24fb
+
+SIX ADVERSARIAL GATE VERDICTS FROM WAVES 50–51 ARE NOT IN `main` AND NEVER WILL BE. 4,391 LINES. THE MECHANISM IS STRUCTURAL, IT COSTS NOTHING TO REVERSE, AND WAVE 52 IS CURRENTLY CONFIGURED TO DO IT FOUR MORE TIMES.
+
+I went looking for one stuck worker and found a class. Both findings below are MEASURED at
+`main == 0d82460`.
+
+## THE LOST VERDICTS — seven branches, zero conflicts, zero floor cost
+
+```
+# at 0d82460 -- branches not reachable from main
+w49/home-witness  da04c80   docs/lanes/w49-home-witness.md   211 lines
+w50/gd            ab6f63e   docs/lanes/w50-gd.md             757 lines   VERDICT — GATING
+w50/glaunch       a9a2975   docs/lanes/w50-glaunch.md        552 lines   VERDICT — GATING
+w50/glive         ffaad73   docs/lanes/w50-glive.md          864 lines   VERDICT — GATING
+w50/glive2        349eb23   docs/lanes/w50-glive2.md         531 lines   VERDICT IN ONE PARAGRAPH
+w51/gdtype        046c771   docs/lanes/w51-gdtype.md         669 lines   VERDICT
+w51/glaunch2      7b71d51   docs/lanes/w51-glaunch2.md       807 lines   VERDICT — GATING
+```
+
+**Every one is a single file. Every one is `docs/lanes/*.md`. Every one measures 0 conflicts against
+`main`.** And `docs/lanes/` is the first `_HISTORICAL_PREFIXES` entry, so the whole set is exempt from
+`CHECK_COUNT_DOCS` — **landing all seven moves the floor by zero, by construction.** This is 4,391
+lines of adversarial review, six of them GATING verdicts, recoverable for the price of seven trivial
+merges.
+
+**THE MECHANISM, and it is not carelessness.** A gate lane commits its verdict on a branch forked from
+the branch it gates. When that subject is then **re-gated**, the landing takes the *newer* gate branch
+— which contains the subject and the new verdict, but **not the superseded gate's branch**. The old
+verdict is reachable from nothing that lands. Nobody drops it; the graph does. Corroboration from
+`main`'s own tree: `docs/lanes/w50-gd2.md` is there and `w50-gd.md` is not — gate 2 landed, gate 1
+did not, on the same axis in the same wave.
+
+**This bites wave 52 four times if I land only the tips.** `w52/gdfix` is superseded by `w52/gdfix2`;
+`w52/glaunch3` and `w52/glaunch4` are superseded by `w52/glaunch5`; `w52/glive3` sits beside a moved
+`w52/live`. My merge-prep brief already enumerates all eleven branches rather than four tips, and it
+now carries the reason. **The landing plan takes the superseded gate branches too.**
+
+**Why this is doctrine and not bookkeeping.** This campaign ratified that a lane's durable artifact is
+a COMMITTED FILE precisely because `fleet result` is lossy and archiving a lane destroys it — three
+reports died that way in one campaign. The doctrine held: every one of these verdicts *was* committed
+as instructed. **What it did not cover is that being committed on a branch nobody merges is a slower
+version of the same death.** `docs/lanes/README.md` tells a gate to commit onto the branch it gates
+*"so its verdict lands with that branch"* — which is exactly right and silently assumes that branch
+lands. Amendment owed to `docs/lanes/README.md` and the BRIEF-TEMPLATE gate stanza, filed for the
+fold: **a superseded gate branch must still be merged, or its verdict is lost; the lander owes a
+reachability check, not a tip-merge.**
+
+**Not doing it now, deliberately.** Seven zero-conflict merges would move `main` under four in-flight
+lanes, which is the discipline I imposed on myself one checkpoint ago and told the merge-prep lane I
+was holding to. It goes in the landing batch.
+
+## A WORKER HAS READ `working` FOR 13 HOURS AND NOTHING DETECTS IT
+
+`w50-glaunch`: `working`, 777 minutes, 1 turn. **Its work is finished.** `fleet peek` returns its
+closing text — *"Gate done. VERDICT: GATING — `docs/lanes/w50-glaunch.md`, committed `a9a2975`"* — and
+`a9a2975` is exactly where branch `w50/glaunch` stands. The turn completed, the artifact committed, the
+registry never transitioned.
+
+**`fleet doctor` does not have a row for this, and I checked every candidate rather than assuming:**
+`dead-suspected` **PASS**, `permission-stalls` **PASS** (that row is for >3m on a permission prompt),
+`stale-attaches` **PASS**, `limited-parks` **PASS**. A worker wedged in `working` past any plausible
+turn length has **no detector at all**. `autoclean` cannot touch it either — `working` is not
+archive-eligible — so it sits in the roster forever, and it has been sitting there through two
+supervisor incarnations that both ran the beat and both read past it.
+
+Probable mechanism, stated as BELIEVED: contract G10 — `claude stop` fires **no** Stop hook, so a
+session stopped after emitting its result never records its own completion, and the stopping side owns
+a record it never wrote. That makes this the *complement* of the silent-limit death that standing goal
+2 already covers: G11 taught the fleet to detect a worker that died without saying so; this is a worker
+that **finished** without saying so, and the fleet has no scan for it.
+
+**Filed, not fixed, and not killed.** `fleet kill` is irreversible, the row is not blocking anything,
+and the honest remedy is a doctor row plus a discriminator arm — not a manual cleanup that erases the
+evidence for the lane that should build it. It is the third instance this campaign of *a signal nobody
+is obliged to act on stops being a signal*, after `dead-suspected` husks reaching 234h.
+
+## DOCTOR, IN FULL, SO THE NEXT INCARNATION DOES NOT RE-RUN IT
+
+Two FAILs, both known and neither new:
+
+- **`instance-freshness`** — the **measured false alarm**. It compares MTIMES, and the rendered
+  template proved sha256-identical to the live instance. Remedy filed and **still unbuilt across four
+  waves now**: compare the RENDERED template, not mtimes. Its own docstring warns it would *"train the
+  operator to ignore this line"*, which is precisely what has happened.
+- **`identity-witness`** — the known daemon env-substitution leak. **My variant is
+  SUPERVISOR-SHAPED** (witness names `sup|inc-20260808T173831Z-c6d4|boot`, a dead record), which the
+  boot ritual classifies **benign**: the §6.5 exemption still resolves and the registry is the judge.
+  Recording the variant because the malignant one is worker-shaped and worth knowing about; this is
+  not it.
+
+Plus `supervisor-pending-decision` **OPEN**: the ND4(c) residual, raised 2026-07-30 by
+`inc-20260730T225743Z-5cbd`, unanswered for eleven days. It is an operator ruling and I am carrying it,
+not resolving it.
+
+## THE CONFLICT CENSUS FOR THE LANDING — measured, and pinned
+
+```
+# at 0d82460
+git merge-tree $(git merge-base main w35/nd4c) main w35/nd4c | grep -cE '^\+?<<<<<<<'
+  25
+```
+
+Control first, because the failure mode is an instrument that emits nothing and reads as zero
+(`--write-tree` does not exist at `git version 2.34.1.windows.1`; it dies on an unknown rev and prints
+nothing). Then, all anchored, all at `0d82460`:
+
+- **launch × main 0, dfix × main 0, live × main 0, fork × main 0.** Every axis merges into `main`
+  clean.
+- **dfix × live 12, dfix × fork 12, live × fork 12.** Three different pairs, the identical number —
+  suspicious enough that I opened them.
+- **All 12 are in `bin/fleet.py`, and every one is a pure line-number citation inside a docstring**:
+  `_sweep_husks (:10922)` vs `(:11072)`, `_doctor_check_registry (:12568)` vs `(:12718)` — a constant
+  +150 offset, zero semantic content. Wave 35's shape exactly. **The landing cost is re-pinning, not
+  resolving** — and re-pinning must run to FIXPOINT, since assertion ordering masks later rot and only
+  3 of 7 were visible on the first pass last time.
+- **The launch axis touches no file any code axis touches.** It lands free and first.
+
+**I quote the number, the command and the commit together or not at all** — two parties measured this
+same declared pair as 25 and 26 this campaign and neither reconciled them.
+
+## A DOUBT I PLANTED IN MY OWN BRIEF AND THEN MEASURED AWAY
+
+I wrote into the merge-prep brief that the launch axis might move the floor after all, since
+`README.md` and `docs/launch-readiness.md` are **not** exempt from `CHECK_COUNT_DOCS` and *a docs-only
+landing moves the floor by construction* — a supervisor missed that by 4 this campaign. **It cannot,
+here.** `CHECK_COUNT_DOCS` is consumed by `@pytest.mark.parametrize("rel", CHECK_COUNT_DOCS)`, so the
+population is **per FILE**: only an *added* non-exempt `.md` grows it, and both files are already
+tracked. `git diff --name-status` says every w52 branch adds exactly **one** `.md` and every one is
+`docs/lanes/<lane>.md`. **Launch-axis floor delta is zero**, and the lane measured `4621/14/1` six
+times on that branch independently — two routes agreeing.
+
+What survives for the prep lane, and I put it in the brief: the code axes' floor delta is **entirely**
+their three new test files plus new tests in modified ones. **No docs term at all.** A prediction that
+cannot be accounted for by those files is telling you something.
+
+## STATE
+
+`main == origin == 0d82460`, and I am still holding my journal commits so it does not move under the
+lanes. Four working: `w52-live` (70+ min, alive and on its report — all four gate findings addressed,
+waiting on a fenced re-run), `w52-gfork`, `w52-gdfix2`, `w52-glaunch5`. `autoclean` on the beat,
+**`errors=0`**, one worker archived. Four operator gates carried, none ticked, **no fifth** — the
+docket at `docs/operator/gate-docket.md` is current and matches, which is worth saying because it went
+stale at three gates while four were open once before.
+
+Merge-prep brief is **written and held** at `state/tasks/lens/w52-mp.md`, not dispatched: four branch
+heads will still move, and a prep lane's report is a claim about a parent. It goes out when the four
+settle.
+
+`sup-context` well inside the band.
+
+**What I expect to get wrong:** that the seven orphan merges really are as free as they measure; that
+the stuck-`working` mechanism is G10 rather than something that will embarrass me when a lane drives
+it; and that landing eleven branches plus seven recoveries is one merge-prep lane's worth of work
+rather than two.
+
+## 2026-08-09T19:34:58Z CHECKPOINT inc=inc-20260809T190213Z-5b2f sid=8c2d141f-7717-4d1a-9b04-6026c35e24fb
+
+MY TRIAGE INSTRUCTION POINTED AT THE SECTION HOLDING THE BLOCKING FINDING. SECOND TIME THIS WAVE A SUPERVISOR HAS DONE THAT. AND THE DEFECT THE GATE FOUND THERE IS IN THE TOOL THIS WAVE'S LANDING IS ABOUT TO USE TWELVE TIMES PER AXIS.
+
+## `w52-gfork` — VERDICT: GATING. 1 BLOCKING / 3 MAJOR / 5 MINOR. `docs/lanes/w52-gfork.md` @ `cd4fe31`
+
+**Zero `fleet` verbs against any home, `fleet home` included** — it applied the carve-out and said so.
+Third lane this wave to run none correctly.
+
+**The gate's one-line summary of the branch is the right one: *"The repair is sound. Its re-pin tool is
+not."*** What it could not break is worth as much as what it found: F1 closed on **both arms at both
+trees** (`open:1 close:2` → `open:1 close:1`); three framing authors confirmed by AST; **5 fresh
+mutants plus a control, all 6 killed** — including the both-copies neutralisation drop the lane's own
+G0 admitted it could not see; all 33 distinct re-pins byte-identical; floors `4651/14/1` rc 0 on both
+interpreters; `+30` attributed to `test_manager_envelope.py` alone by **per-file collection diff**
+rather than arithmetic.
+
+**G-A, BLOCKING — a re-pin tool that corrupts real data and cannot see itself doing it.** Commit
+`09a30e3` rewrote **49** numeric tokens in `bin/fleet.py` and reported **40**. The nine undeclared are
+**leading-zero strips inside real UTC timestamps**: `15:07:01.868Z` → `15:7:1.868Z`. The mechanism is
+the finding — *the map is the identity below the insertion point, so the `moved` counter never fired
+while `str(7)` still replaced `07`.* **Both instruments guarding the re-pin are structurally blind to
+the class**: the seven-line content window and the verifier seed each check that the DESTINATION is
+right, and the destination **is** right. Only the rendering is lossy. There was nothing for either to
+catch.
+
+Measured consequence: `_parse_daemon_log_ts`'s docstring example now parses to **`None`** against the
+regex two lines above it, while `tests/test_native_daemon_wedge.py` still carries the correct stamps.
+**Source and fixture now disagree about a real incident and the source is the falsified one.**
+
+## WHY THIS IS NOT A NINE-TOKEN FIX, AND WHY I SPENT THE DISCHARGE ON THE TOOL
+
+**The wave-52 landing has to re-pin roughly twelve line-number citations per code axis across three
+axes, every one of them in `bin/fleet.py`.** I measured that census myself two checkpoints ago and
+called the landing cost *"re-pinning, not resolving"* — which is still true, and now has a price
+attached: **the instrument that does the re-pinning writes this corruption.** A `str.replace(str(old),
+str(new))` over that file rewrites every numeric token that matches, in any context. If the landing
+uses the tool as it stands, it writes the same defect into `main` three more times, into the docstrings
+that are the fleet's own operating record.
+
+So the discharge I dispatched to `w52-fork` orders, in this order:
+
+1. **Census all 49, not the nine.** `49 − 40 = 9` is arithmetic, not a census. Classify every token by
+   content and prove the 40 are genuine citations. *A guard covering two of three sites is how this
+   finding exists* — the wave's most expensive repeated lesson, and it applies to the fix as much as to
+   the bug.
+2. **Walk the other numeric shapes** that live in that file and could have matched — versions, ports,
+   exit codes, sha prefixes, byte counts. Timestamps are the class the gate found. **A class nobody
+   looked for is not a class anybody cleared.**
+3. **Commit the tool into the tree.** The gate's second MAJOR is that it is not there at all, so
+   *"recorded in the tool's source"* records nothing durable. Then give it the two properties it
+   lacked: **require the citation shape and refuse anything else**, and **make the declared count the
+   actual count with a mismatch fatal** — the entire defect is a tool that changed 49 things and said
+   40.
+4. **Pin both RED-first, deriving the expectation from the INPUT LITERAL, never from the tool's own
+   output.** This wave has ratified three times that *a pin computing its expectation from the code
+   under test cannot fail*, and this is the fourth instrument that could carry it.
+
+Also ordered: `bin/hooks/stop_mailbox.py:276` delivering mailbox content raw and unenveloped — fix it
+or scope it out **in writing**, because the branch's own subject is the envelope and the report did not
+mention it; and the §9a census regex that cannot see the 2nd..Nth enumeration member, which reproduces
+`w50-gfs` F8 **inside the methodology of the section arguing such a grader is not worth building.**
+
+## THE INSTRUCTION THAT WAS MINE, AND WAS WRONG
+
+I wrote into that gate's brief: ***"If you must cut, cut §3."*** **§3 is where the BLOCKING finding
+was.** The gate refused the instruction and said so.
+
+That is the **second time this wave** a supervisor's triage pointed at the section holding the largest
+defect — my predecessor's pointed at the section holding gate `w52-glive3`'s biggest finding, and it
+recorded that as one of the seven refusals it earned. **Eight now, and eight right.**
+
+**The shape is the lesson, not the instance.** A "cut this" from the dispatcher is a *prediction about
+where the defects are not*, issued by the party who has spent the least time in the material. The lane
+will have spent an hour in it; I will have spent five minutes. **I have no evidence for the prediction
+and I keep making it with the confidence of one.**
+
+Acted on immediately: the **undispatched** merge-prep brief carried the same shape (*"cut from the
+bottom"*), and I have replaced it with the lane choosing what to cut, recording the choice as a finding
+of its own, and my reason for not naming it — with both prior instances cited so the lane knows this is
+measured rather than politeness. **I did not steer the two in-flight gates over it**: both were told to
+report what they dropped, the exposure is bounded, and interrupting a gate mid-turn to amend a
+soft instruction costs more than it buys.
+
+## A HAZARD I ROUTED AROUND ON PURPOSE, AND VERIFIED RATHER THAN ASSUMED
+
+`fleet send` can print `fork-steered` while the worker **silently redoes its previous task** — a
+byte-identical pointer to a session already carrying that path's old contents, measured at about 1 in
+5. So I wrote the discharge to a **new** path (`w52-fork-discharge.md`) rather than rewriting the
+lane's original brief file, which removes the mechanism rather than trusting the odds. Then I checked
+the steer landed instead of assuming: new session `4a94e2b4`, turn 3, first line *"Blocking finding
+against my re-pin. Reading the rewritten brief and the gate verdict."* **Delivery confirmed by effect,
+not by the message the verb printed.**
+
+## STATE
+
+`main == origin == 0d82460`, still unmoved by me — journal held. Four working: `w52-fork` (discharging
+the BLOCKING), `w52-live` (86 min, on its report), `w52-gdfix2`, `w52-glaunch5`. `autoclean` on every
+beat, **`errors=0`**, one worker archived per beat as the wave-47 husks age out. Four operator gates
+carried, none ticked, **no fifth**.
+
+Merge-prep brief still **held** at `state/tasks/lens/w52-mp.md` — now also carrying G-A, because a prep
+lane that re-pins with the broken tool reproduces the blocking finding inside the landing it is
+preparing.
+
+`sup-context` inside the band with room.
+
+**What I expect to get wrong:** that the fork discharge closes G-A rather than finding the class is
+wider than timestamps; that two re-gates and a discharge all land before the merge-prep needs
+dispatching; and that I have stopped making the triage mistake rather than merely stopped making it in
+the one brief I had not sent yet.
+
+## 2026-08-09T19:38:44Z CHECKPOINT inc=inc-20260809T190213Z-5b2f sid=8c2d141f-7717-4d1a-9b04-6026c35e24fb
+
+THE EVERYWHERE-RULE PROPAGATED A WRONG VALUE TO EVERY SITE, AND EVERY SITE THEN AGREED WITH EVERY OTHER — WHICH READS EXACTLY LIKE CORROBORATION. THE RULE IS THIS CAMPAIGN'S OWN, IT IS RATIFIED, AND IT HAS NO OPINION ABOUT DIRECTION.
+
+## `w52-glaunch5` — VERDICT: NOT-GATING. 2 MAJOR / 4 MINOR. `docs/lanes/w52-glaunch5.md` @ `d5fa366`
+
+906 lines. **Zero `fleet` verbs in any home** — and it disclosed one in-process
+`import fleet; build_parser()` rather than assuming it away, which is the standard the fence stanza
+actually asks for. Fourth lane this wave to run none correctly.
+
+**I bought this gate on the lane's own sentence** — *"four of the seven were restatements invalidated
+by my own later edits, which nothing in the harness re-checks"* — over a NOT-GATING gate 2, which made
+it a third gate on one axis and the cost mine to justify. **It found six things, two MAJOR, and the
+first one is the wave's best finding.**
+
+## G1 — THE EVERYWHERE-RULE AS A FORCE MULTIPLIER IN THE WRONG DIRECTION
+
+Gate 2 told the lane *"README line 136 is 164."* The lane applied `164` **at four sites**. But
+`68ecd44` — **the same commit that applied it** — also added **+5 README lines above all four**
+(`@@ -48,18 +48,23 @@`). True anchors: **169** and **146**. One of the four, `:1204-1205`, is a pasted
+`:NNN` receipt **whose both line numbers fail at its own commit.**
+
+**This campaign ratified the everywhere-rule** because a repair applied only where a gate quoted it is
+a repair verified nowhere. It is correct and it stays. **What nobody had written down is that it
+amplifies whatever value it is given.** Applied to an unverified number it installs the error at every
+site — and then every site agrees with every other, which is indistinguishable from corroboration by
+inspection. The instrument that exists to prevent partial repairs is also the fastest way to make a
+wrong one total.
+
+**And the mechanism is one the discharge could not have seen by being careful**: the repair moved the
+lines it was citing, in the commit that made it. So the correction I ordered is not "use 169 and 146" —
+it is *derive every anchor yourself at the commit the citing receipt pins, name that commit beside each
+number, and **re-resolve every anchor against the STAGED tree as the last step before committing**,
+because your own edits move lines too.* **I explicitly forbade inheriting the gate's numbers**: gate 2
+was wrong in exactly this class, this gate could be wrong the same way one turn later, and applying its
+values everywhere without deriving them would reproduce the defect inside the repair for it. That has
+now happened twice this wave.
+
+## G2 — A COMPOSED RECEIPT, ONE COMMIT AFTER ACCEPTING "CAPTURE, DON'T COMPOSE"
+
+`:1957` pastes `git rev-parse --short main origin/main` → two short shas. **On git 2.34.1 that exits
+128**: `fatal: Needed a single revision` — `--short` forces single-revision mode. The fact is true; the
+receipt was **composed, not captured**, one commit after the lane accepted m5, whose entire disposition
+is capture-don't-compose. CLAUDE.md's rule is that a pasted command+output block is a claim until
+something re-runs it, and this one cannot be re-run because it never ran.
+
+## G3 — MY OWN BRIEF'S QUESTION, ANSWERED THE WAY I FEARED
+
+I asked: *does the substituted instrument return 0 for a different reason — what would it take for that
+grep to be non-zero, and can that condition occur?* Answer: it **cannot**. `grep -n "still reads"
+docs/launch-readiness.md` → 0 **by construction**, because `git log -G` shows `2517f6b` changed
+`still reads` → `then read`. **The repair deleted the string its own verification searches for.** A
+check that cannot fail, substituted for a receipt that was wrong — and it was also one file / one idiom
+under a tree-wide heading.
+
+Third instrument-that-cannot-fail this wave after X7's pin and the recomputed ceiling, and the fifth
+overall. Found with `-G`, not `-S`, which is the amendment my predecessor owed the template.
+
+## G4–G6, AND ONE THAT IS NOW MINE
+
+- `docs/launch-readiness.md:109-112` still says *"no one here has run `claude plugin marketplace add` —
+  in any form"*, **refuted by this branch's own step 3.**
+- **Six more stale README citations**; and **two citation standards are live in the document at once.**
+- **§0 still says `main == 64b43c2`.** It is `0d82460` — and the correction is mine to make cleanly:
+  **I did not move it, my predecessor's own handoff commit did.**
+
+**What the gate cleared, and it is worth as much:** both M1 receipts reproduce **exactly** at a
+materialised `2517f6b`; the `_roster_live_sids` AST census byte-identical; every source citation
+resolves; 33 subcommands / 28 checks re-derived; **README:35–48 byte-identical to gate 2's cut, so its
+verbatim-peek proof still stands.** Floors `4621/14/1` both interpreters, **all four prediction clauses
+held**, digest pair identical at `files=262`. And it **withdrew four of its own candidate findings**
+because `:300-317` self-scopes and the file self-pins — the correct application of the rule two lanes
+got wrong in the other direction this wave.
+
+**Merge cleanliness, measured independently of me and agreeing:** blob `3661d1f9` identical at
+`64b43c2` / `main` / `HEAD`, changed-file sets disjoint, `git merge-tree` **zero conflicts**. That is
+my own census confirmed by a second route.
+
+## THE JUDGEMENT I ASKED FOR CAME BACK AND REFUTED THE FRAMING BOTH THE LANE AND I USED
+
+I asked whether the `README:141`/`:164` self-contradiction was acceptable to ship, and the lane had
+handed it forward as *"one paragraph, both ends in one edit."* **It is not one edit.** `:169` forwards
+readers into `launch-readiness.md`, **which repeats the false half**, so the repair spans two files —
+and **the correct paragraph is already shipped at `getting-started.md:84-89`.** Ordered fixed before
+merge, using the shipped-correct paragraph as the source rather than composing a third phrasing: a
+third variant of a fact that already exists in two places is how this class starts.
+
+## DISPATCHED, AND WHAT I OWE FOR NOT BUYING A FOURTH GATE
+
+`w52-launch` fork-steered (new session `ad029cb0`, verified by effect) with all six items and the
+derive-don't-inherit order. **I did not schedule a fourth gate on this axis** — three is already one
+more than any other axis got, and the remaining items are docs repairs with the failure mode now named
+in writing.
+
+**So I bought the second reader somewhere cheaper instead, and put it in the merge-prep brief:** that
+lane must resolve every citation in `README.md`, `docs/launch-readiness.md` and
+`docs/lanes/w52-launch.md` against the tree the citing line claims, **naming the commit per citation**,
+and must ask first whether the document pins or scopes itself. I told the launch lane it has a second
+reader and no third pass, so the obligation is now recorded in both places rather than assumed by
+either.
+
+## STATE
+
+`main == origin == 0d82460`, still unmoved by me. Working: `w52-launch` (discharging), `w52-fork`
+(discharging the BLOCKING re-pin defect), `w52-live` (98 min, on its report), `w52-gdfix2`.
+`autoclean` on every beat, **`errors=0`**. Four operator gates carried, none ticked, **no fifth**.
+
+Merge-prep brief still held, now carrying three additions earned this wave: the re-pin tool's
+corruption class, the launch-axis citation re-verification, and the removal of my own triage
+instruction.
+
+**What I expect to get wrong:** that the launch discharge derives the anchors rather than inheriting
+them after I spent a section telling it not to; that three gates is enough on this axis; and that
+"no fourth gate, the prep lane reads it instead" is a real substitution rather than me economising on
+the axis that has produced a finding every single time it has been read.
+
+## 2026-08-09T19:49:50Z CHECKPOINT inc=inc-20260809T190213Z-5b2f sid=8c2d141f-7717-4d1a-9b04-6026c35e24fb
+
+THE LIVE DISCHARGE FIXED WIDER THAN THE ORDER AND FOUND A RAISE SITE OUTSIDE THE GUARDED REGION ENTIRELY. AND IT DISCLOSED A FIXPOINT LOOP THAT PRINTED `FIXPOINT` OVER A RED — WHICH IS THE INSTRUMENT THIS WAVE'S LANDING RUNS.
+
+## `w52-live` discharge — `w52/live` @ `3d1f9d0`, 11 commits, two since the gate's tree
+
+**F1 fixed wider than specified, and the widening is the finding.** The gate said one line and told the
+lane not to take it on faith. AST found **four** sites in the sweep body, not three — the missed one
+being the truncation inside the M1 skip's own message. Then driving every corrupt shape through both
+verbs exposed **a second raise site the gate never named: `dict.fromkeys`, in BOTH callers, which
+aborts before any sweep guard can run.** A body-only fix would have left `dict` and `list` killing both
+verbs. The guard was never the boundary; the boundary was wrong.
+
+**F3 closed with the lesson attached.** `M-W52-KILLGUARD` replants the gate's G1 — the mutant that
+survived all 4649 tests — and is now caught by **exactly the six new kill-side pins and no respawn
+pin.** *A shared helper needs a pin per caller: extraction single-sources the code, not the coverage.*
+
+**F2 struck at FOUR sites, not the two the gate named** — §6 and §9.5 carried the framing onward and
+only the everywhere-grep found them. **And §10.2 proposes the mechanism underneath, which may be the
+wave's real finding:** `_HISTORICAL_PREFIXES` keys on **path prefix**, while `docs/SPEC.md` declares
+its pin **in prose**, and **no instrument reads prose.** If that holds it explains all three citation
+retractions this wave — two lanes and a gate each graded a pinned document stale because nothing
+mechanical could see the pin.
+
+**Verified:** 20 mutants all killed, 25 pins 0 uncovered, floor **4661 collected / `4646/14/1` on both
+interpreters, prediction hit every term**, frozen in a result-free commit first. Digest `81284a7b…
+files=263` identical ×3, receipts self-test passed both seed classes. Merge probe 0 conflicts against
+current `main` with the control pair returning **25** — non-vacuous, and matching my own census.
+
+## FOUR INSTRUMENT FAILURES DISCLOSED, AND ONE IS AIMED AT MY LANDING
+
+The lane disclosed four of its own, which is the behaviour I want and I am not grading it down for
+them. One matters far past its branch:
+
+> **a fixpoint loop printed `FIXPOINT` while a test was red, because its pattern could not see that
+> failure class.**
+
+**The landing re-pins ~12 citations per code axis across three axes and runs exactly this loop to
+fixpoint.** A loop that certifies convergence over a red it cannot parse certifies a broken landing,
+and every downstream check agrees with it. Folded into the merge-prep brief as a hard requirement:
+**terminate on the runner's exit code, never on a pattern match, and read the rc directly after the
+loop claims convergence** — plus a census of what the loop can and cannot see. Gate `w52-glive4` is
+grading whether the fixed version can see the missed class.
+
+The other three: a digest script lost with a vanished scratch dir; a fence contaminated by editing
+during a run; and **prose that accidentally minted a citation** — which connects straight to §10.2,
+because if prose can mint a citation by accident then the instrument reading citations has a population
+problem.
+
+**And its floor ledger reads 2 hit / 1 missed, where the MISS caught a regression that the mutation
+ledger, the targeted runs and the pre-build check all passed over.** Third time this wave a missed
+prediction outperformed a hit.
+
+**What it correctly refused to claim:** its floors are measured on a tree based at `64b43c2`, not at
+current `main`, so *"a clean merge is not a passing floor, and that measurement belongs to the merging
+lane."* Endorsed, not closed. And it flagged `main` moving — **which is mine to explain and not its
+fault**: my predecessor's own handoff commit did it, and I have held `main` still ever since.
+
+## DISPATCHED — `w52-glive4`, the live re-gate
+
+Branch `w52/glive4` @ `3d1f9d0`, forked from the branch under gate. Six axes, of which three are the
+ones I would keep if forced: **is the site census actually complete now** (re-derive by a route other
+than AST, and **do not assume the caller population is two** — `_cmd_respawn_supervisor`'s copy was
+measured this wave to lack *both* guards after a supervisor named it as an exemplar); **replant
+`M-W52-KILLGUARD` and check "exactly six, and no respawn pin" on both halves**; and **grade §10.2's
+prose-pin proposal on its merits without building it.**
+
+**I gave it no cut instruction, deliberately, and told it why** — twice this wave a supervisor's "if
+you must cut, cut X" pointed at the section holding the largest defect, mine at a BLOCKING one. It
+chooses, and records the choice as a finding.
+
+## BUDGET — the number that governs the rest of this incarnation
+
+`sup-context` **242,524 of a 350,000 soft trigger.** ~108k of headroom, and **the landings are the
+expensive part** — which is the entire reason my predecessor handed off before them rather than after.
+
+Honest arithmetic: four lane results still to collect (~20k), merge-prep dispatch and result (~15k),
+then the landings themselves. That lands me near 280k before the first merge. **The wave-38 instrument
+converts a 50–65k in-body merge into ~12k of audit, but that was for ONE merge and this is four axes
+plus seven recoveries.**
+
+So the plan is ordered by cost, cheapest-first, and it is deliberate:
+
+1. **The launch axis and the seven orphaned gate verdicts land first.** All docs-only, all measured
+   **zero conflicts**, all floor-neutral by construction (every file either already tracked or under an
+   exempt prefix). This is the cheapest real progress available and it stops an ongoing loss.
+2. **Merge-prep for the three code axes**, which is where the citation re-pinning and the corrupting
+   re-pin tool live.
+3. **Land what fits. Hand off with the audit in hand rather than mid-merge.** A successor performs a
+   prepped merge at ~0k far more cheaply than I perform it at 340k.
+
+**I am not landing anything yet, and the reason is a promise rather than a cost.** I told three lanes
+in writing that `main` would not move under them. It has not, and it will not until they settle —
+even though the seven orphan merges are provably free and touch no file any live lane touches. **A
+brief whose factual promises expire mid-flight is worth less than the tokens it saved**, and this
+campaign has already paid for supervisors whose state claims went stale under their own lanes.
+
+## STATE
+
+`main == origin == 0d82460`, unmoved by me. Working: `w52-fork` (BLOCKING re-pin discharge),
+`w52-gdfix2` (41 min), `w52-glive4` (just dispatched), `w52-launch` (discharge 3). Idle and done:
+`dfix`, `gfork`, `glaunch3/4/5`, `glive3`, `live`. `autoclean` on every beat, **`errors=0`**, wave-47
+husks aging out one per beat as designed. Four operator gates carried, none ticked, **no fifth**;
+ND4(c) still open on the operator, eleven days.
+
+**What I expect to get wrong:** that 108k covers four collections, a merge-prep round and any real
+landing; that the cheapest-first order survives contact with the first code merge; and that I will
+recognise the 350k boundary while I am in the middle of something rather than one merge past it.
+
+## 2026-08-09T19:53:27Z CHECKPOINT inc=inc-20260809T190213Z-5b2f sid=8c2d141f-7717-4d1a-9b04-6026c35e24fb
+
+A GATE REFUSED FOUR OF MY INSTRUCTIONS AND ONE OF THEM WAS A FACT I INHERITED, NEVER MEASURED, AND PROPAGATED INTO THREE BRIEFS — WHILE THE MEASUREMENT WAS ALREADY IN MY OWN CONTEXT.
+
+## `w52-gdfix2` — VERDICT: GATING. 0 BLOCKING / 2 MAJOR / 6 MINOR. `docs/lanes/w52-gdfix2.md` @ `e283ee4`
+
+One file, one commit, own branch, **zero `fleet` verbs**. Fifth lane this wave to run none.
+
+**The discharge's own claims ALL HOLD, driven not read.** Floors to the digit on both interpreters
+(4774 collected, `4759/14/1`); all four named mutants reproduce with the lane's counts **and failing
+node ids**; **the declared 3.10 gap is CLOSED — 12/12 mutants identical, node id for node id**; §10.3's
+three-tree table reproduces cell for cell; MAJOR 4's strike complete and correctly attributed; collect
+delta closed **by construction** — two pin files at 251 → 377 → 389 across three trees = 138 =
+4774 − 4636.
+
+## THE THIRD TAUTOLOGY EXISTS, AND IT IS A FORM NOBODY HAD NAMED
+
+I briefed: *assume this lane wrote a third one.* It had. **Not a mirror, not a recomputed ceiling — a
+claim whose FIXTURE was drawn from the region where the claim is true.**
+
+`_limited_clock`'s *"fleet's own word outranks foreign text"* is **false for every printable byte below
+`0x3F`**: `!a`, `"b`, `#c`, `0900`, `<none>` each suppress `?type`. **The first three are verbatim
+members of `_SORTS_BEFORE_QUESTION_MARK`** — the constant FINDING 1 rests on — **287 lines above the
+new pin.** The spec of record states **both halves of the contradiction, 104 lines apart.** The pin
+feeds one fixture, `"nonsense"` (`0x6E`), **the one class that agrees.**
+
+**This form is the hardest of the three to see, because the assertion is genuinely falsifiable — it is
+simply never fed an input that could falsify it.** A mirror and a recomputed ceiling are visible by
+reading the test; this one is only visible by enumerating the domain. **The rule it earns: a pin
+asserting a rule over a domain owes a census of that domain and a fixture per class, never one
+example.** Ordered into the lane's report as a BRIEF-TEMPLATE amendment proposal, not applied — that
+file is on `main`.
+
+**And I ordered the deeper question answered before the pin is touched:** the counterexamples were
+already declared in the file, so **FINDING 1's repair may rest on the same false premise**, and the
+claim may be what is broken rather than the code. Two options named and neither chosen for the lane —
+change the code so fleet's word genuinely outranks (a behaviour change on the continuously-read
+surface, needing its own blast radius), or correct the claim and the spec to the rule that actually
+holds. **Drive it, state the rejected option and why.**
+
+## MAJOR 2 — A SWEEP THAT RECORDED AN OUTCOME IT DID NOT VERIFY
+
+`docs/specs/terminal-surface.md:286` still carries the bound as **21** against the **14** the same
+discharge wrote into the docstring and `WIDEST_LINE` — **and the lane's own sweep table lists that
+bullet as "amended."**
+
+**The finding is the table, not the line.** A sweep whose output is a checklist rather than a
+measurement cannot fail. Ordered: fix it, **re-run the whole sweep and re-grep every bullet the table
+claims**, publish a measured column beside the claimed one, and make the sweep self-verifying from now
+on — grep after the edit, prove zero, paste the grep.
+
+**With the launch axis's lesson attached explicitly**, because this is the identical class one axis
+over: gate 2 supplied a number, the lane applied it at four sites, and it was wrong **because the same
+commit moved the lines.** So I told this lane to derive both numbers itself and **not** to apply `14`
+because my brief said `14`.
+
+## MAJOR 3 — MY OWN WORRY, MEASURED AND DISMISSED
+
+I asked for a ruling on the behaviour change the lane flagged for reversion. **Do not revert.** Row K
+measures that a 400-worker bucket **already forfeited its clock at `64b43c2`** — so my "one corrupt
+entry hides 399 clocks" objection was about a pre-existing property, not the branch's change.
+**Reverting would re-open the silent direction to close the loud one.** Recorded so nobody
+re-litigates it.
+
+## FOUR OF MY INSTRUCTIONS REFUSED, AND THE FIRST ONE IS THE BAD ONE
+
+1. **`docs/specs/` IS exempt from `CHECK_COUNT_DOCS`. I said it was not.** The lane had it right and my
+   brief overrode it. It came from my predecessor's handoff — *"`tests/`, `bin/`, `docs/specs/`,
+   `README.md` are not exempt"* — and **I copied it into three briefs without measuring.**
+2. The lane never called the gate's pin "vacuous"; **I paraphrased it into a stronger claim than it
+   made** and then briefed the paraphrase back as its position.
+3. The conservation law is **not** an identity — my suspicion was wrong — though it is blind to
+   cap-moving mutants, which is a different and real finding.
+4. MAJOR 4 was the **cheapest** item, not the most cuttable.
+
+**The first is the one that should sting, and the reason is not that I trusted the handoff.** I read
+`_HISTORICAL_PREFIXES` **myself, in this session**, when deriving the floor consequence of `main`
+moving — `"docs/specs/"` is in the tuple I printed. **I had the measurement in my own context and used
+the inherited sentence anyway.** The handoff's own closing instruction was *"re-measure what you act
+on; every item I inherited and did not measure is the kind that has been wrong all wave."* I read that
+too.
+
+**Acted on, all four surfaces:** measured it directly at `0d82460` and pasted the probe table into the
+merge-prep brief — which needed it most, since `w52/dfix` edits `docs/specs/terminal-surface.md` and
+the wrong list would have corrupted that lane's delta arithmetic. Corrected it to the dfix lane in its
+discharge brief, naming the lane as having been right. **And sent a correction to `w52-glive4`
+mid-flight** even though the error is inert for it (its branch touches no `docs/specs/` file) — with
+"do not restart anything" attached, because a brief's false fact is a defect with a delay fuse and the
+lane cannot know it is inert until told. Every one of those four now says: **read the tuple yourself,
+two parties in a row have stated it wrong from memory.**
+
+**When I check my own extraction I find a smaller version of the same disease:** the one-liner I used to
+print the tuple regex-matched a quoted phrase out of a *comment* (`"open operator decisions live in"`)
+and listed it as a member. The probe answers are unaffected — nothing starts with it — but the list I
+printed is not the tuple, and I nearly published it as one.
+
+## DISPATCHED
+
+`w52-dfix` fork-steered (new session `184ed846`): MAJOR 1 first with the FINDING-1 blast radius
+established **before** the pin is touched; MAJOR 2's sweep re-run with a measured column; MAJOR 3
+recorded as settled; six MINORs with sweep-then-re-grep; the new tautology form written up as a
+template amendment proposal. **No cut instruction, and I told it why.** Re-gate follows.
+
+## STATE
+
+`main == origin == 0d82460`, unmoved by me. Working: `w52-fork` (BLOCKING re-pin), `w52-launch`
+(discharge 3), `w52-glive4` (re-gate), `w52-dfix` (discharge 2). Done and idle: `gfork`,
+`glaunch3/4/5`, `glive3`, `live`, `gdfix`, `gdfix2`. `autoclean` on every beat, **`errors=0`**.
+Four operator gates carried, none ticked, **no fifth**.
+
+`sup-context` ~250k of a 350k soft trigger. The cheapest-first landing order stands: launch axis plus
+the seven orphaned verdicts (all zero-conflict, all floor-neutral), then merge-prep for the three code
+axes, then land what fits and **hand off with the audit in hand rather than mid-merge.**
+
+**What I expect to get wrong:** that MAJOR 1 resolves as a spec correction rather than a behaviour
+change; that this is the last tautology form; and that having now made the inherit-without-measuring
+mistake once and written it down, I will not make it again in the four briefs I have left to write.
+
+## 2026-08-09T21:57:10Z SEIZED inc=inc-20260809T215710Z-4082 sid=be099595-4a4f-423b-9291-3f36f7e8d419
+
+seized from inc-20260809T190213Z-5b2f: holder roster-gone, heartbeat stale (7423s > 3600s)
+
+## 2026-08-09T21:58:46Z CHECKPOINT inc=inc-20260809T215710Z-4082 sid=be099595-4a4f-423b-9291-3f36f7e8d419
+
+WAVE 53 BOOT — SEIZED, AND THE STALL IS NOT WHAT THE BRIEF CALLED IT. FOUR LANE RESULTS WERE NEVER COLLECTED, NOT MERELY NEVER LANDED.
+
+## SEIZURE
+
+`sup-boot` returned VERDICT `seize` at exit 0 — holder `inc-20260809T190213Z-5b2f` roster-gone,
+heartbeat stale 7423s > 3600s. New incarnation `inc-20260809T215710Z-4082`. The interface predicted
+this in the dispatch brief and called the seizure the recovery rather than an anomaly; that reading is
+correct and I am recording it here as ordered rather than treating it as an incident.
+
+`fleet autoclean`: errors=0, archived 1 (`w47-homes`), skipped 180, husks_removed=0.
+
+## WHAT I MEASURED THAT THE BRIEF DID NOT SAY
+
+The brief says "every w52 lane is now idle and done" and orders landing-first. Both true. But the
+predecessor's final checkpoint (19:53:27Z) lists **four lanes as WORKING**: `w52-fork` (BLOCKING re-pin
+discharge), `w52-launch` (discharge 3), `w52-glive4` (the live re-gate), `w52-dfix` (discharge 2).
+All four now read `idle` with their turn counts advanced — fork 3, launch 4, dfix 3, glive4 1.
+
+**So the stranded work is not four gated branches waiting on a merge. It is four lane results that no
+supervisor has ever read.** The command tier stopped inside the window between dispatching them and
+collecting them. That is a materially different failure from "finished branches with no reader":
+the verdicts the landing order depends on — did the BLOCKING re-pin defect actually close, did the
+re-gate clear the liveness fix — are unread by anyone. I cannot land on the brief's ordering until I
+have read them, and the brief's own ordering was written from the pre-discharge state.
+
+Corollary: `w52/glive4` (+12) is a re-gate branch the brief does not mention at all, because when the
+brief was written it had not reported.
+
+## BRANCH CENSUS, RE-DERIVED
+
+`main == origin/main == 0d82460`, unmoved. Working tree carries one modified file, `supervisor/JOURNAL.md`
+— that is this journal, mine to own and not a stray edit.
+
+The brief's four commit counts all reproduce exactly: `w52/launch +10`, `w52/live +11`, `w52/dfix +10`,
+`w52/fork +25`. I re-derived them rather than inheriting them; the brief predicted they were its
+likeliest error and they are not.
+
+Gate/verdict branches also unlanded, measured not assumed: `w52/gdfix +4`, `w52/gdfix2 +7`,
+`w52/gfork +20`, `w52/glaunch3 +2`, `w52/glaunch4 +5`, `w52/glaunch5 +8`, `w52/glive3 +8`,
+`w52/glive4 +12`. Older: `w50/gd`, `w50/glaunch`, `w50/glive`, `w50/glive2` (+1 each), `w51/gdtype +3`,
+`w51/glaunch2 +3` — the six the brief named. **Three it did not name and I am not assuming are dead:**
+`w48/gc +1`, `w48/glaunch +1`, `w49/home-witness +1`. Also non-w5x: `fix/b6-interface-release +3`,
+`fix/outcount-timing +1`, `w35/nd4c +2`. Those last three are older than this campaign's landing queue
+and I am not folding them on this wave without reading them.
+
+## THE PHANTOM, CONFIRMED
+
+`w50-glaunch` still reads `working` on a single turn while its verdict has been committed for
+15.5 hours. That is the disagreement `w52/live` repairs, and it is still costing wall-clock right now,
+which is an argument for the live axis landing early rather than late.
+
+## PLAN
+
+Read the four uncollected reports before landing anything — they are the cheapest information in the
+wave and the landing order is downstream of them. Then land, re-deriving ancestry and re-pricing every
+merge at landing time per the brief. Four operator gates carried, none ticked, no fifth. `fleet init`
+not run. `pin-pass.json` stays HELD at 2.1.222.
+
+**What I expect to get wrong:** that reading four reports is cheap enough to do before the first
+landing at all; that the brief's landing ORDER survives the verdicts I have not read; and that the
+three unnamed branches (`w48/gc`, `w48/glaunch`, `w49/home-witness`) are stale rather than orphaned
+work of the same kind this wave exists to end.
+
+## 2026-08-09T22:07:33Z CHECKPOINT inc=inc-20260809T215710Z-4082 sid=be099595-4a4f-423b-9291-3f36f7e8d419
+
+THE LANDING ORDER IN MY BRIEF IS CONTRADICTED BY MEASUREMENT AND I AM FOLLOWING THE MEASUREMENT. ONE "ORPHANED" BRANCH IS ALREADY LANDED. PREDICTIONS FOR THE DOCS LANDING ARE BELOW AND THIS COMMIT CARRIES NO RESULTS.
+
+## THE FOUR REPORTS, READ — and what they change
+
+All four w52 lanes finished after my predecessor's last checkpoint and **no supervisor had read any of
+them.** That is the stall: not four gated branches waiting on a merge, but four verdicts nobody had
+opened. Read now, and the landing order moves because of it.
+
+**`w52-glive4` — VERDICT: NOT-GATING.** 2 MAJOR / 7 MINOR, and it says of both MAJORs that the defect
+is **pre-existing, not this branch's**: the corrupt-registry class is wider than two verbs and wider
+than the sweep (`fleet clean` is a third exposed verb whose abort lands *after* a durable write). F1
+closed on both verbs for every shape a JSON registry can hold, driven end-to-end at three trees from
+the gate's own harness rather than the lane's fixtures. F3 closed — `M-W52-KILLGUARD` caught by
+**exactly** the six new kill-side pins plus one, and zero respawn pins, both halves confirmed.
+**`w52/live` is the only fully-gated axis in the wave** — its *discharge* has been graded, which is
+not true of the other three.
+
+**`w52-fork` discharge — the BLOCKING closed, and the census is now an enumeration.** `49 = 40
+citations + 9 corrupted timestamps`, zero unclassified; timestamps restored and proved by
+`_parse_daemon_log_ts` parsing its own docstring stamp to a non-None value again. The tool is in the
+tree (`tools/repin_citations.py`, 10 pins) with **three** guards — and the third was found *by the
+lane's own pin, not by the gate*: `01:15:07.492Z` passes guards 1 and 2 and the old tool would have
+written `01:105:07.492Z`. **The exposure was 117 sites, not 9, and both surviving classes survived by
+ACCIDENT** — `:00` only because the line map is 1-based, `4:40am` only because the insertion landed
+below line 40. An insertion near the top of the file would have rewritten a clock time into a line
+number. **Ungated**, and its own §11h asks for exactly the re-gate I have now dispatched: two commits
+(`5066af5`, `582bad9`) land *after* its floor pin and were verified only by a 130-test subset.
+
+**`w52-dfix` second discharge — done, ungated.** Floors `4759/14/1` at `4774` collected, met to the
+digit on both interpreters. Carries a behaviour change **beyond** the finding (row G, an unparseable
+string beside a valid clock, which collapsed on both trees) that the lane flags as a re-gate's to
+disagree with.
+
+**`w52-launch` discharge 3 — done, and self-floored GREEN on both interpreters** (`4621/14/1`, 4636
+collected, every prediction clause held). All nine gate items accepted; it added back that the gate's
+own *"13 call sites"* was a grep count including two docstrings, and that by AST it is **11 in 9
+functions** — the BLOCKING survives, because 11 is still many.
+
+## SO THE ORDER CHANGES, AND I SAY SO RATHER THAN QUIETLY REORDERING
+
+My brief ordered: launch, live, dfix, fork — with fork last because it was GATING when the brief was
+written. Measured now: **only `w52/live` has a graded discharge.** dfix and fork have ungated
+discharges, which is why I dispatched `w53-gfork` and `w53-gdfix` before writing this. Landing an
+ungated discharge is landing an unread verdict, which is the exact failure this wave exists to end,
+one level up.
+
+**And there is a real dependency the brief could not have known:** all three code axes touch
+`bin/fleet.py`, so each landing stales the next one's citations — and the repaired re-pin tool lands
+with `w52/fork`. That is an argument for fork going FIRST among the code axes, not last. I am not
+acting on it yet; it is the re-gate's answer to inform, and I record it now so the reasoning is
+reviewable rather than reconstructed later.
+
+## THE ORPHANS — nine, not ten, and the tenth was caught by re-deriving
+
+The brief named six older gate-verdict branches. I found **three more it did not name**: `w48/gc`,
+`w48/glaunch`, `w49/home-witness`. Every one of the nine adds **exactly one file**, and every one is
+`docs/lanes/<name>.md`.
+
+**`w48/gc` is ALREADY LANDED.** Its verdict blob on `main` is byte-identical to the branch's
+(`29c59ddc0fa6b39a178b178d40362014a569e952`), while the branch itself is ~26,000 lines stale — a
+merge would be an empty commit and a two-dot diff against it reads like a mass revert. **The
+add/add showed ZERO conflicts precisely because the content is identical**, so the conflict census
+alone would have waved it through as free. It is excluded. Nine merges, not ten.
+
+## THE EXEMPTION TUPLE, READ BY ME, NOT INHERITED
+
+`_HISTORICAL_PREFIXES` lives in `tests/test_doc_claims.py:445`, not in `bin/fleet.py`. `docs/lanes/`
+is its **first** entry; `docs/specs/`, `knowledge/`, `supervisor/` are all in it; `README.md` and
+`docs/launch-readiness.md` are **not**. Two parties in a row stated this wrong from memory and a gate
+had to refuse it, so I read the tuple rather than any sentence about it.
+
+## INSTRUMENT VALIDATED BEFORE ITS ZEROS WERE BELIEVED
+
+`git merge-tree` three-arg form (`--write-tree` does not exist at git 2.34.1 and returns a silent
+zero). Control run FIRST: `w35/nd4c × main` = **25 anchored / 26 unanchored** at `0d82460` — matching
+the campaign's reconciled anchor exactly, the 26th being a prose bullet quoting the marker inside a
+lesson file. Only then the ten zeros, all of which held.
+
+## PREDICTION — DOCS LANDING. THIS COMMIT CARRIES NO RESULTS.
+
+Merging into `main` (`0d82460`): `w52/launch`, then `w48/glaunch`, `w49/home-witness`, `w50/gd`,
+`w50/glaunch`, `w50/glive`, `w50/glive2`, `w51/gdtype`, `w51/glaunch2`.
+
+Net tree change: **nine added `docs/lanes/*.md`** (exempt prefix) plus **`README.md` and
+`docs/launch-readiness.md` modified** (both already tracked on `main`).
+
+1. **Collection stays `4636`.** `CHECK_COUNT_DOCS` is consumed by a per-FILE `parametrize`, so only
+   an *added* non-exempt `.md` grows the population. Every added file is under the first exempt
+   prefix; the two modified files are already tracked, so editing their contents adds zero cases.
+2. **`4621 passed, 14 skipped, 1 xfailed`, rc 0, on BOTH interpreters.** `main`'s only delta since
+   `64b43c2` is `supervisor/JOURNAL.md`, which is exempt and collects nothing, so `main`'s floor is
+   `64b43c2`'s floor — and `w52/launch` independently measured `4621/14/1` at its own tip.
+3. **What could falsify this, and it is NOT the count argument.** Wave 51 predicted no movement on a
+   docs-only landing and missed by 4, so a construction argument alone is not enough. The construction
+   argument covers the *count* pins. It does **not** cover the *content* pins, and nine large gate
+   verdicts full of `fleet <verb>` invocations and `:NNN` citations are exactly what
+   `tests/test_doc_claims.py`'s verb scan, `tests/test_self_citations.py` and
+   `tests/test_doctrine_citations.py` read. **That is the live risk and it has a different mechanism
+   from the one the arithmetic clears.** If it fires, I STOP and gate it rather than repair it inline.
+
+**Method, stated in advance so the subset is not mistaken for a floor:** after the docs merges I run
+`--collect-only` plus a targeted run of the doc-scanning pins — **cheap early warning, not a floor** —
+and then land `w52/live` and run the FULL suite on both interpreters over the combined tree. The full
+run is the floor; the targeted one exists only so that a red tells me which merge to blame.
+
+Live's own term, predicted separately so a miss is diagnosable: **`w52/live` adds +25 collected**
+(4636 → 4661), floor `4646 passed, 14 skipped, 1 xfailed`. Its file set is disjoint from `main`'s at
+file granularity — no textual merge is performed on any file at all — measured by three independent
+routes agreeing.
+
+## STATE
+
+Dispatched: `w53-gfork` (session `c5e04ce2`), `w53-gdfix` (session `e68786e5`), both bypass, both
+told `main` is moving under them by a docs-only landing that touches no file they touch. The
+merge-prep brief stays **HELD** for the same reason my predecessor held it — a prep is stale the
+moment a re-gate moves a tip, and two tips are under a gate right now.
+
+`fleet autoclean` errors=0. Four operator gates carried, none ticked, **no fifth**. `fleet init` not
+run. `pin-pass.json` HELD at 2.1.222. `sup-context` 102k of a 350k soft trigger at the last reading.
+
+**What I expect to get wrong:** that the content pins survive nine new verdict documents; that
+combining nine orphan merges into one floor run stays diagnosable if it reds; and that I have
+correctly concluded `w48/gc` is landed rather than merely *looking* landed from the one route I
+checked.
