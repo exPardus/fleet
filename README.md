@@ -48,18 +48,23 @@ $ fleet peek migrate-users
 **Verified:** SQL syntax matches Knex schema (SERIAL PK, VARCHAR NOT NULL UNIQUE e...
 
 $ fleet result migrate-users
--- tokens in=8 out=129 model=claude-haiku-4-5-20251001
 **Changed:** Created `0042_users.sql` (CREATE TABLE) and `0042_users_down.sql` (DROP TABLE) in migrations directory.
 
 **Verified:** SQL syntax matches Knex schema (SERIAL PK, VARCHAR NOT NULL UNIQUE email, TIMESTAMP DEFAULT for created_at). Down migration uses IF EXISTS for safety.
 
 **Blocked:** None. Awaiting manager instruction on whether to remove original 0042_users.js.
+-- tokens in=8 out=129 model=claude-haiku-4-5-20251001
 ```
 
-*Captured verbatim on 2026-08-09 against `fleet` at `64b43c2` (Windows, `claude` 2.1.226) — including the
-absolute `--dir` and the truncation `peek` applies at 200 characters. **An earlier version of this block was
-hand-written and none of its `fleet peek` lines were output the code can produce**; it is pasted from a real
-session now so that it cannot drift back.*
+*Captured on 2026-08-09 against `fleet` at `64b43c2` (Windows, `claude` 2.1.226) — every line verbatim,
+including the absolute `--dir` and the truncation `peek` applies at 200 characters. One ordering note:
+`fleet result` prints the body to stdout and the `-- tokens` line to stderr, so a piped capture shows them
+inverted; they are shown here in the order a terminal prints them.*
+
+*Why this block is pasted rather than written: **an earlier version was composed by hand, and none of it was
+output the code can produce** — every `fleet peek` line used a tag or an argument the renderer never emits,
+and the `fleet status` row showed `COST 0.00`, which the native dispatch path never prints (it renders `-`).
+If you edit this block, capture a real session; do not hand-write a plausible one.*
 
 One task, one worker, one token cap, mid-turn steering — and never once attached a terminal. That's the whole loop.
 
