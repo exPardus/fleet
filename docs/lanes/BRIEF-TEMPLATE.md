@@ -97,3 +97,66 @@ ride. Order it onto **the branch under gate**:
 gating** (`<branch>`), so it lands with that branch. If you reject the branch and it will not be
 merged, commit the verdict to `main` instead — a rejection's reasons must outlive the branch.
 ```
+
+## Proving a run changed nothing — NOT with `git write-tree`
+
+Every brief in this campaign carried the instruction *"prove the tree sha is identical before and
+after each run"*, and every lane that followed it with `git write-tree` **inherited a vacuous
+check**. Measured independently by lane `w50-d` and its gate `w50-gd` on 2026-08-09: `git write-tree`
+hashes the **index**, not the working tree, so with unstaged changes it returns `HEAD^{tree}`
+unchanged and the before/after comparison **cannot fail** — which is every lane's normal state
+during a test run. It answered the same sha across 900 lines of edits. It is also blind to untracked
+files entirely.
+
+Use a working-tree digest instead. Print it immediately before the floor run and immediately after;
+the two lines must match, **`files=` included** — that count is not decoration, it is what catches a
+skip rule that silently swallowed the tree.
+
+```python
+#!/usr/bin/env python3
+"""A digest of the WORKING TREE, not the index. Print before and after a run and
+compare; identical means the run modified nothing."""
+import hashlib, sys
+from pathlib import Path
+
+ROOT = Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve()
+SKIP = {".git", "state", "logs", "mailbox", "__pycache__",
+        ".pytest_cache", ".ruff_cache", ".fleet-index"}
+
+h, n = hashlib.sha256(), 0
+for p in sorted(ROOT.rglob("*")):
+    if any(part in SKIP for part in p.relative_to(ROOT).parts) or not p.is_file():
+        continue
+    h.update(p.relative_to(ROOT).as_posix().encode("utf-8"))
+    h.update(hashlib.sha256(p.read_bytes()).digest())
+    n += 1
+print(f"{h.hexdigest()}  files={n}  root={ROOT}")
+```
+
+`state/`, `logs/` and `mailbox/` are gitignored runtime planes a run may legitimately touch, and the
+cache directories churn by design; everything else — **including untracked files, which
+`git write-tree` cannot see at all** — is in.
+
+This does **not** replace `tests/conftest.py`'s session-scoped
+`_the_real_install_plane_is_byte_identical_afterwards`, which hashes the git-tracked code plane
+*inside* the run and is strictly better for that plane, because it fails the suite rather than a
+human's eye. The digest above covers what that fixture does not.
+
+## Anchor the conflict-marker grep, or it counts prose
+
+`grep -c '<<<<<<<'` over merge output counts any line that merely *contains* the marker, including
+documents that quote it. Measured 2026-08-09 by lane `w50-mp` and reproduced at the wave-50 landing:
+the campaign's long-quoted control value for `w35/nd4c × main` was **26**, and the true count is
+**25** — the extra hit is a context line in `knowledge/INDEX.md`, the wave-42 lesson *about* the
+marker-grep null, quoting the marker in its own prose. **The lesson was corrupting the instrument it
+exists to protect, and an unanchored grep cannot tell.**
+
+Use the anchored form, which `docs/NEXT-SESSION.md` already had right:
+
+```
+grep -cE '^\+?<<<<<<<'
+```
+
+The rule that produced the control in the first place still stands and is unaffected: **run any
+measurement whose good answer is 0 against a known non-zero input first.** This amendment is about
+making the non-zero input's number trustworthy too.
