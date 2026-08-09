@@ -1296,6 +1296,26 @@ class TestAForeignHomeCannotEraseTheOperatorsRow:
         assert sl.PREFIX in line, line
         assert_no_terminal_control(line)
 
+    def test_a_non_dict_row_is_skipped_not_fatal(self):
+        """A row that is not a dict has no `.get`. Added because the mutant that
+        deletes this guard SURVIVED the first sweep -- new code of mine with no
+        pin behind it, which is the coverage claim this campaign keeps finding
+        false. The real row must still be counted, so "skip" cannot degrade into
+        "give up on the list"."""
+        snap = {"ok": True, "totals": {},
+                "workers": ["a string", 7, None, [], _row(status="working")]}
+        line = sl.render_statusline(snap, color=False)
+        assert line == f"{sl.PREFIX}  work 1", line
+
+    @pytest.mark.parametrize("shape", ["dict", "str", "int", "null", "missing"])
+    def test_a_workers_field_that_is_not_a_list_degrades_to_a_word(self, shape):
+        snap = {"ok": True, "totals": {}}
+        if shape != "missing":
+            snap["workers"] = {"dict": {"a": 1}, "str": "w1", "int": 3,
+                               "null": None}[shape]
+        line = sl.render_statusline(snap, color=False)
+        assert line == f"{sl.PREFIX}: no workers", line
+
     def test_status_snapshot_itself_does_not_raise(self, home, monkeypatch):
         """The first sink, in its own file. `by_status[status]` is a dict key."""
         evil = home("evil", {"e": _rec(status=["idle"])})
