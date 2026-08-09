@@ -47,8 +47,11 @@ git grep -hoE '"status"\] = "[a-z_-]+"' -- bin/fleet.py | sort -u
 ```
 
 (`orphan` / `withheld` are `_index_entry` shard results at `:19694` / `:19712`, not registry worker
-records — checked, not assumed. The registry-worker set is the other seven, plus `attached` and
-`over_budget` which are written through variables.)
+records — checked, not assumed. `attached` and `over_budget` are in fleet's vocabulary and are read
+and preserved — `_NATIVE_STICKY` at `:3645`, `cmd_release` at `:8194` — but no shipped path writes
+either as a literal today; they are in `_ORDER` regardless, so they never reach the capped region
+that Finding 1 is about. The seven that remain are the registry-worker set, and `interrupted` and
+`dead-suspected` are the two of them outside `_ORDER` and `_LABEL`.)
 
 Then every field the render reads, at every benign value shape a real home writes: ISO text and
 `null` for `limit_reset_at`; `float`, `int` and `None` for `stale_seconds`; integer counters; unicode
@@ -126,8 +129,8 @@ non-zero overflow counter, a dead tail, `sup released` and the `2 bodies` alarm)
 | | 920266c (merge base) | 2cc4410 (branch) |
 |---|---|---|
 | widest, string statuses only | **274** chars | **274** chars |
-| widest, with wrongly-typed rows | **274** chars (a `TypeError`, i.e. a **blank line** — the MAJOR) | **283** chars |
-| delta attributable to the exemption | 0 | **+9** |
+| the same input plus wrongly-typed rows | **not renderable** — `TypeError: unhashable type: 'list'`, which `main`'s exit-0 guard turns into a blank line (the MAJOR; measured separately at 200 rows) | **283** chars |
+| delta attributable to the exemption | n/a | **+9** |
 
 The 9 characters are `  ?type N` — two separator spaces, the five-character word fleet authored, one
 space, and the count. The count's digits scale with the number of workers exactly as every other
@@ -329,6 +332,17 @@ attacker's and shows fleet's, which is the better behaviour. The exemption is ge
 (without it, `?type` itself is suppressible), so the lane's *conclusion* is sound; the *argument*
 offered for it, and the test offered as its pin, are not.
 
+### Why this is MAJOR and not MINOR
+
+It is not a regression, and the loss is a diagnostic word rather than the operator's roster — both
+of which argue down. What argues up is the shape: `docs/lanes/BRIEF-TEMPLATE.md`'s own gate section
+names it — *"Ask whether the repair was applied EVERYWHERE the repaired claim appears, not whether
+it is correct where it was applied… A repair verified only where it was applied is a repair verified
+nowhere."* The exemption is applied at the one site its argument was written at, and the same
+argument holds verbatim one constant over, in the same function, in the same commit. Add a false
+universal quantifier in the docstring and a tautology as its pin, and the property is not held
+anywhere — which is why the X7 equivalence argument that rests on it does not survive contact.
+
 ### Remedy (not applied — this lane fixes nothing)
 
 Exempt `FIELD_UNKNOWN` alongside `TYPE_FAULT`, or state in the docstring which fleet-authored names
@@ -406,7 +420,7 @@ git log --oneline 5cb0e4e..75aa4eb
   2e3e44d docs(w51-slicee): the final floors -- second prediction, also hit exactly
   0117b83 test(w51/slicee): the canary asserted B unchanged without asserting A ran
   ebf823a docs(w51-slicee): two defects in my own report, found self-auditing
-  47700d8 test(w51/slicee): the conftest redirect, and the floors
+  47700d8 test(w51/slicee): GREEN -- the conftest redirect, and the floors
   438ef52 test(w51/slicee): the four §7 pins slice (a) did not ship, RED
 ```
 
@@ -509,9 +523,10 @@ run predicts it.
 
 ---
 
-## FLOORS — PREDICTED HERE, WITH NO RESULTS IN THIS COMMIT
+## FLOORS — PREDICTED IN `a0887a6`, WITH NO RESULTS IN THAT COMMIT
 
-Written before a single `pytest` invocation on this repository. Results land in the next commit.
+The prediction below was written and committed before a single `pytest` invocation on this
+repository. Results were added afterwards, in this commit.
 
 **Prediction: `4489` collected → `4474` passed / `14` skipped / `1` xfailed / `0` failed, on
 `py -3.13` and on `py -3.10`, both with and without this file in the tree.**
@@ -536,5 +551,98 @@ re-floored at 4489 with `docs/lanes/w51-dtype.md` in the tree.
 **Hygiene, asserted before the runs.** No mutant is on disk: every mutation in this gate
 (`_bucket_order` → X7, three erasure seeds) was applied by in-process monkeypatch inside scratch
 scripts under the job directory and reverted in the same process; the repository tree was never
-patched. `git status --porcelain` is empty and the working-tree digest is recorded in the journal
-before and after each run.
+patched. `git status --porcelain` was empty at the start of every run.
+
+### RESULTS — prediction met exactly, on both interpreters
+
+Round 1, at `a0887a6` (this file present, carrying the prediction and no results):
+
+```
+py -3.13 -m pytest --collect-only -q     ->  4489 tests collected in 5.54s
+py -3.13 -m pytest -q                    ->  4474 passed, 14 skipped, 1 xfailed in 432.05s
+
+py -3.10 -m pytest --collect-only -q     ->  4489 tests collected in 8.83s
+py -3.10 -m pytest -q                    ->  4474 passed, 14 skipped, 1 xfailed in 397.28s
+```
+
+**4489 / 4474 / 14 / 1 / 0, four runs, two interpreters — and the "+0 collected" prediction for a
+`docs/lanes/` file is what those 4489s confirm.** The brief's independent claim of *"+124 pins"* is
+confirmed too, by collecting the merge base in an extracted tree: `920266c` → **4365**, branch →
+**4489**, delta **+124**.
+
+Digest bracket on the `py -3.13` round:
+
+```
+before: 364b5403119c839f27cbf1e370d98d08e1c95a88497432f4c9970c6a48abd76f  files=245
+after : 364b5403119c839f27cbf1e370d98d08e1c95a88497432f4c9970c6a48abd76f  files=245
+git status --porcelain -> empty
+```
+
+**AND THE `py -3.10` ROUND'S DIGEST BRACKET IS VOID, BY MY OWN HAND.** I edited this file — the
+`WHERE THIS BRIEF WAS WRONG` section and two corrections — while that run was in flight, so the
+after-digest differs from the before-digest for a reason that has nothing to do with the run. The
+instrument did exactly what it exists to do: it refused to certify a run it could not isolate.
+`files=` was unchanged at 245 and `git status --porcelain` named only this file, which is
+suggestive and is *not* what the bracket claims, so the bracket is reported as void rather than
+explained away. Round 2 below re-establishes it on a frozen tree.
+
+### Round 2 — re-floored with this report, results and all, in the tree
+
+*(Results for round 2 are appended by the commit that follows this one; the tree they were run
+against is the one this paragraph is committed in.)*
+
+---
+
+## WHERE THIS BRIEF WAS WRONG
+
+The brief asked to be corrected with a receipt. Six places.
+
+**1. `main` is `75aa4eb`, not `5cb0e4e` — it moved a FIFTH time, and slice (e) has already
+landed.** The brief opens with *"Slice (d) is one gate from landing. Slice (d) done leaves only
+slice (e)"*; by the time this ran, slice (e) was merged to `main` and slice (d) was the outstanding
+one. Receipt in Q4 above. Every Q4 number here is at `75aa4eb`; none of the brief's are.
+
+**2. Q2's premise assumes a line that does not exist.** *"How many `?type` markers can N foreign
+homes put on one line?"* presupposes a multi-home render. There is none: `main` resolves one home,
+assigns one `fleet.FLEET_HOME`, and calls `render_statusline(fleet.status_snapshot())` once. N is
+always 1, and the marker count is 1 regardless of rows or types because buckets are dict keys —
+measured at 1, 2, 50 and 500 wrongly-typed rows. The follow-up *"if the answer is unbounded in the
+number of homes, that is an availability finding"* is therefore unreachable. The bounded answer is
++9 characters.
+
+**3. The floor mechanism the brief names does not exist.** *"`CHECK_COUNT_DOCS` is derived as every
+tracked `*.md` minus a dated-history exemption, and two pins are parametrised over it."* There is no
+`CHECK_COUNT_DOCS` in this tree; the only `_CHECK_COUNT` is a regex over the phrase *"N checks"* at
+`tests/test_doc_claims.py:226`. The real mechanism is `tests/test_receipts.py` — **three**
+parametrize sites over `SPEC_DIR.glob("*.md")` with `SPEC_DIR = docs/specs`. So the multiplier is
+three per enforced spec, not two, and the scope is `docs/specs/` only. A verdict filed where this
+brief itself orders it (`docs/lanes/`) moves the floor by **zero**. The instruction *"if you add
+files, predict accordingly"* is right; following the mechanism as written would have produced the
+wrong prediction.
+
+**4. The brief's own guess about which question is sharp is wrong, and it guessed that too.** It
+says *"Likeliest [wrong]: that Q1 is the soft question (I think it is the sharp one)"*. Q1 is the
+soft one: 731 benign combinations, zero over-refusals, with the detector seeded first. The
+narrowing is conservative in the right direction by construction — `registry_status` returns every
+`str` unchanged, so no legitimate status can be refused. The sharp question was Q2, which the brief
+listed among the things it expected to be told were details.
+
+**5. …but its instinct about the swallow was right, and its location wrong.** *"'zero `except`
+handlers added' settles the swallow question when a refusal can widen it without an `except`."* The
+claim is true (verified two ways) and it does not settle it — Finding 2 is a widening with no
+`except` involved. It is not in a handler at all: it is the `if not iso: return ""` short-circuit
+sitting **above** the `try` block, which returns before either narrowing or sanitising happens.
+
+**6. What the brief got right, said plainly.** The lane's read-only price of *12 conflicts, all
+citation-only, 0 functional overlap* re-derives to exactly 12 at a base two `main` commits later,
+with 0 lost hunks — the brief was right to ask for it again and right that it would hold. The
+*"+124 pins"* figure is confirmed independently (`4365` collected at `920266c`, `4489` on the
+branch). The anchored-grep, control-first and pin-your-control instructions all did work here. And
+the exemption is *not* a detail — the brief flagged that correctly, though for the wrong reason:
+its cost is nine characters, and its defect is the sibling constant it was not applied to.
+
+**One thing this gate did not do, and says so.** Finding 1 is not a regression — driven at
+`920266c`, `?` was already a capped bucket suppressible by the same three statuses. This branch
+does not make it worse; it introduces the doctrine that says it should not be true, applies that
+doctrine to one of two words, and states a reason for the split that the tree contradicts. That is
+what keeps it MAJOR rather than BLOCKING, and it is why this gate does not hold the branch.
