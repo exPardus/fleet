@@ -568,6 +568,12 @@ at 14/1. That +13 is the 13 pins in `tests/test_respawn_retired_sweep.py`, and `
 exempt from `CHECK_COUNT_DOCS` via `_HISTORICAL_PREFIXES` (verified — which is also why **this**
 report cannot move the floor either).
 
+That last claim is MEASURED rather than asserted, after this report was committed at `4ab8650`:
+`py -3.13 -m pytest -q --collect-only` → **4649 tests collected**, unchanged; and the four
+document-facing files — `test_doc_claims.py`, `test_lane_report_durability.py`, `test_receipts.py`,
+`test_self_citations.py` — run **171 passed** with it in the tree. The working-tree digest moves to
+`files=264`, which is the one file I added and the only thing about this branch I changed.
+
 The digest **hash** differs from §7.4's `e9b44616…` at the same `files=263`. That is the documented
 behaviour of a checkout-relative instrument (`BRIEF-TEMPLATE.md`, measured by gate `w50-gd2`), not a
 discrepancy: it answers *"did this run change anything here?"* and never *"is this tree that tree?"*
