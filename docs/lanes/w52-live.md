@@ -952,6 +952,34 @@ change rather than of code I did not write.
 
 ---
 
+## 9B. MERGE STATE — `main` DID move, and not by me
+
+Both briefs said *"`main` is `64b43c2` and is not moving under you."* MEASURED at the end of the
+discharge, **it moved**: `main` is now `0d82460`, one docs-only commit ahead
+(*"docs(w52): the wave's record, and the handoff before the expensive part"*).
+
+**It was not me, and the reflog is the evidence rather than my word:** `main@{0}` is a direct
+`commit` on `main`, and every commit I made is on `w52/live`. The lane fence held — commits to
+`w52/live` only, no push, no other ref moved.
+
+```
+merge-base(main, w52/live)                     : 64b43c2   (unchanged)
+anchored conflict markers, w52/live x main     : 0
+control -- same probe, w35/nd4c x main         : 25        (non-vacuous)
+```
+
+The probe is the anchored form (`grep -cE '^\+?<<<<<<<'`) that
+`docs/lanes/BRIEF-TEMPLATE.md` requires, and it is run against a known-conflicting pair first,
+because a measurement whose good answer is 0 proves nothing until something makes it non-zero. The
+control returns the campaign's recorded value.
+
+**What this does and does not mean.** My floors are measured on a tree based at `64b43c2`, not at
+current `main`; the branch merges cleanly onto `0d82460` but I have **not** measured a floor there,
+and a merge that applies without conflict is not a floor that passes. That is the merging lane's
+measurement to make, and it should make it rather than inherit mine.
+
+---
+
 ## 10. RECOMMENDED SUCCESSOR SLICES
 
 Neither is a blocker on this branch.
