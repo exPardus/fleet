@@ -83,12 +83,45 @@ holes are written down rather than left to be rediscovered:
   * WHAT THE WIDENED CHECK-COUNT PIN STILL EXEMPTS, censused (wave 45: any pin
     shipping a carve-out ships the census of what it exempts):
 
-      - DATED HISTORY, by path pattern (`_HISTORICAL_PREFIXES`). 94 hits
-        across 21 files at w50 -- lane reports, gate arguments, dated reviews,
-        `docs/specs/**`, `knowledge/`, `supervisor/JOURNAL.md` and the working
-        ledgers. Ratified 2026-08-05: *a reference is rot only when it claims
-        the CURRENT tree; a pinned receipt and a quoted argument are claims
-        about a PAST tree and stay true.* Fixing them would FABRICATE.
+      - DATED HISTORY, by path pattern (`_HISTORICAL_PREFIXES`) -- lane
+        reports, gate arguments, dated reviews, `docs/specs/**`, `knowledge/`,
+        `supervisor/JOURNAL.md` and the working ledgers. Ratified 2026-08-05:
+        *a reference is rot only when it claims the CURRENT tree; a pinned
+        receipt and a quoted argument are claims about a PAST tree and stay
+        true.* Fixing them would FABRICATE.
+
+        THE SIZE OF THAT EXEMPT SET IS A MEASUREMENT, AND IT NEEDS ITS
+        DEFINITION ATTACHED -- this docstring shipped `94 hits across 21 files`
+        on 2026-08-09 and gate `w50-glaunch` F1 could not reproduce it under
+        any of six counting definitions. Both halves of the failure are worth
+        keeping, because they are two different mistakes:
+
+          1. WRONG INSTRUMENT. The 94 was produced by an exploratory scanner
+             that carried a `check count N -> M` arrow form which was then
+             deliberately dropped from the shipped pin. Re-run that scanner and
+             it still returns exactly 94; the one extra hit is
+             `docs/reviews/TT-BUILD-REVIEW-SPEC-2026-07-24.md:183`,
+             *"check count 22 -> 23"*. A number measured with one instrument
+             was pasted into the docstring of another. That is the same defect
+             class as `docs/SPEC.md`'s `grep -c` receipt, one file over.
+          2. THE CENSUS IS RECURSIVE. The lane report that states the number is
+             itself exempt, so writing the census changed it. At `4a62e21` the
+             report alone carried 36 of the hits.
+
+        Stated so a reader can check it rather than trust it -- definition:
+        `find_check_count_claims` + `find_pass_fail_totals`, summed, over every
+        tracked `*.md` NOT in `CHECK_COUNT_DOCS`:
+
+            at 4a62e21, INCLUDING the lane report that states it:  129 / 22 files
+            at 4a62e21, EXCLUDING it:                               93 / 21 files
+
+        Both are claims about a NAMED COMMIT, not about "now", and that is
+        deliberate: this is a moving population -- every lane report added
+        moves it -- so a bare present-tense number here would be rot by
+        construction. Re-derive with the detectors above rather than trusting
+        these digits; the exempt set is not pinned by any test, and cannot
+        usefully be, because a pin on it would go RED every time anyone writes
+        a lane report.
       - THE `N -> M` DRIFT NARRATIVE, in every file. `CONTRIBUTING.md:41`
         (*"it drifted twice -- 21->23 ... against an actual 28"*) and
         `docs/SPEC.md:17` wear the identical shape, and one is true history
@@ -312,9 +345,25 @@ def strip_markup(text):
 # `4 demand check`, `9 redefine check`, `6 SPURIOUS-FIX check` and
 # `4493 builds checks` across the tree -- none of them about `fleet doctor`.
 # A pin that fires on unrelated prose gets suppressed, and then holds nothing.
+#
+# TWO NARROWINGS ADDED 2026-08-09, each measured by gate `w50-glaunch` F4 as a
+# false positive on a line shape a person actually writes:
+#
+#   * `(?<![\d.#])` -- a digit run that is part of a decimal or an issue
+#     reference is not a count. `### 4.8 Doctor checks` read as 8, and that is
+#     a REAL line (`docs/specs/claim-nonce.md:732`); ``Python `3.13` checks
+#     out`` read as 13; `See #4217 checks` read as 4217. The held population
+#     had just gone 6 -> 27 and `docs/SPEC.md` is section-numbered throughout,
+#     so the heading shape would have fired on a held file.
+#   * HORIZONTAL whitespace only -- `strip_markup` deletes emphasis wholesale,
+#     which joins a `**23**` ending one line to a `* checks` starting the next
+#     into `23\n checks`, and `\s+` matched straight across that newline.
+#     A claim genuinely wrapped mid-phrase is unheld as a result; that trade is
+#     censused in this module's docstring rather than left to be rediscovered.
 _CHECK_COUNT = re.compile(
-    r"\b(?P<before>\d+)\s+(?:fleet\s+)?(?:doctor'?s?\s+)?(?:health\s+)?checks?\b"
-    r"|\bchecks?\b\s*(?::|=|→|->)\s*(?P<after>\d+)",
+    r"(?<![\d.#])\b(?P<before>\d+)[^\S\r\n]+"
+    r"(?:fleet[^\S\r\n]+)?(?:doctor'?s?[^\S\r\n]+)?(?:health[^\S\r\n]+)?checks?\b"
+    r"|\bchecks?\b[^\S\r\n]*(?::|=|→|->)[^\S\r\n]*(?<![\d.#])(?P<after>\d+)",
     re.I,
 )
 
@@ -385,8 +434,18 @@ _HISTORICAL_PREFIXES = (
     # their own receipt harness (`tools/verify_receipts.py`)
     "docs/specs/",
     # ledgers and history, named as such by their own contents
-    "docs/PLAN.md", "docs/PLAN-PROGRESS.md", "docs/NEXT-SESSION.md",
-    "docs/SPEC-v2-history.md", "docs/OPERATOR-GATES.md",
+    "docs/PLAN.md", "docs/PLAN-PROGRESS.md",
+    "docs/SPEC-v2-history.md",
+    # `docs/OPERATOR-GATES.md` is a document root `CLAUDE.md` treats as CURRENT
+    # ("open operator decisions live in"), and it stays exempt anyway. Gate
+    # `w50-glaunch` F6 raised the tension and it resolves in favour of exempt:
+    # its two check-count hits are `29 checks` and `23 checks` QUOTED inside an
+    # argument whose own prose says the truth is 28. Holding it would demand
+    # editing a quotation to make a pin green, i.e. fabricating the argument.
+    # `docs/NEXT-SESSION.md` was on this list beside it and is NOT current-tree
+    # exempt any more -- it carries no check-count claim at all, so holding it
+    # costs nothing today and closes the gap where the next one would land.
+    "docs/OPERATOR-GATES.md",
     "docs/IDEA-FORGE-REPORT.md", "docs/PRIOR-ART.md",
     "docs/longcat-fleet-usage.md",
     "knowledge/", "supervisor/",
@@ -395,14 +454,22 @@ _HISTORICAL_PREFIXES = (
 
 @functools.lru_cache(maxsize=None)
 def _tracked_markdown():
-    proc = subprocess.run(["git", "ls-files", "*.md"], cwd=REPO_ROOT,
+    # `-z`, and NUL-split rather than whitespace-split. `git ls-files` does not
+    # quote a path containing a space, so `.split()` tore `docs/My Notes.md`
+    # into `docs/My` and `Notes.md` -- measured by gate `w50-glaunch` F5, which
+    # noted with some justice that this is the one branch where "a path with a
+    # space splits" should not have been reintroduced one file over from the
+    # fix for it. It failed loudly (four FileNotFoundErrors) rather than
+    # silently, but the real file's content was never read, so a false count
+    # inside it went unheld.
+    proc = subprocess.run(["git", "ls-files", "-z", "*.md"], cwd=REPO_ROOT,
                           capture_output=True, text=True)
     assert proc.returncode == 0, (
         f"`git ls-files` failed in {REPO_ROOT}: {proc.stderr.strip()!r}. This "
         f"population is derived, never listed -- a harness that cannot derive "
         f"it must fail, not silently hold nothing."
     )
-    return tuple(sorted(p for p in proc.stdout.split() if p))
+    return tuple(sorted(p for p in proc.stdout.split("\0") if p))
 
 
 def current_tree_docs():
@@ -589,6 +656,24 @@ def test_the_detector_catches_planted_drift():
                    "7 five-lists check", "8 Doctor-adjacent check"):
         assert find_check_count_claims(benign) == [], benign
 
+    # 2b-ii. THE FALSE-POSITIVE FAMILY GATE `w50-glaunch` F4 MEASURED. Every
+    # string below is a line shape a person writes, and every one of them fired
+    # a bogus claim before 2026-08-09. The first is a real line in this tree
+    # (`docs/specs/claim-nonce.md:732`), and `docs/SPEC.md` -- newly held -- is
+    # section-numbered from top to bottom, so the heading shape would have gone
+    # RED on a held file for a sentence containing no claim at all.
+    for benign in ("### 4.8 Doctor checks, and the views",
+                   "Python `3.13` checks out",
+                   "See #4217 checks",
+                   "**23**\n* checks pass",
+                   "| 23 | checks |",
+                   "version 2.28 checks"):
+        assert find_check_count_claims(benign) == [], benign
+
+    # ...while the same shapes with a genuine claim still fire
+    assert find_check_count_claims("### 4. Doctor: 28 checks, and the views") == [28]
+    assert find_check_count_claims("(28 checks)") == [28]
+
     # the underscore rule is NARROW on purpose: `_` is a word character and
     # `_doctor_check_` is the token this whole pin is derived from.
     assert strip_markup('grep -c "def _doctor_check_" bin/fleet.py') == \
@@ -654,3 +739,14 @@ def test_the_check_count_population_is_derived_and_split_correctly():
 
     # neither empty nor everything
     assert 10 < len(docs) < len(tracked)
+
+    # A PATH WITH A SPACE SURVIVES THE DERIVATION (gate `w50-glaunch` F5).
+    # `git ls-files` does not quote spaces, so the old whitespace split tore
+    # `docs/My Notes.md` into two nonexistent paths. Asserted on the real
+    # derivation rather than on a fixture: every entry must be a file that
+    # exists, which is exactly what a torn path is not.
+    for rel in tracked:
+        assert (REPO_ROOT / rel).is_file(), (
+            f"{rel!r} is not a file -- `_tracked_markdown()` mangled a path. "
+            f"`git ls-files` does not quote spaces; the split must be on NUL."
+        )
