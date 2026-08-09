@@ -31,15 +31,29 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-# TWO files since wave 52. It was one string, and a driver that grades only the
-# file it was born with is the gate2 B2 shape one level up: the w52 build added
-# seven pins in `tests/test_respawn_retired_sweep.py`, and every mutant aimed at
+# THREE files since wave 52. It was one string, and a driver that grades only
+# the file it was born with is the gate2 B2 shape one level up: the w52 build
+# added pins in `tests/test_respawn_retired_sweep.py`, and every mutant aimed at
 # them would have reported SURVIVED -- not because the pins were weak, but
 # because nothing ran them. The ledger's own contract ("a mutant that SURVIVES
 # is a defect in the test file") is only true if the driver runs every file the
 # ledger's mutants are aimed at.
+#
+# `tests/test_native.py` joined them at the DISCHARGE of gate w52-glive3 (F5).
+# The gate's finding was not about the pins but about a CLAIM: the lane's report
+# defended the extraction with "the kill path's own five pins in
+# `tests/test_native.py` ... which `M-W52-M1` proves are load-bearing through
+# the shared body" -- and `M-W52-M1` could prove nothing of the sort, because
+# the driver never ran that file. The instrument cited for the defence was
+# structurally incapable of producing it. Adding the file is what makes the
+# sentence checkable; the alternative was deleting the sentence.
+#
+# Note the shape of the original mistake, because it recurs: the wave-52 repair
+# that made this a tuple added the file the NEW pins were in, not the file the
+# extraction put at RISK.
 TESTFILES = ("tests/test_liveness_readers.py",
-             "tests/test_respawn_retired_sweep.py")
+             "tests/test_respawn_retired_sweep.py",
+             "tests/test_native.py")
 
 # ---------------------------------------------------------------------------
 # THE LEDGER. (id, claim, anchor, replacement, expect)
@@ -170,6 +184,44 @@ MUTANTS = [
             _ok, outcome = _stop_native_session_status(
                 retired, run=run, which=which,
                 timeout=_RETIRED_SID_SWEEP_TIMEOUT_SECONDS)""",
+     "KILLED"),
+
+    # --- added discharging gate w52-glive3 (F1, F3). --------------------------
+    ("M-W52-CORRUPT", "the non-string skip is removed from the shared sweep, "
+                      "restoring F1: an int/bool/float in a corrupted "
+                      "`retired_sids` aborts BOTH verbs with a raw TypeError "
+                      "from `retired[:8]`, with zero subprocess attempts",
+     "        if not isinstance(retired, str) or not retired:",
+     "        if False:  # MUTANT M-W52-CORRUPT",
+     "KILLED"),
+
+    ("M-W52-DEDUP", "the respawn call site goes back to `dict.fromkeys`, "
+                    "restoring the SECOND F1 raise site the gate did not name: "
+                    "an unhashable element aborts in the CALLER, before the "
+                    "sweep's own guards can run at all",
+     "    _sweep = [s for s in _ordered_unique_sids(prior_retired + [old_sid])",
+     "    _sweep = [s for s in dict.fromkeys(prior_retired + [old_sid])"
+     "  # MUTANT M-W52-DEDUP",
+     "KILLED"),
+
+    # The gate's G1, which SURVIVED all 4649 tests on the pre-discharge tree.
+    # Modelled at the call site rather than by threading a `best_effort` flag,
+    # because one anchor cannot make two edits -- but the semantics are G1's
+    # exactly: `kill` stops using the shared guarded body and goes back to its
+    # own loop. Every `respawn` pin stays green by construction, which is the
+    # whole point: only a pin driven through `kill` can catch it.
+    ("M-W52-KILLGUARD", "a realistic successor edit takes `kill` back off the "
+                        "shared body -- the gate's G1, which survived the "
+                        "entire suite because every pin on that body drove "
+                        "`respawn`",
+     """    _sweep_retired_sessions(name, retired_sids, other_current_sids,
+                            run=run, which=which)""",
+     """    for _r in retired_sids:  # MUTANT M-W52-KILLGUARD
+        _ok, outcome = _stop_native_session_status(
+            _r, run=run, which=which,
+            timeout=_RETIRED_SID_SWEEP_TIMEOUT_SECONDS)
+        print(f"fleet: {name}: stopping retired session {_r[:8]}... "
+              f"{outcome}", file=sys.stderr)""",
      "KILLED"),
 
     ("M-W52-REFUSE", "the no-force refusal on a Q1-live turn is deleted, so a "

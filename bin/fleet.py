@@ -908,12 +908,12 @@ def _quarantine_artifacts() -> list:
     registry is always newer -- an "artifact newer than the registry"
     comparison would never fire on the recreation bypasses it exists to stop.
 
-      * `_sweep_husks` (:11008) -- a rename can hide live worker records from
+      * `_sweep_husks` (:11072) -- a rename can hide live worker records from
         the roster sweep, so a thin registry would rm sessions it still owns.
-      * `_doctor_check_autoclean` (:12116) -- a lingering artifact means the
+      * `_doctor_check_autoclean` (:12180) -- a lingering artifact means the
         sweep above is refusing itself, which is how a bricked sweep reads
         green-and-fresh.
-      * `_require_claim_holder`'s §9 arm (:16692) -- the legacy upgrade mints
+      * `_require_claim_holder`'s §9 arm (:16756) -- the legacy upgrade mints
         generation 1 on bare sid equality, so it needs the registry that
         cleared it to be COMPLETE, not merely readable. See there.
 
@@ -929,7 +929,7 @@ def _quarantine_artifacts() -> list:
         §6.5 worker-turn gate, which refuses on `True` alone, so poisoning a
         HEALTHY read here would let a real worker turn through §6.5 -- closing
         the §9 door by opening a wider one. Rule 1 lives at the §9 arm instead.
-      * `_identity_abstention_note` (:16413) -- the same distinction, in words,
+      * `_identity_abstention_note` (:16477) -- the same distinction, in words,
         because the generic note names `fleet doctor` and doctor is what MADE
         this state.
       * `_read_registry_readonly` (:4071) -- the VIEW surface's copy of the same
@@ -938,7 +938,7 @@ def _quarantine_artifacts() -> list:
         a never-initialised box prints, so the two states were not
         distinguishable from the read surface at all. A `Path.glob` is a read,
         so this costs the views doctrine nothing.
-      * `_doctor_check_registry` (:12654) -- doctor graded only on whether the
+      * `_doctor_check_registry` (:12718) -- doctor graded only on whether the
         LOADER RAISED, and the loader returns `{"workers": {}}` for a missing
         file, so the row called a renamed-away path *"is readable"* and doctor
         exited 0 with every row green (P1-12). A bare absence stays a PASS: no
@@ -951,7 +951,7 @@ def _quarantine_artifacts() -> list:
     whose name they were never told.
 
       * `_print_snapshot_table` (:6987) -- `fleet status --stale-ok`.
-      * `_tombstone_releasing_body` (:16849) -- `sup-release`, whose registry
+      * `_tombstone_releasing_body` (:16913) -- `sup-release`, whose registry
         arm previously swallowed the quarantined case in silence.
 
     The operator clears the artifact (after restoring what it holds), which
@@ -3107,7 +3107,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     -- reads `ok` while MISSING every record the artifact holds, and the §9 arm
     read that thinness as an affirmative *"you are provably not a worker"*. The
     presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:16692`), where it costs the §6.5 gate nothing.
+    (`:16756`), where it costs the §6.5 gate nothing.
 
     An artifact can also outlive its incident by days -- `_sweep_husks` tells the
     operator to restore the file first and delete the artifact second -- so that
@@ -8450,7 +8450,7 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
     # order-preserving dedup, THEN the cap. Never `sorted()`. The set is
     # exactly what lands in `retired_sids` below, minus the old sid when the
     # `--force` arm above has already stopped and tombstoned it.
-    _sweep = [s for s in dict.fromkeys(prior_retired + [old_sid])
+    _sweep = [s for s in _ordered_unique_sids(prior_retired + [old_sid])
               if s and not (old_live and s == old_sid)][-_RETIRED_SID_SWEEP_CAP:]
     if _sweep:
         with fleet_lock():
@@ -8716,6 +8716,40 @@ _RETIRED_SID_SWEEP_TIMEOUT_SECONDS = 5
 _RETIRED_SID_SWEEP_CAP = 20
 
 
+def _ordered_unique_sids(values):
+    """Order-preserving dedup over UNTRUSTED registry values (gate w52-glive3,
+    F1, second half).
+
+    This replaces `dict.fromkeys(...)` at both sweep call sites, and the
+    difference is the whole point: `dict.fromkeys` HASHES every element, so a
+    `dict` or `list` sitting in a corrupted `retired_sids` aborted the calling
+    verb with `TypeError: unhashable type` -- in the CALLER, before
+    `_sweep_retired_sessions` could apply any of its guards. Measured: that is
+    a second, distinct raise site from the one F1 quoted, and a fix confined to
+    the sweep body would have left it wide open on both verbs.
+
+    Unhashable values cannot be deduped, so they pass through UNCHANGED rather
+    than being dropped here. Dropping them silently would hide a corrupt
+    registry from the operator; `_sweep_retired_sessions` is the only place
+    that knows which worker is being swept and can say so on stderr, so the
+    reporting belongs there and this function stays a dedup.
+
+    `dict.fromkeys` semantics are otherwise preserved exactly, because the cap
+    at both call sites depends on them: FIRST occurrence wins, so a sid's
+    OLDEST position survives and `retired_sids`' oldest-first order is intact
+    when `[-_RETIRED_SID_SWEEP_CAP:]` takes the most recent."""
+    seen, out = set(), []
+    for value in values:
+        try:
+            if value in seen:
+                continue
+            seen.add(value)
+        except TypeError:
+            pass          # unhashable: cannot dedup it, must not drop it
+        out.append(value)
+    return out
+
+
 def _sweep_retired_sessions(name: str, retired_sids, other_current_sids,
                             run=subprocess.run, which=shutil.which) -> None:
     """Best-effort `claude stop` for each already-retired sid of one worker.
@@ -8756,6 +8790,34 @@ def _sweep_retired_sessions(name: str, retired_sids, other_current_sids,
     cap is a WALL-TIME bound, not a correctness guarantee -- a still-live
     retired sid past it simply is not swept by this invocation."""
     for retired in retired_sids:
+        # A CORRUPT ELEMENT MUST NOT ABORT THE VERB EITHER (gate w52-glive3,
+        # F1). `retired_sids` is read straight out of `state/fleet.json`, and
+        # the corrupted-or-hand-edited registry is the threat model the M1
+        # guard below is FOR -- so a non-string element there is squarely
+        # in-scope input, not an impossible one.
+        #
+        # This guard is FIRST because every other statement in this loop
+        # touches the untrusted value and all four of them raise on one:
+        # the membership test is unhashable-hostile, both progress-line
+        # truncations are not-subscriptable-hostile, and the stop itself
+        # hashes it. Measured before the fix: an `int`/`bool`/`float`
+        # element aborted BOTH verbs at the progress line with a raw
+        # `TypeError` and ZERO subprocess attempts. The `try` below is aimed
+        # at the stop and did not cover any of that -- a guard over one of
+        # four sites, which is how F1 exists at all.
+        #
+        # Skipped rather than coerced: a non-string is not a session id, so
+        # there is nothing to stop, and truncating its `str()` would print
+        # a confident-looking id for something that never was one. Reported on
+        # stderr like every other per-sid outcome, and truncated so a large
+        # corrupt value cannot flood the operator's terminal.
+        if not isinstance(retired, str) or not retired:
+            print(
+                f"fleet: {name}: retired session entry {retired!r:.40} is not a "
+                "session id -- skipping (registry looks corrupted)",
+                file=sys.stderr,
+            )
+            continue
         if retired in other_current_sids:
             print(
                 f"fleet: {name}: retired session {retired[:8]} matches another "
@@ -8913,9 +8975,11 @@ def _cmd_kill_native(name: str, rec: dict, run=subprocess.run, which=shutil.whic
     if rec.get("session_id"):
         _ordered.append(rec["session_id"])
     _ordered += list(extra_stop_sids or ())
-    # dict.fromkeys dedups on FIRST occurrence, so a sid's oldest position wins
-    # -- the under-lock record's ordering is authoritative where the two agree.
-    retired_sids = [s for s in dict.fromkeys(_ordered)
+    # `_ordered_unique_sids` dedups on FIRST occurrence, so a sid's oldest
+    # position wins -- the under-lock record's ordering is authoritative where the
+    # two agree. It replaced `dict.fromkeys` here for the reason in its docstring:
+    # an unhashable element in a corrupt registry aborted this verb on this line.
+    retired_sids = [s for s in _ordered_unique_sids(_ordered)
                     if s and s != sid][-_RETIRED_SID_SWEEP_CAP:]
     # The loop itself lives in `_sweep_retired_sessions`, shared with the
     # worker respawn path since wave 52 -- see its docstring for the M1
@@ -9088,7 +9152,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # P1-6: `read_registry_no_repair`, NOT `load_registry`. This is a PRE-FLIGHT
-    # resolution that runs from `cmd_kill:8982` / `cmd_respawn:8659`, before
+    # resolution that runs from `cmd_kill:9046` / `cmd_respawn:8659`, before
     # either verb has taken `fleet.lock` -- and `load_registry` QUARANTINES a
     # corrupt registry, i.e. RENAMES IT ASIDE, which is a write. An unlocked
     # write races every other fleet command, and it destroys the evidence the
@@ -9151,7 +9215,7 @@ def _supervisor_lifecycle_target(verb, name):
     # P1-6: `read_registry_no_repair` -- `load_registry` MINUS the rename, with
     # the same missing-file contract, the same validator and the same
     # `RegistryCorruptError`, so the arm below is unchanged. This read runs from
-    # `cmd_kill:8982` / `cmd_respawn:8659`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:9046` / `cmd_respawn:8659`, ahead of either verb's `fleet_lock`,
     # and quarantining here did two things: it wrote without the lock, and it
     # STOLE the quarantine from the lock-held read that was designed to perform
     # it. `cmd_respawn:8683-8685` spells out that design -- *"resolve under the
@@ -15287,8 +15351,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     live_sids` is what shipped, and `_record_sids`' own docstring says why it
     is wrong -- *"matching against `session_id` alone fails open on it
     (ND4a)"* -- for the thirteen other sites that already key on the union
-    (`:2822, :2903, :3164, :3314, :4700, :9122, :9442, :9723, :9941, :10028,
-    :10251, :11037, :15158`). The thirteenth is multi-fleet §5 step 2's
+    (`:2822, :2903, :3164, :3314, :4700, :9186, :9506, :9787, :10005, :10092,
+    :10315, :11101, :15222`). The thirteenth is multi-fleet §5 step 2's
     membership test (slice a2), which is the same argument one plane out: a
     home whose record was eagerly restamped would stop claiming its own
     fork-steered body mid-rotation. B6 was the one
@@ -15303,8 +15367,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :7947, :8486, :12998,
-    :18378), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :7947, :8486, :13062,
+    :18442), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -15994,8 +16058,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:7947, :8486, :12998,
-    #     :18378) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:7947, :8486, :13062,
+    #     :18442) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -16028,7 +16092,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         #     file aside (`:1063`), which is a write. Routing the identity read
         #     through it made `fleet send` shred the operator's evidence from a
         #     path that promises to touch nothing; the helper exists for exactly
-        #     this and names this gate as its reason (`:15086`). A `None` here
+        #     this and names this gate as its reason (`:15150`). A `None` here
         #     still fails toward the gate -- an unreadable registry is reported
         #     by its own doctor row, and is never a reason to decide blind.
         #     MERGE NOTE (2026-07-27): main and `fix/identity-registry-judges`
@@ -16670,7 +16734,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # A worker whose own record sits inside the artifact upgrades the claim.
         #
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as `_sweep_husks`
-        # spells it at `:11001`. Not an mtime comparison: `os.rename` preserves
+        # spells it at `:11065`. Not an mtime comparison: `os.rename` preserves
         # mtime, so the artifact's mtime is the PRE-corruption write time and any
         # recreated registry is always newer -- the comparison would never fire
         # on the one bypass it exists to stop.
