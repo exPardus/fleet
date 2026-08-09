@@ -571,6 +571,23 @@ That is the difference between this table and §7.5.1's (m2).
 
 **The merged tree is green. `w50/launchfix` lands cleanly on `main` @ `7b2ff75`.**
 
+**And here is the check, rather than my word for it** — F8's whole point is that *"written before the
+run"* is a self-report git cannot corroborate, so this gate ships the corroboration:
+
+```
+# at 5fc4a28
+git show 5fc4a28 | grep -nE '4317|4302'
+555:+> **4317 collected, 4302 passed, 14 skipped, 1 xfailed, 0 failed.**
+556:+> Derivation: `4238 + 12 + 67 = 4317` collected; `4290 + 12 = 4302` passed; the skip and xfail sets
+557:+> are predicted **unchanged** at 14 and 1. `4302 + 14 + 1 = 4317`.
+
+git show 5fc4a28 | grep -nE 'merged.*(passed|rc=)|(passed|rc=).*merged'     ->  (no output)
+git show 5fc4a28 | grep -n  'collect-only'   ->  only 4d78f6c/7b2ff75/168b608, never the merged tree
+```
+
+Both numbers occur in `5fc4a28` **only inside the prediction and its derivation** — no measurement of
+either, no merged-tree run of any kind. Timestamps: prediction `15:12:36`, results `15:28:53`.
+
 ### 5.7.1 Both standing assumptions confirmed, and the arithmetic is fully additive
 
 §5.6 named two assumptions so they could fail visibly. Neither did — I measured `main`'s own floor
