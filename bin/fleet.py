@@ -14960,7 +14960,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
     writer appends that record's OWN prior sid alone: :7804, :8277, :12720,
-    :18019), the same safety invariant §7.1's send carve-out rests on. That
+    :18034), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -15651,7 +15651,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
     #     writer appends that record's OWN prior sid alone (:7804, :8277, :12720,
-    #     :18019) -- so the sid union can never make one body answer for another.
+    #     :18034) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -17125,13 +17125,19 @@ def _render_sup_spawn_task(name: str, launch_id: str, campaign: str) -> str:
     # same doctrine as `_render_successor_task`.
     py = Path(sys.executable).as_posix()
     bundle = boot_bundle_path(name).as_posix()
+    # DATA PLANE (multi-fleet slice (c)), same argument as
+    # `_render_successor_task`'s: this body is dispatched sid-less and claims
+    # its row afterwards, so during its own pre-claim window §5 step 2 cannot
+    # answer for it either. NOT named by Sequencing §3 -- reported as a
+    # deliberate sibling fix in docs/lanes/w48-c.md.
+    home = FLEET_HOME.as_posix()
     return f"""You are the claude-fleet supervisor's GEN-0 body, fleet worker `{name}`, running in {FLEET_HOME.as_posix()} (three-tier §10.1).
 The `{launch_id}` segment of your worker name is a launch id, NOT your incarnation id -- your incarnation is minted at boot in step 1, and `fleet sup-status` reads supervisor/INCARNATION, never your worker name.
 
 Do exactly this, in order:
 1. FIRST ACT, before anything else -- run sup-boot with its output redirected to a file (class-4
    nonce doctrine: never read a secret off the stream tail):
-   "{py}" "{fleet_py}" sup-boot > "{bundle}" 2>&1
+   "{py}" "{fleet_py}" --fleet-home "{home}" sup-boot > "{bundle}" 2>&1
    Pass NO handoff flags -- this is the fresh-claim path. Note the command's exit code.
 2. Read the verdict, and on success your incarnation and nonce, FROM THE FILE:
    grep -E "^(VERDICT|INCARNATION|NONCE):" "{bundle}"
@@ -17159,7 +17165,7 @@ Do exactly this, in order:
      SUP-BOOT-FROZEN <reason>
 5. After a successful claim: proceed per skills/fleet/supervisor.md -- with the boot bundle
    content you read in step 3 (GOALS, journal tail, knowledge index, fleet status), run an early
-   "{py}" "{fleet_py}" sup-checkpoint "<note>" --nonce <YOUR-NONCE>, substituting the NONCE
+   "{py}" "{fleet_py}" --fleet-home "{home}" sup-checkpoint "<note>" --nonce <YOUR-NONCE>, substituting the NONCE
    value from step 2, then begin the campaign brief below. The flag is not optional: every
    `sup-*` holder verb is refused without it.
 
@@ -17360,11 +17366,20 @@ def _render_successor_task(successor_inc: str, old_inc: str, handoff_token: str)
     # `py -3.13` (a Windows-only launcher): the successor must invoke the
     # same Python this incarnation was launched with, on any platform.
     py = Path(sys.executable).as_posix()
+    # DATA PLANE, and the reason is the widest pre-claim window this fleet has
+    # measured (multi-fleet slice (c)). A successor's registry row carries
+    # `session_id=None` for 33.0-63.1s after dispatch, so for up to a minute
+    # §5 step 2's sid->home lookup cannot answer for it and step 3 would hand
+    # it the DONOR's `FLEET_HOME`. Every verb below is irreversible or
+    # claim-moving; naming the home on each is step 1, applied by
+    # `strip_global_fleet_home` before argparse, so the flag's position
+    # relative to the verb does not change its meaning.
+    home = FLEET_HOME.as_posix()
     return f"""You are the claude-fleet supervisor SUCCESSOR, incarnation {successor_inc}.
 Your predecessor ({old_inc}) dispatched you mid-handoff (spec docs/superpowers/specs/2026-07-13-native-agents-pivot-design.md §4).
 
 Do exactly this, in order:
-1. Run: "{py}" {fleet_py} sup-boot --handoff-inc {successor_inc} --handoff-token {handoff_token}
+1. Run: "{py}" "{fleet_py}" --fleet-home "{home}" sup-boot --handoff-inc {successor_inc} --handoff-token {handoff_token}
    This prints your boot bundle and writes supervisor/HANDSHAKE (carrying the
    token hash and your own freshly minted generation). It also prints a
    `NONCE:` line -- that is YOUR generation; keep it, you present it on your
@@ -17374,9 +17389,9 @@ Do exactly this, in order:
    one successor may boot. You hold nothing and there is nothing to retry. STOP --
    take no actions, end your turn with the final message: HANDOFF-ORPHAN {successor_inc}
 2. Take NO spawn/respawn/send/kill/clean actions before claim transfer -- spec §4's double-spawn guard.
-3. Poll every ~30s (up to 10 minutes): "{py}" {fleet_py} sup-status --json
+3. Poll every ~30s (up to 10 minutes): "{py}" "{fleet_py}" --fleet-home "{home}" sup-status --json
    - When incarnation.incarnation_id == "{successor_inc}": the claim is yours. Run:
-     "{py}" {fleet_py} sup-checkpoint "claim received via handoff from {old_inc}" --nonce <YOUR-NONCE>
+     "{py}" "{fleet_py}" --fleet-home "{home}" sup-checkpoint "claim received via handoff from {old_inc}" --nonce <YOUR-NONCE>
      substituting the NONCE value step 1 printed. THE FLAG IS NOT OPTIONAL: `sup-checkpoint`
      is a `_require_claim_holder` verb, so without it this call is REFUSED and the refusal
      files a false second-body row in `fleet doctor` -- a permanently-red row trains the
