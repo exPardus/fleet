@@ -784,6 +784,14 @@ py -3.10 -m pytest -q   ->  4290 passed, 14 skipped, 1 xfailed in 360.72s   rc=0
 **Hit on every field, on both interpreters, including the skip and xfail counts this lane declined
 to predict last time.** 4290 + 14 + 1 = 4305.
 
+> **CORRECTION, gate `w51-glaunch2` m2.** *"Hit on every field"* counts five fields, and only
+> **four** of them were genuinely at risk. `4305 collected` was **measured before the prediction was
+> written** — §7.5 derives it with `--collect-only` in the same commit that states the prediction —
+> so predicting it was restatement, not forecast. The four that were at risk (passed, skipped,
+> xfailed, failed) all hit on both interpreters, and the prediction stands; the boast was one field
+> too wide. Restated because it costs nothing to be exact and this lane has now been caught twice
+> shipping a claim slightly larger than its evidence.
+
 Working-tree digest over all 242 tracked files, at three points — before 3.13, between the runs,
 after 3.10:
 
@@ -798,6 +806,20 @@ latter, which hashes the index and is silent on unstaged changes. `git status --
 empty before the run and after it, and every mutant this turn ran in a throwaway clone, so no
 floor could have started on a mutated tree.
 
+## 7.6 What the discharge did NOT do
+
+- **Did not touch `bin/fleet.py`.** `git diff --name-only 4a62e21..HEAD`: two test modules,
+  `CONTRIBUTING.md`, this report. The one-line fix the gate cleared is byte-identical.
+- **Did not close the remaining census holes** — unannotated parameters, `.format()`/`%`/
+  concatenation/`str.join`, and subscript-assignment sinks. Each is now pinned as a hole
+  (§7.3), so closing one forces the census to be edited in the same commit.
+- **Did not widen shapes 1 and 3** of the doc pin (verbs, Python floor). Still `ENTRY_DOCS`-only,
+  still stated as a known gap, and `CONTRIBUTING.md` now says so where a contributor will read it.
+- **Did not hold `docs/OPERATOR-GATES.md`** (§7.4 F6) — deliberate, and the reason is in the code
+  beside the exemption, not only here.
+- **Did not bring `docs/SPEC.md` under `tools/verify_receipts.py`.** Its `grep -c` receipt text is
+  still unverified; only the number is pinned. Unchanged from §2.7, still a campaign.
+- **Ran no `fleet` verb at all this turn.**
 ## 7.7 The auto-merge claim — re-checked, because the ground moved
 
 The discharge brief said the branch *"still auto-merges onto `main` @ `4d74d22`"* on the strength
@@ -835,17 +857,3 @@ the merged result rather than only against the base.
 **BELIEVED, stated as such:** that `main` will still be at `6492176` when this lands. If it moves
 again, this check is about a past tree like any other receipt, and the re-run is cheap.
 
-## 7.6 What the discharge did NOT do
-
-- **Did not touch `bin/fleet.py`.** `git diff --name-only 4a62e21..HEAD`: two test modules,
-  `CONTRIBUTING.md`, this report. The one-line fix the gate cleared is byte-identical.
-- **Did not close the remaining census holes** — unannotated parameters, `.format()`/`%`/
-  concatenation/`str.join`, and subscript-assignment sinks. Each is now pinned as a hole
-  (§7.3), so closing one forces the census to be edited in the same commit.
-- **Did not widen shapes 1 and 3** of the doc pin (verbs, Python floor). Still `ENTRY_DOCS`-only,
-  still stated as a known gap, and `CONTRIBUTING.md` now says so where a contributor will read it.
-- **Did not hold `docs/OPERATOR-GATES.md`** (§7.4 F6) — deliberate, and the reason is in the code
-  beside the exemption, not only here.
-- **Did not bring `docs/SPEC.md` under `tools/verify_receipts.py`.** Its `grep -c` receipt text is
-  still unverified; only the number is pinned. Unchanged from §2.7, still a campaign.
-- **Ran no `fleet` verb at all this turn.**
