@@ -180,7 +180,9 @@ campaign has **RATIFIED DESTRUCTIVE**, which only the fold reverses.
 
 ### 4.1 The population
 
-MEASURED by AST over `bin/fleet.py`. The lint (`test_homes_list.py:532`) collects every scope in
+MEASURED by AST over `bin/fleet.py`. The lint (`test_homes_list.py:532` **as it stood at
+`7b2ff75`** -- this branch edits that file, so the line has since moved and the citation is a
+claim about the census commit, not about HEAD) collects every scope in
 which the **`ast.Name` `homes_list_path`** appears, and bans `write_text`, `write_bytes`,
 `unlink`, `rename`, `replace`, `writelines`, `truncate` and `open` there.
 
@@ -479,7 +481,7 @@ pin category. What (d) will owe against **this** file:
 
 * **No fifth operator gate.** §2 explains why none is needed.
 * **No edit to `bin/fleet.py`.** Every finding here is a *pin* defect; the production code
-  behaved correctly in all eleven mutant drives.
+  behaved correctly in all **twelve** mutant drives.
 * **No edit to `docs/specs/multi-fleet.md` §7.** It is ratified text. §1's table is the record of
   what it means against the shipped tree, and that belongs in a lane report.
 * **`tests/test_home_resolution.py::test_the_real_list_is_untouched` is left in place.** It is
@@ -555,7 +557,7 @@ All under `$CLAUDE_JOB_DIR/tmp` (`C:/Users/Techn/.claude/jobs/b72f5258/tmp`), ou
 * **`USERPROFILE` redirection** as the mutant fence, rather than `FLEET_HOME` or `--fleet-home` —
   neither of which fences `Path.home()`, which is what the homes list is resolved from.
 
-### 11.1 The eleven mutants, in one table
+### 11.1 The twelve mutants, in one table
 
 | id | scope | what it breaks | verdict |
 |---|---|---|---|
