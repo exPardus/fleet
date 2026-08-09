@@ -152,6 +152,39 @@ MUTANTS = [
      "              if s and not (old_live and s == old_sid)][-_RETIRED_SID_SWEEP_CAP:]",
      "              if s][-_RETIRED_SID_SWEEP_CAP:]  # MUTANT M-W52-DOUBLE",
      "KILLED"),
+
+    # The two CONTRACT-PRESERVATION pins the build must not have moved. Both
+    # were green before the build and after it, so without a mutant each they
+    # are exactly the shape gate2 B2 named -- a pin nobody has shown can fail.
+    ("M-W52-REFUSE", "the no-force refusal on a Q1-live turn is deleted, so a "
+                     "bare respawn walks into the sweep against a RUNNING turn "
+                     "-- the one thing the unconditional stop must never do",
+     """    stopped_ok = None
+    if old_live:
+        if not getattr(args, "force", False):""",
+     """    stopped_ok = None
+    if old_live:
+        if False:  # MUTANT M-W52-REFUSE""",
+     "KILLED"),
+
+    ("M-W52-ROSTER", "the unfetchable-roster refusal is deleted outright (M-B2 "
+                     "only force-gates it, and force-gating leaves the "
+                     "no-force path refusing, so M-B2 cannot reach this pin): "
+                     "an unreadable roster now reads as `old_live=False` and "
+                     "the sweep stops sessions on ambiguous data",
+     '''    roster_ok, entries = _fetch_agents_roster(which=which, run=run)
+    if not roster_ok:
+        raise FleetCliError(
+            f"{name}: could not fetch the native roster -- refusing respawn "
+            "until the old session's liveness can be verified"
+        )''',
+     '''    roster_ok, entries = _fetch_agents_roster(which=which, run=run)
+    if False:  # MUTANT M-W52-ROSTER
+        raise FleetCliError(
+            f"{name}: could not fetch the native roster -- refusing respawn "
+            "until the old session's liveness can be verified"
+        )''',
+     "KILLED"),
 ]
 
 # M-D needs a compensating definition so the AST CALL COUNT is unchanged --
@@ -170,6 +203,29 @@ def sh(cmd, cwd=None):
 
 def sha(p):
     return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+def text_roundtrip_is_byte_exact(target, floor):
+    """Wave 51's rule -- *a mutant planter must work on BYTES* -- ENFORCED
+    rather than trusted, added by w52.
+
+    This driver patches with `read_text`/`write_text`, which translate line
+    endings in BOTH directions. That is byte-exact only while the export's
+    EOLs already match `os.linesep`, which is measurably true here (`git
+    archive` applies the `.gitattributes`/eol conversion, so on win32 the
+    export is CRLF exactly like the checkout, and `os.linesep` is CRLF) --
+    and silently destructive the moment it is not: a mixed-ending file, an LF
+    export graded on Windows, a CRLF file graded on Linux.
+
+    `sha()` reads BYTES, so the existing post-restore check is genuine and
+    would notice -- but only AFTER a mutant had already been graded against
+    bytes that were never HEAD's, and a verdict from the wrong bytes is worth
+    nothing whichever colour it comes out. Wave 51's other rule is the one
+    that applies: a plant driver must prove its own mechanism sound BEFORE it
+    runs anything. This does the round-trip as a NO-OP patch and compares.
+    """
+    target.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
+    return sha(target) == floor
 
 
 def build_scratch(scratch):
@@ -227,6 +283,13 @@ def main():
     floor = sha(target)
     print(f"scratch      : {scratch}")
     print(f"FLOOR sha256 : {floor}")
+
+    if not text_roundtrip_is_byte_exact(target, floor):
+        print("TEXT ROUND-TRIP IS NOT BYTE-EXACT on this platform/checkout -- "
+              "every patch below would grade bytes that were never HEAD's. "
+              "ABORT (see `text_roundtrip_is_byte_exact`).")
+        return 5
+    print(f"text round-trip byte-exact : True")
 
     rc, line, _ = run_tests(scratch, args.py)
     print(f"=== FLOOR (clean export, no mutant) === rc={rc}  {line}")
