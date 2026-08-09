@@ -8283,3 +8283,1128 @@ Four gates open, all his, carried untouched across three waves. I will not tick 
 ## NEXT
 
 `fleet autoclean`, then re-derive the state of `main` before writing a single brief.
+
+## 2026-08-09T15:44:19Z CHECKPOINT inc=inc-20260809T153033Z-fad2 sid=6a615195-087f-457d-a698-396d0e05e450
+
+WAVE 52 DISPATCHED — FOUR LANES, AND I CORRECTED MY OWN DISPATCHING BRIEF BEFORE A SINGLE LANE STARTED.
+
+## `main == origin == 64b43c2`, committed BEFORE dispatch, deliberately
+
+The boot journal is on `main` and pushed, read back from origin **byte-identical**, and all four lane
+worktrees were cut from that one sha. My predecessor's sixth correction against itself was that it
+landed three times mid-wave and moved `main` under two in-flight lanes; both re-derived unprompted
+and it cost nothing, but the bill was real and the dispatcher handed it to them. **`main` will not
+move again until every lane has reported.** I told each lane so, in writing, in its brief.
+
+`fleet autoclean` ran first: `archived 0, skipped 167, errors=0`. The 2026-07-27→28 §7-exemption bug
+is **not** recurring — a beat-driven sweep holds a fresh claim, which is exactly the condition that
+used to expose it.
+
+## THE CORRECTION, AND I FOUND IT IN THE BRIEF THAT DISPATCHED ME
+
+My campaign brief and the successor queue both say: *"The liveness build … `w50/live` §6 is an
+executable brief for it,"* where *it* is the worker respawn path having no stop, no tombstone and no
+sweep.
+
+**§6 disclaims that in bold, in its own opening subsection.** `docs/lanes/w50-live.md` §6.0 is titled
+*"WHAT THIS BUILD DOES AND DOES NOT FIX"* and reads: *"The build **does not change what Q1 answers**
+… After the entire §6 build, `fleet respawn <worker>` against a `done`+live-pid old sid still
+attempts no stop, writes no tombstone, and sweeps nothing (§3.8)."*
+
+So the document holds **two** builds and the queue fused them: **§6** collapses Q1's five spellings
+into one in-band value (11 call sites, 3 widened signatures, ~40 re-pins) and does not close the gap;
+**§3.8** is the gap, and it is specced nowhere. I dispatched §3.8 and explicitly descoped §6, and I
+put the correction at the top of the lane's brief rather than quietly routing around it. Had I obeyed
+the pointer I was given, the lane would have spent a wave on a refactor whose own author wrote down
+that it does not fix the thing it was ordered for.
+
+**This is the campaign's standing theme arriving on the brief layer**: an instrument's answer is about
+the tree it is standing in, and a *pointer* can cite a section that disclaims what it is cited for.
+
+## AND THE DEFECT IS SHARPER THAN THE QUEUE PUT IT
+
+Re-derived by AST at `64b43c2` before I wrote the brief — the property holds and the line numbers
+have all moved (`:8629`/`:9430` in the report are `:8776`/`:9577` now; a pinned claim about a past
+tree is not rot and I did not "fix" them):
+
+`_RETIRED_SID_SWEEP_CAP` defined `:8650`, used at `:8776` (`_cmd_kill_native`) and `:9577`
+(`_cmd_respawn_supervisor`). `_cmd_respawn_native` (8258–8557) references it **nowhere** and appends
+at `:8420` unconditionally.
+
+Then `_cmd_kill_native`'s own docstring at `:8671` changes the shape: *"`retired_sids` **has no cap
+anywhere else in the codebase**"* — so the constant is a **wall-time bound on the sweep**, not a cap
+on the list. The respawn defect is therefore not "the sweep is uncapped"; it is that **there is no
+sweep at all**, so N respawns leave N prior forks resident and N entries accumulated forever. The
+durable half is the missing tombstone — `write_tombstone_outcome` exists precisely because
+*"`claude stop` fires no Stop hook"*, and it is fleet's only record of a deliberate end.
+
+## THE FOUR LANES
+
+| lane | branch | what |
+|---|---|---|
+| `w52-launch` | `w52/launch` | the stranger-clone rehearsal, driven ALL THE WAY THROUGH for the first time |
+| `w52-dfix` | `w52/dfix` | slice (d)'s three landed-unfixed findings, plus a pin that cannot fail |
+| `w52-live` | `w52/live` | §3.8 — the respawn path's missing stop, tombstone and sweep |
+| `w52-fork` | `w52/fork` | re-measure wave 50's four fork-steer MAJORs at HEAD, then fix what survives |
+
+All four `--mode bypass`, model opus, briefs in `state/tasks/lens/`, `@file` for the prose, reports
+ordered **committed on the lane's own branch** at `docs/lanes/<name>.md` — never `state/`.
+
+**`w52-launch` is the operator's own axis and the one I care most about.** Wave 48's rehearsal stopped
+three steps in at a real blocker; that blocker is fixed. Its §10 lists what nobody has ever run:
+quickstart step 4 with `--statusline` (it writes the operator's live `~/.claude/settings.json`), and
+**every worker verb — `spawn`, `send`, `peek`, `result`, `wait`, `respawn`, `resume-limited`, `kill`,
+`clean`.** So the honest state of "launch-ready" is that the INSTALL half has been rehearsed and
+repaired and the USE half has never been driven by anyone following the documentation. I gave that
+lane the one fence term that unlocks step 4 — redirect `USERPROFILE`/`HOME` into a throwaway so `~`
+resolves there — and told it to **prove** the redirection before running anything mutating, and to
+report "step 4 unrunnable" rather than assert a fence it did not establish.
+
+## TWO THINGS I RE-DERIVED RATHER THAN INHERITED
+
+**Slice (d)'s MAJOR reproduces at `64b43c2`**, measured by me: `bin/fleet_statusline.py:298` exempts
+`TYPE_FAULT` from the cap, `:300` leaves `FIELD_UNKNOWN` inside it, `_MAX_UNKNOWN_BUCKETS = 3`. `?` is
+ASCII `0x3F`, so three foreign statuses beginning `!`, `"`, `#` sort earlier, fill the cap and hide
+fleet's own word while `?type` survives the identical three.
+
+**And the gate's suggested remedy does not by itself make the docstring true.** `_ORDER` holds seven
+names, so `interrupted` (written by `cmd_interrupt`) and `dead-suspected` (written by the liveness
+recompute) are ALSO fleet-authored and ALSO capped — three such names, not one. The docstring claims
+*"every name the cap can hide is a name the ATTACKER chose."* Exempting `FIELD_UNKNOWN` alone leaves
+that sentence false. I told the lane to verify my census rather than inherit it, and that restating
+the docstring honestly may be the better fix — an exemption list that grows without a rule is how
+this got here.
+
+## A TRAP I NEARLY FELL INTO, AND HANDED FORWARD INSTEAD
+
+Grepping `MANAGER MESSAGE` at HEAD returns `bin/fleet.py:1837`: *"subsumes the explicit
+`<MANAGER MESSAGE>` refusal that used to sit here."* **That reads exactly like fork-steer F1 being
+fixed.** It is not — it sits in `read_brief`'s recovery path, a different function on a different
+surface from `dispatch_bg`'s envelope at `:13342`, where the body still appears to reach the f-string
+unescaped. I spent one command, stopped, and gave the near-miss to the lane as a named trap rather
+than a conclusion — including the observation that if a send-path refusal really was removed as
+"subsumed" by a check that does not cover the send path, **the fix wave that closed F1 opened it
+wider**, which is a bigger finding than F1.
+
+## GATES, AND WHAT I HAVE NOT TOUCHED
+
+Four operator gates open, all his, none ticked, **no fifth added**. `fleet init` NOT run and not
+ordered — slice (c) stays inert on this home. `pin-pass.json` stays HELD at 2.1.222; no lane is
+ordered to stamp it. Slice (b) stays blocked on gate 3.
+
+`sup-context` ~150k against a 350k soft trigger.
+
+## 2026-08-09T16:20:39Z CHECKPOINT inc=inc-20260809T153033Z-fad2 sid=6a615195-087f-457d-a698-396d0e05e450
+
+THE REHEARSAL RAN ALL THE WAY THROUGH FOR THE FIRST TIME, AND IT FOUND A HIGH-SEVERITY DEFECT ON THE OPERATOR'S OWN DOCUMENTED PATH — IN THE SAME PREDICATE A SIBLING LANE IS BUILDING NEXT TO, FAILING IN THE OPPOSITE DIRECTION.
+
+## `w52-launch` COMPLETE — `docs/lanes/w52-launch.md`, 1010 lines, committed at `7c87730` on `w52/launch`
+
+All four parts driven, nothing cut. `main` and `origin/main` still `64b43c2`; no push, no other ref
+moved. **Quickstart steps 3 and 4 ran for the first time in this repo's history, rc 0 both** — the
+unlock was redirecting `USERPROFILE`/`HOME`, which moves fleet's machine-global write targets AND
+`claude`'s own config into the throwaway. That closes `launch-readiness` gap 2a for the directory form
+and discharges wave 48 §11's BELIEVED.
+
+**And the fence has a cost nobody had found: the same redirect takes the CREDENTIALS** — `claude -p`
+answers `Not logged in`. **No single fence runs both halves.** The lifecycle therefore ran under a
+narrower fence, and the lane's discriminator attributes containment to the **install-root leg**, not
+to the sid removal: with its session id restored, the clone's shim still resolved to the clone. Every
+future lane inherits that sentence, which is why I have sent it to a gate rather than banked it.
+
+## W52-2 — HIGH, AND IT COLLIDES WITH A LANE I HAVE IN FLIGHT
+
+`fleet respawn <worker>` refuses *"turn is running -- pass --force to interrupt it first, or wait for
+it to finish"* on a worker that `fleet status` and `status --json` both call **idle**. Reproduced four
+times over ten minutes; still true at T+8 min with the pid alive, so not a race.
+
+Cause, measured at the source: on Windows at claude 2.1.226 a **finished** bg session's roster entry
+is `state: "working"`, `status: "idle"`, `pid` present. `_roster_live_sids` counts a sid live on
+`sessionId` + (`status` or `pid`) **present** and `state != "done"` — so the `done` guard never fires
+and a finished turn reads as a running one. **The field that actually reports turn completion,
+`status`, is the one whose VALUE the predicate never reads.** Both remedies the message offers are
+wrong: the turn already finished, and `--force` "interrupts" nothing. `interrupt` → `respawn` is a
+closed R2 loop, because `interrupt`'s own success message points at the bare form that refuses.
+
+**And the docstring predicts this bug and then exempts the platform it happens on** — it carries the
+2026-07-19 posix finding about a lingering host process blocking respawn on an idle worker, and closes
+*"(On Windows the two conditions agree -- done entries lose pid/status.)"* That is half true and
+load-bearing in the wrong direction: `done` entries do lose both keys (90 of 164 on this machine), but
+**a just-finished Windows session is not `done` yet.**
+
+**THE COLLISION.** `w52-live`'s §3.8 target is this same predicate answering **not-live** for a
+`done`+live-pid sid, so the stop/tombstone is skipped. W52-2 is it answering **live** for a
+finished-turn sid. **One predicate, measured wrong in BOTH directions.** That is a far stronger case
+for `w50/live` §6.7's owed decision — *should Q1 consult the OS at all* — than existed when I wrote
+that brief.
+
+I steered `w52-live` mid-turn with the measurement and **did not change its scope**: still no change
+to what Q1 answers, because its fix is meant to be correct regardless of Q1's verdict (the sid is
+retired unconditionally at `:8420`, so the sweep and tombstone can be too), and because W52-2 has not
+been gated yet — I sent a measurement, not a ruling. I asked it for three small things: whether W52-2
+changes its fix, a citation in whatever it writes about §6.7, and the standing instruction to stop and
+report if its fix genuinely requires Q1 to change. I explicitly told it **not** to re-drive W52-2 —
+four lanes wide is not the place to spend context re-proving a sibling.
+
+## THE OTHER FIVE
+
+**W52-4, MED — the statusline quoting fix reaches no existing install, and THE LIVE MACHINE STILL RUNS
+THE UNQUOTED FORM.** Nothing detects it: no `doctor` row reads `user_settings_path()` at all. I have
+not touched the operator's config and will not; this is his machine and his call. I want it gated
+before it goes anywhere near the docket.
+
+**W52-5, MED — the README's flagship demo block is output the shipped code cannot produce**: all five
+`peek` lines, plus `COST 0.00`, which `bin/fleet.py` is explicitly written never to print.
+
+W52-6/3/7 LOW: a stale repair-tracking sentence in `launch-readiness.md`, `interrupted` overflowing
+the STATUS column, and `send` to an idle worker rotating the session id.
+
+Part 3 supplied the regression the launch blocker never got — spaced clone plus spaced venv
+interpreter, with a differential where removing only the quotes reproduces the split.
+
+Containment audit: `~/.claude/settings.json` byte-identical (`578BDE7B…`, 1859 bytes, mtime
+unchanged), `fleet-homes.list` and `fleet-statusline-chain.json` still absent, live
+`worker-settings.json` untouched, all five probe sessions stopped.
+
+## THE GATE, AND THE FIRST THING I ORDERED IT TO ATTACK IS MY OWN BRIEF
+
+`w52-glaunch3` dispatched on `w52/glaunch3` @ `7c87730`, forked from the branch under gate so its
+verdict lands with the work.
+
+**I ended the rehearsal brief with: *"This rehearsal has never once been run without finding
+something. Assume that is still true, and that the something is in the half nobody has walked."*
+That pre-commits an outcome**, and this campaign has already named the defect — *a brief that
+pre-commits a severity is choosing the verdict.* The lane came back with six findings, one HIGH,
+exactly in the half I pointed at. So the gate's first job is to ask whether any severity was earned by
+its measurement or by my sentence, and — symmetrically — whether the install half went unexamined
+because I called it "rehearsed and repaired". I would rather buy that answer than assume it.
+
+I also told the gate the `385 passed, 2 skipped` figure is a SUBSET run and to establish the real floor
+at `7c87730` on both interpreters, checking whether `docs/lanes/` is exempt from `CHECK_COUNT_DOCS`
+first — a docs-only landing moves the floor by construction and my predecessor missed exactly that by 4.
+
+## STATE
+
+`main == origin == 64b43c2`, unmoved and not moving until the wave's lanes report. Four working
+(`w52-dfix`, `w52-live`, `w52-fork`, `w52-glaunch3`), one idle (`w52-launch`). `autoclean` clean,
+`errors=0`. Four operator gates carried, none ticked, **no fifth** — and W52-4 is the closest thing to
+a candidate, which is exactly why it goes to a gate before it goes anywhere near the operator.
+`sup-context` ~190k against a 350k soft trigger.
+
+## 2026-08-09T16:54:24Z CHECKPOINT inc=inc-20260809T153033Z-fad2 sid=6a615195-087f-457d-a698-396d0e05e450
+
+THE GATE REFUTED THE HIGH — AND I HAD ALREADY RELAYED IT TO A SIBLING LANE AS A MEASUREMENT. THAT STEER IS MINE AND IT WAS AVOIDABLE.
+
+## `w52-glaunch3` — VERDICT: GATING. `docs/lanes/w52-glaunch3.md` @ `e97bbcb` on `w52/glaunch3`
+
+Its own framing, and it is the right one: **GATING not because the commit is unsafe** — 1010 lines of
+`docs/lanes/`, no code, no pin moved — **but because the campaign is about to act on this report**, and
+its load-bearing finding is graded on a property that does not replicate.
+
+**W52-2 does not hold as written.** Driven six times on a byte-identical `bin/fleet.py`:
+
+- **5 of 6 drives of the documented bare `fleet respawn <name>` returned rc=0.**
+- The single reproduction was at **`state:"blocked"`** — a third state the report never names — not the
+  `state:"working"` it pasted.
+- 30-sample/60 s poll after a turn ends: only ever `state=done status=idle pid=present`. **No window.**
+- Positive control (respawn during a genuinely running turn) → rc=1. **The null is trustworthy.**
+
+**And the mechanism is backwards.** *"The fix that rescued macOS cannot fire on Windows"* is refuted:
+`done` entries on this machine **do** keep `pid` and `status` — including the reporting lane's own
+session — and the `state != "done"` guard is precisely what makes five of six drives succeed. The
+lane read a docstring's parenthetical as an exemption; the measurement says **the parenthetical is
+false and the code it apologises for is what keeps Windows working.** Regraded **MEDIUM**.
+
+**BLOCKING (G1), and it is the item that matters most to this fleet:** the proposed
+`status == "idle"` remedy is unscoped. `_roster_live_sids` has **13 call sites**, several in supervisor
+claim and release, and the live roster carries a supervisor at `state:"blocked" status:"idle"` with its
+pid alive — **that fix would reclassify a live supervisor as not-live.** The obvious remedy for the
+finding would have broken the machinery holding this claim.
+
+Also MAJOR: a **MEASURED** pasted receipt does not reproduce — `grep -n "user_settings_path()"` prints
+**4** lines, not the 3 pasted, on a byte-identical tree; the finding survives, the word *exhaustive*
+does not.
+
+**Five of seven findings CONFIRMED at the severity given, one STRONGER than claimed** (W52-5:
+`[mail]`/`[assistant]` never existed in `bin/fleet.py` at any commit). The containment audit
+re-verifies on every readable line **including the degrading one — no probe session is alive**. The
+fence claim *"no single fence runs both halves"* survives a wider discriminator than the lane ran, and
+the gate calls it the report's best work.
+
+## THE CORRECTION AGAINST ME, AND IT IS THE SECOND ONE THIS WAVE
+
+**I relayed a lane's self-report to a sibling lane as a measurement before it had been through a
+gate.** I steered `w52-live` with W52-2 framed as *"measured and reproduced four times"* and built a
+*"one predicate, measured wrong in both directions"* argument on it. The gate took under an hour.
+**I could have waited and I did not.**
+
+I have sent `w52-live` a full correction: drop the both-directions framing, correct it **in place** in
+its report if already written and say it came from me, cite §6.7 more weakly. **Its scope never
+changed and that instruction is now vindicated for a measured reason rather than a cautious one** — I
+told it twice not to change what Q1 answers, and G1 shows a Q1 widening can declare a live supervisor
+dead. Holding that fence was the single most valuable thing in either steer, and it was the part I
+was least sure of when I wrote it.
+
+**A finished lane's result is a claim, not a verdict.** That sentence exists in this campaign's
+knowledge already, on the results axis. I paid for it again on the steering axis.
+
+## A SECOND CORRECTION: MY OWN BRIEF PRE-COMMITTED THE OUTCOME
+
+I ended the rehearsal brief with *"this rehearsal has never once been run without finding something —
+assume that is still true, and that the something is in the half nobody has walked."* **A brief that
+pre-commits a severity is choosing the verdict**, and this campaign named that defect two waves ago. I
+ordered the gate to test for it specifically. Its answer: **five of seven findings earned, one earned
+and understated, one inflated — the HIGH, exactly where my sentence pointed.** I do not think the lane
+invented it; I gave it a reason to grade upward.
+
+I also miscounted the lane's ledger in the gate brief — six findings and one HIGH, when it has
+**seven and two** — and told the gate the `385 passed` floor claim was in the report when it is in the
+lane's **gitignored journal**.
+
+## AND A THIRD: I CARRIED A LESSON ACROSS A BOUNDARY IT DOES NOT CROSS
+
+I warned three lanes that a docs-only commit *"can move the floor by construction"* and to check
+whether `docs/lanes/` is exempt. **Measured by the gate: it IS exempt — the first `_HISTORICAL_PREFIXES`
+entry.** `CHECK_COUNT_DOCS` = 30, collection **4636 at both commits**. My predecessor's +4 miss came
+from `docs/operator/`, which is not exempt; I generalised it to a prefix that is. The instruction to
+*check* was right; the implication was false, and I have sent both build lanes the measured baseline
+so they neither re-derive it nor inherit my error.
+
+**Floor at `7c87730`: py 3.10 GREEN, `4621 passed, 14 skipped, 1 xfailed`.** The lone 3.13 failure is
+a flake (3/3 green in isolation) — I passed it on as a caution with an explicit refusal to let it wave
+through a red.
+
+## DISCHARGE DISPATCHED, WITH NEW SCOPE THAT IS LICENSED
+
+`w52-launch` fork-steered (new session `3483d5c3`) with a three-part discharge: (A) correct the report
+— retract the remedy with the 13 call sites re-derived **by AST, not inherited from the gate**,
+regrade HIGH→MEDIUM, retract the mechanism, fix the receipt, close five MINORs including the owed
+"what the narrow fence could not have caught" census; (B) **fix the two CONFIRMED documentation
+defects** — the README's fabricated demo block (generated, not composed) and `launch-readiness.md`'s
+stale sentence; (C) floor discipline, noting that its README edits are **not** under the exempt prefix.
+
+**`bin/` stays untouched.** W52-2, W52-4, W52-3 and W52-7 stay REPORTED for a successor with the
+gate's measurement attached — and W52-2's obvious remedy is now known-unsafe, which is exactly the
+argument against a quick fix. Fix-waves mint defects 7 of 7 in this campaign's own count.
+
+I applied the everywhere-rule to the discharge order itself: the retracted W52-2 claims appear in the
+report's §3, its ledger and its summary, and I told the lane to grep its whole report rather than the
+lines the gate quoted.
+
+**Wave-48 hazard noted and not yet discharged:** `fleet send` printed `fork-steered`, and that call has
+a measured ~1-in-5 mode where the fork silently redoes its previous task. I will verify delivery rather
+than assume it.
+
+## STATE
+
+`main == origin == 64b43c2`, unmoved. `w52-dfix`, `w52-live`, `w52-fork` working; `w52-launch`
+discharging; `w52-glaunch3` idle and done. `autoclean` clean, `errors=0`. Four operator gates carried,
+none ticked, **no fifth** — and W52-4 (the shipped statusline fix reaching no existing install, with no
+doctor row detecting it) is CONFIRMED but stays off the docket until someone can propose a remedy that
+is not the one the gate just blocked. `sup-context` ~230k against a 350k soft trigger.
+
+## 2026-08-09T16:58:54Z CHECKPOINT inc=inc-20260809T153033Z-fad2 sid=6a615195-087f-457d-a698-396d0e05e450
+
+A LANE REFUSED THREE OF MY INSTRUCTIONS AND WAS RIGHT ALL THREE TIMES — AND TWO OF THEM ARE DEFECTS IN THE TEMPLATE EVERY BRIEF ON THIS MACHINE IS BUILT FROM, NOT IN THE BRIEF.
+
+## `w52-fork` PHASE 1 COMPLETE — `w52/fork` @ `2e3a842`, 8 commits, tree clean, `main` unmoved
+
+The census the queue asked for, measured at `64b43c2` rather than inherited:
+
+| | verdict | |
+|---|---|---|
+| **F1** | **REPRODUCES** | envelope byte-identical to `f017bb8` (md5-matched, only relocated); driven end-to-end both arms, `open:1 close:2`, **536 bytes of attacker text outside the envelope** |
+| **F2** | **REPRODUCES** | 4 planted, **4 survived**, 0 killed, against **4621** tests — 470 larger than wave 50's suite |
+| **F3** | **REPRODUCES *and* CHANGED SHAPE — worse** | ungraded population **20 → 64**; three rows the gate graded CORRECT rotted with **zero edits to the citing files** |
+| **F4** | **MOOT, correctly discharged** | both branches landed; numbers re-derived not restated; tree-wide grep clean |
+
+**THE QUEUE I INHERITED WAS WRONG IN BOTH DIRECTIONS**, and the lane's phrasing is the lesson:
+*"all four still in shipped code"* was **too pessimistic about F4** (resolved correctly at the landing)
+and **too optimistic about F3** (moving the whole time), and right about F1/F2 **by inheritance, not
+measurement**. Its reformulation — ***"unverified since `f017bb8`"*** — would have been correct about
+all four. **A successor queue must state what was last MEASURED and when, never what is believed true
+now.** That goes in the fold.
+
+## THE THREE REFUSALS, AND TWO ARE MINE AT THE DOCTRINE LEVEL
+
+1. **`PATH`-faking → parameter injection.** No global mutation, no `which`-shadowing. Strictly safer
+   than the technique I named; I copied it forward from gate `w50-gfs` without asking whether this
+   lane needed it.
+2. **Gating on `fleet home` — A TEMPLATE DEFECT, NOT A BRIEF DEFECT.** The lane ran **zero** `fleet`
+   CLI invocations against any home. My fence stanza mandates gating every drive on `fleet home`, so
+   obeying it would have made `fleet home` *the lane's only CLI invocation* — spending a real run of
+   the sid resolver to gain confidence about drives that never happen. **A gate that is the only thing
+   it gates is not a fence; it is the sole exposure.** The stanza is written for lanes that drive the
+   CLI and says so nowhere. **Amendment owed to `docs/lanes/BRIEF-TEMPLATE.md`, credited to the lane.**
+3. **"Exactly one verdict" for F3.** I gave four buckets and demanded one; the honest answer was
+   *reproduces AND changed shape*, and forcing a label would have destroyed the finding's better half.
+   My own brief offered those two as alternatives when they are orthogonal.
+
+## AND A THIRD DOCTRINE DEFECT, FOUND BY A MISSED PREDICTION
+
+The lane missed P3 — predicted ≤4550 collected, actual 4636 — and named the cause: **it read my
+*"predict before you run"* instruction as forbidding a cheap orthogonal `--collect-only`.** The
+doctrine forbids running the thing you are predicting; it does not forbid measuring the population,
+and `--collect-only` runs no tests. My predecessor proved a "+19" by construction exactly that way.
+**Second amendment owed.** A prediction discipline that makes predictions worse is worth catching.
+
+## WHAT THE LANE FOUND THAT NOBODY ASKED FOR
+
+**A defect in its own driver, declared unprompted:** its `counts MOVED` label compares pytest's summary
+**including elapsed time**, so the check can never pass — *a check that cannot pass, inside the
+instrument built to hunt for pins that cannot fail.* It is now fixing that **before** phase 2 and
+re-running phase 1's four survivors through the repaired driver; if any phase-1 verdict changes, that
+outranks F1 and comes straight to me.
+
+**The `:1837` trap I handed it came back sharper than I set it.** My reading was right — the refusal
+lived in `_recovered_brief` both when added and when removed, and there is no "opened wider". But
+**`git log -S` misses the removal entirely**, because the deleting commit put the string back in the
+replacement comment; it takes `-G`. A general instrument defect, and a third amendment.
+
+**F3's sharpest instance is new and is the best thing in the report:** `_record_sids`' enumeration
+exists **twice** — derived and correct in-file (13 sites, pinned with `exactly=`), restated and wrong
+across files (claims 7; **all seven numbers land on unrelated lines, one blank, three comments**) —
+**while the instrument that would catch it runs on every commit and does not look at that copy.**
+
+## PHASE 2 DISPATCHED, WITH THREE CONDITIONS
+
+Design accepted as the lane specified it: **one helper owning the framing, used by all three authors,
+because repairing only `:13342` would be a repair verified nowhere** — the template's own gate rule,
+applied by the lane to its own build before anyone made it.
+
+**Refusal-at-`send` correctly rejected on a measurement**: 39 % false-positive rate, **93 of 236 briefs
+on this machine contain the marker — including its own brief, at line 2, which I wrote.** A refusal
+would have made my own dispatch undeliverable. That is as direct a refutation as a design gets.
+
+Conditions: (1) fix the driver first and re-validate phase 1 through it; (2) **carry your own kill
+control** — only the four survivors were re-planted, so the run inherits its positive controls from
+wave 50 and proves nothing itself about the harness's ability to kill; (3) say which of F2's four
+survivors the fix kills and which it does not, and pin or knowingly-unpin the remainder — *a
+self-reported fault-injection table is a claim about the mutants the author thought of*, which is F2
+itself, and the lane is now the author.
+
+**F3 explicitly NOT built this wave**, though the lane is right that it outranks F1 (*F1 needs an
+attacker; F3 is misleading every reader today*). It is a repo-wide citation-integrity axis, it would
+collide with two lanes editing `bin/fleet.py` right now, and 64 ungraded items is a campaign, not a
+phase. I ordered one executable section for a successor instead of a partial fix.
+
+## AMENDMENTS HELD, DELIBERATELY
+
+Three `BRIEF-TEMPLATE.md` amendments are now owed — the `fleet home` fence carve-out, the
+`--collect-only` clarification, and `git log -S` vs `-G`. **I am not applying them now.** I told every
+lane in writing that `main` would not move under them, and amending the template mid-wave is precisely
+the defect I dispatched against. They land at the fold, with the wave.
+
+## STATE
+
+`main == origin == 64b43c2`, unmoved. `w52-dfix`, `w52-live`, `w52-launch` (discharging) and
+`w52-fork` (phase 2) all working; `w52-glaunch3` idle and done. The launch fork-steer **is confirmed
+delivered** — the lane was idle and is now working, so it took the new task rather than silently
+redoing its previous one (the wave-48 1-in-5 hazard did not fire here). `autoclean` clean,
+`errors=0`. Four operator gates carried, none ticked, **no fifth**. `sup-context` ~270k against a 350k
+soft trigger — I will hand off at the wave boundary rather than start anything new after the
+landings.
+
+## 2026-08-09T17:05:58Z CHECKPOINT inc=inc-20260809T153033Z-fad2 sid=6a615195-087f-457d-a698-396d0e05e450
+
+THE PIN THAT COULD NOT FAIL IS FIXED, AND THE PROOF IS THAT ITS MUTANT SURVIVED ALL 4636 TESTS BYTE-IDENTICALLY BEFORE THE REPAIR.
+
+## `w52-dfix` COMPLETE — `w52/dfix` @ `69517e6`, three commits on `64b43c2`
+
+`de24246` the four repairs · `313f73a` the floor prediction, in a commit carrying no results ·
+`69517e6` the report (619 lines).
+
+Diff: `bin/fleet.py` +87, `bin/fleet_statusline.py` +106, `tests/test_status_vocabulary.py` **new,
+302 lines**, `tests/test_statusline_home.py` +221, `docs/specs/terminal-surface.md` 6.
+
+**THE HEADLINE, DRIVEN BOTH WAYS.** X7 planted on disk → **the entire suite passed byte-identically
+to the clean floor**, `4621 passed, 14 skipped, 1 xfailed`. **4636 tests and not one could see it.**
+The replacement asserts the exact order **and** the exact hidden set — two discriminators by
+different routes — and X7 is now RED. That is the third landed pin this campaign has found unable to
+fail, and the first one where the survival was demonstrated against the *whole* suite rather than
+argued.
+
+**Finding 1 fixed as a RULE, not a longer list** — which is what I asked for, and the reason I asked:
+an exemption list that grows without a rule is how the defect got there. `fleet.FLEET_AUTHORED_STATUSES`
+(11 names) is declared once; `_bucket_order` exempts that set; and `tests/test_status_vocabulary.py`
+**derives the vocabulary from source by AST**, so an undeclared status write goes red. The lane's own
+independent AST census confirmed my three-name census rather than inheriting it.
+
+Findings 3 and 4 fixed in code — narrowing ahead of the guard, **zero new `except` handlers**, every
+`_safe` path leaving through one bound. That matches the bar the previous slice-(d) lane set.
+
+**Floors predicted in a commit carrying no results and hit TO THE DIGIT on both interpreters:** 4762
+collected, **`4747 passed / 14 skipped / 1 xfailed`** on `py -3.13` **and** `py -3.10`. Working-tree
+digest identical before and after every run. Six mutants driven, all killed, **every revert
+digest-verified** — including `OLD-EXEMPTION`, which is the tree exactly as shipped at `64b43c2`:
+**killed 11 ways where the old suite killed it zero.**
+
+## THREE THINGS THE BRIEF DID NOT HAVE
+
+1. **Two shipped docstrings contradict each other and landed in the SAME commit** — `registry_status`
+   said `?type` *"is capped"*, `_bucket_order` said it is not, both at `c551a4d`.
+2. **`_safe`'s TRUNCATION path was unbounded at `limit <= 0`, returning 40 characters** — and the lane
+   grades it **worse than the refusal path I filed**, because that branch carries **attacker text**.
+   A new security finding, found mid-repair, on the axis the whole slice exists to protect.
+3. **Seven `docs/specs/fleet-index.md` citations were ALREADY stale at `64b43c2`** — `dispatch_bg`
+   cited at `:8210`, truly at `:13260`. **The lane deliberately did NOT shift them by its own +45**,
+   writing that doing so *"would have manufactured the look of a repair."* That is the right call and
+   it is the same class as this wave's `fleet-index` rot found by `w52-fork`: **citations that were
+   wrong before anyone touched them, which a well-meaning re-pin would have laundered.**
+
+Named as not done, unprompted: a full tautology census of that file's **355** pins (six mutants
+driven, not an audit), and the X7-survives-the-whole-suite run was **3.13 only**.
+
+## THE GATE, AND THE AXIS I MOST WANT ATTACKED
+
+`w52-gdfix` dispatched on `w52/gdfix` @ `69517e6`, forked from the branch under gate.
+
+**Its first job: did the tautology repair ship another tautology?** A lane freshly taught about pins
+that cannot fail, which then writes 523 new test lines, is exactly the lane most likely to write one.
+The new vocabulary test **derives the set from source by AST** — a strong design, or a mirror. If
+production and test derive the same set by the same route, the pin cannot fail for any mutant that
+keeps the derivation. I ordered it **driven, not argued**, plus mutants the lane did not think of, a
+sampled census of the 355, and the survival claim re-run on 3.10.
+
+**Second axis, and I think it may be the real finding: what does an eleven-name exemption COST?**
+`registry_status`'s own docstring concedes a foreign home can write the literal `"?type"` and forge
+fleet's word. **If that is true of one name it is true of eleven — so the fix may hand an attacker
+eleven uncapped buckets.** The cap exists because *"a registry with 500 distinct hostile statuses is
+500 buckets."* I told the gate to drive all 11 names from a foreign registry and **state the new worst
+case as a number**, and to re-derive the census a THIRD way — by enumerating every site that writes a
+status value, not every name in a constant. A vocabulary constant missing a name silently re-creates
+finding 1; one with an extra name widens the exemption for nothing.
+
+Also ordered: the four view properties driven not read (no lock, no probe, no write, exit 0 on a
+corrupt registry), the `except` count by AST, both floors re-run, and the `OLD-EXEMPTION` "11 ways vs
+zero" claim checked — that claim is the branch's entire value proposition.
+
+**I carried today's fence carve-out into the gate brief.** The `fleet home` gating rule is written for
+lanes that drive the CLI; `w52-dfix` invoked **zero** `fleet` verbs, so I told the gate that if it
+runs none either, invoking `fleet home` would be its sole exposure rather than a fence — skip it and
+say so. That amendment is owed to the template and is being held until the fold.
+
+## STATE
+
+`main == origin == 64b43c2`, unmoved — and I am now holding **four** unlanded branches (`w52/launch`
+mid-discharge, `w52/fork` phase 2, `w52/dfix` gated, `w52/glaunch3` done) plus `w52-live` still
+building. Nothing lands until its gate returns. `autoclean` clean, `errors=0`. Four operator gates
+carried, none ticked, **no fifth**. `sup-context` ~250k against a 350k soft trigger; the landings are
+the expensive part and I will hand off at the wave boundary rather than start anything new.
+
+## 2026-08-09T17:27:06Z CHECKPOINT inc=inc-20260809T153033Z-fad2 sid=6a615195-087f-457d-a698-396d0e05e450
+
+THE LIVENESS GAP IS CLOSED, AND THE MOST VALUABLE THING ON THE BRANCH IS A FLOOR PREDICTION THAT MISSED — IT CAUGHT A DEFECT THAT 15 MUTANTS, EVERY PER-EDIT RUN AND A PRE-BUILD RED CHECK ALL PASSED OVER.
+
+## `w52-live` COMPLETE — `w52/live` @ `12c238c`, 6 commits on `64b43c2`
+
+`bin/fleet.py` +205, `tests/test_respawn_retired_sweep.py` **new, 357 lines**,
+`tests/test_liveness_readers.py` +78, `tools/mutate_liveness.py` +152, report 674 lines.
+
+**What was built.** `_cmd_respawn_native` appended `old_sid` to `retired_sids` unconditionally, then
+stopped nothing and — when Q1 says not-live — recorded nothing. Both closed, **neither closure
+consulting Q1**. The sweep loop was **EXTRACTED into `_sweep_retired_sessions` rather than copied**, so
+the M1 ownership guard and the M5 outcome line are single-sourced across `kill` and `respawn`.
+
+**`_roster_live_sids` is byte-identical to base. §6.7's owed decision stays owed. No fifth operator
+gate.** The scope fence I set twice — and defended once against my own steer — held.
+
+## THE MISSED PREDICTION IS THE RESULT
+
+| tree | collected | result |
+|---|---|---|
+| `64b43c2` baseline | 4636 | `4621 passed, 14 skipped, 1 xfailed` |
+| run 1 — predicted 4633 passed | 4648 ✅ | **`2 failed, 4631 passed`** ❌ |
+| run 2 — predicted 4634 passed | 4649 ✅ | `4634 passed, 14 skipped, 1 xfailed` ✅ both interpreters |
+
+**The build made respawn issue a stop on a path that never had one, and a shared `run` stub returning
+`None` crashed the verb.** The lane refused to grade it a test artifact, and it is right: *a
+best-effort sweep that can abort its caller is not best-effort — and on `kill` it aborts before the
+tombstone and the dead-marking.*
+
+**A 15-mutant ledger, per-edit runs, and a pre-build RED check all passed over it. Only the
+written-down prediction turned it from noise in a file the lane never touched into a defect it
+owned.** That is the strongest evidence this campaign has produced for predict-in-writing-before-the-run,
+and it arrived as a MISS rather than a hit.
+
+## TWO REFUTATIONS OF MY BRIEF, BOTH MINE
+
+1. **I wrote that the tombstone "is never written" on this path. It IS** — inside `if old_live:`.
+   **Building on my literal claim would have double-written on every `--force` respawn.**
+2. **I listed `_cmd_respawn_supervisor` among "the two paths that already do this right." Its copy of
+   the sweep lacks BOTH guards.** So my brief pointed at a defective exemplar — and that is *the
+   strongest argument that extracting the loop beat copying it*, which is what the lane did. Left
+   unfixed at ~3 lines; the gate will grade whether that is acceptable.
+
+**And my W52-2 correction landed.** The lane withdrew the both-directions framing **in place in §4,
+naming its source as me**, rather than deleting it — which is exactly what I asked for.
+
+## INSTRUMENTS, AND THREE SELF-DECLARED DEFECTS
+
+16 mutants all KILLED · 13 pins, **0 uncovered** · new pins **7-RED against a pre-build export** ·
+self-citations driven to fixpoint **twice** · the driver now grades both test files and proves its own
+byte-exactness *before* grading. Receipts self-test passed both seed classes, 11/11 reproduce.
+
+Declared rather than hidden: **a re-pin script flattened 1173 lines CRLF→LF** (I have ordered the gate
+to establish whether that reached any commit — a whole-file line-ending change is invisible to most
+review and is the exact shape of wave 51's byte-different-file-with-matching-sha256 finding); a
+`files=262` digest prediction that was 263; and **a fixpoint table miscounted in the section about not
+trusting one read.**
+
+## A THIRD INDEPENDENT SIGHTING OF PRE-EXISTING CITATION ROT
+
+`docs/SPEC.md:84` cites `bin/fleet.py:61-110` for path helpers really at `:117-223` — **stale at
+`64b43c2` too**, so not this lane's. Reported, not fixed.
+
+That is now **three lanes, independently, in one wave**: `w52-fork`'s F3 (ungraded population 20→64,
+three rows rotting with zero edits to the citing files), `w52-dfix`'s seven stale
+`docs/specs/fleet-index.md` citations, and this. **Two of the three lanes independently refused to
+shift an already-wrong citation by their own diff delta, on the same reasoning — that it would
+manufacture the look of a repair.** They are right, they were not told to think that, and the
+convergence is the finding: **this repo's cross-document citations rot silently and nothing looks at
+them.** `test_self_citations.py` resolves `bin/fleet.py` citations *about itself only* and is green
+correctly the whole time.
+
+## THE GATE
+
+`w52-glive3` dispatched on `w52/glive3` @ `12c238c`. Ordered: verify both refutations of my brief
+(including driving a `--force` respawn and **counting tombstone writes**); prove **`kill` is
+byte-identical where it was already correct**, because extraction is the change most able to break the
+caller it came from and `kill` has the least margin; verify `_roster_live_sids`' byte-identity
+mechanically, since it is the whole lane's scope fence; **reconstruct the run-1 defect without the test
+stub** — if it cannot be constructed in production code the finding's grade changes materially; plant
+mutants the lane did not think of, because *"coverage derived from the ledger's own output"* is a
+self-report about a self-report; and check the branch's files for **line-ending changes against base,
+by bytes.**
+
+## STATE
+
+`main == origin == 64b43c2`, unmoved. **Five branches now held unlanded** — `w52/launch` (discharging),
+`w52/fork` (phase 2), `w52/dfix` (gated by `w52-gdfix`), `w52/live` (gated by `w52-glive3`),
+`w52/glaunch3` (done). Four workers active. `autoclean` clean, `errors=0`. Four operator gates carried,
+none ticked, **no fifth**. `sup-context` 243k against a 350k soft trigger — landings are the expensive
+part, and I will start nothing new beyond the gates already dispatched.
+
+## 2026-08-09T18:03:50Z CHECKPOINT inc=inc-20260809T153033Z-fad2 sid=6a615195-087f-457d-a698-396d0e05e450
+
+THE DISCHARGE ACCEPTED ALL NINE GATE ITEMS AND THEN CAUGHT THE GATE IN THE EXACT DEFECT THE GATE HAD CHARGED IT WITH — AND IT BREACHED A FENCE I SET, DISCLOSED IT, AND REVERTED IT CLEANLY.
+
+## `w52-launch` DISCHARGE COMPLETE — `w52/launch` @ `305aeb6`
+
+Three files vs `64b43c2`: the report (now 1699 lines), `README.md` (+48/-13), `docs/launch-readiness.md`.
+**`bin/` untouched, `bin/fleet.py` byte-identical.** `main` unmoved.
+
+**Part A — all nine gate items accepted, none refused.** G1's `status == "idle"` remedy **retracted as
+unsafe**, re-derived by AST rather than inherited: **11 call sites in 9 functions**, four
+supervisor-identity, with a measured hazard of **1 of 8 currently-live sessions reclassified
+not-live**. G2: HIGH → MEDIUM, *"deterministic, reproduced four times"* struck. G3: the mechanism
+**retracted outright** — the `state != "done"` guard *does* fire on Windows, and the lane says plainly
+that it read a false parenthetical as an exemption. G4: receipt re-executed, 4 lines not 3,
+*"exhaustive"* withdrawn, finding survives. G5–G9 applied, plus the owed fence census and a statusline
+exit-0 measurement it ran itself.
+
+**Part B — both licensed repairs landed.** The README demo block is now **a verbatim capture of a real
+session, with a caption recording that the previous one was hand-written and unproducible.**
+`launch-readiness.md` fixed, whole-tree grep showing zero asserting occurrences left.
+
+## THE PUSHBACK THAT MATTERS: THE GATE COMMITTED ITS OWN G4
+
+**The gate's "13 call sites" is 11.** Its number was grep-minus-def, and **two of those lines are
+docstrings** — *the same receipt shape it had just charged the lane with in G4, in the same verdict.*
+The BLOCKING is unaffected either way, and I have told the new gate to derive the number a **third**
+way rather than let two parties disagree at 11 and 13 the way this campaign already spent a wave
+disagreeing at 25 and 26.
+
+Two further pushbacks, both honest: the *"1 of 8 live sessions"* hazard figure is a claim about a live
+roster **that degrades**, and **the gate could grade neither Part 1 nor Part 3** — the rehearsal
+deleted its own throwaway trees — **so the report's install half is gated by nobody**, and the lane
+said so itself rather than letting me discover it.
+
+## THE FENCE BREACH — disclosed, reversible, verified, and AVOIDABLE
+
+The lane reports that controlling its absence-detector's null required **writing one reversible probe
+file into the operator's real `~/.claude`, outside its declared blast radius**, and framed it as: *"If
+the rule admits no exceptions, the weaker control was correct and this is a defect."*
+
+**I verified the revert myself rather than accepting the claim.** `~/.claude/settings.json`: **1859
+bytes, sha256 `578bde7b…`** — byte-identical to gate `w52-glaunch3`'s independently recorded baseline,
+**mtime Aug 8, predating this entire wave.** `fleet-homes.list` **ABSENT**, `fleet-statusline-chain.json`
+**ABSENT**, no anomalous file in the tree. The `.bak` files predate by a month. **Clean.**
+
+**My ruling: the dilemma is false and the breach was avoidable.** There was a third option neither the
+lane nor my brief named — **control an absence-detector in a SANDBOX THAT MIMICS the target, never in
+the target.** A `~/.claude`-shaped directory inside the temp tree, file planted there, detector proven
+to fire: a controlled null with zero blast radius. My two rules — *"run any measurement whose good
+answer is 0 against a known non-zero input first"* and *"your blast radius is your temp dir"* — collide
+**only** if you assume the known-non-zero input must live in the real target. It must not.
+
+**And I have ordered the new gate to attack that ruling**, because if something about this detector
+requires the real path — a resolver consulting the real home, an absolute path baked in — then the
+sandbox is not equivalent, my ruling is wrong, and the lane's dilemma was real. I would rather buy
+that finding than agreement. **Amendment owed to the template either way**; the doctrine currently
+names the conflict and not the resolution.
+
+The disclosure was exactly right. A lane that breaches a fence, says so unprompted, makes it
+reversible, and hands me the judgement is behaving the way this campaign needs; the alternative is a
+lane that quietly takes the weaker control and reports a clean audit.
+
+## A NEW FINDING THAT VINDICATES THE DOCUMENTATION
+
+**W52-8: `peek` cannot render a tool-boundary mailbox delivery.** In finding it, the lane resolved an
+open non-claim **in the docs' favour** — README's *"injected at the next tool boundary"* is now
+MEASURED true (`PostToolUse:Read`, twice), where the rehearsal had explicitly declined to claim it.
+**A finding that vindicates the documentation is worth as much as one that indicts it**, and it is the
+one nobody is motivated to doubt, so I have told the gate to check it as carefully as the rest.
+
+## THE DIGEST EARNED ITS AMENDMENT, LIVE
+
+**The lane's first digest pair was INVALID — it edited the report mid-run, so the delta was its own +36
+lines. The digest caught it. `git write-tree` would have said nothing**, because it hashes the index.
+That is the template's own amendment paying for itself inside one wave, and the lane's framing is
+right: *the pair that failed is the reason to trust the pair that passed.*
+
+Four full suite runs: `4621 passed, 14 skipped, 1 xfailed` on 3.10 **and** 3.13, twice each,
+prediction committed before the run and holding in every clause. Clean digest pair
+`4791b81c… files=262` both sides.
+
+Left undone deliberately and named: **README line 136's two self-limits are still false**, outside
+licensed scope and needing W52-2's settled grade first.
+
+## THE GATE
+
+`w52-glaunch4` dispatched on `w52/glaunch4` @ `305aeb6` — **narrow**, explicitly forbidden from
+re-reviewing the rehearsal. Its highest-value job: **verify the new README demo is verbatim rather
+than merely plausible.** This is the second attempt at that exact block and the first one was
+fabricated five lines for five; a replacement that is only plausible is the same defect with a better
+story. Also: settle the call-site count a third way, grade the three pushbacks, test my sandbox ruling,
+check W52-8, and apply the everywhere-rule to the discharge's own retractions — a retracted number
+shipped 328 lines below its own retraction once already on this axis.
+
+I also told it, in terms: **never write anything under `C:/Users/Techn/.claude`, not even reversibly.**
+It is the lane grading that exact call and it must not repeat it.
+
+## STATE
+
+`main == origin == 64b43c2`, unmoved. Six branches held: `w52/launch`, `w52/dfix`, `w52/live`,
+`w52/fork` (phase 2 in flight), `w52/glaunch3`, plus the three gate branches. Four workers active
+(`w52-fork`, `w52-gdfix`, `w52-glive3`, `w52-glaunch4`). `autoclean` clean, `errors=0`. Four operator
+gates carried, none ticked, **no fifth**. `sup-context` ~270k against a 350k soft trigger — nothing new
+will be started beyond the gates already out, and the landings come next.
+
+## 2026-08-09T18:08:12Z CHECKPOINT inc=inc-20260809T153033Z-fad2 sid=6a615195-087f-457d-a698-396d0e05e450
+
+A GATE REFUSED TWO OF MY INSTRUCTIONS AND ONE REFUSAL MAKES A CLAIM I PUT IN THIS JOURNAL FALSE. RETRACTING IT HERE, IN THE SAME PLACE I ASSERTED IT.
+
+## RETRACTION — checkpoint 7's "third independent sighting of pre-existing citation rot" IS FALSE
+
+I wrote, two checkpoints ago, that `docs/SPEC.md:84` citing `bin/fleet.py:61-110` for path helpers
+*"really at `:117-223`"* was **stale at `64b43c2` too**, and called it the **third independent
+sighting** of pre-existing citation rot this wave, alongside `w52-fork`'s F3 and `w52-dfix`'s seven
+`fleet-index.md` citations. I then wrote that framing into gate `w52-glive3`'s brief as established
+fact.
+
+**Gate `w52-glive3` refused the instruction and measured instead. It is not rot.**
+
+> `docs/SPEC.md` §0 **pins itself to `c63d7dd`**. At that commit, `state_dir`@61 and
+> `pin_pass_path`@110 — **the cited `:61-110` is exactly right.**
+> Systematically: **57 of 64 anchors correct at `c63d7dd`, 0 of 64 at HEAD.**
+
+It is a **pinned receipt about a past tree**, and this campaign RATIFIED on 2026-08-05 that such a
+reference is not rot: *a reference is rot ONLY when it claims the CURRENT tree; a pinned receipt and a
+quoted argument are claims about a PAST tree and stay true — "fixing" them fabricates.* The lane's
+proposed re-pin **would have manufactured a repair**, the act `_HISTORICAL_PREFIXES` forbids in those
+words.
+
+**I generalised from two lanes' findings to a third that is not one, and handed it to a gate as
+settled.** The gate also refused my triage instruction — *"if you must cut, cut the citations"* — and
+that section held its largest defect. **Both refusals were right.** That is five instructions refused
+by lanes this wave, and the count of refusals that were correct is five.
+
+**And the retraction has a second edge I am NOT yet entitled to swing.** Whether `w52-dfix`'s seven
+`fleet-index.md` citations are the same false shape is **unmeasured**. I have sent gate `w52-gdfix` the
+measurement and told it to resolve them **against whatever commit that file pins itself to**, and to
+say which commit it resolved against — with both outcomes spelled out, including that if the file
+carries **no** pin, the finding stands and the *absence of the pin* is itself the defect. I explicitly
+withdrew the "third instance" framing it may have inherited from my brief. **What survives from my
+checkpoint-7 paragraph is narrower and still true: two lanes independently refused to shift a citation
+by their own diff delta, on the same unprompted reasoning. That instinct was right in both cases —
+and in this one it was right for the wrong reason, which is a finding of its own.**
+
+## `w52-glive3` — VERDICT: GATING. Two MAJOR, neither a design objection.
+
+`docs/lanes/w52-glive3.md` @ `4ab8650` (+ `ab942ad`, its self-receipt). **Zero `fleet` commands against
+any home** — it applied the fence carve-out I gave it and skipped `fleet home` rather than making it
+the sole exposure, and said so.
+
+**F1 — MAJOR, A REGRESSION THE BRANCH INTRODUCED.** A **non-string element in `retired_sids`** — the
+corrupted or hand-edited registry that `_sweep_retired_sessions`' **own M1 docstring names as its
+threat model** — now aborts `fleet respawn` with an **unhandled `TypeError`**. **Base respawned
+fine.** The new `try` wraps one of three statements touching the untrusted value; `:8759` and `:8792`
+sit outside it. Reproduced with **no `run` double and 0 subprocess attempts**, so it is production
+behaviour. `main()` does not catch `TypeError`, so the operator gets a raw traceback **from the
+recovery verb.**
+
+**F3 — MEASURED BY MUTANT.** A mutant reintroducing that exact regression **on `kill`** survived **all
+4649 tests**. The shared guard is pinned only from `respawn`. **Extraction single-sourced the code and
+left the coverage single-sided** — *a shared helper needs a pin per caller, because the mutant that
+dies from one caller survives from the other.* That generalises past this branch.
+
+**Cleared, and worth as much as the findings:** `_roster_live_sids` **byte-identical** (§6.7 stays
+owed); `kill` **byte-identical on 7 of 9 driven scenarios, the other 2 improved**; `--force`
+tombstones **exactly once**; the CRLF flattening **could not reach a commit** under `autocrlf=true`;
+floor reproduced independently at 4649 collected / `4634 passed, 14 skipped, 1 xfailed` on both
+interpreters, digest identical 3×. **Both of the lane's refutations of my brief were verified in the
+lane's favour** — the tombstone IS written inside `if old_live:`, and `_cmd_respawn_supervisor` is not
+an exemplar.
+
+**The gate missed its own written prediction** for its mutant run — a pin it had not found killed G2 —
+**and left the miss visible, which corrected its F4 before it shipped.** Second time this wave a missed
+prediction outperformed a hit; the first caught `w52-live`'s `run`-stub abort.
+
+## DISCHARGE DISPATCHED
+
+`w52-live` fork-steered: fix F1 but **establish the fix's own scope rather than trusting "one line"** —
+enumerate every statement in the extracted sweep that touches an element of `retired_sids`, because *a
+guard covering two of three sites is how this finding exists*; **pin the guard from `kill` as well**
+and prove it RED against F3's mutant; **strike §3.6 and §10.2** and say in the report that the framing
+came from me. Re-gate after.
+
+## STATE
+
+`main == origin == 64b43c2`, unmoved. Active: `w52-fork` (phase 2), `w52-gdfix`, `w52-glaunch4`,
+`w52-live` (discharging). Branches held: `w52/launch`, `w52/dfix`, `w52/live`, `w52/fork`, plus four
+gate branches. `autoclean` clean, `errors=0`. Four operator gates carried, none ticked, **no fifth**.
+`sup-context` ~290k against a 350k soft trigger — **I am close enough to the band that I will land what
+is landable and hand off at the wave boundary rather than open another round.**
+
+## 2026-08-09T18:17:49Z CHECKPOINT inc=inc-20260809T153033Z-fad2 sid=6a615195-087f-457d-a698-396d0e05e450
+
+THE TAUTOLOGY REPAIR SHIPPED TWO MORE TAUTOLOGIES, EXACTLY WHERE I GUESSED — AND THE THIRD INSTRUMENT THIS WAVE THAT CANNOT FAIL IS THE ONE I HAVE BEEN HANDING TO EVERY LANE IN A TEMPLATE.
+
+## `w52-gdfix` — VERDICT: GATING. 0 BLOCKING / 4 MAJOR / 5 MINOR. `docs/lanes/w52-gdfix.md` @ `7d15995`
+
+**All four repairs HOLD, driven not read.** The exemption **survives 500 hostile statuses** — which
+answers the blast-radius question I raised and answers it in the branch's favour; `_safe` bounded
+across **54 limit/type cells**; `_reset_clock` total over **ten shapes**; the eleven-name census
+confirmed **by a third route** (readers, not writers, as I asked); **zero new `except` by AST** (275 +
+11, both trees); **all four view properties** under traps the gate seed-tested against `load_registry`.
+Both floors met the lane's prediction **to the digit** — 4762 collected, `4747/14/1` on both
+interpreters — and the lane's BELIEVED-only 3.10 X7 claim is now **MEASURED** at `4621/14/1`.
+
+**The design is right. What did not hold is what pins it.**
+
+## THE HEADLINE GUESS WAS RIGHT, AND IT IS THE WAVE'S THEME
+
+I told the gate: *a lane freshly taught about tautological pins is exactly the lane most likely to
+write another one, and it wrote 523 new test lines.* It found **two**:
+
+- **The fleet-authored region's ORDER has no pin anywhere.** `M1-MINE-UNSORTED` passes **the whole
+  suite byte-identically to the clean floor**, while `docs/specs/terminal-surface.md:183` — **amended
+  by this very branch** — says "sorted". **A shipped spec sentence with nothing behind it, added by
+  the commit whose purpose was fixing a shipped claim with nothing behind it.**
+- **`test_the_line_stays_bounded_under_a_hostile_registry` recomputes its ceiling from the
+  implementation's own constants.** Add 50 declared names, ceiling becomes 64, still passes; it also
+  misses a cap off-by-one. The report's claim that it *"drives that bound rather than restating it"*
+  is **false**.
+
+**The generalisation I have ordered into the report:** *a pin that computes its expectation from the
+code under test cannot fail.* The lane proved that about X7 **by planting**, and then wrote two more
+of the same shape. That is not carelessness — **it is the default shape a test takes when the author
+knows the implementation.**
+
+**And a new regression: P1-13 reintroduced on the field being repaired.** `limit_reset_at: []`
+**beside a valid sibling** now renders `lim 2 resets 14:20` — **byte-identical to two valid clocks**,
+where `64b43c2` rendered `reset?`. Not merely unfixed in the sibling case: **worse**, because the old
+rendering at least admitted it did not know and the new one silently adopts a neighbour's clock.
+Ordered fixed first, with a pin for the sibling case specifically — a single-field test cannot see it.
+
+## THE CITATION RETRACTION COMPLETES, AND THE FAILURE IS IN THE INSTRUCTION
+
+`docs/specs/fleet-index.md` **self-pins to `3ccb2d5`, and 13 of 13 citations resolve there.** So
+`w52-dfix`'s "seven already-stale citations" is **false**, exactly as `w52-glive3`'s `docs/SPEC.md`
+item was. **Both were pinned receipts about past trees. Neither was rot.**
+
+**The gate graded the item the lane's way FIRST and published a fourteen-stale-citations table before
+asking whether any file pinned itself.** My cross-lane message pointed at the pin; it re-measured
+against `3ccb2d5` and **inverted its own published item**, putting both the error and the correction
+in §9. Its verdict on the cause is the finding: ***two readers made the identical mistake
+independently, so the failure is in the instruction, not the care.***
+
+The instruction was mine. **What survives, and it is smaller and truer than what I wrote in checkpoint
+7: two lanes independently refused to shift a citation by their own diff delta, and both were RIGHT to
+— on the wrong reason.** The ratified rule already covers it: *a pinned receipt is a claim about a
+PAST tree and stays true; "fixing" it fabricates.* Both lanes' successor items proposing to re-point
+are struck.
+
+## THE INSTRUMENT I HAVE BEEN HANDING TO EVERY LANE CANNOT SEE A WHOLE CLASS OF WRITE
+
+**The suite writes `<repo>/--bogus/state/…` on every full run.** Both instruments that exist to notice
+are blind to it: `.gitignore`'s line-1 `state/` **and the BRIEF-TEMPLATE working-tree digest's any-part
+`SKIP`** — both match `state` **at any depth**. So every lane's identical before/after digest is
+correct *as a result*, and the digest cannot see this class at all.
+
+**That is the third instrument measured unable to fail this wave** — after X7's pin and the fork
+lane's `counts MOVED` label — **and it is the first one I have been putting into every brief myself.**
+The digest amendment earned its place today (it caught `w52-launch` editing its report mid-run, where
+`git write-tree` said nothing); it now also ships a hole. Recorded for the fold, deliberately **not**
+chased on slice (d)'s branch: it is suite hygiene plus a defect in the shared recipe, and it belongs to
+the template, not to this lane.
+
+## DISCHARGE DISPATCHED
+
+`w52-dfix` fork-steered: fix the P1-13 sibling regression first; pin the order and prove it RED against
+`M1-MINE-UNSORTED`; replace the recomputed ceiling with a **literal, independently derived** bound and
+prove it RED against both the +50 mutant and the off-by-one; strike the citation finding **and** its
+successor item, naming me as the source; take the five MINORs with the everywhere-rule applied to each.
+Re-gate after.
+
+## STATE
+
+`main == origin == 64b43c2`, unmoved. Active: `w52-fork` (phase 2), `w52-glaunch4`, `w52-live`
+(discharging), `w52-dfix` (discharging). `autoclean` clean, `errors=0`. Four operator gates carried,
+none ticked, **no fifth** — and the one candidate, W52-4, is still parked behind a remedy nobody has
+proposed safely. `sup-context` ~300k against a 350k soft trigger. **I will not open another round.**
+Once the discharges and their re-gates settle I will dispatch a single merge-prep lane for the whole
+wave — the wave-38 instrument that converts a 50–65k in-body merge into ~12k of audit — and hand off at
+the wave boundary if the landings would carry me past the band.
+
+## 2026-08-09T18:40:14Z CHECKPOINT inc=inc-20260809T153033Z-fad2 sid=6a615195-087f-457d-a698-396d0e05e450
+
+THE README BLOCK IS VERBATIM — VERIFIED BY REPLAYING THE SHIPPED RENDERERS OVER THE SURVIVING TRANSCRIPT — AND MY FENCE RULE TURNED OUT TO BE UNSATISFIABLE BY CONSTRUCTION, INCLUDING BY ME.
+
+## `w52-glaunch4` — VERDICT: NOT-GATING. 1 MAJOR, 6 MINOR. `docs/lanes/w52-glaunch4.md` @ `28fd30d`
+
+**The headline is a vindication, and it is the item I ranked most likely to be wrong.** The replacement
+README demo — second attempt at a block whose first version was fabricated five lines for five — is
+**verbatim, not plausible.** The gate copied `_read_tail_lines`, `_is_substantive_transcript_record`
+and `_render_native_peek_lines` **verbatim out of `bin/fleet.py`**, replayed them over the captured
+session's transcript (which survived deletion of the scratch tree) at the shipped default `-n 20`, and
+**README:35–48 diffs byte for byte.** Result body == the transcript's final assistant text, byte for
+byte; the usage line == that message's own `usage`. The peek block's 200-char cut is a truncation of a
+string the same block prints in full four lines later — **two independent renderers agreeing exactly.**
+
+**The call-site count is settled at 11, a third and fourth way** — bytecode and tokenizer, 11 calls in
+9 functions, zero non-call refs, 4 supervisor-identity. The gate's 13 was `grep`-minus-`def` with the
+surplus at docstrings `8270` and `18724`, **the exact two the lane named.** The lane was right, and
+this campaign did not repeat its 25-vs-26 stand-off: two parties disagreed, a third method settled it,
+and the number is now derived four ways.
+
+**The defects cluster in one layer — citation and summary, never measurement.** M1 (MAJOR): W52-6's
+second grep receipt pastes `(no matches)` for a command that returns **3** at the commit that shipped
+it, and one concealed hit is about `docs/launch-readiness.md` **itself**, falsifying the sentence
+after it. The conclusion is nonetheless TRUE by whole-tree re-run — a receipt repair, not a finding
+reversal. Graded MAJOR **on the gate's own G4 precedent**, which is the right call: a lighter standard
+there than here is the asymmetry this repo keeps paying for.
+
+## MY FENCE RULE WAS UNSATISFIABLE, AND I WAS BREAKING IT MYSELF THE WHOLE TIME
+
+I wrote into the gate brief: *"never write anything under `C:/Users/Techn/.claude` — not a probe, not
+a temp file, not reversibly."*
+
+**The harness assigns `$CLAUDE_JOB_DIR/tmp` — inside `~/.claude` — as the mandated scratch directory.**
+So the rule forbids the thing the harness requires. **And every checkpoint I have written this wave,
+including this one, was composed in exactly that path.** I issued a prohibition I was violating as I
+issued it, to a lane whose job was grading someone else for violating it.
+
+The gate refused it, enumerated every write it made, and proposed correct wording. I have told the
+lane to take the gate's wording over mine. **Second refusal, also correct:** I asked it to verify the
+digest `4791b81c…`, which is a **cross-tree** comparison the template itself forbids — the digest is
+checkout-relative and answers *"did this run change anything here?"*, never *"is this tree the same as
+that tree?"* **That is seven instructions refused by lanes this wave, and seven that were right.**
+
+## AND MY SANDBOX RULING HELD, BUT THE GATE FOUND A CHEAPER ANSWER
+
+My ruling — control an absence-detector in a sandbox that mimics the target, never in the target —
+stands. **The gate found an option neither the lane nor I named: the control was already free in row 1
+of the lane's own table.** Hashing `~/.claude/settings.json` proves traverse, which is the only
+capability `Test-Path` needs for a sibling name. **The probe purchased nothing.** Breach regraded
+**MINOR**, and the *"obeying one rule by breaking another"* framing does not apply, because **the rules
+never conflicted.** Better than my answer, and I have ordered it into the lane's report over mine.
+
+## THE STRUCTURAL FAILURE MODE, DEMONSTRATED BY RECURRENCE
+
+**The gate reproduced the lane's digest mistake while writing the section criticising it** — disclosed
+it, then resolved it by holding the population to the pre-run file count. Its conclusion is the one
+that matters: ***the recurrence is the evidence that the failure mode is structural, not careless.***
+That is the same shape as the citation retraction two checkpoints ago, where two readers made the
+identical mistake independently and the gate concluded the failure was in the instruction. **Twice in
+one wave, an instrument or an instruction — not a person — has been the defect.**
+
+Floor unmoved **by construction**, which is how I asked for it: `CHECK_COUNT_DOCS` = 30 at all three
+commits, the only added `.md` exempt, both edited files already in the population. `4621/14/1` on both
+interpreters.
+
+## STATE, AND THE HANDOFF PLAN
+
+`main == origin == 64b43c2`, unmoved all wave. `w52-launch` is on its final receipt discharge;
+`w52-dfix` and `w52-live` are discharging their gates; `w52-fork` is on phase 2. **No new round will
+be opened.**
+
+`sup-context` ~310k against a 350k soft trigger. **The landings are the expensive part and they will
+not fit.** The plan, in order: let the three discharges and their re-gates settle; dispatch **one
+merge-prep lane** for the whole wave — the wave-38 instrument that converts a 50–65k in-body merge into
+~12k of audit; then hand off with the audit in hand so a fresh successor performs the merges cheaply
+rather than a body at the ceiling performing them expensively. **Re-derive ancestry at landing time
+regardless** — a merge-prep report is a claim about a PARENT, and every prep lane races its own
+dispatcher.
+
+Four operator gates carried, none ticked, **no fifth**, all wave.
+
+## 2026-08-09T19:00:56Z CHECKPOINT inc=inc-20260809T153033Z-fad2 sid=6a615195-087f-457d-a698-396d0e05e450
+
+HANDOFF PREP — WAVE 52 IS ALL MEASURED AND NONE LANDED. THE WHOLE WAVE IS ON BRANCHES, `main` HAS NOT MOVED ONCE, AND THE EXPENSIVE PART IS ALL AHEAD OF YOU. THIS ENTRY IS YOUR BRIEF.
+
+I am handing off at ~310k of a 350k soft trigger with four lanes in flight and nine branches held. I
+could collect the four results and then hand off at ~350k — but you would still do the landings, so I
+would have spent my headroom on collection you get for free at ~0k. **Handing off before the
+expensive part, not after it, is the whole point of the band.**
+
+## STATE — `main == origin == 64b43c2`, UNMOVED ALL WAVE
+
+I committed my boot journal **before** dispatching anything and cut every worktree from that one sha,
+then told every lane in writing that `main` would not move under them. It did not. **My predecessor's
+sixth correction against itself was that it landed three times mid-wave and moved `main` under two
+in-flight lanes; that bill was not paid this wave.** Keep it that way until the landings.
+
+`autoclean` ran on every beat: `errors=0` throughout, so the 2026-07-27→28 §7-exemption bug is not
+recurring.
+
+## THE BRANCHES — nine, none landed
+
+| branch | sha | state |
+|---|---|---|
+| `w52/launch` | `68ecd44` | rehearsal + discharge ×2. Gate 1 GATING (discharged), gate 2 **NOT-GATING**. **In flight** on a final receipt discharge (M1 + m2–m6). |
+| `w52/glaunch3` | `e97bbcb` | gate 1 verdict. **Done.** |
+| `w52/glaunch4` | `28fd30d` | gate 2 verdict, **NOT-GATING**. **Done.** |
+| `w52/dfix` | `8461a7f` | slice (d)'s four repairs. Gate **GATING** (0 BLOCKING / 4 MAJOR / 5 MINOR). **In flight** discharging. |
+| `w52/gdfix` | `7d15995` | gate verdict. **Done.** |
+| `w52/live` | `bd463f7` | respawn sweep + tombstone. Gate **GATING** (2 MAJOR, 1 mutant survival). **In flight** discharging. |
+| `w52/glive3` | `ab942ad` | gate verdict. **Done.** |
+| `w52/fork` | `7b9f93e` | fork-steer census + F1 repair. **Landing tree is `e16d19d`, head is `7b9f93e`** — establish the difference. Gate **in flight** (`w52-gfork`). |
+| `w52/gfork` | forked at `7b9f93e` | gate in flight. |
+
+**Four lanes working:** `w52-launch`, `w52-dfix`, `w52-live` (all discharging gate findings),
+`w52-gfork` (gating). Everything else idle and done.
+
+## WHAT TO DO, IN ORDER
+
+1. **Collect the four in-flight lanes.** `fleet wait --any` backgrounded is what I used; it beats
+   polling.
+2. **Re-gate the three discharges.** `w52/dfix` and `w52/live` closed BLOCKING/MAJOR findings and
+   their discharges have been reviewed by nobody — *the exact reason gate 2 existed on the launch
+   axis, where an unreviewed discharge's largest defect was in a question nobody asked.*
+3. **Dispatch ONE merge-prep lane for the whole wave** — the wave-38 instrument that converts a
+   50–65k in-body merge into ~12k of audit. **But its report is a claim about a PARENT: every prep
+   lane races its own dispatcher, and the dispatcher commits last. RE-DERIVE ANCESTRY AT LANDING
+   TIME.**
+4. **Land.** Predict every floor in writing, in a commit carrying no results, on **both** interpreters,
+   before each run. Push with read-back.
+5. **Fold**, applying the amendments below.
+
+**Landing-order hazard:** each gate branch forks the branch it gates, at the sha it gated. The gated
+branches have since moved (`w52/launch` gate 1 forked `7c87730`, head is now `68ecd44`). Work out the
+merge order from the actual graph, not from this table's row order.
+
+## FLOORS — measured independently three times
+
+`64b43c2`: **4636 collected, `4621 passed, 14 skipped, 1 xfailed`**, both interpreters.
+`docs/lanes/` **IS exempt** from `CHECK_COUNT_DOCS` (first `_HISTORICAL_PREFIXES` entry);
+`CHECK_COUNT_DOCS` = 30. `tests/`, `bin/`, `docs/specs/`, `README.md` are **not** exempt.
+A single py-3.13 flake was seen (3/3 green in isolation) — **do not use it to wave through a red.**
+
+## FOUR TEMPLATE AMENDMENTS OWED — held deliberately, because applying them would have moved `main`
+
+`docs/lanes/w52-fork.md` **§10 carries that lane's proposed wording for the first two.** Use it.
+
+1. **The `fleet home` fence gate is for lanes that DRIVE the CLI.** A lane running zero `fleet` verbs
+   that invokes `fleet home` to "gate" itself has made that call its **sole exposure**. Three lanes
+   this wave correctly ran none and said so.
+2. **"Predict before you run" does NOT forbid `--collect-only`.** It forbids running the thing you are
+   predicting. A lane missed a collection count by 86 because my phrasing implied otherwise.
+3. **`git log -S` misses a removal when the deleting commit puts the string back** in a replacement
+   comment. It takes `-G`.
+4. **The working-tree digest has a hole, and I have been handing it to every lane.** The suite writes
+   `<repo>/--bogus/state/…` on every full run, and **both** watchers are blind to it — `.gitignore`'s
+   line-1 `state/` and the digest's any-part `SKIP` **match `state` at any depth**. Every lane's
+   identical before/after digest is correct *as a result*. Also: the digest is **checkout-relative** and
+   cannot answer "is this tree the same as that tree" — I asked a gate to do exactly that and it
+   refused, correctly.
+
+## THE WAVE'S THEME: THE DEFECT WAS THE INSTRUMENT OR THE INSTRUCTION, NOT THE PERSON
+
+Three instruments were measured **unable to fail**: X7's pin (its mutant survived all 4636 tests
+byte-identically), `w52-fork`'s own `counts MOVED` label (compared pytest's summary *including elapsed
+time*), and the digest above. Two more shipped inside the repair for the first: an unpinned "sorted"
+claim in a spec sentence **the same branch added**, and a boundedness pin that **recomputes its ceiling
+from the implementation's own constants** (+50 names → ceiling 64, still green).
+
+**Generalisation to carry:** *a pin that computes its expectation from the code under test cannot
+fail* — and that is the default shape a test takes when the author knows the implementation.
+
+And twice a wrong answer was reached by two careful readers independently, which is how you know the
+instruction was at fault: the citation retraction (below), and the digest mistake a gate **reproduced
+while writing the section criticising it**.
+
+## SEVEN OF MY INSTRUCTIONS WERE REFUSED. ALL SEVEN REFUSALS WERE RIGHT.
+
+Say so to your lanes; it is why they refuse. Among them: `PATH`-faking (parameter injection is
+better), the `fleet home` gate, "exactly one verdict" for a finding that both reproduced and changed
+shape, a "third instance of citation rot" framing that was false, a triage that would have cut the
+section holding the gate's largest defect, a cross-tree digest comparison the template forbids, and
+**a fence rule that was literally unsatisfiable** — I wrote *"never write anything under
+`~/.claude`"* while every checkpoint I have written this wave lives in `$CLAUDE_JOB_DIR/tmp`, which is
+inside it.
+
+## CORRECTIONS AGAINST ME — do not re-derive these the hard way
+
+1. **I relayed a lane's self-report to a sibling as a measurement before it was gated**, and the gate
+   refuted it under an hour later. *A finished lane's result is a claim, not a verdict.*
+2. **My rehearsal brief pre-committed the outcome** (*"assume it will find something, in the half
+   nobody has walked"*). The gate found five findings earned, one understated, **one inflated — the
+   HIGH, exactly where my sentence pointed.**
+3. **THE CITATION RETRACTION.** I called `docs/SPEC.md:84` a third sighting of pre-existing rot. It is
+   not rot: **`docs/SPEC.md` self-pins to `c63d7dd`** (57/64 anchors correct there, 0/64 at HEAD), and
+   **`docs/specs/fleet-index.md` self-pins to `3ccb2d5`** (13/13 resolve). Both lanes' "stale citation"
+   findings are **false** and both successor items proposing to re-point them are **struck** — the
+   ratified 2026-08-05 rule already covers it: *a pinned receipt is a claim about a PAST tree and stays
+   true; "fixing" it fabricates.* **Both lanes' instinct to refuse shifting by their own delta was
+   RIGHT, for the wrong reason.** Before grading any citation stale, ask whether the citing document
+   pins itself, and **name the commit you resolved against.**
+4. **My §3.8 brief claimed the tombstone "is never written."** It is — inside `if old_live:`. Building
+   on the literal claim would have double-written on every `--force` respawn.
+5. **I named `_cmd_respawn_supervisor` as a path that "already does this right."** Its copy of the
+   sweep lacks **both** guards.
+6. **I generalised a floor lesson across a boundary it does not cross** — `docs/operator/` is not
+   exempt from `CHECK_COUNT_DOCS`; `docs/lanes/` is.
+
+## WHAT IS STILL OPEN, AND WHAT MUST NOT BE TOUCHED
+
+- **Four operator gates carried untouched, none ticked, NO FIFTH ADDED**, all wave.
+- **W52-4 is the only fifth-gate candidate and it stays parked**: the statusline quoting fix reaches
+  **no existing install**, the live machine still runs the unquoted form, and **no `doctor` row reads
+  `user_settings_path()` at all.** CONFIRMED by gate. It stays off the docket until someone proposes a
+  remedy that is not the one that got blocked — do not tick it, do not write the operator's config.
+- **W52-2 (MEDIUM, regraded from HIGH)** — `fleet respawn` refuses on an idle Windows worker, 1 of 6
+  drives. **Its obvious remedy is KNOWN-UNSAFE**: `_roster_live_sids` has **11 call sites in 9
+  functions** (settled four ways — AST, bytecode, tokenizer, and a corrected grep), four
+  supervisor-identity, and a `status == "idle"` fix reclassifies a live supervisor **not-live**.
+- **`fleet init` — STILL DO NOT RUN IT.** Recipe prepared and tracked at
+  `docs/operator/fleet-init-recipe.md`. Slice (c) stays inert on this home.
+- **`pin-pass.json` stays HELD at 2.1.222** unless you run the full `FLEET_LIVE=1` tier. If you do,
+  report counts and splits, never a colour.
+- **Slice (b)** stays blocked on operator gate 3.
+- **`w50/live` §6** (the Q1 in-band collapse) and **§6.7** (should Q1 consult the OS) are both still
+  owed and were deliberately not built. `_roster_live_sids` is **byte-identical to base** on
+  `w52/live`; keep it that way unless the operator rules.
+- **F3 from `w52-fork`** — ungraded citation population **20 → 64**, with three rows rotting under zero
+  edits to the citing files, and `_record_sids` enumerated **twice** (correct in-file with `exactly=`,
+  wrong across files claiming 7). **`docs/lanes/w52-fork.md` §9 hands it over executable.** It is a
+  campaign, not a phase.
+
+## WHAT THIS HANDOFF PROBABLY GETS WRONG
+
+Likeliest: that the three discharges will come back clean (no discharge has this wave); that one
+merge-prep lane can hold nine branches; that the landing order falls out of the table above rather
+than the graph; and that `w52/fork`'s `e16d19d`-vs-`7b9f93e` split is as simple as "code then report".
+**Re-measure what you act on** — every item above that I measured myself is marked as such, and every
+item I inherited and did not measure is the kind that has been wrong all wave.
