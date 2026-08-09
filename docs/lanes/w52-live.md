@@ -542,9 +542,55 @@ Re-graded before this run and unchanged by it: **16 mutants, all KILLED**, floor
 `final sha256 == floor : True`, `real worktree bin/fleet.py : untouched`, and **13 pins, 0
 uncovered**.
 
-### 7.4 — RUN 2 RESULTS
+### 7.4 — RUN 2 RESULTS, at `9e0170f`: **PREDICTION HIT, EVERY TERM, BOTH INTERPRETERS**
 
-*Filled in by the commit after this one. §7.3's prediction is frozen above.*
+MEASURED. §7.3 predicted `4649 collected, 4634 passed, 14 skipped, 1 xfailed, files=263`.
+
+| interpreter | collected | result | wall |
+|---|---|---|---|
+| `py -3.13 -m pytest -q` | **4649** ✅ | **`4634 passed, 14 skipped, 1 xfailed`** ✅ | 513.19s |
+| `py -3.10 -m pytest -q` | **4649** ✅ | **`4634 passed, 14 skipped, 1 xfailed`** ✅ | 581.24s |
+
+Working-tree digest, printed before run 1, between the interpreters, and after run 2 — three times,
+identical, `files=` included:
+
+```
+e9b4461641f5d592f2769cb1395e610e58a19e22549b6dfe447fdf63d870dc75  files=263  root=C:\proga\fleet-w52-live
+```
+
+`files=263` as predicted, and the hash differs from §7.1's because the code changed between the
+runs — which is the point of the instrument being CHECKOUT-RELATIVE: it answers *"did this run
+change anything here?"*, never *"is this tree that tree?"*.
+
+**Receipt harness, run per CLAUDE.md's rule that a verifier without its own seed test proves
+nothing** — `py -3.13 tools/verify_receipts.py --self-test --strict docs/specs/terminal-surface.md`:
+
+```
+SELF-TEST PASSED: a one-word paraphrase inside a pasted receipt is caught.
+EXTRACTION SELF-TEST PASSED: a receipt that stops being parsed is reported, not silently dropped.
+pins resolved: 02bf276, 35cd7b7
+parsed receipts: 11/11 reproduce exactly (14 fenced blocks, 0 unclassified, 0 volatile-skipped)
+VERDICT:         pass -- 0 failure(s), 0 warning(s)
+SELF-TEST VERDICT: PASSED -- the harness proved it can fail, on both seed classes.
+EXIT:            0 (PASSED)
+```
+
+### 7.5 — THE FLOOR LEDGER, END TO END
+
+| tree | collected | result |
+|---|---|---|
+| `64b43c2` baseline (both interpreters) | 4636 | `4621 passed, 14 skipped, 1 xfailed` |
+| `f632d3e` run 1 (both) — **predicted 4633 passed** | 4648 ✅ | `2 failed, 4631 passed, 14 skipped, 1 xfailed` ❌ |
+| `9e0170f` run 2 (both) — **predicted 4634 passed** | 4649 ✅ | `4634 passed, 14 skipped, 1 xfailed` ✅ |
+
+Net against baseline: **+13 tests, 0 failures, skips and xfails unmoved at 14/1.**
+
+**Two predictions, one hit and one miss, and the miss was worth more.** The hit confirms the
+arithmetic. The miss found a real regression in my own build that the 15-mutant ledger, the targeted
+per-edit runs and the pre-build RED check had all passed over. If a gate takes one methodological
+claim from this lane, take that one: **the floor prediction is not ceremony around the run, it is
+the instrument.** Its value is not in being right — it is that a wrong prediction makes an
+unexplained failure impossible to file as somebody else's noise.
 
 ---
 
@@ -597,3 +643,32 @@ does the same for the homes list. All green on every run reported here.
    one test carrying two properties is one test too few, that is a fair finding.
 5. **I did not fix `_cmd_respawn_supervisor` (§3.5) or `docs/SPEC.md:84` (§3.6).** Both are
    deliberate scope refusals with the correction stated. If the gate wants either, both are small.
+6. **The broad `except Exception` in `_sweep_retired_sessions` (§7.2)** is the kind of catch that
+   normally deserves a fight. My case is that the sweep is documented best-effort at both call
+   sites, that it is never load-bearing for either verb's outcome, and that it prints rather than
+   swallows — but "catch everything" is a real hazard and a gate should press on whether some
+   exception class ought to propagate after all (`KeyboardInterrupt` and `SystemExit` do, being
+   `BaseException`; that is deliberate and is why the catch is `Exception`, not `BaseException`).
+7. **A gate should ask what ELSE became reachable.** §7.2's regression came from a code path being
+   newly reached by a verb, not from the code being wrong. I fixed the instance and the class, but
+   the honest generalisation is: `_cmd_respawn_native` now calls `_stop_native_session_status`,
+   which it never did, so any test stubbing `run`/`which` for a respawn is newly exercising it. The
+   full floor on both interpreters is my evidence that nothing else broke — that is a strong check,
+   but it is the only one I ran for this specific question.
+
+---
+
+## 10. RECOMMENDED SUCCESSOR SLICES
+
+Neither is a blocker on this branch.
+
+1. **Carry the guards to `_cmd_respawn_supervisor`** (§3.5). It is now a ~3-line change: the shared
+   `_sweep_retired_sessions` exists and takes `other_current_sids` as a parameter, so that call site
+   gains the M1 ownership skip, the progress line and the best-effort guard by calling it. Needs its
+   own pins and mutants, mirroring `tests/test_respawn_retired_sweep.py`.
+2. **Re-pin `docs/SPEC.md:84`** (§3.6): `bin/fleet.py:61-110` → `:117-223`. One line, in the spec of
+   record, so it wants an operator's eye rather than a build lane's.
+3. **`w50/live` §6** (the `RosterLiveness` collapse) is untouched and its `INVERT-ON-BUILD` pins in
+   `tests/test_liveness_readers.py` are still green and still waiting. §6.7's owed decision now
+   carries a MEDIUM, partly non-reproducing defect and a BLOCKING objection to the obvious fix
+   (§4) — which is an argument for deciding it deliberately, not for deciding it quickly.
