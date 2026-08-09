@@ -155,9 +155,16 @@ class TestRenderedCommandQuoting:
         # multi-fleet slice 0: the rendered command names the INSTALL's
         # fleet.py, not the home's -- a data-only home has no bin/.
         fleet_py = (fleet.INSTALL_ROOT / "bin" / "fleet.py").as_posix()
-        assert f'"{fleet_py}" sup-boot' in text
-        assert f'"{fleet_py}" sup-checkpoint' in text
-        assert f' {fleet_py} sup' not in text      # unquoted form gone
+        # ADDRESSED BY WHAT IS BEING PINNED, NOT BY WHAT FOLLOWS IT. These
+        # three used to read `f'"{fleet_py}" sup-boot'` -- quoting asserted
+        # through the verb that happened to come next. multi-fleet slice (c)
+        # inserts `--fleet-home "<home>"` between them, and an adjacency
+        # spelling would have gone RED for a change that does not touch the
+        # quoting this class exists to pin. The unquoted-form guard below is
+        # unchanged and is what actually catches a lost quote.
+        assert text.count(f'"{fleet_py}"') == 2
+        assert "sup-boot" in text and "sup-checkpoint" in text
+        assert f' {fleet_py} ' not in text        # unquoted form gone
 
     def test_space_in_fleet_home_renders_quoted_commands(self, tmp_path, monkeypatch):
         # The class the finding names: any space under FLEET_HOME. Direct
@@ -178,4 +185,5 @@ class TestRenderedCommandQuoting:
         assert f'> "{bundle}" 2>&1' in text
         assert f'grep -E "^(VERDICT|INCARNATION|NONCE):" "{bundle}"' in text
         assert f'rm "{bundle}"' in text
-        assert f'"{fleet_py}" sup-boot' in text
+        assert f'"{fleet_py}"' in text
+        assert f' {fleet_py} ' not in text

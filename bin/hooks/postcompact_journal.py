@@ -42,10 +42,80 @@ def _valid_token(value):
     return True
 
 
+_ARGV_HOME_FLAG = "--fleet-home"
+
+
+def _argv_fleet_home():
+    """§5 step 1, for a plane that has no `main()` to apply it in: the
+    `--fleet-home` the worker-settings hook command baked into this process's
+    own argv (multi-fleet slice (c)).
+
+    STRUCTURALLY UNABLE TO RAISE, and that is the point rather than a nicety.
+    SPEC invariant 2 is exit-0 hooks: a hook that raises renders a traceback
+    into a worker's session on every tool call. Every operation here is a
+    bounds-checked index or a `str` method on a `sys.argv` element, so an
+    unknown flag, a missing value, a repeated flag and a nonsense path all
+    return a value or `None` -- never an exception.
+
+    Grammar deliberately matches `fleet.strip_global_fleet_home`, which is what
+    `bin/fleet.py`'s own `main()` uses on the same option string: both
+    `--fleet-home V` and `--fleet-home=V`, and a bare `--` ends the options.
+
+    A REPEATED FLAG WITH TWO DIFFERENT VALUES RETURNS `None`. `fleet.py`
+    refuses it outright (*"One invocation names one home"*); a hook has no
+    refusal available to it, so it declines the contradictory input and falls
+    to the next step -- the same decision, tiered by what the plane can do.
+    """
+    argv = sys.argv[1:]
+    found = None
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok == "--":
+            break
+        if tok == _ARGV_HOME_FLAG and i + 1 < len(argv):
+            value, i = argv[i + 1], i + 2
+        elif tok.startswith(_ARGV_HOME_FLAG + "="):
+            value, i = tok.split("=", 1)[1], i + 1
+        else:
+            i += 1
+            continue
+        if found is not None and value != found:
+            return None
+        found = value
+    return found or None
+
+
 def _fleet_home():
-    """FLEET_HOME env var wins if set; otherwise the fleet root is derived
-    from this file's own path: bin/hooks/postcompact_journal.py -> bin/hooks
-    -> bin -> repo root (two parents up from the containing directory)."""
+    """§5's resolution order, as much of it as a hook can run.
+
+    step 1  `--fleet-home` argv  -- the home the DISPATCH baked in. New in
+                                    multi-fleet slice (c); before it, a hook
+                                    could not learn its home at all.
+    step 2  sid->home lookup     -- SKIPPED: it costs one registry read per
+                                    listed home on every hook firing, and the
+                                    argv makes it unnecessary -- dispatch
+                                    already knows which home it dispatched for.
+    step 3  `FLEET_HOME` env     -- unchanged, and still a WORKING input: the
+                                    daemon substitutes environments wholesale,
+                                    and interactive sessions and the suite
+                                    address a home through it.
+    step 4  legacy install root  -- unchanged: derived from this file's own
+                                    path, bin/hooks/postcompact_journal.py -> bin/hooks -> bin -> repo root.
+    step 5  terminus             -- SKIPPED: its content is "mutating verbs
+                                    refuse", and this plane cannot refuse.
+
+    ARGV BEATS ENV. On a hosted body the environment is the daemon donor's,
+    not this body's -- multi-fleet's cross-fleet interference audit calls those
+    values *"donor facts; fenced by hook argv"*. The argv is the fence and the
+    env is what it fences. The argv value is NOT validated before it wins:
+    validating it and falling through on failure would trade a broken bake for
+    a write into the donor's home, which is the exact incident class the fence
+    exists to close.
+    """
+    argv_home = _argv_fleet_home()
+    if argv_home:
+        return argv_home
     env = os.environ.get("FLEET_HOME")
     if env:
         return env
