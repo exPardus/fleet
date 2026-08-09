@@ -192,6 +192,16 @@ def _install_release_carrier(home, archived=False):
     return rec
 
 
+def _respawn_args(name, force=False, **over):
+    """`cmd_respawn`'s full arg surface, in one place. Spelling it inline at
+    five call sites is how a signature change turns into five edits."""
+    ns = dict(name=name, task=None, force=force, yes=True, nonce=None,
+              max_budget_usd=None, setting_sources=None, token_ceiling=None,
+              permission_mode=None, model=None)
+    ns.update(over)
+    return SimpleNamespace(**ns)
+
+
 def _write_claim(age_seconds):
     """A HELD, non-legacy claim owned by a body that is not the caller.
 
@@ -470,106 +480,243 @@ class TestDisagreementOne:
 
 
 class TestTheShapeALingeringFinishedSessionPresents:
-    """W50 GATE F1, re-measured, and then one step past it.
+    """`state:"done"` + `status:"idle"` + a LIVE `claude.exe` pid, on win32.
 
-    The gate falsified the report's "zero done-with-keys on win32" with n=1.
-    Re-measuring with a detached sampler (70 samples, 20s apart, ~24 minutes,
-    from a process outside every session it observed) found **four** distinct
-    sids in that shape simultaneously, every pid verified alive -- and the
-    sharpest instance is that ONE FLEET WORKER HAD TWO LIVE PROCESSES:
+    THE MEASUREMENT (MEASURED, three independent observers). Four concurrent
+    instances in a 69/70-sample run; the `w50/glive2` gate reproduced n=4 in
+    ONE INLINE SNAPSHOT and closed the step this lane had missed -- pid
+    IDENTITY, not merely existence. Re-derived in-lane: **12/12 keyed pids are
+    `claude.exe`**, created 0.9-1.8 s before their entry's `startedAt`
+    (controls: own pid -> `python.exe`; 999999 -> None; discriminates on NAME).
 
-        worker 'w50-live':
-            ('b9b2124d', 'done',    'idle', 4436)    <- retired body, ALIVE
-            ('9d9509b2', 'working', 'busy', 20960)   <- current body
-        control: 10 workers with exactly one keyed entry; pid 999999 -> dead
+    WHAT THIS IS, CORRECTED TWICE. It is NOT "the roster mislabels a working
+    session" (REV2b retraction) and it is NOT "two live sessions under one name
+    from ordinary re-dispatch" (REV3, gate2 M2/M3). Measured against the
+    registry, all four instances were the workers' **CURRENT** sids and all
+    four workers were **idle**. So this is *the ordinary resident state of an
+    idle bg worker between turns* -- which is the exact case the `done` clause
+    was ADDED to serve:
 
-    That is the state `respawn`'s refusal exists to prevent -- "never two live
-    sessions under one name" -- arising as an ordinary consequence of
-    re-dispatch. Both entries are ACCURATE about their own sid: the retired
-    run really did finish, and its host process really did outlive it. This is
-    the mechanism `_roster_live_sids`'s own docstring records from macOS on
-    2026-07-19, now confirmed on win32.
+        "a finished bg session's host process can LINGER after its turn ends
+         ... observed blocking `fleet respawn` on an idle worker."
+                                        -- _roster_live_sids, :14663-14667
 
-    THE CONSEQUENCE: `_roster_live_sids` excludes the `done` entry, so every
-    caller asking "is a body running" gets a false DEAD for a live process.
-    `_cmd_respawn_supervisor._any_live` is the sharp one -- it intersects the
-    sid UNION (retired sids included) with the Q1 live set precisely because,
-    in its own words, "ANY live session of this record breaks the invariant",
-    and the done clause is what hides one from it.
+    **So on those four instances the clause is performing its stated purpose
+    and `not-live` is the RIGHT answer to "is a turn running".** The residency
+    is a bounded window (~1 h 56 m measured for one instance, then process and
+    keys go together).
 
-    A NOTE ON THIS CLASS'S OWN HISTORY, kept deliberately: its first version
-    was called `TestTheShapeABusySessionActuallyPresents` and asserted that
-    the roster had mislabelled a session that was MID-TURN. That was wrong --
-    `b9b2124d` is this lane's retired sid, not its current one. See
-    `docs/lanes/w50-live.md` §3.1 [REV2b].
+    WHAT REMAINS TRUE, AND IT IS NARROWER AND REAL: the same predicate also
+    answers "is there a PROCESS to stop", and for that question `not-live` is
+    wrong. Two shipped paths ask it that way. The worker path is the one where
+    it bites, and this class drives both.
     """
 
+    # SHAPE measured; the sid is this lane's, spliced (see the module docstring).
     LINGERING_DONE = {"sessionId": SID, "state": "done", "status": "idle",
                       "pid": 4436, "kind": "background",
                       "cwd": "C:\\proga\\fleet-w50-live"}
 
     def test_the_q1_predicate_calls_a_live_process_not_live(self):
-        """INVERT-ON-BUILD. The terminal-state rule dominates key presence.
-        That is the CORRECT call for a body whose turn is over and which
-        nothing will steer again -- and the wrong one for a lingering process
-        that a retired sid still answers for."""
+        """The predicate, stated without a consequence attached.
+
+        NOT `INVERT-ON-BUILD`: the build must NOT change this answer. §5.2 and
+        §6.2 both keep the clause, because on the measured population this is
+        correct. The first version of this test carried the marker, which was
+        part of gate2 B2 -- the document claimed a fix its own build does not
+        make."""
         assert fleet._roster_live_sids([self.LINGERING_DONE]) == set()
 
-    def test_the_union_gate_cannot_see_a_live_retired_body(self):
-        """INVERT-ON-BUILD, and the reason this matters to the build.
+    # ---- the WORKER path: where the consequence is real (gate2 Q2.4/M1) -----
 
-        `_record_sids` unions `session_id` with `retired_sids`, and
-        `_cmd_respawn_supervisor` intersects that union with Q1 to decide
-        whether ANY live session of the record remains. Measured above: the
-        retired sid's process IS alive and Q1 says it is not."""
-        record = {"session_id": "9d9509b2-current", "retired_sids": [SID]}
-        union = fleet._record_sids(record)
-        assert SID in union, "the retired sid must be in the union"
-        # ...and yet the union gate sees nothing live:
-        assert not (union & fleet._roster_live_sids([self.LINGERING_DONE]))
-        # CONTROL: the same union DOES intersect once the entry is not `done`.
-        alive_shape = dict(self.LINGERING_DONE, state="working", status="busy")
-        assert union & fleet._roster_live_sids([alive_shape]) == {SID}
-
-    def test_and_therefore_respawn_would_not_refuse_it(
+    def test_worker_respawn_attempts_NO_STOP_AND_NO_TOMBSTONE(
             self, sup_home, monkeypatch):
-        """The hazard, driven rather than argued. `respawn` refuses only when
-        the old sid is in the Q1 live set; this shape is not, so it proceeds
-        to stop a session whose OS process is alive and mid-turn.
+        """INVERT-ON-BUILD. The re-aimed finding, driven.
 
-        Contrast `test_respawn_refuses_on_an_unfetchable_roster_even_with_force`:
-        respawn is scrupulously conservative about an UNKNOWN roster and has no
-        defence at all against a roster that is confidently WRONG."""
+        `_cmd_respawn_native:8230` computes `old_live` from Q1, and the ENTIRE
+        stop-and-reverify block is inside `if old_live:`. On this shape Q1 says
+        not-live, so:
+
+          * no `claude stop` is attempted -- the live `claude.exe` is orphaned;
+          * **no tombstone is written**, and `write_tombstone_outcome` exists
+            precisely because "`claude stop` fires no Stop hook" (:8240-8243);
+          * the old sid is appended to `retired_sids` regardless (:8277);
+          * and there is NO retired-sid sweep on this path -- MEASURED,
+            `_RETIRED_SID_SWEEP_CAP` has exactly two call sites, `:8629`
+            (`_cmd_kill_native`) and `:9430` (`_cmd_respawn_supervisor`).
+
+        So the compensating sweeps that make this shape harmless on the kill
+        and supervisor-respawn paths do not exist here. That is the finding,
+        and it is narrower and better grounded than the one it replaces.
+
+        The branch's previous docstring for this case said respawn "proceeds to
+        stop a session whose OS process is alive and mid-turn". Both halves
+        were false (gate2 M4) and it monkeypatched the stop functions, so it
+        could not have observed either."""
         _install_worker(sup_home)
+        calls = []
         monkeypatch.setattr(fleet, "_fetch_agents_roster",
                             lambda **_: (True, [self.LINGERING_DONE]))
+        monkeypatch.setattr(fleet, "_stop_native_session",
+                            lambda *a, **k: calls.append("stop") or True)
         monkeypatch.setattr(fleet, "_stop_native_session_status",
-                            lambda *a, **k: (True, "gone"))
-        monkeypatch.setattr(fleet, "_stop_native_session", lambda *a, **k: True)
+                            lambda *a, **k: (calls.append("stop"), (True, "gone"))[1])
+        monkeypatch.setattr(fleet, "write_tombstone_outcome",
+                            lambda *a, **k: calls.append("tombstone"))
         monkeypatch.setattr(fleet, "dispatch_bg", _must_not_dispatch)
 
         with pytest.raises(_ReachedDispatch):
-            fleet.cmd_respawn(SimpleNamespace(
-                name="w", task=None, force=False, yes=True, nonce=None,
-                max_budget_usd=None, setting_sources=None, token_ceiling=None))
+            fleet.cmd_respawn(_respawn_args("w"))
+        assert calls == [], (
+            f"respawn touched the old session after Q1 said not-live: {calls}")
 
-    def test_control_it_DOES_refuse_the_same_session_shown_as_working(
+    def test_CONTROL_the_same_drive_DOES_stop_when_the_entry_reads_working(
             self, sup_home, monkeypatch):
-        """The control that makes the test above mean something: flip only
-        `state`/`status` to the mid-turn shape and the identical call refuses.
-        The difference between stopping a working session and refusing to is
-        two string fields the roster got wrong."""
+        """The control that makes the assertion above mean something: the
+        recorder IS wired, and the identical drive records a stop and a
+        tombstone once Q1 says live. Without this limb, `calls == []` would
+        also pass against a test that patched the wrong names."""
+        _install_worker(sup_home)
+        calls = []
+        working = dict(self.LINGERING_DONE, state="working", status="busy")
+
+        # STATEFUL, deliberately: `--force` stops the session and then RE-FETCHES
+        # to verify the daemon actually tore it down (`:8244-8255`). A constant
+        # roster that still says `working` makes respawn abort on its own
+        # re-verification, which would look like "no stop happened" for a
+        # completely different reason. So the fetch models the stop landing.
+        fetches = []
+
+        def _roster(**_):
+            fetches.append(1)
+            return (True, [working] if len(fetches) == 1 else [])
+
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster)
+        monkeypatch.setattr(fleet, "_stop_native_session",
+                            lambda *a, **k: calls.append("stop") or True)
+        monkeypatch.setattr(fleet, "write_tombstone_outcome",
+                            lambda *a, **k: calls.append("tombstone"))
+        monkeypatch.setattr(fleet, "dispatch_bg", _must_not_dispatch)
+
+        with pytest.raises(_ReachedDispatch):
+            fleet.cmd_respawn(_respawn_args("w", force=True))
+        assert calls == ["stop", "tombstone"], calls
+        assert len(fetches) >= 2, (
+            "respawn must re-verify after a --force stop; if it did not, this "
+            "control is not exercising the path it claims")
+
+    def test_worker_respawn_refuses_without_force_when_Q1_says_live(
+            self, sup_home, monkeypatch):
+        """The published contract, pinned so the two tests above cannot both
+        be satisfied by a respawn that never gates at all."""
         _install_worker(sup_home)
         working = dict(self.LINGERING_DONE, state="working", status="busy")
         monkeypatch.setattr(fleet, "_fetch_agents_roster",
                             lambda **_: (True, [working]))
         monkeypatch.setattr(fleet, "dispatch_bg", _must_not_dispatch)
-
         with pytest.raises(fleet.FleetCliError) as ei:
-            fleet.cmd_respawn(SimpleNamespace(
-                name="w", task=None, force=False, yes=True, nonce=None,
-                max_budget_usd=None, setting_sources=None, token_ceiling=None))
+            fleet.cmd_respawn(_respawn_args("w"))
         assert "turn is running" in str(ei.value)
+
+    # ---- the SUPERVISOR path: the B6 union gate, EXECUTED ------------------
+
+    def test_the_B6_union_gate_EXECUTES_and_does_not_see_a_live_retired_body(
+            self, sup_home, monkeypatch):
+        """INVERT-ON-BUILD, and this test exists because its predecessor did
+        not do this.
+
+        THE DEFECT IN THE OLD VERSION (gate2 B2, mutant M-GATE2). The previous
+        pin, `test_the_union_gate_cannot_see_a_live_retired_body`, computed
+        `union & fleet._roster_live_sids([...])` INLINE. It never entered
+        `_cmd_respawn_supervisor`, so when the gate planted the very fix the
+        headline demanded -- `_any_live` widened to count a keyed `done` entry
+        -- all 32 tests stayed green, including that one. A pin that
+        re-implements the predicate cannot detect a change to the caller.
+
+        This one drives `cmd_respawn` on a supervisor-SHAPED husk record, which
+        routes through `_is_supervisor_shaped` (`:8483`) into
+        `_cmd_respawn_supervisor` and reaches the real `_any_live` closure
+        (`:9447-9451`). The record's `retired_sids` carries a sid the roster
+        reports as `done` WITH a live pid.
+
+        TODAY: `_any_live` returns False, the B6 refusal does not fire, and the
+        successor is dispatched. **When `_any_live` stops being blind, this test
+        goes RED** -- which is the whole point, and is what M-GATE2 proved the
+        old pin could not do.
+
+        NOTE THE SCOPE, per gate2 M1: this path is reachable only for
+        supervisor-shaped records. The four measured instances were ordinary
+        WORKER records, which route to `_cmd_respawn_native` and never reach
+        `_any_live`. The blindness here is real and independently true; it is
+        not what the measurement observed. Those are separate claims and the
+        report no longer welds them."""
+        retired_sid = SID
+        sup_name = "sup|inc-20260809T000000Z-aaaa|boot"
+        rec = fleet.new_worker_record("current-sid-0000", str(sup_home / "proj"),
+                                      "campaign", "bypass", dispatch_kind="bg")
+        rec["retired_sids"] = [retired_sid]
+        data = fleet.load_registry()
+        data["workers"][sup_name] = rec
+        fleet.save_registry(data)
+        (sup_home / "proj").mkdir(exist_ok=True)
+
+        # The roster: the CURRENT sid is gone, the RETIRED sid is `done` with a
+        # live pid. `gate_sids` is the union, so a correct process-liveness
+        # answer would see one live session of this record.
+        roster = [dict(self.LINGERING_DONE, sessionId=retired_sid)]
+        assert fleet._record_sids(rec) & {retired_sid} == {retired_sid}
+
+        seen = []
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, roster))
+        monkeypatch.setattr(fleet, "_require_instance_settings", lambda: None)
+        monkeypatch.setattr(fleet, "_stop_native_session_status",
+                            lambda *a, **k: (True, "gone"))
+        monkeypatch.setattr(fleet, "write_tombstone_outcome", lambda *a, **k: None)
+        monkeypatch.setattr(fleet, "_dispatch_supervisor_body",
+                            lambda *a, **k: seen.append("dispatched") or 0)
+
+        rc = fleet.cmd_respawn(_respawn_args(sup_name))
+
+        assert seen == ["dispatched"], (
+            "the B6 gate REFUSED -- if `_any_live` has been fixed to count a "
+            "keyed `done` entry, that is the intended build change and this "
+            "characterising test must be inverted, not deleted")
+        assert rc == 0
+
+    def test_CONTROL_the_same_drive_DOES_refuse_when_the_retired_entry_reads_working(
+            self, sup_home, monkeypatch):
+        """The control that proves the test above reaches the gate at all.
+
+        Identical drive, one field changed: the retired entry reads `working`
+        instead of `done`. Q1 now sees it, `_any_live` returns True, and the
+        real `SUP-RESPAWN-HALTED-B6` refusal fires. So the previous test's
+        green is a statement about the `done` clause and not about an
+        unreachable code path."""
+        retired_sid = SID
+        sup_name = "sup|inc-20260809T000000Z-bbbb|boot"
+        rec = fleet.new_worker_record("current-sid-0000", str(sup_home / "proj"),
+                                      "campaign", "bypass", dispatch_kind="bg")
+        rec["retired_sids"] = [retired_sid]
+        data = fleet.load_registry()
+        data["workers"][sup_name] = rec
+        fleet.save_registry(data)
+        (sup_home / "proj").mkdir(exist_ok=True)
+
+        roster = [dict(self.LINGERING_DONE, sessionId=retired_sid,
+                       state="working", status="busy")]
+        seen = []
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, roster))
+        monkeypatch.setattr(fleet, "_require_instance_settings", lambda: None)
+        monkeypatch.setattr(fleet, "_stop_native_session_status",
+                            lambda *a, **k: (True, "gone"))
+        monkeypatch.setattr(fleet, "write_tombstone_outcome", lambda *a, **k: None)
+        monkeypatch.setattr(fleet, "_dispatch_supervisor_body",
+                            lambda *a, **k: seen.append("dispatched") or 0)
+
+        with pytest.raises(fleet.SupervisorLifecycleRefusal) as ei:
+            fleet.cmd_respawn(_respawn_args(sup_name, force=True))
+        assert "SUP-RESPAWN-HALTED-B6" in str(ei.value)
+        assert seen == [], "no successor may be dispatched when B6 refuses"
 
 
 class TestTheWindowsParenthetical:
