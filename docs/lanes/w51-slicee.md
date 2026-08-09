@@ -376,8 +376,8 @@ disk (`PLANT-ACTIVE.json` absent, checked immediately before the first run):
 | `py -3.10` baseline at `7b2ff75` | 4250 | 4235 passed, 14 skipped, 1 xfailed | 401.28s |
 | `py -3.13` this branch, at `47700d8` | 4279 | 4264 passed, 14 skipped, 1 xfailed | 443.15s |
 | `py -3.10` this branch, at `47700d8` | 4279 | 4264 passed, 14 skipped, 1 xfailed | 394.37s |
-| **`py -3.13` FINAL** | **4280** | **see §7.3** | |
-| **`py -3.10` FINAL** | **4280** | **see §7.3** | |
+| **`py -3.13` FINAL, at `0117b83`** | **4280** | **4265 passed, 14 skipped, 1 xfailed** | 438.81s |
+| **`py -3.10` FINAL, at `0117b83`** | **4280** | **4265 passed, 14 skipped, 1 xfailed** | 396.56s |
 
 **Predicted 4279 collected and 4264 / 14 / 1 in §6.3, before running either. Hit exactly on both
 floors.**
@@ -398,7 +398,27 @@ the armed machine — which §5's destructive tier **refuses** — and proves th
 empty. **+1 test.**
 
 Collected, both floors: **4280**. **PREDICTION: `4265 passed, 14 skipped, 1 xfailed`**
-(4265 + 14 + 1 = 4280). Committed here with no results; measured in §7.4.
+(4265 + 14 + 1 = 4280), committed in `0117b83` with no results.
+
+### 7.4 The final floors — second prediction, also hit exactly
+
+MEASURED at `0117b83`, working tree clean, digest
+`69b52d62fddabeb666740f95e47e797630be5fcb12274473755cc9b835778424 files=247` — **identical
+before the first run and after the second**, so neither floor modified anything. No mutant on
+disk at the start of either (`PLANT-ACTIVE.json` absent, checked). `~/.claude/fleet-homes.list`
+still absent afterwards.
+
+```
+py -3.13   4280 collected   4265 passed, 14 skipped, 1 xfailed   438.81s
+py -3.10   4280 collected   4265 passed, 14 skipped, 1 xfailed   396.56s
+```
+
+**Two predictions made, two hit exactly, both committed before the runs that tested them**
+(`438ef52` → 4264/14/1, `0117b83` → 4265/14/1). The 14 skips are the `FLEET_LIVE`-gated live
+tier, unchanged from the baseline; the xfail is unchanged; **this branch adds no skip and no
+xfail** — the quiescent canary's skip arm is unreachable by construction, which is §7's
+`delete-if-never-quiescent` clause discharged and is what
+`test_the_quiescent_arm_is_reachable_by_construction` asserts.
 
 ### 7.1 The redirect, measured before and after with one instrument
 
