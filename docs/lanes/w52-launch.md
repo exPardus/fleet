@@ -1665,3 +1665,35 @@ checkout-relative, it is **attention-relative**. It cannot distinguish "the run 
 "the author saved a file", so a lane that edits its own report during its own floor run will fail this
 check every time and be tempted to explain it away as noise. **The correct response to a mismatch is
 to find the file, not to re-run until it agrees.**
+
+#### The clean digest pair
+
+**MEASURED.** Tree committed at `c3cff78` and quiet — `git status --porcelain` empty before the run —
+and the AFTER digest taken **inside the same command** as the run, so no edit of mine could land in
+the interval:
+
+```console
+$ git status --porcelain          # 0 modified files
+$ py digest.py .
+4791b81cfe3658c12597ac30fafbc309a7b3d3bf9d8e257d72820e6752d6fab9  files=262
+
+$ py -3.10 -m pytest -q
+4621 passed, 14 skipped, 1 xfailed in 526.74s (0:08:46)
+$ py -3.13 -m pytest -q
+4621 passed, 14 skipped, 1 xfailed in 592.03s (0:09:52)
+
+$ py digest.py .
+4791b81cfe3658c12597ac30fafbc309a7b3d3bf9d8e257d72820e6752d6fab9  files=262
+```
+
+**Identical, `files=` included. The suite modifies nothing in this tree.**
+
+And the second run is an independent repeat of the floor: **`4621 passed, 14 skipped, 1 xfailed` on
+both interpreters, twice each, four full runs, no `FAILED` or `ERROR` line in any of them.** The
+gate's 3.13 flake did not appear in either of my 3.13 runs.
+
+**What the first pair's failure bought, since it cost a repeat run:** the instrument was proven
+non-vacuous on this tree by accident. A digest that had returned "identical" through 36 lines of
+edits would have been worthless and I would not have known — which is precisely the vacuity
+`git write-tree` ships with by default. **The pair that failed is the reason to believe the pair that
+passed.**
