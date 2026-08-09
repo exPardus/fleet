@@ -13,6 +13,20 @@
 Every line is tagged **MEASURED** (I ran it in this lane and read the output) or **BELIEVED**
 (reasoning, or documentation I did not execute).
 
+> **[ADDED BY THE MERGING LANE `w51-livemerge`, 2026-08-09 — no measurement below is altered.]**
+> Every `bin/fleet.py:NNNN` citation in this file is a claim about **`4d78f6c`**, the base named
+> in the table above, and it is still true of that tree. `main` has since taken slice (d)
+> (`bin/fleet.py` +250/−37, 21453 → 21666 lines), so **96 citations here resolve into the base and
+> 93 of them name a line that has moved**; none was deleted. This file is dated history
+> (`tests/test_doc_claims.py:_HISTORICAL_PREFIXES` lists `docs/lanes/`), so the numbers are left
+> exactly as measured — rewriting them would make the report claim a measurement it never made.
+> **§6.5 is the exception a successor will act on**: it recommends an insertion point by line
+> number. On the merged tree those two are `:3714 → :3726` (`recompute_worker_native`) and
+> `:14656 → :14869` (`_roster_live_sids`); the ranking and the ~4× ratio the section tells you to
+> budget against are unaffected. The live test that shipped with this report,
+> `tests/test_liveness_readers.py`, **was** re-pinned (15 citations) because its prose is a claim
+> about the current tree. Derivation and the full census: `docs/lanes/w51-livemerge.md`.
+
 > ## REVISION 3 — after the SECOND gate (`w50/glive2`, `349eb23`), which GATED this branch again
 >
 > **The measurement has survived three passes. Every headline I wrote around it has been wrong,
