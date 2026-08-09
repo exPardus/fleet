@@ -207,7 +207,51 @@ lifecycle mid-wave is how a build lane turns into a merge. **It is now trivial t
 body exists and takes `other_current_sids` as a parameter — and I recommend it as a successor slice,
 not as a gate blocker on this branch.
 
-### 3.6 — **NOT PREDICTED: `docs/SPEC.md` carries a stale current-tree citation, and it is not mine**
+### 3.6 — ~~`docs/SPEC.md` carries a stale current-tree citation~~ **RETRACTED: FALSE FINDING**
+
+> **STRUCK 2026-08-09, discharging gate `w52-glive3` F2 (MAJOR).** Everything in the box below is
+> wrong, and the recommendation it fed (old §10.2) would have **damaged the spec of record**. The
+> original text is kept, struck, because a retraction that deletes the claim leaves the next reader
+> no way to check the correction.
+>
+> **What is actually true, MEASURED by the gate at three trees.** `docs/SPEC.md` §0 pins itself:
+> *"Everything here is descriptive of `bin/fleet.py` at `c63d7dd` … Line numbers below are at
+> `c63d7dd` and will drift; the function names are the durable anchors"* — with a blockquote
+> immediately below titled **"PIN STALENESS — read this before trusting a line number"**. At
+> `c63d7dd`, `state_dir` is at **61** and `pin_pass_path` at **110**. **`bin/fleet.py:61-110` is
+> exactly right at the commit the document pins itself to.** Systematically: **57 of 64** anchors
+> resolve at `c63d7dd`, **0 of 64** at HEAD.
+>
+> So it is a **pinned receipt about a past tree**, which this campaign ratified on 2026-08-05 as
+> **not rot** — `tests/test_doc_claims.py`'s own words: *"a reference is rot only when it claims the
+> CURRENT tree; a pinned receipt and a quoted argument are claims about a PAST tree and stay true.
+> **Fixing them would FABRICATE.**"* My §10.2 proposed exactly that fabrication.
+>
+> **My census number was also wrong.** The correct count of current-tree `bin/fleet.py` citations is
+> **0**, not 1.
+>
+> **Where the framing came from, since the gate asked me to say.** My manager's steer, twice: the
+> gate brief that dispatched `w52-glive3` instructed it to confirm this as *"the third independent
+> instance this wave of citations that were already wrong before anyone touched the file"*, and my
+> own brief had primed the same expectation. The manager has recorded it against themselves —
+> generalising from two lanes' real findings to a third that is not one, and handing it over as
+> established. **The gate refused the instruction and measured instead, and was right to.** It also
+> refused the brief's *"if you must cut, cut the citations"* triage — that section held the largest
+> report-level defect on the branch. Both refusals were correct, and I am recording them here
+> because a lane that only ever reports what its brief expected is not measuring anything.
+>
+> **What survives, and it is not nothing.** The *method* in §6 stands — name the oracle's population
+> before trusting its colour. `tests/test_self_citations.py` genuinely resolves
+> `bin/fleet.py`-about-itself only, and cross-document citations genuinely rot behind it unseen. The
+> blind spot is real; what I found in it was not. There is also a real gap the gate names and I did
+> not: my classifier mirrors `_HISTORICAL_PREFIXES`, which is a **path-prefix** list, and
+> `docs/SPEC.md` governs itself in **prose** instead — *no instrument reads prose*. That is a
+> genuine hole in the repo's classification, and it is the finding I should have filed.
+
+<details>
+<summary>The struck original (do not act on it)</summary>
+
+### ~~3.6 — NOT PREDICTED: `docs/SPEC.md` carries a stale current-tree citation, and it is not mine~~
 
 MEASURED, and it is the exact class the brief told me to look for. The brief warned that
 `tests/test_self_citations.py` *"resolves `bin/fleet.py` citations about itself only, so it can be
@@ -232,6 +276,10 @@ I also swept the other citation spellings across all 30 current-tree documents (
 the `bin/` prefix, bare `(:N)`, backticked `` `:N` ``, `:N-M` ranges): **one hit**,
 `docs/NEXT-SESSION.md`'s `` `:337` ``, which cites a *spec section* in `claim-nonce.md`, not
 `bin/fleet.py`. Nothing else to re-pin.
+
+</details>
+
+*(That sweep result is unaffected by the retraction and stands: it found nothing either way.)*
 
 ---
 
@@ -447,8 +495,13 @@ the ranged `cmd_respawn:8617-8619` → `:8683-8685`; `_registry_records_or_none`
 `_sweep_husks`' presence-only `:10870` → `:10979`; and `_require_claim_holder`'s `:16561` → `:16670`
 at a second, separate citing site that pass 2 did not reach.
 
-**And the population that oracle cannot see is named in §3.6**, with the one current-tree
-cross-document citation it is blind to — which turned out to be stale, and stale before I arrived.
+**And the population that oracle cannot see is named in §3.6** — 894 cross-document
+`bin/fleet.py:NNNN` citations it resolves none of. **Corrected 2026-08-09 (gate F2):** the one I
+reported as current-tree and stale is neither; see §3.6's retraction. The count of current-tree
+citations is **0**, the oracle's blind spot is real, and nothing was found in it. *This sentence is
+one of the two the gate did NOT name — the everywhere-grep found it, which is exactly the duty
+`docs/lanes/BRIEF-TEMPLATE.md` states for a discharge: grep the whole tree for the old claim, not
+the diff, and not only the headings the gate quoted.*
 
 ---
 
@@ -575,6 +628,31 @@ SELF-TEST VERDICT: PASSED -- the harness proved it can fail, on both seed classe
 EXIT:            0 (PASSED)
 ```
 
+### 7.6 — RUN 3 PREDICTION (the F1/F3/F5 discharge) — WRITTEN BEFORE THE RUN
+
+**PREDICTION: 4661 collected, `4646 passed, 14 skipped, 1 xfailed`, both interpreters.
+`files=263`, unchanged.**
+
+Derived, by collection rather than by counting `def test_` lines — which matters more than usual
+here, because **12 of the 13 added cases come from two `parametrize`d pins over five shapes each**
+and a `def`-count would have said 4:
+
+- `tests/test_respawn_retired_sweep.py` collects **25**, up from 13 → **+12**.
+  (`test_a_corrupt_retired_sid_cannot_abort_the_respawn` ×5,
+  `test_a_corrupt_retired_sid_cannot_abort_the_KILL` ×5, `test_a_raising_stop_CANNOT_abort_the_KILL`,
+  `test_the_dedup_still_keeps_the_OLDEST_position_and_the_cap_still_bites`.)
+- Nothing else adds or removes a test: `git diff --name-status 12c238c..HEAD` is three **M**odified
+  files, **zero added**, so `files=263` holds and `CHECK_COUNT_DOCS` is untouched.
+- 4649 + 12 = **4661** collected; 4634 + 12 = **4646** passed; skips and xfails unmoved at 14/1.
+
+Graded before this run and unchanged by it: **20 mutants, all KILLED**; floor green at 456 (+1
+skipped) now that `tests/test_native.py` is in `TESTFILES`; `final sha256 == floor : True`;
+`real worktree bin/fleet.py : untouched`; **25 pins, 0 uncovered**.
+
+### 7.7 — RUN 3 RESULTS
+
+*Filled in by the commit after this one. §7.6's prediction is frozen above.*
+
 ### 7.5 — THE FLOOR LEDGER, END TO END
 
 | tree | collected | result |
@@ -641,8 +719,11 @@ does the same for the homes list. All green on every run reported here.
 4. **`M-W52-ORDER` and `M-W52-CAP` kill the same single pin.** That pin asserts both the count and
    the identity of the 19 swept sids, so it genuinely separates the two defects — but if you think
    one test carrying two properties is one test too few, that is a fair finding.
-5. **I did not fix `_cmd_respawn_supervisor` (§3.5) or `docs/SPEC.md:84` (§3.6).** Both are
-   deliberate scope refusals with the correction stated. If the gate wants either, both are small.
+5. **I did not fix `_cmd_respawn_supervisor` (§3.5).** A deliberate scope refusal with the
+   correction stated; it is small if wanted. ~~or `docs/SPEC.md:84` (§3.6)~~ — **struck 2026-08-09
+   (gate F2): there was nothing to fix there.** My refusal was right for the wrong reason, and that
+   refusal is the only thing that stood between this report and a damaged spec. *This is the second
+   of the two sites the gate did not name; the everywhere-grep found it.*
 6. **The broad `except Exception` in `_sweep_retired_sessions` (§7.2)** is the kind of catch that
    normally deserves a fight. My case is that the sweep is documented best-effort at both call
    sites, that it is never load-bearing for either verb's outcome, and that it prints rather than
@@ -658,16 +739,111 @@ does the same for the homes list. All green on every run reported here.
 
 ---
 
+## 9A. THE GATE'S DISCHARGE (`w52-glive3` @ `4ab8650`, verdict GATING)
+
+The gate is the authority; this section records what I did about it. It confirmed, so I do not
+re-defend: `_roster_live_sids` byte-identical; `kill` byte-identical on 7 of 9 driven scenarios and
+improved on the other 2; `--force` tombstones exactly once; the CRLF flattening could not have
+reached a commit under `autocrlf=true`; the floor reproduced independently on a different tree; and
+**both of my refutations of the dispatching brief were verified in my favour**.
+
+### F1 (MAJOR, gating) — DISCHARGED, and the fix is WIDER than the gate's
+
+A non-string element in `retired_sids` aborted `fleet respawn` with an unhandled `TypeError`. Base
+tolerated it. `main()` does not catch `TypeError`, so it surfaced as a raw traceback from the verb
+§11.4 makes the recovery lever, for the input class recovery is most likely to be looking at. **My
+branch introduced it**, and §7.2's own sentence — *"a best-effort operation that can abort its
+caller is not best-effort"* — is the rule it broke.
+
+**The gate said one line and told me not to take that on faith. It is not one line.** MEASURED:
+
+- By AST, the sweep body touches the untrusted value at **four** sites, not the three the gate
+  listed — it missed the truncation inside the M1 skip's own message.
+- By driving every shape through both verbs, there is a **second raise site the gate did not name at
+  all**: `dict.fromkeys` in **both callers**, which hashes every element.
+
+| element | raised at | in |
+|---|---|---|
+| `123`, `True`, `3.5` | the progress-line truncation | `_sweep_retired_sessions` |
+| `{"a":1}`, `["x"]` | `dict.fromkeys` | **`_cmd_respawn_native` and `_cmd_kill_native`** |
+| `None` | — (falsy, already filtered) | — |
+
+**A fix confined to the sweep body would have left `dict` and `list` aborting both verbs.** So the
+fix is an `isinstance` skip placed FIRST in the loop, above all four sites, plus
+`_ordered_unique_sids` replacing `dict.fromkeys` at both call sites — preserving first-occurrence
+semantics exactly, because the cap depends on them, and passing unhashable values through rather
+than dropping them so the sweep body can report them to the operator.
+
+Re-driven after the fix, all five shapes on both verbs: verb completes, corrupt entry reported on
+stderr, **the good sid is still swept**, tombstone still written, worker still marked dead.
+
+### F3 (MAJOR) — DISCHARGED, and this is the lesson worth keeping
+
+The gate planted a guardless `kill` (its G1) and it **SURVIVED all 4649 tests**, because every pin
+on the shared body drove `respawn`. `M-W52-KILLGUARD` replants that mutant here. MEASURED, it is now
+caught by **exactly the six new kill-side pins and no respawn pin** — plus a `test_native.py` pin
+the driver can only see because of F5 below.
+
+> **A shared helper needs a pin per caller.** The mutant that kills it from one caller can survive
+> from the other, and extracting a body is precisely what makes that possible. Extraction
+> single-sources the code; it does not single-source the coverage, and the coverage is what a
+> successor edit will actually run into.
+
+### F5 (MINOR) — DISCHARGED. `tests/test_native.py` joins `TESTFILES`
+
+The gate's finding was about a **claim**: §9.1 defended the extraction with kill's five pins *"which
+`M-W52-M1` proves are load-bearing through the shared body"*, and the driver never ran that file, so
+the instrument cited structurally could not produce the evidence. Note the shape of the original
+mistake, because it recurs — the wave-52 repair that made `TESTFILES` a tuple added the file the NEW
+pins were in, not the file the extraction put at RISK.
+
+### F2 (MAJOR, gating) — DISCHARGED by retraction; see §3.6, §6, §9.5 and §10.2
+
+**The gate named two sites. The everywhere-grep found four.** `docs/lanes/BRIEF-TEMPLATE.md`'s rule
+for a discharge is to grep the whole tree for the *old* claim rather than the diff or the headings
+the gate quoted — and §6's closing sentence and §9.5's item 5 both carried the struck framing
+onward. Both are corrected in place and marked as the two the gate did not name.
+
+### F4, F6, F7, F8 — accepted, not actioned in this discharge
+
+F4 (the guardless copy now lacks **three** guards, and its *"mirroring `_cmd_kill_native`"* comment
+became less true) is folded into §10.1. F6 (`kill`'s PRIMARY stop still aborts before the tombstone
+— pre-existing, unchanged by me, and arguably correct since that stop's outcome IS load-bearing),
+F7 (the liveness→write window widens to ≤100 s and the write does not re-check the sid — a
+pre-existing race this branch widens) and F8 (the progress line truncates at 8 chars while the stop
+ref splits at `-`, so `retired30`…`retired39` all print as `retired3`) are real and I have not
+touched them. **F7 is the one I would look at next** — it is the only one that is a property of my
+change rather than of code I did not write.
+
+---
+
 ## 10. RECOMMENDED SUCCESSOR SLICES
 
 Neither is a blocker on this branch.
 
 1. **Carry the guards to `_cmd_respawn_supervisor`** (§3.5). It is now a ~3-line change: the shared
    `_sweep_retired_sessions` exists and takes `other_current_sids` as a parameter, so that call site
-   gains the M1 ownership skip, the progress line and the best-effort guard by calling it. Needs its
-   own pins and mutants, mirroring `tests/test_respawn_retired_sweep.py`.
-2. **Re-pin `docs/SPEC.md:84`** (§3.6): `bin/fleet.py:61-110` → `:117-223`. One line, in the spec of
-   record, so it wants an operator's eye rather than a build lane's.
+   gains the guards by calling it. **Corrected per gate F4: it is now missing FOUR guards, not two**
+   — the M1 ownership skip, the M5 progress line, the best-effort `try`, and the corrupt-element
+   skip; the last two are guards *this lane created* and did not apply at the third call site of the
+   same loop in the same file. It also needs `bin/fleet.py`'s *"the retired parents are swept
+   best-effort, **mirroring `_cmd_kill_native`**"* comment fixed: `_cmd_kill_native` no longer
+   contains that loop at all, so a reader following the pointer lands on a function that no longer
+   does what the pointer promises — the extraction made that claim less true and did not update it.
+   Needs its own pins and mutants; note the gate measured that its *existence* IS pinned
+   (`tests/test_sup_tombstone.py:473`), so only the guards are uncovered.
+2. ~~**Re-pin `docs/SPEC.md:84`**: `bin/fleet.py:61-110` → `:117-223`.~~ **WITHDRAWN 2026-08-09,
+   gate `w52-glive3` F2 — DO NOT DO THIS.** The citation is correct at the commit `docs/SPEC.md` §0
+   pins itself to (`c63d7dd`), where 57 of 64 anchors resolve against 0 at HEAD. Acting on it would
+   have taken a document internally consistent at one commit and made it half-`c63d7dd`,
+   half-HEAD with no marker saying which — manufacturing the *look* of a repair on a document that
+   needed none, in the spec of record. See §3.6's retraction.
+
+   **What IS worth a successor slice is the gap underneath it:** `_HISTORICAL_PREFIXES` classifies
+   by **path prefix**, and `docs/SPEC.md` declares its pin in **prose**, which no instrument reads.
+   A document that pins itself should be able to say so in a way the tooling can see — a
+   machine-readable pin marker, or an explicit entry. That is a real hole and it is what I should
+   have filed instead of a false citation finding.
 3. **`w50/live` §6** (the `RosterLiveness` collapse) is untouched and its `INVERT-ON-BUILD` pins in
    `tests/test_liveness_readers.py` are still green and still waiting. §6.7's owed decision now
    carries a MEDIUM, partly non-reproducing defect and a BLOCKING objection to the obvious fix

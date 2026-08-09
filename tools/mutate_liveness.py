@@ -140,8 +140,8 @@ MUTANTS = [
                     "MAJ-NEW defect, replanted on the new call site: `[-cap:]` "
                     "becomes LEXICOGRAPHIC and discards whichever sids sort "
                     "low rather than the oldest",
-     "    _sweep = [s for s in dict.fromkeys(prior_retired + [old_sid])",
-     "    _sweep = [s for s in sorted(dict.fromkeys(prior_retired + [old_sid]))"
+     "    _sweep = [s for s in _ordered_unique_sids(prior_retired + [old_sid])",
+     "    _sweep = [s for s in sorted(_ordered_unique_sids(prior_retired + [old_sid]))"
      "  # MUTANT M-W52-ORDER",
      "KILLED"),
 
@@ -202,6 +202,15 @@ MUTANTS = [
      "    _sweep = [s for s in _ordered_unique_sids(prior_retired + [old_sid])",
      "    _sweep = [s for s in dict.fromkeys(prior_retired + [old_sid])"
      "  # MUTANT M-W52-DEDUP",
+     "KILLED"),
+
+    ("M-W52-DROP", "`_ordered_unique_sids` DROPS the unhashable element "
+                   "instead of passing it through, so a corrupt registry is "
+                   "silently swallowed by the dedup and the operator is never "
+                   "told which entry is bad -- the guard still holds, but the "
+                   "reporting the guard exists to produce disappears",
+     "        except TypeError:\n            pass          # unhashable: cannot dedup it, must not drop it",
+     "        except TypeError:\n            continue  # MUTANT M-W52-DROP",
      "KILLED"),
 
     # The gate's G1, which SURVIVED all 4649 tests on the pre-discharge tree.
