@@ -110,8 +110,16 @@ class TestTheFourDeadHooksAreExactlyFour:
 
         commands = _hook_commands(rendered)
         assert len(commands) == 4
-        dead = [c for c in commands
-                if not Path(re.search(r'"\s*"([^"]+)"\s*$', c).group(1)).exists()]
+        # The SCRIPT path, addressed by what makes it the script (it is the
+        # `bin/hooks/*.py` token), not by its position in the command. The
+        # older `...([^"]+)"\s*$` spelling read the LAST quoted token, which
+        # was the script only for as long as the command ended with it --
+        # multi-fleet slice (c) appends `--fleet-home "<home>"`, and a
+        # position-addressed extraction would then have checked the HOME for
+        # existence and called this row green for the wrong reason.
+        scripts = [re.search(r'"([^"]*/bin/hooks/[^"]+)"', c) for c in commands]
+        assert all(scripts), f"no script path found in: {commands}"
+        dead = [m.group(1) for m in scripts if not Path(m.group(1)).exists()]
         assert not dead, f"still dead against a data-only home: {dead}"
 
     def test_the_statusline_is_the_fifth_casualty_and_is_also_fixed(self, tmp_path, monkeypatch):

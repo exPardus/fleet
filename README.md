@@ -84,7 +84,7 @@ Every `fleet` command is a short-lived CLI invocation. The registry is the singl
 | **Usage-limit park/resume** | A worker that hits a Claude plan usage limit parks itself (`limited` status, recorded reset horizon) instead of dying silently; `fleet resume-limited` relaunches it once the window passes. |
 | **Durable manager identity** | A boot-claim + heartbeat + hand-off protocol (`fleet sup-boot` / `sup-handoff-*`) so exactly one manager owns the fleet across restarts — and can pass the baton to a successor without dropping a campaign. |
 | **Knowledge loop** | `knowledge/` is git-tracked: an index, playbooks, per-project quirks, and append-only lessons that every manager session reads at startup and writes back to after every campaign. The fleet gets better at running the fleet. |
-| **`fleet doctor`** | 28 health checks in one command — registry readability, hook wiring, stale sessions, orphaned mailboxes, stale attaches, version pins, how long since the last `autoclean` sweep, supervisor claim, and more. Report-only: `--repair` is the one flag that mutates, and it only quarantines a corrupt `state/fleet.json`. |
+| **`fleet doctor`** | 29 health checks in one command — registry readability, hook wiring, stale sessions, orphaned mailboxes, stale attaches, version pins, how long since the last `autoclean` sweep, supervisor claim, and more. Report-only: `--repair` is the one flag that mutates, and it only quarantines a corrupt `state/fleet.json`. |
 | **Terminal surface** | Statusline + `/fleet:*` slash commands, shipped as a normal Claude Code plugin. The statusline is opt-in (`fleet init --statusline`) and is the only ambient surface; the plugin itself registers no hooks and injects nothing. |
 | **Interactive hand-off** | A worker is a real Claude Code session, so you drop into it through Claude Code — the agents menu (Ctrl+T) or `claude attach <session-id>`. `fleet release` hands a stale `attached` record back to headless. *(`fleet attach` itself currently refuses and redirects there; native attach integration is a later milestone.)* |
 | **Crash-safe by design** | A worker is a durable Claude Code session addressed by `--session-id`/`--resume`, not a process fleet has to keep alive. Fleet runs no persistent process of its own — every `fleet` command is a short-lived CLI invocation. |
@@ -112,7 +112,7 @@ claude plugin install fleet@claude-fleet
 # 4. Optional: the always-on statusline (a plugin can't ship one)
 fleet init --statusline
 
-# 5. Confirm the wiring -- all 28 checks should pass
+# 5. Confirm the wiring -- all 29 checks should pass
 fleet doctor
 ```
 
@@ -137,7 +137,7 @@ Two things this quickstart cannot do for you: step 3's `<path-or-github-repo-of-
 | `fleet resume-limited` | Relaunch workers parked on a usage limit past their reset horizon |
 | `fleet kill` | Interrupt (if running) and mark a worker dead |
 | `fleet clean` / `archive` / `autoclean` | Tiered cleanup: remove dead workers, archive terminal ones, staleness sweep run by the supervisor's beat and the interface's startup ritual |
-| `fleet doctor [--repair]` | Run the 28 fleet health checks. Report-only unless `--repair` is passed, which quarantines a corrupt `state/fleet.json` by renaming it aside |
+| `fleet doctor [--repair]` | Run the 29 fleet health checks. Report-only unless `--repair` is passed, which quarantines a corrupt `state/fleet.json` by renaming it aside |
 | `fleet home` / `knowledge` | Print the resolved `FLEET_HOME`; print `knowledge/INDEX.md` |
 | `fleet index` / `q` | Opt-in per-project symbol index (`index init/build/update/status`) and the query verb over it |
 | `fleet sup-*` | Supervisor identity: `boot`, `spawn`, `checkpoint`, `heartbeat`, `release`, `status`, `context`, `decision`, `handoff-{begin,complete,abort}` |
