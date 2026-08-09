@@ -271,6 +271,43 @@ below). Search-space-not-authority argument and honesty items unchanged from v6.
 > dischargeable only by editing that test file. **Receipts here land with the trigger that
 > exclusion names, and this note is not it.**
 
+> **SECOND DIVERGENCE RECORD — step 1's refusal is not tiered by verb class at all. Measured
+> 2026-08-09 on the `w48/hookargv` branch (slice (c)), py 3.13.** Recorded, deliberately NOT
+> closed: step 1's sentence is under an open operator gate and closing this means choosing
+> between the ratified text and the shipped guard, which is the operator's call. The sentence
+> above is unedited.
+>
+> Cited by step number and by its own words, never by line. Step 1 reads *"Flag/lookup
+> disagreement → **mutating verbs** refuse without `--yes` + witness line."* The shipped
+> `apply_resolved_home` refuses **every** verb that is not in `TERMINUS_EXEMPT_VERBS` (today:
+> `homes` alone). Driven with a two-home list, the session's sid a member of home B, and
+> `--fleet-home` naming home A:
+>
+> | verb | ratified class | shipped |
+> |---|---|---|
+> | `status`, `peek`, `result`, `home`, `doctor`, `q`, `knowledge`, `sup-status`, `sup-context` | not mutating — all nine are `TERMINUS_VIEW_VERBS` | **refused, rc 1** |
+> | `clean`, `spawn` | mutating | refused, rc 1 — as ratified |
+>
+> **The asymmetry is visible inside the one function.** §5 step 5's terminus DOES carve views
+> out — `if command in TERMINUS_VIEW_VERBS ... print(NO_HOME_LINE); return 0` — while step 1's
+> disagreement arm, twenty lines above it, carves nothing out. So the code already holds the
+> concept that a view must answer rather than refuse, and step 1 does not use it. That also
+> collides with this repo's standing view rule (root `CLAUDE.md`): a view reads the snapshot and
+> exits 0.
+>
+> **How slice (c) reaches it.** Slice (c) bakes `--fleet-home` into `_render_successor_task`,
+> whose step 3 is a ten-minute poll on `sup-status --json` — a view. Under a genuine
+> flag/lookup disagreement that poll refuses for the whole window and the successor ends
+> `HANDOFF-ORPHAN`, and the `sup-checkpoint` in the same body refuses too, which the render's own
+> text warns *"files a false second-body row in `fleet doctor`"*. Slice (c) did not create the
+> behaviour — it is slice (a)'s guard — but it is what puts the flag on a rendered view for the
+> first time, so it is what makes the divergence reachable without an operator typing it.
+>
+> **NOT reached in ordinary operation, measured in the same drive:** with the flag naming the
+> home the body's sid actually belongs to, every verb proceeds; and in the pre-claim window (the
+> sid a member of no home) the lookup misses, falls through, and the flag wins — which is
+> precisely the hole slice (c) exists to close, working.
+
 **The verb-effect table (replaces v7's one-line criterion, which did not generate its own
 list — rs7 C-2 killed it on `kill`, this repo's own contract for which is respawn-recoverable):**
 verbs classify by their **worst irreversible effect in the wrong home**, enumerated per verb:

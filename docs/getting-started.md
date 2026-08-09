@@ -72,9 +72,9 @@ Confirm the wiring is healthy any time:
 fleet doctor
 ```
 
-`fleet doctor` runs 28 checks — hook registration, version pins, orphaned mailboxes, stale attaches, how long since the last autoclean run, the supervisor claim, and more. It prints one `[PASS]`/`[FAIL]` row per check and exits nonzero if any failed. It is **report-only**: `--repair` is the only flag that mutates anything, and all it does is rename a corrupt `state/fleet.json` aside.
+`fleet doctor` runs 29 checks — hook registration, version pins, orphaned mailboxes, stale attaches, how long since the last autoclean run, the supervisor claim, and more. It prints one `[PASS]`/`[FAIL]` row per check and exits nonzero if any failed. It is **report-only**: `--repair` is the only flag that mutates anything, and all it does is rename a corrupt `state/fleet.json` aside.
 
-> **Run `fleet init` before `fleet doctor`, not after.** On a home where `init` has not run, four checks fail by design — `worker-settings-instance`, `instance-freshness`, `instance-grants` and `hook-registration` all report that `worker-settings.json` is missing and tell you to run `fleet init`. That is doctor working, not fleet being broken. After `init`, the same run goes to 28 PASS / 0 FAIL.
+> **Run `fleet init` before `fleet doctor`, not after.** On a home where `init` has not run, four checks fail by design — `worker-settings-instance`, `instance-freshness`, `instance-grants` and `hook-registration` all report that `worker-settings.json` is missing and tell you to run `fleet init`. That is doctor working, not fleet being broken. After `init`, the same run goes to 29 PASS / 0 FAIL.
 
 ## Become the manager
 
@@ -218,7 +218,7 @@ For dependent or review-style work (one worker builds, another attacks the diff)
 | `fleet resume-limited` | Relaunch usage-limit-parked workers past their reset |
 | `fleet kill` | Interrupt (if running) and mark dead |
 | `fleet clean` / `archive` / `autoclean` | Tiered cleanup and staleness sweeps |
-| `fleet doctor` | Run the 28 health checks (`--repair` quarantines a corrupt registry) |
+| `fleet doctor` | Run the 29 health checks (`--repair` quarantines a corrupt registry) |
 | `fleet home` | Print the resolved `FLEET_HOME` |
 | `fleet knowledge` | Print `knowledge/INDEX.md` |
 | `fleet index` / `fleet q` | Opt-in per-project symbol index (`index init/build/update/status`) and the query verb over it |

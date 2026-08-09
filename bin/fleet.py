@@ -910,10 +910,10 @@ def _quarantine_artifacts() -> list:
 
       * `_sweep_husks` (:10730) -- a rename can hide live worker records from
         the roster sweep, so a thin registry would rm sessions it still owns.
-      * `_doctor_check_autoclean` (:11838) -- a lingering artifact means the
+      * `_doctor_check_autoclean` (:11912) -- a lingering artifact means the
         sweep above is refusing itself, which is how a bricked sweep reads
         green-and-fresh.
-      * `_require_claim_holder`'s §9 arm (:16348) -- the legacy upgrade mints
+      * `_require_claim_holder`'s §9 arm (:16428) -- the legacy upgrade mints
         generation 1 on bare sid equality, so it needs the registry that
         cleared it to be COMPLETE, not merely readable. See there.
 
@@ -929,7 +929,7 @@ def _quarantine_artifacts() -> list:
         §6.5 worker-turn gate, which refuses on `True` alone, so poisoning a
         HEALTHY read here would let a real worker turn through §6.5 -- closing
         the §9 door by opening a wider one. Rule 1 lives at the §9 arm instead.
-      * `_identity_abstention_note` (:16069) -- the same distinction, in words,
+      * `_identity_abstention_note` (:16149) -- the same distinction, in words,
         because the generic note names `fleet doctor` and doctor is what MADE
         this state.
       * `_read_registry_readonly` (:4059) -- the VIEW surface's copy of the same
@@ -938,7 +938,7 @@ def _quarantine_artifacts() -> list:
         a never-initialised box prints, so the two states were not
         distinguishable from the read surface at all. A `Path.glob` is a read,
         so this costs the views doctrine nothing.
-      * `_doctor_check_registry` (:12376) -- doctor graded only on whether the
+      * `_doctor_check_registry` (:12450) -- doctor graded only on whether the
         LOADER RAISED, and the loader returns `{"workers": {}}` for a missing
         file, so the row called a renamed-away path *"is readable"* and doctor
         exited 0 with every row green (P1-12). A bare absence stays a PASS: no
@@ -951,7 +951,7 @@ def _quarantine_artifacts() -> list:
     whose name they were never told.
 
       * `_print_snapshot_table` (:6879) -- `fleet status --stale-ok`.
-      * `_tombstone_releasing_body` (:16505) -- `sup-release`, whose registry
+      * `_tombstone_releasing_body` (:16585) -- `sup-release`, whose registry
         arm previously swallowed the quarantined case in silence.
 
     The operator clears the artifact (after restoring what it holds), which
@@ -3095,7 +3095,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     -- reads `ok` while MISSING every record the artifact holds, and the §9 arm
     read that thinness as an affirmative *"you are provably not a worker"*. The
     presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:16348`), where it costs the §6.5 gate nothing.
+    (`:16428`), where it costs the §6.5 gate nothing.
 
     An artifact can also outlive its incident by days -- `_sweep_husks` tells the
     operator to restore the file first and delete the artifact second -- so that
@@ -11249,6 +11249,80 @@ def _doctor_check_instance_grants():
             "template's grants")
 
 
+def _doctor_check_home_witness():
+    """multi-fleet slice (c): does this home's settings instance dispatch hooks
+    that come back to THIS home?
+
+    WHAT "WITNESS" MEANS HERE, since the word carries a specific meaning in
+    this file already. `_doctor_check_identity_witness` below states it:
+    *"THE REGISTRY JUDGES, THE ENVIRONMENT ONLY WITNESSES"* -- a witness is a
+    second channel whose disagreement with the authority is a detected leak
+    that doctor REPORTS and never acts on. This row applies that shape to
+    homes. The authority is the home the instance LIVES in
+    (`instance_settings_path()` is `<home>/state/worker-settings.json`, so
+    `fleet init` renders one instance per home); the witness is the
+    `--fleet-home` value baked into that instance's hook commands. They are the
+    same fact recorded twice, and when they disagree every worker this home
+    dispatches runs hooks that write into a DIFFERENT home -- mailboxes drained
+    elsewhere, outcomes and journals filed elsewhere -- while every surface
+    here still reads this home and sees nothing wrong. Nothing else in the tree
+    can see that, which is why it needs a row.
+
+    Reachable states, all of them from ordinary operation rather than
+    tampering: an instance copied between homes; a `fleet init` run against one
+    home from a shell whose `FLEET_HOME` named another; and -- the common one
+    for a while yet -- an instance rendered BEFORE this slice, whose hook
+    commands carry no `--fleet-home` at all and so have no fence.
+
+    NOT the same row as `instance-freshness`, which compares MTIMES and is a
+    known false alarm; this compares CONTENT, and is the answer freshness
+    cannot give.
+
+    REPORT-ONLY, like every other doctor row: no rename, no write, no repair.
+    An unreadable or unparseable instance is NOT this row's finding -- the
+    `worker-settings-instance` and `instance-grants` rows above own that, and
+    duplicating their FAIL here would train the operator to read two rows for
+    one fault."""
+    try:
+        doc = json.loads(instance_settings_path().read_text(encoding="utf-8"))
+        commands = [str(h.get("command", ""))
+                    for group in (doc.get("hooks") or {}).values()
+                    for entry in (group or [])
+                    for h in (entry.get("hooks") or [])]
+    except Exception:  # noqa: BLE001 -- the instance rows above own this fault
+        return ("home-witness", True,
+                "NOTE: settings instance unreadable or not hook-shaped -- see "
+                "the worker-settings-instance / instance-grants rows above")
+    if not commands:
+        return ("home-witness", True,
+                "NOTE: the settings instance declares no hook commands, so "
+                "there is no baked home to disagree with")
+    baked, unfenced = set(), 0
+    for command in commands:
+        found = re.search(r'--fleet-home\s+"([^"]*)"', command)
+        if found and found.group(1):
+            baked.add(found.group(1))
+        else:
+            unfenced += 1
+    here = FLEET_HOME.as_posix()
+    if unfenced:
+        return ("home-witness", False,
+                f"{unfenced} of {len(commands)} dispatched hook command(s) carry "
+                f"no --fleet-home, so they fall back to the environment -- on a "
+                f"hosted body that is the daemon donor's home, not this one. The "
+                f"instance predates the baked argv: re-run `fleet init`")
+    foreign = sorted(b for b in baked
+                     if os.path.normcase(b) != os.path.normcase(here))
+    if foreign:
+        return ("home-witness", False,
+                f"LEAK: this home is {here}, but its own settings instance "
+                f"dispatches hooks at {', '.join(foreign)} -- every worker "
+                f"launched from here drains mailboxes and files outcomes in "
+                f"another home. Re-run `fleet init` in {here}")
+    return ("home-witness", True,
+            f"every dispatched hook command names this home ({here})")
+
+
 def _doctor_check_legacy_settings():
     legacy = FLEET_HOME / "worker-settings.json"
     if legacy.exists():
@@ -12482,6 +12556,12 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
         # Immediately after freshness, because it covers freshness's blind
         # spot (mtime vs content) and the two read as one answer.
         functools.partial(_doctor_check_instance_grants),
+        # Third of the instance rows, and last of them for a reason: freshness
+        # asks "is it stale?", grants asks "does it grant the right things?",
+        # and this asks "does it point home?" -- the three read as one answer
+        # about one file, and this is the only one of them a multi-fleet box
+        # can fail while the other two pass.
+        functools.partial(_doctor_check_home_witness),
         functools.partial(_doctor_check_hook_registration),
         functools.partial(_doctor_check_legacy_settings),
         functools.partial(_doctor_check_posttooluse_hook_smoke, run=run),
@@ -14944,7 +15024,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     is wrong -- *"matching against `session_id` alone fails open on it
     (ND4a)"* -- for the thirteen other sites that already key on the union
     (`:2810, :2891, :3152, :3302, :4688, :8844, :9164, :9445, :9663, :9750,
-    :9973, :10759, :14814`). The thirteenth is multi-fleet §5 step 2's
+    :9973, :10759, :14894`). The thirteenth is multi-fleet §5 step 2's
     membership test (slice a2), which is the same argument one plane out: a
     home whose record was eagerly restamped would stop claiming its own
     fork-steered body mid-rotation. B6 was the one
@@ -14959,8 +15039,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :7804, :8277, :12720,
-    :18019), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :7804, :8277, :12800,
+    :18114), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -15650,8 +15730,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:7804, :8277, :12720,
-    #     :18019) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:7804, :8277, :12800,
+    #     :18114) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -15684,7 +15764,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         #     file aside (`:1063`), which is a write. Routing the identity read
         #     through it made `fleet send` shred the operator's evidence from a
         #     path that promises to touch nothing; the helper exists for exactly
-        #     this and names this gate as its reason (`:14742`). A `None` here
+        #     this and names this gate as its reason (`:14822`). A `None` here
         #     still fails toward the gate -- an unreadable registry is reported
         #     by its own doctor row, and is never a reason to decide blind.
         #     MERGE NOTE (2026-07-27): main and `fix/identity-registry-judges`
@@ -17125,13 +17205,19 @@ def _render_sup_spawn_task(name: str, launch_id: str, campaign: str) -> str:
     # same doctrine as `_render_successor_task`.
     py = Path(sys.executable).as_posix()
     bundle = boot_bundle_path(name).as_posix()
+    # DATA PLANE (multi-fleet slice (c)), same argument as
+    # `_render_successor_task`'s: this body is dispatched sid-less and claims
+    # its row afterwards, so during its own pre-claim window §5 step 2 cannot
+    # answer for it either. NOT named by Sequencing §3 -- reported as a
+    # deliberate sibling fix in docs/lanes/w48-c.md.
+    home = FLEET_HOME.as_posix()
     return f"""You are the claude-fleet supervisor's GEN-0 body, fleet worker `{name}`, running in {FLEET_HOME.as_posix()} (three-tier §10.1).
 The `{launch_id}` segment of your worker name is a launch id, NOT your incarnation id -- your incarnation is minted at boot in step 1, and `fleet sup-status` reads supervisor/INCARNATION, never your worker name.
 
 Do exactly this, in order:
 1. FIRST ACT, before anything else -- run sup-boot with its output redirected to a file (class-4
    nonce doctrine: never read a secret off the stream tail):
-   "{py}" "{fleet_py}" sup-boot > "{bundle}" 2>&1
+   "{py}" "{fleet_py}" --fleet-home "{home}" sup-boot > "{bundle}" 2>&1
    Pass NO handoff flags -- this is the fresh-claim path. Note the command's exit code.
 2. Read the verdict, and on success your incarnation and nonce, FROM THE FILE:
    grep -E "^(VERDICT|INCARNATION|NONCE):" "{bundle}"
@@ -17159,7 +17245,7 @@ Do exactly this, in order:
      SUP-BOOT-FROZEN <reason>
 5. After a successful claim: proceed per skills/fleet/supervisor.md -- with the boot bundle
    content you read in step 3 (GOALS, journal tail, knowledge index, fleet status), run an early
-   "{py}" "{fleet_py}" sup-checkpoint "<note>" --nonce <YOUR-NONCE>, substituting the NONCE
+   "{py}" "{fleet_py}" --fleet-home "{home}" sup-checkpoint "<note>" --nonce <YOUR-NONCE>, substituting the NONCE
    value from step 2, then begin the campaign brief below. The flag is not optional: every
    `sup-*` holder verb is refused without it.
 
@@ -17360,11 +17446,20 @@ def _render_successor_task(successor_inc: str, old_inc: str, handoff_token: str)
     # `py -3.13` (a Windows-only launcher): the successor must invoke the
     # same Python this incarnation was launched with, on any platform.
     py = Path(sys.executable).as_posix()
+    # DATA PLANE, and the reason is the widest pre-claim window this fleet has
+    # measured (multi-fleet slice (c)). A successor's registry row carries
+    # `session_id=None` for 33.0-63.1s after dispatch, so for up to a minute
+    # §5 step 2's sid->home lookup cannot answer for it and step 3 would hand
+    # it the DONOR's `FLEET_HOME`. Every verb below is irreversible or
+    # claim-moving; naming the home on each is step 1, applied by
+    # `strip_global_fleet_home` before argparse, so the flag's position
+    # relative to the verb does not change its meaning.
+    home = FLEET_HOME.as_posix()
     return f"""You are the claude-fleet supervisor SUCCESSOR, incarnation {successor_inc}.
 Your predecessor ({old_inc}) dispatched you mid-handoff (spec docs/superpowers/specs/2026-07-13-native-agents-pivot-design.md §4).
 
 Do exactly this, in order:
-1. Run: "{py}" {fleet_py} sup-boot --handoff-inc {successor_inc} --handoff-token {handoff_token}
+1. Run: "{py}" {fleet_py} --fleet-home "{home}" sup-boot --handoff-inc {successor_inc} --handoff-token {handoff_token}
    This prints your boot bundle and writes supervisor/HANDSHAKE (carrying the
    token hash and your own freshly minted generation). It also prints a
    `NONCE:` line -- that is YOUR generation; keep it, you present it on your
@@ -17374,9 +17469,9 @@ Do exactly this, in order:
    one successor may boot. You hold nothing and there is nothing to retry. STOP --
    take no actions, end your turn with the final message: HANDOFF-ORPHAN {successor_inc}
 2. Take NO spawn/respawn/send/kill/clean actions before claim transfer -- spec §4's double-spawn guard.
-3. Poll every ~30s (up to 10 minutes): "{py}" {fleet_py} sup-status --json
+3. Poll every ~30s (up to 10 minutes): "{py}" {fleet_py} --fleet-home "{home}" sup-status --json
    - When incarnation.incarnation_id == "{successor_inc}": the claim is yours. Run:
-     "{py}" {fleet_py} sup-checkpoint "claim received via handoff from {old_inc}" --nonce <YOUR-NONCE>
+     "{py}" {fleet_py} --fleet-home "{home}" sup-checkpoint "claim received via handoff from {old_inc}" --nonce <YOUR-NONCE>
      substituting the NONCE value step 1 printed. THE FLAG IS NOT OPTIONAL: `sup-checkpoint`
      is a `_require_claim_holder` verb, so without it this call is REFUSED and the refusal
      files a false second-body row in `fleet doctor` -- a permanently-red row trains the

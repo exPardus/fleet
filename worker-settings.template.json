@@ -2,11 +2,11 @@
   "permissions": { "allow": ["Bash(fleet q:*)"] },
   "hooks": {
     "PostToolUse": [{ "hooks": [{ "type": "command",
-      "command": "\"{{PYTHON}}\" \"{{FLEET_INSTALL}}/bin/hooks/posttooluse_mailbox.py\"" }] }],
+      "command": "\"{{PYTHON}}\" \"{{FLEET_INSTALL}}/bin/hooks/posttooluse_mailbox.py\" --fleet-home \"{{FLEET_HOME}}\"" }] }],
     "Stop": [{ "hooks": [{ "type": "command",
-      "command": "\"{{PYTHON}}\" \"{{FLEET_INSTALL}}/bin/hooks/stop_outcome.py\"" }, { "type": "command",
-      "command": "\"{{PYTHON}}\" \"{{FLEET_INSTALL}}/bin/hooks/stop_mailbox.py\"" }] }],
+      "command": "\"{{PYTHON}}\" \"{{FLEET_INSTALL}}/bin/hooks/stop_outcome.py\" --fleet-home \"{{FLEET_HOME}}\"" }, { "type": "command",
+      "command": "\"{{PYTHON}}\" \"{{FLEET_INSTALL}}/bin/hooks/stop_mailbox.py\" --fleet-home \"{{FLEET_HOME}}\"" }] }],
     "PostCompact": [{ "hooks": [{ "type": "command",
-      "command": "\"{{PYTHON}}\" \"{{FLEET_INSTALL}}/bin/hooks/postcompact_journal.py\"" }] }]
+      "command": "\"{{PYTHON}}\" \"{{FLEET_INSTALL}}/bin/hooks/postcompact_journal.py\" --fleet-home \"{{FLEET_HOME}}\"" }] }]
   }
 }
