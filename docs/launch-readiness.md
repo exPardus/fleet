@@ -172,7 +172,7 @@ Worth stating, because a gap list read alone is misleading:
 - **`fleet init` is honest and narrow.** It wrote exactly one file
   (`<FLEET_HOME>/state/worker-settings.json`), printed both values it substituted, and left the
   machine's real `~/.claude/settings.json` byte-identical (md5 checked before and after).
-- **`fleet doctor` earns its place.** 29 checks; on a fresh home it fails 4 with the exact remedy
+- **`fleet doctor` earns its place.** 28 checks; on a fresh home it fails 4 with the exact remedy
   named, and goes to **28 PASS / 0 FAIL** after `fleet init`. It is report-only by default.
 - **The plugin really does inject nothing.** `.claude-plugin/plugin.json` declares no `hooks` key.
 - **The public clone URL resolves** — `git ls-remote https://github.com/exPardus/fleet` succeeds

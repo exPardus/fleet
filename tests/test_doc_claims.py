@@ -47,9 +47,18 @@ holes are written down rather than left to be rediscovered:
   * FLAGS. No flag is ever checked against its verb; `fleet doctor
     [--frobnicate]` is green.
   * PHRASING. Canonical forms only, one regex each. Drop the backticks and
-    the claim leaves the pin's view entirely. `28 doctor checks`,
-    `28 PASS / 0 FAIL` and `checks: 28` are not "<N> checks"; `Python 3.13 or
-    newer` and `MIN_PYTHON_VERSION == (3, 13)` are not floor restatements.
+    the claim leaves the pin's view entirely. `28 doctor checks` and
+    `checks: 28` are not "<N> checks"; `Python 3.13 or newer` and
+    `MIN_PYTHON_VERSION == (3, 13)` are not floor restatements.
+
+    `28 PASS / 0 FAIL` USED TO BE ON THAT LIST and is not any more -- it is
+    held by `_PASS_FAIL_TALLY` since 2026-08-09. It came off the list the
+    expensive way: gate `w48-gc` finding 1 measured a branch drifting that
+    exact phrasing in `docs/launch-readiness.md`, one bullet away from the
+    `<N> checks` claim it did update, with this file reporting `20 passed`
+    throughout. A hole enumerated in a docstring is still a hole; writing it
+    down bought nothing. Read the remaining entries in this list the same way
+    -- as the next defect, not as a disclaimer.
   * DOTTED INVOCATION. `_FLEET_INVOCATION` wants whitespace after the literal
     `fleet`, and a dot is not whitespace, so `bin/fleet.py <verb>` and
     `fleet.cmd <verb>` are invisible -- including in this module's own failure
@@ -216,10 +225,37 @@ def find_bogus_verbs(text, shipped):
 # word `check` so it cannot swallow unrelated numbers.
 _CHECK_COUNT = re.compile(r"\b(\d+)\s+(?:fleet\s+)?(?:health\s+)?checks?\b", re.I)
 
+# THE SECOND PHRASING OF THE SAME NUMBER, added 2026-08-09.
+#
+# The hole this closes was written down in this module's own docstring, under
+# PHRASING, using this exact string as its worked example of what the pin does
+# NOT hold -- and then a branch drifted it. Gate `w48-gc` finding 1:
+# `docs/launch-readiness.md` was left reading *"29 checks ... goes to 28 PASS /
+# 0 FAIL"* inside ONE bullet, self-contradictory, with
+# `pytest tests/test_doc_claims.py` reporting `20 passed`. Green and wrong.
+#
+# A doctor run's own tally is the same derived number wearing different words.
+# `N PASS / M FAIL` is pinned as a PAIR, against `N + M == <registered checks>`,
+# for two reasons: the sum is the row count whether or not the run was clean
+# (so the pre-`init` `25 PASS / 4 FAIL` shape is held too), and requiring both
+# halves keeps the regex from firing on any lone number that happens to sit
+# before the word PASS.
+#
+# `re.I` is safe here and was checked rather than assumed: `\bPASS\b` cannot
+# match inside "passed" (the boundary fails on the following `e`), so a pytest
+# line like `1403 passed / 8 skipped` is invisible to it.
+_PASS_FAIL_TALLY = re.compile(r"\b(\d+)\s+PASS\s*/\s*(\d+)\s+FAIL\b", re.I)
+
 
 def find_check_count_claims(text):
     """Every "<N> checks" claim, as ints, in document order."""
     return [int(m.group(1)) for m in _CHECK_COUNT.finditer(text)]
+
+
+def find_pass_fail_totals(text):
+    """Every `N PASS / M FAIL` tally as its implied row count `N + M`."""
+    return [int(m.group(1)) + int(m.group(2))
+            for m in _PASS_FAIL_TALLY.finditer(text)]
 
 
 # "Python 3.10+", "**Python 3.10+**", "python-3.10%2B" (the shields.io badge).
@@ -267,6 +303,26 @@ def test_doctor_check_counts_match_the_registered_checks(rel):
         f"{actual}. This number is derived from code and has now drifted twice "
         f"(21->23 in 2026-07-23's doc pass, 23->25/22/23 by 2026-08-05). Do not "
         f"hand-paste it."
+    )
+
+
+@pytest.mark.parametrize("rel", ENTRY_DOCS)
+def test_doctor_pass_fail_tallies_sum_to_the_registered_checks(rel):
+    """The same number in its OTHER phrasing. See `_PASS_FAIL_TALLY`.
+
+    Held separately from the `<N> checks` pin rather than folded into it,
+    because the two are different claims about the same fact and a reader who
+    sees only one of them fail should be told which phrasing drifted -- the
+    third drift of this number was exactly a document stating BOTH, one stale.
+    """
+    actual = _registered_doctor_checks()
+    text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+    wrong = [n for n in find_pass_fail_totals(text) if n != actual]
+    assert not wrong, (
+        f"{rel} states a `N PASS / M FAIL` tally summing to {wrong}; cmd_doctor "
+        f"registers {actual} check(s). Gate w48-gc finding 1 is this exact "
+        f"drift, in this exact file, invisible to the `<N> checks` pin beside "
+        f"this one."
     )
 
 
@@ -341,6 +397,18 @@ def test_the_detector_catches_planted_drift():
     # 2. a check count that disagrees with the code
     assert find_check_count_claims(f"runs {actual + 3} health checks") == [actual + 3]
     assert find_check_count_claims("`fleet doctor` runs 22 checks") == [22]
+
+    # 2b. the same claim in the OTHER phrasing, which the `<N> checks` regex
+    # above cannot see at all -- that blindness IS gate w48-gc finding 1.
+    assert find_check_count_claims("goes to 28 PASS / 0 FAIL") == []
+    assert find_pass_fail_totals("the same run goes to 28 PASS / 0 FAIL.") == [28]
+    assert find_pass_fail_totals("**25 PASS / 4 FAIL**") == [29]
+    assert find_pass_fail_totals(f"{actual} PASS / 0 FAIL") == [actual]
+    # a pytest summary line is not a doctor tally: `\bPASS\b` cannot match
+    # inside "passed", which is why `re.I` is safe on that regex.
+    assert find_pass_fail_totals("1403 passed / 8 skipped") == []
+    # and a lone number before PASS is not a tally either -- both halves required
+    assert find_pass_fail_totals("28 PASS after init") == []
 
     # 3. a Python floor that disagrees with the constant
     floor = tuple(fleet.MIN_PYTHON_VERSION)

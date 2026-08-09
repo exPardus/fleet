@@ -389,119 +389,118 @@ class TestTheSupervisorTaskRendersCarryTheHome:
             assert value == tmp_path.as_posix(), ln
             assert "--fleet-home" not in " ".join(rest), ln
 
-
 # ---------------------------------------------------------------------------
-# (c)(iii) -- the witness.
+# (c)(ii), continued -- the PATHS those same two renders emit are quoted.
 # ---------------------------------------------------------------------------
 
-@pytest.fixture
-def rendered_home(tmp_path, monkeypatch):
-    """A home whose settings instance was rendered FOR IT -- i.e. the state
-    `fleet init` leaves behind. `test_native.py`'s `native_home` writes `{}`,
-    which has no hook commands to witness at all."""
-    monkeypatch.setattr(fleet, "FLEET_HOME", tmp_path)
-    for sub in ("state", "logs", "mailbox"):
-        (tmp_path / sub).mkdir()
-    (tmp_path / "state" / "worker-settings.json").write_text(
-        fleet.render_worker_settings_template(
-            _template_text(), sys.executable, tmp_path, fleet_install=REPO),
-        encoding="utf-8")
-    return tmp_path
+def _render_by_kind(kind):
+    if kind == "successor":
+        return fleet._render_successor_task("inc-new", "inc-old", "tok")
+    return fleet._render_sup_spawn_task("sup|l1|boot", "l1", "camp")
 
 
-class TestTheHomeWitness:
-    """WHAT "witness" MEANS HERE, AND WHY IT IS DERIVED RATHER THAN QUOTED.
-    The word appears in `docs/specs/multi-fleet.md` exactly TWICE -- §5 step 1
-    (*"Flag/lookup disagreement -> mutating verbs refuse without `--yes` +
-    witness line"*) and the Sequencing §3 slice list itself. §5 step 1's
-    witness is slice (a)'s: `docs/mf-slice-a-price.md` items 5 and 7 both
-    assign it there, and it shipped in a2/a3 (`bin/fleet.py`'s
-    `apply_resolved_home`, pinned by `tests/test_home_resolution.py`). Since
-    Sequencing §3 calls its slices DISJOINT, slice (c)'s "witness" cannot be
-    that same line -- and the spec defines no other. FULL FINDING AND
-    ESCALATION: `docs/lanes/w48-c.md`.
-
-    What IS derivable, from three sentences the spec and the tree already own:
-      - §5's title: *"one order for every caller"*;
-      - the cross-fleet audit's `Daemon env` row: a hosted body's env vars are
-        *"donor facts; fenced by hook argv"*;
-      - this repo's established meaning of the word, at `bin/fleet.py`'s
-        identity block -- *"THE REGISTRY JUDGES, THE ENVIRONMENT ONLY
-        WITNESSES"* -- where a witness is a second channel whose disagreement
-        with the authority is a detected leak that `fleet doctor` REPORTS and
-        never acts on (`_doctor_check_identity_witness`).
-
-    Applied to homes: the rendered settings instance lives in the home it was
-    rendered FOR (`instance_settings_path()` = `<home>/state/worker-settings.json`),
-    so the home baked into its hook commands and the home containing it are the
-    same fact recorded twice. When they disagree, every worker dispatched from
-    this home runs hooks that write somewhere else -- the fence is defeated
-    silently, and nothing else in the tree can see it. That is the disagreement
-    this row witnesses."""
-
-    def test_the_row_is_registered_and_passes_on_a_correct_instance(
-            self, rendered_home, capsys):
-        args = fleet.build_parser().parse_args(["doctor"])
-        fleet.cmd_doctor(args, which=lambda n: None,
-                         run=lambda *a, **k: _FakeVersion())
-        out = capsys.readouterr().out
-        assert "home-witness" in out
-        assert "[PASS] home-witness" in out
-
-    def test_it_fails_when_the_instance_bakes_a_foreign_home(
-            self, rendered_home, tmp_path, capsys):
-        inst = fleet.instance_settings_path()
-        doc = json.loads(inst.read_text(encoding="utf-8"))
-        foreign = (tmp_path / "someone-elses-home").as_posix()
-        for group in doc["hooks"].values():
-            for entry in group:
-                for h in entry["hooks"]:
-                    h["command"] = re.sub(r'--fleet-home "[^"]+"',
-                                          f'--fleet-home "{foreign}"',
-                                          h["command"])
-        inst.write_text(json.dumps(doc), encoding="utf-8")
-        args = fleet.build_parser().parse_args(["doctor"])
-        fleet.cmd_doctor(args, which=lambda n: None,
-                         run=lambda *a, **k: _FakeVersion())
-        out = capsys.readouterr().out
-        assert "[FAIL] home-witness" in out
-        assert foreign in out
-
-    def test_it_fails_when_the_instance_bakes_nothing(
-            self, rendered_home, capsys):
-        """A settings instance rendered before slice (c) has hooks with no
-        fence at all. That is not a PASS -- it is the pre-slice state, and the
-        remedy (`fleet init`) is the same one freshness names."""
-        inst = fleet.instance_settings_path()
-        doc = json.loads(inst.read_text(encoding="utf-8"))
-        for group in doc["hooks"].values():
-            for entry in group:
-                for h in entry["hooks"]:
-                    h["command"] = re.sub(r' --fleet-home "[^"]+"', "",
-                                          h["command"])
-        inst.write_text(json.dumps(doc), encoding="utf-8")
-        args = fleet.build_parser().parse_args(["doctor"])
-        fleet.cmd_doctor(args, which=lambda n: None,
-                         run=lambda *a, **k: _FakeVersion())
-        out = capsys.readouterr().out
-        assert "[FAIL] home-witness" in out
-
-    def test_it_never_raises_on_a_corrupt_instance(self, rendered_home, capsys):
-        """`cmd_doctor` isolates a raising check into its own FAIL line, but a
-        check that reports a crash instead of an answer tells the operator
-        nothing. Doctor is a VIEW."""
-        fleet.instance_settings_path().write_text("{not json", encoding="utf-8")
-        args = fleet.build_parser().parse_args(["doctor"])
-        fleet.cmd_doctor(args, which=lambda n: None,
-                         run=lambda *a, **k: _FakeVersion())
-        out = capsys.readouterr().out
-        assert "home-witness" in out
-        assert "check crashed" not in out
+# Every `{fleet_py}` / `{py}` placeholder in bin/fleet.py, with the character
+# on each side of it. A rendered command must write both quoted.
+_PATH_PLACEHOLDER = re.compile(r"(.?)\{(fleet_py|py)\}(.?)")
 
 
-class _FakeVersion:
-    """`cmd_doctor` shells out for `claude --version`; the checks under test
-    do not care what it says."""
-    returncode = 0
-    stdout = "1.0.0 (Claude Code)"
-    stderr = ""
+def find_bare_path_placeholders(source):
+    """`(name, line)` for every path placeholder not written `"{name}"`."""
+    bare = []
+    for m in _PATH_PLACEHOLDER.finditer(source):
+        if m.group(1) != '"' or m.group(3) != '"':
+            bare.append((m.group(2), source.count("\n", 0, m.start()) + 1))
+    return bare
+
+
+class TestEveryRenderedCommandQuotesItsPaths:
+    """A rendered command naming an unquoted path breaks on somebody else's
+    machine and on nobody's here.
+
+    THE DEFECT, measured by gate `w48-gc` (finding 4) against an install root
+    named `Fleet Install With Spaces`, with the sibling render as its control:
+
+        CONTROL  _render_sup_spawn_task  sup-boot    (QUOTED)    rc=0
+        SUBJECT  _render_successor_task  sup-status  (UNQUOTED)  rc=2,
+                 "python.exe: can't open file 'C:/.../Fleet'"
+
+    All three commands `_render_successor_task` emitted were affected. It is
+    PRE-EXISTING -- `fa236cb` renders them identically unquoted -- and it only
+    ever reproduces where somebody installs under `C:/Program Files/...`,
+    which is the class this campaign's install rehearsal proved is real by
+    finding three launch blockers on its first run off this machine.
+
+    WHY THE PIN HAS THIS SHAPE. Slice (c) added a correctly quoted
+    `--fleet-home "{home}"` to those very lines, so the rendered command LOOKED
+    quoting-aware while the interpreter and script paths beside it stayed bare.
+    A pin written against the three lines that were fixed would not have
+    noticed that, and would not notice the next sibling render either. So the
+    property is held twice:
+
+      1. BEHAVIOURALLY, over both renders, through `shlex` -- the consumer's
+         own parser rather than a regex that agrees with the bug. An unquoted
+         path containing a space comes back as two argv tokens, so the
+         membership assertion fails.
+      2. IN SOURCE, over the WHOLE FILE -- every `{fleet_py}` / `{py}`
+         placeholder in `bin/fleet.py`, in any function, must be written
+         quoted. That is the half that survives a THIRD render being added:
+         it needs no fixture, no signature and no call.
+
+    `tests/test_supspawn_fixwave2.py::TestRenderedCommandQuoting` pins the same
+    property for `_render_sup_spawn_task` alone, by literal string. This is not
+    a replacement for it -- that class also holds the `{bundle}` redirect,
+    which is not a path placeholder this file can see."""
+
+    @pytest.mark.parametrize("kind", ["successor", "sup_spawn"])
+    def test_a_space_in_either_root_survives_as_single_argv_tokens(
+            self, kind, tmp_path, monkeypatch):
+        import shlex
+        install = tmp_path / "Fleet Install With Spaces"
+        home = tmp_path / "Fleet Home With Spaces"
+        monkeypatch.setattr(fleet, "INSTALL_ROOT", install)
+        monkeypatch.setattr(fleet, "FLEET_HOME", home)
+        fleet_py = (install / "bin" / "fleet.py").as_posix()
+        interpreter = Path(sys.executable).as_posix()
+        # The fixture is evidence only if it actually carries the hazard.
+        assert " " in fleet_py and " " in home.as_posix()
+
+        lines = _fleet_py_invocations(_render_by_kind(kind))
+        assert lines, kind
+        for ln in lines:
+            argv = shlex.split(ln, posix=True)
+            assert fleet_py in argv, f"script path split by the space: {ln}"
+            assert interpreter in argv, f"interpreter split by the space: {ln}"
+            assert home.as_posix() in argv, f"home split by the space: {ln}"
+
+    def test_no_bare_path_placeholder_is_left_anywhere_in_fleet_py(self):
+        """The half a render nobody has written yet cannot escape.
+
+        Scanned over the whole source rather than over the two functions
+        above: the recurring shape in this repo is that a fix lands at the
+        reported site and the next sibling is written with the same hole. Here
+        the sibling does not have to be found -- if it writes `{fleet_py}` or
+        `{py}` into a rendered command at all, it is scanned."""
+        source = (REPO / "bin" / "fleet.py").read_text(encoding="utf-8")
+        bare = find_bare_path_placeholders(source)
+        assert not bare, (
+            f"bare path placeholder(s), (name, line): {bare}. A bare "
+            f"{{fleet_py}} breaks under `C:/Program Files/...` -- gate w48-gc "
+            f"finding 4 measured rc=2, \"can't open file '.../Fleet'\"."
+        )
+
+    def test_the_scan_can_see_a_bare_placeholder(self):
+        """The seed. A scanner that matches nothing is green for the same
+        reason a correct file is green, and the assertion above is a claim
+        that a set is EMPTY -- the shape that fails silently."""
+        assert find_bare_path_placeholders('f\'"{py}" {fleet_py} sup-status\'') \
+            == [("fleet_py", 1)]
+        assert find_bare_path_placeholders('f\'{py} "{fleet_py}" sup-status\'') \
+            == [("py", 1)]
+        assert find_bare_path_placeholders('f\'"{py}" "{fleet_py}" sup-status\'') == []
+        # half-quoted is bare too, in both directions
+        assert find_bare_path_placeholders('"{fleet_py} ') == [("fleet_py", 1)]
+        assert find_bare_path_placeholders(' {fleet_py}"') == [("fleet_py", 1)]
+        # and the real file has a subject at all, so an empty result above
+        # cannot come from scanning nothing
+        source = (REPO / "bin" / "fleet.py").read_text(encoding="utf-8")
+        assert source.count("{fleet_py}") >= 2, "the scan has no subject"
