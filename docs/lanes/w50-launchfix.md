@@ -345,7 +345,9 @@ claim and the number it states as current — 28 — is right. My first arrow-ma
 **that was the matcher's false positive, not rot.** Per the ratified 2026-08-05 rule, a quoted
 argument about a past tree stays true and fixing it fabricates.
 
-**Historical surfaces — 94 hits across 21 files, exempt and NOT fixed.** Classified by path
+**Historical surfaces — exempt and NOT fixed.** *(This paragraph originally said "94 hits across
+21 files". That number was wrong and §7.1 records what produced it; the corrected measurement,
+with its definition and its commit, is there.)* Classified by path
 pattern, not by enumeration, so tomorrow's lane report is exempt by construction:
 `docs/lanes/`, `docs/reviews/`, `docs/proposals/`, `docs/superpowers/`, `docs/decisions/`,
 `docs/specs/`, `docs/AUTONOMOUS-*`, `docs/OVERNIGHT-*`, `docs/mf-*`, `spike/`, `FIX-WAVE-*`,
@@ -430,7 +432,8 @@ Per wave 45 (*any pin shipping a carve-out ships the census of what it exempts*)
 observation that this pin's docstring has now twice named the exact hole that later shipped a
 defect:
 
-- **Dated history**, by path pattern — 94 hits, 21 files. Fixing them would fabricate.
+- **Dated history**, by path pattern. Fixing them would fabricate. *(Size: §7.1 — the number
+  first printed here was wrong.)*
 - **The `N → M` drift narrative**, in every file. `CONTRIBUTING.md:41` and `docs/SPEC.md:17` wore
   the identical shape and one was true history while the other was stale. **No regex separates
   them**, so neither is held; SPEC.md:17 was fixed by hand and re-anchored to a canonical claim.
@@ -450,8 +453,18 @@ defect:
 
 ## 3. Floors
 
-**PREDICTION, written before either run:** 4299 collected on both interpreters, **0 failed** on
-both, tree sha256 `ac7899b4…` identical before and after each run.
+**PREDICTION as first written:** 4299 collected on both interpreters, **0 failed** on both, tree
+sha256 `ac7899b4…` identical before and after each run.
+
+> **CORRECTION, 2026-08-09 (gate `w50-glaunch` F8).** This paragraph used to open *"PREDICTION,
+> written before either run"*. **That is a self-report git cannot corroborate**, because the
+> prediction and the numbers it predicts were committed together in `e662c46` — so the ordering
+> the sentence asserts is exactly the thing the commit does not witness. The gate is right, and it
+> caught itself making the same error before it caught mine. The claim is withdrawn to what is
+> actually checkable: the predicted values reproduce, the derivation `18 + 42 + 1 = 61` is
+> independently re-runnable, and nothing here proves *when* the prediction was written.
+> **§7.5 does it properly** — that prediction is committed in its own commit, with no numbers in
+> it, before the run it predicts.
 
 **MEASURED.** Collection derived with `--collect-only` on each interpreter separately, never by
 arithmetic on a diff:
@@ -602,3 +615,149 @@ py -3.13 -m pytest tests/test_doc_claims.py tests/test_rendered_command_quoting.
 
 Committed at `e662c46`. `HEAD`, `w50/launchfix` and `main` were all at `4d78f6c` when this lane
 started; only `w50/launchfix` moved, and only by this one commit. Nothing pushed, nothing merged.
+
+---
+
+# 7. DISCHARGE of gate `w50-glaunch` (`a9a2975`) — 3 MAJOR + 5 MINOR
+
+**Nothing in `bin/fleet.py`.** `git diff --name-only 4a62e21..HEAD` touches two test modules,
+`CONTRIBUTING.md` and this report. The Part-1 fix the gate cleared is byte-identical to what it
+reviewed.
+
+**Mutant method, changed to the standard the gate set.** Every mutant below ran in a throwaway
+`git clone`, never in the working tree; restore is `git reset --hard` + `git clean -fdq` from the
+object store; `git status --porcelain` must be empty after **every** mutant or the run stops.
+Two things went wrong inside that harness and both are worth recording, because they are the same
+class as the incident this standard replaces:
+
+- `git checkout -- .` does **not** unstage a `git add`ed file, so the F5 mutant survived the first
+  restore. The post-restore cleanliness assertion caught it and **stopped the run** rather than
+  letting the next mutant execute against a polluted clone.
+- The first runner called `sys.exit` from inside its patch helper when an anchor failed to resolve,
+  which **skipped the restore and left a partially applied three-patch mutant** on the clone. Being
+  in a clone is the only reason that was harmless. The abort path now raises, the loop catches, and
+  restore runs before anything is reported.
+
+Final battery: **14 mutants, 0 mismatches, `final: CLEAN`**, working tree untouched throughout.
+
+## 7.1 F1 (MAJOR) — the exempt census. Both causes found; it was not "unreproducible"
+
+The gate could not reproduce `94` under six counting definitions and concluded it was not
+re-derivable from the tree. **It is re-derivable, and knowing how makes it a sharper finding than
+"careless".** Two independent mistakes stacked:
+
+1. **WRONG INSTRUMENT — this is what produced the digit.** The 94 came from an *exploratory*
+   scanner carrying a `check count N → M` arrow form that I then deliberately **dropped** from the
+   shipped pin (it cannot separate `CONTRIBUTING.md:41`'s true history from `docs/SPEC.md:17`'s
+   stale claim — §2.7). Re-run that exploratory scanner over the exempt set excluding this report
+   and it returns **exactly 94**. The single extra hit is
+   `docs/reviews/TT-BUILD-REVIEW-SPEC-2026-07-24.md:183`, *"check count 22 → 23"*.
+   **I measured with one instrument and pasted the number into the docstring of another** — the
+   same defect as `docs/SPEC.md`'s `grep -c` receipt, committed one file from the paragraph
+   diagnosing it.
+2. **THE CENSUS IS RECURSIVE.** The lane report stating the number is itself exempt, so writing it
+   moved it. At `4a62e21` this report alone carried **36** of the hits.
+
+**Re-derived, with the definition attached** — `find_check_count_claims` + `find_pass_fail_totals`,
+summed, over every tracked `*.md` not in `CHECK_COUNT_DOCS`:
+
+| at commit | including this report | excluding it |
+|---|---|---|
+| `4a62e21` (what the gate reviewed) | **129 hits / 22 files** | **93 hits / 21 files** |
+
+Both agree with the gate's table exactly. **Both are now stated as claims about a NAMED COMMIT,
+not about "now"** — and that, not the digit, is the repair. This is a moving population: every
+lane report added moves it, including this sentence. A bare present-tense number would be rot by
+construction, so the pin's docstring now ships the *definition* and the *re-derivation route*
+beside the snapshot, and says out loud that the document stating the census sits inside its own
+population. It is deliberately **not** pinned by a test — a pin on it would go RED every time
+anyone writes a lane report.
+
+## 7.2 F2 (MAJOR) — the held entry doc this branch falsified
+
+`CONTRIBUTING.md:41`. The gate is right on both clauses, and right that I read the line and missed
+them — §2.3 quotes its `21`→`23` clause at length while grading it, correctly, as true history.
+
+| clause | was | now |
+|---|---|---|
+| scope | "checks them against" six named files | the two populations named separately: verbs/floor over the six `ENTRY_DOCS`, **check count over `CHECK_COUNT_DOCS`, 28 derived files**, with `docs/SPEC.md` / `CLAUDE.md` / `skills/**` / `commands/**` called out |
+| phrasing | "dropping the backticks takes a claim out of its view" | true for shapes 1 and 3; the check count is named as **the exception that reads through markup** |
+
+The `21`→`23` history stays untouched — a claim about a past tree.
+
+**The pin caught my own repair.** My first draft illustrated the widened forms with real digits
+(a bold `23` followed by `checks`) inside this now-**held** file, and
+`test_doctor_check_counts_match_the_registered_checks[CONTRIBUTING.md]` went RED. The examples are
+written with `N` instead of a digit, and the sentence says why: spelling a wrong number even as an
+example is itself a claim this pin catches.
+
+## 7.3 F3 (MAJOR) — the carve-out census, and a by-name allowlist inside a by-property module
+
+The gate framed the code half as optional (*"fixing the hole is optional; fixing the census is
+not"*) and the manager asked for the call to be argued. **I fixed it, and leaving it would have
+been indefensible.**
+
+`_PATH_GLOBALS = {"INSTALL_ROOT", "FLEET_HOME"}` was the single by-name decision in a module whose
+entire thesis is *never by the name* — this lane's own defect shape, sitting inside the instrument
+built to remove it. Documenting it as a known hole would repeat the failure the sibling pin's
+docstring has now committed **twice**: naming a hole in prose and then shipping a defect through
+it. It is a test-file change, so the "nothing in `bin/fleet.py`" fence holds either way.
+
+`_module_scope_path_names()` derives module-scope path bindings **by shape**, and finds a strict
+superset of the allowlist — both former entries *by their shape*, plus the one it could not see:
+
+```
+bin/fleet.py             FLEET_HOME     L86
+bin/fleet.py             INSTALL_ROOT   L114
+bin/fleet_statusline.py  _INSTALL_ROOT  L36    <-- invisible to the allowlist
+```
+
+`Path`-annotated parameters are recognised too, so the census no longer calls the hole an
+*unannotated* parameter while an annotated one escapes beside it.
+
+**Census corrected, and every entry is now PINNED rather than described** — the structural answer
+to a census that drifted:
+
+| hole | status | pinned by |
+|---|---|---|
+| module-scope path alias | **CLOSED** | `test_a_MODULE_SCOPE_path_alias_is_seen` |
+| `Path`-annotated parameter | **CLOSED** | `test_a_Path_ANNOTATED_parameter_is_seen` |
+| parameter with no `Path` annotation | open, wording fixed | `test_an_UNANNOTATED_parameter_is_still_invisible` |
+| `.format()` / `%` / concatenation / **`str.join`** | open, `str.join` newly disclosed | `test_the_other_render_MECHANISMS_are_still_invisible` |
+| subscript-assignment sink | open, newly disclosed | named in the docstring |
+
+Zero false positives: the census on the shipped tree is unchanged at four sites, all clean.
+
+## 7.4 The minors
+
+| # | disposition |
+|---|---|
+| **F4** | **FIXED.** A `(?<![\d.#])` lookbehind and horizontal-only whitespace. All four measured shapes now return `[]` and are pinned as must-not-fire, while `### 4. Doctor: 28 checks` still fires so the narrowing is not blunt. End-to-end: appending the heading shape to `docs/SPEC.md` is **GREEN**. |
+| **F5** | **FIXED, not noted.** `git ls-files -z` and NUL-split, pinned by asserting every derived entry is a file that exists — which a torn path is not. Mutant: a tracked `docs/My Notes.md` is **GREEN** and raises collection to 95, i.e. the file is genuinely read rather than skipped. |
+| **F6** | **SPLIT, with the reasoning stated.** `docs/NEXT-SESSION.md` moves into the held population — it carries no check-count claim, so holding it costs nothing today and closes the gap where the next one lands. `docs/OPERATOR-GATES.md` **stays exempt**, a decision rather than an oversight: its two hits are `29 checks` and `23 checks` **quoted inside an argument whose own prose says the truth is 28**. Holding it would demand editing a quotation to make a pin green. Mutant confirms a real wrong claim in `NEXT-SESSION.md` is now **RED**. |
+| **F7** | **FIXED.** `install` is inside the hazard guard, so the `argv[1]` arm cannot go vacuous if that fixture path loses its space. |
+| **F8** | **CONCEDED AND REPAIRED TWICE** — §3's claim is withdrawn to what git can witness, and §7.5 does it properly. |
+
+## 7.5 Floors — the prediction, committed before the run
+
+Collection derived first, on each interpreter separately (the method requires `--collect-only`,
+never arithmetic on a diff):
+
+```
+py -3.13 -m pytest --collect-only -q   ->  4305 tests collected
+py -3.10 -m pytest --collect-only -q   ->  4305 tests collected
+```
+
+**+6 from `4299`**, accounted per module rather than by subtraction:
+`tests/test_rendered_command_quoting.py` goes **18 → 22** (four new census seeds) and
+`tests/test_doc_claims.py` goes **69 → 71** (two parametrised tests, from `CHECK_COUNT_DOCS`
+going 27 → 28 when `docs/NEXT-SESSION.md` moved into the held population). 4 + 2 = 6.
+
+**PREDICTION — and this commit contains no floor results, which is the entire point:**
+
+> On **both** `py -3.13` and `py -3.10`: **4305 collected, 4290 passed, 14 skipped, 1 xfailed,
+> 0 failed.** 4290 + 14 + 1 = 4305. The skip and xfail counts are predicted explicitly this time
+> rather than declined. Working-tree digest identical before and after each run.
+
+If it misses, it is reported as a miss and the prediction is not adjusted. The numbers land in the
+next commit.
