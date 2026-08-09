@@ -378,7 +378,7 @@ class TestTheCensus:
         # "Prose" means INSIDE a string node's span or on a comment line --
         # not "the line happens to contain a quote". A multi-line docstring's
         # interior lines carry no quote at all, which is how the first draft
-        # of this control produced a false hole at :14994.
+        # of this control produced a false hole at :15207.
         prose = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -418,11 +418,11 @@ class TestDisagreementOne:
         entries = [self.LIVE_SHAPE]
         monkeypatch.setattr(fleet, "has_fresh_outcome", lambda *a, **k: True)
 
-        # Reader A -- the one `fleet respawn` gates on (bin/fleet.py:8230).
+        # Reader A -- the one `fleet respawn` gates on (bin/fleet.py:8373).
         assert SID in fleet._roster_live_sids(entries), \
             "reader A must call this entry LIVE (keys present, state != done)"
 
-        # Reader B -- the one `fleet status` renders (bin/fleet.py:3760).
+        # Reader B -- the one `fleet status` renders (bin/fleet.py:3772).
         verdict = fleet.recompute_worker_native("w", _native_record(), entries)
         assert verdict["status"] == "idle", \
             "reader B must call the same entry IDLE"
@@ -444,7 +444,7 @@ class TestDisagreementOne:
     def test_recompute_has_a_third_inline_spelling_with_no_done_clause(self, monkeypatch):
         """INVERT-ON-BUILD. A LATENT divergence, and the sharper one.
 
-        `recompute_worker_native:3760` re-spells the roster-liveness predicate
+        `recompute_worker_native:3772` re-spells the roster-liveness predicate
         inline as key-presence ALONE -- the `state != "done"` guard that
         `_roster_live_sids` calls load-bearing is simply absent.
 
@@ -499,7 +499,7 @@ class TestTheShapeALingeringFinishedSessionPresents:
 
         "a finished bg session's host process can LINGER after its turn ends
          ... observed blocking `fleet respawn` on an idle worker."
-                                        -- _roster_live_sids, :14663-14667
+                                        -- _roster_live_sids, :14876-14880
 
     **So on those four instances the clause is performing its stated purpose
     and `not-live` is the RIGHT answer to "is a turn running".** The residency
@@ -533,17 +533,17 @@ class TestTheShapeALingeringFinishedSessionPresents:
             self, sup_home, monkeypatch):
         """INVERT-ON-BUILD. The re-aimed finding, driven.
 
-        `_cmd_respawn_native:8230` computes `old_live` from Q1, and the ENTIRE
+        `_cmd_respawn_native:8373` computes `old_live` from Q1, and the ENTIRE
         stop-and-reverify block is inside `if old_live:`. On this shape Q1 says
         not-live, so:
 
           * no `claude stop` is attempted -- the live `claude.exe` is orphaned;
           * **no tombstone is written**, and `write_tombstone_outcome` exists
-            precisely because "`claude stop` fires no Stop hook" (:8240-8243);
-          * the old sid is appended to `retired_sids` regardless (:8277);
+            precisely because "`claude stop` fires no Stop hook" (:8383-8386);
+          * the old sid is appended to `retired_sids` regardless (:8420);
           * and there is NO retired-sid sweep on this path -- MEASURED,
-            `_RETIRED_SID_SWEEP_CAP` has exactly two call sites, `:8629`
-            (`_cmd_kill_native`) and `:9430` (`_cmd_respawn_supervisor`).
+            `_RETIRED_SID_SWEEP_CAP` has exactly two call sites, `:8776`
+            (`_cmd_kill_native`) and `:9577` (`_cmd_respawn_supervisor`).
 
         So the compensating sweeps that make this shape harmless on the kill
         and supervisor-respawn paths do not exist here. That is the finding,
@@ -581,7 +581,7 @@ class TestTheShapeALingeringFinishedSessionPresents:
         working = dict(self.LINGERING_DONE, state="working", status="busy")
 
         # STATEFUL, deliberately: `--force` stops the session and then RE-FETCHES
-        # to verify the daemon actually tore it down (`:8244-8255`). A constant
+        # to verify the daemon actually tore it down (`:8387-8398`). A constant
         # roster that still says `working` makes respawn abort on its own
         # re-verification, which would look like "no stop happened" for a
         # completely different reason. So the fetch models the stop landing.
@@ -634,9 +634,9 @@ class TestTheShapeALingeringFinishedSessionPresents:
         re-implements the predicate cannot detect a change to the caller.
 
         This one drives `cmd_respawn` on a supervisor-SHAPED husk record, which
-        routes through `_is_supervisor_shaped` (`:8483`) into
+        routes through `_is_supervisor_shaped` (`:8630`) into
         `_cmd_respawn_supervisor` and reaches the real `_any_live` closure
-        (`:9447-9451`). The record's `retired_sids` carries a sid the roster
+        (`:9594-9598`). The record's `retired_sids` carries a sid the roster
         reports as `done` WITH a live pid.
 
         TODAY: `_any_live` returns False, the B6 refusal does not fire, and the
@@ -811,7 +811,7 @@ class TestTheReaderTheBriefDidNotName:
 
 
 class TestTheThirteenthReader:
-    """`_record_is_live` (`bin/fleet.py:2993`), found by the w50 gate (F5).
+    """`_record_is_live` (`bin/fleet.py:3005`), found by the w50 gate (F5).
 
     It answers Q1 from the REGISTRY rather than the roster, and the census
     never opened it. It matters to the ruling specifically: it reaches
@@ -1066,7 +1066,7 @@ class TestWhatACanonicalAnswerMustPreserve:
             self, sup_home, monkeypatch, capsys):
         """MUTANT M-B2. `--force` must NOT buy a bypass of the roster refusal:
         indeterminate is treated as alive, because a false-dead here is the
-        file's own named unrecoverable invariant (`:8259`)."""
+        file's own named unrecoverable invariant (`:8402`)."""
         _install_worker(sup_home)
         monkeypatch.setattr(fleet, "_fetch_agents_roster",
                             lambda **_: (False, "roster unavailable"))
