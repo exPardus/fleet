@@ -106,10 +106,23 @@ $ claude plugin marketplace list | grep -c 'Source: GitHub'
 ```
 
 So the CLI plainly accepts URL and GitHub-repo sources, and four marketplaces on this box are
-installed that way. What no one here has run is `claude plugin marketplace add` itself — in any
-form — because it mutates this machine's real plugin configuration. The grade of the directory
-answer is therefore *observed source of a working install*, not *command re-executed on a clean
-box*.
+installed that way.
+
+**UPDATED 2026-08-10 — the directory form has now been executed, and this entry's grade rises.**
+The paragraph here previously read *"What no one here has run is `claude plugin marketplace add`
+itself — in any form — because it mutates this machine's real plugin configuration"*, and graded the
+directory answer *observed source of a working install*, not *command re-executed on a clean box*.
+**That is no longer true.** Lane `w52-launch` ran `marketplace add`, `plugin install` and
+`plugin details` against a throwaway `~` (a redirected `USERPROFILE`, which fences `claude`'s own
+config — verified by a control: the fenced `claude` reported *"No marketplaces configured"* while the
+operator's real config still listed five). All three returned rc=0, and the operator's real
+`~/.claude/settings.json` was re-hashed byte-identical afterwards. Receipts:
+`docs/lanes/w52-launch.md`, §2 step 3.
+
+**So the grade is now *command re-executed on a clean box*, for the directory form.** What remains
+untested is specifically whether **`exPardus/fleet` resolves as a marketplace** — not whether GitHub
+shorthand works at all, which the CLI's own help and this machine's four GitHub-sourced marketplaces
+already establish.
 
 #### 2b. The phrase both docs tell you to say is not a declared trigger
 
