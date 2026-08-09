@@ -52,7 +52,7 @@ fleet init
 
 # 3. Install the plugin — manager skill + /fleet:* slash commands
 #    (no hooks: installing fleet does not change how any other session starts)
-claude plugin marketplace add C:\path\to\this\clone    # a DIRECTORY path, not a URL
+claude plugin marketplace add C:\path\to\this\clone    # the directory form -- the one verified here
 claude plugin install fleet@claude-fleet
 #    restart Claude Code, then verify:
 claude plugin details fleet
@@ -69,17 +69,24 @@ fleet init --statusline
 > the way you normally would. `setx` is the scriptable form, and it edits your machine-wide user
 > environment — a change outside this repo, worth making deliberately rather than by paste.
 
-> **Step 2's `fleet home` is the step that stops the worst mistake.** `fleet` resolves its home from
-> the location of the `fleet.py` behind whichever shim PATH found — *not* from your current
-> directory. So if a different fleet clone is already on your PATH, standing inside your new clone
-> and typing `fleet init` configures the **other** home and leaves your new one untouched. That has
-> happened here and cost a real incident. `fleet home` is read-only, takes no lock, and prints the
-> home every following command will act on. If the answer is not the clone you just made, fix PATH
-> first.
+> **Step 2's `fleet home` is the step that stops the worst mistake.** Two things decide which home
+> you get, and neither of them is your current directory. First, **PATH order**: `fleet` resolves its
+> home from the location of the `fleet.py` behind whichever shim PATH finds first, so step 1's
+> prepend puts your new clone in front for the rest of that shell, and a different fleet clone wins
+> only when it comes first — which is exactly what happens in a later shell where you have not re-run
+> step 1. Second, **`FLEET_HOME`**: an environment variable left over from an earlier install
+> overrides that PATH answer, even when PATH is perfect. Standing inside your new clone settles
+> neither. Typing `fleet init` against the wrong home has happened here and cost a real incident.
+> `fleet home` is read-only, takes no lock, and prints the home every following command will act on.
+> If the answer is not the clone you just made, check PATH **and** check `FLEET_HOME` — either can
+> point you at another home; the full resolution order is a few paragraphs below.
 
-> **Step 3's argument is a directory path to your clone** (that is the source form a working install
-> reports: `claude plugin marketplace list` → `Source: Directory (...)`). Whether the
-> `owner/repo` GitHub shorthand also works is untested.
+> **Step 3's argument is a directory path to your clone** — the source form a working install
+> reports (`claude plugin marketplace list` → `Source: Directory (...)`), and the only form verified
+> for this repo. It is not the only form the command takes: `claude plugin marketplace add --help`
+> reads *"Add a marketplace from a URL, path, or GitHub repo"*, and on the maintainer's machine four
+> of the five configured marketplaces are GitHub-sourced. What is untested is specifically whether
+> `exPardus/fleet` resolves as a marketplace — not whether GitHub shorthand works at all.
 
 **Where does it install to?** Nowhere you have to choose. Fleet derives `FLEET_HOME` from `bin/fleet.py`'s own location, so the clone can live anywhere — there is no hard-coded path in the CLI. `fleet home` prints the resolved value:
 
@@ -94,7 +101,7 @@ priority order (`docs/specs/multi-fleet.md` §5):
 | Priority | Input | Wins when |
 |---|---|---|
 | 1 | `--fleet-home <PATH>` — a global flag, accepted in any position | always, if given |
-| 2 | this session's id, looked up against the registries the install root can see | the session id is claimed by one of them |
+| 2 | this session's id, looked up against every home in `~/.claude/fleet-homes.list` **plus** this install root | the session id is claimed by one of them |
 | 3 | the `FLEET_HOME` environment variable | nothing above matched |
 
 For an ordinary user, priority 2 never fires and `FLEET_HOME` behaves exactly as you would expect.
@@ -106,6 +113,17 @@ that `--fleet-home` requires an *initialized* home, meaning one whose `state/fle
 `fleet init` writes `worker-settings.json` and does **not** create the registry, which appears on
 the first spawn. A freshly `init`-ed home will therefore be rejected as `not_initialized` until a
 worker has been spawned into it.
+
+> **Priority 2's search space is machine-wide, not clone-scoped — and this matters if you are using
+> a second clone as a safety fence.** It is every home in `~/.claude/fleet-homes.list` (the file
+> `fleet homes --add` appends to) *and* the install root behind the shim you invoked, not the install
+> root alone. While that list is empty — the default on a machine that has never run
+> `fleet homes --add` — the search collapses to the one install root, so invoking a second clone's
+> own `fleet` shim does keep you off the first clone's home. **Register a home and that stops being
+> true, silently:** a claimed session id then resolves to the registered home from *any* clone, with
+> no error and with `FLEET_HOME` still ignored. Priority 1, `--fleet-home <PATH>`, is the only
+> override that wins unconditionally. If you are relying on which clone you invoked, check
+> `fleet homes` first, and confirm with `fleet home` run exactly the way the real command will be.
 
 Step 2 writes exactly one file, and tells you where:
 
@@ -270,12 +288,12 @@ For dependent or review-style work (one worker builds, another attacks the diff)
 | `fleet clean` / `archive` / `autoclean` | Tiered cleanup and staleness sweeps |
 | `fleet doctor` | Run the 28 health checks (`--repair` quarantines a corrupt registry) |
 | `fleet home` | Print the resolved `FLEET_HOME` |
-| `fleet homes` | List the machine's registered fleet homes. The bare verb is read-only; `--add` / `--retire` mutate the machine-wide homes list |
+| `fleet homes` | List the machine's registered fleet homes. The bare verb is read-only; `--add` / `--retire` mutate the machine-wide homes list — which is also what priority 2 of home resolution searches, above |
 | `fleet knowledge` | Print `knowledge/INDEX.md` |
 | `fleet index` / `fleet q` | Opt-in per-project symbol index (`index init/build/update/status`) and the query verb over it |
 | `fleet sup-*` | Supervisor identity: `sup-boot`, `sup-spawn`, `sup-checkpoint`, `sup-heartbeat`, `sup-release`, `sup-status`, `sup-context`, `sup-decision`, `sup-handoff-{begin,complete,abort}` |
 
-That is all 33 subcommands `fleet --help` ships, as of `fa236cb`. Every command's exact contract lives in [`SPEC.md`](SPEC.md) §7 — and if this table and `fleet --help` ever disagree, `--help` wins and this table has drifted. To check for yourself, read the `{...}` choice list at the top of `fleet --help`; that is the authority, and it drifted from this table once already (`homes` shipped and went unlisted here for a wave).
+That is all 33 subcommands `fleet --help` ships, as of `fa236cb`. Every command's exact contract lives in [`SPEC.md`](SPEC.md) §7 — and if this table and `fleet --help` ever disagree, `--help` wins and this table has drifted. To check for yourself, read the `{...}` choice list at the top of `fleet --help`; that is the authority, and it drifted from this table once already (`homes` shipped and went unlisted here).
 
 ---
 

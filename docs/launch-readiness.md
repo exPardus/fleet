@@ -5,16 +5,27 @@ derived by executing something on this machine, not by reading prose. Where a cl
 executed here, it says so and says why.
 
 **Re-measured 2026-08-09 against `fa236cb`** by an install rehearsal run from a throwaway clone
-under the OS temp dir (`docs/lanes/w48-launch.md`). Gaps 1, 3, 4, 6 and 7 reproduced unchanged;
-gap 2a's open question is answered below; gap 5 was not re-checked. That rehearsal also found
-**three blockers this list did not have**, all of them ahead of most of what is below:
+under the OS temp dir (`docs/lanes/w48-launch.md`), and re-checked the same day under an adversarial
+gate. Below is the disposition of **every** entry on this list — nine of them, because gap 2 splits
+into 2a and 2b:
+
+| Entry | Disposition on 2026-08-09 |
+|---|---|
+| 1, 3, 4, 6, 7 | Re-measured; each reproduced unchanged. |
+| 2a | Re-measured; the open question is answered below — the argument is a directory path. |
+| 2b | Re-measured and stands. Its substance was acted on — all three entry docs now carry the trigger caveat and point at `/fleet:overview` — but the phrase is still not a declared trigger, and whether it matches anyway is still not deterministically verifiable from here. |
+| 5 | Re-measured and stands: `.github/` still contains only `ISSUE_TEMPLATE/` (`bug_report.md`, `feature_request.md`) and **zero** workflow files. |
+| 8 | Re-measured and **withdrawn — it was false when written.** See the struck section below. |
+
+That rehearsal also found **three blockers this list did not have**, all of them ahead of most of
+what is below:
 
 - **A bare `fleet init` configures whatever fleet is already on your PATH, not the clone you are
   standing in.** Measured: from a fresh clone in temp, `fleet home` printed `C:/proga/claude-fleet`.
   This is the 2026-07-29 incident class, reachable by following the published quickstart exactly.
 - **The quickstart's PATH step is a comment, not a command**, so on a machine with no prior fleet
   the walkthrough dies at step 2 with `CommandNotFoundException`.
-- **`FLEET_HOME` is silently ignored inside a session fleet launched** — the session-id lookup
+- **`FLEET_HOME` is silently ignored inside a fleet-launched session** — the session-id lookup
   (multi-fleet §5 step 2) outranks it, and `--fleet-home`, the flag that does win, appears in no
   user-facing doc.
 
@@ -70,16 +81,35 @@ configuration without mutating it:
 ```console
 $ claude plugin marketplace list
 Configured marketplaces:
-  ❯ claude-fleet
+  ❯ claude-fleet                              # 1 of 5 entries; the other 4 are below
     Source: Directory (C:\proga\claude-fleet)
 ```
 
 That is the source form of a marketplace that demonstrably works, and it agrees with
 `.claude-plugin/marketplace.json`, which declares plugin `fleet` at `"source": "./"`. Both docs now
-give the directory form. **Still unverified:** whether the `exPardus/fleet` GitHub shorthand also
-works — no evidence either way — and `claude plugin marketplace add` itself has still never been
-executed in a rehearsal, because it mutates this machine's real plugin configuration. The grade of
-this answer is *observed source of a working install*, not *command re-executed on a clean box*.
+give the directory form.
+
+**Still unverified, stated precisely:** whether `exPardus/fleet` in particular resolves as a
+marketplace. That is *not* a question about the argument form, and an earlier revision of this
+paragraph wrongly said there was "no evidence either way" about GitHub shorthand — a claim the
+abridged block above helped hide, since the four rows it drops are the refutation. The evidence
+exists, from the command's own help and from this machine's own configuration:
+
+```console
+$ claude plugin marketplace add --help
+Usage: claude plugin marketplace add [options] <source>
+
+Add a marketplace from a URL, path, or GitHub repo
+
+$ claude plugin marketplace list | grep -c 'Source: GitHub'
+4                     # of 5 configured marketplaces; the 5th is claude-fleet, Directory-sourced
+```
+
+So the CLI plainly accepts URL and GitHub-repo sources, and four marketplaces on this box are
+installed that way. What no one here has run is `claude plugin marketplace add` itself — in any
+form — because it mutates this machine's real plugin configuration. The grade of the directory
+answer is therefore *observed source of a working install*, not *command re-executed on a clean
+box*.
 
 #### 2b. The phrase both docs tell you to say is not a declared trigger
 
@@ -189,12 +219,53 @@ so one home already manages workers across many projects — that is the normal 
 workaround. What you cannot do is run two independent fleets side by side. For launch, that is a
 limitation to state, not a blocker.
 
-### 8. `SPEC.md` §18 is stale by two milestones
+### 8. ~~`SPEC.md` §18 is stale by two milestones~~ — WITHDRAWN 2026-08-09: it was false when written
 
-M-0/M-A/M-B/M-C are recorded; **M-D and M-E shipped afterwards and were never folded in.** Anyone
-reading §18 as "what works" gets a two-milestone-old picture; `docs/PLAN-PROGRESS.md` and
-`docs/NEXT-SESSION.md` hold the rest. Contributor-facing, not user-facing — hence low. Flagged, not
-edited: `SPEC.md` was fenced for this lane.
+This entry claimed *"M-0/M-A/M-B/M-C are recorded; **M-D and M-E shipped afterwards and were never
+folded in**"*. Re-measured 2026-08-09 against the tree this document sits in — **false.** §18 records
+M-D and M-E as SHIPPED, with dates, alongside M-F and M-G:
+
+```console
+$ grep -n '^## 18\.' docs/SPEC.md
+355:## 18. Milestones
+
+$ sed -n '355,370p' docs/SPEC.md | grep -oE '^- \*\*M-[A-G0] [^:]+:'
+- **M-0 — spike + contract:
+- **M-A — supervisor identity:
+- **M-B — native dispatch:
+- **M-C — deletions + hardening + SPEC v3:
+- **M-D — vendor contract rehome + UL horizon parser:
+- **M-E — daemon-wedge detection + shipped-code defects + claim-nonce spec:
+- **M-F — SDD / drift-control:
+- **M-G — audit oracle:
+```
+
+They were folded in on **2026-07-22**, fourteen days *before* this entry was written on 2026-08-05
+(`0cefc81`):
+
+```console
+$ git log --format='%h %ad' --date=short -S'**M-D — vendor contract rehome' -- docs/SPEC.md
+36a4c53 2026-07-22
+```
+
+(`36a4c53` is the commit that removed the plugin's SessionStart hook. The subject is dropped from
+the format above on purpose: `tests/test_doc_claims.py` scans shell-fenced blocks in this file for
+`fleet <verb>` invocations, and that subject line contains a word pair it reads as one.)
+
+(Line numbers in the `sed` range are as of `4ccc8f7`; `grep -n` above prints the one they are
+anchored on.)
+
+**Why it was wrong is the part worth keeping.** The sentence was never measured against `SPEC.md`.
+It was relayed from root `CLAUDE.md`, whose opening paragraph still reads *"M-D and M-E shipped
+after and are **not yet folded into §18**"* — a line stale since `36a4c53`. This document opens by
+promising that *"Every row below was derived by executing something on this machine, not by reading
+prose."* This row was the exception, and it is the only entry here that a hostile re-run has removed
+rather than confirmed. **The stale text that remains is root `CLAUDE.md`, not `SPEC.md`** — outside
+this lane's fence, flagged for whoever owns it.
+
+What §18 *is* missing is narrower and not a milestone gap: the "Reconcile", three-tier/claim-nonce
+and supervisor-tombstone entries are present but unlettered, so §18 is a milestone list with
+non-milestone rows in it. Cosmetic, contributor-facing, and not a launch blocker.
 
 ---
 
