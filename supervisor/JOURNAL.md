@@ -6978,3 +6978,56 @@ I gave the lane two readings of "witness" and a weak lean toward B. It measured 
 Restated there and not re-litigated: the GOALS §8 text (approve the parked reconstruction at `docs/proposals/2026-08-09-goals-band-section-replacement.md`; needs approval on CONTENT, not method), §5's `--yes` scope (recommend NARROW), and `init --home` (recommend SPLIT on the E2 ground). **Gate 3 got materially stronger this wave**: the homes list is what makes every lane's temp-home fence real or fake, and slice (b) is what creates it. Nothing was ticked; a supervisor may not tick a box.
 
 Untouched as ordered: `supervisor/GOALS.md`, ND4(c)'s decision slot, `w35/nd4c`, `fix/b6-interface-release`, `fix/outcount-timing`.
+
+## 2026-08-09T01:47:28Z CHECKPOINT inc=inc-20260808T232242Z-ae09 sid=6963e574-e250-48d5-a181-185e92b4ec89
+
+WAVE 48 STAND-DOWN — FIVE COMMITS PUSHED, FOUR FLOORS PREDICTED AND HIT EXACTLY, AND THE SLICE (c) GATE IS STILL RUNNING WITH TWO REAL DEFECTS ALREADY CONFIRMED.
+
+## FINAL STATE — main == origin == `55091c3`
+
+| sha | what |
+|---|---|
+| `5ebba74` | merge — pin tier at claude 2.1.226, report-only |
+| `7c3e48b` | merge — install rehearsal, 3 launch blockers, gated + fully discharged |
+| `8e01d83` | `CLAUDE.md` — M-D/M-E were NOT unfolded; §18 records both SHIPPED |
+| `44f056e` | `docs/lanes/BRIEF-TEMPLATE.md` — the FLEET_HOME-is-not-a-fence safety stanza |
+| `55091c3` | journal |
+
+**Four floor runs, four predictions written before the run, four exact hits on BOTH interpreters** — 4154 collected each time (`4139 passed, 14 skipped, 1 xfailed`), sha proved identical before and after every run, `git status` checked after each for suite-written damage to tracked files. Two merges, both with the `w35/nd4c` x main control run FIRST (26 both times) and both measured zeros carrying byte counts. Parents proved arithmetically on both. Both merge messages went through `-F <file>` and were read back and span-checked; neither ever touched a shell string.
+
+## `w48-gc` IS STILL RUNNING AND ITS VERDICT IS DURABLE WITHOUT ME
+
+The slice (c) gate has been working 69 minutes past two `wait` windows. **Its verdict commits to `docs/lanes/w48-gc.md` on branch `w48/gc` — that is exactly what the `docs/lanes/` convention was built for, and it is why I can stand down without losing it.** Recording here what I have seen by peek, because a peek is ephemeral and the gate could still die:
+
+- **Attack F CONFIRMED — a real breakage, not a cosmetic residual.** The unquoted `{fleet_py}` that `w48-c` disclosed and "deliberately left" **dies on any install path containing a space**: `can't open file 'C:\...\Fleet'`, the path splits at the space, across **all three rendered commands**, while the quoted sibling runs clean at rc 0 with a real boot bundle. On Windows that is `C:\Program Files\...`. **This must be discharged before (c) lands.**
+- **X2 CONFIRMED — a mutant survives the FULL SUITE.** `4217 passed, 14 skipped, 1 xfailed` **with the mutant on disk**: the `normcase` path is entirely unpinned. That is attack D doing precisely what it was ordered to do — re-planting rather than reading the lane's self-reported table — and it is the a3 lesson (*a self-reported fault-injection table is a claim about the mutants the author thought of*) reproducing one wave later.
+- Floors independently reproduced at 4217/14/1 on both interpreters, tree sha256-identical, template unclobbered.
+- **It caught one of its own instrument failures**: mangled quotes where **the control failed identically**, so it graded that an instrument failure rather than a finding, and redid it through a real shell script. Unprompted, and the correct call.
+- It also correctly identified my own `fleet wait --any w48-gc` processes and left them alone rather than treating them as its own strays.
+
+**`w48/hookargv` is NOT landed and must not be landed until that gate is discharged.**
+
+## DOCTOR — 4 FAIL, and every one is accounted for
+
+Read them in this order and do not let a red doctor train anyone to ignore it:
+
+1. **`pin-version` — DELIBERATE.** 2.1.226 vs the 2.1.222 stamp. I held the stamp because the tier has a RED against shipped code. Five of six pins justify the version; that is not a reason to stamp.
+2. **`instance-freshness` — the KNOWN, MEASURED FALSE ALARM** on main (compares mtimes; the rendered template was proved byte-identical to the instance). Remedy filed and unbuilt: compare the RENDERED template. **Note the wrinkle `w48-c` found:** on ITS branch the row fires CORRECTLY, because the template genuinely changed there. Same row, two different meanings depending on the tree — worth knowing before someone "fixes" it.
+3. **`identity-witness` — LEAK, and it is the boot observation I recorded at the start of this wave.** Witness names `sup|inc-20260808T173831Z-c6d4|boot` (dead) while my sid resolves to `sup|inc-20260808T232220Z-db73|boot`. Ratified 2026-07-30: no observation of this variable is evidence about this body in either direction. The detector is right to report the disagreement and wrong to be believed over the registry.
+4. **`supervisor-pending-decision` — ND4(c), the operator's slot**, carried untouched for a 9th wave as ordered.
+
+## WHY I AM RELEASING RATHER THAN CONTINUING
+
+`sup-context` puts me around 320k against the 350k soft trigger, and the remaining work is a discharge cycle on (c) that I cannot land inside what is left. The standing directive at the band is to finish the current wave and hand off, not to start work I cannot finish — and this wave's docket IS discharged: three landings pushed, the operator docket drafted with a recommendation on each of the three gates, mission item 3 verified green by derivation, and the two lanes that could not land are both blocked on a gate rather than on me.
+
+Releasing rather than dying: a released claim reads unambiguously at the next boot (`claim`, no seizure, no page), which is what distinguishes an authorised stop from an outage.
+
+## SUCCESSOR QUEUE — unchanged from my last checkpoint, in priority order
+
+1. **Read `docs/lanes/w48-gc.md` on `w48/gc`.** Discharge it — the unquoted `{fleet_py}` and the unpinned `normcase` are both confirmed — then gate the discharge **on re-plant, not on the diff**, and land `w48/hookargv`. **Re-derive the floor: main has moved five commits since the lane measured 4232.**
+2. **The fork-steer defect** (`fleet send` to an idle worker can dispatch a byte-identical pointer to a session holding stale task-file contents; 1 in 5). Needs `bin/fleet.py`, so it serialises behind (c). Its first act should be reproducing the RED itself, which independently verifies `docs/lanes/w48-pin.md`'s central claim.
+3. **Slice (d)**, staged at `state/tasks/lens/w48-d.md` with the corrected fence already in it. The capture experiment GATES the slice: if the statusline blob carries no usable sid, saying so IS the deliverable.
+4. **The pin stamp stays held** until the fork-steer RED is dispositioned.
+5. **Knowledge fold for waves 44–48 still owed**, carried from my predecessor. This wave adds: the FLEET_HOME fence, the gate-coverage measurement, the fork-steer defect, a mutant surviving a full suite, and `git merge -F -` not reading stdin at this git version (rc 129, `could not read file '-'` — a real file is the only form that works).
+
+**Operator docket is drafted in full at `state/w48-operator-docket.md`** — three gates, one short paragraph and one recommendation each, nothing ticked. Gate 3 (`init --home`) got materially stronger this wave: three independent routes reached the homes list, and it is what makes every lane's temp-home fence real or fake.
