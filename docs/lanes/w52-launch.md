@@ -8,7 +8,7 @@ Every line is tagged **MEASURED** (I ran it on 2026-08-09 and the output is past
 
 **Scope delivered: all four parts.** Nothing was cut.
 
-> ## ⚠ THIS REPORT HAS BEEN THROUGH TWO ADVERSARIAL GATES AND CORRECTED TWICE. READ THIS FIRST.
+> ## ⚠ THIS REPORT HAS BEEN THROUGH THREE ADVERSARIAL GATES AND CORRECTED THREE TIMES. READ THIS FIRST.
 >
 > Gate **`w52-glaunch3`** (`e97bbcb`) returned **GATING — 1 BLOCKING, 3 MAJOR, 5 MINOR**; gate
 > **`w52-glaunch4`** (`28fd30d`) returned **NOT-GATING — 1 MAJOR, 6 MINOR**, recommending the branch
@@ -24,6 +24,13 @@ Every line is tagged **MEASURED** (I ran it on 2026-08-09 and the output is past
 > **What the second gate confirmed, and it was the branch's biggest risk:** the replacement README
 > demo block is **verbatim, not plausible** — proven by replaying the shipped renderer over the
 > surviving transcript for a byte-for-byte diff. And the call-site count is settled at **11**.
+>
+> **Gate `w52-glaunch5`** (`d5fa366`) returned **NOT-GATING — 2 MAJOR, 4 MINOR**, all accepted (§13).
+> Its MAJOR finding is the one to carry: **the everywhere-rule propagated a wrong line number to every
+> site it reached, and every site then agreed with every other, which reads like corroboration.** All
+> citations in this report are now **pinned to a named commit** under a single declared standard (§0),
+> derived by me, and re-derived *after* the edits that could move them. The README/`launch-readiness`
+> contradiction it judged unshippable is **repaired at both ends** in `f49cae4`.
 >
 > **The three things a reader must not carry away from an uncorrected copy:**
 >
@@ -65,10 +72,31 @@ $ sha256sum <clone>/bin/fleet.py C:/proga/fleet-w52-launch/bin/fleet.py C:/proga
 76b9bcbe50eac88eb72610683e0f6182c5ce3f33bf805c3b02056d83cd815d17 *C:/proga/claude-fleet/bin/fleet.py
 ```
 
-Public HEAD == my branch base == `main` == the clone. **The stranger's tree and this report's subject
-are the same bytes**, so a reading taken in the clone is a reading about this repo. Every source line
-number below was read in `C:/proga/fleet-w52-launch/bin/fleet.py` at `64b43c2`; they are not
-transferable to another commit.
+~~Public HEAD == my branch base == `main` == the clone.~~ **That sentence was true when measured on
+2026-08-09 and is stale now** *(corrected in place 2026-08-10, gate `w52-glaunch5` G6; the correction
+previously sat 1,880 lines below this line in §12, which is against this report's own stated method of
+correcting in place)*. **`main` and `origin/main` are `0d82460`**, one commit ahead of `64b43c2`,
+adding only `supervisor/JOURNAL.md`. **The inference this paragraph exists to license survives
+untouched**, because it rests on bytes rather than on refs: `bin/fleet.py` is blob
+`3661d1f95bf4bb7adc3ee98fe5b311c04e89f352` at `64b43c2`, at `main` and at this branch's HEAD, so a
+reading taken in the clone is still a reading about this repo. Full measurement in §12.
+
+**THE CITATION STANDARD THIS REPORT USES, declared once** *(added 2026-08-10, gate `w52-glaunch5` G5,
+which found two standards running at once and rightly called that unfalsifiable for the next reader)*:
+
+> **Every line number in this report — source, `README.md`, or any other file — is pinned to a named
+> commit, and the commit is named at or beside the citation.** A citation is a claim about a tree, not
+> about `HEAD`, exactly as root `CLAUDE.md` rules for receipts. A pinned number stays true forever and
+> "fixing" it against a later tree fabricates.
+
+Applying that rule retires the ambiguity G5 identified: the six inherited `README line N` citations
+below were correct at `64b43c2` and are **now labelled with that commit** rather than renumbered.
+Where a citation is about the branch as it lands, it is pinned to **`f49cae4`** — the commit that
+froze `README.md` and `docs/launch-readiness.md` for this discharge — and every such number was
+re-derived against that commit *after* the edits that moved it, not before.
+
+Every source line number below was read in `bin/fleet.py` at `64b43c2`; that file is blob-identical at
+`main` and at HEAD (above), so those numbers also resolve at both.
 
 **MEASURED — I cloned from the local path**, not from GitHub: `git clone --no-hardlinks --branch main
 C:/proga/claude-fleet <temp>` (4.48 s). `--no-hardlinks` so the throwaway shares no inodes with the
@@ -308,7 +336,7 @@ rc=0
 1. **`launch-readiness.md` gap 2a is CLOSED at the strongest grade available.** The directory form is
    no longer "the form a known-working install on the maintainer's machine reports" — it is a form
    **re-executed on a clean box**, rc=0, install and `details` both green. MEASURED.
-2. **`Hooks (0)`** — the no-injection rule (CLAUDE.md's D7 stanza; README line 88, *"the plugin itself
+2. **`Hooks (0)`** — the no-injection rule (CLAUDE.md's D7 stanza; `README.md:88` at `64b43c2` (**`:121` at `f49cae4`**), *"the plugin itself
    registers no hooks and injects nothing"*) is **measured true at the vendor's own inventory**, not
    just asserted from the manifest. That claim had been read from `.claude-plugin/marketplace.json`
    before; this is `claude` itself reporting it after a real install. **MATCH.**
@@ -920,7 +948,7 @@ lines.append(f"[tool] {part.get('name', '?')}")    # :7126
 tag = "[user:meta]" if rec.get("isMeta") else "[user]"   # :7136
 ```
 
-`grep '\[mail\]' bin/fleet.py` → **no matches.** Now README lines 28–33:
+`grep '\[mail\]' bin/fleet.py` → **no matches.** Now `README.md:28-33` **at `64b43c2`** — the hand-written block, which `2517f6b` deleted, so this quotes a tree that no longer exists and is meant to:
 
 ```console
 $ fleet peek migrate-users
@@ -959,7 +987,7 @@ mid-turn `send` — so the *feature* README is advertising is real. Only its ren
 #### The tool-boundary question — **RESOLVED IN THE DOCUMENTATION'S FAVOUR, and it produced W52-8**
 
 This section originally said the delivery *"surfaced as `[user:meta] Stop hook feedback:`"* in both
-observations, and therefore that README line 81's *"injected at the next tool boundary"* was **not
+observations, and therefore that `README.md:81` at `64b43c2` (**`:114` at `f49cae4`**) — *"injected at the next tool boundary"* — was **not
 confirmed either way.** Generating the replacement demo block (Part B) required driving a real
 mid-turn `send`, so I looked at the transcript instead of the digest. **MEASURED, twice, on two
 independent workers:**
@@ -972,7 +1000,7 @@ independent workers:**
 ```
 
 `hookName: "PostToolUse:Read"` — the message was injected **at the tool boundary immediately after
-the worker's `Read`**, exactly as README line 81 says. **The claim is TRUE and now MEASURED.** My
+the worker's `Read`**, exactly as `README.md:81` at `64b43c2` (**`:114` at `f49cae4`**) says. **The claim is TRUE and now MEASURED.** My
 "not confirmed" was a null produced by a blind instrument, and the instrument was `fleet peek`.
 
 **W52-8 (NEW, LOW) — `fleet peek` cannot show a mailbox delivery that arrives at a tool boundary.**
@@ -1031,7 +1059,7 @@ Every worker is native (`dispatch_kind: "bg"`; the spawn banner says `native bg`
 > is the defect — but the code is not "written never to print it" in general, and I should not have
 > said so on the strength of a comment attached to one branch of an `if`.
 
-README's own line 49 correctly explains that USD budgets are refused under G3 — **the prose and the
+`README.md:49` at `64b43c2` (**`:82` at `f49cae4`**) correctly explains that USD budgets are refused under G3 — **the prose and the
 example in the same document disagree, and the prose is right.**
 
 **This is w48's headline shape repeating one level down.** w48 found the docs wrong about hazards; this
@@ -1150,13 +1178,47 @@ unrelated claims"* — **was false for that hit.** It is withdrawn.
 
 **The instrument was the defect, and this is the transferable part.** Piping a whole-tree grep through
 `grep launch-readiness` searches for *lines that mention the file*, which is a different question from
-*what that file asserts*. The command that answers the intended question is scoped to the file, and it
-is genuinely empty:
+*what that file asserts*.
+
+> **AND THE INSTRUMENT I SUBSTITUTED WAS ALSO WRONG — it returns 0 by construction** *(gate
+> `w52-glaunch5` G3)*. This paragraph used to say *"the command that answers the intended question is
+> scoped to the file, and it is genuinely empty"*, over
+> `grep -n "still reads" docs/launch-readiness.md → 0`. **That check can never be non-zero**, because
+> the W52-6 repair *was* the deletion of that string from that file. MEASURED with `-G`, not `-S`
+> (`-S` misses a removal when the deleting commit puts the string back in a replacement comment):
+>
+> ```console
+> $ git log --oneline -G'still reads' -- docs/launch-readiness.md
+> 2517f6b docs(w52): discharge the glaunch3 gate, and repair the two doc defects it confirmed
+> b4de97a docs(w48): discharge the glaunch gate -- 3 MAJOR, 4 MINOR, and one gap that was false all along
+> ```
+>
+> So a 0 there is **the repair restated, not evidence about it** — and it was filed under a
+> *tree-wide* heading while asking a **one-file, one-idiom** question, which is precisely the shape
+> that hid the third M1 hit (`w48-gc.md:479` is a whole-tree hit a single-file grep can never see).
+> **A check whose good answer is entailed by the thing it checks is not a check.**
+
+**The replacement, which can fail — and a positive control proving it does.** The real question is
+tree-wide: *does any document still assert that `CLAUDE.md` says M-D/M-E are unfolded?* The instrument
+is the tree-wide grep whose hits are then classified, and it is **non-zero** (seven hits, §5 above),
+so the claim rests on the classification rather than on an empty result. What makes it falsifiable: a
+newly-added assertion appears as an eighth, unclassified hit.
+
+MEASURED — the same detector run against a **pre-repair** tree, where an assertion genuinely exists:
 
 ```console
-$ grep -n "still reads" docs/launch-readiness.md
-  match count = 0
+# at 7c87730   (before the W52-6 repair)
+$ git show 7c87730:docs/launch-readiness.md | grep -n "still reads"
+259:It was relayed from root `CLAUDE.md`, whose opening paragraph still reads *"M-D and M-E shipped
+
+# at f49cae4   (after)
+$ git show f49cae4:docs/launch-readiness.md | grep -c "still reads"
+0
 ```
+
+**The detector fires on the tree that contains the defect and is silent on the tree that does not.**
+That is the control the original substitute never had, and it is what licenses reading the 0 as
+meaning anything at all.
 
 **And the concealed allegation is itself stale-and-fixed, checked rather than assumed.** `w48-gc:479`
 charges `docs/launch-readiness.md` with saying `29 checks`. It does not — at `2517f6b` and at this
@@ -1170,11 +1232,28 @@ says exactly that about the README in W52-5, and the same standard applies here.
 
 ### Two README self-limits this lane discharges — **still unrepaired, and deliberately so**
 
-MEASURED — **README line 164** reads *(this said "line 136", which was true at `64b43c2` and
-`7c87730` and was moved to 164 by `2517f6b` — the very commit that wrote the citation, because it
-lengthened the demo block above. Corrected per gate `w52-glaunch4` m6; it is the third instance of one
-pattern, with M1 and m2: **a restatement invalidated by the report's own edits, and nothing in the
-harness re-checks an in-document line number**)*:
+> **EVERY LINE NUMBER IN THIS SUBSECTION WAS WRONG, AND THE WAY THEY GOT WRONG IS THE FINDING**
+> *(gate `w52-glaunch5` G1, MAJOR)*. Gate 2 told me *"README line 136 is 164"*. I accepted it and, per
+> the everywhere-rule, applied `164` at **four** sites — in `68ecd44`, **the same commit that added
+> +5 README lines above every one of them** (hunk `@@ -48,18 +48,23 @@`). So all four were wrong the
+> moment they were written, and one of them was a pasted `:NNN` receipt whose *both* anchors failed at
+> its own commit.
+>
+> **The everywhere-rule worked perfectly and propagated a wrong value to every site it reached.** It
+> is a force multiplier with no opinion about direction: applied to an unverified value it installs
+> the error everywhere, and then every site agrees with every other, **which reads exactly like
+> corroboration.** I cited the everywhere-rule as the control that caught m6's second instance — it
+> caught the second *instance*; it cannot catch a wrong *value*, and nothing else was watching.
+>
+> **What I did about it, which is not "use the gate's numbers".** The brief warned that the gate could
+> be wrong in precisely the way gate 2 was, one turn later. So I re-derived every anchor myself, by
+> `grep -n` against a materialised commit, **after** making this discharge's edits rather than before —
+> and I pin each number to the commit it was derived against, per the standard now declared in §0.
+
+MEASURED — the paragraph below is at **`README.md:169` at `f49cae4`**, derived by
+`git show f49cae4:README.md | grep -n`. *(It was line 136 at `64b43c2`, 164 at `2517f6b` and
+`305aeb6`, and 169 from `68ecd44` onward.)* **This is the text as it stood before this discharge
+repaired it:**
 
 > Two things this quickstart cannot do for you. The walkthrough is only executed as far as `fleet
 > doctor` — **nothing from `fleet spawn` onward is covered by a rehearsal receipt.** And step 3's
@@ -1182,36 +1261,52 @@ harness re-checks an in-document line number**)*:
 > maintainer's machine reports, **not a form re-executed on a clean box.**
 
 Both clauses are **false in the good direction**, and this report is the receipt for both: §3 covers
-`spawn` through `clean`, and §2 step 3 re-executed the directory form on a throwaway box, rc=0. The
-gate independently confirmed the sentence is still in the tree exactly as quoted.
+`spawn` through `clean`, and §2 step 3 re-executed the directory form on a throwaway box, rc=0.
 
-**I did not fix it, and the reason is scope — the dependency reason I gave first was wrong, and the
-gate is right to say so.** The sufficient reason is simply that **the discharge brief licensed two
-documentation repairs by name, W52-5 and W52-6, and this is a third claim.** That covers both clauses
-cleanly.
+### ~~Deferred~~ **REPAIRED — and the deferral's own reasoning was wrong twice**
 
-What I originally wrote — that *"its correct rewrite depends on the regrade above"* — is true of the
-**first** clause only, whose honest residue turns on MEDIUM-vs-HIGH. It is **not** true of the second:
-the marketplace directory form has no dependency on W52-2 whatsoever. It is a pure install-half fact,
-this lane measured it itself, and its repair is one clause. **I bundled a dependency-free repair into a
-deferral justified only by the other clause's dependency** — which, left standing, would let a future
-lane defer a dependency-free repair by citing a dependency it does not have.
+**This is now fixed, at both ends, in `f49cae4`.** The prior two revisions of this passage deferred it
+and mis-sized it, and both errors are worth keeping because they are the same error at different
+scales.
 
-**And the deferral costs more than "a stale self-limit", which nobody had recorded.** README
-contradicts itself on this exact point, 23 lines apart:
+**Mis-reasoning 1 (caught by gate `w52-glaunch4`):** I justified the deferral by dependency — *"its
+correct rewrite depends on the regrade above"*. True of the **first** clause, whose residue turns on
+MEDIUM-vs-HIGH; **false** of the second, which is a pure install-half fact this lane measured itself.
+I bundled a dependency-free repair into a deferral licensed only by the other clause's dependency.
 
+**Mis-reasoning 2 (caught by gate `w52-glaunch5`, and it is the one that mattered):** I wrote *"whoever
+holds the settled grade should fix both ends in one edit — still one paragraph of work."* **The repair
+is not one edit and not one file.** `README.md:169` *forwards the reader into*
+`docs/launch-readiness.md` for exactly this claim, and that document **repeated the false half** at
+`:109-112`. Fixing README alone would have sent the reader to the contradiction rather than away from
+it. **My estimate was wrong in the direction that makes deferral look cheap**, which is the direction
+an estimate defending a deferral will always be wrong in unless it is measured.
+
+**And the claim is stated five times across three documents, not twice.** MEASURED, all at `f49cae4`:
+
+```console
+# at f49cae4
+$ grep -n "verified here\|only form verified\|clean box\|in any form" README.md docs/getting-started.md docs/launch-readiness.md
+README.md:146                  "the directory form -- the one verified here"          ✔ consistent
+README.md:169                  (repaired here — now "the only form verified for this repo")   ✔
+docs/getting-started.md:55     byte-identical to README:146, comment and all          ✔
+docs/getting-started.md:85     "…and the only form verified for this repo…"           ✔
+docs/launch-readiness.md:112   (repaired here — was "no one here has run… in any form")  ✔
 ```
-:141  claude plugin marketplace add C:\path\to\this\clone   # the directory form -- the one verified here
-:164  …is the form a known-working install on the maintainer's machine reports, not a form
-      re-executed on a clean box.
-```
 
-`:141` is **pre-existing at `64b43c2`** and not introduced by this branch — but §2 step 3 is the
-measurement that makes `:141` true and `:164` false, so the two now disagree with each other on the
-strength of my own receipt. **Flag it as a contradiction, not merely a stale self-limit**: a
-launch-facing README that says both things about the same argument is worse than one that says either.
-Whoever holds the settled grade should fix both ends in one edit. Still one paragraph of work, and
-still the most conspicuous known-false sentence left in a launch-facing document.
+**Two of the five were false, in the same direction, and the previous discharge found one.** The
+remaining `docs/launch-readiness.md:70` states the general form (`<path-or-github-repo-of-this-clone>`)
+and is neutral.
+
+**The repair used the paragraph that was already shipped and already gated** —
+`docs/getting-started.md:84-89` — rather than composing a third phrasing, because *a third variant of
+a fact that already exists in two places is how this class started.* `getting-started.md` is
+**untouched**: it was correct at both of its sites.
+
+**The relative claim survived what the absolute anchors did not**, and the gate is right that this is
+structural rather than lucky: I wrote that README contradicted itself *"23 lines apart"*, and
+`169 − 146 = 23` — **a distance between two lines in one file is invariant under an insertion above
+both.** The one form of the claim that could not rot is the one that did not.
 
 ### What the docs got right — MEASURED, and worth saying
 
@@ -1483,7 +1578,7 @@ yet folded into" CLAUDE.md` returns 1 for a document that says the opposite (§5
 discharge, because naming a weak claim is not the same as leaving it weak. Two of the five were one
 command from a measurement, and the gate was right to say so.*
 
-- ~~README line 81's *"injected at the next tool boundary"* is **not confirmed**~~ → **RESOLVED,
+- ~~`README.md:81`@`64b43c2` (= `:114`@`f49cae4`) — *"injected at the next tool boundary"* — is **not confirmed**~~ → **RESOLVED,
   MEASURED, and the doc is right.** `hookName: "PostToolUse:Read"`, twice, on two workers (§5). My
   "not confirmed" was a null produced by a blind instrument, and the blind instrument was `fleet
   peek` — which became W52-8. **A non-claim that is really an undiagnosed instrument failure is worth
@@ -1533,11 +1628,11 @@ is visible rather than quiet.
 | W52-6 | (a) doc | LOW | `docs/launch-readiness.md` asserted root `CLAUDE.md` "still reads" the superseded §18 sentence, after CLAUDE.md had been corrected — a repair-tracking sentence that rotted when the repair landed | §5 | **FIXED on this branch** + whole-tree everywhere-check |
 | W52-7 | (b) doc | LOW | `fleet send` to an idle worker changes the **session id** (fork-steer); described as "a new turn if idle" in README, `getting-started.md` **and** `skills/fleet/SKILL.md` (gate: three surfaces, not one) | §3 | **REPORTED** |
 | W52-8 | (b) gap | LOW | **NEW at discharge.** `fleet peek` cannot show a mailbox delivery that arrives at a tool boundary: the record is `type:"attachment"` and `_is_substantive_transcript_record` drops it. This is the hole the fabricated `[mail]` line was papering over | §5 | **REPORTED**; README now documents `MAIL 0→1→0` as the surface that does answer it |
-| — | — | INFO | README line 81's *"injected at the next tool boundary"* is **TRUE and now MEASURED** (`PostToolUse:Read`, twice) — my earlier non-claim withdrawn | §5 | discharged |
+| — | — | INFO | `README.md:81`@`64b43c2` = `:114`@`f49cae4` — *"injected at the next tool boundary"* is **TRUE and now MEASURED** (`PostToolUse:Read`, twice) — my earlier non-claim withdrawn | §5 | discharged |
 | — | — | INFO | The views exit-0 rule **holds at the statusline**, measured by me with a control: rc=0, `[fleet]: registry unreadable`, zero quarantine artifacts | §9 | discharged |
 | — | — | INFO | Step 3 gap 2a **CLOSED**: directory-form marketplace install re-executed on a clean box, rc=0. GitHub shorthand still untested | §2 | discharged |
 | — | — | INFO | w48 §11's BELIEVED **discharged**: `identity-witness`/`claude-agents`/`daemon-wedge` all PASS on a fresh `~` | §2 | discharged |
-| — | — | INFO | **README line 164** (was 136 before `2517f6b` moved it) — two self-limits still false in the good direction, and README `:141` now **contradicts** `:164` on the marketplace form. **Left unrepaired on purpose:** outside the licensed scope. *(The "depends on W52-2's grade" reason applied to only one of the two clauses — corrected per `w52-glaunch4` m6.)* | §5 | flagged for a successor |
+| — | — | INFO | `README.md:169`@`f49cae4` — the two self-limits, and the `:146`/`:169` contradiction on the marketplace form. **REPAIRED at both ends in `f49cae4`**, from the already-shipped `getting-started.md:84-89`; `docs/launch-readiness.md:111-125`@`f49cae4` was the other end. *(Previously deferred twice, on two wrong reasons — a dependency that covered only one clause, then a one-edit estimate that was really two files. Anchors here were `164`/`141`, both wrong: `w52-glaunch5` G1.)* | §5 | **FIXED** |
 
 **Repaired in this lane: exactly two documentation defects, both licensed by the discharge brief**
 (W52-5, W52-6). **`bin/` is untouched** — `git diff --stat` against `64b43c2` names no file under
@@ -1820,7 +1915,7 @@ are outside it by design.
 | **m3** — discharge ledger **inverts G6** | **ACCEPTED** — row now reads *"named 2; `over_ceiling` is a third"* | §11 |
 | **m4** — `fleet result` block shows stderr above stdout | **ACCEPTED** — reordered to terminal order, with the stdout/stderr note in the caption | `README.md` |
 | **m5** — caption guards the `peek` half, leaves `COST 0.00` unguarded | **ACCEPTED** — caption now names both halves and instructs capture-don't-compose | `README.md` |
-| **m6** — "README line 136" is **164** | **ACCEPTED** — corrected in the body **and** in the ledger INFO row, which the everywhere-rule caught | §5, §10 |
+| **m6** — "README line 136" is **164** | **ACCEPTED — and the accepted value was itself WRONG.** `164` was stale the moment it was written: the same commit added +5 lines above all four sites, so the anchor is **`169`@`f49cae4`**. See `w52-glaunch5` G1 in §13 — the everywhere-rule propagated the bad value to every site | §5, §10, §13 |
 | **m7** — the probe write was avoidable | **ACCEPTED** — original defence withdrawn; see §8 | §8 |
 
 ## M1, and why I am not treating it as smaller than G4
@@ -1953,11 +2048,36 @@ defect two gates have now charged this document with.*
 
 **MEASURED at 2026-08-10T00:05, at the close of the second discharge:**
 
+> **THE FIRST BLOCK HERE WAS COMPOSED, NOT CAPTURED, AND IS REPLACED** *(gate `w52-glaunch5` G2,
+> MAJOR)*. It pasted `git rev-parse --short main origin/main` over two seven-character shas. **That
+> command exits 128** — `--short` forces single-revision mode, so given two revisions `rev-parse`
+> refuses rather than abbreviating. There is no invocation of `git rev-parse` that prints two short
+> shas on two lines. The *fact* was true and everything downstream of it is unaffected; the *receipt*
+> was retyped from what I believed rather than copied from what ran. **I accepted "capture, don't
+> compose" as m5 one commit earlier and then composed a receipt in the next commit** — which is the
+> part worth recording, because it says the rule does not transfer by being agreed to.
+
+MEASURED, captured verbatim, `git version 2.34.1.windows.1`:
+
 ```console
 $ git rev-parse --short main origin/main
-0d82460
-0d82460
+fatal: Needed a single revision
+  exit=128
 
+$ git rev-parse main origin/main
+0d82460e1568ad8e6f608f42659063b43443c766
+0d82460e1568ad8e6f608f42659063b43443c766
+  exit=0
+
+$ git rev-parse --short main
+0d82460
+  exit=0
+```
+
+**`main` and `origin/main` are both `0d82460`** — established by the two invocations that actually
+run, not by the one that does not.
+
+```console
 $ git log --oneline 64b43c2..main
 0d82460 docs(w52): the wave's record, and the handoff before the expensive part
 
@@ -1989,3 +2109,161 @@ figures above were measured against this branch, not against a merge of it — a
 to a file in no scanned population (`supervisor/` is not in `current_tree_docs()`), so the collection
 count should not move, but **that is a prediction and nobody has run it.** Whoever lands this should
 re-run the floor post-merge rather than inherit `4621/14/1` from here.
+
+---
+
+# 13. THIRD DISCHARGE — against the `w52-glaunch5` gate verdict
+
+**Gate:** branch `w52/glaunch5`, report `docs/lanes/w52-glaunch5.md` @ `d5fa366`, cut at `dc0e4f1`.
+Verdict **NOT-GATING — 2 MAJOR, 4 MINOR.** All six accepted; none refused.
+
+**Every item is a citation or a receipt.** No finding of this report was reversed by this gate, and
+the gate re-executed the larger half of the document cleanly. What it found is that a report which had
+already been corrected twice for stale restatements **produced two more while making those very
+corrections** — and that is the thing worth carrying out of this lane.
+
+| Item | Disposition | Where |
+|---|---|---|
+| **G1 MAJOR** — the m6 repair was stale in the commit that made it; `164` applied at four sites, all wrong; one is a pasted `:NNN` receipt failing at its own commit | **ACCEPTED** — every anchor re-derived by me, pinned to a named commit, and re-derived again *after* this discharge's edits | §5, §0 |
+| **G2 MAJOR** — `git rev-parse --short main origin/main` exits 128; the block was composed | **ACCEPTED** — replaced with three captured invocations including the failing one | §12 |
+| **G3 MINOR** — the substituted instrument returns 0 by construction | **ACCEPTED** — replaced with a tree-wide check that is non-zero, plus a positive control on a pre-repair tree | §5 |
+| **G4 MINOR** — `docs/launch-readiness.md:109-112` said *"no one here has run `marketplace add` — in any form"*, which this branch refuted | **ACCEPTED — repaired** in `f49cae4` | `docs/launch-readiness.md` |
+| **G5 MINOR** — six more stale README citations; two citation standards live at once | **ACCEPTED** — all six pinned; **one standard declared in §0** | §0 and throughout |
+| **G6 MINOR** — §0 still said `main == 64b43c2` | **ACCEPTED** — corrected **in place** at §0, which is where my own method said it belonged | §0 |
+
+## G1 is the finding, and it is about the everywhere-rule
+
+**The everywhere-rule has no opinion about direction.** It is ratified in this campaign because a
+repair applied only where a gate quoted it is a repair verified nowhere. Applied to an *unverified
+value* it installs the error at every site — and then **every site agrees with every other, which
+reads exactly like corroboration.** I cited the rule as the control that caught m6's second instance;
+it caught the second *instance*, and it cannot catch a wrong *value*.
+
+**What I did differently this time, because the brief warned the gate could be wrong in the same way:**
+
+1. **Derived every anchor myself** with `grep -n` against a materialised commit, rather than taking
+   `169`/`146` from the gate or the brief. My derivation agreed with the gate's — but it is now mine.
+2. **Named the commit next to every number.** §0 now declares a single standard: *every line number in
+   this report is pinned to a named commit.* That retires G5's two-standards problem, and it means the
+   six inherited citations are **labelled `@64b43c2`** rather than renumbered — a pinned number stays
+   true and "fixing" it fabricates.
+3. **Re-derived after my own edits, not before.** The content repairs landed in **`f49cae4`**, a commit
+   carrying *no* citations; the citations were written in the next commit, so they pin to a frozen
+   tree that their own edit cannot move. **That ordering is the structural fix for G1**, and it is
+   cheaper than vigilance: the failure mode G1 describes is impossible when the cited tree is already
+   committed.
+4. **Verified after the report edits too** — re-resolved all seven anchors against `f49cae4` and the
+   working tree and confirmed they agree, because this discharge's report edits could in principle
+   have touched the cited files. They did not; the check is what establishes that rather than my
+   memory of it.
+
+**`:1204-1205`'s receipt is governed by the receipt rule, not by citation hygiene**, and is rewritten
+as such: it now carries `# at f49cae4` and resolves there.
+
+## G2, and the uncomfortable part
+
+The composed block sat in `dc0e4f1` — **one commit after I accepted m5, whose entire disposition is
+"capture, don't compose", and after I wrote that instruction into `README.md` for future editors.**
+The rule did not transfer by being agreed to. It is now captured, including the invocation that fails:
+
+```console
+$ git rev-parse --short main origin/main
+fatal: Needed a single revision
+  exit=128
+```
+
+**The composed-receipt sweep the gate asked for, reported as population-and-count rather than as a
+verdict.** MEASURED, extracted mechanically (fenced blocks containing a `$ ` line) rather than by
+reading:
+
+| | |
+|---|---|
+| fenced blocks in the report | **54** |
+| of those, command receipts (contain a `$ ` line) | **28** — the swept population |
+| re-executable against this repo today | **8** |
+| **re-executed and diffed** | **8 of 8, all reproduce** |
+
+The eight: the AST call-site census; the status-literal derivation; `grep -c user_settings_path()` →
+4; `grep -c "not yet folded into" CLAUDE.md` → 1; `grep -c "Path.home()"` → 10; the `bin/hooks` null
+plus its non-vacuity check (`ls bin/hooks/*.py | wc -l` → 4); the three-way blob identity; and
+`git ls-remote`. **Every one reproduced byte-identically**, except `git ls-remote`, which now returns
+`0d82460` rather than `64b43c2` — **that is §0's staleness, already corrected in place above, not a
+new defect.**
+
+The other 20 are not re-executable now and I say why rather than counting them as passes: they are
+readings of throwaway trees that no longer exist (the rehearsal homes), of a fenced `claude`, or of
+worker state since torn down. **Two are annotated rather than literal** — the `resolution_population`
+and whole-tree grep blocks carry `…` elisions and inline glosses, which is legitimate but only because
+they are visibly annotated; a reader can see they are not raw output.
+
+## G4 — and the scoping discipline the gate modelled
+
+`docs/launch-readiness.md:109-112` said *"no one here has run `claude plugin marketplace add` — in any
+form"*, and **this branch's §2 step 3 did exactly that.** Repaired in `f49cae4`.
+
+**What is worth copying is what the gate did *not* grade.** It withdrew four other candidates in the
+same file because `:298` heads a section titled *"What this document did not verify"* and the file
+self-pins in its header (*measured against `f457a57`, re-measured against `fa236cb`*). Those bullets
+are **correctly scoped and not defects**, even though this branch ran three of the things they name.
+**Before grading any claim stale, ask whether the document pins or scopes itself, and name what you
+resolved against** — because a pinned receipt is a claim about a past tree and stays true, and
+"fixing" one fabricates. That rule cuts against my own findings as readily as for them, and it is the
+reason `:109-112` *is* a defect: it sits in the body of a live blocker, is phrased about the repo
+(*"no one here"*), and is load-bearing for the grade the entry turns on.
+
+## WHERE THIS DISCHARGE WAS WRONG
+
+**1. I called the README contradiction "one paragraph of work" and "one edit". It was two files.**
+`README:169` forwards the reader into `launch-readiness.md` for exactly this claim, and that document
+repeated the false half. **My estimate was wrong in the direction that made deferring look cheap** —
+which is the direction an estimate defending a deferral will always be wrong in unless it is measured.
+I did not measure it; I sized it from the one file I had open.
+
+**2. I deferred it twice, on two different wrong reasons.** First a dependency that covered only one
+of the two clauses; then a cost estimate that was short by a file. **Two wrong reasons for the same
+decision is a signal the decision was reached first and justified afterwards.** The gate's judgement —
+that it was not acceptable to ship, and that the correct paragraph was already written and gated at
+`getting-started.md:84-89` — is right, and the repair took a copy rather than an authoring job.
+
+**3. My substitute instrument for M1 was worse than the one it replaced, in one respect.** The
+original was wrong-and-loud (it pasted an output the command does not produce). The substitute was
+right-and-vacuous — it could never fail. **A check that cannot fail is harder to notice than a check
+that is wrong**, because nothing ever contradicts it. I replaced a visible defect with an invisible
+one and called it the fix.
+
+**4. Everything I said about the everywhere-rule being the control that caught m6's second instance
+was true and beside the point.** It caught an instance of a value it could not evaluate. **I have now
+used the rule three times and it has propagated a wrong value once** — a 1-in-3 failure rate on a
+control I described as a safeguard.
+
+**5. What the gate got right that I would not have found.** All six. In particular G3: I asked myself
+whether the substitute was a good check and answered by re-reading it, which cannot detect vacuity.
+The only thing that detects vacuity is `git log -G` on the string, and I did not think to run it on my
+own instrument.
+
+## The floor — PREDICTED HERE, BEFORE THE RUN
+
+*Third prediction, same discipline: written and committed with no results attached.*
+
+**What this branch changes since the last floor:** `README.md` and `docs/launch-readiness.md` (content
+repairs, `f49cae4`), and `docs/lanes/w52-launch.md` (this discharge). **No file added or deleted;
+nothing under `bin/`, `tests/`, `commands/`, `skills/` or `hooks/`.**
+
+**PREDICTION — and the brief supplied the derivation, so a miss here is a real signal rather than
+noise.** `CHECK_COUNT_DOCS` is parametrised **per file**; both `README.md` and
+`docs/launch-readiness.md` are already tracked; the only `.md` this branch adds is
+`docs/lanes/w52-launch.md`, which is exempt under `_HISTORICAL_PREFIXES`. **The branch therefore
+cannot move the floor.**
+
+1. `current_tree_docs()` **30**, collection **4636** — confirmed by `--collect-only`, which is
+   permitted because predicting forbids running the thing predicted, not collecting it.
+2. **`py -3.10` and `py -3.13` both GREEN at `4621 passed, 14 skipped, 1 xfailed`** — now the figure
+   from six prior runs.
+3. **Content pins pass.** This is the **fourth** consecutive edit to `README.md`, a file inside the
+   scanned population, and this one rewrites a prose paragraph rather than a fenced block — so it adds
+   no `fleet <verb>` token at all. Predicted PASS.
+4. **Digest pair matches**, taken around a committed and quiet tree with the AFTER inside the same
+   command as the run, compared **only against itself in this worktree** — never against
+   `f6987a04…` or `4791b81c…`, which are different tree states the instrument cannot compare across.
+
+Results follow in the next commit.
