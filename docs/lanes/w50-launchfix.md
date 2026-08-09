@@ -798,6 +798,43 @@ latter, which hashes the index and is silent on unstaged changes. `git status --
 empty before the run and after it, and every mutant this turn ran in a throwaway clone, so no
 floor could have started on a mutated tree.
 
+## 7.7 The auto-merge claim — re-checked, because the ground moved
+
+The discharge brief said the branch *"still auto-merges onto `main` @ `4d74d22`"* on the strength
+of a prep-lane rehearsal. **`main` is no longer at `4d74d22`.** Measured at discharge time it is
+**`6492176`**, and the files it has touched since this branch's base `4d78f6c` include
+**`bin/fleet.py`** — the one file this branch also changed — plus `tests/test_self_citations.py`
+and nine other test modules. A rehearsal against `4d74d22` is not evidence about `6492176`, so it
+was re-run.
+
+**MEASURED, in the throwaway clone. No ref in this worktree was moved, and `main` was not touched:**
+
+```
+merging w50/launchfix (83f8b2c) into main (6492176)
+Auto-merging bin/fleet.py
+Automatic merge went well; stopped before committing as requested      rc=0
+git ls-files -u   ->  (empty: no conflicts)
+```
+
+`bin/fleet.py` **auto-merged** — the one-line quoting change and main's edits are disjoint hunks.
+The merged tree is not merely mergeable, it is green:
+
+```
+merged tree f4cd33b
+py -3.13 -m pytest --collect-only -q   ->  4317 tests collected
+py -3.13 -m pytest -q                  ->  4302 passed, 14 skipped, 1 xfailed in 407.82s   rc=0
+```
+
+4302 + 14 + 1 = 4317 = this branch's 4305 plus twelve tests main added meanwhile.
+`tests/test_self_citations.py` passes on the merged tree, which is the one that could plausibly
+have objected: `bin/fleet.py` is **21570** lines after the merge rather than 21453, because MAIN
+inserted lines. This branch still inserts none, so the *"no self-citation pass is owed"* claim in
+§1.4 remains a true statement about this branch's own diff — and it is now also checked against
+the merged result rather than only against the base.
+
+**BELIEVED, stated as such:** that `main` will still be at `6492176` when this lands. If it moves
+again, this check is about a past tree like any other receipt, and the re-run is cheap.
+
 ## 7.6 What the discharge did NOT do
 
 - **Did not touch `bin/fleet.py`.** `git diff --name-only 4a62e21..HEAD`: two test modules,
