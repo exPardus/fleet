@@ -102,7 +102,7 @@ prompt_id                                             str
 session_name                                          str
 rate_limits                                           dict
 rate_limits.five_hour                                 dict
-rate_limits.five_hour.used_percentage                 int
+rate_limits.five_hour.used_percentage                 int    [see the correction below]
 rate_limits.five_hour.resets_at                       int
 rate_limits.seven_day                                 dict
 rate_limits.seven_day.used_percentage                 int
@@ -118,6 +118,20 @@ context_window.remaining_percentage                   int      (was null)
 
 Nothing present on the first render is absent later (`IN 1 BUT NOT 2: []`, MEASURED). `session_id`
 is in **both** sets, so the slice's key is in the stable core, not in the volatile tail.
+
+> **CORRECTION, 2026-08-09 (`docs/lanes/w50-d.md` §1.3, upheld by `docs/lanes/w50-gd.md` §6).**
+> Two rows of the key table above are wrong or class-specific, and this note is here rather than
+> only in the correcting report because a future consumer cites THIS document:
+>
+> - **`rate_limits.five_hour.used_percentage` is a `float`, not an `int`** — measured
+>   `7.000000000000001` across 16 captured blobs. `cost.total_cost_usd` is likewise `float` **and**
+>   `int` across a single session. Anything that `isinstance(x, int)`-checks either field is wrong.
+> - **`session_name` is present on the FIRST render of a `--bg` session**, which is named at
+>   dispatch. Its position in the "later renders only" set above is a property of the *interactive*
+>   class this lane measured, not of the payload.
+>
+> Neither touches `session_id`, which is a top-level `str` on every render of every class measured
+> so far, and which is the only key multi-fleet slice (d) reads.
 
 One verbatim blob, first render, exactly as captured (only the uuid is real and this session is
 gone) — MEASURED:

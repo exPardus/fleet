@@ -105,14 +105,67 @@ def _fmt_age(seconds) -> str:
     return f"{minutes / 60:.0f}h"
 
 
+# --- REGISTRY TEXT IS FOREIGN INPUT (multi-fleet slice d, gate w50-gd §1.2) --
+#
+# Before slice (d) every string this file rendered came out of the operator's
+# OWN home. Slice (d) can resolve a home the operator does not control -- any
+# directory listed in `~/.claude/fleet-homes.list` -- so two render paths that
+# had always been safe became attacker-reachable:
+#
+#   * `_LABEL.get(bucket, bucket)` falls back to the raw `status` string;
+#   * `_reset_clock` returned `str(iso)` for any shape it could not parse.
+#
+# Driven by the gate: `\x1b[1A\x1b[2K` erases the line ABOVE the statusline
+# (Claude Code's own output), and `idle\r[fleet]  all clear` renders on a
+# terminal as a FORGED fleet status in fleet's own nameplate. The pure-ASCII pin
+# is blind to all of it -- `'\x1b[2K'.isascii()` is `True`, so ESC is a valid
+# ASCII byte and the pin constrains the character set rather than the property.
+#
+# The property is: NO terminal control reaches the screen, and no foreign string
+# is unbounded. `_safe` is the one sanitiser and every registry-derived field
+# goes through it.
+_FIELD_LIMIT = 24
+#: Unknown statuses are the only bucket NAMES an attacker chooses, so they are
+#: the only unbounded axis a per-field limit does not close: 500 distinct hostile
+#: statuses are 500 buckets. Beyond this many, the rest become one counter.
+_MAX_UNKNOWN_BUCKETS = 3
+
+
+def _safe(text, limit: int = _FIELD_LIMIT) -> str:
+    """Registry-derived text, made safe to print on the operator's terminal.
+
+    Printable ASCII only -- everything else becomes `?`. That is deliberately
+    one rule rather than a control-character blacklist: it closes ESC, CR, BEL,
+    NUL, C1 and every future escape family at once, AND it keeps the line
+    encodable on a cp1252 console, which is the invariant
+    `test_the_rendered_line_is_pure_ascii` was written for.
+
+    Bounded, with `~` marking the cut, so one 400-character status word cannot
+    push the operator's own rows off the screen.
+
+    AND THE BRACKETS GO. `[fleet]` is this surface's nameplate -- the token that
+    says "the next words are fleet's". Stripping the CR stops a foreign status
+    OVERWRITING fleet's row, but `idle\\r[fleet]  all clear` still renders a
+    second nameplate mid-line, and an operator glancing at a statusline reads
+    the nameplate, not the column. This is not a token blacklist: brackets are
+    the nameplate's SYNTAX and no status word needs them, so foreign text simply
+    does not get to speak in it. `test_a_forged_all_clear_cannot_be_rendered` is
+    the pin."""
+    out = "".join(ch if 0x20 <= ord(ch) < 0x7f else "?" for ch in str(text))
+    out = out.replace("[", "(").replace("]", ")")
+    return out if len(out) <= limit else out[:limit - 1] + "~"
+
+
 def _reset_clock(iso) -> str:
-    """'2026-07-09T14:20:00Z' -> '14:20'. Any other shape -> the raw value."""
+    """'2026-07-09T14:20:00Z' -> '14:20'. Any other shape -> the raw value,
+    SANITISED: `limit_reset_at` is registry text and reaches the screen
+    verbatim through this fallback."""
     if not iso:
         return ""
     try:
         return fleet._parse_iso(iso).strftime("%H:%M")
     except (ValueError, TypeError, AttributeError):
-        return str(iso)
+        return _safe(iso)
 
 
 def _bucket(worker: dict) -> str:
@@ -138,6 +191,23 @@ def _bucket(worker: dict) -> str:
 
 _SUP_STATE_LABEL = {"held": "sup held", "released": "sup released",
                     "none": "sup none", "unknown": "sup ?"}
+
+# THE THREE REGISTRY-FAULT WORDS, IN ONE PLACE. P1-13 is the finding that two
+# distinct registry states must not render identical bytes on this surface;
+# slice (d) gave the words a SECOND consumer (`render_home_terminus`, which
+# names the default home's fault at §5's terminus), and one state described in
+# two vocabularies is P1-13 with extra steps. `test_the_fault_words_are_the_ones
+# _the_roster_render_uses` drives both renders and requires them to agree.
+_REGISTRY_FAULT_WORD = {"not_initialized": "not initialized",
+                        "quarantined": "registry quarantined"}
+#: Every other reason. `unreadable` is the named one; an unrecognised reason
+#: lands here too, which is the safe direction -- a fault fleet cannot classify
+#: is still a fault, never silence.
+_REGISTRY_FAULT_DEFAULT = "registry unreadable"
+
+
+def registry_fault_word(reason) -> str:
+    return _REGISTRY_FAULT_WORD.get(reason, _REGISTRY_FAULT_DEFAULT)
 
 
 def _supervisor_chunk(snap: dict, paint, stale_after: int):
@@ -166,12 +236,22 @@ def _live_supervisor_bodies(workers) -> int:
                if w.get("tier") == "supervisor" and w.get("status") != "dead")
 
 
-def _bucket_order(buckets) -> list:
-    """Fixed order for the buckets present, unknown statuses last, `dead` never
-    among them -- it is collapsed into the tail counter by the caller."""
+def _bucket_order(buckets) -> tuple:
+    """`(order, hidden)` -- fixed order for the buckets present, unknown
+    statuses last, `dead` never among them (it is collapsed into the tail
+    counter by the caller).
+
+    UNKNOWN STATUSES ARE CAPPED, and the overflow is counted rather than
+    dropped. Every bucket name in `_ORDER` is one fleet writes itself; an
+    unknown one is a string chosen by whoever wrote the registry, and since
+    slice (d) that may not be the operator. A registry with 500 distinct hostile
+    statuses is 500 buckets, which `_safe`'s per-field limit does not bound --
+    this is the axis that does. Known buckets are never capped: they are fleet's
+    own vocabulary and there are eight of them."""
     known = [b for b in _ORDER if b in buckets]
     unknown = sorted(b for b in buckets if b not in _ORDER and b != "dead")
-    return known + unknown
+    hidden = max(0, len(unknown) - _MAX_UNKNOWN_BUCKETS)
+    return known + unknown[:_MAX_UNKNOWN_BUCKETS], hidden
 
 
 def render_statusline(snap: dict, color: bool = True,
@@ -186,16 +266,12 @@ def render_statusline(snap: dict, color: bool = True,
     head = paint(PREFIX, _NAME)
 
     if not snap.get("ok"):
-        if snap.get("reason") == "not_initialized":
-            return f"{head}: not initialized"
         # P1-13: the rename makes absence ambiguous, so `not initialized` was
         # what a just-quarantined fleet printed too -- byte-identical to a box
         # that never ran `fleet init`, on the one surface the operator reads
         # continuously. `status_snapshot` distinguishes the two now; this is a
         # render, and renders nothing new of its own.
-        if snap.get("reason") == "quarantined":
-            return f"{head}: registry quarantined"
-        return f"{head}: registry unreadable"
+        return f"{head}: {registry_fault_word(snap.get('reason'))}"
 
     workers = snap["workers"]
     if not workers:
@@ -226,9 +302,12 @@ def render_statusline(snap: dict, color: bool = True,
         lead.append(paint(f"{bodies} bodies", _ALARM))
 
     parts = []
-    for bucket in _bucket_order(buckets):
+    order, hidden_buckets = _bucket_order(buckets)
+    for bucket in order:
         group = buckets[bucket]
-        label = _LABEL.get(bucket, bucket)
+        # `_LABEL` holds fleet's own vocabulary; anything else is a string out
+        # of a registry that, since slice (d), may not be the operator's.
+        label = _LABEL[bucket] if bucket in _LABEL else _safe(bucket)
         count = f"{_BOLD}{len(group)}" if color else str(len(group))
         chunk = paint(f"{label} {count}", _STATUS_COLOR.get(bucket, ""))
 
@@ -256,6 +335,11 @@ def render_statusline(snap: dict, color: bool = True,
     dead = len(buckets.get("dead", ()))
     if not parts:
         parts = [paint("no live workers", _STATUS_COLOR["dead"])]
+    if hidden_buckets:
+        # Uncoloured on purpose: grey is reserved for `dead`
+        # (`test_grey_is_reserved_for_dead`), and a fourth hue for a counter
+        # that only appears on a malformed registry buys nothing.
+        parts.append(paint(f"+{hidden_buckets} unknown", ""))
     if dead:
         parts.append(paint(f"+{dead} dead", _STATUS_COLOR["dead"]))
 
@@ -333,7 +417,15 @@ def blob_session_id(payload) -> str:
     a surface whose failures are swallowed by an exit-0 guard."""
     try:
         blob = json.loads(payload)
-    except (TypeError, ValueError, UnicodeDecodeError):
+    # THE TWO ON THE END ARE THE POINT, and they are not defensive padding:
+    # `json.loads` RECURSES, so a deeply nested blob raises `RecursionError`,
+    # which is not a `ValueError` and escapes a three-tuple. `fleet.
+    # read_registry_at` catches exactly these five for exactly this reason and
+    # its comment calls copying the three-tuple *"the specific mistake this
+    # function exists to avoid"* -- which is the mistake this function shipped
+    # with, one file over, in the same wave. Found by gate `w50-gd` §4.4.
+    except (TypeError, ValueError, UnicodeDecodeError,
+            RecursionError, MemoryError):
         return ""
     if not isinstance(blob, dict):
         return ""
@@ -388,7 +480,8 @@ def resolve_blob_home(payload, population=None, install=None) -> dict:
     machine at all.
 
     EVERY FAILURE DEGRADES TO `HOME_SINGLE`. See that constant."""
-    unresolved = {"state": HOME_SINGLE, "home": None, "sid": "", "hits": 0}
+    unresolved = {"state": HOME_SINGLE, "home": None, "sid": "", "hits": 0,
+                  "fault": None}
     try:
         pop = (fleet.resolution_population(install) if population is None
                else population)
@@ -405,10 +498,25 @@ def resolve_blob_home(payload, population=None, install=None) -> dict:
             out["state"], out["hits"] = HOME_AMBIGUOUS, len(look["hits"])
             return out
 
+        # `hits` is filled on EVERY verdict, not only the ambiguous one. A
+        # record whose `hits` reads 0 on a hit is a trap for the next consumer
+        # (gate w50-gd §4.7): the only reader today is `render_home_terminus`,
+        # and today is not what a shared record shape has to survive.
+        out["hits"] = len(res["lookup"]["hits"])
+
         if res["step"] == "lookup":
             out["state"], out["home"] = HOME_LOOKUP, Path(res["home"])
         elif res["step"] is None:
+            # §5's terminus, PLUS the default home's own fault. P1-13 forbids
+            # two distinct registry states rendering identical bytes here, and
+            # all three faults reach step 5 -- `home_is_initialized` is False
+            # for absent, corrupt and quarantined alike -- so a bare terminus
+            # would tell an operator with a shredded registry that they have a
+            # configuration problem. `read_registry_at` never raises and never
+            # writes; this is one more lock-free read, on the terminus branch
+            # only.
             out["state"] = HOME_NONE
+            out["fault"] = fleet.read_registry_at(res["default_home"])[1]
         else:
             out["state"] = HOME_DEFAULT
         return out
@@ -452,9 +560,23 @@ def render_home_terminus(decision, color: bool = True):
     missing key would be a view that fails."""
     state = (decision or {}).get("state")
     if state == HOME_NONE:
-        return _paint_terminus(fleet.NO_HOME_LINE, color)
+        # THE TERMINUS NAMES ITS FAULT. `fleet.NO_HOME_LINE` stays the verbatim
+        # head -- §5 step 5 names that line for views -- and the reason follows
+        # it in the `NO_HOME_LINE -- <why>` shape `fleet.resolution_provenance`
+        # already uses, so this is the repo's existing idiom rather than a new
+        # one. Three faults, three distinct byte sequences: P1-13's property.
+        fault = (decision or {}).get("fault")
+        line = fleet.NO_HOME_LINE
+        if fault is not None:
+            line = f"{line} -- {registry_fault_word(fault)}"
+        return _paint_terminus(line, color)
     if state == HOME_AMBIGUOUS:
         hits = (decision or {}).get("hits")
+        # `> 1` rather than `is not None`: an ambiguity is two-or-more by
+        # definition, so anything else is a record that did not come from
+        # `resolve_blob_home` and must degrade to a WORD, never to a rendered
+        # Python value. `(None)` on the operator's statusline is the mutant
+        # this guard exists for (gate w50-gd G2).
         count = hits if isinstance(hits, int) and hits > 1 else "?"
         return _paint_terminus(f"{PREFIX}: home ambiguous ({count})", color)
     return None
@@ -477,20 +599,42 @@ def render_home_terminus(decision, color: bool = True):
 DELEGATE_TIMEOUT_SECONDS = 4
 
 
-def _chain_path() -> Path:
-    return Path(fleet.state_dir()) / "statusline-chain.json"
+def _legacy_chain_path(home) -> Path:
+    """Where the chain file lived before it moved to the machine plane.
+
+    `home` is the PRE-RESOLUTION home -- `$FLEET_HOME` or the install root, the
+    value `fleet.FLEET_HOME` carried before `resolve_blob_home` was allowed to
+    move it. That anchoring is the whole of the fix for gate `w50-gd`'s BLOCKING
+    1: it is exactly what the pre-slice script read, it is operator-controlled
+    by construction, and a home resolved from an unauthenticated session-id
+    claim can never appear here."""
+    return Path(home) / "state" / "statusline-chain.json"
 
 
-def _load_delegates() -> list:
+def _read_delegates(path) -> list:
     try:
-        data = json.loads(_chain_path().read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError,
+            RecursionError, MemoryError):
         return []
     delegates = data.get("delegates") if isinstance(data, dict) else None
     if not isinstance(delegates, list):
         return []
     return [d["command"] for d in delegates
             if isinstance(d, dict) and isinstance(d.get("command"), str) and d["command"].strip()]
+
+
+def _load_delegates(legacy_home=None) -> list:
+    """The machine-plane chain file, falling back to the legacy home-scoped one.
+
+    FALLBACK, NOT UNION: the legacy file is a MIGRATION path for installs that
+    ran `init --statusline --chain` before the move, so once the machine-plane
+    file says something it is the whole answer. Unioning them would print the
+    operator's row twice the first time they re-chain."""
+    delegates = _read_delegates(fleet.statusline_chain_path())
+    if delegates or legacy_home is None:
+        return delegates
+    return _read_delegates(_legacy_chain_path(legacy_home))
 
 
 def _run_delegate(command: str, payload: str) -> list:
@@ -511,9 +655,9 @@ def _run_delegate(command: str, payload: str) -> list:
     return [line for line in proc.stdout.splitlines() if line.strip()]
 
 
-def _delegate_rows(payload: str) -> list:
+def _delegate_rows(payload: str, legacy_home=None) -> list:
     rows = []
-    for command in _load_delegates():
+    for command in _load_delegates(legacy_home):
         rows.extend(_run_delegate(command, payload))
     return rows
 
@@ -547,11 +691,14 @@ def main() -> int:
         except (AttributeError, OSError, ValueError):
             pass
 
-        # §5, BEFORE ANY READ (multi-fleet slice d). ONE RENDER, ONE HOME: the
-        # chain file lives at `state/statusline-chain.json`, i.e. INSIDE a home,
-        # so resolving after the delegates ran would read the operator's
-        # delegate out of one home and the roster out of another. On a
-        # single-home machine this is a no-op by construction.
+        # THE HOME THE STATUSLINE STARTED IN, captured BEFORE §5 is allowed to
+        # move it. Everything the operator's own terminal executes is anchored
+        # here; only what fleet READS follows the resolution. See
+        # `_legacy_chain_path`.
+        launch_home = fleet.FLEET_HOME
+
+        # §5, before any read (multi-fleet slice d). On a single-home machine
+        # this is a no-op by construction.
         decision = resolve_blob_home(payload)
         if decision["home"] is not None:
             fleet.FLEET_HOME = decision["home"]
@@ -559,14 +706,13 @@ def main() -> int:
         # Delegates print above fleet's row. A delegate that fails, hangs, or
         # emits unprintable bytes is dropped -- it must never cost fleet's row.
         #
-        # AND THE CONVERSE, ADDED WITH SLICE (d): fleet failing to resolve a
-        # home must never cost the DELEGATE its row. The delegate is the
-        # operator's own statusline, captured from the one machine-global
-        # `statusLine` entry Claude Code allows; it has nothing to do with which
-        # fleet home this session belongs to, so it runs on every path including
-        # the terminus.
+        # AND THE CONVERSE: fleet failing to resolve a home must never cost the
+        # DELEGATE its row. The delegate is the operator's own statusline,
+        # captured from the one machine-global `statusLine` entry Claude Code
+        # allows; it has nothing to do with which fleet home this session
+        # belongs to, so it runs on every path including the terminus.
         try:
-            for row in _delegate_rows(payload):
+            for row in _delegate_rows(payload, legacy_home=launch_home):
                 if _stdout_can_encode(row):
                     print(row)
         except BaseException:  # noqa: BLE001

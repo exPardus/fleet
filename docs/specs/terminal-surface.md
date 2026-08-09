@@ -247,13 +247,15 @@ Idempotent: re-running against a fleet-owned statusline rewrites it in place wit
 
 Plain `fleet init` (existing behaviour: render `state/worker-settings.json`) never touches user settings.
 
-**`--chain` — composing with an existing statusline.** Claude Code allows exactly ONE `statusLine` command, so an operator already running `ccusage` or `caveman` would otherwise have to choose. `--chain` captures the incumbent command into `state/statusline-chain.json` and installs fleet's; at render time fleet runs each delegate, prints its rows, then prints fleet's row beneath.
+**`--chain` — composing with an existing statusline.** Claude Code allows exactly ONE `statusLine` command, so an operator already running `ccusage` or `caveman` would otherwise have to choose. `--chain` captures the incumbent command into `~/.claude/fleet-statusline-chain.json` and installs fleet's; at render time fleet runs each delegate, prints its rows, then prints fleet's row beneath.
+
+**The chain file is MACHINE-plane, not home-plane** *(moved 2026-08-09, multi-fleet slice (d); it lived at `state/statusline-chain.json` before)*. There is one `statusLine` entry per machine and the delegate is whatever was in it, so a per-home copy was a plane error with two consequences: `init --statusline --chain` on a second install captured nothing (a foreign install's fleet statusline is not "foreign") and silently overwrote the entry anyway, and — once slice (d) let the statusline resolve a home from a session-id claim — a home merely listed in `~/.claude/fleet-homes.list` could put a shell command on the operator's machine. `bin/fleet_statusline.py` still reads the old home-scoped path when the machine-plane file says nothing, anchored to the home the statusline started in and never to a resolved one.
 
 This is the **one** place fleet's statusline spawns a subprocess, and a deliberate, opt-in exception to D1: the delegate is a command the operator was already paying for on every refresh, and fleet's own row still costs zero subprocesses. Guards:
 - A delegate that exits nonzero, hangs past `DELEGATE_TIMEOUT_SECONDS` (4 s), or emits unencodable bytes is **dropped** — fleet's row always prints.
 - A fleet-owned incumbent is never captured as a delegate: chaining fleet's statusline into itself would make it invoke itself once per refresh, forever.
 - `--force` overwrites the incumbent outright and chains nothing.
-- The delegate command is executed through a shell. It comes from the operator's own `settings.json`, which is already an arbitrary-command surface; chaining moves no trust boundary.
+- The delegate command is executed through a shell. It comes from the operator's own `settings.json`, which is already an arbitrary-command surface; chaining moves no trust boundary — **provided the file naming the command is one the operator controls.** *(Corrected 2026-08-09. That proviso was implicit and stopped holding the moment multi-fleet slice (d) let the statusline resolve a home from an unauthenticated session-id claim: with the chain file home-scoped, a listed home ran its own command in the operator's session every ten seconds, with the rendered line unchanged — driven end to end in `docs/lanes/w50-gd.md` §1.1. The plane move above is what restores the sentence; `docs/reviews/ULTRAREVIEW-2026-07-30.md` had examined this same sink and correctly refuted it for the single-fleet scenario, where the attacker can already edit the executing script.)*
 
 ## Error handling
 

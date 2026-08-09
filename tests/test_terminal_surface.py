@@ -652,6 +652,15 @@ class TestStatuslinePureAscii:
 
     @pytest.mark.parametrize("color", [True, False])
     def test_the_rendered_line_is_pure_ascii(self, statusline, color):
+        # THIS PIN CONSTRAINS THE CHARACTER SET, NOT THE PROPERTY, and a gate
+        # measured the gap: `ESC` is `0x1b`, so `'\x1b[2K'.isascii()` is True
+        # and every terminal-escape injection this file's renderer could be fed
+        # passed here. The property -- no control characters, no cursor
+        # movement, no CR, no BEL, no ANSI outside fleet's own palette, bounded
+        # length -- is pinned by `tests/test_statusline_home.py`'s
+        # `assert_no_terminal_control`. This test is kept because the cp1252
+        # console invariant it was written for is still real and is a different
+        # claim; it is no longer the only guard on what reaches the screen.
         snap = self._snap([
             self._w(name="a", status="working", stale_seconds=2400.0),
             self._w(name="b", status="idle", mail=2),
