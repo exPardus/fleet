@@ -8084,3 +8084,102 @@ I have told the lane to assume its own discharge will do it again and to check.*
 Nothing landed. `main == origin == 7b2ff75`. `w51/initprep` held deliberately so it cannot move main
 under this rehearsal. `w51-dtype` and `w51-slicee` still working. Four operator gates untouched, none
 ticked, no fifth.
+
+## 2026-08-09T11:32:19Z CHECKPOINT inc=inc-20260809T094233Z-5e96 sid=3cb901f7-b361-466e-9488-7df4dde80e3d
+
+THE LAUNCH BLOCKER IS LANDED AND PUSHED. AND ON THE VERY NEXT LANDING I MISSED A FLOOR PREDICTION, IN WRITING, FOR A REASON THE BRANCH I HAD JUST MERGED HAD ALREADY WRITTEN DOWN.
+
+## LANDING 1 — `main == origin == 95ba50c`, the launch blocker is gone
+
+`w50/launchfix` @ `f7eb91c` merged. `bin/fleet.py:6134` now quotes both `statusLine.command` interpolations, so a spaced interpreter or script path no longer splits when the shell runs it. **This is README quickstart step 4 — the last defect standing between this repo and being installable by its own instructions.**
+
+**Floor predicted in writing BEFORE the merge and hit exactly on both interpreters: 4317 collected → `4302 passed, 14 skipped, 1 xfailed`, 0 failed, `py -3.13` AND `py -3.10`.** `git status` clean afterwards. Pushed, read back from origin **byte-identical**. Branch-protection bypass fired, as ratified.
+
+**Audited against the parent I actually merged, not either rehearsal.** Two existed and both were stale — the lane's (against `6492176`) and the gate's (against `7b2ff75`, before the branch moved three commits). **So I committed the journal FIRST and derived the merge afterwards**, which is the wave-38 finding applied instead of repeated: my predecessor moved `main` *after* its prep lane audited, and recorded it as a defect. Re-derived at `1836be5`: merge-base `4d78f6c`, **0 conflicts** anchored, **control non-vacuous at 25 in the same run**, sole intersecting file `bin/fleet.py`. Lost-hunk check with digit-masked citations: **main's 148 added lines and the branch's 2 all present, 0 lost either side.** Line counts prove the zero-net-insertion claim arithmetically — 21453 base, 21570 main, **21453 branch**, 21570 merged. Parents proved from the merged commit: `^1 = 1836be5`, `^2 = f7eb91c`.
+
+The final discharge **contested nothing** and closed all four MAJORs plus five minors with `bin/fleet.py` byte-identical across both discharges. It also disclosed a harness failure of its own worth carrying: **its first seed was wiped by the battery's own `restore()` before a single row ran, and all four rows came back GREEN — indistinguishable from a working fix.** Third harness bug of that class on this branch, same shape every time: *the guard was right and the seed was inside it.*
+
+## LANDING 2 — `w51/initprep`, and THE PREDICTION I MISSED
+
+Merged at `76a40de`, plus the template amendment at `5cb0e4e`. **I predicted the floor would not move — "neither commit adds a test, both are docs". Measured on py 3.13: `4306 passed`, not 4302. Four more than I said, in writing.**
+
+**The reason is a real property I did not know, and the branch I had just merged had already written it down.** `CHECK_COUNT_DOCS` is derived as *every tracked `*.md`* minus a dated-history exemption, and two pins are parametrised over it. `docs/operator/` gained two files, so the suite gained **2 pins × 2 files = 4 cases** — measured by node id, not inferred:
+
+```
+test_doctor_check_counts_match_the_registered_checks[docs/operator/fleet-init-recipe.md]
+test_doctor_check_counts_match_the_registered_checks[docs/operator/gate-docket.md]
+test_doctor_pass_fail_tallies_sum_to_the_registered_checks[docs/operator/fleet-init-recipe.md]
+test_doctor_pass_fail_tallies_sum_to_the_registered_checks[docs/operator/gate-docket.md]
+```
+
+`docs/lanes/w51-initprep.md` is exempt — lane reports are out of the population — which is exactly why it is +4 and not +6. Corrected floor: **4321 collected → 4306/14/1/0.**
+
+**A DOCS-ONLY LANDING MOVES THE FLOOR BY CONSTRUCTION.** That sentence did not exist anywhere in this campaign's doctrine, and I asserted its opposite confidently in writing minutes before disproving it.
+
+**And the branch had told me.** The gate's minor m4 flagged `CONTRIBUTING.md`'s bare *"28 files today"* as a present-tense count of a derived, moving population pinned by nothing. The discharge closed it by **deleting the number** and writing that any number there *"would be stale by construction — every document added or exempted changes it."* **I then moved that population from 28 to 30 within the hour and missed my floor because I had not believed the sentence I had just merged.** Measured: `len(CHECK_COUNT_DOCS)` = 30 by collection.
+
+Nothing is stale and nothing is red — the delta is fully explained, `0 failed`, and the removal of the bare count is what stopped it becoming a defect. **The correct call was the lane's, not mine.**
+
+## THE AMENDMENT, AND WHY TWO OF ITS THREE ITEMS ARE AGAINST ME
+
+`docs/lanes/BRIEF-TEMPLATE.md`, the file every brief on this machine is built from:
+
+1. **The fence rationale was FALSE.** It said wave 48's audit was clean because the homes list does not exist "so the lookup population was empty". **The population is never empty** — `resolution_population()` appends the legacy install-root home unconditionally (`bin/fleet.py:4621`), driven both ways by `w51-initprep`. The remedy is unchanged; only the reason was wrong. **A correction of a correction**, and I shipped the false paragraph verbatim in four briefs this wave.
+2. **The control shipped as a bare `25` with no commit pinned**, while the value is a function of `main` — a receipt with no pin, the defect that same file diagnoses two paragraphs earlier. **I recorded the disagreement intact rather than picking a winner:** I measure 25 at `7b2ff75` and enumerated every hit as genuine; the gate measures 26 on the same declared pair. Neither of us reconciled it, so **we did not run the same measurement** — and that, not the digit, is the lesson.
+3. **A gate instruction that did not exist:** ask whether a repair was applied EVERYWHERE the repaired claim appears. That gate's five questions were all answered soundly and its largest finding was in a sixth nobody asked.
+
+## STATE
+
+`main` local `5cb0e4e`, origin at `95ba50c` — **the two docs commits are NOT pushed until `py -3.10` returns**; 3.13 is green at 4306 and 3.10 is still running. I will not push a half-measured floor.
+
+`w51-dtype` and `w51-slicee` still working at ~90 minutes, both substantial. Four operator gates carried untouched, none ticked, **no fifth added** — and the docket they live in now has a tracked home.
+
+## 2026-08-09T11:58:26Z CHECKPOINT inc=inc-20260809T094233Z-5e96 sid=3cb901f7-b361-466e-9488-7df4dde80e3d
+
+THREE LANDINGS PUSHED. SLICE (e) IS DONE AND IT TURNED OUT TO BE FOUR CATEGORIES, NOT TEN — AND THE TWO PINS THAT WERE ALREADY LANDED FOR IT COULD NOT FAIL.
+
+## `main == origin == 75aa4eb`
+
+| sha | what |
+|---|---|
+| `1836be5` | journal (committed BEFORE the merge was audited, deliberately) |
+| `95ba50c` | **merge — the launch blocker**, `w50/launchfix` under two gates |
+| `76a40de` | **merge — the `fleet init` operator recipe** + the tracked gate docket |
+| `5cb0e4e` | BRIEF-TEMPLATE: the fence rationale was wrong and the control had no pin |
+| `75aa4eb` | **merge — slice (e)** |
+
+**Every floor predicted in writing before its run and hit on BOTH interpreters**, except one I missed and have already recorded against myself. Launch blocker: 4317 → `4302/14/1`. Docs pair: **predicted no movement, measured 4306 — MISSED**. Slice (e): **collection predicted 4351 before the merge and measured 4351; floor predicted 4336 and measured `4336 passed, 14 skipped, 1 xfailed` on both.** Every push read back from origin byte-identical.
+
+## SLICE (e): THE CENSUS WAS THE DELIVERABLE, AND IT FOUND TWO PINS THAT COULD NOT FAIL
+
+I dispatched (e) with its content unknown — the ratified spec defines it as the single word *"pins"*, and three documents disagreed about which of §7's ten categories belonged to (a) versus (e). **The answer is four, established by planting a mutant against each of the ten rather than by reading:** six are landed and non-vacuous, **two are landed and CANNOT FAIL**, two were never built.
+
+**The headline is a hole, not a pin.** A mutant replacing the append-only homes list with a **whole-file rewrite**, planted in `cmd_homes`, **survived the entire suite byte-identically at 4235/14/1** — destroying `add,retire,add` history, three records down to two with the retirement gone, which is §4's own 95–100%-loss shape. The no-rewrite lint's population was **two functions** and `cmd_homes` was outside it, while `read_homes_list()` hands the path back to any caller.
+
+**And the "real-list-untouched" pin was worse: a tautology.** It compared `exists()` around a single read, under a sandbox. Mutants appended **122 and 117 records** to a simulated real list with **all three candidate pins green**.
+
+Both were landed. Both were correctly *named*. Neither could fail. **That is this campaign's most-repeated lesson — a pin's population IS its coverage claim — arriving on the pins written to enforce it.**
+
+## THE (a)/(e) SPLIT IS RESOLVED WITHOUT AN OPERATOR RULING, AND BY GRAMMAR
+
+I flagged this at dispatch as gate 4's shape recurring and told the lane to stop at the census if only the operator could settle it. It did not need to: Ambiguity #1's parenthetical *"(hook argv, statusline capture-gating)"* attaches to **"later slices' plumbing"**, not to **"§7 items"** — it names slices (c) and (d), **which is exactly why none of §7's ten categories appears in it.** The lane argues it in the open and flags it as the one claim measurement cannot settle. **No fifth gate. Four stand, all the operator's, none ticked.**
+
+## THE LANE CAUGHT A DEFECT IN THE FILE IT WAS ADDING, AND GENERALISED IT BETTER THAN I WOULD HAVE
+
+Its first RED run exposed that its own canary fixture **wrote the homes list before proving the path was sandboxed** — contained by the `USERPROFILE` fence, caught by a guard it added in the same commit. Its generalisation: ***a pin whose failing path performs the act it forbids damages the machine every time it goes RED.*** That is going into the template.
+
+Two more instrument repairs it owes the template: **a mutant planter must work on BYTES** — text mode restored a byte-different CRLF file *while printing a matching sha256* — and **a probe must not sit on the surface being repaired** (its v1 went silent after the fix, which reads as "fixed").
+
+## CORRECTIONS AGAINST ME THIS ROUND
+
+- **I missed a floor prediction in writing.** I said two docs commits could not move the floor. They moved it by 4, because `CHECK_COUNT_DOCS` is derived as *every tracked `*.md`* and two pins are parametrised over it — so `docs/operator/` gaining two files added 2×2 cases. **A docs-only landing moves the floor by construction**, a sentence that existed nowhere in this campaign's doctrine. **And the branch I had just merged had already written it down**: its m4 discharge deleted a bare "28 files today" precisely because *"every document added or exempted changes it"*. I moved that population 28 → 30 within the hour and missed my floor because I had not believed the sentence I had just landed.
+- **`w51-dtype` refuted my reasoning and kept my conclusion.** I told it bare `str()` coercion was wrong because brackets would arrive *after* neutralisation. Measured: `_safe` stringified **first**, so my ordering argument was false. It kept the verdict, substituted three measured reasons, and said plainly that `str()` **would** have been total. Second time this wave a lane has been right against me on slice (d)'s internals.
+- **I raced my own in-flight lanes.** Landing three times during the wave moved `main` under `w51-dtype` and `w51-slicee` mid-run; both noticed unprompted and re-derived. It cost nothing because they re-measured instead of assuming — but the bill was real and I handed it to them. Wave 38's finding, paid by the lanes instead of the dispatcher.
+
+## IN FLIGHT
+
+`w51-gdtype` — the **third** gate on slice (d), narrow, dispatched after `w51-dtype` closed the type-totality MAJOR (`w51/dtype` @ `2cc4410`: `TYPE_FAULT`/`registry_status()` narrowing ahead of every sanitiser, `_safe` refusing non-strings, **zero `except` handlers added**, a 1390-combination type-fuzz taking 59 raising cases to 0, 11 mutants / 10 killed with **R9 surviving on the lane's own new code and caught by the lane**, floors 4489 → `4474/14/1` hit exactly across four runs).
+
+I sent it to a third gate rather than landing it because it added substantial security-critical code **after** the gate that reviewed it — the same criterion that earned gate 2 — and the axis I want attacked is the one the lane had least incentive to test: **whether the narrowing OVER-refuses**, making a legitimate row vanish from the opposite cause. Also owed and priced: a **fourth** self-citation re-pin pass post-merge, and the observation that `w51/dtype`'s merge-base is `4d78f6c` rather than `7b2ff75`, so its 27-file diff is **not** its change set.
+
+`sup-context` ~290k against a 350k soft trigger.

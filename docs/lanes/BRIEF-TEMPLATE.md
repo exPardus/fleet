@@ -184,6 +184,31 @@ This does **not** replace `tests/conftest.py`'s session-scoped
 *inside* the run and is strictly better for that plane, because it fails the suite rather than a
 human's eye. The digest above covers what that fixture does not.
 
+## Three rules for the instruments themselves — planters, probes and pins
+
+*Added 2026-08-09 (wave 51), each measured by a lane against its own tooling.*
+
+**A mutant planter must work on BYTES.** Lane `w51-slicee` restored a mutant in text mode and got
+back a **byte-different CRLF file while printing a matching sha256** — the digest agreed and the
+tree had changed. Read and write `rb`/`wb`, and compare bytes.
+
+**A probe must not sit on the surface it is repairing.** The same lane's first probe went **silent
+after the fix**, which reads exactly like "fixed". A probe that the repair can disable measures
+nothing; put it somewhere the repair cannot reach, and seed it to prove it still fires.
+
+**A pin whose failing path performs the act it forbids damages the machine every time it goes RED.**
+The same lane's canary fixture wrote the homes list *before* proving the path was sandboxed —
+contained only by a `USERPROFILE` fence, and caught by a guard added in the same commit. Order the
+sandbox proof **above** the act, always.
+
+**And byte-identity of a cited line is the load-bearing check for a re-pin, not name containment.**
+Lane `w51-livemerge` seeded this: **AST name-containment accepts a re-pin target five lines wrong.**
+The same lane found the deeper trap — `tests/test_self_citations.py` resolves line numbers in
+`bin/fleet.py` **about itself only**, so a merge touching no `bin/fleet.py` citations makes it green
+*correctly* while 108 cross-document citations rot behind it. **Name the oracle's population before
+you trust its colour**; a supervisor ordered that pin run to fixpoint as a merge's re-pin oracle and
+would have shipped all 108 green.
+
 ## Anchor the conflict-marker grep, or it counts prose
 
 `grep -c '<<<<<<<'` over merge output counts any line that merely *contains* the marker, including
