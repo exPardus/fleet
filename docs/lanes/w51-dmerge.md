@@ -366,6 +366,39 @@ this one working tree**, since it is checkout-relative and cannot answer whether
 The interpreter floor is `fleet.MIN_PYTHON_VERSION` (3.10), not this machine's `py -3.13` preference,
 which is why both were run rather than only the preferred one.
 
+### The floor above is `a70b1ab`. The BRANCH TIP was floored separately — MEASURED
+
+A floor measured one commit below the tip is an argument about the tip, not a measurement of it, and
+this report's §8 makes claims about the tip. So both suites were re-run at `34d6945` — the commit
+that added this report — after it was committed:
+
+```
+=== TIP 34d69456c82ad90aef3e8c6b20f7782c5496c98d ===
+=== DIGEST BEFORE ===
+d73ea349fdb50d8172b4a0e349aa6b22db8740e10d76b1d4cf4a1e2408d22bb5  files=257  root=C:\proga\fleet-w51-dmerge
+py -3.13 -m pytest -q   ->  4587 passed, 14 skipped, 1 xfailed in 431.30s (0:07:11)
+=== DIGEST MID ===
+d73ea349fdb50d8172b4a0e349aa6b22db8740e10d76b1d4cf4a1e2408d22bb5  files=257  root=C:\proga\fleet-w51-dmerge
+py -3.10 -m pytest -q   ->  4587 passed, 14 skipped, 1 xfailed in 392.38s (0:06:32)
+=== DIGEST AFTER ===
+d73ea349fdb50d8172b4a0e349aa6b22db8740e10d76b1d4cf4a1e2408d22bb5  files=257  root=C:\proga\fleet-w51-dmerge
+py -3.13 --collect-only  ->  4602 tests collected in 1.55s
+py -3.10 --collect-only  ->  4602 tests collected in 5.14s
+```
+
+**Identical: 4602 → 4587/14/1/0 on both.** The docs commit moved the floor by 0, which is what §0
+predicted from the mechanism rather than from hope — `docs/lanes/` is in `_HISTORICAL_PREFIXES`, so
+this file was never in `CHECK_COUNT_DOCS`.
+
+The digest differs from the `a70b1ab` bracket (`d73ea349…` vs `1fa79977…`) at the same `files=257`
+**because this report's own bytes changed between them** — the file existed at both points, so the
+count is flat while the content is not. That is the digest answering the only question it can answer:
+*did anything change in this tree between these two printings?* Yes — I wrote §1–§8.
+
+*(The single commit after `34d6945` adds this subsection and nothing else. It is a `docs/lanes/`
+append of the same exempt class, so it cannot move the floor by the same argument; I state that
+rather than claiming a run I did not make at that sha.)*
+
 ---
 
 ## §4. WHAT THE SUCCESSOR MUST STILL DO — a specified queue
