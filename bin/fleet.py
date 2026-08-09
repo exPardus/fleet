@@ -5488,6 +5488,68 @@ def _supervisor_tier_snapshot(now=None) -> dict:
     return out
 
 
+# --- A REGISTRY FIELD'S TYPE IS FOREIGN INPUT TOO (gate w50-gd2 MAJOR 1) ----
+#
+# Slice (d) let the statusline resolve a home the operator does not control, and
+# the discharge that followed made every foreign string safe to PRINT. It did
+# not make the render total over the TYPES a foreign registry may carry.
+# `_registry_corrupt_reason` constrains the registry to an object of objects and
+# says nothing about a record's fields, so `"status": []` is a VALID registry --
+# and `by_status[status]` below raised `TypeError: unhashable type` on it, which
+# `main()`'s exit-0 guard swallowed into a blank fleet row, at rc 0, on every
+# refresh, with no diagnosis. Driven four-cell: harmless at the merge base,
+# erasing on the branch.
+#
+# THE NARROWING COMES BEFORE THE SANITISER, AND THAT ORDER IS THE FINDING.
+# `fleet_statusline._safe` is a TEXT sanitiser: printable ASCII, bounded,
+# brackets neutralised. Handing it `str(value)` would make the render total and
+# would still be wrong, because `str()` answers "I do not know this type" with
+# "here is some text the attacker wrote":
+#
+#   status=['idle']    -> str() -> _safe -> "('idle')"
+#   status="['idle']"  ->          _safe -> "('idle')"      <- MEASURED, identical
+#
+# Two distinct registry states rendering identical bytes on the one surface the
+# operator reads continuously is P1-13, the finding this slice already spent a
+# MAJOR on. And it is not free: `str()` on a 200k-element list costs 149 ms per
+# refresh to print 24 characters (measured), against 0.004 ms for the narrowing.
+# So a field whose type is wrong is not sanitised into text -- it is REPLACED by
+# a word fleet authored.
+#
+#: What a registry-derived field renders as when its TYPE is not the schema's.
+#: Fleet's own word, chosen by fleet rather than by whoever wrote the registry.
+TYPE_FAULT = "?type"
+#: ...and when the field is absent or null, which is a different fact: nothing
+#: was recorded, as opposed to something of the wrong shape was. `?` is already
+#: this repo's word for a cell with no measurement behind it (`_fmt_age`, the
+#: W15 `unknown_fields` column, `rec.get("status", "?")` as it stood).
+FIELD_UNKNOWN = "?"
+
+
+def registry_status(value) -> str:
+    """A record's `status`, narrowed to `str` BEFORE anything sanitises it.
+
+    Total over every JSON value: object, array, number, string, bool, null and
+    absent. Never raises, never coerces with `str()` (see the block comment
+    above for the measurement that rules `str()` out), and never invents a
+    status fleet's own vocabulary already uses -- `?type` is not in `_ORDER`,
+    `_LABEL` or `_SUP_STATE_LABEL`, so it renders through the unknown-bucket
+    path exactly like any other status fleet did not write, and is capped and
+    sanitised by the same rules.
+
+    A foreign home can still WRITE the literal string `"?type"` and forge this
+    word. That is the class gate `w50-gd2` §4.3 measured and consciously did not
+    file -- a foreign status can already render `sup held` or `no live workers`
+    -- and it is strictly smaller than the alternative: forging a diagnostic
+    word costs an attacker nothing and buys them nothing, while erasing the
+    operator's row cost them one JSON bracket."""
+    if value is None:
+        return FIELD_UNKNOWN
+    if isinstance(value, str):
+        return value
+    return TYPE_FAULT
+
+
 def status_snapshot(now=None, include_archived: bool = False) -> dict:
     """Read-only fleet snapshot. See the module comment above for why this
     exists alongside cmd_status rather than reusing it.
@@ -5551,7 +5613,9 @@ def status_snapshot(now=None, include_archived: bool = False) -> dict:
             stale = (now - _parse_iso(rec["last_activity"])).total_seconds()
         except (ValueError, TypeError, KeyError):
             stale = None
-        status = rec.get("status", "?")
+        # NARROWED, not defaulted: `rec.get("status", "?")` covered the ABSENT
+        # key and nothing else, and `by_status[status]` needs a HASHABLE one.
+        status = registry_status(rec.get("status"))
         by_status[status] = by_status.get(status, 0) + 1
         total_mail += mail
         total_cost += cost
@@ -5951,9 +6015,41 @@ def _stash_short_id_note(exc: BaseException, short_id: str) -> None:
 
 
 def statusline_chain_path() -> Path:
-    """state/statusline-chain.json -- delegate statusline commands fleet runs
-    above its own row. Machine-local (gitignored), like every other state file."""
-    return state_dir() / "statusline-chain.json"
+    """`~/.claude/fleet-statusline-chain.json` -- the delegate statusline
+    commands fleet runs above its own row.
+
+    THE MACHINE PLANE, and it MOVED HERE from `state/statusline-chain.json`
+    (i.e. from inside a home) on 2026-08-09. Two reasons, and the second is a
+    security boundary:
+
+      1. The delegate is a MACHINE-scoped fact. Claude Code allows exactly ONE
+         `statusLine` entry, in one `~/.claude/settings.json`, and the delegate
+         is whatever was in that entry before fleet replaced it. It has nothing
+         to do with which fleet a session belongs to, and storing it per home
+         made `init --statusline --chain` on a second install silently lose it
+         (`foreign` is False for another install's fleet statusline, so nothing
+         is captured and the entry is overwritten anyway).
+      2. Multi-fleet slice (d) lets the statusline resolve a home from an
+         UNAUTHENTICATED session-id claim, and `_run_delegate` runs the chain
+         command with `shell=True`. Home-scoped, that let any directory listed
+         in `~/.claude/fleet-homes.list` run a shell command in the operator's
+         session every ten seconds, invisibly (gate `w50-gd` BLOCKING 1, driven
+         end to end). Machine-scoped, a resolved home is never consulted for it
+         and there is nothing to sanitise.
+
+    DERIVED FROM `user_settings_path()` RATHER THAN RE-SPELLING `Path.home()`,
+    deliberately: the file belongs beside the settings entry it was captured
+    from, AND `tests/conftest.py`'s autouse home sandbox redirects
+    `user_settings_path` BY NAME, so this path is sandboxed for free. A fresh
+    `Path.home()` spelling would sit outside that sandbox exactly as
+    `homes_list_path` does -- see its docstring -- and the suite would write the
+    developer's real `~/.claude/`.
+
+    `bin/fleet_statusline.py` still READS the old home-scoped location when this
+    file says nothing, so an install that chained before today keeps working;
+    that read is anchored to the home the statusline was already in, never to a
+    resolved one."""
+    return user_settings_path().with_name("fleet-statusline-chain.json")
 
 
 def _capture_statusline_delegate(command: str) -> None:
