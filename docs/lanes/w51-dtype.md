@@ -11,6 +11,28 @@ Every line below is tagged **MEASURED** (a command was run and its output is pas
 
 ---
 
+## SUMMARY — WHAT LANDED
+
+| | |
+|---|---|
+| the MAJOR — a foreign home erases fleet's row | **CLOSED**, four-cell, three revisions, actual bytes |
+| the displacement direction | **NOT re-opened** — op delegate 1, evil delegate 0, every cell |
+| siblings, systematically hunted | **1390 fuzz combinations, 59 raising → 0**; plane A had one sink, plane B had five |
+| the verb surface | **no sibling**, driven on three revisions |
+| mutant X4 | **REAL**, closed, re-planted **RED** |
+| mutant X7 | **EQUIVALENT — I agree with the gate**, and §4.2 shows what keeps that true |
+| the third re-pin pass | **31 moved, 43 content-verified, 0 defects**, 170 pins green |
+| floors, `py -3.13` **and** `py -3.10` | **4489 / 4474 / 14 / 1 / 0 — prediction met exactly on both** |
+| working-tree digest | **identical at all four points**, `files=244` |
+| `~/.claude/fleet-statusline-chain.json` | **ABSENT** after two full floors |
+| one mutant survivor of my own (R9) | found, disclosed, **closed**, prediction revised BEFORE any floor ran |
+
+**Owed and NOT done, stated once here so it is not discovered as an omission:** a FOURTH re-pin pass
+after the merge with `main` (§6), and gate `w50-gd2`'s MINOR 1 and MINOR 3, neither assigned to this
+lane (§7).
+
+---
+
 ## 0. FLOOR PREDICTION — WRITTEN BEFORE THE FLOORS WERE RUN
 
 **REVISED ONCE, BEFORE ANY FLOOR RAN, AND THE REVISION IS DISCLOSED HERE RATHER THAN HIDDEN.** The
@@ -335,9 +357,50 @@ diagnosis, which is the MAJOR again in miniature. §4 records what that exemptio
 
 ---
 
-## 4. THE TWO SURVIVING MUTANTS
+## 4. THE TWO SURVIVING MUTANTS THE GATE LEFT ME
 
-*(filled in at §8 — the sweep's receipts.)*
+### 4.1 X4 — **REAL, and now closed**
+
+Gate `w50-gd2` MINOR 2 is exactly right. `assert_no_terminal_control` is the only pin that would
+catch a non-palette SGR, and the only shipped test that reached `+N unknown` rendered with
+`color=False` — so `paint()` returned the text unpainted and the escape never existed. **A pin that
+cannot reach the rendering path it claims to cover is a coverage claim that is false**, which is
+this campaign's most-repeated lesson.
+
+Closed by `TestTheOverflowCounterIsRenderedInColour`, and closed with its own non-vacuity guard:
+`test_the_colour_case_really_differs_from_the_plain_one` asserts `painted != flat` **and**
+`plain(painted) == flat`, because a `color=True` case that silently rendered plain would pass the
+new test and re-open the very gap it exists to close. Re-planted on the fixed tree: **RED, 1
+failed.**
+
+### 4.2 X7 — **I AGREE WITH THE GATE, and the agreement is not free**
+
+The gate's argument, verbatim: *"the cap is still 3, the overflow count is still right, the order is
+still deterministic, and no documented property distinguishes the first three unknown buckets from
+the last three."* **I agree.** X7 survives the target suite on my tree too (816 passed), and I file
+no finding.
+
+**But it would have stopped being true at my own commit if I had not looked.** My fix introduces
+`?type` — a bucket name **fleet** authors — into the unknown region, and `?` (0x3F) sorts before
+every letter. That is precisely the documented property the gate correctly said did not exist at
+`5a47819`. Measured four ways over one bucket set:
+
+```
+buckets: ['?type', 'alpha', 'beta', 'gamma', 'idle']
+
+SHIPPED (exemption, first 3)     (['idle', '?type', 'alpha', 'beta', 'gamma'], hidden=0)
+SHIPPED + X7 (exemption, last 3) (['idle', '?type', 'alpha', 'beta', 'gamma'], hidden=0)
+  -> fault word visible in both: True True          <- EQUIVALENT
+
+NO EXEMPTION + first 3           (['idle', '?type', 'alpha', 'beta'], hidden=1)
+NO EXEMPTION + X7, last 3        (['idle', 'alpha', 'beta', 'gamma'], hidden=1)
+  -> fault word visible:         True False         <- NOT equivalent
+```
+
+So the verdict is neither *"the gate was right"* nor *"the gate was wrong"*: **the gate was right,
+and the thing that makes it right is now load-bearing.** The cap exemption (§3.3) is what holds it,
+`test_the_cap_can_hide_only_names_the_attacker_chose` is the pin that stops the next lane removing
+it by accident, and mutant R6 is the receipt that the pin fires.
 
 ---
 
@@ -458,24 +521,208 @@ constant delta, do not run the driver twice. Note also that `main` has touched
   filed again here.
 - **It does not add the MINOR 4 sentence to `BRIEF-TEMPLATE.md`.** See §10 — the template on this
   branch does not contain the digest snippet at all.
+- **It does not ship the type-fuzz as a test.** `fuzz_types.py` is the instrument gate `w50-gd2`
+  §10 asked for and it found five sinks the shipped pins did not, but it is a driver in a scratch
+  dir, not a pin. Turning it into a parametrized test file is the obvious next move and is a
+  deliberate non-goal here: it would have moved the floor prediction after the prediction was
+  committed, and the six pins it motivated (R9) already cover the specific shapes it found. Filed,
+  not taken.
 
 ---
 
-## 8. THE MUTANTS
+## 8. THE MUTANT SWEEP — 11 PLANTED, 10 KILLED, 1 EQUIVALENT
 
-*(filled in below from the sweep.)*
+### 8.1 The preconditions fired, which is how I know they are load-bearing
+
+My first sweep **refused to plant anything** — MEASURED:
+
+```
+CLEAN BASELINE  rc=1  2 failed, 808 passed, 2 skipped, 1 xfailed in 93.36s
+REFUSING TO PLANT: the baseline is RED, so every 'kill' below would be the
+baseline's failure wearing a mutant's name.
+```
+
+The two failures were `TestCollaboratorInstall::test_{interpreter_shim,posix_cli_shim}_is_tracked_
+and_executable`: `shutil.copy2` cannot carry a git exec bit on Windows, so `bin/fleet` and
+`bin/hooks/run_py.sh` came back `100644` in the extracted copy. Repaired with
+`git update-index --chmod=+x` rather than by excluding the two tests. **Eleven kills reported
+against that baseline would have included two the baseline already owned.**
+
+Four more assertions, each with a named failure behind it in this campaign's record:
+
+| assertion | the failure it prevents |
+|---|---|
+| anchors patched in the TARGET'S OWN newline | `core.autocrlf=true` hands out CRLF; `\n`-spelled anchors match zero times and nine skips read as nine kills (`w50/d` §6a; gate `w50-gd2` §7 hit it again) |
+| anchor occurs EXACTLY ONCE, patch asserted applied | a no-op patch scores a survivor |
+| `bin/fleet.py` mutants LINE-COUNT NEUTRAL | one blank line above `registry_path_at` scores 4 kills with zero behaviour change (`w50-gd2` §7.2 measured it) |
+| restore in `finally`, checked by sha256 | a floor run started with a mutant on disk |
+
+**Target suite, disclosed rather than implied** — nine files (`test_statusline_home`,
+`test_terminal_surface`, `test_quarantine_is_not_a_fresh_install`, `test_status_render_tolerance`,
+`test_view_quarantine`, `test_views_doctrine`, `test_self_citations`,
+`test_retired_sid_citations`, `test_doc_claims`). Clean baseline **816 passed, 2 skipped, 1
+xfailed** (810/2/1 before the six R9 pins landed). This is not the whole floor, and no verdict below
+is a claim about the whole floor.
+
+### 8.2 The results
+
+| | mutant | verdict | suite |
+|---|---|---|---|
+| R1 | the status narrowing is removed from `status_snapshot` | **RED** | 7 failed |
+| R2 | `registry_status` coerces with `str()` instead of refusing | **RED** | 5 failed |
+| R3 | `_safe` stringifies a non-string again | **RED** | 2 failed |
+| R4 | `_bucket` reads the raw status again | **RED** | 21 failed |
+| R5 | the stale filter is `is not None` again | **RED** | 5 failed |
+| R6 | the `TYPE_FAULT` bucket loses its cap exemption | **RED** | 4 failed |
+| R7 | the supervisor `state` narrowing is removed | **RED** | 4 failed |
+| R8 | the supervisor age narrowing is removed | **RED** | 6 failed |
+| R9 | the non-dict worker-row guard is removed | **SURVIVED**, then **RED** | 810 passed → 1 failed |
+| X4 | the `+N unknown` counter is painted a NON-palette red | **RED** | 1 failed |
+| X7 | `_bucket_order` keeps the LAST 3 unknowns, not the first | **SURVIVED — equivalent** | 816 passed |
+
+```
+RESTORED bin/fleet_statusline.py      sha256=931eb5f3ba1b1696 (== base: True)
+RESTORED bin/fleet.py                 sha256=73c9f615ab001a44 (== base: True)
+```
+
+**R1–R8 are the receipt that the new pins are not vacuous.** Each reverts one half of this branch's
+own fix and each goes RED. R2 is the `str()`-coercion the brief warned against, and it is caught by
+name by `test_the_two_absences_stay_distinguishable_from_a_type_fault`.
+
+### 8.3 R9 — the finding of my own I did not see coming, in MY new code
+
+The non-dict worker-row guard I added had **no pin behind it**, so deleting it changed nothing any
+test could observe. That is a false coverage claim on code written the same afternoon, which is
+this campaign's most-repeated defect landing on the lane trying to discharge it. Six tests close it
+and the re-plant is RED (`1 failed, 815 passed`).
+
+One honest note about the log rather than a quiet omission: R9 is the one mutant reported
+`line-count neutral=False`. It lives in `bin/fleet_statusline.py`, which carries no self-citations,
+so the neutrality guard correctly does not gate it — the `False` is the instrument reporting a fact,
+not a suppressed refusal.
 
 ---
 
-## 9. THE FLOORS
+## 9. THE FLOORS — PREDICTION MET EXACTLY, ON BOTH INTERPRETERS
 
-*(filled in below.)*
+```
+=== interpreters ===
+Python 3.13.12
+Python 3.10.1
+
+=== collect ===
+py -3.13 --collect-only:  4489 tests collected in 5.46s
+py -3.10 --collect-only:  4489 tests collected in 11.03s
+
+=== FLOOR py -3.13 ===
+working-tree digest BEFORE : d5c63ab896d299403d44c72f70a5a476b0275dd6c9f88a610a8711e4bb7bc4ca  files=244
+4474 passed, 14 skipped, 1 xfailed in 473.20s (0:07:53)
+working-tree digest AFTER  : d5c63ab896d299403d44c72f70a5a476b0275dd6c9f88a610a8711e4bb7bc4ca  files=244
+
+=== FLOOR py -3.10 ===
+working-tree digest BEFORE : d5c63ab896d299403d44c72f70a5a476b0275dd6c9f88a610a8711e4bb7bc4ca  files=244
+4474 passed, 14 skipped, 1 xfailed in 413.46s (0:06:53)
+working-tree digest AFTER  : d5c63ab896d299403d44c72f70a5a476b0275dd6c9f88a610a8711e4bb7bc4ca  files=244
+```
+
+| | predicted | 3.13 | 3.10 |
+|---|---|---|---|
+| collected | 4489 | **4489** | **4489** |
+| passed | 4474 | **4474** | **4474** |
+| skipped | 14 | **14** | **14** |
+| xfailed | 1 | **1** | **1** |
+| failed | 0 | **0** | **0** |
+
+`4474 + 14 + 1 = 4489` on both. **3.10 is not optional and it was not spot-checked at the collection
+layer** — the floor is `fleet.MIN_PYTHON_VERSION`, `py -3.13` is only this machine's preference, and
+gate `w50-gd2` §10 recorded that it had run 3.10 at `--collect-only` only. Both are full runs here.
+
+**The digest is byte-identical at all four points, `files=` included.** Not `git write-tree`, which
+hashes the INDEX and therefore cannot fail with unstaged changes — every wave-50 brief shipped that
+dead check. And the digest is **CHECKOUT-RELATIVE** (gate `w50-gd2` MINOR 4): `d5c63ab8…` is not a
+tree identity and is not reproducible from `34bc1b9` in another worktree. Only the before/after
+PAIR means anything, and all four are inside one checkout.
+
+**The real machine plane, after two full floors — MEASURED:**
+
+```
+~/.claude/fleet-homes.list            exists: False
+~/.claude/fleet-statusline-chain.json exists: False
+~/.claude/settings.json  mtime  2026-08-08 22:34:02.854189800 +0500
+```
+
+`~/.claude/fleet-statusline-chain.json` — the file this branch's lineage introduces — is **ABSENT**,
+as it was for `w50/d` and for the gate. The `settings.json` mtime predates this session.
 
 ---
 
 ## 10. WHERE THIS BRIEF WAS WRONG
 
-*(filled in below.)*
+**"Use the working-tree digest in `docs/lanes/BRIEF-TEMPLATE.md`" — THE TEMPLATE ON THIS BRANCH DOES
+NOT CONTAIN IT.** MEASURED: `docs/lanes/BRIEF-TEMPLATE.md` at `920266c` is **99 lines** and contains
+the string `digest` **zero** times. The amendment landed on `main` as `c6ddf0f` (+63 lines) **after
+`w50/gd2` was cut**, so a lane fenced to this branch cannot follow that instruction as written. I
+used `docs/lanes/w50-d.md` §18, which is the text the template copied and which IS on this branch.
+An instruction naming a file that does not hold the thing, on the branch the lane is fenced to, is
+this campaign's inherited-enumeration defect in its smallest form. *(And gate `w50-gd2` MINOR 4's
+one missing sentence — that the digest is checkout-relative — is still missing from the template on
+`main` at `7b2ff75`. I carry it in §9 and in the tool's own docstring.)*
+
+**"`str(["idle"])` … is a bracket-bearing attacker-chosen string arriving *after* the point where
+brackets get neutralised" — MEASURABLY FALSE.** `_safe` stringified FIRST and neutralised SECOND, so
+`_safe(["idle"])` was `"('idle')"` — the brackets were always neutralised. **The conclusion is right
+and the reason is not.** §3.2 gives three reasons that survive a probe: the P1-13 byte-collapse
+(load-bearing), 149 ms per refresh, and the loss of the wrong-shape/nothing-recorded distinction.
+Shipping the brief's verdict with my own evidence is worth more than repeating a mechanism that
+falls over in five lines.
+
+**"Coercing everything to `str()` makes the render total" — TRUE, and I doubted it before I measured
+it.** I expected a nesting depth that parses but cannot be stringified from inside the render's call
+stack, which would have made `str()` non-total as well as wrong. There is none: `json.loads` accepts
+2000-deep arrays and `str()` survives all of them. `str()`-coercion really would have been total. It
+is rejected for being **wrong**, not for being incomplete, and I say so rather than banking an
+argument I could not support.
+
+**"Likeliest: that the type-totality fix is small" — SPLIT, and the split is the useful part.** The
+narrowing that closes the gate's exact finding IS small: one helper, one call site, three lines of
+logic. What is not small is what the fuzz found behind it — `render_statusline` had **five** type
+sinks, not one, four of them `KeyError`s on an ABSENT key, a shape the gate never drove, on the
+plane every shipped hostile-status test already uses. The brief's instinct was right and its reason
+was inverted: small at the boundary the gate named, five times larger one file over.
+
+**"That `str()`-coercion plus the existing `_safe()` is enough (I think it is not, and I have said
+why)" — RIGHT, for a better reason than the one given.** See above.
+
+**"That X7 is genuinely equivalent" — RIGHT, and it stays right only because of a change I made
+deliberately.** §4.2 has the four-way measurement. Left alone, my own fix would have converted the
+gate's correct judgement into an incorrect one at my commit.
+
+**"That the third re-pin pass is the last one" — WRONG, and knowably so.** A **fourth** is owed after
+the merge: `main` has moved twice more since the gate measured (`4d74d22` → `c6ddf0f` → `7b2ff75`)
+and both sides re-pin the same citation sites. Priced read-only in §6 — 12 conflict blocks, all
+citation-only, 0 non-citation overlapping lines. My fence forbids the merge, so this branch cannot
+make that pass and does not claim to.
+
+**A citation slip, named because a gate reader will go looking.** The brief says *"`w50-gd2` §21 says
+the post-merge tree needs a third difflib re-pin pass"*. `w50-gd2` has sections 0–12; **§21 is
+`w50-d`'s** (*"MERGE PREP — `main` MOVED UNDER THIS BRANCH"*), and the gate endorses it in its own
+§8. Both documents say the same thing; only the pointer is wrong.
+
+**What the brief could not have known — two, and both are about instruments, not code.**
+
+1. **The one mutant survivor of my own was in the fix's own new code.** R9 deletes a guard I added
+   this branch and nothing noticed. A lane that plants mutants only on the code it was *sent* to fix
+   never finds that class.
+2. **My merge-cost classifier reproduced the wave-45 blind spot inside the tool built to avoid
+   it.** Masking `:\d{3,5}` leaves a range END standing, because the END carries no colon — so it
+   reported a purely-citation conflict as functional. Caught only because the driver PRINTS what it
+   classifies instead of counting it. The brief warned about that shape *in the re-pin driver*; it
+   did not occur to me that it would reappear in a different tool I wrote the same afternoon.
+
+**One thing the brief got right that is worth confirming rather than assuming.** Its four-cell table
+has two columns. I drove **three** revisions, because two columns cannot show what gate `w50-gd2`
+§2.2 shows: that the same hostile record is HARMLESS at `4d78f6c` and erasing at `920266c` — that
+the defect belongs to this slice. Two columns prove the fix works; three prove whose defect it is.
 
 ---
 
