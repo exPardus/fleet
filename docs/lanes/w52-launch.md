@@ -2267,3 +2267,60 @@ cannot move the floor.**
    `f6987a04…` or `4791b81c…`, which are different tree states the instrument cannot compare across.
 
 Results follow in the next commit.
+
+## The floor — RESULTS, scored against the third prediction
+
+**MEASURED**, digest and both suites inside one command:
+
+```console
+=== DIGEST BEFORE ===
+b7def49d186384dc0f1278d2256ddad6693cac52fed9817a114781ef32f6a8d8  files=262
+
+$ py -3.13 -m pytest -q
+4621 passed, 14 skipped, 1 xfailed in 546.94s (0:09:06)
+$ py -3.10 -m pytest -q
+4621 passed, 14 skipped, 1 xfailed in 504.54s (0:08:24)
+
+=== DIGEST AFTER ===
+b7def49d186384dc0f1278d2256ddad6693cac52fed9817a114781ef32f6a8d8  files=262
+```
+
+No `FAILED` or `ERROR` line on either interpreter. **All four clauses hold.**
+
+| # | Predicted | Measured | |
+|---|---|---|---|
+| 1 | `current_tree_docs()` 30, collection 4636 | `30`; `4636 tests collected` (collect-only, pre-run) | ✔ |
+| 2 | both interpreters GREEN `4621 passed, 14 skipped, 1 xfailed` | exactly that, both | ✔ |
+| 3 | content pins pass a **fourth** consecutive `README.md` edit | pass | ✔ |
+| 4 | digest pair matches, compared only against itself here | identical, `files=` included | ✔ |
+
+**Eight full suite runs now stand behind this branch** — four commits × two interpreters — every one
+`4621 passed, 14 skipped, 1 xfailed`. The 3.13 flake gate `w52-glaunch3` recorded has appeared in
+**none** of my four 3.13 runs.
+
+**And the digest is a third distinct value — `b7def49d…`, after `f6987a04…` and `4791b81c…`.** Three
+pairs, three different digests, each internally identical. That is the checkout-relative property
+demonstrated three times rather than asserted: **the instrument answers "did this run change anything
+here?", and its answer is meaningless across trees.** Anyone re-verifying this branch should take
+their own pair; none of these three is a baseline for another.
+
+---
+
+## CLOSING STATE
+
+**Findings:** eight (W52-1…W52-8), unchanged in substance by three gates. Two repaired on this branch
+(W52-5, W52-6) plus the README/`launch-readiness` marketplace contradiction; the rest REPORTED with
+their measurements, because they need `bin/` changes this lane was fenced out of — and because W52-2's
+obvious remedy is now known-unsafe rather than merely unwritten.
+
+**What three gates did to this document.** They reversed **no finding**. Every one of the sixteen
+items across `w52-glaunch3`, `w52-glaunch4` and `w52-glaunch5` was a grade, a mechanism, a receipt or
+a citation — the connective tissue rather than the load. What that means honestly is that **the
+measurements held and the claims about them did not**, which is a specific and slightly humbling
+result: the drive was sound, and the writing about the drive needed three passes.
+
+**The one lesson worth carrying out of the whole lane**, because it cost the most and generalises
+furthest: *the everywhere-rule is a force multiplier with no opinion about direction.* Applied to a
+verified value it makes a repair complete. Applied to an unverified one it installs the error at every
+site — and then every site corroborates every other, which is indistinguishable from being right.
+**The rule needs a derivation upstream of it, or it multiplies whatever it is handed.**
