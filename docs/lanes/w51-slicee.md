@@ -358,5 +358,239 @@ branch adds is skipped or xfailed — the quiescent canary's skip arm is unreach
 construction, which is the point of §7's `delete-if-never-quiescent` clause and is asserted by
 `test_the_quiescent_arm_is_reachable_by_construction`.
 
-**A missed prediction is a STOP-and-report event.** Results are appended in §10 and were not
-known when this section was committed.
+**A missed prediction is a STOP-and-report event.** Results are appended in §7 and were not
+known when this section was committed — it landed in commit `438ef52`, which carries no floor
+numbers at all.
+
+## 7. THE FLOORS — prediction hit exactly, both interpreters
+
+MEASURED, working-tree digest identical before and after **both** runs
+(`38ca585289f0e8077428c99e023f37da849bf55becaa3dac4fea2276aa6dda8c files=247`), no mutant on
+disk (`PLANT-ACTIVE.json` absent, checked immediately before the first run):
+
+| | collected | result | time |
+|---|---|---|---|
+| `py -3.13` baseline at `7b2ff75` | 4250 | 4235 passed, 14 skipped, 1 xfailed | 436.45s |
+| `py -3.10` baseline at `7b2ff75` | 4250 | 4235 passed, 14 skipped, 1 xfailed | 401.28s |
+| **`py -3.13` this branch** | **4279** | **4264 passed, 14 skipped, 1 xfailed** | 443.15s |
+| **`py -3.10` this branch** | **4279** | **4264 passed, 14 skipped, 1 xfailed** | 394.37s |
+
+**Predicted 4279 collected and 4264 / 14 / 1 on both floors in §6.3, before running either.
+Hit exactly.**
+
+### 7.1 The redirect, measured before and after with one instrument
+
+The first instrument I wrote for this wrapped `homes_list_path` — and once the redirect landed,
+conftest's own `monkeypatch.setattr` replaced the wrapper, so it reported **zero of everything**,
+which reads exactly like *"fixed"*. **A probe that sits on the surface being repaired stops being
+a probe the moment the repair lands.** Re-instrumented one level down, at `read_homes_list` and
+`append_home_record`, which nothing redirects — same 574 tests, same three files, both
+directions:
+
+```
+BEFORE (conftest as at 7b2ff75)  {'read_real': 19, 'read_other':  0, 'write_real': 0, 'write_other': 0}
+                                 by file: test_cli.py 3, test_view_quarantine.py 7, test_supervisor.py 9
+AFTER  (this branch)             {'read_real':  0, 'read_other': 19, 'write_real': 0, 'write_other': 0}
+```
+
+### 7.2 The new guard, proven against a mutant nothing else can see
+
+**C3d** — `main()` shadow-appends `C:/leaked` to `Path.home()/.claude/fleet-homes.list` through
+the adapter. Chosen because it is invisible to everything already in the tree: `main` names no
+homes-list symbol, so no lint covers it; the write goes through the adapter, so the adapter
+call-count assertion is satisfied; and every verb in every test file reaches it.
+
+| pin set | result on the 5-file subset | records leaked | what named the breach |
+|---|---|---|---|
+| **shipped, at `7b2ff75`** | 3 failed / 324 passed | **114 per run** | **nothing.** All three are `test_cli.py` `main`-dispatch tests failing *collaterally* — the leaked list made the machine multi-fleet and changed resolution. None mentions the homes list. |
+| **this branch** | 0 failed / 333 passed, **1 ERROR at teardown** | 114 | `_the_real_homes_list_is_untouched_afterwards`, naming the file, the before/after digests and the remedy |
+
+The shipped set produced **noise**; this branch produces **detection**. The collateral noise
+disappears here precisely *because* the redirect works — the reads are sandboxed, so only the
+write escapes, and only the guard speaks.
+
+---
+
+## 8. SIBLING-LANE COLLISION — measured, and there is none
+
+MEASURED. My whole file set, `7b2ff75 → HEAD` plus working tree:
+
+```
+docs/lanes/w51-slicee.md   tests/conftest.py   tests/test_homes_list.py   tests/test_slice_e_pins.py
+```
+
+`git diff --name-only 7b2ff75 w51/dtype` names 27 files. **The intersection is empty.**
+`bin/fleet.py` is deliberately untouched by me — I repaired the *pin* population rather than the
+code — so nothing here needs sequencing against dtype's statusline work.
+
+**One thing for the manager that is not my collision to fix:** `git merge-base w51/dtype
+w51/slicee` is **`4d78f6c`**, not `7b2ff75`. `w51/dtype` branched **before** the wave-50 landings
+(`4d78f6c..7b2ff75`, six commits), so its diff against my base carries those landings as apparent
+changes. Its landing needs a real merge; mine is a fast-forward from `7b2ff75`. Land order does
+not matter between us, but do not read dtype's file list as its change set.
+
+---
+
+## 9. THE BUILD BRIEF FOR WHAT WAITS — executable, nothing to re-derive
+
+**Nothing in §7's ten waits.** What follows is the work that becomes owed when the two blocked
+slices land, written so a successor runs it without re-measuring §1.
+
+### 9.1 When operator gate 3 is ruled and slice (b) builds `init --home`
+
+`docs/OPERATOR-GATES.md` gate 3 asks whether the E2 ground splits `init` the way `homes` was
+split. **Either ruling** leaves (b) shipping **a third writer of the machine-global list** (§4:
+*"Writers: `fleet init --home`, `fleet homes --add`, `fleet homes --retire`"*).
+
+1. **The lint already covers it, and that is measured rather than hoped.**
+   `TestTheWriterIsAppendOnly.LIST_SYMBOL` is a pattern
+   (`homes_list|homes_population|home_record|homes_view`), not a list, so `cmd_init` joins the
+   population the moment it names any of them. **Verify, do not assume:** after (b) lands, run
+   `test_the_population_is_what_the_docstring_says_it_is` and add `assert "cmd_init" in pop`. If
+   (b) reaches the list through a helper spelled differently, widen `LIST_SYMBOL` **in the same
+   commit** — the `len(pop) >= 12` assertion is what makes a silent shrink RED.
+2. **The destructive-tier pin needs one new row, and only if the operator splits `init`.** Copy
+   the shape `TestTheFlagGranularityTheTableActuallyStates::test_the_homes_writes_are_destructive_and_the_bare_read_is_not`
+   already uses — flagged tokens in the destructive tuple, bare verb in no tuple, tier carried in
+   `VERB_EFFECT_RESIDUAL`. The homes lane measured that this form fails SAFE where the naive
+   two-row form fails OPEN; that argument transfers verbatim.
+3. **The canary gains an arm for free.** Add `["init", "--home", str(b)]` to
+   `test_driving_home_a_leaves_home_b_byte_identical`'s parametrise list. It goes RED if
+   `init --home` writes anything into the bystander, which is the whole point of a second writer.
+4. **RED first, and here is the mutant:** plant `cmd_init`'s append so it bypasses
+   `homes_list_path()` (planter mutant `C3-writer-bypasses-redirect`, retargeted at `cmd_init`).
+   It must be caught by `_the_real_homes_list_is_untouched_afterwards`, **not merely** by a
+   sandbox assertion — a sandbox assertion is what §3 proves is not enough.
+
+### 9.2 When slice (d) lands the statusline
+
+§7 names no statusline pin, and the price doc's *"statusline capture-gating"* is plumbing, not a
+pin category. What (d) will owe against **this** file:
+
+1. `bin/fleet_statusline.py` resolves a home from a blob sid through the same lookup, and it is a
+   **separate process** with its own imports — so `tests/conftest.py`'s redirect does not reach it
+   when it is driven as a subprocess. **Measure that before assuming either way**; the instrument
+   is `probe2.py` (§11), retargeted at the statusline module. In-process ⇒ covered. Subprocess ⇒
+   not covered, and that is a second env-fixture gap of exactly the shape §1 row 1 records.
+2. Do **not** write a statusline pin against the render path while `w51/dtype` is in flight (§8).
+   Write it against `resolve_home`'s answer, which is the interface both lanes share.
+
+### 9.3 What I deliberately did not do
+
+* **No fifth operator gate.** §2 explains why none is needed.
+* **No edit to `bin/fleet.py`.** Every finding here is a *pin* defect; the production code
+  behaved correctly in all eleven mutant drives.
+* **No edit to `docs/specs/multi-fleet.md` §7.** It is ratified text. §1's table is the record of
+  what it means against the shipped tree, and that belongs in a lane report.
+* **`tests/test_home_resolution.py::test_the_real_list_is_untouched` is left in place.** It is
+  vacuous, but it is harmless, and deleting a test named after a §7 category from inside a lane
+  that is *adding* that category's real pin would erase the evidence that the category was ever
+  claimed done. **Recommend** the manager fold it into a one-line docstring pointer to the
+  conftest guard, as a follow-up — rather than have me delete it here.
+
+---
+
+## 10. CONTAINMENT — why, not merely whether
+
+Per `docs/lanes/BRIEF-TEMPLATE.md`, and the wave-48 rule that a clean audit must explain its
+cause.
+
+**I ran no `fleet` CLI command at all.** Not one. Everything was `pytest` and `python` inside this
+worktree. There is therefore no per-command home table to give, and that absence *is* the
+enumeration.
+
+Every in-process drive (`fleet.main`, `fleet.cmd_homes`, `fleet.append_home_record`) ran either
+under pytest — where `homes_list_path` is redirected — or in a standalone script whose first
+statement assigned `fleet.homes_list_path = lambda: <tmp path>`.
+
+**Three independent reasons the live home was never a candidate, measured, in the order they
+would have had to fail:**
+
+1. **`FLEET_HOME` is UNSET in this session's environment.** Measured. So `fleet.py` imported from
+   this worktree computes `FLEET_HOME = INSTALL_ROOT = C:\proga\fleet-w51-slicee` — my own
+   worktree — by §5 step 4's install-root default. The live home at `C:\proga\claude-fleet` is not
+   reachable from this checkout's module at all. **This is a stronger fence than the brief assumed
+   and it is an accident of the dispatch, not a fence I built** — a lane launched *with*
+   `FLEET_HOME` set would not have had it.
+2. **`CLAUDE_CODE_SESSION_ID` IS set** (`b72f5258-…`), so the brief is right that the env var
+   alone would not have fenced me. But step 2's lookup needs a population to search, and
+3. **`~/.claude/fleet-homes.list` does not exist**, so the folded population is empty. **This is
+   the wave-48 "clean for the wrong reason" condition, and it is still true of this machine.**
+   Verified absent before the first command and after the last, including after both floors.
+
+**Nothing appended to `~/.claude/fleet-homes.list`, and the proof is not my word.** Every mutant
+that writes it was run with `USERPROFILE` pointed at a throwaway directory, so `Path.home()` — and
+therefore the `REAL_LIST` those test files compute at import — resolved to a simulated home. The
+122, 117, 119, 114 and 228 records reported above all landed there.
+
+`~/.claude/settings.json` was never written. `fleet init` was never run. `~/.claude/fleet-homes.list`
+was never appended to. No ref but `w51/slicee` was moved; nothing was pushed.
+
+**The one thing that DID try to write the real list was mine**, and §6.1 records it: the canary's
+own fixture, on the first RED run, before the guard-before-write existed. It was contained by the
+`USERPROFILE` fence and named by the new session guard. I report it rather than quietly fixing it
+because *"a clean containment audit is not proof the fence worked"* cuts both ways — this audit is
+**not** clean, and the reason it did no harm is a fence I had put there for a different purpose.
+
+---
+
+## 11. INSTRUMENTS — what I used, and the one I had to repair
+
+All under `$CLAUDE_JOB_DIR/tmp` (`C:/Users/Techn/.claude/jobs/b72f5258/tmp`), outside the repo.
+
+* **`digest.py`** — `docs/lanes/BRIEF-TEMPLATE.md`'s working-tree digest, verbatim. Run before and
+  after every floor and every mutant, `files=` included. **Never `git write-tree`.** Compared only
+  against itself in this one checkout, per its own checkout-relative caveat.
+* **`plant.py`** — AST-scoped, byte-safe mutant planter. Refuses when the pattern does not resolve
+  to exactly one scope (it refused twice, correctly: once on a CRLF-mismatched pattern, once on
+  `atomic_append_bytes`, which is two defs); refuses a double-plant; writes `PLANT-ACTIVE.json`;
+  asserts the patch applied; `ast.parse`s the mutant so an unimportable plant cannot masquerade as
+  a survivor; asserts the restore **byte for byte** and prints `git status`.
+  **THE REPAIR, and it is a doctrine amendment (§5 item 7):** v1 was text-mode. On this CRLF tree
+  it restored a byte-different file while printing a **matching** sha256 and asserting
+  `text == text`. `git status: M` and the working-tree digest are what caught it.
+* **`probe2.py`** — read-only pytest plugin wrapping `read_homes_list` / `append_home_record`.
+  Replaces a v1 that wrapped `homes_list_path` and was blinded by the very fix it was measuring
+  (§7.1).
+* **`USERPROFILE` redirection** as the mutant fence, rather than `FLEET_HOME` or `--fleet-home` —
+  neither of which fences `Path.home()`, which is what the homes list is resolved from.
+
+### 11.1 The eleven mutants, in one table
+
+| id | scope | what it breaks | verdict |
+|---|---|---|---|
+| C3 | `append_home_record` | ignores the redirect | 15 failed — none names the breach |
+| C3b | `append_home_record` | shadow-appends via the adapter | 1 failed (adapter call count) |
+| C3c | `append_home_record` | shadow-appends via `open` | 1 failed (the old lint, on `open`) |
+| **C3d** | **`main`** | **shadow-appends via the adapter** | **shipped: 3 collateral failures, 114 records leaked. This branch: caught, by name.** |
+| C5a | `fold_homes_list` | first-record-wins | 16 failed |
+| C5b | `lookup_home_for_sid` | `spawned_by` grants membership | 1 failed, exactly the pin |
+| C6 | `_WindowsPlatform::atomic_append_bytes` | non-atomic append | 1 failed, exactly the pin |
+| C7 | `cmd_homes` | whole-file rewrite, +3 lines | 4 failed — **all four are `:NNNN` citation pins** |
+| **C7b** | **`cmd_homes`** | **whole-file rewrite, line-neutral** | **FULL-SUITE SURVIVOR: 4235 / 14 / 1** |
+| C8 | `render_homes_view` | drops "not initialized" | 1 failed, exactly the pin |
+| C9 | `_apply_wrong_home_guard` | destructive tier lets env through | 7 failed |
+| C10 | `multi_fleet_arming` | unreadable list disarms | 2 failed |
+
+Every one restored; `git status` clean and the digest back to
+`a3c031a778733e31592f735644c402ad429748fa9719011d19f8e14ea4c5778f files=245` after each.
+
+### 11.2 What an adversarial reader should attack first
+
+1. **The C7b survivor claim.** It rests on one full-suite run. Re-run it — plant, full floor,
+   restore. If it fails for you, the headline of this report is wrong.
+2. **`home_is_quiescent`'s parametrised table.** I assert `idle` is NOT quiescent, because
+   `fleet._record_is_live` says a non-archived non-dead record is live. If that reading is wrong,
+   the canary is scoped too tightly and skips more than it should — though never less.
+3. **The widened lint's `len(pop) >= 12` floor.** A floor, not an equality, so *growth* is silent.
+   Deliberate — growth is the safe direction and equality would redden on every unrelated
+   refactor — but it is a carve-out and it is named here rather than left implicit.
+4. **`_the_real_homes_list_is_untouched_afterwards` is session-scoped**, so it reports at teardown
+   and attributes the error to whichever test happened to run last. That is a real usability cost:
+   it names the file and the digests but not the culprit. The install-plane guard beside it has
+   the same shape and the same cost.
+5. **§2's reconciliation turns on one parse of one sentence.** If a reader takes Ambiguity #1's
+   parenthetical as apposition to *"§7 items"* rather than to *"later slices' plumbing"*, the
+   conflict the brief describes is real and the split does need the operator. I read it the other
+   way because the ten categories contain nothing resembling either named item — but that is a
+   reading, and it is the one thing in this report that measurement cannot settle.
