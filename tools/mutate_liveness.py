@@ -124,9 +124,25 @@ def build_scratch(scratch):
 
 
 def run_tests(scratch, py):
+    """(rc, summary_line, [failed test ids]).
+
+    The failure NAMES matter, not just the count: a mutant that kills two tests
+    might be killing the pin it targets plus its control (good), or two
+    unrelated tests while the pin stays green (which is the gate2 B2 shape
+    wearing a KILLED label). Reporting the ids is what lets a reader tell those
+    apart without re-running anything.
+    """
     r = sh(f"py -{py} -m pytest {TESTFILE} -q", cwd=scratch)
-    tail = [l for l in (r.stdout or "").splitlines() if l.strip()]
-    return r.returncode, (tail[-1] if tail else "<no output>")
+    out = (r.stdout or "").splitlines()
+    tail = [l for l in out if l.strip()]
+    # `FAILED tests/x.py::Cls::test_name - AssertionError: ...` -> `Cls::test_name`.
+    # NOT `l.split(" ")[0]`, which yields the literal "FAILED" -- the first
+    # version of this line did exactly that and printed `RED: FAILED` seven
+    # times, which is a report that cannot distinguish a targeted kill from an
+    # incidental one. Caught by reading the output instead of the exit code.
+    failed = [l[len("FAILED "):].split(" ")[0].split("::", 1)[-1]
+              for l in out if l.startswith("FAILED ")]
+    return r.returncode, (tail[-1] if tail else "<no output>"), failed
 
 
 def main():
@@ -149,7 +165,7 @@ def main():
     print(f"scratch      : {scratch}")
     print(f"FLOOR sha256 : {floor}")
 
-    rc, line = run_tests(scratch, args.py)
+    rc, line, _ = run_tests(scratch, args.py)
     print(f"=== FLOOR (clean export, no mutant) === rc={rc}  {line}")
     if rc != 0:
         print("FLOOR IS NOT GREEN -- every verdict below would be meaningless. ABORT.")
@@ -171,12 +187,14 @@ def main():
             print(f"{mid}: patch did not change the file -- ABORT")
             return 3
 
-        rc, line = run_tests(scratch, args.py)
+        rc, line, failed = run_tests(scratch, args.py)
         got = "KILLED" if rc != 0 else "SURVIVED"
         ok = got == expect
         bad |= not ok
         print(f"{mid}  {claim}")
         print(f"      -> rc={rc}  {line}")
+        for tid in failed:
+            print(f"         RED: {tid}")
         print(f"      ==> {got} (expected {expect}) {'OK' if ok else '*** MISMATCH ***'}")
 
         target.write_text(src, encoding="utf-8")
@@ -184,12 +202,13 @@ def main():
             print(f"{mid}: RESTORE FAILED -- ABORT")
             return 4
         print(f"      restored byte-identical (sha256): True")
-        results.append((mid, got, expect))
+        results.append((mid, got, expect, failed))
         print()
 
     print("=== SUMMARY ===")
-    for mid, got, expect in results:
-        print(f"  {mid:<9} {got:<9} (expected {expect})")
+    for mid, got, expect, failed in results:
+        print(f"  {mid:<9} {got:<9} (expected {expect})  "
+              f"{'; '.join(failed) if failed else ''}")
     print(f"final sha256 == floor      : {sha(target) == floor}")
     clean = sh("git diff --quiet HEAD -- bin/fleet.py", cwd=REPO).returncode == 0
     print(f"real worktree bin/fleet.py : {'untouched' if clean else '*** MODIFIED ***'}")
