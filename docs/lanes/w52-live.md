@@ -111,18 +111,27 @@ _cmd_respawn_native         (8258-8557) -> references it NOWHERE
 _cmd_respawn_native  :8420  new_record["retired_sids"] = prior_retired + [old_sid]
 ```
 
-**After, on this branch:**
+**After, at the head of this branch** — re-derived at the DISCHARGE tree, not the build tree. *(The
+first version of this block was correct at `12c238c` and the F1 fix moved every number in it. It is
+a claim about the CURRENT tree, so leaving it would have been exactly the rot §6 is about — caught
+by re-running the derivation rather than by trusting it.)*
 
 ```
+_ordered_unique_sids        def :8719-8750       <- new, F1's caller-side half
+  use :8453 -> _cmd_respawn_native      (8258-8623)
+  use :8982 -> _cmd_kill_native         (8858-9021)
+_sweep_retired_sessions     def :8753-8855
+  use :8462 -> _cmd_respawn_native
+  use :8989 -> _cmd_kill_native
 _RETIRED_SID_SWEEP_CAP      def :8716 (module)
   use :8454 -> _cmd_respawn_native      (8258-8623)
-  use :8897 -> _cmd_kill_native         (8774-8935)
-  use :9686 -> _cmd_respawn_supervisor  (9559-9748)
-_sweep_retired_sessions     def :8719-8771
-  use :8462 -> _cmd_respawn_native
-  use :8903 -> _cmd_kill_native
+  use :8983 -> _cmd_kill_native         (8858-9021)
+  use :9772 -> _cmd_respawn_supervisor  (9645-9834)
 write_tombstone_outcome     use :8396 (--force arm) AND :8470 (unconditional) in _cmd_respawn_native
 ```
+
+The three-site cap census is the gap closing: at `64b43c2` the worker respawn path was not among
+the two. `_cmd_respawn_supervisor` still has neither the shared body nor its guards — §10.1.
 
 ---
 
@@ -649,19 +658,106 @@ Graded before this run and unchanged by it: **20 mutants, all KILLED**; floor gr
 skipped) now that `tests/test_native.py` is in `TESTFILES`; `final sha256 == floor : True`;
 `real worktree bin/fleet.py : untouched`; **25 pins, 0 uncovered**.
 
-### 7.7 — RUN 3 RESULTS
+### 7.7 — RUN 3 RESULTS: **PREDICTION HIT EVERY TERM — and the DIGEST FENCE FAILED**
 
-*Filled in by the commit after this one. §7.6's prediction is frozen above.*
+MEASURED. §7.6 predicted `4661 collected, 4646 passed, 14 skipped, 1 xfailed`.
 
-### 7.5 — THE FLOOR LEDGER, END TO END
+| interpreter | collected | result | wall |
+|---|---|---|---|
+| `py -3.13 -m pytest -q` | **4661** ✅ | **`4646 passed, 14 skipped, 1 xfailed`** ✅ | 583.84s |
+| `py -3.10 -m pytest -q` | **4661** ✅ | **`4646 passed, 14 skipped, 1 xfailed`** ✅ | 470.72s |
+
+The +12 landed exactly where predicted, which is the term worth checking: **12 of the 13 added
+cases come from two `parametrize`d pins over five shapes each**, so the `def test_` count a lazier
+derivation would have used says 4. Collection said 25 for that file before the run and 25 after.
+
+**AND THE CHANGE-NOTHING PROOF DID NOT RUN. Recorded because a missing instrument that nobody
+mentions is indistinguishable from a passing one.**
+
+All three digest calls in that run failed identically:
+
+```
+python.exe: can't open file 'C:\Users\Techn\.claude\jobs\f51d4b79/tmp/wtdigest.py':
+[Errno 2] No such file or directory
+```
+
+**Cause, and it is a lesson about instrument durability rather than about this branch.** The digest
+script from `docs/lanes/BRIEF-TEMPLATE.md` was never in the repo — I had written it to the session's
+scratch directory. That directory is keyed to the session, the session changed between run 2 and run
+3, and the tool went with it. **An instrument stored outside the repository is not durable across a
+session boundary**, and a lane that runs for several sessions will lose it exactly once, silently,
+at the point where it is being trusted most.
+
+The command exited `rc=2` **because of this and not because of any test** — which is the one piece
+of luck in it: had the digest been the *last* step rather than interleaved, a green test summary
+above a failed exit code is precisely the shape that gets read as "passed".
+
+**Re-established rather than argued away.** I recreated the script and re-ran BOTH interpreters with
+the fence in place; §7.8 is that run. I am not deleting §7.7 in its favour: the unfenced numbers are
+the ones the prediction was checked against, and the honest record is that they were measured
+without their guard and then re-measured with it.
+
+Two weaker facts do bound the unfenced pair, and they are worth stating for what they are:
+`git status --porcelain` was empty immediately before run 3 and again immediately after (so no
+tracked file changed and nothing untracked appeared), and the digest computed after run 3 —
+`6eba3bbb…  files=263` — matches §7.8's before/after triple. That is evidence, not the proof the
+instrument exists to give, and I am not presenting it as such.
+
+### 7.8 — THE FENCED RE-RUN, ATTEMPT 1: **I CONTAMINATED MY OWN FENCE**
+
+MEASURED, and reported rather than quietly re-run, because the failure is instructive and it is
+entirely mine.
+
+| step | digest |
+|---|---|
+| before 3.13 | `6eba3bbb67bf5641…  files=263` |
+| **after 3.13 / before 3.10** | **`1a3e3a4515994964…  files=263`** ← **CHANGED** |
+| after 3.10 | `1a3e3a4515994964…  files=263` |
+
+Both interpreters passed identically (`4646 passed, 14 skipped, 1 xfailed`, 607.51s / 531.69s), and
+`files=263` never moved — but **the before/after pair around the 3.13 run does not match, which is
+exactly the condition the instrument exists to report.**
+
+**The cause is not the test run. It is me.** I edited `docs/lanes/w52-live.md` — writing §7.7 and
+re-deriving §2's line numbers — *while the fenced run was in flight in the background*.
+`git status --porcelain` at the end names exactly one modified file, this report, and nothing else.
+The 3.10 half (mid → after) is identical and therefore clean.
+
+**The lesson, which is the second instrument failure in two runs and the same shape as the first:**
+a fence is a claim about an interval, and **anything I do inside that interval is inside the fence**.
+Backgrounding the run does not put my own edits outside it — it makes them concurrent, which is
+worse, because the result still *looks* fenced. §7.7's failure was an instrument that vanished;
+this one is an instrument that ran correctly and was defeated by the operator working beside it.
+Together they are one rule: **freeze the tree for the whole run, and put the instrument somewhere
+the run cannot outlive.**
+
+I am not claiming the 3.13 result is invalid — the suite passed and the delta is a documentation
+file that no test reads. I am claiming **I cannot prove it from this run**, which is a different
+statement, and the honest one.
+
+### 7.8b — THE FENCED RE-RUN, ATTEMPT 2: tree frozen, no concurrent edits
+
+*Filled in by the commit after this one. Everything above is committed first, precisely so there is
+nothing left for me to edit while it runs.*
+
+### 7.9 — THE FLOOR LEDGER, END TO END
 
 | tree | collected | result |
 |---|---|---|
 | `64b43c2` baseline (both interpreters) | 4636 | `4621 passed, 14 skipped, 1 xfailed` |
 | `f632d3e` run 1 (both) — **predicted 4633 passed** | 4648 ✅ | `2 failed, 4631 passed, 14 skipped, 1 xfailed` ❌ |
 | `9e0170f` run 2 (both) — **predicted 4634 passed** | 4649 ✅ | `4634 passed, 14 skipped, 1 xfailed` ✅ |
+| `bd463f7` run 3, the discharge (both) — **predicted 4646 passed** | 4661 ✅ | `4646 passed, 14 skipped, 1 xfailed` ✅ |
 
-Net against baseline: **+13 tests, 0 failures, skips and xfails unmoved at 14/1.**
+Net against baseline: **+25 tests, 0 failures, skips and xfails unmoved at 14/1.**
+
+**Three predictions: two hit, one missed** — and the ledger's shape is the argument. The two hits
+confirm arithmetic. The miss found a regression in my own build that the 15-mutant ledger, the
+per-edit targeted runs and the pre-build RED check had all passed over. The gate that reviewed this
+branch reports the same thing happening to it: it predicted both its mutants would survive, one was
+killed by a pin it had not found, and leaving the miss visible corrected one of its own findings
+before it shipped. **That is twice in one wave that a missed prediction was worth more than a hit,
+on two different lanes, and neither was worth anything until it was written down first.**
 
 **Two predictions, one hit and one miss, and the miss was worth more.** The hit confirms the
 arithmetic. The miss found a real regression in my own build that the 15-mutant ledger, the targeted
@@ -730,7 +826,9 @@ does the same for the homes list. All green on every run reported here.
    swallows — but "catch everything" is a real hazard and a gate should press on whether some
    exception class ought to propagate after all (`KeyboardInterrupt` and `SystemExit` do, being
    `BaseException`; that is deliberate and is why the catch is `Exception`, not `BaseException`).
-7. **A gate should ask what ELSE became reachable.** §7.2's regression came from a code path being
+7. **The digest fence did not run on run 3** (§7.7) and I re-ran fenced rather than reasoning
+   around it. A gate is entitled to treat the unfenced pair as unproven and read only §7.8.
+8. **A gate should ask what ELSE became reachable.** §7.2's regression came from a code path being
    newly reached by a verb, not from the code being wrong. I fixed the instance and the class, but
    the honest generalisation is: `_cmd_respawn_native` now calls `_stop_native_session_status`,
    which it never did, so any test stubbing `run`/`which` for a respawn is newly exercising it. The
