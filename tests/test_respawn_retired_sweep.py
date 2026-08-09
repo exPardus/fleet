@@ -105,8 +105,22 @@ def _drive(home, monkeypatch, roster, *, force=False, calls=None, rc=0,
                           which=lambda _: "claude")
 
 
+def _drive_kill(home, monkeypatch, *, calls=None, run=None, name="w"):
+    """The same shared sweep body, reached through the OTHER caller.
+
+    `kill` needs no roster fetch, so this is a smaller drive than `_drive` --
+    but it exercises the identical `_sweep_retired_sessions`, which is the
+    point: F3 was that every pin on that body came in through `respawn`."""
+    monkeypatch.setattr(fleet, "dispatch_bg", _must_not_dispatch)
+    return fleet.cmd_kill(SimpleNamespace(name=name, yes=True),
+                          run=run or _run_factory(calls=calls),
+                          which=lambda _: "claude")
+
+
 def _stops(calls):
-    return [c[0][2] for c in calls if c[0][:2] == ["claude", "stop"]]
+    return [c[0][2] if isinstance(c, tuple) else c[2]
+            for c in calls
+            if (c[0][:2] if isinstance(c, tuple) else c[:2]) == ["claude", "stop"]]
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +254,102 @@ def test_respawn_skips_a_retired_sid_that_is_another_workers_current_sid(
     assert victim_sid not in stopped
     assert fleet._native_job_ref(victim_sid) not in stopped
     assert "matches another worker's current session_id" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# A CORRUPT REGISTRY MUST NOT ABORT EITHER VERB (gate w52-glive3, F1).
+#
+# `retired_sids` is read straight out of `state/fleet.json`, and the corrupted
+# or hand-edited registry is the threat model the M1 guard exists FOR -- so a
+# non-string element there is in-scope input. The first w52 build made every
+# shape below abort with a raw `TypeError` out of `main()`, on the verb §11.4
+# makes the RECOVERY lever, with zero subprocess attempts. Base tolerated them.
+#
+# The fix is deliberately wider than the gate's one-line suggestion, because
+# measuring found TWO distinct raise sites, not one:
+#   * `retired[:8]` in the sweep body      -- int / bool / float
+#   * `dict.fromkeys(...)` in BOTH CALLERS -- dict / list, unhashable, and it
+#     raised before the sweep's own guards could ever run.
+# A fix confined to the sweep body would have left the second wide open.
+# ---------------------------------------------------------------------------
+
+CORRUPT_SHAPES = [123, {"a": 1}, ["x"], True, 3.5]
+
+
+@pytest.mark.parametrize("bad", CORRUPT_SHAPES, ids=lambda b: type(b).__name__)
+def test_a_corrupt_retired_sid_cannot_abort_the_respawn(bad, home, monkeypatch, capsys):
+    _install(home, retired=[bad, "good-b"])
+    calls = []
+    _drive(home, monkeypatch, [LINGERING_DONE], calls=calls)
+    # NB `_native_job_ref` splits at the first `-`, so the REF is "good".
+    assert fleet._native_job_ref("good-b") in _stops(calls), (
+        f"the corrupt element cost the sweep the GOOD sid too: {_stops(calls)}")
+    assert [o["kind"] for o in _tombstones("w", SID)] == ["stopped"]
+    assert "is not a session id" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("bad", CORRUPT_SHAPES, ids=lambda b: type(b).__name__)
+def test_a_corrupt_retired_sid_cannot_abort_the_KILL(bad, home, monkeypatch, capsys):
+    """The SAME guard, pinned from the OTHER caller.
+
+    Extraction single-sourced the code and left the coverage single-sided: the
+    gate planted a mutant reintroducing the w52 regression on `kill` and it
+    **survived all 4649 tests**, because every pin on the shared body drove
+    `respawn`. `kill` is the caller whose failure mode this lane's own report
+    calls the worse one -- it aborts before the tombstone AND the dead-marking.
+
+    The general lesson, worth more than this test: **a shared helper needs a
+    pin per caller.** The mutant that kills it from one caller can survive from
+    the other, and extracting a body is exactly what makes that possible."""
+    _install(home, retired=[bad, "good-b"])
+    calls = []
+    rc = _drive_kill(home, monkeypatch, calls=calls)
+    assert rc == 0, rc
+    assert fleet._native_job_ref("good-b") in _stops(calls), _stops(calls)
+    assert [o["kind"] for o in _tombstones("w", SID)] == ["killed"], (
+        "kill aborted before its tombstone -- the consequence the guard exists for")
+    assert fleet.load_registry()["workers"]["w"]["status"] == "dead"
+    assert "is not a session id" in capsys.readouterr().err
+
+
+def test_a_raising_stop_CANNOT_abort_the_KILL(home, monkeypatch, capsys):
+    """F3, the mutant-measured half: the best-effort guard, pinned from `kill`.
+
+    `tests/test_native.py`'s five `kill` sweep pins assert that the sweep
+    happens, its timeouts, its cap, its progress line and its M1 skip. **None
+    of them asserts exception safety** -- which the gate proved by planting a
+    guardless `kill` and watching the whole suite stay green."""
+    _install(home, retired=["retired1-a", "retired2-b"])
+    boom = []
+
+    def _run(argv, **kwargs):
+        boom.append(argv)
+        if argv[:3] == ["claude", "stop", "retired1"]:
+            raise ValueError("the daemon did something surprising")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    rc = _drive_kill(home, monkeypatch, run=_run)
+    assert rc == 0, rc
+    assert "retired2" in _stops(boom), (
+        f"the sweep stopped at the first failure instead of continuing: {_stops(boom)}")
+    assert [o["kind"] for o in _tombstones("w", SID)] == ["killed"], (
+        "kill aborted before its tombstone")
+    assert fleet.load_registry()["workers"]["w"]["status"] == "dead", (
+        "kill aborted before marking the worker dead -- kill is terminal")
+    assert "error (ValueError) -- not retried" in capsys.readouterr().err
+
+
+def test_the_dedup_still_keeps_the_OLDEST_position_and_the_cap_still_bites():
+    """`_ordered_unique_sids` replaced `dict.fromkeys` at both call sites, and
+    the cap depends on its exact semantics: FIRST occurrence wins, so a sid's
+    oldest position survives and `[-cap:]` still means most-recent. Asserted
+    directly on the helper, including the unhashable pass-through that is the
+    whole reason it exists."""
+    assert fleet._ordered_unique_sids(["a", "b", "a", "c", "b"]) == ["a", "b", "c"]
+    # unhashable values cannot be deduped, and must NOT be silently dropped --
+    # the sweep body is what reports them to the operator.
+    assert fleet._ordered_unique_sids(["a", {"x": 1}, "a"]) == ["a", {"x": 1}]
+    assert fleet._ordered_unique_sids([]) == []
 
 
 # ---------------------------------------------------------------------------
