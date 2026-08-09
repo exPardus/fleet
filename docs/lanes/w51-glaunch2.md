@@ -7,7 +7,7 @@
 | Lane | Gate. Worktree `C:/proga/fleet-w51-glaunch2`, branch `w51/glaunch2` @ `168b608`. |
 | Fence held | Commits to `w51/glaunch2` only. No push, no merge in this repo, no other ref moved. **No `fleet` verb was run at all this turn**, so the `FLEET_HOME`-is-not-a-fence hazard was never reached. |
 | Interpreters | `py -3.13` and `py -3.10`, both floors re-run **by me, from fresh clones** (§4). |
-| Rehearsal | `w50/launchfix` → `main` @ **`7b2ff75`**, in a throwaway clone (§5). |
+| Rehearsal | `w50/launchfix` → `main` @ **`7b2ff75`**, in a throwaway clone: **auto-merges clean, 0 conflicts, 0 lost hunks, merged floor GREEN on both interpreters** (§5). |
 
 ## 0. VERDICT — **GATING**
 
@@ -42,14 +42,20 @@ MINORs, **zero BLOCKING**. Everything else the brief asked me to attack came bac
 | | M4 | F5's `-z` fix omits `encoding=`, so `_tracked_markdown()` mangles any **non-ASCII** path — and F5's own new pin then fails with a message naming the **wrong cause** (*"the split must be on NUL"*, when the split is already on NUL) |
 | **MINOR** | m1 | F6's exemption argument censuses `docs/OPERATOR-GATES.md` as *"two check-count hits"*; under the census's own summed definition it carries **three** |
 | | m2 | §7.5.1's *"Hit on every field"* counts `4305 collected`, which was **measured in the predicting commit** — 4 of 5 fields were genuinely at risk, not 5 |
-| | m3 | `§7.7` was inserted **above** `§7.6`, so the report now reads 7.5.1 → 7.7 → 7.6 |
+| | m3 | `§7.7` was inserted **above** `§7.6` — measured, the headings run `7.5.1` (L765) → **`7.7`** (L801) → **`7.6`** (L838) |
 | | m4 | CONTRIBUTING.md:41's new *"**28 files today**"* is a bare present-tense count of a derived, moving population, **pinned by nothing** — the exact defect class F1 is about |
 | | m5 | `test_doc_claims.py:186` says *"These **five** are the files"*; `len(ENTRY_DOCS)` is **6**, and the CONTRIBUTING.md sentence this discharge rewrote says *"the **six** `ENTRY_DOCS`"* |
 | | m6 | the derivation's third name, `bin/fleet_statusline.py:36`'s `_INSTALL_ROOT`, is **inert**: that file has **zero** command renders, so the superset adds no coverage today |
 | | m7 | the `INSTALL_ROOT = Path("/opt/fleet")` line added to `test_a_shell_sink_is_censused_even_with_one_path` is **not load-bearing** — the census is identical with and without it |
 
-**Nothing here touches `bin/fleet.py`, and nothing here is a reason to hold the one-line quoting
-fix.** M1/M2 are comment edits. If the operator wants the launch blocker gone today, landing
+**Every finding above is MEASURED**, each with its receipt in the section named. There are **no
+BELIEVED findings** in this report. The one thing I believe rather than measure is stated as such:
+**BELIEVED — that `main` will still be at `7b2ff75` when this lands.** It was `6492176` when the
+lane rehearsed and `4d74d22` when the lane's own brief was written, so the prior is against me; if
+it moves again, §5 is a claim about a past tree like any other receipt and the re-run is cheap.
+
+**Nothing here touches `bin/fleet.py`, and nothing here is a reason to hold the quoting fix
+itself.** M1/M2 are comment edits. If the operator wants the launch blocker gone today, landing
 Part 1 and fixing M1/M2/M4 on top is a defensible sequence; my objection is to landing the
 discharge *while it still states the things it was written to retract*.
 
@@ -215,13 +221,25 @@ bullets:
 
 | bullet | pinned? | by |
 |---|---|---|
-| ONE path, no sink, not a `"command"` value | **NO** | nothing constructs it. The nearest test, `test_prose_naming_a_path_is_NOT_a_command`, uses `registry_path()` — **not path-valued in that snippet at all**, so it is green for a different reason and would stay green if rule (ii) were deleted |
+| ONE path, no sink, not a `"command"` value | **NO** | nothing constructs it — see the control below |
 | parameter with no `Path` annotation | yes | `test_an_UNANNOTATED_parameter_is_still_invisible` |
 | `.format()` / `%` / concat / `str.join` | yes | `test_the_other_render_MECHANISMS_are_still_invisible` |
 | subscript-assignment sink | **NO** | — |
 | anything outside `bin/**/*.py` | **NO** | — |
 
-**2 of 5.** The report's own §7.3 table is honest about one of these — it says the subscript sink is
+**2 of 5.** The nearest candidate for bullet 1, `test_prose_naming_a_path_is_NOT_a_command`, is green
+for the wrong reason, and the control says so: its `registry_path()` carries no `-> Path` annotation
+**in that snippet**, so nothing in it is path-valued at all. Annotate the helper — making the path
+genuinely recognised, which is the shape bullet 1 actually describes — and the census still returns
+`[]`, with no test anywhere asserting it:
+
+```
+# at 168b608
+shipped seed as written                        ->  []   (green: no path is recognised)
+same seed with `def registry_path() -> Path`   ->  []   (green: ONE path, no sink -- UNPINNED)
+```
+
+The report's own §7.3 table is honest about one of these — it says the subscript sink is
 *"named in the docstring"*, not pinned. The **shipped instrument's docstring** is the thing that
 overstates, and the shipped docstring is what the next reader believes. This is wave 46's lesson
 landing again: the pin's population **is** the claim.
@@ -421,7 +439,8 @@ A conflict count whose good answer is `0` proves nothing until it has produced a
 something. `w35/nd4c × main` @ `7b2ff75`:
 
 ```
-# live: a merge rehearsal in a throwaway clone; the answer depends on today's main
+# volatile: a merge rehearsal in a throwaway clone, discarded with the job; and the value is a
+# function of today's `main`, so it is reproducible only against `main` @ 7b2ff75
 merge rc=1, 6 conflicted files
 ANCHORED   grep -cE '^\+?<<<<<<<'  total = 26
 UNANCHORED grep -c   '<<<<<<<'     total = 31
@@ -438,7 +457,8 @@ the wave-42 lesson *about marker-grep nulls*, and `docs/NEXT-SESSION.md` quotes 
 ### 5.3 The merge — AUTO-MERGES CLEAN — MEASURED
 
 ```
-# live: a merge rehearsal in a throwaway clone against main @ 7b2ff75
+# volatile: a merge rehearsal in a throwaway clone, discarded with the job; reproducible from the
+# two named commits -- merging 168b608 into 7b2ff75
 merge-base main w50/launchfix = 4d78f6c
 files main touched since base   = 19
 files branch touched since base = 7
@@ -522,6 +542,76 @@ the two sets are disjoint, so:
 **This commit contains no floor results.** The numbers land in the next commit, so git witnesses the
 ordering rather than this report asserting it.
 
+### 5.7 THE MERGED-TREE FLOOR — THE RESULT
+
+**MEASURED, and the prediction above is in commit `5fc4a28`, which contains no floor results. This
+section is in a later commit.** The ordering is witnessed by git, not asserted by me.
+
+```
+# volatile: the rehearsal clone, discarded with the job; merged commit 9963167,
+# parents 7b2ff75 168b608, tree 54ea03a1
+py -3.13 -m pytest -q  ->  4302 passed, 14 skipped, 1 xfailed in 444.09s   rc=0
+py -3.10 -m pytest -q  ->  4302 passed, 14 skipped, 1 xfailed in 413.44s   rc=0
+py -3.13 -m pytest --collect-only -q  ->  4317 tests collected
+py -3.10 -m pytest --collect-only -q  ->  4317 tests collected
+```
+
+| predicted | measured 3.13 | measured 3.10 |
+|---|---|---|
+| 4317 collected | **4317** | **4317** |
+| 4302 passed | **4302** | **4302** |
+| 14 skipped | **14** | **14** |
+| 1 xfailed | **1** | **1** |
+| 0 failed | **0** | **0** |
+
+**Hit on every field, on both interpreters — and here all five were at risk**, because
+`--collect-only` was not run on the merged tree until after the prediction was committed, and the
+collection figure above is measured with `--collect-only` rather than derived from `4302 + 14 + 1`.
+That is the difference between this table and §7.5.1's (m2).
+
+**The merged tree is green. `w50/launchfix` lands cleanly on `main` @ `7b2ff75`.**
+
+### 5.7.1 Both standing assumptions confirmed, and the arithmetic is fully additive
+
+§5.6 named two assumptions so they could fail visibly. Neither did — I measured `main`'s own floor
+separately to check:
+
+```
+# at 7b2ff75
+py -3.13 -m pytest -q  ->  4235 passed, 14 skipped, 1 xfailed in 450.29s   rc=0     (= 4250 collected)
+```
+
+`main` is green on its own, and its 12 added tests all PASS while adding no skip and no xfail. Every
+count in this report closes additively against a single derived base:
+
+| | collected | passed | skipped | xfailed |
+|---|---|---|---|---|
+| base `4d78f6c` | 4238 | 4223 *(derived)* | 14 | 1 |
+| `main` `7b2ff75` | 4250 | **4235** | 14 | 1 |
+| branch `168b608` | 4305 | **4290** | 14 | 1 |
+| **merged `54ea03a1`** | **4317** | **4302** | **14** | **1** |
+
+`4223 + 67 + 12 = 4302`, and `4238 + 12 + 67 = 4317`. The branch's 67 and main's 12 are disjoint, as
+the clean auto-merge implied.
+
+### 5.8 The tree did not move — digest, at three points
+
+Content digest over bytes on disk (§5.5), read before the 3.13 run, between the two runs, and after
+the 3.10 run — one working tree, compared only against itself:
+
+```
+# volatile: the rehearsal clone, discarded with the job
+m-before     files=247 tree_sha256=1e68415c7ec3dd59a26d11836fc36f4e6ebe758809b40a3d8a88b1efee276719
+m-mid        files=247 tree_sha256=1e68415c7ec3dd59a26d11836fc36f4e6ebe758809b40a3d8a88b1efee276719
+m-after      files=247 tree_sha256=1e68415c7ec3dd59a26d11836fc36f4e6ebe758809b40a3d8a88b1efee276719
+git status --porcelain  ->  empty, before and after
+```
+
+Identical at all three points, **`files=` included** — so neither floor ran on a tree that had moved
+under it, and no run left anything behind. `git rev-parse HEAD^{tree}` stayed `54ea03a1` throughout,
+which is the check to use for tree *identity*; the digest above answers only *did this one checkout
+change*.
+
 ## 6. Q5 — what did the discharge ARM?
 
 The discharge touched `CONTRIBUTING.md` and two test modules. **A test module is an instrument, and
@@ -603,15 +693,26 @@ of this pin's scope is wrong"*, and the discharge rewrote the CONTRIBUTING.md ha
 
 ### 6.3 Reachability across a trust boundary — nothing found
 
-Slice (d)'s gate found working cross-home exploits. I looked for the analogue and found none: this
-discharge adds no code path, no `fleet` verb, no file write, no env-var read, no subprocess except
-the `git ls-files` above, and touches nothing under `bin/`. The two test modules are read-only over
-the repo. **The only thing it made reachable is a test failure (§6.1); the only thing it made
-harder to measure is its own census (§3.4, §3.5, m1).**
+Slice (d)'s gate found working cross-home exploits. I looked for the analogue and found none —
+MEASURED rather than assumed. Every added line in the discharge, filtered for anything that can
+reach outside the process:
+
+```
+# at 168b608
+git diff 4a62e21..168b608 -- tests/ CONTRIBUTING.md | grep '^+' \
+  | grep -E 'subprocess|os\.environ|open\(|write_text|\.write\(|Popen|system\(|eval\(|exec\(|shutil|rmtree|unlink|mkdir'
+
++    proc = subprocess.run(["git", "ls-files", "-z", "*.md"], cwd=REPO_ROOT,
+```
+
+**One line, and it is M4.** No `fleet` verb, no file write, no env-var read, no second subprocess,
+nothing under `bin/`; both test modules are read-only over the repo. **The only thing this discharge
+made reachable is a test failure (§6.1); the only thing it made harder to measure is its own census
+(§3.4, §3.5, m1).**
 
 ## 7. WHERE THIS BRIEF WAS WRONG
 
-Four, and the third is the one worth the most.
+Five, and the third is the one worth the most.
 
 1. **"The script is in `docs/lanes/BRIEF-TEMPLATE.md`."** — FALSE at `168b608`. That file is **80
    lines** and contains no digest script; `git grep -l tree_sha256` over the tracked tree returns
@@ -624,11 +725,13 @@ Four, and the third is the one worth the most.
 2. **"The campaign quoted 26 for `w35/nd4c × main` since wave 38; the true value is 25, the extra hit
    being `knowledge/INDEX.md`."** — not reproducible as stated, and it cannot be, because the value
    is a function of `main`. Measured against `main @ 7b2ff75` I get **anchored 26, unanchored 31**,
-   with prose markers in **three** files, not one (`knowledge/INDEX.md` **2**, `knowledge/lessons.md`
-   **1**, `docs/NEXT-SESSION.md` **1**, and one more from the anchored/unanchored split). The brief
-   hands a control value with no commit attached — which is the same defect the brief itself
-   diagnoses two paragraphs earlier. The *method* is right and I used it; the *number* is a receipt
-   without a pin.
+   with the 5 prose markers spread over **three** files, not one — `knowledge/INDEX.md` **2**,
+   `knowledge/lessons.md` **2**, `docs/NEXT-SESSION.md` **1**. The source is
+   `7b2ff75:docs/lanes/BRIEF-TEMPLATE.md`, which states the 26→25 correction as *"Measured
+   2026-08-09 by lane `w50-mp` and reproduced at the wave-50 landing"* — i.e. against a `main` that
+   has since moved. The brief hands on a control value with no commit attached, which is the same
+   defect the brief itself diagnoses two paragraphs earlier. The *method* is right and I used it;
+   the *number* is a receipt without a pin.
 
 3. **"F3's shape derivation is the safe half and F1 the interesting one (I suspect the reverse)."** —
    **the brief's suspicion is right, and still understates it.** F1 came back fully reproducible on
@@ -645,6 +748,25 @@ Four, and the third is the one worth the most.
    base, intersecting it at `bin/fleet.py`. The staleness the brief warns about is real; the tip
    commit is just not where it lives.
 
+5. **"`bin/fleet.py:6134` … one line, zero insertions."** — *zero insertions* is right; *one line*
+   is not. Measured, the branch changes **two**:
+
+   ```
+   # at 168b608
+   git diff --numstat 4d78f6c 168b608 -- bin/fleet.py   ->  2   2   bin/fleet.py
+
+   -        # Forward slashes: this command string is executed through a shell.
+   -        "command": f"{Path(sys.executable).resolve().as_posix()} {script}",
+   +        # A shell runs this: forward slashes, and QUOTED -- a spaced path splits.
+   +        "command": f'"{Path(sys.executable).resolve().as_posix()}" "{script}"',
+   ```
+
+   The second is the comment, and it is the half that tells the next reader the quotes are load-
+   bearing rather than decorative — so it is worth counting. Net insertions are genuinely zero,
+   which is what `tests/test_self_citations.py` cares about, and that claim survives the merge:
+   `bin/fleet.py` is **21453** lines at base and on this branch, and **21570** both on `main` and on
+   the merged tree, so every one of those 117 lines came from `main`.
+
 **Where the brief was right and it mattered:** "re-run it yourself" on the 94 (it reproduced, which
 *changed the grade* from BLOCKING to sharpened-MAJOR); "plant mutants against the derivation itself"
 (seven escapes); "run your measurement against a known non-zero input first" (26 before 0);
@@ -657,8 +779,12 @@ the same instrument, §5.4).
 - **Did not fix anything.** Findings, not repairs — no change to `bin/fleet.py`, `CONTRIBUTING.md`,
   or either test module on this branch.
 - **Did not run any `fleet` verb**, so nothing in this report depends on `FLEET_HOME` fencing.
-- **Did not measure `main`'s own floor.** §5.6's prediction assumes main @ `7b2ff75` is green on its
-  own; if the merged floor misses, that is the first thing to check.
 - **Did not close the census holes I found.** MUT-1..MUT-5 are reported, not patched.
-- **Did not run the merged floor on a second clone per interpreter** — both interpreters run against
-  the one merged checkout, sequentially, with the digest re-read between them.
+- **Did not run the merged floor on a second clone per interpreter** — both interpreters ran against
+  the one merged checkout, sequentially, with the digest re-read between them (§5.8).
+- **Did not run `main`'s floor on `py -3.10`.** §5.7.1 measures it on 3.13 only; the merged tree is
+  measured on both, so the gap is in the corroborating check, not the subject.
+- **Did not verify the discharge's own mutant battery** (*"14 mutants, 0 mismatches"*, §7). I planted
+  my own instead, which is the stronger check but does not confirm theirs ran as described.
+- **Did not re-run `tools/verify_receipts.py`.** Nothing in the discharge touches `docs/specs/**`,
+  which is the population that harness holds.
