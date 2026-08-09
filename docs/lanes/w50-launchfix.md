@@ -857,3 +857,171 @@ the merged result rather than only against the base.
 **BELIEVED, stated as such:** that `main` will still be at `6492176` when this lands. If it moves
 again, this check is about a past tree like any other receipt, and the re-run is cheap.
 
+
+---
+
+# 8. DISCHARGE of gate `w51-glaunch2` — 4 MAJOR, 7 MINOR
+
+**I contest nothing.** All four MAJORs and all five actionable minors are correct as measured, and
+M1/M2 are the sharpest kind of finding: *the discharge stated, in a second copy, the things it was
+written to retract.* That is the failure the first gate gated on, reproduced inside its own repair.
+The two observations (m6, m7) are answered in prose and nothing was changed for them, per the brief.
+
+**Nothing in `bin/fleet.py`** — `git diff --name-only 168b608..HEAD` is `CONTRIBUTING.md`,
+`docs/lanes/w50-launchfix.md` and the two test modules. Every MAJOR except M4 is a comment edit;
+M4 is one keyword argument plus an assertion message. **The stop condition was not reached**: no
+item required re-deriving the 94 census, touching `bin/fleet.py`, or building new pins.
+
+**The manager's "where I may be wrong" both resolve in the direction predicted.** M1/M2 are pure
+comment edits — I checked each of the four sites (`:94`, `:185`, `:422`, `:425`) and none is
+load-bearing on any assertion. M4's fix is exactly one keyword argument plus a message; the
+encoding problem does not run deeper than `encoding=`, so the boundary the brief set was not
+reached either.
+
+## 8.1 M1 — the retracted number, still asserted 328 lines below its retraction
+
+**CONFIRMED, not contested.** The comment above `_HISTORICAL_PREFIXES` no longer states a size at
+all: it cites the docstring retraction and stops. The literal now appears **exactly once** in the
+file, inside the retraction that disowns it.
+
+```
+$ git grep -n '94 hits across 21 files' -- tests/
+tests/test_doc_claims.py:94:        DEFINITION ATTACHED -- this docstring shipped `94 hits across 21 files`
+```
+
+One line, past tense, in the paragraph that corrects it. I deliberately did **not** re-quote the
+old sentence at the second site: a retraction that repeats the literal leaves two grep hits and the
+next reader has to adjudicate which is live. Citing instead of quoting makes the mechanical check
+unambiguous.
+
+## 8.2 M2 — `NEXT-SESSION.md` named exempt by the commit that held it
+
+**CONFIRMED, not contested.** F2's own defect shape, inside F2's discharge. Both sites corrected;
+`:185` also gained the distinction that actually matters — that `ENTRY_DOCS` and `CHECK_COUNT_DOCS`
+are two different populations, and leaving `NEXT-SESSION.md` out of the first is not the same as
+exempting it from the second.
+
+```
+$ git grep -n 'NEXT-SESSION' -- tests/
+tests/test_doc_claims.py:189:# `NEXT-SESSION.md` was named in that list until 2026-08-09 and is NOT an
+tests/test_doc_claims.py:462:    # `docs/NEXT-SESSION.md` was on this list beside it and is NOT current-tree
+
+$ python -c "... import test_doc_claims as t ..."
+  docs/NEXT-SESSION.md in CHECK_COUNT_DOCS: True
+  len(CHECK_COUNT_DOCS): 28
+  len(ENTRY_DOCS): 6
+```
+
+Both surviving mentions now say it is **not** exempt, which is what the code does.
+
+## 8.3 M3 — the coverage claim measured 2 of 5, and five more shapes were undisclosed
+
+**CONFIRMED, not contested.** *"Every entry below is now PINNED by a test"* was false and I wrote
+it while fixing a census for being false. Per the brief I did **not** build five pins. What changed:
+
+- **every bullet is now marked `[PINNED: <test name>]` or `[UNPINNED]`** — the two that are pinned
+  say which test; the three that are not say so;
+- the *"ONE path, no sink"* bullet carries the gate's own finding that
+  `test_prose_naming_a_path_is_NOT_a_command` **is not its pin** and is green for an unrelated
+  reason (no path is recognised in that snippet at all);
+- **the five undisclosed escape shapes are added as known-uncovered**, with the load-bearing one
+  named first and explained rather than listed: `_module_scope_path_names()` calls
+  `_directly_path_valued` on the bound expression, and that predicate no longer recognises a bare
+  `INSTALL_ROOT` — deleting the allowlist is what removed that recognition. So module-scope
+  resolution is **not transitive** while local resolution is, and `_BIN = INSTALL_ROOT / "bin"` is
+  invisible one indent-level outside a function where the identical binding is seen;
+- the annotated-parameter bullet now says annotations are matched only as the bare name `Path`, so
+  `pathlib.Path`, `"Path"` and `Optional[Path]` escape;
+- the **over-match** direction is disclosed too, with the argument for why it is graded low —
+  its failure mode is noise, and noise is what gets a pin suppressed.
+
+The list is now framed as *a floor on the holes, not a census of them*, because it has been
+measured under-reporting by two consecutive gates.
+
+**Self-check, because this campaign's fix-waves mint defects 7/7 and I was told to assume mine
+would.** I re-measured my own new claims rather than inheriting the gate's:
+
+```
+MUT-1 one-hop module-scope alias   census -> []                                    (escapes, as I now disclose)
+CONTROL direct module-scope bind   census -> [('x.py', 3, 'r', ('_ROOT',))]        (so the scan is not simply blind)
+shipped tree                       4 sites, 0 unquoted, unchanged
+```
+
+## 8.4 M4 — the encoding half, and a control that carries the shape of the data
+
+**CONFIRMED, not contested.** `subprocess.run(...)` gained `encoding="utf-8"`, and the assertion
+message now names **both** causes instead of sending a reader after a NUL split that is already in
+place.
+
+**The control battery includes non-ASCII paths, because that is the entire point of the finding.**
+Run in a throwaway clone, every row restored and asserted clean:
+
+```
+# fix present (HEAD)
+GREEN CONTROL  ASCII + space          docs/My Notes.md          ascii_only=True   73 passed
+GREEN SUBJECT  non-ASCII, NO space    docs/Unicode-Nötes.md     ascii_only=False  73 passed
+GREEN SUBJECT  non-ASCII + space      docs/Ünicode Notes.md     ascii_only=False  73 passed
+GREEN SUBJECT  CJK, no space          docs/文書ノート.md         ascii_only=False  73 passed
+```
+
+**And the battery discriminates** — seeded by removing `encoding=` and re-running:
+
+```
+# encoding= removed
+GREEN CONTROL  ASCII + space          docs/My Notes.md          ascii_only=True   73 passed
+RED   SUBJECT  non-ASCII, NO space    'docs/Unicode-NÃ¶tes.md' is not a file      3 failed
+RED   SUBJECT  non-ASCII + space      'docs/Ãœnicode Notes.md' is not a file      3 failed
+RED   SUBJECT  CJK, no space          'docs/æ–‡æ›¸ãƒŽãƒ¼ãƒˆ.md' is not a file      3 failed
+```
+
+**The ASCII row stays green through the defect in both directions.** That is the campaign's oldest
+lesson firing for the third time, and it is why an ASCII-only control was never evidence here.
+
+**My own seed failed first, and the failure is worth recording** because it produces exactly the
+output a working fix produces. My first seed edited the clone's working tree, but the battery calls
+`restore()` as its first action — `git reset --hard HEAD` wiped the seed before a single row ran,
+and all four rows came back GREEN. A seed the harness silently reverts is indistinguishable from a
+fix that works. It only discriminated once the seed was **committed** in the clone so the restore
+preserved it. Same family as the two harness bugs recorded in §7: the guard was right, the seed was
+inside it.
+
+## 8.5 The minors
+
+| # | disposition |
+|---|---|
+| **m1** | **CONFIRMED.** `docs/OPERATOR-GATES.md` carries **three** hits under this module's own summed definition, not two — re-measured myself: `find_check_count_claims → [23, 29]`, `find_pass_fail_totals → [28]`. The third is the `28 PASS / 0 FAIL` inside the same quoted argument, so the carve-out decision is unaffected and I still hold it; the comment supporting it was wrong about the file it carves out. Corrected in place. |
+| **m2** | **CONFIRMED.** *"Hit on every field"* counted five, and `4305 collected` was measured in the predicting commit, so only **four** were at risk. Restated in §7.5.1; the prediction itself stands. |
+| **m3** | **CONFIRMED.** `§7.7` had been inserted above `§7.6`. Reordered — headings now run `7.5` → `7.5.1` → `7.6` → `7.7`. |
+| **m4** | **CONFIRMED.** `CONTRIBUTING.md:41`'s *"28 files today"* was a bare present-tense count of a derived, moving population pinned by nothing — F1's exact class, minted while discharging F1. Removed rather than updated, and the sentence now says why no number belongs there and points the reader at `len(CHECK_COUNT_DOCS)`. |
+| **m5** | **CONFIRMED.** *"These five are the files"* against `len(ENTRY_DOCS) == 6`. Corrected to SIX; re-measured. |
+| **m6** | **Observation, agreed, nothing changed.** `bin/fleet_statusline.py:36`'s `_INSTALL_ROOT` is inert: that file has zero command renders, so the superset adds no coverage *today*. Deriving it is still right — the allowlist's defect was not that it missed a live site, it was that it decided by name, and a by-name rule is wrong on the day someone adds the render, not on the day you notice. The honest framing is the one the gate uses: the superset is real, its extra member is currently unexercised, and §7.3's claim was about the derivation being sound rather than about new coverage. |
+| **m7** | **Observation, agreed, nothing changed.** The `INSTALL_ROOT = Path("/opt/fleet")` line in `test_a_shell_sink_is_censused_even_with_one_path` is measurably not load-bearing — that snippet's path-valued-ness comes from its `-> Path` helper. Its docstring says the binding is there *"because this module no longer carries a list of blessed global names to fall back on"*, which is a true statement about why the snippet must now define its own globals to be self-contained, not a claim that the census depends on it. `test_a_MODULE_SCOPE_path_alias_is_seen` is the seed that genuinely discriminates the new derivation, as the gate says. Left alone deliberately: the brief said change nothing, and this discharge is not the place to widen scope. |
+
+## 8.6 Floors — the prediction, again in a commit with no results
+
+Collection derived on each interpreter separately, **COLLECTED, never counted from `def test_`
+lines**:
+
+```
+py -3.13 -m pytest --collect-only -q   ->  4305 tests collected
+py -3.10 -m pytest --collect-only -q   ->  4305 tests collected
+```
+
+**PREDICTION, and what I expect it to become and why:**
+
+> **Unchanged from the branch floor before these changes — 4305 collected, 4290 passed, 14 skipped,
+> 1 xfailed, 0 failed, on both `py -3.13` and `py -3.10`.**
+>
+> Why unchanged: this punch list added **no tests**. M1, M2, m1, m4 and m5 are comment and prose
+> edits; M3 is a docstring; m2 and m3 are report edits. M4 is the only executable change and it
+> alters `_tracked_markdown()`'s **decoding**, not its result on this tree — no tracked markdown
+> path here contains a non-ASCII character, which is precisely why the defect was latent. Per-module
+> collection confirms it: `tests/test_doc_claims.py` **71** and
+> `tests/test_rendered_command_quoting.py` **22**, both identical to the pre-change branch.
+>
+> If it misses, it is reported as a miss and the prediction is not adjusted.
+
+The run happens in a **fresh checkout**, with the working-tree digest from
+`main:docs/lanes/BRIEF-TEMPLATE.md` — not `git write-tree` — printed before and after, `files=`
+included, and compared only against itself within that one checkout. Results land in the next
+commit.
