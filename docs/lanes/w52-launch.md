@@ -1904,3 +1904,43 @@ branch), and nothing else. **No file added or deleted; nothing under `bin/`, `te
    checkouts. `files=` is held to the pre-run count as its own check.
 
 Results follow in the next commit.
+
+## The floor — RESULTS, scored against the second prediction
+
+**MEASURED**, digest and both suites inside one command so no edit of mine could land mid-window:
+
+```console
+=== DIGEST BEFORE ===
+f6987a0482ea04d53ba1e2488b16cd412b90aff3b9547103435b268d632d0ed1  files=262
+
+$ py -3.10 -m pytest -q
+4621 passed, 14 skipped, 1 xfailed in 495.52s (0:08:15)
+$ py -3.13 -m pytest -q
+4621 passed, 14 skipped, 1 xfailed in 529.34s (0:08:49)
+
+=== DIGEST AFTER ===
+f6987a0482ea04d53ba1e2488b16cd412b90aff3b9547103435b268d632d0ed1  files=262
+
+4636 tests collected
+```
+
+No `FAILED` or `ERROR` line on either interpreter. **All four clauses hold.**
+
+| # | Predicted | Measured | |
+|---|---|---|---|
+| 1 | population 30, collection 4636, **by construction** | `current_tree_docs() == 30`, tracked `.md` 156, `4636 tests collected` | ✔ |
+| 2 | both interpreters GREEN at `4621 passed, 14 skipped, 1 xfailed` | exactly that, both | ✔ |
+| 3 | content pins pass on a **third** consecutive edit to a scanned file | pass | ✔ |
+| 4 | digest pair matches, compared only against itself in this tree | identical, `files=` included | ✔ |
+
+**Clause 4 is worth one more sentence, because this run demonstrates the caveat rather than just
+restating it.** This pair is `f6987a04…`; the previous clean pair was `4791b81c…`. **Different, and
+correctly so** — the tree carries two more commits of edits. That is precisely why the instrument
+answers *"did this run change anything here?"* and never *"is this tree the same as that tree?"*, and
+why re-verifying `4791b81c…` from a later tree state is a question it cannot be asked. Each pair is
+valid only against itself.
+
+**Six full suite runs now stand behind this branch** — three commits × two interpreters — every one
+`4621 passed, 14 skipped, 1 xfailed`, no failure in any of them. The 3.13 flake gate `w52-glaunch3`
+recorded has not appeared in any of my three 3.13 runs, which is three independent datapoints for its
+"flake" grade and none against it.
