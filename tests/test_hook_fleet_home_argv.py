@@ -441,10 +441,25 @@ class TestEveryRenderedCommandQuotesItsPaths:
          own parser rather than a regex that agrees with the bug. An unquoted
          path containing a space comes back as two argv tokens, so the
          membership assertion fails.
-      2. IN SOURCE, over the WHOLE FILE -- every `{fleet_py}` / `{py}`
-         placeholder in `bin/fleet.py`, in any function, must be written
-         quoted. That is the half that survives a THIRD render being added:
-         it needs no fixture, no signature and no call.
+      2. IN SOURCE, over the whole file but SCOPED TO TWO PLACEHOLDER NAMES --
+         every `{fleet_py}` / `{py}` in `bin/fleet.py`, in any function, must
+         be written quoted. It needs no fixture, no signature and no call.
+
+         THAT SCOPE IS A CLAIM ABOUT NAMES, NOT ABOUT THE PROPERTY, and this
+         docstring used to overstate it as "the half that survives a THIRD
+         render being added". It does not. `_install_statusline` was the
+         fourth render, it interpolated `{Path(sys.executable).resolve()
+         .as_posix()}` and `{script}`, it shipped BROKEN into README quickstart
+         step 4, and this scan walked past it while reporting full-file
+         coverage. Gate `w49-gc2` proved the scoping is the whole gate:
+         unquoting a render with the names kept goes RED, the same unquoting
+         with the placeholders renamed `{interp}`/`{script_path}` goes GREEN.
+         Re-measured at w50 (rc=1 / rc=0 respectively) before it was fixed.
+
+         `tests/test_rendered_command_quoting.py` holds the PROPERTY -- an AST
+         census that decides path-valued-ness by the SHAPE of the interpolated
+         expression, so a rename changes nothing. This scan is kept because it
+         is cheap and still true within its scope, not because it is complete.
 
     `tests/test_supspawn_fixwave2.py::TestRenderedCommandQuoting` pins the same
     property for `_render_sup_spawn_task` alone, by literal string. This is not
@@ -473,13 +488,15 @@ class TestEveryRenderedCommandQuotesItsPaths:
             assert home.as_posix() in argv, f"home split by the space: {ln}"
 
     def test_no_bare_path_placeholder_is_left_anywhere_in_fleet_py(self):
-        """The half a render nobody has written yet cannot escape.
+        """A render nobody has written yet cannot escape THIS SCAN -- provided
+        it spells its placeholders `{fleet_py}` or `{py}`. One that picks any
+        other name escapes entirely; `_install_statusline` did, for as long as
+        it took a gate to look. The name-independent half of this property is
+        `tests/test_rendered_command_quoting.py`.
 
         Scanned over the whole source rather than over the two functions
         above: the recurring shape in this repo is that a fix lands at the
-        reported site and the next sibling is written with the same hole. Here
-        the sibling does not have to be found -- if it writes `{fleet_py}` or
-        `{py}` into a rendered command at all, it is scanned."""
+        reported site and the next sibling is written with the same hole."""
         source = (REPO / "bin" / "fleet.py").read_text(encoding="utf-8")
         bare = find_bare_path_placeholders(source)
         assert not bare, (
