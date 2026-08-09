@@ -8,6 +8,30 @@ Every line is tagged **MEASURED** (I ran it on 2026-08-09 and the output is past
 
 **Scope delivered: all four parts.** Nothing was cut.
 
+> ## ⚠ THIS REPORT HAS BEEN THROUGH AN ADVERSARIAL GATE AND CORRECTED. READ THIS FIRST.
+>
+> Gate **`w52-glaunch3`** (`e97bbcb` on `w52/glaunch3`) returned **GATING — 1 BLOCKING, 3 MAJOR,
+> 5 MINOR**. All nine are **accepted**; none is refused. The corrections are made **in place**, with
+> the superseded text struck through or quoted rather than deleted, and the discharge is summarised in
+> **§11** at the end.
+>
+> **The three things a reader must not carry away from an uncorrected copy:**
+>
+> 1. **W52-2 is MEDIUM, not HIGH.** It was graded on *"deterministic, reproduced four times"*. The
+>    gate drove it six times on byte-identical code and got **rc=0 five times**; its one reproduction
+>    was in a roster state this report never named. **Determinism is the property that did not
+>    replicate**, and it is what the HIGH rested on.
+> 2. **W52-2's proposed remedy was unsafe and is RETRACTED.** `_roster_live_sids` has **11 call
+>    sites** (AST-derived here, §3), four of them supervisor-identity machinery. The suggested
+>    `status == "idle"` disjunct would reclassify live-but-idle sessions as dead. **Do not apply it.**
+> 3. **W52-2's mechanism claim was backwards and is RETRACTED.** *"The fix that rescued macOS cannot
+>    fire on Windows"* is false: the `state != "done"` guard **does** fire on Windows and is what makes
+>    most drives succeed. I read a false docstring parenthetical as an exemption.
+>
+> **Two findings were repaired on this branch** under the discharge licence — W52-5 (README's demo
+> block, now a verbatim capture) and W52-6 (`docs/launch-readiness.md`'s stale sentence). **`bin/` is
+> untouched.** One new finding, **W52-8**, was found while generating the replacement.
+
 ---
 
 ## 0. Vantage, and why any of these readings are about *this* repo
@@ -465,9 +489,35 @@ loudly on a corrupt registry is defensible. I did not measure `/fleet:status` or
 against a corrupt registry, so **whether the exit-0 half holds at the surfaces the rule actually names
 is UNVERIFIED by this lane.** Flagged, not claimed.
 
-### W52-2 — **`fleet respawn` is unreachable by its documented invocation on Windows. HIGH.**
+### W52-2 — **`fleet respawn` can refuse `"turn is running"` on an idle worker. MEDIUM.**
 
-**MEASURED, deterministic, reproduced four times across ten minutes.**
+> **REGRADED AND PARTLY RETRACTED after gate `w52-glaunch3` (`e97bbcb`), which drove this finding six
+> times on a byte-identical `bin/fleet.py`.** This heading previously read *"is unreachable by its
+> documented invocation on Windows. **HIGH**"*, and the line under it read *"**MEASURED,
+> deterministic, reproduced four times across ten minutes.**"* **Both are withdrawn.** The gate got
+> **rc=0 on 5 of 6 drives** of the bare `fleet respawn <name>`, and its one reproduction was in a
+> roster state this report never named (`blocked`), not the `state:"working"` pasted below. Its null
+> is trustworthy: its positive control — respawn against a genuinely running turn — refused with
+> rc=1, so its harness can see the refusal. A 30-sample / 60 s poll immediately after a turn ended
+> showed only `state=done status=idle pid=present`: **no window, no transition.**
+>
+> **What survives, and it is the whole defect class:** `_roster_live_sids` decides liveness from key
+> *presence* plus a single terminal state, and never from `status`'s *value* — so a finished session
+> sitting in a non-`done` state with `pid`/`status` present is read as a running turn. The gate
+> confirms that reasoning and reproduced it once. **What does not survive is the word
+> *deterministic*, which is what the HIGH rested on.** A stranger following the documented
+> invocation gets a working `respawn` most of the time, and when they do not, the refusal's own
+> first clause names the escape that works. **MEDIUM.**
+>
+> I do not think the inflation was invention. The brief that produced this lane pre-committed the
+> outcome — *"this rehearsal has never once been run without finding something … the something is in
+> the half nobody has walked"* — and the manager has since said so in the same words. But **I** wrote
+> *deterministic* after four drives that all pointed one way, and four same-direction drives is not a
+> determinism claim. **The correct grade of a four-sample run is a rate, not an adjective.**
+
+**MEASURED at the time — four drives, all refusing, over roughly ten minutes.** Read the retraction
+above before this receipt: it is a true record of what my harness printed, and a 4-sample rate of 4/4
+against the gate's 1/6 on the same code.
 
 ```console
 $ fleet wait probe --timeout 240
@@ -515,23 +565,48 @@ The actual roster entry for the **idle** worker, at claude 2.1.226 on Windows:
 
 `pid` present, `status` present, and **`state` is `"working"`, not `"done"`** — so the `done` guard
 never fires, and a finished session is read as a running turn. Still `state=working status=idle` at
-T+8 min, with pid 46460 alive. **Not a transient race.**
+T+8 min, with pid 46460 alive.
 
-**The docstring predicts this bug and then exempts the platform it happens on.** `_roster_live_sids`
-carries a 2026-07-19 posix-port finding — *"a finished bg session's host process can LINGER … observed
-blocking `fleet respawn` on an idle worker"* — and closes with:
+> **The sentence that stood here next said *"Not a transient race."* WITHDRAWN.** The gate could not
+> produce `state:"working"` on a finished session once in six drives, and its 60 s poll saw only
+> `done`. My entry above is what my roster read — the roster is machine-global and we were looking at
+> the same object five hours apart — but a state I observed four times and the gate observed zero
+> times is not a stable property of a finished session, and I called it one.
 
-> *"(On Windows the two conditions agree -- done entries lose pid/status.)"*
+#### The mechanism claim — **RETRACTED OUTRIGHT, and this is the instructive one**
 
-That parenthetical is **half true and load-bearing in the wrong direction.** MEASURED across the
-whole 164-entry roster on this machine: `done` entries *do* lose both keys — 90 of them, all
-`done, (absent), (absent)`. What the sentence misses is that **a just-finished Windows session is not
-`done` yet**; it sits at `working`/`idle` with both keys. The fix that rescued macOS therefore cannot
-fire on Windows, and the field that actually reports turn completion — `status: "idle"` — is the one
-`_roster_live_sids` never reads the *value* of.
+This report charged the `_roster_live_sids` docstring with *"predicting this bug and then exempting
+the platform it happens on"*, and concluded:
 
-**Both remedies the message offers are wrong.** *"wait for it to finish"* never terminates: the turn
-already finished. *"pass `--force` to interrupt it first"* works, but interrupts nothing —
+> ~~*"The fix that rescued macOS therefore cannot fire on Windows"*~~
+
+**MEASURED FALSE by the gate, and the direction of the error is the lesson.** The `state != "done"`
+guard **does** fire on Windows — it is precisely what makes five of the gate's six drives return
+rc=0. Without it, all six would have refused. The guard is not inapplicable here; it is load-bearing
+here.
+
+**My own evidence pointed the other way and I read it backwards.** I measured 90 `done` entries that
+had lost both keys and concluded the parenthetical was *"half true"*. The gate found the entries I did
+not look for: `done` entries that **keep** `pid` and `status` — including **my own lane's session**,
+on Windows, `done`, holding both. So on Windows a `done` entry keeps its keys while its host process
+lives, which is exactly the macOS shape the docstring describes.
+
+**Stated plainly, because it is the transferable error: I read a false parenthetical as an
+exemption.** The parenthetical *"(On Windows the two conditions agree -- done entries lose
+pid/status.)"* is simply wrong. But a wrong sentence in a docstring does not make the code it sits
+above wrong, and I let the wrong sentence tell me what the code did instead of measuring the code.
+**The code is right, the comment is wrong, and I inverted which was which.**
+
+**What the genuine hole is, narrowed to what survives:** states that are neither `done` nor a running
+turn are counted live. `blocked` — the gate measured it, and it is the state its one reproduction sat
+in. `working` on a finished session — I measured it; the gate could not. Neither document names
+either case, and `status`'s *value*, the field that actually reports turn completion, is never read.
+
+**One of the two remedies the message offers is wrong** *(corrected: this read "**Both remedies … are
+wrong**", and the gate is right that it is one too strong)*. *"wait for it to finish"* never
+terminates when the turn has already finished. *"pass `--force` to interrupt it first"* is offered
+**first** in the refusal text and it works — it interrupts nothing, but it does what the operator
+wanted:
 
 ```console
 $ fleet respawn probe --yes --force
@@ -545,15 +620,98 @@ succeeds (MEASURED). But `fleet interrupt`'s own success message points the oper
 is a closed R2 loop between two verbs**, escapable only by adding `--force`, which the loop never
 suggests as the primary remedy for an idle worker.
 
-**Impact.** `fleet respawn` is the documented context-reset lever (README's feature table; a
-`/fleet:respawn` slash command; `docs/getting-started.md` names it 3 times). On Windows a stranger who
-follows the documented invocation on a healthy idle worker gets a refusal that misdescribes the state
-and prescribes a wait that cannot end. **REPORTED, not repaired — `bin/` is outside this lane's
-deliverable set.** BELIEVED (from the code above, not executed): the minimal correct fix is to stop
-inferring turn state from key presence and read `status`'s value, e.g. treat
-`state in ("done","stopped","failed")` **or** `status == "idle"` as not-a-running-turn; a maintainer
-should decide whether `status` is contractual, since `docs/specs/native-substrate.md`'s roster
-contract is what `_roster_live_sids` cites.
+**Impact, restated at MEDIUM.** `fleet respawn` is the documented context-reset lever (README's
+feature table; a `/fleet:respawn` slash command; `docs/getting-started.md` names it 3 times).
+*Sometimes* — 1 in 6 on the gate's harness, 4 in 4 on mine — a stranger following the documented
+invocation on an idle worker gets a refusal that misdescribes the state. The escape is in the
+refusal's first clause. Real, worth fixing, not a launch blocker.
+
+#### THE PROPOSED REMEDY — **RETRACTED. It is unsafe, and I never measured its blast radius.**
+
+This section previously carried, as BELIEVED: *"the minimal correct fix is to stop inferring turn
+state from key presence and read `status`'s value, e.g. treat `state in ("done","stopped","failed")`
+**or** `status == "idle"` as not-a-running-turn."*
+
+**Do not apply that.** It was reasoned from one call site and proposed for a shared helper. The gate
+raised this BLOCKING; I re-derived the blast radius myself rather than inheriting its number, and
+**by AST rather than by grep, because grep is what produced the wrong number in the first place**
+(see W52-4, where a grep receipt of my own did not reproduce).
+
+**MEASURED — `_roster_live_sids` call sites, by `ast.Call`, on `bin/fleet.py` `76b9bcbe…`:**
+
+```console
+$ py -3.13 callsites.py bin/fleet.py _roster_live_sids
+target                 : _roster_live_sids
+AST def sites          : [14869]
+AST CALL sites (count) : 11
+AST CALL sites (lines) : [8373, 8392, 8398, 9559, 9598, 9914, 10121, 15393, 15443, 15673, 18772]
+bare Name refs (non-call, e.g. passed as a value): []
+
+call sites by enclosing function:
+  _any_live                                x1  lines 9598
+  _archive_eligible                        x1  lines 10121
+  _cmd_respawn_native                      x3  lines 8373,8392,8398
+  _cmd_respawn_supervisor                  x1  lines 9559
+  _doctor_check_supervisor_wedge           x1  lines 18772
+  _render_boot_bundle                      x1  lines 15393
+  _wedged_release_gate                     x1  lines 15673
+  cmd_clean                                x1  lines 9914
+  cmd_sup_boot                             x1  lines 15443
+
+textual grep-style occurrences of the bare name: 14
+```
+
+**Eleven call sites, in nine functions.** The reasoning I did covered three of them, all inside
+`_cmd_respawn_native`. The other eight include **four supervisor-identity sites** —
+`_cmd_respawn_supervisor`, `cmd_sup_boot`, `_wedged_release_gate`, `_doctor_check_supervisor_wedge` —
+plus `cmd_clean`, `_archive_eligible`, `_render_boot_bundle` and `_any_live`. Two of the supervisor
+sites feed `_releaser_live_sids`, i.e. the decision *"may another supervisor take this claim"*.
+
+**A correction to the gate, which does not weaken its finding.** The gate's number is **13**, from
+`grep -n` returning 14 lines minus the `def`. Two of those 14 are prose, not calls —
+`bin/fleet.py:8270` (a docstring naming the helper) and `:18724` (a docstring paragraph). The manager
+told me to re-derive by AST rather than inherit, and this is why: **13 is a grep artifact of the same
+family as the receipt the gate charged me with in G4.** The correct count is 11 calls / 14 textual
+occurrences / 1 def. **The BLOCKING is unaffected** — the argument needs "many, including the
+supervisor", not "thirteen".
+
+**The hazard, measured on live data, on my own roster:**
+
+```
+roster size                                  = 181
+live by _roster_live_sids today              = 8
+of those, status=='idle' (my fix kills them) = 1
+```
+
+**One in eight currently-live sessions would be reclassified not-live by the `status == "idle"`
+disjunct** — today a `claude-oracle-…` session with a live pid and **no `state` key at all**.
+
+**On the supervisor instance specifically, I owe a distinction.** The gate MEASURED a supervisor at
+`state:"blocked" status:"idle"` with pid 44232 alive — exactly the shape the proposed clause would
+kill. I re-read that same session id five hours later and it has since **lost** `pid` and `status`:
+
+```json
+{"id": "3cb901f7", "cwd": "C:\\proga\\claude-fleet", "kind": "background",
+ "startedAt": 1786268531571, "sessionId": "3cb901f7-b361-466e-9488-7df4dde80e3d",
+ "name": "sup|inc-20260809T094210Z-5c4e|boot", "state": "blocked"}
+```
+
+So my re-measurement **neither confirms nor refutes** the gate's observation — the process died in
+between, and a degraded observation is not a contradiction. I record the gate's as MEASURED-by-gate
+and mine as a null that cannot speak. **The hazard does not depend on catching one live:** a
+supervisor between turns *is* idle by definition, and four of the eleven call sites are supervisor
+machinery. That is enough.
+
+**Is `status`'s value even contractual?** The docstring cites `docs/specs/native-substrate.md`'s
+roster contract for **key presence** (*"`status`/`pid` keys exist only while the process lives"*). I
+found no clause making the *value* contractual and I cite none. **BELIEVED** — a `status`-value fix
+builds on an unpinned field, which is a second, independent reason not to put it in the shared helper.
+
+**What I now believe, stated as a direction and not as a diff:** any fix belongs **scoped to
+`_cmd_respawn_native`**, not in `_roster_live_sids`, and it needs the roster contract settled first.
+**REPORTED, not repaired.** I am explicitly *not* proposing the one-line change any more; the
+campaign's standing count is that fix-waves mint defects 7 out of 7, and this remedy would have been
+one of them.
 
 ### W52-3 — `interrupted` overflows the STATUS column. LOW, cosmetic, but on the primary surface.
 
@@ -565,9 +723,29 @@ probe               interrupted     3        -        0     0        -  -
 ```
 
 `_text_cell(value, width)` returns `f"{value:<{width}}"` — a **minimum** width, not a truncation — and
-the STATUS column is `<10`. `interrupted` is 11 characters and `dead-suspected` is 14, so every column
-right of STATUS shifts. Both are statuses the code sets. Only reachable by driving a worker into
-`interrupted`, which no lane had done.
+the STATUS column is `<10`, so every column right of STATUS shifts. Only reachable by driving a worker
+into `interrupted`, which no lane had done.
+
+**The enumeration here originally named two statuses. It is three** *(corrected after gate
+`w52-glaunch3` G6, and re-derived rather than inherited)*. MEASURED, against the statuses the code
+actually writes into a record:
+
+```console
+$ grep -oE '\["status"\] = "[a-z_-]+"|"status": "[a-z_-]+"' bin/fleet.py | grep -oE '"[a-z_-]+"$' | sort -u
+"dead"  "dead-suspected"  "idle"  "interrupted"  "limited"  "ok"  "orphan"  "over_ceiling"  "withheld"  "working"
+
+  dead-suspected   len=14  OVERFLOWS
+  over_ceiling     len=12  OVERFLOWS      <-- missing from the original enumeration
+  interrupted      len=11  OVERFLOWS
+```
+
+**And I checked for a fourth, because an incomplete enumeration is the defect here.** `over_budget`
+is 11 characters and appears in `_NATIVE_STICKY` (`bin/fleet.py:3657`) — but it is **never assigned**
+as a status anywhere in the file; its only other occurrences are comments and docstrings. So it is a
+fourth *name* in a sticky-guard tuple, not a fourth reachable status. **Three is the right number,
+and the gate's three is confirmed by an independent derivation.** LOW stands; it matters only if
+someone widens the column to 12 on this section's authority, which is exactly what an incomplete list
+invites.
 
 ### Would a stranger have known the order?
 
@@ -671,29 +849,57 @@ population for whom the blocker is still live is "installed before the fix" ∪ 
 space", and the second set is large. MEASURED on this machine: my own account has no space, which is
 precisely why the defect stayed invisible here.
 
-**And `fleet doctor` cannot see it.** MEASURED by exhaustive reference count — `user_settings_path()`
-has exactly three references in `bin/fleet.py` at `64b43c2`:
+**And `fleet doctor` cannot see it.**
+
+> **THE RECEIPT PRINTED HERE DID NOT REPRODUCE, and the correction is below** *(gate `w52-glaunch3`
+> G4, MAJOR)*. This paragraph claimed *"MEASURED by **exhaustive** reference count — three
+> references"* and pasted a three-line block. Re-executed on a tree whose `bin/fleet.py` is
+> byte-identical, plain `grep -n` prints **four**. The dropped line is `6040`, inside a docstring. I
+> did not reconstruct how the block lost it — the honest reading is that I pasted a filtered or
+> hand-trimmed view and labelled it as the command's output, which is the exact defect class this
+> repo keeps paying for and which this same report charges the README with in W52-5. **The word
+> *exhaustive* is withdrawn.**
+
+MEASURED, re-executed at `76b9bcbe…` and quoted whole:
 
 ```console
 $ grep -n "user_settings_path()" bin/fleet.py
 353:def user_settings_path() -> Path:
+6040:    DERIVED FROM `user_settings_path()` RATHER THAN RE-SPELLING `Path.home()`,
 6052:    return user_settings_path().with_name("fleet-statusline-chain.json")
 6204:    path = user_settings_path()
+$ grep -c "user_settings_path()" bin/fleet.py
+4
 ```
 
-The definition, the chain-path derivation, and `_install_statusline` itself. **No doctor check reads
-the installed statusline at all**, so the 28/28 that a stranger is told to trust says nothing about
-whether their statusline is the working form. REPORTED; the remedy is a `doctor` row and is `bin/`
-work.
+Four occurrences: the definition, **a docstring mention at `6040`**, the chain-path derivation, and
+`_install_statusline` itself. `6040` is prose, so no `doctor` row is hiding in it and **the conclusion
+is unchanged**: no doctor check reads the installed statusline, so the 28/28 a stranger is told to
+trust says nothing about whether their statusline is the working form. REPORTED; the remedy is a
+`doctor` row and is `bin/` work.
+
+**The lesson I take, since a careful report shipped an uncareful receipt:** a pasted command block is
+a claim that *this command prints this*, and reading the output is not checking it. Only re-execution
+checks it. The gate found this by re-executing, and it is the one item it says it would have missed
+by reading.
 
 ---
 
 ## 5. PART 4 — grading the documentation
 
-### W52-5 — **the README's flagship demo block is output the shipped code cannot produce. MEDIUM.**
+### W52-5 — **the README's flagship demo block is output the shipped code cannot produce. MEDIUM. → FIXED ON THIS BRANCH.**
 
 Where the code is right and the docs are wrong, in those words: **the code is right; README's
 "See it in action" section is wrong.** It is the first thing a stranger reads.
+
+> **CONFIRMED by gate `w52-glaunch3` line by line, five for five — and it is STRONGER than this
+> section claimed.** The gate ran `git log -S` per tag and found that **`[mail]` and `[assistant]`
+> have never existed in `bin/fleet.py` at any commit.** They are not substrate-pivot rot; they were
+> invented. The gate also closed a scope hole I left open: *"the shipped renderer"* has no ambiguity,
+> because `cmd_peek` calls `_cmd_peek_native` unconditionally with no legacy branch.
+>
+> **REPAIRED on this branch** *(licensed by the discharge brief)*: the block is now pasted verbatim
+> from a real captured session. See "The replacement" below.
 
 MEASURED at the renderer. `_render_native_peek_lines` (`bin/fleet.py:7103`–`7138`) emits exactly four
 shapes, and its docstring enumerates them:
@@ -739,10 +945,49 @@ Also create a file named world.txt containing exactly the word WORLD.
 
 **The steered message did land** — the worker created `world.txt`, and later `a4.txt` from a second
 mid-turn `send` — so the *feature* README is advertising is real. Only its rendering is fictional.
-Note the delivery in both of my observations surfaced as `[user:meta] Stop hook feedback:`; the
-PostToolUse mailbox path exists and `doctor` smoke-tests it (`posttooluse-hook-smoke: fired
-end-to-end`), but **this lane did not observe a delivery at a tool boundary**, so README line 81's
-*"injected at the next tool boundary"* is **not confirmed by me either way.**
+
+#### The tool-boundary question — **RESOLVED IN THE DOCUMENTATION'S FAVOUR, and it produced W52-8**
+
+This section originally said the delivery *"surfaced as `[user:meta] Stop hook feedback:`"* in both
+observations, and therefore that README line 81's *"injected at the next tool boundary"* was **not
+confirmed either way.** Generating the replacement demo block (Part B) required driving a real
+mid-turn `send`, so I looked at the transcript instead of the digest. **MEASURED, twice, on two
+independent workers:**
+
+```json
+{"attachment":{"type":"hook_success","hookName":"PostToolUse:Read","hookEvent":"PostToolUse",
+  "stdout":"{\"hookSpecificOutput\": {\"hookEventName\": \"PostToolUse\",
+   \"additionalContext\": \"<MANAGER MESSAGE>\\nalso add a down-migration, I forgot to ask\\n\\n\"}}"},
+ "type":"attachment"}
+```
+
+`hookName: "PostToolUse:Read"` — the message was injected **at the tool boundary immediately after
+the worker's `Read`**, exactly as README line 81 says. **The claim is TRUE and now MEASURED.** My
+"not confirmed" was a null produced by a blind instrument, and the instrument was `fleet peek`.
+
+**W52-8 (NEW, LOW) — `fleet peek` cannot show a mailbox delivery that arrives at a tool boundary.**
+MEASURED at the filter: `_is_substantive_transcript_record` opens with
+
+```python
+if rec.get("type") not in ("assistant", "user"):
+    return False
+```
+
+and a PostToolUse delivery is recorded as `type: "attachment"`. So the record is dropped before
+`_render_native_peek_lines` ever sees it, and no `-n` widens the window enough to reveal it — I tried
+`-n 20` on a transcript whose delivery sat at record 31 of 80, and it did not appear. **Both delivery
+paths exist and only one is visible:** a Stop-hook delivery is a real `user`/`isMeta` record and
+renders as `[user:meta]` (my Part 2 observations); a PostToolUse delivery is an `attachment` and
+renders as nothing.
+
+**This is the hole the fabricated `[mail]` line was papering over.** Someone wanted `peek` to show a
+steer landing; `peek` structurally cannot, for the delivery path the README's own prose advertises.
+
+**Graded LOW, deliberately, and with the case for MEDIUM stated rather than taken:** there *is* a
+surface that answers "did my steer land" — `fleet status`'s `MAIL` column goes `0 → 1` on queue and
+back to `0` on delivery, MEASURED in both drives. So the operator is not blind, only `peek` is. Given
+the gate has just corrected this report for grading a real finding one notch high, I am not going to
+do it twice in the same document.
 
 The same block's `fleet status` row is wrong for a second, independent reason:
 
@@ -761,15 +1006,47 @@ if is_native(rec):
     cost_s = f"{'-':>9}"
 ```
 
-Every worker is native (`dispatch_kind: "bg"`; the spawn banner says `native bg`). **`0.00` is a value
-the code is explicitly written never to print**, and the comment says so. Every `fleet status` in this
-lane rendered `-`. README's own line 49 correctly explains that USD budgets are refused under G3 —
-**the prose and the example in the same document disagree, and the prose is right.**
+Every worker is native (`dispatch_kind: "bg"`; the spawn banner says `native bg`), and every
+`fleet status` in this lane rendered `-`.
+
+> **The sentence here overreached and is corrected** *(gate `w52-glaunch3` G5)*. It read: **"`0.00`
+> is a value the code is explicitly written never to print**, and the comment says so." The comment
+> says so **for the native branch only**. Fifteen lines on, the `else` branch calls `_cost_cell`,
+> which returns `f"{cost:>{width}.2f}"` and therefore *does* render `0.00` for a cost of `0.0`. That
+> branch is live code, reached when `dispatch_kind != "bg"` — a **pre-pivot record**. Every spawn
+> site sets `"bg"`, so nothing fleet can spawn today reaches it.
+>
+> **Correct wording, and what the finding actually is:** `0.00` is never printed for any worker fleet
+> can spawn today. The README example shows a `COST` value that no current worker can produce — which
+> is the defect — but the code is not "written never to print it" in general, and I should not have
+> said so on the strength of a comment attached to one branch of an `if`.
+
+README's own line 49 correctly explains that USD budgets are refused under G3 — **the prose and the
+example in the same document disagree, and the prose is right.**
 
 **This is w48's headline shape repeating one level down.** w48 found the docs wrong about hazards; this
 is the docs wrong about *output*, in the block that exists to show a newcomer what the tool looks
 like. Nothing tests it: `tests/test_doc_claims.py` pins verbs, flags and counts against the parser —
 by its own docstring — and a pasted sample transcript is none of those.
+
+#### The replacement — generated, not composed
+
+**REPAIRED on this branch.** `README.md`'s "See it in action" block is now a verbatim capture of a
+real session driven for this discharge: a fenced clone at `64b43c2`, a haiku worker, a genuine
+Knex→SQL port in a scratch project, and a genuine mid-turn `fleet send`. The block carries the real
+`spawn` banner (`model: haiku`, a full session id), `COST` as `-`, `MAIL` going `0 → 1`, the real
+`peek` tag vocabulary, `peek`'s own 200-character truncation, and the worker's actual result text.
+
+Two things I added rather than merely fixing, because a fix that does not stop the recurrence is half
+a fix:
+
+1. A caption stating the block is a verbatim capture, **naming that an earlier version was
+   hand-written and that none of its `peek` lines were producible**. A future editor now has to
+   knowingly overwrite that sentence to reintroduce the defect.
+2. Two sentences of prose making `MAIL 0 → 1 → 0` the documented way to confirm a steer landed, and
+   saying outright that `peek` does **not** show the delivery (W52-8). The fabricated `[mail]` line
+   existed because the README needed to show something `peek` cannot show; deleting the line without
+   answering the need would have left the same pressure in place.
 
 ### W52-6 — the §18 question the brief asked, answered: the repair went the *other* way
 
@@ -806,11 +1083,37 @@ not a claim about assertion, and on this exact question — where the whole disp
 sentence — the naive detector inverts the answer. Per the brief's own rule, I checked the vantage
 before believing the reading.
 
-**REPORTED, not repaired.** Editing `docs/launch-readiness.md` is a prose fix outside this lane's
-stated deliverable (my branch + my report); the correction is one sentence and belongs to whoever
-owns that document this wave.
+~~**REPORTED, not repaired.**~~ **REPAIRED on this branch** *(licensed by the discharge brief; the
+original sentence deferred it to "whoever owns that document this wave", and that turned out to be
+me)*. `docs/launch-readiness.md`'s paragraph now (a) puts the CLAUDE.md quotation in the past tense,
+(b) records that CLAUDE.md has since been corrected and that this paragraph was the last place saying
+otherwise, and (c) warns that a substring search still matches CLAUDE.md and that the match is a
+retraction — so the next reader does not re-open this on a `grep -c`.
 
-### Two README self-limits this lane discharges
+**CONFIRMED by gate `w52-glaunch3`, which sharpened it:** `docs/launch-readiness.md` is **not** in
+`_HISTORICAL_PREFIXES`, so by this repo's own exemption logic it is a current-tree document — a stale
+present-tense claim there is exactly the class the exemption exists to keep held.
+
+**The everywhere-rule, applied and MEASURED after the fix** *(the discharge brief's governing rule:
+apply each repair everywhere the claim appears, not where the gate quoted it)*:
+
+```console
+$ grep -rn "not yet folded into" --exclude-dir=.git .
+./CLAUDE.md:5:                    … quoting the superseded sentence in order to retract it
+./docs/lanes/w48-launch.md:831:   … dated lane history, quoting
+./docs/lanes/w52-launch.md:786:   … this report, quoting
+./docs/lanes/w52-launch.md:798:   … this report's own grep receipt
+./docs/launch-readiness.md:260:   … now past tense ("then read"), inside the retraction
+./docs/launch-readiness.md:268:   … the new warning that a substring match is a retraction
+
+$ grep -rn "still reads" --exclude-dir=.git . | grep launch-readiness
+(no matches)
+```
+
+**Zero asserting occurrences remain.** The other `still reads` hits in the tree are unrelated
+documents about unrelated claims, checked individually.
+
+### Two README self-limits this lane discharges — **still unrepaired, and deliberately so**
 
 MEASURED — README line 136 currently reads:
 
@@ -819,10 +1122,16 @@ MEASURED — README line 136 currently reads:
 > marketplace argument, a directory path to the clone, is the form a known-working install on the
 > maintainer's machine reports, **not a form re-executed on a clean box.**
 
-Both clauses are now **false in the good direction**, and this report is the receipt for both: §3
-covers `spawn` through `clean`, and §2 step 3 re-executed the directory form on a throwaway box, rc=0.
-The sentence should be rewritten rather than deleted — the honest residue is that the drive found a
-HIGH defect (W52-2) and that the GitHub-shorthand marketplace form is still untested.
+Both clauses are **false in the good direction**, and this report is the receipt for both: §3 covers
+`spawn` through `clean`, and §2 step 3 re-executed the directory form on a throwaway box, rc=0. The
+gate independently confirmed the sentence is still in the tree exactly as quoted.
+
+**I did not fix it, and the reason is scope rather than tidiness.** The discharge brief licenses two
+documentation repairs by name — W52-5 and W52-6 — and this is a third claim in the same file as one of
+them. Its correct rewrite also *depends* on the regrade above: the honest residue is no longer "the
+drive found a HIGH defect" but "found a MEDIUM one, at a rate of 1-in-6 on an independent harness",
+and that sentence should be written by whoever holds the settled grade. Flagged here, loudly, as the
+most conspicuous known-false sentence left in a launch-facing document. It is one paragraph of work.
 
 ### What the docs got right — MEASURED, and worth saying
 
@@ -922,7 +1231,71 @@ lane's own session. **No process was left running.**
 
 **Left on disk deliberately, for an adversarial gate to re-run:** the two throwaway trees
 (`…\Temp\w52-launch`, `…\Temp\w52 launch space`) and their helper scripts. Both are under the OS temp
-dir and touch nothing else.
+dir and touch nothing else. *(Added at discharge: `…\Temp\billing-service` — the scratch project the
+replacement README block was captured against — and `$CLAUDE_JOB_DIR\tmp\w52d\`, the discharge
+clone.)*
+
+### THE CENSUS THIS SECTION OWED — what the narrow fence could NOT have caught
+
+*Added at discharge; gate `w52-glaunch3` G9 is right that its absence was this report's largest
+structural gap, and that a clean audit without it is a smaller statement than it looks.*
+
+The table above is a claim about **five named artifacts**. It is not a claim that nothing was written.
+Stated precisely, so nobody reads it as broader than it is:
+
+| What the fence would have caught | What it would NOT have caught |
+|---|---|
+| A write to `~/.claude/settings.json` (hashed before/after) | A write to any **other** path under the real `~/.claude` |
+| A `fleet-homes.list` append (absence checked both ends) | A file created and deleted **inside** my observation window |
+| A `fleet-statusline-chain.json` (absence checked both ends) | A write reaching `~` via a **fourth spelling** of `Path.home()` |
+| A `fleet init` against the live home (`worker-settings.json` mtime+sha) | A write to any other file in the live `C:/proga/claude-fleet` tree |
+| A live worker process left behind (roster, pid) | A registry mutation in the live home that left no live process |
+
+**The load-bearing weakness, named:** under Part 2's legs (1)+(2) the real `~` is *in scope for
+writes*, and my audit covers it only at the three fleet-owned paths I knew to name. `_install_statusline`
+is proven not to have run against the real home **by absence of invocation** — I did not run
+`fleet init --statusline` outside the redirect — not by containment. Anything writing `~/.claude` under
+a path helper I did not enumerate would have landed in the operator's real config and **no row in my
+table would have seen it.**
+
+**How much of a hole is it, measured rather than waved at.** MEASURED at `76b9bcbe…`, quoted whole:
+
+```console
+$ grep -n "Path.home()" bin/fleet.py
+358:    return Path.home() / ".claude" / "settings.json"          <-- user_settings_path
+368:    docstring that *"any new `Path.home()` path added to fleet lands here by
+377:    return Path.home() / ".claude" / "fleet-homes.list"       <-- homes_list_path
+386:    Portable by construction: `Path.home()/".claude"` is the vendor's config
+392:    return Path.home() / ".claude" / "daemon.lock"            <-- claude_daemon_lock_path
+398:    return Path.home() / ".claude" / "daemon.log"             <-- claude_daemon_log_path
+2597:        candidates = sorted(Path.home().glob(f".claude/projects/*/{sid}.jsonl"))   <-- a READ
+6040:    DERIVED FROM `user_settings_path()` RATHER THAN RE-SPELLING `Path.home()`,
+6044:    `Path.home()` spelling would sit outside that sandbox exactly as
+12240:    PORTABILITY (SPEC.md v3 invariant 8): pure `Path.home()` + `Path.read_text`
+$ grep -c "Path.home()" bin/fleet.py
+10
+```
+
+**Ten occurrences: four path-returning helpers, one transcript read, five prose lines.** And zero in
+the other code that runs — `bin/fleet_statusline.py` and all four `bin/hooks/*.py`:
+
+```console
+$ grep -l "Path.home()" bin/hooks/*.py bin/fleet_statusline.py
+(no file matches)
+$ ls bin/hooks/*.py | wc -l          # the null is not vacuous: the files exist
+4
+```
+
+So there is no fifth `~`-writer, and the hole is narrow. **But *"I enumerated the writers and found
+four"* is the statement I can defend, and *"nothing was written"* is the statement I made.** Those are
+different, and the gate is right that I made the second while measuring the first.
+
+**And a whole-tree digest would not have closed it either**, which is worth saying because it is the
+obvious rebuttal: the real `~` is outside any tree digest I ran, and `~/.claude` churns continuously
+under a live machine (`daemon.log`, `history.jsonl`, `projects/`), so a whole-`~` snapshot could not
+truthfully return UNCHANGED — the same lesson w48's MINOR-4 paid for with `state/`. **A fence receipt
+on a live machine must name the files the feared write would touch. Mine did. It just must not then
+be summarised as if it had named all of them.**
 
 ---
 
@@ -970,41 +1343,206 @@ that silently unspaced my interpreter (§4) and would have produced a false gree
 3 exists to test. And *"an instrument's answer is about the tree it is STANDING IN"* — `grep -c "not
 yet folded into" CLAUDE.md` returns 1 for a document that says the opposite (§5, W52-6).
 
-**7. This report's own weakest claims, named so a gate does not have to find them.**
-- README line 81's *"injected at the next tool boundary"* is **not confirmed**; both my deliveries
-  surfaced at the Stop hook. Not a refutation — I never sent during a long tool sequence with the
-  hook's window open — but I am not claiming it works as written.
-- The views-doctrine exit-0 half is **unverified at the surfaces the rule names** (statusline,
-  `/fleet:*`); I measured the CLI verb only (§3).
-- W52-4's affected population ("account names with spaces") is **BELIEVED**, reasoned from where
-  Windows puts user-scoped Python. The unquoted live install itself is MEASURED.
+**7. This report's own weakest claims, named so a gate does not have to find them** — *and updated at
+discharge, because naming a weak claim is not the same as leaving it weak. Two of the five were one
+command from a measurement, and the gate was right to say so.*
+
+- ~~README line 81's *"injected at the next tool boundary"* is **not confirmed**~~ → **RESOLVED,
+  MEASURED, and the doc is right.** `hookName: "PostToolUse:Read"`, twice, on two workers (§5). My
+  "not confirmed" was a null produced by a blind instrument, and the blind instrument was `fleet
+  peek` — which became W52-8. **A non-claim that is really an undiagnosed instrument failure is worth
+  less than nothing: it reads as caution and is actually an unexamined bug.**
+- ~~The views-doctrine exit-0 half is **unverified at the surfaces the rule names**~~ → **RESOLVED at
+  the statusline, MEASURED BY ME** (not inherited from the gate, which also ran it), with the control
+  first:
+  ```console
+  === POSITIVE CONTROL: healthy registry ===   [fleet]: no workers          rc=0
+  === CORRUPT registry ({ this is not json) ===[fleet]: registry unreadable rc=0
+  registry still present = True; content = { this is not json
+  quarantine artifacts   = 0
+  ```
+  **The rule holds at the statusline: it reads, renders a word, exits 0, and quarantines nothing.**
+  For the `/fleet:*` half, "exit 0" has no direct referent — they are prompt templates, and what they
+  invoke is the CLI verb, which exits 1 by design and does not quarantine (§3). **A refusal to claim
+  that costs one command is a gap wearing humility**, and this was one.
+- W52-4's affected population ("account names with spaces") is **still BELIEVED**, reasoned from where
+  Windows puts user-scoped Python. Nobody has measured it, the gate says so too, and it is the reason
+  W52-4 stays MEDIUM rather than going higher.
 - The space could not be isolated alone in the **interpreter** position under `cmd` (§4); B1 isolates
-  it in the script position and that is the proof I am standing on.
-- One `claude` version, one OS. Everything here is Windows 10 / claude 2.1.226.
+  it in the script position and that is the proof I am standing on. **Ungraded by the gate** — it did
+  not rebuild the spaced tree — so Part 3 rests on my measurement alone.
+- One `claude` version, one OS. Everything here is Windows 10 / claude 2.1.226. **The gate's
+  refutation of `state:"working"` carries the same limit**, so W52-2's rate is a claim about this
+  machine on this day and not about the platform.
+- **New at discharge:** Part 1 (quickstart steps 1–5) is **ungradeable now**. The gate could not audit
+  it because I deleted nothing — but the throwaway trees it needed were mine and it did not rebuild
+  them, and a future reader cannot re-run those receipts either. **A rehearsal whose evidence lives in
+  a temp tree cannot be gated on its central half**, which is the gate's observation and is a defect
+  in how this lane was *structured*, not in what it measured.
 
 ---
 
 ## 10. Findings ledger
 
+**Severities below are POST-GATE.** Where a grade moved, the original is struck through so the change
+is visible rather than quiet.
+
 | # | Class | Sev | Finding | Where | Disposition |
 |---|---|---|---|---|---|
-| W52-1 | fence doctrine | **HIGH** | `USERPROFILE` redirect fences `claude` too, so credentials go with it: no single fence runs both halves of this rehearsal | §1d, §6 | reported; doctrine input for BRIEF-TEMPLATE |
-| W52-2 | (c) code | **HIGH** | `fleet respawn` refuses `"turn is running"` on an idle worker on Windows; `_roster_live_sids` reads key presence, and a finished Windows session is `state:"working"`/`status:"idle"`, not `done`. Both offered remedies are wrong; `interrupt`↔`respawn` is a closed R2 loop | §3 | **REPORTED** — `bin/` outside deliverable |
-| W52-3 | (c) code | LOW | `interrupted` (11) and `dead-suspected` (14) overflow the `<10` STATUS column and shift every column right | §3 | **REPORTED** |
-| W52-4 | (b) gap | MED | The statusline quoting fix never reaches an already-installed statusline; the live machine still runs the unquoted form, and **no `doctor` row reads `user_settings_path()`** | §4 | **REPORTED** |
-| W52-5 | (a) doc | MED | README's flagship demo: all 5 `fleet peek` lines are shapes the renderer cannot emit, and the `status` row's `0.00` is a value the code is written never to print | §5 | **REPORTED** — doc fix, `README.md` outside deliverable |
-| W52-6 | (a) doc | LOW | `docs/launch-readiness.md` still says root `CLAUDE.md` "still reads" the superseded §18 sentence; CLAUDE.md was corrected, so the repair-tracking sentence is now the stale one | §5 | **REPORTED** |
-| W52-7 | (b) doc | LOW | `fleet send` to an idle worker changes the **session id** (fork-steer); README describes it as "a new turn if idle" | §3 | **REPORTED** |
+| W52-1 | fence doctrine | **HIGH** | `USERPROFILE` redirect fences `claude` too, so credentials go with it: no single fence runs both halves of this rehearsal | §1d, §6 | **CONFIRMED + strengthened by gate**; doctrine input for BRIEF-TEMPLATE |
+| W52-2 | (c) code | ~~HIGH~~ **MEDIUM** | `fleet respawn` **can** refuse `"turn is running"` on an idle worker — 4/4 on my harness, **1/6 on the gate's**, its one reproduction at `state:"blocked"`. `_roster_live_sids` never reads `status`'s *value*, so a finished session in a non-`done` state with keys present reads as live. ~~Both remedies wrong~~ → one of two. **Mechanism claim retracted; proposed remedy retracted as unsafe** | §3 | **REPORTED** — `bin/` untouched, and the obvious fix is now known-unsafe |
+| W52-3 | (c) code | LOW | `dead-suspected` (14), `over_ceiling` (12) and `interrupted` (11) overflow the `<10` STATUS column. ~~two statuses~~ → **three**; `over_budget` checked and **not** reachable | §3 | **REPORTED** |
+| W52-4 | (b) gap | MED | The statusline quoting fix never reaches an already-installed statusline; the live machine still runs the unquoted form, and **no `doctor` row reads `user_settings_path()`**. Finding CONFIRMED; ~~"exhaustive… three references"~~ → the receipt prints **four** | §4 | **REPORTED** |
+| W52-5 | (a) doc | MED | README's flagship demo: all 5 `fleet peek` lines are unemittable — and per the gate `[mail]`/`[assistant]` **never existed at any commit**. `0.00` rescoped: never printed for any worker fleet can spawn today | §5 | **FIXED on this branch** — block replaced with a verbatim capture |
+| W52-6 | (a) doc | LOW | `docs/launch-readiness.md` asserted root `CLAUDE.md` "still reads" the superseded §18 sentence, after CLAUDE.md had been corrected — a repair-tracking sentence that rotted when the repair landed | §5 | **FIXED on this branch** + whole-tree everywhere-check |
+| W52-7 | (b) doc | LOW | `fleet send` to an idle worker changes the **session id** (fork-steer); described as "a new turn if idle" in README, `getting-started.md` **and** `skills/fleet/SKILL.md` (gate: three surfaces, not one) | §3 | **REPORTED** |
+| W52-8 | (b) gap | LOW | **NEW at discharge.** `fleet peek` cannot show a mailbox delivery that arrives at a tool boundary: the record is `type:"attachment"` and `_is_substantive_transcript_record` drops it. This is the hole the fabricated `[mail]` line was papering over | §5 | **REPORTED**; README now documents `MAIL 0→1→0` as the surface that does answer it |
+| — | — | INFO | README line 81's *"injected at the next tool boundary"* is **TRUE and now MEASURED** (`PostToolUse:Read`, twice) — my earlier non-claim withdrawn | §5 | discharged |
+| — | — | INFO | The views exit-0 rule **holds at the statusline**, measured by me with a control: rc=0, `[fleet]: registry unreadable`, zero quarantine artifacts | §9 | discharged |
 | — | — | INFO | Step 3 gap 2a **CLOSED**: directory-form marketplace install re-executed on a clean box, rc=0. GitHub shorthand still untested | §2 | discharged |
 | — | — | INFO | w48 §11's BELIEVED **discharged**: `identity-witness`/`claude-agents`/`daemon-wedge` all PASS on a fresh `~` | §2 | discharged |
-| — | — | INFO | README line 136's two self-limits are now false in the good direction | §5 | needs a rewrite, not a deletion |
+| — | — | INFO | README line 136's two self-limits are still false in the good direction — **left unrepaired on purpose**, outside the licensed scope, and its rewrite depends on W52-2's settled grade | §5 | flagged for a successor |
 
-**Nothing was repaired in this lane.** The deliverable is the branch and this report; every code and
-prose fix above is REPORTED with the measurement that licenses it and the file that would carry it.
+**Repaired in this lane: exactly two documentation defects, both licensed by the discharge brief**
+(W52-5, W52-6). **`bin/` is untouched** — `git diff --stat` against `64b43c2` names no file under
+`bin/`. Every code finding stays REPORTED with its measurement, and W52-2's obvious remedy is now
+recorded as *known-unsafe* rather than as a suggestion.
 
-**The honest state of "launch-ready", updated.** Before this lane: the install half was rehearsed and
-repaired, the use half had never been driven. After it: **both halves have now been driven end to end
-by someone following the documentation** — and the use half returned a HIGH defect on the
-context-reset lever, a still-unquoted statusline on the live machine, and a flagship README example
-that the shipped code cannot produce. The rehearsal has never once been run without finding something.
-It still hasn't.
+**The honest state of "launch-ready", updated twice.** Before this lane: the install half was
+rehearsed and repaired, the use half had never been driven. After the lane: both halves had been
+driven, and the use half returned what I graded a HIGH. **After the gate: that HIGH is a MEDIUM that
+reproduces about one time in six, and its stated mechanism was backwards.** What stands is a real
+intermittent defect on the context-reset lever, a still-unquoted statusline on the live machine that
+no check inspects, a flagship README example the code could never have produced — now replaced with a
+real one — and a `peek` that cannot show the feature the README advertises.
+
+**The rehearsal has never once been run without finding something. That is still true, and it is now
+true of the report as well** — which is the gate's line, and it is the right one to close on. The
+most expensive defect this document contained was not in the half nobody had walked; it was in an
+adjective I wrote about my own measurement.
+
+---
+
+# 11. DISCHARGE — against the `w52-glaunch3` gate verdict
+
+**Gate:** branch `w52/glaunch3`, report `docs/lanes/w52-glaunch3.md` @ `e97bbcb`, cut at this
+branch's tip `7c87730`. Verdict **GATING — 1 BLOCKING, 3 MAJOR, 5 MINOR.** Read in full before this
+section.
+
+**All nine accepted. I looked for a defensible refusal and did not find one.** The BLOCKING is a real
+hazard in a change I proposed without measuring its reach; the three MAJORs are each a sentence *this
+report shipped* that does not survive re-execution. Where I add to the gate rather than merely
+complying — the call-site count, and a null it read as a confirmation — it is argued below, not
+assumed.
+
+| Gate item | Disposition | Where |
+|---|---|---|
+| **G1 BLOCKING** — proposed remedy unsafe/unscoped | **ACCEPTED — remedy RETRACTED**, blast radius re-derived by AST (11 call sites, 9 functions, 4 supervisor), hazard quantified (1 of 8 live sessions today) | §3 |
+| **G2 MAJOR** — HIGH grade / *"deterministic, reproduced four times"* | **ACCEPTED — regraded MEDIUM**, phrase struck, gate's 1-of-6 and the `blocked` state recorded | §3 + banner |
+| **G3 MAJOR** — macOS/Windows mechanism backwards | **ACCEPTED — RETRACTED outright**, replaced with what was measured, and named as "I read a false parenthetical as an exemption" | §3 |
+| **G4 MAJOR** — `user_settings_path()` receipt prints 4, not 3 | **ACCEPTED** — receipt re-executed and quoted whole, *"exhaustive"* withdrawn; finding survives | §4 |
+| **G5 MINOR** — `0.00` sentence overreaches | **ACCEPTED** — rescoped to *"never printed for any worker fleet can spawn today"* | §5 |
+| **G6 MINOR** — two overflowing statuses, not three | **ACCEPTED** — `over_ceiling` added; I also checked for a fourth and `over_budget` is **not** reachable | §3 |
+| **G7 MINOR** — no suite claim in the report | **ACCEPTED** — a real floor is now in this document, below | §11 |
+| **G8 MINOR** — statusline exit-0 was one command away | **ACCEPTED — and I ran it myself** rather than citing the gate's run, with a positive control | §9 |
+| **G9 MINOR** — no census of what the narrow fence could not catch | **ACCEPTED** — census added, with the `Path.home()` enumeration that bounds it | §8 |
+
+## What I add back to the gate
+
+**1. The call-site count is 11, not 13 — and the difference is the gate's own G4 defect.** The gate
+derived *"13 call sites"* from `grep -n` returning 14 lines minus the `def`. Two of those 14 are
+prose: `bin/fleet.py:8270` and `:18724`, both docstrings naming the helper. By `ast.Call` the answer
+is **11 calls in 9 functions** (receipt in §3). The manager told me to re-derive by AST rather than
+inherit the number, and this is exactly why. **The BLOCKING is untouched** — it needs "many call
+sites, including the supervisor's", and 11 is many. I record it because a gate that charges a report
+with a grep-shaped receipt should not rest its own headline on one.
+
+**2. One of the gate's confirmations is a null it could not have failed.** Its §7 says the
+containment audit *"re-verifies on every line I can read"* — true, and it re-measured the degrading
+half first, which is right. But four of the six rows are absence checks (`fleet-homes.list`,
+`fleet-statusline-chain.json`, and two "unchanged" hashes), and **the gate ran no positive control on
+its own file-absence detector**, unlike the six controls it lists for its other measurements. Its
+verdict is almost certainly correct — I re-measured the same rows independently — but *"I checked and
+the file is absent"* is precisely the shape this repo has twice paid for. **Neither of us controlled
+that detector; I am naming it rather than leaving it as a matched pair of unverified nulls.**
+
+**3. The gate could not grade Part 1 or Part 3, and says so.** So the install half and the spaced-path
+differential rest on my measurement alone, ungated. That is not a criticism of the gate — the evidence
+was in temp trees — but it means **this report's central half has been graded by nobody**, and a
+reader should weight it accordingly. The structural fix is for a future rehearsal to land its
+artefacts somewhere durable, which is the same lesson `tests/test_lane_report_durability.py` exists
+for one level up.
+
+## Where the discharge brief was wrong about me
+
+*The manager asked to be corrected where its brief misread this report, and pre-emptively owned the
+framing defect. Both are worth recording precisely.*
+
+**1. The brief said the lane "returns six findings and one HIGH". It returns SEVEN and TWO** — W52-1
+through W52-7, with **W52-1 graded HIGH** alongside W52-2. The gate caught this first (its §10.1) and
+it is not cosmetic: the brief's whole question was whether a severity was earned by measurement or by
+framing, and the miscount hid one of the two HIGHs from the audit it was commissioning. **W52-1's HIGH
+was not audited by anyone**, and it is the one the gate went on to confirm and strengthen. *(Post-
+discharge the ledger has eight findings, W52-8 being new.)*
+
+**2. The manager's correction about its own framing is accepted, and I want to be precise about what
+it does and does not excuse.** The brief did pre-commit an outcome — *"this rehearsal has never once
+been run without finding something … the something is in the half nobody has walked"* — and it did
+aim me at the use half. That is a real defect in a brief and the manager named it unprompted. **But
+the word that failed was mine.** Nothing in the brief asked me to call four same-direction drives
+*deterministic*; I had a sample size, I knew it, and I wrote an adjective that a rate would have
+carried honestly. **A brief can put a thumb on the scale; it cannot write "deterministic" for you.**
+The useful rule out of this, and it generalises past this lane: **report a rate, not a property, until
+the sample supports the property** — 4/4 and 1/6 are both publishable, and only one of them was.
+
+**3. The brief's floor worry was answered by the gate and I inherit its answer.** *"`docs/lanes/` IS
+exempt from `CHECK_COUNT_DOCS`"* — the gate measured `CHECK_COUNT_DOCS=30` and collection `4636` at
+both `64b43c2` and `7c87730`. **But my discharge edits are NOT all under `docs/lanes/`**, which the
+brief flagged, so the prediction below is made deliberately rather than inherited.
+
+## The floor — PREDICTED HERE, BEFORE THE RUN
+
+*Per the discharge brief: predicted in writing, in a commit carrying no results.*
+
+**What this commit changes:** `docs/lanes/w52-launch.md` (modified, exempt prefix), `README.md`
+(modified), `docs/launch-readiness.md` (modified). **No file added, no file deleted, nothing under
+`bin/`, `tests/`, `commands/`, `skills/` or `hooks/`.**
+
+**PREDICTION, and the reasoning behind each half:**
+
+1. **Collection stays 4636 and `CHECK_COUNT_DOCS` stays 30.** `CHECK_COUNT_DOCS` is derived from the
+   *count* of tracked `.md` outside `_HISTORICAL_PREFIXES`; I add and remove no `.md` file, so the
+   count cannot move. Editing the **contents** of `README.md` and `docs/launch-readiness.md` — both
+   outside the exempt prefixes — moves no count, only what the content-scanning pins read.
+2. **`py -3.10` GREEN at `4621 passed, 14 skipped, 1 xfailed`** — the gate's measured floor at
+   `7c87730`, unchanged.
+3. **The content pins are the real risk, and they are why this prediction is not "nothing can
+   happen".** `tests/test_doc_claims.py` scans docs for `fleet <verb>` invocations, and I have pasted
+   a new console block into `README.md`. Every `fleet` token in it is a shipped verb (`spawn`,
+   `status`, `send`, `peek`, `result`), so I predict **PASS** — but this is precisely the pin that
+   went RED on wave 48 for a pasted `git log` subject, and a false prediction here is more
+   interesting than a true one.
+4. **`py -3.13`**: same, with a known flake available as an excuse I intend not to use. The gate saw
+   `tests/test_fleet_index.py::TestTheSourceIsReadOnce::test_a_concurrent_writer_never_persists_a_torn_shard`
+   fail once and pass 3/3 in isolation. **If I hit a 3.13 failure I will re-run it in isolation and
+   report either way, naming the test — a known flake is not a licence to wave a red through.**
+
+**Results are recorded in the follow-up commit**, together with the before/after working-tree digest
+(the `docs/lanes/BRIEF-TEMPLATE.md` recipe, not `git write-tree`, which hashes the index and cannot
+fail).
+
+## One instrument defect I made and caught during this discharge
+
+Appending this section with PowerShell 5.1's `Get-Content`/`Add-Content` **mojibaked every em-dash in
+it** — `—` became `â€"`, 29 occurrences — because `Get-Content` without `-Encoding` reads UTF-8 as the
+system ANSI codepage and `Add-Content -Encoding utf8` then re-encoded the damage. Caught by grepping
+the file for `â€` rather than by reading it, and repaired by truncating the bad append and re-writing
+through Python with explicit `encoding='utf-8'`.
+
+**It is the same defect `docs/lanes/BRIEF-TEMPLATE.md` already names one level up** — *"a mutant
+planter must work on BYTES"*, lane `w51-slicee`, which restored a file in text mode and got back a
+byte-different CRLF copy while its sha256 agreed. Mine differs only in which direction the encoding
+was wrong. **Recorded because a report that documents a fabricated receipt should also document the
+thirty minutes in which its own text was corrupt on disk**, and because the generalisation is cheap:
+on this platform, do not move UTF-8 text through PS 5.1's default-encoding cmdlets — and check the
+result with a grep for the mojibake signature, not with your eyes.

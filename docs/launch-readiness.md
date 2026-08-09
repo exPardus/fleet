@@ -256,12 +256,20 @@ the format above on purpose: `tests/test_doc_claims.py` scans shell-fenced block
 anchored on.)
 
 **Why it was wrong is the part worth keeping.** The sentence was never measured against `SPEC.md`.
-It was relayed from root `CLAUDE.md`, whose opening paragraph still reads *"M-D and M-E shipped
+It was relayed from root `CLAUDE.md`, whose opening paragraph then read *"M-D and M-E shipped
 after and are **not yet folded into §18**"* — a line stale since `36a4c53`. This document opens by
 promising that *"Every row below was derived by executing something on this machine, not by reading
 prose."* This row was the exception, and it is the only entry here that a hostile re-run has removed
-rather than confirmed. **The stale text that remains is root `CLAUDE.md`, not `SPEC.md`** — outside
-this lane's fence, flagged for whoever owns it.
+rather than confirmed.
+
+**`CLAUDE.md` has since been corrected, and this paragraph was the last place still saying otherwise**
+*(updated 2026-08-09 by lane `w52-launch`, which found it; see `docs/lanes/w52-launch.md` W52-6)*. Its
+opening paragraph now records M-D and M-E as SHIPPED and quotes the superseded sentence only in order
+to retract it — so a substring search for *"not yet folded into"* still matches `CLAUDE.md` and that
+match is a retraction, not an assertion. **No stale text remains in either file.** The transferable
+lesson is the one this paragraph is an instance of: **a sentence that reports an outstanding repair
+elsewhere goes stale the moment that repair lands**, and nothing re-checks it, because the document it
+describes is not the document it lives in.
 
 What §18 *is* missing is narrower and not a milestone gap: the "Reconcile", three-tier/claim-nonce
 and supervisor-tombstone entries are present but unlettered, so §18 is a milestone list with

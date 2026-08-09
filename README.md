@@ -13,31 +13,59 @@ Workers aren't fire-and-forget processes — they're **durable Claude Code sessi
 ## See it in action
 
 ```console
-$ fleet spawn migrate-users --dir C:\proga\billing-service --mode bypass \
+$ fleet spawn migrate-users --dir C:\Users\Techn\AppData\Local\Temp\billing-service \
+    --mode bypass --model haiku \
     --task "Port the users table migration from Knex to raw SQL, see MIGRATION.md" \
     --token-ceiling 200000
-migrate-users a1b2c3d4-... (native bg, short id a1b2c3d4)
+model: haiku
+migrate-users 555e6b27-3d6c-4a42-9ea5-dea4ca9e1646 (native bg, short id 555e6b27)
 
 $ fleet status
 NAME                STATUS     TURNS     COST  MIN-AGO  MAIL   ATTACH  FLAGS
-migrate-users       working        1     0.00        2     0        -  -
+migrate-users       working        1        -        0     0        -  -
 
 $ fleet send migrate-users "also add a down-migration, I forgot to ask"
 migrate-users: turn running -- message queued to mailbox
 
+$ fleet status
+NAME                STATUS     TURNS     COST  MIN-AGO  MAIL   ATTACH  FLAGS
+migrate-users       working        1        -        0     1        -  -
+
 $ fleet peek migrate-users
-[tool] Read MIGRATION.md
-[tool] Write migrations/0042_users.sql
-[mail] delivered: "also add a down-migration, I forgot to ask"
-[tool] Write migrations/0042_users.down.sql
-[assistant] Added the down-migration and re-ran the local suite; both pass.
+-- migrate-users (555e6b27) --
+[tool] Bash
+[tool] Write
+[text] Creating SQL migrations now.
+[tool] Write
+[tool] Write
+[tool] Edit
+[text] Verifying SQL files.
+[tool] Read
+[tool] Read
+[tool] Edit
+[text] **Changed:** Created `0042_users.sql` (CREATE TABLE) and `0042_users_down.sql` (DROP TABLE) in migrations directory.
+
+**Verified:** SQL syntax matches Knex schema (SERIAL PK, VARCHAR NOT NULL UNIQUE e...
 
 $ fleet result migrate-users
-Migrated 0042_users to raw SQL with a matching down-migration. Ran
-`npm test -- migrations` locally: 14 passed. Diff is 2 files, no schema drift.
+-- tokens in=8 out=129 model=claude-haiku-4-5-20251001
+**Changed:** Created `0042_users.sql` (CREATE TABLE) and `0042_users_down.sql` (DROP TABLE) in migrations directory.
+
+**Verified:** SQL syntax matches Knex schema (SERIAL PK, VARCHAR NOT NULL UNIQUE email, TIMESTAMP DEFAULT for created_at). Down migration uses IF EXISTS for safety.
+
+**Blocked:** None. Awaiting manager instruction on whether to remove original 0042_users.js.
 ```
 
+*Captured verbatim on 2026-08-09 against `fleet` at `64b43c2` (Windows, `claude` 2.1.226) — including the
+absolute `--dir` and the truncation `peek` applies at 200 characters. **An earlier version of this block was
+hand-written and none of its `fleet peek` lines were output the code can produce**; it is pasted from a real
+session now so that it cannot drift back.*
+
 One task, one worker, one token cap, mid-turn steering — and never once attached a terminal. That's the whole loop.
+
+The steer landed while the turn was still running: `MAIL` goes `0 → 1` when it is queued and back to `0` once
+delivered, which is how you confirm it without attaching. **`fleet peek` does not show the delivery itself** —
+the mailbox arrives as a hook attachment record, and `peek` renders only assistant and user records.
 
 ## Why an orchestration layer for Claude Code
 
