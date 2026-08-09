@@ -16,7 +16,7 @@ the evidence for the real cause is gone from where they would look for it.
 
 THE ROOT CAUSE IS AN ORDERING ONE, and it is worth stating precisely because the
 fix is not "stop quarantining". `cmd_respawn` documents the intended design in
-prose at `bin/fleet.py:6254-6256`:
+prose at `bin/fleet.py:6266-6268`:
 
     resolve under the lock so a corrupt registry surfaces through
     load_registry's quarantine and an unknown worker gets the uniform error
@@ -607,7 +607,7 @@ class TestTheUnlockedCensusIsPinned:
             assert hits == [], (
                 f"{name} calls `load_registry` again at {hits}. It is a "
                 f"PRE-FLIGHT read that runs before `kill`/`respawn` take "
-                f"`fleet.lock` (`bin/fleet.py:6488` / `:6230`), and the rename "
+                f"`fleet.lock` (`bin/fleet.py:6500` / `:6230`), and the rename "
                 f"there steals the quarantine from the lock-held read -- after "
                 f"which the operator is told `unknown worker` about a worker "
                 f"that was in the registry. Use `read_registry_no_repair`.")

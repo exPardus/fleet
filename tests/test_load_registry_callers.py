@@ -224,7 +224,7 @@ ALLOWED = {
     # `_resolve_worker_target` WAS HERE. It is a PRE-FLIGHT NAME LOOKUP that runs
     # at the top of every verb -- the three views included -- before any of them
     # has taken the lock, so it carried the same disqualifier `_supervisor_gate`
-    # did. It hid behind the short-circuit at `bin/fleet.py:2414`: the measured
+    # did. It hid behind the short-circuit at `bin/fleet.py:2426`: the measured
     # table was driven with an ordinary worker name, which returns before the
     # read, so `fleet peek supervisor` was quarantining from a path the table
     # showed as clean. It now reads via `read_registry_no_repair`; the mutating

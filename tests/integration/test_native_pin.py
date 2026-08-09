@@ -9,7 +9,10 @@ real haiku `--bg` workers in a throwaway temp FLEET_HOME:
      withheld counter is RATIFIED behaviour, so step 2 discriminates the
      withheld case from a vanished usage block instead of demanding a number)
   3. fork-steer (G2b): idle `send` mints a new sid, old retires, hooks fire
-     in the fork
+     in the fork -- and the steer is actually DELIVERED, proved with a
+     per-run token that has exactly one way into the forked session (see
+     PIN_STEER_MESSAGE below; before wave 49 this step could go green on a
+     fork that never read the steer at all)
   4. `claude stop` + fleet tombstone on a mid-turn interrupt (G10: no Stop
      hook fires on an external stop -- fleet's own tombstone is the only
      record)
@@ -56,6 +59,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -99,6 +103,89 @@ ROSTER_SCHEMA_KEYS = {"pid", "id", "cwd", "kind", "startedAt",
 SPAWN_TIMEOUT = 420
 WAIT_TIMEOUT = 220
 CLI_TIMEOUT = 60
+
+
+# ===========================================================================
+# Step 3's steer -- the success token must have exactly ONE way into the fork
+# ===========================================================================
+# THE CONFOUND THIS REPLACES (docs/lanes/w49-fs.md §1e; docs/lanes/w48-pin.md
+# "CORRECTION 2026-08-09"). Step 3 used to steer with the 28-character
+# `Reply with exactly: STEER-OK`. `_cmd_send_native` passes
+# `hint=message[:NATIVE_NAME_HINT_MAX]` (40) to `dispatch_bg`
+# (bin/fleet.py:7642), which renders the FORKED session's own roster name as
+# `cat|name|hint` (bin/fleet.py:13219). So this step handed its own success
+# token to the session under test AS ITS TITLE, on a channel that has nothing
+# to do with whether the steer was delivered: a fork that silently re-did its
+# previous task could still emit `STEER-OK` and turn the step green. **The
+# test could pass while the path it tests was broken**, which is what makes
+# five waves of green here weaker evidence than they looked.
+#
+# Wave 48's transcript forensics had the observation and took only one of its
+# two readings: `STEER-OK` appearing 6x and *only* in `custom-title` /
+# `agent-name` metadata was offered as proof the steer was absent from the
+# user message. It is equally proof that answering it required reading
+# nothing.
+#
+# THE REPAIR IS NOT "MAKE THE TOKEN LONGER". A longer literal fixes today's
+# string and re-breaks the moment someone shortens the message -- which is
+# exactly the edit that produced the confound. Two structural properties
+# instead, both derived from fleet's own constants so neither can rot in
+# silence:
+#
+#   1. PER-RUN UNIQUE, so no answer already carried in the fork's transcript
+#      -- step 1's `PIN-OK`, or any earlier run's token -- can coincidentally
+#      satisfy the assertion;
+#   2. positioned past the hint window BY CONSTRUCTION (`ljust` off
+#      `NATIVE_NAME_HINT_MAX`, never a hand-counted literal), and PROVED
+#      there by `_assert_steer_token_has_one_way_in`, which renders the name
+#      through `fleet.render_native_name` with the same arguments
+#      `_cmd_send_native` will use rather than re-deriving the truncation.
+#
+# Property (2) is ALSO checked in the unit tier, where it costs nothing and
+# runs on every commit: tests/test_fork_steer_delivery.py::
+# test_the_pin_tiers_steer_token_cannot_reach_the_session_name. That is the
+# half that survives the next edit -- whoever shortens this message will not
+# be running a live haiku tier when they do it.
+PIN_STEER_TOKEN = "STEER-OK-" + uuid.uuid4().hex[:8].upper()
+
+# `.ljust(NATIVE_NAME_HINT_MAX + 1)` and not a hand-counted string: raise the
+# constant and the token stays outside the window with no edit here. The pad
+# is trailing whitespace in the delivered body, which is inert to the worker
+# and collapsed out of the roster name anyway.
+_PIN_STEER_LEAD = (
+    "This message supersedes the task you were given earlier; that task is "
+    "already finished and its answer is no longer wanted. "
+).ljust(fleet.NATIVE_NAME_HINT_MAX + 1)
+PIN_STEER_MESSAGE = _PIN_STEER_LEAD + "Reply with exactly: " + PIN_STEER_TOKEN
+
+
+def _assert_steer_token_has_one_way_in(worker_name, message, token,
+                                       category=None):
+    """A delivery test's success token must be reachable by the forked
+    session ONLY through the steer fleet delivers.
+
+    Computed through fleet's OWN renderer, so a change to
+    `NATIVE_NAME_HINT_MAX` or to `render_native_name`'s truncation is tracked
+    without this file being edited. Its one duplication is the hint slice
+    itself (`_cmd_send_native`, bin/fleet.py:7642): this re-derives it rather
+    than observing it, so a change to THAT expression would slip past here.
+    `tests/test_fork_steer_delivery.py::
+    test_the_pin_tiers_steer_token_cannot_reach_the_session_name` closes that
+    gap by driving the real `cmd_send` and reading the `-n` value off the
+    dispatched argv. Returns the rendered name so a failure downstream can
+    quote what the fork was actually titled."""
+    rendered = fleet.render_native_name(
+        category, worker_name, message[:fleet.NATIVE_NAME_HINT_MAX])
+    assert token not in rendered, (
+        f"CONFOUNDED PIN -- refusing to run a delivery test that cannot "
+        f"fail. The step-3 success token {token!r} is inside the roster name "
+        f"the fork is dispatched under ({rendered!r}), so a worker that never "
+        f"read the steer can still emit it and turn this step green "
+        f"(docs/lanes/w49-fs.md §1e). Move the token past "
+        f"NATIVE_NAME_HINT_MAX ({fleet.NATIVE_NAME_HINT_MAX}) -- do not "
+        f"shorten the message to make this assertion pass."
+    )
+    return rendered
 
 
 def _claude(*args, timeout=30):
@@ -411,7 +498,15 @@ def test_3_pin_fork_steer(sandbox: Sandbox):
         f"pin-w1 must be idle before a fork-steer can fire: {before}"
     )
 
-    s = sandbox.fleet("send", "pin-w1", "Reply with exactly: STEER-OK")
+    # Guard BEFORE the spend: if the token can reach the fork by any channel
+    # other than the steer, this whole step is a tautology and there is no
+    # point paying for it. Category comes off the record so the guard renders
+    # the name fleet will actually render, not an assumed default.
+    rendered_name = _assert_steer_token_has_one_way_in(
+        "pin-w1", PIN_STEER_MESSAGE, PIN_STEER_TOKEN,
+        category=before.get("category"))
+
+    s = sandbox.fleet("send", "pin-w1", PIN_STEER_MESSAGE)
     assert "fork-steered" in s.stdout, s.stdout
 
     after = sandbox.worker("pin-w1")
@@ -437,7 +532,25 @@ def test_3_pin_fork_steer(sandbox: Sandbox):
         f"fire in the fork (settings did not survive --bg --resume):\n"
         f"wait stdout: {w.stdout}\nall outcomes: {outcomes}"
     )
-    assert "STEER-OK" in matching[-1].get("result_text", ""), matching[-1]
+    # THE DELIVERY ASSERTION. `PIN_STEER_TOKEN` is minted per run and exists
+    # nowhere the forked session can reach except the steer body fleet wrote
+    # -- the guard above proved it is not in the fork's own roster name -- so
+    # emitting it is only possible after reading the steer. A `PIN-OK` here
+    # is not a flake: it is the wave-48 defect verbatim (docs/lanes/
+    # w48-pin.md §4, root-caused in docs/lanes/w49-fs.md §2), a fork replaying
+    # its previous turn's answer to a byte-identical dispatched turn.
+    result_text = matching[-1].get("result_text") or ""
+    assert PIN_STEER_TOKEN in result_text, (
+        f"THE STEER WAS NOT DELIVERED. The forked sid {new_sid} answered "
+        f"{result_text!r}, which does not contain this run's token "
+        f"{PIN_STEER_TOKEN!r}. That token is not in the fork's roster name "
+        f"({rendered_name!r}) and not in anything it answered before, so the "
+        f"only way to produce it is to have read the steer -- and this fork "
+        f"did not. If the text above is step 1's `PIN-OK`, the fork replayed "
+        f"a turn it had already answered: `fleet send` printed "
+        f"`fork-steered` while the worker silently re-did its previous task "
+        f"(docs/lanes/w49-fs.md §2). outcome={matching[-1]}"
+    )
 
 
 # ===========================================================================
@@ -528,11 +641,11 @@ def test_5_pin_archive_rm(sandbox: Sandbox):
 
     a = sandbox.fleet("archive", "pin-w1")
     # cmd_archive's own summary line unconditionally reads "archived N
-    # worker(s), skipped M" (bin/fleet.py:6337) -- a blanket "skipped" not
+    # worker(s), skipped M" (bin/fleet.py:6349) -- a blanket "skipped" not
     # in stdout check can never pass even on full success (M=0). Live
     # verification (T12 fix wave) is the first real exercise of this exact
     # message; check for the PER-WORKER skip line ("pin-w1: skipped --
-    # <reason>", fleet.py:6283) instead of the always-present summary word.
+    # <reason>", fleet.py:6295) instead of the always-present summary word.
     assert "pin-w1: skipped" not in a.stdout, a.stdout
     assert "epoch" not in a.stdout.lower(), a.stdout
 

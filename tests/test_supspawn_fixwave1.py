@@ -183,7 +183,7 @@ class TestPipeNameJournalPath:
         assert fleet.journal_file_path("w1").name == "w1.md"
 
     def test_compose_prompt_journal_target_is_mapped(self, native_home):
-        prompt, _ = fleet.compose_prompt(SUP_PIPE, "C:/x", "task", None)
+        prompt, _, _mail = fleet.compose_prompt(SUP_PIPE, "C:/x", "task", None)
         assert "sup~inc-1~boot.md" in prompt
         assert "sup|inc-1|boot.md" not in prompt
 

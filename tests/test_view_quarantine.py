@@ -22,7 +22,7 @@ TWO SEPARATE REASONS THIS MATTERS, and they are not the same reason:
      is the extreme case: it quarantined what it was invoked to diagnose.
   2. **Privilege escalation.** The rename converts *corrupt* into *absent*, and the
      §9 legacy-claim upgrade abstains on corrupt but is GRANTED on absent. The
-     refusal message at `bin/fleet.py:12640` walked the caller through that door by
+     refusal message at `bin/fleet.py:12691` walked the caller through that door by
      name (*"Repair `state/fleet.json` (see `fleet doctor`)"*), and `fleet doctor`
      was the step that performed it. That message now names `--repair`.
 
@@ -249,7 +249,7 @@ class TestRepairIsTheOnlyQuarantine:
 # ---------------------------------------------------------------------------
 
 class TestTheSection9RefusalNamesTheRepairFlag:
-    """`bin/fleet.py:12640`. As written it named `fleet doctor`, which (a) will
+    """`bin/fleet.py:12691`. As written it named `fleet doctor`, which (a) will
     now do nothing by default, and (b) previously performed step 2 of the
     escalation -- corrupt refuses, the rename makes it absent, absent grants the
     upgrade. Driven end-to-end rather than grepped out of the source: a message
@@ -350,7 +350,7 @@ class TestTheViewsDoNotQuarantine:
     def test_resolving_the_logical_supervisor_name_does_not_quarantine(self, home):
         """THE HOLE THE BRIEF DOES NOT NAME. `_resolve_worker_target` is the
         first thing all three views call, and it called `load_registry` too. It
-        short-circuits for ordinary names (`bin/fleet.py:2414`), so the measured
+        short-circuits for ordinary names (`bin/fleet.py:2426`), so the measured
         table -- driven with `fleet peek w` -- never reached it; `fleet peek
         supervisor` did, and quarantined there instead. Converting only the
         three verbs would have left the property false for exactly the name the
