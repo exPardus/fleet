@@ -7035,3 +7035,408 @@ Releasing rather than dying: a released claim reads unambiguously at the next bo
 ## 2026-08-09T01:47:59Z RELEASED inc=inc-20260808T232242Z-ae09 sid=6963e574-e250-48d5-a181-185e92b4ec89
 
 released cleanly: @C:/proga/claude-fleet/state/w48-release.md
+
+## 2026-08-09T01:49:33Z BOOT inc=inc-20260809T014933Z-e276 sid=bfe71706-88b7-446e-a4c1-c31fe6fd6295
+
+fresh claim: predecessor inc-20260808T232242Z-ae09 released cleanly -- fresh claim, no seizure
+
+## 2026-08-09T01:51:33Z CHECKPOINT inc=inc-20260809T014933Z-e276 sid=bfe71706-88b7-446e-a4c1-c31fe6fd6295
+
+WAVE 49 BOOT — CLEAN CLAIM, AND THE SLICE (c) GATE IS ALIVE AND MID-COMMIT, WITH THREE SURVIVING MUTANTS RATHER THAN THE ONE I WAS BRIEFED ON.
+
+## BOOT
+
+`sup-boot` returned VERDICT `claim` at exit 0 — predecessor `inc-20260808T232242Z-ae09` released cleanly, no seizure, no page. I am `inc-20260809T014933Z-e276`. The launch id in my worker name (`inc-20260809T014912Z-c477`) is not my incarnation and I am not treating it as one.
+
+Boot bundle was redirected to a file, grepped for VERDICT/INCARNATION/NONCE, read in full, and **deleted** — verified by a post-delete listing that returned empty. The nonce lives in my working context only, per claim-nonce 5.8/5.9.
+
+`fleet autoclean` ran: `archived 0, skipped 143`, husks 0, tombstones 0, errors 0. Nothing owed.
+
+main == origin/main == `cef230f`, confirmed by rev-parse on both. My predecessor's release note reads `55091c3` as final; main has since advanced by one commit (the release journal entry itself). Anything I land re-derives its floor from `cef230f`, not from the lane's 4232.
+
+## THE GATE IS NOT DEAD — IT IS IN ITS LAST ACT, AND I CAUGHT IT THERE
+
+`w48-gc` reads `working` with 73 minutes since its last recorded event, which is exactly the shape of a husk. It is not one. Three independent observations say it is finishing:
+
+- its peek tail reads *"Tree fully intact. Filling in the mutant table and committing the verdict."* followed by an Edit/Edit/Edit/Bash sequence;
+- `docs/lanes/w48-gc.md` exists in its worktree as an **untracked 38,455-byte file**, mtime stamped this minute;
+- branch `w48/gc` is still at `1161d39`, the lane tip — so the commit has not landed yet.
+
+I am giving it a bounded wait rather than interrupting. Interrupting a gate one tool call short of committing its own verdict would destroy the artifact the `docs/lanes/` convention exists to make durable.
+
+## WHAT THE PEEK ALREADY CORRECTS IN MY OWN BRIEF
+
+My dispatch brief and my predecessor's stand-down both recorded **one** surviving mutant (X2, `normcase` unpinned). The gate's own tail says otherwise:
+
+> All confirmed: M1 RED (4 failed) — so all 6 of the lane's mutants die. X2, X4, X5 each survived the full 4217-test floor.
+
+So the two-defect list I inherited is a **lower bound, and it is wrong by two**. The lane's self-reported fault-injection table is vindicated on its own six mutants — all six die — and defeated on the three the gate invented, which is the a3 lesson (*a self-reported fault-injection table is a claim about the mutants the author thought of*) reproducing for a third consecutive wave. I will read the committed verdict before pricing the discharge, and I will not assume X2/X4/X5 are the whole list either.
+
+## STANDING POSTURE
+
+Operator still away. The docket at `state/w48-operator-docket.md` is finished and I am carrying it forward untouched — I will not redraft it, and I will add to it only if a genuinely new gate is forced. `supervisor/GOALS.md`, the parked GOALS band proposal, ND4(c)'s slot, `w35/nd4c`, `fix/b6-interface-release` and `fix/outcount-timing` stay untouched.
+
+Queue, unchanged in order: discharge (c)'s gate and land it, then slice (d), then the fork-steer RED. The pin stamp stays held until the fork-steer RED is dispositioned; I will report the tier as counts, never as a colour.
+
+## 2026-08-09T02:02:42Z CHECKPOINT inc=inc-20260809T014933Z-e276 sid=bfe71706-88b7-446e-a4c1-c31fe6fd6295
+
+THE SLICE (c) GATE LANDED ITS VERDICT — GATING, 0 BLOCKING, 3 MAJOR, 4 MINOR — AND ALL THREE MAJORS ARE ONE OBJECT. I AM SPLITTING THE BRANCH RATHER THAN PATCHING AROUND THEM.
+
+## THE GATE FINISHED, AND MY "IT MAY HAVE DIED" WAS WRONG IN THE RIGHT DIRECTION
+
+`w48-gc` committed `4d2d7ae` on `w48/gc` — *"gate verdict on w48/hookargv — GATING, 3 MAJOR, 4 MINOR, 0 BLOCKING"*, 38,455 bytes. It read `working` with 73 minutes of silence, which is the exact shape of a husk; it was in fact one tool call from committing. **A bounded `fleet wait` cost me seven minutes and preserved the artifact; an interrupt would have destroyed it.** The `docs/lanes/` convention did precisely the job it was built for — I read the verdict from the branch, not from a peek.
+
+My dispatch brief said the known defect list was "two". It was three, then it was neither: **all three surviving mutants are the gate's own (X2/X4/X5), all three are the same subject, and 8 of 11 mutants died.** The lane's own six-mutant table is truthful — 6/6 die. The a3 lesson holds a third wave running, but note its precise shape this time: *the self-reported table was not dishonest, it was incomplete about a component the author added last.*
+
+## THE DECOMPOSITION THAT DECIDES THE DISCHARGE
+
+The three MAJORs are not three problems. They are one component, viewed three ways:
+
+- **F2 (governance)** — the `home-witness` doctor row is content the lane DERIVED from prose. Nothing ratified defines a hook-plane witness; the gate confirmed the count independently (`witness` occurs exactly twice in the spec, with a 199-hit control proving the grep sees anything at all). Not wrong — *unauthorised*.
+- **F1** — `docs/launch-readiness.md` now reads *"29 checks … goes to 28 PASS / 0 FAIL"* inside one bullet. **This exists only because the row exists**: adding a doctor row is a six-site documentation edit by construction, the lane fixed five sites and missed the sixth phrasing.
+- **F3** — the row recognises **one of the three `--fleet-home` spellings its own hooks accept**, and three of its four documented design decisions have no pin (X2 `normcase`, X4 empty value, X5 registration position — each survived the full 4217-test floor).
+- **F6** likewise: the row renders a mismatching `\r` invisibly.
+
+Delete the row and F1, F3 and F6 do not need fixing — **they cease to exist**, and the six doc sites revert to an internally consistent `28`.
+
+## THE CALL: LAND THE RATIFIED MECHANISM, HOLD THE ROW
+
+Slice (c) ships two things the spec names — hook argv and the `_render_successor_task` argv — plus a sibling fix the gate independently endorsed (*"in scope by the repo's own sibling-defect doctrine; correct as written"*). That is landable. The row is not part of it.
+
+**And I want to be exact about why this is not "parking on an absent operator," because that is the failure mode my brief warned me against.** The authorisation question would not, on its own, justify holding built work for an operator who is away. What justifies it is that **the gate measured the row DEFECTIVE, not merely unratified**: F3(a) is a shipped defect in which a correctly fenced instance is reported as unfenced, with a remedy (`re-run fleet init`) that would not fix it. That is a permanently-red-row generator — and I was dispatched this wave specifically to kill a known-RED tier because *a known-RED surface trains everyone to read RED as normal*. Landing a row with that property while removing a RED for the same reason would be incoherent.
+
+So the row is held on merit AND on authorisation, and the operator gets a genuinely new gate — the first I have added, and my brief's bar for adding one is met: it is forced by a gate finding, not redrafted from the docket I inherited.
+
+Footprint measured before deciding, not estimated: `home-witness` appears **7 times in `bin/fleet.py`, 5 in the new test file, 8 in the lane's own report**, and the six doc-count edits are visible in a three-file diff that contains nothing else. The gate's revert estimate holds.
+
+## WHAT STILL GETS FIXED, BECAUSE A MINOR GRADE IS NOT A REASON TO SKIP IT
+
+**F4 — the unquoted `{fleet_py}` — is graded MINOR by the gate (correctly: it is pre-existing and disclosed) and I am fixing it anyway**, because my orders name it and the reason is sound: it breaks on any install path containing a space, which on Windows is `C:\Program Files\...`, and it is the class that only ever reproduces on someone else's machine. The gate drove it: all three rendered commands die `can't open file 'C:\...\Fleet'` at rc 2 while the quoted sibling boots clean at rc 0. **The branch added a correctly quoted `--fleet-home "{home}"` to those very lines, leaving a command that looks quoting-aware and is not.**
+
+Also folding in the pin that would have caught F1 — widening `_CHECK_COUNT` to match the `N PASS` phrasing. That hole was *written down in the pin module's own docstring, naming the exact stale string, as its worked example of what it does not cover.* Pinning the property rather than the instance is the standing instruction and this is the cheapest possible instance of it.
+
+## WAVE PLAN — THREE LANES, AND TWO OF THEM ARE DISJOINT FROM THE CODE LANE BY CONSTRUCTION
+
+The serialisation I inherited said (d) and fork-steer both wait on (c) because all three need `bin/fleet.py`. True of their BUILD phases. It is not true of what actually gates them:
+
+1. **`w49-c`** — the (c) discharge. Owns `bin/fleet.py` and the test/doc set. Respawned onto the existing `w48/hookargv` worktree.
+2. **`w49-dcap`** — slice (d)'s capture experiment ALONE. The spec word is *capture-gated*: if Claude Code's statusline blob carries no usable sid, the slice as specified is unbuildable and saying so IS the deliverable. That is an experiment producing a report — it writes one file under `docs/lanes/` and touches no code.
+3. **`w49-fs`** — reproduce and root-cause the fork-steer RED, report-only, no `bin/fleet.py` edit. Its first act independently verifies `docs/lanes/w48-pin.md`'s central claim.
+
+Lanes 2 and 3 buy back the whole serialisation: the two blocked slices arrive at the code lane with their unknowns already measured, so their build phases are short and can take `bin/fleet.py` in turn. Disjointness will be measured with `git diff --name-only $(git merge-base main $b) $b`, not asserted.
+
+Floors will be re-derived by `--collect-only` on both sides — the lane's 4232 is stale (main has moved, and the split removes tests), and a count derived by arithmetic on a diff is the wave-38 defect.
+
+## ONE TEMPLATE CORRECTION THE GATE EARNED, RECORDED NOW SO IT IS NOT LOST
+
+`docs/lanes/BRIEF-TEMPLATE.md`'s safety stanza says to pass `--fleet-home <temp>` on every invocation. **The gate measured that this cannot work for the `init`/`doctor` case**: `fleet home --fleet-home <fresh temp>` refuses with `not_initialized`, because §5 step 1 validates that `state/fleet.json` exists and `fleet init` does not create it. The idiom that does work is **removing `CLAUDE_CODE_SESSION_ID` from the child environment** — which is what makes `FLEET_HOME` a real fence — gated on `fleet home` run identically. I am putting the corrected idiom into every brief I write this wave and will land the template fix with the (c) merge rather than spending a lane on it.
+
+## 2026-08-09T02:10:50Z CHECKPOINT inc=inc-20260809T014933Z-e276 sid=bfe71706-88b7-446e-a4c1-c31fe6fd6295
+
+WAVE 49 DISPATCHED — THREE LANES RUNNING, TWO OF THEM ON WORK MY INHERITED PLAN SAID HAD TO WAIT. GATE 4 FILED.
+
+## DISPATCHED, AND THE SERIALISATION I INHERITED WAS TOO COARSE
+
+| lane | sid | branch / worktree | owns |
+|---|---|---|---|
+| `w48-c` | `72621d79` | `w48/hookargv` @ `1161d39` | `bin/fleet.py`, `tests/**`, the doc-count set |
+| `w49-dcap` | `e4ebf3a6` | `w49/dcap` @ `cef230f` | `docs/lanes/w49-dcap.md` only |
+| `w49-fs` | `4dc4cacf` | `w49/fs` @ `cef230f` | `docs/lanes/w49-fs.md` + NEW files under `tests/` |
+
+All three `--mode bypass`, briefs in `state/tasks/lens/`, dispatched by `@file` so no prose ever touched a shell string (REFUSAL CLASS 5's real surface is the shell, not the verb).
+
+**The plan I inherited serialised (d) and fork-steer behind (c) because all three need `bin/fleet.py`. That is true of their BUILD phases and false of what actually gates them.** (d) is *capture-gated*: its blocking unknown is whether Claude Code's statusline blob carries a usable sid, which is an experiment, not an edit. Fork-steer's blocking unknown is a root cause, and the brief forbids that lane from touching `bin/fleet.py` at all — it delivers the fix as a patch in its report plus a new test file (a new file cannot conflict). So both blocked slices now arrive at the code lane with their unknowns already measured, and the file stays single-writer throughout. Disjointness will be *measured* at landing with `git diff --name-only $(git merge-base main $b) $b`, not asserted from this table.
+
+**`w48-c` was dispatched by `respawn`, not `send`** — same reason my predecessor gave and it has not expired: `send` to an idle worker takes the fork-steer path, which is the very defect under investigation. Using the suspect verb to dispatch work is a free risk. Brief survival verified rather than assumed: distinctive spans present exactly once each, and every dispatched file **GREW** (7833→8515, 7970→8640, and `w48-c` to 22012 because respawn carries the journal forward). The truncation defect's signature is 784 bytes and a sentence cut mid-word; none of these. One span check returned 0 and that was **my** search string being case-sensitive against an uppercase heading, not a truncation — checked before believing it.
+
+## GATE 4 FILED — THE FIRST I HAVE ADDED, AND THE BAR WAS MET
+
+`docs/OPERATOR-GATES.md` gains one open item: whether the derived `home-witness` doctor row is ratified as slice (c)'s witness (conditional on repair), whether the operator specifies what (c)'s witness should be, or whether the word is vestigial. I carried the three inherited gates forward **untouched** as ordered and did not redraft the wave-48 docket.
+
+I put my recommendation in (ratify-after-repair — it is the only candidate that has been built and measured) and then said plainly that I hold it loosely, because **this is the one question a supervisor genuinely cannot answer: the operator ratified the sentence, so only they can say what `witness` in slice (c) was meant to name.** A recommendation that pretends the authorship question is a technical one would be the wrong kind of helpful.
+
+Format is pinned by `tests/test_supervisor.py::TestOperatorGatesFile` and I ran it before believing the edit: **3 passed**.
+
+## THE FLOOR, PREDICTED BEFORE IT RAN
+
+Predicted in writing: **4154 collected = 4139 passed / 14 skipped / 1 xfailed**, identical on both interpreters, because my edit adds no test. `--collect-only` on `cef230f` returned **4154 on py 3.13 AND py 3.10** — derived by collection, never by arithmetic on a diff and never by counting `def test_` lines. The execution floor is running on both interpreters now; sha proved identical before, checked again after, with a `git status` damage check (`worker-settings.template.json` has been clobbered to `{}` by the suite before). Expected dirt in that check is `supervisor/JOURNAL.md`, which is mine and is tracked.
+
+**I deliberately made no other edit to the tree while that run is in flight.** A knowledge fold or a doc fix committed mid-run would show up in the post-run `git status` and destroy the damage check's meaning — the instrument only works if I am the only thing that could have dirtied the tree.
+
+## STILL OWED, UNCHANGED
+
+The knowledge fold for waves 44–48, carried from two predecessors now. It grows every wave and this one adds: a gate that read as a husk at 73 minutes and was one tool call from committing; the three-surviving-mutants correction; `--fleet-home` cannot name a home you are about to `init`; and the split-a-slice-rather-than-patch-its-symptoms shape. The pin stamp stays held at 2.1.222 until the fork-steer RED is dispositioned — five of six passing is not a reason to stamp.
+
+## 2026-08-09T02:39:30Z CHECKPOINT inc=inc-20260809T014933Z-e276 sid=bfe71706-88b7-446e-a4c1-c31fe6fd6295
+
+FIRST LANDING PUSHED, FLOOR PREDICTED AND HIT EXACTLY ON BOTH INTERPRETERS — AND THE CAPTURE LANE ANSWERED ITS QUESTION "YES" IN A WAY THAT MAY STILL KILL THE SLICE.
+
+## LANDED — main == origin == `1c0d807`
+
+`1c0d807`, gate 4 into `docs/OPERATOR-GATES.md`. One file, +2 lines, no production code.
+
+**Floor predicted in writing BEFORE the run and hit exactly on both interpreters:** 4154 collected = `4139 passed, 14 skipped, 1 xfailed` on `py -3.13` **and** `py -3.10`. Derived by `--collect-only` on both interpreters first (4154/4154), never by arithmetic on a diff. Tree sha `cef230f` proved identical before and after both runs. `git status` after the run showed exactly two modified files — `docs/OPERATOR-GATES.md` (my edit) and `supervisor/JOURNAL.md` (my checkpoints) — so **no suite-written damage to tracked files**, and `worker-settings.template.json`, which the suite has clobbered to `{}` before, was untouched.
+
+The format pin `TestOperatorGatesFile` ran green (3 passed) **before** I believed the edit, not after.
+
+Message went through `-F <file>`, never a shell string, and was **read back from the PUSHED ref**: five distinctive spans present exactly once each, 1937 bytes stored vs 1936 source — the one-trailing-newline signature my predecessor measured on both of its merges. Branch-protection bypass event fired again (*"Changes must be made through a pull request"*, push succeeded) — ratified 2026-07-30, behaving as ruled.
+
+## `w49-dcap` — THE PREMISE IS TRUE AND THE SLICE MAY STILL BE UNBUILDABLE
+
+The lane answered all four questions and then found the thing that outranks them.
+
+**The premise holds.** The statusline blob carries `session_id`, a top-level string uuid, **byte-identical to `CLAUDE_CODE_SESSION_ID`** read in the statusline's own process, 8/8 across two independent sessions, present on **every** refresh (4/4, 4/4). The key *set* varies — the first render lacks `prompt_id`, `session_name`, `rate_limits` — but `session_id` sits in the stable core. Blob self-stamps `version: "2.1.226"`; 2.1.222 is not installed, so it was **not measured and not guessed**.
+
+**Then the sting.** The statusline does not fire headless — proven by a discriminator rather than by absence, with a `SessionStart` hook in the *same* project settings file writing its marker while the capture stayed empty. The real measurement came from driving `claude` under **winpty**, which neither my brief nor its predecessor knew was on this machine. And the only session class that gets a statusline is **interactive — which is not a registry member.**
+
+**I verified the load-bearing half myself before propagating it**, because a finding this consequential arriving by relay is how a wrong sentence gains authority at every hop and evidence at none:
+
+- `lookup_home_for_sid`'s own docstring: **"MEMBERSHIP IS THE UNION, AND `spawned_by` NEVER GRANTS IT (§5.2, pinned)"** — with the reason stated: a record's `spawned_by` is the MANAGER's sid, so honouring it *"would make every manager a member of every home it ever dispatched into — ambiguity by construction, on the one caller class §5 most needs to serve."*
+- The live registry: **145 records, `Counter({'bg': 145})`, 144 carrying `spawned_by`.**
+
+So §5 step 2 is a **designed permanent miss on the operator's own screen** — not a bug, a ratified decision with its reasoning written down. It falls through rather than refusing, so nothing breaks; the lookup is simply inert where it was meant to pay off.
+
+**The cost premise in my own brief was also wrong, and the lane corrected it with numbers.** I warned that a per-refresh registry sweep would be a hot-path regression. Measured: `status_snapshot` 2.4 ms, bare read 0.1 ms, lookup 1.6 ms — against **560 ms** end-to-end statusline latency dominated by interpreter startup. The short-circuit is worth building for **refusal shape, not speed**.
+
+## WHY I DISPATCHED A DISCRIMINATOR INSTEAD OF FILING A SECOND GATE
+
+The tempting move was to escalate §5.2-versus-slice-(d) to the operator immediately. I did not, because the lane named — and correctly declined to run — the one measurement that decides it: **the documented hand-off path is the agents menu or `claude attach <session-id>`, and a session resumed that way IS a fleet worker, whose sid IS a registry member.** If a resumed session's blob carries the worker's sid, the lookup hits exactly where the operator actually uses it and the slice is buildable as specified. If it is issued a fresh sid, the lookup resolves nowhere and it is genuinely an operator question.
+
+Filing a gate on an unmeasured premise would put the operator's time behind an experiment I can run myself. `w49-dcap` respawned onto exactly that discriminator, with one hard line added: **never resume, attach to, or drive any session belonging to the live fleet** — it spawns its own throwaway worker into a temp home, which is what makes the lookup answerable while keeping it out of a fleet with three lanes running. It is ordered to drive `lookup_home_for_sid` for real rather than reason about it, with a known-good control first.
+
+I also told it explicitly **not** to propose honouring `spawned_by`, and why — the docstring already prices that as ambiguity by construction, and I would not carry that recommendation forward if it came back.
+
+## STATE
+
+Three lanes working: `w48-c` (the (c) discharge), `w49-fs` (fork-steer root cause), `w49-dcap` (the discriminator). Gates open: 4. `main` is one commit ahead of where the (c) lane forked, which its brief already told it to re-derive rather than trust.
+
+## 2026-08-09T02:55:22Z CHECKPOINT inc=inc-20260809T014933Z-e276 sid=bfe71706-88b7-446e-a4c1-c31fe6fd6295
+
+THE DISCRIMINATOR CAME BACK YES, THE LANE CORRECTED ITS OWN PREVIOUS REPORT TO GET THERE, AND SLICE (d) IS UNBLOCKED WITHOUT COSTING THE OPERATOR A GATE.
+
+## `w49-dcap2` — YES, AND THE REASON IT IS YES IS BETTER THAN THE QUESTION
+
+Committed at `c228d69` on `w49/dcap`. All three strings identical — blob sid, worker registry sid, driven-session sid: `b4f8ad98-1fd9-4cb0-891b-0582b6f59ff7`. **`claude --resume <worker sid>` adopts the sid, and the lookup returns `hit`.**
+
+The controls are what make that worth believing, and they are the ones I ordered plus one I did not: a known-good sid → `hit`, a negative control → `miss`, **and `--fork-session` → a different sid entirely**, which proves a NO was detectable. A yes from an instrument that cannot produce a no is not a measurement.
+
+**The finding that outranks the question I asked:** `--bg` workers render a statusline **under their own member sid, unattached**. So §5 step 2 already resolves in the ordinary case — slice (d)'s `blob sid -> same lookup` half is **live**, and the escalation I had pre-authorised is **not needed**. §5.2 and slice (d) never conflicted, because the sid that reaches the lookup is the worker's own, not the manager's.
+
+**Session classes, measured — three, not two:**
+
+| class | statusline | blob sid | lookup |
+|---|---|---|---|
+| `--bg` worker's own process | yes, 6 + 7 renders | worker's | **hit** |
+| `claude --resume <worker sid>` | yes | worker's | **hit** |
+| `claude attach <short-id>` | starts no session | — | n/a |
+| `claude agents` host | yes | own fresh sid | miss |
+| `--fork-session` | yes | fresh sid | miss |
+
+## THE LANE CORRECTED ITSELF, UNPROMPTED, AND THAT IS THE HEADLINE FOR ME
+
+Its first report generalised *"the only session class where the statusline fires is interactive."* Its second says plainly: **that generalisation is false; three classes exist, not two** — while noting that the `-p` measurement underneath it still stands. It did not quietly let the newer report supersede the older one, which is the failure mode that leaves two live documents disagreeing and nobody knowing which is current.
+
+**And I should record my own share of this honestly: I nearly filed it as an operator gate.** The tempting move after the first report was to escalate §5.2-versus-slice-(d) immediately. What stopped me was that the lane had *named* the measurement it declined to run — so the gate would have put the operator's time behind an experiment I could run myself, on a premise that turned out to be **wrong**. A gate filed on an unmeasured premise is worse than no gate: it spends the one resource I cannot replace, and it would have arrived with a false conclusion attached.
+
+## TWO NEW DEFECTS, FOUND SIDEWAYS, AND ONE OF THEM IS A LIVE REPRODUCTION OF WHAT SLICE (c) EXISTS TO FIX
+
+1. **`fleet attach` pastes the full `session_id` while `claude attach` matches the roster SHORT id** → `No job matching`. The documented hand-off path prints a command that does not work. That is the R2 class again — *a surface that names a remedy the machine will not accept.*
+2. **`FLEET_HOME` does not reach a `--bg` child.** The daemon donated the live fleet's supervisor boot env, so the worker's Stop hook wrote its outcome to the hook's `INSTALL_ROOT` **instead of the spawning home** — leaving that home reading `working` for a worker the roster called `done`.
+
+**The second one is slice (c)'s exact defect, reproduced live and independently, by a lane that was not looking for it.** Slice (c) bakes `--fleet-home` into the dispatched hook argv precisely so a hook does not depend on an env var the daemon may have substituted. So the branch now under discharge has a measured, reproducible failure it closes — corroboration that arrived from a completely different direction than the slice's own evidence.
+
+**I am deliberately NOT steering `w48-c` with this mid-turn.** It is working and may be inside a floor run; a mid-turn steer lands at the next tool boundary and interrupting a floor costs more than the fact is worth right now. It goes into the gate brief and the landing note instead, where it is actionable rather than merely encouraging. Both defects need `bin/fleet.py` and therefore serialise behind (c) regardless.
+
+## REDEPLOYED — THE KNOWLEDGE FOLD, OWED ACROSS THREE INCARNATIONS
+
+`w49-dcap` respawned onto the waves 44–48 knowledge fold. It is standing goal 4 and it is the one goal this campaign has been quietly failing: each of the last three supervisors carried it forward untouched, including me until now.
+
+Disjointness **measured, not assumed**, before dispatch: `w48-c`'s worktree has 8 modified files (all inside its fence — `bin/fleet.py`, the doc-count set, two test files, BRIEF-TEMPLATE) and `w49-fs` has exactly two untracked files (`docs/lanes/w49-fs.md`, `tests/test_fork_steer_delivery.py`) and **has not touched `bin/fleet.py` at all**, exactly as its brief required. Neither touches `knowledge/`. That tree is the one thing nothing in this wave writes.
+
+The brief carries the rules this file's own history imposes — append-at-top means never line-cite it; nothing under `knowledge/` is re-executed by the receipts harness so every pasted command is pinned to its commit; a dated line is corrected by appending; and **sweep for the wrong value, not for the place you noticed it**. And it asks for a process change per entry rather than a summary, because several of these lessons have now recurred two and three times — which means the lesson was recorded and the process was not changed.
+
+## STATE
+
+`main == origin == 1c0d807`. Three lanes working: `w48-c` (discharge), `w49-fs` (fork-steer), `w49-dcap` (fold). Gates open: 4. Occupancy 225k against a 350k soft trigger.
+
+## 2026-08-09T03:07:35Z CHECKPOINT inc=inc-20260809T014933Z-e276 sid=bfe71706-88b7-446e-a4c1-c31fe6fd6295
+
+SLICE (c) DISCHARGED AND UNDER ITS SECOND GATE; THE FORK-STEER LANE CORRECTED THE WAVE-48 CLAIM ON THREE AXES; AND I FOUND TWO FLEET SURFACES DISAGREEING ABOUT WHETHER A WORKER IS ALIVE — INCLUDING ONE THAT HAD ME WAITING ON A LANE THAT WAS ALREADY DONE.
+
+## `w48-c` — ALL SIX TASKS DISCHARGED, `w48/hookargv` @ `2841c95`
+
+Floors **`4223 passed, 14 skipped, 1 xfailed` on both 3.13 and 3.10**, three predictions written before the runs and all three hit. `w49/home-witness` @ `da04c80` holds the row, its tests and the derivation with a re-land recipe.
+
+**The removal dissolved the first gate's finding 1 with no edit aimed at it**, exactly as designed: the three count-bearing docs are now **byte-identical to base**, and `fleet doctor` on a temp home drives **28 rows / 24 PASS / 4 FAIL before `init`, 28 / 28 / 0 after** — so `launch-readiness.md`'s bullet has both halves measured in one run for the first time.
+
+**It corrected me four times and every correction is one I should have caught:**
+
+1. **Task 5's premise was FALSE.** I told it to add a safety stanza to `BRIEF-TEMPLATE.md`; that stanza does not exist at the lane's base — `main` added it at `44f056e`, *which I knew, because I read it in my own boot bundle*. Following my brief literally would have shipped a duplicate and an add/add conflict. I wrote an instruction against a tree I had not checked the lane was standing on.
+2. **The doc-count census is EIGHT sites in two phrasings**, not six. My brief said six and told it to assume an eighth existed; it found exactly that. The count has now risen every single time anyone re-counted it — six, seven, eight — which is why the gate brief orders a hunt for a ninth.
+3. "5 occurrences by grep" was four tests plus a fixture and a stub.
+4. The `+37` spec lines document the §5 divergence, **not** the row, so they stay — the one thing I explicitly asked it to check before committing, and the check paid.
+
+**A defect in text I landed and pushed**, flagged by the lane rather than edited (correctly — it is outside a lane's fence): my gate-4 entry calls a new doctor row a *"six-site documentation edit"*. Measured, it is **eight**. That is a wrong number in a live operator decision aid, and I will correct it in the landing commit rather than spend a floor run on it alone. Recording it here so it cannot be quietly dropped.
+
+## `w49-fs` — THE W48 CLAIM CONFIRMED IN SUBSTANCE, WRONG IN THREE PARTICULARS
+
+Branch `w49/fs` @ `bcc6522`, `bin/fleet.py` **untouched** as ordered (sha256 proven, `git diff` empty), two new files, **2 tests RED by design** and it declined to `xfail` its own finding.
+
+**Root cause is not what my brief guessed** and not what the precedent suggested. `dispatch_bg` builds its turn as `f"Read {task_file_path(name).as_posix()} and follow it exactly."` — **a pure function of the worker NAME**. A `--resume` dispatch therefore hands the session a turn byte-identical to one it has already answered, with the change hidden behind a pointer it already dereferenced. Replaying is the cheapest correct reading of the question actually asked.
+
+| w48 claim | measured |
+|---|---|
+| interpreter-dependent (RED 3.13, GREEN 3.10) | **no** — byte-identical argv/prompt/payload on both, proven without spawning anything |
+| a race | **no** — one actor, no window; `steer_on_disk` true in 92/92 |
+| 1 in 5 | **1 in 92** (95% CI 0.03–5.91%) |
+
+**That third row is the one I want remembered: the 1-in-5 figure was n=5, CI 0.5–72% — a number that says essentially nothing, and it travelled two waves as though it did.** And the lane's explanation of why five waves of green pin runs missed this is the actual lesson: **unconditional in the code, ~1% in the outcome.**
+
+Two findings beyond the brief. **`resume-limited` is a second, previously unreported instance — and it fires unattended**, which is standing goal 2's territory. And **`test_3_pin_fork_steer` can pass while broken**: it steers with a 28-character token that fits inside `NATIVE_NAME_HINT_MAX = 40`, so `dispatch_bg` hands the pin's own success token to the forked session as its roster title. *The evidence was already in `docs/lanes/w48-pin.md` §4b, which offered it as proof of one thing and read past its equal proof of the other.* Every GREEN that test produced across five waves is weaker than it looks — which is why the lane's own routing puts fixing it **before** anything that would clear the stamp. `w49-fs` is respawned onto exactly that.
+
+## THE FLEET IS LYING TO ITSELF ABOUT LIVENESS, IN BOTH DIRECTIONS
+
+`fleet respawn w49-fs` refused with *"turn is running"* while `fleet status` said `idle` and the peek showed `Lane complete.` I chased it rather than reaching for `--force`, and the census is worse than the symptom:
+
+| fleet says | roster `state` | count |
+|---|---|---|
+| idle | absent from roster | 80 |
+| idle | `done` | 9 |
+| working | `working` (`status: busy`) | 1 |
+| **idle** | **`working`** (`status: idle`, live pid) | **1 — `w49-fs`** |
+| **working** | **`done`** | **1 — `w48-c`** |
+| idle | `blocked` | 1 |
+
+`_roster_live_sids` excludes `state == "done"`, so the 9 reconcile correctly. The two anomalies do not, and they fail in **opposite directions**:
+
+- **`w49-fs`: roster `working`, fleet `idle`** → `respawn` refused a finished worker. This is the macOS lingering-host finding of 2026-07-19 arriving on Windows **in a different shape** — and the function's own docstring closes with *"(On Windows the two conditions agree — done entries lose pid/status.)"* **That sentence is now false.** The Windows linger keeps `state:"working"`, which the terminal-state rule was never written to catch.
+- **`w48-c`: roster `done`, fleet `working`** → **I was waiting on a lane that had already finished.** That is wave 37's lesson — *a finished worker result with no reader is indistinguishable from work not done* — reaching me through a new mechanism, and it cost real wall-clock this wave.
+
+I forced the respawn only after verifying the turn was complete three independent ways (peek tail, retrievable result, committed worktree), not because the refusal was inconvenient.
+
+Filed, not fixed — it needs `bin/fleet.py`, which is serialised, and the wave already has three lanes.
+
+## DISPATCHED — `w49-gc2`, THE DISCHARGE GATE
+
+Branch `w49/gc2` at `2841c95` **plus one cherry-picked docs file**: `docs/lanes/w48-gc.md`, the first gate's verdict. Its original branch `w48/gc` diverged when the lane advanced `w48/hookargv`, so merging the slice alone would have **lost the 630-line verdict** — the exact durability failure the `docs/lanes/` convention exists to prevent, arriving through branch topology instead of through `state/`. Code on the gate branch is byte-identical to `2841c95` and I told the gate to verify that itself rather than take my word.
+
+Ordered to gate on **re-plant, not on the diff**; to attack the two genuinely new pins rather than the deletion; to hunt a ninth doc-count site; to read the added prose as prose (every MAJOR in two consecutive gates was in a sentence its commit added, and neither the suite nor a gate of that shape proofreads); and to run the merge with a known-non-zero control first, since `git merge-tree --write-tree` does not exist at git 2.34.1 and reads as "no conflicts" when it measures nothing. I also gave it the corroborating `--bg`/`FLEET_HOME` reproduction **and told it explicitly not to go easy because of it**.
+
+## STATE
+
+`main == origin == 1c0d807`. Three lanes working: `w49-gc2` (discharge gate), `w49-fs` (pin confound), `w49-dcap` (knowledge fold). Gates open: 4. Nothing landed since `1c0d807`; nothing is blocked on the operator.
+
+## 2026-08-09T04:00:23Z CHECKPOINT inc=inc-20260809T014933Z-e276 sid=bfe71706-88b7-446e-a4c1-c31fe6fd6295
+
+SLICE (c) IS LANDED AND PUSHED. TWO GATES, BOTH DISCHARGED, FLOOR PREDICTED AND HIT EXACTLY ON BOTH INTERPRETERS — AND THE FORK-STEER LANE CORRECTED ITSELF ON THE CLAIM I HAD ALREADY PROPAGATED.
+
+## LANDED — main == origin == `1fa6d82`
+
+Multi-fleet slice (c): the dispatch bakes `--fleet-home` into every hook command it renders, plus the successor render's argv and the `_render_sup_spawn_task` sibling fix. Both gate verdicts rode in with it — `docs/lanes/w48-gc.md` (630 lines) and `docs/lanes/w49-gc2.md`.
+
+**Floor predicted in writing BEFORE the merge and hit exactly: `4223 passed, 14 skipped, 1 xfailed` on py 3.13 AND py 3.10.** Derived by `--collect-only` on both sides first (main 4154, branch 4238) rather than by arithmetic on a diff; the merged tree then collected 4238 before either floor ran. Tree sha identical before and after both runs; `git status` afterwards showed only `supervisor/JOURNAL.md`, which is mine — no suite-written damage, template unclobbered.
+
+**Conflict measured, not predicted: 1 file, 3 hunks, over 208,265 bytes — with the `w35/nd4c` × main control run FIRST and returning 26.** Parents proved arithmetically from the PUSHED ref (`^1 = 1c0d807`, `^2 = 8b2b381`), not inferred from the merge succeeding. Message through `-F <file>`, read back from origin, 3607 stored vs 3606 source. Branch-protection bypass fired again, as ratified.
+
+**The lost-hunk check earned its place and then needed a human judgement it cannot make.** It flagged **6 of main's 32 added lines** to `BRIEF-TEMPLATE.md` as absent from the merged text. All six turned out to be **deliberately superseded, not lost** — the branch rewrites that stanza and every constraint survives, while additionally correcting the fence itself. But *the check cannot tell those apart*, and a landing that read only its count would have either aborted a good merge or waved through a real loss. **The check finds candidates; reading is what resolves them.**
+
+## THE SECOND GATE: GATING, 0 BLOCKING / 2 MAJOR / 3 MINOR — AND I LANDED ANYWAY, DELIBERATELY
+
+It said so itself: *"Nothing blocks the merge."* Both MAJORs are the same shape — **a pin this commit added claims wider coverage than it has, with a live instance already outside its reach** — and both are pre-existing non-regressions:
+
+1. **The quoting pin is placeholder-NAME-scoped, not property-scoped.** Discriminating pair: unquote `_steer_supervisor_release` with names intact → RED; rename the placeholders to `{interp}`/`{script_path}` → **GREEN, survived the full 4223-test floor.** A fourth render, `_install_statusline`, is uncovered and **breaks on a spaced interpreter (rc 127 git-bash, rc 1 cmd; quoted control rc 0)** — and it is on README quickstart step 4.
+2. **The widened doc pin has the same blind-spot class it was built to close.** Bold and comma-formed variants of the same falsehood both survive, and the census is **NINE**: `docs/SPEC.md` says `23 checks` behind a pasted `grep -c` receipt where the truth is 28, invisible three separate ways.
+
+Holding a sound slice for two pre-existing coverage gaps would be exactly the "park what is not blocked" error I was warned against. They carry forward as a *specified* queue, not a vague one.
+
+**And it confirmed all four of the corrections that lane made to my brief**, including that the doc-count census is eight rather than my six. I have corrected my own gate-4 entry accordingly — it said "six-site documentation edit"; measured eight, with a ninth found later. **The correction strengthens the gate's argument rather than weakening it, which is precisely why leaving it wrong was not an option.**
+
+## `w49-fs` CORRECTED ITSELF ON ITS SHARPEST CLAIM, AND I HAD ALREADY REPEATED IT
+
+Its §1e said `test_3_pin_fork_steer` can pass while broken, because a 28-character steer token fits inside `NATIVE_NAME_HINT_MAX = 40` and reaches the fork as its own roster title. **I wrote that into my own checkpoint as "every GREEN it produced across five waves is weaker than it looks."**
+
+It then tried to make the confound fire and could not: **20 runs with delivery shammed away, precondition verified 20/20, `test_3` failed 20/20, title-echo 0/20** (5× stale token, 15× re-read and reported no instruction). 0/20 carries a 95% interval of 0–16.84%, so *not never*. Its own verdict: **the pin was unsound, not observed to be wrong** — and *"saying five waves of GREENs are worthless was rhetoric outrunning evidence, the same error I was correcting in w48."*
+
+**That correction is binding on me too, and I am recording it against my own earlier checkpoint rather than letting the newer entry quietly supersede it.** The repair still matters and still landed on its branch — a per-run unique token positioned past the window, plus a guard that refuses to spend unless the renderer proves the token is absent from the name, mirrored into the unit tier so slice, constant and renderer are covered on every commit. Positive control 7/7 GREEN on live haiku.
+
+**And it found two defects in its OWN patch**: `resume-limited` drains queued mail into the payload, so the fix lands in zero bytes new to the session, and the wrapper says the message *"supersedes anything earlier"* — wrong for a continuation. **§6e must be amended before the patch lands.** Its answer to my "does unattended justify more?" was a reasoned no: *fix the delivery; do not build a detector for a defect the fix removes.*
+
+## WHAT IS ON BRANCHES AND NOT YET LANDED
+
+- **`w49/fs` @ `ba2e2f0`** — the fork-steer pin (2 RED by design), the confound repair, the appended correction to `docs/lanes/w48-pin.md`. **Must not land before its own §6e patch is amended for the queued-mail case.**
+- **`w49/dcap` @ `5ab2382`** — both capture reports and the waves 45/46/48 knowledge fold. Docs and `knowledge/` only.
+- **`w49/home-witness` @ `da04c80`** — parked on operator gate 4.
+
+## 2026-08-09T04:31:59Z CHECKPOINT inc=inc-20260809T014933Z-e276 sid=bfe71706-88b7-446e-a4c1-c31fe6fd6295
+
+WAVE 49 CLOSING — FOUR LANDINGS PUSHED, FOUR FLOOR PREDICTIONS WRITTEN BEFORE THE RUN AND FOUR EXACT HITS ON BOTH INTERPRETERS, AND THE WAVE'S BEST WORK WAS THREE LANES CORRECTING THEMSELVES.
+
+## FINAL STATE — main == origin == `f9c1d55`
+
+| sha | what |
+|---|---|
+| `1c0d807` | `docs/OPERATOR-GATES.md` — gate 4 opened: slice (c)'s `witness` names nothing the spec defines |
+| `1fa6d82` | merge — multi-fleet slice (c), the dispatch bakes the home into hook argv, with both gate verdicts |
+| `fe970da` | gate 4 said six sites; measured, eight, then nine — my own error, corrected in place |
+| `f9c1d55` | merge — the waves 45/46/48 knowledge fold and the capture experiments |
+
+**Four floor runs, four predictions written down BEFORE the run, four exact hits on `py -3.13` AND `py -3.10`** — 4139/14/1 at the gate-4 landing, then 4223/14/1 three times. Every collection count derived by `--collect-only` on both sides, never by arithmetic on a diff. Tree sha proved identical before and after every run; `git status` checked after each, and the only tracked file ever dirty was `supervisor/JOURNAL.md`, which is mine. `worker-settings.template.json` never clobbered.
+
+Both merges ran the `w35/nd4c` × main control FIRST — 26 both times — and both measured counts carry byte totals (3 hunks over 208,265 bytes; 0 over 133,221). Parents proved arithmetically from the PUSHED ref on both. Both messages went through `-F <file>` and were read back from origin.
+
+## SLICE (c) LANDED BY SUBTRACTION, WHICH IS THE DECISION I MOST WANT REVIEWED
+
+The first gate returned three MAJORs. **All three were one object** — the `home-witness` doctor row: unauthorised (finding 2), the cause of the doc contradiction (finding 1), and defective in four measured ways (findings 3 and 6). Removing it **dissolved** three findings rather than patching around them, and the three count-bearing docs went byte-identical to base.
+
+**The reason this was not "parking on an absent operator"** — the failure mode my orders named — is that the row was measured *defective*, not merely unratified: it recognises one of the three `--fleet-home` spellings its own hooks accept, so a correctly fenced instance reports as **unfenced** with a remedy that would not fix it. That is a permanently-red row, and I was dispatched this wave to *kill* a known-RED surface for exactly that reason. Landing one while removing another would have been incoherent.
+
+The second gate returned 2 MAJOR / 3 MINOR / **0 BLOCKING** and said plainly *"nothing blocks the merge."* I landed on that, because holding a sound slice for two pre-existing pin-coverage gaps is the opposite error.
+
+## THREE LANES CORRECTED THEMSELVES, AND ONE CORRECTED ME INTO A BETTER DECISION
+
+- **`w49-dcap` reversed its own generalisation** (*"the only session class where the statusline fires is interactive"* — false; three classes exist) and in doing so **unblocked slice (d) and cancelled an escalation I had pre-authorised.** I had nearly filed §5.2-versus-slice-(d) as a gate; the discriminator I dispatched instead showed `--bg` workers render under their own member sid, so §5 step 2 already resolves. **A gate filed on that unmeasured premise would have spent the operator's time on a false conclusion.**
+- **`w49-fs` refuted its own sharpest claim.** Its §1e said the pin can pass while broken; 20 driven runs with delivery shammed away produced title-echo **0/20**, so the honest verdict is *the pin was unsound, not observed to be wrong* — *"rhetoric outrunning evidence, the same error I was correcting in w48."* **I had already repeated the stronger claim in my own checkpoint, and I have recorded the correction against it rather than letting a later entry quietly supersede it.** It also found **two defects in its own patch**.
+- **`w48-c` corrected my brief four times**, including a task whose premise was false because I wrote it against a tree I had not checked the lane was standing on.
+
+## THE FOLD FOUND WHY LESSONS RECUR, AND IT IS NOT NEGLIGENCE
+
+The debt was three waves, not five (44 and 47 were already folded — proved by grep on tokens that could only appear in the missing entries). The finding that is in **no** wave: `knowledge/lessons.md` has 37 commits since 2026-07-25 and `campaign-template.md` has **zero**, while the template's own §8 makes amending it required to close a knowledge wave. **The instrument moved** — lane-era work amends `docs/lanes/BRIEF-TEMPLATE.md` — and nothing told the template, which still declared itself the living one. *A doctrine file that is stale and still claims to be live routes every future process change into a dead drop.* That is the mechanism behind every "3rd instance" line in the file. Fixed at v1.11 with a ROUTING header and a §8 item requiring the amender to name the instrument.
+
+## SUCCESSOR QUEUE, IN PRIORITY ORDER
+
+1. **`w49/fs` @ `ba2e2f0` — amend §6e BEFORE landing.** The lane measured its own patch incomplete: `resume-limited` drains queued mail into the payload, so the fix lands in zero bytes new to the session, and the wrapper's *"supersedes anything earlier"* is wrong for a continuation. Two REDs on that branch are deliberate and go green with the corrected patch. **Then** re-run the pin tier from a sid-free shell and decide the stamp — **not before**, and not because five of six pass.
+2. **The two gate-2 MAJORs**, both specified: the quoting pin is placeholder-**name**-scoped rather than property-scoped (rename the placeholders and a real defect survives the full floor), and a fourth render `_install_statusline` **breaks on a spaced interpreter** — rc 127 git-bash, rc 1 cmd — **on README quickstart step 4**. And the doc-count census is **nine**, with `docs/SPEC.md` stating 23 where the truth is 28.
+3. **The roster/registry liveness disagreement**, measured by me and filed with the census: `respawn` refused a finished worker (roster `state:"working"`, live pid) while `status` said idle, and fleet read `working` for `w48-c` after it had finished. **`_roster_live_sids`' own docstring closes with *"On Windows the two conditions agree — done entries lose pid/status"*, and that sentence is now false.** It cost me real wall-clock this wave: I waited on a lane that was already done.
+4. **Slice (d) is unblocked and buildable as specified** — the staged brief at `state/tasks/lens/w48-d.md` plus both capture reports now on main. Its cost premise is corrected: the registry read is 2.4 ms against 560 ms of statusline latency, so the short-circuit is for refusal shape, not speed.
+5. Do NOT start slice (b) — still blocked on gate 3.
+
+## OPERATOR DOCKET — FOUR GATES, THREE CARRIED UNTOUCHED
+
+Gates 1–3 are the wave-48 docket, restated at `state/w48-operator-docket.md` and **not redrafted**, as ordered. **Gate 4 is mine and is the only one I added**: is the derived `home-witness` row ratified as slice (c)'s witness conditional on repair, does the operator specify what (c)'s witness should be, or is the word vestigial? I gave a recommendation and then said plainly that I hold it loosely — the operator ratified the sentence, so only they can say what it was meant to name. Nothing is ticked; a supervisor may not tick a box. **Nothing in this wave was blocked on the operator.**
+
+## WHY I AM RELEASING
+
+`sup-context` puts me near the 350k soft trigger. The wave's docket is discharged: slice (c) landed under two gates, the fork-steer defect is root-caused with a written and tested patch, slice (d) is unblocked, the knowledge fold is landed, and gate 4 is filed. What remains is a discharge cycle I cannot both start and finish. The standing directive at the band is to finish the current wave and hand off, not to begin work I cannot land — and every unlanded artifact is committed on a branch, durable without me.
+
+Releasing rather than dying: a released claim reads unambiguously at the next boot (`claim`, no seizure, no page).
+
+## 2026-08-09T04:33:10Z CHECKPOINT inc=inc-20260809T014933Z-e276 sid=bfe71706-88b7-446e-a4c1-c31fe6fd6295
+
+ADDENDUM BEFORE RELEASE — A DOCTOR ROW CHANGED MEANING WHEN SLICE (c) LANDED, AND I AM DELIBERATELY NOT ACTING ON IT.
+
+## DOCTOR: 4 FAIL, AND THE SECOND ONE IS NO LONGER THE FALSE ALARM MY PREDECESSOR HANDED ME
+
+1. **`pin-version` — DELIBERATE.** claude 2.1.226 against the 2.1.222 stamp. Held because the fork-steer RED stands against shipped code. Five of six pins justifying the version is not a reason to stamp, and the branch that fixes it is not landed.
+2. **`instance-freshness` — NO LONGER A FALSE ALARM. It is now CORRECT, and I measured which rather than inheriting the label.** On main it was the known mtime-comparison false alarm (the rendered template proved byte-identical to the instance). Slice (c) changed `worker-settings.template.json` — 4 insertions, 4 deletions — and the discriminator is unambiguous: **the landed template contains `--fleet-home` four times; the live instance contains it zero times.** So the row is reporting a real difference, and my predecessor's wrinkle (*"on ITS branch the row fires correctly, because the template genuinely changed there"*) has arrived on main with the branch.
+3. **`identity-witness`** — the ratified leak. Witness names a dead body; the registry is the judge. No observation of that variable is evidence in either direction.
+4. **`supervisor-pending-decision`** — ND4(c), the operator's slot, carried untouched for a 10th wave.
+
+## THE CONSEQUENCE, STATED PLAINLY: SLICE (c) IS LANDED BUT NOT ACTIVE ON THIS HOME
+
+`fleet init` re-renders the instance from the template. Until someone runs it, **this fleet's hooks still run without the baked `--fleet-home`** — the fix is on main and inert here.
+
+**I am not running it, and the reason is timing rather than doubt about the code.** `fleet init` rewrites the file every future worker spawn reads, so its blast radius is "every subsequent worker's hooks." Both gates drove `init` + `doctor` only on temp homes; nobody has driven the new template on a live fleet. Doing that unattended, at the end of my wave, with no runway left to detect a silent Stop-hook failure and recover from it, is the shape of change this project has repeatedly paid for.
+
+**Not running it is the strictly safer state**: the hooks behave exactly as they did before the slice landed, so there is no regression to sit on — only a fix not yet switched on. And the defect it closes is multi-home containment, which is unreachable here anyway while `~/.claude/fleet-homes.list` does not exist. There is no urgency that outweighs verifying it with someone watching.
+
+**Successor: this is a good first act, and it wants a verification recipe rather than a bare `fleet init`.** Run it, then `fleet doctor` (expect `instance-freshness` to clear), then **spawn one throwaway worker and confirm its Stop hook actually wrote an outcome to this home** — because the failure mode if the baked argv is wrong is silent: the hook exits 0 and the outcome lands somewhere else, which is precisely what a statusline lane measured happening through the env channel this wave. Do not take a green doctor row as proof the hooks still work; drive one.
