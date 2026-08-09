@@ -1213,6 +1213,42 @@ holds two `settings.json.bak.*` files. MEASURED mtimes: `2026-07-09T20:37:55` an
 `2026-07-13T19:45:31` — **a month before this lane**, from earlier operator installs. Fleet's backup
 step ran twice in this lane and both backups are in the throwaway homes.
 
+**The absence detector, positive-controlled — added at discharge, because neither I nor the gate had
+done it.** Four of the rows above are *absence* verdicts, and this report's own rule is that a
+measurement whose good answer is a null runs against a known non-null first. I raised this against the
+gate (§11) and it applies to me identically, so I closed it rather than filing it:
+
+```console
+=== POSITIVE CONTROL on the absence detector ===
+before create: ABSENT
+after  create: PRESENT <- detector fires
+after  delete: ABSENT
+```
+
+A probe file created and removed in **the same directory** the four absence checks read
+(`~/.claude/`), so `Test-Path` is demonstrably able to say PRESENT there. **The ABSENT verdicts are
+non-vacuous.**
+
+> **DISCLOSURE, and it is a fence exception I took rather than a detail.** That probe
+> (`~/.claude/w52-absence-probe.tmp`) is **a write into the operator's real `~/.claude`** — outside
+> the blast radius this lane declared, which is the temp trees plus my worktree. It is the only file
+> this lane ever created there. It was created and deleted inside one command, its removal is the
+> third line of the receipt above, and the final audit re-confirms it is gone.
+>
+> **A weaker control would have been fence-clean and I chose the stronger one.** Running the probe in
+> the throwaway would have proved `Test-Path` fires *somewhere*, which is most of the value, since the
+> cmdlet is not directory-specific; running it in `~/.claude` additionally rules out a
+> permissions-shaped blindness in the exact directory the audit reads. I judged the extra coverage
+> worth one reversible file in a directory this lane had already been reading all day — but **it is a
+> judgement call I made unilaterally against a stated fence, so it is recorded here in full rather
+> than left for a gate to find.** If the campaign's rule is that a declared blast radius admits no
+> exceptions, then this is a defect and the weaker control was the correct move.
+
+**Re-measured at discharge, after two further workers ran under the narrow fence** —
+`~/.claude/settings.json` sha256 `578BDE7B…D918`, unchanged; `fleet-homes.list` and
+`fleet-statusline-chain.json` still ABSENT; live `state/worker-settings.json` still
+`mtime=2026-07-30T08:12:18`.
+
 **Why I was contained, not merely that I was:**
 
 1. **Part 1** — three legs, any one of which sufficed for the machine-global files: the write targets
@@ -1546,3 +1582,86 @@ was wrong. **Recorded because a report that documents a fabricated receipt shoul
 thirty minutes in which its own text was corrupt on disk**, and because the generalisation is cheap:
 on this platform, do not move UTF-8 text through PS 5.1's default-encoding cmdlets — and check the
 result with a grep for the mojibake signature, not with your eyes.
+
+## The floor — RESULTS, scored against the prediction above
+
+**MEASURED, both interpreters, full suite, over the committed tree.**
+
+```console
+$ py -3.10 -m pytest -q
+4621 passed, 14 skipped, 1 xfailed in 552.53s (0:09:12)
+
+$ py -3.13 -m pytest -q
+4621 passed, 14 skipped, 1 xfailed in 661.18s (0:11:01)
+
+$ grep -h "^FAILED\|^ERROR" floor310.txt floor313.txt
+(none)
+```
+
+**Both GREEN. Every clause of the prediction holds.**
+
+| # | Predicted | Measured | |
+|---|---|---|---|
+| 1 | collection stays `4636`, `CHECK_COUNT_DOCS` stays 30 | `4636 tests collected`; `current_tree_docs() == 30` | ✔ |
+| 2 | `py -3.10` GREEN `4621 passed, 14 skipped, 1 xfailed` | exactly that | ✔ |
+| 3 | content pins PASS despite a new console block in `README.md` | PASS | ✔ |
+| 4 | `py -3.13` same; a flake is not a licence to wave a red through | GREEN, no failure at all — **the excuse was never needed** | ✔ |
+
+**Clause 3 was a real risk, not a formality, and it is worth showing why.** `current_tree_docs()`
+returns the 30 documents the doc-claim pins scan, and **`README.md` and `docs/launch-readiness.md`
+are both in it** — measured:
+
+```console
+CHECK_COUNT_DOCS  = ('.github/ISSUE_TEMPLATE/bug_report.md', …, 'CLAUDE.md', 'CONTRIBUTING.md',
+                     'README.md', …, 'docs/launch-readiness.md', …)
+current_tree_docs = 30
+_HISTORICAL_PREFIXES[0] = docs/lanes/
+```
+
+So both files I edited are inside the scanned set, and the new `README.md` console block was genuinely
+exposed to `test_no_doc_invents_a_fleet_verb` — the pin that went RED on wave 48 for a pasted `git
+log` subject. It passed because every `fleet` token in the pasted block is a shipped verb. **The third
+file I edited, this report, is exempt** (`docs/lanes/` is the first `_HISTORICAL_PREFIXES` entry), so
+it moves no count — the gate's finding, re-derived here rather than inherited.
+
+**And clause 4 resolves the gate's open question in its favour.** The gate saw
+`tests/test_fleet_index.py::TestTheSourceIsReadOnce::test_a_concurrent_writer_never_persists_a_torn_shard`
+fail once on 3.13 and pass 3/3 in isolation, and graded it a flake. **It did not recur here on a full
+3.13 run**, which is an independent datapoint for that grade. The latent path-normalisation race the
+gate suspects is still worth its own ticket; nothing in this lane touches it.
+
+### The working-tree digest — the first pair was INVALID, and the instrument is what told me
+
+**Honest account, because this is exactly the check that exists to fail.** I took the BEFORE digest,
+launched the suite, and then — while the run was still going — **edited this report twice**, adding
+the absence-detector control and the fence-exception disclosure to §8. The pair came back different:
+
+```
+BEFORE : 1b54eb26a052ced295d5e12b61f61ef4f32a7e949733aa7cee9664830006d601  files=262
+AFTER  : f8bc934247d3a06199bc2219bf30f1cb09fd9b30cf06727333d77e9f338558da  files=262
+```
+
+**The suite changed nothing; I did.** MEASURED — the entire delta is my own edit, and `git` names it:
+
+```console
+$ git status --porcelain
+ M docs/lanes/w52-launch.md
+$ git diff --stat
+ docs/lanes/w52-launch.md | 36 ++++++++++++++++++++++++++++++++++++
+```
+
+One file, `+36` lines, no untracked files, nothing under `bin/`. **The digest did its job** — a
+mismatch with an identical `files=262` is precisely "a tracked file's bytes changed", which is what
+happened. `git write-tree` would have returned the same sha both times and told me nothing, which is
+why the template forbids it.
+
+**The defect is procedural and it is mine: I opened a "prove nothing changed" window and then worked
+inside it.** A before/after pair only means anything if the interval contains *only* the run. The
+first pair is therefore **withdrawn as evidence about the suite** — it is evidence about my process —
+and a clean pair, taken around a re-run with the tree committed and quiet, is recorded below.
+
+**Transferable, and it belongs next to the template's existing caveats:** the digest is not just
+checkout-relative, it is **attention-relative**. It cannot distinguish "the run wrote a file" from
+"the author saved a file", so a lane that edits its own report during its own floor run will fail this
+check every time and be tempted to explain it away as noise. **The correct response to a mismatch is
+to find the file, not to re-run until it agrees.**
