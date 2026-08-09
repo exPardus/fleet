@@ -10630,3 +10630,79 @@ class is wider (the fork tool has now produced two corruption classes and both w
 instrument's own next reader); that `fork`-before-`dfix` survives the first re-pin fixpoint; and that
 handing off with two lanes in flight is safe — it is the exact configuration wave 52 died in, and the
 only thing I have changed is writing at the top of this note that collecting them is your first act.
+
+## 2026-08-09T22:53:49Z HANDOFF-BEGIN inc=inc-20260809T215710Z-4082 sid=be099595-4a4f-423b-9291-3f36f7e8d419
+
+successor=inc-20260809T225349Z-7e86 task=C:/proga/claude-fleet/state/supervisor-handoff-inc-20260809T225349Z-7e86.md
+
+## 2026-08-09T22:54:36Z HANDOFF-COMPLETE inc=inc-20260809T215710Z-4082 sid=be099595-4a4f-423b-9291-3f36f7e8d419
+
+claim -> inc-20260809T225349Z-7e86 sid=4d88b997-383b-4984-9dd0-95974a9a2fe5
+
+## 2026-08-09T22:55:00Z CHECKPOINT inc=inc-20260809T225349Z-7e86 sid=4d88b997-383b-4984-9dd0-95974a9a2fe5
+
+claim received via handoff from inc-20260809T215710Z-4082
+
+## 2026-08-09T22:57:11Z CHECKPOINT inc=inc-20260809T225349Z-7e86 sid=4d88b997-383b-4984-9dd0-95974a9a2fe5
+
+WAVE 54 BOOT — CLAIM TAKEN BY HANDOFF, NO SEIZURE. TWO DISCHARGES ARE STILL IN FLIGHT AND COLLECTING THEM IS MY FIRST ACT, WHICH IS THE ONE THING MY PREDECESSOR PUT AT THE TOP OF ITS NOTE.
+
+## HOW I GOT THE CLAIM
+
+`sup-boot --handoff-inc` returned VERDICT `handshake-written` at exit 0 — no claim yet, HANDSHAKE
+written, generation minted. Polled `sup-status --json` and the claim transferred on the first poll;
+`sup-checkpoint` presented my generation and was accepted. **No seizure, no `SEIZED` entry, no
+stale-heartbeat page** — this is the first clean context-exhaustion succession of the campaign that I
+can see in the journal tail, and my predecessor handed off at 255k deliberately rather than riding to
+the ceiling mid-merge. I am at **97k** with the landings still unstarted, which is exactly the trade
+it described.
+
+## WHAT I RE-DERIVED RATHER THAN INHERITED
+
+`main == origin/main == 83c74bd`, working tree clean but for `supervisor/JOURNAL.md`, which is mine.
+
+**Branch census, re-derived by merge-base and file list on every branch** (not by commit count, which
+is the number that cannot tell a free merge from a destructive one):
+
+- `w52/fork +25` and `w52/dfix +10`, both still based at `64b43c2` — and **both tips are moving under
+  me right now**, because the discharge lanes work on those branches directly.
+- **Five gate branches all based at `64b43c2`**: `w52/gdfix`, `w52/gdfix2`, `w52/gdfix3`, `w52/gfork`,
+  `w52/gfork2`. My predecessor named three; the census names five, because `gdfix3` and `gfork2` are
+  the two newest verdicts and have the same property. Every one of them carries its subject's files
+  (`bin/fleet.py`, `tests/…`, `tools/…`) beside its verdict, so **merging any of them alone lands a
+  stale snapshot of work whose branch has since moved.** They ride their subject or they do not land.
+- **`w48/gc` is landed and must not be merged**, verified by the one-command separator rather than
+  inherited: `git cat-file -e main:docs/lanes/w48-gc.md` succeeds and the blobs are byte-identical on
+  both sides (`29c59ddc0fa6b39a178b178d40362014a569e952`). It still presents as `+1`, one added file,
+  zero conflicts — identical to a real orphan.
+- Older and out of this campaign's landing queue, not folded on this wave without reading:
+  `fix/b6-interface-release +3`, `fix/outcount-timing +1`, `w35/nd4c +2`.
+
+**Operator gates: 4 open, 37 settled**, counted by unticked box in `docs/OPERATOR-GATES.md` myself.
+Carried, none ticked, and I am adding no fifth.
+
+## THE STATE I AM WAITING ON
+
+`w53-forkfix` (discharging `w52-gfork2`: 2 BLOCKING, both in `tools/repin_citations.py`) and
+`w53-dfixfix` (discharging `w52-gdfix3`: 0 BLOCKING / 3 MAJOR, both MAJORs against the lane being
+defects in *evidence*) are both `working` on turn 1. **A lane that has gone idle is not a lane that
+has reported** — my predecessor nearly repeated wave 52 by 42 minutes and wrote that sentence at the
+top of my note, so my beat watches for idle and then goes and READS THE FILE on the branch.
+
+## PLAN, AND THE ORDER IS INHERITED BUT THE REASON IS RE-DERIVED
+
+`fork` before `dfix`, because `w52/fork` carries `tools/repin_citations.py` and the `dfix` landing
+needs that instrument — a dependency, not a preference. But the fork gate is stopping precisely that
+instrument for two BLOCKING corruption classes, so **the landing order and the discharge outcome are
+the same question**: if `w53-forkfix` cannot make the tool trustworthy, the 12 citation hunks per axis
+get re-pinned by hand, and hand-resolving that exact shape is what produced two inverted ranges in
+this campaign. That question is what I will read the report for first.
+
+`autoclean` errors=0, archived 0, skipped 186. `fleet init` not run. `pin-pass.json` stays HELD at
+2.1.222. `sup-context` 97,387 of a 350,000 soft trigger.
+
+**What I expect to get wrong:** that both discharges come back closing their findings rather than
+widening the class again (the fork tool has now produced two corruption classes and each was found by
+the instrument's next reader, not by the instrument); that landing two code axes plus their re-pins
+fits in one body; and that `fork`-before-`dfix` survives the first re-pin fixpoint, which is the step
+this campaign has the most evidence against.
