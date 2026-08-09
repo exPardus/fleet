@@ -10500,3 +10500,133 @@ unticked boxes in `docs/OPERATOR-GATES.md` (4 open, 37 settled), not inherited f
 discharge; that I have budget to land two code axes plus their re-pins after collecting two verdicts;
 and that `fork`-before-`dfix` survives contact with the first re-pin fixpoint, which is the step this
 wave has the most evidence against.
+
+## 2026-08-09T22:53:22Z CHECKPOINT inc=inc-20260809T215710Z-4082 sid=be099595-4a4f-423b-9291-3f36f7e8d419
+
+HANDOFF PREP. BOTH RE-GATES CAME BACK GATING, BOTH DISCHARGES ARE DISPATCHED AND IN FLIGHT, AND YOUR FIRST ACT IS TO COLLECT THEM — BECAUSE NOT DOING THAT IS THE EXACT FAILURE THIS WAVE EXISTED TO REPAIR.
+
+## SUCCESSOR: READ THIS FIRST
+
+**Two lanes are working: `w53-forkfix` and `w53-dfixfix`.** When they go idle, their reports are
+committed on their own branches. **Collect them before you do anything else.** Wave 52 ended because
+four lanes finished and nobody opened their reports; I nearly repeated it myself this wave — both
+re-gates had been idle for **42 minutes** before I noticed. A lane that has gone idle is not a lane
+that has reported; the report is a file on a branch and someone has to read it.
+
+## WHAT LANDED — pushed, read back byte-identical, floors green on both interpreters
+
+`main` `0d82460` → **`43702f9`**, in two pushes (`5dd045b`, then `43702f9`).
+
+- **`w52/launch`** — the stranger-clone launch rehearsal. The operator's own axis.
+- **`w52/live`** — the liveness fix. The wave's only fully-gated axis (its *discharge* was graded
+  NOT-GATING by `w52-glive4`).
+- **Fourteen gate verdicts.** Nine orphaned across waves 48→52 (`w48/glaunch`, `w49/home-witness`,
+  `w50/gd`, `w50/glaunch`, `w50/glive`, `w50/glive2`, `w51/gdtype`, `w51/glaunch2`, plus
+  `w52-launch`'s own report), then five more once their subjects landed and their merge-bases moved
+  (`w52/glaunch3`, `w52/glaunch4`, `w52/glaunch5`, `w52/glive3`, `w52/glive4`).
+- **The wave fold**, in `knowledge/lessons.md` + `INDEX.md`.
+
+**Floors, every one predicted in a commit carrying no results and hit to the digit on BOTH
+interpreters:** `4636` collected after the docs set; `4661` collected / `4646 passed, 14 skipped,
+1 xfailed` rc 0 after the code axis; unchanged across round 2 and the fold. Zero `FAILED`, zero
+`ERROR`. Nineteen merged blobs each byte-identical to their branch's blob.
+
+## WHAT IS LEFT, AND THE ORDER IS MEASURED RATHER THAN INHERITED
+
+**`w52/fork` — gate `w52-gfork2`: GATING, 2 BLOCKING / 3 MAJOR / 4 MINOR.**
+*"The discharge is sound and the tool it ships still corrupts — this time the bytes it writes and the
+citations it does not own."* B1: `--apply` deletes 21,774 CR bytes whole-file while reporting
+`moved 39, writes 39`, and its guard is blind by construction because it compares newline-normalised
+text. B2: the tool re-pins citations into OTHER documents against `bin/fleet.py`'s line map — 4 sites
+bare, 16 across 28 files under `--with-tests` — because tool and grader use the same regex with
+different preprocessing while the docstring claims they agree. **The repair itself is CONFIRMED
+complete**; what the gate is stopping is the instrument, and that instrument is what your landing
+needs.
+
+**`w52/dfix` — gate `w52-gdfix3`: GATING, 0 BLOCKING / 3 MAJOR / 6 MINOR.** The gate's own framing
+matters: *"Nothing here is a behaviour defect on the operator's screen. Both MAJORs against the lane
+are defects in evidence."* Floors green to the digit, the row-G widening UPHELD on measurement, the
+3.10 mutant gap confirmed closed. MAJOR 1 is a universal claim whose census could not construct the
+33 cells that falsify it; MAJOR 2 is a sweep that is stale (+2 on all seven self-citations) and
+unrepeatable (script not in the tree).
+
+**LANDING ORDER: `fork` BEFORE `dfix`.** `w52/fork` carries `tools/repin_citations.py`, the
+instrument the `dfix` merge will need. My dispatch brief ordered fork LAST because it was GATING when
+that brief was written; the dependency is the measurement and it points the other way.
+
+## THE NUMBER THAT GOVERNS BOTH LANDINGS
+
+**Both axes went from 0 conflicts against `main` to 12, because I landed `w52/live`.** That is wave
+38's sequential-poisoning effect arriving on schedule, and `w52-gdfix3` calls it *"the single most
+actionable fact in this report."* All 12 per axis are pure line-number citations inside docstrings —
+read, not generalised from a sample.
+
+**And the wave-52 census's characterisation of them is WRONG in the way that matters.** It called
+them *"a constant +150 offset."* Measured at `5dd045b`:
+
+```
+_identity_abstention_note   :16477 -> :16327    -150
+_doctor_check_registry      :12718 -> :12568    -150
+_print_snapshot_table        :6987 ->  :7032     +45
+```
+
+**Two directions in one hunk set.** A re-pin computed as *either side's value plus a delta* is wrong
+for at least one citation in every merge, and a sample of two cannot see it. **Derive every value
+from the MERGED tree.** Run the citation pins to fixpoint, terminate on the runner's **exit code**
+rather than a pattern match, and read the rc yourself after the loop claims convergence — a fixpoint
+loop printed `FIXPOINT` over a red this campaign because its pattern could not see that failure class.
+
+## THREE GATE BRANCHES YOU MUST NOT MERGE ON THEIR OWN
+
+`w52/gdfix`, `w52/gdfix2`, `w52/gfork` are still based at `64b43c2`, so each would bring **the verdict
+PLUS a stale snapshot of work whose branch has since moved.** They ride their subject's landing or not
+at all. `w52/gfork2` and `w52/gdfix3` are cut from their subjects' tips and have the same property.
+**Check every one with `git diff --name-status $(git merge-base main <gate>) <gate>` before merging** —
+five branches of identical shape were free this wave and three were not, and nothing in any status
+output distinguishes them.
+
+**And `w48/gc` is already landed** (identical blob on `main`, branch ~26,000 lines stale). It shows
+`+1` and **zero conflicts**, because an add/add of identical content never conflicts — the census
+scores it *free* when it means *redundant*. Do not merge it. `git cat-file -e main:<path>` is the
+separator, one command.
+
+## THINGS I MEASURED THAT CONTRADICT WHAT YOU MAY INHERIT
+
+1. **`w52/live` does NOT fix the `w50-glaunch` phantom.** My dispatch brief offered that 15.5h
+   `working` reading as evidence for what the branch repairs. Landed it and re-measured: the entry is
+   **well-formed** (`status=working turns=1 last_activity=2026-08-09T06:21:46Z`); its *session* is
+   gone and the outcome discriminator never demoted it. `w52/live` repairs corrupt-registry aborts —
+   malformed *content*. Two defects, one symptom, and the symptom got cited. Unsweepable while it
+   reads `working`; **not remedied because the remedy is DESTRUCTIVE and the operator is away.**
+2. **My own brief handed `w53-gdfix` the wrong floor** — I wrote `4774/4759`, which is §11.8's
+   *baseline*; §11.9 pins `4790/4775`. The gate followed the measurement and said so. That is the
+   ninth supervisor instruction refused by a lane this campaign and the ninth refusal that was right.
+   **Re-measure what you act on.**
+3. **`_HISTORICAL_PREFIXES` lives at `tests/test_doc_claims.py:445`, not in `bin/fleet.py`.**
+   `docs/lanes/` is its first entry; `docs/specs/`, `knowledge/`, `supervisor/` are members;
+   `README.md` and `docs/launch-readiness.md` are **not**. Read the tuple, do not trust this sentence
+   — three parties in a row have now stated it wrong from memory.
+
+## STANDING CONSTRAINTS, ALL UNCHANGED BY ME
+
+**Four operator gates open, none ticked, no fifth** — verified by counting unticked boxes in
+`docs/OPERATOR-GATES.md` (4 open, 37 settled), not inherited from the digest. **`fleet init` still
+not run**; the operator's one-line-approvable recipe stands. **`pin-pass.json` HELD at 2.1.222** — no
+`FLEET_LIVE=1` tier was run. `autoclean` on every beat, `errors=0` throughout, two wave-47 husks aged
+out. The merge-prep brief at `state/tasks/lens/w52-mp.md` stays **HELD** and is still good reading —
+I did not dispatch it because I derived the order, census and re-pin hazard directly for less than the
+lane would have cost, and a prep is stale the moment a re-gate moves a tip.
+
+## WHY I AM HANDING OFF AT 255k RATHER THAN RIDING TO 350k
+
+The remaining chain is collect-two-discharges → re-gate → land-two-axes-with-re-pins. Done by me it
+starts at 255k and reaches the ceiling somewhere inside the first landing; done by you it starts at
+zero. **A successor performs a prepped landing far more cheaply than I perform it near the band**,
+and this campaign has already paid for supervisors who handed off mid-merge. The wave's landings are
+done and pushed; the boundary is clean.
+
+**What I expect to get wrong:** that both discharges close their BLOCKINGs rather than finding the
+class is wider (the fork tool has now produced two corruption classes and both were found by the
+instrument's own next reader); that `fork`-before-`dfix` survives the first re-pin fixpoint; and that
+handing off with two lanes in flight is safe — it is the exact configuration wave 52 died in, and the
+only thing I have changed is writing at the top of this note that collecting them is your first act.
