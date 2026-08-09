@@ -8183,3 +8183,71 @@ Two more instrument repairs it owes the template: **a mutant planter must work o
 I sent it to a third gate rather than landing it because it added substantial security-critical code **after** the gate that reviewed it — the same criterion that earned gate 2 — and the axis I want attacked is the one the lane had least incentive to test: **whether the narrowing OVER-refuses**, making a legitimate row vanish from the opposite cause. Also owed and priced: a **fourth** self-citation re-pin pass post-merge, and the observation that `w51/dtype`'s merge-base is `4d78f6c` rather than `7b2ff75`, so its 27-file diff is **not** its change set.
 
 `sup-context` ~290k against a 350k soft trigger.
+
+## 2026-08-09T15:25:44Z CHECKPOINT inc=inc-20260809T094233Z-5e96 sid=3cb901f7-b361-466e-9488-7df4dde80e3d
+
+WAVE 51 CLOSING — SIX LANDINGS, EVERY MISSION ITEM DISCHARGED, THE LAUNCH BLOCKER GONE, AND EVERY BUILD SLICE ON MAIN EXCEPT THE ONE THE OPERATOR GATES.
+
+**This entry IS the release note.** My predecessor pointed its release at `state/w50-release.md`, and `state/` is gitignored — the same defect I spent this wave moving the operator docket out of. A release record that dies with the machine is not a record. It goes in the journal, which is tracked.
+
+## FINAL STATE — `main == origin == e081814`
+
+| sha | what |
+|---|---|
+| `1836be5` | journal, committed BEFORE the merge was audited — deliberately |
+| `95ba50c` | **merge — THE LAUNCH BLOCKER.** `bin/fleet.py:6134` quotes both `statusLine.command` interpolations. README quickstart step 4 now works. |
+| `76a40de` | **merge — the `fleet init` operator recipe** + the gate docket's tracked home |
+| `5cb0e4e` | BRIEF-TEMPLATE: the fence rationale was false; the control had no pin |
+| `75aa4eb` | **merge — slice (e)** |
+| `a914708` | **merge — slice (d)** |
+| `b57259b` | **merge — the wave-50 liveness work** |
+| `e081814` | the wave fold + four instrument repairs |
+
+**Every Sequencing §3 build slice is now landed except (b), and (b) is blocked on the operator's own gate 3 — not on us.**
+
+**Every floor predicted in writing in a commit carrying no results, and hit on BOTH `py -3.13` and `py -3.10`:** 4317→`4302/14/1`, 4351→`4336/14/1`, 4602→`4587/14/1`, 4636→`4621/14/1`, and the fold holding at `4621/14/1`. **One exception, mine, recorded below.** Every push read back from origin **byte-identical**. `git status` clean after every run.
+
+## THE MISSION, ITEM BY ITEM
+
+1. **Land 1 → 2 → 3.** Done, in order. `w50/launchfix` under a second gate it had never had; `w50/d` under a **third**; `w50/live` unchanged as its two gates left it.
+2. **Slice (e).** Done — and it was **four categories, not ten**, established by planting a mutant against each of the ten. **Two already-landed pins could not fail.**
+3. **`fleet init` prepared, NOT run.** 400-line recipe at `docs/operator/fleet-init-recipe.md`, approvable in one line. I never ran it and neither did the lane.
+4. **Four gates carried forward untouched, none ticked, NO FIFTH ADDED** — including two places I could have opened one and measured instead.
+
+## THE THEME, AND IT IS THE MECHANISM UNDER WAVE 50'S
+
+**An instrument's answer is about the tree it is STANDING IN, not the tree it is talking about.** Four instances in one wave: a gate reported `CHECK_COUNT_DOCS` absent when it is at `tests/test_doc_claims.py:506` and merely did not exist *on that gate's branch*; my brief named a file as it exists on `main` while the lane's cwd lacked it; my dispatch brief quoted a `main` sha that had moved before it was read; and two parties measured one declared conflict pair as 25 and 26.
+
+**That last one is now RECONCILED, and it is the grep anchor.** 25 anchored, 26 unanchored — **and the 26th hit is a prose bullet at `knowledge/lessons.md:994`, inside the lesson documenting that exact failure.** The lesson corrupts the instrument it exists to protect, one level deeper than wave 50 found it. **And the campaign shipped `25` with no commit pinned** — a receipt with no pin, two paragraphs below where that file diagnoses the defect.
+
+## SIX CORRECTIONS AGAINST MYSELF
+
+1. **I missed a floor prediction, in writing.** I said two docs commits could not move the floor; they moved it by 4. **A docs-only landing moves the floor by construction** — `CHECK_COUNT_DOCS` is every tracked `*.md` and two pins are parametrised over it. **The branch I was merging had already written the reason down** and I disbelieved a sentence I had just landed.
+2. **I ordered the wrong oracle.** I told `w51-livemerge` to run `test_self_citations.py` to fixpoint as the merge's re-pin oracle. It resolves `bin/fleet.py` citations **about itself only** — green *correctly* — so obeying me would have shipped **108 stale cross-document citations green**. The lane found the real surface.
+3. **I mislabelled `w50/live`'s 7/26 figures as stale merge costs.** They are a **forward budget for an unbuilt feature**, and that branch's own §6.5 says not to inherit them. I inherited them anyway.
+4. **My reason for rejecting bare `str()` on slice (d) was measurably false** — `_safe` stringified *first*, so my ordering argument was wrong. The lane kept the verdict, substituted three measured reasons, and said plainly that `str()` **would** have been total.
+5. **"One line, zero insertions" was two lines** — the second being the comment that tells the next reader the quotes are load-bearing. It travelled two waves as the branch's description before a gate measured it.
+6. **I raced my own in-flight lanes**, landing three times mid-wave and moving `main` under `w51-dtype` and `w51-slicee`. Both noticed unprompted and re-derived; it cost nothing, but the bill was real and I handed it to them.
+
+**And I shipped a false paragraph verbatim in four briefs**: the fence rationale. The population is never empty — `resolution_population()` appends the legacy install-root home unconditionally. Remedy unchanged, reason false, in the one stanza whose purpose is teaching a lane to ask *why*.
+
+## WHAT THE SUCCESSOR INHERITS, IN PRIORITY ORDER
+
+1. **Slice (d)'s three findings, landed unfixed and specified.** The MAJOR: the unknown-bucket cap exemption was applied to **one of two sibling words** — `?type` exempt, `?` not, on a ground false three ways, since **three foreign statuses sorting below `?` (ASCII 0x3F) suppress it while `?type` survives the same three**. And `test_the_cap_can_hide_only_names_the_attacker_chose` **passes unchanged under the mutant it is cited as covering** — it re-asserts the implementation's own filter comprehension. **Not a regression.** Two MINORs: `_reset_clock`'s "any other TYPE → refusal word" is false for five falsy non-strings (`if not iso` sits above the `try`); `_safe`'s refusal ignores its own `limit`.
+2. **The liveness build brief, re-derived by AST and now landed.** `_RETIRED_SID_SWEEP_CAP` is defined at `:8650` with exactly two call sites — `:8776` (`_cmd_kill_native`) and `:9577` (`_cmd_respawn_supervisor`). **`_cmd_respawn_native` (8258–8557) references it nowhere**, so the worker respawn path has no stop, no tombstone and no sweep. `w50/live` §6 is an executable brief for it.
+3. **The fork-steer merge's four MAJORs**, still in shipped code from wave 50 — chiefly mailbox content containing `</MANAGER MESSAGE>` escaping the dispatched turn's envelope and forging fleet's own `NATIVE_INLINE_LEAD` prose.
+4. **`fleet init` awaits the operator**, recipe ready. Do not run it for him.
+5. **`pin-pass.json` correctly HELD at 2.1.222.** 2.1.226 is proposed only conditional on a full `FLEET_LIVE=1` tier run nobody has run. Do not stamp on five-of-six.
+6. **Slice (b) stays blocked** on operator gate 3.
+
+**One observation I recorded and deliberately did not chase:** two distinct nonces — a superseded boot generation and a freshly minted one — both cleared §7's gate in the same turn. It may be entirely by design. Nothing is blocked on it, and a supervisor spending a wave on its own continuity machinery is a failure mode this campaign has named.
+
+## WHY I AM RELEASING
+
+`sup-context` ~338k against a 350k soft trigger, at a clean wave boundary with the docket empty: the launch blocker is in shipped code, three branches that were durable-and-unlanded this morning are on `main`, slice (e) is done, and the last build slice is the operator's to unblock. Nothing is half-finished and nothing is in flight.
+
+Releasing rather than dying: a released claim reads unambiguously at the next boot — `claim`, no seizure, no page.
+
+## 2026-08-09T15:26:31Z RELEASED inc=inc-20260809T094233Z-5e96 sid=3cb901f7-b361-466e-9488-7df4dde80e3d
+
+released cleanly: @C:/Users/Techn/.claude/jobs/3cb901f7/tmp/release.md
