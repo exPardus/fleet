@@ -1166,7 +1166,328 @@ class TestBlobSessionIdReallyNeverRaises:
 
 
 # ===========================================================================
-# 11. The belt.
+# 11. THE RENDER IS TOTAL OVER FIELD TYPES (gate `w50-gd2` MAJOR 1).
+#
+# `_safe` made every foreign STRING safe to print. It never made the render
+# total over the TYPES a foreign registry may carry, because a `list` never
+# reaches a sanitiser at all -- it raises `TypeError: unhashable type` at the
+# bucket key, `main()`'s exit-0 guard swallows it, and the operator's own fleet
+# row disappears at rc 0 on every refresh with no diagnosis. Driven four-cell:
+# at the merge base a foreign home could hold any garbage it liked and the
+# operator's row was fine; slice (d) is what made it cross-home reachable.
+#
+# THE ORDER IS THE FINDING, and these tests pin the order rather than the
+# patch. Narrow the TYPE first (`fleet.registry_status`), sanitise the TEXT
+# second (`_safe`). Coercing with `str()` would also make the render total and
+# is refused here explicitly: `str(["idle"])` is `"['idle']"`, an
+# attacker-composed string that renders byte-identical to a registry which
+# wrote that string outright -- two distinct registry states, one byte
+# sequence, on the surface the operator reads continuously, which is P1-13.
+# ===========================================================================
+
+#: Every JSON shape a foreign registry may put in a field that fleet's schema
+#: says is text. `MISSING` is a shape too -- an absent key is not a null one.
+MISSING = object()
+HOSTILE_TYPES = {
+    "list-empty": [],
+    "list-of-str": ["idle"],
+    "list-nested": [["idle"]],
+    "dict-empty": {},
+    "dict": {"a": 1},
+    "int": 7,
+    "float": 1.5,
+    "bool": True,
+    "null": None,
+    "missing": MISSING,
+}
+
+
+def _rec(**over):
+    rec = {"session_id": CAPTURED_SID, "status": "idle", "cwd": "C:/x",
+           "last_activity": fleet.now_iso(), "turns": 1, "cost_usd": 0.0}
+    for key, value in over.items():
+        if value is MISSING:
+            rec.pop(key, None)
+        else:
+            rec[key] = value
+    return rec
+
+
+def _row(**over):
+    row = {"status": "idle", "mail": 0, "stale_seconds": 1,
+           "limit_reset_at": None, "resume_eligible": False, "tier": "worker"}
+    for key, value in over.items():
+        if value is MISSING:
+            row.pop(key, None)
+        else:
+            row[key] = value
+    return row
+
+
+class TestAForeignHomeCannotEraseTheOperatorsRow:
+    """THE PIN THE GATE ASKED FOR: a foreign registry of non-string field types
+    driven through `main()`, requiring `[fleet]` on stdout."""
+
+    @pytest.mark.parametrize("shape", sorted(HOSTILE_TYPES))
+    def test_a_wrongly_typed_status_cannot_remove_the_fleet_row(
+            self, shape, home, listed, at, run_main, monkeypatch):
+        own = home("own", worker("nobody-claims-this", status="working"))
+        evil = home("evil", {"e": _rec(status=HOSTILE_TYPES[shape])})
+        at(own)
+        listed(own, evil)
+        monkeypatch.setenv("NO_COLOR", "1")
+        rc, out = run_main(BLOB_LATER_RENDER)
+        assert rc == 0
+        assert sl.PREFIX in out, (
+            f"a foreign home with status={shape} removed fleet's own row: {out!r}")
+        assert_no_terminal_control(out.strip())
+
+    def test_every_field_hostile_at_once_still_renders(
+            self, home, listed, at, run_main, monkeypatch):
+        """One field at a time is a weaker claim than the fixture suggests: the
+        render reads seven of them and a fix that narrows only the one the gate
+        named would pass every case above."""
+        own = home("own", worker("nobody-claims-this", status="working"))
+        evil = home("evil", {"e": {
+            "session_id": CAPTURED_SID, "status": ["limited"],
+            "last_activity": {"a": 1}, "limit_reset_at": [1, 2],
+            "turns": ["many"], "cost_usd": {"usd": 1}, "cwd": 7,
+            "limit_kind": [], "attached_since": {}, "dispatch_kind": 1.5,
+            "retired_sids": "not-a-list", "archived_at": []}})
+        at(own)
+        listed(own, evil)
+        monkeypatch.setenv("NO_COLOR", "1")
+        rc, out = run_main(BLOB_LATER_RENDER)
+        assert rc == 0
+        assert sl.PREFIX in out, out
+        assert_no_terminal_control(out.strip())
+
+    def test_the_erasure_detector_can_see_an_erasure(self):
+        """NON-VACUITY, and the shape of the defect itself. Without the
+        narrowing the bucket key is unhashable; this asserts that the raise is
+        what the pin above would have caught, not that some other thing
+        happened to differ."""
+        with pytest.raises(TypeError, match="unhashable"):
+            {}.setdefault(["idle"], [])
+
+    @pytest.mark.parametrize("shape", sorted(HOSTILE_TYPES))
+    @pytest.mark.parametrize("color", [True, False])
+    def test_the_renderer_is_total_over_its_own_input(self, shape, color):
+        """The SECOND sink, one file over. A fix confined to `status_snapshot`
+        leaves this open -- and this is the plane every hostile-status test in
+        section 7 already uses, so it is not a hypothetical caller."""
+        line = sl.render_statusline(
+            {"ok": True, "workers": [_row(status=HOSTILE_TYPES[shape])],
+             "totals": {}}, color=color)
+        assert sl.PREFIX in line, line
+        assert_no_terminal_control(line)
+
+    @pytest.mark.parametrize("field", ["status", "mail", "stale_seconds",
+                                       "limit_reset_at", "resume_eligible"])
+    @pytest.mark.parametrize("shape", sorted(HOSTILE_TYPES))
+    def test_no_row_field_can_raise_the_renderer(self, field, shape):
+        # `limited` first so the `_reset_clock` / `resume_eligible` branch is
+        # actually entered -- a fuzz that never reaches a branch reports a
+        # clean sheet for code it did not execute.
+        over = {"status": "limited"}
+        over[field] = HOSTILE_TYPES[shape]
+        line = sl.render_statusline(
+            {"ok": True, "workers": [_row(**over)], "totals": {}}, color=False)
+        assert sl.PREFIX in line, line
+        assert_no_terminal_control(line)
+
+    def test_status_snapshot_itself_does_not_raise(self, home, monkeypatch):
+        """The first sink, in its own file. `by_status[status]` is a dict key."""
+        evil = home("evil", {"e": _rec(status=["idle"])})
+        monkeypatch.setattr(fleet, "FLEET_HOME", evil)
+        snap = fleet.status_snapshot()
+        assert snap["ok"] is True
+        assert list(snap["totals"]["by_status"]) == [fleet.TYPE_FAULT]
+        assert snap["workers"][0]["status"] == fleet.TYPE_FAULT
+
+
+class TestTheNarrowingComesBeforeTheSanitiser:
+    """A SANITISER IS NOT A VALIDATOR, and this is where that is enforced."""
+
+    def test_safe_refuses_a_non_string_instead_of_stringifying_it(self):
+        assert sl._safe(["idle"]) == fleet.TYPE_FAULT
+        assert sl._safe({"a": 1}) == fleet.TYPE_FAULT
+        assert sl._safe(7) == fleet.TYPE_FAULT
+        assert sl._safe(None) == fleet.TYPE_FAULT
+
+    def test_str_coercion_would_collapse_two_distinct_registry_states(self):
+        """THE REASON `str()` IS THE WRONG FIX, as a property rather than as an
+        opinion. `_safe` neutralises the brackets `str()` introduces -- so the
+        nameplate stays safe -- and that is exactly what makes the two states
+        indistinguishable afterwards. P1-13 is the finding this slice already
+        spent a MAJOR on; re-opening it one field over would be worse than the
+        crash, because a crash is at least visible once."""
+        forged = "['idle']"
+        assert sl._safe(forged) == "('idle')"
+        assert sl._safe(["idle"]) != sl._safe(forged), (
+            "a wrongly-typed status and a status forging its repr must not "
+            "render the same bytes")
+
+    def test_fleets_own_text_still_reaches_the_sanitiser_unchanged(self):
+        """The narrowing must not cost the sanitiser its day job."""
+        assert sl._safe("idle") == "idle"
+        assert sl._safe("a\x1b[2Kb") == "a?(2Kb"
+        assert sl._safe("Z" * 100) == "Z" * 23 + "~"
+
+    @pytest.mark.parametrize("shape", sorted(HOSTILE_TYPES))
+    def test_registry_status_is_total_and_returns_a_string(self, shape):
+        value = HOSTILE_TYPES[shape]
+        out = fleet.registry_status(None if value is MISSING else value)
+        assert isinstance(out, str) and out
+
+    def test_the_two_absences_stay_distinguishable_from_a_type_fault(self):
+        """P1-13 again, at the smallest scale: "nothing was recorded" and
+        "something of the wrong shape was recorded" are different facts."""
+        assert fleet.registry_status(None) == fleet.FIELD_UNKNOWN
+        assert fleet.registry_status([]) == fleet.TYPE_FAULT
+        assert fleet.FIELD_UNKNOWN != fleet.TYPE_FAULT
+
+    def test_the_fault_word_is_not_one_of_fleets_own_status_words(self):
+        """`?type` renders through the UNKNOWN-bucket path, so it is capped,
+        sanitised and coloured by the same rules as any status fleet did not
+        write. Putting it in `_ORDER` would add a word to the set "statuses
+        fleet writes into a registry" that fleet never writes."""
+        assert fleet.TYPE_FAULT not in sl._ORDER
+        assert fleet.TYPE_FAULT not in sl._LABEL
+        assert fleet.TYPE_FAULT not in sl._SUP_STATE_LABEL.values()
+        assert sl._safe(fleet.TYPE_FAULT) == fleet.TYPE_FAULT
+
+    def test_a_wrongly_typed_status_renders_a_word_not_a_blank(self):
+        """§2.3's standard: this surface always says something. A fourth state
+        collapsing into no word at all is what the MAJOR was."""
+        line = sl.render_statusline(
+            {"ok": True, "workers": [_row(status={"a": 1})], "totals": {}},
+            color=False)
+        assert line == f"{sl.PREFIX}  {fleet.TYPE_FAULT} 1", line
+
+
+class TestTheTierFieldIsTotalToo:
+    """`_SUP_STATE_LABEL.get(state, ...)` is a dict lookup, so it is the same
+    defect as the bucket key one field over. `_supervisor_tier_snapshot` cannot
+    produce a wrongly-typed `state` today -- it answers from a four-word
+    vocabulary and swallows everything else into `unknown` -- so this is the
+    fail-closed default `_load_delegates` takes, pinned for the same reason:
+    the next caller is what it is for."""
+
+    @staticmethod
+    def _snap(**sup):
+        base = {"goals_active": True, "state": "held", "incarnation_id": "i",
+                "heartbeat_age_seconds": None}
+        base.update(sup)
+        return {"ok": True, "workers": [_row()], "totals": {}, "supervisor": base}
+
+    @pytest.mark.parametrize("shape", sorted(HOSTILE_TYPES))
+    def test_no_supervisor_field_can_raise_the_renderer(self, shape):
+        value = HOSTILE_TYPES[shape]
+        for field in ("state", "heartbeat_age_seconds", "goals_active"):
+            snap = self._snap(**{field: None if value is MISSING else value})
+            if field == "goals_active" and not snap["supervisor"]["goals_active"]:
+                continue          # the tier field is silent, which is its job
+            line = sl.render_statusline(snap, color=False)
+            assert sl.PREFIX in line, (field, shape, line)
+            assert_no_terminal_control(line)
+
+    def test_a_wrongly_typed_state_reads_as_unknown_not_as_a_crash(self):
+        line = sl.render_statusline(self._snap(state=["held"]), color=False)
+        assert sl._SUP_STATE_LABEL["unknown"] in line, line
+
+    def test_a_wrongly_typed_heartbeat_age_does_not_invent_staleness(self):
+        """`age > stale_after` is a comparison, and a comparison against a
+        string is a `TypeError`. Degrading to "no age" is right: inventing one
+        would present an unmeasured claim as an observation, which is D2."""
+        line = sl.render_statusline(self._snap(heartbeat_age_seconds="9999"),
+                                    color=False)
+        assert sl._SUP_STATE_LABEL["held"] in line, line
+        assert "h" not in line.split(sl._SUP_STATE_LABEL["held"])[1][:4], line
+
+    def test_a_real_heartbeat_age_still_renders(self):
+        """The narrowing must not cost the field its day job."""
+        line = sl.render_statusline(self._snap(heartbeat_age_seconds=99999),
+                                    color=False)
+        assert sl._SUP_STATE_LABEL["held"] in line and "28h" in line, line
+
+
+class TestTheOverflowCounterIsRenderedInColour:
+    """MUTANT X4 (gate MINOR 2). Painting `+N unknown` with a hard-coded
+    non-palette `\\x1b[31;1m` survived the whole suite: `assert_no_terminal_
+    control` is the only pin that would catch a non-palette SGR, and the one
+    test that reaches the overflow counter renders with `color=False`, so
+    `paint()` returns the text unpainted and the escape never exists.
+
+    A pin that cannot reach the rendering path it claims to cover is a coverage
+    claim that is false."""
+
+    @staticmethod
+    def _overflowing(count=9):
+        return {"ok": True, "workers": [
+            _row(status=f"hostile-{i}") for i in range(count)], "totals": {}}
+
+    def test_the_overflow_counter_is_reached_in_colour(self):
+        line = sl.render_statusline(self._overflowing(), color=True)
+        assert "unknown" in plain(line), plain(line)
+        assert_no_terminal_control(line)
+
+    def test_the_colour_case_really_differs_from_the_plain_one(self):
+        """Without this, a `color=True` case that silently rendered plain would
+        pass the test above and re-open exactly the gap it closes."""
+        painted = sl.render_statusline(self._overflowing(), color=True)
+        flat = sl.render_statusline(self._overflowing(), color=False)
+        assert painted != flat
+        assert plain(painted) == flat
+        assert "\x1b[" in painted
+
+    def test_the_overflow_counter_carries_no_colour_of_its_own(self):
+        """Grey is reserved for `dead` and a fourth hue for a counter that only
+        appears on a malformed registry buys nothing -- so the assertion is
+        that the counter is UNPAINTED, not merely that its paint is legal."""
+        painted = sl.render_statusline(self._overflowing(), color=True)
+        tail = painted[painted.index("+"):]
+        assert tail.startswith("+6 unknown"), tail
+
+    def test_a_foreign_home_cannot_push_the_fault_word_off_the_line(self):
+        """THE DISPLACEMENT DIRECTION, which is the one the first gate found and
+        the brief before it missed: a foreign home did not merely ADD a row, it
+        REPLACED the operator's own. `?type` sits in the unknown region but is
+        fleet's word, not the registry's, so it is exempt from the cap -- three
+        hostile statuses sorting earlier must not be able to hide the word that
+        says a record is malformed."""
+        snap = {"ok": True, "workers": [_row(status=["bad"])] + [
+            _row(status=f"!hostile-{i}") for i in range(9)], "totals": {}}
+        line = sl.render_statusline(snap, color=False)
+        assert f"{fleet.TYPE_FAULT} 1" in line, line
+        # nine hostile buckets, three shown, six counted -- and the fault word
+        # is not one of the nine, so it neither consumes a slot nor inflates
+        # the overflow.
+        assert "+6 unknown" in line, line
+
+    def test_the_cap_can_hide_only_names_the_attacker_chose(self):
+        """The exemption stated as the property it buys, and the reason gate
+        `w50-gd2`'s X7 equivalence argument survives onto this tree."""
+        buckets = {"idle": [], "!a": [], "!b": [], "!c": [], "zzz": [],
+                   fleet.TYPE_FAULT: []}
+        order, hidden = sl._bucket_order(buckets)
+        assert fleet.TYPE_FAULT in order, order
+        assert hidden == 1
+        assert all(b not in ("dead", fleet.TYPE_FAULT) and b not in sl._ORDER
+                   for b in set(buckets) - set(order))
+
+    def test_a_wrongly_typed_status_shares_one_bucket(self):
+        """Distinct hostile STRINGS are distinct buckets, capped at three. Every
+        wrongly-typed status collapses into one, which is the direction that
+        helps: a foreign registry cannot spend the unknown budget with types."""
+        snap = {"ok": True, "workers": [
+            _row(status=[i]) for i in range(50)], "totals": {}}
+        line = sl.render_statusline(snap, color=False)
+        assert line == f"{sl.PREFIX}  {fleet.TYPE_FAULT} 50", line
+
+
+# ===========================================================================
+# 12. The belt.
 # ===========================================================================
 
 def test_the_real_homes_list_is_untouched_by_this_file():

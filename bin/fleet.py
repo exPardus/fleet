@@ -908,12 +908,12 @@ def _quarantine_artifacts() -> list:
     registry is always newer -- an "artifact newer than the registry"
     comparison would never fire on the recreation bypasses it exists to stop.
 
-      * `_sweep_husks` (:10762) -- a rename can hide live worker records from
+      * `_sweep_husks` (:10826) -- a rename can hide live worker records from
         the roster sweep, so a thin registry would rm sessions it still owns.
-      * `_doctor_check_autoclean` (:11870) -- a lingering artifact means the
+      * `_doctor_check_autoclean` (:11934) -- a lingering artifact means the
         sweep above is refusing itself, which is how a bricked sweep reads
         green-and-fresh.
-      * `_require_claim_holder`'s §9 arm (:16380) -- the legacy upgrade mints
+      * `_require_claim_holder`'s §9 arm (:16444) -- the legacy upgrade mints
         generation 1 on bare sid equality, so it needs the registry that
         cleared it to be COMPLETE, not merely readable. See there.
 
@@ -929,7 +929,7 @@ def _quarantine_artifacts() -> list:
         §6.5 worker-turn gate, which refuses on `True` alone, so poisoning a
         HEALTHY read here would let a real worker turn through §6.5 -- closing
         the §9 door by opening a wider one. Rule 1 lives at the §9 arm instead.
-      * `_identity_abstention_note` (:16101) -- the same distinction, in words,
+      * `_identity_abstention_note` (:16165) -- the same distinction, in words,
         because the generic note names `fleet doctor` and doctor is what MADE
         this state.
       * `_read_registry_readonly` (:4059) -- the VIEW surface's copy of the same
@@ -938,7 +938,7 @@ def _quarantine_artifacts() -> list:
         a never-initialised box prints, so the two states were not
         distinguishable from the read surface at all. A `Path.glob` is a read,
         so this costs the views doctrine nothing.
-      * `_doctor_check_registry` (:12408) -- doctor graded only on whether the
+      * `_doctor_check_registry` (:12472) -- doctor graded only on whether the
         LOADER RAISED, and the loader returns `{"workers": {}}` for a missing
         file, so the row called a renamed-away path *"is readable"* and doctor
         exited 0 with every row green (P1-12). A bare absence stays a PASS: no
@@ -950,8 +950,8 @@ def _quarantine_artifacts() -> list:
     these two only spell the filename, because an operator cannot restore a file
     whose name they were never told.
 
-      * `_print_snapshot_table` (:6911) -- `fleet status --stale-ok`.
-      * `_tombstone_releasing_body` (:16537) -- `sup-release`, whose registry
+      * `_print_snapshot_table` (:6975) -- `fleet status --stale-ok`.
+      * `_tombstone_releasing_body` (:16601) -- `sup-release`, whose registry
         arm previously swallowed the quarantined case in silence.
 
     The operator clears the artifact (after restoring what it holds), which
@@ -3095,7 +3095,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     -- reads `ok` while MISSING every record the artifact holds, and the §9 arm
     read that thinness as an affirmative *"you are provably not a worker"*. The
     presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:16380`), where it costs the §6.5 gate nothing.
+    (`:16444`), where it costs the §6.5 gate nothing.
 
     An artifact can also outlive its incident by days -- `_sweep_husks` tells the
     operator to restore the file first and delete the artifact second -- so that
@@ -5476,6 +5476,68 @@ def _supervisor_tier_snapshot(now=None) -> dict:
     return out
 
 
+# --- A REGISTRY FIELD'S TYPE IS FOREIGN INPUT TOO (gate w50-gd2 MAJOR 1) ----
+#
+# Slice (d) let the statusline resolve a home the operator does not control, and
+# the discharge that followed made every foreign string safe to PRINT. It did
+# not make the render total over the TYPES a foreign registry may carry.
+# `_registry_corrupt_reason` constrains the registry to an object of objects and
+# says nothing about a record's fields, so `"status": []` is a VALID registry --
+# and `by_status[status]` below raised `TypeError: unhashable type` on it, which
+# `main()`'s exit-0 guard swallowed into a blank fleet row, at rc 0, on every
+# refresh, with no diagnosis. Driven four-cell: harmless at the merge base,
+# erasing on the branch.
+#
+# THE NARROWING COMES BEFORE THE SANITISER, AND THAT ORDER IS THE FINDING.
+# `fleet_statusline._safe` is a TEXT sanitiser: printable ASCII, bounded,
+# brackets neutralised. Handing it `str(value)` would make the render total and
+# would still be wrong, because `str()` answers "I do not know this type" with
+# "here is some text the attacker wrote":
+#
+#   status=['idle']    -> str() -> _safe -> "('idle')"
+#   status="['idle']"  ->          _safe -> "('idle')"      <- MEASURED, identical
+#
+# Two distinct registry states rendering identical bytes on the one surface the
+# operator reads continuously is P1-13, the finding this slice already spent a
+# MAJOR on. And it is not free: `str()` on a 200k-element list costs 149 ms per
+# refresh to print 24 characters (measured), against 0.004 ms for the narrowing.
+# So a field whose type is wrong is not sanitised into text -- it is REPLACED by
+# a word fleet authored.
+#
+#: What a registry-derived field renders as when its TYPE is not the schema's.
+#: Fleet's own word, chosen by fleet rather than by whoever wrote the registry.
+TYPE_FAULT = "?type"
+#: ...and when the field is absent or null, which is a different fact: nothing
+#: was recorded, as opposed to something of the wrong shape was. `?` is already
+#: this repo's word for a cell with no measurement behind it (`_fmt_age`, the
+#: W15 `unknown_fields` column, `rec.get("status", "?")` as it stood).
+FIELD_UNKNOWN = "?"
+
+
+def registry_status(value) -> str:
+    """A record's `status`, narrowed to `str` BEFORE anything sanitises it.
+
+    Total over every JSON value: object, array, number, string, bool, null and
+    absent. Never raises, never coerces with `str()` (see the block comment
+    above for the measurement that rules `str()` out), and never invents a
+    status fleet's own vocabulary already uses -- `?type` is not in `_ORDER`,
+    `_LABEL` or `_SUP_STATE_LABEL`, so it renders through the unknown-bucket
+    path exactly like any other status fleet did not write, and is capped and
+    sanitised by the same rules.
+
+    A foreign home can still WRITE the literal string `"?type"` and forge this
+    word. That is the class gate `w50-gd2` §4.3 measured and consciously did not
+    file -- a foreign status can already render `sup held` or `no live workers`
+    -- and it is strictly smaller than the alternative: forging a diagnostic
+    word costs an attacker nothing and buys them nothing, while erasing the
+    operator's row cost them one JSON bracket."""
+    if value is None:
+        return FIELD_UNKNOWN
+    if isinstance(value, str):
+        return value
+    return TYPE_FAULT
+
+
 def status_snapshot(now=None, include_archived: bool = False) -> dict:
     """Read-only fleet snapshot. See the module comment above for why this
     exists alongside cmd_status rather than reusing it.
@@ -5539,7 +5601,9 @@ def status_snapshot(now=None, include_archived: bool = False) -> dict:
             stale = (now - _parse_iso(rec["last_activity"])).total_seconds()
         except (ValueError, TypeError, KeyError):
             stale = None
-        status = rec.get("status", "?")
+        # NARROWED, not defaulted: `rec.get("status", "?")` covered the ABSENT
+        # key and nothing else, and `by_status[status]` needs a HASHABLE one.
+        status = registry_status(rec.get("status"))
         by_status[status] = by_status.get(status, 0) + 1
         total_mail += mail
         total_cost += cost
@@ -8842,7 +8906,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # P1-6: `read_registry_no_repair`, NOT `load_registry`. This is a PRE-FLIGHT
-    # resolution that runs from `cmd_kill:8736` / `cmd_respawn:8478`, before
+    # resolution that runs from `cmd_kill:8800` / `cmd_respawn:8542`, before
     # either verb has taken `fleet.lock` -- and `load_registry` QUARANTINES a
     # corrupt registry, i.e. RENAMES IT ASIDE, which is a write. An unlocked
     # write races every other fleet command, and it destroys the evidence the
@@ -8905,10 +8969,10 @@ def _supervisor_lifecycle_target(verb, name):
     # P1-6: `read_registry_no_repair` -- `load_registry` MINUS the rename, with
     # the same missing-file contract, the same validator and the same
     # `RegistryCorruptError`, so the arm below is unchanged. This read runs from
-    # `cmd_kill:8736` / `cmd_respawn:8478`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:8800` / `cmd_respawn:8542`, ahead of either verb's `fleet_lock`,
     # and quarantining here did two things: it wrote without the lock, and it
     # STOLE the quarantine from the lock-held read that was designed to perform
-    # it. `cmd_respawn:8502-8504` spells out that design -- *"resolve under the
+    # it. `cmd_respawn:8566-8568` spells out that design -- *"resolve under the
     # lock so a corrupt registry surfaces through load_registry's quarantine"* --
     # and the theft is what falsified it: by the time the lock-held read ran the
     # file was ABSENT rather than corrupt, so `{"workers": {}}` came back and the
@@ -14975,8 +15039,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     live_sids` is what shipped, and `_record_sids`' own docstring says why it
     is wrong -- *"matching against `session_id` alone fails open on it
     (ND4a)"* -- for the thirteen other sites that already key on the union
-    (`:2810, :2891, :3152, :3302, :4688, :8876, :9196, :9477, :9695, :9782,
-    :10005, :10791, :14846`). The thirteenth is multi-fleet §5 step 2's
+    (`:2810, :2891, :3152, :3302, :4688, :8940, :9260, :9541, :9759, :9846,
+    :10069, :10855, :14910`). The thirteenth is multi-fleet §5 step 2's
     membership test (slice a2), which is the same argument one plane out: a
     home whose record was eagerly restamped would stop claiming its own
     fork-steered body mid-rotation. B6 was the one
@@ -14991,8 +15055,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :7836, :8309, :12752,
-    :18066), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :7900, :8373, :12816,
+    :18130), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -15682,8 +15746,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:7836, :8309, :12752,
-    #     :18066) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:7900, :8373, :12816,
+    #     :18130) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -15716,7 +15780,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         #     file aside (`:1063`), which is a write. Routing the identity read
         #     through it made `fleet send` shred the operator's evidence from a
         #     path that promises to touch nothing; the helper exists for exactly
-        #     this and names this gate as its reason (`:14774`). A `None` here
+        #     this and names this gate as its reason (`:14838`). A `None` here
         #     still fails toward the gate -- an unreadable registry is reported
         #     by its own doctor row, and is never a reason to decide blind.
         #     MERGE NOTE (2026-07-27): main and `fix/identity-registry-judges`
@@ -16358,7 +16422,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # A worker whose own record sits inside the artifact upgrades the claim.
         #
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as `_sweep_husks`
-        # spells it at `:10755`. Not an mtime comparison: `os.rename` preserves
+        # spells it at `:10819`. Not an mtime comparison: `os.rename` preserves
         # mtime, so the artifact's mtime is the PRE-corruption write time and any
         # recreated registry is always newer -- the comparison would never fire
         # on the one bypass it exists to stop.
