@@ -589,3 +589,16 @@ excludes it (`docs/lanes/`), and `CHECK_COUNT_DOCS` is unchanged at 27 of 141. T
 which the widened pin is built to catch — and the pin stays green *because the pattern-based
 exemption is doing exactly the job it was designed for*. Numbers and the pin re-run are appended
 below.
+
+```
+tracked markdown: 141          (was 140; this report is the +1)
+CHECK_COUNT_DOCS: 27           (UNCHANGED)
+report tracked  : True
+report exempt   : True
+
+py -3.13 -m pytest tests/test_doc_claims.py tests/test_rendered_command_quoting.py -q
+  ->  87 passed
+```
+
+Committed at `e662c46`. `HEAD`, `w50/launchfix` and `main` were all at `4d78f6c` when this lane
+started; only `w50/launchfix` moved, and only by this one commit. Nothing pushed, nothing merged.
