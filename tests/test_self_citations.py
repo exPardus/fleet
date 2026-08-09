@@ -350,7 +350,7 @@ def _function_qualified_citations():
     so a line enumerating `cmd_kill:A` / `cmd_respawn:B` can only ever be tested
     against one of the two names -- and a pair of numbers SWAPPED between their
     functions keeps every anchor and every `exactly` set intact. Measured, not
-    assumed: that swap was planted at `bin/fleet.py:6597` and passed the whole
+    assumed: that swap was planted at `bin/fleet.py:6609` and passed the whole
     file before this existed.
 
     Each entry is `(citing line, name, start, end)`, `end` None for a bare

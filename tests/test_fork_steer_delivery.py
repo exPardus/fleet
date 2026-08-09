@@ -77,6 +77,7 @@ import fleet
 # ---------------------------------------------------------------------------
 SID_SPAWN = "11111111-aaaa-4bbb-8ccc-000000000001"
 SID_FORK = "22222222-aaaa-4bbb-8ccc-000000000002"
+SID_THIRD = "33333333-aaaa-4bbb-8ccc-000000000003"
 
 NAME = "steer-w1"
 
@@ -90,6 +91,15 @@ TASK = ("# First mission\n\nDo the original thing.\n\n" + TASK_SENTINEL + "\n")
 STEER_SENTINEL = "STEER-SENTINEL-9c3b: the steered instruction, and the whole point."
 STEER = ("Change of plan from the manager. The earlier mission is superseded.\n"
          "Do the NEW thing instead, and report on it.\n" + STEER_SENTINEL)
+
+# The operator message that meets a usage limit. `cmd_send` REFUSES to steer a
+# `limited` worker, so mail can never arrive DURING a park -- it is queued to a
+# `working` worker whose turn then dies on the limit, and the resume drains it.
+# That is the ordinary way a manager's message meets a usage limit, and it is
+# the case wave 49's own patch did not cover (`docs/lanes/w49-fs.md` 11g).
+MAIL_SENTINEL = "MAIL-SENTINEL-7e2d: the queued operator message, and the whole point."
+QUEUED_MAIL = ("Manager, mid-turn: the requirements changed while you were working.\n"
+               "Apply this to the task you are already on.\n" + MAIL_SENTINEL)
 
 
 @pytest.fixture(autouse=True)
@@ -232,6 +242,54 @@ def _steer(monkeypatch, log, message=STEER):
                           sleep=lambda s: None) == 0
 
 
+def _park_limited(mail=None):
+    """Leave the worker exactly as a turn killed by a usage limit leaves it:
+    `limited`, horizon already passed -- and, optionally, an operator message
+    queued into the CURRENT sid's mailbox.
+
+    The mail is queued here rather than during the park on purpose: `cmd_send`
+    refuses a `limited` worker outright, so the only reachable ordering is
+    mail-then-park. Driving the unreachable one would pin a scenario the CLI
+    forbids."""
+    data = fleet.load_registry()
+    rec = data["workers"][NAME]
+    rec["status"] = "limited"
+    rec["limit_reset_at"] = "2020-01-01T00:00:00Z"
+    rec["limit_kind"] = "session_5h"
+    fleet.save_registry(data)
+    if mail:
+        fleet.append_mailbox(rec["session_id"], mail)
+
+
+def _resume_limited(monkeypatch, log, new_sid=SID_FORK, prior=(SID_SPAWN,)):
+    """The unattended sweep: `fleet resume-limited <name>` on a parked worker
+    whose horizon has passed."""
+    entries = [_entry(s) for s in prior]
+    monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                        _roster((True, list(entries)),
+                                (True, list(entries)),
+                                (True, entries + [_entry(new_sid)])))
+    args = SimpleNamespace(name=NAME, force_now=False, nonce=None)
+    assert fleet.cmd_resume_limited(args, run=_recorder(new_sid, log),
+                                    which=_claude, sleep=lambda s: None) == 0
+
+
+def _bytes_new_to_this_session(previous, current):
+    """What `current`'s session receives that it did not already have.
+
+    Identical accounting to `test_the_steer_is_determined_by_the_dispatched_turn
+    _alone`: the turn itself always counts; a pointer this session has already
+    dereferenced contributes NOTHING (it holds that path's old contents and
+    cannot know they moved); a pointer it has never dereferenced contributes its
+    content."""
+    already = set(previous.readable)
+    parts = [current.turn]
+    for path, content in current.readable.items():
+        if path not in already:
+            parts.append(content)
+    return "\n".join(parts)
+
+
 @pytest.fixture
 def dispatches(project, monkeypatch):
     """(spawn, fork-steer) as the resumed session experiences them."""
@@ -306,6 +364,264 @@ def test_the_steer_is_determined_by_the_dispatched_turn_alone(dispatches):
         f"  dispatched turn : {steer_d.turn!r}\n"
         f"  already read    : {sorted(already_dereferenced)}\n"
         f"  named this time : {sorted(steer_d.readable)}")
+
+
+# ---------------------------------------------------------------------------
+# THE SAME PROPERTY AT THE OTHER RESUMING CALL SITE
+#
+# `_resume_one_limited_native` fork-steers exactly like `send` does -- same
+# `--resume`, same name-derived turn, same session that already answered it --
+# and it fires UNATTENDED after a usage-limit park, on a worker whose turn was
+# cut off mid-task, with no operator watching the reply. `docs/lanes/w49-fs.md`
+# §2e found it and 11g measured it; the tests below are the pins that arm has
+# never had.
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def limit_resume_dispatches(project, monkeypatch):
+    """(spawn, limit-resume) with an operator message queued BEFORE the park."""
+    log = []
+    _spawn(project, monkeypatch, log)
+    assert len(log) == 1, log
+    _park_limited(mail=QUEUED_MAIL)
+    _resume_limited(monkeypatch, log)
+    assert len(log) == 2, (
+        "resume-limited did not dispatch -- it skipped the worker, so "
+        "everything below would be vacuous")
+    spawn_d, resume_d = log
+    assert resume_d.resumed_sid == SID_SPAWN, (
+        "the resume did not RESUME the parked session, so it is not the "
+        f"fork-steer these tests are about: argv={resume_d.argv}")
+    return spawn_d, resume_d
+
+
+def test_the_queued_mail_actually_reached_the_resume_dispatch_layer(limit_resume_dispatches):
+    """Guard, mirroring `test_the_steer_actually_reached_the_dispatch_layer`:
+    if the queued mail never got as far as anything the resumed session could
+    reach, the pin below would red for a DIFFERENT defect (the park lost the
+    mail entirely) and the diagnosis would be wrong."""
+    _spawn_d, resume_d = limit_resume_dispatches
+    reachable = resume_d.turn + "".join(resume_d.readable.values())
+    assert MAIL_SENTINEL in reachable, (
+        "the queued mail reached neither the resume turn nor anything it "
+        "names -- the park DROPPED it, which is a different defect from the "
+        f"one below. turn={resume_d.turn!r} named={list(resume_d.readable)}")
+
+
+def test_a_limit_resume_delivers_queued_mail_by_the_dispatched_turn_alone(limit_resume_dispatches):
+    """THE property, at the unattended arm.
+
+    An operator's message that met a usage limit must reach the resumed session
+    in bytes that session did not already have. Wave 49's own patch inlined a
+    CONSTANT continuation sentence here and left the mail behind the
+    already-dereferenced pointer -- so the turn said "read it again", which is
+    SHAM-2, the shape this file refuses (module docstring), and refuses for a
+    reason that applies here verbatim: delivery stays contingent on the worker
+    CHOOSING to re-read."""
+    spawn_d, resume_d = limit_resume_dispatches
+    new_bytes = _bytes_new_to_this_session(spawn_d, resume_d)
+    assert MAIL_SENTINEL in new_bytes, (
+        "the limit-resume handed the resumed session the operator's queued "
+        "message ONLY behind a pointer it had already dereferenced, so "
+        "delivering it depends entirely on the worker CHOOSING to re-read a "
+        "file it believes it has read -- unattended, with nobody watching.\n"
+        f"  dispatched turn : {resume_d.turn!r}\n"
+        f"  already read    : {sorted(spawn_d.readable)}\n"
+        f"  named this time : {sorted(resume_d.readable)}")
+
+
+def test_a_limit_resume_with_no_queued_mail_is_not_a_turn_already_answered(project, monkeypatch):
+    """The other half of 11g's table. With no mail there is still an
+    instruction to deliver -- *continue the task* -- and it must not be
+    delivered as a turn the session has already answered."""
+    log = []
+    _spawn(project, monkeypatch, log)
+    _park_limited(mail=None)
+    _resume_limited(monkeypatch, log)
+    assert len(log) == 2, "resume-limited did not dispatch"
+    spawn_d, resume_d = log
+    assert resume_d.turn != spawn_d.turn, (
+        "the limit-resume dispatched a turn BYTE-IDENTICAL to the one this "
+        "session already answered, so replaying the previous answer satisfies "
+        f"it:\n  {resume_d.turn!r}")
+
+
+def test_compose_prompt_hands_back_the_mail_it_drained(isolated_home):
+    """The enabling contract for the pin above, stated directly.
+
+    `compose_prompt` CLAIMS the mailbox -- it is the sole drain point -- so
+    until now the drained text was reachable only by re-parsing the composed
+    prompt or by a second claim. A resuming caller has to inline that exact
+    text, so the drain returns it: ONE source of truth, and the turn and the
+    payload cannot disagree about what the operator said.
+
+    Pinned here rather than left implicit because the two-value shape is what
+    made §6e inline a constant at the resume arm in the first place."""
+    fleet.append_mailbox("sid-x", QUEUED_MAIL)
+    prompt, claim, mail = fleet.compose_prompt("w", "C:/x", "", "sid-x")
+    assert mail.strip() == QUEUED_MAIL.strip(), (
+        "compose_prompt did not return the mail it drained, so a resuming "
+        f"caller cannot inline it: {mail!r}")
+    assert mail in prompt, (
+        "the returned mail is not the text that went into the prompt -- two "
+        "copies that can disagree is exactly what this return value exists "
+        "to prevent")
+    assert claim is not None
+
+    _p, claim2, none_mail = fleet.compose_prompt("w", "C:/x", "", "sid-empty")
+    assert none_mail == "", (
+        f"no mail must read as the empty string, not {none_mail!r} -- the "
+        "resume arm branches on it")
+    assert claim2 is None
+
+
+# ---------------------------------------------------------------------------
+# THE TWO ARMS SAY OPPOSITE THINGS AND MUST NOT SHARE ONE SENTENCE
+# ---------------------------------------------------------------------------
+def test_the_steer_and_resume_arms_do_not_share_one_wrapper(project, monkeypatch):
+    """A steer SUPERSEDES the running task; a limit-resume CONTINUES it. Wave
+    49's patch used one wrapper for both -- *"That message is a NEW instruction
+    and it supersedes anything earlier in this session"* -- which is right for
+    `send` and actively wrong for `resume-limited`, whose entire purpose is to
+    pick the earlier task back up.
+
+    **The two arms having different wrapper text IS the property here. A shared
+    constant is the regression this test exists to catch**, so it is stated over
+    what the two REAL dispatches carry rather than over the constants: someone
+    collapsing them has to defeat a driven comparison, not rename a variable.
+
+    Both arms are driven in ONE fleet home, in the order an operator produces
+    them (spawn -> steer -> park -> resume), so the comparison is between two
+    turns the same code emitted in the same run.
+
+    `wrapper_of` subtracts the SPAWN turn -- the bytes this session has already
+    answered -- rather than reconstructing fleet's pointer sentence. That keeps
+    the test ignorant of the storage decision (module docstring) and degrades
+    safely: a future fix that changes the payload IDENTITY per dispatch leaves
+    the subtraction a no-op and the whole turn as the wrapper, which still
+    satisfies every assertion below for the right reason."""
+    log = []
+    _spawn(project, monkeypatch, log)
+    _settle_to_idle(monkeypatch)
+    _steer(monkeypatch, log)
+    _park_limited(mail=None)
+    _resume_limited(monkeypatch, log, new_sid=SID_THIRD,
+                    prior=(SID_SPAWN, SID_FORK))
+    assert len(log) == 3, (
+        f"expected spawn + steer + resume dispatches, got {len(log)}")
+    spawn_d, steer_d, resume_d = log
+    assert resume_d.resumed_sid == SID_FORK, (
+        "the resume did not resume the steered session, so the two arms were "
+        f"not both exercised: argv={resume_d.argv}")
+
+    def wrapper_of(d, body=""):
+        w = d.turn.replace(spawn_d.turn, "")
+        if body:
+            # Subtract the operator's OWN words too. `STEER` itself contains
+            # "superseded", so without this the steer assertion below would
+            # pass on a wrapper that says nothing at all -- a test that reds
+            # only because of the fixture's prose is not a pin.
+            w = w.replace(body.strip(), "")
+        return w.strip()
+
+    steer_w, resume_w = wrapper_of(steer_d, STEER), wrapper_of(resume_d)
+
+    assert steer_w, ("the steer turn carries nothing beyond the turn the "
+                     f"session already answered: {steer_d.turn!r}")
+    assert resume_w, ("the limit-resume turn carries nothing beyond the turn "
+                      f"the session already answered: {resume_d.turn!r}")
+    assert steer_w != resume_w, (
+        "`send` and `resume-limited` now frame their dispatched turn with the "
+        "SAME sentence. They mean opposite things: a steer supersedes the "
+        "running task, a limit-resume continues it. Collapsing them tells a "
+        "resumed worker to abandon the task the resume exists to finish.\n"
+        f"  shared wrapper : {steer_w!r}")
+    assert "supersede" in steer_w.lower(), (
+        "the steer arm no longer tells the worker its new instruction "
+        f"supersedes the running task: {steer_w!r}")
+    assert "supersede" not in resume_w.lower(), (
+        "the limit-resume arm tells the worker something supersedes the task "
+        "it was parked mid-way through. The resume exists to CONTINUE that "
+        f"task: {resume_w!r}")
+    assert "continue" in resume_w.lower(), (
+        "the limit-resume arm no longer tells the worker to continue the task "
+        f"it was parked on: {resume_w!r}")
+
+
+# ---------------------------------------------------------------------------
+# THE KNOWN HOLE, PINNED RATHER THAN LEFT AS PROSE
+# ---------------------------------------------------------------------------
+BIG_HEAD = "BIG-STEER-HEAD-1a2b: the opening of an over-length steer."
+BIG_TAIL = "BIG-STEER-TAIL-5f6e: past the inline cap, and therefore NOT delivered."
+
+
+def test_an_over_length_steer_rides_the_turn_only_as_far_as_the_cap(project, monkeypatch):
+    """CHARACTERISATION of a hole this lane did NOT close, pinned so it cannot
+    be mistaken for fixed and cannot silently get worse.
+
+    Inlining is bounded (`NATIVE_INLINE_STEER_MAX`) because Win32 caps a
+    command line at 32767 characters and `fleet send @file` accepts arbitrarily
+    large input -- uncapped, a large steer makes dispatch fail outright, which
+    trades a rare silent miss for a common loud one.
+
+    **Over the cap the guarantee degrades to exactly the SHAM-2 shape this file
+    refuses**: the turn is distinguishable and says the file was rewritten, so
+    the tail arrives only if the worker chooses to re-read. `docs/lanes/
+    w49-fs.md` §6b calls that "a real hole in my own fix" and it is still open
+    -- closing it needs FIX-B composed onto the overflow (a payload identity
+    the session has never dereferenced), which changes `task_file_path`'s
+    identity and so touches cleanup and archive. Out of this lane's arm.
+
+    What IS pinned: the head reaches the turn, the turn SAYS it was cut, and
+    the tail is still reachable behind the pointer. A regression that dropped
+    the marker, or dropped the inline entirely at length, reds here."""
+    big = BIG_HEAD + "\n" + ("filler line that pads this steer out. " * 130) + "\n" + BIG_TAIL
+    assert len(big) > fleet.NATIVE_INLINE_STEER_MAX, (
+        "this test's steer no longer exceeds the inline cap, so it cannot "
+        f"exercise truncation at all (len={len(big)}, "
+        f"cap={fleet.NATIVE_INLINE_STEER_MAX})")
+
+    log = []
+    _spawn(project, monkeypatch, log)
+    _settle_to_idle(monkeypatch)
+    _steer(monkeypatch, log, message=big)
+    assert len(log) == 2
+    _spawn_d, steer_d = log
+
+    assert BIG_HEAD in steer_d.turn, (
+        "an over-length steer no longer rides the turn AT ALL -- the cap is "
+        "meant to bound the inline, not remove it")
+    assert "truncated" in steer_d.turn.lower(), (
+        "the turn carries a silently truncated steer: the worker is given a "
+        "cut-off instruction with nothing saying it was cut. That is worse "
+        f"than the hole it replaces. turn={steer_d.turn[:200]!r}")
+    assert BIG_TAIL not in steer_d.turn, (
+        "the tail now rides the turn too -- if the cap was raised or removed "
+        "deliberately, update this test and `docs/lanes/w50-fs2.md`; if it "
+        "was an accident, a `fleet send @bigfile` can now blow the Win32 "
+        "command-line limit and fail the dispatch outright")
+    assert BIG_TAIL in "".join(steer_d.readable.values()), (
+        "the truncated tail is not reachable behind the pointer either, so it "
+        "is simply LOST -- the marker in the turn points at a file that does "
+        "not contain it")
+
+
+def test_an_unrecognised_inline_kind_is_a_loud_error(project):
+    """A dispatch that means to inline must not silently fail to.
+
+    `inline_kind` is a string selecting between two sentences that contradict
+    each other, so a typo (`"resumed"`, `"send"`) is a plausible edit. Without
+    this guard it would fall through to an un-inlined turn -- i.e. it would
+    silently restore the exact defect the parameter exists to remove, on a path
+    whose tests all still pass because they assert about the OTHER arm."""
+    with pytest.raises(fleet.NativeDispatchError) as exc:
+        fleet.dispatch_bg(NAME, str(project), "body", "bypass",
+                          inline_kind="resumed", inline_body="x",
+                          resume_sid=SID_SPAWN, which=_claude,
+                          run=lambda *a, **k: (_ for _ in ()).throw(
+                              AssertionError("dispatch must not launch")),
+                          sleep=lambda s: None,
+                          roster_fetch=lambda **kw: (True, []))
+    assert "inline_kind" in str(exc.value)
 
 
 # ---------------------------------------------------------------------------

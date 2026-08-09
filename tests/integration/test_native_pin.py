@@ -112,8 +112,8 @@ CLI_TIMEOUT = 60
 # "CORRECTION 2026-08-09"). Step 3 used to steer with the 28-character
 # `Reply with exactly: STEER-OK`. `_cmd_send_native` passes
 # `hint=message[:NATIVE_NAME_HINT_MAX]` (40) to `dispatch_bg`
-# (bin/fleet.py:7614), which renders the FORKED session's own roster name as
-# `cat|name|hint` (bin/fleet.py:13132). So this step handed its own success
+# (bin/fleet.py:7642), which renders the FORKED session's own roster name as
+# `cat|name|hint` (bin/fleet.py:13219). So this step handed its own success
 # token to the session under test AS ITS TITLE, on a channel that has nothing
 # to do with whether the steer was delivered: a fork that silently re-did its
 # previous task could still emit `STEER-OK` and turn the step green. **The
@@ -167,7 +167,7 @@ def _assert_steer_token_has_one_way_in(worker_name, message, token,
     Computed through fleet's OWN renderer, so a change to
     `NATIVE_NAME_HINT_MAX` or to `render_native_name`'s truncation is tracked
     without this file being edited. Its one duplication is the hint slice
-    itself (`_cmd_send_native`, bin/fleet.py:7614): this re-derives it rather
+    itself (`_cmd_send_native`, bin/fleet.py:7642): this re-derives it rather
     than observing it, so a change to THAT expression would slip past here.
     `tests/test_fork_steer_delivery.py::
     test_the_pin_tiers_steer_token_cannot_reach_the_session_name` closes that
@@ -641,11 +641,11 @@ def test_5_pin_archive_rm(sandbox: Sandbox):
 
     a = sandbox.fleet("archive", "pin-w1")
     # cmd_archive's own summary line unconditionally reads "archived N
-    # worker(s), skipped M" (bin/fleet.py:6337) -- a blanket "skipped" not
+    # worker(s), skipped M" (bin/fleet.py:6349) -- a blanket "skipped" not
     # in stdout check can never pass even on full success (M=0). Live
     # verification (T12 fix wave) is the first real exercise of this exact
     # message; check for the PER-WORKER skip line ("pin-w1: skipped --
-    # <reason>", fleet.py:6283) instead of the always-present summary word.
+    # <reason>", fleet.py:6295) instead of the always-present summary word.
     assert "pin-w1: skipped" not in a.stdout, a.stdout
     assert "epoch" not in a.stdout.lower(), a.stdout
 

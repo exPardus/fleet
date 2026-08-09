@@ -1281,7 +1281,7 @@ class TestMailEvents:
         fleet.append_mailbox(sid, "queued work")
         # append_mailbox itself is a low-level helper -- it must NOT emit an event.
         assert not any(e["kind"] == "mail_drained" for e in _read_events())
-        prompt, claim = fleet.compose_prompt("w", str(fleet.FLEET_HOME), "", sid)
+        prompt, claim, _mail = fleet.compose_prompt("w", str(fleet.FLEET_HOME), "", sid)
         assert "queued work" in prompt
         drained = [e for e in _read_events() if e["kind"] == "mail_drained"]
         assert drained, "no mail_drained event emitted at compose-time drain"
@@ -1289,7 +1289,7 @@ class TestMailEvents:
         assert drained[-1]["sid"] == sid
 
     def test_compose_prompt_no_mail_emits_no_drain(self, isolated_home):
-        prompt, claim = fleet.compose_prompt("w", str(fleet.FLEET_HOME), "do the thing", "empty-sid")
+        prompt, claim, _mail = fleet.compose_prompt("w", str(fleet.FLEET_HOME), "do the thing", "empty-sid")
         assert not any(e["kind"] == "mail_drained" for e in _read_events())
 
 

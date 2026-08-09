@@ -908,12 +908,12 @@ def _quarantine_artifacts() -> list:
     registry is always newer -- an "artifact newer than the registry"
     comparison would never fire on the recreation bypasses it exists to stop.
 
-      * `_sweep_husks` (:10730) -- a rename can hide live worker records from
+      * `_sweep_husks` (:10781) -- a rename can hide live worker records from
         the roster sweep, so a thin registry would rm sessions it still owns.
-      * `_doctor_check_autoclean` (:11838) -- a lingering artifact means the
+      * `_doctor_check_autoclean` (:11889) -- a lingering artifact means the
         sweep above is refusing itself, which is how a bricked sweep reads
         green-and-fresh.
-      * `_require_claim_holder`'s §9 arm (:16348) -- the legacy upgrade mints
+      * `_require_claim_holder`'s §9 arm (:16465) -- the legacy upgrade mints
         generation 1 on bare sid equality, so it needs the registry that
         cleared it to be COMPLETE, not merely readable. See there.
 
@@ -923,22 +923,22 @@ def _quarantine_artifacts() -> list:
     read and described, and the question only arises when there is no file to
     answer for itself.
 
-      * `_acting_worker_identity` (:3145) -- `not_initialized` stays the
+      * `_acting_worker_identity` (:3157) -- `not_initialized` stays the
         affirmative *"there are no records"* only with no artifact beside it.
         SCOPED TO THE ABSENT CASE ON PURPOSE: this resolver is shared with the
         §6.5 worker-turn gate, which refuses on `True` alone, so poisoning a
         HEALTHY read here would let a real worker turn through §6.5 -- closing
         the §9 door by opening a wider one. Rule 1 lives at the §9 arm instead.
-      * `_identity_abstention_note` (:16069) -- the same distinction, in words,
+      * `_identity_abstention_note` (:16186) -- the same distinction, in words,
         because the generic note names `fleet doctor` and doctor is what MADE
         this state.
-      * `_read_registry_readonly` (:4059) -- the VIEW surface's copy of the same
+      * `_read_registry_readonly` (:4071) -- the VIEW surface's copy of the same
         question, and the last reader to get it (P1-13, 2026-07-31). Until then
         every view described a just-quarantined fleet with the identical string
         a never-initialised box prints, so the two states were not
         distinguishable from the read surface at all. A `Path.glob` is a read,
         so this costs the views doctrine nothing.
-      * `_doctor_check_registry` (:12376) -- doctor graded only on whether the
+      * `_doctor_check_registry` (:12427) -- doctor graded only on whether the
         LOADER RAISED, and the loader returns `{"workers": {}}` for a missing
         file, so the row called a renamed-away path *"is readable"* and doctor
         exited 0 with every row green (P1-12). A bare absence stays a PASS: no
@@ -950,8 +950,8 @@ def _quarantine_artifacts() -> list:
     these two only spell the filename, because an operator cannot restore a file
     whose name they were never told.
 
-      * `_print_snapshot_table` (:6879) -- `fleet status --stale-ok`.
-      * `_tombstone_releasing_body` (:16505) -- `sup-release`, whose registry
+      * `_print_snapshot_table` (:6891) -- `fleet status --stale-ok`.
+      * `_tombstone_releasing_body` (:16622) -- `sup-release`, whose registry
         arm previously swallowed the quarantined case in silence.
 
     The operator clears the artifact (after restoring what it holds), which
@@ -1608,9 +1608,20 @@ Do not leave servers or watchers running past the end of the turn without record
 
 
 def compose_prompt(name: str, cwd, task: str, sid: str | None, journal_path=None,
-                   context=None) -> tuple[str, Path | None]:
+                   context=None) -> tuple[str, Path | None, str]:
     """preamble (SPEC §8) + claimed mailbox + task text (+ journal contents
     when respawning, i.e. when journal_path is given and exists).
+
+    Returns `(prompt, claim, mail)`. The third element is the DRAINED MAIL
+    TEXT, exactly as embedded in `prompt` -- `""` when there was none. It is
+    returned rather than kept internal because a `--resume` dispatch has to be
+    able to carry the operator's message IN the dispatched turn: a resumed
+    session is handed a turn that is a pure function of the worker NAME, so a
+    message reachable only through that turn's pointer is delivered *if the
+    worker chooses to re-read a file it believes it has read* (w49 fork-steer
+    defect; `dispatch_bg`'s `inline_body`). Returning the drained text keeps
+    ONE source of truth: the caller inlines the same string this function
+    embedded, so the turn and the payload can never disagree.
 
     Claims (does not destroy) mailbox/<sid>.md via claim_mailbox() so the
     universal-drain guarantee holds (every compose_prompt call claims the
@@ -1665,6 +1676,7 @@ def compose_prompt(name: str, cwd, task: str, sid: str | None, journal_path=None
             parts.append(digests)
 
     claim = None
+    mail = ""
     if sid is not None:
         mail, claim = claim_mailbox(sid)
         if mail:
@@ -1689,7 +1701,7 @@ def compose_prompt(name: str, cwd, task: str, sid: str | None, journal_path=None
             if journal_text:
                 parts.append(f"## Journal from previous session\n{journal_text}\n")
 
-    return "\n".join(parts), claim
+    return "\n".join(parts), claim, mail
 
 
 # ---------------------------------------------------------------------------
@@ -3095,7 +3107,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     -- reads `ok` while MISSING every record the artifact holds, and the §9 arm
     read that thinness as an affirmative *"you are provably not a worker"*. The
     presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:16348`), where it costs the §6.5 gate nothing.
+    (`:16465`), where it costs the §6.5 gate nothing.
 
     An artifact can also outlive its incident by days -- `_sweep_husks` tells the
     operator to restore the file first and delete the artifact second -- so that
@@ -6493,7 +6505,7 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
     # `Exception`, not `BaseException`: a Ctrl-C during compose has no record
     # to clean up yet and must stay a KeyboardInterrupt.
     try:
-        prompt, _claim = compose_prompt(args.name, cwd, task, None,
+        prompt, _claim, _mail = compose_prompt(args.name, cwd, task, None,
                                         context=parse_context_arg(
                                             getattr(args, "context", None)))
     except FleetCliError:
@@ -7607,12 +7619,30 @@ def _cmd_send_native(name: str, message: str,
     append_mailbox(old_sid, message)
     append_event("mail_sent", name, sid=old_sid, status="idle",
                  caller_sid=caller_sid)
-    prompt, claim = compose_prompt(name, cwd, "", old_sid)
+    prompt, claim, mail = compose_prompt(name, cwd, "", old_sid)
+    # w49: this dispatch RESUMES a session that has already answered a
+    # byte-identical turn, so whatever `send` reports as delivered has to ride
+    # the TURN, not the payload file behind it.
+    #
+    # `mail` is `message` plus anything that queued before it (the F6 append
+    # above is what puts `message` in there), so inlining the drain delivers
+    # BOTH -- including a residual another steer's `_migrate_residual_mailbox`
+    # parked here. But the inline cap truncates the HEAD-first, and `message`
+    # is the mailbox's TAIL: over the cap, inlining the whole drain would cut
+    # away the very steer this command is about to print success for. So take
+    # the drain when it fits and fall back to `message` when it does not --
+    # never fewer guarantees than §6e's `inline_body=message`, usually more.
+    # The empty-drain fallback matters too: a mailbox read that failed
+    # (claim_mailbox swallows OSError into ("", None)) must not silently
+    # un-deliver the steer.
+    inline = mail if (mail and len(mail) <= NATIVE_INLINE_STEER_MAX) else message
     try:
         result = dispatch_bg(
             name, cwd, prompt, mode, model=model, category=category,
             hint=message[:NATIVE_NAME_HINT_MAX], resume_sid=old_sid,
-            setting_sources=setting_sources, run=run, which=which, sleep=sleep,
+            setting_sources=setting_sources,
+            inline_kind="steer", inline_body=inline,
+            run=run, which=which, sleep=sleep,
         )
         finalize_mailbox_claim(claim)
     except BaseException:
@@ -7761,14 +7791,31 @@ def _resume_one_limited_native(name: str, old_sid: str, cwd, mode, model, catego
     roster join), so the only remaining race is the registry commit lock,
     exactly like cmd_spawn's post-dispatch stamp."""
     journal_path = journal_file_path(name)
-    prompt, claim = compose_prompt(name, cwd, "", old_sid, journal_path=journal_path)
+    prompt, claim, mail = compose_prompt(name, cwd, "", old_sid, journal_path=journal_path)
     body = ("The usage-limit reset horizon has passed. Continue the task "
             "from where you left off.\n\n" + prompt)
     try:
         result = dispatch_bg(
             name, cwd, body, mode, model=model, category=category,
             hint="resume past limit", resume_sid=old_sid,
-            setting_sources=setting_sources, run=run, which=which, sleep=sleep,
+            setting_sources=setting_sources,
+            # w50 amendment (i): inline the DRAINED MAIL, not a constant.
+            # `cmd_send` refuses a `limited` worker outright, so mail never
+            # arrives during a park -- it is queued to a WORKING worker whose
+            # turn then dies on the limit, and this drain is where it
+            # resurfaces. §6e inlined the continuation constant and left that
+            # message behind the already-dereferenced pointer, i.e. SHAM-2,
+            # the shape tests/test_fork_steer_delivery.py refuses. `mail` is
+            # "" in the no-mail case and the lead below is then the whole
+            # instruction, which is what the turn needs to carry.
+            #
+            # w50 amendment (ii): `inline_kind="resume"`, NOT "steer". A steer
+            # supersedes the running task; this resume CONTINUES the task the
+            # worker was parked mid-way through. Same wrapper for both would
+            # tell an unattended worker to abandon the work the resume exists
+            # to finish.
+            inline_kind="resume", inline_body=mail,
+            run=run, which=which, sleep=sleep,
         )
         finalize_mailbox_claim(claim)
     except BaseException:
@@ -8289,7 +8336,11 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
         pass
 
     journal_path = journal_file_path(name)
-    prompt, claim = compose_prompt(name, cwd, task_for_record, old_sid, journal_path=journal_path)
+    # No `inline_*` on this dispatch, deliberately: respawn MINTS a fresh
+    # session (no `resume_sid`), so nothing here has already answered this
+    # turn and there is no cached content for the pointer. The fork-steer
+    # defect cannot reach it -- docs/lanes/w49-fs.md §2e.
+    prompt, claim, _mail = compose_prompt(name, cwd, task_for_record, old_sid, journal_path=journal_path)
     prior_brief = brief_snapshot(name)
     try:
         # FIX WAVE (F1): RECORDING the override happens here, inside the same
@@ -8810,7 +8861,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # P1-6: `read_registry_no_repair`, NOT `load_registry`. This is a PRE-FLIGHT
-    # resolution that runs from `cmd_kill:8704` / `cmd_respawn:8446`, before
+    # resolution that runs from `cmd_kill:8755` / `cmd_respawn:8497`, before
     # either verb has taken `fleet.lock` -- and `load_registry` QUARANTINES a
     # corrupt registry, i.e. RENAMES IT ASIDE, which is a write. An unlocked
     # write races every other fleet command, and it destroys the evidence the
@@ -8873,10 +8924,10 @@ def _supervisor_lifecycle_target(verb, name):
     # P1-6: `read_registry_no_repair` -- `load_registry` MINUS the rename, with
     # the same missing-file contract, the same validator and the same
     # `RegistryCorruptError`, so the arm below is unchanged. This read runs from
-    # `cmd_kill:8704` / `cmd_respawn:8446`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:8755` / `cmd_respawn:8497`, ahead of either verb's `fleet_lock`,
     # and quarantining here did two things: it wrote without the lock, and it
     # STOLE the quarantine from the lock-held read that was designed to perform
-    # it. `cmd_respawn:8470-8472` spells out that design -- *"resolve under the
+    # it. `cmd_respawn:8521-8523` spells out that design -- *"resolve under the
     # lock so a corrupt registry surfaces through load_registry's quarantine"* --
     # and the theft is what falsified it: by the time the lock-held read ran the
     # file was ABSENT rather than corrupt, so `{"workers": {}}` came back and the
@@ -12903,6 +12954,42 @@ NATIVE_WEDGE_CLEANUP_TIMEOUT_SECONDS = 10
 DEFAULT_CATEGORY = "fleet"
 NATIVE_NAME_HINT_MAX = 40
 
+# w49: how much of an inlined message rides the dispatched turn ITSELF rather
+# than the payload file. A `--resume` dispatch's turn is a pure function of the
+# worker NAME, so it is BYTE-IDENTICAL to one the resumed session has already
+# answered, and anything that changed sits behind a pointer that session has
+# already dereferenced -- replaying the previous answer is then the cheapest
+# correct reading of the turn. Measured live at 2.1.226: 1 silent miss in 92
+# driven samples (docs/lanes/w49-fs.md §3c). Carrying the message IN the turn
+# is what makes delivery independent of the worker CHOOSING to re-read.
+#
+# Bounded because Win32 caps a command line at 32767 chars and `fleet send
+# @file` accepts arbitrarily large input: uncapped, a large steer would make
+# dispatch fail outright, converting a rare silent miss into a common loud one.
+# STATED RESIDUAL: over this cap the turn is merely DISTINGUISHABLE and says
+# the file was rewritten, which is the "read it again" shape the pin tier
+# refuses -- see docs/lanes/w50-fs2.md, left open on purpose.
+NATIVE_INLINE_STEER_MAX = 4000
+
+# The sentence that FRAMES an inlined body. THE TWO ARMS SAY OPPOSITE THINGS
+# AND MUST NEVER BE COLLAPSED INTO ONE CONSTANT: `send` hands the worker an
+# instruction that SUPERSEDES what it is doing; `resume-limited` hands it a
+# reason to CONTINUE the task it was parked mid-way through, unattended, after
+# a usage limit. Wave 49's patch used the steer wording for both, which told a
+# resumed worker to abandon the very work the resume exists to finish
+# (docs/lanes/w49-fs.md 11g item ii). Pinned by tests/test_fork_steer_delivery
+# .py::test_the_steer_and_resume_arms_do_not_share_one_wrapper, which compares
+# the two REAL dispatched turns -- so re-sharing the text is caught even if
+# this dict is refactored away.
+NATIVE_INLINE_LEAD = {
+    "steer": ("That message is a NEW instruction and it supersedes anything "
+              "earlier in this session."),
+    "resume": ("Your previous turn was cut short by a usage limit, whose reset "
+               "horizon has now passed. CONTINUE the task you were already "
+               "working on -- nothing here replaces it, and anything above is "
+               "further instruction for that same task."),
+}
+
 # · = MIDDLE DOT (the daemon's literal separator glyph). Previously a
 # duplicate-codepoint char class `[··]` (same character twice) -- collapsed
 # to a single literal, behavior-identical.
@@ -13076,7 +13163,7 @@ def _await_attach(name, sid, roster_fetch, sleep, clock,
 
 def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
                 hint="", resume_sid=None, settings_path=None,
-                setting_sources=None,
+                setting_sources=None, inline_kind=None, inline_body="",
                 run=subprocess.run, which=shutil.which, sleep=time.sleep,
                 roster_fetch=None, clock=time.monotonic):
     # Defense in depth (adversarial trap 6): every current caller
@@ -13131,6 +13218,36 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
     rendered = (name if _is_supervisor_shaped(name)
                 else render_native_name(category, name, hint))
     tiny_prompt = f"Read {task_path.as_posix()} and follow it exactly."
+    # w49 fork-steer defect, amended in w50 (docs/lanes/w49-fs.md §6,
+    # docs/lanes/w50-fs2.md): the turn above is a pure function of the worker
+    # NAME, so a `--resume` dispatch hands the session a turn BYTE-IDENTICAL
+    # to one it already answered, with everything that changed behind a
+    # pointer it already dereferenced. `send` then prints "fork-steered" over
+    # a worker that never saw the steer. Every RESUMING caller therefore
+    # passes an `inline_kind`, and the message rides the turn itself; the
+    # pointer stays for the preamble, the journal, any residual mail and an
+    # over-length tail.
+    #
+    # `inline_kind` selects the framing sentence rather than the caller
+    # passing prose: the steer and resume arms mean OPPOSITE things and the
+    # wording is the thing that must not be shared (NATIVE_INLINE_LEAD).
+    if inline_kind is not None:
+        lead = NATIVE_INLINE_LEAD.get(inline_kind)
+        if lead is None:
+            raise NativeDispatchError(
+                f"unknown inline_kind: {inline_kind!r} (expected one of "
+                f"{sorted(NATIVE_INLINE_LEAD)}) -- a dispatch that inlines "
+                f"must say which framing it means, since they contradict")
+        body = (inline_body or "").strip()
+        if len(body) > NATIVE_INLINE_STEER_MAX:
+            body = (body[:NATIVE_INLINE_STEER_MAX].rstrip()
+                    + "\n[truncated here -- the full text is in the file "
+                      "named below]")
+        block = f"<MANAGER MESSAGE>\n{body}\n</MANAGER MESSAGE>\n\n" if body else ""
+        tiny_prompt = (
+            f"{block}{lead} {tiny_prompt} That file has been REWRITTEN since "
+            f"you last read it -- read it again rather than reusing an "
+            f"earlier copy.")
     argv = [exe, "--bg"]
     if resume_sid:
         argv += ["--resume", resume_sid]
@@ -14756,7 +14873,7 @@ def _registry_records_or_none():
     no write" and runs at the top of every mutating verb, so routing its
     identity read through `load_registry` would let a speed-bump shred operator
     evidence on a path that documents itself as touching nothing. This is D4's
-    rule for the view path (`:4021`) applied to the one other reader that has
+    rule for the view path (`:4033`) applied to the one other reader that has
     no business quarantining. Quarantining stays where it belongs: the
     lock-holding verbs, `cmd_sup_boot` included via `_holder_is_limited`."""
     ok, _reason, data = _read_registry_readonly()
@@ -14943,8 +15060,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     live_sids` is what shipped, and `_record_sids`' own docstring says why it
     is wrong -- *"matching against `session_id` alone fails open on it
     (ND4a)"* -- for the thirteen other sites that already key on the union
-    (`:2810, :2891, :3152, :3302, :4688, :8844, :9164, :9445, :9663, :9750,
-    :9973, :10759, :14814`). The thirteenth is multi-fleet §5 step 2's
+    (`:2822, :2903, :3164, :3314, :4700, :8895, :9215, :9496, :9714, :9801,
+    :10024, :10810, :14931`). The thirteenth is multi-fleet §5 step 2's
     membership test (slice a2), which is the same argument one plane out: a
     home whose record was eagerly restamped would stop claiming its own
     fork-steered body mid-rotation. B6 was the one
@@ -14959,8 +15076,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :7804, :8277, :12720,
-    :18019), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :7851, :8324, :12771,
+    :18136), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -15650,8 +15767,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:7804, :8277, :12720,
-    #     :18019) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:7851, :8324, :12771,
+    #     :18136) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -15684,7 +15801,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         #     file aside (`:1063`), which is a write. Routing the identity read
         #     through it made `fleet send` shred the operator's evidence from a
         #     path that promises to touch nothing; the helper exists for exactly
-        #     this and names this gate as its reason (`:14742`). A `None` here
+        #     this and names this gate as its reason (`:14859`). A `None` here
         #     still fails toward the gate -- an unreadable registry is reported
         #     by its own doctor row, and is never a reason to decide blind.
         #     MERGE NOTE (2026-07-27): main and `fix/identity-registry-judges`
@@ -16326,7 +16443,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # A worker whose own record sits inside the artifact upgrades the claim.
         #
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as `_sweep_husks`
-        # spells it at `:10723`. Not an mtime comparison: `os.rename` preserves
+        # spells it at `:10774`. Not an mtime comparison: `os.rename` preserves
         # mtime, so the artifact's mtime is the PRE-corruption write time and any
         # recreated registry is always newer -- the comparison would never fire
         # on the one bypass it exists to stop.
