@@ -13,31 +13,64 @@ Workers aren't fire-and-forget processes — they're **durable Claude Code sessi
 ## See it in action
 
 ```console
-$ fleet spawn migrate-users --dir C:\proga\billing-service --mode bypass \
+$ fleet spawn migrate-users --dir C:\Users\Techn\AppData\Local\Temp\billing-service \
+    --mode bypass --model haiku \
     --task "Port the users table migration from Knex to raw SQL, see MIGRATION.md" \
     --token-ceiling 200000
-migrate-users a1b2c3d4-... (native bg, short id a1b2c3d4)
+model: haiku
+migrate-users 555e6b27-3d6c-4a42-9ea5-dea4ca9e1646 (native bg, short id 555e6b27)
 
 $ fleet status
 NAME                STATUS     TURNS     COST  MIN-AGO  MAIL   ATTACH  FLAGS
-migrate-users       working        1     0.00        2     0        -  -
+migrate-users       working        1        -        0     0        -  -
 
 $ fleet send migrate-users "also add a down-migration, I forgot to ask"
 migrate-users: turn running -- message queued to mailbox
 
+$ fleet status
+NAME                STATUS     TURNS     COST  MIN-AGO  MAIL   ATTACH  FLAGS
+migrate-users       working        1        -        0     1        -  -
+
 $ fleet peek migrate-users
-[tool] Read MIGRATION.md
-[tool] Write migrations/0042_users.sql
-[mail] delivered: "also add a down-migration, I forgot to ask"
-[tool] Write migrations/0042_users.down.sql
-[assistant] Added the down-migration and re-ran the local suite; both pass.
+-- migrate-users (555e6b27) --
+[tool] Bash
+[tool] Write
+[text] Creating SQL migrations now.
+[tool] Write
+[tool] Write
+[tool] Edit
+[text] Verifying SQL files.
+[tool] Read
+[tool] Read
+[tool] Edit
+[text] **Changed:** Created `0042_users.sql` (CREATE TABLE) and `0042_users_down.sql` (DROP TABLE) in migrations directory.
+
+**Verified:** SQL syntax matches Knex schema (SERIAL PK, VARCHAR NOT NULL UNIQUE e...
 
 $ fleet result migrate-users
-Migrated 0042_users to raw SQL with a matching down-migration. Ran
-`npm test -- migrations` locally: 14 passed. Diff is 2 files, no schema drift.
+**Changed:** Created `0042_users.sql` (CREATE TABLE) and `0042_users_down.sql` (DROP TABLE) in migrations directory.
+
+**Verified:** SQL syntax matches Knex schema (SERIAL PK, VARCHAR NOT NULL UNIQUE email, TIMESTAMP DEFAULT for created_at). Down migration uses IF EXISTS for safety.
+
+**Blocked:** None. Awaiting manager instruction on whether to remove original 0042_users.js.
+-- tokens in=8 out=129 model=claude-haiku-4-5-20251001
 ```
 
+*Captured on 2026-08-09 against `fleet` at `64b43c2` (Windows, `claude` 2.1.226) — every line verbatim,
+including the absolute `--dir` and the truncation `peek` applies at 200 characters. One ordering note:
+`fleet result` prints the body to stdout and the `-- tokens` line to stderr, so a piped capture shows them
+inverted; they are shown here in the order a terminal prints them.*
+
+*Why this block is pasted rather than written: **an earlier version was composed by hand, and none of it was
+output the code can produce** — every `fleet peek` line used a tag or an argument the renderer never emits,
+and the `fleet status` row showed `COST 0.00`, which the native dispatch path never prints (it renders `-`).
+If you edit this block, capture a real session; do not hand-write a plausible one.*
+
 One task, one worker, one token cap, mid-turn steering — and never once attached a terminal. That's the whole loop.
+
+The steer landed while the turn was still running: `MAIL` goes `0 → 1` when it is queued and back to `0` once
+delivered, which is how you confirm it without attaching. **`fleet peek` does not show the delivery itself** —
+the mailbox arrives as a hook attachment record, and `peek` renders only assistant and user records.
 
 ## Why an orchestration layer for Claude Code
 
@@ -133,7 +166,7 @@ fleet doctor
 
 Then open a Claude Code session and say *"become the fleet manager"* — or run **`/fleet:overview`**, which is a slash command and so triggers deterministically — and spawn your first worker.
 
-Two things this quickstart cannot do for you. The walkthrough is only executed as far as `fleet doctor` — nothing from `fleet spawn` onward is covered by a rehearsal receipt. And step 3's marketplace argument, a directory path to the clone, is the form a known-working install on the maintainer's machine reports, not a form re-executed on a clean box. Both, with everything else that blocks a first use, are stated plainly in **[Launch readiness](docs/launch-readiness.md)**. The step-by-step version with real output is **[Getting started](docs/getting-started.md)**; collaborator/multi-machine setup and the `--statusline --chain` composition flag are in [`docs/SPEC.md`](docs/SPEC.md).
+One thing this quickstart cannot do for you, and one caveat on step 3. The whole walkthrough — install *and* the worker lifecycle from `fleet spawn` through `fleet clean` — has now been driven end to end from these instructions by a rehearsal, so it is covered by receipts; what that rehearsal also found is a defect on `fleet respawn` and a statusline install that predates a quoting fix, both listed under **[Launch readiness](docs/launch-readiness.md)** along with everything else that blocks a first use. And step 3's argument, a directory path to your clone, is **the only form verified for this repo** — it is not the only form the command takes (`claude plugin marketplace add --help` reads *"Add a marketplace from a URL, path, or GitHub repo"*), and what is untested is specifically whether `exPardus/fleet` resolves as a marketplace, not whether GitHub shorthand works at all. The step-by-step version with real output is **[Getting started](docs/getting-started.md)**; collaborator/multi-machine setup and the `--statusline --chain` composition flag are in [`docs/SPEC.md`](docs/SPEC.md).
 
 ## CLI
 
