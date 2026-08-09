@@ -17,8 +17,10 @@ identical on py -3.13 and py -3.10.
 """
 import ast
 import json
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -115,16 +117,141 @@ def _grace_is_shut(rec):
 
 
 # ---------------------------------------------------------------------------
+# Fixtures for the DRIVEN tests in TestWhatACanonicalAnswerMustPreserve.
+# These drive real verbs, so they need a real home shape -- the module's
+# `isolated_home` only repoints FLEET_HOME.
+# ---------------------------------------------------------------------------
+
+_CARRIER = "sup|inc-old|boot"
+_RELEASER = "sid-releaser-0000"
+# A record the releasing body already HAD is necessarily older than the release
+# it performed -- the fork-steer boundary `_releaser_live_sids` draws.
+_BEFORE_RELEASE = "2020-01-01T00:00:00Z"
+
+
+class _ReachedDispatch(Exception):
+    """Sentinel: control flow got PAST the roster gate and would have launched
+    a real session. Raised instead of dispatching, so a control can assert
+    "this proceeded" without a claude process ever existing."""
+
+
+def _must_not_dispatch(*_a, **_k):
+    raise _ReachedDispatch()
+
+
+@pytest.fixture
+def sup_home(tmp_path, monkeypatch):
+    """A home complete enough for `respawn`, `clean` and `sup-*` to run."""
+    monkeypatch.setattr(fleet, "FLEET_HOME", tmp_path)
+    for sub in ("state", "mailbox", "logs", "supervisor", "knowledge"):
+        (tmp_path / sub).mkdir(exist_ok=True)
+    (tmp_path / "state" / "worker-settings.json").write_text(
+        '{"hooks": {}}', encoding="utf-8")
+    (tmp_path / "supervisor" / "GOALS.md").write_text(
+        "# Supervisor Goals\n\nThe Target: test.\n", encoding="utf-8")
+    (tmp_path / "knowledge" / "INDEX.md").write_text(
+        "# Knowledge Index\n- entry one\n", encoding="utf-8")
+    fleet.save_registry({"workers": {}})
+    return tmp_path
+
+
+def _install_worker(home, name="w", sid=SID):
+    rec = fleet.new_worker_record(sid, str(home / "proj"), "task", "bypass",
+                                  dispatch_kind="bg")
+    data = fleet.load_registry()
+    data["workers"][name] = rec
+    fleet.save_registry(data)
+    (home / "proj").mkdir(exist_ok=True)
+    return rec
+
+
+def _install_release_carrier(home, archived=False):
+    """A record carrying a RELEASED claim's `released_by_sid`, produced by the
+    shipped verbs rather than hand-planted: hold a claim, then `sup-release`."""
+    rec = fleet.new_worker_record(_RELEASER, str(home / "proj"), "t", "bypass",
+                                  dispatch_kind="bg")
+    rec["created"] = _BEFORE_RELEASE
+    if archived:
+        rec["archived_at"] = fleet.now_iso()
+    data = fleet.load_registry()
+    data["workers"][_CARRIER] = rec
+    fleet.save_registry(data)
+
+    value = fleet.mint_nonce()
+    beat = fleet.now_iso()
+    fleet.write_incarnation(
+        {"incarnation_id": "inc-old", "session_id": _RELEASER,
+         "claimed_at": beat, "heartbeat_at": beat, "claimed_via": "fresh",
+         "nonce_hash": fleet.nonce_digest(value), "nonce_seq": 1,
+         "lineage_id": "lin-20260101T000000Z-aaaa"})
+    assert fleet.cmd_sup_release(
+        SimpleNamespace(sid=_RELEASER, nonce=value, reason=None)) == 0
+    return rec
+
+
+def _write_claim(age_seconds):
+    """A HELD, non-legacy claim owned by a body that is not the caller.
+
+    Non-legacy matters: `_claim_is_legacy` is "`nonce_hash` absent AND `state`
+    absent", and a legacy claim disarms the gate for a different reason
+    (§9, no generation to demand). Carrying a `nonce_hash` keeps the staleness
+    branch the only thing that can disarm it."""
+    beat = _iso(datetime.now(timezone.utc) - timedelta(seconds=age_seconds))
+    fleet.write_incarnation(
+        {"incarnation_id": "inc-held", "session_id": "the-holder-body",
+         "claimed_at": beat, "heartbeat_at": beat, "claimed_via": "fresh",
+         "state": "held", "nonce_hash": fleet.nonce_digest(fleet.mint_nonce()),
+         "nonce_seq": 1, "lineage_id": "lin-20260101T000000Z-bbbb"})
+
+
+# ---------------------------------------------------------------------------
 # THE CENSUS, as pins. A census is a claim about a count; a claim about a
 # count that nothing re-derives is the defect this repo is named for.
 # ---------------------------------------------------------------------------
 
 class TestTheCensus:
-    def test_roster_live_sids_has_eleven_call_sites_not_ten(self, tree):
+    def test_roster_live_sids_call_sites_are_this_exact_POPULATION(self, tree):
         """The brief said 10, counted by grep. Grep sees 14 lines: 11 calls,
-        1 def, 2 docstring mentions. The AST cannot see the last three."""
+        1 def, 2 docstring mentions. The AST cannot see the last three.
+
+        THIS PINS THE POPULATION, NOT THE COUNT, and the difference is a
+        measured mutant. The first version asserted `len(calls) == 11` and
+        failed with `f"call sites moved: {calls}"` -- naming the very thing it
+        could not detect. The w50 gate defeated it with a two-part patch:
+
+            # part 1 -- site 10 stops consulting Q1 at all
+            -    live_now = _releaser_live_sids(claim, _roster_live_sids(payload),
+            +    live_now = _releaser_live_sids(claim, _mutant_d_decoy(payload),
+            # part 2 -- a compensating call elsewhere, so the count is unchanged
+            +def _mutant_d_decoy(entries):
+            +    return _roster_live_sids(entries)
+
+        Eleven calls before, eleven after, and `_wedged_release_gate` -- the
+        one site the report calls "the trap" -- no longer reads Q1. A count
+        assertion is defeated by ANY same-arity rearrangement; a scope
+        multiset is not. Same shape as
+        `test_the_heartbeat_census_has_no_hole`, which asserts scopes."""
+        smap = _scope_map(tree)
         calls = _call_lines(tree, "_roster_live_sids")
-        assert len(calls) == 11, f"call sites moved: {calls}"
+        got = Counter(smap.get(ln, "<module>") for ln in calls)
+        expected = Counter({
+            "_cmd_respawn_native": 3,
+            "_cmd_respawn_supervisor": 1,
+            "_cmd_respawn_supervisor._any_live": 1,
+            "cmd_clean": 1,
+            "_archive_eligible": 1,
+            "_render_boot_bundle": 1,
+            "cmd_sup_boot": 1,
+            "_wedged_release_gate": 1,
+            "_doctor_check_supervisor_wedge": 1,
+        })
+        assert got == expected, (
+            f"the Q1 call-site POPULATION moved.\n"
+            f"  gained: {got - expected}\n  lost:   {expected - got}\n"
+            f"A site that disappears from this map has stopped reading Q1 even "
+            f"if the total is unchanged -- which is exactly the mutant this "
+            f"assertion exists to catch.")
+        assert sum(expected.values()) == 11
 
         # COUNT CONTROL, both limbs. A census whose good answer might be zero
         # must be shown to be able to report non-zero AND zero (wave 38).
@@ -152,10 +279,63 @@ class TestTheCensus:
                  "_releaser_is_roster_live", "recompute_worker_native",
                  "native_epoch_suspicious", "supervisor_epoch_check",
                  "_roster_entry_has_life_signal", "_investigate_no_outcome",
-                 "_supervisor_tier_snapshot", "_dispatch_grace_active"]
+                 "_supervisor_tier_snapshot", "_dispatch_grace_active",
+                 # Added by the w50 gate (F5): the REGISTRY-side liveness
+                 # predicate. Its absence from this list is how the census
+                 # asserted a closed population by omission.
+                 "_record_is_live"]
         defined = {n.name for n in ast.walk(tree)
                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
         assert not [n for n in names if n not in defined]
+
+    def test_the_reader_population_is_not_asserted_closed(self, tree):
+        """The honest pin: this file does NOT claim to have found every
+        liveness reader, and must not be read as claiming it.
+
+        What it CAN pin is that the readers it names still exist and that any
+        function whose name advertises a liveness question is either in the
+        census or deliberately excluded. A name-shaped sweep is weaker than a
+        semantic one and is labelled as such -- `_dispatch_grace_active` is a
+        liveness reader whose name contains none of these tokens, which is
+        precisely why the sweep cannot be the closure argument."""
+        censused = {
+            "_roster_live_sids", "_releaser_live_sids", "_releaser_is_roster_live",
+            "_roster_entry_has_life_signal", "_record_is_live",
+            "recompute_worker_native", "native_epoch_suspicious",
+            "supervisor_epoch_check", "_investigate_no_outcome",
+            "_supervisor_tier_snapshot", "_dispatch_grace_active",
+            # nested in `_cmd_respawn_supervisor`; it IS a Q1 reader and the
+            # call-site map above already carries it as
+            # `_cmd_respawn_supervisor._any_live`
+            "_any_live",
+        }
+        excluded = {
+            # roster PLUMBING, not a liveness verdict
+            "_fetch_agents_roster", "_roster_entry_for",
+            # claim/identity predicates that consume a liveness answer rather
+            # than producing one
+            "_releaser_body_is_tombstoned", "_claim_resume_allowed",
+            "_await_attach", "_join_roster_by_short_id",
+            # A NAME-SHAPED FALSE POSITIVE, and a useful one to keep listed:
+            # "live" here means "does this machine have a live POPULATION of
+            # fleet homes", i.e. multi-fleet territory. Nothing to do with a
+            # session or a process. Its own docstring: "Is this machine in
+            # multi-fleet territory at all?" This is the evidence that the
+            # sweep is a heuristic and cannot be the closure argument.
+            "_multi_fleet_population_is_live",
+        }
+        shaped = {n.name for n in ast.walk(tree)
+                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                  and any(tok in n.name for tok in ("_live", "live_", "alive",
+                                                    "_roster", "roster_"))}
+        unaccounted = shaped - censused - excluded
+        assert not unaccounted, (
+            f"a liveness-shaped name is in neither the census nor the "
+            f"exclusion list: {sorted(unaccounted)}. Add it to one -- the w50 "
+            f"gate found `_record_is_live` exactly here.")
+        # CONTROL: the sweep must actually be finding things, or an empty
+        # `shaped` set would satisfy it vacuously.
+        assert len(shaped) >= 6, f"sweep found only {sorted(shaped)}"
 
     def test_the_heartbeat_census_has_no_hole(self, tree):
         """MEASURED: 8 write sites, all inside a `sup-*` verb's function.
@@ -253,11 +433,17 @@ class TestDisagreementOne:
 
         `recompute_worker_native:3760` re-spells the roster-liveness predicate
         inline as key-presence ALONE -- the `state != "done"` guard that
-        `_roster_live_sids` calls load-bearing is simply absent. On the
-        2026-08-09 win32 roster this shape had ZERO instances (69 `done`
-        entries, none carrying keys), so it is unreachable there today. It is
-        reachable on posix: `_roster_live_sids`'s own docstring records
-        observing it on macOS 2026-07-19."""
+        `_roster_live_sids` calls load-bearing is simply absent.
+
+        CORRECTED after the w50 gate (F1). This docstring used to say the
+        exact shape below had "ZERO instances" on win32 and was "unreachable
+        there today", reachable only on posix. That was wrong, and it was
+        wrong because one snapshot taken by a busy session was generalised
+        into a property of the platform. Re-measured with a detached sampler:
+        `{state:"done"}` WITH keys is routine on win32 -- three concurrent
+        instances. `status:"busy"` alongside it was still not observed, so
+        THIS entry's exact triple remains synthetic; what is no longer
+        synthetic is its enabling condition."""
         entry = {"sessionId": SID, "state": "done", "status": "busy", "pid": 4321}
         monkeypatch.setattr(fleet, "has_fresh_outcome", lambda *a, **k: False)
         rec = _native_record()
@@ -280,19 +466,111 @@ class TestDisagreementOne:
             "w", rec, [idle_entry])["status"] == "dead-suspected"
 
 
+class TestTheShapeABusySessionActuallyPresents:
+    """W50 GATE F1, and then one step past it.
+
+    The gate falsified the report's "zero done-with-keys on win32" with n=1 --
+    the lane's own session, between turns. Re-measuring with a detached
+    sampler (29 samples, 20s apart, ~10 minutes, from a process outside every
+    session it observed) found **three** distinct sids in that shape
+    simultaneously, and one of them was the lane's own session **while it was
+    executing a turn**:
+
+        state="done"  status="idle"  pid=4436  alive=True   x29/29 samples
+
+    The turn was running for the whole window -- the sampler was launched from
+    inside it. So on win32, today, the roster's `state` and `status` can both
+    be wrong about a session that is actively working, while key-presence and
+    the OS are right. That is MEASURED. WHY is not: the mechanism is most
+    likely that `state` flips to `done` at turn end and is not flipped back
+    when a subsequent turn begins in the same session, but this lane could not
+    observe its own turn boundary from inside, and no session it was permitted
+    to drive would have shown the other direction. Stated as BELIEVED in
+    `docs/lanes/w50-live.md` §3.
+
+    The consequence does not depend on the mechanism, and it is the direction
+    that matters: `_roster_live_sids` excludes this entry, so `fleet respawn`
+    does NOT refuse -- the false-DEAD branch, on a session that is mid-turn.
+    """
+
+    BUSY_BUT_DONE = {"sessionId": SID, "state": "done", "status": "idle",
+                     "pid": 4436, "kind": "background",
+                     "cwd": "C:\\proga\\fleet-w50-live"}
+
+    def test_the_q1_predicate_calls_a_working_session_not_live(self):
+        """INVERT-ON-BUILD. The terminal-state rule dominates key presence --
+        correct for a lingering finished session (the 2026-07-19 macOS
+        finding), and wrong for this one, which is the same shape."""
+        assert fleet._roster_live_sids([self.BUSY_BUT_DONE]) == set()
+
+    def test_and_therefore_respawn_would_not_refuse_it(
+            self, sup_home, monkeypatch):
+        """The hazard, driven rather than argued. `respawn` refuses only when
+        the old sid is in the Q1 live set; this shape is not, so it proceeds
+        to stop a session whose OS process is alive and mid-turn.
+
+        Contrast `test_respawn_refuses_on_an_unfetchable_roster_even_with_force`:
+        respawn is scrupulously conservative about an UNKNOWN roster and has no
+        defence at all against a roster that is confidently WRONG."""
+        _install_worker(sup_home)
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            lambda **_: (True, [self.BUSY_BUT_DONE]))
+        monkeypatch.setattr(fleet, "_stop_native_session_status",
+                            lambda *a, **k: (True, "gone"))
+        monkeypatch.setattr(fleet, "_stop_native_session", lambda *a, **k: True)
+        monkeypatch.setattr(fleet, "dispatch_bg", _must_not_dispatch)
+
+        with pytest.raises(_ReachedDispatch):
+            fleet.cmd_respawn(SimpleNamespace(
+                name="w", task=None, force=False, yes=True, nonce=None,
+                max_budget_usd=None, setting_sources=None, token_ceiling=None))
+
+    def test_control_it_DOES_refuse_the_same_session_shown_as_working(
+            self, sup_home, monkeypatch):
+        """The control that makes the test above mean something: flip only
+        `state`/`status` to the mid-turn shape and the identical call refuses.
+        The difference between stopping a working session and refusing to is
+        two string fields the roster got wrong."""
+        _install_worker(sup_home)
+        working = dict(self.BUSY_BUT_DONE, state="working", status="busy")
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            lambda **_: (True, [working]))
+        monkeypatch.setattr(fleet, "dispatch_bg", _must_not_dispatch)
+
+        with pytest.raises(fleet.FleetCliError) as ei:
+            fleet.cmd_respawn(SimpleNamespace(
+                name="w", task=None, force=False, yes=True, nonce=None,
+                max_budget_usd=None, setting_sources=None, token_ceiling=None))
+        assert "turn is running" in str(ei.value)
+
+
 class TestTheWindowsParenthetical:
     """`(On Windows the two conditions agree -- done entries lose pid/status.)`
 
-    MEASURED 2026-08-09 against 137 live win32 roster entries: the sentence's
-    FORWARD direction held (69 `done`, zero carrying pid/status), so the
-    predecessor's measurement did not reproduce. But "the two conditions
-    agree" is a BICONDITIONAL, and the reverse direction is false with 60
-    counter-examples. These fixtures carry the shapes of those 60."""
+    The sentence is a BICONDITIONAL and BOTH directions are false on win32.
+    Re-measured after the w50 gate falsified this class's first version.
+
+      * forward  (`done` => no keys): **FALSE**, 3 concurrent counter-examples
+        in a 29-sample detached run, one of them a session that was executing
+        a turn at the time.
+      * reverse  (no keys => `done`): **FALSE**, 60 counter-examples in the
+        same population -- `blocked` x32, `stopped` x26, `failed` x2.
+
+    The first version of this class asserted the forward direction HELD and
+    that the clause was therefore inert here. Both fixtures below now carry
+    measured shapes for both directions."""
 
     KEYLESS_NOT_DONE = [
         {"sessionId": "s-blocked", "state": "blocked"},   # 32 live instances
         {"sessionId": "s-stopped", "state": "stopped"},   # 26 live instances
         {"sessionId": "s-failed", "state": "failed"},     # 2 live instances
+    ]
+    # MEASURED, and this is the fixture the previous version of this file did
+    # not have: `done` WITH keys, three of them live simultaneously.
+    DONE_WITH_KEYS = [
+        {"sessionId": "s-done-1", "state": "done", "status": "idle", "pid": 4436},
+        {"sessionId": "s-done-2", "state": "done", "status": "idle", "pid": 41464},
+        {"sessionId": "s-done-3", "state": "done", "status": "idle", "pid": 38740},
     ]
 
     def test_the_reverse_direction_of_the_biconditional_is_false(self):
@@ -302,24 +580,39 @@ class TestTheWindowsParenthetical:
             assert fleet._roster_live_sids([entry]) == set(), (
                 "not-done and yet not live: the two conditions do NOT agree")
 
-    def test_the_done_clause_is_inert_on_a_windows_shaped_roster(self):
-        """Why nobody noticed. On win32 the key-presence test is strictly
-        stronger, so dropping the `done` clause changes no answer at all --
-        which is precisely what makes the comment safe to believe and the
-        divergence safe to ship."""
-        roster = self.KEYLESS_NOT_DONE + [
-            {"sessionId": "s-done", "state": "done"},
+    def test_the_forward_direction_is_false_too(self):
+        """What the gate found, as a fixture. `done` entries do NOT lose
+        pid/status on win32."""
+        for entry in self.DONE_WITH_KEYS:
+            assert entry["state"] == "done"
+            assert "pid" in entry and "status" in entry
+
+    def test_the_done_clause_is_NOT_inert_and_changes_exactly_these_answers(self):
+        """REPLACES `test_the_done_clause_is_inert_on_a_windows_shaped_roster`,
+        which asserted the opposite and was measured wrong.
+
+        On a roster of the shape win32 actually presents, dropping the clause
+        changes the verdict for every `done`-with-keys entry -- and each of
+        those is the difference between `fleet respawn` refusing and
+        proceeding against a live OS process."""
+        roster = self.KEYLESS_NOT_DONE + self.DONE_WITH_KEYS + [
+            {"sessionId": "s-done-reaped", "state": "done"},
             {"sessionId": "s-live", "state": "working", "status": "busy", "pid": 7},
         ]
         with_clause = fleet._roster_live_sids(roster)
         without_clause = {e["sessionId"] for e in roster
                           if "status" in e or "pid" in e}
-        assert with_clause == without_clause == {"s-live"}
+        assert with_clause == {"s-live"}
+        assert without_clause - with_clause == {"s-done-1", "s-done-2", "s-done-3"}
+        assert with_clause != without_clause, "the clause is NOT inert"
 
 
 # ---------------------------------------------------------------------------
-# THE FOURTH READER -- not named in the brief, and it answers the OPPOSITE way
-# on every one of the 60 entries above.
+# THE FOURTH READER -- not named in the brief. It answers the OPPOSITE way on
+# 131 of the 139 entries measured, not the 60 above: the `done` bucket (71)
+# disagrees too, and the report's first draft counted only the reverse-
+# counter-example population. The loop below has always iterated `done`, so
+# the TEST asserted the wider property while the PROSE narrowed it (gate F9).
 # ---------------------------------------------------------------------------
 
 class TestTheReaderTheBriefDidNotName:
@@ -340,6 +633,57 @@ class TestTheReaderTheBriefDidNotName:
         entry = {"sessionId": "x", "state": "working", "status": "busy", "pid": 1}
         assert fleet._roster_entry_has_life_signal(entry) is True
         assert fleet._roster_live_sids([entry]) == {"x"}
+
+
+class TestTheThirteenthReader:
+    """`_record_is_live` (`bin/fleet.py:2993`), found by the w50 gate (F5).
+
+    It answers Q1 from the REGISTRY rather than the roster, and the census
+    never opened it. It matters to the ruling specifically: it reaches
+    `_wedged_release_gate` -- the site the report calls "the trap" -- through
+    `_releaser_live_sids`'s tombstone arm, and §6.2's proposed predicate takes
+    roster arguments only, with no registry argument and therefore no place for
+    this reader. Build §6 as first specified and a fourth spelling of Q1
+    survives the consolidation, inside the one gate the report warns about."""
+
+    def test_it_calls_live_the_very_record_recompute_just_called_dead(
+            self, monkeypatch):
+        """INVERT-ON-BUILD. `recompute_worker_native` demotes a record to
+        `dead-suspected` precisely because it could find no life for it;
+        `_record_is_live` reads that same record and returns True."""
+        monkeypatch.setattr(fleet, "has_fresh_outcome", lambda *a, **k: False)
+        monkeypatch.setattr(fleet, "_limit_scan_hook", None)
+        rec = _native_record()
+        assert _grace_is_shut(rec)
+
+        demoted = fleet.recompute_worker_native("w", rec, [])   # roster-GONE
+        assert demoted["status"] == "dead-suspected"
+        assert fleet._record_is_live(demoted) is True, (
+            "the registry-side reader must be shown disagreeing with the "
+            "roster-side one on the SAME record")
+
+    def test_only_an_explicit_dead_or_an_archive_stops_it(self):
+        """Its whole predicate is `not archived and status != "dead"`, so every
+        other terminal-ish status reads as live -- including `limited`,
+        `stopped`, `failed` and `dead-suspected`."""
+        for status in ("working", "idle", "dead-suspected", "stopped",
+                       "failed", "limited", "blocked"):
+            assert fleet._record_is_live({"status": status}) is True, status
+        # CONTROL, both limbs -- a predicate that always returned True would
+        # satisfy the loop above.
+        assert fleet._record_is_live({"status": "dead"}) is False
+        assert fleet._record_is_live(
+            {"status": "idle", "archived_at": "2026-01-01T00:00:00Z"}) is False
+        assert fleet._record_is_live("not-a-dict") is False
+
+    def test_the_husk_that_reached_234h_is_live_to_this_reader_throughout(self):
+        """Why it lands on §5.3's argument. The five `dead-suspected` husks
+        that accumulated to 234h -- the report's own example of a signal
+        nobody is obliged to act on -- are `live` to this reader for every one
+        of those hours, because `dead-suspected` is not `dead`."""
+        husk = {"status": "dead-suspected", "session_id": SID,
+                "dispatch_kind": "bg"}
+        assert fleet._record_is_live(husk) is True
 
 
 # ---------------------------------------------------------------------------
@@ -517,21 +861,117 @@ class TestDisagreementThree:
 # ---------------------------------------------------------------------------
 
 class TestWhatACanonicalAnswerMustPreserve:
-    def test_respawn_must_stay_conservative_toward_alive(self):
-        """`_cmd_respawn_native` refuses on an UNFETCHABLE roster
-        (bin/fleet.py:8225) -- indeterminate is treated as alive, because a
-        false-dead here is "never two live sessions under one name", which is
-        the named unrecoverable invariant. Any canonical answer that lets
-        respawn proceed on `unknown` is a regression."""
-        src = FLEET_PY.read_text(encoding="utf-8")
-        assert "refusing respawn " in src and "until the old session's liveness" in src
+    """DRIVEN, not grepped.
 
-    def test_clean_must_stay_conservative_toward_alive_too(self):
-        """`cmd_clean` passes `live_sids=None` on an unreadable roster and the
-        predicate SPARES on None (bin/fleet.py:9766-9767)."""
-        assert fleet._roster_live_sids([]) == set()
-        src = FLEET_PY.read_text(encoding="utf-8")
-        assert 'None means "the roster is unknown", which SPARES' in src
+    The first version of this class asserted that certain SUBSTRINGS were
+    present in `bin/fleet.py` -- the refusal message, and a comment containing
+    the word SPARES. The w50 gate planted three mutants that break the
+    properties these tests name while leaving those substrings in place, and
+    all three survived the whole 20-test file:
+
+      * `if not roster_ok:` -> `if not roster_ok and not args.force:`  (respawn
+        proceeds on an unfetchable roster -- the "two live sessions under one
+        name" branch), refusal text untouched;
+      * `... if roster_ok else None` -> `...`  (`clean` DOOMS instead of
+        sparing on an unreadable roster -- an irreversible deletion), the
+        SPARES comment untouched;
+      * the `_supervisor_gate` staleness disarm deleted, which the old test
+        could not see because it re-implemented the comparison in the test
+        instead of calling the gate.
+
+    That is wave 35's shape in the file written to answer wave 35. Every test
+    below now DRIVES the verb and asserts the OUTCOME, and each carries a
+    control that proves the assertion can go the other way -- a refusal test
+    that cannot observe a non-refusal is pinning nothing.
+    """
+
+    # --- respawn -------------------------------------------------------------
+
+    def test_respawn_refuses_on_an_unfetchable_roster_even_with_force(
+            self, sup_home, monkeypatch, capsys):
+        """MUTANT M-B2. `--force` must NOT buy a bypass of the roster refusal:
+        indeterminate is treated as alive, because a false-dead here is the
+        file's own named unrecoverable invariant (`:8259`)."""
+        _install_worker(sup_home)
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            lambda **_: (False, "roster unavailable"))
+        monkeypatch.setattr(fleet, "dispatch_bg", _must_not_dispatch)
+
+        for argv in (["respawn", "w", "--yes"], ["respawn", "w", "--yes", "--force"]):
+            capsys.readouterr()
+            rc = fleet.main(argv)
+            err = capsys.readouterr().err
+            assert rc != 0, (argv, err)
+            assert "refusing respawn" in err, (argv, err)
+
+    def test_control_respawn_gets_past_the_roster_gate_when_the_sid_is_gone(
+            self, sup_home, monkeypatch):
+        """The control the refusal test needs. Without it, the test above
+        passes for any reason respawn happens to raise -- and `main` collapses
+        every `FleetCliError` to rc 1, so "nonzero" alone proves little."""
+        _install_worker(sup_home)
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
+        monkeypatch.setattr(fleet, "_stop_native_session_status",
+                            lambda *a, **k: (True, "gone"))
+        monkeypatch.setattr(fleet, "_stop_native_session", lambda *a, **k: True)
+        monkeypatch.setattr(fleet, "dispatch_bg", _must_not_dispatch)
+
+        with pytest.raises(_ReachedDispatch):
+            fleet.cmd_respawn(SimpleNamespace(
+                name="w", task=None, force=False, yes=True, nonce=None,
+                max_budget_usd=None, setting_sources=None, token_ceiling=None))
+
+    # --- clean ---------------------------------------------------------------
+
+    def test_clean_spares_an_archived_carrier_when_the_roster_is_unreadable(
+            self, sup_home, monkeypatch):
+        """MUTANT M-C. An ARCHIVED record is "always doomed" in `cmd_clean` and
+        never enters the G9 epoch freeze, so the unreadable-roster abstain is
+        the ONLY thing standing between it and deletion. Sparing is reversible;
+        deleting a live worker's journal is not."""
+        _install_release_carrier(sup_home, archived=True)
+        monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                            lambda **_: (False, "roster unavailable"))
+        assert fleet.main(["clean", "--yes"]) == 0
+        assert _CARRIER in fleet.load_registry()["workers"], (
+            "clean deleted the release carrier on an UNREADABLE roster -- "
+            "the abstain is gone")
+
+    def test_control_clean_does_sweep_that_carrier_once_the_roster_says_gone(
+            self, sup_home, monkeypatch):
+        """The other limb. A spare that never releases is not an abstain, it is
+        a permanent leak -- and a test that only ever asserts "still there"
+        would pass against a `clean` that deletes nothing at all."""
+        _install_release_carrier(sup_home, archived=True)
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
+        assert fleet.main(["clean", "--yes"]) == 0
+        assert _CARRIER not in fleet.load_registry()["workers"], (
+            "clean spared the carrier even though the roster says the body is "
+            "GONE -- the spare never releases")
+
+    # --- the supervisor gate -------------------------------------------------
+
+    def test_the_gate_arms_on_a_fresh_beat_and_disarms_on_a_stale_one(
+            self, sup_home, monkeypatch):
+        """MUTANT M-A. The old version of this test built
+        `stale = now - (STALE + 60)` and asserted `fresh <= STALE < stale` --
+        an identity about `timedelta` that is true for any positive constant
+        and stays green with the entire gate deleted. This one CALLS the gate.
+
+        Both limbs are the point: the ARM proves the gate exists, the DISARM
+        proves the staleness branch is what turns it off. Deleting the disarm
+        makes the second call raise."""
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "a-third-body")
+
+        # FRESH: a held, non-legacy claim owned by someone else, no nonce
+        # presented -> the gate must REFUSE.
+        _write_claim(age_seconds=0)
+        with pytest.raises(fleet.SupervisorClaimGateError):
+            fleet._supervisor_gate("clean")
+
+        # STALE by one minute past the threshold -> DISARMED, no refusal.
+        _write_claim(age_seconds=fleet.SUPERVISOR_CLAIM_STALE_SECONDS + 60)
+        fleet._supervisor_gate("clean")   # must not raise
 
     def test_status_must_stay_liberal_and_advisory(self):
         """`dead-suspected` is surfaced, never auto-respawned -- so `status`
