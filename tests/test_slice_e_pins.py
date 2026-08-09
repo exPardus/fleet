@@ -330,9 +330,30 @@ class TestTheQuiescentHomeCanary:
                 f"fleet's own activity rather than this one's interference. "
                 f"§7 scopes the canary to quiescent homes for this reason.")
         monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+
+        # THE VERB MUST ACTUALLY RUN, ASSERTED, NOT ASSUMED. "Home B is
+        # unchanged" is trivially true of a verb that `main()` refused at the
+        # door -- and a two-home machine is an ARMED machine, which is exactly
+        # where refusals live. Without this the canary would go quietly vacuous
+        # the first time the guard tightened, which is the failure mode this
+        # whole file exists to document. Borrowed in shape from
+        # `test_verb_effect_guard.py::_reached`, which pins the same property
+        # for the destructive tier's *"env-resolved `spawn` proceeds"*.
+        reached = []
+        name = "cmd_" + argv[0].replace("-", "_")
+        original = getattr(fleet, name)
+        monkeypatch.setattr(fleet, name,
+                            lambda args: reached.append(name) or original(args))
+
         before = _digest(b)
-        fleet.main(["--fleet-home", str(a)] + argv)
+        rc = fleet.main(["--fleet-home", str(a)] + argv)
         capsys.readouterr()
+
+        assert reached == [name], (
+            f"`fleet {' '.join(argv)}` never reached `{name}` -- main() "
+            f"refused or short-circuited, so the byte comparison below would "
+            f"pass without the verb ever having had a chance to interfere")
+        assert rc == 0, f"the driven verb exited {rc}, so it did not complete"
         assert _digest(b) == before, (
             f"`fleet {' '.join(argv)}` driven against home A changed bystander "
             f"home B. M1's scope is *'Zero cross-home writes'*.")
@@ -360,6 +381,31 @@ class TestTheQuiescentHomeCanary:
         assert _digest(b) != before, (
             "a DELETION inside B was invisible -- this is what `files=` is in "
             "the digest for")
+
+    def test_the_reached_assertion_can_see_a_verb_that_never_ran(
+            self, two_homes, monkeypatch, capsys):
+        """THE SEED for the `reached` assertion above.
+
+        Two listed homes is an ARMED machine, and on an armed machine a
+        destructive verb resolved through the ENV rather than the flag is
+        REFUSED by §5's tier. Drive exactly that and prove the call log stays
+        empty -- so the assertion above is measuring something, and the canary
+        cannot go quietly vacuous behind a refusal."""
+        a, _b = two_homes
+        monkeypatch.setenv("FLEET_HOME", str(a))
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        reached = []
+        original = fleet.cmd_clean
+        monkeypatch.setattr(fleet, "cmd_clean",
+                            lambda args: reached.append("cmd_clean") or original(args))
+
+        rc = fleet.main(["clean", "--yes"])
+        capsys.readouterr()
+
+        assert rc == 1 and reached == [], (
+            "the destructive tier let an env-resolved `clean` through on an "
+            "armed machine, so this seed no longer exercises a refusal -- the "
+            "`reached` assertion above is unproven until it does")
 
     def test_a_live_bystander_takes_the_skip_arm(self, tmp_path, monkeypatch):
         """The skip arm, exercised rather than merely written. A home holding a

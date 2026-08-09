@@ -374,11 +374,31 @@ disk (`PLANT-ACTIVE.json` absent, checked immediately before the first run):
 |---|---|---|---|
 | `py -3.13` baseline at `7b2ff75` | 4250 | 4235 passed, 14 skipped, 1 xfailed | 436.45s |
 | `py -3.10` baseline at `7b2ff75` | 4250 | 4235 passed, 14 skipped, 1 xfailed | 401.28s |
-| **`py -3.13` this branch** | **4279** | **4264 passed, 14 skipped, 1 xfailed** | 443.15s |
-| **`py -3.10` this branch** | **4279** | **4264 passed, 14 skipped, 1 xfailed** | 394.37s |
+| `py -3.13` this branch, at `47700d8` | 4279 | 4264 passed, 14 skipped, 1 xfailed | 443.15s |
+| `py -3.10` this branch, at `47700d8` | 4279 | 4264 passed, 14 skipped, 1 xfailed | 394.37s |
+| **`py -3.13` FINAL** | **4280** | **see §7.3** | |
+| **`py -3.10` FINAL** | **4280** | **see §7.3** | |
 
-**Predicted 4279 collected and 4264 / 14 / 1 on both floors in §6.3, before running either.
-Hit exactly.**
+**Predicted 4279 collected and 4264 / 14 / 1 in §6.3, before running either. Hit exactly on both
+floors.**
+
+### 7.3 A SECOND prediction, because I then changed the tree
+
+Self-auditing after those floors (§11.2 is the list of what I told a reader to attack, and I ran
+the first item against myself) I found the canary's own assertion was **incomplete**: *"bystander
+home B is unchanged"* is trivially true of a verb `main()` refused at the door, and two listed
+homes is an **armed** machine, which is exactly where refusals live. Driven, all four verbs do
+reach dispatch at rc 0 — but **the pin did not say so**, so the first tightening of the guard
+would have made the canary silently vacuous. That is the defect class this whole report is about,
+found in my own new file, so it is fixed rather than footnoted.
+
+The canary now asserts the verb reached its `cmd_*` and exited 0, and a new seed
+(`test_the_reached_assertion_can_see_a_verb_that_never_ran`) drives an env-resolved `clean` on
+the armed machine — which §5's destructive tier **refuses** — and proves the call log stays
+empty. **+1 test.**
+
+Collected, both floors: **4280**. **PREDICTION: `4265 passed, 14 skipped, 1 xfailed`**
+(4265 + 14 + 1 = 4280). Committed here with no results; measured in §7.4.
 
 ### 7.1 The redirect, measured before and after with one instrument
 
@@ -427,7 +447,8 @@ code — so nothing here needs sequencing against dtype's statusline work.
 
 **One thing for the manager that is not my collision to fix:** `git merge-base w51/dtype
 w51/slicee` is **`4d78f6c`**, not `7b2ff75`. `w51/dtype` branched **before** the wave-50 landings
-(`4d78f6c..7b2ff75`, six commits), so its diff against my base carries those landings as apparent
+(`4d78f6c..7b2ff75`, **12** commits -- counted with `git rev-list --count`, not eyeballed
+from a `--oneline` page, which is how this was wrong the first time), so its diff against my base carries those landings as apparent
 changes. Its landing needs a real merge; mine is a fast-forward from `7b2ff75`. Land order does
 not matter between us, but do not read dtype's file list as its change set.
 
