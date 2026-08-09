@@ -137,6 +137,17 @@ print(f"{h.hexdigest()}  files={n}  root={ROOT}")
 cache directories churn by design; everything else — **including untracked files, which
 `git write-tree` cannot see at all** — is in.
 
+**It is CHECKOUT-RELATIVE. Compare it only against itself, in one working tree.** It hashes bytes on
+disk, and checkout applies line-ending normalisation (`core.autocrlf`, `.gitattributes`), so **two
+clean worktrees of the same commit can produce different digests at an identical `files=` count.**
+Measured by gate `w50-gd2` on 2026-08-09 against two checkouts of `5a47819`, both `files=242`. That
+is not a defect in the instrument — a byte digest is supposed to see bytes — but it means the digest
+answers *"did this run change anything here?"* and never *"is this tree the same as that tree?"* For
+the second question use `git rev-parse HEAD^{tree}` on committed trees, or compare `git status`
+plus the commit sha. **This caveat shipped one commit late: the amendment above landed without it,
+which is the same class of defect the amendment itself documents — an instrument published without
+the census of what it does not cover.**
+
 This does **not** replace `tests/conftest.py`'s session-scoped
 `_the_real_install_plane_is_byte_identical_afterwards`, which hashes the git-tracked code plane
 *inside* the run and is strictly better for that plane, because it fails the suite rather than a
