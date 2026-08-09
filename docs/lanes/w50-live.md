@@ -73,7 +73,7 @@ Revision 2's headline — *"every caller asking 'is a body running' gets a false
 that polarity. For the caller question those four instances actually pose (*is a turn running?*)
 **not-live is the right answer.** And *"two live sessions under one name from ordinary
 re-dispatch"* was also wrong twice over: it is a **documented property of the Steering contract**
-(`:8509-8511`, `:9420-9424`), with retired-sid stop sweeps already built at two sites as
+(`:8509-8511`, `:9421-9426`), with retired-sid stop sweeps already built at two sites as
 compensation — not a discovery.
 
 ### 0.3 [REV3] What survives, and it is one sentence
@@ -89,10 +89,12 @@ nothing.** MEASURED, driven, mutant goes RED:
   call sites, `:8629` (`_cmd_kill_native`) and `:9430` (`_cmd_respawn_supervisor`).
 
 So the compensations that make this shape harmless on the kill and supervisor-respawn paths **do
-not exist on the worker path**, which is the one an operator uses most. `write_tombstone_outcome`
-exists precisely because *"`claude stop` fires no Stop hook"* (`:8240-8243`), and on this branch it
-never runs. Pinned by `test_worker_respawn_attempts_NO_STOP_AND_NO_TOMBSTONE` with a control
-proving the recorder is wired, and by mutant **M-GATE3**.
+not exist on the worker path** (BELIEVED that this is the most-used of the three; I did not count
+invocations). `write_tombstone_outcome` exists precisely because *"`claude stop` fires no Stop
+hook"* (`:8240-8243`) — it is fleet's only record that a session was deliberately ended — and on
+this code path it never executes. Pinned by
+`test_worker_respawn_attempts_NO_STOP_AND_NO_TOMBSTONE` with a control proving the recorder is
+wired, and by mutant **M-GATE3**.
 
 **Scope, stated because revision 2 did not:** the B6 union gate
 (`_cmd_respawn_supervisor._any_live`) is *independently* blind to the same shape — but it is
@@ -586,7 +588,7 @@ sweeps — **covers the other two paths and not this one.**
 durable part, because it is state fleet keeps rather than state the vendor reclaims.
 
 **[REV3] And credit where the gate placed it (M3):** the *shape* — a retired fork still resident —
-is documented in `bin/fleet.py` at `:8509-8511` and `:9420-9424` as a property of the Steering
+is documented in `bin/fleet.py` at `:8509-8511` and `:9421-9426` as a property of the Steering
 contract, with sweeps built. I presented it in revision 2 as newly discovered and unguarded. What
 is mine is narrower: **the worker respawn path, which has neither the sweep nor the tombstone.**
 
@@ -613,11 +615,13 @@ green run is the receipt that the disagreement exists — not that it is fixed.
 
 **[REV2] `INVERT-ON-BUILD`, reconciled (gate F7).** Revision 1 said *five* in §4, *seven* in §6.1
 and *five* in §6.4, and told the reader to check with `grep -c`, which returns a fourth number
-because the module docstring mentions the marker too. **The count of marked TESTS is 8**, and the
+because the module docstring mentions the marker too. **[REV3] The count of marked TESTS is 8**, and the
 check that returns it is:
 
 ```
-grep -c "INVERT-ON-BUILD" tests/test_liveness_readers.py    # 9 = 8 markers + 1 docstring
+# 8 markers. The raw grep -c is 10: + the module docstring, + one test that says
+# it is deliberately NOT marked. So count markers, do not count lines:
+grep -c '"""INVERT-ON-BUILD' tests/test_liveness_readers.py    # 8
 ```
 
 No other section states a number. Where it would have mattered — §6.4 M7 — the text now says
@@ -651,6 +655,32 @@ so the ordering is in `git log`. §9 explains why I still label it BELIEVED rath
 
 **If any of these misses, I stop and report it rather than adjusting the prediction.**
 
+#### 4.0b — RESULT for revision 2, and prediction (1) MISSED. Reporting rather than adjusting.
+
+| # | predicted | measured | verdict |
+|---|---|---|---|
+| 1 | 31 passed, both floors | **32 passed** on `py -3.13` **and** `py -3.10` — zero floor delta | **MISSED by one test** (cause below) |
+| 2 | 4254 / 14 skipped / 1 xfailed | **4254/14/1** at the 31-test state (3.13), then **4255/14/1** at the 32-test state on **both** floors | **HIT**, at both states |
+| 3 | green file + red suite (the fixture leak I was watching for) | did not occur | **HELD** |
+
+```
+py -3.13 -m pytest -q   ->  4255 passed, 14 skipped, 1 xfailed
+py -3.10 -m pytest -q   ->  4255 passed, 14 skipped, 1 xfailed in 477.35s
+```
+
+**Why (1) missed, stated plainly: I added a test after committing the prediction.** Between the
+prediction commit and the run I found the REV2b error (§3.1) and added
+`test_the_union_gate_cannot_see_a_live_retired_body` to pin the corrected finding. So the miss is
+a *scope change I made*, not a surprise in the run — 31 predicted tests all passed, and one more
+exists.
+
+**That is exactly the excuse the method exists to refuse**, so I am recording it as a miss rather
+than editing §4.0 to say 32. The pre-registration is only worth something if "I changed my mind
+about what to run" counts against it. **A successor should read this as: the prediction mechanism
+worked and caught a real change, and the discipline it enforces is that the *number* is not the
+point — the *unexplained* delta is. This one is explained, in git: `f9fa57e` predicts 31, the
+test that makes it 32 lands after it.**
+
 #### 4.0c — [REV3] FLOOR PREDICTION FOR REVISION 3 — committed BEFORE the run
 
 Same discipline, one methodological fix the manager required: the "these are the bytes I ran"
@@ -683,31 +713,42 @@ COMBINED: 273ad7a6d8d3353ce90598cf15ef0465d42b685a534ddf20c4611e9f252dd302
 
 **If any of these misses, I stop and report it rather than adjusting the prediction.**
 
-#### 4.0b — RESULT for revision 2, and prediction (1) MISSED. Reporting rather than adjusting.
+#### 4.0d — [REV3] RESULT: all four HIT
 
 | # | predicted | measured | verdict |
 |---|---|---|---|
-| 1 | 31 passed, both floors | **32 passed** on `py -3.13` **and** `py -3.10` — zero floor delta | **MISSED by one test** (cause below) |
-| 2 | 4254 / 14 skipped / 1 xfailed | **4254/14/1** at the 31-test state (3.13), then **4255/14/1** at the 32-test state on **both** floors | **HIT**, at both states |
-| 3 | green file + red suite (the fixture leak I was watching for) | did not occur | **HELD** |
+| 1 | 34 passed, both floors, zero delta | **34 / 34** | **HIT** |
+| 2 | 4257 / 14 skipped / 1 xfailed, both | **4257 / 14 / 1** on both | **HIT** |
+| 3 | all seven mutants KILLED, both floors | 7/7 on `3.13` **and** `3.10` | **HIT** |
+| 4 | the new `tools/` file breaks no lint | full suite green, `test_steering` included | **HIT** |
 
 ```
-py -3.13 -m pytest -q   ->  4255 passed, 14 skipped, 1 xfailed
-py -3.10 -m pytest -q   ->  4255 passed, 14 skipped, 1 xfailed in 477.35s
+py -3.13 -m pytest -q   ->  4257 passed, 14 skipped, 1 xfailed in 476.26s
+py -3.10 -m pytest -q   ->  4257 passed, 14 skipped, 1 xfailed in 425.92s
 ```
 
-**Why (1) missed, stated plainly: I added a test after committing the prediction.** Between the
-prediction commit and the run I found the REV2b error (§3.1) and added
-`test_the_union_gate_cannot_see_a_live_retired_body` to pin the corrected finding. So the miss is
-a *scope change I made*, not a surprise in the run — 31 predicted tests all passed, and one more
-exists.
+**And the ledger now names WHICH test each mutant kills**, which is the difference between a
+`KILLED` label and evidence that the *targeted* pin fired:
 
-**That is exactly the excuse the method exists to refuse**, so I am recording it as a miss rather
-than editing §4.0 to say 32. The pre-registration is only worth something if "I changed my mind
-about what to run" counts against it. **A successor should read this as: the prediction mechanism
-worked and caught a real change, and the discipline it enforces is that the *number* is not the
-point — the *unexplained* delta is. This one is explained, in git: `f9fa57e` predicts 31, the
-test that makes it 32 lands after it.**
+```
+M-A       -> test_the_gate_arms_on_a_fresh_beat_and_disarms_on_a_stale_one
+M-B2      -> test_respawn_refuses_on_an_unfetchable_roster_even_with_force
+M-C       -> test_clean_spares_an_archived_carrier_when_the_roster_is_unreadable
+M-D       -> test_roster_live_sids_call_sites_are_this_exact_POPULATION
+M-E       -> 5 tests, incl. test_the_done_clause_is_NOT_inert_and_changes_exactly_these_answers
+M-GATE2   -> test_the_B6_union_gate_EXECUTES_and_does_not_see_a_live_retired_body   (+ census)
+M-GATE3   -> test_worker_respawn_attempts_NO_STOP_AND_NO_TOMBSTONE                 (+ census)
+```
+
+**M-GATE2 and M-GATE3 each kill exactly the pin written for them** — which is the proof that closes
+gate2 B2, because it shows the pin *executes* the code the mutant changes. The census test fires
+alongside both because each mutant removes a `_roster_live_sids(` call, which is that pin doing its
+job (§4.4 M-D), not an incidental hit.
+
+*This per-test reporting exists because the first version of it printed `RED: FAILED` seven times —
+`l.split(" ")[0]` on a pytest `FAILED …` line yields the literal word. Caught by reading the output
+rather than the exit code. **A ledger that cannot tell a targeted kill from an incidental one is the
+shape gate2 B2 exploited**, so it is fixed rather than left as cosmetic.*
 
 ### 4.1 Disagreement 1 — REPRODUCED ✅
 
@@ -1318,6 +1359,11 @@ its caller at `:10501`. Giving site 7 the tri-state is a signature change, not a
 | M7 | every test marked `INVERT-ON-BUILD` fails if the readers are *not* unified | revert one call site |
 | **M8** | **[REV2] no test in the file passes by asserting SOURCE TEXT** | for each test, plant a mutant that breaks the named property while leaving every string in `bin/fleet.py` intact. This is gate F3 turned into a standing obligation: three of the original twenty failed it, and the driver in §6.6 is the harness. |
 | **M9** | **[REV2] the Q1 call-site census pins the POPULATION** | relocate one Q1 read out of `_wedged_release_gate` and add a compensating call elsewhere so the total is unchanged (gate F4's two-part M-D). A count assertion cannot see this; a scope multiset can. |
+| **M10** | **[REV3] every pin EXECUTES the function it names** | the M8 obligation, sharpened by gate2 B2 because M8 as written did not catch it: a pin can avoid asserting source text and *still* be a re-implementation. For each `INVERT-ON-BUILD` test, plant the fix its claim demands and require RED. `M-GATE2`/`M-GATE3` in `tools/mutate_liveness.py` are the two live instances; **`--only M-GATE2` returning SURVIVED means the headline pin has decayed and the build must stop.** |
+
+**[REV3] The seven mutants in the ledger already implement M5, M8, M9 and M10.** They are
+runnable now, not after the build: `py -3.13 tools/mutate_liveness.py`. M1–M4, M6 and M7 describe
+mutants that cannot exist until §6.2 lands, and the successor adds them to the same file.
 
 **Also carry forward, unchanged:** `test_a_released_claim_has_no_beat_and_that_is_not_staleness`.
 A released claim's `heartbeat_age_seconds is None` means *correct stand-down*, never *stale*; any
@@ -1402,7 +1448,7 @@ portability directive binds Win/macOS/Linux) into a codebase that has deliberate
 
 1. **Change the two callers, not Q1.** `_cmd_respawn_native` attempts the stop unconditionally
    (`claude stop` on an already-gone sid is already treated as success — `_stop_native_session_status`
-   returns ok for `"gone"`, `:8656`), and always writes the tombstone. **Cheapest, no new
+   returns ok for `"gone"` — `:12656`), and always writes the tombstone. **Cheapest, no new
    dependency, and it is where §3.8 locates the defect.** My own leaning, stated as a leaning.
 2. **Add a second Q1 answer backed by an OS probe.** Most correct, most expensive, and it makes
    every Q1 caller pay a per-sid syscall — plus the portability surface above.
