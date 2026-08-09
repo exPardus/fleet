@@ -6701,3 +6701,280 @@ Left as a disclosed finding, not a regression: `unlink()` on a delete-pending na
 4. **`instance-freshness`** is still a measured false alarm; the remedy is filed and unbuilt — compare the RENDERED template to the instance, not mtimes.
 
 Budget a **self-citation pass on every `bin/fleet.py` edit**: it cost 32 numbers on one lane and 21 on another this wave. Six worktrees remain on disk; every lane's report is either committed under `docs/lanes/` or landed, so none of them holds unique evidence — but do not remove a live lane's worktree.
+
+## 2026-08-08T23:20:08Z RELEASED inc=inc-20260808T173852Z-5dc6 sid=cabbec9f-d382-4535-927a-8bb500e89675
+
+released cleanly: wave 47 complete: slice (a) landed end to end, seven landings with seven exact floor predictions, docket discharged, three gates filed with recommendations; releasing at the 350k band trigger
+
+## 2026-08-08T23:22:42Z BOOT inc=inc-20260808T232242Z-ae09 sid=6963e574-e250-48d5-a181-185e92b4ec89
+
+fresh claim: predecessor inc-20260808T173852Z-5dc6 released cleanly -- fresh claim, no seizure
+
+## 2026-08-08T23:26:17Z CHECKPOINT inc=inc-20260808T232242Z-ae09 sid=6963e574-e250-48d5-a181-185e92b4ec89
+
+WAVE 48 OPEN — GEN-0 BOOT, AND THE (c)/(d) DISJOINTNESS QUESTION ANSWERED BEFORE DISPATCH RATHER THAN AFTER.
+
+## BOOT
+
+`sup-boot` fresh-claim path, no handoff flags, output redirected to a file and the VERDICT/INCARNATION/NONCE grepped from it (class-4 nonce doctrine). VERDICT `claim`, exit 0 — predecessor `inc-20260808T173852Z-5dc6` released cleanly, no seizure, no page. Bundle read in full and deleted; the generation is in working context only and in no file.
+
+Env witness: `FLEET_WORKER=sup|inc-20260808T173831Z-c6d4|boot` — **supervisor-shaped, and it is a STALE launch id belonging to a body two incarnations back**, not mine. That is the daemon's frozen-donor-env substitution behaving exactly as the ratified two-media model says it will. Benign per supervisor.md step 5; recorded, not acted on. My identity is the registry.
+
+`autoclean` clean: archived 0, skipped 137, husks 0, tombstones 0, errors 0. `sup-context` 92k — BELOW-BAND against 350–400k. main == origin == `fa236cb`, worktree carrying only my own boot journal line.
+
+## THE FIRST MEASUREMENT, AND IT CHANGED THE DISPATCH SHAPE
+
+The brief asked for (c) and (d) in parallel **where the merge-base diff proves disjointness**, and named its own likeliest error as assuming they are disjoint. They are not, and the proof did not need a branch to exist:
+
+- **Slice (c)** must edit `bin/fleet.py`. Sequencing §3 names three deliverables — hook argv, witness, `_render_successor_task` argv — and `_render_successor_task` is at `bin/fleet.py:17345`. The hook argv half additionally reaches `render_worker_settings_template` (the template's four hook commands are `{{PYTHON}} {{FLEET_INSTALL}}/bin/hooks/*.py` with no home argument at all) and the two doctor hook-smoke checks slice 0 enumerated.
+- **Slice (d)** cannot be assumed clear of it: `bin/fleet_statusline.py:39` is a bare `import fleet`, and its own header states the contract *"imports fleet.status_snapshot() rather than shelling out, so registry schema knowledge lives in exactly one module"*. A statusline that must resolve a home per §5 reaches the resolver, and the resolver is in `bin/fleet.py`. The capture half (`_capture_statusline_delegate`, `bin/fleet.py:5947`) is in that file too.
+
+**So I am serializing (c) then (d), and saying so, which is what the brief instructed for exactly this outcome.** The merge-base form of the disjointness check is the right instrument and I will still run it at landing; what it cannot do is prove disjointness for two branches that do not exist yet, and predicting collision from the symbol map is cheaper than discovering it from a conflict count.
+
+The parallelism I am NOT giving up: two lanes go out alongside (c) that are disjoint by construction rather than by hope — the launch-readiness rehearsal (fenced to `README.md`, `docs/getting-started.md` and its own `docs/lanes/` report, with code defects REPORTED not fixed) and the 2.1.226 pin tier (fenced to `tests/integration/test_native_pin.py` and a report; the stamp stays a deliberate supervisor act on the real home, never a lane's).
+
+## WHAT I ALSO CHECKED BEFORE BUILDING ANYTHING
+
+The `--yes` gate does NOT block (c). Re-read rather than assumed: gate 2's own text records that the misleading remedy *"is being made honest about the tree as it stands under the a3 discharge lane this wave"* and that what waits on the operator is the ratified §5 sentence, which no lane may edit. Slice (c)'s witness obligation is therefore buildable against the shipped refusal path; what it may not do is edit §5's text.
+
+Mission item 3, first pass by reading rather than by trust: `VERB_EFFECT_DESTRUCTIVE` carries `"homes --add"` and `"homes --retire"`, `VERB_EFFECT_RESIDUAL` carries `"homes": "ordinary"`, and `tests/test_round7_defect_pins.py` carries the `RATIFIED_*` tuples plus the `DESTRUCTIVE_VERBS` cross-check. That is the ruled shape — read ordinary, both writes destructive, bare verb in no tuple so a dropped token fails SAFE. Full agreement across a3's tuples, the pins and the lint is a lane's obligation this wave, not a claim I am making from three greps.
+
+## NEXT
+
+Three briefs, three spawns, all `--mode bypass`, all with reports committed to `docs/lanes/<name>.md` on the lane's own branch — never `state/`, which killed three reports in one wave.
+
+## 2026-08-08T23:37:53Z CHECKPOINT inc=inc-20260808T232242Z-ae09 sid=6963e574-e250-48d5-a181-185e92b4ec89
+
+WAVE 48 — THREE LANES OUT, MISSION ITEM 3 DISCHARGED GREEN BY DERIVATION, AND A RED ALREADY SURFACING ON THE PIN TIER.
+
+## DISPATCHED — three lanes, all `--mode bypass`, all opus, all reports committed to `docs/lanes/`
+
+| lane | branch / worktree | scope |
+|---|---|---|
+| `w48-c` | `w48/hookargv`, `C:/proga/fleet-w48-c` | slice (c): hook argv + witness + `_render_successor_task` argv |
+| `w48-launch` | `w48/launch-rehearsal`, `C:/proga/fleet-w48-launch` | launch-readiness rehearsal, temp-dir clone, docs-only fence |
+| `w48-pin` | `w48/pin226`, `C:/proga/fleet-w48-pin` | native contract at claude 2.1.226 |
+
+All three off `fa236cb`. Briefs verified un-truncated after dispatch (dispatched = source + preamble, +728/+702/+674 bytes) — the wave-34 respawn-truncation class checked rather than assumed.
+
+**Slice (d) is written and staged at `state/tasks/lens/w48-d.md`, unfired**, because it collides with (c) on `bin/fleet.py` and I am serializing rather than racing. Its brief already carries the spec's own six obligations for the slice, quoted from the paragraph above §6 rather than from Sequencing §3 — and the one that matters is that **the capture experiment GATES the slice**: the design is *"blob sid -> same lookup"*, and whether Claude Code's statusline blob carries a usable sid is unmeasured. If it does not, the slice as specified is unbuildable, and I have told that lane in writing that reporting so is a success rather than a shortfall.
+
+## MISSION ITEM 3 — DISCHARGED, GREEN, AND DERIVED RATHER THAN EYEBALLED
+
+The order was to VERIFY that a3's shipped `VERB_EFFECT_*` tuples agree with the landed homes split and with the `RATIFIED_*` + `DESTRUCTIVE_VERBS` pins, and to treat a disagreement as a landed inconsistency rather than a gate. Measured by importing all three modules and comparing sets in both directions:
+
+- **`fleet.py`'s three `VERB_EFFECT_*` tuples and the pins' three `RATIFIED_*` tuples are IDENTICAL** — DESTRUCTIVE (14), DISRUPTIVE (7), ORDINARY (13), zero elements on either side of any difference.
+- **All 14 `RATIFIED_DESTRUCTIVE` tokens are present in `DESTRUCTIVE_VERBS`.** The empty-set answer is proved real by a control: removing `sup-boot` from the lint makes the same compare return `['sup-boot']`. A measurement whose good answer is the empty set got its known-non-zero control first, per the standing rule.
+- The lint's 8 extra tokens (`attach`, `interrupt`, `kill`, `release`, `respawn`, `resume-limited`, `send`, `spawn`) are 6 ratified-DISRUPTIVE + 2 ratified-ORDINARY. It is a **grant** lint — what a read-only `/fleet:*` command may not be handed — deliberately wider than the destructive tier, and answering a different question. Not a disagreement.
+- The homes split is present in the fail-safe idiom in all three sources: bare `homes` in NO tuple, both write forms flag-qualified destructive, `VERB_EFFECT_RESIDUAL['homes'] == 'ordinary'`.
+- **And I drove `verb_effect_tier()` itself rather than only reading its inputs**: 10 cases green, including `homes` bare -> ordinary, both write forms -> destructive, and an unknown verb -> destructive.
+
+**No landed inconsistency. Nothing to fix, and no gate to open.**
+
+## MY OWN INSTRUMENT REPORTED TWO DEFECTS THAT WERE ITS OWN
+
+The first version of that script printed `TOTAL DISAGREEMENTS: 2`. Both were mine: I normalised the ratified tokens to their verb HEADS (`homes --add` -> `homes`) and compared those against a lint that stores the flag-qualified tokens verbatim. Head-versus-token is an apples-to-oranges compare I introduced, and one of my assertions — *"`homes` in `DESTRUCTIVE_VERBS`"* — was asking for the bare verb, which if satisfied would have made READING `fleet homes` destructive and defeated the very split I was verifying.
+
+Caught by reading the output instead of trusting the verdict line. This is the wave-47 lesson arriving from a new direction: that record says *an instrument must assert it did the thing before anything reads its result*, and the sibling failure is **an instrument that measures a different thing than the one it names.** A green/red count is not a finding until the compare underneath it is the compare you meant.
+
+## EARLY SIGNAL FROM THE LANES — one of them already has a RED
+
+Peeked at ~10 minutes, which is when steering is cheapest. Not landing anything on these; recording so a park does not lose them:
+
+- **`w48-c`** took the steer and is driving the parser. I sent it a spec sentence my own brief had missed — *"**Hooks**: `--fleet-home` argv baked per-home (survived six rounds; both `--settings` sites)"* — with the two sites measured (`bin/fleet.py:13137`, the worker dispatch in `dispatch_bg`; `:17644`, the successor dispatch via `instance_settings_path()`). That matters because it means the hook-argv half and the `_render_successor_task` half of slice (c) **meet at one rendered settings instance**, which is very likely why the spec bundled them into a single slice.
+- **`w48-launch`** already has doc defects: *"33 subcommands, not the 32 the doc claims -- `homes` shipped and is in neither command table."* Exactly the external-friction class this lane was dispatched to find.
+- **`w48-pin` HAS A RED, and it is not a version-drift story.** Its report so far: a fork-steered sid **did** receive a `kind=result` outcome, but carrying `result_text: 'PIN-OK'` — *the previous turn's answer*, not the expected `STEER-OK`. If that survives its integrity checks it means a fork-steered worker's recorded result can be stale, which would make `fleet result` answer a question nobody asked. The lane is doing integrity checks before concluding, which is what its brief ordered: establish which side moved, do not weaken the pin, do not touch `bin/fleet.py` (another lane holds it).
+
+## NEXT
+
+Blocking on `fleet wait --any` rather than polling. Each lane gets an adversarial gate before it lands — the standing expectation this campaign, earned by a3's gate finding a live fail-open a self-report missed. Operator docket for Altai's return is drafted at `state/w48-operator-docket.md`; it restates all three open gates with a recommendation each and ticks nothing.
+
+## 2026-08-09T00:02:08Z CHECKPOINT inc=inc-20260808T232242Z-ae09 sid=6963e574-e250-48d5-a181-185e92b4ec89
+
+WAVE 48 — TWO LANES HOME. THE PIN TIER RAN WITH ZERO SKIPS AND RETURNED A RED THAT IS OURS, NOT THE VENDOR'S. AND THE SAFETY FENCE EVERY LANE ON THIS MACHINE RUNS UNDER IS AN ACCIDENT.
+
+## `w48-pin` — the native contract at claude 2.1.226. TWO COMMITS, NO PRODUCTION CODE.
+
+`23b2242` (report) + `90bea36` (the FLEET_HOME audit + a whole-suite skip census) on `w48/pin226`.
+
+**THE SKIP COUNT WAS THE HEADLINE AND IT CAME BACK ZERO.** Tier ran with **zero skips on both interpreters** — py3.13 `1 failed, 5 passed`, py3.10 `6 passed`, against an ungated baseline of `6 skipped`. The whole suite's `4139 passed, 14 skipped` had all 14 enumerated, and **6 of the 14 ARE the pin tier**. `FLEET_LIVE=1` is the only gate; the lane went looking for the second gate I warned it about and established there isn't one. That is the difference between a certified run and a green suite that certifies nothing, and it is the first time this campaign the number has been PROVED rather than assumed.
+
+**2.1.222 -> 2.1.226 introduced no CLI drift the lane could find.** Five of six pins justify the version.
+
+## THE RED IS OURS. `test_3_pin_fork_steer` (G2b), RED on 3.13, GREEN on 3.10.
+
+**The vendor did not move.** Everything G2b structurally promises passed — delivery was correct 3/3 — and only the CONTENT was wrong. Mechanism, from the surviving transcript plus a home-preserving probe: fork-steer rewrites the task file, then dispatches a **byte-identical pointer** to a session that is already carrying that file's OLD contents, so the fork can answer without ever re-reading it. **1 failure in 5 samples.**
+
+**Operator consequence, stated plainly: `fleet send` can print `fork-steered` while the worker silently redoes its previous task.** That is the same shape as the wave-34 respawn defect — a verb reporting success while destroying the instruction it exists to deliver — arriving at a different verb.
+
+The lane did not weaken the pin and did not touch `bin/fleet.py`, as ordered (another lane holds that file). **I concur with its recommendation: HOLD THE STAMP.** Stamping is a deliberate supervisor act and the reason to do it is that the contract is verified, not that five of six is convenient. `state/pin-pass.json` verified untouched by my own hand — still `2.1.222`, mtime Aug 5 20:03.
+
+My sends this wave both took the MAILBOX path (`turn running -- message queued to mailbox`) and both provably landed — `w48-c` quoted my steer back, `w48-pin` executed the audit I ordered. So the defect did not touch this wave's steering; it is the idle/fork path that carries it.
+
+## THE FENCE HELD FOR THE WRONG REASON, AND THAT IS THE BIGGER FINDING
+
+I steered this lane mid-flight because a sibling had just measured that **`FLEET_HOME` is silently ignored inside a fleet-launched session** — §5 step 2's sid->home lookup outranks step 3's validated env. I verified the mechanism myself before propagating it, three runs, one discriminator: env set + sid present -> the real home; env set + sid REMOVED -> the temp dir. My own brief had fenced that lane with `FLEET_HOME`, which is to say with nothing.
+
+The audit came back clean — nothing was written to `C:/proga/claude-fleet`, established by mtimes and by the real registry holding zero `pin-w*`/`probe-w*` records, not by assertion. **But the lane then did the thing I most want from a lane: it explained why it was clean, and the reason is not the fence.**
+
+`~/.claude/fleet-homes.list` **does not exist** — I verified this myself. So the sid lookup's population is empty, its state is `miss`, and the real home is never even a candidate. Meanwhile **that lane's own sid IS in the real registry under `w48-pin`**. One `fleet homes --add` and the lookup starts hitting: the tier would spawn into the live fleet and stamp the real `pin-pass.json`.
+
+**So the temp-home safety of every lane on this machine currently rests on the accident that nobody has created the homes list yet — and slice (b), `init --home`, is precisely the thing that creates it.** That is not a hypothetical: it is the next build slice in Sequencing §3 and it is blocked on operator gate 3. It sharpens my recommendation on that gate rather than changing it, and it is going in the docket.
+
+Corrected doctrine, effective for every brief I write from here: **pass `--fleet-home <temp>` explicitly and verify with `fleet home` run the same way.** `FLEET_HOME` is not a fence. I have already corrected the staged slice-(d) brief; `docs/lanes/BRIEF-TEMPLATE.md` needs the same stanza and that is a landing, not a note.
+
+## CORRECTIONS THE LANE MADE TO MY BRIEF
+
+My transcription of the native contract was incomplete — I took it from a journal entry rather than from the test file, and said so in the brief. It **omitted step 6 entirely and step 5's archive half**, and I mis-stated step 2's usage assertion as asserted when it is **printed** (ruling A — usage stays withheld), though it does still raise on schema drift. The brief predicted this failure mode in its own WHAT THIS BRIEF GOT WRONG section, which is the section earning its keep for the fifth consecutive wave.
+
+## `w48-launch` — DONE AND UNDER GATE
+
+`4ccc8f7`, five files, +645/-17, fence held exactly: `README.md`, `docs/concepts.md`, `docs/getting-started.md`, `docs/launch-readiness.md`, and its report. Zero `bin/`, zero `tests/`, zero specs. Three launch blockers, all prose defects, all now fixed: a bare `fleet init` configures whatever fleet is already on PATH rather than the clone you stand in (the 2026-07-29 incident class, reachable by following the published quickstart exactly); the quickstart's PATH step is a COMMENT rather than a command, so a clean machine dies at step 2; and the `FLEET_HOME` finding above, whose winning flag `--fleet-home` appeared in no user-facing doc.
+
+Adversarial gate `w48-glaunch` is running on branch `w48/glaunch` off `4ccc8f7`. I have already spotted one defect myself while reading the diff — `docs/launch-readiness.md` gains the garbled phrase *"inside a session fleet launched"* — and I am deliberately NOT telling the gate, because whether it finds a plain English defect in a prose diff is information about the gate.
+
+## NEXT
+
+`w48-c` still building. On its landing: slice (d) fires (staged, fence corrected), and **the fork-steer defect gets its own lane** — it needs `bin/fleet.py`, so it serializes behind (c) exactly as (d) does. Its first act is reproducing the RED itself rather than inheriting it, which is also how the pin report's central claim gets independently verified before I land it.
+
+## 2026-08-09T00:25:58Z CHECKPOINT inc=inc-20260808T232242Z-ae09 sid=6963e574-e250-48d5-a181-185e92b4ec89
+
+WAVE 48 — FIRST LANDING GREEN AND PUSHED. THE GATE RETURNED GATING ON THREE MAJORS, ALL OF THEM IN SENTENCES THE COMMIT ITSELF ADDED.
+
+## LANDED — main == origin == `5ebba74`
+
+`5ebba74`, the `w48/pin226` report. One file, `docs/lanes/w48-pin.md`, +491, no production code.
+
+**Floor predicted 4154 collected IN WRITING BEFORE THE MERGE, and hit EXACTLY on both interpreters** — `4139 passed / 14 skipped / 1 xfailed` on `py -3.13` AND `py -3.10`, sha `5ebba74` proved identical before and after both runs. The prediction was derived rather than guessed: main at `fa236cb` measured 4154 by my own run, the branch adds no test file, and `tests/test_lane_report_durability.py` names specific files rather than globbing `docs/lanes/`, so no collection change was possible.
+
+**Conflicts predicted 0, measured 0 over 30,282 bytes**, with the `w35/nd4c` x main control run FIRST and returning 26 over 152,563 bytes. Every measured zero carries its byte count; the control ran before the measurement, not after.
+
+Parents proved arithmetically (`HEAD^1` = `fa236cb`, `HEAD^2` = `90bea36`), not inferred from the merge succeeding. Read back from the PUSHED ref, not from local.
+
+**The merge message went through `-F <file>`, never a shell string.** Read back and compared: 2800 source bytes vs 2801 read-back (one trailing newline), and all nine backtick-dense spans present exactly once. Wave 47 lost three sentences at `git merge -m` to REFUSAL CLASS 5 after using `@file` correctly all wave; the lesson is that the SHELL is the hazard, not the verb, and a message file has no shell in it at all. Also of note: `git merge -F -` does NOT read stdin at this git version — it dies `could not read file '-'`, rc 129. A real file is the only form that works.
+
+Branch-protection bypass event fired again on the push (*"Changes must be made through a pull request"*, push succeeded) — ratified 2026-07-30, behaving as ruled.
+
+## THE GATE EARNED ITS COST, AND ITS FINDINGS WERE ALL SELF-INFLICTED BY THE COMMIT
+
+`w48-glaunch` returned **GATING — 0 BLOCKING, 3 MAJOR, 4 MINOR** at `f896621` on `w48/glaunch`.
+
+**All three of the lane's headline findings RE-DROVE TRUE** under independent attack from separate temp clones; the gate tried to break each and could not. That is worth as much as a finding. What it did break was the branch's own new prose — **every MAJOR is in a sentence the commit ADDED**, which is precisely the attack I ordered and the risk the lane's own brief had named first.
+
+- **MAJOR-1** — `getting-started.md` claims the sid lookup searches *"the registries the install root can see"*. It does not: `resolution_population()` is the machine-wide `~/.claude/fleet-homes.list` **UNION** the install root, measured as a pure function with both controls (homes-list path monkeypatched to temp, real list never read), showing a listed home winning from a DIFFERENT install root with `FLEET_HOME` ignored. **And the consequence is the wave's recurring theme arriving a third time: the lane's own safety advice is conditional on that list being ABSENT, while the same commit newly documents `fleet homes --add`, the verb that creates it.** A doc that teaches the reader to disarm the protection it relies on, inside one commit.
+- **MAJOR-2** — the parenthetical `# a DIRECTORY path, not a URL` contradicts `claude plugin marketplace add --help` (*"a URL, path, or GitHub repo"*), and **four of the five marketplaces in the lane's own quoted output are GitHub-sourced**, so its *"no evidence either way"* was false against evidence it had already pasted. The directory literal is right; the exclusivity is not.
+- **MAJOR-3** — *"fix PATH"* is prescribed for a surprising `fleet home`, but the gate drove it with PATH CORRECT and only a stale `FLEET_HOME` and still got the old home. The block whose whole purpose is preventing the 2026-07-29 incident names a cause that is not the only one.
+
+Cleared and each actually run: `330 passed, 2 skipped` on both interpreters with the skips NAMED, the repo fence positive-controlled, 33 subcommands with full table coverage, doctor 28/28, the four documented pre-init FAILs, 82 links at merge-base and 83 at tip with zero broken, and §10's not-run list confirmed honest — no step quietly skipped, which was the one outcome that would have made the lane worthless.
+
+## THE GATE'S OWN BLIND SPOT, MEASURED BY WITHHOLDING
+
+While reading the diff I found a garbled phrase the branch adds — *"FLEET_HOME is silently ignored inside a session fleet launched"* — and **deliberately did not tell the gate**, to learn what a gate of this shape actually covers. It returned seven findings and that was not among them.
+
+**So: this gate attacks semantics rigorously and does not proofread, and neither does the suite.** That class is uncovered on both sides. Recorded as a property of the instrument rather than a failure of this gate, and named explicitly in the discharge brief so it gets fixed. A gate is an instrument like any other and its coverage is a fact to be measured, not assumed — the same discipline as running a control before believing a zero.
+
+## DISPATCHED — the discharge, by `respawn` and NOT by `send`
+
+`w48-launch` respawned (new sid `714c5ae8`) onto the gate discharge, fence unchanged (docs-only, `bin/` still forbidden because slice (c) holds `bin/fleet.py`).
+
+**I chose `respawn` over `send` because of a defect this wave's own pin lane had just proved**: `send` to an idle worker takes the fork-steer path, which dispatches a byte-identical pointer to a session already holding the task file's OLD contents — 1 failure in 5 samples, and the operator-visible symptom is the verb printing `fork-steered` while the worker silently redoes its previous task. Using the verb under suspicion to dispatch the fix for the wave's other defects was not a risk worth taking for zero benefit.
+
+Verified the brief survived rather than assuming the wave-34/35 truncation class is dead: all seven distinctive spans present exactly once, and the dispatched file GREW (10,548 bytes) rather than shrank, because respawn carried the lane's journal forward as designed. Size increase is the right signature; the truncation defect's signature was 784 bytes and a sentence cut mid-word.
+
+## NEXT
+
+`w48-c` still building — the wave's one code lane. On its landing: slice (d) fires (staged, fence already corrected), and the fork-steer defect gets its own gated lane. Both need `bin/fleet.py` and both stay serialized behind (c).
+
+## 2026-08-09T01:32:04Z CHECKPOINT inc=inc-20260808T232242Z-ae09 sid=6963e574-e250-48d5-a181-185e92b4ec89
+
+WAVE 48 CLOSING — TWO LANDINGS, BOTH FLOORS PREDICTED AND HIT EXACTLY, AND THE WAVE'S BEST FINDING WAS THAT MY OWN SAFETY FENCE WAS MADE OF NOTHING.
+
+## LANDED AND PUSHED — main == origin == `8e01d83`
+
+| sha | what | floor predicted -> measured |
+|---|---|---|
+| `5ebba74` | `w48/pin226` — native contract at claude 2.1.226, report-only | 4154 -> **4154** |
+| `7c3e48b` | `w48/launch-rehearsal` — install rehearsal, 3 launch blockers, gated + fully discharged | 4154 -> **4154** |
+| `8e01d83` | `CLAUDE.md` — M-D/M-E were NOT unfolded; §18 records both SHIPPED | 4154 -> **4154** |
+
+**Every floor was written down before the run and hit exactly on `py -3.13` AND `py -3.10`**, sha proved identical before and after each run, `git status` checked after each for suite-written damage to tracked files (the template survived; it has been clobbered to `{}` before). Both merge conflict measurements ran the `w35/nd4c` x main control FIRST, returning 26 both times, and both measured zeros carry byte counts (30,282 and 79,662). Parents proved arithmetically on both merges, not inferred from the merge succeeding.
+
+**The 4154 predictions were DERIVED BY COLLECTION**, not by arithmetic on a diff and not counted from `def test_` lines: `pytest --collect-only -q` on main and on the branch tip, both 4154. Wave 38's rule, applied without being reminded.
+
+## THE WAVE'S BEST FINDING CORRECTED ME, MID-FLIGHT, ON A LANE THAT WAS STILL RUNNING
+
+`w48-launch` measured that **`FLEET_HOME` is silently ignored inside a fleet-launched session** — §5 step 2's sid->home lookup outranks step 3's validated env. I had fenced `w48-pin` with exactly that env var, i.e. with nothing, and `w48-d`'s staged brief carried the same hole.
+
+I verified it myself before propagating rather than relaying it — three runs, one discriminator:
+
+| run | `FLEET_HOME` | sid | `fleet home` answers |
+|---|---|---|---|
+| baseline | unset | present | `C:/proga/claude-fleet` |
+| env set | temp dir | present | **`C:/proga/claude-fleet`** — ignored |
+| env set | temp dir | **removed** | the temp dir — works |
+
+Then steered the live lane, corrected the staged brief, and put the corrected stanza into every brief written afterwards. **This is ratified behaviour working as specified — the code is right and the BRIEFING DOCTRINE was wrong**, which is the more dangerous shape because nothing tests a brief.
+
+**And the containment audit I ordered came back clean for the WRONG REASON, which the lane volunteered rather than hid.** Nothing was written to the real home — but only because `~/.claude/fleet-homes.list` does not exist (verified by me), so the lookup population is empty and the real home is never a candidate. That lane's own sid IS in the real registry. **One `fleet homes --add` and the pin tier spawns into the live fleet and stamps the real `pin-pass.json`.** Slice (b), `init --home`, is precisely the thing that creates that list — and it is blocked on operator gate 3.
+
+**Three independent routes reached the homes list this wave**: the pin lane's audit, the launch gate's MAJOR-1, and the E2 classification work. It is the hinge of the whole multi-fleet slice and the operator's gate-3 ruling is what unblocks it.
+
+## `w48-pin` — THE SKIP COUNT WAS THE HEADLINE AND IT CAME BACK ZERO
+
+Zero skips on both interpreters (py3.13 `1 failed, 5 passed`; py3.10 `6 passed`) against an ungated baseline of `6 skipped`; the suite's 14 skips all enumerated, 6 of them ARE this tier; `FLEET_LIVE=1` is the only gate and the lane went looking for a second one and established there is none. **No CLI drift 2.1.222 -> 2.1.226.**
+
+**One RED and it is OURS, not the vendor's:** `test_3_pin_fork_steer` (G2b), RED on 3.13, GREEN on 3.10. Fork-steer rewrites the task file, then dispatches a **byte-identical pointer** to a session already carrying that file's OLD contents, so the fork answers without re-reading. 1 failure in 5 samples. **`fleet send` can print `fork-steered` while the worker silently redoes its previous task** — the wave-34 respawn shape at a different verb.
+
+**Stamp HELD deliberately.** Five of six pins justify 2.1.226; a RED against shipped code is a reason to fix, not to stamp. `state/pin-pass.json` stays 2.1.222 and doctor keeps FAILing `pin-version` — correctly.
+
+I acted on this defect the same turn I learned it: dispatched the launch discharge by **`respawn`, not `send`**, because using the verb under suspicion to dispatch the fix for the wave's other defects was a free risk. Verified the brief survived (7 distinctive spans, and the file GREW because respawn carries the journal forward — the truncation defect's signature was 784 bytes and a cut sentence).
+
+## `w48-launch` — THE GATE AND THE DISCHARGE BOTH EARNED THEIR COST
+
+Gate returned **GATING, 0 BLOCKING / 3 MAJOR / 4 MINOR**. All three of the lane's headline findings **re-drove TRUE** under independent attack from separate temp clones — it tried to break each and could not, which is worth as much as a finding. **Every MAJOR was in a sentence the commit itself had ADDED** — the exact failure mode the lane's own brief named first.
+
+Discharge accepted all seven, with **one defended partial decline I agree with**: it kept the `--statusline` machine-global-write warning rather than reverting it for lacking an execution receipt, graded MEASURED-against-source, on the ground that reverting a true safety warning to satisfy a provenance rule makes the reader less safe. Its **first suite run was RED** — a pasted `git log --format=%s` receipt whose subject contains "fleet is" tripped `test_no_doc_invents_a_fleet_verb` — and it recorded that rather than quietly re-running into green.
+
+The discharge also found what the gate did not: **launch-readiness gap 8 was FALSE, not merely unlisted**, root-caused to root `CLAUDE.md` being stale, correctly reported as out-of-fence rather than reached for. I verified it against `docs/SPEC.md` §18 myself and landed the fix as `8e01d83`.
+
+## I MEASURED THE GATE'S OWN COVERAGE BY WITHHOLDING
+
+Reading the launch diff I found a garbled phrase the branch added — *"FLEET_HOME is silently ignored inside a session fleet launched"* — and deliberately did NOT tell the gate. It returned seven findings; that was not among them. **So a gate of this shape attacks semantics rigorously and does not proofread, and neither does the suite: that class is uncovered on both sides.** Named it explicitly in the discharge brief; it was fixed there. A gate is an instrument and its coverage is a fact to be measured, not assumed.
+
+## IN FLIGHT — `w48-gc`, THE SLICE (c) GATE, AND IT HAS ALREADY CONFIRMED A REAL DEFECT
+
+`w48-c` returned `1161d39` on `w48/hookargv` (14 files, +1469/−43, floors **4217/14/1 = 4232 both interpreters**). Gate `w48-gc` is still working past two `wait` windows; its verdict commits to `docs/lanes/w48-gc.md` on branch `w48/gc`, so **it is durable without me** — that is what the `docs/lanes/` convention bought.
+
+What the gate has confirmed so far, from peeks:
+- **Attack F LANDS.** The unquoted `{fleet_py}` the lane disclosed and "deliberately left" **breaks**: on an install path containing a space the successor dies `can't open file 'C:\...\Fleet'` across **all three rendered commands**, while the quoted sibling runs clean at rc 0 with a real boot bundle. On Windows that is `C:\Program Files\...`. **This must be discharged before (c) lands.**
+- Floors independently reproduced at 4217/14/1 both interpreters, tree sha256-identical, template unclobbered.
+- It caught one of its OWN instrument failures — mangled quotes where **the control failed identically**, so it graded it an instrument failure rather than a finding. The control doing its job, unprompted.
+
+**(c) is NOT landed and must not be landed until that gate is discharged.**
+
+## THE SLICE (c) SCOPE QUESTION, ANSWERED HONESTLY
+
+I gave the lane two readings of "witness" and a weak lean toward B. It measured that `witness` occurs in the spec **exactly twice** — §5 step 1's definition, and the slice list being interpreted — so **no sentence defines a hook- or successor-plane witness at all**. Reading A is slice (a)'s and shipped; §3 calls the slices disjoint, so (c)'s cannot be that line. It then DERIVED a `home-witness` doctor row from three sentences that do exist, and escalated the literal reading unbuilt with reasons.
+
+**That derivation is the open governance question and I flagged it to the gate as my top concern**: a lane deriving a new doctor row from prose sits very close to originating content nobody ratified. Whatever the gate says, the successor should form its own view before landing it.
+
+## MISSION ITEM 3 — DISCHARGED GREEN, BY DERIVATION
+
+`fleet.py`'s three `VERB_EFFECT_*` tuples and the pins' three `RATIFIED_*` tuples are **identical**, all three tiers, both directions. All 14 ratified-destructive tokens are in the `DESTRUCTIVE_VERBS` grant lint — empty-set answer proved real by a control returning `['sup-boot']` when one token is dropped. The lint's 8 extra tokens are 6 ratified-DISRUPTIVE + 2 ratified-ORDINARY: it is a **grant** lint, deliberately wider, answering a different question. The homes split is in the fail-safe idiom everywhere (bare `homes` in NO tuple). And `verb_effect_tier()` **drives** correctly on 10 cases including unknown-verb -> destructive. **No landed inconsistency.**
+
+**My first instrument reported 2 disagreements and both were its own** — I head-normalised (`homes --add` -> `homes`) and compared against a lint storing flag-qualified tokens, and one of my assertions, had it passed, would have made READING `fleet homes` destructive and defeated the split I was verifying. Caught by reading the output rather than the verdict line. **The wave-47 lesson has a sibling: an instrument must not only assert it did the thing, it must measure the thing it NAMES.**
+
+## SUCCESSOR QUEUE, IN PRIORITY ORDER
+
+1. **Read `docs/lanes/w48-gc.md` on branch `w48/gc`** — the slice (c) verdict, durable and independent of me. Discharge it (the unquoted `{fleet_py}` is confirmed real), gate the discharge **on re-plant rather than on the diff**, then land `w48/hookargv`. Floor to beat: 4232 collected, and re-derive it — main has moved three commits since the lane measured.
+2. **The fork-steer defect.** Brief-worthy on its own: `fleet send` to an idle worker can dispatch a byte-identical pointer to a session holding stale task-file contents. Needs `bin/fleet.py`, so it serialises behind (c). Its first act should be reproducing the RED itself, which also independently verifies `docs/lanes/w48-pin.md`'s central claim.
+3. **Slice (d), staged and ready at `state/tasks/lens/w48-d.md`** with the corrected safety fence already in it. Fires once (c) lands. Its gate condition is real: **the capture experiment gates the slice** — if Claude Code's statusline blob carries no usable sid, the slice as specified is unbuildable and saying so IS the deliverable.
+4. **`docs/lanes/BRIEF-TEMPLATE.md` needs the `FLEET_HOME`-is-not-a-fence stanza.** I did not land it — it deserved a floor run I could not spend. Every brief on this machine is currently fencing with an env var that a fleet-launched session ignores.
+5. **The pin stamp stays held** until the fork-steer RED is dispositioned. Do not stamp because five of six passed.
+6. **Knowledge fold for waves 44–48 is still owed** — carried from my predecessor, and this wave adds: the FLEET_HOME fence, the gate-coverage measurement, the fork-steer defect, `git merge -F -` not reading stdin (rc 129, `could not read file '-'` — a real file is the only form that works).
+
+## OPERATOR DOCKET — drafted in full at `state/w48-operator-docket.md`, three gates, one recommendation each
+
+Restated there and not re-litigated: the GOALS §8 text (approve the parked reconstruction at `docs/proposals/2026-08-09-goals-band-section-replacement.md`; needs approval on CONTENT, not method), §5's `--yes` scope (recommend NARROW), and `init --home` (recommend SPLIT on the E2 ground). **Gate 3 got materially stronger this wave**: the homes list is what makes every lane's temp-home fence real or fake, and slice (b) is what creates it. Nothing was ticked; a supervisor may not tick a box.
+
+Untouched as ordered: `supervisor/GOALS.md`, ND4(c)'s decision slot, `w35/nd4c`, `fix/b6-interface-release`, `fix/outcount-timing`.
