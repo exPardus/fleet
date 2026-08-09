@@ -156,6 +156,22 @@ MUTANTS = [
     # The two CONTRACT-PRESERVATION pins the build must not have moved. Both
     # were green before the build and after it, so without a mutant each they
     # are exactly the shape gate2 B2 named -- a pin nobody has shown can fail.
+    ("M-W52-BESTEFFORT", "the sweep's per-sid failure guard is removed, so one "
+                         "abandoned fork's exception aborts the whole verb -- "
+                         "the regression the post-build floor run actually "
+                         "caught, in a test file about prompt composition",
+     """        try:
+            _ok, outcome = _stop_native_session_status(
+                retired, run=run, which=which,
+                timeout=_RETIRED_SID_SWEEP_TIMEOUT_SECONDS)
+        except Exception as exc:
+            outcome = f"error ({exc.__class__.__name__}) -- not retried\"""",
+     """        if True:  # MUTANT M-W52-BESTEFFORT
+            _ok, outcome = _stop_native_session_status(
+                retired, run=run, which=which,
+                timeout=_RETIRED_SID_SWEEP_TIMEOUT_SECONDS)""",
+     "KILLED"),
+
     ("M-W52-REFUSE", "the no-force refusal on a Q1-live turn is deleted, so a "
                      "bare respawn walks into the sweep against a RUNNING turn "
                      "-- the one thing the unconditional stop must never do",

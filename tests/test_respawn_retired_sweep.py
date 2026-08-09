@@ -178,6 +178,55 @@ def test_respawn_sweep_reports_the_classified_outcome_not_a_guess(
         f"'timeout' names a mechanism that did not occur: {err}")
 
 
+def test_a_raising_stop_CANNOT_abort_the_respawn(home, monkeypatch, capsys):
+    """`best-effort` must mean it, and until w52 it did not.
+
+    HOW THIS WAS FOUND, recorded because the finding is better than the fix.
+    It was not reasoned about -- it came back as two REAL FAILURES in the
+    post-build floor run, in `tests/test_index_compose.py`, a file about
+    prompt composition that has nothing to do with stopping sessions. Its four
+    compose paths all share one stub, `run=lambda *a, **k: None`, and three of
+    them never issue a stop. Making the sweep reachable from
+    `_cmd_respawn_native` made the fourth one issue one, and
+    `_classify_native_cli_result(None)` raised `AttributeError` straight out of
+    the verb.
+
+    A `run` returning None is not a production shape. **The class is**:
+    `_stop_native_session_status` catches OSError/SubprocessError around the
+    subprocess and nothing else, so anything else out of one abandoned fork
+    took down the whole verb -- skipping every remaining retired sid, and on
+    the kill path aborting before the tombstone and the dead-marking.
+
+    So the pin is not "None must not crash". It is the contract: **no failure
+    of this sweep may change what the verb does.** Asserted three ways below --
+    the verb still reaches dispatch, the LATER retired sid is still attempted,
+    and the tombstone is still written -- because a `try` that merely stopped
+    the crash would satisfy the first alone."""
+    _install(home, retired=["retired1-a", "retired2-b"])
+    monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                        lambda **_: (True, [LINGERING_DONE]))
+    monkeypatch.setattr(fleet, "dispatch_bg", _must_not_dispatch)
+    seen = []
+
+    def _run_returning_none(argv, **kwargs):
+        seen.append(argv)
+        return None                      # the exact shape the floor run found
+
+    with pytest.raises(_ReachedDispatch):
+        fleet.cmd_respawn(_respawn_args("w"), run=_run_returning_none,
+                          which=lambda _: "claude")
+
+    stopped = [a[2] for a in seen if a[:2] == ["claude", "stop"]]
+    assert "retired2" in stopped, (
+        f"the sweep stopped at the first failure instead of continuing: {stopped}")
+    assert [o["kind"] for o in _tombstones("w", SID)] == ["stopped"], (
+        "a failing sweep must not cost the tombstone -- that is the durable "
+        "half of the finding this build exists to close")
+    err = capsys.readouterr().err
+    assert "error (AttributeError) -- not retried" in err, (
+        f"the swallowed failure must still be one line per sid: {err}")
+
+
 def test_respawn_skips_a_retired_sid_that_is_another_workers_current_sid(
         home, monkeypatch, capsys):
     """T8 adv M1, carried across. Only a corrupted or hand-edited registry can
@@ -274,14 +323,33 @@ def test_an_unfetchable_roster_still_refuses_and_sweeps_nothing(home, monkeypatc
 
 def test_the_sid_is_still_retired_and_no_foreign_sid_enters(home, monkeypatch):
     """The write at the heart of §3.8 is unchanged: the record still carries
-    its own prior sid and nothing else."""
+    its own prior sid and nothing else.
+
+    The first version of this test asserted ONLY the `respawned` event's
+    `old_session_id` and never opened `retired_sids` at all -- so its name
+    claimed an invariant its body did not check. Fixed by making the body
+    match the name rather than the name match the body: the new record is read
+    from the registry at the dispatch boundary, which is the only moment it
+    exists (a dispatch failure rolls it back), and compared to the exact list
+    it must hold -- prior sids in order, then this record's OWN old sid, and
+    nothing else."""
     _install(home, retired=["retired1-a"])
     monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, [LINGERING_DONE]))
-    monkeypatch.setattr(fleet, "dispatch_bg", _must_not_dispatch)
+    written = {}
+
+    def _capture_then_raise(*_a, **_k):
+        # `dispatch_bg` runs OUTSIDE the pre-claim lock, so this is an ordinary
+        # unlocked read of the record as it was just committed.
+        written["retired_sids"] = list(
+            fleet.load_registry()["workers"]["w"]["retired_sids"])
+        raise _ReachedDispatch()
+
+    monkeypatch.setattr(fleet, "dispatch_bg", _capture_then_raise)
     with pytest.raises(_ReachedDispatch):
         fleet.cmd_respawn(_respawn_args("w"), run=_run_factory(),
                           which=lambda _: "claude")
-    # the dispatch failure rolled the record back; read the event instead.
+
+    assert written["retired_sids"] == ["retired1-a", SID], written
     events = [json.loads(l) for l in
               fleet.events_path().read_text(
                   encoding="utf-8").splitlines() if l.strip()]
