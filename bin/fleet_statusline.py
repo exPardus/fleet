@@ -15,6 +15,14 @@ Contract, all four points load-bearing:
   * exits 0 on every path, printing nothing on error. This is the statusline
     analogue of invariant 2 (exit-0 hooks): a traceback here would render
     under the input box on every refresh.
+
+WHICH home it reads is answered by `resolve_blob_home()` below (multi-fleet
+slice d): the session id Claude Code puts in the stdin blob is run through
+`fleet.resolve_home()`, so a machine with two fleets renders each session's OWN
+fleet. A machine with one home short-circuits before the lookup and is
+byte-identical to the pre-slice statusline. None of the four points above move:
+the resolution takes no lock, probes nothing, writes nothing, and its failure
+mode is the default home rather than a blank line.
 """
 import json
 import os
@@ -269,6 +277,189 @@ def _want_color() -> bool:
     return True
 
 
+# --- §5 resolution, on a view (multi-fleet slice d) ------------------------
+#
+# `docs/specs/multi-fleet.md`, the paragraph above §6:
+#
+#   **Statusline**: blob sid -> same lookup; single-home short-circuit; words,
+#   exit 0; resolver pure-function; capture experiment gates the slice.
+#
+# WHAT MOVED, IN ONE SENTENCE: the home this file reads used to be whatever
+# `fleet.FLEET_HOME` computed at import (env, else the install root), and is now
+# the home whose registry CLAIMS the session Claude Code is rendering for.
+#
+# THE GATE, RE-DRIVEN BEFORE ANY OF THIS WAS WRITTEN (docs/lanes/w50-d.md §1):
+# 13 statusline invocations of a real `--bg` session, captured to a file and
+# read back from the file. `session_id` is a top-level `str` on 13/13, is
+# byte-identical to the `CLAUDE_CODE_SESSION_ID` the statusline child itself
+# carries on 13/13, and is in the FIRST render's smaller key set as well as
+# every later one. Slice (d) stands on that measurement and on nothing else.
+#
+# THE ORDER IS NOT RE-SPELLED HERE. `fleet.resolve_home()` is §5's five steps as
+# a pure function and its own header names this file as one of its four callers;
+# a fifth spelling of the order is *"the exact defect the four standalone
+# `_fleet_home()` copies already demonstrate"*. What this module owns is the
+# three things §5 does not: where the sid comes from on THIS surface, when not
+# to ask at all, and what a VIEW renders where a verb would refuse.
+
+#: `resolve_blob_home()`'s verdicts.
+#:
+#: `HOME_SINGLE` is the short-circuit: one home on this machine, so nothing was
+#: looked up and nothing moved. It is deliberately also the ERROR value -- a
+#: resolution that dies degrades to "render the default home exactly as the
+#: shipped statusline always did", never to a blank line and never to a word the
+#: operator cannot act on.
+HOME_SINGLE = "single_home"
+HOME_LOOKUP = "lookup"        # a member home claims this session -- home moved
+HOME_DEFAULT = "default"      # steps 3/4 answered; the global already IS that
+HOME_NONE = "no_home"         # §5 step 5's terminus
+HOME_AMBIGUOUS = "ambiguous"  # two+ member homes claim this session
+
+
+def blob_session_id(payload) -> str:
+    """The blob's session id, or `""`. A PURE FUNCTION, AND IT NEVER RAISES.
+
+    This is the slice's one genuinely new pure function and the only place the
+    statusline knows anything about the payload's shape. Four degenerate inputs
+    are real and all four answer `""`: unparseable JSON, a non-dict top level, a
+    missing `session_id`, and a non-string one. `""` is not `None` on purpose --
+    it is what `lookup_home_for_sid` already treats as *"nobody asked"*, so the
+    empty case needs no second spelling downstream.
+
+    IT DOES NOT FALL BACK TO `CLAUDE_CODE_SESSION_ID`, and that is a decision
+    rather than an omission. The env var carries the same bytes today -- MEASURED
+    13/13 -- but §5 step 2's input on this surface is *"blob sid"*, and a second
+    evidence source that agrees today is a second thing to disagree tomorrow, on
+    a surface whose failures are swallowed by an exit-0 guard."""
+    try:
+        blob = json.loads(payload)
+    except (TypeError, ValueError, UnicodeDecodeError):
+        return ""
+    if not isinstance(blob, dict):
+        return ""
+    sid = blob.get("session_id")
+    if not isinstance(sid, str):
+        return ""
+    return sid.strip()
+
+
+def population_is_multi_home(pop) -> bool:
+    """Is this machine in multi-fleet territory? THE SHORT-CIRCUIT'S PREDICATE.
+
+    Delegates to `fleet._multi_fleet_population_is_live`, which is the shipped
+    answer `apply_resolved_home` already gates the terminus on. The two callers
+    hold different records -- that one has a `lookup_home_for_sid` result, this
+    one has only a `resolution_population`, because HAVING RUN THE LOOKUP IS
+    EXACTLY WHAT THE SHORT-CIRCUIT AVOIDS -- so this adapts the keys rather than
+    re-deriving the rule. `test_the_short_circuit_agrees_with_fleets_own_
+    predicate` drives both shapes through the predicate and requires them to
+    agree, so the adapter cannot drift into a second opinion.
+
+    NOT A PERFORMANCE FEATURE. The lookup costs 1.35 ms inside a ~560 ms
+    statusline process (measured, w49-dcap §4.1 and re-measured by w50-d §3), so
+    skipping it saves 0.2 % of nothing. It exists because §5's arming paragraph
+    binds the whole feature to *"with a determinate population of <2:
+    byte-identical to today"*, and a single-home machine that rendered `[fleet]:
+    no home` -- or an ambiguity, or a home resolved from a sid rather than from
+    `$FLEET_HOME` -- would not be byte-identical to today."""
+    return bool(fleet._multi_fleet_population_is_live({
+        "list_ok": pop["list_ok"],
+        "population": pop["homes"],
+        "legacy": pop["legacy"],
+    }))
+
+
+def resolve_blob_home(payload, population=None, install=None) -> dict:
+    """§5's order, driven from the blob. NEVER RAISES; NEVER WRITES.
+
+    Returns `{"state", "home", "sid", "hits"}` where `home` is a `Path` ONLY for
+    `HOME_LOOKUP` -- steps 3 and 4 ARE `fleet.FLEET_HOME`'s own import-time
+    computation, so handing them back would be a no-op in production and would
+    overwrite the suite's monkeypatch in every test. `apply_resolved_home` makes
+    the same split for the same reason: this moves the home only when something
+    NAMED one.
+
+    THE AMBIGUITY BRANCH COSTS A SECOND LOOKUP, DELIBERATELY. `resolve_home`
+    raises §5 step 2's two-plus refusal rather than returning it, because for a
+    verb it is not a verb-class decision. A view cannot re-raise it -- `main`'s
+    exit-0 guard would swallow it into a permanently blank line -- so it is
+    caught, and the hit COUNT the word needs is re-read from step 2 directly.
+    One extra ~1.4 ms read, on the branch that cannot happen on a single-home
+    machine at all.
+
+    EVERY FAILURE DEGRADES TO `HOME_SINGLE`. See that constant."""
+    unresolved = {"state": HOME_SINGLE, "home": None, "sid": "", "hits": 0}
+    try:
+        pop = (fleet.resolution_population(install) if population is None
+               else population)
+        if not population_is_multi_home(pop):
+            return dict(unresolved)
+
+        out = dict(unresolved)
+        out["sid"] = sid = blob_session_id(payload)
+        try:
+            res = fleet.resolve_home(flag=None, sid=sid, population=pop,
+                                     install=install)
+        except fleet.FleetCliError:
+            look = fleet.lookup_home_for_sid(sid, population=pop, install=install)
+            out["state"], out["hits"] = HOME_AMBIGUOUS, len(look["hits"])
+            return out
+
+        if res["step"] == "lookup":
+            out["state"], out["home"] = HOME_LOOKUP, Path(res["home"])
+        elif res["step"] is None:
+            out["state"] = HOME_NONE
+        else:
+            out["state"] = HOME_DEFAULT
+        return out
+    except BaseException:  # noqa: BLE001 -- a statusline never surfaces a traceback
+        return dict(unresolved)
+
+
+def _paint_terminus(line: str, color: bool) -> str:
+    """Paint the nameplate and nothing else, so the WORDS are exactly the
+    constant they came from and `plain(line)` round-trips to it."""
+    if not color:
+        return line
+    head, sep, tail = line.partition(":")
+    return f"{_NAME}{head}{_RESET}{sep}{tail}"
+
+
+def render_home_terminus(decision, color: bool = True):
+    """The word a VIEW renders where a verb refuses, or `None` for "render the
+    fleet row normally".
+
+    §5 step 5 splits the surface exactly once -- *"mutating verbs refuse with the
+    named remedy, and views render `[fleet]: no home` and exit 0"* -- and the
+    statusline is on the view side of that split, so it has NO refusal path and
+    prints no remedy. The terminus text is `fleet.NO_HOME_LINE`, the constant §5
+    is quoted into, never retyped here (`test_the_terminus_text_is_not_a_retyped_
+    literal`).
+
+    THE AMBIGUITY WORD NAMES NO HOME, AND THAT IS THE REFUSAL CONTRACT TAKEN
+    SERIOUSLY RATHER THAN DROPPED. §5's rule is *"Refusals print facts + the
+    `fleet homes` view, never a paste-ready command with a chosen home"*. The
+    `fleet homes` view is multi-line and this surface is one line under the
+    operator's input box, refired after every assistant message -- so embedding
+    it is not available, and the honest one-line form of *"facts, and no chosen
+    home"* is the COUNT: it says how many homes claim this session and leaves
+    every one of them unnamed. Naming one would be choosing; naming all of them
+    would be a paragraph. The full view is one `fleet homes` away and every
+    verb-tier surface already embeds it.
+
+    TOLERANT OF A HAND-BUILT RECORD, like `fleet.resolution_provenance` and for
+    the same reason: unit tests hand it dicts, and a renderer that raised on a
+    missing key would be a view that fails."""
+    state = (decision or {}).get("state")
+    if state == HOME_NONE:
+        return _paint_terminus(fleet.NO_HOME_LINE, color)
+    if state == HOME_AMBIGUOUS:
+        hits = (decision or {}).get("hits")
+        count = hits if isinstance(hits, int) and hits > 1 else "?"
+        return _paint_terminus(f"{PREFIX}: home ambiguous ({count})", color)
+    return None
+
+
 # --- statusline chaining ---------------------------------------------------
 #
 # Claude Code allows exactly ONE `statusLine` command. An operator who already
@@ -356,8 +547,24 @@ def main() -> int:
         except (AttributeError, OSError, ValueError):
             pass
 
+        # §5, BEFORE ANY READ (multi-fleet slice d). ONE RENDER, ONE HOME: the
+        # chain file lives at `state/statusline-chain.json`, i.e. INSIDE a home,
+        # so resolving after the delegates ran would read the operator's
+        # delegate out of one home and the roster out of another. On a
+        # single-home machine this is a no-op by construction.
+        decision = resolve_blob_home(payload)
+        if decision["home"] is not None:
+            fleet.FLEET_HOME = decision["home"]
+
         # Delegates print above fleet's row. A delegate that fails, hangs, or
         # emits unprintable bytes is dropped -- it must never cost fleet's row.
+        #
+        # AND THE CONVERSE, ADDED WITH SLICE (d): fleet failing to resolve a
+        # home must never cost the DELEGATE its row. The delegate is the
+        # operator's own statusline, captured from the one machine-global
+        # `statusLine` entry Claude Code allows; it has nothing to do with which
+        # fleet home this session belongs to, so it runs on every path including
+        # the terminus.
         try:
             for row in _delegate_rows(payload):
                 if _stdout_can_encode(row):
@@ -366,8 +573,13 @@ def main() -> int:
             pass
 
         # Fleet's own row is pure ASCII, so no console encoding can reject it
-        # and there is no fallback renderer to get wrong.
-        print(render_statusline(fleet.status_snapshot(), color=_want_color()))
+        # and there is no fallback renderer to get wrong. At the terminus and at
+        # an ambiguity there is no home to read a roster from, so the word takes
+        # the row's place -- one line either way, exit 0 either way.
+        line = render_home_terminus(decision, color=_want_color())
+        if line is None:
+            line = render_statusline(fleet.status_snapshot(), color=_want_color())
+        print(line)
     except BaseException:  # noqa: BLE001 -- a statusline never surfaces a traceback
         return 0
     return 0
