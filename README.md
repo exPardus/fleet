@@ -110,7 +110,7 @@ fleet home                                 # must print the clone you just cd'd 
 fleet init                                 # writes <FLEET_HOME>\state\worker-settings.json
 
 # 3. Install the plugin (manager skill + /fleet:* commands; registers no hooks)
-claude plugin marketplace add C:\path\to\this\clone   # a DIRECTORY path, not a URL
+claude plugin marketplace add C:\path\to\this\clone   # the directory form -- the one verified here
 claude plugin install fleet@claude-fleet
 #    restart Claude Code, verify: claude plugin details fleet
 
@@ -122,15 +122,18 @@ fleet init --statusline
 fleet doctor
 ```
 
-> **Step 2's `fleet home` is not ceremony.** If another fleet clone is already on your PATH, a bare
-> `fleet init` configures *that* home, not the one you just cloned — the clone you are standing in
-> has nothing to do with it. `fleet home` is read-only and tells you which home every subsequent
-> command will act on. If it prints something other than your new clone, fix PATH before running
-> `fleet init`.
+> **Step 2's `fleet home` is not ceremony.** `fleet` acts on the home behind whichever `fleet` shim
+> your PATH resolves to; the clone you are standing in has nothing to do with it. **PATH order
+> decides** — step 1 prepends your new clone, so it wins for the rest of that shell; but in a later
+> shell where you have not re-run step 1, an older fleet clone can come first, and a bare
+> `fleet init` would configure *that* home. A leftover `FLEET_HOME` redirects it too, even when PATH
+> is perfect. `fleet home` is read-only and tells you which home every command will act on. If it
+> prints something other than your new clone, check PATH **and** check `FLEET_HOME` before running
+> `fleet init` — either one can point you at another home.
 
 Then open a Claude Code session and say *"become the fleet manager"* — or run **`/fleet:overview`**, which is a slash command and so triggers deterministically — and spawn your first worker.
 
-One thing this quickstart cannot do for you: the walkthrough is only executed as far as `fleet doctor` — nothing from `fleet spawn` onward is covered by a rehearsal receipt. Step 3's marketplace argument is a directory path to the clone; that is the form a known-working install on the maintainer's machine reports, not a form re-executed on a clean box. Both, with everything else that blocks a first use, are stated plainly in **[Launch readiness](docs/launch-readiness.md)**. The step-by-step version with real output is **[Getting started](docs/getting-started.md)**; collaborator/multi-machine setup and the `--statusline --chain` composition flag are in [`docs/SPEC.md`](docs/SPEC.md).
+Two things this quickstart cannot do for you. The walkthrough is only executed as far as `fleet doctor` — nothing from `fleet spawn` onward is covered by a rehearsal receipt. And step 3's marketplace argument, a directory path to the clone, is the form a known-working install on the maintainer's machine reports, not a form re-executed on a clean box. Both, with everything else that blocks a first use, are stated plainly in **[Launch readiness](docs/launch-readiness.md)**. The step-by-step version with real output is **[Getting started](docs/getting-started.md)**; collaborator/multi-machine setup and the `--statusline --chain` composition flag are in [`docs/SPEC.md`](docs/SPEC.md).
 
 ## CLI
 
@@ -151,7 +154,7 @@ One thing this quickstart cannot do for you: the walkthrough is only executed as
 | `fleet clean` / `archive` / `autoclean` | Tiered cleanup: remove dead workers, archive terminal ones, staleness sweep run by the supervisor's beat and the interface's startup ritual |
 | `fleet doctor [--repair]` | Run the 28 fleet health checks. Report-only unless `--repair` is passed, which quarantines a corrupt `state/fleet.json` by renaming it aside |
 | `fleet home` / `knowledge` | Print the resolved `FLEET_HOME`; print `knowledge/INDEX.md` |
-| `fleet homes` | List the machine's registered fleet homes. Read-only on its own; `--add` / `--retire` mutate the machine-wide homes list |
+| `fleet homes` | List the machine's registered fleet homes (`~/.claude/fleet-homes.list`). Read-only on its own; `--add` / `--retire` mutate that list, which is also what session-id home resolution searches — see [Getting started](docs/getting-started.md#install) |
 | `fleet index` / `q` | Opt-in per-project symbol index (`index init/build/update/status`) and the query verb over it |
 | `fleet sup-*` | Supervisor identity: `boot`, `spawn`, `checkpoint`, `heartbeat`, `release`, `status`, `context`, `decision`, `handoff-{begin,complete,abort}` |
 
