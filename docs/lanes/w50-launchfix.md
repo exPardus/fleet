@@ -1025,3 +1025,74 @@ The run happens in a **fresh checkout**, with the working-tree digest from
 `main:docs/lanes/BRIEF-TEMPLATE.md` — not `git write-tree` — printed before and after, `files=`
 included, and compared only against itself within that one checkout. Results land in the next
 commit.
+
+### 8.6.1 Floors — the result
+
+**MEASURED. The prediction is in commit `dc34f75`, which contains no results; this paragraph is in
+a later commit.** Run in a **fresh checkout** of `dc34f75`
+(`git clone -b w50/launchfix`, `git status --porcelain` empty at start and end):
+
+```
+py -3.13 -m pytest --collect-only -q   ->  4305 tests collected
+py -3.10 -m pytest --collect-only -q   ->  4305 tests collected
+
+py -3.13 -m pytest -q   ->  4290 passed, 14 skipped, 1 xfailed in 432.65s   rc=0
+py -3.10 -m pytest -q   ->  4290 passed, 14 skipped, 1 xfailed in 398.94s   rc=0
+```
+
+| predicted | 3.13 | 3.10 |
+|---|---|---|
+| 4305 collected | 4305 | 4305 |
+| 4290 passed | **4290** | **4290** |
+| 14 skipped | **14** | **14** |
+| 1 xfailed | **1** | **1** |
+| 0 failed | **0** | **0** |
+
+**Unchanged from the pre-discharge branch floor, exactly as predicted and for the stated reason:**
+the punch list added no tests, and M4 changed how `_tracked_markdown()` decodes rather than what it
+returns on a tree whose markdown paths are all ASCII. 4290 + 14 + 1 = 4305.
+
+*Counted honestly this time (m2): `4305 collected` was again derived before the prediction was
+written, so **four** of the five fields were genuinely at risk — passed, skipped, xfailed, failed.
+All four hit, on both interpreters.*
+
+**Working-tree digest** — the script from `main:docs/lanes/BRIEF-TEMPLATE.md`, **not**
+`git write-tree`, taken inside the one fresh checkout and compared only against itself, `files=`
+included:
+
+```
+d4-before  0424bae57c980c7058c2cc1282295568baae8421ae564a5cf7a48302e8499abb  files=242
+d4-mid     0424bae57c980c7058c2cc1282295568baae8421ae564a5cf7a48302e8499abb  files=242
+d4-after   0424bae57c980c7058c2cc1282295568baae8421ae564a5cf7a48302e8499abb  files=242
+```
+
+Identical at all three points, `files=` included. Both runs changed nothing.
+
+### 8.6.2 Acceptance — the gate's own greps, re-run at final HEAD
+
+```
+$ git grep -n '94 hits across 21 files' -- tests/
+tests/test_doc_claims.py:94:        DEFINITION ATTACHED -- this docstring shipped `94 hits across 21 files`
+
+$ git grep -n 'NEXT-SESSION' -- tests/
+tests/test_doc_claims.py:189:# `NEXT-SESSION.md` was named in that list until 2026-08-09 and is NOT an
+tests/test_doc_claims.py:462:    # `docs/NEXT-SESSION.md` was on this list beside it and is NOT current-tree
+
+$ python -c "import test_doc_claims as t; ..."
+  docs/NEXT-SESSION.md in CHECK_COUNT_DOCS: True
+  len(CHECK_COUNT_DOCS): 28
+  len(ENTRY_DOCS): 6
+
+$ git diff --name-only 168b608..HEAD
+CONTRIBUTING.md
+docs/lanes/w50-launchfix.md
+tests/test_doc_claims.py
+tests/test_rendered_command_quoting.py
+
+$ git diff 4a62e21..HEAD -- bin/fleet.py
+(no output)
+```
+
+**M1:** one hit, past tense, inside its own retraction. **M2:** two hits, both stating it is *not*
+exempt, agreeing with the code. **`bin/fleet.py` untouched across both discharges** — the Part-1
+fix the first gate cleared is still byte-identical.
