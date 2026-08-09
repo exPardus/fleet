@@ -8251,3 +8251,35 @@ Releasing rather than dying: a released claim reads unambiguously at the next bo
 ## 2026-08-09T15:26:31Z RELEASED inc=inc-20260809T094233Z-5e96 sid=3cb901f7-b361-466e-9488-7df4dde80e3d
 
 released cleanly: @C:/Users/Techn/.claude/jobs/3cb901f7/tmp/release.md
+
+## 2026-08-09T15:30:33Z BOOT inc=inc-20260809T153033Z-fad2 sid=6a615195-087f-457d-a698-396d0e05e450
+
+fresh claim: predecessor inc-20260809T094233Z-5e96 released cleanly -- fresh claim, no seizure
+
+## 2026-08-09T15:31:56Z CHECKPOINT inc=inc-20260809T153033Z-fad2 sid=6a615195-087f-457d-a698-396d0e05e450
+
+WAVE 52 BOOT — fresh claim, no seizure, and I inherit a successor queue my predecessor wrote in priority order.
+
+## BOOT
+
+`sup-boot` exit 0, `VERDICT: claim` — predecessor `inc-20260809T094233Z-5e96` released cleanly. No seizure, no transfer, no anomaly. Incarnation `inc-20260809T153033Z-fad2`. Class-4 nonce doctrine observed: output redirected to a file, VERDICT/INCARNATION/NONCE grepped from the file, the whole bundle read, **the bundle deleted and its absence verified** (`ls | grep -c boot-bundle` = 0). The nonce lives in working context only and reaches no file, including this one.
+
+Boot bundle read in full: GOALS, journal tail (5), knowledge index, native roster (159 entries, 5 live), fleet status (38 workers), `EPOCH: ok`.
+
+`FLEET_WORKER` witness (skill step 5): my registry name is `sup|inc-20260809T153011Z-fe52|boot` and that segment is a **launch id, not my incarnation** — `sup-status` reads `supervisor/INCARNATION`, which is `inc-20260809T153033Z-fad2`. The two differ by design and I am recording the distinction rather than reconciling it.
+
+## WHAT I INHERIT, AND WHAT I HAVE NOT YET VERIFIED
+
+My predecessor's closing checkpoint is the release record of account and I read it from the journal, not from `state/` — it says so itself, and the reason it says so is that its own predecessor pointed a release note at a gitignored path.
+
+The successor queue, in its order: (1) slice (d)'s three findings landed unfixed — a cap exemption applied to one of two sibling words, and a pin that passes under the very mutant it is cited as covering; (2) the liveness build — `_RETIRED_SID_SWEEP_CAP` has two call sites and `_cmd_respawn_native` is neither; (3) wave 50's four fork-steer MAJORs, filed against a tree that has since moved six landings; (4) the stranger-clone launch rehearsal, now that quickstart step 4 works; (5) `fleet init` stays unrun; (6) the pin stamp stays HELD at 2.1.222.
+
+**Every one of those is a claim I have inherited and not one is a claim I have measured.** The brief that dispatched me says so in its own last section, and my predecessor's most expensive correction this campaign was disbelieving a sentence it had just landed. I am recording the queue here as *received*, and nothing in it will be acted on before it is re-derived at HEAD.
+
+## THE OPERATOR IS AWAY
+
+Four gates open, all his, carried untouched across three waves. I will not tick one. I will not open a fifth unless genuinely forced — my predecessor twice could have and measured instead, which is the standard.
+
+## NEXT
+
+`fleet autoclean`, then re-derive the state of `main` before writing a single brief.
