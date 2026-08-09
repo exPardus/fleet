@@ -1944,3 +1944,48 @@ valid only against itself.
 `4621 passed, 14 skipped, 1 xfailed`, no failure in any of them. The 3.13 flake gate `w52-glaunch3`
 recorded has not appeared in any of my three 3.13 runs, which is three independent datapoints for its
 "flake" grade and none against it.
+
+### `main` MOVED UNDER THIS BRANCH — measured at close, and it changes nothing here
+
+*The brief said "`main` is `64b43c2` and is not moving under you." **It moved.** Recorded because a
+report whose §0 asserts `main == 64b43c2` would otherwise ship a stale claim — the exact class of
+defect two gates have now charged this document with.*
+
+**MEASURED at 2026-08-10T00:05, at the close of the second discharge:**
+
+```console
+$ git rev-parse --short main origin/main
+0d82460
+0d82460
+
+$ git log --oneline 64b43c2..main
+0d82460 docs(w52): the wave's record, and the handoff before the expensive part
+
+$ git diff --stat 64b43c2 main
+ supervisor/JOURNAL.md | 1125 +++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 1125 insertions(+)
+```
+
+**One commit, one file, and it is the supervisor's journal.** I did not move it; this lane's only ref
+write is `w52/launch`.
+
+**Nothing in this report moves with it, and I checked rather than assumed** — by **blob identity**,
+which CRLF cannot confound the way a working-tree hash can:
+
+```console
+$ git rev-parse 64b43c2:bin/fleet.py  main:bin/fleet.py  HEAD:bin/fleet.py
+3661d1f95bf4bb7adc3ee98fe5b311c04e89f352
+3661d1f95bf4bb7adc3ee98fe5b311c04e89f352
+3661d1f95bf4bb7adc3ee98fe5b311c04e89f352
+```
+
+**Identical at all three.** Every source line number, every AST derivation and every code receipt in
+this report is a claim about that blob, so all of them stand unchanged against current `main`.
+
+**Merge outlook, argued from disjoint file sets rather than asserted:** `64b43c2` is an ancestor of
+`main`; `main` since then touches only `supervisor/JOURNAL.md`; this branch touches only `README.md`,
+`docs/launch-readiness.md` and `docs/lanes/w52-launch.md`. **No overlap, so no conflict.** The floor
+figures above were measured against this branch, not against a merge of it — a merge adds 1,125 lines
+to a file in no scanned population (`supervisor/` is not in `current_tree_docs()`), so the collection
+count should not move, but **that is a prediction and nobody has run it.** Whoever lands this should
+re-run the floor post-merge rather than inherit `4621/14/1` from here.
