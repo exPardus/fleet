@@ -748,18 +748,18 @@ class TestRestoreMailboxClaim:
         mbox.mkdir(parents=True)
         (mbox / "sid-1.md").write_text("also check the logs", encoding="utf-8")
 
-        prompt, claim = fleet.compose_prompt("probe-1", "C:/x", "task text", "sid-1")
+        prompt, claim, _mail = fleet.compose_prompt("probe-1", "C:/x", "task text", "sid-1")
         assert "also check the logs" in prompt
 
         fleet.restore_mailbox_claim(claim)  # simulated failed launch
 
-        prompt2, claim2 = fleet.compose_prompt("probe-1", "C:/x", "task text", "sid-1")
+        prompt2, claim2, _mail2 = fleet.compose_prompt("probe-1", "C:/x", "task text", "sid-1")
         assert "also check the logs" in prompt2
 
 
 class TestComposePrompt:
     def test_preamble_mentions_name_cwd_and_rules(self, isolated_home):
-        prompt, claim = fleet.compose_prompt("probe-1", r"C:\proga\polymarket", "do the thing", "sid-1")
+        prompt, claim, _mail = fleet.compose_prompt("probe-1", r"C:\proga\polymarket", "do the thing", "sid-1")
         assert claim is None
         assert "probe-1" in prompt
         assert r"C:\proga\polymarket" in prompt
@@ -768,7 +768,7 @@ class TestComposePrompt:
         assert "do the thing" in prompt
 
     def test_empty_mailbox_is_noop(self, isolated_home):
-        prompt, claim = fleet.compose_prompt("probe-1", "C:/x", "task text", "sid-1")
+        prompt, claim, _mail = fleet.compose_prompt("probe-1", "C:/x", "task text", "sid-1")
         # The preamble explains the <MANAGER MESSAGE> convention (in backticks);
         # what must NOT appear is an actual injected mail block.
         assert "<MANAGER MESSAGE>\n" not in prompt
@@ -778,7 +778,7 @@ class TestComposePrompt:
         mbox = fleet.mailbox_dir()
         mbox.mkdir(parents=True)
         (mbox / "sid-1.md").write_text("also check the logs", encoding="utf-8")
-        prompt, claim = fleet.compose_prompt("probe-1", "C:/x", "task text", "sid-1")
+        prompt, claim, _mail = fleet.compose_prompt("probe-1", "C:/x", "task text", "sid-1")
         assert "<MANAGER MESSAGE>\n" in prompt
         assert "also check the logs" in prompt
         assert not (mbox / "sid-1.md").exists()  # claimed, not left in place
@@ -788,12 +788,12 @@ class TestComposePrompt:
     def test_journal_contents_included_when_respawning(self, isolated_home, tmp_path):
         journal = tmp_path / "probe-1.md"
         journal.write_text("## goal\ndo the thing\n## done\nstep 1", encoding="utf-8")
-        prompt, claim = fleet.compose_prompt("probe-1", "C:/x", "task text", "sid-1", journal_path=journal)
+        prompt, claim, _mail = fleet.compose_prompt("probe-1", "C:/x", "task text", "sid-1", journal_path=journal)
         assert "do the thing" in prompt
         assert "step 1" in prompt
 
     def test_no_journal_path_means_no_journal_section(self, isolated_home):
-        prompt, claim = fleet.compose_prompt("probe-1", "C:/x", "task text", "sid-1")
+        prompt, claim, _mail = fleet.compose_prompt("probe-1", "C:/x", "task text", "sid-1")
         assert "## Journal" not in prompt
 
     def test_empty_task_emits_no_blank_task_section(self, isolated_home):
@@ -804,7 +804,7 @@ class TestComposePrompt:
         mbox = fleet.mailbox_dir()
         mbox.mkdir(parents=True)
         (mbox / "sid-1.md").write_text("do the thing", encoding="utf-8")
-        prompt, claim = fleet.compose_prompt("probe-1", "C:/x", "", "sid-1")
+        prompt, claim, _mail = fleet.compose_prompt("probe-1", "C:/x", "", "sid-1")
         assert "do the thing" in prompt  # the mail still comes through
         assert not prompt.endswith("\n\n")  # no trailing blank task section
         assert "\n\n\n" not in prompt
@@ -812,7 +812,7 @@ class TestComposePrompt:
     def test_journal_with_invalid_utf8_bytes_does_not_raise(self, isolated_home, tmp_path):
         journal = tmp_path / "probe-1.md"
         journal.write_bytes(b"## goal\ndo the thing \xff\xfe invalid bytes\n")
-        prompt, claim = fleet.compose_prompt("probe-1", "C:/x", "task text", "sid-1", journal_path=journal)
+        prompt, claim, _mail = fleet.compose_prompt("probe-1", "C:/x", "task text", "sid-1", journal_path=journal)
         assert "do the thing" in prompt
 
 
