@@ -81,13 +81,44 @@ becomes usable on that home by initialising it. That is why the stanza above spl
 instead of naming one idiom: the flag for homes that already exist, the env-plus-sid-removal for
 homes that do not, and `fleet home` as the gate in both.
 
-**Do not read a clean containment audit as proof the fence worked.** Wave 48's audit came back
-clean for the wrong reason: `~/.claude/fleet-homes.list` did not exist, so the lookup population
-was empty and the live home was never a candidate — while the lane's own sid *was* in the live
-registry. One `fleet homes --add` and that protection is gone. Ask a lane to explain *why* it was
-contained, not merely to assert that it was.
+**Do not read a clean containment audit as proof the fence worked.** Ask a lane to explain *why* it
+was contained, not merely to assert that it was.
+
+**And the reason this file gave for that rule was itself wrong — corrected 2026-08-09 (wave 51).**
+It said wave 48's audit came back clean because `~/.claude/fleet-homes.list` did not exist, *"so the
+lookup population was empty and the live home was never a candidate."* **The population is never
+empty.** Measured by lane `w51-initprep` and confirmed in the shipped code:
+
+```
+# at 7b2ff75
+grep -n "list(listed\[.members.\]) + \[legacy\]" bin/fleet.py
+  4621:    for ident in list(listed["members"]) + [legacy]:
+```
+
+`resolution_population()` appends the legacy install-root home **unconditionally** — §8's completion
+is what removes that term, and §8 is an open operator decision. With an absent list the population is
+still `['C:/proga/claude-fleet']`, and the lane drove the discriminator both ways: **sid present +
+list absent → the live home; sid removed → the temp path.** So the fence fails today for every
+fleet-launched lane, list or no list.
+
+**The remedy above is unchanged and still correct.** Only the reason was false — and a false reason
+in a doctrine file is worse than none, because this stanza's entire purpose is teaching a lane to ask
+*why*, and it pointed at the wrong why. Note also what this is: **a correction of a correction.** The
+wave-48 paragraph was itself a fix, and it shipped a wrong mechanism attached to a correct
+measurement — the shape wave 50 found four times. Assume this paragraph has one too.
 
 ## For a gate lane
+
+**Ask whether the repair was applied EVERYWHERE the repaired claim appears** — not whether it is
+correct where it was applied. A discharge that fixes a finding at the site the gate quoted, and
+leaves the same claim standing elsewhere in the same file, passes every question a gate normally
+asks. Measured 2026-08-09 by gate `w51-glaunch2` against the launch-blocker discharge: a retracted
+census number still shipped **328 lines below the paragraph retracting it**, and a file named EXEMPT
+at two sites was moved into the held population by a third site **in the same commit**. Both had been
+"discharged"; both greps take one second. **That gate's five questions were all answered soundly and
+its largest finding was in a sixth nobody asked.** For every claim a discharge retracts or restates,
+grep the whole tree for the *old* claim before grading it — not the changed lines, not the diff, the
+tree. A repair verified only where it was applied is a repair verified nowhere.
 
 A gate works in a detached worktree that never merges, so its verdict has no merge of its own to
 ride. Order it onto **the branch under gate**:
@@ -171,3 +202,26 @@ grep -cE '^\+?<<<<<<<'
 The rule that produced the control in the first place still stands and is unaffected: **run any
 measurement whose good answer is 0 against a known non-zero input first.** This amendment is about
 making the non-zero input's number trustworthy too.
+
+**A control value is a receipt, so PIN IT — and the `25` above did not, when it shipped.** *(Added
+2026-08-09, wave 51.)* The paragraph above stated 25 without naming the commit it was measured at,
+while **the value is a function of `main`, which moves every wave.** That is a receipt with no pin —
+the same defect this file diagnoses two paragraphs earlier, and precisely what CLAUDE.md's receipt
+rule exists to prevent. Caught by gate `w51-glaunch2`, against the supervisor that quoted the bare
+number in four briefs the same day.
+
+It is not academic: two measurements of *the same named pair* on 2026-08-09 disagree. The supervisor
+measured, and enumerated all 25 hits as genuine `+<<<<<<< .our` lines —
+
+```
+# at 7b2ff75
+git merge-tree $(git merge-base main w35/nd4c) main w35/nd4c | grep -cE '^\+?<<<<<<<'
+  25
+```
+
+— while gate `w51-glaunch2`, same day and same declared pair, reports **anchored 26 / unanchored 31**
+with five prose markers across three files. Neither reconciled the two, which means **they did not
+run the same measurement.** That is the lesson, not the digit. **Quote the command, the commit, and
+the number together, or quote none of them** — and use whatever your own run produces at your own
+base, writing down which. Both 25 and 26 discharge the duty the control exists for, which is to be
+non-vacuous.
