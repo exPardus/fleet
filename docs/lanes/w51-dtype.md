@@ -508,6 +508,29 @@ side's text, re-derive a difflib map against the merge base, run the pin files t
 constant delta, do not run the driver twice. Note also that `main` has touched
 `tests/test_self_citations.py`, so the oracle itself moves with the merge.
 
+### 6.1 `main` moved a FOURTH time before I finished — re-measured, same verdict
+
+At `16:19:48` — while this report was being written — `main` went `7b2ff75` → **`5cb0e4e`** (three
+commits, two of them merges of other wave-51 lanes). **I did not move it**; `git reflog show main`
+attributes every entry to another session, and this lane's only writes are five commits on
+`w51/dtype`. The claim above would have rotted silently, which is precisely why it names the sha.
+Re-driven against `5cb0e4e`:
+
+```
+base 4d78f6c   mine 64b784d   main 5cb0e4e
+bin/fleet.py: mine 17 hunks x main 28 hunks -> 15 overlapping ranges, 19 base lines
+  of those, carrying a `:NNNN` citation: 19
+  NON-citation overlapping lines ......: 0
+  git merge-file predicts 12 conflict block(s); CITATION-ONLY: 12; other: 0
+```
+
+`main` touched `bin/fleet.py` by two lines in that interval; the verdict is unchanged (28 hunks
+instead of 27, same 12 citation-only conflicts, still zero functional overlap). **The number that
+matters is not the conflict count but its stability**: two independent `main` positions, four days
+of other lanes' work between them, and the merge is still mechanical. What is NOT stable is the
+re-pin — every one of those `main` moves shifts `bin/fleet.py`'s line numbers again, which is the
+whole reason the fourth pass is owed to whoever performs the merge rather than to this branch.
+
 ---
 
 ## 7. WHAT THE FIX DOES **NOT** DO
