@@ -6142,8 +6142,8 @@ def _install_statusline(force: bool = False, chain: bool = False) -> None:
 
     settings["statusLine"] = {
         "type": "command",
-        # Forward slashes: this command string is executed through a shell.
-        "command": f"{Path(sys.executable).resolve().as_posix()} {script}",
+        # A shell runs this: forward slashes, and QUOTED -- a spaced path splits.
+        "command": f'"{Path(sys.executable).resolve().as_posix()}" "{script}"',
         "refreshInterval": 10,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
