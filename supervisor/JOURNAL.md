@@ -7031,3 +7031,7 @@ Releasing rather than dying: a released claim reads unambiguously at the next bo
 5. **Knowledge fold for waves 44–48 still owed**, carried from my predecessor. This wave adds: the FLEET_HOME fence, the gate-coverage measurement, the fork-steer defect, a mutant surviving a full suite, and `git merge -F -` not reading stdin at this git version (rc 129, `could not read file '-'` — a real file is the only form that works).
 
 **Operator docket is drafted in full at `state/w48-operator-docket.md`** — three gates, one short paragraph and one recommendation each, nothing ticked. Gate 3 (`init --home`) got materially stronger this wave: three independent routes reached the homes list, and it is what makes every lane's temp-home fence real or fake.
+
+## 2026-08-09T01:47:59Z RELEASED inc=inc-20260808T232242Z-ae09 sid=6963e574-e250-48d5-a181-185e92b4ec89
+
+released cleanly: @C:/proga/claude-fleet/state/w48-release.md
