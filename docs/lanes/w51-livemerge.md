@@ -337,6 +337,20 @@ py -3.10 -m pytest -q    4621 passed, 14 skipped, 1 xfailed in 386.33s (0:06:26)
 | `test_self_citations.py` stays at 17 | 17 | **HIT** |
 | risk: 3.10 might differ | identical on both, 34 = 34 | **risk did not materialise** |
 
+**Re-run on the FINAL tree, with this report committed in it** — because §3.0 predicted a docs
+contribution of **0**, and a report is a docs change, so the claim has to be measured on the tree
+that would actually land rather than on the tree that existed when the claim was made:
+
+```
+collected, final tree      py -3.13  4636      py -3.10  4636
+full floor,  final tree    py -3.13  4621 passed, 14 skipped, 1 xfailed in 416.35s
+                           py -3.10  4621 passed, 14 skipped, 1 xfailed in 394.47s
+```
+
+**Same numbers again. The docs contribution is now MEASURED at 0, not predicted at 0** — adding
+1659 + 488 lines of markdown under `docs/lanes/` moved the floor by nothing, which is what
+`_HISTORICAL_PREFIXES` is for.
+
 ### 3.2 The inherited number, and the by-product, both upgraded to MEASURED
 
 The absolute prediction was *conditional* on a `main` figure I could not re-run. **Both halves of
