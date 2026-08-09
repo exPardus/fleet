@@ -17,8 +17,8 @@ Every line is tagged **MEASURED** (I ran it in this lane and read the output) or
 >
 > **My headline was wrong and the gate was right.** Revision 1 led with *"the predecessor's
 > measurement does not reproduce"*. It reproduces. The gate found one counter-example; I
-> re-measured with a method that can actually see the shape and found **three at once, one of
-> them a session that was executing a turn at the time.**
+> re-measured with a method that can actually see the shape and found **four at once — including
+> one fleet worker running two live processes under one name at the same instant.**
 >
 > **The error was not a miscount — it was an inference from a single snapshot**, and §3 now
 > carries it as the lane's own methodology lesson rather than as a footnote.
@@ -32,11 +32,26 @@ Every line is tagged **MEASURED** (I ran it in this lane and read the output) or
 
 ## 0. HEADLINE
 
-**MEASURED [REV2] — the roster's `state` field can be wrong about a session that is actively
-working, and that is the sharpest form of this lane's whole thesis.** A detached sampler (29
-samples, 20s apart, ~10 minutes, run from a process outside every session it observed) found
-**three sids simultaneously** carrying `state:"done"` **with** `pid` and `status:"idle"` — and one
-of them was **this lane's own session, mid-turn, for all 29 samples**, pid verified alive.
+**MEASURED [REV2] — `state:"done"` co-occurs with a LIVE host process routinely on win32, and the
+clearest instance is a fleet worker that has two live processes at once.** A detached sampler (70
+samples, 20s apart, ~24 minutes, run from a process outside every session it observed) found up to
+**four sids simultaneously** carrying `state:"done"` **with** `pid` and `status:"idle"`, every pid
+verified alive. One of them is **this lane's own retired session**:
+
+```
+FLEET WORKERS WITH >1 LIVE-KEYED ROSTER ENTRY   (sample 70, 2026-08-09T06:28:10Z)
+  worker 'w50-live':
+      ('b9b2124d', 'done',    'idle', 4436)     <- retired body, process STILL ALIVE
+      ('9d9509b2', 'working', 'busy', 20960)    <- current body
+  total: 1        CONTROL: 10 workers with exactly one keyed entry (grouping works)
+  pid 4436 alive=True   pid 20960 alive=True   pid 999999 alive=False (control)
+```
+
+**That is "two live sessions under one name" — the state `respawn`'s refusal exists to prevent —
+existing right now as an ordinary consequence of re-dispatch.** And `_roster_live_sids` cannot see
+the older half: the `done` clause excludes `b9b2124d`, so `_cmd_respawn_supervisor._any_live`,
+whose own comment says it gates on the sid union *"since ANY live session of this record breaks
+the invariant"*, is blind to a live session of that record.
 
 **So the predecessor was right and my refutation was wrong.** *"On Windows the two conditions
 agree — done entries lose pid/status"* is false on win32, in the direction originally claimed.
@@ -56,9 +71,9 @@ right now.** The roster carries **three different facts in three different field
 
 | roster field | the fact it states | evidence |
 |---|---|---|
-| `pid` / `status` **key presence** | **a host process exists** | **MEASURED: 8/8 keyed entries back a live OS process** at t0, and the gate independently measured 9/9 later (`tasklist` per pid, control limbs both passing). The converse (keyless ⇒ gone) is **BELIEVED**, not measured: a keyless entry carries no pid to check. **This is the only one of the three fields never measured wrong.** |
-| `status` **value** (`busy`/`idle`/`waiting`) | *intended:* the current turn | **[REV2] MEASURED WRONG.** Read `idle` for 29/29 samples on a session that was executing a turn throughout. |
-| `state` (`working`/`done`/`stopped`/`failed`/`blocked`) | *intended:* how the last RUN ended | **[REV2] MEASURED WRONG in the same window** — read `done` for the same executing session. It also outlives the process (129 of 137 entries carry a `state` and no process keys), so it is not a process fact either. |
+| `pid` / `status` **key presence** | **a host process exists** | **MEASURED: 8/8 keyed entries back a live OS process** at t0; the gate independently measured 9/9; the REV2 sampler re-confirmed every keyed pid alive across 70 samples (`tasklist` per pid, control limbs passing). The converse (keyless ⇒ gone) is **BELIEVED**, not measured: a keyless entry carries no pid to check. |
+| `status` **value** (`busy`/`idle`/`waiting`) | **the current turn of THAT SID** | MEASURED and **accurate wherever I could check it** — including on both halves of the two-process worker above. It is not a fact about the *worker*: a worker can have an `idle` sid and a `busy` sid at the same instant. |
+| `state` (`working`/`done`/`stopped`/`failed`/`blocked`) | **how that sid's last RUN ended** | MEASURED: **outlives the process in both directions.** It persists after the process is gone (129 of 137 entries carry a `state` and no process keys) **and** it says `done` while the process is still alive (4 concurrent instances). Never a process fact. |
 
 `_roster_live_sids` asks a *process* question (`is a body running?`) and answers it with key
 presence **plus a `state` clause** — a run-fact. `recompute_worker_native` asks a *turn* question
@@ -71,13 +86,14 @@ That entry is worth pausing on, because it is the whole finding in one row: the 
 alive (so reader A is right), its turn **is** over (so reader B is right), and its last run ended
 `blocked` (so the field reader A consults is talking about neither).
 
-**[REV2] And the `done`-with-keys entries are the same finding, one notch worse.** There, `state`
-is not merely talking about something else — it is *wrong about the thing it names*. On such an
-entry `_roster_live_sids` returns **not-live for a live, working process**, so `fleet respawn`
-does not refuse and proceeds to stop it. That is the **false-DEAD** direction, which §2.2 shows
-is the unrecoverable one at 9 of 11 sites. Driven, not argued:
-`TestTheShapeABusySessionActuallyPresents`, three tests including the control that shows the
-identical call *does* refuse once the same entry reads `working`/`busy`.
+**[REV2] And the `done`-with-keys entries are the same finding, one notch worse.** `state` there
+is accurate about the *run* — that run really did finish — and the process it belongs to is still
+alive. So `_roster_live_sids` returns **not-live for a live process**, and every caller that asks
+it "is a body running" gets a false **DEAD** — the direction §2.2 shows is unrecoverable at 9 of
+11 sites. Driven, not argued: `TestTheShapeALingeringFinishedSessionPresents`, three tests
+including the control that shows the identical call *does* refuse once the same entry reads
+`working`/`busy`. **Two string fields are the difference between refusing and stopping a live
+process.**
 
 **THE RULING (§5): one canonical *verdict* cannot serve every reader; one canonical tri-state
 *value* can, and should.** The split is **CORRECT rather than merely current** — three genuinely
@@ -188,7 +204,7 @@ confirmed with the number corrected upward rather than down.
 **MEASURED asymmetry — and it is NOT uniform, which is the more useful finding.** [REV2] For
 **eight** of the nine non-display sites a false *dead* is unrecoverable and a false *alive* is a
 recoverable refusal. **Site 10 (`_wedged_release_gate`) is the exception and it runs the other
-way**: its false-*alive* cost, in the table below, is *"every mutating verb refused fleet-wide"* —
+way**: its false-*alive* cost, row 10 of the census above, is *"every mutating verb refused fleet-wide"* —
 which §6.3 calls an outage, not a recoverable refusal. Revision 1 stated the asymmetry over all
 nine here while retracting it in §7 and carving site 10 out in §6.3; the gate (F2) found the
 retraction recorded in one section and contradicted in three others. The carve-out is now stated
@@ -204,10 +220,14 @@ I checked all 11 rather than generalising from the first two:
 | display / report only | 8, 11 | a wrong count in a bundle; a `True` row with a caveat (`:18551`) |
 
 **That table is the ruling in miniature.** Three different UNKNOWN policies across sites reading
-one fact — and each is right for its own site. `_roster_live_sids` is already the conservative
-process-existence predicate and **it is the one reader in this census behaving correctly**; what is
-missing is that UNKNOWN never reaches it as a value, so the policy lives in eleven places instead
-of one.
+one fact — and each is right for its own site. What is missing is that UNKNOWN never reaches those
+sites *as a value*, so the policy lives in eleven places instead of one.
+
+**[REV2] Revision 1 added here that `_roster_live_sids` is "the one reader in this census behaving
+correctly". Withdrawn.** It is the best-behaved reader about *ambiguity* — it never guesses when
+the roster is unreadable, because it never sees that case. It is not correct about *liveness*: F1
+measured it returning not-live for live processes, four at once. **Those are different virtues,
+and revision 1 credited it with the second for demonstrating the first.**
 
 ### 2.3 The other readers — and the two the brief did not name
 
@@ -232,6 +252,24 @@ too. **The real figure is ~94%, and my own test always asserted the wider proper
 "stopped", "blocked")`. The prose narrowed what the test proved (gate F9). Both readers are still
 right: one asks *"did this ever attach"*, the other *"is it running now"*. Nothing in the tree
 says so.
+
+### 2.4 `heartbeat_at` — the brief's error #3, MEASURED TRUE
+
+**8 write sites, 6 read sites.** Every writer is inside `cmd_sup_boot`, `cmd_sup_checkpoint`,
+`cmd_sup_heartbeat`, `cmd_sup_handoff_complete`, `_cmd_sup_handoff_retire_all`, or
+`cmd_sup_handoff_abort` — all bound to `sup-*` CLI verbs at `:21406–:21427`. No hook writes it
+(`grep -rn heartbeat bin/hooks/` → 0 hits). **The interface tier's diagnosis of its own incident
+was correct.**
+
+> **My own census had a hole, and the control is what found it.** The first version counted
+> `ast.Subscript` stores only and reported **5** writers. A dict *literal* — `{"heartbeat_at":
+> now_iso()}` — is an `ast.Dict`, not a `Subscript`. Three writers were invisible. The reconciling
+> control (every textual occurrence must classify as a node, a comment, or a string interior)
+> is what surfaced it, and it is now `TestTheCensus::test_the_heartbeat_census_has_no_hole`.
+> A census with a hole reports a *smaller* number confidently, which is wave 35's mutant survival
+> in miniature.
+
+---
 
 ### 2.5 [REV2] `_record_is_live` — the reader the gate found, and why it changes the build
 
@@ -273,24 +311,6 @@ fleet *homes*). That the sweep produces false positives, and that `_dispatch_gra
 genuine reader carrying none of the tokens, is exactly why a name sweep **cannot** be the closure
 argument, and the test says so in its own docstring.
 
-### 2.4 `heartbeat_at` — the brief's error #3, MEASURED TRUE
-
-**8 write sites, 6 read sites.** Every writer is inside `cmd_sup_boot`, `cmd_sup_checkpoint`,
-`cmd_sup_heartbeat`, `cmd_sup_handoff_complete`, `_cmd_sup_handoff_retire_all`, or
-`cmd_sup_handoff_abort` — all bound to `sup-*` CLI verbs at `:21406–:21427`. No hook writes it
-(`grep -rn heartbeat bin/hooks/` → 0 hits). **The interface tier's diagnosis of its own incident
-was correct.**
-
-> **My own census had a hole, and the control is what found it.** The first version counted
-> `ast.Subscript` stores only and reported **5** writers. A dict *literal* — `{"heartbeat_at":
-> now_iso()}` — is an `ast.Dict`, not a `Subscript`. Three writers were invisible. The reconciling
-> control (every textual occurrence must classify as a node, a comment, or a string interior)
-> is what surfaced it, and it is now `TestTheCensus::test_the_heartbeat_census_has_no_hole`.
-> A census with a hole reports a *smaller* number confidently, which is wave 35's mutant survival
-> in miniature.
-
----
-
 ## 3. THE WINDOWS PARENTHETICAL — **[REV2] rewritten; revision 1 was wrong here**
 
 ```
@@ -313,52 +333,61 @@ claude session, polling `claude agents --json --all` every 20s. Every session in
 therefore external to the observer, and the run spans minutes rather than an instant.
 
 ```
-samples: 29  from 2026-08-09T06:04:33Z to 2026-08-09T06:14:xxZ   roster: 141 entries
+samples: 70  from 2026-08-09T06:04:33Z to 2026-08-09T06:28:10Z   roster: 141 -> 145 entries
 
 CONTROL positive limb: 2 (expect 2) PASS      <- shaped synthetic, done-with-keys
 CONTROL negative limb: 0 (expect 0) PASS      <- same roster with the done entries removed
 
-Q-A  distinct sids observed as state='done' WITH pid/status keys: 3
-       93f5c952  seen in 29/29 samples, status='idle' pid=41464
-       b9b2124d  seen in 29/29 samples, status='idle' pid=4436
-       2d3724ff  seen in 29/29 samples, status='idle' pid=38740
+done+keys in the final sample: 4
+   5bd99e65 pid 41176  fleet|w50-launchfix|...
+   93f5c952 pid 41464  fleet|w50-fs2|...
+   b9b2124d pid 4436   fleet|w50-live|# w50 lane -- three readers...   <- THIS LANE, turn 1
+   2d3724ff pid 38740  fleet|w50-glive|...
 
-Q-C  the OBSERVING session's own entry (b9b2124d), every sample:
-       state=done  status=idle  pid=4436   samples 1-29 (29x)
-       pid 4436 alive now: True   (control: bogus pid alive = False, expect False)
+FLEET WORKERS WITH >1 LIVE-KEYED ROSTER ENTRY:
+  worker 'w50-live':  ('b9b2124d','done','idle',4436)  ('9d9509b2','working','busy',20960)
+  CONTROL: 10 workers with exactly one keyed entry (so the grouping discriminates)
+  pid 4436 alive=True    pid 20960 alive=True    pid 999999 alive=False (control)
 ```
-
-**`b9b2124d` is this lane's own session, and it was executing a turn for the entire window** —
-the sampler was launched from inside that turn and every one of these tool calls ran during it.
 
 The run also carries a **licensing control the first measurement lacked** (Q-B): it reports
 whether any session was observed in more than one phase, because without a phase transition
-somewhere in the window, a zero in Q-A would again be indistinguishable from "nothing finished
-while I watched". **Q-B reported 0 transitions in this window.** Q-A is non-zero so nothing here
-rests on it — but it is now impossible to report a zero from this harness without the reader
-being told the window was uninformative.
+somewhere in the window, a zero would again be indistinguishable from "nothing finished while I
+watched". The hit count is non-zero so nothing here rests on it — but it is now impossible to
+report a zero from this harness without the reader being told whether the window was informative.
 
 ### §3.1 — [REV2] The predecessor's measurement REPRODUCES. Mine was the wrong one.
 
-MEASURED: three concurrent counter-examples, each stable across 29 consecutive samples. The
-forward direction — *`done` ⇒ no keys* — is **FALSE on win32**, exactly as
-`_roster_live_sids`'s docstring records from macOS on 2026-07-19. Revision 1's §3.1 asserted the
-opposite and five further sections descended from it.
+MEASURED: **four concurrent counter-examples**, stable across the run, every pid alive. The
+forward direction — *`done` ⇒ no keys* — is **FALSE on win32**, and the mechanism is exactly the
+one `_roster_live_sids`'s docstring already records from macOS on 2026-07-19: *"a finished bg
+session's host process can LINGER after its turn ends — the entry keeps `pid` AND `status`
+(\"idle\") with `state:\"done\"`."* **The docstring's finding is right, its parenthetical is
+wrong, and they sit five lines apart.** Revision 1's §3.1 asserted the opposite and five further
+sections descended from it.
 
-**One thing measured here goes past both the predecessor's claim and the gate's**, and it is the
-finding I would keep if I could keep only one: the entry was not a *lingering finished* session.
-It was **mid-turn**. `state` said `done` and `status` said `idle` about a session that was
-actively working. So the parenthetical is not just stale — the field it describes is not
-reliably reporting what its own name says even for live sessions.
+> **[REV2b] A SECOND CORRECTION, mine, made before publishing and worth more than the first.**
+> My first REV2 draft claimed the `b9b2124d` entry was *"this lane's own session, mid-turn"* —
+> that the roster was mislabelling a **working** session. **That was wrong.** Checking
+> `CLAUDE_CODE_SESSION_ID` showed my current sid is `9d9509b2` (pid 20960), reading `working`/
+> `busy` **correctly**; `b9b2124d` (pid 4436) is my **retired** sid from turn 1, whose run really
+> had finished. *The roster was right and I had mis-identified myself.*
+>
+> I nearly shipped it because it was the more dramatic reading and it fitted the thesis. The
+> thing that caught it was noticing a session id change in an unrelated tool-output path — not
+> any control I had designed. **Recording it because §7.8's pattern is exactly this, and a
+> lane that only discloses the errors its own harness catches is not disclosing the dangerous
+> ones.**
+>
+> The corrected finding is stronger anyway: it needs no speculation about vendor internals, it
+> matches a mechanism already documented in the file, and it produces a live instance of the
+> two-live-sessions-under-one-name state that respawn exists to prevent.
 
-**Mechanism: BELIEVED, not measured.** The likeliest account is that `state` flips to `done` at
-turn end and is *not* flipped back when a subsequent turn begins in the same session — the three
-affected sids are all sessions on a later turn, while the sessions still on their first
-dispatched turn read `working`/`busy`. I could not confirm it: observing my own turn boundary
-from inside is impossible, and the fence forbids driving another lane to produce one. **The
-discriminating experiment for a successor** is to dispatch a throwaway `--bg` session in a
-scratch home, let its first turn end, steer it a second turn, and sample the roster across that
-boundary from outside.
+**Mechanism: MEASURED, not inferred** (this is what changed between REV2 drafts). The `done`
+entry is a genuinely finished run whose **host process outlived it**, and the worker's *next*
+dispatch runs as a different sid in a different process. Both processes are alive; the roster
+reports each accurately about itself. No claim is made here about *why* the parent lingers —
+that is the vendor's business, and it is the same behaviour the 2026-07-19 macOS note records.
 
 **What does NOT follow.** The brief's causal claim — that this parenthetical explains
 disagreements 1 and 2 — remains **unestablished**, and §3.4 measures against it. Two defects,
@@ -416,15 +445,17 @@ a *causal* inference, and it remains falsified even though its *premise* has now
 Revision 1's proposed wording would have shipped *"this clause is currently inert here"* into
 `bin/fleet.py` — a false statement, in the file, one line above the predicate. Replacement:
 
-> *(This is FALSE ON WIN32 in both directions, measured 2026-08-09 on claude 2.1.226 — do not
-> restore it. Forward: three sessions were observed simultaneously carrying `state:"done"` WITH
-> `pid` and `status:"idle"`, sampled every 20s for ten minutes from outside; all three processes
-> were alive, and one was executing a turn at the time. So the clause is LOAD-BEARING here, not
-> inert: it is what makes `_roster_live_sids` answer "not live" for those entries, which is the
-> conservative answer for a lingering finished session and the WRONG one for a working session
-> the roster has mislabelled. Reverse: `stopped`/`failed`/`blocked` entries are keyless too, so
-> "not `done`" does not mean "live" — `_roster_entry_has_life_signal` answers the opposite way on
-> exactly those. Neither field is a process fact; only key presence is.)*
+> *(FALSE ON WIN32 IN BOTH DIRECTIONS, measured 2026-08-09 on claude 2.1.226 — do not restore it.
+> Forward: four sessions were observed simultaneously carrying `state:"done"` WITH `pid` and
+> `status:"idle"`, sampled every 20s for 24 minutes from outside every session observed; every
+> pid was alive. This is the same lingering-host-process behaviour the posix note above records,
+> and it is not posix-only. One worker held TWO live roster entries at once — a `done` retired sid
+> and a `working` current sid, two live pids — which is the state `respawn` refuses to create.
+> The clause is therefore LOAD-BEARING here, and its cost is that
+> `_cmd_respawn_supervisor._any_live` cannot see the live retired body it intersects the sid union
+> to find. Reverse: `stopped`/`failed`/`blocked` entries are keyless too, so "not `done`" does not
+> mean "live" — `_roster_entry_has_life_signal` answers the opposite way on those. Neither `state`
+> nor `status` is a process fact; only key presence is.)*
 
 **§3.6 — [REV2] The lesson, which is new and is the lane's own.** Wave 38 says *run the control
 against a known non-zero input before trusting a zero.* I did, and it passed, and I was still
@@ -438,7 +469,7 @@ rather than reporting a bare zero.
 
 ## 4. THE THREE DISAGREEMENTS, REPRODUCED (deliverable B)
 
-`tests/test_liveness_readers.py` — **[REV2] 31 tests** (was 20), green on `py -3.13` and
+`tests/test_liveness_readers.py` — **[REV2] 32 tests** (was 20), green on `py -3.13` and
 `py -3.10`. Roster literals carry **shapes** measured from the live roster; **they are not
 verbatim entries** — `LIVE_SHAPE` in particular splices this lane's own `sessionId` onto another
 entry's `state`/`status`/`pid`/`name`, and revision 1 called it verbatim in two places (gate F10).
@@ -450,16 +481,17 @@ green run is the receipt that the disagreement exists — not that it is fixed.
 
 **[REV2] `INVERT-ON-BUILD`, reconciled (gate F7).** Revision 1 said *five* in §4, *seven* in §6.1
 and *five* in §6.4, and told the reader to check with `grep -c`, which returns a fourth number
-because the module docstring mentions the marker too. **The count of marked TESTS is now 7**
-(five carried over, plus the two added in REV2), and the check that returns it is:
+because the module docstring mentions the marker too. **The count of marked TESTS is 8**, and the
+check that returns it is:
 
 ```
-grep -c "INVERT-ON-BUILD" tests/test_liveness_readers.py    # 8 = 7 markers + 1 docstring
+grep -c "INVERT-ON-BUILD" tests/test_liveness_readers.py    # 9 = 8 markers + 1 docstring
 ```
 
-The report states **7 marked tests** and nothing else states a different number. Where the number
-matters — §6.4 M7 — it now says "every test marked `INVERT-ON-BUILD`", so a successor counts them
-rather than trusting an integer that can rot.
+No other section states a number. Where it would have mattered — §6.4 M7 — the text now says
+"every test marked `INVERT-ON-BUILD`", so a successor counts them rather than trusting an integer
+that rots the moment a test is added. *It rotted twice inside this lane alone, which is the
+argument for not writing it down at all.*
 
 **[REV2] What these tests are NOT.** Three of the original twenty asserted that a substring was
 present in `bin/fleet.py`. The gate planted mutants that broke the properties those tests named
@@ -487,12 +519,38 @@ so the ordering is in `git log`. §9 explains why I still label it BELIEVED rath
 
 **If any of these misses, I stop and report it rather than adjusting the prediction.**
 
+#### 4.0b — RESULT, and prediction (1) MISSED. Reporting rather than adjusting.
+
+| # | predicted | measured | verdict |
+|---|---|---|---|
+| 1 | 31 passed, both floors | **32 passed** on `py -3.13` **and** `py -3.10` — zero floor delta | **MISSED by one test** (cause below) |
+| 2 | 4254 / 14 skipped / 1 xfailed | **4254/14/1** at the 31-test state (3.13), then **4255/14/1** at the 32-test state on **both** floors | **HIT**, at both states |
+| 3 | green file + red suite (the fixture leak I was watching for) | did not occur | **HELD** |
+
+```
+py -3.13 -m pytest -q   ->  4255 passed, 14 skipped, 1 xfailed
+py -3.10 -m pytest -q   ->  4255 passed, 14 skipped, 1 xfailed in 477.35s
+```
+
+**Why (1) missed, stated plainly: I added a test after committing the prediction.** Between the
+prediction commit and the run I found the REV2b error (§3.1) and added
+`test_the_union_gate_cannot_see_a_live_retired_body` to pin the corrected finding. So the miss is
+a *scope change I made*, not a surprise in the run — 31 predicted tests all passed, and one more
+exists.
+
+**That is exactly the excuse the method exists to refuse**, so I am recording it as a miss rather
+than editing §4.0 to say 32. The pre-registration is only worth something if "I changed my mind
+about what to run" counts against it. **A successor should read this as: the prediction mechanism
+worked and caught a real change, and the discipline it enforces is that the *number* is not the
+point — the *unexplained* delta is. This one is explained, in git: `f9fa57e` predicts 31, the
+test that makes it 32 lands after it.**
+
 ### 4.1 Disagreement 1 — REPRODUCED ✅
 
 ```python
+# SHAPE from the live roster; sid spliced from a different entry -- see above.
 LIVE_SHAPE = {"sessionId": SID, "state": "blocked", "status": "idle", "pid": 38336,
-              "kind": "bg", "name": "sup|inc-c477|boot", ...}   # SHAPE from the live roster,
-                                                                # sid spliced -- see above
+              "kind": "bg", "name": "sup|inc-c477|boot"}
 
 assert SID in fleet._roster_live_sids([LIVE_SHAPE])                       # respawn: LIVE
 assert fleet.recompute_worker_native("w", rec, [LIVE_SHAPE])["status"] == "idle"   # status: IDLE
@@ -590,18 +648,18 @@ control proving the assertion can go the other way. Re-planted, and the RED watc
 
 ```
 FLOOR sha256 : b76dc65d6007ba71e6c59dd47f6ac0502f92588466a22dfd1d1b5a2e4b50ef2c
-=== FLOOR (clean tree, no mutant) === rc=0  31 passed in 10.98s
+=== FLOOR (clean tree, no mutant) === rc=0  32 passed in 3.61s
 
 M-A   the stale-beat DISARM of _supervisor_gate is deleted
-        -> rc=1  1 failed, 30 passed   ==> KILLED (test went RED)      restored: True
+        -> rc=1  1 failed, 31 passed   ==> KILLED (test went RED)      restored: True
 M-B2  respawn gains a --force bypass of the unfetchable-roster refusal
-        -> rc=1  1 failed, 30 passed   ==> KILLED (test went RED)      restored: True
+        -> rc=1  1 failed, 31 passed   ==> KILLED (test went RED)      restored: True
 M-C   clean DOOMS instead of sparing on an unreadable roster
-        -> rc=1  1 failed, 30 passed   ==> KILLED (test went RED)      restored: True
+        -> rc=1  1 failed, 31 passed   ==> KILLED (test went RED)      restored: True
 M-D   a Q1 call site relocated out of _wedged_release_gate (decoy keeps the count)
-        -> rc=1  1 failed, 30 passed   ==> KILLED (test went RED)      restored: True
+        -> rc=1  1 failed, 31 passed   ==> KILLED (test went RED)      restored: True
 M-E   the state != 'done' clause deleted from _roster_live_sids
-        -> rc=1  4 failed, 27 passed   ==> KILLED (test went RED)      restored: True
+        -> rc=1  5 failed, 27 passed   ==> KILLED (test went RED)      restored: True
 
 final sha256 == floor: True
 real worktree bin/fleet.py untouched: True
@@ -649,7 +707,7 @@ So the ruling is not "they cannot share". It is: **they can and must share the v
 must not share a verdict, and Q2 and Q3 are different questions that cannot share either.** Three
 questions, three genuinely different cost asymmetries — the split is **CORRECT rather than merely
 current**. But — and this is the ruling, not a description — **the split fleet has today is not
-that split.** Three questions, four-and-a-half implementations, no stated mapping:
+that split.** Three questions, five-and-a-half implementations, no stated mapping:
 
 | the question | what SHOULD answer it | what actually answers it today |
 |---|---|---|
@@ -674,23 +732,36 @@ unqualified,** because that is what let it into a census of process-liveness rea
 resemblance and out of it by omission.
 
 **Verdict: three readers because three genuinely different questions — a sound design that needs
-documenting and pinning — with ONE genuine defect inside it: Q1 is spelled three times, and Q2 is
-not named at all.** Not "nobody unified them". The line is drawn there.
+documenting and pinning — with ONE genuine defect inside it: Q1 is spelled four times (five with
+`_record_is_live`, §2.5), and Q2 is not named at all.** Not "nobody unified them". The line is
+drawn there.
 
-### 5.2 `state:"done"` — a fact about the process or about the turn? **NEITHER.**
+### 5.2 `state:"done"` — a fact about the process or about the turn? **NEITHER.** [REV2]
 
-The brief offered two options. MEASURED, the answer is a third: **`state` is a fact about how the
-last RUN ended, and it outlives both the process and the turn.** 69 `done` entries and 60 keyless
-not-`done` entries persist for hours after their processes are gone. The three facts are in three
-fields (§0's table).
+The brief offered two options. MEASURED, the answer is a third: **`state` is a fact about how that
+sid's last RUN ended, and it is independent of the process in BOTH directions.**
+
+* It **outlives** the process: 129 of 137 entries carry a `state` and no process keys at all.
+* It **precedes** the process's death: four entries read `done` while their pids were alive.
 
 So the `state != "done"` clause in `_roster_live_sids` is **a process question answered with a
-run-fact field** — which is precisely why it is inert on win32 (where key presence tracks the
-process faithfully) and load-bearing on posix (where the process lingers, key presence stops
-moving, and the run-fact is the only thing left that has). *The clause is a correct patch for a
-platform where the process fact is unreliable.* It should be documented as that, and it should
-apply to `stopped`/`failed` too — **BELIEVED, not measured; I have no posix roster.** Flagged in
-§6 as the one thing the build must measure on posix before shipping.
+run-fact field**. [REV2] Revision 1 concluded from this that the clause was *"inert on win32 and
+load-bearing on posix"* — a platform story that is simply false. **The clause is load-bearing
+everywhere**, because the condition it patches (a finished run whose host process lingers) occurs
+on both platforms; win32 was never the exception, my snapshot was.
+
+**And the clause is a patch with a cost, which revision 1 did not price.** It buys the correct
+answer for a lingering body nobody will steer again, and it pays for it with a **false DEAD for
+every live retired process** — including the one measured in §0, which
+`_cmd_respawn_supervisor._any_live` intersects the sid union specifically to catch. *A correct
+patch applied to the wrong field is still the wrong field*, and that is the whole argument for
+§6.2 rather than for tuning the clause.
+
+**BELIEVED, and now the only posix-shaped claim left standing:** the same reasoning says the rule
+should extend to `stopped`/`failed`, whose entries are also terminal-with-a-possibly-live-process.
+I did not observe a `stopped`-with-keys entry, on either platform — 26 `stopped` entries, all
+keyless. **Not a gap the build should close by guessing**: §6.4 M5 keeps the mutant, and a
+successor with a posix box should re-run §3.0's sampler there before widening the clause.
 
 ### 5.3 Does a "we do not know" third value belong? **YES for Q1 — and it already exists,
 spelled twice.**
@@ -801,11 +872,13 @@ half-instance — a Q1 predicate re-spelled without the clause its author called
 nowhere to put it.
 
 **[REV2] F1 raises the stakes rather than changing the conclusion.** The argument above is about
-sites that are conservative *by coincidence*. F1 measured something worse: on a
-`done`-with-keys entry the Q1 predicate is confidently **wrong**, and respawn's carefully
-conservative UNKNOWN handling never engages, because the roster did not say "unknown" — it said
-"done". *A reader that is scrupulous about ambiguity and has no defence against confident error is
-the exact shape this consolidation should be designed to expose.*
+sites that are conservative *by coincidence*. F1 measured something worse: on a `done`-with-keys
+entry the roster is **accurate** and the Q1 predicate is nonetheless **wrong** — it reports a live
+process as not-live, and respawn's carefully conservative UNKNOWN handling never engages, because
+nothing said "unknown". *A reader scrupulous about ambiguity and defenceless against a confident
+wrong answer is exactly the shape this consolidation should be designed to expose* — and the
+answer is wrong not because the data is bad but because the predicate reads a run field to
+answer a process question, which is §0's thesis restated in the one place it costs the most.
 
 The fix is ~80 inserted lines at a measured cost of **~8 re-pins at `:14656` versus ~34 at
 `:3714`** (§6.5, with the population that produced those numbers). At that price it is cheaper to
@@ -845,7 +918,7 @@ remove**, and site 10, the trap, is one of them.
 
 ROSTER_LIVE, ROSTER_GONE, ROSTER_UNKNOWN = "live", "gone", "unknown"
 
-class RosterLiveness(NamedTuple):
+class RosterLiveness:                      # NOT a NamedTuple -- see the note below
     """Q1's answer: WHICH sids are backed by a live host process, and WHETHER
     fleet actually knows. `known=False` means the roster could not be read --
     `sids` is then empty and MUST NOT be read as "nothing is alive".
@@ -861,27 +934,52 @@ class RosterLiveness(NamedTuple):
     it cannot accumulate and needs no clearing ritual. Its ritual is the next
     roster fetch.
 
-    THIS ANSWERS NOTHING ABOUT THE TURN, and on win32 it cannot: `state` and
-    `status` were both measured reporting `done`/`idle` for a session that was
-    executing a turn (w50 3.1). Key presence is the only roster field that
-    tracked the process. `recompute_worker_native` owns the turn question.
+    THIS ANSWERS NOTHING ABOUT THE TURN, and `state` must never be read as if
+    it did: a finished run's host process can outlive it, so `state:"done"`
+    co-occurs with a LIVE pid (four concurrent instances measured on win32
+    2026-08-09; w50 3.1). Key presence is the only roster field that tracked
+    the process. `recompute_worker_native` owns the turn question.
 
     THIS IS ALSO NOT `_record_is_live` (:2993), which asks whether FLEET has
     retired a record. Different substrate, different question, deliberately
     not merged (w50 5.1)."""
-    known: bool
-    sids: frozenset
+
+    __slots__ = ("known", "sids")
+
+    def __init__(self, known, sids):
+        self.known = bool(known)
+        self.sids = frozenset(sids)
 
     def state_of(self, sid) -> str:
         if not self.known:
             return ROSTER_UNKNOWN
         return ROSTER_LIVE if sid in self.sids else ROSTER_GONE
 
+    def __bool__(self):
+        # DELIBERATELY NOT DEFINED as "are any sids live". Several call sites
+        # today read `if live_sids:` / `if not live_now:`, and an unreadable
+        # roster must never silently take the "nothing is alive" branch there.
+        raise TypeError("RosterLiveness has no truth value -- ask .known or "
+                        ".sids explicitly. An UNKNOWN roster that reads as "
+                        "falsy is the exact defect this type replaces.")
 
-def roster_liveness(roster_ok: bool, entries) -> RosterLiveness:
-    return RosterLiveness(bool(roster_ok),
-                          frozenset(_roster_live_sids(entries) if roster_ok else ()))
+
+def roster_liveness(roster_ok, entries) -> RosterLiveness:
+    return RosterLiveness(roster_ok, _roster_live_sids(entries) if roster_ok else ())
 ```
+
+**Two implementation notes the successor needs before writing a line:**
+
+1. **`bin/fleet.py` imports no `typing` and no `collections`** (MEASURED: its import block is 20
+   bare stdlib modules plus `contextlib`, `datetime`, `pathlib`). A `NamedTuple` or
+   `collections.namedtuple` spelling costs a new import in a file whose stdlib-only,
+   single-file discipline is a project rule. The plain class above costs none.
+2. **The `__bool__` refusal is load-bearing, not decoration.** The 7 set-consuming sites read the
+   set in boolean context today — `if not live_now: return`, `bool(gate_sids & ...)`. Swap a bare
+   set for a container whose emptiness *also* means "could not read", and every one of those
+   silently acquires the fail-open behaviour that is correct at exactly one site (§6.3's trap) and
+   catastrophic at the other six. Raising here converts that from a silent behaviour change into
+   an import-time-obvious `TypeError` at each site the migration must actually think about.
 
 `state_of` serves the 4 per-sid sites; the value itself serves the 7 set-consuming ones. **The
 tri-state now reaches every site in-band, which the scalar could not do.**
@@ -997,6 +1095,14 @@ restore by sha256 against the floor digest. Five mutants (M-A/M-B2/M-C/M-D/M-E),
 successor adding a test to this file should add its mutant to that ledger in the same commit** —
 the three tests that failed gate F3 were all added without one.
 
+**And the code in §6.2 compiles.** MEASURED on both floors: every ```python fence in this report
+is `ast.parse`d, with a control that a deliberately broken snippet is rejected first. That check
+found one real defect in my own draft — §4.1's illustrative fixture used `...` inside a dict
+literal — and it is why §6.2's sketch is a plain class rather than a `NamedTuple`: **`bin/fleet.py`
+imports no `typing`**, so the obvious spelling would have cost a new import in a file whose
+stdlib-only single-file discipline is a project rule. *A build brief whose code does not parse is
+a build brief the successor debugs instead of executing.*
+
 ---
 
 ## 7. WHERE THIS BRIEF WAS WRONG
@@ -1004,7 +1110,7 @@ the three tests that failed gate F3 were all added without one.
 | # | the brief's claim | verdict |
 |---|---|---|
 | 1 | "These are three instances of one class" | **PARTLY WRONG.** #1 and #3 are one class. **#2 is a different class** — a correct, deliberate safety freeze whose only defect is silence, and unifying it would produce a wrong fix. **[REV2] Stated with LOW confidence about the incident**: the classification is sound, the attribution is not. I reproduced a mechanism that produces the symptom and could not tie it to the incident; poll-not-push fits equally well. §1's caveat governs, and §6.3 step 7 adds an attribution step so the next occurrence is evidence. |
-| 2 | "The `_roster_live_sids` Windows parenthetical is the cause of disagreements 1 and 2" | **[REV2] THE PREMISE REPRODUCES; THE CAUSAL INFERENCE FROM IT IS STILL WRONG.** Revision 1 said the premise did not reproduce, and that was my error, not the brief's — see §7.8. MEASURED now: three concurrent `done`-with-keys entries, one of them mid-turn (§3.1), so the parenthetical is false in the direction the brief claimed *and* in the reverse. But the entry that actually splits `respawn` from `status` is `blocked`, not `done` (§3.4), so the parenthetical still does not explain disagreement 1. **Two defects in the same six lines: a false comment, and a reader answering a process question with a run-fact.** |
+| 2 | "The `_roster_live_sids` Windows parenthetical is the cause of disagreements 1 and 2" | **[REV2] THE PREMISE REPRODUCES; THE CAUSAL INFERENCE FROM IT IS STILL WRONG.** Revision 1 said the premise did not reproduce, and that was my error, not the brief's — see §7.8. MEASURED now: four concurrent `done`-with-keys entries, every pid alive, including one worker holding two live sessions at once (§3.1), so the parenthetical is false in the direction the brief claimed *and* in the reverse. But the entry that actually splits `respawn` from `status` is `blocked`, not `done` (§3.4), so the parenthetical still does not explain disagreement 1. **Two defects in the same six lines: a false comment, and a reader answering a process question with a run-fact.** |
 | 3 | "`heartbeat_at` refreshes only on `sup-*` verbs" | **RIGHT.** MEASURED: 8 write sites, all in `cmd_sup_*` functions bound to `sup-*` verbs; no hook writes it. §2.4. |
 | 4 | "10 call sites, counted by grep" | **WRONG, and in the direction the brief did not guess.** MEASURED: **11**. Grep's 14 = 11 calls + 1 def + 2 docstring mentions. The brief expected the grep to over-count; it under-counted. §2.2. |
 | 5 | "A read-only lane can settle this" | **RIGHT.** Every finding here is a pure-function or AST measurement plus one read-only vendor roster fetch. No production change was needed to reach the ruling, and no live fleet verb was run. |
@@ -1048,12 +1154,29 @@ which I had missed.** A census that started and stopped at the named five would 
    population definition** (§6.5), the **`INVERT-ON-BUILD` count was stated three ways** (§4), and
    **`LIVE_SHAPE` was called "verbatim" when it is a splice of two entries** (§4).
 
-**The pattern across 1–6, and I would rather name it than have a third gate find it:** every one
+### 7.9 [REV2b] And one more of mine, caught between drafts — the most instructive of all
+
+7. **My first REV2 draft replaced a wrong headline with a wronger one.** Having been told my
+   "zero" was a bad inference, I re-measured, saw `state:"done"` on a sid I recognised as my own,
+   and wrote that **the roster had mislabelled a session that was mid-turn** — a bigger claim than
+   the gate's, and one that would have put a false statement about vendor behaviour into a spec
+   file (§6.1 routes it to `docs/specs/native-substrate.md`). It was wrong: that sid was my
+   *retired* body, and my current sid was reported correctly all along. §3.1 [REV2b].
+
+   **What makes it worth a numbered entry is how it was caught.** Not by a control — I had
+   designed three and all three passed. By noticing that an unrelated tool-output path had a
+   different session id in it than the one I had been assuming was mine. **The error was in the
+   step where I decided which entry was me**, and no detector I had built was pointed there.
+
+**The pattern across 1–7, and I would rather name it than have a third gate find it:** every one
 is *a claim that outran its evidence by one step*. The apparatus defects (1, 2) were caught by
-controls. The reasoning defects (3, 4, 6) were caught by re-reading the population — twice by me,
-more often by the gate. **The class is not carelessness; it is that a measurement licenses a
-narrower statement than the one it feels like it licenses**, and the only defence that has
-actually worked in this lane is going back to enumerate rather than trusting my own summary.
+controls. The reasoning defects (3, 4, 6, 7) were caught by re-reading the population or
+re-checking an identity — never by the harness. **The class is not carelessness; it is that a
+measurement licenses a narrower statement than the one it feels like it licenses.** And #7 adds
+the sharpest version: *the most dangerous inference is the one that confirms the correction you
+have just been handed*, because the sense of having learned the lesson substitutes for checking.
+The only defence that has actually worked in this lane is going back to enumerate rather than
+trusting my own summary.
 
 ---
 

@@ -8,9 +8,12 @@ successor who unifies the readers and leaves this file green has not landed the
 change, and that is the point of writing them this way round.
 
 Nothing here requires a production change to run, and nothing here reads the
-live fleet: every roster entry below is a literal transcribed from a real
-`claude agents --json --all` snapshot taken on win32 2026-08-09 (137 entries),
-so the SHAPES are measured even though the fixtures are synthetic.
+live fleet. Every roster fixture carries a SHAPE measured from a real
+`claude agents --json --all` observation on win32 2026-08-09 (a 137-entry
+snapshot, then a 70-sample detached run) -- but they are NOT verbatim entries:
+`LIVE_SHAPE` in particular splices this lane's sid onto another entry's
+state/status/pid. The first version of this docstring said "transcribed",
+which is the word that stops a reader re-checking (w50 gate F10).
 
 Floor: stdlib + pytest only, no 3.11+ syntax. Predicted and then measured
 identical on py -3.13 and py -3.10.
@@ -466,42 +469,67 @@ class TestDisagreementOne:
             "w", rec, [idle_entry])["status"] == "dead-suspected"
 
 
-class TestTheShapeABusySessionActuallyPresents:
-    """W50 GATE F1, and then one step past it.
+class TestTheShapeALingeringFinishedSessionPresents:
+    """W50 GATE F1, re-measured, and then one step past it.
 
-    The gate falsified the report's "zero done-with-keys on win32" with n=1 --
-    the lane's own session, between turns. Re-measuring with a detached
-    sampler (29 samples, 20s apart, ~10 minutes, from a process outside every
-    session it observed) found **three** distinct sids in that shape
-    simultaneously, and one of them was the lane's own session **while it was
-    executing a turn**:
+    The gate falsified the report's "zero done-with-keys on win32" with n=1.
+    Re-measuring with a detached sampler (70 samples, 20s apart, ~24 minutes,
+    from a process outside every session it observed) found **four** distinct
+    sids in that shape simultaneously, every pid verified alive -- and the
+    sharpest instance is that ONE FLEET WORKER HAD TWO LIVE PROCESSES:
 
-        state="done"  status="idle"  pid=4436  alive=True   x29/29 samples
+        worker 'w50-live':
+            ('b9b2124d', 'done',    'idle', 4436)    <- retired body, ALIVE
+            ('9d9509b2', 'working', 'busy', 20960)   <- current body
+        control: 10 workers with exactly one keyed entry; pid 999999 -> dead
 
-    The turn was running for the whole window -- the sampler was launched from
-    inside it. So on win32, today, the roster's `state` and `status` can both
-    be wrong about a session that is actively working, while key-presence and
-    the OS are right. That is MEASURED. WHY is not: the mechanism is most
-    likely that `state` flips to `done` at turn end and is not flipped back
-    when a subsequent turn begins in the same session, but this lane could not
-    observe its own turn boundary from inside, and no session it was permitted
-    to drive would have shown the other direction. Stated as BELIEVED in
-    `docs/lanes/w50-live.md` §3.
+    That is the state `respawn`'s refusal exists to prevent -- "never two live
+    sessions under one name" -- arising as an ordinary consequence of
+    re-dispatch. Both entries are ACCURATE about their own sid: the retired
+    run really did finish, and its host process really did outlive it. This is
+    the mechanism `_roster_live_sids`'s own docstring records from macOS on
+    2026-07-19, now confirmed on win32.
 
-    The consequence does not depend on the mechanism, and it is the direction
-    that matters: `_roster_live_sids` excludes this entry, so `fleet respawn`
-    does NOT refuse -- the false-DEAD branch, on a session that is mid-turn.
+    THE CONSEQUENCE: `_roster_live_sids` excludes the `done` entry, so every
+    caller asking "is a body running" gets a false DEAD for a live process.
+    `_cmd_respawn_supervisor._any_live` is the sharp one -- it intersects the
+    sid UNION (retired sids included) with the Q1 live set precisely because,
+    in its own words, "ANY live session of this record breaks the invariant",
+    and the done clause is what hides one from it.
+
+    A NOTE ON THIS CLASS'S OWN HISTORY, kept deliberately: its first version
+    was called `TestTheShapeABusySessionActuallyPresents` and asserted that
+    the roster had mislabelled a session that was MID-TURN. That was wrong --
+    `b9b2124d` is this lane's retired sid, not its current one. See
+    `docs/lanes/w50-live.md` §3.1 [REV2b].
     """
 
-    BUSY_BUT_DONE = {"sessionId": SID, "state": "done", "status": "idle",
-                     "pid": 4436, "kind": "background",
-                     "cwd": "C:\\proga\\fleet-w50-live"}
+    LINGERING_DONE = {"sessionId": SID, "state": "done", "status": "idle",
+                      "pid": 4436, "kind": "background",
+                      "cwd": "C:\\proga\\fleet-w50-live"}
 
-    def test_the_q1_predicate_calls_a_working_session_not_live(self):
-        """INVERT-ON-BUILD. The terminal-state rule dominates key presence --
-        correct for a lingering finished session (the 2026-07-19 macOS
-        finding), and wrong for this one, which is the same shape."""
-        assert fleet._roster_live_sids([self.BUSY_BUT_DONE]) == set()
+    def test_the_q1_predicate_calls_a_live_process_not_live(self):
+        """INVERT-ON-BUILD. The terminal-state rule dominates key presence.
+        That is the CORRECT call for a body whose turn is over and which
+        nothing will steer again -- and the wrong one for a lingering process
+        that a retired sid still answers for."""
+        assert fleet._roster_live_sids([self.LINGERING_DONE]) == set()
+
+    def test_the_union_gate_cannot_see_a_live_retired_body(self):
+        """INVERT-ON-BUILD, and the reason this matters to the build.
+
+        `_record_sids` unions `session_id` with `retired_sids`, and
+        `_cmd_respawn_supervisor` intersects that union with Q1 to decide
+        whether ANY live session of the record remains. Measured above: the
+        retired sid's process IS alive and Q1 says it is not."""
+        record = {"session_id": "9d9509b2-current", "retired_sids": [SID]}
+        union = fleet._record_sids(record)
+        assert SID in union, "the retired sid must be in the union"
+        # ...and yet the union gate sees nothing live:
+        assert not (union & fleet._roster_live_sids([self.LINGERING_DONE]))
+        # CONTROL: the same union DOES intersect once the entry is not `done`.
+        alive_shape = dict(self.LINGERING_DONE, state="working", status="busy")
+        assert union & fleet._roster_live_sids([alive_shape]) == {SID}
 
     def test_and_therefore_respawn_would_not_refuse_it(
             self, sup_home, monkeypatch):
@@ -514,7 +542,7 @@ class TestTheShapeABusySessionActuallyPresents:
         defence at all against a roster that is confidently WRONG."""
         _install_worker(sup_home)
         monkeypatch.setattr(fleet, "_fetch_agents_roster",
-                            lambda **_: (True, [self.BUSY_BUT_DONE]))
+                            lambda **_: (True, [self.LINGERING_DONE]))
         monkeypatch.setattr(fleet, "_stop_native_session_status",
                             lambda *a, **k: (True, "gone"))
         monkeypatch.setattr(fleet, "_stop_native_session", lambda *a, **k: True)
@@ -532,7 +560,7 @@ class TestTheShapeABusySessionActuallyPresents:
         The difference between stopping a working session and refusing to is
         two string fields the roster got wrong."""
         _install_worker(sup_home)
-        working = dict(self.BUSY_BUT_DONE, state="working", status="busy")
+        working = dict(self.LINGERING_DONE, state="working", status="busy")
         monkeypatch.setattr(fleet, "_fetch_agents_roster",
                             lambda **_: (True, [working]))
         monkeypatch.setattr(fleet, "dispatch_bg", _must_not_dispatch)
