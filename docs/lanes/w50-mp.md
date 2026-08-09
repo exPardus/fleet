@@ -575,7 +575,51 @@ carries, and the re-verification are in §10. **Merge the §10 head, not `a4d429
 
 ## 10. RE-VERIFICATION AFTER MY OWN COMMIT
 
-*(This section is completed after the report commit lands; see the trailing block.)*
+This report was committed on `w50/gfs` as **`bb77a7f71a3087333fa43abf1e14dd4db1c4b0ed`**, one file,
+597 insertions, nothing else touched. `main` remained `4d78f6c`.
+
+The whole merge was then re-run from a clean detached `main` against that head — not argued about,
+re-run:
+
+```
+$ git reset --hard 4d78f6c && git clean -fd
+$ git merge --no-commit --no-ff w50/gfs
+Auto-merging bin/fleet.py
+CONFLICT (content): Merge conflict in bin/fleet.py
+
+$ grep -c '^<<<<<<< ' bin/fleet.py          2        <- same count
+$ grep -n  '^<<<<<<< ' bin/fleet.py         15079, 15775   <- same lines
+
+  (resolved to :7851, :8324, :12771, :18151 -- §3d, unchanged)
+
+$ grep -c '^<<<<<<< ' bin/fleet.py          0
+bin/fleet.py sha256  be5505e1fa308182…      <- BIT-IDENTICAL to the audited resolution
+tracked paths        244 -> 245             <- exactly this report, nothing else
+WT-DIGEST            44923c2f4f2e48ca…      <- stable across both suite runs below
+
+$ py -3.13 -m pytest -q --collect-only      4250 tests collected
+$ py -3.10 -m pytest -q --collect-only      4250 tests collected
+$ py -3.13 -m pytest -q -rf   rc=0          4235 passed, 14 skipped, 1 xfailed
+$ py -3.10 -m pytest -q -rf   rc=0          4235 passed, 14 skipped, 1 xfailed
+```
+
+**Every number in §3, §4 and §5 survives my own commit unchanged.** That is expected and it is also
+checked: `docs/lanes/**` is scanned by nothing — `tools/verify_receipts.py` covers `docs/specs/**`,
+`tests/test_doc_claims.py` covers six named entry documents, and neither list includes this path —
+so a lane report cannot move a floor or a citation.
+
+**One regress remains and I am naming it rather than hiding it.** The commit you are reading adds
+this section to the same file, so the final head of `w50/gfs` is one commit past `bb77a7f`. It
+changes only this markdown file, which by the paragraph above cannot affect the merge. The check is
+one line — and it is the same discipline §0 asks of you for `main`:
+
+```
+git rev-parse w50/gfs                         # the head you are merging
+git diff --name-only bb77a7f w50/gfs          # MUST be exactly docs/lanes/w50-mp.md
+```
+
+If that diff names anything else, this report is stale and §3d's four numbers are the first thing to
+re-derive.
 
 ---
 
