@@ -37,6 +37,27 @@ def _never_touch_the_real_home(tmp_path_factory, monkeypatch):
     verdict depends on the developer's live daemon state is a flaky test. The
     sandbox keeps the `.claude/<name>` shape so path-shape assertions still hold.
 
+    MULTI-FLEET SLICE (e) ADDS `homes_list_path`, AND CORRECTS THIS DOCSTRING.
+    The sentence above used to promise that *"any new `Path.home()` path added
+    to fleet lands here by default"*. **That was never true**: this fixture
+    redirects HELPERS BY NAME, so a helper added later is covered only when
+    someone remembers to add it, and `homes_list_path` (slice a1, 2026-08-05)
+    was not. Slice a1 saw the gap, could not close it -- editing this file was
+    outside its fence -- and escalated it in
+    `tests/test_homes_list.py`'s module docstring, where it sat while four test
+    files carried four private copies of the redirect and every OTHER file
+    resolved the operator's real list. MEASURED before this line landed: 19
+    calls to the real `~/.claude/fleet-homes.list` across `test_cli.py`,
+    `test_view_quarantine.py` and `test_supervisor.py` alone, 0 to a sandbox --
+    because `main()` transitively reaches `read_homes_list` and 15 test files
+    outside those four drive `main()`. The reads were harmless on a machine
+    with no list; the list is one `fleet homes --add` away from existing, and
+    an append to it is RATIFIED DESTRUCTIVE. Receipts: `docs/lanes/
+    w51-slicee.md` §3. The DEFAULT is pinned from a file that deliberately does
+    not opt in (`tests/test_slice_e_pins.py::TestTheConftestRedirectReaches
+    EveryFile`), because a pin written inside an opted-in file would have gone
+    green on the broken world -- which is exactly what happened for six days.
+
     Tests that assert on these paths override them again with their own value;
     this fixture only guarantees the default is never the real home."""
     import fleet
@@ -48,6 +69,8 @@ def _never_touch_the_real_home(tmp_path_factory, monkeypatch):
                         lambda: sandbox / ".claude" / "daemon.lock")
     monkeypatch.setattr(fleet, "claude_daemon_log_path",
                         lambda: sandbox / ".claude" / "daemon.log")
+    monkeypatch.setattr(fleet, "homes_list_path",
+                        lambda: sandbox / ".claude" / "fleet-homes.list")
 
 
 @pytest.fixture(autouse=True)
