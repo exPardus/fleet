@@ -43,31 +43,48 @@ A site is censused as a COMMAND RENDER when, by AST:
 
 "Path-valued" is decided by the shape of the EXPRESSION, never by the name of
 the placeholder: `Path(...)`, any `.as_posix()/.resolve()/.absolute()/
-.expanduser()` call, `sys.executable`, the module globals `INSTALL_ROOT` /
-`FLEET_HOME`, or a call to a helper in the same file annotated `-> Path`.
-Names are followed only as an alias step -- a name resolves to the expression
-it was assigned -- so renaming `py` to `interp` changes nothing.
+.expanduser()` call, `sys.executable`, a call to a helper in the same file
+annotated `-> Path`, a MODULE-SCOPE name bound to any of those, or a parameter
+annotated `Path`. Names are followed only as an alias step -- a name resolves
+to the expression it was assigned -- so renaming `py` to `interp` changes
+nothing. **There is no list of blessed names anywhere in this module**; there
+was one until 2026-08-09 and `_module_scope_path_names()` records why it went.
 
 WHAT THIS CENSUS DOES NOT REACH (wave 45: a pin shipping a carve-out ships the
-census of what it exempts):
+census of what it exempts). CORRECTED 2026-08-09 after gate `w50-glaunch`
+finding 3 measured this list wrong in three places: it mis-named one hole,
+omitted two, and one of the omissions was already live in the population.
+Every entry below is now PINNED by a test in
+`TestTheCensusCanSeeWhatItClaimsToSee`, so the list cannot drift away from the
+code the way it just did:
 
   * A command render that interpolates exactly ONE path, is not a `"command"`
     dict value, and reaches no shell sink this file can see. Rule (ii) needs
-    two paths; rule (i) needs a visible sink. Such a render is invisible here.
-  * A path that arrives as an unannotated FUNCTION PARAMETER. The shape test
-    runs inside one function; it does not read call sites.
-  * `.format()` / `%` / string-concatenation renders. Only f-strings are
-    walked. The `{{PLACEHOLDER}}` template surface is covered separately below
+    two paths; rule (i) needs a visible sink.
+  * A path that arrives as a FUNCTION PARAMETER CARRYING NO `Path` ANNOTATION.
+    (The word here used to be "unannotated", which promised that an annotated
+    one was seen. It was not. Annotated parameters ARE seen now; unannotated
+    ones are still invisible, because the shape test runs inside one function
+    and does not read call sites.)
+  * `.format()` / `%` / string-concatenation / **`str.join`** renders. Only
+    f-strings are walked. `str.join` was missing from this family entirely.
+    The `{{PLACEHOLDER}}` template surface is covered separately below
     (`TestTheTemplateSurfaceQuotesToo`) precisely because it is not an f-string.
+  * A command assembled by SUBSCRIPT ASSIGNMENT (`settings["x"]["command"] =
+    f"..."`) rather than written as a dict literal -- rule (i) reads dict
+    literals, `shell=True` arguments and `-c`/`/c` argv positions only.
   * Anything outside `bin/**/*.py` and `worker-settings.template.json`.
 
-All four gaps are backstopped for the renders that exist today by the
-BEHAVIOURAL half: every censused site is driven with a real space in the
-interpreter path and in both roots, and the rendered command lines are re-parsed
-with `shlex` -- the consumer's own parser, not a regex that agrees with the bug.
-The census and the drivers are cross-checked against each other, so a render
-added tomorrow cannot land without either a driver or a deliberate edit to the
-pinned count.
+Nothing escapes through these holes on the tree as it stands -- every shipped
+render is an f-string over recognised shapes -- but that is a fact about today,
+not a property, which is exactly why they are enumerated and pinned.
+
+The gaps are backstopped for the renders that exist today by the BEHAVIOURAL
+half: every censused site is driven with a real space in the interpreter path
+and in both roots, and the rendered command lines are re-parsed with `shlex` --
+the consumer's own parser, not a regex that agrees with the bug. The census and
+the drivers are cross-checked against each other, so a render added tomorrow
+cannot land without either a driver or a deliberate edit to the pinned count.
 """
 import ast
 import json
@@ -86,7 +103,10 @@ import fleet  # noqa: E402
 # ---------------------------------------------------------------------------
 
 _PATH_ATTRS = frozenset({"as_posix", "resolve", "absolute", "expanduser"})
-_PATH_GLOBALS = frozenset({"INSTALL_ROOT", "FLEET_HOME"})
+# There is deliberately NO list of path-valued NAMES here. `_PATH_GLOBALS`
+# lived on this line until 2026-08-09 and was the one by-name decision in a
+# by-property module; `_module_scope_path_names()` derives it by shape now.
+
 # A separator that a shell treats as nothing: whitespace, and the quote
 # characters that a CORRECT render puts around the paths themselves.
 _SEPARATOR_CHARS = frozenset(" \t\r\n\"'")
@@ -107,7 +127,11 @@ def _path_returning_helpers(tree):
 
 
 def _directly_path_valued(node, helpers):
-    """True when the expression itself has the shape of a filesystem path."""
+    """True when the expression itself has the shape of a filesystem path.
+
+    PURE SHAPE -- it consults no list of names. That is what makes the rename
+    mutant inert, and it is why the module-scope globals below are DERIVED
+    rather than enumerated."""
     for sub in ast.walk(node):
         if isinstance(sub, ast.Call):
             fn = sub.func
@@ -118,9 +142,60 @@ def _directly_path_valued(node, helpers):
         if (isinstance(sub, ast.Attribute) and sub.attr == "executable"
                 and isinstance(sub.value, ast.Name) and sub.value.id == "sys"):
             return True
-        if isinstance(sub, ast.Name) and sub.id in _PATH_GLOBALS:
-            return True
     return False
+
+
+def _module_scope_path_names(tree, helpers):
+    """Module-level names bound to a path-valued expression, BY SHAPE.
+
+    THIS REPLACED A TWO-NAME ALLOWLIST, and the replacement is the point.
+    Until 2026-08-09 this was `_PATH_GLOBALS = {"INSTALL_ROOT", "FLEET_HOME"}`
+    -- a decision by NAME, sitting inside a module whose entire thesis is
+    "never by the name", and gate `w50-glaunch` finding 3 caught it. It was not
+    theoretical: `bin/fleet_statusline.py:36` binds
+    `_INSTALL_ROOT = Path(__file__).resolve().parent.parent`, which the
+    allowlist could not see, so a command render in that file interpolating it
+    was invisible.
+
+    Derived, the same scan finds a strict SUPERSET -- both allowlisted names by
+    their shape, plus the one the allowlist missed:
+
+        bin/fleet.py             FLEET_HOME     L86
+        bin/fleet.py             INSTALL_ROOT   L114
+        bin/fleet_statusline.py  _INSTALL_ROOT  L36    <-- was invisible
+
+    Module scope only, deliberately: a name bound inside a function is already
+    handled by `_local_bindings`, and walking every nested scope into one
+    namespace would let an unrelated local shadow a module name."""
+    names = set()
+    for node in tree.body:
+        targets = []
+        if isinstance(node, ast.Assign):
+            targets = [t for t in node.targets if isinstance(t, ast.Name)]
+        elif (isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+                and node.value is not None):
+            targets = [node.target]
+        if targets and _directly_path_valued(node.value, helpers):
+            names.update(t.id for t in targets)
+    return frozenset(names)
+
+
+def _path_annotated_parameters(fn):
+    """Parameters of `fn` annotated `Path` -- also a shape, not a name.
+
+    Closes the hole gate `w50-glaunch` measured as
+    `def r(exe: Path, tgt: Path)` escaping. An UNannotated parameter is still
+    invisible and is censused as such in this module's docstring: the shape
+    test runs inside one function and does not read call sites."""
+    if fn is None:
+        return frozenset()
+    spec = fn.args
+    everything = (list(spec.posonlyargs) + list(spec.args) + list(spec.kwonlyargs)
+                  + [a for a in (spec.vararg, spec.kwarg) if a is not None])
+    return frozenset(
+        arg.arg for arg in everything
+        if isinstance(arg.annotation, ast.Name) and arg.annotation.id == "Path"
+    )
 
 
 def _local_bindings(fn):
@@ -142,13 +217,19 @@ def _local_bindings(fn):
     return bindings
 
 
-def _path_valued(node, bindings, helpers, seen=()):
+def _path_valued(node, bindings, helpers, roots=frozenset(), seen=()):
+    """`roots` are names already known path-valued by shape -- module-scope
+    bindings and `Path`-annotated parameters of the enclosing function."""
     if _directly_path_valued(node, helpers):
         return True
     for sub in ast.walk(node):
-        if isinstance(sub, ast.Name) and sub.id in bindings and sub.id not in seen:
+        if not isinstance(sub, ast.Name) or sub.id in seen:
+            continue
+        if sub.id in roots:
+            return True
+        if sub.id in bindings:
             for value in bindings[sub.id]:
-                if _path_valued(value, bindings, helpers, seen + (sub.id,)):
+                if _path_valued(value, bindings, helpers, roots, seen + (sub.id,)):
                     return True
     return False
 
@@ -237,7 +318,9 @@ def census_command_renders(source, filename):
     helpers = _path_returning_helpers(tree)
     enclosing = _enclosing_function(tree)
     sinks = _shell_sink_fstrings(tree)
+    module_roots = _module_scope_path_names(tree, helpers)
     bindings_cache = {}
+    roots_cache = {}
     sites = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.JoinedStr):
@@ -246,13 +329,15 @@ def census_command_renders(source, filename):
         key = id(fn)
         if key not in bindings_cache:
             bindings_cache[key] = _local_bindings(fn)
+            roots_cache[key] = module_roots | _path_annotated_parameters(fn)
         bindings = bindings_cache[key]
+        roots = roots_cache[key]
         parts = node.values
         part_lines = _rendered_line_of_each_part(parts)
         path_indexes = [
             i for i, part in enumerate(parts)
             if isinstance(part, ast.FormattedValue)
-            and _path_valued(part.value, bindings, helpers)
+            and _path_valued(part.value, bindings, helpers, roots)
         ]
         if not path_indexes:
             continue
@@ -359,9 +444,11 @@ class TestTheCensusCanSeeWhatItClaimsToSee:
 
         The helper carries its `-> Path` annotation IN THIS SNIPPET on purpose:
         path-valued-ness is derived per file, so a snippet that only CALLS a
-        helper defined elsewhere is correctly not recognised -- which is the
-        `unannotated parameter` gap the module docstring censuses."""
-        src = ('def statusline_script_path() -> Path:\n'
+        helper defined elsewhere is correctly not recognised. `INSTALL_ROOT` is
+        likewise bound here at module scope, because this module no longer
+        carries a list of blessed global names to fall back on."""
+        src = ('INSTALL_ROOT = Path("/opt/fleet")\n'
+               'def statusline_script_path() -> Path:\n'
                '    return INSTALL_ROOT / "bin" / "fleet_statusline.py"\n'
                'def r():\n'
                '    return subprocess.run(f"{statusline_script_path()} --x", shell=True)\n')
@@ -401,6 +488,51 @@ class TestTheCensusCanSeeWhatItClaimsToSee:
                '"""\n')
         sites = census_command_renders(src, "x.py")
         assert [(s[2], s[3]) for s in sites] == [("r", ("py", "fleet_py"))], sites
+
+    def test_a_MODULE_SCOPE_path_alias_is_seen(self):
+        """Closed 2026-08-09 (gate `w50-glaunch` F3). This escaped while
+        `_PATH_GLOBALS` was a two-name allowlist, and it was live:
+        `bin/fleet_statusline.py:36` binds `_INSTALL_ROOT` by exactly this
+        shape. One path only, so rule (ii) cannot fire -- the `"command"` sink
+        is what censuses it."""
+        src = ('_ROOT = Path(__file__).resolve().parent\n'
+               'def r():\n'
+               '    return {"command": f"{_ROOT}/bin/x.py --flag"}\n')
+        assert [(s[2], s[3]) for s in census_command_renders(src, "x.py")] \
+            == [("r", ("_ROOT",))]
+
+    def test_a_Path_ANNOTATED_parameter_is_seen(self):
+        """Also closed 2026-08-09. The census docstring used to promise this by
+        saying the hole was an *unannotated* parameter; it was not true then and
+        it is true now."""
+        src = ('def r(exe: Path, tgt: Path):\n'
+               '    return f"{exe} {tgt} status"\n')
+        assert [(s[2], s[3]) for s in census_command_renders(src, "x.py")] \
+            == [("r", ("exe", "tgt"))]
+
+    def test_an_UNANNOTATED_parameter_is_still_invisible(self):
+        """The hole that remains, pinned as a hole rather than described as one.
+
+        If someone closes it, this test fails and the module docstring's census
+        has to be edited in the same commit -- which is the whole point of
+        pinning a carve-out instead of writing it down."""
+        src = ('def r(exe, tgt):\n'
+               '    return f"{exe} {tgt} status"\n')
+        assert census_command_renders(src, "x.py") == []
+
+    def test_the_other_render_MECHANISMS_are_still_invisible(self):
+        """`.format()`, `%`, concatenation and `str.join` -- pinned as holes.
+
+        Gate `w50-glaunch` measured each of these escaping as a real new module.
+        `str.join` was missing from the disclosed family entirely; it is named
+        now, and pinned here so the census cannot drift away from the code."""
+        for src in (
+            'def r():\n    return "{} {}".format(Path("a"), Path("b"))\n',
+            'def r():\n    return "%s %s" % (Path("a"), Path("b"))\n',
+            'def r():\n    return str(Path("a")) + " " + str(Path("b"))\n',
+            'def r():\n    return " ".join([str(Path("a")), str(Path("b"))])\n',
+        ):
+            assert census_command_renders(src, "x.py") == [], src
 
     def test_it_does_not_scan_an_empty_tree(self):
         """The real files have subjects at all, so an empty offender list above
@@ -572,10 +704,16 @@ class TestTheTemplateSurfaceQuotesToo:
         commands = _template_hook_commands(payload)
         assert len(commands) == 4
         expect = {python_exe.resolve().as_posix(), home.resolve().as_posix()}
-        assert all(" " in e for e in expect), expect
+        # `install` carries the hazard for the `argv[1]` assertion below but is
+        # NOT in `expect`, so it was outside the "does the fixture actually
+        # carry a space" guard -- remove the space from that fixture path and
+        # that arm would go vacuous in silence (gate `w50-glaunch` F7). Guarded
+        # over every path the assertions below depend on, not just two of them.
+        install_posix = install.resolve().as_posix()
+        assert all(" " in e for e in expect | {install_posix}), (expect, install_posix)
         for command in commands:
             argv = shlex.split(command, posix=True)
-            assert install.resolve().as_posix() in argv[1], command
+            assert install_posix in argv[1], command
             for sentinel in expect:
                 assert sentinel in argv, (
                     f"{sentinel!r} split by its space into {argv}")
