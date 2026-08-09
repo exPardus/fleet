@@ -31,7 +31,15 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-TESTFILE = "tests/test_liveness_readers.py"
+# TWO files since wave 52. It was one string, and a driver that grades only the
+# file it was born with is the gate2 B2 shape one level up: the w52 build added
+# seven pins in `tests/test_respawn_retired_sweep.py`, and every mutant aimed at
+# them would have reported SURVIVED -- not because the pins were weak, but
+# because nothing ran them. The ledger's own contract ("a mutant that SURVIVES
+# is a defect in the test file") is only true if the driver runs every file the
+# ledger's mutants are aimed at.
+TESTFILES = ("tests/test_liveness_readers.py",
+             "tests/test_respawn_retired_sweep.py")
 
 # ---------------------------------------------------------------------------
 # THE LEDGER. (id, claim, anchor, replacement, expect)
@@ -90,6 +98,60 @@ MUTANTS = [
      "    old_live = old_sid in {e.get('sessionId') for e in entries "
      "if isinstance(e, dict) and ('status' in e or 'pid' in e)}  # MUTANT M-GATE3",
      "KILLED"),
+
+    # --- added by the w52 build (§3.8). ------------------------------------
+    # These aim at `tests/test_respawn_retired_sweep.py`, which is why
+    # `TESTFILES` above stopped being a single string in the same commit. Each
+    # one models the specific way the fix could be written wrong -- not merely
+    # deleted -- because a build's own pins are the ones most likely to have
+    # been shaped around the implementation instead of around the property.
+    ("M-W52-SWEEP", "the retired-sid sweep is removed from the worker respawn "
+                    "path, restoring the §3.8 gap (the tombstone stays, so the "
+                    "kill path's pins and half of this file's cannot notice)",
+     """        _sweep_retired_sessions(name, _sweep, other_current_sids,
+                                run=run, which=which)""",
+     "        pass  # MUTANT M-W52-SWEEP",
+     "KILLED"),
+
+    ("M-W52-TOMB", "the tombstone goes back inside the liveness branch: the "
+                   "sweep still runs, so the process is stopped and the "
+                   "DURABLE half of the finding silently reopens",
+     """    if not old_live:
+        # G10, for the branch that never reached the write above. Same kind""",
+     """    if old_live and False:  # MUTANT M-W52-TOMB
+        # G10, for the branch that never reached the write above. Same kind""",
+     "KILLED"),
+
+    ("M-W52-ORDER", "the respawn sweep sorts before capping -- FIX WAVE 3's "
+                    "MAJ-NEW defect, replanted on the new call site: `[-cap:]` "
+                    "becomes LEXICOGRAPHIC and discards whichever sids sort "
+                    "low rather than the oldest",
+     "    _sweep = [s for s in dict.fromkeys(prior_retired + [old_sid])",
+     "    _sweep = [s for s in sorted(dict.fromkeys(prior_retired + [old_sid]))"
+     "  # MUTANT M-W52-ORDER",
+     "KILLED"),
+
+    ("M-W52-CAP", "the respawn sweep loses its cap, so one respawn of a much-"
+                  "steered worker can block for cap x timeout seconds with no "
+                  "bound at all",
+     "              if s and not (old_live and s == old_sid)][-_RETIRED_SID_SWEEP_CAP:]",
+     "              if s and not (old_live and s == old_sid)]  # MUTANT M-W52-CAP",
+     "KILLED"),
+
+    ("M-W52-M1", "the M1 cross-worker ownership skip is disarmed in the SHARED "
+                 "sweep body -- the guard the extraction exists to keep "
+                 "single-sourced. A corrupted registry now lets one worker's "
+                 "sweep stop another worker's LIVE session.",
+     "        if retired in other_current_sids:",
+     "        if False:  # MUTANT M-W52-M1",
+     "KILLED"),
+
+    ("M-W52-DOUBLE", "the --force arm's already-stopped sid is no longer "
+                     "excluded from the sweep, so a forced respawn stops the "
+                     "old session twice and tombstones around a redundant stop",
+     "              if s and not (old_live and s == old_sid)][-_RETIRED_SID_SWEEP_CAP:]",
+     "              if s][-_RETIRED_SID_SWEEP_CAP:]  # MUTANT M-W52-DOUBLE",
+     "KILLED"),
 ]
 
 # M-D needs a compensating definition so the AST CALL COUNT is unchanged --
@@ -118,9 +180,10 @@ def build_scratch(scratch):
     if r.returncode != 0:
         print(r.stdout, r.stderr)
         sys.exit(2)
-    # The test file under development may be UNCOMMITTED -- grade the working
-    # copy, or this driver certifies the wrong bytes.
-    shutil.copy2(REPO / TESTFILE, scratch / TESTFILE)
+    # The test files under development may be UNCOMMITTED -- grade the working
+    # copies, or this driver certifies the wrong bytes.
+    for rel in TESTFILES:
+        shutil.copy2(REPO / rel, scratch / rel)
 
 
 def run_tests(scratch, py):
@@ -132,7 +195,7 @@ def run_tests(scratch, py):
     wearing a KILLED label). Reporting the ids is what lets a reader tell those
     apart without re-running anything.
     """
-    r = sh(f"py -{py} -m pytest {TESTFILE} -q", cwd=scratch)
+    r = sh(f"py -{py} -m pytest {' '.join(TESTFILES)} -q", cwd=scratch)
     out = (r.stdout or "").splitlines()
     tail = [l for l in out if l.strip()]
     # `FAILED tests/x.py::Cls::test_name - AssertionError: ...` -> `Cls::test_name`.
