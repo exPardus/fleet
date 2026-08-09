@@ -235,40 +235,66 @@ the `bin/` prefix, bare `(:N)`, backticked `` `:N` ``, `:N-M` ranges): **one hit
 
 ---
 
-## 4. THE MANAGER'S MID-LANE STEER: W52-2, AND WHETHER IT CHANGES MY FIX
+## 4. THE MANAGER'S MID-LANE STEER: W52-2 — SENT, THEN RETRACTED
 
-The manager sent finding **W52-2** (measured by lane `w52-launch`, committed at `7c87730` on
-`w52/launch`) mid-build: on Windows at claude 2.1.226 a **finished** bg session presents as
-`state:"working"`, `status:"idle"`, `pid` present — so Q1 reads a finished turn as **live**, and a
-bare `fleet respawn` refuses with *"turn is running"* on a worker `fleet status` calls idle.
+**CORRECTED IN PLACE, and the correction is the point of the section.** I was steered twice about
+finding **W52-2** and the second steer withdrew the first. Both are recorded, in order, because a
+report that shows only the surviving version teaches nothing about how it got there.
 
-I did not re-drive it, as instructed. Answering the three asks:
+**What I was told first** (mid-build): lane `w52-launch` had *"measured and reproduced four times"*
+that on Windows at claude 2.1.226 a **finished** bg session presents as `state:"working"`,
+`status:"idle"`, `pid` present — so Q1 reads a finished turn as **live** and a bare `fleet respawn`
+refuses on an idle worker. Graded HIGH.
 
-**1. Does W52-2 change my fix? No, and it partly explains why the fix is shaped the way it is.**
-BELIEVED (reasoning from my MEASURED code path, not from re-driving W52-2):
+**What the gate found** (`w52-glaunch3`, verdict at `e97bbcb` on `w52/glaunch3`, driven
+independently on a byte-identical `bin/fleet.py`): **GATING**. 5 of 6 drives of the documented bare
+`fleet respawn <name>` returned rc=0 — it does not reproduce deterministically, and *deterministic*
+was the word HIGH rested on. Regraded **MEDIUM**. The single reproduction was at `state:"blocked"`,
+never the `state:"working"` the report pasted. A 30-sample / 60 s poll after a turn ends only ever
+showed `state=done status=idle pid=present` — no window — with a trustworthy positive control.
 
-- **The sweep half is completely unaffected.** `prior_retired` is swept on **every** respawn,
+**And the mechanism was backwards from what I was relayed.** `done` entries on this machine *do*
+keep `pid` and `status`, and the `state != "done"` guard is precisely what makes five of six drives
+succeed. The docstring's Windows parenthetical is false; the code it apologises for is what keeps
+Windows working.
+
+### What I retract from my own first pass
+
+I wrote, on the strength of the first steer, that this was *"one predicate measured wrong in both
+directions."* **I withdraw that framing.** It rested on W52-2 as filed, and only the §3.8 direction
+is supported by evidence that has survived a gate. The sentence was mine; the claim under it came
+from the manager, who has recorded the relay against themselves (*"a finished lane's result is a
+claim, not a verdict"*). I am not deleting it, per the standing rule that a retraction must be
+visible where the claim was.
+
+### What survives, and it is the part that matters to this build
+
+**1. Does any of this change my fix? No — and the gate's BLOCKING finding vindicates the scope fence
+rather than merely permitting it.** The proposed W52-2 remedy (treat `status == "idle"` as
+not-a-running-turn) is unscoped: `_roster_live_sids` has **13 call sites**, several in supervisor
+claim and release, and the live roster carries a supervisor at `state:"blocked" status:"idle"` with
+its pid alive — that fix would reclassify a **live supervisor as not-live**. So "do not change what
+Q1 answers" is now correct for a *measured* reason, not a cautious one.
+
+- **The sweep half is unaffected by any of it.** `prior_retired` is swept on **every** respawn,
   including every `--force` one, because only `old_sid` is excluded when `old_live`. The
-  accumulating-forks defect — *N* respawns leaving *N* resident forks — is closed regardless of what
-  Q1 answers, on both roster shapes.
-- **The tombstone half is reached less often on that specific build than I assumed, and it is still
-  reached.** If a finished session reads `live`, the operator passes `--force` and the `--force`
-  arm's own tombstone fires — so the gap narrows there. But `old_live` is also False whenever the
-  old sid is **roster-gone** (past the residency window, after a restart, after a daemon cycle),
-  and that is the ordinary case for any respawn that is not immediately after a turn. The
-  `done`+live-pid shape §3.8 names was measured on macOS 2026-07-19 and is what the `done` clause
-  exists for. So the two roster shapes are platform/version-specific and the fix covers both,
-  precisely because it never asks.
-- The manager's framing is right and worth restating: **this is one predicate measured wrong in both
-  directions.** §3.8's gap is Q1 saying not-live for a live process; W52-2 is Q1 saying live for a
-  finished one. My fix is orthogonal to both because it keys on *"this sid is being retired"*, which
-  is a fact about what the verb is doing, not a fact about the roster.
+  accumulating-forks defect — *N* respawns leaving *N* resident forks — closes regardless of what Q1
+  answers, on every roster shape either lane observed.
+- **The tombstone half is reached, and the gate's own null makes that stronger than my first pass
+  did.** The gate's 30-sample poll found `state=done status=idle pid=present` — *which is exactly
+  the §3.8 shape*: keyed, `done`, process alive. That is Q1 answering not-live for a live process,
+  it is the branch my tombstone is on, and the gate measured it as the steady state after a turn
+  ends rather than as a window.
 
-**2. §6.7 now has a live operator-facing defect attached.** Recorded in §6 below.
+**2. §6.7 is cited more weakly than the first steer told me to**, and §6/§9 say so: the owed decision
+stands on its own design argument. It does not have a confirmed operator-facing defect behind it —
+it has a MEDIUM, partly non-reproducing one, plus a BLOCKING objection to the obvious fix.
 
 **3. Does my fix require Q1 to change? NO.** MEASURED: `_roster_live_sids` is byte-identical to
 `64b43c2`, and `test_Q1_STILL_ANSWERS_NOT_LIVE_this_build_did_not_widen_it` pins that from the
-outside. I did not have to stop and report.
+outside. I never had to stop and report.
+
+I did not re-drive W52-2 in either direction, as instructed both times.
 
 ---
 
@@ -389,19 +415,30 @@ MEASURED. Inserting into `bin/fleet.py` moved every citation below the insertion
 said to run the self-citation pin **to fixpoint** because *"one red/green read is a lower bound,
 never a census."* That is exactly what happened:
 
-| pass | findings |
+| observation | findings |
 |---|---|
-| 1 | 7 |
-| 2 | 3 |
-| 3 | 1 |
-| 4 | 1 |
-| 5 | 1 |
-| 6 | **0 — fixpoint, 21 passed** |
+| after the build | 7 |
+| after re-pinning 9 | 3 |
+| after re-pinning 2 | 1 |
+| after re-pinning 1 | 1 |
+| after re-pinning 1 | **0 — fixpoint, 21 passed** |
 
-11 distinct citations across 5 rounds. **Stopping after the first green read of pass 1's fixes would
-have shipped 6 stale citations**, including the entire 13-number `_record_sids` union enumeration
-and the 9-number `_quarantine_artifacts` reader enumeration — both `exactly=` censuses, which are
-the sites that exist because a census once said "seven" when the source held twelve.
+**Corrected 2026-08-09, in the results commit:** the first version of this table had six rows
+(`7, 3, 1, 1, 1, 0`) and said *"11 distinct citations across 5 rounds"*. Both were wrong. The
+observed sequence is **7 → 3 → 1 → 1 → 0** — five observations, four fixing rounds — and the count
+is **13 self-citation edits** (9 + 2 + 1 + 1), plus the four `retired_sids` writer numbers re-pinned
+at two citing sites. Miscounting my own instrument's output in the section about not trusting one
+read of it is the joke writing itself, and it is left visible rather than silently corrected.
+
+**Stopping after the first green read would have shipped 6 stale citations**, including the entire
+13-number `_record_sids` union enumeration and the 9-number `_quarantine_artifacts` reader
+enumeration — both `exactly=` censuses, which exist because a census once said "seven" when the
+source held twelve.
+
+**A second fixpoint was needed after the regression fix in §7.2**, and it converged in ONE pass with
+14 edits — because that time I derived every target by AST up front instead of discovering them one
+red run at a time. That is the cheaper way to run this instrument, and it is worth writing down: the
+pin tells you *what* is stale one failure at a time, but the AST tells you *all* of it at once.
 
 What was re-pinned: the four `retired_sids` writers at both citing sites
 (`:7947, :8420, :12867, :18247` → `:7947, :8486, :12976, :18356`); the nine `_quarantine_artifacts`
@@ -417,7 +454,97 @@ cross-document citation it is blind to — which turned out to be stale, and sta
 
 ## 7. FLOOR RESULTS
 
-*Filled in by the commit after this one. §0's prediction is frozen above.*
+### 7.1 — RUN 1, at `f632d3e`: **THE PREDICTION MISSED, AND THE MISS WAS A REAL REGRESSION**
+
+MEASURED. §0 predicted `4648 collected, 4633 passed, 14 skipped, 1 xfailed`. What happened:
+
+| interpreter | collected | result |
+|---|---|---|
+| `py -3.13` | **4648** ✅ | **`2 failed, 4631 passed, 14 skipped, 1 xfailed`** ❌ (519.05s) |
+| `py -3.10` | **4648** ✅ | **`2 failed, 4631 passed, 14 skipped, 1 xfailed`** ❌ (483.11s) |
+
+```
+FAILED tests/test_index_compose.py::TestAllFourComposePaths::test_path_4_respawn
+FAILED tests/test_index_compose.py::TestAllFourComposePaths::test_path_4_respawn_stays_silent_without_an_index
+```
+
+Working-tree digest, printed before run 1, between the two interpreters, and after run 2 — three
+times, identical, so neither run modified anything:
+
+```
+7458b8d86aa6bcfb55156400c305a10a50f20eaf8ffffc5cf20bce09636f1524  files=263  root=C:\proga\fleet-w52-live
+```
+
+**Two misses, and they are not the same kind.**
+
+**Miss 1 — `files=263`, not the `262` I wrote.** A plain arithmetic slip: two files were added since
+`64b43c2` (`git diff --name-status`: `docs/lanes/w52-live.md` and
+`tests/test_respawn_retired_sweep.py`), so 261 + 2 = 263. I named the report in the same sentence in
+which I failed to count it. Harmless to the floor, embarrassing in a section about deriving rather
+than guessing.
+
+**Miss 2 — the two failures, and this one was worth the whole exercise.** My build introduced a real
+regression that nothing else in the lane had caught: not the mutation ledger (15/15 KILLED), not the
+targeted files I ran after every edit, not the pre-build RED check. **The full floor found it, on
+both interpreters, in a file about prompt composition.**
+
+The mechanism is in §7.2. What I want on the record here is the methodological point, because it is
+the brief's own doctrine landing on me: **predicting the floor is what turned a green-looking build
+into a caught regression.** Had I not written `4633 passed` down in a commit beforehand, `2 failed`
+in a file I had never touched would have read as pre-existing noise to be triaged, rather than as
+*the prediction is wrong and I own the difference*. The value was not in being right.
+
+### 7.2 — WHAT THE REGRESSION WAS
+
+`tests/test_index_compose.py`'s four compose paths share one stub, `run=lambda *a, **k: None`. Three
+of them never issue a stop. **Making the sweep reachable from `_cmd_respawn_native` made the fourth
+one issue one**, and `_classify_native_cli_result(None)` raised `AttributeError` straight out of the
+verb:
+
+```
+bin/fleet.py:8462  in _cmd_respawn_native   -> _sweep_retired_sessions(...)
+bin/fleet.py:8767  in _sweep_retired_sessions -> _stop_native_session_status(...)
+bin/fleet.py:10486 in _classify_native_cli_result -> if proc.returncode == 0:
+E   AttributeError: 'NoneType' object has no attribute 'returncode'
+```
+
+A `run` returning `None` is not a production shape, so this could have been closed by fixing the
+stub. **That would have been the wrong read.** The class is real and it predates the shape:
+`_stop_native_session_status` catches `OSError`/`SubprocessError` around the subprocess and *nothing
+else*, so any other failure out of one abandoned fork left the loop, skipped every remaining retired
+sid, and took the calling verb down with it — on `kill`, aborting before the tombstone and the
+dead-marking; on `respawn`, failing the operator's context reset because cleaning up a fork that was
+already abandoned threw. **A best-effort operation that can abort its caller is not best-effort**,
+and both call sites said "best-effort" in their docstrings while this was true.
+
+Fixed in `bin/fleet.py` (`9e0170f`), per-sid, broad but never silent — the failure prints on the
+same progress line every other outcome uses. **The extraction paid for itself here: one edit fixed
+both call sites.** `test_a_raising_stop_CANNOT_abort_the_respawn` pins the *contract* rather than
+the crash (the verb still reaches dispatch, the LATER retired sid is still attempted, the tombstone
+is still written — a bare `try` that only stopped the crash satisfies the first alone), and
+`M-W52-BESTEFFORT` proves it RED.
+
+Also folded into that commit: `test_the_sid_is_still_retired_and_no_foreign_sid_enters` asserted only
+the `respawned` event's `old_session_id` and never opened `retired_sids` — its name claimed an
+invariant its body did not check. I made the body match the name rather than the reverse.
+
+### 7.3 — RUN 2 PREDICTION, at `9e0170f` — WRITTEN BEFORE THE RUN, RESULTS BELOW
+
+**PREDICTION: 4649 collected, `4634 passed, 14 skipped, 1 xfailed`, both interpreters.
+`files=263`, unchanged.**
+
+Derived: run 1's tree collected 4648; `9e0170f` adds exactly one test
+(`test_a_raising_stop_CANNOT_abort_the_respawn`) and renames none, so **4649**. The two
+`test_index_compose.py` failures are fixed and rejoin the passing set: 4631 + 2 + 1 = **4634**. No
+files added or removed, so `files=263` holds. Skips and xfails untouched at 14/1.
+
+Re-graded before this run and unchanged by it: **16 mutants, all KILLED**, floor green at 47,
+`final sha256 == floor : True`, `real worktree bin/fleet.py : untouched`, and **13 pins, 0
+uncovered**.
+
+### 7.4 — RUN 2 RESULTS
+
+*Filled in by the commit after this one. §7.3's prediction is frozen above.*
 
 ---
 
@@ -460,9 +587,11 @@ does the same for the homes list. All green on every run reported here.
    scope judgement and a gate is entitled to disagree.
 2. **`_archive_eligible`'s `no-outcome-record` gate** (§3.3) is the one behavioural delta outside the
    respawn path. I argue it is not a new state; check that argument rather than take it.
-3. **§4's claim that the tombstone half is still reached** is BELIEVED, not MEASURED — it rests on
-   reasoning about when a sid is roster-gone, not on a drive. It is the weakest load-bearing
-   sentence in this report.
+3. **§4's claim that the tombstone half is still reached** is BELIEVED, not MEASURED by me — it
+   rests on reasoning about when a sid is roster-gone plus a *sibling gate's* poll data
+   (`state=done status=idle pid=present`), not on a drive of my own. It is the weakest load-bearing
+   sentence in this report, and note that its supporting evidence has already changed hands once
+   (§4): the first steer I was given about that predicate did not survive its gate.
 4. **`M-W52-ORDER` and `M-W52-CAP` kill the same single pin.** That pin asserts both the count and
    the identity of the 19 swept sids, so it genuinely separates the two defects — but if you think
    one test carrying two properties is one test too few, that is a fair finding.
