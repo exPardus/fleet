@@ -418,7 +418,7 @@ class TestDisagreementOne:
         entries = [self.LIVE_SHAPE]
         monkeypatch.setattr(fleet, "has_fresh_outcome", lambda *a, **k: True)
 
-        # Reader A -- the one `fleet respawn` gates on (bin/fleet.py:8373).
+        # Reader A -- the one `fleet respawn` gates on (bin/fleet.py:8383).
         assert SID in fleet._roster_live_sids(entries), \
             "reader A must call this entry LIVE (keys present, state != done)"
 
@@ -499,7 +499,7 @@ class TestTheShapeALingeringFinishedSessionPresents:
 
         "a finished bg session's host process can LINGER after its turn ends
          ... observed blocking `fleet respawn` on an idle worker."
-                                        -- _roster_live_sids, :14876-14880
+                                        -- _roster_live_sids, :14985-14989
 
     **So on those four instances the clause is performing its stated purpose
     and `not-live` is the RIGHT answer to "is a turn running".** The residency
@@ -529,30 +529,46 @@ class TestTheShapeALingeringFinishedSessionPresents:
 
     # ---- the WORKER path: where the consequence is real (gate2 Q2.4/M1) -----
 
-    def test_worker_respawn_attempts_NO_STOP_AND_NO_TOMBSTONE(
+    def test_worker_respawn_NOW_STOPS_AND_TOMBSTONES_a_lingering_done_session(
             self, sup_home, monkeypatch):
-        """INVERT-ON-BUILD. The re-aimed finding, driven.
+        """**INVERTED 2026-08-09 by the w52 build. This is the pin working.**
 
-        `_cmd_respawn_native:8373` computes `old_live` from Q1, and the ENTIRE
-        stop-and-reverify block is inside `if old_live:`. On this shape Q1 says
-        not-live, so:
+        WHAT IT USED TO BE, kept verbatim because a characterising test that
+        is quietly rewritten leaves no evidence the gap ever existed. It was
+        `test_worker_respawn_attempts_NO_STOP_AND_NO_TOMBSTONE`, marked
+        `INVERT-ON-BUILD`, and it asserted `calls == []` with this reasoning:
 
-          * no `claude stop` is attempted -- the live `claude.exe` is orphaned;
-          * **no tombstone is written**, and `write_tombstone_outcome` exists
-            precisely because "`claude stop` fires no Stop hook" (:8383-8386);
-          * the old sid is appended to `retired_sids` regardless (:8420);
-          * and there is NO retired-sid sweep on this path -- MEASURED,
-            `_RETIRED_SID_SWEEP_CAP` has exactly two call sites, `:8776`
-            (`_cmd_kill_native`) and `:9577` (`_cmd_respawn_supervisor`).
+          `_cmd_respawn_native` computes `old_live` from Q1, and the ENTIRE
+          stop-and-reverify block is inside `if old_live:`. On this shape Q1
+          says not-live, so: no `claude stop` is attempted -- the live
+          `claude.exe` is orphaned; **no tombstone is written**, and
+          `write_tombstone_outcome` exists precisely because "`claude stop`
+          fires no Stop hook"; the old sid is appended to `retired_sids`
+          regardless; and there is NO retired-sid sweep on this path --
+          MEASURED, `_RETIRED_SID_SWEEP_CAP` had exactly TWO call sites,
+          `_cmd_kill_native` and `_cmd_respawn_supervisor`. So the
+          compensating sweeps that make this shape harmless on those two
+          paths did not exist here.
 
-        So the compensating sweeps that make this shape harmless on the kill
-        and supervisor-respawn paths do not exist here. That is the finding,
-        and it is narrower and better grounded than the one it replaces.
+        WHAT IT IS NOW. The w52 build closed exactly that gap and nothing
+        else, so the assertion flips to its complement: the sweep runs, then
+        the tombstone is written. Re-derived at the built tree, the cap now
+        has THREE call sites -- `:8454` (`_cmd_respawn_native`), `:8897`
+        (`_cmd_kill_native`), `:9686` (`_cmd_respawn_supervisor`) -- and the
+        respawn path writes `write_tombstone_outcome` at `:8470` in addition
+        to the `--force` arm's own at `:8396`.
 
-        The branch's previous docstring for this case said respawn "proceeds to
-        stop a session whose OS process is alive and mid-turn". Both halves
-        were false (gate2 M4) and it monkeypatched the stop functions, so it
-        could not have observed either."""
+        **WHAT DID NOT CHANGE, and this test is also the pin on that:** Q1.
+        `test_the_q1_predicate_calls_a_live_process_not_live` above still
+        holds, `_roster_live_sids` is untouched, and the roster fixture here
+        is the same one. The stop below is not Q1 saying "live" -- it is the
+        path no longer ASKING Q1 about a sid it is retiring unconditionally
+        (`:8486`). `w50/live` §6.7's owed decision stays owed.
+
+        The wider mirror of the kill path's five properties (cap, per-sid
+        timeout, progress line, classified outcome, M1 ownership skip) lives
+        in `tests/test_respawn_retired_sweep.py`; what stays here is the
+        inversion itself, beside the control that gives it meaning."""
         _install_worker(sup_home)
         calls = []
         monkeypatch.setattr(fleet, "_fetch_agents_roster",
@@ -567,8 +583,8 @@ class TestTheShapeALingeringFinishedSessionPresents:
 
         with pytest.raises(_ReachedDispatch):
             fleet.cmd_respawn(_respawn_args("w"))
-        assert calls == [], (
-            f"respawn touched the old session after Q1 said not-live: {calls}")
+        assert calls == ["stop", "tombstone"], (
+            f"respawn left the retired session unswept or unrecorded: {calls}")
 
     def test_CONTROL_the_same_drive_DOES_stop_when_the_entry_reads_working(
             self, sup_home, monkeypatch):
@@ -581,7 +597,7 @@ class TestTheShapeALingeringFinishedSessionPresents:
         working = dict(self.LINGERING_DONE, state="working", status="busy")
 
         # STATEFUL, deliberately: `--force` stops the session and then RE-FETCHES
-        # to verify the daemon actually tore it down (`:8387-8398`). A constant
+        # to verify the daemon actually tore it down (`:8397-8408`). A constant
         # roster that still says `working` makes respawn abort on its own
         # re-verification, which would look like "no stop happened" for a
         # completely different reason. So the fetch models the stop landing.
@@ -634,9 +650,9 @@ class TestTheShapeALingeringFinishedSessionPresents:
         re-implements the predicate cannot detect a change to the caller.
 
         This one drives `cmd_respawn` on a supervisor-SHAPED husk record, which
-        routes through `_is_supervisor_shaped` (`:8630`) into
+        routes through `_is_supervisor_shaped` (`:8695`) into
         `_cmd_respawn_supervisor` and reaches the real `_any_live` closure
-        (`:9594-9598`). The record's `retired_sids` carries a sid the roster
+        (`:9703-9707`). The record's `retired_sids` carries a sid the roster
         reports as `done` WITH a live pid.
 
         TODAY: `_any_live` returns False, the B6 refusal does not fire, and the
@@ -1066,7 +1082,7 @@ class TestWhatACanonicalAnswerMustPreserve:
             self, sup_home, monkeypatch, capsys):
         """MUTANT M-B2. `--force` must NOT buy a bypass of the roster refusal:
         indeterminate is treated as alive, because a false-dead here is the
-        file's own named unrecoverable invariant (`:8402`)."""
+        file's own named unrecoverable invariant (`:8412`)."""
         _install_worker(sup_home)
         monkeypatch.setattr(fleet, "_fetch_agents_roster",
                             lambda **_: (False, "roster unavailable"))

@@ -31,7 +31,29 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-TESTFILE = "tests/test_liveness_readers.py"
+# THREE files since wave 52. It was one string, and a driver that grades only
+# the file it was born with is the gate2 B2 shape one level up: the w52 build
+# added pins in `tests/test_respawn_retired_sweep.py`, and every mutant aimed at
+# them would have reported SURVIVED -- not because the pins were weak, but
+# because nothing ran them. The ledger's own contract ("a mutant that SURVIVES
+# is a defect in the test file") is only true if the driver runs every file the
+# ledger's mutants are aimed at.
+#
+# `tests/test_native.py` joined them at the DISCHARGE of gate w52-glive3 (F5).
+# The gate's finding was not about the pins but about a CLAIM: the lane's report
+# defended the extraction with "the kill path's own five pins in
+# `tests/test_native.py` ... which `M-W52-M1` proves are load-bearing through
+# the shared body" -- and `M-W52-M1` could prove nothing of the sort, because
+# the driver never ran that file. The instrument cited for the defence was
+# structurally incapable of producing it. Adding the file is what makes the
+# sentence checkable; the alternative was deleting the sentence.
+#
+# Note the shape of the original mistake, because it recurs: the wave-52 repair
+# that made this a tuple added the file the NEW pins were in, not the file the
+# extraction put at RISK.
+TESTFILES = ("tests/test_liveness_readers.py",
+             "tests/test_respawn_retired_sweep.py",
+             "tests/test_native.py")
 
 # ---------------------------------------------------------------------------
 # THE LEDGER. (id, claim, anchor, replacement, expect)
@@ -90,6 +112,156 @@ MUTANTS = [
      "    old_live = old_sid in {e.get('sessionId') for e in entries "
      "if isinstance(e, dict) and ('status' in e or 'pid' in e)}  # MUTANT M-GATE3",
      "KILLED"),
+
+    # --- added by the w52 build (§3.8). ------------------------------------
+    # These aim at `tests/test_respawn_retired_sweep.py`, which is why
+    # `TESTFILES` above stopped being a single string in the same commit. Each
+    # one models the specific way the fix could be written wrong -- not merely
+    # deleted -- because a build's own pins are the ones most likely to have
+    # been shaped around the implementation instead of around the property.
+    ("M-W52-SWEEP", "the retired-sid sweep is removed from the worker respawn "
+                    "path, restoring the §3.8 gap (the tombstone stays, so the "
+                    "kill path's pins and half of this file's cannot notice)",
+     """        _sweep_retired_sessions(name, _sweep, other_current_sids,
+                                run=run, which=which)""",
+     "        pass  # MUTANT M-W52-SWEEP",
+     "KILLED"),
+
+    ("M-W52-TOMB", "the tombstone goes back inside the liveness branch: the "
+                   "sweep still runs, so the process is stopped and the "
+                   "DURABLE half of the finding silently reopens",
+     """    if not old_live:
+        # G10, for the branch that never reached the write above. Same kind""",
+     """    if old_live and False:  # MUTANT M-W52-TOMB
+        # G10, for the branch that never reached the write above. Same kind""",
+     "KILLED"),
+
+    ("M-W52-ORDER", "the respawn sweep sorts before capping -- FIX WAVE 3's "
+                    "MAJ-NEW defect, replanted on the new call site: `[-cap:]` "
+                    "becomes LEXICOGRAPHIC and discards whichever sids sort "
+                    "low rather than the oldest",
+     "    _sweep = [s for s in _ordered_unique_sids(prior_retired + [old_sid])",
+     "    _sweep = [s for s in sorted(_ordered_unique_sids(prior_retired + [old_sid]))"
+     "  # MUTANT M-W52-ORDER",
+     "KILLED"),
+
+    ("M-W52-CAP", "the respawn sweep loses its cap, so one respawn of a much-"
+                  "steered worker can block for cap x timeout seconds with no "
+                  "bound at all",
+     "              if s and not (old_live and s == old_sid)][-_RETIRED_SID_SWEEP_CAP:]",
+     "              if s and not (old_live and s == old_sid)]  # MUTANT M-W52-CAP",
+     "KILLED"),
+
+    ("M-W52-M1", "the M1 cross-worker ownership skip is disarmed in the SHARED "
+                 "sweep body -- the guard the extraction exists to keep "
+                 "single-sourced. A corrupted registry now lets one worker's "
+                 "sweep stop another worker's LIVE session.",
+     "        if retired in other_current_sids:",
+     "        if False:  # MUTANT M-W52-M1",
+     "KILLED"),
+
+    ("M-W52-DOUBLE", "the --force arm's already-stopped sid is no longer "
+                     "excluded from the sweep, so a forced respawn stops the "
+                     "old session twice and tombstones around a redundant stop",
+     "              if s and not (old_live and s == old_sid)][-_RETIRED_SID_SWEEP_CAP:]",
+     "              if s][-_RETIRED_SID_SWEEP_CAP:]  # MUTANT M-W52-DOUBLE",
+     "KILLED"),
+
+    # The two CONTRACT-PRESERVATION pins the build must not have moved. Both
+    # were green before the build and after it, so without a mutant each they
+    # are exactly the shape gate2 B2 named -- a pin nobody has shown can fail.
+    ("M-W52-BESTEFFORT", "the sweep's per-sid failure guard is removed, so one "
+                         "abandoned fork's exception aborts the whole verb -- "
+                         "the regression the post-build floor run actually "
+                         "caught, in a test file about prompt composition",
+     """        try:
+            _ok, outcome = _stop_native_session_status(
+                retired, run=run, which=which,
+                timeout=_RETIRED_SID_SWEEP_TIMEOUT_SECONDS)
+        except Exception as exc:
+            outcome = f"error ({exc.__class__.__name__}) -- not retried\"""",
+     """        if True:  # MUTANT M-W52-BESTEFFORT
+            _ok, outcome = _stop_native_session_status(
+                retired, run=run, which=which,
+                timeout=_RETIRED_SID_SWEEP_TIMEOUT_SECONDS)""",
+     "KILLED"),
+
+    # --- added discharging gate w52-glive3 (F1, F3). --------------------------
+    ("M-W52-CORRUPT", "the non-string skip is removed from the shared sweep, "
+                      "restoring F1: an int/bool/float in a corrupted "
+                      "`retired_sids` aborts BOTH verbs with a raw TypeError "
+                      "from `retired[:8]`, with zero subprocess attempts",
+     "        if not isinstance(retired, str) or not retired:",
+     "        if False:  # MUTANT M-W52-CORRUPT",
+     "KILLED"),
+
+    ("M-W52-DEDUP", "the respawn call site goes back to `dict.fromkeys`, "
+                    "restoring the SECOND F1 raise site the gate did not name: "
+                    "an unhashable element aborts in the CALLER, before the "
+                    "sweep's own guards can run at all",
+     "    _sweep = [s for s in _ordered_unique_sids(prior_retired + [old_sid])",
+     "    _sweep = [s for s in dict.fromkeys(prior_retired + [old_sid])"
+     "  # MUTANT M-W52-DEDUP",
+     "KILLED"),
+
+    ("M-W52-DROP", "`_ordered_unique_sids` DROPS the unhashable element "
+                   "instead of passing it through, so a corrupt registry is "
+                   "silently swallowed by the dedup and the operator is never "
+                   "told which entry is bad -- the guard still holds, but the "
+                   "reporting the guard exists to produce disappears",
+     "        except TypeError:\n            pass          # unhashable: cannot dedup it, must not drop it",
+     "        except TypeError:\n            continue  # MUTANT M-W52-DROP",
+     "KILLED"),
+
+    # The gate's G1, which SURVIVED all 4649 tests on the pre-discharge tree.
+    # Modelled at the call site rather than by threading a `best_effort` flag,
+    # because one anchor cannot make two edits -- but the semantics are G1's
+    # exactly: `kill` stops using the shared guarded body and goes back to its
+    # own loop. Every `respawn` pin stays green by construction, which is the
+    # whole point: only a pin driven through `kill` can catch it.
+    ("M-W52-KILLGUARD", "a realistic successor edit takes `kill` back off the "
+                        "shared body -- the gate's G1, which survived the "
+                        "entire suite because every pin on that body drove "
+                        "`respawn`",
+     """    _sweep_retired_sessions(name, retired_sids, other_current_sids,
+                            run=run, which=which)""",
+     """    for _r in retired_sids:  # MUTANT M-W52-KILLGUARD
+        _ok, outcome = _stop_native_session_status(
+            _r, run=run, which=which,
+            timeout=_RETIRED_SID_SWEEP_TIMEOUT_SECONDS)
+        print(f"fleet: {name}: stopping retired session {_r[:8]}... "
+              f"{outcome}", file=sys.stderr)""",
+     "KILLED"),
+
+    ("M-W52-REFUSE", "the no-force refusal on a Q1-live turn is deleted, so a "
+                     "bare respawn walks into the sweep against a RUNNING turn "
+                     "-- the one thing the unconditional stop must never do",
+     """    stopped_ok = None
+    if old_live:
+        if not getattr(args, "force", False):""",
+     """    stopped_ok = None
+    if old_live:
+        if False:  # MUTANT M-W52-REFUSE""",
+     "KILLED"),
+
+    ("M-W52-ROSTER", "the unfetchable-roster refusal is deleted outright (M-B2 "
+                     "only force-gates it, and force-gating leaves the "
+                     "no-force path refusing, so M-B2 cannot reach this pin): "
+                     "an unreadable roster now reads as `old_live=False` and "
+                     "the sweep stops sessions on ambiguous data",
+     '''    roster_ok, entries = _fetch_agents_roster(which=which, run=run)
+    if not roster_ok:
+        raise FleetCliError(
+            f"{name}: could not fetch the native roster -- refusing respawn "
+            "until the old session's liveness can be verified"
+        )''',
+     '''    roster_ok, entries = _fetch_agents_roster(which=which, run=run)
+    if False:  # MUTANT M-W52-ROSTER
+        raise FleetCliError(
+            f"{name}: could not fetch the native roster -- refusing respawn "
+            "until the old session's liveness can be verified"
+        )''',
+     "KILLED"),
 ]
 
 # M-D needs a compensating definition so the AST CALL COUNT is unchanged --
@@ -110,6 +282,29 @@ def sha(p):
     return hashlib.sha256(p.read_bytes()).hexdigest()
 
 
+def text_roundtrip_is_byte_exact(target, floor):
+    """Wave 51's rule -- *a mutant planter must work on BYTES* -- ENFORCED
+    rather than trusted, added by w52.
+
+    This driver patches with `read_text`/`write_text`, which translate line
+    endings in BOTH directions. That is byte-exact only while the export's
+    EOLs already match `os.linesep`, which is measurably true here (`git
+    archive` applies the `.gitattributes`/eol conversion, so on win32 the
+    export is CRLF exactly like the checkout, and `os.linesep` is CRLF) --
+    and silently destructive the moment it is not: a mixed-ending file, an LF
+    export graded on Windows, a CRLF file graded on Linux.
+
+    `sha()` reads BYTES, so the existing post-restore check is genuine and
+    would notice -- but only AFTER a mutant had already been graded against
+    bytes that were never HEAD's, and a verdict from the wrong bytes is worth
+    nothing whichever colour it comes out. Wave 51's other rule is the one
+    that applies: a plant driver must prove its own mechanism sound BEFORE it
+    runs anything. This does the round-trip as a NO-OP patch and compares.
+    """
+    target.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
+    return sha(target) == floor
+
+
 def build_scratch(scratch):
     if scratch.exists():
         shutil.rmtree(scratch)
@@ -118,9 +313,10 @@ def build_scratch(scratch):
     if r.returncode != 0:
         print(r.stdout, r.stderr)
         sys.exit(2)
-    # The test file under development may be UNCOMMITTED -- grade the working
-    # copy, or this driver certifies the wrong bytes.
-    shutil.copy2(REPO / TESTFILE, scratch / TESTFILE)
+    # The test files under development may be UNCOMMITTED -- grade the working
+    # copies, or this driver certifies the wrong bytes.
+    for rel in TESTFILES:
+        shutil.copy2(REPO / rel, scratch / rel)
 
 
 def run_tests(scratch, py):
@@ -132,7 +328,7 @@ def run_tests(scratch, py):
     wearing a KILLED label). Reporting the ids is what lets a reader tell those
     apart without re-running anything.
     """
-    r = sh(f"py -{py} -m pytest {TESTFILE} -q", cwd=scratch)
+    r = sh(f"py -{py} -m pytest {' '.join(TESTFILES)} -q", cwd=scratch)
     out = (r.stdout or "").splitlines()
     tail = [l for l in out if l.strip()]
     # `FAILED tests/x.py::Cls::test_name - AssertionError: ...` -> `Cls::test_name`.
@@ -164,6 +360,13 @@ def main():
     floor = sha(target)
     print(f"scratch      : {scratch}")
     print(f"FLOOR sha256 : {floor}")
+
+    if not text_roundtrip_is_byte_exact(target, floor):
+        print("TEXT ROUND-TRIP IS NOT BYTE-EXACT on this platform/checkout -- "
+              "every patch below would grade bytes that were never HEAD's. "
+              "ABORT (see `text_roundtrip_is_byte_exact`).")
+        return 5
+    print(f"text round-trip byte-exact : True")
 
     rc, line, _ = run_tests(scratch, args.py)
     print(f"=== FLOOR (clean export, no mutant) === rc={rc}  {line}")
