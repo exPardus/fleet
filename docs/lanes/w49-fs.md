@@ -23,6 +23,11 @@ Identical on `py -3.10`. Both failures are the new pin, and they are red because
 pin is unfixed in `bin/fleet.py`, which another lane holds this wave.** The brief ordered exactly
 this: write the pin, watch it red, deliver the fix as a patch.
 
+> *[Added 2026-08-09, turn 2 — the line above is left as measured on 2026-08-08 rather than edited.]*
+> Turn 2 adds one unit-tier test, so the current count is **2 failed, 4142 passed, 14 skipped,
+> 1 xfailed** on both interpreters. **The two failures are the same two**, and everything else in
+> this section still holds. Receipts and the prediction that named the +1 in advance: §11e.
+
 **Applying §6's patch turns both green** — proven, §6c. If the supervisor lands this branch and
 the patch in the same merge there is no red window at all. If they land separately, main is red in
 between, and that is a scheduling decision, not a defect. If a green main is required in the
@@ -857,3 +862,515 @@ In priority order:
 3. **Then** re-run the pin tier from a sid-free shell and decide the stamp.
 4. **Consider** whether `resume-limited`'s silent-miss deserves more than the patch gives it: it is
    the unattended path, and an operator is by definition not watching when it fires.
+
+---
+
+# 11. TURN 2 — 2026-08-09: the pin-tier confound, and what driving it actually showed
+
+*Appended, not merged. §§0–10 are turn 1 and stand as written on 2026-08-08. This section corrects
+one of my own claims in §1e; the correction is in 11d and it makes my case weaker, not stronger.*
+
+## 11a. Headline
+
+**The confound was real and is gone. It never got the chance to do the damage I said it could.**
+
+- `test_3_pin_fork_steer`'s success token no longer has a second way into the session under test,
+  and the property is now held in the **unit** tier so the next person to shorten the message reds
+  on their own commit instead of at the next live run (11b).
+- **Positive control: 7/7 GREEN**, five runs on py3.13 and two on py3.10, live haiku, against
+  **unpatched** `bin/fleet.py`. The repaired pin still passes when a steer is genuinely delivered
+  (11c).
+- **Re-creating the confound: I could not make it fire.** With delivery shammed away and wave 48's
+  28-character token restored, the confounded pin **failed every time**. The token was measurably
+  sitting in the fork's own roster name on every run, and the fork never once answered from it
+  (11d). §1e's claim that the pin "can pass while the path it tests is broken" is sound as
+  logic and **unobserved as behaviour**, and I should have separated those two things the first
+  time.
+- `resume-limited` is **not** fully covered by §6e's patch, and the gap is specific and measured
+  (11g).
+
+## 11b. The repair — and the brief was right that "one line" was generous
+
+The brief predicted I had been generous to myself in calling this a one-liner, and that the right
+repair decouples the assertion from the roster name rather than fixing today's string. Both correct.
+The change is +116/−3 in the pin file and +102/−6 in the unit-tier one (comment blocks included, and
+they are most of it), and the reason is that **every one-line version of
+this fix re-breaks on the next edit**:
+
+| candidate repair | why it is not enough |
+|---|---|
+| lengthen the token | fixes this literal; the next person who shortens the message reintroduces the confound silently — which is exactly how it got here |
+| make the token per-run unique | kills a *different* confound (a stale answer coincidentally matching). A unique token under 40 characters is still copied into the roster name |
+| assert the token is past character 40 | a hand-counted constant that says nothing if `NATIVE_NAME_HINT_MAX` moves |
+
+What landed instead, three properties, none hand-counted:
+
+1. **Per-run unique.** `PIN_STEER_TOKEN = "STEER-OK-" + uuid4().hex[:8].upper()`.
+2. **Positioned past the window by construction.** `PIN_STEER_MESSAGE` builds its lead-in with
+   `.ljust(fleet.NATIVE_NAME_HINT_MAX + 1)`, so raising the constant moves the token with it.
+   **Stated honestly: that `ljust` is inert today** — the lead-in is already 123 characters, so it
+   pads nothing. It is a floor for a future edit that shortens the prose, not an active mechanism,
+   and property 3 is what is actually load-bearing right now.
+3. **Proved, not assumed.** `_assert_steer_token_has_one_way_in` renders the name through
+   **fleet's own** `render_native_name` and refuses to let the test spend if the token appears in
+   it — so `NATIVE_NAME_HINT_MAX` or the renderer's truncation can move without an edit here.
+   **Its one duplication, stated because I nearly shipped it as a claim it does not support:** it
+   re-derives `message[:NATIVE_NAME_HINT_MAX]` rather than observing it, so a change to *that
+   expression at the call site* would slip past. The unit-tier test closes exactly that gap — it
+   drives the real `cmd_send` with the pin tier's real message and reads `-n` off the argv
+   `dispatch_bg` assembled, which watches the slice, the constant and the renderer with one
+   assertion.
+
+Run against wave 48's own message, the guard reproduces §4b's observed roster name exactly — which
+is the cheapest possible demonstration that the guard is measuring the real channel:
+
+```
+# py -3.13, worktree, no spend
+--- guard vs WAVE 48 message (28 ch) ---
+GUARD FIRED:
+CONFOUNDED PIN -- refusing to run a delivery test that cannot fail. The step-3 success token
+'STEER-OK' is inside the roster name the fork is dispatched under
+('fleet|pin-w1|Reply with exactly: STEER-OK'), so a worker that never read the steer can still
+emit it and turn this step green (docs/lanes/w49-fs.md §1e). Move the token past
+NATIVE_NAME_HINT_MAX (40) -- do not shorten the message to make this assertion pass.
+
+--- guard vs WAVE 49 message ---
+token          : STEER-OK-F436DBA7
+token offset   : 143 (NATIVE_NAME_HINT_MAX = 40 )
+rendered name  : 'fleet|pin-w1|This message supersedes the task you wer'
+```
+
+**Where the guard lives, and why that is the actual repair.** A guard inside `test_3` fires only
+when someone runs a live haiku tier — which costs money and needs a live daemon, so it is not what
+the next editor of this file will be doing. `tests/test_fork_steer_delivery.py::
+test_the_pin_tiers_steer_token_cannot_reach_the_session_name` loads the pin module **by path** (that
+directory is not a package, so importing by basename would depend on collection order) and asserts
+all three properties in the unit tier. It is the only part of this repair that survives someone who
+never reads this file.
+
+`NATIVE_NAME_HINT_MAX` is **not** load-bearing elsewhere — the brief flagged that as a thing it
+might have got wrong, and it did not. Two uses in `bin/fleet.py`: `:7614` and `:12947`.
+
+## 11c. Direction A — the positive control
+
+Ordered first because it is the one that could have invalidated everything: a repaired pin that
+fails when the steer *is* delivered would be worse than the confounded one.
+
+Live, `FLEET_LIVE=1`, temp `FLEET_HOME`, `CLAUDE_CODE_SESSION_ID` and `FLEET_WORKER` stripped from
+the shell, **`bin/fleet.py` unpatched** so the defect under study is live in the code:
+
+| interpreter | runs | test_1 | test_2 | test_3 |
+|---|---|---|---|---|
+| py 3.13.12 | 5 | 5 pass | 5 pass | **5 pass** |
+| py 3.10.1 | 2 | 2 pass | 2 pass | **2 pass** |
+
+`3 passed, 3 deselected` on all seven, 32–50s each. **7/7.** The repaired pin is not a pin that
+fails when the code is correct.
+
+Worth stating plainly, because it is the first time anyone has had this number: **7/7 is also the
+first measurement of the fork-steer defect's rate on the pin tier's own shape with the confound
+removed.** It is consistent with §3c's 1.09% and it is 7 samples, so it establishes nothing on its
+own — 0/7 has a 95% upper bound of 41%.
+
+## 11d. Direction B — re-creating the confound, and a correction to my own §1e
+
+The brief asked me to "prove the confound was real by re-creating it… show the fork answering it
+without delivery." **I could not.** The channel is there and I measured it on every single run; the
+model never used it. That result is worth more than the one I expected, so it gets the same
+treatment I would give a positive.
+
+### The experiment
+
+Two scratch trees outside the repo, built by an anchored planter that aborts unless **every** anchor
+matches exactly once (4 anchors for the confounded variant, 2 for the repaired one). Both carry a
+byte-identical mutated `bin/fleet.py`, `sha256 abfe1274…`, built from the worktree's untouched
+`14526760…`:
+
+```
+scratch: ...\tmp\scratch-confounded  variant=confounded
+  SHAM-DELIVERY: OK (1 anchor)
+  FORENSICS: OK (1 anchor)
+  CONFOUND-28-send: OK (1 anchor)
+  CONFOUND-28-assert: OK (1 anchor)
+  bin/fleet.py sha256 before 14526760d9f1d707866517788cf60ac7ea204e617ec52845c30cab446c6a9181
+  bin/fleet.py sha256 after  abfe12742b6a9d7e8906efd12293cd766016bc6952e770e46fe4429150733ed9
+  byte-compile OK
+```
+
+- **SHAM-DELIVERY** removes `append_mailbox(old_sid, message)` from `_cmd_send_native`, so
+  `compose_prompt` has nothing to drain and the rewritten payload carries the preamble **alone**.
+  The steer is then not delivered by any channel fleet owns — while `hint=message[:40]` still copies
+  it into the fork's roster name, untouched. This makes the "broken delivery" case **deterministic**
+  instead of waiting on a ~1% natural miss.
+- **CONFOUND-28** restores wave 48's exact shape: the 28-character `Reply with exactly: STEER-OK`,
+  asserted verbatim, with wave 49's pre-send guard removed — wave 48 had no guard, and a faithful
+  re-creation must not carry one.
+- **FORENSICS** reads the payload file fleet just wrote and the roster name the fork was dispatched
+  under, so "without delivery" is *measured in the same run* rather than inferred from the mutation.
+
+### What every run showed
+
+```
+[direction-b] STEER-OK present in the delivered task file: False
+[direction-b] fork roster name: 'fleet|pin-w1|Reply with exactly: STEER-OK'
+[direction-b] delivered task file, verbatim:
+You are fleet worker `pin-w1` in `C:\...\fleet-pin-proj-_oiosz2k`.
+Manager messages arrive mid-task marked `<MANAGER MESSAGE>`; treat them as user instructions.
+Maintain a journal at `C:/.../state/journals/pin-w1.md` (create it early; ...)
+End every turn with a compact result summary: changed, verified, blocked.
+Do not leave servers or watchers running past the end of the turn ...
+[direction-b] --- end delivered task file ---
+```
+
+**The confound's precondition held on every run**: the success token was absent from everything
+fleet delivered, and present in the session's own title — the same string `w48-pin.md` §4b read out
+of the transcript. So each run was a genuine opportunity for a false GREEN.
+
+### The result
+
+| | count |
+|---|---|
+| confounded runs (live haiku, py3.13) | 20 |
+| steer absent from the delivered payload — *the precondition* | **20 / 20** |
+| fork's roster name was `fleet\|pin-w1\|Reply with exactly: STEER-OK` | **20 / 20** |
+| `test_3` FAILED | **20 / 20** |
+| **fork answered from its title (`STEER-OK`)** | **0 / 20** |
+| fork replayed its previous answer (`PIN-OK`) | 5 / 20 |
+| fork re-read the payload, found no instruction, and said so | 15 / 20 |
+
+**Twenty confounded runs, twenty failures, ZERO answers taken from the title.** The forked session
+either replayed its previous answer (`PIN-OK`) or re-read the payload, found nothing to do, and
+reported that — *"Journal created. Ready for task assignment."*, *"No `<MANAGER MESSAGE>` yet. Still
+awaiting task."*, *"**Result:** Journal created, ready. No task defined yet."* Both are correct
+readings of the turn it was handed. Neither is the title.
+
+**0 of 20 is not "never".** Clopper–Pearson gives 0/20 a 95% interval of **0.00% – 16.84%** — which
+is the same kind of number I spent 11f criticising, so I am not going to launder it into a
+certainty. If a session answers from its own roster title at all, this says only that it does so
+less than roughly one time in six. What it *does* establish is that in twenty deliberate
+opportunities, with every precondition verified on every run, the confound never once converted a
+broken delivery into a GREEN.
+
+Two things measured on the way past, recorded so they are not later attributed to whatever changed
+most recently:
+
+- **The stale-replay rate under a shammed delivery is 5/20 (25%), not §3c's 1.09%.** These are not
+  the same quantity and the larger one must not be quoted as the defect rate: emptying the payload
+  removes any reason to prefer the file over the transcript, so replay becomes a much more
+  attractive reading. §3c's 1.09% remains the rate for a steer that *was* delivered.
+- **Step 2 failed once in 20** (`conf12`): the spawned worker answered its
+  `Reply with exactly: PIN-OK` turn with a status summary instead of the token. That is the pin
+  tier's own step-1/2 model-compliance variance — ~5% here — and it has nothing to do with this
+  change. It is worth knowing before someone reads a future step-2 RED as a regression.
+
+### Is a shammed payload a fair test? — the objection, and why the answer is yes
+
+The sham is **not** a model of the real defect. In the real defect the payload *does* contain the
+steer and the fork simply does not re-read it; under the sham the payload contains no instruction at
+all, a state that never occurs in production. So it is fair to ask whether these twenty runs were
+really twenty opportunities.
+
+They were, and the 15 re-read runs are the *strongest* opportunity the experiment could have
+constructed:
+
+- the **5 `PIN-OK` runs** are the direct analogue of the real failure — the fork did not act on the
+  payload, its title carried an instruction, and it replayed instead;
+- the **15 "awaiting task" runs** are better than the analogue. Those forks went looking for an
+  instruction, found none in the file, and were left holding a session title that reads
+  `Reply with exactly: STEER-OK` — an instruction, in the imperative, addressed to them. A model
+  inclined to answer from its own metadata would do it *here* if anywhere. None did; they reported
+  having nothing to do.
+
+What the sham is a model of is the **confound's opportunity**, not the defect — which is exactly the
+thing under test.
+
+### What this changes about §1e — and what it does not
+
+§1e says the pin **"can pass while the path it tests is broken"**, and calls every GREEN across five
+waves *"weaker evidence than it looks"*. Splitting that into the two claims it conflates:
+
+| claim | verdict |
+|---|---|
+| The success token reaches the session on a channel independent of delivery, so a GREEN does not *establish* delivery | **STANDS — measured on every run of this experiment.** The inference the pin invites is unsound |
+| The pin *did* pass while broken, so past GREENs are false | **NOT SHOWN, and I implied it.** In 20 deliberate opportunities the model never took the channel. w48's one natural failure is concordant: its fork's title said `STEER-OK` and it answered `PIN-OK` |
+
+The honest statement is the first one alone: **the pin was unsound, not observed to be wrong.** A
+test you cannot reason about is still worth fixing — the repair costs one commit and removes the
+need to argue about this at all — but "five waves of GREENs are worthless" was my rhetoric outrunning
+my evidence, and it is the same error I spent 11f correcting in someone else's report.
+
+### The one thing the experiment could not do
+
+Under the sham, the **repaired** pin also fails — 3 runs, `test_3` FAILED 3/3 — so the sham does not
+*empirically* discriminate the two variants. The discrimination is logical, and it is the whole
+point: the confounded pin **could** have passed with delivery broken and happened not to; the
+repaired pin **cannot**, because its token exists nowhere the fork can reach except the steer. That
+is the difference between a test that got a right answer and a test that could not have got a wrong
+one.
+
+Those three runs do carry one receipt worth more than the failure itself — the repaired message's
+roster name, read off a **live** dispatch rather than derived:
+
+```
+[direction-b] fork roster name: 'fleet|pin-w1|This message supersedes the task you wer'   (3/3)
+```
+
+Compare the confounded arm's `'fleet|pin-w1|Reply with exactly: STEER-OK'` (20/20). The leak channel
+is unchanged and still carries the first 40 characters of whatever is sent; what changed is that
+those 40 characters no longer contain the answer.
+
+*Receipt note, so nobody misreads the raw logs:* in the confounded scratch the anchored edit
+replaced the assertion **expression** (`assert "STEER-OK" in result_text`, wave 48's) but left wave
+49's failure **message**, which still interpolates `PIN_STEER_TOKEN`. The line pytest evaluated and
+reported is `assert 'STEER-OK' in 'PIN-OK'`; the surrounding prose in those logs is stale and was
+not what was tested.
+
+## 11e. The floors — the prediction, written first, and what happened
+
+Predicted in the journal before any pytest ran this turn:
+
+> the total collected count moves by exactly +1, deliberately, and not because of gating […] the
+> predicted end state is **2 failed, 4142 passed, 14 skipped, 1 xfailed** on both interpreters.
+
+Held, exactly:
+
+| | before | after | |
+|---|---|---|---|
+| collected, py3.13 | 4158 | **4159** | +1 |
+| collected, py3.10 | 4158 | **4159** | +1 |
+| py3.13 full suite | 2F / 4141P / 14S / 1xF | **2F / 4142P / 14S / 1xF** | passed +1 |
+| py3.10 full suite | 2F / 4141P / 14S / 1xF | **2F / 4142P / 14S / 1xF** | passed +1 |
+
+The +1 is the unit-tier guard, added on purpose and predicted in advance. **The gating did not
+move**: the `live` tier is 9 collected / 9 skipped with `FLEET_LIVE` unset both before and after
+(6 from `test_native_pin.py`, 3 from `test_live_smoke.py`), and the pin file's own contribution is
+unchanged at 6. My two deliberate REDs are still RED, on both interpreters, and stay that way until
+§6e's patch lands.
+
+## 11f. TASK 2 — the correction on `docs/lanes/w48-pin.md`
+
+Appended as a dated section; **not one original line was edited.** That is not a promise, it is a
+measurement — `git diff --numstat` for this commit reads `89  0  docs/lanes/w48-pin.md` and
+`517  0  docs/lanes/w49-fs.md`. **Zero deletions in either record**, including this one: §0's stale
+suite count is annotated in place with a dated note rather than corrected, for the same reason.
+
+Two corrections:
+
+- **C1** — §4b's transcript observation is conclusive for what it was offered as proof of, and it
+  supports a second reading the report did not draw: a fork that answered `STEER-OK` need not have
+  read anything. The note carries the mechanism, a reproduction of the exact roster name §4b quotes,
+  and the consequence for five waves of GREENs.
+- **C2** — §4d's "1 failure in 5 samples". Both Clopper–Pearson intervals were recomputed for the
+  correction rather than copied from turn 1:
+
+  | source | k/n | point | 95% CI |
+  |---|---|---|---|
+  | `w48-pin` §4d | 1/5 | 20% | 0.51% – 71.64% |
+  | `w49-fs` §3c | 1/92 | 1.09% | 0.03% – 5.91% |
+
+  The note says the thing worth keeping is not the new point estimate but that **an interval
+  spanning 0.5% to 72% is a number that says almost nothing** — and it credits §4f item 1's
+  "make the token unique per run" as the right instinct, while noting uniqueness alone would not
+  have closed the confound.
+
+I then had to apply that same standard to myself, which is what 11d is about.
+
+## 11g. TASK 3 — `resume-limited`: the patch does **not** fully cover it
+
+The brief asked for a plain answer and said "no further work needed" was a real one. It is not the
+answer here. What I measured before saying so:
+
+I drove the **real** `cmd_spawn` → `cmd_resume_limited` with only `claude` faked, in a temp
+`FLEET_HOME`, recording each dispatched turn and the contents of every file that turn names *at the
+instant of that dispatch*. Scenario: an operator steers a **working** worker (mail queues to
+`mailbox/<old_sid>.md`), that turn then parks on a usage limit, and the unattended sweep fires.
+
+```
+=== the two dispatched turns ===
+spawn  turn : 'Read C:/.../state/tasks/lim-w1.md and follow it exactly.'
+resume turn : 'Read C:/.../state/tasks/lim-w1.md and follow it exactly.'
+resume -n   : 'fleet|lim-w1|resume past limit'
+BYTE-IDENTICAL TURNS: True
+
+=== where the queued mail ended up ===
+mail in the resume TURN               : False
+mail in the payload file it points at : True
+payload file already dereferenced     : True
+mail in the BYTES NEW TO THIS SESSION : False
+```
+
+Four findings, all MEASURED:
+
+1. **The defect is present at this call site, unconditionally** — the resume dispatch's turn is
+   byte-identical to the one the session already answered. This confirms §2e's scope claim by
+   driving it rather than by reading the code.
+2. **The confound is NOT present here.** `hint="resume past limit"` is a constant
+   (`bin/fleet.py:7770`), so nothing of the message reaches the roster name. This call site needed
+   no equivalent of 11b's repair.
+3. **The queued-mail scenario is reachable, not hypothetical.** `cmd_send` refuses to steer a
+   `limited` worker outright (`bin/fleet.py:7521`, message at `:7525` — *"parked (limited) -- use
+   `fleet resume-limited <name>` instead (never steer a parked worker)"*), so mail cannot arrive *during* a park. It
+   arrives **before** one: queued to a `working` worker whose turn then dies on the limit, and
+   `compose_prompt` drains it at resume time. That is the ordinary way an operator's message meets a
+   usage limit.
+4. **§6e's patch covers one of the two cases and not the other:**
+
+   | case | what the resume must deliver | does §6e's `inline_body` carry it? |
+   |---|---|---|
+   | no queued mail | the constant continuation sentence | **YES — fully covered.** The constant *is* the whole instruction, and it now rides the turn |
+   | queued mail present | the operator's message | **NO.** The patch inlines a constant; the mail stays behind an already-dereferenced pointer |
+
+   In the second case the patched turn is distinguishable and says "read it again" — which is
+   **SHAM-2**, the shape `tests/test_fork_steer_delivery.py` explicitly refuses, and refuses for a
+   reason that applies here verbatim: delivery stays contingent on the worker *choosing* to re-read.
+   I am not going to grant my own patch an exemption from a standard I wrote to judge other people's
+   fixes.
+
+**So: two defects in my own §6e patch, both at the resume-limited arm.**
+
+- **(i) incompleteness** — `inline_body` must carry the drained mail, not a constant. The mail text
+  is not available at that call site today (`compose_prompt` returns `(prompt, claim)` and keeps the
+  mail internally), so this is more than a one-word change: it needs a decision about whether
+  `compose_prompt` grows a third return value or the call site claims the mailbox itself.
+  **Not applied — `bin/fleet.py` is not mine this turn.**
+- **(ii) wrong semantics** — the inline wrapper reads *"That message is a NEW instruction and it
+  supersedes anything earlier in this session."* For a steer that is right. For a **resume** it is
+  actively wrong: the whole intent is to *continue* the earlier task, not supersede it. The
+  resume-limited arm needs its own wrapper sentence. I did not notice this in turn 1.
+
+### Does the unattended context justify more than the patch? **No — and I checked each of the three.**
+
+The brief named three candidates. Taking them in turn, and refusing to invent a fourth:
+
+- **A recorded outcome — already exists, no work needed.** Driven and read off the real events
+  file: `spawned` → `turn_started` → `mail_drained` → `limit_resumed` (carrying both
+  `old_session_id` and `session_id`). The raced case appends `steer_orphaned`; the commit-failure
+  case reaches `_report_stranded_native_turn`, which prints loudly **and** best-effort appends an
+  event. The resumed turn then gets its own Stop-hook outcome record keyed to the new sid. There is
+  no missing record of the *act*, and another one would add nothing.
+- **A verifiable acknowledgement — NOT justified, and I want this on the record as a refusal.**
+  Once the instruction rides the turn there is nothing left to acknowledge: delivery stops being
+  contingent, which is the entire point of the fix. An ack would measure the *model's compliance*,
+  not fleet's delivery — and fleet cannot distinguish "read it and judged it already satisfied"
+  from "ignored it", so the signal would be unactionable in exactly the unattended context that is
+  supposed to justify it. **Fix the delivery; do not build a detector for a defect the fix removes.**
+- **A doctor row — already exists, no work needed.** `_doctor_check_limited_parks`
+  (`bin/fleet.py:11351`) already surfaces parks past their reset horizon, weekly parks, and
+  null-horizon parks. It covers the failure that genuinely needs an unattended alarm: *nobody ran
+  the sweep*. **Its blind spot is real and I am deliberately not proposing to close it** — once a
+  resume fires, status flips `limited → working` and the worker leaves that row, so a resume that
+  no-ops is invisible there. Closing it would require the acknowledgement I just argued against.
+
+**Plain answer: complete the patch — (i) and (ii) — and build nothing else.** The unattended context
+raises the *cost* of the defect, which is why the resume-limited arm has to be complete rather than
+nearly complete. It does not create a requirement the attended path lacks.
+
+## 11h. Containment
+
+Same standard as turn 1: attribute what moved, do not merely report that nothing did.
+
+**Never touched, sha256 identical before and after this turn:**
+
+| artifact | sha256 | verdict |
+|---|---|---|
+| `~/.claude/settings.json` | `578bde7b…` | UNCHANGED |
+| `~/.claude/fleet-homes.list` | — | **ABSENT both times** (never created, never appended) |
+| live `C:/proga/claude-fleet/state/pin-pass.json` | `d3b4bd15…` | **UNCHANGED — NOT stamped** |
+| live `state/worker-settings.json` | `642bdcbe…` | UNCHANGED |
+| worktree `bin/fleet.py` | `14526760…` | **UNCHANGED — never edited** |
+
+`bin/fleet.py`'s sha is the same value turn 1 recorded, and the same value the scratch builder read
+as its `before` on both variants. `fleet init --statusline` was never run.
+
+**Live sessions driven, and what became of them.** Every live run used a temp `FLEET_HOME` created
+by the pin harness itself, launched from a shell with `CLAUDE_CODE_SESSION_ID` and `FLEET_WORKER`
+stripped (`env -u` on every invocation, belt-and-braces over `conftest.py`'s own in-process
+`monkeypatch.delenv`, which the harness's `subprocess` children would otherwise inherit).
+
+| arm | runs | native `--bg` sessions |
+|---|---|---|
+| Direction A, positive control (py3.13 ×5, py3.10 ×2) | 7 | 14 |
+| Direction B, confounded under sham | 20 | 40 |
+| Direction B, repaired under sham | 3 | 6 |
+| **total** | **30** | **60** (30 spawns + 30 fork-steers) |
+
+The two `resume-limited` measurements behind 11g spawned **no live session at all** — they fake
+`claude` and drive the real fleet code, so they cost nothing and touch no roster.
+
+The pin harness's module-scoped fixture `claude stop`s and `claude rm`s every short id it dispatched,
+plus a sweep of any roster entry named `fleet|pin-w*`, and `rmtree`s both temp dirs. **Roster census:
+132 entries before, 132 after; ZERO entries matching `pin-w`/`probe-w`/`sham-w` at either end.**
+
+**The one artifact that moved, attributed rather than excused.** Live `state/fleet.json` changed
+(`b3aa4dce…` → `3dc2624b…`) — the same finding turn 1 reported, and it resolves the same way. Its
+worker count is 146 before and after with **no name added and none removed**, and the live event log
+holds exactly **2** events inside its mtime window: `w49-gc2 turn_started` and `w49-dcap
+status_changed` — sibling lanes, supervisor-driven. **Zero events name anything I dispatched.**
+
+**The scratch trees are outside the repo** (`$CLAUDE_JOB_DIR/tmp/scratch-{confounded,repaired}`),
+so the mutated `bin/fleet.py` never existed inside the worktree at any moment — there was nothing to
+"restore byte-identically" because nothing was displaced. `git status` on the worktree at the end of
+this turn shows exactly the four files this lane means to commit and nothing else.
+
+**One write of mine DID land in the live fleet home, and it is declared rather than found:**
+`C:/proga/claude-fleet/state/journals/w49-fs.md`. The worker preamble names that path and the lane
+brief names the worktree copy, so the journal is written to the worktree and mirrored there — which
+is how turn 1's journal reached the manager.
+
+That it is the ONLY one is measured, not assumed. Every file under `C:/proga/claude-fleet/` with an
+mtime inside this turn — **116 of them** — enumerated and binned:
+
+| count | what | mine? |
+|---|---|---|
+| 65 | `.git/` metadata — refs, other lanes' worktree indices, `FETCH_HEAD` | no |
+| 33 | `.git/objects/` — the shared object store; any lane that commits writes here | no |
+| 6 | `state/` — `events.jsonl`, `fleet.json`, `journals/w49-gc2.md`, `outcomes/w49-{dcap,gc2}.jsonl`, **`journals/w49-fs.md`** | **1 of 6** |
+| 12 | the main worktree's own checked-out files (`bin/fleet.py`, `bin/hooks/*`, four `tests/*.py`, four `docs/**`, `worker-settings.template.json`) — all at one timestamp, the signature of a checkout/merge in the main worktree, not of a write | no |
+
+**Exactly one path in all 116 contains the string `w49-fs`, and it is the declared journal mirror.**
+Note the main worktree's `bin/fleet.py` is in that list: that is the slice-(c) lane's work arriving
+on `main`, and it is precisely why this lane did not touch the file — **my** worktree's copy is still
+`14526760…`.
+
+## 11i. What I did not do, and residual risk
+
+- **`bin/fleet.py` is untouched.** §6e's patch is still a patch, and it now needs the two amendments
+  in 11g before it lands. The two REDs in `tests/test_fork_steer_delivery.py` stay RED.
+- **`state/pin-pass.json` is not stamped**, in the live home or anywhere that matters. Turn 1's §8c
+  reasoning is unchanged, and 11d gives it one more leg: the pin tier is now *worth* stamping on,
+  which is precisely why it should be stamped only after the defect is fixed rather than before.
+- **I did not run the full pin tier**, only steps 1–3. Steps 4–6 are untouched by this change, and
+  step 6 stamps a `pin-pass.json` — in the harness's own temp home, but the lane's fence says do not
+  stamp and I preferred not to argue about which one it meant.
+- **Residual on the repair itself.** The guard proves the token is absent from the *roster name*.
+  That is the only leak channel anyone has measured; it is not a proof that no other channel exists.
+  If a future `dispatch_bg` copies the message anywhere else the session can see, the guard will not
+  know. The honest scope of 11b is "the one channel we found, closed and pinned", not "the token is
+  provably unreachable".
+- **Residual on 11d.** Twenty samples of one model on one machine. A different model, or a longer
+  transcript, could weight its own title differently. The structural argument does not depend on
+  that; the severity claim does.
+
+## 11j. Routing — updated from §10
+
+§10's list, re-ordered by what this turn changed. Items 2 and 3 are unchanged and still blocked on
+the slice-(c) lane releasing `bin/fleet.py`.
+
+1. ~~Fix the pin-tier confound first~~ — **DONE this turn** (11b), with the positive control driven
+   (11c). §10 called it "one line"; it was not, and 11b says why. **`test_3`'s next GREEN now means
+   what it appears to mean.**
+2. **Apply §6e's patch with the §6d citation re-pin in one commit — but amend the resume-limited arm
+   first** (11g): carry the drained mail, and give the resume its own wrapper sentence. Landing the
+   patch as written would leave the unattended path half-fixed and looking finished, which is worse
+   than leaving it visibly broken.
+3. **Then** re-run the pin tier from a sid-free shell and decide the stamp. Worth noting for whoever
+   does: steps 1–3 cost ~40 s and ran 30 times this turn (7 unmodified + 23 against a shammed
+   scratch) with one non-harness hiccup — `conf12`'s step-2 compliance miss, 11d.
+4. **Downgrade §10 item 4.** `resume-limited` needs no recorded outcome, no acknowledgement and no
+   doctor row — all three already exist or would be inventions (11g). It needs the patch to be
+   complete. That is a smaller ask than §10 implied and I would rather shrink it than let it stand
+   as an open question.
+5. **New, low priority:** `docs/superpowers/plans/2026-07-15-native-pivot-mB-dispatch.md:1364` still
+   specifies step 3 with the 28-character token. It is a plan document, not executable, so nothing
+   reads it — but it is where the confound was specified, and a future reader following it would
+   rebuild it. One line, and not mine to route.

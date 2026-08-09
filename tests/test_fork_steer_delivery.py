@@ -50,7 +50,18 @@ RESIDUAL, stated rather than hidden: neither test can prove a real model obeys
 a turn it has genuinely never seen. They prove the worker is HANDED the steer.
 The live evidence that the current shipped turn is not obeyed is in
 `docs/lanes/w49-fs.md` §3 (28 driven samples, both interpreters).
+
+THE OTHER TWO TESTS HERE ARE ABOUT A DIFFERENT THING and are GREEN. A steer's
+opening characters are copied into the dispatched session's own roster NAME, so
+any delivery test whose success token fits inside that window can pass while
+delivery is broken -- which is what wave 48's live pin tier did. One test
+characterises the leak channel; the other holds `tests/integration/
+test_native_pin.py`'s step-3 token outside it, in this tier, where it is
+checked on every commit rather than only when someone spends money on a live
+haiku run. See `docs/lanes/w49-fs.md` §11d for what driving that confound
+actually showed -- the channel is real; the model was never observed to use it.
 """
+import importlib.util
 import re
 import types
 from pathlib import Path
@@ -211,12 +222,12 @@ def _settle_to_idle(monkeypatch):
     monkeypatch.setattr(fleet, "recompute_worker_native", _idle)
 
 
-def _steer(monkeypatch, log):
+def _steer(monkeypatch, log, message=STEER):
     monkeypatch.setattr(fleet, "_fetch_agents_roster",
                         _roster((True, [_entry(SID_SPAWN)]),
                                 (True, [_entry(SID_SPAWN)]),
                                 (True, [_entry(SID_SPAWN), _entry(SID_FORK)])))
-    args = SimpleNamespace(name=NAME, message=STEER, yes=True, nonce=None)
+    args = SimpleNamespace(name=NAME, message=message, yes=True, nonce=None)
     assert fleet.cmd_send(args, run=_recorder(SID_FORK, log), which=_claude,
                           sleep=lambda s: None) == 0
 
@@ -310,11 +321,20 @@ def test_the_steer_text_is_copied_into_the_dispatched_session_name(dispatches):
     with whether delivery worked. A live test whose success token fits inside
     that window can pass while the delivery path under test is broken.
 
-    `tests/integration/test_native_pin.py`'s step 3 steers with
+    `tests/integration/test_native_pin.py`'s step 3 used to steer with
     `Reply with exactly: STEER-OK` -- 28 characters, entirely inside the
-    window -- so its GREENs are weaker evidence than they look. The remedy is
-    one line: push the token past the window, or make it per-run unique.
-    (Not applied here: that file belongs to another lane this wave.)
+    window -- so every GREEN it produced across five waves was weaker
+    evidence than it looked. REPAIRED in wave 49; the test below is what
+    stops it coming back, and it lives in the unit tier on purpose.
+
+    Wave 49 turn 1 called that remedy "one line" and was wrong: a longer or
+    unique literal fixes today's string and re-breaks on the next edit that
+    shortens the message. The repair that survives is structural -- position
+    derived from `NATIVE_NAME_HINT_MAX` rather than hand-counted, and an
+    assertion that renders the name through `render_native_name` instead of
+    trusting the count. THIS test stays because the leak channel itself is
+    unchanged: `bin/fleet.py` is not fixed, and any future live delivery test
+    is one short token away from the same tautology.
     """
     _spawn_d, steer_d = dispatches
     name_value = steer_d.argv[steer_d.argv.index("-n") + 1]
@@ -325,3 +345,79 @@ def test_the_steer_text_is_copied_into_the_dispatched_session_name(dispatches):
     assert fleet.NATIVE_NAME_HINT_MAX < len(STEER), (
         "this test's steer no longer exceeds the hint window, so it cannot "
         "demonstrate the truncation that makes the leak partial")
+
+
+def _load_pin_tier_constants():
+    """Load `tests/integration/test_native_pin.py` by PATH, under a private
+    module name.
+
+    By path on purpose: `tests/` is not a package, so importing it by
+    basename would work or not depending on whether pytest had already
+    prepended `tests/integration/` to `sys.path` -- i.e. on collection order,
+    which is not a thing a guard should depend on. Under a private name on
+    purpose too: this must not collide with pytest's own module registry
+    entry for that file, and loading it here must not collect its tests. It
+    does not -- `conftest.py` applies the `FLEET_LIVE=1` gate at COLLECTION,
+    and an import is not a collection. Nothing in that module runs at import
+    time beyond building the constants read below."""
+    path = Path(__file__).resolve().parent / "integration" / "test_native_pin.py"
+    spec = importlib.util.spec_from_file_location("_pin_tier_constants", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_the_pin_tiers_steer_token_cannot_reach_the_session_name(project, monkeypatch):
+    """THE GUARD, and the reason it is in the unit tier.
+
+    `tests/integration/test_native_pin.py::test_3_pin_fork_steer` is the only
+    thing that checks a steer is delivered to a REAL worker, and its success
+    token used to sit inside the hint window characterised above -- so it
+    could pass on a fork that read nothing. It now carries its own guard, but
+    that guard only fires when someone runs a live haiku tier, and whoever
+    shortens the steer next will not be doing that. This runs on every
+    commit, for free.
+
+    It does NOT re-derive `hint=message[:NATIVE_NAME_HINT_MAX]`. Recomputing
+    the call site's own slice would leave the one thing it most needs to
+    watch -- that call site -- unwatched. Instead it drives the REAL
+    `cmd_send` with the pin tier's REAL message and reads the `-n` value off
+    the argv `dispatch_bg` actually assembled, so a change to the slice, to
+    the constant, or to `render_native_name` is all covered by the same
+    assertion.
+
+    Three properties, because the confound had three ways back in: the token
+    is not in the dispatched name (the leak itself), it is positioned past
+    the window rather than merely happening to be long (so a prose edit to
+    the lead-in reds here instead of silently sliding the token back inside),
+    and it differs between runs (so a stale answer carried in a fork's
+    transcript can never coincidentally match it)."""
+    pin = _load_pin_tier_constants()
+
+    log = []
+    _spawn(project, monkeypatch, log)
+    _settle_to_idle(monkeypatch)
+    _steer(monkeypatch, log, message=pin.PIN_STEER_MESSAGE)
+    assert len(log) == 2, (
+        "the send did not dispatch, so no name was rendered and this guard "
+        "would pass vacuously")
+    steer_d = log[1]
+    name_value = steer_d.argv[steer_d.argv.index("-n") + 1]
+    assert pin.PIN_STEER_TOKEN not in name_value, (
+        "the live pin tier's step-3 success token is back inside the roster "
+        "name its own fork is dispatched under, so that step can go GREEN on "
+        "a worker that never read the steer -- the exact tautology wave 49 "
+        f"removed. name={name_value!r} token={pin.PIN_STEER_TOKEN!r}")
+
+    assert pin.PIN_STEER_MESSAGE.index(pin.PIN_STEER_TOKEN) > fleet.NATIVE_NAME_HINT_MAX, (
+        "the pin tier's token is no longer positioned past "
+        f"NATIVE_NAME_HINT_MAX ({fleet.NATIVE_NAME_HINT_MAX}) by "
+        "construction. It may still be outside the window by luck of the "
+        "current wording; that is what broke last time. Derive the offset "
+        "from the constant.")
+
+    assert pin.PIN_STEER_TOKEN != _load_pin_tier_constants().PIN_STEER_TOKEN, (
+        "the pin tier's steer token is the same on two independent loads, so "
+        "it is no longer per-run unique -- an answer carried over in a "
+        "forked session's transcript can satisfy the delivery assertion "
+        "without the steer having been delivered")

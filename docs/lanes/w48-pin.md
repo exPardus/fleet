@@ -489,3 +489,92 @@ Recommended: **do not stamp `pin-pass.json` to 2.1.226 yet.** Five of six pins j
 stamping records that the native contract was verified, and `test_3` is currently RED-capable
 against shipped code. Stamp after the fork-steer defect is dispositioned — either fixed, or
 explicitly accepted with the pin adjusted for the right reason rather than a convenient one.
+
+---
+
+# CORRECTION — 2026-08-09, appended by `w49-fs`
+
+**Appended, not merged.** Everything above stands as written on 2026-08-08 and is left byte-for-byte
+intact, including the two claims this note corrects. This repo's doctrine is that *a dated record of
+an act is corrected by appending* — rewriting one to fix a lookup problem falsifies the lesson to
+save the index. Read §4b and §4d first; then read this.
+
+Both corrections make the report's **conclusion stronger**, not weaker. The defect it found is real,
+it was root-caused in wave 49 (`docs/lanes/w49-fs.md` §2), and its §9 recommendation — do not stamp
+`pin-pass.json` yet — was and remains correct.
+
+## C1. §4b's observation is sound; the inference drawn from it is only half of what it supports
+
+§4b reports, correctly and by direct transcript reading:
+
+> `STEER-OK` appears 6× in the transcript and **only** in `custom-title` / `agent-name` metadata
+> (`fleet|pin-w1|Reply with exactly: STEER-OK` — that is the roster *name*, from `dispatch_bg`'s
+> `hint=`). It appears in **no user message content**.
+
+That is offered as proof the steer was absent from the user message, and for that it is conclusive.
+**It is equally proof of a second thing the report did not draw, and the second thing is about the
+pin rather than about the defect:** a fork that answered `STEER-OK` need not have read anything at
+all. Same observation, two readings; the report took only the one that supported its conclusion.
+
+The mechanism, measured (`bin/fleet.py` at `bcc6522`): `_cmd_send_native:7614` passes
+`hint=message[:NATIVE_NAME_HINT_MAX]` to `dispatch_bg`, which renders the forked session's roster
+name as `cat|name|hint` (`:13132`). `NATIVE_NAME_HINT_MAX` is `40`; step 3 steered with
+`Reply with exactly: STEER-OK`, **28 characters**. So the pin handed its own success token to the
+session under test *as that session's title*, on a channel that has nothing to do with whether the
+steer was delivered.
+
+**Consequence: `test_3_pin_fork_steer` could pass while the path it tests was broken.** Every GREEN
+it produced across five waves is weaker evidence than it looks — the failures it produced are
+unaffected, which is why the RED in §4a remains sound evidence and the conclusion above stands.
+
+The name §4b quotes is reproducible without spending anything, and is exactly what wave 49's guard
+now refuses to run against:
+
+```
+$ py -3.13 -c "... _assert_steer_token_has_one_way_in('pin-w1', 'Reply with exactly: STEER-OK', 'STEER-OK')"
+CONFOUNDED PIN -- refusing to run a delivery test that cannot fail. The step-3 success token
+'STEER-OK' is inside the roster name the fork is dispatched under
+('fleet|pin-w1|Reply with exactly: STEER-OK') ...
+```
+
+Fixed on `w49/fs`: the token is now per-run unique and positioned past the hint window by
+construction, `test_3` refuses to spend before proving the token has one way in, and
+`tests/test_fork_steer_delivery.py::test_the_pin_tiers_steer_token_cannot_reach_the_session_name`
+holds that property in the unit tier so the next person to shorten the message reds immediately
+instead of at the next expensive live run.
+
+## C2. §4d's "1 failure in 5 samples" is not a rate, and the rate is ~20× lower
+
+§4d tabulates 5 samples, 1 failure, and says *"1 failure in 5 samples at 2.1.226. Small-N; treat
+~20% as an order of magnitude, not a measurement."* The hedge was right and was not enough: the
+figure travelled two waves as though it were a measurement, and §9's "~1 run in 5" restates it
+without the hedge.
+
+Wave 49 drove the failure deliberately, on both interpreters, and measured:
+
+| source | failures / samples | point estimate | 95% CI (Clopper–Pearson) |
+|---|---|---|---|
+| `w48-pin` §4d | 1 / 5 | 20% | **0.51% – 71.64%** |
+| `w49-fs` §3c | 1 / 92 | **1.09%** | **0.03% – 5.91%** |
+
+The intervals overlap, so wave 48's samples are not contradicted — they were never capable of
+contradicting anything. **An interval spanning 0.5% to 72% is a number that says almost nothing**,
+and that is the correction worth keeping, more than the point estimate that replaces it.
+
+The lesson wave 49 drew from the same data is the one that explains how five waves of green pin runs
+missed a defect that is **unconditional in the code**: `dispatch_bg`'s fork-steer turn is
+byte-identical to one the resumed session already answered on *every* fork-steer, without exception —
+what is ~1% is only the *outcome*, i.e. how often the model takes the cheap reading. A defect that is
+certain in the code and rare in the outcome is invisible to single-run pins, and the fix belongs in
+the code, not in the sampling.
+
+## What this does NOT change
+
+- §4a's RED, §4c's mechanism, and §4e's "the vendor did not move" — all confirmed independently by
+  wave 49 (`docs/lanes/w49-fs.md` §2, §3).
+- §4f's three recommendations, all of which were right. Item 1's *"consider making the pin's steer
+  token unique per run"* was the correct instinct; note that uniqueness **alone** would not have been
+  enough, since a unique token under 40 characters still lands in the roster name.
+- §8's `FLEET_HOME` fence audit and §9's stamping recommendation.
+
+— `w49-fs`, 2026-08-09, on branch `w49/fs`
