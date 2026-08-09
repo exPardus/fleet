@@ -529,52 +529,148 @@ class TestTheWriterIsAppendOnly:
             "a byte reached disk with the adapter silenced -- something else "
             "in append_home_record writes the list")
 
-    def test_the_no_rewrite_lint(self):
-        """§4: *"Append-only forever (rewrite reading measured 95-100% loss;
-        no-rewrite lint)"*. Derived from the AST rather than listed: any scope
-        that mentions `homes_list_path` may not also perform a whole-file write,
-        truncate, unlink or rename."""
-        tree = ast.parse(Path(fleet.__file__).read_text(encoding="utf-8"))
-        banned = {"write_text", "write_bytes", "unlink", "rename", "replace",
-                  "writelines", "truncate"}
-        offenders = []
+    #: What a scope may not do once it can reach the list's own path.
+    REWRITE_CALLS = frozenset({"write_text", "write_bytes", "unlink", "rename",
+                               "replace", "writelines", "truncate", "open"})
+
+    #: THE POPULATION, DERIVED BY PATTERN RATHER THAN ENUMERATED, and this
+    #: pattern IS the coverage claim (multi-fleet slice (e), `docs/lanes/
+    #: w51-slicee.md` §4).
+    #:
+    #: THE DEFECT THIS REPLACES, MEASURED. This lint used to collect scopes
+    #: naming the single `ast.Name` `homes_list_path`. Driven by AST at
+    #: `7b2ff75` that population is **two functions** -- `append_home_record`
+    #: and `read_homes_list` -- while **ten** other scopes reach the list,
+    #: `cmd_homes` (the verb, the only surface an operator drives) among them.
+    #: `read_homes_list()` hands its caller the list's own `Path` back under
+    #: the `"path"` key, so any of those ten could rewrite the file while
+    #: naming nothing the old lint looked for. A one-line whole-file rewrite
+    #: planted in `cmd_homes` -- which destroys `add.retire.add` history, 3
+    #: records to 2, the retirement gone -- was a **full-suite survivor**:
+    #: 4235 passed / 14 skipped / 1 xfailed, byte-identical to the clean
+    #: baseline on `py -3.13`.
+    #:
+    #: WHY A PATTERN AND NOT A LONGER LIST. A list of ten names is a census
+    #: taken once; the eleventh list-touching function ships unlinted and
+    #: nothing says so. The pattern joins it automatically.
+    #:
+    #: WHY NOT THE TRANSITIVE CLOSURE, which is the other obvious answer.
+    #: Measured: the closure is 16 scopes and **includes `main()`**, which
+    #: dispatches every verb -- so the first `open()` added anywhere in `main`
+    #: would redden a homes-list lint, and the lint would be edited rather than
+    #: the code. The pattern below covers 12 scopes, excludes `main`, and
+    #: includes `cmd_homes`. Both counts are pinned below so a drift in either
+    #: direction is RED rather than silent.
+    LIST_SYMBOL = re.compile(r"homes_list|homes_population|home_record|homes_view")
+
+    @classmethod
+    def _population(cls, tree):
+        """Every scope that names a homes-list API symbol, by NAME or by
+        ATTRIBUTE. The attribute half matters: `listed["path"]` is reached
+        through a value, but every way of OBTAINING that value goes through one
+        of these symbols."""
+        out = {}
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             names = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
-            if "homes_list_path" not in names:
-                continue
+            names |= {a.attr for a in ast.walk(node) if isinstance(a, ast.Attribute)}
+            if any(cls.LIST_SYMBOL.search(n) for n in names):
+                out[node.name] = node
+        return out
+
+    @classmethod
+    def _offenders(cls, tree):
+        found = []
+        for name, node in cls._population(tree).items():
             for call in ast.walk(node):
-                if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) \
-                        and call.func.attr in banned:
-                    offenders.append((node.name, call.func.attr))
-                if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) \
-                        and call.func.id == "open":
-                    offenders.append((node.name, "open"))
+                if not isinstance(call, ast.Call):
+                    continue
+                if isinstance(call.func, ast.Attribute) \
+                        and call.func.attr in cls.REWRITE_CALLS:
+                    found.append((name, call.func.attr))
+                if isinstance(call.func, ast.Name) \
+                        and call.func.id in cls.REWRITE_CALLS:
+                    found.append((name, call.func.id))
+        return found
+
+    def test_the_no_rewrite_lint(self):
+        """§4: *"Append-only forever (rewrite reading measured 95-100% loss;
+        no-rewrite lint)"*. Derived from the AST rather than listed: any scope
+        that can reach the homes list may not perform a whole-file write,
+        truncate, unlink or rename."""
+        tree = ast.parse(Path(fleet.__file__).read_text(encoding="utf-8"))
+        offenders = self._offenders(tree)
         assert not offenders, (
             f"these scopes touch the homes list and can rewrite it: {offenders}. "
             f"§4 is append-only FOREVER -- a rewrite reading measured 95-100% "
             f"loss. Append through `PLATFORM.atomic_append_bytes` only.")
 
-    def test_the_lint_can_see_a_rewrite(self):
-        """THE SEED. The lint above is a negative over a derived set, which is
-        the shape that passes vacuously when the derivation rots. Plant the
-        exact shape it bans and prove it still says yes."""
+    def test_the_population_is_what_the_docstring_says_it_is(self):
+        """THE COVERAGE CLAIM, ASSERTED. A pin's population IS its coverage
+        claim, and the previous version of this lint was green over a hole
+        because nobody had ever printed the population it was actually
+        checking. The verb is named explicitly because it is the one that was
+        missing; `main` is named explicitly because including it is the
+        failure mode of the obvious over-correction."""
+        pop = set(self._population(
+            ast.parse(Path(fleet.__file__).read_text(encoding="utf-8"))))
+        assert "cmd_homes" in pop, (
+            "the verb an operator drives is outside the no-rewrite lint -- "
+            "this is the exact hole slice (e) found")
+        assert "append_home_record" in pop and "read_homes_list" in pop
+        assert "main" not in pop, (
+            "the lint has widened to `main`, which dispatches every verb: any "
+            "unrelated `open()` there will now redden a homes-list lint and "
+            "the lint will get edited instead of the code")
+        assert len(pop) >= 12, (
+            f"the population shrank to {len(pop)} scopes ({sorted(pop)}). A "
+            f"lint that stops seeing scopes stops being a lint; if a function "
+            f"was legitimately renamed, widen LIST_SYMBOL in the same commit.")
+
+    @pytest.mark.parametrize("scope,body", [
+        # The historical shape: the path helper, named directly.
+        ("append_home_record", "homes_list_path().write_text('C:/a\\n')"),
+        # THE SHAPE THAT SURVIVED THE FULL SUITE. `cmd_homes` never names
+        # `homes_list_path`; it gets the path out of the reader's own dict.
+        ("cmd_homes", "read_homes_list()['path'].write_text('C:/a\\n')"),
+        # The same reach through the view's population record.
+        ("render_homes_view", "homes_population()['path'].unlink()"),
+        # A raw handle rather than a Path method.
+        ("cmd_homes", "open(read_homes_list()['path'], 'w')"),
+        # A rename, which loses the file without writing a byte.
+        ("cmd_homes", "read_homes_list()['path'].rename('x')"),
+    ])
+    def test_the_lint_can_see_a_rewrite(self, scope, body):
+        """THE SEED, one per shape the widened population is claimed to cover.
+
+        The lint is a negative over a derived set, which is the shape that
+        passes vacuously when the derivation rots -- and it DID rot: the single
+        seed this replaces planted the one shape the narrow population could
+        already see, so it proved the detector worked on the case that was
+        never in doubt. Each row below is a shape the OLD lint was blind to,
+        except the first, which is kept as the control."""
+        planted = ast.parse(f"def {scope}():\n    {body}\n")
+        assert self._offenders(planted), (
+            f"the lint cannot see `{body}` in `{scope}` -- this is a shape it "
+            f"claims to cover")
+
+    def test_the_seed_set_includes_a_shape_the_old_lint_was_blind_to(self):
+        """THE CONTROL ON THE SEEDS. A seed set is only evidence if at least
+        one of its rows would have failed before. Re-implement the OLD
+        population rule here and prove it says nothing about `cmd_homes`."""
         planted = ast.parse(
-            "def cmd_homes_bad():\n"
-            "    homes_list_path().write_text('C:/a\\n')\n")
-        offenders = []
-        for node in ast.walk(planted):
-            if not isinstance(node, ast.FunctionDef):
-                continue
-            names = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
-            if "homes_list_path" not in names:
-                continue
-            for call in ast.walk(node):
-                if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) \
-                        and call.func.attr == "write_text":
-                    offenders.append((node.name, "write_text"))
-        assert offenders == [("cmd_homes_bad", "write_text")]
+            "def cmd_homes():\n"
+            "    read_homes_list()['path'].write_text('C:/a\\n')\n")
+        old_population = [
+            n for n in ast.walk(planted)
+            if isinstance(n, ast.FunctionDef)
+            and "homes_list_path" in {x.id for x in ast.walk(n)
+                                      if isinstance(x, ast.Name)}]
+        assert old_population == [], (
+            "the old rule can see this shape after all, so the widening below "
+            "is not evidence of anything -- re-derive the finding")
+        assert self._offenders(planted), "and the new rule must see it"
 
 
 class TestWriterContention:
