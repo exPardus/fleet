@@ -182,9 +182,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # The entry surface: what a reader who has never seen this repo actually lands
 # on. Deliberately NOT every *.md in the tree -- `docs/specs/**` has its own
 # receipt harness (`tools/verify_receipts.py`), and the INTERNAL campaign docs
-# (`PLAN-PROGRESS.md`, `NEXT-SESSION.md`, ...) are working ledgers whose stale
-# numbers are history rather than defects. These five are the files whose job
-# is to be true for a stranger.
+# (`PLAN.md`, `PLAN-PROGRESS.md`, ...) are working ledgers whose stale numbers
+# are history rather than defects. These SIX are the files whose job is to be
+# true for a stranger.
+#
+# `NEXT-SESSION.md` was named in that list until 2026-08-09 and is NOT an
+# exempt ledger any more -- it is in `CHECK_COUNT_DOCS`, so a stale check count
+# in it is a RED test rather than history (gate `w51-glaunch2` M2). It is still
+# outside `ENTRY_DOCS`: the two populations are different, see `CHECK_COUNT_DOCS`.
 ENTRY_DOCS = (
     "README.md",
     "docs/getting-started.md",
@@ -418,13 +423,25 @@ def find_pass_fail_totals(text):
 #
 # WHAT IS EXEMPT, AND WHY (ratified 2026-08-05): *a reference is rot only when
 # it claims the CURRENT tree; a pinned receipt and a quoted argument are claims
-# about a PAST tree and stay true.* Fixing those would FABRICATE. Measured at
-# w50, the exempt set holds 94 hits across 21 files -- lane reports and gate
-# arguments quoting the counts they were arguing about, dated reviews, spec
-# documents describing their own moment, `knowledge/` lessons, the supervisor
-# journal, and the working ledgers (`PLAN-PROGRESS.md`, `NEXT-SESSION.md`).
-# `docs/OPERATOR-GATES.md:24` is the clearest case: it quotes both `29 checks`
-# and `23 checks` inside an argument whose own prose says *"the truth is 28"*.
+# about a PAST tree and stay true.* Fixing those would FABRICATE. The exempt
+# set is lane reports and gate arguments quoting the counts they were arguing
+# about, dated reviews, spec documents describing their own moment,
+# `knowledge/` lessons, the supervisor journal, and the working ledgers
+# (`PLAN-PROGRESS.md`). `docs/OPERATOR-GATES.md:24` is the clearest case: it
+# quotes `29 checks`, `23 checks` AND a `28 PASS / 0 FAIL` tally -- three hits
+# under this module's own summed definition, not the two an earlier draft of
+# this comment claimed -- inside an argument whose own prose says the truth is
+# 28.
+#
+# ITS SIZE IS NOT STATED HERE, DELIBERATELY. This comment used to carry a
+# present-tense hit count for the exempt set. That number was wrong, and it is
+# retracted -- with its two causes, the corrected figures, and why they are
+# pinned to a NAMED COMMIT rather than stated in the present tense -- in this
+# module's own docstring, under "THE SIZE OF THAT EXEMPT SET IS A MEASUREMENT".
+# Read it there; it is not repeated here, so the file states it once.
+#
+# Gate `w51-glaunch2` M1 caught the retracted number still being asserted at
+# this site, 328 lines below its own retraction. One file may not claim both.
 _HISTORICAL_PREFIXES = (
     # dated, per-wave working records
     "docs/lanes/", "docs/reviews/", "docs/proposals/", "docs/superpowers/",
@@ -462,8 +479,16 @@ def _tracked_markdown():
     # fix for it. It failed loudly (four FileNotFoundErrors) rather than
     # silently, but the real file's content was never read, so a false count
     # inside it went unheld.
+    # `encoding="utf-8"` is the OTHER half, and omitting it made the `-z` fix
+    # above correct only for ASCII (gate `w51-glaunch2` M4). `-z` disables
+    # git's path quoting, so a non-ASCII path arrives as raw UTF-8 bytes;
+    # `text=True` alone decodes with the Windows ANSI codepage, turning
+    # `docs/Unicode-Nötes.md` into `docs/Unicode-NÃ¶tes.md` -- a path that does
+    # not exist, whose content is therefore never read. That is the identical
+    # defect `-z` was added to fix, one layer down, and F5's ASCII-only control
+    # stayed green throughout it: a control must carry the SHAPE of the data.
     proc = subprocess.run(["git", "ls-files", "-z", "*.md"], cwd=REPO_ROOT,
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, encoding="utf-8")
     assert proc.returncode == 0, (
         f"`git ls-files` failed in {REPO_ROOT}: {proc.stderr.strip()!r}. This "
         f"population is derived, never listed -- a harness that cannot derive "
@@ -740,13 +765,22 @@ def test_the_check_count_population_is_derived_and_split_correctly():
     # neither empty nor everything
     assert 10 < len(docs) < len(tracked)
 
-    # A PATH WITH A SPACE SURVIVES THE DERIVATION (gate `w50-glaunch` F5).
-    # `git ls-files` does not quote spaces, so the old whitespace split tore
-    # `docs/My Notes.md` into two nonexistent paths. Asserted on the real
-    # derivation rather than on a fixture: every entry must be a file that
-    # exists, which is exactly what a torn path is not.
+    # EVERY DERIVED PATH IS A REAL FILE. Two different mangles land here, and
+    # the message has to name both or it sends the reader nowhere:
+    #   * a SPACE, if the split is on whitespace instead of NUL (`w50-glaunch`
+    #     F5) -- `git ls-files` does not quote spaces under `-z`;
+    #   * a NON-ASCII character, if `subprocess` decodes git's raw UTF-8 bytes
+    #     with the console codepage (`w51-glaunch2` M4).
+    # The first version of this assertion named only the space, so when the
+    # encoding half fired it reported "the split must be on NUL" while the
+    # split was already on NUL -- a remedy the reader would find already
+    # applied, with no next step.
     for rel in tracked:
         assert (REPO_ROOT / rel).is_file(), (
             f"{rel!r} is not a file -- `_tracked_markdown()` mangled a path. "
-            f"`git ls-files` does not quote spaces; the split must be on NUL."
+            f"Two known causes: the split must be on NUL (`git ls-files -z` "
+            f"does not quote spaces), AND the decode must be explicit "
+            f"`encoding='utf-8'` (a non-ASCII path arrives as raw UTF-8 bytes "
+            f"and `text=True` alone decodes it with the ANSI codepage). "
+            f"Check which character in the path above is the culprit."
         )

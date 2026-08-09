@@ -51,33 +51,74 @@ nothing. **There is no list of blessed names anywhere in this module**; there
 was one until 2026-08-09 and `_module_scope_path_names()` records why it went.
 
 WHAT THIS CENSUS DOES NOT REACH (wave 45: a pin shipping a carve-out ships the
-census of what it exempts). CORRECTED 2026-08-09 after gate `w50-glaunch`
-finding 3 measured this list wrong in three places: it mis-named one hole,
-omitted two, and one of the omissions was already live in the population.
-Every entry below is now PINNED by a test in
-`TestTheCensusCanSeeWhatItClaimsToSee`, so the list cannot drift away from the
-code the way it just did:
+census of what it exempts). This list has now been measured wrong TWICE, by two
+gates in a row, in the same direction both times -- it under-reports. Read it as
+a floor on the holes, not a census of them.
 
-  * A command render that interpolates exactly ONE path, is not a `"command"`
-    dict value, and reaches no shell sink this file can see. Rule (ii) needs
-    two paths; rule (i) needs a visible sink.
-  * A path that arrives as a FUNCTION PARAMETER CARRYING NO `Path` ANNOTATION.
-    (The word here used to be "unannotated", which promised that an annotated
-    one was seen. It was not. Annotated parameters ARE seen now; unannotated
-    ones are still invisible, because the shape test runs inside one function
-    and does not read call sites.)
-  * `.format()` / `%` / string-concatenation / **`str.join`** renders. Only
-    f-strings are walked. `str.join` was missing from this family entirely.
-    The `{{PLACEHOLDER}}` template surface is covered separately below
-    (`TestTheTemplateSurfaceQuotesToo`) precisely because it is not an f-string.
-  * A command assembled by SUBSCRIPT ASSIGNMENT (`settings["x"]["command"] =
-    f"..."`) rather than written as a dict literal -- rule (i) reads dict
-    literals, `shell=True` arguments and `-c`/`/c` argv positions only.
-  * Anything outside `bin/**/*.py` and `worker-settings.template.json`.
+WHICH ENTRIES ARE PINNED, MEASURED RATHER THAN CLAIMED. The 2026-08-09 draft
+said *"Every entry below is now PINNED by a test"*; gate `w51-glaunch2` M3
+measured that as **2 of 5**, and it was right. Marked per entry:
 
-Nothing escapes through these holes on the tree as it stands -- every shipped
-render is an f-string over recognised shapes -- but that is a fact about today,
-not a property, which is exactly why they are enumerated and pinned.
+  * [UNPINNED] A command render that interpolates exactly ONE path, is not a
+    `"command"` dict value, and reaches no shell sink this file can see. Rule
+    (ii) needs two paths; rule (i) needs a visible sink.
+    `test_prose_naming_a_path_is_NOT_a_command` looks like this entry's pin and
+    is NOT: its helper carries no `-> Path` annotation in that snippet, so
+    nothing there is path-valued and it is green for an unrelated reason.
+  * [PINNED: `test_an_UNANNOTATED_parameter_is_still_invisible`] A path
+    arriving as a FUNCTION PARAMETER CARRYING NO `Path` ANNOTATION. The shape
+    test runs inside one function and does not read call sites. **Annotated
+    parameters are seen -- but only when spelled exactly `Path`**: the
+    annotation test is `isinstance(ann, ast.Name) and ann.id == "Path"`, so
+    `pathlib.Path` (dotted), `"Path"` (string annotation) and `Optional[Path]`
+    all escape. [UNPINNED]
+  * [PINNED: `test_the_other_render_MECHANISMS_are_still_invisible`]
+    `.format()` / `%` / string-concatenation / `str.join` renders. Only
+    f-strings are walked. The `{{PLACEHOLDER}}` template surface is covered
+    separately below (`TestTheTemplateSurfaceQuotesToo`) precisely because it
+    is not an f-string.
+  * [UNPINNED] A command assembled by SUBSCRIPT ASSIGNMENT
+    (`settings["x"]["command"] = f"..."`) rather than written as a dict literal
+    -- rule (i) reads dict literals, `shell=True` arguments and `-c`/`/c` argv
+    positions only.
+  * [UNPINNED] Anything outside `bin/**/*.py` and
+    `worker-settings.template.json`.
+
+FIVE MORE SHAPES, ALL UNDISCLOSED UNTIL NOW, all measured escaping by gate
+`w51-glaunch2` §2.3 as planted mutants against this very module. They are
+listed because they exist, not because they are pinned -- none of them is:
+
+  * [UNPINNED] **MODULE-SCOPE RESOLUTION IS NOT TRANSITIVE, and this is the
+    one that matters.** `_module_scope_path_names()` calls
+    `_directly_path_valued` on the bound expression, and that predicate does
+    not recognise a bare `INSTALL_ROOT` -- recognising it is exactly what the
+    deleted allowlist used to do. So `_BIN = INSTALL_ROOT / "bin"` at module
+    scope is INVISIBLE, while the same binding inside a function is seen,
+    because `_local_bindings`/`_path_valued` recurse and this does not.
+    `INSTALL_ROOT / "bin"` is the most idiomatic derived-path shape in this
+    codebase. A one-hop module-scope alias of it is the likeliest way the next
+    real render escapes.
+  * [UNPINNED] A module-scope path binding under a CONDITIONAL
+    (`if os.name == "nt":`). The scan walks `tree.body` only. A conditional
+    module-scope binding is still module scope -- `FLEET_HOME` at L86 is itself
+    conditional, merely as a ternary rather than a statement.
+  * [UNPINNED] A TUPLE-TARGET module-scope binding (`A, B = Path(...), 3`):
+    the target filter keeps `ast.Name` and drops `ast.Tuple`.
+  * [UNPINNED] The ATTRIBUTE form on an imported module (`mod.INSTALL_ROOT`).
+  * [UNPINNED] A WALRUS binding, and a CLASS ATTRIBUTE.
+
+AND THE CENSUS OVER-CLAIMS IN ONE DIRECTION TOO, which is worth knowing because
+its failure mode is noise rather than silence: `_directly_path_valued` walks the
+whole bound expression, so a module-scope global whose initialiser merely
+*mentions* a path call is claimed path-valued -- `IS_WIN = Path(__file__)
+.resolve().name == "x"` is a bool, `DEPTH = len(Path(...).parts)` an int. None
+fires on the shipped tree. If one ever does, the person who wrote an unrelated
+bool global is told their commit broke a quoting pin, and this module's own
+docstring names that outcome as the thing that gets a pin suppressed.
+
+Nothing escapes through any of these on the tree as it stands -- every shipped
+render is an f-string over recognised shapes, and the census returns four sites
+with zero unquoted paths. That is a fact about today, not a property.
 
 The gaps are backstopped for the renders that exist today by the BEHAVIOURAL
 half: every censused site is driven with a real space in the interpreter path
