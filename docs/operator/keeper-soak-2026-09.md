@@ -16,3 +16,96 @@ pre-existing failures (6, same set on both): tests/test_fleet_index.py::TestPath
 
 | when (UTC) | rule | text | true/false page | action taken |
 |---|---|---|---|---|
+
+## S0 — install
+
+Host: this box, `/home/altai/proga/fleet`, branch `server/persistent-fleet` at `62b5e96`.
+`fleet init` had never been run here; `fleet doctor` showed four `[FAIL] … run fleet init` rows
+before this section. Steps below follow `docs/operator/fleet-init-recipe.md` §2/§4 and Task 1's
+`--setting-sources`.
+
+### Step 1 — init and install the plugin
+
+```text
+# volatile: host state — 2026-09-08 14:32 UTC
+$ export PATH="$PWD/bin:$PATH"
+$ fleet home
+/home/altai/proga/fleet
+
+$ fleet doctor 2>&1 | grep -E '^\[FAIL\]' ; printf 'doctor rc=%s\n' $?
+[FAIL] worker-settings-instance: /home/altai/proga/fleet/state/worker-settings.json missing -- run `fleet init`
+[FAIL] instance-freshness: worker-settings.json instance missing -- run `fleet init`
+[FAIL] instance-grants: /home/altai/proga/fleet/state/worker-settings.json missing -- run `fleet init`
+[FAIL] hook-registration: /home/altai/proga/fleet/state/worker-settings.json missing -- run `fleet init`
+rc=0
+
+$ env -u CLAUDE_CODE_SESSION_ID fleet init
+fleet init: wrote /home/altai/proga/fleet/state/worker-settings.json
+  python:      /home/altai/.local/share/uv/python/cpython-3.12.14-linux-x86_64-gnu/bin/python3.12
+  fleet home:  /home/altai/proga/fleet
+init rc=0
+
+$ fleet doctor 2>&1 | grep -E '^\[FAIL\]' ; printf 'doctor rc=%s\n' $?
+doctor rc=1
+# (grep matched nothing, so it printed no [FAIL] lines; rc=1 is grep's "no match" status)
+
+$ claude plugin marketplace add /home/altai/proga/fleet
+Adding marketplace…✔ Successfully added marketplace: claude-fleet (declared in user settings)
+marketplace add rc=0
+
+$ claude plugin install fleet@claude-fleet
+Installing plugin "fleet@claude-fleet"...✔ Successfully installed plugin: fleet@claude-fleet (scope: user)
+install rc=0
+```
+
+No fallback marketplace name was needed — `fleet@claude-fleet` installed on the first try.
+
+### Step 2 — canary worker, spawned with `--setting-sources`
+
+```text
+# volatile: host state — 2026-09-08 14:32 UTC
+$ fleet spawn canary-srv --dir /home/altai/proga/fleet --setting-sources project,local \
+    --task "Print the current date and stop. Do not edit any file."
+model: (claude default)
+canary-srv 73da4fe2-a391-4bf9-8e71-f3309751e1bb (native bg, short id 73da4fe2)
+spawn rc=0
+
+# polled with `sleep 15` in a loop (no background &); outcome file appeared after 15s
+$ tail -n 1 state/outcomes/canary-srv.jsonl
+{"ts": "2026-09-08T14:32:22Z", "session_id": "73da4fe2-a391-4bf9-8e71-f3309751e1bb", "kind": "result", "result_text": "Tue Sep  8 07:32:16 PM +05 2026\n\n**Result:** changed — none (task explicitly forbids file edits, including the journal). verified — `date` executed in `/home/altai/proga/fleet`. blocked — none. No background processes started.", "input_tokens": 2, "output_tokens": 88, "cache_creation_input_tokens": 9187, "cache_read_input_tokens": 40120, "model": "claude-opus-5", "transcript_path": "/home/altai/.claude/projects/-home-altai-proga-fleet/73da4fe2-a391-4bf9-8e71-f3309751e1bb.jsonl"}
+
+$ fleet result canary-srv
+-- tokens in=2 out=88 model=claude-opus-5
+Tue Sep  8 07:32:16 PM +05 2026
+
+**Result:** changed — none (task explicitly forbids file edits, including the journal). verified — `date` executed in `/home/altai/proga/fleet`. blocked — none. No background processes started.
+```
+
+### Step 3 — the ccgram-events check
+
+```text
+# volatile: host state — 2026-09-08 14:32 UTC
+$ SID=$(python3 - <<'EOF'
+import json;print(json.load(open('state/fleet.json'))['workers']['canary-srv']['session_id'])
+EOF
+)
+$ echo "$SID"
+73da4fe2-a391-4bf9-8e71-f3309751e1bb
+
+$ grep -c "$SID" /home/altai/.ccgram/events.jsonl || printf 'no ccgram events for %s\n' "$SID"
+0
+```
+
+**Result: 0.** The canary's session id does not appear anywhere in `~/.ccgram/events.jsonl`.
+`--setting-sources project,local` excluded the user-level ccgram hooks registered in
+`~/.claude/settings.json` on this `claude` 2.1.263 install, as designed. Not blocked; proceeding
+per the brief.
+
+### Step 4 — dispose
+
+```text
+# volatile: host state — 2026-09-08 14:32 UTC
+$ fleet kill canary-srv --yes
+canary-srv: killed
+kill rc=0
+```
