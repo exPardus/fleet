@@ -17,7 +17,13 @@ Neither the manager nor any worker may tick a box. An author never promotes its 
 
 *(**An empty docket is a legitimate state, not a parse failure:** `TestOperatorGatesFile` previously asserted the file always carries at least one open gate. Twenty-seven gates have now been ruled across seven in-session passes, the last being 2026-08-10 (the GOALS §8 text, §5's `--yes` scope, `init --home` under E2, and the vestigial slice-(c) witness) — all recorded under Settled below.)*
 
+- [ ] **Keeper typing `KEEPER:` lines into the dedicated `work:fleet` window — inside D7's pull-only intent (one opt-in window the keeper itself launched), or does D7 need an explicit amendment naming it**?
+- [ ] **Under the notify-only-via-ccgram ruling, two failures stay silent — a login expiry that also kills the interface window, and a failed `fleet-keeper` unit. Accept both as known blind spots, or permit one out-of-band alert path later**?
+- [ ] **`supervisor/briefs/` becomes a git-tracked home for standing briefs (dispatched by `sup-spawn --task @…`) — approve the directory, or keep briefs under gitignored `state/tasks/`**?
+
 ## Settled
+
+- [x] **kz-work server fleet — revival actor, notification path, and interface permission mode?** *(2026-09-08 by Altai, in-session.)* Answer: **the keeper timer PAGES ONLY and never dispatches; outbound notification goes ONLY through the ccgram-bound `work:fleet` window (no direct Bot API, no second bot); the server interface session runs `bypassPermissions`.** Design: `docs/superpowers/specs/2026-09-08-server-persistent-fleet-design.md`.
 
 - [x] **The prepared `supervisor/GOALS.md` §8 replacement text does not exist anywhere — supply it, authorise a supervisor-drafted reconstruction, or fall back to numbers-only?** *(2026-08-10 by Altai, in-session through the interface.)* Answer: **approve the drafted reconstruction.** Land the parked draft at `docs/proposals/2026-08-09-goals-band-section-replacement.md` into `supervisor/GOALS.md`, and add the file to `test_supervisor_context.py`'s `SURFACES` tuple as the 2026-08-08 ruling already directed. Grounds: the draft was written against that ruling's own three-defect specification, with every number re-derived from `fleet.band_thresholds` and every build-state claim re-derived by grep; the operator is approving CONTENT, and the "paste verbatim / no lane may originate" clauses were the interface's safeguard around an artifact it wrongly believed existed, not the operator's words. Numbers-only stays rejected for the reason first given: it leaves the false `[UNBUILT]` tag and the built/unbuilt conflation standing under a pin that would then bless them. Watch the pin RED before the edit and GREEN after, both floors.
 
