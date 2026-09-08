@@ -15368,7 +15368,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
     writer appends that record's OWN prior sid alone: :7947, :8486, :13062,
-    :18442), the same safety invariant §7.1's send carve-out rests on. That
+    :18444), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -16059,7 +16059,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
     #     writer appends that record's OWN prior sid alone (:7947, :8486, :13062,
-    #     :18442) -- so the sid union can never make one body answer for another.
+    #     :18444) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -17613,12 +17613,13 @@ def cmd_sup_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep
     campaign = _read_task_arg(args.task)
     mode = getattr(args, "permission_mode", None) or SUP_SPAWN_DEFAULT_MODE
     return _dispatch_supervisor_body(campaign, mode, getattr(args, "model", None),
+                                     setting_sources=getattr(args, "setting_sources", None),
                                      run=run, which=which, sleep=sleep, clock=clock)
 
 
-def _dispatch_supervisor_body(campaign, mode, model, *, run=subprocess.run,
-                              which=shutil.which, sleep=time.sleep,
-                              clock=time.monotonic) -> int:
+def _dispatch_supervisor_body(campaign, mode, model, *, setting_sources=None,
+                              run=subprocess.run, which=shutil.which,
+                              sleep=time.sleep, clock=time.monotonic) -> int:
     """Mint + dispatch ONE gen-0 supervisor body: name, pre-claim, boot-ritual
     task body, dispatch, stamp, rollback.
 
@@ -17653,6 +17654,7 @@ def _dispatch_supervisor_body(campaign, mode, model, *, run=subprocess.run,
         _spawner = current_caller_session()
         record = new_worker_record(
             None, cwd, campaign, mode, model=model,
+            setting_sources=setting_sources,
             spawned_by=_spawner,
             # §10.2: null at gen-0 falls out naturally -- the caller holds no
             # claim, so `_spawning_claim_lineage` returns None (design §3).
@@ -17677,7 +17679,7 @@ def _dispatch_supervisor_body(campaign, mode, model, *, run=subprocess.run,
         assert_brief_carried(name, campaign, prompt)
         result = dispatch_bg(
             name, cwd, prompt, mode, model=model,
-            category=None, hint="",
+            category=None, hint="", setting_sources=setting_sources,
             run=run, which=which, sleep=sleep, clock=clock,
         )
     except NativeDispatchError as exc:
@@ -21596,6 +21598,11 @@ def build_parser() -> argparse.ArgumentParser:
                                  f"{SUP_SPAWN_DEFAULT_MODE}, §10.2 "
                                  f"earned-privilege)")
     p_supspawn.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
+    # Same raw passthrough `spawn` has (SPEC §6): a host whose user-level
+    # settings register foreign Stop hooks (kz-work's ccgram bridge) needs
+    # the supervisor body dispatched without them, or every body's hook
+    # events land on the tmux window that first launched the daemon.
+    p_supspawn.add_argument("--setting-sources", dest="setting_sources", default=None)
 
     p_supckpt = sub.add_parser("sup-checkpoint", help="append a supervisor journal checkpoint (claim holder only) + refresh heartbeat")
     p_supckpt.add_argument("body", help="checkpoint text, or @file")
