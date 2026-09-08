@@ -9,6 +9,12 @@ writes fleet state, and never dispatches a session -- revival is a human
 message from the phone (operator ruling 2026-09-08, spec
 docs/superpowers/specs/2026-09-08-server-persistent-fleet-design.md).
 
+Exit codes: 0 for every observed fleet state (a dead fleet is news, not an
+error), 2 from argparse for a usage error, and 1 for exactly one condition
+-- `--fleet-home` naming a home other than the one the imported `fleet`
+module froze at import time, where every reading would be about the wrong
+home (fix wave 1, I3).
+
 stdlib only; floor is fleet.MIN_PYTHON_VERSION.
 """
 from __future__ import annotations
@@ -16,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -34,46 +41,151 @@ UNPUSHED_PAGE_SECONDS = 6 * 3600
 REPAGE_SECONDS = 6 * 3600
 ANOMALOUS_STATUSES = ("dead-suspected", "limited")
 
+PAGE_PREFIX = "KEEPER: "
+PAGE_TEXT_LIMIT = 200
+# Only the CSI form is matched here; a bare ESC left by any other escape
+# shape is dropped by the C0 filter in `_one_line` a line later.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;:<=>?]*[ -/]*[@-~]")
+
+
+def _one_line(text, limit=PAGE_TEXT_LIMIT):
+    """Collapse `text` into one printable line of at most `limit` chars.
+
+    Fix wave 1, C4. Every page is typed into a `bypassPermissions` Claude
+    session with `tmux send-keys -l`, and the substrings it interpolates --
+    a `sup-decision` question, a registry key -- are worker-writable. A
+    newline in either becomes a SECOND submitted prompt line, i.e. a
+    worker->interface injection channel, and an ANSI run or a 5 000-char
+    name makes the page unreadable. So: ANSI stripped, `\\r\\n\\t` and the
+    other C0 controls folded to spaces, whitespace collapsed, truncated
+    with an ellipsis. Sanitising at DELIVERY (rather than in each rule)
+    means a rule added later cannot forget to do it.
+    """
+    text = _ANSI_RE.sub("", str(text))
+    text = "".join(" " if ch < " " or ch == "\x7f" else ch for ch in text)
+    text = " ".join(text.split())
+    if len(text) > limit:
+        text = text[:limit - 1].rstrip() + "…"
+    return text
+
+
+def _page_line(text):
+    """The exact bytes a page types: `KEEPER: `-prefixed, then one-lined.
+
+    Prefix FIRST, sanitise second (C4's ruling): the prefix is what stops a
+    page whose interpolated text begins with `-` from reaching `send-keys`
+    as something that could read as a flag, and one-lining afterwards keeps
+    the guarantee that the whole delivered line is one line."""
+    text = str(text)
+    if not text.startswith(PAGE_PREFIX):
+        text = PAGE_PREFIX + text
+    return _one_line(text)
+
 
 # --------------------------------------------------------------------- rules
 
-def _sup_alive(obs) -> bool:
-    return any(str(n).startswith("sup|") for n in obs.get("sup_sessions", []))
+def _since(obs):
+    """When the supervisor stopped, if anything says: the claim's own
+    `released_at` first, else the heartbeat age in whole minutes."""
+    released_at = obs.get("released_at")
+    if released_at:
+        return str(released_at)
+    beat = obs.get("heartbeat_age_seconds")
+    if beat is None:
+        return None
+    return f"{int(beat // 60)} min ago"
 
 
 def rule_registry_unreadable(obs, now):
+    """Two states, two pages (fix wave 1, I1). A home where `fleet init` has
+    never run reads as `ok=False, reason="not_initialized"` -- the same shape
+    a QUARANTINED registry produces -- and paging "registry unreadable" at an
+    operator whose real remedy is `fleet init` sends them looking for an
+    incident that never happened."""
     if obs.get("registry_ok", True):
         return None
     reason = obs.get("registry_reason") or "unknown"
+    if reason == "not_initialized":
+        return Page("not-initialised", reason,
+                    "KEEPER: fleet home not initialised "
+                    "(state/worker-settings.json or registry missing). "
+                    "Run fleet init from a plain shell.")
     return Page("registry-unreadable", reason,
                 f"KEEPER: registry unreadable ({reason}). Report it; do not repair.")
+
+
+def rule_claude_missing(obs, now):
+    """`claude` absent from the unit's PATH is a DEPLOY fault, not an expired
+    login (fix wave 1, I2). systemd user units get a minimal PATH; the login
+    remedy (`/login` on the box) would not fix it."""
+    if not obs.get("agents_missing"):
+        return None
+    return Page("claude-missing", "not-on-path",
+                "KEEPER: claude binary not found on PATH for the keeper unit. "
+                "Check the service PATH.")
 
 
 def rule_login_expired(obs, now):
     if obs.get("agents_ok", True):
         return None
+    if obs.get("agents_missing"):
+        return None  # claude-missing says the true thing about this one
     return Page("login-expired", "agents-failed",
                 "KEEPER: claude login appears expired (`claude agents` failed). "
                 "Operator must /login on the box.")
 
 
-def rule_supervisor_dead(obs, now):
+def rule_claim_unknown(obs, now):
+    """`unknown` is "the claim could not be read or projected"
+    (`_supervisor_tier_snapshot`), which is NOT evidence of death. It used to
+    ride the supervisor-dead page and so reported a read failure as a fact
+    about the supervisor (fix wave 1, C2)."""
     if not obs.get("goals_active"):
         return None
     if not obs.get("agents_ok", True):
-        return None  # cannot tell dead from unlisted; login rule covers it
-    if _sup_alive(obs):
         return None
+    if obs.get("claim_state") != "unknown":
+        return None
+    return Page("claim-unknown", "unknown",
+                "KEEPER: supervisor claim unreadable (state unknown). "
+                "Report it; do not repair.")
+
+
+def rule_supervisor_dead(obs, now):
+    """Fires on: GOALS active, the roster readable, and either a
+    released/absent claim (dead by definition -- no roster condition), or a
+    HELD claim whose heartbeat is missing/stale AND whose own session id is
+    not in `claude agents --json`.
+
+    Fix wave 1, C2: the identity test is the claim's SESSION ID, not a
+    `sup|` name prefix. `claude agents --json` lists ACTIVE sessions only, so
+    an idle-between-turns supervisor is absent from it while perfectly alive
+    -- fleet's own verdict engine reads roster-absence plus a fresh outcome
+    as `idle`, not dead -- and a name join is the weaker proof anyway
+    (ai-title can overwrite `name` after a resume). A held claim with a
+    FRESH heartbeat never pages, whatever the roster says."""
+    if not obs.get("goals_active"):
+        return None
+    if not obs.get("agents_ok", True):
+        return None  # cannot tell dead from unlisted; login/missing rules cover it
     state = obs.get("claim_state")
-    beat = obs.get("heartbeat_age_seconds")
-    if state in ("released", "none", "unknown"):
+    if state in ("released", "none"):
         reason = f"claim {state}"
-    elif beat is not None and beat > HEARTBEAT_STALE_SECONDS:
-        reason = f"heartbeat {int(beat // 60)} min stale, no sup session"
+    elif state == "held":
+        beat = obs.get("heartbeat_age_seconds")
+        if beat is not None and beat <= HEARTBEAT_STALE_SECONDS:
+            return None
+        if obs.get("claim_sid_live"):
+            return None
+        stale = ("no heartbeat" if beat is None
+                 else f"heartbeat {int(beat // 60)} min stale")
+        reason = f"{stale}, claim session not in the roster"
     else:
-        return None
+        return None  # `unknown` belongs to rule_claim_unknown
+    since = _since(obs)
+    head = f"supervisor dead since {since}" if since else "supervisor dead"
     return Page("supervisor-dead", f"{state}:{reason}",
-                f"KEEPER: supervisor dead ({reason}). Report state; "
+                f"KEEPER: {head} ({reason}). Report state; "
                 "await operator before sup-spawn.")
 
 
@@ -126,7 +238,9 @@ def rule_hook_errors(obs, now):
 
 RULES = (
     rule_registry_unreadable,
+    rule_claude_missing,
     rule_login_expired,
+    rule_claim_unknown,
     rule_supervisor_dead,
     rule_supervisor_frozen,
     rule_worker_anomaly,
@@ -181,10 +295,15 @@ def save_state(path: Path, state: dict) -> None:
 # ------------------------------------------------------------------- collect
 
 SUBPROCESS_TIMEOUT = 30
+MISSING_BINARY_RC = 127
 
 
 def _run_text(run, argv, *, cwd=None, env=None):
-    """(rc, stdout) with every failure class folded into rc != 0."""
+    """(rc, stdout). A missing executable returns `MISSING_BINARY_RC`, which
+    is the shell's own convention -- folding it into rc=1 made "claude is not
+    on this unit's PATH" indistinguishable from "claude ran and refused",
+    i.e. from an expired login (fix wave 1, I2). Every other failure class
+    (timeout, permission, non-zero exit) still lands on rc != 0."""
     kwargs = {"capture_output": True, "text": True, "timeout": SUBPROCESS_TIMEOUT}
     if cwd is not None:
         kwargs["cwd"] = cwd
@@ -192,6 +311,8 @@ def _run_text(run, argv, *, cwd=None, env=None):
         kwargs["env"] = env
     try:
         cp = run(argv, **kwargs)
+    except FileNotFoundError:
+        return MISSING_BINARY_RC, ""
     except (OSError, subprocess.SubprocessError):
         return 1, ""
     return cp.returncode, cp.stdout or ""
@@ -210,30 +331,67 @@ def _sup_status(home, run):
     return data if isinstance(data, dict) else None
 
 
+def _pending_question(status):
+    """The open decision's QUESTION, or None.
+
+    Fix wave 1, C4. `sup-status --json` publishes `read_pending_decision()`'s
+    whole dict (`question`/`raised_by_inc`/`raised_at`/`answer`), so the old
+    code interpolated a dict repr into the page. An ANSWERED-but-unconsumed
+    decision is not a freeze either, so it must not page. A bare string is
+    accepted as the question for the older shape."""
+    pending = status.get("pending_decision")
+    if isinstance(pending, str):
+        return pending or None
+    if not isinstance(pending, dict):
+        return None
+    if pending.get("answer"):
+        return None
+    question = pending.get("question")
+    return question if isinstance(question, str) and question else None
+
+
 def _agents(run):
+    """(ok, missing, session_ids). `claude agents --json` lists the ACTIVE
+    sessions; the sids are the identity join C2 replaced the name prefix
+    with."""
     rc, out = _run_text(run, ["claude", "agents", "--json"])
+    if rc == MISSING_BINARY_RC:
+        return False, True, set()
     if rc != 0:
-        return False, []
+        return False, False, set()
     try:
         rows = json.loads(out)
     except ValueError:
-        return False, []
-    names = [str(r.get("name", "")) for r in rows if isinstance(r, dict)]
-    return True, [n for n in names if n.startswith("sup|")]
+        return False, False, set()
+    if not isinstance(rows, list):
+        return False, False, set()
+    sids = set()
+    for row in rows:
+        if isinstance(row, dict) and isinstance(row.get("sessionId"), str):
+            if row["sessionId"]:
+                sids.add(row["sessionId"])
+    return True, False, sids
 
 
-def _git_unpushed(home, run):
-    rc, out = _run_text(run, ["git", "rev-list", "--count", "origin/main..main"],
-                        cwd=str(home))
+def _git_unpushed(home, run, out=sys.stdout):
+    """(count, oldest unpushed commit ts). A repo with no `origin/main` --
+    or no `origin` at all -- makes `rev-list` exit non-zero; that is "cannot
+    tell", not "nothing unpushed", and it must not page (fix wave 1, minor).
+    It says so on the keeper's own stdout and returns the silent value."""
+    rc, text = _run_text(run, ["git", "rev-list", "--count", "origin/main..main"],
+                         cwd=str(home))
+    if rc != 0:
+        print("keeper: git unpushed check unavailable", file=out)
+        return 0, None
     try:
-        n = int(out.strip()) if rc == 0 else 0
+        n = int(text.strip())
     except ValueError:
-        n = 0
+        return 0, None
     if n <= 0:
         return 0, None
-    rc, out = _run_text(run, ["git", "log", "--format=%ct", "--reverse",
-                              "origin/main..main"], cwd=str(home))
-    first = out.strip().splitlines()[0] if rc == 0 and out.strip() else ""
+    rc, text = _run_text(run, ["git", "log", "--format=%ct", "--reverse",
+                               "origin/main..main"], cwd=str(home))
+    first = text.strip().splitlines()[0] if rc == 0 and text.strip() else ""
     try:
         return n, float(first)
     except ValueError:
@@ -249,35 +407,51 @@ def _count_lines(path):
 
 
 def collect(home, *, now, run=subprocess.run, snapshot_fn=fleet.status_snapshot,
-            prev_state=None):
+            prev_state=None, out=sys.stdout):
+    """One observation dict from four read-only sources.
+
+    CLAIM STATE AND GOALS COME FROM `status_snapshot()`, ALWAYS (fix wave 1,
+    C1). `sup-status --json`'s `incarnation` projection copies the claim's
+    raw `state` key, and only `sup-release` ever WRITES that key -- so a
+    perfectly healthy HELD claim projects `state: None` and read `unknown`
+    here, which put every live supervisor into the dead-trigger set.
+    `_supervisor_tier_snapshot` is the normaliser (`none`/`held`/`released`/
+    `unknown`), so it is the source. `sup-status` is still read, for the
+    three things the snapshot does not carry: the pending decision, the
+    heartbeat age at claim-projection precision, and the claim's session id."""
     home = Path(home)
     prev_state = prev_state or {}
     snap = snapshot_fn()
     sup = snap.get("supervisor") or {}
     status = _sup_status(home, run)
+    claim_state = sup.get("state") or "unknown"
+    goals_active = bool(sup.get("goals_active"))
     if status is not None:
-        claim_state = (status.get("incarnation") or {}).get("state") or (
-            "none" if status.get("incarnation") is None else "unknown")
-        goals_active = bool(status.get("goals_active"))
+        incarnation = status.get("incarnation") or {}
         beat = status.get("heartbeat_age_seconds")
-        pending = status.get("pending_decision")
+        pending = _pending_question(status)
+        claim_sid = incarnation.get("session_id")
+        released_at = incarnation.get("released_at")
     else:
-        claim_state = sup.get("state") or "unknown"
-        goals_active = bool(sup.get("goals_active"))
         beat = sup.get("heartbeat_age_seconds")
         pending = None
-    agents_ok, sup_sessions = _agents(run)
-    unpushed, oldest = _git_unpushed(home, run)
+        claim_sid = None
+        released_at = None
+    agents_ok, agents_missing, agent_sids = _agents(run)
+    unpushed, oldest = _git_unpushed(home, run, out=out)
     workers = [{"name": w.get("name"), "status": w.get("status"),
                 "mail": w.get("mail") or 0, "limit_kind": w.get("limit_kind")}
                for w in (snap.get("workers") or [])]
     return {
         "goals_active": goals_active,
         "claim_state": claim_state,
+        "claim_sid": claim_sid if isinstance(claim_sid, str) and claim_sid else None,
+        "claim_sid_live": bool(claim_sid) and claim_sid in agent_sids,
+        "released_at": released_at,
         "heartbeat_age_seconds": beat,
         "pending_decision": pending,
-        "sup_sessions": sup_sessions,
         "agents_ok": agents_ok,
+        "agents_missing": agents_missing,
         "registry_ok": bool(snap.get("ok", True)),
         "registry_reason": snap.get("reason"),
         "workers": workers,
@@ -290,6 +464,9 @@ def collect(home, *, now, run=subprocess.run, snapshot_fn=fleet.status_snapshot,
 
 # ---------------------------------------------------------------------- tmux
 
+SHELL_COMMANDS = ("sh", "bash", "zsh", "fish", "dash")
+
+
 def _tmux(run, out, *args):
     argv = ["tmux", *args]
     rc, _ = _run_text(run, argv)
@@ -298,32 +475,66 @@ def _tmux(run, out, *args):
     return rc == 0
 
 
+def _panes(run, target):
+    """[(current command, dead)] for `target`, or None when the window is
+    absent (that is what a non-zero `list-panes` means)."""
+    rc, text = _run_text(run, ["tmux", "list-panes", "-t", target, "-F",
+                               "#{pane_current_command} #{pane_dead}"])
+    if rc != 0:
+        return None
+    panes = []
+    for line in text.splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        panes.append((parts[0], len(parts) > 1 and parts[1] == "1"))
+    return panes
+
+
 def window_alive(run, target):
-    rc, text = _run_text(run, ["tmux", "list-panes", "-t", target,
-                               "-F", "#{pane_current_command}"])
-    return rc == 0 and "claude" in text.split()
-
-
-def _window_exists(run, target):
-    rc, _ = _run_text(run, ["tmux", "list-panes", "-t", target])
-    return rc == 0
+    panes = _panes(run, target)
+    return bool(panes) and any(cmd == "claude" and not dead for cmd, dead in panes)
 
 
 def ensure_window(run, *, session, window, cwd, launch, out=sys.stdout):
+    """Create `session:window` when it is absent or provably unusable.
+
+    Returns True only when a `new-window` actually SUCCEEDED (fix wave 1,
+    C3 -- it used to return True unconditionally, so a tmux server that was
+    gone still read as "created"). The caller treats True as "defer this
+    tick's pages" (I6): a freshly launched Claude TUI is not ready to
+    receive typed input, and a page typed into its startup is lost.
+
+    RECYCLING IS NARROW (I5). `pane_current_command` is one sample of a
+    live pane, and `claude` is not what it reads while claude shells out --
+    at that instant it reads `git`, `rg`, `node`. Killing the window then
+    kills the operator's live interface session mid-turn. So the window is
+    recycled only when its pane is DEAD or is sitting at a bare shell
+    prompt; anything else is left alone and reported."""
     target = f"{session}:{window}"
-    if window_alive(run, target):
-        return False
-    if _window_exists(run, target):
+    panes = _panes(run, target)
+    if panes is not None:
+        if any(cmd == "claude" and not dead for cmd, dead in panes):
+            return False
+        cmd, dead = panes[0] if panes else ("", True)
+        if not dead and cmd and cmd not in SHELL_COMMANDS:
+            print(f"keeper: window {target} busy with {cmd}; not recycling", file=out)
+            return False
         _tmux(run, out, "kill-window", "-t", target)
-    _tmux(run, out, "new-window", "-d", "-t", session, "-n", window,
-          "-c", cwd, launch)
-    return True
+    return _tmux(run, out, "new-window", "-d", "-t", session, "-n", window,
+                 "-c", cwd, launch)
 
 
 def page(run, target, text, out=sys.stdout):
-    ok = _tmux(run, out, "send-keys", "-t", target, "-l", text)
-    ok = _tmux(run, out, "send-keys", "-t", target, "Enter") and ok
-    return ok
+    """Type one sanitised line and submit it. Returns whether it landed --
+    the caller records dedup state only for a page that did (C3).
+
+    `Enter` is NOT sent when the literal send failed: that would submit
+    whatever the interface session had half-typed in its prompt box."""
+    line = _page_line(text)
+    if not _tmux(run, out, "send-keys", "-t", target, "-l", line):
+        return False
+    return _tmux(run, out, "send-keys", "-t", target, "Enter")
 
 
 # ---------------------------------------------------------------------- main
@@ -347,6 +558,18 @@ def main(argv=None, *, run=subprocess.run, now_fn=time.time,
          snapshot_fn=fleet.status_snapshot, out=sys.stdout):
     args = _parser().parse_args(argv)
     home = Path(args.fleet_home).resolve()
+    # I3: `--fleet-home` reaches the sup-status subprocess, git's cwd and the
+    # state path -- but `fleet.FLEET_HOME` is frozen at IMPORT, so
+    # `status_snapshot()` reads whatever home the imported module resolved.
+    # A mismatch means half the observation is about one home and half about
+    # another, which is worse than no tick at all. Read, never assigned:
+    # rebinding it here would make the keeper a second definition of where
+    # the fleet lives.
+    imported_home = Path(fleet.FLEET_HOME).resolve()
+    if imported_home != home:
+        print(f"keeper: --fleet-home {home} does not match the imported fleet "
+              f"home {imported_home}; refusing", file=out)
+        return 1
     profile = Path(args.profile) if args.profile else (
         home / "docs" / "operator" / "server-interface-profile.md")
     launch = ('claude --permission-mode bypassPermissions '
@@ -356,14 +579,15 @@ def main(argv=None, *, run=subprocess.run, now_fn=time.time,
     now = float(now_fn())
 
     state = load_state(state_path)
-    obs = collect(home, now=now, run=run, snapshot_fn=snapshot_fn, prev_state=state)
+    obs = collect(home, now=now, run=run, snapshot_fn=snapshot_fn,
+                  prev_state=state, out=out)
     pages = evaluate(obs, now)
-    rule_state = {k_: v for k_, v in state.items() if not k_.startswith("_")}
-    send, rule_state = dedup(pages, rule_state, now)
+    prev_rules = {k_: v for k_, v in state.items() if not k_.startswith("_")}
+    send, rule_state = dedup(pages, prev_rules, now)
 
     if args.dry_run:
         for p in pages:
-            print(f"[dry-run] {p.rule}: {p.text}", file=out)
+            print(f"[dry-run] {p.rule}: {_page_line(p.text)}", file=out)
         if not window_alive(run, target):
             print(f"[dry-run] would create {target}: {launch}", file=out)
         return 0
@@ -371,10 +595,28 @@ def main(argv=None, *, run=subprocess.run, now_fn=time.time,
     created = ensure_window(run, session=args.tmux_session, window=args.window,
                             cwd=str(home), launch=launch, out=out)
     if created:
-        print(f"keeper: created {target}", file=out)
-    for p in send:
-        page(run, target, p.text, out=out)
-        print(f"keeper: paged {p.rule}", file=out)
+        # I6: nothing is paged into a window created this tick, and the dedup
+        # record is left exactly as the previous tick wrote it -- so the next
+        # tick, 15 minutes into the new session's life, pages everything that
+        # is still true.
+        print(f"keeper: created {target}; pages deferred to next tick", file=out)
+        rule_state = prev_rules
+    else:
+        for p in send:
+            if page(run, target, p.text, out=out):
+                print(f"keeper: paged {p.rule}", file=out)
+                continue
+            # C3: a page tmux refused was never seen by anyone. Recording it
+            # as sent suppressed the rule for the whole 6h re-page window --
+            # the fleet's loudest alarm silenced by the failure of the wire
+            # that carries it. Carry the previous entry forward (or drop the
+            # key) so the next tick tries again.
+            print(f"keeper: page NOT delivered: {p.rule}", file=out)
+            previous = prev_rules.get(p.rule)
+            if previous is None:
+                rule_state.pop(p.rule, None)
+            else:
+                rule_state[p.rule] = previous
 
     rule_state["_hook_error_lines"] = obs["hook_error_lines"]
     save_state(state_path, rule_state)
