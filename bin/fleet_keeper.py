@@ -176,3 +176,113 @@ def save_state(path: Path, state: dict) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, indent=1, sort_keys=True), encoding="utf-8")
     os.replace(tmp, path)
+
+
+# ------------------------------------------------------------------- collect
+
+SUBPROCESS_TIMEOUT = 30
+
+
+def _run_text(run, argv, *, cwd=None, env=None):
+    """(rc, stdout) with every failure class folded into rc != 0."""
+    kwargs = {"capture_output": True, "text": True, "timeout": SUBPROCESS_TIMEOUT}
+    if cwd is not None:
+        kwargs["cwd"] = cwd
+    if env is not None:
+        kwargs["env"] = env
+    try:
+        cp = run(argv, **kwargs)
+    except (OSError, subprocess.SubprocessError):
+        return 1, ""
+    return cp.returncode, cp.stdout or ""
+
+
+def _sup_status(home, run):
+    argv = [sys.executable, str(Path(home) / "bin" / "fleet.py"),
+            "sup-status", "--json"]
+    rc, out = _run_text(run, argv, env={**os.environ, "FLEET_HOME": str(home)})
+    if rc != 0:
+        return None
+    try:
+        data = json.loads(out)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _agents(run):
+    rc, out = _run_text(run, ["claude", "agents", "--json"])
+    if rc != 0:
+        return False, []
+    try:
+        rows = json.loads(out)
+    except ValueError:
+        return False, []
+    names = [str(r.get("name", "")) for r in rows if isinstance(r, dict)]
+    return True, [n for n in names if n.startswith("sup|")]
+
+
+def _git_unpushed(home, run):
+    rc, out = _run_text(run, ["git", "rev-list", "--count", "origin/main..main"],
+                        cwd=str(home))
+    try:
+        n = int(out.strip()) if rc == 0 else 0
+    except ValueError:
+        n = 0
+    if n <= 0:
+        return 0, None
+    rc, out = _run_text(run, ["git", "log", "--format=%ct", "--reverse",
+                              "origin/main..main"], cwd=str(home))
+    first = out.strip().splitlines()[0] if rc == 0 and out.strip() else ""
+    try:
+        return n, float(first)
+    except ValueError:
+        return n, None
+
+
+def _count_lines(path):
+    try:
+        with open(path, "rb") as fh:
+            return sum(1 for _ in fh)
+    except OSError:
+        return 0
+
+
+def collect(home, *, now, run=subprocess.run, snapshot_fn=fleet.status_snapshot,
+            prev_state=None):
+    home = Path(home)
+    prev_state = prev_state or {}
+    snap = snapshot_fn()
+    sup = snap.get("supervisor") or {}
+    status = _sup_status(home, run)
+    if status is not None:
+        claim_state = (status.get("incarnation") or {}).get("state") or (
+            "none" if status.get("incarnation") is None else "unknown")
+        goals_active = bool(status.get("goals_active"))
+        beat = status.get("heartbeat_age_seconds")
+        pending = status.get("pending_decision")
+    else:
+        claim_state = sup.get("state") or "unknown"
+        goals_active = bool(sup.get("goals_active"))
+        beat = sup.get("heartbeat_age_seconds")
+        pending = None
+    agents_ok, sup_sessions = _agents(run)
+    unpushed, oldest = _git_unpushed(home, run)
+    workers = [{"name": w.get("name"), "status": w.get("status"),
+                "mail": w.get("mail") or 0, "limit_kind": w.get("limit_kind")}
+               for w in (snap.get("workers") or [])]
+    return {
+        "goals_active": goals_active,
+        "claim_state": claim_state,
+        "heartbeat_age_seconds": beat,
+        "pending_decision": pending,
+        "sup_sessions": sup_sessions,
+        "agents_ok": agents_ok,
+        "registry_ok": bool(snap.get("ok", True)),
+        "registry_reason": snap.get("reason"),
+        "workers": workers,
+        "unpushed": unpushed,
+        "oldest_unpushed_ts": oldest,
+        "hook_error_lines": _count_lines(home / "state" / "hook-errors.log"),
+        "prev_hook_error_lines": int(prev_state.get("_hook_error_lines", 0) or 0),
+    }
