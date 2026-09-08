@@ -126,3 +126,165 @@ $ fleet kill canary-srv --yes
 canary-srv: killed
 kill rc=0
 ```
+
+## S2/S3 — window, dry-run, timer
+
+Host: this box, `/home/altai/proga/fleet`, branch `server/persistent-fleet` at `92cec0a`.
+`fleet init` already ran (Task 9). Window created by hand, keeper run twice by hand (dry-run then
+real), timer deploy attempted via Ansible.
+
+### Step 1 — interface window by hand, ccgram binding
+
+```text
+# volatile: host state — 2026-09-08 20:41 UTC (host clock)
+$ tmux list-windows -t work -F '#{window_name} #{pane_current_command}'   # before
+zsh zsh
+zsh zsh
+repo claude
+claude claude
+
+$ tmux new-window -d -t work -n fleet -c /home/altai/proga/fleet \
+  'claude --permission-mode bypassPermissions "Read /home/altai/proga/fleet/docs/operator/server-interface-profile.md and follow it exactly."'
+new-window rc=0
+
+$ sleep 20
+$ tmux list-windows -t work -F '#{window_name} #{pane_current_command}'
+zsh zsh
+zsh zsh
+fleet claude
+repo claude
+claude claude
+
+$ python3 -c "import json;d=json.load(open('/home/altai/.ccgram/state.json'));print(d.get('window_display_names'));print([k for k in d.get('chat_thread_bindings',{})])"
+{'@0': 'zsh', '@7': 'tap', '@8': 'repo', '@9': 'fwdeploy', '@10': 'claude', '@12': 'dep2', '@13': 'dep3', '@14': 'codexlogin', '@15': 'codexauth', '@16': 'zsh', '@17': 'chk', '@18': 'dep4', '@19': 'fleet'}
+['1219110869:1219110869:511347', ... 14 opaque thread-binding keys, no readable names ...]
+
+$ tail -n 5 ~/.ccgram/events.jsonl | cut -c1-200
+... {"event":"SessionStart","window_key":"work:@19","session_id":"e9fc7d5e-6c18-4e7d-8a05-dd9bd4b101f1", ...}
+... {"event":"Stop","window_key":"work:@19","session_id":"e9fc7d5e-6c18-4e7d-8a05-dd9bd4b101f1", ...} (arrived after the ~60s wait)
+```
+
+`@19` -> `fleet` in `window_display_names` confirms ccgram bound the new window; `SessionStart`/
+`Stop` events for `work:@19` confirm the session ran. `chat_thread_bindings` keys are opaque
+chat:chat:thread ids with no window name attached, so binding was read off `window_display_names` +
+events, not that map. Could not see the phone from this session (no phone access) -- did not send
+`status` from it; recording only what the host shows, per the controller's ruling. Waited ~60s
+foreground (20s + 40s, no `&`) before the real tick in Step 3. `tmux capture-pane -p -t work:fleet`
+after the wait showed the full startup ritual report (open gates G-K1/G-K2/G-K4, no supervisor
+claim, GOALS active, fleet dead and not revived, 1 dead worker, git clean and 17 ahead of main, no
+hook errors, keeper timer not yet installed) ending in "Waiting."
+
+### Step 2 — keeper dry-run
+
+```text
+# volatile: host state — 2026-09-08 20:42 UTC
+$ sh bin/hooks/run_py.sh bin/fleet_keeper.py --once --dry-run --fleet-home "$PWD"
+[dry-run] supervisor-dead: KEEPER: supervisor dead (claim none). Report state; await operator before sup-spawn.
+dry-run rc=0
+
+$ sh bin/hooks/run_py.sh bin/fleet_keeper.py --once --dry-run --fleet-home "$PWD"   # again, same
+[dry-run] supervisor-dead: KEEPER: supervisor dead (claim none). Report state; await operator before sup-spawn.
+dry-run rc=0
+```
+
+Matches the controller's prior verification exactly; no `would create` line (window already
+existed); nothing typed into the window.
+
+### Step 3 — one real tick
+
+```text
+# volatile: host state — 2026-09-08 20:42 UTC
+$ sh bin/hooks/run_py.sh bin/fleet_keeper.py --once --fleet-home "$PWD"
+keeper: paged supervisor-dead
+real-tick rc=0
+
+$ cat state/keeper/last-page.json
+{
+ "_hook_error_lines": 0,
+ "supervisor-dead": {
+  "at": 1788882140.5814927,
+  "fingerprint": "none:claim none"
+ }
+}
+
+$ sh bin/hooks/run_py.sh bin/fleet_keeper.py --once --fleet-home "$PWD"   # second run
+second-tick rc=0
+(no stdout -- dedup confirmed)
+```
+
+`tmux capture-pane -p -t work:fleet | tail -n 30` after the tick and a further ~15s wait:
+
+```text
+❯ KEEPER: supervisor dead (claim none). Report state; await operator before sup-spawn.
+
+  Ran 1 shell command
+
+● Keeper page confirmed.
+
+  Keeper saw: supervisor dead, claim none.
+
+  Confirmed: fleet sup-status = no claim, GOALS active. fleet doctor all PASS, no pending decision, no wedge, no hook errors. One worker canary-srv dead (70 min). One untracked
+  claude session f83c8b56 (not fleet's). Git clean, 17 commits ahead of main, unpushed.
+
+  Recommend: dispatch supervisor/briefs/server-standing.md via fleet sup-spawn --task @supervisor/briefs/server-standing.md --setting-sources project,local. Reply revive to do it. No
+  action taken.
+
+✻ Cooked for 11s · done 8:42 PM
+```
+
+The interface session read the `KEEPER:` line, investigated with read-only verbs only, posted one
+message, took no mutating action -- exactly per `server-interface-profile.md`.
+
+### Step 4 — Ansible timer deploy: BLOCKED at stage (a)
+
+```text
+# volatile: host state — 2026-09-08 20:43 UTC
+$ cd /home/altai/china-infra && git status --short
+ M inventory/group_vars/all/secrets.sops.yml
+```
+(pre-existing dirty file from another live session; not touched, not stashed.)
+
+```text
+$ ansible-playbook playbooks/work.yml --tags fleet_keeper --check --diff 2>&1 | tail -60
+... (preflight plays skip) ...
+PLAY [Configure kz-work (Headscale, DERP #1, devbox, monitoring)] **************
+TASK [Gathering Facts] *********************************************************
+ok: [kz-work]
+TASK [golang : Install the pinned Go toolchain] ********************************
+included: /home/altai/china-infra/roles/golang/tasks/install.yml for kz-work
+TASK [golang : Look for an existing Go toolchain] ******************************
+ok: [kz-work]
+TASK [golang : Ask the installed toolchain which version it is] ****************
+skipping: [kz-work]
+TASK [golang : Decide whether the pinned toolchain has to be installed] ********
+ok: [kz-work]
+TASK [golang : Report that the pinned Go toolchain is already installed] *******
+skipping: [kz-work]
+TASK [golang : Fetch the go.dev release index] *********************************
+skipping: [kz-work]
+TASK [golang : Pick the linux-amd64 entry out of the index for go1.27.1.linux-amd64.tar.gz] ***
+ok: [kz-work]
+TASK [golang : Fail unless go.dev publishes the pinned digest for this release] ***
+[ERROR]: Task failed: Action failed: go.dev publishes sha256 "" for go1.27.1.linux-amd64.tar.gz, but roles/golang/defaults/main.yml pins "63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445". An empty value means go1.27.1 is not in https://go.dev/dl/?mode=json&include=all at all -- check versions.go in inventory/group_vars/all/vars.yml. A DIFFERENT value means upstream re-cut the release under the same file name, or somebody is between this host and go.dev. Do not deploy either way.
+Origin: /home/altai/china-infra/roles/golang/tasks/install.yml:71:3
+fatal: [kz-work]: FAILED! => assertion: golang_published_sha256 | length == 64, changed: false, evaluated_to: false
+
+PLAY RECAP *********************************************************************
+kz-work                    : ok=5    changed=0    unreachable=0    failed=1    skipped=21   rescued=0    ignored=0
+```
+
+The `golang` role's preflight tasks ran despite `--tags fleet_keeper` (apparently tagged `always`
+or otherwise unfiltered) and aborted the play on an unrelated, network-dependent digest assertion
+(go.dev no longer serves a sha256 for the pinned `go1.27.1` release) *before* any `fleet_keeper`
+task ran. `changed=0`, no diff was produced for any file. Per the controller's ruling ("Proceed to
+(b) ONLY if every changed/created file is under `~/.config/systemd/user/fleet-keeper.*`... if the
+check shows changes to any other host file... STOP... reply BLOCKED"): there is no diff to confirm
+that condition against, so stage (b) (the real `ansible-playbook ... --tags fleet_keeper` without
+`--check`) was **not run**. The timer is **not deployed**. `systemctl --user list-timers
+fleet-keeper.timer` / `journalctl --user -u fleet-keeper.service` were not run (nothing to verify
+yet). `china-infra` left untouched beyond this read-only check and two `git status` calls; still
+only the pre-existing dirty `secrets.sops.yml`.
+
+This is an existing, unrelated `china-infra` infra issue (an upstream Go release digest gone
+missing) blocking every tagged play on this host, not something this task introduced. It needs a
+decision from whoever owns `china-infra` before the fleet_keeper timer diff can even be evaluated.
