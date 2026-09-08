@@ -17,6 +17,10 @@ from test_sup_spawn import (  # noqa: F401  (fixtures re-exported)
     _the_one_worker,
     native_home,
 )
+from test_sup_tombstone import (
+    _fake_run_factory as _tombstone_run_factory,
+    _respawn_happy,
+)
 
 
 def _args(setting_sources=None):
@@ -67,3 +71,44 @@ def test_the_parser_accepts_the_flag():
     ns = parser.parse_args(["sup-spawn", "--task", "x",
                             "--setting-sources", "project"])
     assert ns.setting_sources == "project"
+
+
+# --- I4: the flag survives the bodies that follow the first one -------------
+#
+# `sup-spawn` carrying the flag (above) is one body's worth of remedy. The two
+# paths that mint the NEXT supervisor body -- `respawn supervisor` (three-tier
+# §10.4, which re-dispatches through `_dispatch_supervisor_body`) and
+# `sup-handoff-begin` (SPEC §6.1's sanctioned second argv builder) -- have to
+# carry it too, or the ccgram hooks come back at the first ceiling. The
+# handoff half lives beside the other handoff tests, in
+# tests/test_supervisor.py::TestHandoff.
+
+def _respawn_dispatch_argv(calls):
+    return next(argv for argv, _ in calls if "--bg" in argv)
+
+
+def test_respawn_supervisor_carries_the_old_bodys_setting_sources(
+        native_home, monkeypatch):
+    calls = []
+    rc = _respawn_happy(native_home, monkeypatch,
+                        run=_tombstone_run_factory(calls=calls),
+                        holder={"setting_sources": "project,local"})
+    assert rc == 0
+    argv = _respawn_dispatch_argv(calls)
+    i = argv.index("--setting-sources")
+    assert argv[i + 1] == "project,local"
+    assert i > argv.index("--settings")
+    # and persisted on the fresh gen-0 record, so the body after THIS one
+    # reads it back the same way
+    workers = fleet.load_registry()["workers"]
+    fresh = [r for n, r in workers.items() if n != "sup|inc-1|boot"]
+    assert len(fresh) == 1, workers
+    assert fresh[0]["setting_sources"] == "project,local"
+
+
+def test_respawn_supervisor_without_the_flag_adds_nothing(native_home, monkeypatch):
+    calls = []
+    rc = _respawn_happy(native_home, monkeypatch,
+                        run=_tombstone_run_factory(calls=calls))
+    assert rc == 0
+    assert "--setting-sources" not in _respawn_dispatch_argv(calls)

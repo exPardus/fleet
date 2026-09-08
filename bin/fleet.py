@@ -9830,7 +9830,20 @@ def _cmd_respawn_supervisor(args, name, rec, claim, *, run, which, sleep, clock)
     # supervisor/JOURNAL.md, GOALS and the claim files -- re-seeding from those
     # durable artifacts is the §3.5.4 doctrine, not a loss, which is why the
     # worker journal + drained mailbox carry-over is deliberately NOT used.
-    return _dispatch_supervisor_body(campaign, mode, model, run=run, which=which,
+    #
+    # `setting_sources` IS carried, unlike the journal (2026-09-08, final
+    # review I4). It is not state to re-seed -- it is the DISPATCH FLAG that
+    # decides which settings files the successor body merges, and on the
+    # kz-work server it is the whole ccgram remedy: without
+    # `--setting-sources project,local` the body runs the user-level ccgram
+    # hooks and every one of its turns is attributed to the tmux pane that
+    # first launched the daemon. `mode` and `model` are already read off the
+    # record here for exactly this reason; a remedy that survived one body
+    # and then silently lapsed at the first respawn is worse than one that
+    # never applied, because the operator has a receipt saying it works.
+    return _dispatch_supervisor_body(campaign, mode, model,
+                                     setting_sources=rec.get("setting_sources"),
+                                     run=run, which=which,
                                      sleep=sleep, clock=clock)
 
 
@@ -17812,6 +17825,37 @@ Do exactly this, in order:
 """
 
 
+def _claim_holder_setting_sources(claim):
+    """The claim holder's persisted `setting_sources`, or None (I4).
+
+    A READ, and a best-effort one: it decides a dispatch FLAG, not whether
+    the handoff may proceed. So an unreadable registry, a claim with no
+    readable sid, or a holder sid that matches no record all degrade to
+    None -- the successor launches with claude's default source merge,
+    exactly as it did before this carry existed -- rather than raising and
+    stranding a handoff over a settings nicety.
+
+    `read_registry_no_repair`, never `load_registry`: this runs OUTSIDE
+    `fleet.lock` (the dispatch half of the verb is deliberately lock-free,
+    F4 doctrine) and the loader QUARANTINES a corrupt registry, which is an
+    unlocked write. Same boundary `_supervisor_lifecycle_target`'s
+    pre-flight states at length."""
+    holder_sid = claim.get("session_id")
+    if not isinstance(holder_sid, str) or not holder_sid:
+        return None
+    try:
+        data = read_registry_no_repair(hint=False)
+    except RegistryCorruptError:
+        return None
+    for rec in data.get("workers", {}).values():
+        if not isinstance(rec, dict):
+            continue
+        if holder_sid in _record_sids(rec):
+            value = rec.get("setting_sources")
+            return value if isinstance(value, str) and value else None
+    return None
+
+
 def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
                           sleep=time.sleep, clock=time.monotonic) -> int:
     """`fleet sup-handoff-begin [--model M] [--permission-mode P] [--sid S]`.
@@ -17869,9 +17913,21 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     NOT carried, deliberately: `--add-dir`. `dispatch_bg` needs it because
     `tasks_dir()` sits outside the worker's cwd; this dispatch runs with
     `cwd=FLEET_HOME` and its task file is `FLEET_HOME/state/...`, already
-    inside the authorized root. `--setting-sources` likewise: it is a
-    per-worker persisted value not carried on this launch (the successor's
-    record, registered on the success path below, defaults it to None).
+    inside the authorized root.
+
+    `--setting-sources` IS carried, since 2026-09-08 (final review I4). It
+    used to be on the deliberate-omission list above, reasoned as "a
+    per-worker persisted value", and that reasoning does not survive the
+    ccgram remedy: the flag decides which settings files the successor
+    merges, and on a host whose USER-level settings register foreign hooks
+    (kz-work's ccgram bridge) dropping it puts those hooks back on the very
+    next body. The identity of the value is the CLAIM HOLDER's -- the body
+    running this verb, resolved by the same holder sid this function has
+    already used to authorise the caller -- because that is the body whose
+    dispatch established the fleet's current hook posture. It is appended
+    after `--settings` (the same order `dispatch_bg` emits) and persisted on
+    the successor's record, so the NEXT handoff reads it back and the remedy
+    survives an unbounded chain of bodies rather than exactly one.
 
     Mode flags ARE carried (B4/D6 fix wave). `dispatch_bg` ends every worker
     argv with `mode_flags(mode)`; this path emitted a permission flag only when
@@ -18067,6 +18123,12 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     # this function's docstring for why this path is not dispatch_bg.
     argv = [exe, "--bg", "-n", name,
             "--settings", instance_settings_path().as_posix()]
+    # I4: carry the claim holder's own `--setting-sources` (see the docstring).
+    # Optional by construction -- absent from the argv when the holder has
+    # none, which is every home that never needed the flag.
+    succ_setting_sources = _claim_holder_setting_sources(claim)
+    if succ_setting_sources:
+        argv += ["--setting-sources", succ_setting_sources]
     if getattr(args, "model", None):
         argv += ["--model", args.model]
     # B4/D6: never leave the mode to claude's default -- see the docstring.
@@ -18242,6 +18304,7 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
                 successor_sid, FLEET_HOME,
                 f"supervisor successor {successor_inc} (handoff from {holder_inc})",
                 succ_mode, model=getattr(args, "model", None),
+                setting_sources=succ_setting_sources,
                 spawned_by=caller, spawned_by_lineage=claim.get("lineage_id"),
                 dispatch_kind="bg", category=None)
             succ_rec["turns"] = 1

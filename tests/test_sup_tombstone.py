@@ -517,9 +517,11 @@ class TestKillArmTwo:
 # ---------------------------------------------------------------------------
 # §7 test 5 -- respawn success shape.
 # ---------------------------------------------------------------------------
-def _respawn_happy(native_home, monkeypatch, args=None, run=None):
+def _respawn_happy(native_home, monkeypatch, args=None, run=None, holder=None):
+    """`holder` overrides fields on the OLD body's registry record -- the one
+    `_cmd_respawn_supervisor` reads its dispatch flags back off."""
     _held_claim()
-    _seed_pipe_worker()
+    _seed_pipe_worker(**(holder or {}))
     _releasing_send(monkeypatch)
     monkeypatch.setattr(fleet, "_stop_native_session_status",
                         lambda *a, **k: (True, "gone"))
