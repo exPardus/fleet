@@ -142,3 +142,37 @@ def evaluate(obs, now) -> list:
         if page is not None:
             pages.append(page)
     return pages
+
+
+# --------------------------------------------------------------------- dedup
+
+def dedup(pages, state, now):
+    """Send a page when its rule is new, its fingerprint changed, or the
+    re-page window elapsed. Rules that stopped firing drop out of state."""
+    send = []
+    new_state = {}
+    for page in pages:
+        prev = state.get(page.rule)
+        if (prev is None or prev.get("fingerprint") != page.fingerprint
+                or now - float(prev.get("at", 0)) > REPAGE_SECONDS):
+            send.append(page)
+            new_state[page.rule] = {"fingerprint": page.fingerprint, "at": now}
+        else:
+            new_state[page.rule] = prev
+    return send, new_state
+
+
+def load_state(path: Path) -> dict:
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_state(path: Path, state: dict) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, indent=1, sort_keys=True), encoding="utf-8")
+    os.replace(tmp, path)
