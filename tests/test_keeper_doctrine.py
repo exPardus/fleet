@@ -36,29 +36,71 @@ def test_the_keeper_references_no_dispatching_or_locking_name():
 
 
 def test_the_detector_sees_a_planted_dispatch():
+    """The seed test for the pin above, and it must fail the SAME check that
+    pin makes -- not merely prove that `_referenced_names` extracts a name.
+    A detector whose extraction works while its comparison is vacuous passes
+    the weaker form and catches nothing."""
     planted = SRC + "\n\ndef _mutant():\n    return fleet.dispatch_bg('x', '.', '', 'bypass')\n"
-    assert "dispatch_bg" in _referenced_names(planted)
+    hits = sorted(FORBIDDEN & _referenced_names(planted))
+    assert hits == ["dispatch_bg"], (
+        "the planted dispatch must FAIL the forbidden-name check that "
+        "test_the_keeper_references_no_dispatching_or_locking_name runs")
 
 
 def test_the_only_fleet_attributes_used_are_read_only_ones():
+    """`FLEET_HOME` joined the set in fix wave 1 (I3): `main` compares the
+    imported module's frozen home against `--fleet-home` and refuses a
+    mismatch, because `status_snapshot()` reads the former while every other
+    source reads the latter. It is a READ -- the test below pins that."""
     tree = ast.parse(SRC)
     used = {n.attr for n in ast.walk(tree)
             if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
             and n.value.id == "fleet"}
-    assert used <= {"status_snapshot", "MIN_PYTHON_VERSION"}, used
+    assert used <= {"status_snapshot", "MIN_PYTHON_VERSION", "FLEET_HOME"}, used
 
 
-def test_the_keeper_writes_only_under_state_keeper():
+def _assigned_fleet_attributes(source):
+    targets = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Assign):
+            targets.extend(node.targets)
+        elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+            targets.append(node.target)
+    return {t.attr for t in targets
+            if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name)
+            and t.value.id == "fleet"}
+
+
+def test_the_keeper_never_assigns_a_fleet_attribute():
+    """The keeper READS `fleet.FLEET_HOME`; rebinding it would make this
+    module a second definition of where the fleet lives, and would turn the
+    I3 refusal into a silent redirection of `status_snapshot()`."""
+    assert _assigned_fleet_attributes(SRC) == set()
+
+
+def test_the_assignment_detector_sees_a_planted_rebind():
+    planted = SRC + "\n\ndef _mutant(home):\n    fleet.FLEET_HOME = home\n"
+    assert _assigned_fleet_attributes(planted) == {"FLEET_HOME"}
+
+
+def test_the_only_writer_is_save_state():
     # Every open(..., 'w'|'x'|'a') / write_text / os.replace target in the
     # module is the keeper's own state file. Audited by name: the module
     # has exactly one writer, save_state.
     tree = ast.parse(SRC)
     writers = [n for n in ast.walk(tree)
                if isinstance(n, ast.Attribute) and n.attr in ("write_text", "replace")]
+    assert writers, "no write call found at all -- the detector is broken"
     for w in writers:
-        fn = next(p for p in ast.walk(tree)
-                  if isinstance(p, ast.FunctionDef)
-                  and any(c is w for c in ast.walk(p)))
+        fn = next((p for p in ast.walk(tree)
+                   if isinstance(p, ast.FunctionDef)
+                   and any(c is w for c in ast.walk(p))), None)
+        # A write at MODULE level has no enclosing function, and `next`
+        # without a default raised StopIteration there -- an error that
+        # reads as a broken test rather than as the violation it is.
+        assert fn is not None, (
+            f"a module-level `{w.attr}` call: the keeper's only writer must "
+            f"be save_state, and a top-level write runs on import")
         assert fn.name == "save_state", (fn.name, w.attr)
 
 
