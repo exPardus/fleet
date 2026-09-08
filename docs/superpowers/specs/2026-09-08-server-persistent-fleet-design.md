@@ -72,18 +72,30 @@ Supervisor and workers stay native `--bg` sessions. Two additions:
 
 ### 3.3 Layer 3 — the keeper (new, small, dumb)
 
+*Amended 2026-09-08 after the final review: the rules table below was written before the fix waves it describes and had drifted from the shipped rule set — `supervisor-dead`'s condition understated what the code checks (`claude agents` must itself have answered, and the roster join is the claim's session id, not a `sup\|*` name prefix), `login-expired`'s trigger no longer includes an outcomes-log auth error (that source was dropped; the rule now fires on any `agents` failure that is not a missing binary), and four rules the code has always had (`claim-unknown`, `claude-missing`, `not-initialised`, `registry-unreadable`) had no rows at all. The table now states what `bin/fleet_keeper.py` ships, plus the delivery and sanitiser rules that govern every row alike.*
+
 `bin/fleet_keeper.py`: stdlib-only, Python ≥ `fleet.MIN_PYTHON_VERSION`, imports `fleet` for `status_snapshot()` and the sup-status projection only. It is run by `fleet-keeper.timer` every 15 minutes with `--once`, and never as a daemon.
 
-**Rules** (pure functions over one snapshot; each yields zero or one page):
+**Rules** (pure functions over one observation; each yields zero or one page), in the order they are evaluated:
 
 | rule | signal | page text (one line, typed into `work:fleet`) |
 |---|---|---|
-| supervisor-dead | GOALS active AND claim `released`/absent, OR heartbeat age > 60 min AND no `sup\|*` session in `claude agents --json` | `KEEPER: supervisor dead since <ts> (<reason>). Report state; await operator before sup-spawn.` |
-| supervisor-frozen | `sup-status` reports a freeze or a pending `sup-decision` | `KEEPER: supervisor parked on decision: <q>. Carry it to the operator.` |
-| worker-anomaly | `status_snapshot()` shows `dead-suspected`, `limited`, `idle+mail`, or permission-stall | `KEEPER: <n> worker anomalies: <names>. Summarise for the operator.` |
-| unpushed | `git rev-list --count origin/main..main` > 0 for > 6 h (age from the oldest unpushed commit) | `KEEPER: <n> commits unpushed for <h>h. Push or explain.` |
-| login-expired | `claude agents --json` fails, or the newest outcome in `state/outcomes/` is an auth error | `KEEPER: claude login appears expired. Operator must /login on the box.` |
+| registry-unreadable | `status_snapshot()` reads `ok=False` with a reason other than `not_initialized` | `KEEPER: registry unreadable (<reason>). Report it; do not repair.` |
+| not-initialised | `status_snapshot()` reads `ok=False, reason="not_initialized"` — a home where `fleet init` never ran, not a corrupt registry | `KEEPER: fleet home not initialised (state/worker-settings.json or registry missing). Run fleet init from a plain shell.` |
+| claude-missing | `claude agents --json` is not on the unit's PATH (a deploy fault, distinct from an expired login) | `KEEPER: claude binary not found on PATH for the keeper unit. Check the service PATH.` |
+| login-expired | `claude agents --json` fails for any reason other than a missing binary | `` KEEPER: claude login appears expired (`claude agents` failed). Operator must /login on the box. `` |
+| claim-unknown | GOALS active AND `claude agents` answered AND the claim's normalised state is `unknown` (a read failure, not evidence of death) | `KEEPER: supervisor claim unreadable (state unknown). Report it; do not repair.` |
+| supervisor-dead | GOALS active AND `claude agents` answered AND (claim `released`/`none`, OR claim `held` with heartbeat missing or older than 60 min AND the claim's own `session_id` absent from `claude agents --json`) | `KEEPER: supervisor dead since <since> (<reason>). Report state; await operator before sup-spawn.` |
+| supervisor-frozen | `sup-status --json`'s `pending_decision` carries an unanswered question | `KEEPER: supervisor parked on decision: <q> Carry it to the operator.` |
+| worker-anomaly | `status_snapshot()` shows `dead-suspected`, `limited`, or `idle` with unread mail | `KEEPER: <n> worker anomalies: <names>. Summarise for the operator.` |
+| unpushed | `git rev-list --count origin/main..main` > 0 for > 6 h (age from the oldest unpushed commit; an unreadable upstream reports on stdout and pages nothing) | `KEEPER: <n> commits unpushed for <h>h. Push or explain.` |
 | hook-errors | `state/hook-errors.log` grew since last tick | `KEEPER: hook-errors.log grew by <n> lines. Read it.` |
+
+`supervisor-dead`'s roster join is on the claim's SESSION ID, never a `sup\|*` name prefix: `claude agents --json` lists ACTIVE sessions only, so an idle-between-turns supervisor is legitimately absent from it while alive, and only a fresh heartbeat or a live session id (not a name, which `ai-title` can overwrite after a resume) settles the question.
+
+**Delivery is a fact about tmux, not about the rule firing.** A page counts as sent — and is the only kind dedup ever records as sent — when `tmux send-keys` for both the literal line and `Enter` is accepted; a tick that only *created* `work:fleet` this cycle defers every page to the next tick instead (a freshly launched Claude TUI is not yet reading its prompt box, so anything typed into it is lost), and a tick whose delivery tmux refused carries the previous tick's record forward so the next tick retries rather than going silent for the re-page window.
+
+**Every page is sanitised at the point of delivery**, not by each rule: prefixed with `KEEPER: ` (first, so a page beginning with `-` cannot read as a `send-keys` flag), then collapsed to one printable line — ANSI stripped, C0 controls (including `\r`, `\n`, `\t`) folded to spaces, whitespace collapsed, truncated with an ellipsis at 200 characters. This is what stops a worker-writable substring (a `sup-decision` question, a registry reason) from becoming a second submitted prompt line in the `bypassPermissions` interface session.
 
 **Actions** — exactly two, both tmux-level, neither touches fleet state:
 
