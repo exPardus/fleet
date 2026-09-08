@@ -39,6 +39,27 @@ def test_a_rule_that_stops_firing_is_forgotten():
     assert send == [] and state2 == {}
 
 
+def test_a_held_stale_supervisor_dead_page_dedups_across_a_tick():
+    """End-to-end version of the beat-free fingerprint fix (re-review minor
+    1): the same held+stale situation, observed 15 minutes apart with the
+    heartbeat age advanced, must not re-page -- only the fingerprint (which
+    no longer carries the age) governs dedup."""
+    sid = "11111111-2222-3333-4444-555555555555"
+
+    def obs(beat):
+        return {"goals_active": True, "claim_state": "held", "claim_sid": sid,
+                "claim_sid_live": False, "heartbeat_age_seconds": beat}
+
+    p1 = k.evaluate(obs(k.HEARTBEAT_STALE_SECONDS + 1), NOW)[0]
+    send1, state = k.dedup([p1], {}, NOW)
+    assert send1 == [p1]
+
+    p2 = k.evaluate(obs(k.HEARTBEAT_STALE_SECONDS + 901), NOW + 900)[0]
+    send2, state2 = k.dedup([p2], state, NOW + 900)
+    assert send2 == []
+    assert state2 == state
+
+
 def test_state_roundtrip_and_corrupt_file(tmp_path):
     path = tmp_path / "keeper" / "last-page.json"
     k.save_state(path, {"x": {"fingerprint": "f", "at": 1.0}})

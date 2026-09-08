@@ -159,6 +159,22 @@ def test_a_supervisor_shaped_name_from_another_launch_is_not_the_claim(home):
     assert obs["claim_sid_live"] is False
 
 
+def test_a_non_string_session_id_is_normalised_before_the_roster_test(home):
+    """Re-review minor 2: `claim_sid_live` used to test the RAW projection
+    value's membership in the roster set, while `claim_sid` just above it was
+    already type-normalised. A non-str `session_id` (a dict, from a
+    malformed or hostile sup-status projection) made `in` on a set raise
+    `TypeError`, which killed the tick. The normalised value must be what
+    both fields are built from."""
+    weird = json.dumps({"goals_active": True,
+                        "incarnation": {"state": None, "session_id": {"x": 1},
+                                        "released_at": None},
+                        "heartbeat_age_seconds": 30.0, "pending_decision": None})
+    obs = _collect(home, _runner(_table(sup=weird)))
+    assert obs["claim_sid"] is None
+    assert obs["claim_sid_live"] is False
+
+
 def test_an_absent_claim_sid_is_never_live(home):
     no_sid = json.dumps({"goals_active": True, "incarnation": None,
                          "heartbeat_age_seconds": None, "pending_decision": None})
