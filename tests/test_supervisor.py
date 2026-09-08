@@ -2923,6 +2923,58 @@ class TestHandoff:
         assert (dispatch[dispatch.index("--settings") + 1]
                 == fleet.instance_settings_path().as_posix())
 
+    def _seed_holder_record(self, sid="sid-old", name="sup|inc-old|boot", **over):
+        """The claim holder's own registry record -- the body running the
+        verb. `cmd_sup_handoff_begin` already resolves the caller by this sid
+        to authorise it; I4 reads the same record for its dispatch flags."""
+        rec = fleet.new_worker_record(sid, fleet.FLEET_HOME, "campaign", "bypass",
+                                      dispatch_kind="bg", **over)
+        data = fleet.load_registry()
+        data["workers"][name] = rec
+        fleet.save_registry(data)
+        return rec
+
+    def test_successor_dispatch_carries_the_holders_setting_sources(self, sup_home):
+        """I4: the ccgram remedy must survive the handoff chain, not one body.
+        `--setting-sources project,local` is what keeps a supervisor body from
+        running the host's user-level ccgram hooks; a successor launched
+        without it puts them straight back, and the operator holds a canary
+        receipt saying they are gone."""
+        self._hold()
+        self._seed_holder_record(setting_sources="project,local")
+        run = self._dispatch_then_roster()
+        assert self._begin(run) == 0
+        dispatch = next(c for c in run.calls if "--bg" in c)
+        i = dispatch.index("--setting-sources")
+        assert dispatch[i + 1] == "project,local"
+        assert i > dispatch.index("--settings")
+        # and persisted, so the NEXT handoff reads it back off this record
+        successor = next(r for n, r in fleet.load_registry()["workers"].items()
+                         if n.endswith("|successor"))
+        assert successor["setting_sources"] == "project,local"
+
+    def test_successor_dispatch_omits_setting_sources_when_the_holder_has_none(
+            self, sup_home):
+        self._hold()
+        self._seed_holder_record()
+        run = self._dispatch_then_roster()
+        assert self._begin(run) == 0
+        dispatch = next(c for c in run.calls if "--bg" in c)
+        assert "--setting-sources" not in dispatch
+        successor = next(r for n, r in fleet.load_registry()["workers"].items()
+                         if n.endswith("|successor"))
+        assert successor.get("setting_sources") is None
+
+    def test_an_unresolvable_holder_record_does_not_break_the_handoff(self, sup_home):
+        """The carry is a best-effort READ of a dispatch flag, not a
+        precondition: a claim whose holder sid matches no record (the
+        stranded-stamp window) still hands off."""
+        self._hold()
+        run = self._dispatch_then_roster()
+        assert self._begin(run) == 0
+        dispatch = next(c for c in run.calls if "--bg" in c)
+        assert "--setting-sources" not in dispatch
+
     def test_successor_dispatch_refused_without_rendered_settings(self, sup_home):
         """Same doctrine as cmd_spawn's `_require_instance_settings`: claude
         silently ignores a --settings path that does not exist, so a missing
