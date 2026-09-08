@@ -281,6 +281,19 @@ def test_dry_run_prints_the_sanitised_line(home):
     assert "KEEPER: supervisor parked on decision: a b" in line
 
 
+def test_dry_run_reports_a_busy_window_and_does_not_claim_it_would_create(home):
+    """Re-review minor 3: `ensure_window` refuses to recycle a busy
+    non-claude, non-shell pane, so `--dry-run` must not tell the operator it
+    would create one -- it must report the same busy verdict `ensure_window`
+    would have."""
+    r = Runner(pane_cmd="node")
+    rc, out = _main(home, r, "--dry-run")
+    assert rc == 0
+    assert "would create" not in out
+    assert "window work:fleet busy with node; would not recycle" in out
+    assert not [a for a in r.calls if a[0] == "tmux" and a[1] != "list-panes"]
+
+
 def test_tmux_failure_is_reported_and_exit_stays_zero(home):
     r = Runner(tmux_rc=1)
     rc, out = _main(home, r)

@@ -171,6 +171,7 @@ def rule_supervisor_dead(obs, now):
     state = obs.get("claim_state")
     if state in ("released", "none"):
         reason = f"claim {state}"
+        fp = reason
     elif state == "held":
         beat = obs.get("heartbeat_age_seconds")
         if beat is not None and beat <= HEARTBEAT_STALE_SECONDS:
@@ -180,11 +181,18 @@ def rule_supervisor_dead(obs, now):
         stale = ("no heartbeat" if beat is None
                  else f"heartbeat {int(beat // 60)} min stale")
         reason = f"{stale}, claim session not in the roster"
+        # The fingerprint must NOT carry the heartbeat age (re-review minor
+        # 1): the age changes every tick, so a beat-bearing fingerprint never
+        # equals its predecessor and `dedup` can never suppress it -- the
+        # operator would be paged every 15 minutes instead of once per
+        # REPAGE_SECONDS. The age still reaches the operator, in the TEXT,
+        # via `_since` below.
+        fp = f"held:stale:{obs.get('claim_sid') or '-'}"
     else:
         return None  # `unknown` belongs to rule_claim_unknown
     since = _since(obs)
     head = f"supervisor dead since {since}" if since else "supervisor dead"
-    return Page("supervisor-dead", f"{state}:{reason}",
+    return Page("supervisor-dead", f"{state}:{fp}",
                 f"KEEPER: {head} ({reason}). Report state; "
                 "await operator before sup-spawn.")
 
@@ -442,11 +450,19 @@ def collect(home, *, now, run=subprocess.run, snapshot_fn=fleet.status_snapshot,
     workers = [{"name": w.get("name"), "status": w.get("status"),
                 "mail": w.get("mail") or 0, "limit_kind": w.get("limit_kind")}
                for w in (snap.get("workers") or [])]
+    # Type-normalise BEFORE the roster membership test (re-review minor 2):
+    # `incarnation.get("session_id")` is worker-writable projection data, and
+    # a non-str shape (a dict, say) used to reach `claim_sid in agent_sids`
+    # RAW -- `in` on a set hashes its operand, and an unhashable value raised
+    # `TypeError` straight out of the tick. `claim_sid` here is the same
+    # normalised value the caller reads back as `obs["claim_sid"]`.
+    claim_sid = claim_sid if isinstance(claim_sid, str) and claim_sid else None
+    roster_sids = agent_sids
     return {
         "goals_active": goals_active,
         "claim_state": claim_state,
-        "claim_sid": claim_sid if isinstance(claim_sid, str) and claim_sid else None,
-        "claim_sid_live": bool(claim_sid) and claim_sid in agent_sids,
+        "claim_sid": claim_sid,
+        "claim_sid_live": claim_sid is not None and claim_sid in roster_sids,
         "released_at": released_at,
         "heartbeat_age_seconds": beat,
         "pending_decision": pending,
@@ -496,6 +512,34 @@ def window_alive(run, target):
     return bool(panes) and any(cmd == "claude" and not dead for cmd, dead in panes)
 
 
+def _window_disposition(panes):
+    """Classify `panes` (as returned by `_panes`) into what `ensure_window`
+    would do with them, without doing it: `("alive", None)` -- a live claude
+    pane, leave it; `("busy", cmd)` -- occupied by something else, leave it
+    and report `cmd`; `("create", None)` -- absent, dead, or a bare shell,
+    safe to (re)create.
+
+    RECYCLING IS NARROW (I5). `pane_current_command` is one sample of a
+    live pane, and `claude` is not what it reads while claude shells out --
+    at that instant it reads `git`, `rg`, `node`. Killing the window then
+    kills the operator's live interface session mid-turn. So `"create"` is
+    returned only when the pane is DEAD or is sitting at a bare shell
+    prompt; anything else reads `"busy"`.
+
+    Shared by `ensure_window` (which acts on the verdict) and the `--dry-run`
+    path in `main` (which only reports it) so the two cannot drift apart
+    (re-review minor 3: `--dry-run` used to print "would create" for a busy
+    non-claude pane too, which `ensure_window` refuses to recycle)."""
+    if panes is None:
+        return "create", None
+    if any(cmd == "claude" and not dead for cmd, dead in panes):
+        return "alive", None
+    cmd, dead = panes[0] if panes else ("", True)
+    if not dead and cmd and cmd not in SHELL_COMMANDS:
+        return "busy", cmd
+    return "create", None
+
+
 def ensure_window(run, *, session, window, cwd, launch, out=sys.stdout):
     """Create `session:window` when it is absent or provably unusable.
 
@@ -503,23 +547,16 @@ def ensure_window(run, *, session, window, cwd, launch, out=sys.stdout):
     C3 -- it used to return True unconditionally, so a tmux server that was
     gone still read as "created"). The caller treats True as "defer this
     tick's pages" (I6): a freshly launched Claude TUI is not ready to
-    receive typed input, and a page typed into its startup is lost.
-
-    RECYCLING IS NARROW (I5). `pane_current_command` is one sample of a
-    live pane, and `claude` is not what it reads while claude shells out --
-    at that instant it reads `git`, `rg`, `node`. Killing the window then
-    kills the operator's live interface session mid-turn. So the window is
-    recycled only when its pane is DEAD or is sitting at a bare shell
-    prompt; anything else is left alone and reported."""
+    receive typed input, and a page typed into its startup is lost."""
     target = f"{session}:{window}"
     panes = _panes(run, target)
+    disposition, cmd = _window_disposition(panes)
+    if disposition == "alive":
+        return False
+    if disposition == "busy":
+        print(f"keeper: window {target} busy with {cmd}; not recycling", file=out)
+        return False
     if panes is not None:
-        if any(cmd == "claude" and not dead for cmd, dead in panes):
-            return False
-        cmd, dead = panes[0] if panes else ("", True)
-        if not dead and cmd and cmd not in SHELL_COMMANDS:
-            print(f"keeper: window {target} busy with {cmd}; not recycling", file=out)
-            return False
         _tmux(run, out, "kill-window", "-t", target)
     return _tmux(run, out, "new-window", "-d", "-t", session, "-n", window,
                  "-c", cwd, launch)
@@ -588,7 +625,16 @@ def main(argv=None, *, run=subprocess.run, now_fn=time.time,
     if args.dry_run:
         for p in pages:
             print(f"[dry-run] {p.rule}: {_page_line(p.text)}", file=out)
-        if not window_alive(run, target):
+        # Mirror `ensure_window`'s own verdict (via the same classifier)
+        # instead of asking only "is it alive" (re-review minor 3): a busy
+        # non-claude pane reads not-alive too, but `ensure_window` refuses
+        # to recycle it, so a dry-run that only checked `window_alive` over-
+        # reported "would create" for a window it would actually leave alone.
+        disposition, cmd = _window_disposition(_panes(run, target))
+        if disposition == "busy":
+            print(f"[dry-run] window {target} busy with {cmd}; would not recycle",
+                  file=out)
+        elif disposition == "create":
             print(f"[dry-run] would create {target}: {launch}", file=out)
         return 0
 

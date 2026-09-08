@@ -122,6 +122,23 @@ def test_supervisor_dead_says_nothing_about_when_if_nothing_knows():
     assert pages[0].text.startswith("KEEPER: supervisor dead (claim none)")
 
 
+def test_held_stale_fingerprint_is_beat_free_across_ticks():
+    """Re-review minor 1: the held+stale fingerprint must not embed the
+    heartbeat age, or `dedup` can never suppress it -- the age changes every
+    tick, so a beat-bearing fingerprint would never equal its predecessor and
+    the operator would be paged every 15 minutes instead of once per
+    REPAGE_SECONDS. The age still reaches the operator, in the TEXT, via
+    `_since`."""
+    p1 = k.evaluate(_obs(heartbeat_age_seconds=k.HEARTBEAT_STALE_SECONDS + 1,
+                         claim_sid_live=False), NOW)[0]
+    p2 = k.evaluate(_obs(heartbeat_age_seconds=k.HEARTBEAT_STALE_SECONDS + 901,
+                         claim_sid_live=False), NOW + 900)[0]
+    assert p1.rule == p2.rule == "supervisor-dead"
+    assert p1.fingerprint == p2.fingerprint
+    assert "60 min stale" in p1.text
+    assert "75 min stale" in p2.text
+
+
 def test_goals_inactive_never_pages_supervisor_dead():
     pages = k.evaluate(_obs(goals_active=False, claim_state="none",
                             claim_sid_live=False), NOW)
