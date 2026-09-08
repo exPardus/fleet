@@ -286,3 +286,100 @@ def collect(home, *, now, run=subprocess.run, snapshot_fn=fleet.status_snapshot,
         "hook_error_lines": _count_lines(home / "state" / "hook-errors.log"),
         "prev_hook_error_lines": int(prev_state.get("_hook_error_lines", 0) or 0),
     }
+
+
+# ---------------------------------------------------------------------- tmux
+
+def _tmux(run, out, *args):
+    argv = ["tmux", *args]
+    rc, _ = _run_text(run, argv)
+    if rc != 0:
+        print(f"keeper: tmux failed: {argv}", file=out)
+    return rc == 0
+
+
+def window_alive(run, target):
+    rc, text = _run_text(run, ["tmux", "list-panes", "-t", target,
+                               "-F", "#{pane_current_command}"])
+    return rc == 0 and "claude" in text.split()
+
+
+def _window_exists(run, target):
+    rc, _ = _run_text(run, ["tmux", "list-panes", "-t", target])
+    return rc == 0
+
+
+def ensure_window(run, *, session, window, cwd, launch, out=sys.stdout):
+    target = f"{session}:{window}"
+    if window_alive(run, target):
+        return False
+    if _window_exists(run, target):
+        _tmux(run, out, "kill-window", "-t", target)
+    _tmux(run, out, "new-window", "-d", "-t", session, "-n", window,
+          "-c", cwd, launch)
+    return True
+
+
+def page(run, target, text, out=sys.stdout):
+    ok = _tmux(run, out, "send-keys", "-t", target, "-l", text)
+    ok = _tmux(run, out, "send-keys", "-t", target, "Enter") and ok
+    return ok
+
+
+# ---------------------------------------------------------------------- main
+
+def _parser():
+    p = argparse.ArgumentParser(prog="fleet_keeper",
+                                description="page-only liveness tick for a headless fleet")
+    p.add_argument("--once", action="store_true", required=True,
+                   help="run one tick and exit (the only mode; a timer supplies cadence)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="print what would be paged; touch neither tmux nor state")
+    p.add_argument("--fleet-home", default=str(_INSTALL_ROOT))
+    p.add_argument("--tmux-session", default="work")
+    p.add_argument("--window", default="fleet")
+    p.add_argument("--profile", default=None,
+                   help="interface profile the window's claude is told to read")
+    return p
+
+
+def main(argv=None, *, run=subprocess.run, now_fn=time.time,
+         snapshot_fn=fleet.status_snapshot, out=sys.stdout):
+    args = _parser().parse_args(argv)
+    home = Path(args.fleet_home).resolve()
+    profile = Path(args.profile) if args.profile else (
+        home / "docs" / "operator" / "server-interface-profile.md")
+    launch = ('claude --permission-mode bypassPermissions '
+              f'"Read {profile} and follow it exactly."')
+    target = f"{args.tmux_session}:{args.window}"
+    state_path = home / "state" / "keeper" / "last-page.json"
+    now = float(now_fn())
+
+    state = load_state(state_path)
+    obs = collect(home, now=now, run=run, snapshot_fn=snapshot_fn, prev_state=state)
+    pages = evaluate(obs, now)
+    rule_state = {k_: v for k_, v in state.items() if not k_.startswith("_")}
+    send, rule_state = dedup(pages, rule_state, now)
+
+    if args.dry_run:
+        for p in pages:
+            print(f"[dry-run] {p.rule}: {p.text}", file=out)
+        if not window_alive(run, target):
+            print(f"[dry-run] would create {target}: {launch}", file=out)
+        return 0
+
+    created = ensure_window(run, session=args.tmux_session, window=args.window,
+                            cwd=str(home), launch=launch, out=out)
+    if created:
+        print(f"keeper: created {target}", file=out)
+    for p in send:
+        page(run, target, p.text, out=out)
+        print(f"keeper: paged {p.rule}", file=out)
+
+    rule_state["_hook_error_lines"] = obs["hook_error_lines"]
+    save_state(state_path, rule_state)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
