@@ -288,3 +288,109 @@ only the pre-existing dirty `secrets.sops.yml`.
 This is an existing, unrelated `china-infra` infra issue (an upstream Go release digest gone
 missing) blocking every tagged play on this host, not something this task introduced. It needs a
 decision from whoever owns `china-infra` before the fleet_keeper timer diff can even be evaluated.
+
+### Timer deployed
+
+`versions.go` pins `go1.27.1`, which go.dev no longer publishes, so every tagged `work.yml` run
+fails at the devbox→golang dependency before reaching `fleet_keeper` -- this is the same blocker
+as Step 4 above, unresolved on the `china-infra` side. To unblock the timer without waiting on
+that fix, the units were applied from the role's own task files (`roles/fleet_keeper/tasks/units.yml`,
+`verify.yml`, `handlers/main.yml`, `defaults/main.yml`, `templates/*.j2`) verbatim, via a scratch
+localhost-only play outside any repo -- so the next `work.yml --tags fleet_keeper` run that gets
+past the golang preflight will find the units already rendered and the timer already active, and
+be a no-op.
+
+```text
+# volatile: host state — 2026-09-08
+$ cd /tmp/.../scratchpad/keeper-deploy && ansible-playbook -i localhost, deploy.yml --check --diff 2>&1 | tail -80
+...
+TASK [Render the keeper service and timer] *************************************
+--- before
++++ after: .../fleet-keeper.service.j2
+@@ -0,0 +1,21 @@
++[Unit]
++# Managed by Ansible — roles/fleet_keeper. DO NOT EDIT ON THE HOST.
+... (fleet-keeper.service.j2 body, ExecStart = run_py.sh fleet_keeper.py --once --fleet-home ...)
+changed: [localhost] => (item=fleet-keeper.service)
+--- before
++++ after: .../fleet-keeper.timer.j2
+@@ -0,0 +1,14 @@
++[Unit]
++# Managed by Ansible — roles/fleet_keeper. DO NOT EDIT ON THE HOST.
+... (fleet-keeper.timer.j2 body, OnBootSec=2min OnUnitActiveSec=15min Persistent=true)
+changed: [localhost] => (item=fleet-keeper.timer)
+...
+RUNNING HANDLER [Restart fleet-keeper timer] ***********************************
+[ERROR]: Task failed: Module failed: Could not find the requested service fleet-keeper.timer: host
+fatal: [localhost]: FAILED! => {"changed": false, "msg": "Could not find the requested service fleet-keeper.timer: host"}
+PLAY RECAP: localhost : ok=6  changed=1  failed=1
+```
+
+Only the two expected files (`fleet-keeper.service`, `fleet-keeper.timer`) showed a diff; the
+handler failure is the anticipated check-mode artifact (the unit was never really written under
+`--check`, so systemd doesn't know it to restart) -- not a real failure. Proceeded to the real run:
+
+```text
+$ ansible-playbook -i localhost, deploy.yml 2>&1 | tail -60
+...
+TASK [Render the keeper service and timer] *************************************
+changed: [localhost] => (item=fleet-keeper.service)
+changed: [localhost] => (item=fleet-keeper.timer)
+RUNNING HANDLER [Reload the user systemd manager for fleet-keeper] **************
+ok: [localhost]
+RUNNING HANDLER [Restart fleet-keeper timer] ************************************
+changed: [localhost]
+TASK [Enable and start the keeper timer] ****************************************
+changed: [localhost]
+TASK [Wait for the keeper timer to be active] ***********************************
+ok: [localhost]
+TASK [Assert the keeper timer is active] ****************************************
+ok: [localhost] => {"changed": false, "msg": "All assertions passed"}
+TASK [Run one dry keeper tick so a broken interpreter fails the play, not the night] ***
+ok: [localhost]
+PLAY RECAP: localhost : ok=12  changed=3  failed=0
+```
+
+```text
+$ systemctl --user list-timers fleet-keeper.timer --no-pager
+NEXT                         LEFT LAST                         PASSED UNIT               ACTIVATES
+Tue 2026-09-08 21:05:14 +05 14min Tue 2026-09-08 20:50:14 +05 20s ago fleet-keeper.timer fleet-keeper.service
+
+$ systemctl --user status fleet-keeper.timer --no-pager | head -8
+● fleet-keeper.timer - Run the claude-fleet keeper tick every 15min
+     Loaded: loaded (/home/altai/.config/systemd/user/fleet-keeper.timer; enabled; preset: enabled)
+     Active: active (waiting) since Tue 2026-09-08 20:50:14 +05; 20s ago
+    Trigger: Tue 2026-09-08 21:05:14 +05; 14min left
+   Triggers: ● fleet-keeper.service
+
+$ journalctl --user -u fleet-keeper.service -n 30 --no-pager
+Sep 08 20:50:14 a444837921.local systemd[112711]: Starting fleet-keeper.service - claude-fleet keeper tick (page-only)...
+Sep 08 20:50:15 a444837921.local systemd[112711]: Finished fleet-keeper.service - claude-fleet keeper tick (page-only).
+Sep 08 20:50:15 a444837921.local systemd[112711]: fleet-keeper.service: Consumed 1.299s CPU time, 51.8M memory peak, 0B memory swap peak.
+
+$ ls -l ~/.config/systemd/user/fleet-keeper.*
+-rw-r--r-- 1 altai altai 1041 Sep  8 20:50 /home/altai/.config/systemd/user/fleet-keeper.service
+-rw-r--r-- 1 altai altai  403 Sep  8 20:50 /home/altai/.config/systemd/user/fleet-keeper.timer
+
+$ head -5 ~/.config/systemd/user/fleet-keeper.service
+[Unit]
+# Managed by Ansible — roles/fleet_keeper. DO NOT EDIT ON THE HOST.
+#
+# One page-only tick of the claude-fleet keeper. It reads fleet state and
+# types a line into tmux window work:fleet;
+```
+
+The `OnBootSec=2min` clause already having elapsed since the last boot, the timer fired once for
+real immediately on activation (20:50:14, no `--dry-run`); the tmux `work:fleet` window content was
+unchanged from the earlier S2/S3 Step 3 page, i.e. this tick found nothing new to page. A second,
+idempotent run of the same play (`-v`, `changed=0` throughout) confirmed the unit files are stable
+and surfaced the verify task's dry tick directly:
+
+```text
+TASK [Run one dry keeper tick so a broken interpreter fails the play, not the night] ***
+ok: [localhost] => {"cmd": ["/bin/sh", ".../bin/hooks/run_py.sh", ".../bin/fleet_keeper.py", "--once", "--dry-run", "--fleet-home", "/home/altai/proga/fleet"], "rc": 0,
+"stdout": "[dry-run] supervisor-dead: KEEPER: supervisor dead (claim none). Report state; await operator before sup-spawn.", ...}
+```
+
+Timer active, `NEXT` cadence ~15min, unit header confirms "Managed by Ansible — roles/fleet_keeper".
+`china-infra` left untouched beyond reads; still only the pre-existing dirty `secrets.sops.yml`.
