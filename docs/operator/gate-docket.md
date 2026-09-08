@@ -1,6 +1,6 @@
 # Operator docket — the durable digest
 
-**For: Altai, on his return. Four gates are open. None of them is blocking any work.**
+**For: Altai, on his return. Three gates are open. None of them is blocking any work.**
 
 **THIS FILE IS NOT THE RECORD.** The record is [`docs/OPERATOR-GATES.md`](../OPERATOR-GATES.md) —
 tracked, authoritative, carrying every open gate in full with its filer's own reasoning, plus every
@@ -11,6 +11,15 @@ gates file wins.** Nothing here is ticked; only Altai ticks a box.
 *Written 2026-08-09 by lane `w51-initprep`. No gate text was edited, nothing was ticked, and no gate
 was re-litigated — each recommendation below is the one already on file from the incarnation that
 raised the gate, attributed and compressed, never a new opinion.*
+
+*Updated 2026-09-08 by the `server/persistent-fleet` fix wave. **The four gates this digest was
+first written for were all answered by Altai on 2026-08-10** and now sit under `## Settled` in the
+gates file; their sections are kept below as history, marked. The three gates listed here are the
+ones the kz-work server design filed (G-K1, G-K2, G-K4 of
+`docs/superpowers/specs/2026-09-08-server-persistent-fleet-design.md` §7). G-K3 — the server
+interface running in bypass — was ruled with the design itself and is already settled. Same
+discipline as the first pass: no gate text edited, nothing ticked, each recommendation the filer's
+own.*
 
 ---
 
@@ -48,18 +57,83 @@ template, skill, or instruction surface ever pointed a reader at that path.
 
 ---
 
-## The four open gates
+## The three open gates
 
 | # | In one line | Blocks | Recommendation on file |
 |---|---|---|---|
-| 1 | The `supervisor/GOALS.md` §8 replacement text | nothing | approve the drafted reconstruction |
-| 2 | Scope of `--yes` in multi-fleet §5 step 1 | nothing | narrow the clause |
-| 3 | Does the E2 ground reach `init --home`? | **build slice (b)** | split `init`, as `homes` was split |
-| 4 | What was slice (c)'s `witness` meant to be? | nothing (row parked) | ratify the built row, conditional on repair — *held loosely* |
+| G-K1 | Is the keeper typing `KEEPER:` lines into `work:fleet` inside D7's pull-only intent? | nothing (the keeper is built and its unit is not installed) | rule it INSIDE D7, and say so in D7's own text |
+| G-K2 | Two failures stay silent under the ccgram-only ruling — accept, or permit one out-of-band path? | nothing | accept both as known blind spots for the soak week |
+| G-K4 | Does `supervisor/briefs/` become a git-tracked home for standing briefs? | the standing brief S5 dispatches | approve the directory |
 
 ---
 
-### Gate 1 — the `supervisor/GOALS.md` §8 replacement text
+### G-K1 — the keeper types into `work:fleet`; is that inside D7?
+
+**The question:** D7 (`docs/specs/terminal-surface.md`, 2026-07-22) says fleet injects nothing into
+any session — it is pull-only, because a globally-enabled SessionStart hook leaked this fleet's
+gates and worker table into every unrelated project on the machine. The keeper types one-line
+`KEEPER:` pages into a tmux window. **Is that an injection surface, or is it outside D7's subject?**
+
+**What the design already constrains** (`§3.3`, "Doctrine check, rule by rule"): the keeper types
+into ONE dedicated window whose sole purpose is fleet, which the keeper itself launched with the
+server interface profile; it never touches another session, never installs a hook, and never fires
+in a session that did not opt in. Nothing reaches a session an operator did not create for fleet.
+
+**Recommendation on file (the design's author, folded into the spec rather than assumed): rule it
+INSIDE D7's intent and amend D7 to name it**, rather than leaving a reader to infer that a rule
+saying "fleet injects nothing" has an unwritten exception. The design deliberately files this as a
+gate instead of treating it as obviously permitted — the standing rule from gate 4 below (a slice
+may not derive a normative deliverable from prose the spec never defines) applied to itself.
+
+**Nothing is waiting on it.** The keeper is built and tested; its systemd unit is not installed.
+
+---
+
+### G-K2 — two silent failures under the notify-only-via-ccgram ruling
+
+**The question:** ruling 2 (yours, 2026-09-08) says outbound notification goes only through the
+ccgram-bound `work:fleet` window. Two failures then tell nobody: a **login expiry** that also kills
+the interface window (the keeper's page has nowhere to land), and a **failed `fleet-keeper` unit**
+(nothing observes the observer — `systemctl --user status` is the only witness). **Accept both as
+known blind spots, or permit one out-of-band alert path later?**
+
+**What the fix wave changed about the shape of this:** the keeper now distinguishes a missing
+`claude` binary from an expired login and pages each with its own remedy, so the *diagnosable* half
+of the login mode reaches you whenever the window is alive. The blind spot is narrower than filed,
+and it is still real: it is exactly the case where the window is gone too.
+
+**Recommendation on file (the design's author, §5 "Failure modes"): accept both for the soak
+week** and record every real page in `docs/operator/keeper-soak-2026-09.md`. A second outbound path
+is the thing ruling 2 exists to prevent, and one week of measured pages is what would justify
+re-opening it — a decision better taken with the soak's evidence than before it.
+
+---
+
+### G-K4 — `supervisor/briefs/` as a git-tracked home for standing briefs
+
+**The question:** the server standing brief (`supervisor/briefs/server-standing.md`) is what the
+interface session dispatches with `sup-spawn --task @…` when you say "revive" from the phone. It
+must survive a reboot, a dead supervisor and a dead interface session. `state/` is gitignored and
+disposable — the exact plane this whole docket was moved OUT of. **Approve a git-tracked
+`supervisor/briefs/`, or keep briefs under `state/tasks/`?**
+
+**Recommendation on file (the design's author, §3.2): approve the directory.** The brief carries no
+task of its own — the plan lives in `supervisor/JOURNAL.md`, which is the point of a persistent
+identity — so it is stable text, reviewed once, dispatched many times. Keeping it in `state/` would
+repeat the failure this digest exists because of: an artifact three supervisors depended on, living
+in one disposable directory on one machine.
+
+**This one has work behind it:** S5 (the first revival from the phone) dispatches that brief.
+
+---
+
+## Settled 2026-08-10 — the four gates this digest was first written for
+
+*Kept as history, not as a docket. Altai answered all four in-session through the interface on
+2026-08-10; each answer, in full, is under `## Settled` in `docs/OPERATOR-GATES.md`, which is the
+record. Nothing below is waiting on anybody.*
+
+### Gate 1 (settled: approve the drafted reconstruction) — the `supervisor/GOALS.md` §8 replacement text
 
 **You already ruled the substance** (2026-08-08): apply the §8 band replacement **in full** rather
 than numbers-only, because the block carries three defects — the superseded 150–200k band, a false
@@ -89,7 +163,7 @@ committed, and correctly **not applied**.
 
 ---
 
-### Gate 2 — the scope of `--yes` in multi-fleet §5 step 1
+### Gate 2 (settled: narrow the clause) — the scope of `--yes` in multi-fleet §5 step 1
 
 **The defect:** §5 step 1 says a mutating verb on a flag/registry disagreement "refuses without
 `--yes`", as though every mutating verb has that flag. **Three of thirty-three do.** Measured end to
@@ -117,7 +191,7 @@ which no lane may edit.
 
 ---
 
-### Gate 3 — does the E2 ground reach `init --home`?
+### Gate 3 (settled: split `init` the same way) — does the E2 ground reach `init --home`?
 
 **The question:** you ruled `homes --add`/`--retire` DESTRUCTIVE on the E2 ground — an irreversible
 append to the machine-global `~/.claude/fleet-homes.list`, which only the fold reverses — while
@@ -140,7 +214,7 @@ Ruling before (b) is built is cheaper than retrofitting after.
 
 ---
 
-### Gate 4 — what was slice (c)'s `witness` meant to be?
+### Gate 4 (settled: the word is vestigial, dropped) — what was slice (c)'s `witness` meant to be?
 
 **The question:** Sequencing §3 names build slice (c) as *"hook argv + witness"*, but the word
 `witness` occurs exactly twice in the whole multi-fleet spec and neither occurrence defines a
@@ -167,11 +241,10 @@ alternative readings are unbuilt.
 
 ## The one-line asks
 
-1. **Gate 1** — approve the drafted §8 text, supply your own, or take the numbers-only fallback?
-2. **Gate 2** — narrow §5's `--yes` clause, or promote the flag globally?
-3. **Gate 3** — split `init` on the E2 ground, or keep it wholly ordinary? *(unblocks slice (b))*
-4. **Gate 4** — ratify the derived row conditional on repair, specify what (c)'s witness should be,
-   or rule the word vestigial?
+1. **G-K1** — is the keeper's one dedicated window inside D7, or does D7 need amending to say so?
+2. **G-K2** — accept the two silent failures for the soak week, or permit one out-of-band path now?
+3. **G-K4** — approve a git-tracked `supervisor/briefs/`? *(the standing brief S5 dispatches lives
+   there)*
 
 Answer any of them in one line in `docs/OPERATOR-GATES.md`, or through
 `fleet sup-decision --answer <text>` for whatever is occupying the supervisor's decision slot.

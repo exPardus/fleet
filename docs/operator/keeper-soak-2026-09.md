@@ -12,6 +12,23 @@ Every block here is `# volatile: host state` — evidence lives on kz-work, not 
 pre-existing failures (6, same set on both): tests/test_fleet_index.py::TestPathContainment x3, tests/test_fleet_q.py::TestOutlinePathContainment x1, tests/test_terminal_surface.py::TestCollaboratorInstall x2
 ```
 
+**"~6 min" above is APPROXIMATE and UNMEASURED** — it is a wall-clock impression of the two runs,
+not a timed figure, and pytest's own duration line was not captured. Read it as "minutes, not
+seconds and not an hour"; do not cite it as a benchmark or use it to detect a slowdown. A real
+figure would come from the `in <n>s` pytest prints, kept verbatim.
+
+## Soak items — carried deliberately, no code until the soak says so
+
+Each is a signal the design's §3.3 rule table names and the shipped keeper does NOT observe. They
+are listed here rather than built because the soak is what decides whether they page usefully or
+just add noise; a rule that fires falsely is worse than a rule that is absent, because it teaches
+the operator to ignore the channel.
+
+| # | Signal | Why it is deferred | What would close it |
+|---|---|---|---|
+| S-1 | The **outcomes half of `login-expired`** — the spec's rule reads "`claude agents --json` fails, **or the newest outcome in `state/outcomes/` is an auth error**". Only the first half is built. | The auth-error shape in an outcome record has never been measured on this host; a rule keyed on a guessed substring would page on any result text containing it. | One real expiry during the soak, with the outcome file kept, and a rule keyed on what it actually contains. |
+| S-2 | The **permission-stall arm of `worker-anomaly`** — the spec's rule reads "`dead-suspected`, `limited`, `idle+mail`, **or permission-stall**". The first three are built. | A permission stall is not in `status_snapshot()` at all: the snapshot carries `status`/`mail`/`limit_kind`, and nothing distinguishes a worker waiting on a permission prompt from one working. Building it means either a new snapshot field or a second read path, and the keeper is deliberately a reader of one projection. | A measured stall on this host, then a decision about which layer should surface it — `status_snapshot` (where every view would get it) rather than the keeper. |
+
 ## Pages observed
 
 | when (UTC) | rule | text | true/false page | action taken |
