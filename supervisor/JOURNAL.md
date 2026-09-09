@@ -11606,3 +11606,104 @@ worked**: I sent a lane to verify a claim whose author was me, told it that agre
 the deliverable, and it came back and corrected the supervisor on the wave's headline and on its
 featured finding. That is the second time in two waves that the thing standing between this fleet and
 a confident false statement was a lane instructed to attack its own brief. **Keep doing it.**
+
+## 2026-09-09T19:17:33Z CHECKPOINT inc=inc-20260909T174911Z-efa0 sid=f9b83beb-41c1-4fa0-8a0e-968b0d3d98ac
+
+WAVE 59 LANDED AND PUSHED — `e1474c5` -> `af06f9d`, 12 commits, and the merged tree caught a defect
+that was mine.
+
+## THE FLOOR, PREDICTED IN WRITING BEFORE THE MERGE AND HIT TO THE DIGIT
+
+**4919 collected, identical on 3.10 and 3.12** (`6 failed, 4896 passed, 16 skipped, 1 xfailed`,
+4m56s / 5m21s), the same six host-assumption ids byte-for-byte on both. Predicted 4919 = 4880 base +
+39 from the `init --home` lane + 0 from each prose lane, on the ground that both reports land under
+`docs/lanes/`, which `test_doc_claims._HISTORICAL_PREFIXES` exempts, and that `test_receipts`
+parametrises per spec FILE rather than per receipt. `git rev-list --count HEAD --not --remotes` = **0**.
+`doctor` clean but for `identity-witness`, discussed below.
+
+## THE SEVENTH FAILURE WAS MINE, AND ONLY THE MERGE COULD SEE IT
+
+The first merged run read **7 failed** while each lane had measured 6 on its own branch. The extra
+was `TestOperatorGatesFile::test_the_shipped_gates_file_parses`: my G-K5 entry put the question
+mid-line with its grounds trailing after, and the pin requires every `- [ ]` LINE to end with `?`.
+Grounds moved to a continuation line; green. **The pin's own docstring says a format drift is
+"invisible from any one gate", and it presented exactly that way** — three lanes, two clean floors
+each, and the defect only existed in the union. Recorded because the process is what caught it, not
+a reviewer.
+
+## WHAT SHIPPED
+
+**`fleet init --home` — multi-fleet slice (b), the last unbuilt slice.** RED `30 failed / 9 passed`
+(byte-identical on both interpreters) -> GREEN, +39 tests. **And the audit lane found why it mattered
+more than the operator's question implied: on a machine already ARMED with one home there was NO
+shipped path to create a second** — four routes driven, all exit 1. Multi-fleet was *unreachable*,
+not merely unpolished. Slice (e) turned out to be substantially discharged at wave 51, with all ten
+pin categories carrying reddening mutants — re-measured here rather than inherited.
+
+**The succession landed in the form the evidence carries**, which is narrower than the form I sent
+the lane to land: first on THIS HOST and on POSIX, not first at all. See the correction checkpoint
+above; the route was 6-for-6 post-fix and my drill is the sixth.
+
+**G-K5 filed** with the audit's measured collision analysis, and the tracked digest moved from three
+gates to four — the precise staleness root `CLAUDE.md` warns about, created and closed in one turn.
+Root `CLAUDE.md`'s Python rule corrected: its documented suite command could not run on this host at
+all.
+
+## THE FINDING I WOULD PUT FIRST FOR A GATE, AND IT IS THE BUILD LANE'S, NOT MINE
+
+**The 2026-08-10 ruling settles CLASSIFICATION and says nothing about §5's resolution ORDER — and
+for this verb the shipped guard would have deadlocked it on its own remedy.** A destructive
+`init --home` takes `_terminus_refusal` on the fresh box it exists to populate, and
+`_refuse_wrong_home_destructive` on an armed one; both print `--fleet-home` as the remedy, and
+**§5 step 1's `validate_named_home` demands an already-INITIALIZED home, which is exactly what
+`--home` creates.** The same shape `TERMINUS_EXEMPT_VERBS` was minted for one verb earlier, whose
+own comment calls it *"a deadlock with a friendly message"*. **A lane that took my brief at face
+value would have shipped the tier, passed every pin I named, and left the verb unusable on the
+multi-home machine it exists for.** My predicted difficulty — a value-taking flag versus
+`store_true` — cost nothing: `verb_effect_tier`'s presence predicate was already value-shaped.
+
+I also undercounted the landing obligation. **Four files move together, not three**:
+`test_homes_list.py::test_only_the_named_writers_append` asserts an AST-derived EQUALITY over
+`append_home_record`'s caller set, so a second writer reddens it by construction.
+
+## SUCCESSOR QUEUE, IN ORDER
+
+1. **Four shipped test sites read the OPERATOR'S REAL homes list** in subprocesses driven with
+   `{**os.environ}` and only `FLEET_HOME` overridden (`test_terminal_surface.py:1372`,
+   `test_install_home_split.py:351`, `test_destructive_guard.py:506` and `:584`). Harmless TODAY
+   only because `~/.claude/fleet-homes.list` does not exist here — **and it becomes real the moment
+   the operator does the thing they just asked for**, because `fleet homes --add` is what arming
+   multi-fleet means. The seam is `HOME=<temp>` in the child env (`homes_list_path`,
+   `user_settings_path` and both daemon paths all resolve from `Path.home()`). **This should land
+   before multi-fleet is adopted, not after.**
+2. **`identity-witness` grading (lane R1).** The row is red for every `--bg` body that did not found
+   the daemon — measured on an ordinary worker, not just on me — and doctor's stated remedy cannot
+   run while workers are live. Two honest shapes: demote to NOTE when the disagreement is fully
+   explained by §18, or accept the row is decorative here. Code, and not for a body on the turn it
+   inherits the claim.
+3. **The six host-assumption failures WRITE INTO THE REPO ROOT.** `--bogus/` and a newline-named
+   directory, invisible to `git status` because each contains only gitignored `state/` — I verified
+   `git check-ignore` does NOT ignore them. "Benign" was under-stated for three waves. A
+   `skipif`-or-fix decision is owed.
+4. **`sup-recover` is still UNBUILT**, which qualifies the whole §1417 exchange the prose lane
+   re-argued; and O13's word "PREFERRED" is deliberately left unrestored (operator's, under
+   no-author-self-promotion).
+5. **G-K1, G-K2, G-K4 carried; G-K5 new.** `supervisor/GOALS.md` still states the dead 150-200k band
+   with replacement text unlanded since 2026-08-10, and is still outside
+   `test_supervisor_context.py`'s `SURFACES` — operator-owned, no lane may originate it.
+6. **The dogfood second home is now possible and was not before.** `init --home` shipped, so a real
+   two-home proof (spawn, status, statusline, keeper `--fleet-home`) can finally run end to end.
+   That is the natural next wave and the operator-visible deliverable for their priority.
+7. **`supervisor/JOURNAL.md` is 1.9 MB and is now load-bearing EVIDENCE** — the 6-for-6 count only
+   survives because its entries can be shown committed contemporaneously. Nothing enforces
+   append-only. Worth knowing before someone rewrites it.
+
+## WHAT I EXPECT TO GET WRONG
+
+That a green floor and a clean push mean this wave is done being wrong. Two of its three lanes
+corrected their own briefs on the point their brief called most likely, and in both cases the real
+error was somewhere the brief never looked — the tier idiom transferred fine and the RESOLUTION
+ORDER was the trap; the doctor row was real and its SUBJECT was wrong. **The pattern is that my
+predictions fail where I did not think to predict**, which is not something a more careful brief
+fixes. It is an argument for keeping lanes instructed to attack, and for reading the section where
+they say I was wrong before the section where they say what shipped.
