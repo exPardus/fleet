@@ -226,6 +226,36 @@ Handoff verifies a one-shot **token**, not a sid (claim-nonce §6.4): a
 successor that forks between HANDSHAKE and complete still holds the token, so
 the transfer no longer breaks on a rotated sid.
 
+**REACHING YOUR BAND IS ROUTINE, NOT AN INCIDENT** (operator ruling 2026-09-09 and
+its amendment; `knowledge/lessons.md#2026-09-09-keeper-revives`). The interface
+session is the operator's own and is never recycled by fleet for context reasons;
+YOU are the swappable layer between it and the workers. A generation ending is
+the system working. Report it in that register -- do not escalate it, and do not
+write it up as a failure.
+
+**The graceful end is FOUR steps, in order**, and step 2 is the one this file
+did not used to have:
+1. Checkpoint with the successor queue (below, step 1).
+2. **Notify the interface**: one line typed into the ccgram-bound tmux window
+   `work:fleet`, the same way the keeper types its `KEEPER:` lines
+   (`tmux send-keys -l` + `Enter`, one printable line, the keeper's sanitising),
+   prefixed `SUPERVISOR:` -- e.g.
+   `SUPERVISOR: handoff begin inc=<id> token in <file>`. **That BEHAVIOUR is
+   what binds.** The verb is `fleet sup-notify`. **NAME UNSHIPPED -- reconcile at
+   merge:** `grep -rn "sup.notify" bin/ tests/ docs/` returned nothing at
+   `2a15dec`; a sibling lane owns the mechanism (a sanitising helper shared with
+   the keeper, plus a verb over it), so check `fleet --help` for the shipped
+   spelling. No receipt for it exists anywhere in this repo, because nobody has
+   run it.
+3. The handoff protocol below, WITH the interface. **`sup-handoff-begin`
+   dispatches the successor ITSELF** -- the interface does NOT `sup-spawn` one,
+   and a `sup-spawn` at that moment is a second live body. The interface's job is
+   to watch `fleet sup-status --json` until the claim moves and to tell the
+   operator it happened; its steps are in
+   `docs/operator/server-interface-profile.md`.
+4. **Only if the handoff is stillborn**, `sup-release` (the "Standing down"
+   section below), after which the keeper pages and the **interface** relaunches.
+
 Old incarnation:
 1. `fleet sup-checkpoint "handoff prep: <state summary for successor>"` (present `--nonce`).
 2. `fleet sup-handoff-begin --nonce <value>` — mints the token into the
@@ -313,6 +343,16 @@ releasing body is still live — does not arm against you. The successor's
 to be a step that lived outside the fleet and is where every unproven handoff
 died. Only your own record is ever touched: the target is whatever the registry
 resolves YOUR sid to, so a release can never retire another body.
+
+**Release is the FOURTH step, not the first one.** At your band the ordered end is
+checkpoint -> notify the interface -> handoff -> and only if the handoff is
+stillborn, release (see "Handoff" above, ruling 2026-09-09). Releasing without
+having tried the handoff throws away a generation transfer the protocol can do.
+**What follows a release is no longer a wait for a human**: the keeper pages
+`work:fleet` and the **interface** runs `sup-spawn` on that page without waiting
+for the operator (2026-09-09 amendment, superseding the 2026-09-08 "a human
+revives" ruling, which stays on the record as history). The keeper still never
+dispatches; the two-live-body guard is the interface's.
 
 Still stop your session after releasing — you are told to EXIT and you should —
 but succession no longer waits on it. If `sup-release` prints that it could
