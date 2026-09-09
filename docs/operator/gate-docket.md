@@ -1,6 +1,6 @@
 # Operator docket — the durable digest
 
-**For: Altai, on his return. Three gates are open. None of them is blocking any work.**
+**For: Altai, on his return. FOUR gates are open. None of them is blocking any work — but G-K5 is the one you will care about, because it is about the priority you sent today.**
 
 **THIS FILE IS NOT THE RECORD.** The record is [`docs/OPERATOR-GATES.md`](../OPERATOR-GATES.md) —
 tracked, authoritative, carrying every open gate in full with its filer's own reasoning, plus every
@@ -57,7 +57,7 @@ template, skill, or instruction surface ever pointed a reader at that path.
 
 ---
 
-## The three open gates
+## The four open gates
 
 | # | In one line | Blocks | Recommendation on file |
 |---|---|---|---|
@@ -126,6 +126,43 @@ in one disposable directory on one machine.
 **This one has work behind it:** S5 (the first revival from the phone) dispatches that brief.
 
 ---
+
+### G-K5 — "independent per repo/dir": is the flag/env sense what you asked for?
+
+*Raised 2026-09-09 by supervisor `inc-20260909T174911Z-efa0` from your own Telegram priority, relayed
+by the interface. Measured evidence: `docs/lanes/w59-slice-e.md` §6.2. Recommendation below is the
+filer's, as this file's discipline requires — the audit lane deliberately recommended nothing.*
+
+**Your words:** *"how far away are we from multi fleet? it should be independent per repo/dir, this
+is a high priority and should be done asap"*. That sentence has two readings and the fleet has built
+exactly one of them.
+
+**Reading A — built, as of this wave.** Each repo gets its own home, reached by `--fleet-home <path>`
+or `FLEET_HOME`, and **created by the new `fleet init --home`**, which merged today (slice (b), the
+last unbuilt multi-fleet slice). Before it, an armed machine had *no shipped path to create a second
+home at all* — four routes, all exit 1 — so the feature was unreachable rather than merely
+unpolished. That is fixed.
+
+**Reading B — does not exist.** A session whose cwd is `/home/altai/proga/X` reaches X's fleet with
+**no flag and no env**. `resolve_home` consults flag → sid lookup → `FLEET_HOME` → terminus and
+**never reads the working directory**; the only two `cwd` sites in `bin/fleet.py` both belong to
+`fleet index`. Building it means a **new §5 resolution step**, which is a spec amendment only you
+ratify.
+
+**Three things Reading B would have to clear**, none of them fatal, all of them real:
+1. It is a **marker step**, and multi-fleet §9 is that design's graveyard. A live lint bans the
+   marker across five files, for the stated reason that *a stale marker could silently redirect the
+   CLI — `fleet clean` and `fleet kill` included — at a different fleet's registry.*
+2. **Linked worktrees.** A cwd walk-up would resolve a lane's worktree to its parent checkout's home
+   unless it stops at `.git`, the way `find_index_root` already does for the index.
+3. It adds a **fourth spelling of "which home"** whose answer can disagree with the other three,
+   where §5's design is deliberately one order for every caller.
+
+**Filer's recommendation: A is probably what you want, and it is done — try it before ordering B.**
+`fleet init --home /home/altai/proga/X/.fleet` then `--fleet-home` (or an exported `FLEET_HOME` per
+shell) gives independent per-repo fleets today. If typing that per shell is the actual friction, say
+so and B becomes worth its three collisions; if it is not, B buys a fourth way to be wrong about
+which fleet you are killing. **No lane has built any of B, and every brief this wave forbade it.**
 
 ## Settled 2026-08-10 — the four gates this digest was first written for
 
@@ -245,6 +282,9 @@ alternative readings are unbuilt.
 2. **G-K2** — accept the two silent failures for the soak week, or permit one out-of-band path now?
 3. **G-K4** — approve a git-tracked `supervisor/briefs/`? *(the standing brief S5 dispatches lives
    there)*
+4. **G-K5** — "independent per repo/dir": is `--fleet-home`/`FLEET_HOME` per repo (built today)
+   what you meant, or do you want cwd to decide the home with nothing typed? *(the second needs a
+   new §5 step and your ratification)*
 
 Answer any of them in one line in `docs/OPERATOR-GATES.md`, or through
 `fleet sup-decision --answer <text>` for whatever is occupying the supervisor's decision slot.
