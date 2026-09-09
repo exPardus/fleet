@@ -125,6 +125,57 @@ the tracked-test growth: `test_keeper_collect.py` (+299), `test_keeper_dedup.py`
 (+52) -- the keeper test suite (M-F/keeper work) accounts for essentially the whole tracked delta,
 which is the expected, non-defect cause the brief names.
 
+### The clean re-run — this is the S5 receipt of record
+
+The two runs above are kept exactly as the lane measured them, because they are the evidence for
+the lesson, not a mistake to be erased. **But they are not a baseline**, and the lane said so
+itself: they executed against a working tree that two sibling lanes were editing in place. So the
+supervisor re-ran both interpreters after every wave-55 lane was idle and the tree was clean
+(`git status --short` showed only `supervisor/JOURNAL.md`, which is the supervisor's own and is not
+code), taking no journal-writing action during either run — a checkpoint mid-run would itself have
+modified a git-tracked file under `conftest.py`'s install-plane hash guard and re-created the very
+ERROR being investigated.
+
+```text
+# volatile: host state — 2026-09-09, tree clean at d5111b6
+$ /home/altai/.local/bin/uv run --python 3.12 --with pytest -q python -m pytest -q -p no:cacheprovider --ignore=tests/integration
+6 failed, 4762 passed, 7 skipped, 1 xfailed in 276.17s (0:04:36)
+
+$ /home/altai/.local/bin/uv run --python 3.10 --with pytest -q python -m pytest -q -p no:cacheprovider --ignore=tests/integration
+6 failed, 4762 passed, 7 skipped, 1 xfailed in 296.79s (0:04:56)
+```
+
+**Identical on both interpreters — 4776 collected, and the failure set is the six pre-existing
+members node-id for node-id, nothing entered and nothing left.** Both anomalies the contaminated
+runs carried are gone: no ERROR on `test_views_doctrine.py::test_the_receipt_section_is_present_and_cited`
+(the install-plane guard had been reporting a real change, made by the other lane, exactly as
+designed), and none of the four `test_self_citations` / `test_retired_sid_citations` failures
+(citation drift from an uncommitted edit moving lines between the two runs). Both diagnoses in the
+block above are therefore **confirmed, not merely plausible** — the predicted clean result was
+stated before this run and hit.
+
+The `in <n>s` figures the baseline block complains were never captured are now on record for the
+first time: **4m36s and 4m56s**, which retires "~6 min" as a wall-clock impression. Note what that
+licenses and what it does not — two timings on one host on one day are a starting point for a
+trend, not a benchmark, and the 3.10/3.12 difference here (20s, ~7%) is smaller than the run-to-run
+spread this file has any right to assume.
+
+**Collected total 4776 vs the 2026-09-08 baseline's 4646** (`6 + 4638 + 1 + 1`): +130, of which +19
+is wave 55's own `w55-nonce-b` (18 boot-ritual pins plus one `tasks_dir()` pin) and the remainder is
+the keeper test suite the branch already carried. A docs-only landing moved nothing.
+
+### What this cost, and it was the supervisor's error
+
+Three lanes were dispatched in parallel into **one shared working directory**, on the campaign's
+standing rule that parallelism is bound only by file-set disjointness. Their *edit* targets were
+disjoint — `docs/operator/`, `bin/fleet.py` + `tests/`, `docs/SPEC.md` + `docs/NEXT-SESSION.md` —
+and that is exactly why the rule did not protect them. **A test-suite run is not disjoint from
+anything**: it reads the whole tree, and `conftest.py`'s guard hashes it before and after. The
+disjointness rule is about writes and the suite lane's dependency was on reads, so the rule was
+satisfied and the measurement was still destroyed. The remedy is not a narrower file set — it is a
+worktree, or ordering a measuring lane alone. `w55-recon-b` reached for a throwaway worktree
+unprompted to get an attributable answer, which is the shape the next brief should carry by default.
+
 ## S0 — install
 
 Host: this box, `/home/altai/proga/fleet`, branch `server/persistent-fleet` at `62b5e96`.
