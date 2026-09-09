@@ -482,7 +482,35 @@ RATIFIED_BUT_UNBUILT = ()
 # there is no longer a second place a name could be parked. Its seed
 # (`test_the_seed_a_new_verb_with_no_disposition_is_caught`) is what proves it
 # still fires; do not delete that seed to save a test.
-UNCLASSIFIED_BY_THE_RATIFIED_TABLE = ()
+#
+# IT IS NON-EMPTY AGAIN AS OF 2026-09-09 (w58/notify), AND THIS IS THE SHAPE
+# WORKING, NOT ROT. `fleet sup-notify` shipped in that branch. Its tier is a
+# ratified-section edit to `docs/specs/multi-fleet.md` §5 that only the
+# operator may make, and this file's own refusal message names exactly this
+# tuple as the alternative: *"or record them in
+# UNCLASSIFIED_BY_THE_RATIFIED_TABLE with the reason. Do not guess a tier."*
+# So the tier is NOT guessed here.
+#
+# WHAT IT COSTS UNTIL THE OPERATOR RULES, MEASURED RATHER THAN ASSUMED: a verb
+# in no row is `"destructive"` by `fleet.verb_effect_tier`'s own unknown-verb
+# default, so in an ARMED multi-fleet population resolved via env/legacy,
+# `sup-notify` requires the explicit `--fleet-home` flag. That is the fail-safe
+# direction §5 names and it is strictly the SAFE error for this verb; the cost
+# is one extra flag on a machine that has more than one fleet home, which this
+# one does not (a single home, so the guard is not even armed).
+#
+# THE CANDIDATE TIER, PRICED SO THE RULING IS CHEAP AND NOT SO THE RULING IS
+# PRE-EMPTED. Its irreversible effects in the WRONG home are (a) one
+# `write_incarnation` on that home's supervisor claim -- the §6.6 restamp and
+# a possible pending acknowledgment, the same write `sup-heartbeat` makes, and
+# `sup-heartbeat` is DISRUPTIVE -- and (b) one line typed into a tmux window,
+# which is not a home-scoped effect at all (the target is a `--tmux-session` /
+# `--window` pair, not a path under the home). It dispatches nothing, steers
+# no worker, and appends to no journal, which is what put `sup-checkpoint` and
+# `sup-spawn` in DESTRUCTIVE. So DISRUPTIVE is the shape the derivation
+# suggests. It is written here as a recommendation for the operator, in the
+# tuple that exists to force that escalation -- not as a classification.
+UNCLASSIFIED_BY_THE_RATIFIED_TABLE = ("sup-notify",)
 
 
 def _classified_verbs():

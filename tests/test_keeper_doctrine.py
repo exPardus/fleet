@@ -47,16 +47,64 @@ def test_the_detector_sees_a_planted_dispatch():
         "test_the_keeper_references_no_dispatching_or_locking_name runs")
 
 
+#: What the keeper may reach for inside `fleet`. An ALLOWLIST, and the reason
+#: it is one rather than a denylist is `FORBIDDEN` above: that set names the
+#: dispatchers and lockers we already know about, while this one refuses
+#: everything nobody has argued for.
+#:
+#: THE SIX TMUX-LINE NAMES JOINED IN w58/notify (2026-09-09), and they are
+#: the C4 sanitiser the keeper used to own outright. It moved into `fleet.py`
+#: because the SUPERVISOR needs the same wire (`fleet sup-notify`, ruling
+#: 2026-09-09 graceful-end step 2) and cannot call this module: the keeper is
+#: a separate timer process, and the import direction is `fleet_keeper ->
+#: fleet`. Two copies of a security control is how one of them rots.
+#:
+#: EACH ONE IS STILL READ-ONLY IN THE SENSE THIS TEST MEANS -- no fleet state
+#: is read or written by any of them. `one_line`/`interface_line` are pure
+#: string functions; `tmux_command`/`type_interface_line` shell out to `tmux`,
+#: which is the keeper's OWN pre-existing action (it typed pages and created
+#: windows through its own copies of these before this file listed them), not
+#: a new capability. `fleet_lock`, `load_registry` and the dispatchers stay
+#: forbidden above and none of these four touches them.
+#:
+#: NOTE THE IMPORT STYLE THAT WOULD DEFEAT THIS TEST. `from fleet import
+#: one_line` makes the reference an `ast.Name`, not an `ast.Attribute` of
+#: `fleet`, so it would be invisible here. The keeper deliberately calls
+#: `fleet.<name>` for exactly that reason; do not "tidy" it into a bare
+#: import.
+ALLOWED_FLEET_ATTRIBUTES = {
+    "status_snapshot", "MIN_PYTHON_VERSION", "FLEET_HOME",
+    "KEEPER_LINE_PREFIX", "INTERFACE_LINE_LIMIT",
+    "one_line", "interface_line", "tmux_command", "type_interface_line",
+}
+
+
 def test_the_only_fleet_attributes_used_are_read_only_ones():
     """`FLEET_HOME` joined the set in fix wave 1 (I3): `main` compares the
     imported module's frozen home against `--fleet-home` and refuses a
     mismatch, because `status_snapshot()` reads the former while every other
     source reads the latter. It is a READ -- the test below pins that."""
-    tree = ast.parse(SRC)
-    used = {n.attr for n in ast.walk(tree)
+    used = _fleet_attributes(SRC)
+    assert used <= ALLOWED_FLEET_ATTRIBUTES, used
+
+
+def _fleet_attributes(source):
+    return {n.attr for n in ast.walk(ast.parse(source))
             if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
             and n.value.id == "fleet"}
-    assert used <= {"status_snapshot", "MIN_PYTHON_VERSION", "FLEET_HOME"}, used
+
+
+def test_the_fleet_attribute_detector_sees_a_planted_reach():
+    """Seed for the allowlist. Without this, an extractor that silently
+    stopped returning anything would make the assertion above `set() <=
+    ALLOWED` -- vacuously true forever, at the moment the keeper started
+    reaching into `fleet` for something nobody argued for."""
+    planted = SRC + "\n\ndef _mutant():\n    return fleet.save_registry({})\n"
+    used = _fleet_attributes(planted)
+    assert "save_registry" in used
+    assert not (used <= ALLOWED_FLEET_ATTRIBUTES), (
+        "the planted reach must FAIL the allowlist that "
+        "test_the_only_fleet_attributes_used_are_read_only_ones checks")
 
 
 def _assigned_fleet_attributes(source):

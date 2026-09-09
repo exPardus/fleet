@@ -57,7 +57,15 @@ def test_released_claim_with_goals_active_pages_supervisor_dead():
                             released_at="2026-09-08T04:00:00Z"), NOW)
     assert _rules(pages) == ["supervisor-dead"]
     assert pages[0].text.startswith("KEEPER: supervisor dead")
-    assert "await operator" in pages[0].text
+    # THIS PIN MOVED, AND THE MOVE IS THE POINT (operator ruling 2026-09-09,
+    # AMENDMENT: *"keeper must just instruct interface to relaunch
+    # supervisor"*). It used to read `"await operator" in pages[0].text`,
+    # which pinned the 2026-09-08 ruling the amendment supersedes. Both
+    # halves are asserted so a page that merely dropped the old sentence
+    # without naming the new act cannot pass.
+    assert "relaunch with sup-spawn" in pages[0].text
+    assert "do not await the operator" in pages[0].text
+    assert "await operator before" not in pages[0].text
 
 
 def test_absent_claim_with_goals_active_pages_supervisor_dead():
