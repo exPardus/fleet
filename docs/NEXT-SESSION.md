@@ -1,6 +1,38 @@
 # Next session — handoff
 
-## ⛔ 2026-08-06 STAND-DOWN — read this block first, the rest of this file is a day stale
+## ✅ 2026-09-09 CURRENT — read this block first, the stand-down below is a month and a machine stale
+
+**The fleet is NOT stopped.** It is running headless on the server (`kz-work`,
+`/home/altai/proga/fleet`), which the operator revived 2026-09-09 on branch
+`server/persistent-fleet` (21 commits ahead of `origin/main`, `09819e1` (oldest) through
+`f4aa63f` (newest as of this write) — `git rev-list --count origin/main..f4aa63f` returns 21;
+the two-dot form `09819e1..f4aa63f` excludes its own left endpoint and returns 20). `fleet
+status` shows a supervisor incarnation in `working` state with a fresh heartbeat, and a
+`fleet-keeper.timer` (systemd user unit, confirmed active on this host) fires roughly every
+15 minutes, collecting one
+read-only fleet observation and — on a page-worthy rule — typing `KEEPER:` lines into the
+ccgram-bound `work:fleet` tmux window. The keeper never dispatches, never takes `fleet.lock`.
+
+Authoritative pointers for the current state, all re-derivable rather than trusted:
+`docs/SPEC.md` §18's server-persistent-fleet entry (build record, real shas); design
+`docs/superpowers/specs/2026-09-08-server-persistent-fleet-design.md`; plan
+`docs/superpowers/plans/2026-09-08-server-persistent-fleet.md`; `docs/OPERATOR-GATES.md`
+§Open for the three still-open gates (G-K1, G-K2, G-K4; G-K3 settled 2026-09-08 — digest at
+`docs/operator/gate-docket.md`); `docs/operator/keeper-soak-2026-09.md` for the one-week soak
+(S6, begun 2026-09-08, **still IN PROGRESS**) and the two rule halves deliberately left unbuilt
+pending it (S-1: `login-expired`'s auth-error-outcome arm; S-2: `worker-anomaly`'s
+permission-stall arm).
+
+**The stand-down block immediately below, and everything under it in this file, predates the
+server era (written 2026-08-05/06) and has not been re-verified against the current tree.**
+It was true of a Windows reference box a month ago; it is not evidence about whether the fleet
+is running today — this block is. Treat waves, branch names, docket state and suite counts
+below as a historical record of the pre-server multi-fleet build, to be re-derived before
+acting on, not as current instruction. Whether that lower material is still worth carrying at
+all, or should be replaced by a pointer to `supervisor/JOURNAL.md`, is itself unverified — flag
+it to the operator rather than assuming either way.
+
+## ⛔ 2026-08-06 STAND-DOWN (HISTORICAL — true of the Windows reference box a month ago; superseded 2026-09-09 above) — read this block first, the rest of this file is a day stale
 
 **The fleet is deliberately STOPPED** (operator needed the machine, 2026-08-06; supervisor
 released cleanly 22:24:12Z). Revival = the fleet skill's startup ritual, as always. First
