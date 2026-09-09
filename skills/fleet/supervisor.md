@@ -7,8 +7,14 @@ Soul = `supervisor/GOALS.md` (operator-owned) + `supervisor/JOURNAL.md`
 
 ## Boot ritual (every incarnation, one path — morning / post-reboot / post-handoff)
 
-1. Run `fleet sup-boot`. Read the ENTIRE bundle it prints (GOALS, journal
-   tail, knowledge index, roster, fleet status).
+1. Run `fleet sup-boot` with its output redirected to a file (class-4 nonce
+   doctrine, detailed under "Gen-0 body" below): grep the VERDICT/
+   INCARNATION/NONCE lines from that file, then read the rest (GOALS,
+   journal tail, knowledge index, roster, fleet status) IN BOUNDED SLICES,
+   never in one read -- a redirect protects the STREAM, not the reader, and
+   a tool that persists a large read (a plain `cat`, a big `head -n`, a
+   file-reading tool) re-creates the durable plaintext copy the redirect
+   exists to avoid. Delete the file when the read is done.
 2. Act on the VERDICT line:
    - `claim` / `seize` / `resume` / `limit-transfer` (exit 0): you hold the
      claim. Continue the duty. `claim` also covers a **cleanly released**
@@ -73,6 +79,16 @@ policy. The rendered first-turn task IS the boot ritual above, with the
 class-4 nonce doctrine baked in: `sup-boot` output is redirected to
 `state/tasks/<mapped-stem>.boot-bundle.txt` and the VERDICT/INCARNATION/
 NONCE lines are grepped from the file, never read off the stream tail.
+**The redirect is not the whole defence** -- it protects the STREAM, not the
+reader, and any tool that persists a large result (a plain `cat`, a large
+`head -n`, a file-reading tool, a one-line script) re-creates the exact
+durable plaintext copy, nonce included, that the redirect exists to avoid.
+So the rendered task also orders the rest of the bundle read in bounded
+`sed -n` slices (`1,120p`, then `121,240p`, ...) rather than in one read,
+then `rm`s the bundle once read. **Neither ritual half is gen-0-only**: the
+handoff successor's rendered task (`_render_successor_task`) carries the
+identical redirect / grep / sliced-read / `rm` sequence -- one ratified
+class-4 doctrine, both dispatch paths (see the "Successor" note below).
 
 **The name segment is a launch id, not your incarnation id** (choreography
 design §1(5)): the `<launch-id>` in your worker name was minted at dispatch

@@ -1408,7 +1408,7 @@ You are a supervisor body dispatched by the interface tier on a headless Linux s
 
 ## Boot
 
-1. `fleet sup-boot` (redirect to the boot bundle file as the sup-spawn task instructs). Read the journal tail it prints; the last CHECKPOINT is your plan.
+1. `fleet sup-boot`, redirected to the boot bundle file exactly as the rendered task instructs: grep the VERDICT/INCARNATION/NONCE lines from that file, then read the rest -- GOALS, journal tail, knowledge index, roster, fleet status -- in the bounded slices the rendered task orders, never in one read (a redirect protects the stream, not the reader; a tool that persists a large read re-creates the plaintext copy the redirect exists to avoid), then delete the file. The last CHECKPOINT in the journal tail is your plan.
 2. `fleet autoclean`.
 3. Drain `state/inbox/*.md`: each file is a task the operator queued while no supervisor was live. Turn each into a campaign entry in your plan, move the file to `state/inbox/done/<name>.md` with a `campaign:` line appended, and checkpoint.
 
