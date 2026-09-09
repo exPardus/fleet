@@ -404,6 +404,45 @@ file, no fleet involvement. Not fixed.
 
 ---
 
-## 10. Suite
+## 10. Suite (MEASURED)
 
-Prediction was written down before the run; see §11 in the commit message and the journal.
+**Predicted before running**, per the brief. The prediction, verbatim:
+
+> Baseline at `1c7f9a4`: 4919 collected — 6 failed, 4896 passed, 16 skipped, 1 xfailed.
+> This branch adds exactly one new test file (27 tests when run alone on 3.12), edits five
+> existing drive sites and adds two module-level helpers to `conftest.py`; no test is added,
+> removed or reparametrised anywhere else. Neither `skipif(os.name == "nt")` test skips on this
+> POSIX host, so the skip count does not move.
+> **PREDICTED: 4946 collected — 6 failed, 4923 passed, 16 skipped, 1 xfailed, identical on 3.10
+> and 3.12.**
+
+**Measured.** From a fresh `git clone --no-local` of `w60/homeseam` at `a7dcfb1` — a separate tree,
+never edited during the run, per the brief's warning about `inspect.getsource` at cached line
+offsets:
+
+```
+uv run --no-project --python 3.12 --with pytest python -m pytest -q
+  6 failed, 4923 passed, 16 skipped, 1 xfailed in 319.46s
+
+uv run --no-project --python 3.10 --with pytest python -m pytest -q
+  6 failed, 4923 passed, 16 skipped, 1 xfailed in 347.38s
+```
+
+4946 collected on both floors. **Predicted and hit, identically on 3.10 and 3.12.**
+
+The six are the documented host assumptions, unchanged from `1c7f9a4`, and none is touched by this
+branch — same names on both floors:
+
+```
+test_fleet_index.py::TestPathContainment::test_the_choke_point_refuses_a_drive_qualified_rel_and_writes_nothing
+test_fleet_index.py::TestPathContainment::test_a_drive_qualified_rel_cannot_overwrite_a_file_outside_the_root
+test_fleet_index.py::TestPathContainment::test_the_update_library_surface_refuses_a_drive_qualified_rel
+test_fleet_q.py::TestOutlinePathContainment::test_an_absolute_path_outside_the_root_is_refused_too
+test_terminal_surface.py::TestCollaboratorInstall::test_fleet_python_may_be_a_path_containing_spaces
+test_terminal_surface.py::TestCollaboratorInstall::test_fleet_python_still_accepts_a_multi_word_command
+```
+
+Four drive-qualified-path escapes, two venv-shim re-execs — exactly the split `CLAUDE.md` records.
+
+**Post-run safety check:** `ls -la ~/.claude/fleet-homes.list` -> `No such file or directory`.
+Two full suite runs, 9892 tests, and the operator's real homes list is still absent.
