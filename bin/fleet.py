@@ -908,12 +908,12 @@ def _quarantine_artifacts() -> list:
     registry is always newer -- an "artifact newer than the registry"
     comparison would never fire on the recreation bypasses it exists to stop.
 
-      * `_sweep_husks` (:11085) -- a rename can hide live worker records from
+      * `_sweep_husks` (:11117) -- a rename can hide live worker records from
         the roster sweep, so a thin registry would rm sessions it still owns.
-      * `_doctor_check_autoclean` (:12193) -- a lingering artifact means the
+      * `_doctor_check_autoclean` (:12277) -- a lingering artifact means the
         sweep above is refusing itself, which is how a bricked sweep reads
         green-and-fresh.
-      * `_require_claim_holder`'s §9 arm (:16774) -- the legacy upgrade mints
+      * `_require_claim_holder`'s §9 arm (:17010) -- the legacy upgrade mints
         generation 1 on bare sid equality, so it needs the registry that
         cleared it to be COMPLETE, not merely readable. See there.
 
@@ -929,7 +929,7 @@ def _quarantine_artifacts() -> list:
         §6.5 worker-turn gate, which refuses on `True` alone, so poisoning a
         HEALTHY read here would let a real worker turn through §6.5 -- closing
         the §9 door by opening a wider one. Rule 1 lives at the §9 arm instead.
-      * `_identity_abstention_note` (:16495) -- the same distinction, in words,
+      * `_identity_abstention_note` (:16731) -- the same distinction, in words,
         because the generic note names `fleet doctor` and doctor is what MADE
         this state.
       * `_read_registry_readonly` (:4071) -- the VIEW surface's copy of the same
@@ -938,7 +938,7 @@ def _quarantine_artifacts() -> list:
         a never-initialised box prints, so the two states were not
         distinguishable from the read surface at all. A `Path.glob` is a read,
         so this costs the views doctrine nothing.
-      * `_doctor_check_registry` (:12731) -- doctor graded only on whether the
+      * `_doctor_check_registry` (:12815) -- doctor graded only on whether the
         LOADER RAISED, and the loader returns `{"workers": {}}` for a missing
         file, so the row called a renamed-away path *"is readable"* and doctor
         exited 0 with every row green (P1-12). A bare absence stays a PASS: no
@@ -950,8 +950,8 @@ def _quarantine_artifacts() -> list:
     these two only spell the filename, because an operator cannot restore a file
     whose name they were never told.
 
-      * `_print_snapshot_table` (:6987) -- `fleet status --stale-ok`.
-      * `_tombstone_releasing_body` (:16931) -- `sup-release`, whose registry
+      * `_print_snapshot_table` (:7002) -- `fleet status --stale-ok`.
+      * `_tombstone_releasing_body` (:17167) -- `sup-release`, whose registry
         arm previously swallowed the quarantined case in silence.
 
     The operator clears the artifact (after restoring what it holds), which
@@ -3107,7 +3107,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     -- reads `ok` while MISSING every record the artifact holds, and the §9 arm
     read that thinness as an affirmative *"you are provably not a worker"*. The
     presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:16774`), where it costs the §6.5 gate nothing.
+    (`:17010`), where it costs the §6.5 gate nothing.
 
     An artifact can also outlive its incident by days -- `_sweep_husks` tells the
     operator to restore the file first and delete the artifact second -- so that
@@ -5639,6 +5639,21 @@ def status_snapshot(now=None, include_archived: bool = False) -> dict:
             # is_native's full record shape.
             "dispatch_kind": rec.get("dispatch_kind"),
             "archived_at": rec.get("archived_at"),
+            # w56 (incident 2026-09-09): how many tool calls the harness
+            # REFUSED in this session -- `None` when nothing has measured it
+            # (no outcome record yet, or one written before the field existed),
+            # `0` when a turn was measured and nothing was denied. Additive and
+            # file-only, exactly like `dispatch_kind` and `unknown_fields`
+            # above: a bounded tail read of this row's own outcome file, no
+            # lock, no roster fetch, no probe (terminal-surface D1/D4).
+            #
+            # THIS IS THE HALF OF SOAK ITEM S-2 THAT CAN LIVE HERE. S-2 asks
+            # for a permission signal in `status_snapshot` "where every view
+            # would get it" and names the permission STALL -- but the stall is
+            # roster-only and can never reach this function (see the block
+            # above `_permission_stalls`). A DENIAL leaves an artifact in
+            # FLEET_HOME, so for a denial S-2's chosen layer is exactly right.
+            "permission_denials": _session_permission_denials(name, sid),
             # three-tier §3/§10.1: which TIER this row's session occupies.
             # Derived from the name family `sup|<inc>|<role>` via fleet's own
             # predicate, so no consumer re-implements the shape. "supervisor"
@@ -7014,6 +7029,15 @@ def _print_snapshot_table(snap: dict, name=None) -> None:
             flags.append("resume-eligible")
         if w.get("archived_at"):
             flags.append("archived")
+        # w56: the count, never a verdict. `> 0` and not `is not None` -- the
+        # ordinary answer is `0` and a column that says "0 denials" on every
+        # healthy row is noise, which is how a flags column stops being read
+        # (the 2026-07-30 incident, one register quieter). A COUNT is also
+        # deliberately not a rule: it cannot fire falsely, because it asserts
+        # only the number the harness itself recorded.
+        denied = w.get("permission_denials")
+        if isinstance(denied, int) and not isinstance(denied, bool) and denied > 0:
+            flags.append(f"permission-denied:{denied}")
         # T5 fix wave (Minor: snapshot cost render): G3 says USD cost is
         # dead for native dispatch -- render "-" here too, matching
         # _print_status_table, instead of a stale/always-zero dollar
@@ -7085,6 +7109,14 @@ def _print_status_table(data: dict, names) -> None:
             tok = _native_token_summary(n, rec)
             if tok:
                 flag_list = flag_list + [tok]
+            # w56: same count `status_snapshot` carries, rendered in the same
+            # column of the probed table, so the two views cannot tell the
+            # operator different stories about one worker. This table is not
+            # the statusline hot path, but the reader is bounded anyway --
+            # there is no second implementation to drift.
+            denied = _session_permission_denials(n, rec.get("session_id"))
+            if isinstance(denied, int) and denied > 0:
+                flag_list = flag_list + [f"permission-denied:{denied}"]
         else:
             cost_s = _cost_cell(rec.get("cost_usd"))
         flags = ",".join(flag_list) or "-"
@@ -9152,7 +9184,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # P1-6: `read_registry_no_repair`, NOT `load_registry`. This is a PRE-FLIGHT
-    # resolution that runs from `cmd_kill:9046` / `cmd_respawn:8659`, before
+    # resolution that runs from `cmd_kill:9078` / `cmd_respawn:8691`, before
     # either verb has taken `fleet.lock` -- and `load_registry` QUARANTINES a
     # corrupt registry, i.e. RENAMES IT ASIDE, which is a write. An unlocked
     # write races every other fleet command, and it destroys the evidence the
@@ -9215,10 +9247,10 @@ def _supervisor_lifecycle_target(verb, name):
     # P1-6: `read_registry_no_repair` -- `load_registry` MINUS the rename, with
     # the same missing-file contract, the same validator and the same
     # `RegistryCorruptError`, so the arm below is unchanged. This read runs from
-    # `cmd_kill:9046` / `cmd_respawn:8659`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:9078` / `cmd_respawn:8691`, ahead of either verb's `fleet_lock`,
     # and quarantining here did two things: it wrote without the lock, and it
     # STOLE the quarantine from the lock-held read that was designed to perform
-    # it. `cmd_respawn:8683-8685` spells out that design -- *"resolve under the
+    # it. `cmd_respawn:8715-8717` spells out that design -- *"resolve under the
     # lock so a corrupt registry surfaces through load_registry's quarantine"* --
     # and the theft is what falsified it: by the time the lock-held read ran the
     # file was ABSENT rather than corrupt, so `{"workers": {}}` came back and the
@@ -11806,6 +11838,58 @@ def _doctor_check_permission_stalls(workers: dict, which=shutil.which, run=subpr
             f"{detail}")
 
 
+def _doctor_check_permission_denials(workers: dict):
+    """`permission-denials`: did a worker's session have tool calls REFUSED?
+
+    NOTE-ONLY (`ok=True`), and that is the deliberate opposite of the
+    `permission-stalls` row two checks up, which is the only worker-keyed FAIL
+    in this verb. That row earned its exit code on one argument -- *it cannot go
+    stale-red*, because it is re-derived from the live roster every run and
+    vanishes the instant the session does. This row is the mirror image: it
+    reads a DURABLE record, so a worker denied once stays reported until the
+    operator archives or cleans the row. A FAIL that outlives its incident is
+    the three-stale-FAILs failure the standing doctrine (*a permanently-red
+    doctor is a disabled doctor*) was written against, and it would be earned by
+    a row that is trying to tell the operator something true. So this row takes
+    the shape `dead-suspected` and `limited-parks` already take: `ok=True`, with
+    a message that says plainly that these workers need looking at.
+
+    `mode` IS NAMED PER WORKER, because it is the remedy. The 2026-09-09
+    incident was three workers born at the `fleet spawn` default `--mode
+    dontask`; an operator reading "3 workers had calls denied" has to go find
+    that out, and one reading "w55-suite (mode=dontask): 11 denied" already has
+    it. R2 (2026-07-26): a diagnostic must name a remedy its audience can
+    perform, and `fleet respawn --mode ...` is one.
+
+    ARCHIVED ROWS ARE SKIPPED -- a tombstone is history, matching every other
+    worker-keyed check here -- and so is any row whose count is `0` or unknown.
+    Unknown is not zero: a record predating the field, or a turn whose hook
+    never opened a transcript, has measured nothing, and this row says nothing
+    about it rather than vouching for it."""
+    denied = []
+    for name, rec in sorted(workers.items()):
+        if not isinstance(rec, dict) or rec.get("archived_at") is not None:
+            continue
+        count = _session_permission_denials(name, rec.get("session_id"))
+        if isinstance(count, int) and count > 0:
+            denied.append((name, rec.get("mode"), count))
+    if not denied:
+        # Anti-vacuity (the wording rule `_doctor_check_registry` documents):
+        # this must not read as "nothing is wrong" when it may equally mean
+        # "no worker has an outcome record carrying the field yet".
+        return ("permission-denials", True,
+                "no live worker has a measured tool-permission denial")
+    detail = " | ".join(
+        f"{n} (mode={m if isinstance(m, str) else '?'}): {c} denied"
+        for n, m, c in denied)
+    return ("permission-denials", True,
+            f"{len(denied)} worker(s) had tool calls refused by the permission "
+            f"layer -- a worker denied its first Bash call goes idle on turn 1 "
+            f"and is otherwise indistinguishable from one that finished fast: "
+            f"{detail}. Read the report (`fleet result <name>`), then respawn "
+            f"under a mode that can run the brief or fix the allow-list")
+
+
 def _mailbox_first_line(path: Path) -> str:
     """The first non-empty line of a mailbox file (best-effort), for the
     orphaned-mailbox disposition -- enough to identify what mail was stranded
@@ -12851,6 +12935,12 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
         # deliberately NOT last: `tzdata` holds that slot by pin
         # (tests/test_native.py TestCmdDoctorRegistersNewChecks).
         functools.partial(_doctor_check_permission_stalls, workers, which=which, run=run),
+        # Immediately after the stall row: the two are the same operator
+        # question ("did permissions stop a worker?") answered from the two
+        # different witnesses available, and they read as one answer. The
+        # `tzdata`-holds-last pin (tests/test_native.py
+        # TestCmdDoctorRegistersNewChecks) is untouched.
+        functools.partial(_doctor_check_permission_denials, workers),
         functools.partial(_doctor_check_orphaned_claims, workers=workers),
         functools.partial(_doctor_check_identity_witness, workers),
         functools.partial(_doctor_check_claude_agents, workers, which=which, run=run),
@@ -12949,6 +13039,152 @@ def read_outcomes(name: str, sid: str | None = None) -> list[dict]:
 def latest_outcome(name: str, sid: str) -> dict | None:
     recs = read_outcomes(name, sid=sid)
     return recs[-1] if recs else None
+
+
+# ---------------------------------------------------------------------------
+# Permission DENIALS (incident 2026-09-09, w56). Distinct from the permission
+# STALL block far above, and the difference is the whole design:
+#
+#   a STALL is a live session parked on a prompt. `waiting_for_permission` is
+#   transient by construction, every persist site strips it, and the roster is
+#   the only witness -- so NO file-only view can ever see one (that block says
+#   so in its own words, and terminal-surface D1/D4 is why).
+#
+#   a DENIAL leaves an ARTIFACT. `dontAsk` does not prompt, it refuses, and the
+#   refusal is recorded by the harness on the transcript record that answers the
+#   tool call, as a typed field: `toolDenialKind`. `bin/hooks/stop_outcome.py`
+#   already reads that transcript once per turn for the usage numbers, so it now
+#   counts denials in the same pass and writes the total into the outcome record
+#   it was already writing. The fact therefore reaches FLEET_HOME as data, and a
+#   file-only view can read it without probing anything.
+#
+# THE DEFECT THIS CLOSES. Measured on this host 2026-09-09: three workers
+# dispatched at the shipped `fleet spawn` default `--mode dontask` were born
+# unable to act. Every fleet view rendered them exactly as it renders a worker
+# that finished a fast task -- `idle` on turn 1 with an outcome record, then
+# `dead`. Nothing in `fleet status`, `status_snapshot()` or `fleet doctor` said
+# "this body never had permission to do anything."
+#
+# WHY NOT A SUBSTRING RULE OVER `result_text`. Of the three, exactly ONE left a
+# result record at all; the other two left only the operator's kill tombstone.
+# That one describes the denial in prose the model chose to write, so a rule
+# keyed on it would have caught one worker in three AND would fire on any report
+# that merely quotes a denial message -- a rule that fires falsely, which the
+# soak file rightly calls worse than no rule. `toolDenialKind` is the harness's
+# own field: present 11/3/3 times in the three denied transcripts and zero times
+# in every other session on this host, and it is the same field the 2026-07-27
+# `SUCCESSOR_DEFAULT_MODE` measurement was read from ("2 x `permission-rule`").
+# ---------------------------------------------------------------------------
+
+# The hot-path budget. `status_snapshot` refires after every assistant message
+# (see the terminal-surface block above), and an outcome file grows without
+# bound -- one record per turn, each carrying up to OUTCOME_RESULT_TEXT_MAX
+# characters of report. `read_outcomes` parses the WHOLE file, which is correct
+# for `fleet status` and wrong for a statusline. So the snapshot reads a bounded
+# TAIL instead: the field it wants is in the newest record, and an append-only
+# file keeps its newest record at the end. 64 KiB is ~3 full-length reports, so
+# the window covers many more ordinary turns than it needs to; the cost is
+# constant per worker no matter how long that worker has run.
+OUTCOME_TAIL_BYTES = 65536
+
+
+def _tail_outcome_records(key: str, max_bytes: int = OUTCOME_TAIL_BYTES) -> list:
+    """The parseable JSONL records in the last `max_bytes` of one outcome file.
+
+    NEVER RAISES and never writes -- it is reached from `status_snapshot`, and
+    the views doctrine (root CLAUDE.md; terminal-surface D1/D4) allows a view to
+    read and to report, nothing else. Absent/unreadable file -> [].
+
+    THE FIRST LINE OF THE WINDOW IS DISCARDED unless the window starts at byte
+    0, because a seek into the middle of the file lands mid-record and half a
+    JSON object is not a record. That is a deliberate loss of at most one record
+    at the far end of the window, never at the near end where the answer is.
+    A record cut short by the window is indistinguishable from the torn line
+    `read_outcomes` already skips, so both readers behave the same way on it.
+
+    Decoded with errors="replace", matching `read_outcomes`' tolerance and
+    `stop_outcome.py`'s writer: a lone surrogate in a worker's report must
+    degrade one character, never lose the record or raise into a view."""
+    path = outcome_path(key)
+    try:
+        with path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            start = max(0, size - max_bytes)
+            fh.seek(start)
+            raw = fh.read()
+    except OSError:
+        return []
+    lines = raw.decode("utf-8", errors="replace").splitlines()
+    if start > 0 and lines:
+        lines = lines[1:]
+    records = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(rec, dict):
+            records.append(rec)
+    return records
+
+
+def _outcome_denial_count(rec: dict):
+    """`permission_denials` off ONE outcome record, or None.
+
+    None means UNKNOWN and 0 means MEASURED-NONE, and nothing here may collapse
+    the two: a record written before this field existed, or by a hook that never
+    opened a transcript, has not measured anything, and reporting `0 denials`
+    for it would reinstate the exact silence the field was added to remove.
+    A bool is not a count (`True` is an `int` in Python and would render as 1),
+    and a negative is not a count either."""
+    if not isinstance(rec, dict):
+        return None
+    value = rec.get("permission_denials")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _session_permission_denials(name: str, sid: str, records=None):
+    """How many tool calls the harness refused in THIS session, or None if
+    nothing has measured it yet.
+
+    Scoped to `sid`, exactly like `has_fresh_outcome`/`latest_outcome`: a dead
+    predecessor's denials are not this body's news, and a respawn under a fixed
+    mode must clear the signal rather than inherit it.
+
+    NEWEST RECORD THAT CARRIES THE FIELD, not simply the newest record. The
+    measured shape of this incident is a `result` record followed by the
+    operator's `killed` tombstone, and a tombstone carries no transcript and so
+    no count -- reading only the last record would have answered "unknown" for
+    the one worker in three that actually reported.
+
+    The count is cumulative over the SESSION, not the turn (`stop_outcome.py`'s
+    `_transcript_result` says why: no transcript marks a resumed turn's start).
+    A caller wanting one turn's delta subtracts the previous record's count;
+    every record is kept and every one is stamped.
+
+    `records` is an injection point for the readers that have already paid for
+    the file read -- `fleet doctor` walks every worker and should not open the
+    same file twice. Default: a bounded tail read of both the name-keyed and
+    the sid-keyed file, the same dual-file shape `read_outcomes` uses."""
+    if not isinstance(sid, str) or not sid:
+        return None
+    if records is None:
+        records = _tail_outcome_records(name)
+        if sid != name:
+            records = records + _tail_outcome_records(sid)
+    scoped = [r for r in records if isinstance(r, dict) and r.get("session_id") == sid]
+    scoped.sort(key=lambda r: str(r.get("ts", "")))
+    for rec in reversed(scoped):
+        count = _outcome_denial_count(rec)
+        if count is not None:
+            return count
+    return None
 
 
 def has_fresh_outcome(name: str, sid: str, since_iso: str,
@@ -15364,8 +15600,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     live_sids` is what shipped, and `_record_sids`' own docstring says why it
     is wrong -- *"matching against `session_id` alone fails open on it
     (ND4a)"* -- for the fourteen other sites that already key on the union
-    (`:2822, :2903, :3164, :3314, :4700, :9186, :9506, :9787, :10018, :10105,
-    :10328, :11114, :15235, :17927`). The thirteenth is multi-fleet §5 step 2's
+    (`:2822, :2903, :3164, :3314, :4700, :9218, :9538, :9819, :10050, :10137,
+    :10360, :11146, :15471, :18163`). The thirteenth is multi-fleet §5 step 2's
     membership test (slice a2), which is the same argument one plane out: a
     home whose record was eagerly restamped would stop claiming its own
     fork-steered body mid-rotation. The fourteenth is
@@ -15385,8 +15621,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :7947, :8486, :13075,
-    :18590), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :7979, :8518, :13311,
+    :18826), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -16076,8 +16312,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:7947, :8486, :13075,
-    #     :18590) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:7979, :8518, :13311,
+    #     :18826) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -16110,7 +16346,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         #     file aside (`:1063`), which is a write. Routing the identity read
         #     through it made `fleet send` shred the operator's evidence from a
         #     path that promises to touch nothing; the helper exists for exactly
-        #     this and names this gate as its reason (`:15163`). A `None` here
+        #     this and names this gate as its reason (`:15399`). A `None` here
         #     still fails toward the gate -- an unreadable registry is reported
         #     by its own doctor row, and is never a reason to decide blind.
         #     MERGE NOTE (2026-07-27): main and `fix/identity-registry-judges`
@@ -16752,7 +16988,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # A worker whose own record sits inside the artifact upgrades the claim.
         #
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as `_sweep_husks`
-        # spells it at `:11078`. Not an mtime comparison: `os.rename` preserves
+        # spells it at `:11110`. Not an mtime comparison: `os.rename` preserves
         # mtime, so the artifact's mtime is the PRE-corruption write time and any
         # recreated registry is always newer -- the comparison would never fire
         # on the one bypass it exists to stop.
