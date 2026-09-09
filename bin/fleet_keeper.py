@@ -5,9 +5,21 @@ Runs from a systemd user timer every 15 minutes (`--once`). It OBSERVES
 fleet state read-only and TYPES one-line pages into the dedicated tmux
 interface window (`work:fleet`), whose Claude session relays them to
 Telegram through the ccgram bridge. It never takes `fleet.lock`, never
-writes fleet state, and never dispatches a session -- revival is a human
-message from the phone (operator ruling 2026-09-08, spec
-docs/superpowers/specs/2026-09-08-server-persistent-fleet-design.md).
+writes fleet state, and NEVER DISPATCHES A SESSION.
+
+WHAT "never dispatches" NOW MEANS (operator ruling 2026-09-09 and its
+AMENDMENT, `state/tasks/20260909-succession-ruling.md`; it supersedes the
+2026-09-08 "the timer pages, a human revives" ruling recorded in
+docs/superpowers/specs/2026-09-08-server-persistent-fleet-design.md, which
+still carries the old page text and is the prose lane's to correct). The
+keeper's own boundary is UNCHANGED in kind -- it observes and it types. What
+changed is what it types: `rule_supervisor_dead` used to say "await operator
+before sup-spawn" and now says "relaunch", because the INTERFACE runs
+`sup-spawn` on that line without waiting for the operator. Revival is
+therefore no longer a human message from the phone, and the keeper still
+runs no `sup-spawn` itself. The two-live-body guard the amendment asks for
+lives on the interface, in docs/operator/server-interface-profile.md, not
+here.
 
 Exit codes: 0 for every observed fleet state (a dead fleet is news, not an
 error), 2 from argparse for a usage error, and 1 for exactly one condition
@@ -22,7 +34,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
 import time
@@ -41,45 +52,31 @@ UNPUSHED_PAGE_SECONDS = 6 * 3600
 REPAGE_SECONDS = 6 * 3600
 ANOMALOUS_STATUSES = ("dead-suspected", "limited")
 
-PAGE_PREFIX = "KEEPER: "
-PAGE_TEXT_LIMIT = 200
-# Only the CSI form is matched here; a bare ESC left by any other escape
-# shape is dropped by the C0 filter in `_one_line` a line later.
-_ANSI_RE = re.compile(r"\x1b\[[0-9;:<=>?]*[ -/]*[@-~]")
+# THE SANITISER MOVED, THE DOCTRINE DID NOT (w58/notify, 2026-09-09). Fix
+# wave 1's C4 body now lives in `fleet.one_line` / `fleet.interface_line`,
+# generalised over the prefix, because the SUPERVISOR needs the same wire and
+# the same sanitiser and cannot call this module -- the keeper is a separate
+# timer process with no inbound surface, and the import direction is
+# `fleet_keeper -> fleet`, never the reverse. Two copies of a security control
+# is how one of them rots. The four functions below are the keeper's names for
+# it; they stay because this module's own tests and rules bind to them, and
+# because a delegate that changes no behaviour is cheaper than a rename that
+# reddens `tests/test_keeper_*.py`. The WHY is in `fleet.py`'s
+# "THE TMUX INTERFACE LINE" section header; do not restate it in two places.
+PAGE_PREFIX = fleet.KEEPER_LINE_PREFIX
+PAGE_TEXT_LIMIT = fleet.INTERFACE_LINE_LIMIT
 
 
 def _one_line(text, limit=PAGE_TEXT_LIMIT):
-    """Collapse `text` into one printable line of at most `limit` chars.
-
-    Fix wave 1, C4. Every page is typed into a `bypassPermissions` Claude
-    session with `tmux send-keys -l`, and the substrings it interpolates --
-    a `sup-decision` question, a registry key -- are worker-writable. A
-    newline in either becomes a SECOND submitted prompt line, i.e. a
-    worker->interface injection channel, and an ANSI run or a 5 000-char
-    name makes the page unreadable. So: ANSI stripped, `\\r\\n\\t` and the
-    other C0 controls folded to spaces, whitespace collapsed, truncated
-    with an ellipsis. Sanitising at DELIVERY (rather than in each rule)
-    means a rule added later cannot forget to do it.
-    """
-    text = _ANSI_RE.sub("", str(text))
-    text = "".join(" " if ch < " " or ch == "\x7f" else ch for ch in text)
-    text = " ".join(text.split())
-    if len(text) > limit:
-        text = text[:limit - 1].rstrip() + "…"
-    return text
+    """Collapse `text` into one printable line of at most `limit` chars
+    (fix wave 1, C4). Delegate: `fleet.one_line`."""
+    return fleet.one_line(text, limit)
 
 
 def _page_line(text):
     """The exact bytes a page types: `KEEPER: `-prefixed, then one-lined.
-
-    Prefix FIRST, sanitise second (C4's ruling): the prefix is what stops a
-    page whose interpolated text begins with `-` from reaching `send-keys`
-    as something that could read as a flag, and one-lining afterwards keeps
-    the guarantee that the whole delivered line is one line."""
-    text = str(text)
-    if not text.startswith(PAGE_PREFIX):
-        text = PAGE_PREFIX + text
-    return _one_line(text)
+    Delegate: `fleet.interface_line` with this module's prefix."""
+    return fleet.interface_line(text, PAGE_PREFIX, PAGE_TEXT_LIMIT)
 
 
 # --------------------------------------------------------------------- rules
@@ -192,9 +189,27 @@ def rule_supervisor_dead(obs, now):
         return None  # `unknown` belongs to rule_claim_unknown
     since = _since(obs)
     head = f"supervisor dead since {since}" if since else "supervisor dead"
+    # THE INSTRUCTION IS `RELAUNCH`, NOT `WAIT` (operator ruling 2026-09-09,
+    # AMENDMENT: *"keeper must just instruct interface to relaunch
+    # supervisor"*). The keeper still does not dispatch -- it types, the
+    # INTERFACE runs `sup-spawn`, and it does so without waiting for the
+    # operator. The predecessor text ("Report state; await operator before
+    # sup-spawn.") is what the amendment names and replaces.
+    #
+    # THE TWO-LIVE-BODY GUARD IS DELIBERATELY NOT IN THIS PAGE. The amendment
+    # puts it on the interface -- *"check `sup-status` and the roster before
+    # dispatching, and page the operator instead when the state is
+    # ambiguous"* -- and `docs/operator/server-interface-profile.md` is where
+    # it is written, because it is a procedure and this is 200 characters
+    # shared with a worker-writable `released_at`. A page that spends its
+    # budget restating a checklist truncates the verb it exists to name.
+    #
+    # `Page(...)`'s rule name and fingerprint are UNTOUCHED. `fp` still
+    # carries no heartbeat age (see the comment above), so this rewording
+    # cannot change how often the operator is paged.
     return Page("supervisor-dead", f"{state}:{fp}",
-                f"KEEPER: {head} ({reason}). Report state; "
-                "await operator before sup-spawn.")
+                f"KEEPER: {head} ({reason}). Report state, then relaunch "
+                "with sup-spawn; do not await the operator.")
 
 
 def rule_supervisor_frozen(obs, now):
@@ -566,11 +581,9 @@ SHELL_COMMANDS = ("sh", "bash", "zsh", "fish", "dash")
 
 
 def _tmux(run, out, *args):
-    argv = ["tmux", *args]
-    rc, _ = _run_text(run, argv)
-    if rc != 0:
-        print(f"keeper: tmux failed: {argv}", file=out)
-    return rc == 0
+    """Delegate: `fleet.tmux_command`, labelled `keeper` so the failure line
+    on `out` is byte-identical to the one this function printed itself."""
+    return fleet.tmux_command(run, out, *args, label="keeper")
 
 
 def _panes(run, target):
@@ -647,13 +660,10 @@ def ensure_window(run, *, session, window, cwd, launch, out=sys.stdout):
 def page(run, target, text, out=sys.stdout):
     """Type one sanitised line and submit it. Returns whether it landed --
     the caller records dedup state only for a page that did (C3).
-
-    `Enter` is NOT sent when the literal send failed: that would submit
-    whatever the interface session had half-typed in its prompt box."""
-    line = _page_line(text)
-    if not _tmux(run, out, "send-keys", "-t", target, "-l", line):
-        return False
-    return _tmux(run, out, "send-keys", "-t", target, "Enter")
+    Delegate: `fleet.type_interface_line` with this module's prefix."""
+    return fleet.type_interface_line(run, target, text, prefix=PAGE_PREFIX,
+                                     out=out, limit=PAGE_TEXT_LIMIT,
+                                     label="keeper")
 
 
 # ---------------------------------------------------------------------- main
