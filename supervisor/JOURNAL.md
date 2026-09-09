@@ -11033,3 +11033,59 @@ just mean a short session. That the six pre-existing failures are benign — the
 reproduced five times and explained zero. And that `--mode bypass` on every worker is the right
 answer rather than the convenient one: it is the third time this campaign has resolved a permission
 question by widening, and the memo I am handing over is the first time anyone priced the alternative.
+
+## 2026-09-09T08:17:50Z RELEASED inc=inc-20260909T062235Z-abe4 sid=44701f95-4bbf-4094-bf36-532629f1b637
+
+released cleanly: (no reason given)
+
+## 2026-09-09T16:29:43Z BOOT inc=inc-20260909T162943Z-d912 sid=c903f29a-ee23-4448-8ca7-d30d5c9ca891
+
+fresh claim: predecessor inc-20260909T062235Z-abe4 released cleanly -- fresh claim, no seizure
+
+## 2026-09-09T16:30:52Z CHECKPOINT inc=inc-20260909T162943Z-d912 sid=c903f29a-ee23-4448-8ca7-d30d5c9ca891
+
+BOOT — gen-0 fresh claim, campaign is the 2026-09-09 succession ruling.
+
+## CLAIM
+`claim` at exit 0: predecessor `inc-20260909T062235Z-abe4` released cleanly at 08:17:50Z, no
+seizure, no transfer, no anomaly. Boot bundle read in 120-line slices and deleted; nonce lives in
+working context only. `EPOCH: ok -- roster holds 17 entries`.
+
+## STATE I INHERIT
+- `server/persistent-fleet` at `9be9933` (one commit past the predecessor's release tip `0dc9be2`
+  — the interface committed the journal fold). `git rev-list --count HEAD --not --remotes` = **0**:
+  nothing is stranded on this disk.
+- Working tree dirty in exactly two files, both expected and both append-only: `supervisor/JOURNAL.md`
+  (my own BOOT line) and `knowledge/lessons.md` (the interface's dated ruling line, uncommitted).
+- `state/inbox/` **empty** — the standing brief's step 3 drain is a no-op this boot; the only prior
+  entry is already at `state/inbox/done/20260908-first-wave.md`.
+- `autoclean`: archived `canary-srv`, skipped 11, `husks_removed=0 husks_deferred=0 errors=0`.
+- Roster: 11 workers, all `idle` or `dead`, none live. No lane is mid-flight.
+- Gates: **three open and unanswered since 2026-09-08 — G-K1, G-K2, G-K4.** Carried, none ticked.
+
+## THE CAMPAIGN
+`state/tasks/20260909-succession-ruling.md`, an operator ruling relayed by the interface tier,
+superseding the 2026-09-08 "the timer pages, a human revives" ruling. Three principles: the
+interface is the operator's own persistent session; the supervisor is a swappable layer; **the
+keeper revives** both the interface window and the supervisor. Plus a graceful end-of-generation
+protocol the supervisor owes: checkpoint, notify the interface on `work:fleet` with a `SUPERVISOR:`
+line, then run the handoff WITH the interface, and `sup-release` only if the handoff is stillborn.
+
+**The hard part is named in the ruling itself and I am recording it before I start:** handoff has
+**8 stillbirths on record** and is a CANDIDATE, not proven. The campaign is instructed to drive it
+green on this host or say precisely why it cannot. A doc-only landing that leaves handoff unproven
+would satisfy the file list and fail the ruling.
+
+## WHAT I CARRY FORWARD FROM THE PREDECESSOR'S QUEUE
+1. The worker-permission default (`fleet spawn` still defaults to `dontask`; live workaround is
+   `--mode bypass` per spawn; `docs/lanes/w56-permvis.md` prices A/B/C and recommends A conditional
+   on extending `_warn_missing_bypass_ack` to workers). Build slice, not a blocker.
+2. The stall half of S-2. 3. `NEXT-SESSION.md`'s 2026-08-05 sections. 4. S6 soak continues.
+
+## WHAT I EXPECT TO GET WRONG
+That the ruling is a docs campaign. Two of its four graceful-end steps are code (`sup-notify` or a
+shared keeper helper; the keeper's revive rule), and the third is a protocol with a 0-for-8 record
+that no amount of prose will turn green. I also expect to under-weight the two-live-bodies guard:
+the ruling hands the keeper the power to dispatch, which is exactly the power the 2026-09-08 ruling
+took away from it, and the only thing standing between that and a double supervisor is a claim
+check I have not yet read the code for.
