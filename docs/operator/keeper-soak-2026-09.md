@@ -34,6 +34,97 @@ the operator to ignore the channel.
 | when (UTC) | rule | text | true/false page | action taken |
 |---|---|---|---|---|
 
+## S5 — first wave
+
+```text
+# volatile: host state — 2026-09-09, commit f4aa63f
+$ /home/altai/.local/bin/uv run --python 3.10 --with pytest -q python -m pytest -q -p no:cacheprovider --ignore=tests/integration
+6 failed, 4743 passed, 7 skipped, 1 xfailed, 1 error in 340.86s (0:05:40)
+
+$ /home/altai/.local/bin/uv run --python 3.12 --with pytest -q python -m pytest -q -p no:cacheprovider --ignore=tests/integration
+10 failed, 4757 passed, 7 skipped, 1 xfailed, 1 error in 284.89s (0:04:44)
+
+uv: /home/altai/.local/bin/uv (uv 0.12.9); no download -- both were already cached, `uv run
+--python 3.X python -c "import sys;print(sys.version)"` returned instantly for both:
+3.10 -> 3.10.21 (main, Sep  1 2026, 14:16:49) [Clang 22.1.3]
+3.12 -> 3.12.14 (main, Sep  1 2026, 14:16:52) [Clang 22.1.3]
+
+FAILED node ids, 3.10 (6, matches every member of the baseline set):
+tests/test_fleet_index.py::TestPathContainment::test_the_choke_point_refuses_a_drive_qualified_rel_and_writes_nothing
+tests/test_fleet_index.py::TestPathContainment::test_a_drive_qualified_rel_cannot_overwrite_a_file_outside_the_root
+tests/test_fleet_index.py::TestPathContainment::test_the_update_library_surface_refuses_a_drive_qualified_rel
+tests/test_fleet_q.py::TestOutlinePathContainment::test_an_absolute_path_outside_the_root_is_refused_too
+tests/test_terminal_surface.py::TestCollaboratorInstall::test_fleet_python_may_be_a_path_containing_spaces
+tests/test_terminal_surface.py::TestCollaboratorInstall::test_fleet_python_still_accepts_a_multi_word_command
+
+FAILED node ids, 3.12 (10 -- the 3.10 six, plus four new self-citation failures explained below):
+tests/test_fleet_index.py::TestPathContainment::test_the_choke_point_refuses_a_drive_qualified_rel_and_writes_nothing
+tests/test_fleet_index.py::TestPathContainment::test_a_drive_qualified_rel_cannot_overwrite_a_file_outside_the_root
+tests/test_fleet_index.py::TestPathContainment::test_the_update_library_surface_refuses_a_drive_qualified_rel
+tests/test_fleet_q.py::TestOutlinePathContainment::test_an_absolute_path_outside_the_root_is_refused_too
+tests/test_retired_sid_citations.py::TestRetiredSidWritersAreWhereTheyAreCited::test_every_cited_line_is_a_retired_sids_write
+tests/test_retired_sid_citations.py::TestRetiredSidWritersAreWhereTheyAreCited::test_every_retired_sids_writer_is_cited
+tests/test_self_citations.py::TestEverySelfCitationResolves::test_every_cited_line_carries_its_anchor
+tests/test_self_citations.py::TestEverySelfCitationResolves::test_every_enumeration_matches_the_derived_set
+tests/test_terminal_surface.py::TestCollaboratorInstall::test_fleet_python_may_be_a_path_containing_spaces
+tests/test_terminal_surface.py::TestCollaboratorInstall::test_fleet_python_still_accepts_a_multi_word_command
+
+ERROR, both runs, identical: tests/test_views_doctrine.py::test_the_receipt_section_is_present_and_cited
+  (session-scope teardown fixture `_the_real_install_plane_is_byte_identical_afterwards` in
+  conftest.py; "the test suite modified git-tracked install-plane files: ['bin/fleet.py']")
+```
+
+**Does this reproduce the baseline? Partially -- the 3.10 failure set is identical to baseline;
+the 3.12 failure set differs, plus both runs carry one extra ERROR neither run had before, and
+both anomalies trace to the same external cause, not to `bin/fleet.py`'s own content at HEAD.**
+
+This host had another live process (a concurrent supervisor/worker lane) editing this same
+working tree, in place, while both runs executed -- confirmed by `git status`/`git diff`/`git
+reflog` taken between and after the runs: `bin/fleet.py` went from clean to a 101-line dirty diff
+(new docstring content in `_render_sup_spawn_task` / `_render_successor_task`, dated 2026-09-09)
+partway through the 3.10 run and grew further (116 lines) by the time the 3.12 run finished; an
+untracked `tests/test_boot_bundle_chunked_read.py` appeared mid-3.10-run; `docs/NEXT-SESSION.md`
+and `docs/SPEC.md` were reset and recommitted on top of `f4aa63f` twice each (reflog: `f4aa63f`
+appears three times as a reset target). Both suite runs therefore executed against a moving,
+partially-uncommitted `bin/fleet.py`, not a fixed commit -- the `commit f4aa63f` pinned above is
+the last commit that touched `bin/fleet.py` itself; nothing after it in the reflog touches that
+file, so it is the honest anchor, but the working tree was not clean at either run.
+
+That explains both anomalies without any change to this task's own behavior:
+- **The ERROR** (`test_views_doctrine.py::test_the_receipt_section_is_present_and_cited`,
+  identical on both runs) is `conftest.py`'s own code-plane-drift guard doing its job: it hashes
+  git-tracked files before the session and compares after, and `bin/fleet.py` really did change
+  under it -- but the writer was the other lane's live edit, not a WRITE-through-INSTALL_ROOT bug
+  in the code under test. Not a repair item; not evidence of a sandbox escape.
+- **The 3.12-only four** (`test_retired_sid_citations` x2, `test_self_citations` x2) are line-number
+  self-citation checks pinned to exact `bin/fleet.py` line numbers. One failure names the mechanism
+  directly: `bin/fleet.py:18512 is cited as a retired_sids writer and is not one` / `uncited
+  writers: [18581]` -- an 69-line offset consistent with the ~97-116 lines the concurrent edit
+  inserted above that point between the two runs. This is citation drift caused by an in-flight,
+  uncommitted edit landing between the 3.10 and 3.12 runs, not a 3.10-vs-3.12 semantic difference
+  and not a regression at any single commit -- there is no commit where these four fail together
+  with the six baseline failures at a clean tree.
+
+So: **the six pre-existing baseline failures reproduced exactly, on both interpreters, node-id for
+node-id.** Nothing entered or left that set. The two anomalies on top of it (the shared ERROR, and
+3.12's extra four) are both artifacts of running against a repo under concurrent, uncommitted edit
+from another lane, not new defects in the code this task was asked to measure -- consistent with
+the brief's own framing that six-failures-once is a claim to be reproduced, not disproven, by a
+clean rerun once the tree is quiescent.
+
+**Collected-total delta.** 3.10: 4743 passed vs baseline's 4638 = **+105**. 3.12: 4757 passed vs
+baseline = **+119**; 3.10 vs 3.12 also differ from each other by **+14**, because the untracked
+`tests/test_boot_bundle_chunked_read.py` (13 test functions, appeared mid-3.10-run at a point past
+that run's collection phase, present for 3.12's) was collected only in the 3.12 run -- consistent
+with, though not exactly equal to, the 14-test gap; that file is untracked and not part of the
+`09819e1..HEAD` tracked-test diff below. HEAD moved 12+ commits past `09819e1` as the brief
+expects; `git diff --stat 09819e1..HEAD -- tests/` (22 commits, run at the top of this task) shows
+the tracked-test growth: `test_keeper_collect.py` (+299), `test_keeper_dedup.py` (+69),
+`test_keeper_doctrine.py` (+110), `test_keeper_main.py` (+306), `test_keeper_rules.py` (+329),
+`test_sup_spawn_setting_sources.py` (+114), `test_sup_tombstone.py` (+6/-2), `test_supervisor.py`
+(+52) -- the keeper test suite (M-F/keeper work) accounts for essentially the whole tracked delta,
+which is the expected, non-defect cause the brief names.
+
 ## S0 — install
 
 Host: this box, `/home/altai/proga/fleet`, branch `server/persistent-fleet` at `62b5e96`.
