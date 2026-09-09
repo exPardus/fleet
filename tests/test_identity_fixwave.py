@@ -83,11 +83,31 @@ def _registry_untouched(home):
     assert strays == [], f"quarantine copies appeared: {strays}"
 
 
-# The seven `_require_claim_holder` call sites, covered BY CLASS rather than one
+def _tmux_absent(argv, **kwargs):
+    """A `run` seam for `sup-notify` that never reaches a real tmux server.
+    `FileNotFoundError` is what `subprocess.run` raises for a missing binary,
+    and `fleet._tmux_rc` turns it into 127 -- so the verb takes its delivery-
+    failure path (a `FleetCliError` the class below already tolerates) without
+    a subprocess, and without typing into whatever tmux the test host is
+    running."""
+    raise FileNotFoundError(argv[0])
+
+
+# EVERY `_require_claim_holder` call site, covered BY CLASS rather than one
 # test each: what differs between them is only the args they carry, and the read
 # under test happens before any of that is looked at. `verb` is the label; the
 # lambda is the drive.
+#
+# IT WAS "the seven" UNTIL 2026-09-09 (w58/notify), WHEN `sup-notify` MADE IT
+# EIGHT. The count came out of both the comment and the seed test's name for
+# the reason this repo keeps re-learning: a cardinal in a name is a claim that
+# rots on the next feature, and the seed below derives the real set from the
+# source anyway.
 VERBS = {
+    "sup-notify": lambda n: fleet.cmd_sup_notify(
+        SimpleNamespace(text="handoff begin", tmux_session="work",
+                        window="fleet", dry_run=False, sid="sid-sup", nonce=n),
+        run=_tmux_absent),
     "sup-checkpoint": lambda n: fleet.cmd_sup_checkpoint(
         SimpleNamespace(body="a checkpoint", kind="CHECKPOINT", sid="sid-sup", nonce=n)),
     "sup-heartbeat": lambda n: fleet.cmd_sup_heartbeat(
@@ -205,11 +225,16 @@ class TestNoSupervisorVerbQuarantinesTheRegistry:
         assert fleet.cmd_sup_heartbeat(
             SimpleNamespace(sid="sid-successor", nonce=nonce)) == 0
 
-    def test_the_seven_call_sites_are_all_covered(self):
+    def test_every_require_claim_holder_call_site_is_covered(self):
         """The seed check. If a verb is added to `_require_claim_holder`'s
         callers and not to `VERBS`, the parametrisation above silently stops
         being a claim about all of them -- which is exactly the shape of defect
-        this file was written to catch."""
+        this file was written to catch.
+
+        RENAMED from `test_the_seven_call_sites_are_all_covered` on 2026-09-09
+        (w58/notify), when `sup-notify` made it eight. The number was in the
+        node id, so the node id was a claim nobody re-derived; this assertion
+        derives it."""
         import re
         from pathlib import Path
         src = Path(fleet.__file__).read_text(encoding="utf-8")

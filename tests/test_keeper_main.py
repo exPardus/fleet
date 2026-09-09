@@ -252,8 +252,8 @@ def test_enter_is_not_sent_when_the_literal_send_failed(home):
     r = Runner(tmux_rc=1)
     _main(home, r)
     assert [a[-1] for a in r.tmux("send-keys")] == ["KEEPER: supervisor dead (claim none). "
-                                                    "Report state; await operator before "
-                                                    "sup-spawn."]
+                                                    "Report state, then relaunch with "
+                                                    "sup-spawn; do not await the operator."]
 
 
 # --- C4: what actually reaches the bypass session --------------------------

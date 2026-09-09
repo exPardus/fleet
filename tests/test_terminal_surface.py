@@ -888,7 +888,21 @@ class TestCommandFiles:
                          "sup-handoff-abort",
                          "sup-boot", "sup-handoff-begin", "sup-handoff-complete",
                          "sup-decision --clear", "sup-spawn", "sup-checkpoint",
-                         "sup-release", "homes --add", "homes --retire")
+                         "sup-release", "homes --add", "homes --retire",
+                         # [w58/notify] `sup-notify` TYPES A LINE INTO THE
+                         # OPERATOR'S INTERFACE WINDOW, which the ccgram bridge
+                         # relays to their phone, and it writes the supervisor
+                         # claim. This list is the read-only-grant lint's own
+                         # enumeration, NOT §5's tier -- it already carries
+                         # `spawn`, `send` and `attach`, none of which §5 calls
+                         # destructive -- so this entry is independent of, and
+                         # does not pre-empt, the operator's §5 classification
+                         # (recorded as OPEN in
+                         # `tests/test_round7_defect_pins.py::
+                         # UNCLASSIFIED_BY_THE_RATIFIED_TABLE`). PROSPECTIVE,
+                         # measured: no shipped `commands/*.md` grants it. The
+                         # entry is what keeps it shut.
+                         "sup-notify")
 
     @pytest.mark.parametrize("name", sorted(READ_ONLY_COMMANDS))
     def test_read_only_grants_never_cover_the_whole_fleet_cli(self, name):
