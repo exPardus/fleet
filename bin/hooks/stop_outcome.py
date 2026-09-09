@@ -274,19 +274,54 @@ def _resolve_name(home: Path, sid: str):
 
 
 def _transcript_result(transcript_path):
-    """(text, input_tokens, output_tokens, cache_creation, cache_read, model)
-    from the LAST assistant record -- the tail is bookkeeping, never 'read last
-    line' (contract).
+    """(text, input_tokens, output_tokens, cache_creation, cache_read, model,
+    denial_kinds) from the LAST assistant record -- the tail is bookkeeping,
+    never 'read last line' (contract).
 
     three-tier §11.2 (B2): context occupancy is the SUM of the three prompt
     summands input_tokens + cache_creation_input_tokens + cache_read_input_tokens.
     Recording all three (belt-and-braces, additive schema) lets a third party
-    read the supervisor's occupancy without being the supervisor."""
+    read the supervisor's occupancy without being the supervisor.
+
+    `denial_kinds` (w56, incident 2026-09-09) is a SEPARATE fact that happens to
+    live in the same file, and it is returned as its own element rather than
+    folded into the usage contract above precisely so a later edit to either one
+    cannot quietly move the other. It is `{kind: count}` over every record in
+    the transcript carrying a `toolDenialKind` -- the harness's own typed field
+    on the `type:"user"` record that answers a denied tool call. It is COUNTED
+    OVER THE WHOLE FILE, i.e. it is cumulative for this SESSION, not for this
+    turn: nothing in a transcript marks where a resumed turn began, and a
+    boundary this function cannot see is one it must not pretend to. A reader
+    that wants this turn's denials subtracts the previous outcome record's
+    count from this one's -- both are stamped and both are kept.
+
+    WHY THIS FIELD AND NOT THE MODEL'S PROSE. Measured on this host 2026-09-09,
+    the three workers born under `--mode dontask`: all three transcripts carry
+    `toolDenialKind: "permission-rule"` (11, 3, 3 records), and every other
+    session in the same project directory carries it zero times. Only ONE of the
+    three left a `result_text` at all, and that one describes the denial in
+    English the model chose -- so a substring rule over the report would have
+    caught one worker in three and would fire on any report that quotes a denial
+    message. This field is emitted by the harness, is typed, and is absent when
+    nothing was denied. `bin/fleet.py`'s `SUCCESSOR_DEFAULT_MODE` comment already
+    names the same value ("2 x `permission-rule` denial") from the 2026-07-27
+    reading of ten transcripts, so this is the field that measurement was read
+    from, not a new guess.
+
+    `None` AND `{}` ARE DIFFERENT ANSWERS AND THE CALLER DEPENDS ON IT.
+    `None` means the transcript could not be read, so nothing was measured;
+    `{}` means it WAS read and held no denial. `main` publishes a count only
+    for the second, so an absent field in the outcome record reads as
+    "unknown" and a `0` reads as "measured, none". Collapsing the two would
+    make an unreadable transcript vouch for a worker as undenied, which is the
+    same silence this field exists to remove."""
     text = tokens_in = tokens_out = cache_creation = cache_read = model = None
     try:
         raw = Path(transcript_path).read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return text, tokens_in, tokens_out, cache_creation, cache_read, model
+        return (text, tokens_in, tokens_out, cache_creation, cache_read, model,
+                None)
+    denial_kinds = {}
     # ONE assistant message is written as SEVERAL transcript records -- one per
     # content block (thinking, then tool_use, then text) -- all carrying the
     # same `message.id` and the same `message.usage`. The previous loop tracked
@@ -306,7 +341,18 @@ def _transcript_result(transcript_path):
             rec = json.loads(line)
         except ValueError:
             continue
-        if not isinstance(rec, dict) or rec.get("type") != "assistant":
+        if not isinstance(rec, dict):
+            continue
+        # Read BEFORE the assistant filter: a denial is recorded on the
+        # `type:"user"` record that carries the tool_result, so the filter
+        # below would drop every one of them. Non-str kinds are counted under
+        # their repr rather than dropped -- an unknown SHAPE is still a denial,
+        # and silently discarding it is how a signal goes missing.
+        kind = rec.get("toolDenialKind")
+        if kind is not None:
+            key = kind if isinstance(kind, str) else repr(kind)
+            denial_kinds[key] = denial_kinds.get(key, 0) + 1
+        if rec.get("type") != "assistant":
             continue
         msg = rec.get("message")
         if not isinstance(msg, dict):
@@ -331,7 +377,8 @@ def _transcript_result(transcript_path):
             cache_read = usage.get("cache_read_input_tokens")
         if msg.get("model"):
             model = msg.get("model")
-    return text, tokens_in, tokens_out, cache_creation, cache_read, model
+    return (text, tokens_in, tokens_out, cache_creation, cache_read, model,
+            denial_kinds)
 
 
 def main() -> int:
@@ -350,9 +397,10 @@ def main() -> int:
         if not isinstance(text, str):
             text = None
         tokens_in = tokens_out = cache_creation = cache_read = model = None
+        denial_kinds = None
         if transcript_path:
-            (t_text, tokens_in, tokens_out,
-             cache_creation, cache_read, model) = _transcript_result(transcript_path)
+            (t_text, tokens_in, tokens_out, cache_creation, cache_read, model,
+             denial_kinds) = _transcript_result(transcript_path)
             # THE TOKEN COUNTS ARE PUBLISHED ONLY IF THEY CAN BE PROVED TO
             # DESCRIBE THE MESSAGE THE TURN ENDED ON.
             #
@@ -418,6 +466,24 @@ def main() -> int:
                   "cache_creation_input_tokens": cache_creation,
                   "cache_read_input_tokens": cache_read,
                   "model": model, "transcript_path": transcript_path}
+        # w56 (incident 2026-09-09): the permission-denial counter. Additive
+        # schema, and WRITTEN ONLY WHEN A TRANSCRIPT WAS ACTUALLY READ -- an
+        # absent pair of keys means "this hook never looked", a `0` means "it
+        # looked and found none". Every fleet-side reader distinguishes those
+        # two, because the whole point of the field is to make a silence
+        # legible and a field that reports 0 for "unknown" reinstates exactly
+        # the silence it was added to remove.
+        #
+        # NOT subject to the usage fields' proof-of-lastness gate above. That
+        # gate exists because a token count describes ONE message and the hook
+        # frequently reads the transcript before that message lands; this is a
+        # count over the whole file, so a transcript that is one record short
+        # yields a count that is at worst one short of the truth -- still a
+        # true statement about denials that DID happen, which is the only claim
+        # made for it.
+        if denial_kinds is not None:
+            record["permission_denials"] = sum(denial_kinds.values())
+            record["permission_denial_kinds"] = dict(sorted(denial_kinds.items()))
         line = json.dumps(record, ensure_ascii=False)
         # errors="replace", not a bare .encode(): `ensure_ascii=False` keeps
         # every character of the report verbatim in `line`, and a worker's
