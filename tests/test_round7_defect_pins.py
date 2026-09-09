@@ -418,6 +418,15 @@ SPEC = REPO / "docs" / "specs" / "multi-fleet.md"
 # tokens -- the `doctor --repair` shape, not a second row. The bare read is
 # ordinary via `fleet.VERB_EFFECT_RESIDUAL`, because a verb named by two rows is
 # what `test_no_verb_IS_NAMED_BY_TWO_spec_rows` exists to stop.
+#
+# THE 2026-08-10 E2/init RULING LANDS THE SAME WAY, in the same commit as its own
+# spec edit and as slice (b)'s verb: *"split `init` the same way. `init --home`
+# is a second writer of the same machine-global `fleet-homes.list` whose append
+# E2 already ruled irreversible."* So `init` LEAVES `RATIFIED_ORDINARY` and
+# arrives here as ONE flagged token. The operator ruled the SHAPE as well as the
+# tier, and named the failure direction that decides it: the flagged-token form
+# *"fails SAFE (drop the flagged tokens and the verb is unclassified, hence
+# destructive) where the naive two-row form fails OPEN"*.
 RATIFIED_DESTRUCTIVE = ("clean", "archive", "autoclean",
                         "doctor --repair", "sup-handoff-abort",
                         # [w42/mf5], landed under the same ruling
@@ -426,10 +435,12 @@ RATIFIED_DESTRUCTIVE = ("clean", "archive", "autoclean",
                         # [w43/s5] E1, then E2/E3
                         "sup-spawn", "sup-checkpoint", "sup-release",
                         # [w47/homes] E2/homes split, operator 2026-08-08
-                        "homes --add", "homes --retire")
+                        "homes --add", "homes --retire",
+                        # [w59/inithome] E2/init split, operator 2026-08-10
+                        "init --home")
 RATIFIED_DISRUPTIVE = ("kill", "interrupt", "send", "respawn", "release",
                        "resume-limited", "sup-heartbeat")
-RATIFIED_ORDINARY = ("spawn", "init", "status", "peek", "result",
+RATIFIED_ORDINARY = ("spawn", "status", "peek", "result",
                      "home", "knowledge", "attach", "wait", "sup-status",
                      "sup-context", "q", "index")
 

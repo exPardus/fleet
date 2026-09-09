@@ -889,6 +889,17 @@ class TestCommandFiles:
                          "sup-boot", "sup-handoff-begin", "sup-handoff-complete",
                          "sup-decision --clear", "sup-spawn", "sup-checkpoint",
                          "sup-release", "homes --add", "homes --retire",
+                         # [w59/inithome] `init --home` landed 2026-08-10 with
+                         # the operator's E2/init ruling, in the SAME commit as
+                         # the spec row and the pin tuple -- the third leg of the
+                         # landing obligation the ruling names by name. FLAGGED,
+                         # never bare `init`: `commands/*.md` may legitimately
+                         # grant a read-only `Bash(fleet init)`-shaped rule some
+                         # day, and the destructive capability is the FLAG --
+                         # the irreversible append to the machine-global
+                         # `~/.claude/fleet-homes.list`. PROSPECTIVE, measured:
+                         # no shipped `commands/*.md` grants `fleet init` at all.
+                         "init --home",
                          # [w58/notify] `sup-notify` TYPES A LINE INTO THE
                          # OPERATOR'S INTERFACE WINDOW, which the ccgram bridge
                          # relays to their phone, and it writes the supervisor
