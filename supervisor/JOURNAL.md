@@ -11707,3 +11707,85 @@ ORDER was the trap; the doctor row was real and its SUBJECT was wrong. **The pat
 predictions fail where I did not think to predict**, which is not something a more careful brief
 fixes. It is an argument for keeping lanes instructed to attack, and for reading the section where
 they say I was wrong before the section where they say what shipped.
+
+## 2026-09-09T20:04:23Z CHECKPOINT inc=inc-20260909T174911Z-efa0 sid=f9b83beb-41c1-4fa0-8a0e-968b0d3d98ac
+
+WAVE 60 LANDED AND PUSHED — `1c7f9a4` -> `28febcf`, and the lane escalated my own finding in five
+directions at once.
+
+## FLOOR, PREDICTED BEFORE THE MERGE AND HIT ON BOTH INTERPRETERS
+
+**4946 collected** (`6 failed, 4923 passed, 16 skipped, 1 xfailed`, 5m07s / 5m38s), identical on 3.10
+and 3.12, same six host-assumption ids. The lane predicted `4919 + 27` in writing from a fresh
+`git clone --no-local` — never from the tree it was editing — and I re-measured the merged tree
+myself rather than inheriting its number. `rev-list --count HEAD --not --remotes` = **0**. Doctor: 28
+PASS, 1 FAIL (`identity-witness`, the §18 daemon class).
+
+## THE BRIEF WAS WRONG IN THE DIRECTION THAT MATTERS — I UNDER-STATED IT
+
+I wrote *"a determinism hazard, not a data-loss hazard, and you should not write it up as one."*
+**Driven and measured: on a lookup HIT the verb is RETARGETED, and `fleet kill --yes` then WRITES
+`"dead"` into a bystander home's registry.** Not a read. My instruction to soften the write-up was
+wrong and the lane said so.
+
+Four more corrections, each larger than the thing I sent it for:
+- **The census is 46 subprocess launches, not 4.** My grep shape (`{**os.environ}` /
+  `os.environ.copy()`) finds **6 of 46** — `os.environ.copy()` appears **zero** times in this tree,
+  while `dict(os.environ)` (13 sites) is the idiom the repo actually uses. Worse, the largest
+  population is **`env=None` — 20 sites**, which inherit the whole parent environment and are
+  invisible to any grep for `os.environ` at all. The new census lint flags a missing `env=` for
+  exactly this reason.
+- **The lookup is eager for EVERY verb**, not for `kill`. `resolve_home` computes
+  `lookup_home_for_sid` before step 1, and `apply_resolved_home` runs for everything outside
+  `TERMINUS_EXEMPT_VERBS` (one entry: `homes`). `status`, `result` and `clean` read the list too.
+- **`env.pop("HOME")` is not a fix and would have looked like one.** `Path.home()` falls back to
+  `pwd`, so deleting the variable lands back on the real home — a seam that does nothing under a
+  green suite. That was the plausible wrong fix and mutant M2 is the pin against it.
+- **`USERPROFILE` is a separate arm**: `ntpath.expanduser` never reads `HOME`.
+
+## THE SECOND SEAM IS ARMED TODAY, AND IT IS NOT THE ONE I PREDICTED
+
+I guessed a module-level constant computed at import; an AST sweep over `bin/fleet.py`,
+`fleet_statusline.py`, `fleet_keeper.py` and all four hooks found **none**. The real one is the
+**legacy `INSTALL_ROOT` term of `resolution_population()`** — `Path(__file__).resolve().parent.parent`,
+**deliberately not overridable by any environment variable.** Two consequences:
+- **the population is never empty, even with no homes list at all** (the w51 fence-doctrine
+  correction, now shown to have a second consequence nobody had drawn); and
+- **when the suite runs from a checkout that is itself a live fleet home — which is how this repo is
+  routinely developed — every subprocess drive reads that home's registry.** Measured against the
+  main checkout: population `['/home/altai/proga/fleet']`, real registry readable, 19 workers.
+
+**So my "land this before multi-fleet is adopted" was right for the wrong reason.** The list term
+arms when `fleet homes --add` runs. The legacy term is armed **now**.
+
+**The only thing standing between that and a destructive write is luck, and the lane said so.** The
+three sids hardcoded in `test_destructive_guard.py` miss today (0 occurrences, measured) — but they
+are **real historical sids of this project**, and `_record_sids` is `session_id ∪ retired_sids`, so
+one archived worker carrying one turns every miss into a hit.
+
+## OPEN ITEM 2, WITH A CHEAPER MITIGATION THAN THE ONE THE LANE PRICED — FOR THE SUCCESSOR, NOT FOR TONIGHT
+
+The lane declined to fix the `INSTALL_ROOT` subprocess seam because the twin of
+`conftest._never_touch_the_real_install` means staging a whole fake install tree per drive — a real
+cost, correctly refused by a test lane. **I think there is a much cheaper mitigation it did not
+price, and I am recording it rather than making it at 01:30 on an unverified hunch:** replace the
+three hardcoded historical sids with synthetic values that this project has never issued and never
+could. That does not close the seam — the reads remain — but it removes the *collision* that is the
+only mechanism turning a harmless read into a retargeted destructive write. Cheap, local, and
+verifiable. **Verify before adopting**: I have been wrong twice this session in exactly the place I
+felt most confident, and this is a claim about a mechanism I have not driven.
+
+## MEASURED THIS SESSION AND WRITTEN NOWHERE ELSE: THE FLEET IS BOUNDED BY MEMORY, NOT TOKENS
+
+This host has **8 GB**, with ~3.7 GB available while ONE Opus lane runs beside the daemon and the
+keeper. The harness killed two of my background watchers for memory pressure — the watchers, never
+the lane. Wave 59 ran **three** Opus lanes concurrently plus a full 4919-test suite in the main tree
+and was closer to the edge than I knew. **Every planning document in this repo prices a wave in
+context and spend; none of them prices RAM**, and on this box that is the binding constraint.
+Practical form for a successor: three concurrent Opus lanes is the ceiling here, and do not run the
+suite in the main tree while a full wave is in flight.
+
+## STATE
+
+No lane running, no worktree left, nothing stranded, gates G-K1/G-K2/G-K4/G-K5 open and untouched.
+Context 246k against a 350k band at the last check — comfortably below trigger.
