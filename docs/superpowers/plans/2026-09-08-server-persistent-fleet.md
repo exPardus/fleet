@@ -10,6 +10,17 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-08-server-persistent-fleet-design.md`
 
+> **⛔ SUPERSEDED IN PART — 2026-09-09, and this banner exists because this document PASTES WHOLE FILES.**
+> Task 8 and Task 10 below carry verbatim copies of `docs/operator/server-interface-profile.md` and
+> `supervisor/briefs/server-standing.md` as they were written on 2026-09-08. Both **live files have since
+> been rewritten** by the 2026-09-09 succession ruling and its amendment: the interface no longer waits
+> for the operator's `revive`, it dispatches on a `KEEPER: … relaunch` page after a two-live-body guard,
+> and a supervisor at its band runs a four-step graceful end. **Read the live files, never these copies.**
+> The plan is kept unedited below as the record of what was built and in what order. Sources:
+> `state/tasks/20260909-succession-ruling.md` (with its `## AMENDMENT`),
+> `knowledge/lessons.md#2026-09-09-keeper-revives`, the design spec's own 2026-09-09 amendment section,
+> and `docs/lanes/w58-docs.md` for the corrections the ruling earned.
+
 ## Global Constraints
 
 - `bin/fleet.py` is stdlib-only, single file. `bin/fleet_keeper.py` is a second stdlib-only file beside it, following the `bin/fleet_statusline.py` precedent.

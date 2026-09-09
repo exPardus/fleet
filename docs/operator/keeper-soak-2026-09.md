@@ -3,6 +3,15 @@
 Host receipts for `docs/superpowers/specs/2026-09-08-server-persistent-fleet-design.md`.
 Every block here is `# volatile: host state` — evidence lives on kz-work, not in the tree.
 
+**Note added 2026-09-09 (lane `w58-docs`), and nothing below it was edited.** The `supervisor-dead`
+pages recorded in this log end `Report state; await operator before sup-spawn.` That instruction is
+**superseded** by the 2026-09-09 succession ruling and its amendment: the keeper still never dispatches,
+but its page now asks the interface to **relaunch**, and the interface runs `sup-spawn` on it without
+waiting for the operator (after a two-live-body guard). The page strings below are **what was actually
+typed on those dates** and stay verbatim — they are host evidence, not doctrine. The shipped string in
+`bin/fleet_keeper.py` still reads the old way; changing it is a sibling build lane's, not this log's.
+Doctrine: `docs/operator/server-interface-profile.md`, `knowledge/lessons.md#2026-09-09-keeper-revives`.
+
 ## Baseline (before Task 1)
 
 ```text

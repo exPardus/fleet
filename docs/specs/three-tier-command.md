@@ -120,6 +120,16 @@ human's session; its tier is advisory (a note in policy that the human should ru
 the supervisor and worker tiers are fleet-dispatched, and only those two get a fleet-resolved model —
 which is also why §11.3's context ceiling can never apply to the interface (ND1).
 
+*(**Extended 2026-09-09 by operator ruling.** On a headless host the interface session is also
+**PERSISTENT and never recycled by fleet** — not by the keeper, not by a supervisor, not by a timer;
+only the operator retires it. The keeper may RECREATE its tmux window when the window is gone, which is
+a tmux act and not a launch of the tier. **The supervisor is the swappable layer** between it and the
+workers, which is why §3.5.3(a)'s "the fallback is dispatched by the interface tier" generalises: on a
+`KEEPER: … relaunch` page the interface dispatches a fresh supervisor **without waiting for the
+operator**, carrying the two-live-body guard (`sup-status --json` plus the roster; page instead of
+dispatching when the state is ambiguous). ND1 is untouched — a tier fleet cannot launch still cannot be
+ceiling-refused.)*
+
 ### 3.2 The only model surface shipped today is `--model`, and it carries a tier alias
 
 There is no hardcoded model id anywhere in `bin/fleet.py`:
@@ -1545,6 +1555,24 @@ since the 2026-08-05 raise** — the raise moved a threshold and neither narrowe
 paragraphs describe. Nothing else in this subsection changed — not ND1, not the verb enumeration, not
 the `--task` discriminator, not ND4. The 2026-07-23 text is left standing as the record of what was
 ratified and why.)*
+
+*(**AMENDED 2026-09-09 by operator ruling — what a supervisor DOES at its band, added; what the band IS,
+unchanged.** Reaching the band is **routine, not an incident**: the interface tier is the operator's own
+persistent session and is never recycled by fleet for context reasons, while the supervisor is the
+swappable layer between it and the workers, so a generation ending is the design working. The band now
+drives a **four-step** graceful end: (1) checkpoint with the successor queue; (2) **notify the interface**
+— one `SUPERVISOR:`-prefixed line typed into the ccgram-bound `work:fleet` window with the keeper's own
+sanitising *(verb `fleet sup-notify`; **NAME UNSHIPPED — reconcile at merge**, `grep -rn "sup.notify"
+bin/ tests/ docs/` returned nothing at `2a15dec`; the behaviour binds, the spelling is a sibling lane's
+to fix)*; (3) the handoff protocol below, run WITH the interface — **`sup-handoff-begin` dispatches the
+successor itself**, so the interface WATCHES `sup-status --json` rather than `sup-spawn`ing a second body
+*(the ruling's own step 3 says the interface `sup-spawn`s the successor; that is wrong about shipped code
+and is corrected here — see `docs/lanes/w58-docs.md`)*; (4) only if the handoff is stillborn,
+`sup-release`, after which the keeper pages `work:fleet` and the **interface** relaunches without waiting
+for the operator. **No threshold, no verb enumeration, no ceiling arm below is changed by this.** Sources:
+`state/tasks/20260909-succession-ruling.md` with its `## AMENDMENT`,
+`knowledge/lessons.md#2026-09-09-keeper-revives`, `docs/specs/graceful-succession.md` §1.2's amendment
+box, `docs/operator/server-interface-profile.md`.)*
 
 The operator requirement **stands and is not weakened** (manager ruling, 2026-07-23): 150k → hand off at
 the next wave/task boundary; 200k → finish the current urgent task, no new work. B4's defect is that the

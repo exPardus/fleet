@@ -112,8 +112,8 @@ re-opening it — a decision better taken with the soak's evidence than before i
 ### G-K4 — `supervisor/briefs/` as a git-tracked home for standing briefs
 
 **The question:** the server standing brief (`supervisor/briefs/server-standing.md`) is what the
-interface session dispatches with `sup-spawn --task @…` when you say "revive" from the phone. It
-must survive a reboot, a dead supervisor and a dead interface session. `state/` is gitignored and
+interface session dispatches with `sup-spawn --task @…`. It
+must survive a reboot, a dead supervisor and a dead interface session. **(Amended 2026-09-09: this used to read "when you say `revive` from the phone". Under the succession ruling and its amendment the interface also dispatches that brief on a `KEEPER: … relaunch` page, with no operator keystroke — which makes the durability argument below stronger, not weaker: the brief is now read on a path where nobody is watching. The gate itself is UNCHANGED and still OPEN; nothing here ticks it.)** `state/` is gitignored and
 disposable — the exact plane this whole docket was moved OUT of. **Approve a git-tracked
 `supervisor/briefs/`, or keep briefs under `state/tasks/`?**
 
