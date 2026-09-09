@@ -908,12 +908,12 @@ def _quarantine_artifacts() -> list:
     registry is always newer -- an "artifact newer than the registry"
     comparison would never fire on the recreation bypasses it exists to stop.
 
-      * `_sweep_husks` (:11117) -- a rename can hide live worker records from
+      * `_sweep_husks` (:11259) -- a rename can hide live worker records from
         the roster sweep, so a thin registry would rm sessions it still owns.
-      * `_doctor_check_autoclean` (:12277) -- a lingering artifact means the
+      * `_doctor_check_autoclean` (:12419) -- a lingering artifact means the
         sweep above is refusing itself, which is how a bricked sweep reads
         green-and-fresh.
-      * `_require_claim_holder`'s §9 arm (:17010) -- the legacy upgrade mints
+      * `_require_claim_holder`'s §9 arm (:17152) -- the legacy upgrade mints
         generation 1 on bare sid equality, so it needs the registry that
         cleared it to be COMPLETE, not merely readable. See there.
 
@@ -929,7 +929,7 @@ def _quarantine_artifacts() -> list:
         §6.5 worker-turn gate, which refuses on `True` alone, so poisoning a
         HEALTHY read here would let a real worker turn through §6.5 -- closing
         the §9 door by opening a wider one. Rule 1 lives at the §9 arm instead.
-      * `_identity_abstention_note` (:16731) -- the same distinction, in words,
+      * `_identity_abstention_note` (:16873) -- the same distinction, in words,
         because the generic note names `fleet doctor` and doctor is what MADE
         this state.
       * `_read_registry_readonly` (:4071) -- the VIEW surface's copy of the same
@@ -938,7 +938,7 @@ def _quarantine_artifacts() -> list:
         a never-initialised box prints, so the two states were not
         distinguishable from the read surface at all. A `Path.glob` is a read,
         so this costs the views doctrine nothing.
-      * `_doctor_check_registry` (:12815) -- doctor graded only on whether the
+      * `_doctor_check_registry` (:12957) -- doctor graded only on whether the
         LOADER RAISED, and the loader returns `{"workers": {}}` for a missing
         file, so the row called a renamed-away path *"is readable"* and doctor
         exited 0 with every row green (P1-12). A bare absence stays a PASS: no
@@ -950,8 +950,8 @@ def _quarantine_artifacts() -> list:
     these two only spell the filename, because an operator cannot restore a file
     whose name they were never told.
 
-      * `_print_snapshot_table` (:7002) -- `fleet status --stale-ok`.
-      * `_tombstone_releasing_body` (:17167) -- `sup-release`, whose registry
+      * `_print_snapshot_table` (:7144) -- `fleet status --stale-ok`.
+      * `_tombstone_releasing_body` (:17309) -- `sup-release`, whose registry
         arm previously swallowed the quarantined case in silence.
 
     The operator clears the artifact (after restoring what it holds), which
@@ -3107,7 +3107,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     -- reads `ok` while MISSING every record the artifact holds, and the §9 arm
     read that thinness as an affirmative *"you are provably not a worker"*. The
     presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:17010`), where it costs the §6.5 gate nothing.
+    (`:17152`), where it costs the §6.5 gate nothing.
 
     An artifact can also outlive its incident by days -- `_sweep_husks` tells the
     operator to restore the file first and delete the artifact second -- so that
@@ -5671,6 +5671,148 @@ def status_snapshot(now=None, include_archived: bool = False) -> dict:
         "by_status": by_status,
     }
     return snap
+
+
+# ---------------------------------------------------------------------------
+# THE TMUX INTERFACE LINE -- the one wire both the keeper and the supervisor
+# type on (operator ruling 2026-09-09, "Graceful end of a supervisor
+# generation" step 2: *"a one-line message typed into tmux window `work:fleet`
+# the same way the keeper does (`tmux send-keys -l`, same sanitising), prefixed
+# `SUPERVISOR:`"*).
+#
+# WHY IT LIVES HERE AND NOT IN `bin/fleet_keeper.py`, WHICH OWNED IT FIRST.
+# The dependency direction is fixed and one-way: `fleet_keeper.py` imports
+# `fleet`, never the reverse, so shared code between the two can only live in
+# this file. And a supervisor BODY cannot call the keeper at all -- the keeper
+# is a separate systemd-timer process with no inbound surface -- so the
+# supervisor needs its own path to the same window, and that path must carry
+# the same sanitiser. Two copies of a security control is how one of them
+# rots; the keeper's `_one_line`/`_page_line`/`_tmux`/`page` are now thin
+# delegates onto these four.
+#
+# D7 IS NOT VIOLATED, AND THE BAR IS D7'S OWN. `docs/specs/terminal-surface.md`
+# D7 (*"fleet injects nothing into any session; every fleet surface is
+# pull-only"*) is answered by its own closing sentence: *"A future injection
+# surface is not forbidden by fiat, but it inherits D7's bar: it must not fire
+# in a session that has not opted into fleet work."* Nothing here fires on its
+# own -- no hook, no timer, no import-time effect, and the plugin manifest is
+# untouched. One line is typed only when a verb is run, and only into the
+# window an operator dedicated to fleet work. What D7 deleted was a
+# SessionStart hook that fired in EVERY session on the machine.
+#
+# THE SANITISER IS A SECURITY CONTROL, NOT FORMATTING (fix wave 1, C4). Every
+# line typed through here lands in a `bypassPermissions` Claude session via
+# `tmux send-keys -l`, and the substrings interpolated into it -- a worker
+# name, a `sup-decision` question, a `sup-notify` argument -- are
+# worker-writable. A newline becomes a SECOND SUBMITTED PROMPT LINE, i.e. a
+# worker->interface injection channel; an ANSI run or a 5 000-char name makes
+# the line unreadable; and a leading `-` reaching `send-keys` reads as a flag.
+# So the prefix goes on FIRST and the one-lining runs AFTER it, which is what
+# makes both guarantees hold of the whole delivered line rather than of the
+# interpolated half. Sanitising at DELIVERY rather than in each caller means a
+# caller added later cannot forget to do it.
+# ---------------------------------------------------------------------------
+
+#: The two prefixes `docs/operator/server-interface-profile.md` routes on.
+#: `KEEPER: ` is the timer's; `SUPERVISOR: ` is a supervisor body's own
+#: outbound line. Spelled once, here, so the interface's routing key and the
+#: two producers cannot drift apart.
+KEEPER_LINE_PREFIX = "KEEPER: "
+SUPERVISOR_LINE_PREFIX = "SUPERVISOR: "
+
+#: Every interface line, prefix included, is capped at this. The keeper has
+#: shipped this number as `PAGE_TEXT_LIMIT` since fix wave 1 and now reads it
+#: from here.
+INTERFACE_LINE_LIMIT = 200
+
+# Only the CSI form is matched here; a bare ESC left by any other escape shape
+# is dropped by the C0 filter in `one_line` a line later.
+_ANSI_CSI_RE = re.compile(r"\x1b\[[0-9;:<=>?]*[ -/]*[@-~]")
+
+#: Same wall `fleet_keeper.SUBPROCESS_TIMEOUT` uses. A wedged tmux must not
+#: hang a supervisor's handoff.
+TMUX_TIMEOUT_SECONDS = 30
+
+
+def one_line(text, limit=INTERFACE_LINE_LIMIT):
+    """Collapse `text` into one printable line of at most `limit` chars: ANSI
+    stripped, `\\r\\n\\t` and the other C0 controls folded to spaces,
+    whitespace collapsed, truncated with an ellipsis.
+
+    See this section's header for why each of those is load-bearing. The body
+    is `fleet_keeper._one_line`'s, moved verbatim."""
+    text = _ANSI_CSI_RE.sub("", str(text))
+    text = "".join(" " if ch < " " or ch == "\x7f" else ch for ch in text)
+    text = " ".join(text.split())
+    if len(text) > limit:
+        text = text[:limit - 1].rstrip() + "…"
+    return text
+
+
+def interface_line(text, prefix, limit=INTERFACE_LINE_LIMIT):
+    """The exact bytes one interface line types: `prefix`-prefixed, then
+    one-lined.
+
+    PREFIX FIRST, SANITISE SECOND (C4's ruling), and generalising over the
+    prefix does not weaken it: the prefix is what stops a line whose
+    interpolated text begins with `-` from reaching `send-keys` as something
+    that could read as a flag, and one-lining afterwards keeps the guarantee
+    that the WHOLE delivered line is one line and within `limit`.
+
+    THE `startswith` TEST IS AGAINST THIS CALL'S OWN PREFIX, WHICH IS WHY IT
+    CANNOT FORGE THE OTHER ONE. Text that already begins with `SUPERVISOR: `
+    passed to a `KEEPER: ` call is prefixed anyway and delivered as
+    `KEEPER: SUPERVISOR: ...` -- visibly a keeper line quoting a claim, not a
+    supervisor line. It exists so a caller that composed the whole line itself
+    (every keeper rule does) is not double-prefixed."""
+    text = str(text)
+    if not text.startswith(prefix):
+        text = prefix + text
+    return one_line(text, limit)
+
+
+def _tmux_rc(run, argv, timeout=TMUX_TIMEOUT_SECONDS):
+    """`tmux`'s exit code, or a synthetic one. `FileNotFoundError` yields the
+    shell's own 127 (tmux is not installed) rather than being folded into 1
+    (tmux ran and refused) -- the same split `fleet_keeper._run_text` keeps for
+    `claude`, and the same reason: the two have different remedies."""
+    try:
+        cp = run(argv, capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError:
+        return 127
+    except (OSError, subprocess.SubprocessError):
+        return 1
+    return cp.returncode
+
+
+def tmux_command(run, out, *args, label="fleet"):
+    """Run one `tmux` subcommand; True iff it exited 0.
+
+    NEVER RAISES. This is a notification wire attached to a machine's tmux
+    server, and every caller is doing something else that matters more -- a
+    keeper tick, a supervisor's handoff. A dead tmux is reported on `out` and
+    returned as False; the caller decides what that means."""
+    argv = ["tmux", *args]
+    rc = _tmux_rc(run, argv)
+    if rc != 0:
+        print(f"{label}: tmux failed: {argv}", file=out)
+    return rc == 0
+
+
+def type_interface_line(run, target, text, *, prefix, out=sys.stdout,
+                        limit=INTERFACE_LINE_LIMIT, label="fleet"):
+    """Type one sanitised line into tmux `target` and submit it. Returns
+    whether it landed -- a caller that records state off a delivery must
+    record it only for a True (fix wave 1, C3).
+
+    `Enter` is NOT sent when the literal send failed: that would submit
+    whatever the interface session had half-typed in its own prompt box."""
+    line = interface_line(text, prefix, limit)
+    if not tmux_command(run, out, "send-keys", "-t", target, "-l", line,
+                        label=label):
+        return False
+    return tmux_command(run, out, "send-keys", "-t", target, "Enter",
+                        label=label)
 
 
 # ---------------------------------------------------------------------------
@@ -9184,7 +9326,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # P1-6: `read_registry_no_repair`, NOT `load_registry`. This is a PRE-FLIGHT
-    # resolution that runs from `cmd_kill:9078` / `cmd_respawn:8691`, before
+    # resolution that runs from `cmd_kill:9220` / `cmd_respawn:8833`, before
     # either verb has taken `fleet.lock` -- and `load_registry` QUARANTINES a
     # corrupt registry, i.e. RENAMES IT ASIDE, which is a write. An unlocked
     # write races every other fleet command, and it destroys the evidence the
@@ -9247,10 +9389,10 @@ def _supervisor_lifecycle_target(verb, name):
     # P1-6: `read_registry_no_repair` -- `load_registry` MINUS the rename, with
     # the same missing-file contract, the same validator and the same
     # `RegistryCorruptError`, so the arm below is unchanged. This read runs from
-    # `cmd_kill:9078` / `cmd_respawn:8691`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:9220` / `cmd_respawn:8833`, ahead of either verb's `fleet_lock`,
     # and quarantining here did two things: it wrote without the lock, and it
     # STOLE the quarantine from the lock-held read that was designed to perform
-    # it. `cmd_respawn:8715-8717` spells out that design -- *"resolve under the
+    # it. `cmd_respawn:8857-8859` spells out that design -- *"resolve under the
     # lock so a corrupt registry surfaces through load_registry's quarantine"* --
     # and the theft is what falsified it: by the time the lock-held read ran the
     # file was ABSENT rather than corrupt, so `{"workers": {}}` came back and the
@@ -15600,8 +15742,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     live_sids` is what shipped, and `_record_sids`' own docstring says why it
     is wrong -- *"matching against `session_id` alone fails open on it
     (ND4a)"* -- for the fourteen other sites that already key on the union
-    (`:2822, :2903, :3164, :3314, :4700, :9218, :9538, :9819, :10050, :10137,
-    :10360, :11146, :15471, :18163`). The thirteenth is multi-fleet §5 step 2's
+    (`:2822, :2903, :3164, :3314, :4700, :9360, :9680, :9961, :10192, :10279,
+    :10502, :11288, :15613, :18399`). The thirteenth is multi-fleet §5 step 2's
     membership test (slice a2), which is the same argument one plane out: a
     home whose record was eagerly restamped would stop claiming its own
     fork-steered body mid-rotation. The fourteenth is
@@ -15621,8 +15763,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :7979, :8518, :13311,
-    :18826), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :8121, :8660, :13453,
+    :19062), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -16312,8 +16454,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:7979, :8518, :13311,
-    #     :18826) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:8121, :8660, :13453,
+    #     :19062) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -16346,7 +16488,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         #     file aside (`:1063`), which is a write. Routing the identity read
         #     through it made `fleet send` shred the operator's evidence from a
         #     path that promises to touch nothing; the helper exists for exactly
-        #     this and names this gate as its reason (`:15399`). A `None` here
+        #     this and names this gate as its reason (`:15541`). A `None` here
         #     still fails toward the gate -- an unreadable registry is reported
         #     by its own doctor row, and is never a reason to decide blind.
         #     MERGE NOTE (2026-07-27): main and `fix/identity-registry-judges`
@@ -16988,7 +17130,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # A worker whose own record sits inside the artifact upgrades the claim.
         #
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as `_sweep_husks`
-        # spells it at `:11110`. Not an mtime comparison: `os.rename` preserves
+        # spells it at `:11252`. Not an mtime comparison: `os.rename` preserves
         # mtime, so the artifact's mtime is the PRE-corruption write time and any
         # recreated registry is always newer -- the comparison would never fire
         # on the one bypass it exists to stop.
@@ -17602,6 +17744,100 @@ def cmd_sup_context(args) -> int:
     if sid is None:
         print("NOTE: no CLAUDE_CODE_SESSION_ID -- run this from the session you "
               "are measuring (it reads its OWN transcript, §11.2)")
+    return 0
+
+
+def cmd_sup_notify(args, run=subprocess.run) -> int:
+    """`fleet sup-notify <text> [--nonce N] [--sid S] [--tmux-session S]
+    [--window W] [--dry-run]` -- THE SUPERVISOR'S OUTBOUND LINE.
+
+    Operator ruling 2026-09-09, "Graceful end of a supervisor generation"
+    step 2: at its context band, or at a clean task boundary it chooses to
+    stop at, the supervisor *"notif[ies] the interface -- a one-line message
+    typed into tmux window `work:fleet` the same way the keeper does
+    (`tmux send-keys -l`, same sanitising), prefixed `SUPERVISOR:`"*, and then
+    runs the handoff protocol WITH the interface. This is that verb. The bytes
+    it types come from `type_interface_line`, the same function the keeper
+    pages through, so there is exactly one sanitiser on this wire (see the
+    "THE TMUX INTERFACE LINE" section header for why that matters).
+
+    IT IS NOT ARMED ON THE CONTEXT CEILING, DELIBERATELY. `_ceiling_refuses_
+    dispatch` is called at five sites across four verbs (`spawn`, `send`,
+    `sup-spawn`, `respawn` twice; the census is
+    `tests/test_respawn_ceiling.py::TestTheCeilingCallSiteCensus`) and this is
+    not a sixth. The ceiling exists to stop a supervisor at 400k from
+    dispatching MORE work; announcing a handoff is the opposite act -- it is
+    how the ceiling's own scenario ends. A supervisor that could not tell the
+    interface it was handing off, precisely because it had reached the band
+    that requires the handoff, would be wedged by the guard that was supposed
+    to protect it. Nothing here dispatches, steers, or spawns.
+
+    IT IS CLAIM-HOLDER-GATED, THROUGH THE SAME `_require_claim_holder` AS
+    `sup-checkpoint`/`sup-release`/`sup-handoff-*`. A `SUPERVISOR: ` line is
+    read by the interface as coming from the supervisor, and the one channel
+    this file treats as sound identity is the claim (claim-nonce §18). SAY
+    PLAINLY WHAT THAT BUYS: it is a SPEED-BUMP, not an authorization boundary,
+    for the reason `_supervisor_gate` and `_confirm_destructive` both state --
+    a worker runs as the same OS user and can call `tmux send-keys` itself, so
+    no check here is a security boundary against a body that wants to forge a
+    line. What it stops is the over-helpful second body, and what makes the
+    forged line survivable anyway is the sanitiser, which is the control that
+    IS load-bearing.
+
+    `mint=False`, LIKE `sup-handoff-begin` AND `sup-handoff-complete`, NOT
+    LIKE `sup-heartbeat`. This verb sits immediately before
+    `sup-handoff-begin` in the ruling's own step order, and rotating the
+    generation between the announcement and the handoff would hand the
+    outgoing body a fresh NONCE it must capture off stdout and re-present, in
+    the exact ritual that has eight stillbirths on record. Announcing is not a
+    continuation ritual; it changes no fleet state at all. The single
+    `write_incarnation` the contract requires is still performed -- §6.6's
+    session-id restamp and a rule-2 pending acknowledgment both need to
+    commit -- and it is the ONLY write this verb makes.
+
+    THE NOTICES ARE DELIVERED BEFORE THE TMUX SEND, NOT AFTER IT, WHICH IS
+    UNLIKE EVERY OTHER SUP VERB. §5.3 says a minted generation is printed once
+    on the verb's own stdout after the commit and exists nowhere else; here
+    the step AFTER the commit can fail (a dead tmux server), and the failure
+    path returns non-zero. Delivering last would risk printing a generation
+    beside a failure the caller might read as "nothing happened", or -- worse
+    -- reordering it behind a stderr refusal. So the commit's receipt is
+    emitted the moment the commit lands. Only the legacy-upgrade arm (§9) can
+    put anything in `notices` while `mint=False`, so this is normally empty.
+
+    `--dry-run` PRINTS THE BYTES AND STOPS, AHEAD OF THE CLAIM WORK. It takes
+    no lock, reads no claim, writes nothing and calls no tmux -- which means
+    it is not a rehearsal of the gate, and any caller can run it. That is
+    deliberate and it costs nothing: what it produces is one line on the
+    caller's own stdout. The keeper's `--dry-run` has the same shape.
+
+    IT DOES NOT REFRESH THE HEARTBEAT. `sup-checkpoint` does because spec §4
+    says the holder refreshes at every checkpoint; announcing is not a
+    checkpoint, and a verb that silently rewrote liveness would make the
+    keeper's dead-supervisor rule quieter for a reason unrelated to being
+    alive."""
+    target = f"{args.tmux_session}:{args.window}"
+    if args.dry_run:
+        print(f"[dry-run] would type into {target}: "
+              f"{interface_line(args.text, SUPERVISOR_LINE_PREFIX)}")
+        return 0
+    with fleet_lock():
+        claim, _, notices = _require_claim_holder(
+            getattr(args, "sid", None), nonce=getattr(args, "nonce", None),
+            verb="sup-notify", mint=False)
+        write_incarnation(claim)
+    inc = claim.get("incarnation_id", "?")
+    _deliver_notices(notices)
+    if not type_interface_line(run, target, args.text,
+                               prefix=SUPERVISOR_LINE_PREFIX, label="fleet"):
+        raise FleetCliError(
+            f"sup-notify: tmux would not deliver the line to {target} -- the "
+            f"interface has NOT been told. Check that the tmux server and the "
+            f"window exist (`tmux list-windows -t {args.tmux_session}`); the "
+            f"claim is untouched apart from this call's own restamp, so "
+            f"re-running this verb is safe.")
+    print(f"notified {target} as {inc}: "
+          f"{interface_line(args.text, SUPERVISOR_LINE_PREFIX)}")
     return 0
 
 
@@ -22040,6 +22276,28 @@ def build_parser() -> argparse.ArgumentParser:
     p_supdec.add_argument("--sid", help="override caller session id (for --raise)")
     p_supdec.add_argument("--nonce", help=NONCE_ARG_HELP)
 
+    # Ruling 2026-09-09, graceful-end step 2. Its flags MATCH THE KEEPER'S
+    # (`--tmux-session` default `work`, `--window` default `fleet`, a
+    # `--dry-run`) so one host convention serves both producers on this wire;
+    # `bin/fleet_keeper.py`'s `_parser` is the other copy.
+    p_supnotify = sub.add_parser(
+        "sup-notify",
+        help="type one `SUPERVISOR: <text>` line into the interface tmux "
+             "window (claim holder only): the graceful-end announcement the "
+             "interface acts on")
+    p_supnotify.add_argument("text",
+                             help="the line's text -- prefixed with `SUPERVISOR: ` "
+                                  "and sanitised to one printable line before it is typed")
+    p_supnotify.add_argument("--tmux-session", dest="tmux_session", default="work",
+                             help="tmux session holding the interface window (default: work)")
+    p_supnotify.add_argument("--window", default="fleet",
+                             help="tmux window name (default: fleet)")
+    p_supnotify.add_argument("--dry-run", dest="dry_run", action="store_true",
+                             help="print the exact bytes and stop: no lock, no claim "
+                                  "read, no write, no tmux")
+    p_supnotify.add_argument("--sid", help="override caller session id")
+    p_supnotify.add_argument("--nonce", help=NONCE_ARG_HELP)
+
     p_suphb = sub.add_parser("sup-handoff-begin", help="dispatch a handoff successor (claim holder only)")
     p_suphb.add_argument("--model", help="model for the successor session")
     p_suphb.add_argument("--permission-mode", dest="permission_mode",
@@ -22214,6 +22472,8 @@ def main(argv=None) -> int:
             return cmd_sup_status(args)
         if args.command == "sup-context":
             return cmd_sup_context(args)
+        if args.command == "sup-notify":
+            return cmd_sup_notify(args)
         if args.command == "sup-decision":
             return cmd_sup_decision(args)
         if args.command == "sup-handoff-begin":
