@@ -27,7 +27,45 @@ the operator to ignore the channel.
 | # | Signal | Why it is deferred | What would close it |
 |---|---|---|---|
 | S-1 | The **outcomes half of `login-expired`** — the spec's rule reads "`claude agents --json` fails, **or the newest outcome in `state/outcomes/` is an auth error**". Only the first half is built. | The auth-error shape in an outcome record has never been measured on this host; a rule keyed on a guessed substring would page on any result text containing it. | One real expiry during the soak, with the outcome file kept, and a rule keyed on what it actually contains. |
-| S-2 | The **permission-stall arm of `worker-anomaly`** — the spec's rule reads "`dead-suspected`, `limited`, `idle+mail`, **or permission-stall**". The first three are built. | A permission stall is not in `status_snapshot()` at all: the snapshot carries `status`/`mail`/`limit_kind`, and nothing distinguishes a worker waiting on a permission prompt from one working. Building it means either a new snapshot field or a second read path, and the keeper is deliberately a reader of one projection. | A measured stall on this host, then a decision about which layer should surface it — `status_snapshot` (where every view would get it) rather than the keeper. |
+| S-2 | The **permission-stall arm of `worker-anomaly`** — the spec's rule reads "`dead-suspected`, `limited`, `idle+mail`, **or permission-stall**". The first three are built. **HALF-CLOSED 2026-09-09 (w56) — see the note under this table.** | A permission stall is not in `status_snapshot()` at all: the snapshot carries `status`/`mail`/`limit_kind`, and nothing distinguishes a worker waiting on a permission prompt from one working. Building it means either a new snapshot field or a second read path, and the keeper is deliberately a reader of one projection. **Amended:** for a stall this is not a cost, it is an impossibility — `bin/fleet.py`'s own block above `_permission_stalls` records that `waiting_for_permission` is transient, every persist site strips it, and the roster is the only witness, so no file-only view can see one without breaking terminal-surface D1/D4. | **The stall half, still open:** a measured stall on this host. The layer question is now answered for it and the answer is *not* `status_snapshot` — the keeper (or any roster-holding caller) is the only place it can live. **The denial half is closed:** `status_snapshot()` carries `permission_denials` per row. |
+
+### S-2, half-closed — a measured DENIAL, still no measured stall (w56, 2026-09-09)
+
+S-2 was written for a permission **stall**: a worker hanging on a prompt nobody will answer. What
+this host then measured is a permission **denial**, which is a different event with a different
+witness — no hang, an immediate idle turn on turn 1, and a worker that every fleet view renders
+exactly as it renders one that finished a fast task. Three workers dispatched at the shipped `fleet
+spawn` default `--mode dontask` died that way. **The denial half is built; the stall half is
+untouched and still wants the measured stall S-2 asks for.** Nothing here re-purposes the stall's
+slot: the stall row in `fleet doctor` is unchanged, and the new work is registered beside it under
+its own name.
+
+S-2's standing opinion — put the signal in `status_snapshot()`, *"where every view would get it"*,
+rather than in the keeper — was followed, and it is right **for a denial**. It is also, for a
+**stall**, not merely expensive but impossible, which S-2 could not have known when it was written:
+`waiting_for_permission` is derived per call and stripped at every persist site, so the registry has
+never contained it and the roster is its only witness. A denial is the opposite — `dontAsk` does not
+prompt, it refuses, and the harness records the refusal as a typed field (`toolDenialKind`) on the
+transcript record that answers the tool call. `bin/hooks/stop_outcome.py` already reads that
+transcript once per turn for the usage numbers, so it now counts denials in the same pass and writes
+the total into the outcome record it was already writing. The fact reaches `FLEET_HOME` as data, and
+`status_snapshot()` reads it with a bounded tail read — no lock, no probe, no quarantine.
+
+**What was measured, since this file's rule is that a rule which fires falsely is worse than one
+that is absent.** The three denied sessions' transcripts carry `toolDenialKind: "permission-rule"`
+11, 3 and 3 times; every other session in the same project directory carries it zero times. The
+alternative — a substring rule over the outcome record's `result_text` — was rejected on the
+evidence: only ONE of the three left a result record at all (the other two left just the operator's
+kill tombstone), and that one describes the denial in prose the model chose to write, so the rule
+would have caught one worker in three and would fire on any report that merely quotes a denial
+message. **What shipped is not a rule at all.** Every surface reports the number the harness
+recorded and infers nothing from it, so there is no threshold to tune and nothing that can fire
+falsely; the operator does the inferring, with the worker's `mode` printed next to the count. An
+absent count reads as *unknown* and a `0` as *measured, none* — the two are never collapsed, because
+answering `0` for a worker nobody looked at would reinstate the silence this closes.
+
+Receipts live in the code and its tests (`tests/test_permission_denials.py`), not here: this file is
+`# volatile: host state`, and the measurement above is a property of three transcripts on this box.
 
 ## Pages observed
 
