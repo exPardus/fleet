@@ -152,6 +152,36 @@ message:**
 Both horns are the two things §2 and §5.8 already forbid. There is no third mechanism, so there is
 nothing for this spec to build.
 
+> **⛔ AMENDED 2026-09-08 AND AGAIN 2026-09-09 — THE SECOND HORN IS NOW TAKEN, DELIBERATELY, AND
+> THE GROUNDS ABOVE ARE WHAT THE OPERATOR RULED AGAINST.** *(Landed by lane `w58-docs`. The 2026-07-27
+> refusal stays on the record above, verbatim, because a spec that quietly deletes a rejected option
+> invites the next author to re-propose it — and because a later ruling reversing it is exactly the
+> evidence the next author needs.)*
+>
+> - **2026-09-08:** a liveness timer may **observe and page** — never dispatch. The keeper
+>   (`bin/fleet_keeper.py`) types `KEEPER:` lines into ONE dedicated `work:fleet` window it launched
+>   itself. The first horn is still refused: no hook fires in a session nobody asked to be
+>   fleet-aware. Recorded as operator gate **G-K1**, still OPEN — the ruling did not assume it was
+>   obviously inside D7.
+> - **2026-09-09 (with its own same-day amendment):** on that page, **the interface tier dispatches
+>   without waiting for the operator.** So there IS now "a replacement dispatched with no operator in
+>   the loop", which is the second horn as this section words it. **The operator ruled it acceptable
+>   on a ground this section did not consider: the dispatcher is not an autonomous actor but the
+>   operator's own persistent session**, which can read an ambiguous claim and decline — the
+>   two-live-body guard moved onto it for exactly that reason (check `sup-status --json` and the
+>   roster; page instead of dispatching when seized, `unknown`, mid-handoff, or a releasing body is
+>   still roster-live). The keeper itself still never runs a dispatching verb.
+> - **What survives unchanged:** *"when the honest mechanism would have to be an injection or an
+>   autonomous actor, the trigger belongs on the human action that was going to happen anyway."* Both
+>   clauses of it are still respected — the amendment introduces neither an injection nor an
+>   autonomous actor. What it introduces is a **third** mechanism this section said did not exist: a
+>   page to a fleet-aware session that is already the human's proxy. **This spec's `sup-recover` is
+>   unbuilt and unaffected; §5.8's safety argument is amended in place, not here.**
+> - Sources: `state/tasks/20260909-succession-ruling.md` (with its `## AMENDMENT`),
+>   `knowledge/lessons.md#2026-09-09-keeper-revives`,
+>   `docs/superpowers/specs/2026-09-08-server-persistent-fleet-design.md` (its own 2026-09-09
+>   amendment section), `docs/operator/server-interface-profile.md`.
+
 **What this costs the design, stated plainly.** Nothing in this document shortens window B. A fleet
 that is dark because the box was dark has no reader, and **a pull signal with no reader is not a
 signal** — which is the same sentence as the lesson this whole document exists for, pointed at itself.
@@ -187,7 +217,10 @@ hook and the plugin `hooks` key were deleted and a test pins their absence.
   event. Nor can any hook observe a power cut. If a later author reaches for a hook here, those are the
   two facts to re-read first.
 - **Succession is never automatic.** §5.8 states the safety argument structurally rather than by
-  promise.
+  promise. **AMENDED 2026-09-09 (see §1.2's amendment box and §5.8's): on a keeper-equipped host it
+  is now automatic in the sense of "no operator keystroke", and still not automatic in the sense
+  §5.8 actually defends — no timer, hook, view or supervisor mints a body. The dispatcher is the
+  interface session, which is the human's own.**
 
 ---
 
@@ -1119,6 +1152,18 @@ races the successor — the two-bodies hole arriving by a new door.
 > a view that starts a body with no human in the loop. That is not a difference of degree: a supervisor
 > dispatching its own replacement produces two live supervisors over one GOALS.md, the one condition
 > the entire claim system exists to prevent.
+
+**AMENDED 2026-09-09 — the quoted paragraph's first sentence no longer holds as written, and the
+distinction it draws does.** *"A verb that ends in a fresh supervisor body is acceptable because a
+human typed it"* is now too narrow: on this host the interface tier types it on a `KEEPER: … relaunch`
+line, with no operator keystroke. **The forbidden class is unchanged and is what the four facts below
+actually enforce** — a supervisor, a hook, a scheduler, or a view starting a body. The keeper is a
+scheduler-driven observer that reaches no dispatching verb (pinned by an AST test); the interface is
+neither of those four, holds no claim, and carries the two-live-body guard. Restated for the
+amendment: **what is forbidden is a SELF-triggering path — an actor dispatching its own replacement,
+or a view acting on what it renders. An actor that is the operator's own session, dispatching a body
+it does not become, on a signal it did not generate, is outside that class.** Fact 1 below is what
+keeps the two apart, and it is unaffected. *(Landed by lane `w58-docs`; sources as in §1.2's box.)*
 
 **Enforced, not promised, by four structural facts:**
 
