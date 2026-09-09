@@ -12,6 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin"))
 import fleet  # noqa: E402
+from conftest import child_env  # noqa: E402
 
 
 @pytest.fixture
@@ -1375,14 +1376,18 @@ class TestHomeResolution:
         `sys.path` must be install-derived. Driven rather than read -- run it in
         a subprocess with `$FLEET_HOME` pointed at a directory containing no
         `bin/` at all, and it must still import fleet and exit 0."""
-        import os
         import subprocess
         import tempfile
         with tempfile.TemporaryDirectory() as data_only_home:
+            # `child_env`: the statusline calls `fleet.resolution_population()`,
+            # so an inherited `$HOME` made this render a function of the
+            # operator's real `~/.claude/fleet-homes.list` (w60 §5: measured
+            # rendering `home ambiguous (2)` instead of the fixture's roster).
             proc = subprocess.run(
                 [sys.executable, str(REPO / "bin" / "fleet_statusline.py")],
                 input='{"session_id": "sid-x"}', capture_output=True, text=True,
-                env={**os.environ, "FLEET_HOME": data_only_home}, timeout=60)
+                env=child_env(data_only_home, FLEET_HOME=data_only_home),
+                timeout=60)
         assert proc.returncode == 0, proc.stderr
         assert "ModuleNotFoundError" not in proc.stderr
         assert "Traceback" not in proc.stderr
