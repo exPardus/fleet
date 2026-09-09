@@ -403,7 +403,8 @@ would not, and derived it rather than defaulting to it:**
   none of my surfaces.
 - Nothing parametrises over `knowledge/lessons.md` anchors or `knowledge/INDEX.md` lines.
 
-**MEASURED, after the edits:** *(filled in below at §8.1.)*
+**MEASURED, after the edits and after the commit** (so the `git ls-files` glob sees the landed tree):
+**hit to the digit on both interpreters.**
 
 **One live pin caught a real defect in my own prose, and it is worth recording:**
 `TestCollaboratorInstall::test_shipped_surfaces_hardcode_no_absolute_fleet_home[skills]` went RED
@@ -413,7 +414,24 @@ hardcoded path to a lint, and the lint is the one that ships.**
 
 ### 8.1 Measured floors
 
-*(see §11)*
+| | collected | result | wall |
+|---|---|---|---|
+| baseline, py3.12, `1294920` | 4880 | `6 failed, 4857 passed, 16 skipped, 1 xfailed` | 337.59s |
+| landed, py3.12, `ce1e101` | 4880 | `6 failed, 4857 passed, 16 skipped, 1 xfailed` | 319.59s |
+| landed, py3.10, `ce1e101` | 4880 | `6 failed, 4857 passed, 16 skipped, 1 xfailed` | 343.90s |
+
+The six failures are the same six named ones, unchanged and unexplained by anything on this branch:
+three `test_fleet_index.py::TestPathContainment` and one `test_fleet_q.py::TestOutlinePathContainment`
+expecting a drive-qualified `C:foo` to be refused as an escape (on POSIX it is an ordinary relative
+filename), and two `test_terminal_surface.py::TestCollaboratorInstall` cases that copy
+`sys.executable` into a spaced directory and re-exec it, which cannot work for a venv shim. Neither
+group carries a `skipif`.
+
+Receipt harness, run separately as CLAUDE.md requires:
+`tools/verify_receipts.py --self-test --strict docs/specs/graceful-succession.md` →
+`34/34 reproduce exactly (36 fenced blocks, 0 unclassified, 0 volatile-skipped)`, `VERDICT: pass -- 0
+failure(s), 0 warning(s)`, `SELF-TEST VERDICT: PASSED -- the harness proved it can fail, on both seed
+classes`, `EXIT: 0`.
 
 ---
 
@@ -445,7 +463,19 @@ Nothing enforces that it stays append-only. Not a gate I am filing; a fact worth
 
 ## 10. FENCE — MEASURED
 
-*(see §11 for the diffstat, produced after the final commit.)*
+`git diff --stat 1294920..HEAD`:
+
+     docs/SPEC.md                      |   7 +
+     docs/lanes/w59-proven.md          | 494 +++++++++++++++++++++++++++++++++
+     docs/specs/graceful-succession.md | 150 +++++++++-
+     knowledge/INDEX.md                |   1 +
+     knowledge/lessons.md              |  23 ++
+     skills/fleet/SKILL.md             |   9 +-
+     6 files changed, 679 insertions(+), 5 deletions(-)
+
+`git diff --name-only 1294920..HEAD | grep -E '^(bin/|tests/|supervisor/|CLAUDE.md|docs/OPERATOR-GATES.md)'`
+matches **nothing**. Six files, all prose. The five deletions are the struck-through O13 cell and the
+four replaced clause-lines, all of which are quoted in place rather than removed.
 
 `bin/fleet.py`, `bin/fleet_keeper.py`, `tests/**`, `supervisor/GOALS.md`, `docs/OPERATOR-GATES.md` and
 root `CLAUDE.md` are **read-only in this lane**. No gate ticked, no Settled line added, no gate filed —
