@@ -11407,3 +11407,202 @@ That proving the handoff is the same as finishing the ruling. The ruling's four-
 now been exercised end-to-end exactly once, by a body that chose a clean boundary with 230k of
 headroom — the drill was designed to succeed. The step I have not seen work is the one after mine:
 the interface noticing. I am about to announce on a wire whose only prior traffic was a dry run.
+
+## 2026-09-09T17:59:52Z CHECKPOINT inc=inc-20260909T174911Z-efa0 sid=f9b83beb-41c1-4fa0-8a0e-968b0d3d98ac
+
+OPERATOR PRIORITY SHIFT — multi-fleet is now the top item, and I am starting it in parallel rather than after.
+
+## THE MESSAGE
+
+Relayed by the interface from Telegram: *"how far away are we from multi fleet? it should be
+independent per repo/dir, this is a high priority and should be done asap"*. Spec of record
+`docs/specs/multi-fleet.md` v8 (ratified 2026-07-30). The relay says it lands "after the
+succession-ruling task lands"; that task's final landing is lane `w59-proven`, already in flight and
+PROSE-ONLY by fence, so a code lane is free right now under the one-writer-per-`bin/fleet.py` rule.
+**ASAP plus a disjoint-by-kind fence means parallel, not sequential.** That is my call, not the
+relay's.
+
+## I VERIFIED THE RELAY'S LOAD-BEARING CLAIM RATHER THAN TAKING IT
+
+The relay asked to be checked. `fleet init --help` at `1294920` offers exactly `--nonce`,
+`--statusline`, `--chain`, `--force`; `grep -n '"--home"' bin/fleet.py` returns **nothing**. Slice
+(b) is genuinely unbuilt and is the prerequisite either way. The rest of its build census I will have
+a lane re-derive rather than inherit — a supervisor propagating an unverified premise into briefs is
+the defect my last two predecessors each recorded about themselves, in this same slot of this same
+ritual.
+
+## THE GAP THE OPERATOR'S OWN WORDS EXPOSE, AND WHY NO LANE OF MINE WILL CLOSE IT
+
+§5 resolves a home by flag -> sid lookup -> `FLEET_HOME` -> legacy install root. **No step resolves
+by cwd.** So "independent per repo/dir" is already achievable today (`init --home <repo>/...` once
+(b) lands, plus `--fleet-home`/`FLEET_HOME` per shell) — but a session in `/home/altai/proga/X`
+reaching X's fleet with NO flag and NO env is a **new §5 step** (cwd walk-up to a LISTED home) and a
+spec amendment only the operator ratifies. The interface has put that to the operator. **Every brief
+I write this wave will forbid building it**, because the shortest path from "high priority, asap" to
+a ratified-spec breach is a lane that reads the operator's intent and helpfully implements it.
+
+## WHAT I AM DISPATCHING
+
+Disjoint by KIND, the w58 pattern that worked: `w59-proven` owns prose (running), `w59-inithome`
+owns `bin/fleet.py` + `tests/` for slice (b), `w59-slice-e` owns nothing writable at all — a pure
+audit that reports and edits no file it audits. Lane 3 of the relay's list (the dogfood second home)
+is DEFERRED and that is a dependency, not a deprioritisation: `fleet init` does not create
+`state/fleet.json`, so a second home cannot be initialised until (b) exists. Sequencing it after (b)
+is the only order that can work.
+
+## DISTANCE TO DONE, FOR THE PHONE
+
+**One build slice from "independent per repo/dir" in the flag/env sense; one operator ruling from it
+in the zero-configuration sense.** Slice (b) `init --home` is the last unbuilt slice and is
+unblocked (2026-08-10 ruling: split `init` the `w47-homes` way). Slices 0, (a), (c), (d) are built.
+What (b) does NOT buy is cwd-based resolution, which is what "per repo/dir" most naturally means to
+someone typing it on a phone — that needs the §5 amendment above.
+
+## ALSO DONE THIS TURN
+
+Root `CLAUDE.md`'s Python rule corrected — `py -3.1x` is the WINDOWS launcher and the file's command
+could not run on this host at all. Measured myself before editing (`py` absent; pytest not importable
+in ANY interpreter on PATH, china-infra venv included; `uv` present) and verified the replacement
+collects **4880 on both 3.10 and 3.12** at `1294920` before writing it down. Two lanes had
+rediscovered this independently in one hour. My predecessor left it alone as the project instruction
+file and handed the decision forward; I took it, because a doctrine file shipping a command that
+cannot run is a defect every future brief inherits. The DOCTRINE (3.10 floor, `MIN_PYTHON_VERSION`,
+stdlib-only single file) is untouched.
+
+## WHAT I EXPECT TO GET WRONG
+
+That "high priority, asap" justifies compressing the verification I just spent a lane on. The failure
+mode for an urgent operator request in this repo is not slowness — it is a lane that builds the thing
+the operator described rather than the thing the ratified spec permits, and then a supervisor who
+merges it because the operator said asap.
+
+## 2026-09-09T18:04:40Z CHECKPOINT inc=inc-20260909T174911Z-efa0 sid=f9b83beb-41c1-4fa0-8a0e-968b0d3d98ac
+
+TWO SAFETY FACTS ABOUT THE HANDOFF THE DRILL DID NOT TEST — one lucky, one derivable and reassuring.
+
+## THE DRILL NEVER MET THE KEEPER, AND THAT WAS TIMING, NOT DESIGN
+
+The keeper fires every 15 minutes. Its ticks bracketed my succession: `22:39:35` and `22:55:35`
+local, with the claim transferring at `22:49:36`. **The whole handoff window fell between two ticks,
+so the keeper never observed the transition at all.** With a ~2-minute window against a 15-minute
+period, roughly one handoff in eight is observed mid-flight — so "the keeper did not interfere" is a
+statement about this run's luck, not about the protocol. I am recording it as a limit of the drill
+rather than letting a quiet log read as a passed test.
+
+**Why this mattered enough to check:** `w58-notify` changed the keeper's `supervisor-dead` page from
+*"await operator before sup-spawn"* to *"relaunch"*, and the 2026-09-09 amendment has the interface
+dispatch on that page WITHOUT waiting for the operator. So a false page during a handoff is no
+longer a nuisance — it is a token-less `sup-spawn` beside a token-bearing successor, which is the
+two-live-bodies condition the claim system exists to prevent. The new page and the newly-proven
+protocol shipped the same day and have never been in the same room.
+
+## BUT THE KEEPER CANNOT PAGE DURING A HEALTHY HANDOFF, AND THE REASON IS THE HEARTBEAT
+
+Derived from `rule_supervisor_dead` in `bin/fleet_keeper.py`, not assumed. It pages on a
+`released`/`none` claim unconditionally, or on a `held` claim whose heartbeat is stale AND whose
+session is absent from `claude agents --json`. Walking the handoff states:
+- after `sup-handoff-begin` — the predecessor **still holds** the claim and has just checkpointed, so
+  the beat is fresh: `beat <= HEARTBEAT_STALE_SECONDS` returns None before any roster test;
+- between HANDSHAKE and complete — unchanged, still held, still fresh;
+- after `sup-handoff-complete` — held by the successor, `claimed_at` and heartbeat both new.
+
+**At no point in a healthy handoff is the claim `released` or `none`, and at no point is the
+heartbeat stale.** The docstring's own line — *"A held claim with a FRESH heartbeat never pages,
+whatever the roster says"* — is the property doing the work, and it holds through the one window
+where a false page would be most expensive. The order the ruling prescribes (announce, hand off,
+release only if stillborn) is what keeps the claim continuously `held`; **releasing first would have
+opened exactly the window this closes**, which is a second, independent reason for an order my
+predecessor adopted for a different one (a released claim cannot `sup-notify`).
+
+The genuinely exposed path is the **stillborn** one, where `sup-release` sets `released` and the
+keeper pages "relaunch" correctly. There the two-live-body guard is the INTERFACE's, it lives in
+`docs/operator/server-interface-profile.md` as prose for a session to follow, and **nothing in code
+enforces it.** Filed as an observation; not a gate, and not mine to build this turn.
+
+## WAVE 59 STATE
+
+Three lanes live, disjoint by kind: `w59-proven` (prose, the succession landing), `w59-inithome`
+(code, multi-fleet slice (b)), `w59-slice-e` (audit, writes only its own report). All three wrote
+journals to the exact paths only their briefs name, so the `@`-file task rendering worked on all
+three. Beat run: `autoclean` archived 0, skipped 18, `errors=0`; keeper timer active and healthy
+(S6 soak continues, began 2026-09-08).
+
+I am deliberately NOT steering the running prose lane with the keeper finding above. It is an
+addition, not a correction, the lane is mid-task on a clear brief, and `fleet send` has a measured
+1-in-5 failure mode where a fork-steer silently redoes the previous task. It lands at the merge.
+
+## STILL QUEUED, NOT FORGOTTEN
+
+The cwd-resolution question (a new §5 step, the operator's own phrase "per repo/dir") is unfiled as a
+gate ON PURPOSE: `w59-slice-e` is measuring what such a step would collide with, and a gate filed
+with that analysis is worth more than one filed from my sketch an hour earlier. The interface has
+already put the question to the operator, so nothing is lost by waiting. If I am parked before that
+lane returns, **file it anyway** — it is the only thing standing between the operator's stated
+priority and a lane that helpfully implements a ratified-spec breach.
+
+## 2026-09-09T18:51:54Z CHECKPOINT inc=inc-20260909T174911Z-efa0 sid=f9b83beb-41c1-4fa0-8a0e-968b0d3d98ac
+
+CORRECTION — MY OWN HEADLINE WAS WRONG, AND THE LANE I SENT TO CHECK IT IS WHY I KNOW.
+
+## WHAT I CLAIMED AND WHAT IS TRUE
+
+I checkpointed this morning that the handoff was the **first proven succession on this host** and
+that **"0-for-8 is now 1-for-9"**. The first half is true. **The second half is false, and it is
+false by a wide margin.**
+
+`w59-proven` counted the journal by regex over entry headers, at `1294920`, and pinned it as
+receipts: **26 `HANDOFF-BEGIN`, 15 `HANDOFF-COMPLETE`, 3 `HANDOFF-ABORT`.** The eight recorded
+stillbirths are exactly the eight begins with no terminal event, and **all eight predate the
+`dontask` fix** (`87cbf9a`, 2026-07-27T19:10Z), as do all three aborts. Six completions have run
+under the fixed default:
+
+    2026-08-05T16:48:54Z  17:32:10Z  19:33:26Z   2026-08-09T19:03:01Z  22:54:36Z   2026-09-09T17:49:36Z
+
+**So the route was already 6-for-6 post-fix, and my drill is the sixth, not the first.** The first
+five ran on the retired Windows host — established not from dates but from the task-file paths in the
+begin entries (`C:/proga/claude-fleet/state/…` for five, `/home/altai/proga/fleet/state/…` for mine).
+The true claim is the narrow one, and it is what landed in every file: **first on THIS HOST and on
+POSIX**, on a quiet fleet, at a boundary the outgoing body chose.
+
+## THE SENTENCE THAT MADE FOUR OF US WRONG, AND ITS DATES
+
+`skills/fleet/SKILL.md`'s *"no live drill has run under the fixed default, so the route is a
+CANDIDATE, not a proven one"* entered at `b9957f7` on **2026-07-30**, when it was **true** — six days
+before the first post-fix completion. It has been **false since 2026-08-05T16:48:54Z**. And it was
+**re-landed verbatim yesterday** by `5d11f99`, whose diff shows that exact line being edited: new
+context wrapped around it, the stale clause preserved character for character.
+
+That is the whole mechanism. The operator's ruling inherited it, the interface relayed it, my
+predecessor corrected one half of it (the root cause was known and fixed) and carried the other,
+and I inherited that and put it in a checkpoint as a headline. **Four tiers repeated a sentence that
+a single `git log -S` refuted.** A lane asked to verify rather than agree found it in one command.
+*A stale sentence survives a careful edit precisely BECAUSE the edit is careful — you preserve what
+you were not sent to change.*
+
+## AND MY DOCTOR FINDING WAS REAL BUT WRONGLY ATTRIBUTED
+
+I claimed `[FAIL] identity-witness: LEAK` is **structural to every handoff** and that *"nobody could
+have known that before, because no handoff had ever completed."* The lane **refuted it with one
+measurement**, and did not need to attack the step I told it to attack: it ran `fleet doctor` **from
+inside itself** — an ordinary worker, nobody's successor, no handoff anywhere near it — and got the
+identical row, same foreign witness. The daemon founded by my predecessor's dispatch donates that
+founder's name to **every** `--bg` body it hosts. The successor is one instance of a documented class
+(claim-nonce §18, ratified 2026-07-30, already a bullet in `SKILL.md`), not the cause of one. My
+"nobody could have known" was wrong twice over: handoffs had completed, and the class was six weeks
+old.
+
+The lane also refuted my step 3 on its own terms — it conflates *the predecessor is alive* with *the
+predecessor is `--bg`-hosted*; a non-daemon-hosted supervisor with no live workers could let the
+daemon idle-exit, and the successor's own dispatch would then found it, witness == registry, row
+GREEN. **What survives is the operationally true version:** on a persistent server fleet — `--bg`
+supervisor plus live workers, which is exactly this design — the row is red for the successor's whole
+generation and doctor's stated remedy cannot run. That is a grading question about `identity-witness`
+in general. Still filed, still not fixed, and now correctly addressed.
+
+## WHY I AM RECORDING THIS AT LENGTH RATHER THAN QUIETLY RE-STATING IT
+
+The journal is the durable record and a false headline in it outlives me. **And the instrument
+worked**: I sent a lane to verify a claim whose author was me, told it that agreeing with me was not
+the deliverable, and it came back and corrected the supervisor on the wave's headline and on its
+featured finding. That is the second time in two waves that the thing standing between this fleet and
+a confident false statement was a lane instructed to attack its own brief. **Keep doing it.**
