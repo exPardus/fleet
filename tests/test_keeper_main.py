@@ -47,10 +47,17 @@ class Runner:
                                             "pending_decision": self.decision}))
         if argv[:2] == ["claude", "agents"]:
             return _cp(argv, self.agents_rc, "[]")
+        if argv[:2] == ["git", "for-each-ref"]:
+            # w56: the keeper's first git call is the remote-tracking-ref
+            # probe -- with none, `HEAD --not --remotes` would count the whole
+            # history, so "cannot tell" is answered before anything is counted.
+            return _cp(argv, 0, "refs/remotes/origin/main\n")
         if argv[:2] == ["git", "rev-list"]:
             return _cp(argv, 0, "0\n")
         if argv[:2] == ["git", "log"]:
             return _cp(argv, 0, "")
+        if argv[:2] == ["git", "rev-parse"]:
+            return _cp(argv, 0, "server/persistent-fleet\n")
         raise AssertionError(argv)
 
     def tmux(self, verb):
