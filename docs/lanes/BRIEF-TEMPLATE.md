@@ -81,6 +81,28 @@ becomes usable on that home by initialising it. That is why the stanza above spl
 instead of naming one idiom: the flag for homes that already exist, the env-plus-sid-removal for
 homes that do not, and `fleet home` as the gate in both.
 
+**SUPERSEDED IN PART 2026-09-09 by multi-fleet slice (b) — `fleet init --home <PATH>` now exists
+and is exactly the missing step.** Everything above stays true of BARE `fleet init`, which still
+writes only `state/worker-settings.json`; what changed is that there is now a verb whose contract
+is creation. A lane can promote a fresh temp dir into a real home and then use the flag idiom on
+it, which is the shape most drives actually want:
+
+```
+mkdir -p <fresh temp dir>
+fleet init --home <fresh temp dir>      # env-plus-sid-removal idiom: --fleet-home is REFUSED here
+fleet home --fleet-home <fresh temp dir>   # now resolves
+```
+
+**Two things a lane must carry with that, and neither is optional.** `fleet init --home` is
+RATIFIED DESTRUCTIVE (operator, 2026-08-10): it appends to the machine-global
+`~/.claude/fleet-homes.list`, which only the fold reverses. And it deliberately REFUSES
+`--fleet-home` in the same invocation — one invocation names one home — so the first line above
+still needs the env-plus-sid-removal fence, not the flag. **The seam that makes this safe to drive
+at all is `HOME=<temp dir>` in the child environment**: `homes_list_path()`, `user_settings_path()`
+and both daemon paths all resolve from `Path.home()`, so one env var moves the whole `~/.claude`
+surface into a sandbox. Measured on this host by lane `w59-inithome`; before it, a live drive of
+any list-writing verb had no redirect at all outside pytest's monkeypatch.
+
 **Do not read a clean containment audit as proof the fence worked.** Ask a lane to explain *why* it
 was contained, not merely to assert that it was.
 

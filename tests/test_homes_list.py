@@ -712,8 +712,23 @@ class TestNoImplicitReaders:
     def test_only_the_named_writers_append(self):
         """§4: *"Writers: `fleet init --home`, `fleet homes --add`,
         `fleet homes --retire`; never hooks, never dispatch, never
-        session-implicit."* `init --home` is slice (b) and does not exist yet, so
-        at a1 the only caller of the appender is `cmd_homes`.
+        session-implicit."*
+
+        SLICE (b) BUILT THE THIRD WRITER (2026-09-09), and this pin moved with
+        it deliberately rather than being widened to make a RED go away -- which
+        is the whole reason the assertion is an equality over a derived set and
+        not a subset check. §4 names its writers exhaustively, so the population
+        below is a transcription of that sentence and every entry must be one of
+        the three verbs it names.
+
+        `_record_home_on_this_machine` IS `fleet init --home`, one frame down.
+        The verb's scope is `cmd_init` -> `_init_named_home`; the append sits in
+        its own function because `tests/test_homes_list.py`'s no-rewrite lint
+        bans `write_text`/`open` in any scope that can reach the list, and
+        `init --home` also has to write `state/fleet.json` and
+        `state/worker-settings.json` inside the home it creates. One function
+        doing both would be RED, correctly -- the lint cannot tell which file a
+        `write_text` is aimed at.
 
         Derived from the AST so a new caller cannot appear quietly."""
         tree = ast.parse(Path(fleet.__file__).read_text(encoding="utf-8"))
@@ -725,7 +740,7 @@ class TestNoImplicitReaders:
                 if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) \
                         and call.func.id == "append_home_record":
                     callers.add(node.name)
-        assert callers == {"cmd_homes"}, (
+        assert callers == {"cmd_homes", "_record_home_on_this_machine"}, (
             f"`append_home_record` is called from {sorted(callers)}. §4 names "
             f"its writers exhaustively -- never hooks, never dispatch, never "
             f"session-implicit. Add the new writer to this pin deliberately.")
