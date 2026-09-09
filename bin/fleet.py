@@ -15365,7 +15365,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     is wrong -- *"matching against `session_id` alone fails open on it
     (ND4a)"* -- for the fourteen other sites that already key on the union
     (`:2822, :2903, :3164, :3314, :4700, :9186, :9506, :9787, :10018, :10105,
-    :10328, :11114, :15235, :17858`). The thirteenth is multi-fleet §5 step 2's
+    :10328, :11114, :15235, :17927`). The thirteenth is multi-fleet §5 step 2's
     membership test (slice a2), which is the same argument one plane out: a
     home whose record was eagerly restamped would stop claiming its own
     fork-steered body mid-rotation. The fourteenth is
@@ -15386,7 +15386,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
     writer appends that record's OWN prior sid alone: :7947, :8486, :13075,
-    :18512), the same safety invariant §7.1's send carve-out rests on. That
+    :18590), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -16077,7 +16077,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
     #     writer appends that record's OWN prior sid alone (:7947, :8486, :13075,
-    #     :18512) -- so the sid union can never make one body answer for another.
+    #     :18590) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -17518,6 +17518,24 @@ def _warn_missing_bypass_ack(mode: str) -> None:
           file=sys.stderr)
 
 
+# A REDIRECT PROTECTS THE STREAM, NOT THE READER (2026-09-09, measured at that
+# morning's gen-0 supervisor boot on this host). `sup-boot > <bundle>` keeps the
+# minted nonce out of the tool's stdout, and the ritual's `rm` keeps it off disk
+# -- but step 3 then told the body to "read the REST of the bundle file" without
+# saying HOW. The bundle measured ~35KB, and a harness that persists a large tool
+# result writes it to durable storage of its OWN; one whole-file read therefore
+# re-created, out of the fleet's reach, exactly the artifact the redirect exists
+# to avoid, and the `rm` deleted one of TWO plaintext copies (claim-nonce
+# §5.8/§5.9). The supervisor reproduced it at its own boot and deleted both.
+#
+# GENERALISATION, which is the part worth keeping: any tool that persists large
+# output re-creates the artifact a redirect was added to prevent. The transport,
+# not the command, is where the evidence goes wrong -- the same shape as the
+# wave-38 `| tail -8` lesson. So both rituals below order the bundle read IN
+# BOUNDED SLICES, and neither states a byte threshold: 35.1KB is one
+# observation, not a measured boundary, and a number written here would be read
+# as a contract. Pinned by `tests/test_boot_bundle_chunked_read.py`, over BOTH
+# renders -- the successor path had never had the redirect at all.
 def _render_sup_spawn_task(name: str, launch_id: str, campaign: str) -> str:
     """Gen-0 supervisor bootstrap body (sup-spawn choreography design §4,
     modeled on `_render_successor_task`; task-file bootstrap per contract G8
@@ -17542,7 +17560,15 @@ def _render_sup_spawn_task(name: str, launch_id: str, campaign: str) -> str:
     retention policy) -- with the belt sweeps in `_remove_worker_files` /
     `_archive_file_pairs` for a body that dies before its rm. NEW-2: every
     rendered path is double-quoted -- a space under FLEET_HOME must not split
-    the command."""
+    the command.
+
+    2026-09-09: step 3 now orders that read in BOUNDED SLICES, for the reason
+    the comment above this function states. `_render_successor_task` gained the
+    redirect, the grep, the sliced read and the rm in the same change: it had
+    none of them, so the ONE ratified doctrine had been repaired on one of two
+    dispatch paths. The two paths are now the same ritual, and the docstring
+    below reasons about the successor for a second reason -- previously only to
+    distinguish its plaintext handoff token (§6.4), which is unchanged."""
     # CODE PLANE (multi-fleet slice 0): the rendered command must invoke the
     # fleet.py that is running right now, not one under whatever home the
     # caller resolved -- a data-only home has no bin/.
@@ -17570,7 +17596,14 @@ Do exactly this, in order:
    RECORD THE NONCE VALUE NOW -- it is printed exactly once. Every later `sup-*` verb requires it
    (present it with the --nonce flag); losing it costs up to 3600s of lockout.
 3. Read the REST of the bundle file now (GOALS, journal tail, knowledge index, fleet status) so
-   its content is in your working context, then delete the file:
+   its content is in your working context -- IN SLICES, never in one read:
+   sed -n '1,120p' "{bundle}"
+   then '121,240p', then '241,360p', and so on until a slice comes back empty. WHY IN SLICES: a
+   redirect protects the STREAM, not the READER -- a tool that persists a large result writes a
+   SECOND durable plaintext copy of it, in storage this ritual's `rm` cannot reach, and that copy
+   would carry the nonce. The hazard is the SIZE of one read's output, not the spelling of the
+   command, so do not substitute `cat`, a large `head -n`, a file-reading tool, or a one-line
+   script. Then delete the file:
    rm "{bundle}"
    Carry the NONCE value in your working context ONLY -- never into the journal, never into any
    file. Why: claim-nonce §5.8 -- the nonce is printed exactly once and retained nowhere else; a
@@ -17785,7 +17818,21 @@ def _render_successor_task(successor_inc: str, old_inc: str, handoff_token: str)
     predecessor stores only its hash (§5.8), and the file is unlinked on
     complete/abort (§5.9). The successor hashes the token into HANDSHAKE so the
     predecessor can verify the body it dispatched without a sid comparison a
-    fork-steer would break."""
+    fork-steer would break.
+
+    2026-09-09, THE OTHER HALF OF THAT REASONING, which had never been drawn:
+    the token is plaintext in argv BY DESIGN and its own ruling; the NONCE this
+    boot mints is not, and until this change step 1 ran with NO REDIRECT, so the
+    successor was told to read its own generation off the stream tail -- the
+    exact class-4 act `_render_sup_spawn_task`'s docstring says the gen-0 ritual
+    was fixed for. One ratified doctrine, two dispatch paths, one repair. This
+    render now carries the SAME ritual as gen-0: redirect to `boot_bundle_path`,
+    grep the VERDICT/INCARNATION/NONCE lines out of the file, read the rest in
+    bounded slices (see the comment above `_render_sup_spawn_task` for why
+    slices), then `rm`. The bundle is keyed on `_successor_worker_name`, which
+    IS a registered record from `sup-handoff-begin` onward, so the existing
+    `_remove_worker_files` / `_archive_file_pairs` belt sweeps a bundle left by
+    a successor that dies before its rm -- no second sweep was invented."""
     # CODE PLANE (multi-fleet slice 0): the rendered command must invoke the
     # fleet.py that is running right now, not one under whatever home the
     # caller resolved -- a data-only home has no bin/.
@@ -17803,28 +17850,50 @@ def _render_successor_task(successor_inc: str, old_inc: str, handoff_token: str)
     # `strip_global_fleet_home` before argparse, so the flag's position
     # relative to the verb does not change its meaning.
     home = FLEET_HOME.as_posix()
+    # Same redirect target the gen-0 ritual uses, through the same single source
+    # of truth, keyed on the name this successor is REGISTERED under -- so the
+    # deleter (`_remove_worker_files`) and the writer cannot drift apart.
+    bundle = boot_bundle_path(_successor_worker_name(successor_inc)).as_posix()
     return f"""You are the claude-fleet supervisor SUCCESSOR, incarnation {successor_inc}.
 Your predecessor ({old_inc}) dispatched you mid-handoff (spec docs/superpowers/specs/2026-07-13-native-agents-pivot-design.md §4).
 
 Do exactly this, in order:
-1. Run: "{py}" "{fleet_py}" --fleet-home "{home}" sup-boot --handoff-inc {successor_inc} --handoff-token {handoff_token}
-   This prints your boot bundle and writes supervisor/HANDSHAKE (carrying the
-   token hash and your own freshly minted generation). It also prints a
-   `NONCE:` line -- that is YOUR generation; keep it, you present it on your
-   first supervisor verb after the claim transfers. You hold NO claim yet.
-   IF THAT COMMAND REFUSES (`VERDICT: handoff-refused`, exit 5): your predecessor
-   began another handoff after dispatching you, so you were superseded and at most
-   one successor may boot. You hold nothing and there is nothing to retry. STOP --
-   take no actions, end your turn with the final message: HANDOFF-ORPHAN {successor_inc}
-2. Take NO spawn/respawn/send/kill/clean actions before claim transfer -- spec §4's double-spawn guard.
-3. Poll every ~30s (up to 10 minutes): "{py}" "{fleet_py}" --fleet-home "{home}" sup-status --json
+1. FIRST ACT, before anything else -- run sup-boot with its output redirected to a file (class-4
+   nonce doctrine: never read a secret off the stream tail -- the same ritual the gen-0 body runs):
+   "{py}" "{fleet_py}" --fleet-home "{home}" sup-boot --handoff-inc {successor_inc} --handoff-token {handoff_token} > "{bundle}" 2>&1
+   Note the command's exit code. On success this writes your boot bundle to that file and writes
+   supervisor/HANDSHAKE (carrying the token hash and your own freshly minted generation).
+2. Read the verdict, and on success your generation, FROM THE FILE:
+   grep -E "^(VERDICT|INCARNATION|NONCE):" "{bundle}"
+   RECORD THE NONCE VALUE NOW -- it is printed exactly once. That is YOUR generation; you present
+   it on your first supervisor verb after the claim transfers. You hold NO claim yet.
+   IF THE VERDICT IS `handoff-refused` (exit 5): your predecessor began another handoff after
+   dispatching you, so you were superseded and at most one successor may boot. Delete the bundle
+   with the step-3 `rm` and stop -- you hold nothing and there is nothing to retry. Take no
+   actions, end your turn with the final message: HANDOFF-ORPHAN {successor_inc}
+3. Read the REST of the bundle file now (GOALS, journal tail, knowledge index, fleet status) so
+   its content is in your working context -- IN SLICES, never in one read:
+   sed -n '1,120p' "{bundle}"
+   then '121,240p', then '241,360p', and so on until a slice comes back empty. WHY IN SLICES: a
+   redirect protects the STREAM, not the READER -- a tool that persists a large result writes a
+   SECOND durable plaintext copy of it, in storage this ritual's `rm` cannot reach, and that copy
+   would carry the nonce. The hazard is the SIZE of one read's output, not the spelling of the
+   command, so do not substitute `cat`, a large `head -n`, a file-reading tool, or a one-line
+   script. Then delete the file:
+   rm "{bundle}"
+   Carry the NONCE value in your working context ONLY -- never into the journal, never into any
+   file. Why: claim-nonce §5.8 -- the nonce is printed exactly once and retained nowhere else; a
+   bundle left on disk is a durable plaintext copy (gitignored is not a retention policy, §5.9).
+4. Take NO spawn/respawn/send/kill/clean actions before claim transfer -- spec §4's double-spawn guard.
+5. Poll every ~30s (up to 10 minutes): "{py}" "{fleet_py}" --fleet-home "{home}" sup-status --json
    - When incarnation.incarnation_id == "{successor_inc}": the claim is yours. Run:
      "{py}" "{fleet_py}" --fleet-home "{home}" sup-checkpoint "claim received via handoff from {old_inc}" --nonce <YOUR-NONCE>
-     substituting the NONCE value step 1 printed. THE FLAG IS NOT OPTIONAL: `sup-checkpoint`
+     substituting the NONCE value step 2 printed. THE FLAG IS NOT OPTIONAL: `sup-checkpoint`
      is a `_require_claim_holder` verb, so without it this call is REFUSED and the refusal
      files a false second-body row in `fleet doctor` -- a permanently-red row trains the
      operator to ignore the row that will one day be real.
-     then read your boot bundle output and continue the supervisor duty per skills/fleet/supervisor.md.
+     then continue the supervisor duty per skills/fleet/supervisor.md on the boot bundle content
+     you read in step 3.
    - If 10 minutes pass without transfer: the handoff was aborted. STOP -- take no actions,
      end your turn with the final message: HANDOFF-ORPHAN {successor_inc}
 """
@@ -18034,6 +18103,15 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
         })
         write_incarnation(claim)
         task_path.parent.mkdir(parents=True, exist_ok=True)
+        # 2026-09-09: the successor's boot ritual now redirects `sup-boot` into
+        # `boot_bundle_path`, whose parent is `tasks_dir()` -- and THIS dispatch
+        # path is the one that does not go through `dispatch_bg`, which is the
+        # only place that directory is otherwise created. In practice a handoff
+        # always follows a `dispatch_bg` launch so it exists, but a redirect
+        # into a missing directory fails the successor's FIRST ACT and strands
+        # the whole handoff, which is too expensive to leave resting on that.
+        boot_bundle_path(_successor_worker_name(successor_inc)).parent.mkdir(
+            parents=True, exist_ok=True)
         task_path.write_text(
             _render_successor_task(successor_inc, claim["incarnation_id"], handoff_token),
             encoding="utf-8")
