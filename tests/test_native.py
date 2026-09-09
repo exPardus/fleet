@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 import fleet
+from conftest import child_env  # noqa: E402
 
 
 NOW = datetime(2026, 7, 15, 12, 0, 0, tzinfo=timezone.utc)
@@ -4906,8 +4907,9 @@ class TestMainUtf8Reconfigure:
         fleet.append_outcome("w1", {"ts": _iso(NOW), "session_id": sid, "kind": "result",
                                     "result_text": "✓ 完了 émoji",
                                     "input_tokens": 1, "output_tokens": 1})
-        env = dict(os.environ)
-        env["FLEET_HOME"] = str(native_home)
+        # `child_env`: a REAL `fleet.py` verb drive -- `main()` reaches
+        # `read_homes_list()` -> `Path.home()` (w60 §5).
+        env = child_env(native_home, FLEET_HOME=str(native_home))
         env.pop("PYTHONIOENCODING", None)
         proc = subprocess.run(
             [*PY_CMD, str(REPO_ROOT / "bin" / "fleet.py"), "result", "w1"],

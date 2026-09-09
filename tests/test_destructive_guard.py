@@ -24,6 +24,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin"))
 import fleet  # noqa: E402
+from conftest import child_env  # noqa: E402
 
 
 @pytest.fixture
@@ -499,9 +500,15 @@ class TestRealCliRefusesCleanly:
             {"workers": {"victim": _rec(spawned_by=spawned_by, status="idle")}}), encoding="utf-8")
 
     def _run(self, tmp_path, *argv, session="an-agent"):
-        import os
         import subprocess
-        env = {**os.environ, "FLEET_HOME": str(tmp_path), "CLAUDE_CODE_SESSION_ID": session}
+        # `child_env`, not `{**os.environ, ...}`: this is a REAL `fleet kill`,
+        # and `main()` reaches `read_homes_list()` -> `Path.home()` on every
+        # non-exempt verb. Inheriting `$HOME` pointed that read at the
+        # OPERATOR's `~/.claude/fleet-homes.list`, so a listed home claiming
+        # this sid would retarget the kill off `tmp_path` entirely (w60, §5:
+        # measured writing `dead` into a bystander home's registry).
+        env = child_env(tmp_path, FLEET_HOME=str(tmp_path),
+                        CLAUDE_CODE_SESSION_ID=session)
         return subprocess.run(
             [sys.executable, str(Path(fleet.__file__)), *argv],
             capture_output=True, text=True, stdin=subprocess.DEVNULL, env=env)
@@ -571,9 +578,8 @@ class TestAWorkerCallerIsNotExempt:
 
         `session=None` means a human shell: the variable is ABSENT, not empty.
         `worker` sets FLEET_WORKER, the marker a launched worker carries."""
-        import os
         import subprocess
-        env = {**os.environ, "FLEET_HOME": str(tmp_path)}
+        env = child_env(tmp_path, FLEET_HOME=str(tmp_path))   # w60: see the twin above
         env.pop("CLAUDE_CODE_SESSION_ID", None)
         env.pop("FLEET_WORKER", None)
         if session is not None:
