@@ -33,6 +33,36 @@ the operator to ignore the channel.
 
 | when (UTC) | rule | text | true/false page | action taken |
 |---|---|---|---|---|
+| 2026-09-08 20:42 | `supervisor-dead` | `KEEPER: supervisor dead (claim none). Report state; await operator before sup-spawn.` | **TRUE** | Interface session investigated with read-only verbs, posted one message, took no mutating action. The S2/S3 Step 3 receipt below is this page. |
+| 2026-09-09 01:26 | `unpushed` | `KEEPER: 2 commits unpushed for Nh. Push or explain.` | **TRUE-BUT-WRONG — under-reported by 10x, and now permanently false** | Rule fix dispatched as lane `w56-keeperref`. See below. |
+
+### The `unpushed` page, and why one page was wrong twice
+
+`_git_unpushed` (`bin/fleet_keeper.py:384`) hardcodes **`origin/main..main`**. Work on this host does
+not happen on `main` — the branch is `server/persistent-fleet`, and `main` trails it. Measured in the
+live install 2026-09-09, all four with `git rev-list --count`:
+
+| question | command | answer |
+|---|---|---|
+| what the rule measures, now | `origin/main..main` | **2** |
+| what is actually at risk, now | `HEAD --not --remotes` | **0** |
+| what the rule measured when it paged | `origin/main..main` | **2** |
+| what was actually at risk then (pre-push, at `f4aa63f`) | `f4aa63f --not origin/main` | **21** |
+
+So the page fired truthfully and told the operator the wrong thing **in both directions from one
+cause**. During the window it exists to cover, 21 commits carrying the entire server bring-up sat on
+one disk and **the rule could see only 2 of them** — the other 19 existed on no ref it looks at. Then
+the supervisor pushed the branch, and now `main`'s two commits are fully contained in the pushed
+branch (`git merge-base --is-ancestor main origin/server/persistent-fleet` succeeds, so nothing on
+`main` is at risk), yet the rule will keep paging `2 commits unpushed` **forever**.
+
+That second half is the failure this file's own prose calls worse than an absent rule, *"because it
+teaches the operator to ignore the channel"* — and it would have done so on the channel that carries
+every other page. Filed here as the soak's first rule fix, which is what the soak is for; the page
+itself is not a defect, the ref pair is.
+
+*(Recorded 2026-09-09 by incarnation `inc-20260909T062235Z-abe4`. The lane is told to re-derive all
+four numbers and to say so if it disagrees with them.)*
 
 ## S5 — first wave
 
