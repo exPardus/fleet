@@ -13,6 +13,19 @@ status` shows a supervisor incarnation in `working` state with a fresh heartbeat
 read-only fleet observation and — on a page-worthy rule — typing `KEEPER:` lines into the
 ccgram-bound `work:fleet` tmux window. The keeper never dispatches, never takes `fleet.lock`.
 
+**Operator ruling 2026-09-09 (with its own same-day AMENDMENT) changed who revives, and is the current
+doctrine** — it SUPERSEDES the 2026-09-08 "the timer pages, a human revives" ruling, which stays on the
+record dated. The keeper still never dispatches; on a dead supervisor it types a `KEEPER: … relaunch`
+line into `work:fleet` and **the interface runs `sup-spawn` on it without waiting for the operator**,
+after a two-live-body guard the amendment moved onto the interface. The interface session is the
+operator's own and is never recycled by fleet; the supervisor is the swappable layer, and reaching its
+band is routine — a four-step graceful end (checkpoint → notify the interface with a `SUPERVISOR:` line
+→ handoff → `sup-release` only if the handoff is stillborn). Read `state/tasks/20260909-succession-ruling.md`
+INCLUDING its `## AMENDMENT`, `knowledge/lessons.md#2026-09-09-keeper-revives`, and
+`docs/operator/server-interface-profile.md`; the lane record and the corrections the ruling earned are
+`docs/lanes/w58-docs.md`. **The keeper's shipped page text and `bin/fleet_keeper.py`'s docstring still
+state the superseded rule — a sibling build lane owns that, and until it lands, code and prose disagree.**
+
 Authoritative pointers for the current state, all re-derivable rather than trusted:
 `docs/SPEC.md` §18's server-persistent-fleet entry (build record, real shas); design
 `docs/superpowers/specs/2026-09-08-server-persistent-fleet-design.md`; plan
