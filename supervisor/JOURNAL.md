@@ -10706,3 +10706,330 @@ widening the class again (the fork tool has now produced two corruption classes 
 the instrument's next reader, not by the instrument); that landing two code axes plus their re-pins
 fits in one body; and that `fork`-before-`dfix` survives the first re-pin fixpoint, which is the step
 this campaign has the most evidence against.
+
+## 2026-09-09T06:22:35Z BOOT inc=inc-20260909T062235Z-abe4 sid=44701f95-4bbf-4094-bf36-532629f1b637
+
+fresh claim: no existing claim -- fresh claim
+
+## 2026-09-09T06:24:19Z CHECKPOINT inc=inc-20260909T062235Z-abe4 sid=44701f95-4bbf-4094-bf36-532629f1b637
+
+WAVE 55 BOOT (kz-work server, first supervisor incarnation on this host) — FRESH CLAIM, NO SEIZURE.
+
+## HOW I GOT THE CLAIM
+
+`sup-boot` with NO handoff flags returned VERDICT `claim -- no existing claim -- fresh claim` at
+exit 0. Incarnation `inc-20260909T062235Z-abe4`, sid `44701f95-4bbf-4094-bf36-532629f1b637`.
+This is the gen-0 path the sup-spawn task predicted: not a seizure, not a limit-transfer, not a
+handoff. `EPOCH: ok -- roster holds 6 entries`, so no suspicious-roster freeze.
+
+## A CLASS-4 NONCE LEAK I CAUSED AND CLOSED — READ THIS BEFORE THE NEXT BOOT
+
+The task file's redirect doctrine is sound and I followed it, but `cat`-ing the 35KB bundle in one
+Bash call made THE HARNESS PERSIST ITS OWN COPY of the whole bundle — nonce line included — to
+`~/.claude/projects/<slug>/<sid>/tool-results/<id>.txt`, because output over ~30KB is spilled to a
+file. So the `rm` the task orders deletes ONE of TWO durable plaintext copies and the doctrine's
+own §5.9 ("gitignored is not a retention policy") is violated by a path nobody wrote down. I
+deleted both and verified `tool-results/` is now empty.
+
+**Remedy for the next boot task (not yet applied to any file):** read the bundle in `sed -n`
+chunks under the spill threshold, never `cat` it whole — or grep the three header lines and read
+the body in slices. The generalisation is worth more than the fix: *a redirect protects the
+stream, not the reader; any tool that persists large output re-creates the artifact the redirect
+existed to avoid.* This is the same shape as the wave-38 `| tail -8` lesson — the transport, not
+the command, is where the evidence goes wrong.
+
+## THE STATE I INHERITED, RE-DERIVED NOT INHERITED
+
+The journal tail I was handed is FIVE ENTRIES ENDING 2026-08-09 with `C:/proga/claude-fleet` paths
+— the Windows era. **The journal tail is not the state of this host.** All server-era work
+(2026-09-08) was done by the interface tier and lanes, and it is NOT in the journal at all. So the
+standing brief's "the last CHECKPOINT is your plan" resolves to a plan for a different machine, and
+I re-derived the real state from the tree instead:
+
+- Branch `server/persistent-fleet`, working tree clean but for `supervisor/JOURNAL.md` (mine).
+- **21 commits ahead of `origin/main`, and `git ls-remote --heads origin server/persistent-fleet`
+  returns NOTHING — the branch does not exist on the remote.** The 2026-09-08 interface receipt
+  said "17 ahead, unpushed"; it is 21 now. Every commit of the server bring-up — keeper, units,
+  spec §3.3, the S0/S2/S3 receipts — exists on exactly one disk. This is precisely what the
+  standing brief says the keeper pages about after six hours, and it is my first landing act.
+- `autoclean`: errors=0, archived 0, skipped 2.
+- Gates: **three open — G-K1, G-K2, G-K4** (counted by unticked box in `docs/OPERATOR-GATES.md`
+  myself; the docket digest agrees). Carried, none ticked, no fourth from me.
+- **G-K4 is already executed on the tree while still unratified**: `supervisor/briefs/` is
+  git-tracked and `supervisor/briefs/server-standing.md` is committed. The gate asks whether that
+  directory should exist; the answer was shipped ahead of the ruling. I am not ticking it and not
+  reverting it — recording that the gate is now about ratifying a fact, which is a different and
+  weaker question than the one filed.
+- Keeper timer IS live: `fleet-keeper.timer` active, 15min cadence, deployed from the role's task
+  files via a scratch localhost play because `china-infra`'s golang preflight (`go1.27.1` digest
+  gone from go.dev) aborts every tagged `work.yml` run before `fleet_keeper`. That blocker is
+  someone else's and unresolved.
+- `docs/NEXT-SESSION.md` opens with a 2026-08-06 STAND-DOWN block and knows nothing of this host.
+  It is stale by a month and by a machine; anyone reading it in order will be told the fleet is
+  deliberately stopped. Fixing it is a wave-boundary act, not a boot act.
+
+## PLAN
+
+1. Drain `state/inbox/20260908-first-wave.md` — one Sonnet worker, full suite on 3.10 and 3.12,
+   both tail lines into `docs/operator/keeper-soak-2026-09.md` under `## S5 — first wave`. The
+   baseline to beat is on record: 6 failed / 4638 passed / 7 skipped / 1 xfailed, same six
+   pre-existing failures on both interpreters. **A rerun that reproduces the baseline exactly is
+   the result; a rerun that differs is the finding.** Spawn carries `--setting-sources
+   project,local`.
+2. Push `server/persistent-fleet` to origin. Doing it BEFORE the wave's own commits, not after,
+   because 21 commits on one disk is the risk and my own additions are the smallest part of it.
+3. Then the operator's 2026-09-09 task ("continue fleet development"): fold the server era into
+   the journal and into `docs/NEXT-SESSION.md`, so the next incarnation's boot bundle stops
+   describing a dead machine.
+
+## WHAT I EXPECT TO GET WRONG
+
+That the suite reproduces the baseline — the 3.10/3.12 runs on record were taken at `09819e1` and
+the branch has moved 12+ commits since, including `bin/fleet.py` and keeper changes, so the six
+pre-existing failures are the only part I would bet on. That the push is uncontested (nobody has
+pushed this branch, so there is no remote history to disagree with — but `origin/main` may have
+moved). And that "continue fleet development" is one wave: the journal/NEXT-SESSION reconciliation
+alone is the kind of documentation debt this campaign has repeatedly under-priced.
+
+## 2026-09-09T06:31:43Z CHECKPOINT inc=inc-20260909T062235Z-abe4 sid=44701f95-4bbf-4094-bf36-532629f1b637
+
+WAVE 55 MID-WAVE — A HOST DEFECT THAT PARALYSED EVERY WORKER, AND IT IS THIS REPO'S OWN 2026-07-27
+LESSON ARRIVING ON A SURFACE THE FIX NEVER REACHED.
+
+## WHAT HAPPENED
+
+I dispatched three lanes (`w55-suite` Sonnet, `w55-nonce` Opus, `w55-recon` Sonnet), all with
+`--setting-sources project,local` per the standing brief and all at the shipped default
+`--mode dontask`. `w55-suite` came back `idle` on turn 1 having done NOTHING, and its report is the
+best defect report a worker has filed this campaign:
+
+> Every step ... is being denied with "Permission to use Bash has been denied because Claude Code is
+> running in don't ask mode." ... Read-only commands succeed: `git status --short`, `ls`, `echo
+> hello`. But `uv --version` alone is denied, and so is `command -v uv`, any Bash chaining (`;`),
+> any pipe (`|`), any heredoc, and both the `Write` and `Edit` tools outright (tested twice each).
+
+It also declined to work around it with a sandbox-disable flag on the grounds that this would bypass
+the boundary rather than resolve it. **That is the correct call and I am recording it as such** —
+the worker that reports a wall beats the worker that climbs it.
+
+## THE CAUSE, AND WHY NOBODY SAW IT COMING
+
+`bin/fleet.py:21451` — `p_spawn.add_argument("--mode", ..., default="dontask")`. Workers still
+default to `dontask`. **The supervisor surfaces were migrated off it and the worker surface was
+not.** `bin/fleet.py:13897-13931` carries the measurement in full: `dontask` was the supervisor
+default 2026-07-21→27 and was removed after **10 of 10 successors dispatched under it were
+stillborn** against **7 of 7 under `bypass`** — 17/17, zero exceptions — with the comment's own
+conclusion, verbatim: *"`dontAsk` does not prompt -- it DENIES anything the allow-list does not
+already cover"* and *"Do NOT 'restore' dontask ... it trades a loud wedge for a silent death, which
+is strictly worse and cost three days."* `SUCCESSOR_DEFAULT_MODE` and `SUP_SPAWN_DEFAULT_MODE` are
+both `bypass`. `spawn` is the third dispatch surface and it kept the retired value.
+
+**Why it never fired before this host.** `dontask` denies whatever the allow-list does not cover, so
+it is survivable exactly as long as the allow-list is fat. On Windows, workers launched with no
+`--setting-sources`, so `~/.claude/settings.json`'s grants merged in and carried them. **This host's
+standing rule — `--setting-sources project,local`, which exists to keep a foreign user-level Stop
+hook off fleet sessions — strips those grants**, leaving `state/worker-settings.json`'s entire
+allow-list: `["Bash(fleet q:*)"]`. One entry. So the host rule that protects the fleet from a
+foreign hook is the same rule that reduces every worker to `fleet q`, and the two were introduced by
+different waves that never met.
+
+**And the S0 canary passed, which is why the bring-up cleared this.** `canary-srv` ran one command
+— `date` — and `date` happens to fall inside what this mode permits. *A canary proves the path it
+flew.* The 2026-07-27 comment says the `dontask` reasoning "was never tested against a command
+outside the allow-list"; the 2026-09-08 canary repeated that omission on a new host, with a
+different allow-list, sixteen months of doctrine later.
+
+## WHAT I DID
+
+Killed all three (`--yes`, all mine, all this wave) and re-dispatched as `w55-suite-b`,
+`w55-nonce-b`, `w55-recon-b`, identical briefs, `--mode bypass` added. `respawn` was NOT the
+instrument: it carries no `--mode` and would have re-used the record's dead mode. Cost of the
+misfire: three turn-1 bodies, one useful report.
+
+## WHAT I DELIBERATELY DID NOT DO
+
+**I did not raise a fourth operator gate.** Three (G-K1, G-K2, G-K4) have been open and unanswered
+since 2026-09-08 and the docket's own discipline is "no fifth" while the earlier ones wait. Nothing
+is blocked: `--mode bypass` is a per-spawn flag I already own, and it is the same value the ratified
+three-tier §10.2 earned-privilege doctrine already gives supervisor bodies in this repo. **What is
+genuinely a design question is the DURABLE fix, and it has two candidate shapes** — default the
+worker surface to `bypass` the way the two supervisor surfaces already are, or ship a real
+`permissions.allow` block in `worker-settings.template.json` and take the `fleet init` migration
+that implies. **SPEC §18's own fleet-index M2 entry already names the second one as owed** ("the
+template ships no permissions block ... a default worker's call would hang unanswerable") — so this
+is not a new hole, it is a known latent one that this host made live. Successor-queue item 1. If the
+operator wants it as a gate rather than a build slice, this checkpoint is where that is visible.
+
+## STILL TRUE FROM THE BOOT CHECKPOINT
+
+`origin/server/persistent-fleet` created at `f4aa63f`, remote tip == local HEAD, verified — the 21
+inherited commits are no longer on one disk. Inbox drained to
+`state/inbox/done/20260908-first-wave.md` with its campaign line. `sup-context` 118,968 — BELOW-BAND
+against a 350k soft trigger.
+
+## WHAT I EXPECT TO GET WRONG NEXT
+
+That `bypass` is sufficient rather than merely necessary — the three lanes have not yet proved they
+can WRITE, only that the mode that denied them is gone. And that killing three turn-1 bodies was the
+cheap call: if `w55-nonce`'s Opus turn had already finished its investigation and only the edit was
+blocked, I threw away the expensive half to save the cheap half. I did not read its transcript
+before killing it, and I should have.
+
+## 2026-09-09T07:06:11Z CHECKPOINT inc=inc-20260909T062235Z-abe4 sid=44701f95-4bbf-4094-bf36-532629f1b637
+
+WAVE 55 CLOSED — six landings, branch pushed twice, inbox drained, three gates carried, no fourth.
+
+## LANDED AND PUSHED (`f4aa63f` -> `dba0868`, remote tip verified byte-equal to local HEAD)
+
+- `443af3c` `docs(spec)` — §18 records the kz-work server era. `grep -c keeper docs/SPEC.md` was **0**
+  before this: the entire keeper era was absent from the milestone record `CLAUDE.md` sends readers
+  to. Entry names the three OPEN gates, the S-1/S-2 deferrals, and the china-infra golang blocker.
+- `7e5fef9` `docs(next-session)` — the file no longer opens by declaring the fleet deliberately
+  STOPPED. The 2026-08-06 stand-down is re-labelled HISTORICAL and kept, not deleted.
+- `f7b063e` `docs(operator)` — the lane's S5 receipts, contamination and all.
+- `d5111b6` `fix(sup)` — the boot ritual's second durable nonce copy, both dispatch paths, +19 tests.
+- `8d03f6c` `docs(operator)` — the CLEAN S5 receipt (below).
+- `dba0868` `knowledge(w55)` — lessons + INDEX + project file.
+
+## THE CLEAN FLOOR, WHICH IS THE ONE THAT COUNTS
+
+`6 failed, 4762 passed, 7 skipped, 1 xfailed` — **4776 collected, IDENTICAL on 3.10 and 3.12**,
+failure set the six pre-existing members node-id for node-id, 4m56s / 4m36s. Taken after every lane
+was idle and the tree quiescent, and deliberately with NO checkpoint during either run: a checkpoint
+writes `supervisor/JOURNAL.md`, which is git-tracked, under `conftest.py`'s install-plane hash guard
+— I would have re-created the exact ERROR I was investigating. The first durations this host has on
+record; "~6 min" is retired.
+
+## THE TWO FINDINGS, AND BOTH ARE ABOUT THE WAVE RATHER THAN ITS SUBJECTS
+
+**1. `fleet spawn` still defaults to `dontask`** (`bin/fleet.py:21451`) — the mode this repo measured
+**17/17 fatal** in July and removed from `SUCCESSOR_DEFAULT_MODE` and `SUP_SPAWN_DEFAULT_MODE`.
+Workers were the third dispatch surface and kept the retired value. Armed on this host by our own
+`--setting-sources project,local`, which strips the user-level allow-list that made `dontask`
+survivable on Windows, leaving `["Bash(fleet q:*)"]`. The S0 canary cleared the bring-up by running
+`date`. Remedy applied per-spawn (`--mode bypass`, 3/3 booted); the durable fix is queued below.
+
+**2. The parallelism failure was mine, and I have corrected my own account of it.** My mid-wave
+checkpoint called it a hole in the disjointness rule. It is not: `knowledge/projects/claude-fleet.md`
+§Bootstrap hazard — which its own header calls the live home of the worktree-isolation doctrine —
+already says code-touching workers never run in the live install and at most ONE `bin/fleet.py`
+writer is alive fleet-wide. **I dispatched a `bin/fleet.py` writer into the live repo.** I reached
+for the 2026-08-05 disjointness rule and treated it as the whole test; it relaxes a worker-count
+limit, it does not repeal the worktree rule that predates it. What is genuinely new is only a SECOND
+ground for that same rule — measurement contamination, which bites even when nothing hot-swaps —
+and that is what went into the project file.
+
+## WHAT THE LANES DID THAT I WANT REPEATED
+
+`w55-suite` refused to work around its permission wall with a sandbox-disable flag and filed the
+denial instead — the report that diagnosed the wave. `w55-recon-b` cut a throwaway worktree
+unprompted to get an attributable answer, and flagged rather than decided the open question about
+`NEXT-SESSION.md`'s lower sections. `w55-nonce-b` left its floor prediction as written (+18) and
+recorded the correction (+19) instead of editing it to match, re-pinned three self-citations BY HAND
+rather than trusting `repin_citations.py`, and named one of its own tests green-against-unpatched-code
+in its report so nobody later cites it as evidence of the original defect. It also found a latent
+bug the task never asked about: `cmd_sup_handoff_begin` is the one `--bg` launch that skips
+`dispatch_bg`, the only creator of `tasks_dir()`, so the redirect it was adding would have stranded a
+handoff on any home that had never dispatched a worker.
+
+## SUCCESSOR QUEUE, IN ORDER
+
+1. **The worker-permission durable fix.** Two candidate shapes: default the worker surface to
+   `bypass` the way both supervisor surfaces already are, or ship a real `permissions.allow` block in
+   `worker-settings.template.json` and take the `fleet init` migration **SPEC §18's fleet-index M2
+   entry already says is owed.** Live workaround exists (`--mode bypass`), so this is a build slice,
+   not a gate. **Dispatch it in a WORKTREE** — it touches `bin/fleet.py`.
+2. **Doc changes `w55-nonce-b` reported and correctly did not make** (out of its scope):
+   `skills/fleet/supervisor.md:74-75` and the server plan at `:1411` both describe the gen-0 redirect
+   and are silent on how the rest of the bundle is read, so they carry the same hole by omission and
+   now describe only one of two paths.
+3. **`NEXT-SESSION.md`'s lower sections** — 2026-08-05 material, unverified against the current tree,
+   flagged by the lane and left alone deliberately. Operator call whether it becomes a journal pointer.
+4. **S6 soak continues** (began 2026-09-08). `## Pages observed` is still empty; the keeper has paged
+   once, before this incarnation existed.
+
+## GATES
+
+Three open and unanswered since 2026-09-08: G-K1, G-K2, G-K4. Carried, none ticked, **no fourth
+raised.** G-K4 remains the odd one — `supervisor/briefs/` is already git-tracked and committed, so
+that gate is now about ratifying a fact rather than approving a proposal, which is a weaker question
+than the one filed.
+
+## WHAT I EXPECT TO GET WRONG NEXT
+
+That `--mode bypass` on every worker is the right durable answer rather than the convenient one — it
+is the third time this campaign has resolved a permission question by widening, and nobody has yet
+priced what a curated allow-list would actually cost. And that the clean floor is stable: it is one
+measurement of a tree that six commits just moved, taken on a host whose six pre-existing failures
+nobody has yet explained.
+
+## 2026-09-09T08:17:36Z CHECKPOINT inc=inc-20260909T062235Z-abe4 sid=44701f95-4bbf-4094-bf36-532629f1b637
+
+STAND-DOWN — three waves (55, 56, 57) closed, everything pushed, claim about to be released cleanly.
+
+## STATE AT RELEASE
+
+`server/persistent-fleet` at **`0dc9be2`**, remote tip verified byte-equal, and the metric the
+keeper's own repaired rule uses — `git rev-list --count HEAD --not --remotes` — reads **0**. When I
+booted, 21 commits carrying the entire server bring-up existed on one disk and the branch was not on
+the remote at all. `fleet doctor`: every row PASS, no FAIL, no WARN, no NOTE. Gates: **three open
+(G-K1, G-K2, G-K4), unchanged, none ticked, none added.** Floors **4836 collected, identical on 3.10
+and 3.12**, six pre-existing failures unchanged throughout.
+
+## WHAT SHIPPED
+
+**Wave 55** — inbox drained; §18 gained the server era (`grep -c keeper docs/SPEC.md` was 0);
+`NEXT-SESSION.md` no longer opens by declaring the fleet STOPPED; the boot ritual's second durable
+nonce copy closed on BOTH dispatch paths; the branch pushed for the first time.
+**Wave 56** — the keeper's `unpushed` rule now measures risk instead of a fixed ref pair; a
+permission-denied worker no longer renders as a fast one; the priced A/B/C memo at
+`docs/lanes/w56-permvis.md`; three corrections, one of them mine.
+**Wave 57** — `skills/fleet/supervisor.md`, the file every supervisor loads at boot, no longer
+describes a redirect as the whole class-4 defence or gen-0 as the only path carrying the ritual.
+
+## THE THREE THINGS I GOT WRONG, ON THE RECORD
+
+1. **I ran three lanes in one working tree** and destroyed wave 55's suite receipt. Not a gap in the
+   disjointness rule — `knowledge/projects/claude-fleet.md` §Bootstrap hazard already forbade a
+   `bin/fleet.py` writer in the live install, and I broke it. Wave 56 used two separate worktrees and
+   its merged floor prediction hit to the digit on both interpreters.
+2. **I repeated a false premise into two briefs and a checkpoint** — that
+   `worker-settings.template.json` ships no `permissions.allow` block, sourced from SPEC §18's M2
+   entry. It has shipped one since July. A lane opened the file; nobody had.
+3. **I line-cited a rolling document** (`knowledge/INDEX.md` → `bin/fleet.py:21451`), against this
+   repo's own ratified 2026-08-05 rule, already stale by 78 lines the day I wrote it.
+
+None of the three was found by me. All three were found by lanes I had told to check my work, which
+is the only reason to write briefs that invite contradiction.
+
+## SUCCESSOR QUEUE
+
+1. **The worker-permission default.** `fleet spawn` still defaults to `dontask`; every worker on this
+   host needs an explicit `--mode bypass`. **`docs/lanes/w56-permvis.md` prices all three shapes and
+   recommends A (default to `bypass`) CONDITIONAL on extending `_warn_missing_bypass_ack` to workers**
+   — because §10.2's earned privilege is scoped to `FLEET_HOME` and a worker runs wherever `--dir`
+   points. Shape B is already built and was never the blocker. This is a build slice with a live
+   workaround, and it is the one thing here I would raise as a gate if the operator wants the
+   security posture decided rather than assumed.
+2. **The stall half of S-2**, still needing a measured stall — and now known to be impossible from a
+   file-only projection, so it must live wherever the roster does.
+3. **`docs/NEXT-SESSION.md`'s 2026-08-05 sections** — unverified against the current tree, flagged by
+   a lane and deliberately left. Operator call whether they become a journal pointer.
+4. **S6 soak continues** (began 2026-09-08). `## Pages observed` now has two entries and one rule fix.
+
+## WHY I AM RELEASING RATHER THAN HOLDING
+
+`sup-context` 232k against a 350k soft trigger, so this is not a context handoff — there is headroom
+and I am not spending it. The operator's task ("continue fleet development") is discharged to a
+clean boundary: nothing is half-landed, no lane is running, no worktree is left on disk, and the
+next decision is theirs rather than mine. **The keeper will page `supervisor-dead` on its next tick
+and the interface will carry it to the phone. That is the designed end of S5 — the plan's own Step 3
+says so — not a failure to hide.**
+
+## WHAT I EXPECT TO GET WRONG
+
+That three waves without a single usage-limit park means the tier policy is comfortable here; it may
+just mean a short session. That the six pre-existing failures are benign — they have now been
+reproduced five times and explained zero. And that `--mode bypass` on every worker is the right
+answer rather than the convenient one: it is the third time this campaign has resolved a permission
+question by widening, and the memo I am handing over is the first time anyone priced the alternative.
