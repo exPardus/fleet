@@ -223,6 +223,15 @@ def rule_worker_anomaly(obs, now):
 
 
 def rule_unpushed(obs, now):
+    """`unpushed` is commits that exist on NO remote -- see `_git_unpushed`,
+    which is where w56 replaced the fixed `origin/main..main` ref pair.
+
+    The page NAMES the ref it measured (w56). The page this host actually got
+    said `2 commits unpushed for 9h` and nothing more, and the operator had no
+    way to see from it that the two commits were on `main`, fully contained in
+    a pushed branch, while the nineteen the rule could not see were on the
+    working branch. `unpushed_ref` is optional: an observation that could not
+    read the name still pages the count."""
     n = obs.get("unpushed") or 0
     oldest = obs.get("oldest_unpushed_ts")
     if n <= 0 or oldest is None:
@@ -231,8 +240,11 @@ def rule_unpushed(obs, now):
     if age < UNPUSHED_PAGE_SECONDS:
         return None
     hours = int(age // 3600)
+    ref = obs.get("unpushed_ref")
+    where = f" on {ref}" if ref else ""
     return Page("unpushed", f"{n}:{int(oldest)}",
-                f"KEEPER: {n} commits unpushed for {hours}h. Push or explain.")
+                f"KEEPER: {n} commits unpushed{where} for {hours}h. "
+                "Push or explain.")
 
 
 def rule_hook_errors(obs, now):
@@ -304,6 +316,10 @@ def save_state(path: Path, state: dict) -> None:
 
 SUBPROCESS_TIMEOUT = 30
 MISSING_BINARY_RC = 127
+# The rev set the unpushed rule measures: everything the checked-out work
+# reaches that no remote-tracking ref does. Named once so the count and the
+# oldest-timestamp lookup cannot drift apart.
+UNPUSHED_REVS = ("HEAD", "--not", "--remotes")
 
 
 def _run_text(run, argv, *, cwd=None, env=None):
@@ -382,28 +398,93 @@ def _agents(run):
 
 
 def _git_unpushed(home, run, out=sys.stdout):
-    """(count, oldest unpushed commit ts). A repo with no `origin/main` --
-    or no `origin` at all -- makes `rev-list` exit non-zero; that is "cannot
-    tell", not "nothing unpushed", and it must not page (fix wave 1, minor).
-    It says so on the keeper's own stdout and returns the silent value."""
-    rc, text = _run_text(run, ["git", "rev-list", "--count", "origin/main..main"],
+    """(count, oldest unpushed commit ts, ref name) for the work AT RISK:
+    commits reachable from the checked-out HEAD that exist on no remote-
+    tracking ref -- `git rev-list --count HEAD --not --remotes`.
+
+    W56, MEASURED ON THIS HOST. This used to ask `origin/main..main`, which is
+    a claim about two REF NAMES rather than about exposure, and this fleet does
+    not work on `main`. At `f4aa63f` (the 2026-09-09T01:26:01Z page) it
+    answered **2** while **21** commits sat on one disk and on no remote: the
+    entire server bring-up, 19 commits, invisible to the rule during the exact
+    window it exists to cover. Four hours later, with the branch pushed, those
+    same two `main` commits were fully contained in
+    `origin/server/persistent-fleet` (`git merge-base --is-ancestor` proves it)
+    and at no risk whatever -- and the rule would have re-paged about them
+    every six hours forever. A page that is technically true and operationally
+    false is worse than no rule, because it teaches the operator to ignore the
+    channel.
+
+    HEAD, NOT `--branches`. The wider rule -- page about any local branch
+    carrying unpushed work -- is defensible in the abstract and wrong for this
+    fleet: worker lanes are branches in worktrees of this same repository which
+    are committed-and-not-pushed BY POLICY until the manager merges them, so
+    `--branches` would manufacture, every wave, exactly the operationally-false
+    page this change removes. Their remedy is a merge, not a push, so they are
+    not this rule's business. The cost is named rather than hidden: a lane
+    worktree has its own HEAD, so its commits are not counted here.
+
+    NO REMOTE-TRACKING REF IS "CANNOT TELL", AND IS THE MOST LIKELY WAY TO MAKE
+    THIS RULE WORSE. `--not --remotes` subtracts nothing when there are no
+    remote refs, so `rev-list` counts the ENTIRE history and exits 0 -- the
+    failure does not even look like one (measured: 5 of 5 commits in a fresh
+    repo). So the probe below runs FIRST and nothing else is attempted. That is
+    the same doctrine the old docstring picked for a missing `origin/main`: a
+    repo that cannot be compared says so on the keeper's own stdout and stays
+    silent. Every other unreadable state -- no commits yet (`HEAD` is not a
+    revision), a home that is not a repo, an unparsable count -- lands there
+    too. A detached HEAD and a repo mid-rebase or mid-merge are NOT unreadable:
+    `HEAD` resolves in all three and the commits it reaches are exactly the
+    ones at risk, which is why they are counted rather than excused."""
+    rc, refs = _run_text(run, ["git", "for-each-ref", "--count=1",
+                               "--format=%(refname)", "refs/remotes/"],
+                         cwd=str(home))
+    if rc != 0 or not refs.strip():
+        print("keeper: git unpushed check unavailable "
+              "(no remote-tracking ref to compare against)", file=out)
+        return 0, None, None
+    rc, text = _run_text(run, ["git", "rev-list", "--count", *UNPUSHED_REVS],
                          cwd=str(home))
     if rc != 0:
         print("keeper: git unpushed check unavailable", file=out)
-        return 0, None
+        return 0, None, None
     try:
         n = int(text.strip())
     except ValueError:
-        return 0, None
+        print("keeper: git unpushed check unavailable (unreadable count)", file=out)
+        return 0, None, None
     if n <= 0:
-        return 0, None
-    rc, text = _run_text(run, ["git", "log", "--format=%ct", "--reverse",
-                               "origin/main..main"], cwd=str(home))
-    first = text.strip().splitlines()[0] if rc == 0 and text.strip() else ""
-    try:
-        return n, float(first)
-    except ValueError:
-        return n, None
+        return 0, None, None
+    # The age half must move with the count or the six-hour gate and the
+    # fingerprint go stale in a new way, so it asks the SAME rev set. And it
+    # takes the MINIMUM rather than the first line of `--reverse`: `git log`
+    # orders by commit date subject to a topological constraint, so a skewed
+    # clock or a merge of an old local branch can print a younger commit first.
+    rc, text = _run_text(run, ["git", "log", "--format=%ct", *UNPUSHED_REVS],
+                         cwd=str(home))
+    stamps = []
+    if rc == 0:
+        for line in text.split():
+            try:
+                stamps.append(float(line))
+            except ValueError:
+                pass
+    oldest = min(stamps) if stamps else None
+    return n, oldest, _git_head_ref(home, run)
+
+
+def _git_head_ref(home, run):
+    """What HEAD points at, for the page TEXT only -- never for the count, and
+    never a reason to suppress a page. `rev-parse --abbrev-ref HEAD` prints the
+    literal string `HEAD` when detached, which reads as nonsense in a page and
+    is precisely the state where naming it matters most: nothing but the reflog
+    points at that work."""
+    rc, text = _run_text(run, ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                         cwd=str(home))
+    name = text.strip() if rc == 0 else ""
+    if not name:
+        return None
+    return "a detached HEAD" if name == "HEAD" else name
 
 
 def _count_lines(path):
@@ -446,7 +527,7 @@ def collect(home, *, now, run=subprocess.run, snapshot_fn=fleet.status_snapshot,
         claim_sid = None
         released_at = None
     agents_ok, agents_missing, agent_sids = _agents(run)
-    unpushed, oldest = _git_unpushed(home, run, out=out)
+    unpushed, oldest, unpushed_ref = _git_unpushed(home, run, out=out)
     workers = [{"name": w.get("name"), "status": w.get("status"),
                 "mail": w.get("mail") or 0, "limit_kind": w.get("limit_kind")}
                for w in (snap.get("workers") or [])]
@@ -473,6 +554,7 @@ def collect(home, *, now, run=subprocess.run, snapshot_fn=fleet.status_snapshot,
         "workers": workers,
         "unpushed": unpushed,
         "oldest_unpushed_ts": oldest,
+        "unpushed_ref": unpushed_ref,
         "hook_error_lines": _count_lines(home / "state" / "hook-errors.log"),
         "prev_hook_error_lines": int(prev_state.get("_hook_error_lines", 0) or 0),
     }
