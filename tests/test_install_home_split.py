@@ -50,6 +50,7 @@ import pytest
 import fleet
 
 REPO = Path(__file__).resolve().parents[1]
+from conftest import child_env  # noqa: E402
 HOOKS = REPO / "bin" / "hooks"
 
 
@@ -347,10 +348,12 @@ class TestTheStatuslineNoLongerResolvesAHome:
         and the import survived only because a script's own directory is already
         `sys.path[0]` -- an accident, and one an `import fleet_statusline`
         (rather than a run) does not get."""
+        # `child_env`: this drives the real statusline, which reaches
+        # `fleet.resolution_population()` -> `Path.home()`. See w60 §5.
         proc = subprocess.run(
             [sys.executable, str(REPO / "bin" / "fleet_statusline.py")],
             input='{"session_id": "sid-x"}', capture_output=True, text=True,
-            env={**os.environ, "FLEET_HOME": str(tmp_path)}, timeout=60)
+            env=child_env(tmp_path, FLEET_HOME=str(tmp_path)), timeout=60)
         assert proc.returncode == 0, proc.stderr
         assert "ModuleNotFoundError" not in proc.stderr
 

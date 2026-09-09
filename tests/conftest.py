@@ -73,6 +73,74 @@ def _never_touch_the_real_home(tmp_path_factory, monkeypatch):
                         lambda: sandbox / ".claude" / "fleet-homes.list")
 
 
+# ---------------------------------------------------------------------------
+# THE SUBPROCESS HALF OF THE SAME SEAM. The fixture above is IN-PROCESS ONLY.
+# ---------------------------------------------------------------------------
+
+def subprocess_home(sandbox):
+    """The directory a child launched with `child_env(sandbox)` will resolve
+    `Path.home()` to. Created on call, with `.claude/` present and EMPTY.
+
+    `.claude/` is created rather than left absent so a test that wants to plant
+    a list has somewhere to plant it, and so the child sees the same directory
+    SHAPE the real machine has. The list itself stays absent, which is
+    `read_homes_list()`'s `(True, "absent")` -- an ordinary single-fleet box,
+    the state this host is actually in."""
+    home = Path(sandbox) / "_child_home"
+    (home / ".claude").mkdir(parents=True, exist_ok=True)
+    return home
+
+
+def child_env(sandbox, **over):
+    """The environment for a SUBPROCESS drive: the parent's, with `$HOME`
+    redirected under `sandbox`. Pass `**over` for `FLEET_HOME` and friends.
+
+    WHY THIS EXISTS, AND WHY `_never_touch_the_real_home` ABOVE IS NOT ENOUGH.
+    That fixture monkeypatches four helpers BY NAME inside THIS interpreter. A
+    subprocess is a fresh interpreter: it re-imports `fleet` and gets the
+    shipped `homes_list_path`, which resolves from `Path.home()`. So a test that
+    launches a child with `{**os.environ, "FLEET_HOME": tmp_path}` overrides the
+    home fleet ACTS on and leaves the home fleet RESOLVES `~/.claude` from
+    pointing at the operator's real machine. Two different seams, two different
+    populations; conflating them is how this survived from slice (a) to w60.
+
+    ONE VARIABLE MOVES THE WHOLE `~/.claude` SURFACE, which is why the seam is
+    this small: `homes_list_path`, `user_settings_path`,
+    `claude_daemon_lock_path`, `claude_daemon_log_path` and the transcript glob
+    in `_transcript_for` all spell `Path.home()`.
+
+    SET, NEVER UNSET -- and this is the one thing about it that is not obvious.
+    `Path.home()` is `os.path.expanduser("~")`, and on POSIX a MISSING `HOME`
+    falls back to `pwd.getpwuid(os.getuid()).pw_dir`, i.e. straight back to the
+    operator's real home. MEASURED on this host (`docs/lanes/w60-homeseam.md`
+    §4): `HOME` deleted from the child env -> `/home/<user>/.claude/
+    fleet-homes.list`, identical to inheriting it. An EMPTY `HOME` is a third
+    wrong answer: `posixpath.expanduser` takes the empty string at its word and
+    yields `/.claude/fleet-homes.list`. `test_subprocess_home_seam.py` pins all
+    three.
+
+    THE WINDOWS ARM IS `USERPROFILE`, NOT `HOME`. `ntpath.expanduser` never
+    reads `HOME` at all: it takes `USERPROFILE` if present, else
+    `HOMEDRIVE` + `HOMEPATH`. Both spellings are set here because this repo
+    still supports the Windows host, and the `HOMEDRIVE`/`HOMEPATH` pair is
+    dropped rather than left standing -- `USERPROFILE` outranks it today, so a
+    leftover pair is dead weight that would silently become live if a caller
+    ever overrode `USERPROFILE` through `**over`.
+
+    WHAT THIS DELIBERATELY DOES NOT DO: it does not redirect `INSTALL_ROOT`.
+    `resolution_population()` is the folded list PLUS the legacy install-root
+    home, and the second term is `__file__`-derived, so no environment variable
+    moves it. A suite run from a checkout that is ALSO a live fleet home reads
+    that home's registry on every one of these drives -- see the lane report's
+    §6, where it is filed rather than fixed."""
+    home = subprocess_home(sandbox)
+    env = {**os.environ, "HOME": str(home), "USERPROFILE": str(home)}
+    env.pop("HOMEDRIVE", None)
+    env.pop("HOMEPATH", None)
+    env.update(over)
+    return env
+
+
 @pytest.fixture(autouse=True)
 def _never_touch_the_real_install(tmp_path_factory, monkeypatch):
     """The code-plane twin of `_never_touch_the_real_home`, and it exists
