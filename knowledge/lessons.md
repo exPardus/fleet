@@ -1891,3 +1891,72 @@ Operator ruling, in-session through the interface (Telegram), superseding the 20
 **AND THE SECOND HORN OF A 2026-07-27 REFUSAL IS NOW TAKEN, DELIBERATELY.** `docs/specs/graceful-succession.md` §1.2 refused a fleet-side restart path on two grounds: any watcher must either fire in a session nobody asked to be fleet-aware (the D7 leak) **or dispatch a replacement with no operator in the loop, "which is how two live supervisors happen."** The 2026-09-08 ruling narrowed the first horn (page into one dedicated opt-in window, gate G-K1, still open); **the 2026-09-09 amendment takes the second** — the interface dispatches with no operator keystroke. The operator's ground is one that section never considered: **the dispatcher is not an autonomous actor but the operator's own persistent session, which can read an ambiguous claim and decline** — which is precisely why the two-live-body guard rides with it. *A refusal survives as long as its grounds do; when a ruling reverses one, amend the refusal in place with the new ground beside the old one rather than deleting it — the next author needs to see that the trade was made knowingly.* §1.2, §2 and §5.8 now carry that amendment box; `sup-recover` itself remains unbuilt and unaffected.
 
 **Two contradictions this landing found and did NOT fix, because they are not prose:** (1) `bin/fleet_keeper.py`'s `supervisor-dead` page still reads `await operator before sup-spawn` and its module docstring still says *"revival is a human message"* — a sibling build lane's, and until it lands the code and the doctrine disagree; (2) `supervisor/GOALS.md` — **the file a booting supervisor loads first** — still states a **150–200k** context band and an `[UNBUILT]` §11.3 ceiling, both dead since the 2026-08-05 raise, with the approved replacement text sitting unlanded at `docs/proposals/2026-08-09-goals-band-section-replacement.md` since the 2026-08-10 docket. `test_supervisor_context.py`'s `SURFACES` tuple is `("skills/fleet/SKILL.md", "skills/fleet/supervisor.md")` — GOALS.md was ruled into it on 2026-08-08 and **is still not in it**, so nothing reddens. *Landing the graceful end at 350k into two files a supervisor reads while the file it reads FIRST says 150k is a half-landing, and no lane may originate GOALS.md content.*
+
+## 2026-09-09 — wave 58: the ruling's own step 3, and a host that cannot run its own suite {#2026-09-09-w58-succession}
+
+**THE RULING WAS WRONG ABOUT THE MECHANISM IT ORDERED, AND FOLLOWING IT WOULD HAVE MINTED A SECOND
+LIVE SUPERVISOR.** The 2026-09-09 succession ruling's graceful-end step 3 reads *"`sup-handoff-begin`,
+**the interface runs `sup-spawn` for the successor**, ..."*. `cmd_sup_handoff_begin` **dispatches the
+successor itself** — it builds its own `claude --bg -n <name>` argv rather than going through
+`dispatch_bg`, and writes that body a task file already carrying `sup-boot --handoff-inc
+--handoff-token`. An interface `sup-spawn` at that moment adds a **token-less gen-0 body beside the
+token-bearing successor**: two live bodies over one `GOALS.md`, the exact condition the claim system
+exists to prevent — and `sup-spawn` could not have produced a working successor anyway, since a
+gen-0 body's first act is a plain `sup-boot` with no token to hash into `HANDSHAKE`. Found by the
+prose lane, reading the code it was told it did not own. *A ruling is authoritative about intent and
+merely well-informed about mechanism; the tier that writes the ruling is the tier furthest from the
+argv.* Landed as a correction flagged inline at every site — during a handoff the interface
+**watches** `sup-status --json` and dispatches only on the stillborn path — never as a silent fix.
+
+**A CAMPAIGN'S "UNPROVEN, 8 STILLBIRTHS" FRAMING OUTLIVED ITS OWN FIX BY SIX WEEKS.**
+`docs/specs/graceful-succession.md` already records the root cause as ANSWERED — successors
+dispatched under `dontask`, **17/17, no exceptions**, closed by `SUCCESSOR_DEFAULT_MODE = "bypass"`
+on `fix/stillborn-handoff`. The brief that ordered this campaign still described the protocol as an
+open mystery, because the fix landed on a branch while the document recording the mystery sat
+elsewhere — which is that document's own account of how it got stale. *Before treating a failure
+record as an open question, check whether the repo already closed it; the count of past failures is
+not evidence about the present when the cause is named and fixed.*
+
+**THE HOST HAZARD THAT WOULD ACTUALLY HAVE KILLED A HANDOFF HERE IS A SILENT DEGRADATION, AND IT WAS
+MEASURED CLOSED RATHER THAN ASSUMED.** kz-work requires `--setting-sources project,local` on every
+dispatch; a successor gets it only via `_claim_holder_setting_sources`, which resolves the claim's
+`session_id` against the registry and **degrades to `None` on any lookup miss — by design**, so a
+settings nicety cannot strand a handoff. Silent degradation is exactly the shape that yields a
+stillbirth nobody can explain, and the claim holder's registry record shows `sid = None` in its
+top-level field, which looks precisely like that miss. It is not: executed against the live claim,
+`_record_sids` carries the sid and the resolution returns `project,local`. *A best-effort read whose
+failure mode is a working dispatch with a missing flag deserves a pre-flight, not a post-mortem.*
+
+**THIS HOST CANNOT RUN ITS OWN TEST SUITE OUT OF THE BOX, AND TWO LANES REDISCOVERED IT IN THE SAME
+HOUR.** `py -3.13` / `py -3.10` are the **Windows** launcher; root `CLAUDE.md`'s Python rule is a
+fact about the retired host. No interpreter on this box has pytest importable — the china-infra venv
+that every `fleet` verb is invoked with included. What works is `uv run --no-project --python 3.1x
+--with pytest python -m pytest -q`, and it must go in every future brief. **The inherited baseline
+was also wrong: 4845 at `2a15dec`, not 4836** — measured independently by both lanes, after the
+supervisor propagated the stale number into both briefs. *That is the same defect the previous
+incarnation recorded about itself one wave earlier, in the same slot of the same ritual: the brief
+is where a supervisor's unchecked number becomes everyone's.* Wave floor predicted in writing before
+the merge and hit to the digit: **4880 collected, identical on 3.10 and 3.12.**
+
+**THE SIX "UNEXPLAINED" FAILURES ARE EXPLAINED, AND THEY ARE HOST ASSUMPTIONS RATHER THAN FLEET
+DEFECTS.** Four expect a Windows drive-qualified path (`C:foo`) to be refused as a containment
+escape — on POSIX it is an ordinary relative filename, so the refusal correctly does not fire. Two
+copy `sys.executable` into a directory containing a space and re-exec it, which cannot work for a
+venv shim (`ModuleNotFoundError: No module named 'encodings'`). Neither group carries a `skipif`.
+The standing "reproduced five times, explained zero" line retires. *A failure reproduced without
+being read is not evidence of anything except that nobody read it.*
+
+**A NEW VERB COSTS MORE THAN THE VERB.** Adding `cmd_sup_notify` shifted every line below it and
+reddened **seven citation tests across two files, 22 stale numbers on 16 comment lines** — the true
+price of any `bin/fleet.py` insertion, and it belongs in the brief. The lane re-pinned them by
+building an old→new line map with `difflib` rather than by arithmetic. It also hit the pin that
+forces a §5 verb-effect disposition, and **took the `UNCLASSIFIED_BY_THE_RATIFIED_TABLE` exit with a
+written reason rather than guessing a tier** — the pin's own message says why (*"a wrong `ordinary`
+is a destructive verb running unguarded in a foreign home"*), and an unclassified verb defaults to
+`destructive`, which is the fail-safe direction. *The exit a pin builds for you is not a workaround;
+it is the pin working.*
+
+**AND A DISCLOSED LIMIT THAT SETS THE ORDER OF THE PROTOCOL:** `_require_claim_holder` refuses on a
+released claim, so **a released supervisor cannot `sup-notify` anything** — including that it
+released. Announce, then hand off, then release only if stillborn. After a release the keeper's
+`supervisor-dead` page is the channel, which is exactly the page this wave rewrote.
