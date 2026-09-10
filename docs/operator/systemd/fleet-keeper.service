@@ -1,0 +1,11 @@
+# Operator-installed template; this lane does not install or activate units.
+[Unit]
+Description=Fleet keeper pages and existing supervisor wake
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/proga/fleet
+EnvironmentFile=%h/.config/fleet/keeper.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 ${FLEET_HOME}/bin/fleet_keeper.py --once --fleet-home ${FLEET_HOME} --wake-socket ${FLEET_WAKE_SOCKET} --wake-key ${FLEET_WAKE_KEY}
+TimeoutStartSec=300

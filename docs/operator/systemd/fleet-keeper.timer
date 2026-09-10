@@ -1,0 +1,12 @@
+# Replaces the existing timer of this name; never install a second wake timer.
+[Unit]
+Description=Fleet keeper quarter-hour tick
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+AccuracySec=1s
+Unit=fleet-keeper.service
+
+[Install]
+WantedBy=timers.target
